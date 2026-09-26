@@ -1,18 +1,15 @@
 //! Source mesh-surface particle births, separate from mesh-renderer geometry.
-//! Triangle probability is proportional to source area, not triangle count.
+//! The surface is the module's mesh cache of the Triangle placement (see
+//! `moly_law::particle::shape_mesh`): triangle areas, per-submesh sums and
+//! the area lookup table, in the source's own vertex and triangle order. The
+//! native birth path samples it through the Shape law; the legacy step picks
+//! and blends with the same cache from its own draws.
 use crate::particle_geometry::SourceMesh;
-use bevy::prelude::*;
+use moly_law::particle::shape_mesh::MeshShapeCache;
 
 #[derive(Clone, Debug)]
-struct Triangle {
-    positions: [Vec3; 3],
-    normals: [Vec3; 3],
-}
-#[derive(Clone, Debug)]
 pub(crate) struct EmissionSurface {
-    triangles: Vec<Triangle>,
-    cumulative_area: Vec<f32>,
-    total_area: f32,
+    native: MeshShapeCache,
 }
 impl EmissionSurface {
     pub(crate) fn from_source(source: &SourceMesh) -> Result<Self, String> {
@@ -30,75 +27,66 @@ impl EmissionSurface {
                     .into(),
             );
         }
-        let mut triangles = Vec::with_capacity(source.indices.len() / 3);
-        let mut cumulative_area = Vec::with_capacity(triangles.capacity());
-        let mut total_area = 0.0f32;
-        for indices in source.indices.chunks_exact(3) {
+        if source.submesh_ends.last() != Some(&source.indices.len())
+            || source.submesh_ends.windows(2).any(|pair| pair[0] > pair[1])
+            || source.submesh_ends.iter().any(|end| end % 3 != 0)
+        {
+            return Err("mesh emission requires the source submesh boundaries".into());
+        }
+        let mut submeshes = Vec::with_capacity(source.submesh_ends.len());
+        let mut start = 0;
+        for &end in &source.submesh_ends {
             // Positions/normals are already restored to source coordinates by
             // SourceMesh. Its indices retain GLB winding for drawing; undo that
-            // reflection here to preserve the native barycentric vertex order.
-            let indices = [
-                indices[0] as usize,
-                indices[2] as usize,
-                indices[1] as usize,
-            ];
-            if indices.iter().any(|&i| i >= source.positions.len()) {
-                return Err("emission triangle index is out of bounds".into());
-            }
-            let positions = indices.map(|i| source.positions[i]);
-            let normals = indices.map(|i| source.normals[i]);
-            let area = (positions[1] - positions[0])
-                .cross(positions[2] - positions[0])
-                .length()
-                * 0.5;
-            total_area += area;
-            if !area.is_finite() || !total_area.is_finite() {
-                return Err("source emission surface area overflow".into());
-            }
-            // Retain zero-area source triangles and their index ordering. They
-            // occupy no probability interval; do not rewrite the source mesh.
-            cumulative_area.push(total_area);
-            triangles.push(Triangle { positions, normals });
+            // reflection here to restore the native triangle corner order.
+            submeshes.push(
+                source.indices[start..end]
+                    .chunks_exact(3)
+                    .flat_map(|t| [t[0], t[2], t[1]])
+                    .collect::<Vec<u32>>(),
+            );
+            start = end;
+        }
+        let native = MeshShapeCache::new(
+            source.positions.iter().map(|p| p.to_array()).collect(),
+            Some(source.normals.iter().map(|n| n.to_array()).collect()),
+            &submeshes,
+            None,
+        )
+        .map_err(|refused| format!("source emission mesh cache refused: {refused:?}"))?;
+        let total_area = native.total_area();
+        if !total_area.is_finite() || native.triangles().iter().any(|t| !t.area.is_finite()) {
+            return Err("source emission surface area overflow".into());
         }
         if total_area <= 0.0 {
             return Err("source emission mesh has no positive surface area".into());
         }
-        Ok(Self {
-            triangles,
-            cumulative_area,
-            total_area,
-        })
+        Ok(Self { native })
     }
-    pub(crate) fn sample(&self, selector: f32, mut u: f32, mut v: f32) -> ([f32; 3], [f32; 3]) {
+    /// The module's mesh cache, as the native Shape law reads it.
+    pub(crate) fn native(&self) -> &MeshShapeCache {
+        &self.native
+    }
+    /// The legacy step's sample: the native pick and blend (normal offset
+    /// zero, the only one the surface contract admits) from its own draws.
+    pub(crate) fn sample(&self, selector: f32, u: f32, v: f32) -> ([f32; 3], [f32; 3]) {
         assert!(
             [selector, u, v]
                 .iter()
                 .all(|x| x.is_finite() && (0.0..=1.0).contains(x)),
             "source sampler requires three U01 draws"
         );
-        let target = selector * self.total_area;
-        let index = self
-            .cumulative_area
-            .partition_point(|&area| area < target)
-            .min(self.triangles.len() - 1);
-        if u + v > 1.0 {
-            u = 1.0 - u;
-            v = 1.0 - v;
-        }
-        let w = (1.0 - u) - v;
-        let triangle = &self.triangles[index];
-        let weighted =
-            |values: [Vec3; 3]| ((values[0] * u + values[1] * v) + values[2] * w).to_array();
-        (weighted(triangle.positions), weighted(triangle.normals))
+        self.native.point(self.native.pick(selector), u, v, 0.0)
     }
     pub(crate) fn triangles(&self) -> usize {
-        self.triangles.len()
+        self.native.triangles().len()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::prelude::*;
     fn source() -> SourceMesh {
         SourceMesh {
             positions: vec![
@@ -111,6 +99,7 @@ mod tests {
             ],
             normals: vec![Vec3::Y; 6],
             indices: vec![0, 2, 1, 3, 5, 4],
+            submesh_ends: vec![6],
             uv: vec![Vec2::ZERO; 6],
             colours: vec![Vec4::ONE; 6],
             bounds_size: Vec3::new(14., 0., 2.),
@@ -119,7 +108,7 @@ mod tests {
     #[test]
     fn triangle_selection_is_area_weighted_and_preserves_source_order() {
         let surface = EmissionSurface::from_source(&source()).unwrap();
-        assert_eq!(surface.cumulative_area, vec![1., 5.]);
+        assert_eq!(surface.native().triangles().iter().map(|t| t.area).collect::<Vec<_>>(), vec![1., 4.]);
         assert_eq!(surface.sample(0., 1., 0.).0, [0., 0., 0.]);
         assert_eq!(surface.sample(0.2, 0., 1.).0, [2., 0., 0.]);
         assert_eq!(surface.sample(0.2001, 1., 0.).0, [10., 0., 0.]);
@@ -151,9 +140,13 @@ mod tests {
         assert!(EmissionSurface::from_source(&mesh).is_err());
         let mut mesh = source();
         mesh.indices = vec![0, 0, 0];
+        mesh.submesh_ends = vec![3];
         assert!(EmissionSurface::from_source(&mesh).is_err());
         let mut mesh = source();
         mesh.indices.pop();
+        assert!(EmissionSurface::from_source(&mesh).is_err());
+        let mut mesh = source();
+        mesh.submesh_ends.clear();
         assert!(EmissionSurface::from_source(&mesh).is_err());
     }
 }

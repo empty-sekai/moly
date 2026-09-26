@@ -31,6 +31,7 @@ mod json;
 pub mod value;
 pub mod shape;
 pub mod shape_birth;
+pub mod shape_mesh;
 pub mod emit;
 pub mod step;
 pub mod buffer;
@@ -73,6 +74,7 @@ mod armf;
 pub mod trail;
 pub mod trail_geometry;
 pub mod mesh_transform;
+pub mod stretch_geometry;
 
 #[cfg(test)]
 mod corpus;

@@ -1937,10 +1937,11 @@ pub(crate) fn follow_avatar(
     };
     let player = avatar.translation();
     match state.0 {
-        CameraStateType::HouseEntry => {
+        CameraStateType::HouseEntry | CameraStateType::ZoomPlayer => {
             // HouseEntryCameraState.OnUpdate: LookAt = the player's view
             // position, UpdatePosition, view.LookAt(LookAt + Offset). The
-            // entry owns entering and leaving this state.
+            // entry owns entering and leaving this state. ZoomPlayer's
+            // OnUpdate is the same body (`zoom_player_camera`).
             models.look_at = player;
             let pivot = models.look_at + models.offset;
             let eye = pivot + view_dir(models.pitch, models.yaw) * models.distance;
@@ -1961,6 +1962,9 @@ pub(crate) fn follow_avatar(
         // LearnSiteEnvironmentCameraState: its OnUpdate is `harvest::learn`,
         // which runs right after this system.
         CameraStateType::LearnSiteEnvironment => {}
+        // DeliveryHonorRewardCameraState: its OnUpdate is `delivery_camera`,
+        // which runs right after this system.
+        CameraStateType::DeliveryHonorReward => {}
         CameraStateType::Fps => {
             // FPS 态律：取景点直写玩家位+高度偏移（无插值无钳界），眼位
             // 沿视线退 FPS 距离，相机朝向取景点——两态共享同一条轨道，

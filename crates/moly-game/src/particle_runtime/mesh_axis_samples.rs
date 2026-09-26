@@ -48,7 +48,7 @@ fn row_runtime(roots: &[std::path::PathBuf], phenomenon: &str, effect: &str, nod
     rt.kind = EffectKind::Sky;
     rt.geometry = Geometry::Mesh(crate::particle_geometry::MeshDraw {
         source: std::sync::Arc::new(crate::particle_geometry::SourceMesh { positions: Vec::new(), normals: Vec::new(),
-            uv: Vec::new(), colours: Vec::new(), indices: Vec::new(), bounds_size }),
+            uv: Vec::new(), colours: Vec::new(), indices: Vec::new(), submesh_ends: Vec::new(), bounds_size }),
         alignment, scaling, pivot: vec3(&renderer["pivot"]), flip: vec3(&renderer["flip"]), axis_body: Some(body),
     });
     rt.gravity_law = moly_law::particle::gravity::Gravity::new(&emitter.start.gravity_modifier).unwrap();

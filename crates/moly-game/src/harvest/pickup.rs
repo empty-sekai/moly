@@ -134,7 +134,7 @@ pub(crate) fn advance(
 }
 
 /// `Vector3.MoveTowards`.
-fn move_towards(current: Vec3, target: Vec3, max_delta: f32) -> Vec3 {
+pub(crate) fn move_towards(current: Vec3, target: Vec3, max_delta: f32) -> Vec3 {
     let d = target - current;
     let length = d.length();
     if length <= max_delta || length == 0.0 {

@@ -26,8 +26,11 @@
 //! Named differences:
 //! - `HomeSiteController.ExecuteNPCRandomFixtureAction` (room to home, the
 //!   NPCs take random fixture actions while the wipe opens) belongs to the
-//!   NPC domain; it is not run here and is logged at its step. Without it
-//!   the source's await returns at once, which is what runs here.
+//!   NPC domain. The core requests it by inserting
+//!   `npc::RandomFixtureActionPending` and awaits it until the NPC side
+//!   removes it, but only while the NPC side's reader marker
+//!   (`npc::RandomFixtureActionReader`) exists; without the marker the await
+//!   returns at once with one WARN naming the missing reader.
 //! - `Home.OnEnterSite` returns the game to Normal inside the room-to-home
 //!   core; here the site-move input lock holds until the executor's Normal
 //!   (in the source the player's closed intercept gate and the HouseEntry
@@ -100,6 +103,10 @@ enum Stage {
     Loading,
     /// Home to room: 1.0 s after the room door starts opening.
     EnterRoomWait(Delay),
+    /// Room to home: the await on
+    /// `HomeSiteController.ExecuteNPCRandomFixtureAction` (the NPC side
+    /// removes `npc::RandomFixtureActionPending`).
+    NpcFixtureActionWait,
     /// Room to home: `StartMysekaiTransition`'s 0.1 s.
     StartTransitionWait(Delay),
     /// Room to home: `PlayExitMyRoomAction`'s 1.0 s.
@@ -461,6 +468,22 @@ impl DoorMove {
                     }
                     let note = Self::due(delay, dt);
                     self.enter_room(world, frame, note);
+                }
+                Stage::NpcFixtureActionWait => {
+                    if world.contains_resource::<crate::npc::RandomFixtureActionPending>() {
+                        if world.contains_resource::<crate::npc::RandomFixtureActionReader>() {
+                            self.waiting(
+                                world,
+                                "ExecuteNPCRandomFixtureAction",
+                                "the NPC side has not removed RandomFixtureActionPending",
+                            );
+                            return;
+                        }
+                        warn!("[site-move] MyRoomToHome core: npc::RandomFixtureActionReader went away while the await was pending; RandomFixtureActionPending removed, the await returns");
+                        world.remove_resource::<crate::npc::RandomFixtureActionPending>();
+                    }
+                    info!("[site-move] HomeSiteController.ExecuteNPCRandomFixtureAction returned");
+                    self.move_to_entrance(world, frame);
                 }
                 Stage::StartTransitionWait(delay) => {
                     if !delay.tick(frame, dt) {
@@ -889,29 +912,46 @@ impl DoorMove {
                 };
                 set_player_visible(world, false);
                 self.fade_in(world);
-                info!("[site-move] player.Hide, ShowFadeInAnimation; HomeSiteController.ExecuteNPCRandomFixtureAction: NPC domain, not run here (its await returns at once)");
-                if let Some(outside) = house
-                    .as_ref()
-                    .and_then(|house| house.outside_door)
-                    .and_then(|e| world.get::<GlobalTransform>(e).copied())
-                {
-                    // MoveToEntrance: ForceSetPosition, agent off, LookRotation(forward).
-                    place(world, outside.translation(), outside.rotation() * Vec3::Z);
-                    info!(
-                        "[site-move] MoveToEntrance: player at the outside door {:.2}",
-                        outside.translation()
-                    );
-                }
                 self.house = house;
-                self.house_entry_camera(world);
-                world.remove_resource::<super::BgmHold>();
-                info!("[site-move] PlayBGMAsync released; StartMysekaiTransition: MysekaiTransitioner.SafeFinish, LiveTransitioner.SafeFinish (no product counterpart)");
-                self.stage = Stage::StartTransitionWait(Delay::new(
-                    door_law::wait(door_law::START_TRANSITION_WAIT),
-                    frame,
-                ));
+                if world.contains_resource::<crate::npc::RandomFixtureActionReader>() {
+                    let requested_frame = world.resource::<bevy::diagnostic::FrameCount>().0;
+                    world.insert_resource(crate::npc::RandomFixtureActionPending { requested_frame });
+                    info!("[site-move] player.Hide, ShowFadeInAnimation; await HomeSiteController.ExecuteNPCRandomFixtureAction (RandomFixtureActionPending inserted on frame {requested_frame})");
+                    self.wait_logged = false;
+                    self.stage_real = world.resource::<Time<Real>>().elapsed_secs_f64();
+                    self.stage = Stage::NpcFixtureActionWait;
+                } else {
+                    warn!("[site-move] player.Hide, ShowFadeInAnimation; HomeSiteController.ExecuteNPCRandomFixtureAction: no reader of npc::RandomFixtureActionPending is installed (npc::RandomFixtureActionReader is missing); the await returns at once");
+                    self.move_to_entrance(world, frame);
+                }
             }
         }
+    }
+
+    /// Room to home, after the await on
+    /// `HomeSiteController.ExecuteNPCRandomFixtureAction`: `MoveToEntrance`,
+    /// the HouseEntry camera, then `StartMysekaiTransition`.
+    fn move_to_entrance(&mut self, world: &mut World, frame: u64) {
+        if let Some(outside) = self
+            .house
+            .as_ref()
+            .and_then(|house| house.outside_door)
+            .and_then(|e| world.get::<GlobalTransform>(e).copied())
+        {
+            // MoveToEntrance: ForceSetPosition, agent off, LookRotation(forward).
+            place(world, outside.translation(), outside.rotation() * Vec3::Z);
+            info!(
+                "[site-move] MoveToEntrance: player at the outside door {:.2}",
+                outside.translation()
+            );
+        }
+        self.house_entry_camera(world);
+        world.remove_resource::<super::BgmHold>();
+        info!("[site-move] PlayBGMAsync released; StartMysekaiTransition: MysekaiTransitioner.SafeFinish, LiveTransitioner.SafeFinish (no product counterpart)");
+        self.stage = Stage::StartTransitionWait(Delay::new(
+            door_law::wait(door_law::START_TRANSITION_WAIT),
+            frame,
+        ));
     }
 
     /// Home to room: `MoveMyRoom` after the door wait.
@@ -1034,6 +1074,17 @@ impl DoorMove {
     /// The step table, once, when the move ends. `chained`: the executor
     /// admits the nested move next, still in `GameState.SiteMove`.
     pub(crate) fn finish(mut self, world: &mut World, chained: bool) {
+        if world
+            .remove_resource::<crate::npc::RandomFixtureActionPending>()
+            .is_some()
+        {
+            warn!(
+                "[site-move] {} {} -> {} ended with npc::RandomFixtureActionPending still present: the NPC side never answered the await; removed",
+                self.kind.name(),
+                self.from,
+                self.to
+            );
+        }
         if !chained {
             world.remove_resource::<super::SiteMoveActive>();
             world.remove_resource::<super::EnvironmentHold>();

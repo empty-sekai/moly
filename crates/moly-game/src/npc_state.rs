@@ -139,7 +139,35 @@ impl Plugin for NpcStatePlugin {
                 First,
                 crate::npc_clock::advance.after(bevy::time::TimeSystems),
             )
-            .add_systems(Update, crate::npc_tweet::parse);
+            .add_systems(Update, crate::npc_tweet::parse)
+            // Residency: a member whose own site is not the loaded one is
+            // suspended from its first frame there (after the registration
+            // that writes its own site, before the next frame's AI loop).
+            .add_systems(
+                Update,
+                crate::npc::residency::mark_away
+                    .after(crate::npc::sync_rest_lifecycle)
+                    .after(crate::npc::reseed),
+            )
+            // The door answer (see `npc::random_fixture_action`): the marker
+            // tells the door move a reader of its await is installed.
+            .insert_resource(crate::npc::RandomFixtureActionReader)
+            .add_systems(
+                Update,
+                crate::npc::random_fixture_action::answer.in_set(crate::npc::DoorAnswerSet),
+            )
+            // The change-site controller: the lottery on entering home or a
+            // floor and its loop (see `npc::change_site`).
+            .init_resource::<crate::npc::change_site::ChangeSiteController>()
+            .add_systems(Startup, crate::npc::change_site::load)
+            .add_systems(
+                Update,
+                (
+                    crate::npc::change_site::parse,
+                    crate::npc::change_site::run.after(crate::npc::residency::mark_away),
+                )
+                    .chain(),
+            );
         // The presenter's other per-frame calls, in the source order around
         // the state machine update (call 3) and the greeting gate (call 10)
         // that the schedule chains in this set: 1, 2 before call 3; 4 to 9
@@ -371,9 +399,17 @@ pub(crate) fn on_update(
             &mut MotionPhase,
             Option<&crate::character_material::ToonMaterials>,
         ),
-        Without<crate::player::PlayerControlled>,
+        (
+            Without<crate::player::PlayerControlled>,
+            Without<crate::npc::residency::Away>,
+        ),
     >,
+    site: Option<Res<crate::site::SiteActive>>,
 ) {
+    // The avatar store's per-frame NPC update, of which this is call 3.
+    if !crate::npc::residency::loaded_site_runs(site.as_deref()) {
+        return;
+    }
     let (facial_tables, mut materials) = facial;
     let dt = clock.delta();
     let frame = frame.0;

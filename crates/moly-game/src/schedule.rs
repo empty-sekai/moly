@@ -178,6 +178,7 @@ pub fn install(app: &mut App) {
         .init_resource::<crate::player_fixture_action::PlayerFixtureRuntime>()
         .init_resource::<crate::fixture_activity_provider::FixtureActivityProvider>()
         .init_resource::<crate::fixture_gimmick::Gimmicks>()
+        .init_resource::<crate::player_avatar::item_timeline::PlayerStepItem>()
         .add_systems(Startup, crate::fixture_activity_data::load)
         .add_systems(Startup, crate::fixture_gimmick::load)
         .add_systems(
@@ -219,6 +220,13 @@ pub fn install(app: &mut App) {
     .add_systems(
         Update,
         crate::entry::house::build.before(crate::fixture::FixtureLayoutSet),
+    )
+    // ForceResetJoyStick: a press lets the stick go in the click's frame.
+    .add_systems(
+        Update,
+        joystick::force_reset
+            .after(action_button::click)
+            .before(player::advance),
     )
     .add_systems(
         Update,
@@ -330,6 +338,7 @@ pub fn install(app: &mut App) {
         .add_message::<gesture::UiPointerEvent>()
         .add_message::<player_talk::PlayerTalkRequest>()
         .add_message::<crate::player_fixture_action::PlayerFixtureRequest>()
+        .add_message::<joystick::ForceResetJoystick>()
         // 摆设编辑的保存回执沿（保存动作 → tweet 域 after-edit 反应）。
         .add_message::<fixture_edit::LayoutSaved>()
         .init_resource::<gesture::GestureLayerState>()
@@ -486,7 +495,12 @@ pub fn install(app: &mut App) {
                     joystick::smoke_autojoystick,
                     // 动作按钮的走位冒烟口也注在摇杆层推进之前：它写入的
                     // 触摸要被同一帧的摇杆层读到。
-                    (action_button::smoke_autowalk, action_button::smoke_door_walk).chain(),
+                    (
+                        action_button::smoke_autowalk,
+                        action_button::smoke_door_walk,
+                        crate::player_fixture_action::walk::smoke_fixture_walk,
+                    )
+                        .chain(),
                     joystick::advance,
                     gesture::advance,
                     joystick::spawn_when_ready,
@@ -783,6 +797,7 @@ pub fn install(app: &mut App) {
                 crate::player_fixture_action::receive_requests,
                 crate::player_fixture_action::advance,
                 crate::fixture_gimmick::advance,
+                crate::player_avatar::item_timeline::advance,
                 crate::fixture_activity_timeline::advance,
             )
                 .chain()

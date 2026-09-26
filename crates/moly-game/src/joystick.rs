@@ -120,6 +120,34 @@ pub(crate) struct JoystickState {
     pub(crate) move_vector: Vec3,
 }
 
+/// MysekaiUtility.ForceResetJoyStick -> CustomJoyStick.ForcePointerUp: the
+/// captured finger is let go (the stick hides and publishes END), and that
+/// finger no longer drives the stick until it is lifted and pressed again.
+#[derive(Message, Clone, Copy, Debug)]
+pub(crate) struct ForceResetJoystick {
+    pub(crate) reason: &'static str,
+}
+
+/// Update, after the action buttons' click: ForcePointerUp for each reset
+/// request. END is published whether or not a finger was captured.
+pub(crate) fn force_reset(
+    mut state: ResMut<JoystickState>,
+    mut resets: MessageReader<ForceResetJoystick>,
+) {
+    for reset in resets.read() {
+        let finger = state.captured.take();
+        let was_active = state.active;
+        state.active = false;
+        state.direction = Vec2::ZERO;
+        state.move_vector = Vec3::ZERO;
+        info!(
+            "[joystick] ForcePointerUp ({}): END; finger {finger:?} released (input was {})",
+            reset.reason,
+            if was_active { "on" } else { "off" }
+        );
+    }
+}
+
 /// Update（手势链内、手势层之前）：摇杆层推进。读 `TouchInput` 消息流
 /// ——与手势层同一条流，两层按同一谓词各自分流（见模块注释）。
 pub(crate) fn advance(

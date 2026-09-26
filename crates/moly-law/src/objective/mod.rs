@@ -38,8 +38,10 @@
 //! 不增删。
 
 pub mod approach;
+pub mod change_site;
 pub mod ladder;
 pub mod overlap;
+pub mod random_fixture_action;
 pub mod rest;
 pub mod social;
 pub mod wander;

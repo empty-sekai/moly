@@ -132,6 +132,10 @@ pub struct CameraBasis {
     pub aspect: f32,
     /// Near clip plane distance; the renderer's depth sort reads it.
     pub near: f32,
+    /// The camera's world velocity (`Camera::UpdateVelocity`: the position
+    /// change since the last render times the inverse frame delta); zero where
+    /// the caller does not track it. The Stretch renderer reads it.
+    pub velocity: Vec3,
 }
 
 /// 视口占比钳制：渲染器记录的 min/maxParticleSize。
@@ -265,6 +269,23 @@ pub fn write_quads(
     tally
 }
 
+/// `Camera::UpdateVelocity`, once per render: the camera's position change
+/// since the last render times the inverse frame delta (the engine multiplies
+/// by the time manager's stored inverse delta). The first render has no last
+/// position here and gives zero.
+#[derive(Default)]
+pub struct CameraVelocity {
+    last: Option<Vec3>,
+}
+
+impl CameraVelocity {
+    pub fn update(&mut self, position: Vec3, delta: f32) -> Vec3 {
+        let velocity = self.last.map_or(Vec3::ZERO, |last| (position - last) * (1.0 / delta));
+        self.last = Some(position);
+        velocity
+    }
+}
+
 /// 从相机的世界变换矩阵取三条基轴。bevy 的相机看向 `-Z`，所以视线
 /// 方向是第三列的相反数。
 pub fn basis_from_matrix(matrix: Mat3, position: Vec3, fov_y: f32, aspect: f32, near: f32) -> CameraBasis {
@@ -276,5 +297,6 @@ pub fn basis_from_matrix(matrix: Mat3, position: Vec3, fov_y: f32, aspect: f32, 
         fov_y,
         aspect,
         near,
+        velocity: Vec3::ZERO,
     }
 }

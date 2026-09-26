@@ -1677,13 +1677,12 @@ fn size_3d(emitter: &EmitterParams) -> bool {
 /// Trigger have no consumer here; any trail is refused, its flag not
 /// identified), no Noise size amount (whose size update after the module is
 /// not ported), the native birth path and every storage condition the slot
-/// model has: no ring mode, every lane simulated (a positive start lifetime),
-/// and the reserved storage known to hold the slots it follows. Play reserves
-/// the smaller of the authored maximum and `CalculateMaxActiveParticles`,
-/// which adds the ceiling of the largest lifetime times the largest rate to
-/// the largest summed count of the bursts within one lifetime of a burst
-/// (each count truncated); with a positive maximum and a positive estimate
-/// the first 32 slots lie in it.
+/// model has: no ring mode and every lane simulated (a positive start
+/// lifetime). Play reserves the smaller of the authored maximum and
+/// `CalculateMaxActiveParticles`, which adds the ceiling of the largest
+/// lifetime times the largest rate to the largest summed count of the bursts
+/// within one lifetime of a burst (each count truncated); a birth past that
+/// reservation grows it, keeping every slot the model follows.
 pub(crate) fn size_storage_eligible(emitter: &EmitterParams, route: &SourceRoute) -> Result<(), String> {
     use moly_law::particle::MinMaxCurve;
     native_birth_eligible(emitter, route).map_err(|reason| format!("the native birth path is refused: {reason}"))?;
@@ -2083,7 +2082,8 @@ pub(crate) fn write_geometry(
                         }
                     }
                     crate::source_billboard::write(mesh, draw, &instances, &frame,
-                        system.emitter.simulation_space == SimulationSpace::Local, basis.fov_y, basis.aspect, simulation)
+                        system.emitter.simulation_space == SimulationSpace::Local, basis.fov_y, basis.aspect, simulation,
+                        reflect(basis.velocity))
                 }
                 _ => unreachable!(),
             }
