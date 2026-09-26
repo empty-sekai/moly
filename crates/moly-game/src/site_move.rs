@@ -277,6 +277,9 @@ pub(crate) fn install(app: &mut App) {
                 advance
                     .after(crate::site::read_switch)
                     .before(crate::site::plan)
+                    // The NPC side answers the door's await before the door
+                    // reads it, so an answer lets the door go on that frame.
+                    .after(crate::npc::DoorAnswerSet)
                     .run_if(
                         resource_exists::<SiteMove>
                             .or(resource_exists::<SiteMoveRequest>)
