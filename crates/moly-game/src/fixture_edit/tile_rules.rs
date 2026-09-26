@@ -296,6 +296,61 @@ impl TileBox {
     }
 }
 
+/// `FixtureController.UpdateAddUsingGridBoundList`: one single-cell bound
+/// per enabled tile of the bundle's `AddUsingGrid`, rotated with the
+/// fixture (`isCenterZero`) and offset by `GetRotatedCenterGrid` (source
+/// frame, at the center's y).
+fn add_using_at(
+    meta: Option<&StackMeta>,
+    size: Vector3Int,
+    center: GridPosition,
+    direction: Direction,
+) -> Vec<GridPosition> {
+    meta.and_then(|meta| meta.add_using.as_ref())
+        .map(|grid| {
+            let mut area = GridAreaData::from_meta(grid.rows, grid.cols, |r, c| grid.cell(r, c));
+            area.rotate(direction, true);
+            let rotated = rotated_center_grid(center, size, direction);
+            area.enable_tiles
+                .iter()
+                .map(|tile| rotated + *tile)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+/// The add-using cells of a draft row (source frame), for the grid's fill.
+pub(crate) fn add_using_cells(
+    item: &EditableFixture,
+    meta: &HashMap<String, StackMeta>,
+) -> Result<Vec<GridPosition>, Missing> {
+    let (center, direction, _) = moly_assets::player_data::mirror_fixture_layout(
+        item.center,
+        item.grid_size,
+        item.direction,
+        item.layout,
+    )
+    .map_err(|_| Missing::Footprint)?;
+    Ok(add_using_at(
+        meta.get(&item.package),
+        item.grid_size,
+        center,
+        direction,
+    ))
+}
+
+/// The unavailable zones of one floor layout, or `None` while the table is
+/// not read (or failed to read).
+pub(crate) fn zones_of(world: &World, layout_id: u32) -> Option<Vec<Zone>> {
+    match world
+        .get_resource::<ZoneTable>()
+        .and_then(|table| table.read.as_ref())
+    {
+        Some(Ok(zones)) => Some(zones.get(&layout_id).cloned().unwrap_or_default()),
+        _ => None,
+    }
+}
+
 /// One fixture in the source frame.
 #[derive(Clone, Debug)]
 pub(crate) struct Piece {
@@ -342,19 +397,7 @@ impl Piece {
             .copied()
             .unwrap_or_default();
         let meta = rules.meta.get(&item.package);
-        let add_using = meta
-            .and_then(|meta| meta.add_using.as_ref())
-            .map(|grid| {
-                let mut area =
-                    GridAreaData::from_meta(grid.rows, grid.cols, |r, c| grid.cell(r, c));
-                area.rotate(direction, true);
-                let rotated = rotated_center_grid(center, item.grid_size, direction);
-                area.enable_tiles
-                    .iter()
-                    .map(|tile| rotated + *tile)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let add_using = add_using_at(meta, item.grid_size, center, direction);
         let stack_enables = meta
             .and_then(|meta| meta.stack_enables.as_ref())
             .map(|grid| stack_enable_cells(grid, center, item.grid_size, direction))
@@ -937,15 +980,7 @@ pub(crate) fn rules(world: &World, floor: Option<FloorGridLayout>) -> Result<Rul
         .filter(|areas| areas.loaded)
         .map(|areas| areas.stack.clone())
         .ok_or(Missing::AreaTable)?;
-    let zones = match world
-        .get_resource::<ZoneTable>()
-        .and_then(|table| table.read.as_ref())
-    {
-        Some(Ok(zones)) => Some(Arc::new(
-            zones.get(&floor.layout_id).cloned().unwrap_or_default(),
-        )),
-        _ => None,
-    };
+    let zones = zones_of(world, floor.layout_id).map(Arc::new);
     Ok(Rules {
         traits,
         meta,

@@ -915,6 +915,13 @@ pub fn install(app: &mut App) {
                     .run_if(common_conditions::on_timer(cloth_runtime::REPORT_PERIOD)),
             ),
         )
+        // The weather's physics scene: the site's readiness and the local
+        // player's avatar, after the transforms propagate and before the
+        // weather particles query it.
+        .add_systems(
+            PostUpdate,
+            crate::particle_runtime::collision_scene::observe_product.after(TransformSystems::Propagate),
+        )
         // TransformPropagate 之后：scene 实体当帧展开，取景要读已传播的全局变换。
         // 追角色再排在取景之后：角色就位当帧起，追角色每帧覆盖机位。
         // 天空钉位收尾：读玩家视变换当帧（传播之后）的世界位置。
@@ -942,7 +949,8 @@ pub fn install(app: &mut App) {
                 // 机位都要当帧值。
                 weather_fx::advance
                     .after(TransformSystems::Propagate)
-                    .after(camera::follow_avatar),
+                    .after(camera::follow_avatar)
+                    .after(crate::particle_runtime::collision_scene::observe_product),
                 // 角色侧相机态（屏幕/投影参数）与站点取景同拍；头参考点在
                 // TransformPropagate 之后回写——动画在 Propagate 之前推进，
                 // 读到的是当帧姿势。

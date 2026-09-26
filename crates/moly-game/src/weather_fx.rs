@@ -494,6 +494,10 @@ pub(crate) struct WeatherFxRetirements {
 }
 
 impl WeatherFxRetirements {
+    /// The site's physics scene.
+    pub(crate) fn physics(&self) -> &crate::particle_runtime::collision_scene::SiteScene {
+        &self.physics
+    }
     fn stop(&mut self, active: &mut WeatherFxState, now: f64, delta: f32) {
         self.stop_matching(active, now, delta, |_| true);
     }
