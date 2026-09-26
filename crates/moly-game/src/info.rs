@@ -947,9 +947,6 @@ fn selected_option(group: ToggleGroup, settings: &InfoSettings) -> usize {
     }
 }
 
-/// Update：摆位与逐帧状态。每帧——
-/// 1. 层开关沿（进层/退层钩子串各一串，与层栈梯日志同帧互补）；
-/// 2. 根可见性 = 层栈当前层是否情报层；根缩放 = canvas 缩放；
 /// The info screen's rank gauge targets. The rank page class is not decoded,
 /// so on a region layout the gauge is the document's single
 /// `UIPartsMysekaiRankGauge` component and its decoded references; the
@@ -974,6 +971,18 @@ fn info_rank_gauge_targets(doc: &moly_assets::ui_layout::UiPrefab) -> crate::men
     crate::menu_dialog::rank_gauge_references(doc, gauge)
 }
 
+/// The place system's own memory across frames: the open edge, the rank
+/// model built per open, and the one-time scene start.
+#[derive(Default)]
+pub(crate) struct PlaceMemory {
+    was_open: bool,
+    rank: Option<moly_law::ui::mysekai_rank::MysekaiRankModel>,
+    scene_started: bool,
+}
+
+/// Update：摆位与逐帧状态。每帧——
+/// 1. 层开关沿（进层/退层钩子串各一串，与层栈梯日志同帧互补）；
+/// 2. 根可见性 = 层栈当前层是否情报层；根缩放 = canvas 缩放；
 /// 3. 源页节点按当前页显隐，对话框根按对话框态显隐；
 /// 4. UiPrefabView 覆写单选勾选、箭头、量表与动态文案。
 #[allow(clippy::type_complexity)]
@@ -982,16 +991,15 @@ pub(crate) fn place(
     mut settings:ResMut<InfoSettings>,page_state:Res<InfoPageState>,dialog:Res<InfoDialogState>,
     mut roots:Query<(&mut Visibility,&mut Transform,&mut crate::ui_layout::UiPrefabView),(With<InfoRoot>,Without<InfoDialogRoot>)>,
     mut dialogs:Query<(&InfoDialogRoot,&mut Visibility,&mut Transform,&mut crate::ui_layout::UiPrefabView),Without<InfoRoot>>,
-    mut was_open:Local<bool>,
+    mut memory: Local<PlaceMemory>,
     time: Res<Time>, mut presentation: Option<ResMut<InfoPresentation>>,
     root_canvas: Option<Res<crate::canvas::RootCanvas>>,
     ranks: Option<Res<crate::mysekai_rank::MysekaiRanks>>,
     total_exp: Res<crate::mysekai_rank::UserTotalExp>,
     layouts: Res<crate::ui_layout::UiLayouts>,
-    mut rank: Local<Option<moly_law::ui::mysekai_rank::MysekaiRankModel>>,
     mut graphics: ResMut<crate::game_settings::GameSettings>,
-    mut scene_started: Local<bool>,
 ) {
+    let PlaceMemory { was_open, rank, scene_started } = &mut *memory;
     if !*scene_started {
         *scene_started = true;
         apply_on_scene_start(&mut graphics, &settings);
