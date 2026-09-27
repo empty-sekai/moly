@@ -430,39 +430,30 @@ pub(crate) fn bake_atlas(
     };
     let font = swash::FontRef::from_index(FONT_BYTES, 0)
         .unwrap_or_else(|| panic!("仓内字体不是可读的 OpenType 字体"));
-    let mut chars: Vec<char> = Vec::new();
-    for row in tables.tweets() {
-        for ch in row.text.chars() {
-            if ch != '\n' && !chars.contains(&ch) {
-                chars.push(ch);
-            }
-        }
-    }
-    for ch in &talk_charset.chars {
-        if *ch != '\n' && !chars.contains(ch) {
-            chars.push(*ch);
-        }
-    }
-    for ch in &player_talk_charset.chars {
-        if *ch != '\n' && !chars.contains(ch) {
-            chars.push(*ch);
-        }
-    }
-    for ch in &shell_charset.chars {
-        if *ch != '\n' && !chars.contains(ch) {
-            chars.push(*ch);
-        }
-    }
-    for ch in &collect_charset.chars {
-        if *ch != '\n' && !chars.contains(ch) {
-            chars.push(*ch);
-        }
-    }
+    let mut chars: Vec<char> = tables
+        .tweets()
+        .iter()
+        .flat_map(|row| row.text.chars())
+        .chain(talk_charset.chars.iter().copied())
+        .chain(player_talk_charset.chars.iter().copied())
+        .chain(shell_charset.chars.iter().copied())
+        .chain(collect_charset.chars.iter().copied())
+        .collect();
+    chars.sort_unstable();
+    chars.dedup();
     // TMP lays these out with its synthesized zero-metric glyph: nothing to
     // bake, and not a missing glyph.
     let zero_metric = chars.iter().filter(|ch| tmp_zero_metric(**ch)).count();
     chars.retain(|ch| !tmp_zero_metric(*ch));
-    chars.sort_unstable();
+    // The text normalisation point for the atlas: a control character
+    // (general category Cc) never asks for a glyph. U+000A is the line break
+    // every text walk splits on. U+000D reaches here from a UI prefab whose
+    // serialized text ends a line with "\r\n"; the source's text generator
+    // draws nothing for it and moves the pen back to the line's indent, which
+    // the UI layout mirrors. The open font maps no control character, so
+    // baking one could only report it missing.
+    let controls = chars.iter().filter(|ch| ch.is_control()).count();
+    chars.retain(|ch| !ch.is_control());
 
     let mut context = swash::scale::ScaleContext::new();
     let mut scaler = context.builder(font).size(BAKE_PPEM).build();
@@ -634,7 +625,7 @@ pub(crate) fn bake_atlas(
         .map(|ch| format!("U+{:04X}", *ch as u32))
         .collect();
     info!(
-        "字形图集烘成：{} 格（字符集 {}，{page_count} 页 {atlas_size}x{atlas_size}，每页容量 {page_capacity}，总容量 {capacity}，设备上限 {max_edge}），TMP 零度量字符 {zero_metric} 个（不烘），缺字形 {} 个 [{}]，烘制 {:.0}px 实际墨迹上界 {:.1} 下界 {:.1} ⇒ 格 {:.0}px 笔点=({pen_x:.0},{baseline_from_top:.0})",
+        "字形图集烘成：{} 格（字符集 {}，{page_count} 页 {atlas_size}x{atlas_size}，每页容量 {page_capacity}，总容量 {capacity}，设备上限 {max_edge}），TMP 零度量字符 {zero_metric} 个（不烘），控制字符 {controls} 个（不烘），缺字形 {} 个 [{}]，烘制 {:.0}px 实际墨迹上界 {:.1} 下界 {:.1} ⇒ 格 {:.0}px 笔点=({pen_x:.0},{baseline_from_top:.0})",
         cells.len(),
         chars.len(),
         missing.len(),
