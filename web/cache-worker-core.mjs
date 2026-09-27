@@ -15,6 +15,10 @@ export const CONTROL_CACHE = "moly-control-v1";
 export const LIMIT = 512 * 1024 * 1024;
 export const MAX_ENTRY = 128 * 1024 * 1024;
 const MAX_PENDING = 8;
+// Storage reads issued together while taking an inventory of stored entries.
+const INVENTORY_BATCH = 64;
+// Age after which the budget's accounting is taken again from storage.
+const LEDGER_MS = 60 * 1000;
 const IDENTITY = /^[a-z0-9][a-z0-9._-]{0,95}$/;
 const escape = (value) => value.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
 
@@ -353,35 +357,77 @@ export function createCacheCore({
       queue = result.catch(() => {});
       return result;
     };
+    // Every stored entry of the resource caches, read from their headers. The
+    // reads are independent, so they are issued in batches: one storage round
+    // trip per batch instead of one per entry.
     async function inventory() {
       const entries = [];
       for (const name of (await caches.keys()).filter((name) =>
         name.startsWith(RESOURCE_FAMILY_PREFIX),
       )) {
         const cache = await caches.open(name);
-        for (const request of await cache.keys()) {
-          const response = await cache.match(request);
-          entries.push({
-            name,
-            request,
-            bytes: Number(response?.headers.get("X-Moly-Stored-Bytes") || 0),
-            time: lastUsed.get(request.url) ?? Number(response?.headers.get("X-Moly-Stored-At") || 0),
+        const requests = await cache.keys();
+        for (let start = 0; start < requests.length; start += INVENTORY_BATCH) {
+          const batch = requests.slice(start, start + INVENTORY_BATCH);
+          const responses = await Promise.all(batch.map((request) => cache.match(request)));
+          batch.forEach((request, index) => {
+            const response = responses[index];
+            entries.push({
+              name,
+              url: request.url,
+              bytes: Number(response?.headers.get("X-Moly-Stored-Bytes") || 0),
+              stored: Number(response?.headers.get("X-Moly-Stored-At") || 0),
+            });
           });
         }
       }
       return entries;
     }
+    // The budget's accounting: one inventory, then kept current by this
+    // worker's own writes and evictions. A full inventory per stored response
+    // made every write cost one storage read per entry already stored. Writes
+    // by another worker of the same origin, or storage the browser evicted,
+    // reach the accounting when it is taken again: after a clear, and at most
+    // LEDGER_MS after the previous inventory.
+    let ledger = null,
+      ledgerAt = 0,
+      ledgerBytes = 0;
+    const ledgerKey = (name, url) => `${name}\n${url}`;
+    function takeLedger(entries) {
+      ledger = new Map(entries.map((entry) => [ledgerKey(entry.name, entry.url), entry]));
+      ledgerBytes = entries.reduce((sum, entry) => sum + entry.bytes, 0);
+      ledgerAt = Date.now();
+      return entries;
+    }
+    function forget(name, url) {
+      const key = ledgerKey(name, url),
+        entry = ledger?.get(key);
+      if (!entry) return;
+      ledger.delete(key);
+      ledgerBytes -= entry.bytes;
+    }
+    function remember(entry) {
+      if (!ledger) return;
+      forget(entry.name, entry.url);
+      ledger.set(ledgerKey(entry.name, entry.url), entry);
+      ledgerBytes += entry.bytes;
+    }
     async function makeSpace(extra, incoming) {
-      const active = activeResourceRoots(await scope.clients.matchAll({ type: "window" }), scope.location.origin);
-      const entries = (await inventory()).filter(
-        (entry) => entry.request.url !== incoming,
-      );
+      if (!ledger || Date.now() - ledgerAt > LEDGER_MS) takeLedger(await inventory());
+      // The total includes any stored copy of the incoming URL, so a total
+      // within the budget needs no closer look.
+      if (ledgerBytes + extra <= LIMIT) return;
+      const entries = [...ledger.values()].filter((entry) => entry.url !== incoming);
       let bytes = entries.reduce((sum, entry) => sum + entry.bytes, 0);
-      for (const entry of entries.sort((a, b) => a.time - b.time)) {
+      if (bytes + extra <= LIMIT) return;
+      const active = activeResourceRoots(await scope.clients.matchAll({ type: "window" }), scope.location.origin);
+      const time = (entry) => lastUsed.get(entry.url) ?? entry.stored;
+      for (const entry of entries.sort((a, b) => time(a) - time(b))) {
         if (bytes + extra <= LIMIT) break;
-        if (isActiveRequiredResource(entry.request.url, required, active)) continue;
-        await (await caches.open(entry.name)).delete(entry.request);
-        lastUsed.delete(entry.request.url);
+        if (isActiveRequiredResource(entry.url, required, active)) continue;
+        await (await caches.open(entry.name)).delete(entry.url);
+        forget(entry.name, entry.url);
+        lastUsed.delete(entry.url);
         bytes -= entry.bytes;
       }
       // Never evict necessary base resources or engines for optional content.
@@ -421,6 +467,7 @@ export function createCacheCore({
             epoch++;
           } else if (message.type === "clear") {
             epoch++;
+            ledger = null;
             required.clear();
             lastUsed.clear();
             await (await caches.open(CONTROL_CACHE)).delete(pinsUrl);
@@ -430,7 +477,7 @@ export function createCacheCore({
                 .map((name) => caches.delete(name)),
             );
           }
-          const entries = await inventory();
+          const entries = takeLedger(await inventory());
           port.postMessage({
             source: "moly-cache",
             schemaVersion: CACHE_PROTOCOL,
@@ -570,11 +617,10 @@ export function createCacheCore({
             if (!release) return response;
             let copy = response.clone();
             event.waitUntil(
-              serial(async () => {
-                if (!enabled || generation !== epoch) {
-                  await copy.body?.cancel();
-                  return;
-                }
+              (async () => {
+                // The hash check touches no shared state: admitted copies are
+                // checked concurrently, within the admission bounds, while
+                // earlier ones are written. Only storage changes are queued.
                 if (identity.sha256) {
                   const data = await verifiedSharedBody(
                     copy,
@@ -587,36 +633,44 @@ export function createCacheCore({
                     headers: response.headers,
                   });
                 }
-                if (
-                  identity.shared &&
-                  request.headers.get("X-Moly-Required") === "1" &&
-                  required.size < 20000
-                ) {
-                  required.add(identity.url);
-                  pinsChanged = true;
-                }
-                if (pinsChanged)
-                  await (
-                    await caches.open(CONTROL_CACHE)
-                  ).put(
-                    pinsUrl,
-                    new Response(JSON.stringify([...required]), {
-                      headers: { "Content-Type": "application/json" },
-                    }),
+                await serial(async () => {
+                  if (!enabled || generation !== epoch) {
+                    await copy.body?.cancel();
+                    return;
+                  }
+                  if (
+                    identity.shared &&
+                    request.headers.get("X-Moly-Required") === "1" &&
+                    required.size < 20000
+                  ) {
+                    required.add(identity.url);
+                    pinsChanged = true;
+                  }
+                  if (pinsChanged)
+                    await (
+                      await caches.open(CONTROL_CACHE)
+                    ).put(
+                      pinsUrl,
+                      new Response(JSON.stringify([...required]), {
+                        headers: { "Content-Type": "application/json" },
+                      }),
+                    );
+                  await makeSpace(bytes, identity.url);
+                  const headers = new Headers(copy.headers);
+                  headers.delete("Content-Encoding");
+                  headers.delete("Content-Length");
+                  const stored = Date.now();
+                  headers.set("X-Moly-Stored-Bytes", String(bytes));
+                  headers.set("X-Moly-Stored-At", String(stored));
+                  const cache = await caches.open(identity.cache);
+                  await cache.put(
+                    identity.url,
+                    new Response(copy.body, { status: 200, headers }),
                   );
-                await makeSpace(bytes, identity.url);
-                const headers = new Headers(copy.headers);
-                headers.delete("Content-Encoding");
-                headers.delete("Content-Length");
-                headers.set("X-Moly-Stored-Bytes", String(bytes));
-                headers.set("X-Moly-Stored-At", String(Date.now()));
-                const cache = await caches.open(identity.cache);
-                await cache.put(
-                  identity.url,
-                  new Response(copy.body, { status: 200, headers }),
-                );
-                lastUsed.set(identity.url, Date.now());
-              })
+                  remember({ name: identity.cache, url: identity.url, bytes, stored });
+                  lastUsed.set(identity.url, Date.now());
+                });
+              })()
                 .catch(() => {
                   /* Retention is best-effort; never fail successful online playback. */
                 })
