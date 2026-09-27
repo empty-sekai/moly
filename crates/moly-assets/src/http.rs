@@ -178,6 +178,68 @@ async fn stream(
     Ok(bytes)
 }
 
+/// A public remote read (a master table) whose response headers must arrive
+/// within `first_byte_ms`: past that the request is aborted and the read
+/// fails as `TimedOut`, so its consumer can try its next host. The body that
+/// follows the headers is read with no time bound; a large table on a slow
+/// network still completes. A 403 or 404 is "not found", as Bevy's web reader
+/// answers it.
+pub(crate) async fn read_first_byte_bounded(
+    url: &str,
+    first_byte_ms: i32,
+) -> Result<Vec<u8>, AssetReaderError> {
+    let window = web_sys::window().ok_or_else(|| error("remote reads require a browser window"))?;
+    let controller = AbortController::new()
+        .map_err(|e| error(format!("Create remote request: {}", js_error(&e))))?;
+    let abort = controller.clone();
+    let callback = Closure::wrap(Box::new(move || abort.abort()) as Box<dyn FnMut()>);
+    let timer = window
+        .set_timeout_with_callback_and_timeout_and_arguments_0(
+            callback.as_ref().unchecked_ref(),
+            first_byte_ms,
+        )
+        .map_err(|e| error(format!("Set remote timeout: {}", js_error(&e))))?;
+    let init = RequestInit::new();
+    init.set_signal(Some(&controller.signal()));
+    let fetched = JsFuture::from(window.fetch_with_str_and_init(url, &init)).await;
+    // The headers are in (or the request failed): the body is not bounded.
+    window.clear_timeout_with_handle(timer);
+    drop(callback);
+    let response: Response = match fetched {
+        Ok(value) => value
+            .dyn_into()
+            .map_err(|_| error(format!("Invalid HTTP response for {url}")))?,
+        Err(_) if controller.signal().aborted() => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "no response headers within {} s: {url}",
+                    first_byte_ms / 1000
+                ),
+            )
+            .into());
+        }
+        Err(e) => {
+            return Err(error(format!(
+                "Remote request failed for {url}: {}",
+                js_error(&e)
+            )))
+        }
+    };
+    match response.status() {
+        200 => {}
+        403 | 404 => return Err(AssetReaderError::NotFound(url.into())),
+        status => return Err(AssetReaderError::HttpError(status)),
+    }
+    let body = response
+        .array_buffer()
+        .map_err(|e| error(format!("Read remote response {url}: {}", js_error(&e))))?;
+    let data = JsFuture::from(body)
+        .await
+        .map_err(|e| error(format!("Read remote response {url}: {}", js_error(&e))))?;
+    Ok(js_sys::Uint8Array::new(&data).to_vec())
+}
+
 /// Packed callers already own a representation-specific buffer reservation.
 /// `exact` says that `limit` is the authenticated size of the body.
 pub(crate) async fn read_bytes(

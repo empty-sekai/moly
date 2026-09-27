@@ -9,18 +9,23 @@
 //! [`resolve`] is the one system that loads them. Once the root's region is
 //! known (`source.region` of the root's `source.json`), each requested table
 //! is read from the master bases in order ([`MasterBases`]: the master host,
-//! then its mirror), and the region's upstream data version is logged once. A table that no base
-//! serves, or whose text its consumer's parser refuses, is named once in the
-//! log and in the root's missing list ([`MasterData::missing`]); its consumer
-//! takes the named error and applies its own fallback. Nothing here panics on
-//! data.
+//! then its mirror), and the region's upstream data version is logged once. A
+//! base whose read timed out (no response headers within the reader's bound)
+//! is demoted for the session: every later table tries it after the others.
+//! A table that no base serves, or whose text its consumer's parser refuses,
+//! is named once in the log and in the root's missing list
+//! ([`MasterData::missing`]); its consumer takes the named error and applies
+//! its own fallback. Nothing here panics on data.
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::fmt;
 
 use bevy::app::{App, PreUpdate};
-use bevy::asset::{AssetPath, AssetServer, AssetTrackingSystems, Assets, Handle, LoadState};
+use bevy::asset::io::AssetReaderError;
+use bevy::asset::{
+    AssetLoadError, AssetPath, AssetServer, AssetTrackingSystems, Assets, Handle, LoadState,
+};
 use bevy::prelude::*;
 use serde_json::{Map, Value};
 
@@ -184,8 +189,10 @@ struct Pending {
     table: &'static str,
     name: &'static str,
     parse: Box<dyn Fn(&str) -> Result<Parsed, String> + Send + Sync>,
-    /// The base being read.
-    base: usize,
+    /// The base being read (an index into [`MasterBases`]).
+    base: Option<usize>,
+    /// The bases already tried.
+    tried: Vec<usize>,
     handle: Option<Handle<JsonAsset>>,
     /// The bases that failed, with their errors.
     failures: Vec<String>,
@@ -202,6 +209,9 @@ pub struct MasterData {
     missing: Vec<MasterError>,
     /// Tables no base served, and why (named once per table).
     absent: HashMap<&'static str, String>,
+    /// Bases whose read timed out, in the order they did: tried last for
+    /// the rest of the session.
+    demoted: Vec<usize>,
 }
 
 impl MasterData {
@@ -218,7 +228,8 @@ impl MasterData {
             table: table.table,
             name: table.name,
             parse: Box::new(move |text| parse(text).map(|value| Box::new(value) as Parsed)),
-            base: 0,
+            base: None,
+            tried: Vec::new(),
             handle: None,
             failures: Vec::new(),
         });
@@ -268,6 +279,24 @@ impl MasterData {
             Document::Read(Ok(region)) => Some(*region),
             _ => None,
         }
+    }
+
+    /// The bases demoted for the session because a read of theirs timed out.
+    pub fn demoted(&self) -> &[usize] {
+        &self.demoted
+    }
+
+    /// Demotes a base whose read timed out; named once per base.
+    fn demote(&mut self, index: usize, base: &MasterBase, table: &str, next: Option<&MasterBase>) {
+        if self.demoted.contains(&index) {
+            return;
+        }
+        self.demoted.push(index);
+        warn!(
+            "[masters] {} sent no response headers in time for {table}; for the rest of the session every table tries {} first",
+            base.name,
+            next.map_or("no other base", |next| next.name)
+        );
     }
 
     /// Names a table its consumer does not get: once per table when it is
@@ -379,7 +408,16 @@ impl Pending {
             data.name_missing(&error, true);
             return Some(Err(error));
         }
-        let Some(base) = bases.0.get(self.base) else {
+        // The next base: the first untried one that is not demoted, else the
+        // first untried demoted one.
+        if self.base.is_none() {
+            let untried = |index: &usize| !self.tried.contains(index);
+            self.base = (0..bases.0.len())
+                .filter(untried)
+                .find(|index| !data.demoted.contains(index))
+                .or_else(|| data.demoted.iter().copied().find(untried));
+        }
+        let Some(index) = self.base else {
             let reason = if self.failures.is_empty() {
                 "no master base is configured".to_owned()
             } else {
@@ -390,14 +428,21 @@ impl Pending {
             data.name_missing(&error, true);
             return Some(Err(error));
         };
+        let base = bases.0[index];
         let handle = self
             .handle
             .get_or_insert_with(|| server.load(base.table(region, self.table)))
             .clone();
         if let LoadState::Failed(error) = server.load_state(&handle) {
             self.failures.push(format!("{}: {error}", base.name));
-            self.base += 1;
+            self.tried.push(index);
+            self.base = None;
             self.handle = None;
+            if timed_out(&error) {
+                let next = (0..bases.0.len())
+                    .find(|other| !self.tried.contains(other) && !data.demoted.contains(other));
+                data.demote(index, &base, self.table, next.map(|other| &bases.0[other]));
+            }
             return None;
         }
         let text = &jsons.get(&handle)?.0;
@@ -413,6 +458,16 @@ impl Pending {
             }
         }
     }
+}
+
+/// Whether a load failed because its read timed out (the remote reader's
+/// bound on the response headers).
+fn timed_out(error: &AssetLoadError) -> bool {
+    matches!(
+        error,
+        AssetLoadError::AssetReaderError(AssetReaderError::Io(io))
+            if io.kind() == std::io::ErrorKind::TimedOut
+    )
 }
 
 /// `source.region` of the root's identity document.
