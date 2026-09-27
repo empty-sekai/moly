@@ -1,4 +1,4 @@
-import { PackClient, packDigest } from "./asset-pack-client.mjs";
+import { PackClient } from "./asset-pack-client.mjs";
 
 // The first entry downloads the measured necessary pack without waiting for
 // audio permission. Playback still begins from the trusted in-frame gesture.
@@ -115,14 +115,18 @@ export async function warmBaseResources(
     while (next < rows.length) {
       const row = rows[next++];
       if (client) {
-        const bytes = await client.read(row.path);
+        // read() returns only bytes that match the entry's content checksum
+        // and size, so comparing those with the measured row checks the
+        // bytes without digesting them a second time.
+        const entry = await client.resolve(row.path);
         if (
-          bytes.byteLength !== row.decodedBytes ||
-          (await packDigest(bytes)) !== row.sha256
+          entry.bytes !== row.decodedBytes ||
+          entry.content_sha256 !== row.sha256
         )
           throw new Error(
             "Packed base resource differs from its measured descriptor",
           );
+        const bytes = await client.read(row.path);
         decodedBytes += bytes.byteLength;
       } else {
         // Add after the await: `decodedBytes += await ...` reads the total

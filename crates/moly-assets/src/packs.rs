@@ -504,6 +504,16 @@ impl PackReader {
                             "unsupported packed representation for {path}"
                         )));
                     }
+                    // An identity blob is its content: the content checksum and
+                    // size must be the blob's, so the blob check verifies both.
+                    if entry.codec == "identity"
+                        && (entry.content_sha256 != entry.blob_sha256
+                            || entry.bytes != entry.blob_bytes)
+                    {
+                        return Err(invalid(format!(
+                            "identity representation differs from its content: {path}"
+                        )));
+                    }
                     key(Path::new(&format!("blobs/{}", entry.blob)))?;
                     if entries.insert(path, entry).is_some() {
                         return Err(invalid("duplicate path in package manifest"));
@@ -572,18 +582,20 @@ impl PackReader {
                         .take(entry.bytes as u64 + 1)
                         .read_to_end(&mut decoded)?;
                     drop(bytes);
+                    if decoded.len() != entry.bytes
+                        || format!("{:x}", Sha256::digest(&decoded)) != entry.content_sha256
+                    {
+                        return Err(invalid(format!(
+                            "decoded asset checksum differs: {}",
+                            entry.path
+                        )));
+                    }
                     decoded
                 } else {
+                    // The manifest admits an identity entry only when its
+                    // content checksum and size are the blob's (checked above).
                     bytes
                 };
-                if decoded.len() != entry.bytes
-                    || format!("{:x}", Sha256::digest(&decoded)) != entry.content_sha256
-                {
-                    return Err(invalid(format!(
-                        "decoded asset checksum differs: {}",
-                        entry.path
-                    )));
-                }
                 reservation.shrink_to(decoded.capacity());
                 Ok::<Arc<Buffer>, AssetReaderError>(Arc::new(Buffer {
                     bytes: decoded,
