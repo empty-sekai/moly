@@ -214,7 +214,7 @@ const BAKE_PPEM: f32 = 32.0;
 const CELL_PAD: f32 = 2.0;
 const ATLAS_SIZE: f32 = 1024.0;
 /// 仓内开源字体（与气泡同款，授权文本同目录进仓）。
-const FONT_BYTES: &[u8] = include_bytes!("../assets/font/ResourceHanRoundedSC-Medium.subset.ttf");
+use crate::ui_font::UI_FONT as FONT_BYTES;
 
 // ---------------------------------------------------------------------------
 // 数据面：装载请求 → 解析

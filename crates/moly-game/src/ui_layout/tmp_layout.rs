@@ -44,7 +44,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use swash::shape::ShapeContext;
 use swash::text::Codepoint;
 
-const FONT: &[u8] = include_bytes!("../../assets/font/ResourceHanRoundedSC-Medium.subset.ttf");
+use crate::ui_font::UI_FONT as FONT;
 pub(super) const FONT_METRICS_REVISION: &str = "ResourceHanRoundedSC-Medium/metrics-wrap-1-source-face-1-tmp-assets-1";
 const EPSILON: f32 = 0.0001;
 const LARGE: f32 = 32767.0;

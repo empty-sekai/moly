@@ -145,6 +145,7 @@ mod zoom_player_camera;
 mod talk_ingest;
 pub mod talk_window;
 mod two_button_dialog;
+mod ui_font;
 pub mod uber_particle;
 pub mod ui_layers;
 pub mod ui_layout;
