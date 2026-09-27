@@ -222,6 +222,8 @@ const OPTIONAL_DOCUMENTS: &[(&str, &str)] = &[
     ("CommonReward", "menu/CommonRewardSubWindowDialog.json"),
     ("HonorReward", "menu/HonorRewardSubWindowDialog.json"),
     ("RefreshBirthdayPlant", "menu/MysekaiRefreshBirthdayPlantSubWindowDialog.json"),
+    ("BgmSelect", "bgmselect/ScreenLayerMysekaiBGMSelect.json"),
+    ("BgmSelectListCell", "bgmselect/MysekaiBGMSelectListCell.json"),
 ];
 
 #[derive(Resource, Default)]
