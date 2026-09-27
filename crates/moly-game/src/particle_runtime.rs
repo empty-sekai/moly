@@ -1581,6 +1581,8 @@ pub(crate) fn director_chunk(system: &mut Runtime, dt: f32, emitting: bool, ctx:
 /// Update1Incremental's fixed-step loop without the backlog widening (see
 /// [`moly_law::particle::frame_time::IncrementalEntry::ScriptSimulateFixed`]).
 /// One call, not chunked. The Simulate leaves the system paused.
+// The cut-scene EffectClip play calls this once its caller is wired.
+#[allow(dead_code)]
 pub(crate) fn script_simulate_fixed(system: &mut Runtime, t: f32, emitting: bool, ctx: &Context,
     slice_start: impl FnMut(&Runtime)) -> Result<bool, String> {
     advance_frame_entry(system, t, emitting, ctx, slice_start,

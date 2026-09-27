@@ -633,7 +633,7 @@ mod tests {
     /// must return without panicking. `MOLY_TIMESTEP_FUZZ` is the iteration count.
     /// The time update of `ParticleSystem.Simulate(t, withChildren, restart)`
     /// (fixedTimeStep true: UpdateData flags 5) and of a Director chunk
-    /// (flags 4) against JP 6.8.1 Update1b / GetTimeStep / Update1Incremental
+    /// (flags 4) against the source's Update1b / GetTimeStep / Update1Incremental
     /// rows executed from a zero pending time: every slice's pending time
     /// before it and its length, and the pending time left, bit for bit.
     /// Named one-rule mutants must each miss somewhere.

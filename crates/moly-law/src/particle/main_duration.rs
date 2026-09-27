@@ -57,8 +57,8 @@ mod tests {
     }
 
     /// Native rows of `ParticleSystem::SetLengthInSec` and of the setter
-    /// binding's tail (JP 6.8.1, executed in an emulator with the relocations
-    /// and the static initializer run first): every stored duration word must
+    /// binding's tail (the source build's own code, with its static
+    /// initializer run first): every stored duration word must
     /// equal the native one, the binding rows' byte must be raised exactly
     /// when the system is not stopped, and each named one-rule mutant must
     /// miss.

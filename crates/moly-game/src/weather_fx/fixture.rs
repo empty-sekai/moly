@@ -1805,6 +1805,8 @@ pub(crate) fn step_played(system: &mut Runtime, played: &mut Played, clocks: &Fr
 /// The Simulate leaves every system paused and out of the per-frame manager;
 /// the `Play()` that follows resumes them, so this host leaves them playing.
 /// Returns how many systems took the time update.
+// The cut-scene EffectClip play calls this once its caller is wired.
+#[allow(dead_code)]
 pub(crate) fn simulate_played(world: &mut World, draws: &[Entity], t: f32, frame_dt: f32) -> Result<usize, String> {
     if !(t.is_finite() && t >= 0.0) {
         return Err(format!("Simulate time {t} outside the finite range"));
@@ -1886,6 +1888,8 @@ pub(crate) fn simulate_played(world: &mut World, draws: &[Entity], t: f32, frame
 
 /// The world transform of `entity` from its local Transform chain now
 /// (TransformPropagate has not run for a change made this frame).
+// The cut-scene EffectClip play calls this once its caller is wired.
+#[allow(dead_code)]
 fn composed_global(world: &World, entity: Entity) -> GlobalTransform {
     let mut chain = Vec::new();
     let mut current = Some(entity);
@@ -1900,6 +1904,8 @@ fn composed_global(world: &World, entity: Entity) -> GlobalTransform {
 /// (see [`SubEmitterTargets`]): each target's owner words composed from its
 /// instance first, the commands with the parent update's UpdateData `flags`;
 /// a command whose target is not installed is dropped, counted.
+// The cut-scene EffectClip play calls this once its caller is wired.
+#[allow(dead_code)]
 fn deliver_to_targets(world: &mut World, parent: Entity, commands: Vec<(String, moly_law::particle::sub_emission::SubEmitterCommand)>,
     frame_dt: f32, flags: u32) {
     if commands.is_empty() {

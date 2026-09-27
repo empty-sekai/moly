@@ -534,11 +534,11 @@ mod tests {
     /// scale, edges, and the exported chains of the sub-emitter targets that
     /// use this mode (the sky ones under the environment chain). Every output
     /// word is compared bit for bit; the shape scale is (1, 1, 1).
-    /// Native rows of UpdateLocalToWorldMatrixAndScales (JP 6.8.1) for the
+    /// Native rows of UpdateLocalToWorldMatrixAndScales for the
     /// Hierarchy, Local and Shape scaling modes over parent-indexed chains,
     /// with the default transform (mode 0: the system's own Transform). Every
     /// word of the matrix, the inverse, the rotation, the local 3x3, the
-    /// particle scale (+0x15c) and the shape scale (+0x150) is compared bit
+    /// particle scale and the shape scale is compared bit
     /// for bit. Rows of the renderer-shape transform (mode 1) and the Custom
     /// simulation space (mode 2) take other branches and are counted, not
     /// compared. Named one-rule mutants of the Shape branch must each miss.

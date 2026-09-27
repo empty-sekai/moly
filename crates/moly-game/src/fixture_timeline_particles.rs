@@ -772,6 +772,8 @@ pub(crate) fn play_object(world: &mut World, binding: &ParticlePlayBinding) -> R
 /// installed and playing, as the `Play()` that follows resumes paused ones,
 /// so that Play finds them playing. Returns how many systems took the time
 /// update.
+// The cut-scene EffectClip play calls this once its caller is wired.
+#[allow(dead_code)]
 pub(crate) fn simulate_object(world: &mut World, binding: &ParticlePlayBinding, t: f32) -> Result<usize, String> {
     let Some(mut prepared) = world.entity_mut(binding.root).take::<PreparedPlay>() else {
         return Err("played object was released".into());
@@ -786,6 +788,8 @@ pub(crate) fn simulate_object(world: &mut World, binding: &ParticlePlayBinding, 
 /// `ParticleSystem.Simulate(t, withChildren, restart)` from script on the
 /// played object's own system: the restart with children is
 /// [`simulate_object`]; the other combinations are refused by name.
+// The cut-scene EffectClip play calls this once its caller is wired.
+#[allow(dead_code)]
 pub(crate) fn simulate_played_object(world: &mut World, binding: &ParticlePlayBinding, t: f32, with_children: bool,
     restart: bool) -> Result<usize, String> {
     if !(with_children && restart) {
@@ -806,6 +810,8 @@ pub(crate) fn simulate_played_object(world: &mut World, binding: &ParticlePlayBi
 /// system refuses the call by name before anything is written. A listed node
 /// this host does not play has nothing to write. Returns how many systems were
 /// written.
+// The cut-scene EffectClip play calls this once its caller is wired.
+#[allow(dead_code)]
 pub(crate) fn set_played_object_duration(world: &mut World, binding: &ParticlePlayBinding, systems: &[Entity],
     duration: f32) -> Result<usize, String> {
     if world.get::<PreparedPlay>(binding.root).is_none() {
@@ -1602,7 +1608,7 @@ pub(crate) trait FamilyWorld {
 /// One frame of a controlled system whose cached sub-emitter targets this
 /// host prepared: ParticleControlPlayable.PrepareFrame as [`advance`] runs
 /// it, with each of its Simulate calls entering SimulateChildrenRecursive
-/// (JP 6.8.1 libunity) with withChildren false:
+/// (in the engine) with withChildren false:
 ///
 /// - the parent's SubModule is enabled (its birth events are installed), so
 ///   each target GetSubEmitterPtrs lists (a row naming an object whose own
