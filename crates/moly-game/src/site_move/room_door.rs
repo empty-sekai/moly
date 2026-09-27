@@ -39,8 +39,8 @@
 //!   path then reaches `SetupRoom`'s `ShowDoor`, so the door is spawned
 //!   shown and the test has no visible result.
 //! - The go-home view's floor buttons (`MyRoomSiteSelector.
-//!   SetActiveSmallButton`): [`small_buttons_active`] over the player-data
-//!   catalog's release rows and the client copy's rank
+//!   SetActiveSmallButton`): [`small_buttons_active`] over the master
+//!   release rows and the client copy's rank
 //!   ([`FloorReleaseMasters`]); the view itself is the action button's.
 //!   The rank is a server value (`UserMysekaiGamedata.mysekaiRank`, the
 //!   server model's); the rule over it is the client's.
@@ -68,7 +68,8 @@ use serde_json::Value;
 
 use super::{InstanceReady, PendingInstance};
 use crate::character_silhouette::{door_part_attribute, SourceStencilAttribute};
-use crate::site_expansion::law::Masters;
+use crate::site_expansion::law::{Masters, FLOOR_BUTTON_TABLES};
+use moly_assets::json::master::MasterData;
 
 /// `SetUpDoor`'s search: a Transform named exactly this under the wall.
 const DOOR_ANCHOR: &str = "Loc_door";
@@ -950,19 +951,18 @@ pub(crate) fn mysekai_rank(client: Option<&crate::server::ClientUserData>) -> i3
     }
 }
 
-/// The player-data catalog's `mysekaiSites`, `mysekaiSiteLevels` and
-/// `mysekaiRankReleases` rows the floor buttons' show rule reads (master
-/// data from the runtime root), or why the root has none.
+/// The `mysekaiSites`, `mysekaiSiteLevels` and `mysekaiRankReleases` rows
+/// the floor buttons' show rule reads, or why they are missing.
 #[derive(Resource)]
 pub(crate) enum FloorReleaseMasters {
-    Loading(Handle<JsonAsset>),
+    Loading,
     Ready(Result<Masters, String>),
 }
 
 impl FloorReleaseMasters {
     /// [`small_buttons_active`] for the view: the current site type and the
     /// client copy the rank comes from. `Err` names why the rows are not
-    /// there (still loading, file absent, a table malformed); the source
+    /// there (still loading, a table missing or malformed); the source
     /// always has its master data, so the view should keep the buttons
     /// hidden and say so rather than guess.
     #[allow(dead_code)] // Called by the go-home view's SetShowAction.
@@ -972,8 +972,8 @@ impl FloorReleaseMasters {
         client: Option<&crate::server::ClientUserData>,
     ) -> Result<[bool; 3], String> {
         match self {
-            FloorReleaseMasters::Loading(_) => {
-                Err("the player-data catalog is still loading".to_owned())
+            FloorReleaseMasters::Loading => {
+                Err("the floor buttons' master tables are still loading".to_owned())
             }
             FloorReleaseMasters::Ready(Err(reason)) => Err(reason.clone()),
             FloorReleaseMasters::Ready(Ok(masters)) => Ok(small_buttons_active(
@@ -985,30 +985,23 @@ impl FloorReleaseMasters {
     }
 }
 
-fn load_floor_release_masters(mut commands: Commands, server: Res<AssetServer>) {
-    commands.insert_resource(FloorReleaseMasters::Loading(
-        server.load::<JsonAsset>("moly://fixture-models/player-data.json"),
-    ));
+fn load_floor_release_masters(mut commands: Commands, mut tables: ResMut<MasterData>) {
+    FLOOR_BUTTON_TABLES.request(&mut tables);
+    commands.insert_resource(FloorReleaseMasters::Loading);
 }
 
 fn parse_floor_release_masters(
-    server: Res<AssetServer>,
-    jsons: Res<Assets<JsonAsset>>,
+    mut tables: ResMut<MasterData>,
     masters: Option<ResMut<FloorReleaseMasters>>,
 ) {
     let Some(mut masters) = masters else {
         return;
     };
-    let FloorReleaseMasters::Loading(handle) = &*masters else {
+    let FloorReleaseMasters::Loading = &*masters else {
         return;
     };
-    let parsed = if let bevy::asset::LoadState::Failed(error) = server.load_state(handle) {
-        Err(format!("player-data.json is not in this root ({error})"))
-    } else {
-        let Some(json) = jsons.get(handle) else {
-            return;
-        };
-        Masters::parse(&json.0).map_err(|error| format!("player-data.json: {error}"))
+    let Some(parsed) = FLOOR_BUTTON_TABLES.take(&mut tables) else {
+        return;
     };
     match &parsed {
         Ok(rows) => info!(
@@ -1045,7 +1038,7 @@ fn report_small_buttons(
         return;
     };
     let rows = match &*masters {
-        FloorReleaseMasters::Loading(_) => return,
+        FloorReleaseMasters::Loading => return,
         FloorReleaseMasters::Ready(rows) => rows,
     };
     *last = Some(site.site_id);

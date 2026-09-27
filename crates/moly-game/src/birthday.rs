@@ -1,4 +1,4 @@
-//! 生日派对主表（`birthday-parties.json`）与站点地图庆典门的档期律。
+//! 生日派对主表（`birthdayParties`，经区域主表镜像读入）与站点地图庆典门的档期律。
 //!
 //! 真源入口：站点地图点开已解锁的庆典庭院，先问主管理器的
 //! GetMasterBirthdayPartiesInSession——生日派对主表按「档期内」过滤；
@@ -12,70 +12,49 @@
 //! before the model is installed, device time. The native instrument
 //! `MOLY_BIRTHDAY_NOW_MS` fixes that server clock through the model's native
 //! overlay; game mode reads no environment variable.
+//!
+//! A table that is absent or malformed is named once by the master layer;
+//! then no party is in session, the gate shows its no-party dialog, the
+//! delivery and gather replies refuse by naming the table, and the rest of
+//! the game runs as usual.
 
-use bevy::asset::{Assets, LoadState};
 use bevy::prelude::*;
 
-use moly_assets::json::JsonAsset;
+use moly_assets::json::master::{self, MasterData, MasterTable};
 
 // ---------------------------------------------------------------------------
 // 装载：请求 → 解析
 // ---------------------------------------------------------------------------
 
-/// 主表 JSON 的装载请求；解析成功后即撤。
-#[derive(Resource)]
-pub(crate) struct BirthdayPartiesHandle(Handle<JsonAsset>);
+/// The party master the gate and the delivery read.
+const PARTIES: MasterTable<Vec<PartyRow>> = MasterTable {
+    table: "birthdayParties",
+    name: "birthdayParties (the festival gate and the delivery)",
+    parse: parse_parties,
+};
 
-/// Startup：请求装载生日派对主表。
-pub(crate) fn load(mut commands: Commands, server: Res<AssetServer>) {
-    commands.insert_resource(BirthdayPartiesHandle(
-        server.load::<JsonAsset>(moly_assets::birthday_parties()),
-    ));
+/// Startup：请求生日派对主表。
+pub(crate) fn load(mut masters: ResMut<MasterData>) {
+    masters.request(&PARTIES);
 }
 
-/// Update：主表到齐即解析。装载失败响亮 panic（资产边界的唯一拒绝点）；
-/// 行缺档期字段同样响亮拒绝——门读不了档期就是读不了行。
-pub(crate) fn parse(
-    mut commands: Commands,
-    server: Res<AssetServer>,
-    jsons: Res<Assets<JsonAsset>>,
-    handle: Option<Res<BirthdayPartiesHandle>>,
-) {
-    let Some(handle) = handle else {
+/// Update：主表到齐即落座。缺表或表形不对由主表层具名一次，落座一份
+/// 零行、带缺表原因的主表：档期内恒无派对。
+pub(crate) fn parse(mut commands: Commands, mut masters: ResMut<MasterData>) {
+    let Some(result) = masters.take(&PARTIES) else {
         return;
     };
-    if let LoadState::Failed(err) = server.load_state(&handle.0) {
-        panic!("生日派对主表装载失败：{err:?}");
-    }
-    let Some(json) = jsons.get(&handle.0) else {
-        return;
+    let parties = match result {
+        Ok(parties) => parties,
+        Err(error) => {
+            info!("[birthday] no party table: no party is in session");
+            commands.insert_resource(BirthdayParties {
+                rows: Vec::new(),
+                missing: Some(error.to_string()),
+            });
+            return;
+        }
     };
-    let value: serde_json::Value = serde_json::from_str(&json.0)
-        .unwrap_or_else(|err| panic!("生日派对主表不是合法 JSON：{err}"));
-    let rows = value
-        .get("rows")
-        .and_then(|v| v.as_array())
-        .unwrap_or_else(|| panic!("生日派对主表缺 rows 数组"));
-    let mut parties = Vec::with_capacity(rows.len());
-    for row in rows {
-        parties.push(PartyRow {
-            id: int_field(row, "id"),
-            start_at: int_field(row, "startAt"),
-            closed_at: int_field(row, "closedAt"),
-            // 门只读档期；包名是日志里的行标签，快照间字段形状有差，
-            // 缺了用行 id 标。
-            assetbundle_name: row
-                .get("assetbundleName")
-                .and_then(|v| v.as_str())
-                .map(str::to_owned),
-            // The delivery site reads these two columns of the parties in
-            // session; the gate does not.
-            delivery_item_material_id: row.get("deliveryItemMaterialId").and_then(|v| v.as_i64()),
-            delivery_reward_material_id: row
-                .get("deliveryRewardMysekaiMaterialId")
-                .and_then(|v| v.as_i64()),
-        });
-    }
     let now = now_ms();
     let in_session: Vec<String> = parties
         .iter()
@@ -98,15 +77,37 @@ pub(crate) fn parse(
             format!("：{}", in_session.join("，"))
         }
     );
-    commands.insert_resource(BirthdayParties { rows: parties });
-    commands.remove_resource::<BirthdayPartiesHandle>();
+    commands.insert_resource(BirthdayParties {
+        rows: parties,
+        missing: None,
+    });
 }
 
-/// 行上的整型字段；缺失或非整型响亮拒绝并具名行与字段。
-fn int_field(row: &serde_json::Value, field: &str) -> i64 {
-    row.get(field)
-        .and_then(|v| v.as_i64())
-        .unwrap_or_else(|| panic!("生日派对主表行 {:?} 缺整型字段 {field}", row.get("id")))
+/// `birthdayParties`：行在主表序；缺整型档期字段的行具名拒绝整表。
+fn parse_parties(text: &str) -> Result<Vec<PartyRow>, String> {
+    master::rows(text)?
+        .iter()
+        .map(|row| {
+            Ok(PartyRow {
+                id: master::int(row, "id")?,
+                start_at: master::int(row, "startAt")?,
+                closed_at: master::int(row, "closedAt")?,
+                // 门只读档期；包名是日志里的行标签，缺了用行 id 标。
+                assetbundle_name: row
+                    .get("assetbundleName")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
+                // The delivery site reads these two columns of the parties in
+                // session; the gate does not.
+                delivery_item_material_id: row
+                    .get("deliveryItemMaterialId")
+                    .and_then(|v| v.as_i64()),
+                delivery_reward_material_id: row
+                    .get("deliveryRewardMysekaiMaterialId")
+                    .and_then(|v| v.as_i64()),
+            })
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -148,9 +149,18 @@ impl PartyRow {
 #[derive(Resource)]
 pub(crate) struct BirthdayParties {
     rows: Vec<PartyRow>,
+    /// Why the table is missing (named once by the master layer); it then
+    /// has no rows.
+    missing: Option<String>,
 }
 
 impl BirthdayParties {
+    /// Why the root has no party table, for the replies that refuse by
+    /// naming it.
+    pub(crate) fn missing(&self) -> Option<&str> {
+        self.missing.as_deref()
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.rows.len()
     }

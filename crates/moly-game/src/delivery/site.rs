@@ -592,7 +592,10 @@ pub(crate) fn arrive(
     // GetMasterBirthdayPartiesInSession.
     let in_session = parties.in_session(crate::birthday::now_ms());
     if in_session.is_empty() {
-        info!("[delivery] arrival on {}: no party in session; RefreshBirthdayParty returns, no delivery", objects.scene);
+        match parties.missing() {
+            Some(reason) => info!("[delivery] arrival on {}: no party in session, the party table is missing ({reason}); no delivery", objects.scene),
+            None => info!("[delivery] arrival on {}: no party in session; RefreshBirthdayParty returns, no delivery", objects.scene),
+        }
         return;
     }
     let Some(tables) = tables else {
