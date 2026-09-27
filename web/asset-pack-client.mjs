@@ -483,6 +483,37 @@ export class PackClient {
     if (!entry) throw new Error(`Package omitted logical asset: ${path}`);
     return { ...entry, url: this.url(`blobs/${entry.blob}`) };
   }
+  /** Transfers a logical asset's blob to its end without keeping or checking
+   * the bytes, only their exact length: a prewarm, like the loose prewarm.
+   * The retention worker checks a copy against its address before keeping
+   * it, and every reader that uses the bytes, read() here and the engine's
+   * pack reader, checks them itself. Resolves to the entry, as read from
+   * the verified package manifest. */
+  async warm(path) {
+    const entry = await this.resolve(path);
+    const response = await this.request(`blobs/${entry.blob}`);
+    if (response.status !== 200 || !response.body)
+      throw new Error(`Packed response unavailable (${response.status})`);
+    const reader = response.body.getReader();
+    let length = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        length += value.byteLength;
+        if (length > entry.blob_bytes)
+          throw new Error("Packed response exceeded its byte limit");
+      }
+      if (length !== entry.blob_bytes)
+        throw new Error("Packed response length mismatch");
+      return entry;
+    } catch (error) {
+      await reader.cancel().catch(() => {});
+      throw error;
+    } finally {
+      reader.releaseLock();
+    }
+  }
   async read(path) {
     const entry = await this.resolve(path);
     const release = await budget.acquire(packedReadBytes(entry));

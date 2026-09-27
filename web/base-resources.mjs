@@ -115,10 +115,10 @@ export async function warmBaseResources(
     while (next < rows.length) {
       const row = rows[next++];
       if (client) {
-        // read() returns only bytes that match the entry's content checksum
-        // and size, so comparing those with the measured row checks the
-        // bytes without digesting them a second time.
-        const entry = await client.resolve(row.path);
+        // Like the loose prewarm, this only transfers the bytes. Every
+        // reader that uses them checks them against this entry, so the
+        // entry must be the measured row.
+        const entry = await client.warm(row.path);
         if (
           entry.bytes !== row.decodedBytes ||
           entry.content_sha256 !== row.sha256
@@ -126,8 +126,7 @@ export async function warmBaseResources(
           throw new Error(
             "Packed base resource differs from its measured descriptor",
           );
-        const bytes = await client.read(row.path);
-        decodedBytes += bytes.byteLength;
+        decodedBytes += entry.bytes;
       } else {
         // Add after the await: `decodedBytes += await ...` reads the total
         // first and drops what the other workers added meanwhile.
