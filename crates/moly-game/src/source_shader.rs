@@ -592,6 +592,7 @@ pub fn pipeline_descriptor(
             })?;
         let format = match (interface.ty.as_str(), interface.adapter.as_deref()) {
             ("vec4", Some("vec3-position-w-one")) => VertexFormat::Float32x3,
+            ("vec3", Some("vec3-position")) => VertexFormat::Float32x3,
             ("float", None) => VertexFormat::Float32,
             ("vec2", None) => VertexFormat::Float32x2,
             ("vec3", None) => VertexFormat::Float32x3,

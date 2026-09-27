@@ -46,6 +46,8 @@ impl ParticleStreams {
                 field.adapter.as_deref(),
             ) {
                 ("in_POSITION0", "vec4", Some("vec3-position-w-one")) => VertexFormat::Float32x3,
+                // The position stream is three floats; a float3 input reads them unpadded.
+                ("in_POSITION0", "vec3", Some("vec3-position")) => VertexFormat::Float32x3,
                 ("in_NORMAL0", "vec3", None) => VertexFormat::Float32x3,
                 ("in_COLOR0", "vec4", None) => VertexFormat::Float32x4,
                 ("in_TEXCOORD0", "vec2", None) => VertexFormat::Float32x2,
