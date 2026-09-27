@@ -493,8 +493,12 @@ impl ServerModel {
         };
         match self.craft(request) {
             Ok((crafted, changed)) => {
+                let row = self.doc.inventory.fixtures.iter().find(|row| {
+                    row.mysekai_fixture_id == crafted.blueprint.craft_target_id
+                        && row.texture_id == crafted.texture_id
+                });
                 info!(
-                    "[server] {}: {} x blueprint {} -> fixture {} texture {}; spent {:?}; first craft {} -> totalExp +{} (now {}, rank {:?})",
+                    "[server] {}: {} x blueprint {} -> fixture {} texture {}; spent {:?}; first craft {} -> totalExp +{} (now {}, rank {:?}); userMysekaiMaterials now {:?}; fixture row now {:?}",
                     kind.name(),
                     request.quantity,
                     crafted.blueprint.id,
@@ -505,6 +509,8 @@ impl ServerModel {
                     crafted.exp,
                     self.doc.gamedata.total_exp,
                     self.doc.gamedata.mysekai_rank,
+                    self.doc.delivery.mysekai_materials,
+                    row,
                 );
                 self.answer(kind, &changed)
             }
