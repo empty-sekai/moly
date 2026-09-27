@@ -5,6 +5,8 @@ MYSEKAI的还原项目，使用 Rust 与 [Bevy](https://bevyengine.org/) 构建�
 
 目标是还原场景探索、角色行为、家具互动与天气表现。**项目仍在开发中**
 
+当前版本的范围与之后的计划见 [路线图](ROADMAP.md)。
+
 ![moly 中的角色、家具与头顶气泡](screenshots/readme.png)
 
 ## 资源
