@@ -519,9 +519,13 @@ fn admit(world: &mut World, request: SiteMoveRequest, frame: u64) {
     world.insert_resource(BgmHold);
     // SiteMoveGameState.OnEnter: the gesture layer off, the empty site-move
     // screen replaces the field screen (ChangeUIScreen 653), taps disabled.
-    // The site map's screen is removed first (ChangeSiteProcessAsync).
-    if world.resource::<UiLayerStack>().current() == LayerId::MysekaiSiteMap {
-        world.write_message(LayerCommand::Pop);
+    // The site map's screen is removed first: `MysekaiUtility.ChangeSite`
+    // calls `RemoveScreen(MysekaiSiteMap)` when the map is in the screen map
+    // and active. RemoveScreen runs outside the transition slot and mounts
+    // nothing, so the change that follows is not held by a mount's start
+    // animation.
+    if world.resource::<UiLayerStack>().is_active(LayerId::MysekaiSiteMap) {
+        world.write_message(LayerCommand::Remove(LayerId::MysekaiSiteMap));
     }
     world.write_message(LayerCommand::Change(LayerId::MysekaiSiteMove));
     info!(
