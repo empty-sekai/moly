@@ -256,8 +256,8 @@ pub(super) fn advance_frame(
         let previous = frame.previous_position;
         frame.velocity = std::array::from_fn(|axis| (current[axis] - previous[axis]) / frame_dt);
     }
-    let head = moly_law::particle::prewarm::FrameStep::new(
-        frame_dt, system.emitter.simulation_speed, PLAYER_TIME);
+    let head = moly_law::particle::prewarm::FrameStep::new_entry(
+        frame_dt, system.emitter.simulation_speed, PLAYER_TIME, entry);
     let result = if head.skips() {
         Ok(false)
     } else {

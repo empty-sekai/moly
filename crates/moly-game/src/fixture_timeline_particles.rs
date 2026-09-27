@@ -106,10 +106,41 @@ pub(crate) struct DirectorClock {
     route: SourceRoute,
     /// A sub-emitter parent's birth events, which each restart installs.
     event_edges: Option<crate::particle_runtime::EventEdges>,
+    /// The parent's cached sub-emitter targets this host prepared, by node,
+    /// in the order its Simulate steps them (see [`advance_family`]).
+    targets: Vec<(String, Entity)>,
     /// Sub-emitter commands with no installed target, dropped.
     dropped: u64,
     /// A refused Simulate retires the system: it draws nothing until released.
     failed: bool,
+}
+
+impl DirectorClock {
+    /// Whether the playable's Simulate steps sub-emitter targets first (see
+    /// [`advance_family`]).
+    pub(crate) fn has_targets(&self) -> bool {
+        !self.targets.is_empty()
+    }
+
+    /// The draws of its targets, in the order its Simulate steps them.
+    pub(crate) fn target_draws(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.targets.iter().map(|(_, draw)| *draw)
+    }
+
+    /// An empty clock that stands in while a family's clock is taken out for
+    /// its Simulate (see [`advance_family`]); never evaluated.
+    pub(crate) fn vacant() -> Self {
+        Self {
+            requested: None,
+            times: PlayableTimes::NEW,
+            stop_emitting: false,
+            route: SourceRoute::Ordinary,
+            event_edges: None,
+            targets: Vec::new(),
+            dropped: 0,
+            failed: true,
+        }
+    }
 }
 
 /// A ParticleControlPlayable's two floats.
@@ -733,6 +764,25 @@ pub(crate) fn play_object(world: &mut World, binding: &ParticlePlayBinding) -> R
     result
 }
 
+/// `ParticleSystem.Simulate(t, withChildren: true, restart: true)` on the
+/// object's system from script (the managed three-argument overload, which
+/// passes fixedTimeStep): every system the object's subtree reaches restarts
+/// and takes its time update of `t`, its sub-emitters first (see
+/// [`crate::weather_fx::fixture::simulate_played`]). The systems are left
+/// installed and playing, as the `Play()` that follows resumes paused ones,
+/// so that Play finds them playing. Returns how many systems took the time
+/// update.
+pub(crate) fn simulate_object(world: &mut World, binding: &ParticlePlayBinding, t: f32) -> Result<usize, String> {
+    let Some(mut prepared) = world.entity_mut(binding.root).take::<PreparedPlay>() else {
+        return Err("played object was released".into());
+    };
+    let frame_dt = crate::particle_runtime::source_delta_time(world.resource::<Time>().delta());
+    let result = crate::weather_fx::fixture::simulate_played(world, &binding.draws, t, frame_dt);
+    prepared.stopped = false;
+    world.entity_mut(binding.root).insert(prepared);
+    result
+}
+
 /// `ParticleSystem.Stop()` on the object's system: `Stop(withChildren: true,
 /// StopEmitting)`, so the live particles finish their lifetimes. Returns how
 /// many systems it stopped.
@@ -992,6 +1042,15 @@ fn prepare_root(
     }
     let mut selected = Vec::new();
     let mut seeds = HashMap::new();
+    // ControlPlayableAsset.GetControllableParticleSystems: the subtree's
+    // systems in pre-order; one not cached as a sub-emitter of an earlier
+    // root becomes a root (one playable each) and caches every system its
+    // sub-emitter list names, whatever its SubModule's enabled state, one
+    // level deep. A cached system is its root's target: no playable, stepped
+    // by that root's Simulate (see [`advance_family`]).
+    let mut cached: HashSet<String> = HashSet::new();
+    // Each root's sub-emitter rows that name a system: (row index, node).
+    let mut rows_of: HashMap<Entity, Vec<(u32, String)>> = HashMap::new();
     for (anchor, path, ordinal) in instances {
         let Some(ordinal) = *ordinal else {
             continue;
@@ -1005,18 +1064,31 @@ fn prepare_root(
         }
         let modules = ParticleSourceModules::from_system(&particle["system"])
             .map_err(|error| invalid(format!("{path}: {error}")))?;
-        if modules.enabled.iter().any(|name| name == "SubModule")
-            || particle["system"]["subEmitters"]
-                .as_array()
-                .is_some_and(|rows| !rows.is_empty())
-        {
-            return Err(invalid(format!(
-                "{path}: source sub-emitter control is not implemented"
-            )));
+        let node = particle["node"]
+            .as_str()
+            .ok_or_else(|| invalid(format!("{path}: source particle path is missing")))?;
+        let target = cached.contains(node);
+        if !target {
+            let mut named = Vec::new();
+            for (index, row) in particle["system"]["subEmitters"].as_array().into_iter().flatten().enumerate() {
+                // A null row names no system; its index still counts in
+                // the seed recursion (see [`initialize_targets`]).
+                if let Some(child) = row["emitter"].as_str() {
+                    cached.insert(child.to_owned());
+                    named.push((index as u32, child.to_owned()));
+                }
+            }
+            // SimulateChildrenRecursive steps sub-emitters only while the
+            // SubModule is enabled (GetSubEmitterPtrs lists none otherwise).
+            if modules.enabled.iter().any(|name| name == "SubModule") {
+                rows_of.insert(*anchor, named);
+            }
         }
         // StopEmittingAndClear plus a proven disabled Emission module is an
         // empty simulation, including coffee's renderer-disabled parent PSs.
-        if !modules.enabled.iter().any(|name| name == "EmissionModule") {
+        // A target's births come from its parent's commands, so its own
+        // Emission module does not decide.
+        if !target && !modules.enabled.iter().any(|name| name == "EmissionModule") {
             continue;
         }
         shared_path_reads_agree(particles, nodes, particle)?;
@@ -1077,14 +1149,38 @@ fn prepare_root(
             .and_then(|p| p.0.anchor)
             .ok_or_else(|| invalid("prepared source particle anchor is missing"))?;
         draw_seeds.insert(draw, seeds[&anchor]);
+    }
+    // The prepared targets by node (a target this host refused has no draw).
+    let target_draws: HashMap<String, Entity> = created
+        .iter()
+        .copied()
+        .filter(|&draw| world.get::<crate::weather_fx::fixture::DirectorTarget>(draw).is_some())
+        .filter_map(|draw| Some((world.get::<FixtureParticleLive>(draw)?.0.node.clone(), draw)))
+        .collect();
+    for &draw in &draws {
         // Existing autonomous PS state is untouched until owner admission and
-        // sample. Only newly-created private draws receive a dormant clock.
-        if created.contains(&draw) {
-            let clock = initialize(world, draw, settings.random_seed)?;
-            world.entity_mut(draw).insert(clock);
-            if let Some(mut source) = world.get_mut::<SourceParticle>(draw) {
-                source.enabled = true;
-            }
+        // sample. Only newly-created private draws receive a dormant clock;
+        // a target takes none (its root's playable steps it).
+        if !created.contains(&draw) {
+            continue;
+        }
+        if let Some(mut source) = world.get_mut::<SourceParticle>(draw) {
+            source.enabled = true;
+        }
+        if world.get::<crate::weather_fx::fixture::DirectorTarget>(draw).is_some() {
+            continue;
+        }
+        let mut clock = initialize(world, draw, settings.random_seed)?;
+        let anchor = world.get::<FixtureParticleLive>(draw).and_then(|p| p.0.anchor);
+        let rows = anchor.and_then(|anchor| rows_of.get(&anchor)).cloned().unwrap_or_default();
+        clock.targets = initialize_targets(world, &rows, &target_draws, settings.random_seed);
+        world.entity_mut(draw).insert(clock);
+    }
+    for (node, draw) in &target_draws {
+        let stepped = draws.iter().any(|&root| world.get::<DirectorClock>(root)
+            .is_some_and(|clock| clock.targets.iter().any(|(_, target)| target == draw)));
+        if !stepped {
+            warn!("[prefab-director] {node}: a sub-emitter target no controlled root caches (its parent is outside this control, or the target comes first in the hierarchy): no Simulate steps it, it draws nothing");
         }
     }
     let binding = ParticleControlBinding {
@@ -1146,6 +1242,10 @@ pub(crate) fn sample(
         world
             .entity_mut(draw)
             .remove::<(StoppedByDirector, RestoredAutonomous)>();
+        // A cached sub-emitter target has no playable of its own.
+        if world.get::<crate::weather_fx::fixture::DirectorTarget>(draw).is_some() {
+            continue;
+        }
         if world.get::<DirectorClock>(draw).is_none() {
             // A playable taking over a system that another owner played.
             let clock = initialize(world, draw, seed)?;
@@ -1219,9 +1319,57 @@ fn initialize(world: &mut World, draw: Entity, clip_seed: u32) -> Result<Directo
         stop_emitting: false,
         route,
         event_edges,
+        targets: Vec::new(),
         dropped: 0,
         failed: false,
     })
+}
+
+/// SetRandomSeed's recursion into a root's sub-emitters at its playable's
+/// Initialize: the playable's seed is `max(1, clip seed)`, and sub-emitter
+/// row `i` (null rows counted) takes `seed + 1 + i` when its owner is still
+/// automatic; a manual owner keeps its serialized seed, and a system an
+/// earlier Initialize reached keeps what that one left (it is manual since).
+/// The Stop(withChildren, StopEmittingAndClear) before it clears each
+/// target. Returns the prepared targets in row order, the order the root's
+/// Simulate steps them in (see [`advance_family`]).
+fn initialize_targets(
+    world: &mut World,
+    rows: &[(u32, String)],
+    target_draws: &HashMap<String, Entity>,
+    clip_seed: u32,
+) -> Vec<(String, Entity)> {
+    let playable_seed = clip_seed.max(1);
+    let mut targets: Vec<(String, Entity)> = Vec::new();
+    for (index, node) in rows {
+        let Some(&draw) = target_draws.get(node) else { continue };
+        if targets.iter().any(|(_, known)| *known == draw) {
+            continue;
+        }
+        let Some(anchor) = world.get::<FixtureParticleLive>(draw).and_then(|live| live.0.anchor) else { continue };
+        let seed = match world.get::<DirectorOwnerSeed>(anchor) {
+            Some(owner) => owner.0,
+            None => {
+                let emitter = &world.get::<FixtureParticleLive>(draw).unwrap().0.emitter;
+                let seed = match (emitter.auto_random_seed, emitter.random_seed) {
+                    (Some(true), _) => playable_seed.wrapping_add(1).wrapping_add(*index),
+                    (Some(false), Some(seed)) => seed,
+                    // Seed ownership unknown: its restart refuses a
+                    // system whose owner is not manual.
+                    _ => continue,
+                };
+                world.entity_mut(anchor).insert(DirectorOwnerSeed(seed));
+                seed
+            }
+        };
+        let mut live = world.get_mut::<FixtureParticleLive>(draw).unwrap();
+        live.0.emitter.random_seed = Some(seed);
+        live.0.emitter.auto_random_seed = Some(false);
+        crate::particle_runtime::clear_particles(&mut live.0);
+        live.0.native_birth = None;
+        targets.push((node.clone(), draw));
+    }
+    targets
 }
 
 pub(crate) fn release(world: &mut World, binding: &ParticleControlBinding) {
@@ -1250,6 +1398,11 @@ pub(crate) fn release(world: &mut World, binding: &ParticleControlBinding) {
         if let Some(mut clock) = world.get_mut::<DirectorClock>(draw) {
             clock.requested = None;
             clock.times.last = f32::MAX;
+        }
+        // A cached target is stepped only by its root's Simulate; no
+        // activation edge plays it on its own.
+        if world.get::<crate::weather_fx::fixture::DirectorTarget>(draw).is_some() {
+            continue;
         }
         if let Ok(mut entity) = world.get_entity_mut(draw) {
             entity.insert(StoppedByDirector { was_inactive });
@@ -1332,12 +1485,10 @@ const EXTERNAL_FLOOR: f32 = f32::from_bits(8);
 /// Each of the playable's Simulate calls enters SimulateChildrenRecursive
 /// (withChildren false): when the system's SubModule is enabled, every
 /// sub-emitter it names is simulated first, by the same time (by zero at a
-/// restart), and then the system itself, unless it is one of them. Under a
-/// Director the fixture host installs no sub-emitter target (the judgement
-/// refuses each one there, and a played parent whose targets are installed
-/// takes no Director clock, see [`initialize`]), so the call is the system's
-/// own update; the commands its updates leave for the targets are dropped,
-/// counted, as the played path drops a command whose target is not installed.
+/// restart), and then the system itself, unless it is one of them. A system
+/// with installed targets goes through [`advance_family`]; for any other the
+/// call is the system's own update, and the commands its updates leave for
+/// a target this host did not prepare are dropped, counted.
 pub(crate) fn advance(
     system: &mut Runtime,
     clock: &mut DirectorClock,
@@ -1380,6 +1531,258 @@ pub(crate) fn advance(
             system.side.clear();
             false
         }
+    }
+}
+
+/// The systems a Director family's Simulate reaches, by draw: the host
+/// lends each one with its own context for one call.
+pub(crate) trait FamilyWorld {
+    /// Run `f` on the system of `draw`; `None` when it has gone.
+    fn with_system<R>(&mut self, draw: Entity, f: impl FnOnce(&mut Runtime, &Context) -> R) -> Option<R>;
+    /// The owner words a target's commands read, composed from its spawned
+    /// instance now (see [`crate::weather_fx::fixture::instance_owner`]).
+    fn target_owner(&mut self, draw: Entity) -> Result<moly_law::particle::child_emit::ChildOwner, String>;
+}
+
+/// One frame of a controlled system whose cached sub-emitter targets this
+/// host prepared: ParticleControlPlayable.PrepareFrame as [`advance`] runs
+/// it, with each of its Simulate calls entering SimulateChildrenRecursive
+/// (JP 6.8.1 libunity) with withChildren false:
+///
+/// - the parent's SubModule is enabled (its birth events are installed), so
+///   each target GetSubEmitterPtrs lists (a row naming an object whose own
+///   GameObject is active; inactive in the hierarchy still counts) is
+///   simulated first. The engine sorts them by type and instance id; each
+///   target's Simulate reads and writes only its own state, so the row
+///   order this host keeps gives the same result. At a restart by
+///   time zero with the restart (ResetSeeds from the manual seed the
+///   playable's Initialize left, Clear, Play, a zero-time update that skips:
+///   see [`crate::particle_runtime::restart_child_target`]), and otherwise
+///   by the chunk's time (its stopped update: a cached target never emits on
+///   its own);
+/// - then the parent itself, which is none of its own targets;
+/// - no child Transform (withChildren false), and not a target's own
+///   targets (the call steps one level only).
+///
+/// The parent's update records its targets' births; they reach each target
+/// after the parent's call and before the next Simulate call, with the
+/// update's UpdateData flags: 4 for a chunk (the script Simulate's time
+/// update), and the restart warm's flags for a restart (0 on the ordinary
+/// route). `frame_dt` is the frame's Time.deltaTime the child Emit reads.
+/// Returns whether the parent draws this frame.
+pub(crate) fn advance_family<W: FamilyWorld>(
+    world: &mut W,
+    parent: Entity,
+    clock: &mut DirectorClock,
+    inactive: bool,
+    frame_dt: f32,
+) -> bool {
+    if clock.failed {
+        return false;
+    }
+    if inactive {
+        if clock.requested.is_some() {
+            clock.times.last = f32::MAX;
+        }
+        return false;
+    }
+    let Some(time) = clock.requested else {
+        return true;
+    };
+    let Some(head) = world.with_system(parent, |system, _| system.playback_head) else {
+        return false;
+    };
+    let mut times = clock.times;
+    let mut family = Family {
+        world: &mut *world,
+        parent,
+        targets: &clock.targets,
+        stop_emitting: &mut clock.stop_emitting,
+        route: &clock.route,
+        event_edges: clock.event_edges.as_ref(),
+        frame_dt,
+        head,
+        dropped: 0,
+        refused: HashSet::new(),
+    };
+    let result = prepare_frame(&mut family, &mut times, time as f32);
+    let dropped = family.dropped;
+    clock.times = times;
+    let node = world.with_system(parent, |system, _| (system.effect.clone(), system.node.clone()));
+    let (effect, node) = node.unwrap_or_default();
+    if dropped > 0 {
+        if clock.dropped == 0 {
+            warn!(%effect, %node, "sub-emitter commands dropped: their target is not installed");
+        }
+        clock.dropped += dropped;
+    }
+    match result {
+        Ok(()) => true,
+        Err(reason) => {
+            error!(%reason, %effect, %node,
+                "Director particle Simulate refused: the system is retired and draws nothing");
+            clock.failed = true;
+            world.with_system(parent, |system, _| {
+                system.pool.clear();
+                system.side.clear();
+            });
+            false
+        }
+    }
+}
+
+/// A controlled parent and the targets its Simulate steps first.
+struct Family<'a, W: FamilyWorld> {
+    world: &'a mut W,
+    parent: Entity,
+    targets: &'a [(String, Entity)],
+    stop_emitting: &'a mut bool,
+    route: &'a SourceRoute,
+    event_edges: Option<&'a crate::particle_runtime::EventEdges>,
+    frame_dt: f32,
+    /// The parent's clock after the last call.
+    head: f32,
+    dropped: u64,
+    /// Targets whose restart or step was refused (named once each).
+    refused: HashSet<Entity>,
+}
+
+impl<W: FamilyWorld> Family<'_, W> {
+    fn refuse_target(&mut self, draw: Entity, reason: String) {
+        if self.refused.insert(draw) {
+            let node = self.targets.iter().find(|(_, known)| *known == draw).map_or("?", |(node, _)| node.as_str());
+            error!(%reason, %node, "Director sub-emitter target refused: it takes no more commands and draws what it holds");
+        }
+        self.world.with_system(draw, |system, _| {
+            if let Some(native) = system.native_birth.as_mut() {
+                native.target = None;
+            }
+        });
+    }
+
+    /// The parent's queued commands, in the order recorded, to its targets
+    /// (their owner words composed from the instance first); a command whose
+    /// target is not installed is dropped, counted.
+    fn deliver(&mut self, flags: u32) {
+        let commands = self.world.with_system(self.parent, |system, _| {
+            let mut commands = system.native_birth.as_mut().and_then(|native| native.events.as_mut())
+                .map_or_else(Vec::new, |events| events.take_commands());
+            if let Some(collision) = system.collision.as_mut() {
+                commands.extend(collision.take_commands());
+            }
+            commands
+        }).unwrap_or_default();
+        let mut refreshed = HashSet::new();
+        for (node, command) in commands {
+            let Some(&(_, draw)) = self.targets.iter().find(|(known, _)| *known == node) else {
+                self.dropped += 1;
+                continue;
+            };
+            if refreshed.insert(draw) {
+                match self.world.target_owner(draw) {
+                    Ok(owner) => {
+                        self.world.with_system(draw, |system, _| {
+                            if let Some(state) = system.native_birth.as_mut().and_then(|native| native.target.as_mut()) {
+                                state.owner = owner;
+                            }
+                        });
+                    }
+                    Err(reason) => error!(%reason, %node,
+                        "sub-emitter target owner words not composed; its commands read the last ones"),
+                }
+            }
+            let frame_dt = self.frame_dt;
+            match self.world.with_system(draw, |system, _| {
+                let installed = system.native_birth.as_ref().is_some_and(|native| native.target.is_some());
+                installed.then(|| crate::particle_runtime::deliver_command_with(system, &command, frame_dt, flags)
+                    .map_err(|reason| (reason, system.native_birth.as_ref().and_then(|n| n.target.as_ref())
+                        .is_some_and(|state| state.refused == 1))))
+            }) {
+                Some(Some(Ok(_))) => {}
+                Some(Some(Err((reason, first)))) => {
+                    if first {
+                        error!(%reason, %node, "sub-emitter command refused by its target");
+                    }
+                }
+                Some(None) | None => self.dropped += 1,
+            }
+        }
+    }
+
+    fn installed_targets(&mut self) -> Vec<String> {
+        let mut installed = Vec::new();
+        for (node, draw) in self.targets {
+            if self.world.with_system(*draw, |system, _|
+                system.native_birth.as_ref().is_some_and(|native| native.target.is_some())) == Some(true) {
+                installed.push(node.clone());
+            }
+        }
+        installed
+    }
+
+    fn read_head(&mut self) {
+        if let Some(head) = self.world.with_system(self.parent, |system, _| system.playback_head) {
+            self.head = head;
+        }
+    }
+}
+
+impl<W: FamilyWorld> Controlled for Family<'_, W> {
+    fn system_time(&self) -> f32 {
+        self.head
+    }
+
+    fn restart(&mut self) -> Result<(), String> {
+        // Each cached target first: Simulate(0, restart).
+        for &(_, draw) in self.targets {
+            let owner = self.world.target_owner(draw);
+            let result = self.world.with_system(draw, |system, _| owner.and_then(|owner|
+                crate::particle_runtime::restart_child_target(system, owner)));
+            match result {
+                Some(Ok(())) => { self.refused.remove(&draw); }
+                Some(Err(reason)) => self.refuse_target(draw, reason),
+                None => {}
+            }
+        }
+        // Then the parent: its Play installs its birth events afresh, whose
+        // edges to the installed targets deliver.
+        let (route, edges) = (self.route, self.event_edges);
+        let installed = self.installed_targets();
+        let result = self.world.with_system(self.parent, |system, ctx| {
+            crate::particle_runtime::director_restart(system, route, edges, ctx).map(|_| {
+                crate::weather_fx::fixture::mark_delivered(system, installed.iter().map(String::as_str));
+            })
+        }).unwrap_or_else(|| Err("controlled particle system is gone".into()));
+        *self.stop_emitting = false;
+        self.deliver(0);
+        self.read_head();
+        result
+    }
+
+    /// The non-looping end inside an update sets the stop-emitting state
+    /// the next chunk's head reads.
+    fn chunk(&mut self, dt: f32) -> Result<(), String> {
+        for &(_, draw) in self.targets {
+            if self.refused.contains(&draw) {
+                continue;
+            }
+            let result = self.world.with_system(draw, |system, ctx|
+                crate::particle_runtime::director_chunk(system, dt, false, ctx, |_| {}));
+            if let Some(Err(reason)) = result {
+                self.refuse_target(draw, reason);
+            }
+        }
+        let emitting = !*self.stop_emitting;
+        let stop = &mut *self.stop_emitting;
+        let result = self.world.with_system(self.parent, |system, ctx|
+            crate::particle_runtime::director_chunk(system, dt, emitting, ctx, |s| {
+                if !s.emitter.looping && s.playback_head >= s.emitter.duration {
+                    *stop = true;
+                }
+            }).map(|_| ())).unwrap_or_else(|| Err("controlled particle system is gone".into()));
+        self.deliver(4);
+        self.read_head();
+        result
     }
 }
 
@@ -1490,6 +1893,7 @@ mod tests {
             stop_emitting: false,
             route: SourceRoute::Ordinary,
             event_edges: None,
+            targets: Vec::new(),
             dropped: 0,
             failed: false,
         }

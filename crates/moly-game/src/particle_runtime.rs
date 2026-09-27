@@ -14,7 +14,7 @@ pub(crate) use trails::{
     write_mesh as write_trail_mesh, TrailOwner, TrailState,
 };
 pub(crate) use sub_events::{BirthEdge, BirthEvents, CollisionEdge, DeathEdge, EventEdges};
-pub(crate) use child::{child_target_eligible, deliver_command, install_child_target};
+pub(crate) use child::{child_target_eligible, deliver_command, deliver_command_with, install_child_target, restart_child_target};
 pub(crate) mod seed;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -1551,6 +1551,20 @@ pub(crate) fn director_chunk(system: &mut Runtime, dt: f32, emitting: bool, ctx:
     let entry = if child::arms::on("scriptSimulateWidens") { IncrementalEntry::PerFrame }
         else { IncrementalEntry::ScriptSimulate };
     advance_frame_entry(system, dt, emitting, ctx, slice_start, entry)
+}
+
+/// The time update of `ParticleSystem.Simulate(t, restart: true)` from
+/// script with fixedTimeStep (the managed three-argument overload passes
+/// it): Update1b with UpdateData flags 5, the frame head over `t` (the
+/// explicit dt, scaled by the simulation speed), GetTimeStep's fixed step
+/// (the TimeManager's Fixed Timestep while the world plays) and
+/// Update1Incremental's fixed-step loop without the backlog widening (see
+/// [`moly_law::particle::frame_time::IncrementalEntry::ScriptSimulateFixed`]).
+/// One call, not chunked. The Simulate leaves the system paused.
+pub(crate) fn script_simulate_fixed(system: &mut Runtime, t: f32, emitting: bool, ctx: &Context,
+    slice_start: impl FnMut(&Runtime)) -> Result<bool, String> {
+    advance_frame_entry(system, t, emitting, ctx, slice_start,
+        moly_law::particle::frame_time::IncrementalEntry::ScriptSimulateFixed)
 }
 
 /// What `ParticleSystem.Simulate`'s restart needs besides the birth decision.

@@ -1334,10 +1334,7 @@ pub(crate) fn spawn_fixture_particles(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn advance_fixture_particles(
-    mut commands: Commands, mut live: Query<(Entity, &mut FixtureParticleLive,
-        Option<&mut crate::fixture_timeline_particles::DirectorClock>,
-        Option<&mut crate::fixture_timeline_particles::StoppedByDirector>,
-        Option<&mut crate::weather_fx::fixture::Played>, Option<&crate::weather_fx::fixture::FixtureTrailDraw>)>,
+    mut commands: Commands, mut live: FixtureLive<'_, '_>,
     anchors: Query<&GlobalTransform>, cameras: Query<(&GlobalTransform, &Projection, &Camera), With<Camera3d>>,
     inactive: Query<(), With<moly_assets::scene_state::SourceInactive>>,
     time: Res<Time>, unscaled: Option<Res<crate::particle_runtime::UnscaledFrameClock>>,
@@ -1345,6 +1342,8 @@ pub(crate) fn advance_fixture_particles(
     mut camera_speed: Local<billboard::CameraVelocity>,
     families: Query<(Entity, &crate::weather_fx::fixture::SubEmitterTargets)>,
     locals: Query<(&Transform, Option<&ChildOf>)>,
+    director_targets: Query<(), With<crate::weather_fx::fixture::DirectorTarget>>,
+    activity: Query<&moly_assets::scene_state::SourceNodeActivity>,
 ) {
     let Some((camera_transform, Projection::Perspective(projection), camera)) = cameras.iter().next() else {
         commands.queue(crate::fixture_timeline_particles::collect_garbage); return;
@@ -1364,6 +1363,9 @@ pub(crate) fn advance_fixture_particles(
         now: time.elapsed_secs_f64(),
     };
     let mut targets = Vec::new();
+    // Director parents whose Simulate steps their cached targets first, run
+    // after this pass (see `advance_director_families`).
+    let mut director_families = Vec::new();
     for (entity, mut particle, mut clock, stopped, played, trail) in &mut live {
         let system = &mut particle.0;
         let dormant = system.anchor.is_some_and(|entity| inactive.get(entity).is_ok());
@@ -1393,7 +1395,17 @@ pub(crate) fn advance_fixture_particles(
             continue;
         }
         let Some(anchor) = system.anchor.and_then(|e| anchors.get(e).ok()).copied() else { commands.entity(entity).despawn(); continue; };
+        // A Director's cached sub-emitter target: its root's Simulate steps
+        // it, and it draws after that root's family ran.
+        if director_targets.get(entity).is_ok() {
+            targets.push((entity, anchor));
+            continue;
+        }
         let ctx = Context { site: anchor, sky: GlobalTransform::IDENTITY, camera: *camera_transform };
+        if clock.as_ref().is_some_and(|clock| clock.has_targets()) {
+            director_families.push((entity, anchor, dormant));
+            continue;
+        }
         if let Some(mut clock) = clock {
             // The Director's ParticleControlPlayable: PrepareFrame and its
             // Simulate calls. An inactive or retired system draws nothing.
@@ -1447,6 +1459,18 @@ pub(crate) fn advance_fixture_particles(
             crate::particle_runtime::write_trail_mesh(mesh, system, &anchor, camera_transform);
         }
     }
+    for (entity, anchor) in advance_director_families(&mut live, &director_families, &anchors, &locals, &activity,
+        camera_transform, clocks.scaled) {
+        match anchor {
+            Some(anchor) => targets.push((entity, anchor)),
+            None => if let Ok((_, particle, _, _, _, trail)) = live.get(entity) {
+                if let Some(mesh) = meshes.get_mut(&particle.0.mesh) {
+                    if mesh.count_vertices() != 0 { *mesh = billboard::empty_mesh(); }
+                }
+                clear_trail_mesh(&mut meshes, trail);
+            },
+        }
+    }
     deliver_played_commands(&mut live, &families, &locals, clocks.scaled);
     for (entity, anchor) in targets {
         let Ok((_, mut particle, _, _, _, trail)) = live.get_mut(entity) else { continue };
@@ -1462,6 +1486,73 @@ pub(crate) fn advance_fixture_particles(
         }
     }
     commands.queue(crate::fixture_timeline_particles::collect_garbage);
+}
+
+type FixtureLive<'w, 's> = Query<'w, 's, (Entity, &'static mut FixtureParticleLive,
+    Option<&'static mut crate::fixture_timeline_particles::DirectorClock>,
+    Option<&'static mut crate::fixture_timeline_particles::StoppedByDirector>,
+    Option<&'static mut crate::weather_fx::fixture::Played>, Option<&'static crate::weather_fx::fixture::FixtureTrailDraw>)>;
+
+/// The systems of one Director family, each with its own context and, for a
+/// target, the owner words composed from its instance this frame.
+struct FixtureFamily<'a, 'w, 's> {
+    live: &'a mut FixtureLive<'w, 's>,
+    contexts: HashMap<Entity, Context>,
+    owners: HashMap<Entity, Result<moly_law::particle::child_emit::ChildOwner, String>>,
+}
+
+impl crate::fixture_timeline_particles::FamilyWorld for FixtureFamily<'_, '_, '_> {
+    fn with_system<R>(&mut self, draw: Entity, f: impl FnOnce(&mut crate::particle_runtime::Runtime, &Context) -> R) -> Option<R> {
+        let ctx = self.contexts.get(&draw)?;
+        let (_, mut particle, ..) = self.live.get_mut(draw).ok()?;
+        Some(f(&mut particle.0, ctx))
+    }
+
+    fn target_owner(&mut self, draw: Entity) -> Result<moly_law::particle::child_emit::ChildOwner, String> {
+        self.owners.get(&draw).cloned().unwrap_or_else(|| Err("target has no instance node".into()))
+    }
+}
+
+/// Each Director parent with cached targets: its playable's PrepareFrame
+/// with the Simulate that steps its targets first (see
+/// [`crate::fixture_timeline_particles::advance_family`]). Returns each
+/// parent with its anchor when it draws this frame (`None`: inactive or
+/// retired); its targets draw with the other targets.
+fn advance_director_families(live: &mut FixtureLive<'_, '_>, families: &[(Entity, GlobalTransform, bool)],
+    anchors: &Query<&GlobalTransform>, locals: &Query<(&Transform, Option<&ChildOf>)>,
+    activity: &Query<&moly_assets::scene_state::SourceNodeActivity>,
+    camera: &GlobalTransform, frame_dt: f32) -> Vec<(Entity, Option<GlobalTransform>)> {
+    let mut drawn = Vec::new();
+    for &(parent, anchor, dormant) in families {
+        let Ok((_, _, Some(mut slot), ..)) = live.get_mut(parent) else { continue };
+        let mut clock = std::mem::replace(&mut *slot, crate::fixture_timeline_particles::DirectorClock::vacant());
+        let mut family = FixtureFamily { live: &mut *live, contexts: HashMap::new(), owners: HashMap::new() };
+        family.contexts.insert(parent, Context { site: anchor, sky: GlobalTransform::IDENTITY, camera: *camera });
+        for draw in clock.target_draws() {
+            let Ok((_, particle, ..)) = family.live.get(draw) else { continue };
+            let system = &particle.0;
+            let Some(node) = system.anchor else { continue };
+            // GetSubEmitterPtrs drops a row whose object's own GameObject is
+            // inactive: no context, so its Simulate and commands are skipped.
+            if activity.get(node).is_ok_and(|active| !active.active_self()) {
+                continue;
+            }
+            let Ok(site) = anchors.get(node) else { continue };
+            family.contexts.insert(draw, Context { site: *site, sky: GlobalTransform::IDENTITY, camera: *camera });
+            let owner = crate::weather_fx::fixture::target_scaling(system).and_then(|scaling|
+                crate::weather_fx::fixture::instance_owner(node, scaling,
+                    |entity| locals.get(entity).ok().map(|(transform, _)| *transform),
+                    |entity| locals.get(entity).ok().and_then(|(_, parent)| parent.map(ChildOf::parent))));
+            family.owners.insert(draw, owner);
+        }
+        let drew = crate::fixture_timeline_particles::advance_family(&mut family, parent, &mut clock, dormant, frame_dt);
+        drop(family);
+        if let Ok((_, _, Some(mut slot), ..)) = live.get_mut(parent) {
+            *slot = clock;
+        }
+        drawn.push((parent, drew.then_some(anchor)));
+    }
+    drawn
 }
 
 /// Empty a fixture-host system's trail draw with its particle draw.

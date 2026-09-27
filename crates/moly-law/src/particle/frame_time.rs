@@ -126,12 +126,20 @@ pub fn time_step(scaled: f32, maximum_particle_timestep: f32) -> f32 {
 /// from script passes flags 4 to its time update (bit 2 set; bit 1 as well on
 /// a restart, whose time update is zero and skips): Update1Incremental then
 /// takes every slice as `min(pending, step)`, without the 5 s / 10 s backlog
-/// widening.
+/// widening. `ParticleSystem.Simulate` with fixedTimeStep (the managed
+/// three-argument overload passes it) adds bit 0, so its time update is
+/// entered with flags 5 ([`IncrementalEntry::ScriptSimulateFixed`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IncrementalEntry {
     PerFrame,
     ExplicitDt,
     ScriptSimulate,
+    /// UpdateData flags 5: GetTimeStep returns the TimeManager's fixed step
+    /// (the world plays), Update1Incremental enters while the pending time is
+    /// at least that step, takes every slice as `min(pending, step)` without
+    /// the backlog widening (bit 2) and continues while the pending time is at
+    /// least the slice just taken (bit 0).
+    ScriptSimulateFixed,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -192,8 +200,8 @@ impl IncrementalSlices {
             base_step: step,
             prior_step: step,
             duration,
-            widen: entry != IncrementalEntry::ScriptSimulate,
-            fixed: false,
+            widen: !matches!(entry, IncrementalEntry::ScriptSimulate | IncrementalEntry::ScriptSimulateFixed),
+            fixed: entry == IncrementalEntry::ScriptSimulateFixed,
             budget: SLICE_BUDGET,
         })
     }
@@ -298,11 +306,22 @@ pub fn frame_step_entry(
     entry: IncrementalEntry,
 ) -> Result<FrameStep, &'static str> {
     let scaled = dt * fmax_zero(simulation_speed);
-    let step = time_step(scaled, time.maximum_particle_timestep);
+    let step = entry_step(scaled, time, entry);
     if !(step >= MINIMUM_STEP) {
         return Ok(FrameStep::Skipped);
     }
     IncrementalSlices::new(pending + scaled, step, entry, duration).map(FrameStep::Slices)
+}
+
+/// GetTimeStep for an update entered as `entry`: with UpdateData bit 0 (a
+/// fixed-time-step script `Simulate`) the TimeManager's fixed step, which it
+/// returns while the world plays; otherwise [`time_step`] of the scaled dt.
+pub fn entry_step(scaled: f32, time: TimeManagerSnapshot, entry: IncrementalEntry) -> f32 {
+    if entry == IncrementalEntry::ScriptSimulateFixed {
+        time.fixed_timestep
+    } else {
+        time_step(scaled, time.maximum_particle_timestep)
+    }
 }
 
 #[cfg(test)]
@@ -612,6 +631,87 @@ mod tests {
 
     /// Research instrument: every law above over random finite and edge inputs
     /// must return without panicking. `MOLY_TIMESTEP_FUZZ` is the iteration count.
+    /// The time update of `ParticleSystem.Simulate(t, withChildren, restart)`
+    /// (fixedTimeStep true: UpdateData flags 5) and of a Director chunk
+    /// (flags 4) against JP 6.8.1 Update1b / GetTimeStep / Update1Incremental
+    /// rows executed from a zero pending time: every slice's pending time
+    /// before it and its length, and the pending time left, bit for bit.
+    /// Named one-rule mutants must each miss somewhere.
+    #[test]
+    #[ignore = "MOLY_FLAGS5_RECEIPT must name the native flags 5 / flags 4 slicing receipt"]
+    fn script_simulate_slices_match_native_rows() {
+        let path = std::env::var_os("MOLY_FLAGS5_RECEIPT").expect("MOLY_FLAGS5_RECEIPT");
+        let receipt = read(std::path::Path::new(&path));
+        let time = TimeManagerSnapshot {
+            fixed_timestep: f32::from_bits(0x3ca3_d70a),
+            maximum_particle_timestep: f32::from_bits(0x3cf5_c28f),
+            maximum_delta_time: f32::from_bits(0x3eaa_aaab),
+        };
+        #[derive(Clone, Copy, PartialEq)]
+        enum Rule { Source, FixedWithWidening, ScriptSimulateOnly, FixedStepTinyContinue }
+        fn run(rule: Rule, t: f32, speed: f32, duration: f32, flags: u32, time: TimeManagerSnapshot)
+            -> Option<(f32, Vec<(u32, u32)>, u32)> {
+            let entry = match (flags, rule) {
+                (4, _) => IncrementalEntry::ScriptSimulate,
+                (5, Rule::Source) => IncrementalEntry::ScriptSimulateFixed,
+                (5, Rule::ScriptSimulateOnly) => IncrementalEntry::ScriptSimulate,
+                (5, Rule::FixedWithWidening | Rule::FixedStepTinyContinue) => IncrementalEntry::ScriptSimulateFixed,
+                _ => panic!("flags {flags} outside the receipt"),
+            };
+            let scaled = t * fmax_zero(speed);
+            let step = entry_step(scaled, time, entry);
+            if !(step >= MINIMUM_STEP) {
+                return None;
+            }
+            let mut slices = match (flags, rule) {
+                (5, Rule::FixedWithWidening) => IncrementalSlices::fixed(scaled, step, duration).unwrap(),
+                (5, Rule::FixedStepTinyContinue) =>
+                    IncrementalSlices::new(scaled, step, IncrementalEntry::ScriptSimulate, duration).unwrap(),
+                _ => IncrementalSlices::new(scaled, step, entry, duration).unwrap(),
+            };
+            let mut out = Vec::new();
+            for slice in slices.by_ref() {
+                let slice = slice.unwrap();
+                out.push((slice.remaining_before.to_bits(), slice.duration.to_bits()));
+            }
+            Some((step, out, slices.remaining().to_bits()))
+        }
+        let cases = receipt.get("cases").and_then(Value::as_array).expect("cases");
+        let (mut compared, mut slices_compared, mut mismatched) = (0usize, 0usize, 0usize);
+        let mut red = [(Rule::FixedWithWidening, "fixedWithWidening", 0usize),
+            (Rule::ScriptSimulateOnly, "scriptSimulateOnly", 0), (Rule::FixedStepTinyContinue, "fixedStepTinyContinue", 0)];
+        for case in cases {
+            let num = |key: &str| case.get(key).and_then(Value::as_f64).unwrap_or_else(|| panic!("case {key}"));
+            let t = num("t") as f32;
+            let speed = num("speed") as f32;
+            let duration = num("duration") as f32;
+            let flags = int(case.get("flags").expect("flags"));
+            let native: Vec<(u32, u32)> = case.get("nativeSlices").and_then(Value::as_array).expect("nativeSlices").iter()
+                .map(|row| { let row = row.as_array().expect("slice row"); (int(&row[0]), int(&row[1])) }).collect();
+            let expected = (int(case.get("stepBits").expect("stepBits")), native, int(case.get("pendingAfterBits").expect("pendingAfterBits")));
+            let got = run(Rule::Source, t, speed, duration, flags, time).map(|(step, s, rest)| (step.to_bits(), s, rest));
+            compared += 1;
+            slices_compared += expected.1.len();
+            if got.as_ref() != Some(&expected) {
+                mismatched += 1;
+                println!("script-simulate mismatch t {t} speed {speed} duration {duration} flags {flags}");
+            }
+            for (rule, _, count) in red.iter_mut() {
+                let mutant = run(*rule, t, speed, duration, flags, time).map(|(step, s, rest)| (step.to_bits(), s, rest));
+                if mutant.as_ref() != Some(&expected) {
+                    *count += 1;
+                }
+            }
+        }
+        println!("script-simulate slices: cases {compared}, slices {slices_compared}, mismatched {mismatched}; mutants red {:?}",
+            red.iter().map(|(_, name, count)| (*name, *count)).collect::<Vec<_>>());
+        assert!(compared > 0 && slices_compared > 0);
+        assert_eq!(mismatched, 0);
+        for (_, name, count) in red {
+            assert!(count > 0, "mutant {name} matched every case");
+        }
+    }
+
     #[test]
     #[ignore = "MOLY_TIMESTEP_FUZZ must give the iteration count"]
     fn frame_laws_are_total() {
