@@ -399,8 +399,13 @@ pub(crate) fn settled_host_view(doc: &UiPrefab, key: &str) -> UiPrefabView {
     view
 }
 
+/// The leave confirmation and the addresses of its three buttons.
 #[derive(Component)]
-pub(crate) struct ShellDialogRoot;
+pub(crate) struct ShellDialogRoot {
+    accept: String,
+    cancel: String,
+    close: String,
+}
 
 /// These are identities, not a second copy of layout data.
 struct ShellBindings {
@@ -546,6 +551,11 @@ pub(crate) fn parse(
     layouts: Res<UiLayouts>,
     stage: Option<Res<crate::browser_stage::BrowserStage>>,
     phenomena: Option<Res<crate::learn_phenomena_dialog::PhenomenonGlyphs>>,
+    inventory: Option<Res<crate::inventory::InventoryGlyphs>>,
+    (delivery_screen, delivery): (
+        Option<Res<crate::delivery::screen::DeliveryScreen>>,
+        Option<Res<crate::delivery::screen::DeliveryCharset>>,
+    ),
 ) {
     let Some(handle) = handle else { return; };
     // A stage does not render prefab-based menus or their fixed button labels.
@@ -567,6 +577,11 @@ pub(crate) fn parse(
     }
     // The phenomenon names the learn dialog and the notice banner print.
     let Some(phenomenon_names) = phenomena.as_deref().and_then(|p| p.texts.as_ref()) else { return; };
+    // The inventory screen's master names and fixed texts.
+    let Some(inventory_texts) = inventory.as_deref().and_then(|g| g.texts.as_ref()) else { return; };
+    // The delivery screen's item names (read from materials.json), when the
+    // delivery screen is installed.
+    if delivery_screen.is_some() && delivery.is_none() { return; }
     let parsed: Value = serde_json::from_str(&asset.0).expect("site name document");
     let rows = parsed["sites"].as_array().expect("site name rows");
     let mut chars = layouts.text_chars();
@@ -576,14 +591,26 @@ pub(crate) fn parse(
     for name in phenomenon_names {
         chars.extend(name.chars());
     }
+    for text in inventory_texts {
+        chars.extend(text.chars());
+    }
+    if let Some(delivery) = delivery.as_deref() {
+        chars.extend(delivery.chars.iter().copied());
+    }
     for wording in ["WORD_LEFT_ROOM", "WORD_CANCEL", "MSG_CONFIRM_LEAVE_MYSEKAI",
         "WORD_NOT_SAVE_RETURN", "WORD_SAVE_RETURN", "WORD_EDIT_SAVE_CONFIRMATION", "MSG_LEARN_PHENOMENA"]
         .into_iter().chain(crate::menu_dialog::RANK_GAUGE_WORDINGS) {
         chars.extend(layouts.wordings.get(wording).unwrap_or_else(|| panic!("UI wording missing: {wording}")).chars());
     }
-    // The option dialog and the info screen write these wordings; a root
-    // without one is named by the screen that writes it.
-    for wording in crate::option_dialog::WORDINGS.iter().chain(crate::info::WORDINGS) {
+    // The option dialog, the info screen, the delivery screen and the
+    // inventory screen write these wordings; a root without one is named by
+    // the screen that writes it.
+    for wording in crate::option_dialog::WORDINGS
+        .iter()
+        .chain(crate::info::WORDINGS)
+        .chain(crate::delivery::screen::WORDINGS.iter())
+        .chain(crate::inventory::WORDINGS)
+    {
         if let Some(text) = layouts.wordings.get(*wording) {
             chars.extend(text.chars());
         }
@@ -591,7 +618,7 @@ pub(crate) fn parse(
     for texts in [
         crate::info::FIXED_TEXTS, crate::menu_dialog::FIXED_TEXTS,
         crate::get_resource::FIXED_TEXTS, crate::option_dialog::FIXED_TEXTS,
-        crate::fixture_edit_ui::FIXED_TEXTS,
+        crate::fixture_edit_ui::FIXED_TEXTS, crate::delivery::screen::FIXED_TEXTS,
     ] {
         for text in texts { chars.extend(text.chars()); }
     }
@@ -620,12 +647,16 @@ pub(crate) fn spawn_when_ready(
             RenderLayers::layer(BALLOON_LAYER), view,
         ));
     }
+    let doc = layouts.document("Common2").expect("ready dialog prefab");
+    let dialog = crate::two_button_dialog::resolve(doc)
+        .unwrap_or_else(|e| panic!("leave confirmation: {e}"));
     let mut view = UiPrefabView::new("Common2", SITEMAP_LAYER);
     view.set_visible("WindowRoot/Tabs", false);
-    view.set_text("@34358", layouts.wordings["WORD_CANCEL"].clone());
-    view.set_text("@11788", layouts.wordings["WORD_LEFT_ROOM"].clone());
+    view.set_text(&dialog.negative_label, layouts.wordings["WORD_CANCEL"].clone());
+    view.set_text(&dialog.positive_label, layouts.wordings["WORD_LEFT_ROOM"].clone());
+    let root = ShellDialogRoot { accept: dialog.positive, cancel: dialog.negative, close: dialog.close };
     commands.spawn((
-        ShellDialogRoot, Visibility::Hidden, Transform::default(),
+        root, Visibility::Hidden, Transform::default(),
         RenderLayers::layer(SITEMAP_LAYER), view,
     ));
     commands.insert_resource(ShellSpawned);
@@ -863,7 +894,7 @@ pub(crate) fn click(
     (mut stack, entry): (ResMut<UiLayerStack>, Option<Res<crate::entry::EntrySequence>>),
     active: Option<Res<SiteActive>>,
     roots: Query<(&MenuShellRoot, &UiPrefabView)>,
-    dialogs: Query<&UiPrefabView, With<ShellDialogRoot>>,
+    dialogs: Query<(&ShellDialogRoot, &UiPrefabView)>,
     root_canvas: Option<Res<RootCanvas>>,
     mut sounds: ResMut<crate::audio::SeRequests>,
 ) {
@@ -882,12 +913,12 @@ pub(crate) fn click(
         consumed.0 = true;
         let Some(context) = dialog.leave_context.as_ref() else { return; };
         let on_confirm = context.on_confirm;
-        let Ok(view) = dialogs.single() else { return; };
+        let Ok((buttons, view)) = dialogs.single() else { return; };
         for position in taps {
             let canvas = to_canvas(position, window, root_canvas);
-            let accept = hit(view, &layouts, "@137046", canvas, size);
-            let cancel = hit(view, &layouts, "@113613", canvas, size)
-                || hit(view, &layouts, "WindowRoot/UIPartsCloseButton", canvas, size)
+            let accept = hit(view, &layouts, &buttons.accept, canvas, size);
+            let cancel = hit(view, &layouts, &buttons.cancel, canvas, size)
+                || hit(view, &layouts, &buttons.close, canvas, size)
                 || !hit(view, &layouts, "WindowRoot", canvas, size);
             if accept || cancel {
                 close_leave_confirm(&mut dialog, &mut stack);

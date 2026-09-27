@@ -78,7 +78,8 @@ use serde_json::{json, Map, Value};
 
 use crate::action_button::ActionTapConsumed;
 use crate::audio::{
-    apply_system_volume, stop_voice_all, LocalVolumeSettings, SeClass, SeRequest, SeRequests,
+    apply_system_volume, stop_voice_all, LocalVolumeSettings, PreviewSound, SeClass, SeRequest,
+    SeRequests,
     VoiceChannel, VolumeBus, VolumeSettingData,
 };
 use crate::gesture::{GestureEvent, GestureKind, GestureState};
@@ -2109,13 +2110,16 @@ fn fire_preview(
             info!("[option] preview (0.15 s, b__1): {who} -> type 1 PlaySEOneShot({cue})");
         }
         PreviewKind::Voice => {
-            info!("[option] preview (0.15 s, b__1): {who} -> type 2 PlayVoice({cue}, 1): the audio channel has no volume preview player; not played");
+            se_requests.preview(PreviewSound::Voice(cue.into()));
+            info!("[option] preview (0.15 s, b__1): {who} -> type 2 PlayVoice({cue}, 1)");
         }
         PreviewKind::IngameSe => {
-            info!("[option] preview (0.15 s, b__1): {who} -> type 3 SamplePlaySE({cue}, {volume:.2}): the audio channel has no volume preview player; not played");
+            se_requests.preview(PreviewSound::SampleSe(cue.into(), volume));
+            info!("[option] preview (0.15 s, b__1): {who} -> type 3 SamplePlaySE({cue}, {volume:.2})");
         }
         PreviewKind::IngameVoice => {
-            info!("[option] preview (0.15 s, b__1): {who} -> type 4 PlayVoiceFixedVolume({cue}, {volume:.2}): the audio channel has no volume preview player; not played");
+            se_requests.preview(PreviewSound::VoiceFixed(cue.into(), volume));
+            info!("[option] preview (0.15 s, b__1): {who} -> type 4 PlayVoiceFixedVolume({cue}, {volume:.2})");
         }
         PreviewKind::Bgm => unreachable!("a slider with a cue is not type 0"),
     }

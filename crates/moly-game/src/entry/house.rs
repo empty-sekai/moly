@@ -16,7 +16,7 @@
 use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
-use moly_assets::json::JsonAsset;
+use moly_assets::json::master::{self, MasterData, MasterTable};
 use moly_law::fixture::{Direction, GridPosition};
 use serde_json::Value;
 
@@ -52,7 +52,8 @@ pub(crate) fn mock_house_uid(site_id: u32) -> String {
 }
 
 /// Which placed packages are the player's house and which are gates, from
-/// the fixture master and the system fixture table.
+/// the fixture master and the system fixture table (`mysekaiFixtures` and
+/// `mysekaiSystemFixtures`, read from the region's master mirror).
 ///
 /// `MysekaiFixtureUtility.IsHomeFixture(id)`: the master has a
 /// `mysekaiSystemFixtures` row whose type is home (2).
@@ -72,13 +73,9 @@ struct Tables {
 }
 
 impl HomeFixtures {
-    pub(crate) fn build(masters: &Value, system: &Value) -> Result<Self, String> {
+    pub(crate) fn build(masters: &[Value], system: &[Value]) -> Result<Self, String> {
         let mut home_ids = HashSet::new();
-        for entry in system["entries"]
-            .as_object()
-            .ok_or("system fixture table has no entries map")?
-            .values()
-        {
+        for entry in system {
             let kind = entry["mysekaiSystemFixtureType"]
                 .as_str()
                 .ok_or("system fixture row without mysekaiSystemFixtureType")?;
@@ -95,17 +92,14 @@ impl HomeFixtures {
         // package -> (is home, is gate) of every master row naming it.
         let mut classes: HashMap<String, Vec<(i64, bool, bool)>> = HashMap::new();
         let mut starter_master = None;
-        for row in masters["fixtures"]
-            .as_array()
-            .ok_or("fixture master has no fixtures array")?
-        {
+        for row in masters {
             let id = row["id"].as_i64().ok_or("fixture master row without id")?;
             let bundle = row["assetbundleName"]
                 .as_str()
                 .ok_or("fixture master row without assetbundleName")?;
-            let kind = row["fixtureType"]
+            let kind = row["mysekaiFixtureType"]
                 .as_str()
-                .ok_or("fixture master row without fixtureType")?;
+                .ok_or("fixture master row without mysekaiFixtureType")?;
             let package = format!("mysekai__fixture__{bundle}");
             if i64::from(STARTER_HOUSE.fixture_id) == id {
                 starter_master = Some((package.clone(), row.clone()));
@@ -146,7 +140,7 @@ impl HomeFixtures {
                 STARTER_HOUSE.fixture_id
             )
         })?;
-        let size = |field: &str| master[field].as_i64();
+        let size = |field: &str| master["gridSize"][field].as_i64();
         let expected = (
             i64::from(STARTER_HOUSE.max.x - STARTER_HOUSE.min.x) + 1,
             i64::from(STARTER_HOUSE.max.y - STARTER_HOUSE.min.y) + 1,
@@ -154,7 +148,7 @@ impl HomeFixtures {
         );
         if package != STARTER_HOUSE.package
             || !homes.contains(&package)
-            || (size("gridWidth"), size("gridHeight"), size("gridDepth"))
+            || (size("width"), size("height"), size("depth"))
                 != (Some(expected.0), Some(expected.1), Some(expected.2))
         {
             return Err(format!(
@@ -195,54 +189,52 @@ impl HomeFixtures {
     }
 }
 
+/// The fixture master, in master order.
+const FIXTURES: MasterTable<Vec<Value>> = MasterTable {
+    table: "mysekaiFixtures",
+    name: "mysekaiFixtures (the player's house and gates)",
+    parse: master::rows,
+};
+
+/// The system fixture table, in master order.
+const SYSTEM_FIXTURES: MasterTable<Vec<Value>> = MasterTable {
+    table: "mysekaiSystemFixtures",
+    name: "mysekaiSystemFixtures (the player's house)",
+    parse: master::rows,
+};
+
+/// Present until both tables have resolved.
 #[derive(Resource)]
-pub(crate) struct HomeTablesRequest {
-    masters: Handle<JsonAsset>,
-    system: Handle<JsonAsset>,
-}
+pub(crate) struct HomeTablesRequest;
 
 /// Startup: request both tables.
-pub(crate) fn request(mut commands: Commands, server: Res<AssetServer>) {
-    commands.insert_resource(HomeTablesRequest {
-        masters: server.load::<JsonAsset>(moly_assets::mysekai_fixtures()),
-        system: server.load::<JsonAsset>("moly://mysekai-system-fixtures.json"),
-    });
+pub(crate) fn request(mut commands: Commands, mut masters: ResMut<MasterData>) {
+    commands.insert_resource(HomeTablesRequest);
+    masters.request(&FIXTURES);
+    masters.request(&SYSTEM_FIXTURES);
 }
 
-/// Update: build [`HomeFixtures`] once both tables are in. A failure is
-/// kept as the resource's state, so the home site restore refuses loudly
+/// Update: build [`HomeFixtures`] once both tables have resolved. A failure
+/// is kept as the resource's state, so the home site restore refuses loudly
 /// instead of waiting forever.
 pub(crate) fn build(world: &mut World) {
-    let Some(request) = world.get_resource::<HomeTablesRequest>() else {
+    if world.get_resource::<HomeTablesRequest>().is_none() {
+        return;
+    }
+    let mut masters = world.resource_mut::<MasterData>();
+    if !masters.is_resolved(FIXTURES.key()) || !masters.is_resolved(SYSTEM_FIXTURES.key()) {
+        return;
+    }
+    let (Some(fixtures), Some(system)) = (masters.take(&FIXTURES), masters.take(&SYSTEM_FIXTURES))
+    else {
         return;
     };
-    let (masters, system) = (request.masters.clone(), request.system.clone());
-    let server = world.resource::<AssetServer>();
-    for handle in [&masters, &system] {
-        match server.load_state(handle) {
-            bevy::asset::LoadState::Loaded => {}
-            bevy::asset::LoadState::Failed(error) => {
-                let error = format!("a fixture table failed to load: {error}");
-                error!("[entry] player's house tables: {error}");
-                world.remove_resource::<HomeTablesRequest>();
-                world.insert_resource(HomeFixtures::failed(error));
-                return;
-            }
-            _ => return,
-        }
-    }
-    let jsons = world.resource::<Assets<JsonAsset>>();
-    let parse = |handle: &Handle<JsonAsset>| -> Result<Value, String> {
-        let text = jsons
-            .get(handle)
-            .ok_or("a loaded fixture table is not in the asset table")?;
-        serde_json::from_str(&text.0)
-            .map_err(|error| format!("a fixture table is not JSON: {error}"))
-    };
-    let built = parse(&masters)
-        .and_then(|masters| Ok((masters, parse(&system)?)))
-        .and_then(|(masters, system)| HomeFixtures::build(&masters, &system));
     world.remove_resource::<HomeTablesRequest>();
+    let built = match (fixtures, system) {
+        (Ok(fixtures), Ok(system)) => HomeFixtures::build(&fixtures, &system),
+        // Named once by the master layer.
+        (Err(error), _) | (_, Err(error)) => Err(error.to_string()),
+    };
     match built {
         Ok(homes) => {
             let tables = homes.tables().expect("built tables");
@@ -263,31 +255,32 @@ pub(crate) fn build(world: &mut World) {
 #[cfg(test)]
 mod tests {
     //! `IsHomeFixture` / `IsGateFixture` / `CanCleanUp` on rows shaped like
-    //! the exports (values copied from the CN tables): the home test reads
-    //! the system fixture type, not the master's `system` fixture type.
+    //! the upstream master tables (values copied from the CN tables): the
+    //! home test reads the system fixture type, not the master's `system`
+    //! fixture type.
     use super::*;
     use serde_json::json;
 
-    fn masters(extra: Vec<Value>) -> Value {
+    fn masters(extra: Vec<Value>) -> Vec<Value> {
         let mut rows = vec![
-            json!({"id": 1, "assetbundleName": "mdl_mis0001_house_house1", "fixtureType": "system",
-                   "gridWidth": 12, "gridHeight": 13, "gridDepth": 12}),
-            json!({"id": 5, "assetbundleName": "mdl_mis0001_system_chest1", "fixtureType": "system",
-                   "gridWidth": 2, "gridHeight": 2, "gridDepth": 2}),
-            json!({"id": 6, "assetbundleName": "mdl_mis0001_fixture_bed1", "fixtureType": "normal",
-                   "gridWidth": 4, "gridHeight": 3, "gridDepth": 6}),
-            json!({"id": 900002, "assetbundleName": "mdl_non0006_gate_lon1", "fixtureType": "gate",
-                   "gridWidth": 6, "gridHeight": 6, "gridDepth": 2}),
+            json!({"id": 1, "assetbundleName": "mdl_mis0001_house_house1", "mysekaiFixtureType": "system",
+                   "gridSize": {"width": 12, "height": 13, "depth": 12}}),
+            json!({"id": 5, "assetbundleName": "mdl_mis0001_system_chest1", "mysekaiFixtureType": "system",
+                   "gridSize": {"width": 2, "height": 2, "depth": 2}}),
+            json!({"id": 6, "assetbundleName": "mdl_mis0001_fixture_bed1", "mysekaiFixtureType": "normal",
+                   "gridSize": {"width": 4, "height": 3, "depth": 6}}),
+            json!({"id": 900002, "assetbundleName": "mdl_non0006_gate_lon1", "mysekaiFixtureType": "gate",
+                   "gridSize": {"width": 6, "height": 6, "depth": 2}}),
         ];
         rows.extend(extra);
-        json!({ "fixtures": rows })
+        rows
     }
 
-    fn system() -> Value {
-        json!({"entries": {
-            "1": {"id": 1, "mysekaiFixtureId": 1, "mysekaiSystemFixtureType": "home"},
-            "2": {"id": 2, "mysekaiFixtureId": 5, "mysekaiSystemFixtureType": "chest"}
-        }})
+    fn system() -> Vec<Value> {
+        vec![
+            json!({"id": 1, "mysekaiFixtureId": 1, "mysekaiSystemFixtureType": "home"}),
+            json!({"id": 2, "mysekaiFixtureId": 5, "mysekaiSystemFixtureType": "chest"}),
+        ]
     }
 
     /// A chest is a system fixture but not a home: it can be cleaned up.

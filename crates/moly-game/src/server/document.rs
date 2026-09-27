@@ -4,10 +4,14 @@
 //! Sections use the source's response keys (`userMysekaiGamedata`,
 //! `userMysekaiStamina`, `userMysekaiColorfulPass`,
 //! `mysekaiPhenomenaSchedules`, `userMysekaiGateCharacterVisit`,
-//! `userMysekaiSiteHousingLayouts`, and the birthday-party delivery's
-//! `userBirthdayParties`, `userMaterials`, `userMysekaiMaterials`,
-//! `userCards`, `userHonors` and `masterConfigs`, which are optional on read).
-//! The rest are the mock's own keys and
+//! `userMysekaiSiteHousingLayouts`, and these, optional on read: the
+//! birthday-party delivery's `userBirthdayParties`, `userMaterials`,
+//! `userMysekaiMaterials`, `userCards` and `userHonors`, the music record
+//! settings' `userMysekaiMusicPlayFixtureSettings`, the avatar's
+//! `userAvatar`, and the owned data's `userMysekaiFixtures`,
+//! `userMysekaiCanvases`, `userMysekaiBlueprints`, `userMysekaiItems` and
+//! the two possession levels in `userMysekaiGamedata`). A `masterConfigs` key of an earlier document is read and
+//! ignored: those values are master data. The rest are the mock's own keys and
 //! name themselves as such: `clock` (the one server clock), `policies` (the
 //! server rules this mock stands in for), `phenomenaSchedulePolicy`,
 //! `talkListPolicy` and `controls`.
@@ -146,6 +150,18 @@ pub(crate) struct ServerDocument {
     pub(crate) controls: Value,
     /// The birthday-party delivery sections ([`super::delivery`]).
     pub(crate) delivery: super::delivery::DeliveryDoc,
+    /// `policies.homeActionReply` ([`super::home_action`]).
+    pub(crate) home_action_reply: super::home_action::HomeActionReplyPolicy,
+    /// `userMysekaiMusicPlayFixtureSettings` ([`super::music`]).
+    pub(crate) music_settings: Vec<super::client::music::MusicPlaySetting>,
+    /// `userAvatar` ([`super::avatar`]).
+    pub(crate) avatar: super::client::avatar::UserAvatar,
+    /// The owned MySekai tables and possession levels ([`super::inventory`]).
+    pub(crate) inventory: super::inventory::InventoryDoc,
+    /// `policies.musicPlayReply` ([`super::music_play`]).
+    pub(crate) music_play_reply: super::music_play::MusicPlayReplyPolicy,
+    /// `userMysekaiMusicRecords` ([`super::music_play`]).
+    pub(crate) music_records: Vec<super::client::music_play::OwnedMusicRecord>,
 }
 
 /// Which migration a schemaVersion 1 slice takes.
@@ -494,6 +510,9 @@ fn parse_gamedata(value: &Value) -> Result<Gamedata, String> {
             "totalExp",
             "refreshedAt",
             "isMysekaiTutorialEnd",
+            // Read by the owned-data part (the possession levels).
+            "mysekaiMaterialPossessionLevel",
+            "mysekaiFixturePossessionLevel",
         ],
         AT,
     )?;
@@ -524,6 +543,9 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
     let allowed: Vec<&str> = V2_FIELDS
         .iter()
         .chain(super::delivery::DOCUMENT_KEYS.iter())
+        .chain([super::music::SECTION, super::avatar::SECTION].iter())
+        .chain(super::inventory::DOCUMENT_KEYS.iter())
+        .chain(std::iter::once(&super::music_play::RECORDS_SECTION))
         .copied()
         .collect();
     only(doc, &allowed, "the server document")?;
@@ -539,9 +561,18 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
     let policies = object(field(doc, "policies", "the server document")?, "policies")?;
     let allowed: Vec<&str> = std::iter::once("staminaRefresh")
         .chain(super::delivery::POLICY_KEYS.iter().copied())
+        .chain(std::iter::once(super::home_action::POLICY_KEY))
+        .chain(super::inventory::POLICY_KEYS.iter().copied())
+        .chain(std::iter::once(super::music_play::POLICY_KEY))
         .collect();
     only(policies, &allowed, "policies")?;
     let delivery = super::delivery::DeliveryDoc::parse(doc, policies)?;
+    let home_action_reply = super::home_action::parse(policies)?;
+    let music_settings = super::music::parse(doc)?;
+    let avatar = super::avatar::parse(doc)?;
+    let inventory = super::inventory::InventoryDoc::parse(doc, policies)?;
+    let music_play_reply = super::music_play::parse_reply_policy(policies)?;
+    let music_records = super::music_play::parse(doc)?;
     let (gate, gate_characters, talk_histories) = parse_visit(
         field(doc, "userMysekaiGateCharacterVisit", "the server document")?,
         true,
@@ -602,6 +633,12 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
         layouts,
         controls,
         delivery,
+        home_action_reply,
+        music_settings,
+        avatar,
+        inventory,
+        music_play_reply,
+        music_records,
     };
     document.check_structure()?;
     Ok((document, pending))
@@ -717,6 +754,12 @@ pub(crate) fn migrate_v1(text: &str, migration: Migration) -> Result<ServerDocum
         layouts: field(doc, "userMysekaiSiteHousingLayouts", "the slice")?.clone(),
         controls: field(doc, "controls", "the slice")?.clone(),
         delivery: super::delivery::DeliveryDoc::default(),
+        home_action_reply: Default::default(),
+        music_settings: Vec::new(),
+        avatar: Default::default(),
+        inventory: Default::default(),
+        music_play_reply: Default::default(),
+        music_records: Vec::new(),
     };
     document.check_structure()?;
     Ok(document)
@@ -794,7 +837,8 @@ impl ServerDocument {
                 ));
             }
         }
-        self.delivery.check_structure()
+        self.delivery.check_structure()?;
+        self.inventory.check_structure()
     }
 
     fn gamedata_value(&self) -> Value {
@@ -868,6 +912,21 @@ impl ServerDocument {
         let mut policies = value["policies"].as_object().cloned().unwrap_or_default();
         if let Some(top) = value.as_object_mut() {
             self.delivery.write(top, &mut policies);
+            super::home_action::write(self.home_action_reply, &mut policies);
+            top.insert(
+                super::music::SECTION.into(),
+                super::client::music::rows_value(&self.music_settings),
+            );
+            top.insert(
+                super::avatar::SECTION.into(),
+                super::client::avatar::value(&self.avatar),
+            );
+            self.inventory.write(top, &mut policies);
+            super::music_play::write_policy(self.music_play_reply, &mut policies);
+            top.insert(
+                super::music_play::RECORDS_SECTION.into(),
+                super::client::music_play::owned_rows_value(&self.music_records),
+            );
             top.insert("policies".into(), Value::Object(policies));
         }
         value

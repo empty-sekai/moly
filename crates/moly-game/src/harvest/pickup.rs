@@ -1,57 +1,156 @@
 //! Pickup: drops approach the moving player and are collected
 //! (`MysekaiDropItemManager.OnCollectDropItem`, `MoveItemTowardsPlayer`).
 //!
-//! A landed drop has radius 1.0; the player is in contact when the 3D
-//! distance to it is within that radius. Every frame, for each drop in
-//! contact that the inventory can take, and only while the player is in the
-//! Move or Dash state: when the squared distance is below
-//! `DropItemApproachDistance`^2 (FloatConfigs 90) the drop is queued for
+//! The drop list (`_dropItemList`) holds the drops the player's collision
+//! owner added, in enter order: a landed drop (radius 1.0) enters when the
+//! 3D distance to the player is within its radius and exits when it is not.
+//! At the enter, a drop the inventory cannot take (`CanCollectResource`,
+//! [`super::possession`]) raises the collection notice first
+//! (`NoticeCollectItem`, [`super::notice`]). Drops that enter in one frame
+//! are listed by uid (the physics order of one frame is not read here).
+//! The collision scan runs while `ObjectCollisionManager.IsCanUpdate` holds
+//! (the interaction gate) and not during a site move (its game state is
+//! none of Normal, Harvest and Sketch).
+//!
+//! Every frame while the update is enabled (`SceneMysekai.Update` →
+//! `OnUpdate`): destroyed drops leave the list; then for each listed drop,
+//! in list order, a drop the inventory cannot take ends the frame's pass
+//! (nothing is collected that frame, and the drops after it do not move);
+//! otherwise, only while the player is in the Move or Dash state, the drop
+//! approaches: when the squared distance is below
+//! `DropItemApproachDistance`^2 (FloatConfigs 90) it is queued for
 //! collection and its acceleration reset; then, while it is attracted, its
 //! acceleration grows by the frame time and it moves toward the player by
 //! `DropItemApproachSpeed` (FloatConfigs 89) plus that acceleration, a
 //! per-frame step (`Vector3.MoveTowards`, not scaled by the frame time).
+//! Then each queued drop the inventory can take (checked again, after the
+//! stacks queued before it) is collected.
 //!
-//! Collection (`HarvestUtility.OnCollectDropItem`): the material cue
-//! (`se_get_rare_material` for a tone material or a rarity of rarity_2 and
-//! above, else `se_get_material`), a gather stack for the log loop, then
-//! `GetDropItem`: `se_pick_item` and the drop is destroyed. Leaving a harvest
-//! site by cannon collects every drop in contact
-//! (`AllCollectCollisionDropItemAsync`).
+//! Collection (`HarvestUtility.OnCollectDropItem`): the collection notice
+//! (with its cue), then a gather stack for the log loop; then `GetDropItem`:
+//! `se_pick_item`, the drop leaves the list and is destroyed.
 //!
-//! Named gaps: `CanCollectResource` (inventory capacity, server data) is the
-//! mock's own answer, always yes; the collection notice (HUD, dialogs) is
-//! the UI lane's.
+//! Leaving a harvest site by cannon (`AllCollectCollisionDropItemAsync`,
+//! not awaited by the cannon): the update is disabled; the listed drops are
+//! walked in order, and each live one the inventory can take is collected
+//! (`OnCollectDropItem`, then destroyed without `se_pick_item`), one per
+//! frame (a `UniTask.Yield` after each); then the list is cleared and the
+//! update enabled again. The walk is the list's own enumerator: a list
+//! changed under it throws in the source, which ends the task with the
+//! update left disabled; that case is reported here and reproduced.
+//!
+//! Named gaps: the notice is not drawn (see [`super::notice`]); the
+//! possession values are the `PossessionMock` panel's.
 
 use bevy::prelude::*;
 
+use super::catalog::{HarvestCatalog, HarvestUserData};
+use super::notice::{notice_collect_item, CollectNotice};
+use super::possession::{Capacity, PossessionLimits, PossessionMock};
 use super::queue::{HarvestLogQueue, Stack};
-use super::{HarvestDropItem, HarvestStats, RT_MYSEKAI_MATERIAL};
+use super::{HarvestDropItem, HarvestStats};
 use crate::audio::SeRequests;
 use crate::player::PlayerControlled;
 use crate::player_state::{PlayerActionState, PlayerAvatarStates};
 
-fn collect(
-    commands: &mut Commands,
-    entity: Entity,
+/// `MysekaiDropItemManager`: the drop list, `_isEnableUpdate`, and the
+/// cannon's walk while it runs.
+#[derive(Resource)]
+pub(crate) struct HarvestDropManager {
+    list: Vec<Entity>,
+    /// The list's version (`List<T>._version`): every add and remove bumps it.
+    version: u64,
+    enable_update: bool,
+    all_collect: Option<AllCollect>,
+}
+
+impl Default for HarvestDropManager {
+    fn default() -> Self {
+        Self {
+            list: Vec::new(),
+            version: 0,
+            enable_update: true,
+            all_collect: None,
+        }
+    }
+}
+
+/// `AllCollectCollisionDropItemAsync`'s enumerator.
+struct AllCollect {
+    index: usize,
+    version: u64,
+    collected: usize,
+}
+
+impl HarvestDropManager {
+    fn remove(&mut self, entity: Entity) {
+        if let Some(at) = self.list.iter().position(|listed| *listed == entity) {
+            self.list.remove(at);
+            self.version += 1;
+        }
+    }
+}
+
+/// The user data and panels the capacity check and the notice read.
+struct Inputs<'a> {
+    catalog: &'a HarvestCatalog,
+    user: &'a HarvestUserData,
+    limits: Option<&'a PossessionLimits>,
+    mock: &'a PossessionMock,
+}
+
+impl<'a> Inputs<'a> {
+    fn capacity<'q>(&self, queue: &'q HarvestLogQueue) -> Capacity<'q>
+    where
+        'a: 'q,
+    {
+        Capacity {
+            stacks: &queue.stacks,
+            catalog: self.catalog,
+            limits: self.limits,
+            mock: self.mock,
+        }
+    }
+
+    fn can_collect(&self, queue: &HarvestLogQueue, item: &HarvestDropItem) -> bool {
+        self.capacity(queue)
+            .can_collect(item.resource_type, item.resource_id, item.row.quantity)
+    }
+
+    /// `HarvestUtility.NoticeCollectItem(model)`.
+    fn notice(
+        &self,
+        queue: &HarvestLogQueue,
+        item: &HarvestDropItem,
+        se: &mut SeRequests,
+        notices: &mut Vec<CollectNotice>,
+        reason: &str,
+    ) {
+        notice_collect_item(
+            item.resource_type,
+            item.resource_id,
+            item.row.quantity,
+            &self.capacity(queue),
+            self.catalog,
+            self.user,
+            se,
+            notices,
+            reason,
+        );
+    }
+}
+
+/// `HarvestUtility.OnCollectDropItem`: the notice, then the gather stack.
+fn on_collect_drop_item(
+    inputs: &Inputs,
     item: &HarvestDropItem,
     se: &mut SeRequests,
     queue: &mut HarvestLogQueue,
     stats: &mut HarvestStats,
+    notices: &mut Vec<CollectNotice>,
     reason: &str,
 ) {
-    if item.resource_type == RT_MYSEKAI_MATERIAL {
-        let rare = item.material_type == 6 || item.rarity >= 1;
-        super::damage::push_se(
-            se,
-            if rare {
-                "se_get_rare_material"
-            } else {
-                "se_get_material"
-            },
-            "harvest-pickup",
-        );
-    }
-    super::damage::push_se(se, "se_pick_item", "harvest-pickup");
+    inputs.notice(queue, item, se, notices, reason);
     queue.stacks.push(Stack::Gather {
         site_id: item.site_id,
         drop: item.row.clone(),
@@ -61,11 +160,10 @@ fn collect(
         "[harvest-pickup] collected uid {} ({reason}): resourceType {} id {} qty {} rarity {}",
         item.uid, item.resource_type, item.resource_id, item.row.quantity, item.rarity
     );
-    commands.entity(entity).despawn();
 }
 
-/// Update: approach and collection while the player moves.
-#[allow(clippy::too_many_arguments)]
+/// Update: the collision scan, then the manager's frame pass.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) fn advance(
     mut commands: Commands,
     time: Res<Time>,
@@ -84,53 +182,129 @@ pub(crate) fn advance(
     mut se: ResMut<SeRequests>,
     mut queue: ResMut<HarvestLogQueue>,
     mut stats: ResMut<HarvestStats>,
+    mut manager: ResMut<HarvestDropManager>,
+    data: (
+        Option<Res<HarvestCatalog>>,
+        Option<Res<HarvestUserData>>,
+        Option<Res<PossessionLimits>>,
+        Res<PossessionMock>,
+        Option<Res<crate::site_move::SiteMoveActive>>,
+    ),
+    mut notices: MessageWriter<CollectNotice>,
 ) {
-    let Some(configs) = configs else {
+    let (catalog, user, limits, mock, site_move) = data;
+    let (Some(configs), Some(catalog), Some(user)) = (configs, catalog, user) else {
         return;
     };
-    if !eligibility.collision_updates() {
-        return;
-    }
-    if !matches!(
-        states.current,
-        PlayerActionState::Move | PlayerActionState::Dash
-    ) {
-        return;
-    }
+    let inputs = Inputs {
+        catalog: &catalog,
+        user: &user,
+        limits: limits.as_deref(),
+        mock: &mock,
+    };
     let Ok(player) = players.single() else {
         return;
     };
     let player = player.translation;
-    let step = configs.float(crate::client_config::KEY_DROP_ITEM_APPROACH_SPEED);
-    let reach = configs.float(crate::client_config::KEY_DROP_ITEM_APPROACH_DISTANCE);
-    let dt = time.delta_secs();
-    for (entity, mut item, mut transform) in &mut drops {
-        if item.radius <= 0.0 || transform.translation.distance(player) > item.radius {
-            continue;
+    let mut raised = Vec::new();
+
+    // The collision owner: enters in uid order, then exits.
+    if eligibility.collision_updates() && site_move.is_none() {
+        let mut entered: Vec<(u64, Entity)> = Vec::new();
+        let mut exited: Vec<Entity> = Vec::new();
+        for (entity, item, transform) in &drops {
+            let inside = item.radius > 0.0 && transform.translation.distance(player) <= item.radius;
+            let listed = manager.list.contains(&entity);
+            if inside && !listed {
+                entered.push((item.uid, entity));
+            } else if !inside && listed {
+                exited.push(entity);
+            }
         }
-        let d = transform.translation - player;
-        let mut queued = false;
-        if d.length_squared() < reach * reach {
-            item.acceleration = 0.0;
-            queued = true;
+        entered.sort_by_key(|(uid, _)| *uid);
+        for (_, entity) in entered {
+            let (_, item, _) = drops.get(entity).expect("listed above");
+            if !inputs.can_collect(&queue, item) {
+                inputs.notice(
+                    &queue,
+                    item,
+                    &mut se,
+                    &mut raised,
+                    "entered, the inventory cannot take it",
+                );
+            }
+            manager.list.push(entity);
+            manager.version += 1;
         }
-        if item.attracting {
-            item.acceleration += dt;
-            transform.translation =
-                move_towards(transform.translation, player, step + item.acceleration);
-        }
-        if queued {
-            collect(
-                &mut commands,
-                entity,
-                &item,
-                &mut se,
-                &mut queue,
-                &mut stats,
-                "walked into it",
-            );
+        for entity in exited {
+            manager.remove(entity);
         }
     }
+
+    if manager.enable_update {
+        // RemoveAll(item == null).
+        let before = manager.list.len();
+        manager.list.retain(|entity| drops.contains(*entity));
+        if manager.list.len() != before {
+            manager.version += 1;
+        }
+        let moving = matches!(
+            states.current,
+            PlayerActionState::Move | PlayerActionState::Dash
+        );
+        let step = configs.float(crate::client_config::KEY_DROP_ITEM_APPROACH_SPEED);
+        let reach = configs.float(crate::client_config::KEY_DROP_ITEM_APPROACH_DISTANCE);
+        let dt = time.delta_secs();
+        let mut to_collect: Vec<Entity> = Vec::new();
+        let mut stopped = false;
+        let listed = manager.list.clone();
+        for entity in listed {
+            let Ok((_, mut item, mut transform)) = drops.get_mut(entity) else {
+                continue;
+            };
+            if !inputs.can_collect(&queue, &item) {
+                stopped = true;
+                break;
+            }
+            if !moving {
+                continue;
+            }
+            // MoveItemTowardsPlayer.
+            if (transform.translation - player).length_squared() < reach * reach {
+                item.acceleration = 0.0;
+                to_collect.push(entity);
+            }
+            if item.attracting {
+                item.acceleration += dt;
+                transform.translation =
+                    move_towards(transform.translation, player, step + item.acceleration);
+            }
+        }
+        if !stopped {
+            for entity in to_collect {
+                let Ok((_, item, _)) = drops.get(entity) else {
+                    continue;
+                };
+                if !inputs.can_collect(&queue, item) {
+                    continue;
+                }
+                on_collect_drop_item(
+                    &inputs,
+                    item,
+                    &mut se,
+                    &mut queue,
+                    &mut stats,
+                    &mut raised,
+                    "walked into it",
+                );
+                // GetDropItem.
+                super::damage::push_se(&mut se, "se_pick_item", "harvest-pickup");
+                manager.remove(entity);
+                commands.entity(entity).despawn();
+            }
+        }
+    }
+    notices.write_batch(raised);
 }
 
 /// `Vector3.MoveTowards`.
@@ -144,46 +318,103 @@ pub(crate) fn move_towards(current: Vec3, target: Vec3, max_delta: f32) -> Vec3 
     }
 }
 
-/// Update: the cannon leaves a harvest site; every drop in contact is
-/// collected first.
+/// Update: the cannon leaves a harvest site
+/// (`AllCollectCollisionDropItemAsync`, started the frame the site move
+/// begins, then one collected drop a frame).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn collect_on_leave(
     mut commands: Commands,
     site_move: Option<Res<crate::site_move::SiteMoveActive>>,
     site: Option<Res<crate::site::SiteActive>>,
-    players: Query<&Transform, (With<PlayerControlled>, Without<HarvestDropItem>)>,
-    drops: Query<(Entity, &HarvestDropItem, &Transform), Without<PlayerControlled>>,
+    drops: Query<&HarvestDropItem>,
     mut se: ResMut<SeRequests>,
     mut queue: ResMut<HarvestLogQueue>,
     mut stats: ResMut<HarvestStats>,
+    mut manager: ResMut<HarvestDropManager>,
+    data: (
+        Option<Res<HarvestCatalog>>,
+        Option<Res<HarvestUserData>>,
+        Option<Res<PossessionLimits>>,
+        Res<PossessionMock>,
+    ),
+    mut notices: MessageWriter<CollectNotice>,
 ) {
-    let Some(site_move) = site_move else {
-        return;
-    };
-    if !site_move.is_added() || !site.is_some_and(|site| site.category == "harvest") {
-        return;
-    }
-    let Ok(player) = players.single() else {
-        return;
-    };
-    let mut count = 0usize;
-    for (entity, item, transform) in &drops {
-        if item.radius > 0.0 && transform.translation.distance(player.translation) <= item.radius {
-            collect(
-                &mut commands,
-                entity,
-                item,
-                &mut se,
-                &mut queue,
-                &mut stats,
-                "in contact at the cannon's leave",
-            );
-            count += 1;
+    let (catalog, user, limits, mock) = data;
+    let started = site_move
+        .as_ref()
+        .is_some_and(|site_move| site_move.is_added())
+        && site.is_some_and(|site| site.category == "harvest");
+    if started {
+        if manager.all_collect.is_some() {
+            warn!("[harvest-pickup] AllCollectCollisionDropItemAsync started while one runs");
         }
+        manager.enable_update = false;
+        manager.all_collect = Some(AllCollect {
+            index: 0,
+            version: manager.version,
+            collected: 0,
+        });
+        info!(
+            "[harvest-pickup] AllCollectCollisionDropItemAsync at the cannon's leave: {} drops listed",
+            manager.list.len()
+        );
     }
-    info!(
-        "[harvest-pickup] AllCollectCollisionDropItemAsync at the cannon's leave: {count} drops in contact collected"
-    );
+    let Some(mut walk) = manager.all_collect.take() else {
+        return;
+    };
+    let (Some(catalog), Some(user)) = (catalog, user) else {
+        manager.all_collect = Some(walk);
+        return;
+    };
+    let inputs = Inputs {
+        catalog: &catalog,
+        user: &user,
+        limits: limits.as_deref(),
+        mock: &mock,
+    };
+    let mut raised = Vec::new();
+    loop {
+        if walk.version != manager.version {
+            error!(
+                "[harvest-pickup] AllCollectCollisionDropItemAsync: the drop list changed under its enumerator after {} collected; the source throws (InvalidOperationException) and the update stays disabled",
+                walk.collected
+            );
+            break;
+        }
+        let next = manager.list.get(walk.index).copied();
+        let Some(entity) = next else {
+            manager.list.clear();
+            manager.version += 1;
+            manager.enable_update = true;
+            info!(
+                "[harvest-pickup] AllCollectCollisionDropItemAsync done: {} drops collected; list cleared, update enabled",
+                walk.collected
+            );
+            break;
+        };
+        walk.index += 1;
+        let Ok(item) = drops.get(entity) else {
+            continue; // destroyed
+        };
+        if !inputs.can_collect(&queue, item) {
+            continue;
+        }
+        on_collect_drop_item(
+            &inputs,
+            item,
+            &mut se,
+            &mut queue,
+            &mut stats,
+            &mut raised,
+            "listed at the cannon's leave",
+        );
+        commands.entity(entity).despawn();
+        walk.collected += 1;
+        // UniTask.Yield: the next drop on the next frame.
+        manager.all_collect = Some(walk);
+        break;
+    }
+    notices.write_batch(raised);
 }
 
 #[cfg(test)]

@@ -33,16 +33,47 @@
 //! The gather loop, from the arrival while the site is on: every
 //! `DeliveryGatherAPIInterval` (FloatConfigs 169), in state Gather with a
 //! non-empty stack: state InGathering (published), the gather API with a
-//! copy of the stack, those items leave the stack, every party synchronizes,
-//! the total reward animation of the reply, then state Gather while the
-//! stack still holds items, else Idle (published).
+//! copy of the stack (`contents`: per party of the stack, its gathered
+//! count; `crate::server::delivery::put_birthday_party_gather`), those items
+//! leave the stack, every party synchronizes, the total reward animation of
+//! the reply, then state Gather while the stack still holds items, else Idle
+//! (published).
+//!
+//! `CanCollectResource(dropItem)`: a drop is the party's reward material,
+//! `ResourceType.mysekai_material` (41), whose arm of the method's switch is
+//! `CanCollectMaterial(resourceId, quantity)`. That answers yes at once when
+//! `IsMaterialReceivableOverPossessionLimit`: the material's master row has
+//! `MysekaiMaterialType` game_character (4) or birthday_party (7); a missing
+//! row is a LogError and a no. Otherwise it sums the quantity of every
+//! Gather stack of the harvest user data, the quantity and the user's
+//! material possession and compares them with the possession limit of the
+//! user's possession level. A no leaves the drop where it is and runs
+//! `HarvestUtility.NoticeCollectItem` instead of the gather.
+//!
+//! `ShowRareDropEffect(rarity)` right after the view's `Init`: rarity_1,
+//! rarity_2 and rarity_3 play `_normalDropEffect`, `_rareDropEffect` and
+//! `_ultraRareDropEffect` (`ParticleSystem.Play()`, children included) and
+//! keep it as the current effect; rarity_4 plays nothing; a larger value
+//! throws. The hop's sequence starts with `StopAllDropEffect` (the three
+//! stop and clear) and ends with `ResumeCurrentDropEffect`.
 //!
 //! Named stand-ins and gaps: the landing height is the walk field's height,
-//! else the highest ground vertex within 2 m (the harvest drops' stand-in
-//! for the downward raycast); `CanCollectResource` (inventory capacity) is
-//! always yes; the collection notice and `ShowRareDropEffect` /
-//! `StopAllDropEffect` (particles) are not drawn; the view appears when its
-//! package has loaded (it is requested on the arrival).
+//! else the highest ground vertex within 2 m, the harvest drops' stand-in
+//! for `PlayDeliveryDropAnimationAsync`'s `Physics.Raycast` down onto the
+//! colliders: the product has no ray query on the site's colliders (they
+//! are cooked only in the weather collision scene, which answers sphere
+//! sweeps). The possession branch of `CanCollectMaterial` is not ported
+//! (every party's reward material in the master is birthday_party, so no
+//! delivery drop reaches it; one that does is answered yes and logged as
+//! WARN). The collection notices (`NoticeCollectItem`, the gather's) are
+//! not drawn. The drop effects are not drawn: in the drop documents the
+//! three view fields reference one system, `fx_stay_dropitem_birthday_rare_01
+//! /root` with five child rows, all drawn with `Mysekai/Effect/UberUnlit`;
+//! the prop documents carry no program catalogue for that shader and their
+//! rows carry no `useUnscaledTime`, so the site prop particle host (the
+//! harvest stay particles) refuses them, and the play is logged here only.
+//! The view appears when its package has loaded (it is requested on the
+//! arrival).
 
 use bevy::diagnostic::FrameCount;
 use bevy::gltf::Gltf;
@@ -52,12 +83,12 @@ use moly_law::action_button::inside_circle;
 use moly_law::delivery as law;
 
 use super::honor::{RewardOwner, RewardRuns};
-use super::server_mock::DeliveryServerMock;
 use super::site::{DeliveryObjects, DeliverySite};
 use super::{publish, DeliveryActionState, DeliveryModel, DeliveryProgress, DropModel};
 use crate::audio::{SeClass, SeRequest, SeRequests};
 use crate::harvest::{HarvestDocs, HarvestGltfs, Rng};
 use crate::player::PlayerControlled;
+use crate::server::delivery::{ClientBirthdayPartyData, GatherContent};
 use crate::site_move::timeline::{delay_seconds, Delay};
 
 /// `DeliveryGatherAPIInterval` (FloatConfigs 169).
@@ -113,6 +144,8 @@ struct PendingSpawn {
 pub(crate) struct DeliveryDropSpawns {
     pending: Vec<PendingSpawn>,
     ground: Option<Vec<Vec3>>,
+    /// `RemoveDropItemView`: the drop views to destroy on the next step.
+    removed: Vec<u64>,
 }
 
 impl DeliveryDropSpawns {
@@ -224,7 +257,7 @@ pub(crate) fn on_drop_item(
 /// more removes the surplus synchronized drops.
 pub(crate) fn generate_unclaimed(
     model: &mut DeliveryModel,
-    mock: &DeliveryServerMock,
+    client: &ClientBirthdayPartyData,
     spawns: &mut DeliveryDropSpawns,
     objects: &DeliveryObjects,
     reason: &str,
@@ -235,7 +268,9 @@ pub(crate) fn generate_unclaimed(
         .map(|p| (p.id, p.reward_material_id))
         .collect();
     for (id, _) in ids {
-        let dropped = mock.dropped_count(id);
+        let dropped = client
+            .user_birthday_party(id)
+            .map_or(0, |row| row.dropped_mysekai_material_count);
         let Some(party) = model.party(id) else {
             continue;
         };
@@ -250,9 +285,7 @@ pub(crate) fn generate_unclaimed(
                 on_drop_item(model, spawns, objects, id, -1, false, true, "unclaimed");
             }
         } else if count > dropped {
-            warn!(
-                "[delivery-drop] GenerateUnclaimedDropItemsIfNeeded ({reason}) party {id}: the client holds {count}, the server counts {dropped}: RemoveSynchronizedDropItems is not ported"
-            );
+            remove_synchronized_drop_items(model, spawns, id, count - dropped, reason);
         }
     }
 }
@@ -409,6 +442,24 @@ pub(crate) fn spawn(
                 Visibility::default(),
             ))
             .id();
+        let effect = match rarity {
+            0 => "_normalDropEffect",
+            1 => "_rareDropEffect",
+            2 => "_ultraRareDropEffect",
+            3 => "nothing",
+            other => panic!(
+                "[delivery-drop] ShowRareDropEffect: rarity {other} is out of range (the source throws ArgumentOutOfRangeException)"
+            ),
+        };
+        info!(
+            "[delivery-drop] view uid {}: ShowRareDropEffect(rarity {rarity}) plays {effect}{} (not drawn: the prop particle host refuses the UberUnlit rows)",
+            model.uid,
+            if item.with_animation {
+                "; the hop starts with StopAllDropEffect and ends with ResumeCurrentDropEffect"
+            } else {
+                ""
+            }
+        );
         if item.with_animation {
             play_drop_item_se(rarity, &mut se);
             let distance = start.distance(landing);
@@ -446,16 +497,91 @@ pub(crate) fn spawn(
     }
 }
 
+/// `RemoveSynchronizedDropItems(siteData, removeCount)`: nothing below 1;
+/// otherwise the first `min(removeCount, count)` unsynchronized drops, then
+/// the first `min(rest, count)` synchronized ones, each removed from the
+/// model (`DeliverySiteModel.RemoveDropItem`) and its view destroyed
+/// (`RemoveDropItemView`).
+fn remove_synchronized_drop_items(
+    model: &mut DeliveryModel,
+    spawns: &mut DeliveryDropSpawns,
+    party_id: i32,
+    remove_count: i32,
+    reason: &str,
+) {
+    if remove_count < 1 {
+        return;
+    }
+    let Some(party) = model.party(party_id) else {
+        return;
+    };
+    let take = |list: &[DropModel], n: i32| -> Vec<u64> {
+        list.iter()
+            .take(n.max(0) as usize)
+            .map(|drop| drop.uid)
+            .collect()
+    };
+    let mut uids = take(&party.unsynced_drops, remove_count);
+    let rest = remove_count - uids.len() as i32;
+    if rest >= 1 {
+        uids.extend(take(&party.drops, rest));
+    }
+    for uid in &uids {
+        model.remove_drop(*uid);
+        let before = spawns.pending.len();
+        spawns.pending.retain(|pending| pending.model.uid != *uid);
+        if spawns.pending.len() == before {
+            spawns.removed.push(*uid);
+        }
+    }
+    info!(
+        "[delivery-drop] GenerateUnclaimedDropItemsIfNeeded ({reason}) party {party_id}: the client holds {remove_count} more than the server counts: RemoveSynchronizedDropItems removes {uids:?} (unsynchronized first)"
+    );
+}
+
+/// `OnCollisionEnterDropItem`: the uid joins the collision list (a list
+/// add, a second enter adds it again), state Gather (published).
+fn enter_drop(
+    model: &mut DeliveryModel,
+    progress: &mut MessageWriter<DeliveryProgress>,
+    uid: u64,
+    why: &str,
+) {
+    model.collision_drops.push(uid);
+    model.state = DeliveryActionState::Gather;
+    let rate = model.rate;
+    publish(progress, DeliveryActionState::Gather, None, 0, 0.0, rate);
+    info!("[delivery-drop] OnCollisionEnterDropItem uid {uid} ({why}); state Gather");
+}
+
 /// Update: the drops' collision edges (the collision manager, while it
-/// updates).
+/// updates), and the delivery screen's `TriggerOnEnterCollisions`, which
+/// runs the enter callback of every drop the player collides with whatever
+/// the game state.
 pub(crate) fn scan(
     eligibility: crate::interaction::InteractionEligibility,
     mut model: ResMut<DeliveryModel>,
     mut progress: MessageWriter<DeliveryProgress>,
+    mut retrigger: ResMut<super::DeliveryEnterRetrigger>,
     players: Query<&Transform, (With<PlayerControlled>, Without<DeliveryDropItem>)>,
     mut drops: Query<(&Transform, &mut DeliveryDropItem), Without<PlayerControlled>>,
 ) {
-    if model.site_id.is_none() || !eligibility.collision_updates() {
+    let again = std::mem::take(&mut retrigger.drops);
+    if model.site_id.is_none() {
+        return;
+    }
+    if again {
+        let mut colliding: Vec<u64> = drops
+            .iter()
+            .filter(|(_, item)| item.inside)
+            .map(|(_, item)| item.model.uid)
+            .collect();
+        colliding.sort_unstable();
+        for uid in colliding {
+            enter_drop(&mut model, &mut progress, uid, "TriggerOnEnterCollisions");
+        }
+    }
+    if !eligibility.collision_updates() {
         return;
     }
     let Ok(player) = players.single() else {
@@ -475,16 +601,15 @@ pub(crate) fn scan(
         item.inside = inside;
         let uid = item.model.uid;
         if inside {
-            model.collision_drops.push(uid);
-            model.state = DeliveryActionState::Gather;
-            publish(&mut progress, DeliveryActionState::Gather, None, 0, 0.0);
-            info!(
-                "[delivery-drop] OnCollisionEnterDropItem uid {uid}: player {:.3} m away (radius {}); state Gather",
+            let why = format!(
+                "player {:.3} m away, radius {}",
                 player.translation.distance(transform.translation),
                 item.radius
             );
-        } else {
-            model.collision_drops.retain(|u| *u != uid);
+            enter_drop(&mut model, &mut progress, uid, &why);
+        } else if let Some(index) = model.collision_drops.iter().position(|u| *u == uid) {
+            // `List.Remove`: the first occurrence.
+            model.collision_drops.remove(index);
         }
     }
 }
@@ -495,6 +620,7 @@ pub(crate) fn advance(
     mut commands: Commands,
     time: Res<Time>,
     configs: Option<Res<crate::client_config::ClientConfigs>>,
+    mut spawns: ResMut<DeliveryDropSpawns>,
     mut model: ResMut<DeliveryModel>,
     mut se: ResMut<SeRequests>,
     players: Query<&Transform, (With<PlayerControlled>, Without<DeliveryDropItem>)>,
@@ -508,6 +634,15 @@ pub(crate) fn advance(
         Without<PlayerControlled>,
     >,
 ) {
+    if !spawns.removed.is_empty() {
+        let removed = std::mem::take(&mut spawns.removed);
+        for (entity, _, item, _) in &drops {
+            if removed.contains(&item.model.uid) {
+                commands.entity(entity).despawn();
+            }
+        }
+        info!("[delivery-drop] RemoveDropItemView {removed:?}: views destroyed");
+    }
     let Some(configs) = configs else {
         return;
     };
@@ -602,16 +737,26 @@ pub(crate) fn advance(
 
 /// Update: `OnUpdateGatherDropItem` (the controller's Update on the delivery
 /// site).
-pub(crate) fn gather(mut model: ResMut<DeliveryModel>, mut drops: Query<&mut DeliveryDropItem>) {
+pub(crate) fn gather(
+    mut model: ResMut<DeliveryModel>,
+    catalog: Option<Res<crate::harvest::catalog::HarvestCatalog>>,
+    mut warned: Local<bool>,
+    mut drops: Query<&mut DeliveryDropItem>,
+) {
     if model.site_id.is_none() || model.collision_drops.is_empty() {
         return;
     }
     let uids = std::mem::take(&mut model.collision_drops);
     for uid in uids {
-        if model.drop_model(uid).is_none() {
+        let Some(drop) = model.drop_model(uid) else {
+            continue;
+        };
+        if !can_collect_resource(catalog.as_deref(), &drop, &mut warned) {
+            info!(
+                "[delivery-drop] uid {uid}: CanCollectResource no: HarvestUtility.NoticeCollectItem (not drawn); the drop stays"
+            );
             continue;
         }
-        // CanCollectResource: the mock's yes.
         if let Some(mut item) = drops.iter_mut().find(|item| item.model.uid == uid) {
             if matches!(item.phase, DropPhase::Rest) {
                 item.phase = DropPhase::Fly {
@@ -622,6 +767,38 @@ pub(crate) fn gather(mut model: ResMut<DeliveryModel>, mut drops: Query<&mut Del
             }
         }
     }
+}
+
+/// `HarvestUserDataManager.CanCollectResource` for a drop (resource type
+/// `mysekai_material`, quantity 1): `CanCollectMaterial`'s
+/// `IsMaterialReceivableOverPossessionLimit` arm.
+fn can_collect_resource(
+    catalog: Option<&crate::harvest::catalog::HarvestCatalog>,
+    drop: &DropModel,
+    warned: &mut bool,
+) -> bool {
+    const GAME_CHARACTER: i32 = 4;
+    const BIRTHDAY_PARTY: i32 = 7;
+    let Some(material) = catalog.and_then(|catalog| catalog.materials.get(&drop.material_id))
+    else {
+        error!(
+            "[delivery-drop] IsMaterialReceivableOverPossessionLimit: no MasterMysekaiMaterial row for id {} (the source's LogError){}; CanCollectResource no",
+            drop.material_id,
+            if catalog.is_none() { ", the mysekai material master is not loaded" } else { "" }
+        );
+        return false;
+    };
+    if matches!(material.material_type, GAME_CHARACTER | BIRTHDAY_PARTY) {
+        return true;
+    }
+    if !*warned {
+        *warned = true;
+        warn!(
+            "[delivery-drop] CanCollectMaterial({}, 1): material type {} is not receivable over the possession limit; the possession check (Gather stacks, UserMysekaiMaterialPossession, the possession level's limit) is not ported: answered yes",
+            drop.material_id, material.material_type
+        );
+    }
+    true
 }
 
 /// `ScheduleExecuteSendGatherData`.
@@ -650,7 +827,7 @@ pub(crate) fn gather_loop(
     time: Res<Time>,
     mut gather: ResMut<DeliveryGatherLoop>,
     mut model: ResMut<DeliveryModel>,
-    mock: Option<ResMut<DeliveryServerMock>>,
+    mut client: ResMut<ClientBirthdayPartyData>,
     mut runs: ResMut<RewardRuns>,
     mut progress: MessageWriter<DeliveryProgress>,
 ) {
@@ -670,9 +847,6 @@ pub(crate) fn gather_loop(
     }
     let interval = gather.interval;
     gather.delay = Some(Delay::new(delay_seconds(interval as f64), frame));
-    let Some(mut mock) = mock else {
-        return;
-    };
     if model.state != DeliveryActionState::Gather || model.gather_stack.is_empty() {
         return;
     }
@@ -684,12 +858,34 @@ pub(crate) fn gather_loop(
         None,
         0,
         0.0,
+        model.rate,
     );
-    let rewards = mock.gather(&items);
+    // UserBirthdayPartyGatherRequest.contents: per party of the stack, in
+    // stack order, its gathered count.
+    let mut contents: Vec<GatherContent> = Vec::new();
+    for item in &items {
+        match contents
+            .iter_mut()
+            .find(|content| content.birthday_party_id == item.party_id)
+        {
+            Some(content) => content.gathered_count += 1,
+            None => contents.push(GatherContent {
+                birthday_party_id: item.party_id,
+                gathered_count: 1,
+            }),
+        }
+    }
+    let rewards = match crate::server::delivery::put_birthday_party_gather(&mut client, &contents) {
+        Ok(reply) => reply.obtained_delivery_total_rewards,
+        Err(reason) => {
+            error!("[delivery-drop] {reason}: the error dialog (UI lane)");
+            Vec::new()
+        }
+    };
     for item in &items {
         model.gather_stack.retain(|d| d != item);
     }
-    model.update_synchronized(&mock);
+    model.update_synchronized(&client);
     if rewards.is_empty() {
         after_gather(&mut gather, &mut model, &mut progress, frame);
     } else {
@@ -711,7 +907,7 @@ fn after_gather(
         DeliveryActionState::Gather
     };
     model.state = state;
-    publish(progress, state, None, 0, 0.0);
+    publish(progress, state, None, 0, 0.0, model.rate);
     info!(
         "[delivery-drop] gather loop: state {state:?}; tallies {:?}",
         model

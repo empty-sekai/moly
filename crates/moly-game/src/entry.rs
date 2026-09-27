@@ -20,11 +20,25 @@
 //! one exists; in solo play none does (`UIUtility.PlayMysekaiTransition` has
 //! one caller, the multiplay layout update), so both calls here do nothing.
 //!
-//! Named gaps: the start particle of the cover, the
-//! `ScreenLayerMysekaiNotice` weather banner (INFO lines at its steps), and
-//! the stamina-refresh branch (`isRefreshed` is a mock that is false). The
-//! cover's loading indicator is drawn from the extracted prefab
-//! ([`indicator`]).
+//! The stamina refresh (`JoinMysekaiEndAction`'s `IsRefresh()`: the local
+//! lists hold the `StaminaRefresh` topic, which the server model's join
+//! reply adds when it is `isRefreshed`): `Refresh()` changes the player into
+//! `PlayerAvatarRefreshState` (the gate closes, `c_000_other_house1_003`
+//! plays; when it has played to its end the gate opens and the state goes
+//! Idle, whose clip fades in over 0.25 s), awaits that together with
+//! `RefreshStaminaOnJoin`, then hides the weather banner at once
+//! (`HideSiteEnvironment`), hides the stamina view and removes the topic;
+//! `OnFinishEnterAsync` follows. Named differences of that branch: the
+//! player state machine has no Refresh value here, so `CurrentState` reads
+//! Idle while the clip plays (the closed gate drops input as the source's
+//! does); the HUD stamina view (`HarvestPlayerHeadUpDisplay._staminaView`:
+//! `Init`, `DelayFrame(53)`, `Show`, `RefreshStaminaViewAsync(0, 1)`,
+//! `Hide`) is not built, so the await waits for the player alone.
+//!
+//! Named gap: the `ScreenLayerMysekaiNotice` weather banner steps (INFO
+//! lines). The cover's loading indicator is drawn from the extracted prefab
+//! ([`indicator`]), its start particle through the UIParticle host
+//! ([`cover`]; the host refuses its two UI particle programs for now).
 
 pub(crate) mod cover;
 pub(crate) mod house;
@@ -46,10 +60,9 @@ use crate::{
 };
 use law::{ColorFade, FadeStage, NormalPrivate, UniTaskDelay};
 
-/// Server flag `isRefreshed` of the join response (it adds the
-/// StaminaRefresh topic): a named mock, not refreshed. The refresh branch
-/// (`c_000_other_house1_003` and the 53-frame stamina view) is not ported.
-const IS_REFRESHED: bool = false;
+/// `PlayerAvatarRefreshState.Initialize`'s clip (the string literal of the
+/// method).
+const REFRESH_CLIP: &str = "c_000_other_house1_003";
 
 /// Movement hold of the join (`NavMeshAgent.enabled = false`,
 /// `updatePosition = false` in `MoveToEntrance`, undone in `Finish`).
@@ -80,6 +93,13 @@ enum Phase {
         delay: UniTaskDelay,
         player: Entity,
         token: Option<PlayerActionToken>,
+    },
+    /// `JoinMysekaiEndAction`'s `Refresh()`: the refresh state's clip is
+    /// playing (`finished` once its UpdateState has sent it Idle; the
+    /// `WaitUntil` continues on the next frame).
+    Refresh {
+        token: Option<PlayerActionToken>,
+        finished: bool,
     },
     Ended,
 }
@@ -151,6 +171,7 @@ impl EntrySequence {
             (_, Phase::WaitCharacters { .. }) => "wait-character-spawned",
             (_, Phase::AwaitTransition { .. }) => "start-mysekai-transition",
             (_, Phase::AwaitExit { .. }) => "play-exit-my-room-action",
+            (_, Phase::Refresh { .. }) => "refresh",
             (_, Phase::Ended) => "ended",
         }
     }
@@ -305,6 +326,7 @@ fn safe_finish(world: &mut World, seq: &mut EntrySequence, dt: f32) {
     }
     seq.since_finish = Some((0, 0.0));
     indicator::hide(world);
+    cover::resume_start_particle(world);
     let (fade, written) = ColorFade::start(
         law::WHITE_ALPHA_1,
         law::WHITE_ALPHA_0,
@@ -320,7 +342,7 @@ fn safe_finish(world: &mut World, seq: &mut EntrySequence, dt: f32) {
         destroy: UniTaskDelay::new(law::COVER_DESTROY_DELAY),
     };
     step(seq, "LiveTransitioner.SafeFinish", Some(0.0));
-    info!("[entry] LiveTransitioner.Finish: loadingContent off, start particle resume (not drawn), ColorFader.Play(WHITE_ALPHA_0, delay 1.0, duration 1.0)");
+    info!("[entry] LiveTransitioner.Finish: loadingContent off, start particle resume, ColorFader.Play(WHITE_ALPHA_0, delay 1.0, duration 1.0)");
 }
 
 fn advance_cover(world: &mut World, seq: &mut EntrySequence, dt: f32) {
@@ -562,11 +584,67 @@ fn finish(
 /// error branch (the end action follows SafeFinish in the same frame).
 fn end_action(world: &mut World, seq: &mut EntrySequence, source_t: Option<f32>) {
     seq.end_source_t = source_t;
-    if IS_REFRESHED {
-        error!("[entry] JoinMysekaiEndAction: the stamina-refresh branch is not ported");
+    let refresh = world
+        .get_resource::<crate::site_expansion::MysekaiLocalSettings>()
+        .is_some_and(|local| {
+            local
+                .0
+                .has_topic(crate::server::local::TOPIC_STAMINA_REFRESH)
+        });
+    let has_player = world
+        .query_filtered::<(), With<PlayerControlled>>()
+        .iter(world)
+        .next()
+        .is_some();
+    if refresh && has_player {
+        // Refresh(): player.ChangeState(Refresh), whose Initialize closes
+        // the gate and plays the clip.
+        let token = crate::site_move::door_state::play_state_clip(world, REFRESH_CLIP, None);
+        world.resource_mut::<PlayerAvatarStates>().can_intercept = false;
+        seq.phase = Phase::Refresh {
+            token,
+            finished: false,
+        };
+        step(
+            seq,
+            "JoinMysekaiEndAction: IsRefresh (StaminaRefresh topic) -> Refresh(): ChangeState(Refresh), PlayAnimation(c_000_other_house1_003); RefreshStaminaOnJoin: the HUD stamina view is not built, not awaited",
+            source_t,
+        );
+        return;
     }
     seq.banner_hide = Some(UniTaskDelay::new(law::BANNER_HIDE_CALL_DELAY));
-    info!("[entry] JoinMysekaiEndAction: isRefreshed mock false; DelayCall({}, HideSiteEnvironment) scheduled", law::BANNER_HIDE_CALL_DELAY);
+    info!(
+        "[entry] JoinMysekaiEndAction: not IsRefresh (no StaminaRefresh topic); DelayCall({}, HideSiteEnvironment) scheduled",
+        law::BANNER_HIDE_CALL_DELAY
+    );
+    finish_enter(world, seq, source_t);
+}
+
+/// The end of `Refresh()`: `HideSiteEnvironment()` at once, the stamina
+/// view's `Hide` (not built), `RemoveTopic(StaminaRefresh)`; then
+/// `OnFinishEnterAsync`.
+fn end_refresh(world: &mut World, seq: &mut EntrySequence) {
+    world.write_message(crate::notice_banner::SiteEnvironmentInfo::Hide {
+        delay: 0.0,
+        duration: law::BANNER_HIDE_DURATION,
+    });
+    if let Some(mut local) = world.get_resource_mut::<crate::site_expansion::MysekaiLocalSettings>()
+    {
+        local
+            .0
+            .topics
+            .retain(|topic| *topic != crate::server::local::TOPIC_STAMINA_REFRESH);
+    }
+    step(
+        seq,
+        "Refresh() done: HideSiteEnvironment, staminaView.Hide (not built), RemoveTopic(StaminaRefresh)",
+        None,
+    );
+    finish_enter(world, seq, None);
+}
+
+/// `HomeSiteController.OnFinishEnterAsync` and the return of `JoinMysekai`.
+fn finish_enter(world: &mut World, seq: &mut EntrySequence, source_t: Option<f32>) {
     // HomeSiteController.OnFinishEnterAsync: home HUD, then camera Normal.
     seq.hud_open = true;
     step(seq, "OnFinishEnterAsync: ScreenLayerMysekaiHome", source_t);
@@ -605,6 +683,7 @@ pub(crate) fn advance(world: &mut World) {
     };
     let dt = world.resource::<Time>().delta_secs();
     let real = world.resource::<Time<Real>>().elapsed_secs_f64();
+    cover::fit_start_particle(world);
     seq.frame += 1;
     if seq.frame == 1 {
         seq.started_real = real;
@@ -767,6 +846,46 @@ pub(crate) fn advance(world: &mut World) {
                     player,
                     token,
                 };
+            }
+        }
+        Phase::Refresh { token, finished } => {
+            if finished {
+                // WaitUntil(CurrentState == Idle) continues.
+                end_refresh(world, &mut seq);
+            } else {
+                match crate::site_move::door_state::clip_finished(world, REFRESH_CLIP) {
+                    Some(false) => {
+                        seq.phase = Phase::Refresh {
+                            token,
+                            finished: false,
+                        };
+                    }
+                    ended => {
+                        if ended.is_none() {
+                            error!("[entry] PlayerAvatarRefreshState: {REFRESH_CLIP} is not on the player's animator; the state ends at once");
+                        }
+                        // UpdateState: SetInterceptFlag(true), next state Idle,
+                        // whose Initialize plays the idle clip (0.25 s fade).
+                        world.resource_mut::<PlayerAvatarStates>().can_intercept = true;
+                        world
+                            .resource_mut::<PlayerAvatarStates>()
+                            .change_status(PlayerActionState::Idle);
+                        crate::site_move::door_state::finish_idle(
+                            world,
+                            token,
+                            crate::site_move::door_law::STATE_CLIP_FADE,
+                        );
+                        step(
+                            &seq,
+                            "PlayerAvatarRefreshState: clip ended, SetInterceptFlag(true), Idle",
+                            None,
+                        );
+                        seq.phase = Phase::Refresh {
+                            token: None,
+                            finished: true,
+                        };
+                    }
+                }
             }
         }
         Phase::Ended => {}

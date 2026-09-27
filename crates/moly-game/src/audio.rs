@@ -5,8 +5,8 @@
 //!
 //! - **BGM**（BGM 管理器 `MysekaiBGMManager` 的选曲）：按「当前站点 × 当前
 //!   现象」现算。真源 `PlayBGMAsync(site, phenomenon)` 先问用户唱片设定（只在
-//!   住宅类站点查；设定是服务端用户态，本仓是具名 mock，默认为空、可由环境
-//!   变量下发，见 [`UserMusicPlaySettings`]），再走默认选曲
+//!   住宅类站点查；设定是服务端用户态，由服务端模型的响应写进客户端副本
+//!   [`crate::server::client::music::ClientMusicPlaySettings`]，默认为空），再走默认选曲
 //!   `PlayDefaultBGMAsync`：现象 id 等于客户端配置的配送现象 id → 站点
 //!   normal 档；现象主表亮度档非 none →
 //!   站点×亮度档行；none → 现象自己的 BGM 行（主数据缓存按 mysekaiPhenomenaId
@@ -20,7 +20,7 @@
 //!   现象切换钮在真源里没有对应物，这边把它当成「以该现象进站」：站点或现象
 //!   一变就按新的「站点 × 现象」重选。
 //! - **区域环境音**（现象 SE 管理器 `MysekaiPhenomenaSEManager`）：平铺 2D——
-//!   每帧的位置与朝向都不进这条链，音量就是「1.0 × 面板」。真源在环境建成
+//!   每帧的位置与朝向都不进这条链，音量是 SE 播放器 × cue 的类别与音量命令。真源在环境建成
 //!   （进站）与交叉淡化收尾两处各调一次：站点类型先过门（草原、海岸、花园、
 //!   纪念地四类放，家园、三层房间、祭会场只停），过门则取该站本现象的行、
 //!   否则该站「其它」条件的行；每次调用都先停旧声再放（同 cue 也从头放）；
@@ -28,11 +28,12 @@
 //!   （提交序号前进一次＝真源一次调用）。cue 是按它的**序列结构**放的：
 //!   提取侧在 loop.json 的包条目里导出结构（`sequenceExport` 计数 +
 //!   `sequences` 块）。列了、没有块的 cue 是 plain（一轨一条波形、从 cue
-//!   起点放），照单流放。带块且是洗牌序列（类型 2）的按移植的律放
-//!   （[`crate::audio_sequence`]）：每轮一轨，等该轨的起播延迟，把那条波形
-//!   放完，没被叫停且带重放标志就起下一轮。位置与顺序表挂在 cue 表的
-//!   工作区上，停了再放接着走。其余序列形状，以及条目没被读过、却带多条
-//!   波形的键，都具名拒绝，不拿其中一条波形顶替。
+//!   起点放）。带块的按序列类型 0-4 的律放（[`cue_law`]：全轨、顺序、洗牌、
+//!   随机、不重复随机），每起一次选出的轨各等自己的起播延迟、把波形放完，
+//!   一轮的轨都放完且带重放标志就起下一轮（[`cue`]）。位置与顺序表挂在
+//!   cue 表的工作区上，停了再放接着走。一次性 SE 与时间线 SE 走同一个
+//!   引擎。其余结构（类型 5-8、动作轨、未解码事件……），以及条目没被读
+//!   过、却带多条波形的键，都具名拒绝，不拿其中一条波形顶替。
 //!
 //! **A 套邻近环境音管理器**（声源对象管理器）是第三个消费者：声源组件 +
 //! 距离调音 `clamp(1 - d/max, 0, 1)` + 单通道就近选择。声源由站点场景
@@ -44,16 +45,18 @@
 //! text，voice 与文本行是行内同拍，不是窗体开拍。通道单声道：真源每次
 //! 起播前 `StopVoiceAll`（在 ExistsCueName 判定之前，缺 cue 也先停旧声）；
 //! 缺 cue 真源是「不播、对话照走」，这边照做并按本仓纪律把跳过记响。
-//! 音量 = 1.0 × 面板 `vox_scenario`（talk voice 包的 ACB category 实名）。
+//! 音量 = voice 播放器 × cue 的类别（talk voice 的 cue 属 VOX_SCENARIO）与
+//! 音量命令。
 //!
 //! **一次性 SE 通道**（`SoundManager.PlaySEOneShot` 的事件族）是第五个：
 //! 事件侧入队（采集受击、对话窗点跳/步进、摆放编辑动作），通道侧起播——
 //! 平铺 2D（真源 PlaySEOneShot 走不挂 3d 源的播放器，位置不进这条链）、
 //! Requests start individually after the scene's cue-name substitutions. The
 //! ambient AudioSourceRepeater interval does not apply to button/one-shot sounds.
-//! 音量类按 cue 家族语义归
-//! 九类面板的 `se_ingame`/`se_ui` 两键（类→cue 绑定在 ACF 侧，盘上无
-//! .acf，归法具名）。
+//! Every request starts its cue on the cue engine (plain or sequence types
+//! 0-4); the volume is the SE player times the cue's own categories and
+//! volume commands. The request's class (`se_ingame`/`se_ui`) only stands in
+//! for a cue whose facts the export does not carry.
 //!
 //! cue 到音频文件的绑定是 **(cue, 路由行的 package)**，不是 cue 名单义：
 //! 同一 cue 名可以同时活在「多曲共装的包」与「自成一包的下载件」里
@@ -61,19 +64,37 @@
 //! talk voice 的路由行是提取侧的映射语义：cue = `voice_<script>_<行>_<变体>`，
 //! 包随 script（`mysekai__talk__voice__<script>`），cue 不必问包名。
 //!
-//! 音量分两层。**类别层**是九类总线（SE_INGAME…BGM）：类名与序 = ACF
-//! 类别枚举（同名同序），是消费侧的类别接口，类别音量本身 mysekai 不写
-//! （真源写者只在 streaming live 域）。**用户层**是本地档三旋钮 × 两组
-//! （Live/System——`ApplicationLocalSettings` 的对应物，见
-//! [`LocalVolumeSettings`]）：mysekai 只应用 System 组（BGM×0.7 · SE ·
-//! Voice，0.7 即 [`BGM_VOLUME_FACTOR`]），Live 组是节奏域的档（持久化但不
-//! 施加）。总线值由档派生（进场施加与选项页 `UpdateVolume` 两条写者，
-//! 见 [`apply_system_volume`]）；环境变量 `MOLY_AUDIO_VOLUME_<类>` 降为
-//! **装载期初始覆写**（mock 通则保留，非锁——施加链跑过即接管）。已接线
-//! 消费 `bgm`、`se_area_ambient`、`vox_scenario`、`se_ingame`、`se_ui`
-//! 五类，其余四类是骨架，等各自的通道落地再接。
+//! Volume has two layers, multiplied per sounding track (see
+//! [`cue::CueVolume`]). The **player layer** is the user's system volume on
+//! the middleware's three players: BGM (times 0.7, [`BGM_VOLUME_FACTOR`]),
+//! SE and voice (`SetupVolume(1, bgm, se, voice)` at scene start and on every
+//! option-page `UpdateVolume`, [`apply_system_volume`]; the Live group of the
+//! local settings is the rhythm game's and is persisted, not applied). The
+//! **category layer** is the sound configuration's nine categories
+//! (SE_INGAME ... BGM): every cue belongs to the categories its sequence
+//! command list names, each category has a volume in the configuration
+//! (0.75-0.90, not 1), and MySekai never writes them (the only writers are in
+//! the streaming live). So a cue sounds at `player x category volumes x the
+//! cue's, track's and synth's volume commands`, whatever channel starts it.
+//! The configuration's category table comes as
+//! `phenomena/audio/categories.json` (name, index, volume; the index order is
+//! the configuration's, not the order of the client's category enum), and
+//! the cues' categories and volume commands come with the sequence export. A
+//! cue whose facts are not exported plays in its channel's family category,
+//! and the parse names how many keys do. The environment variables
+//! `MOLY_AUDIO_VOLUME_<CLASS>` override a category's volume at load (mock
+//! rule).
 
-use crate::audio_sequence::{advance_shuffle, SequenceRng, ShuffleWork, SEQUENCE_TYPE_SHUFFLE};
+mod cue;
+mod cue_law;
+mod record;
+
+pub use self::record::RecordChoice;
+pub(crate) use self::cue::advance_cue_playbacks as advance_ambient_sequence;
+use self::cue::{track_volume, CueGain, CueVolume};
+pub(crate) use self::cue::{CuePlayback, CueRngs, Player, RngSlot};
+use self::cue_law::{SequenceKind, NO_REPEAT_HISTORY_FORMAT};
+use crate::audio_sequence::{ShuffleWork, SEQUENCE_TYPE_SHUFFLE};
 use crate::character::AvatarRoot;
 use crate::client_config::ClientConfigs;
 use crate::site::SiteActive;
@@ -124,10 +145,12 @@ fn plays_site_phenomena_sound(site_type: &str) -> bool {
 /// BGM 音量因子（真源声明级常量；乘在总线音量上）。
 const BGM_VOLUME_FACTOR: f32 = 0.7;
 
-/// BGM 切曲的淡入淡出时长（秒）：BGM 控制器构造时的默认淡化时长 0.25（BGM
-/// 选曲界面打开后会改成 0.3/1.0，本仓没有那个界面）。真源把它按毫秒交给
+/// BGM 切曲的淡入淡出时长（秒）：BGM 控制器构造时的默认淡化时长 0.25。BGM
+/// 选曲界面 Resume 时改成 0.3、Dispose 时改成 1.0（经
+/// [`RecordChoice::set_fade_time`]），改后对之后每次换曲都生效，直到管理器
+/// 重建——本产品不离开 MySekai，不重建。每路淡化按起跑时的值走完。真源把它按毫秒交给
 /// CRI 播放器的淡入淡出器：旧声从它当时已到的电平线性降到 0、新声从 0 线性
-/// 升到 1，两条同时起跑、各 0.25s（淡化曲线取默认的线性档，无起点偏移）。
+/// 升到 1，两条同时起跑、各走完同一个淡化时长（淡化曲线取默认的线性档，无起点偏移）。
 /// CRI 的推进节拍是音频服务线程，每拍增量封顶 67ms；这边按渲染帧推进，帧长
 /// 不是那个量，封顶不移植。旧声在电平归零后再保留 500ms 才停（静音段），
 /// 这边归零即拆。
@@ -186,17 +209,14 @@ impl Default for LocalVolumeSettings {
     }
 }
 
-/// 九类音量总线：每类一个 0..=1 的档位值。**类名与序 = ACF 类别枚举**
-/// （同名同序：SE_INGAME=0…BGM=8），是消费侧的类别接口；**值由本地档
-/// System 组派生**（进场施加与选项页 `UpdateVolume` 两条写者，见
-/// [`apply_system_volume`]）：`bgm←System.Bgm`（BGM 消费侧再乘 0.7）·
-/// 六个 `se_*←System.Se` · `vox_scenario`/`vox_ingame←System.Voice`——
-/// 播放器级施加（三播放器各乘自己全部 cue）在类别面上的形状。类别音量
-/// 本身 mysekai 不写（真源写者只在 streaming live 域）。已接线消费：
-/// `bgm`、`se_area_ambient`、`vox_scenario`、`se_ingame`、`se_ui`；其余
-/// 四类是骨架，等各自的通道落地再接。环境变量
-/// `MOLY_AUDIO_VOLUME_<类>` 是装载期初始覆写（[`init_settings`]）。
-#[derive(Resource)]
+/// Both volume layers. The nine named fields are the **category layer**, in
+/// the order of the client's category enum (`SeCategoryType`): each holds
+/// that category's volume from the sound configuration (1.0 until the
+/// category table loads), then the load-time environment override.
+/// `acf_slots` maps the configuration's own category index (what a cue sheet
+/// names) to a field by name. `player` is the **player layer**, written by
+/// [`apply_system_volume`].
+#[derive(Resource, Clone)]
 pub(crate) struct VolumeBus {
     pub se_ingame: f32,
     pub se_ui: f32,
@@ -207,6 +227,68 @@ pub(crate) struct VolumeBus {
     pub vox_scenario: f32,
     pub vox_ingame: f32,
     pub bgm: f32,
+    /// The three players' volumes (the user's system settings).
+    pub player: PlayerVolumes,
+    /// Configuration category index -> field slot; empty until the category
+    /// table has loaded.
+    acf_slots: Vec<Option<usize>>,
+}
+
+/// The user's system volume per player.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PlayerVolumes {
+    pub bgm: f32,
+    pub se: f32,
+    pub voice: f32,
+}
+
+/// Field slots of the category layer (client category enum order).
+const SLOT_SE_INGAME: usize = 0;
+const SLOT_SE_UI: usize = 1;
+const SLOT_SE_AREA_AMBIENT: usize = 5;
+const SLOT_VOX_SCENARIO: usize = 6;
+const SLOT_BGM: usize = 8;
+
+impl VolumeBus {
+    /// The user's volume of one player.
+    pub(crate) fn player_volume(&self, player: Player) -> f32 {
+        match player {
+            Player::Bgm => self.player.bgm,
+            Player::Se => self.player.se,
+            Player::Voice => self.player.voice,
+            Player::Unscaled => 1.0,
+        }
+    }
+
+    /// A category's volume by field slot.
+    pub(crate) fn slot_volume(&self, slot: usize) -> f32 {
+        [
+            self.se_ingame,
+            self.se_ui,
+            self.se_scenario,
+            self.se_sl,
+            self.se_sl_call,
+            self.se_area_ambient,
+            self.vox_scenario,
+            self.vox_ingame,
+            self.bgm,
+        ][slot]
+    }
+
+    /// A category's volume by the configuration's index. Before the category
+    /// table loads the index cannot be named and the factor is 1.0 (the parse
+    /// logs that the table is absent).
+    pub(crate) fn acf_volume(&self, index: u32) -> f32 {
+        match self.acf_slots.get(index as usize) {
+            Some(Some(slot)) => self.slot_volume(*slot),
+            Some(None) => 1.0,
+            None if self.acf_slots.is_empty() => 1.0,
+            None => panic!(
+                "cue names category index {index}, the configuration has {}",
+                self.acf_slots.len()
+            ),
+        }
+    }
 }
 
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,18 +297,28 @@ pub(crate) struct AudioGate {
 }
 
 impl Default for AudioGate {
-    fn default() -> Self { Self { enabled: true } }
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 impl AudioGate {
     #[inline]
-    fn factor(&self) -> f32 { if self.enabled { 1.0 } else { 0.0 } }
+    fn factor(&self) -> f32 {
+        if self.enabled {
+            1.0
+        } else {
+            0.0
+        }
+    }
 }
 
+/// How a sink's volume follows the two layers. `Cue` is the full product of
+/// one sounding track; `Se(class)` is a sound its starter plays outside the
+/// cue player (SE player, the class's category, no cue facts).
 #[derive(Component)]
 pub(crate) enum BusVolume {
-    Ambient,
-    Voice,
+    Cue(CueVolume),
     Se(SeClass),
 }
 
@@ -237,8 +329,7 @@ pub(crate) fn apply_sink_volumes(
 ) {
     for (source, mut sink) in &mut sinks {
         let volume = match source {
-            BusVolume::Ambient => bus.se_area_ambient,
-            BusVolume::Voice => bus.vox_scenario,
+            BusVolume::Cue(volume) => volume.linear(&bus),
             BusVolume::Se(class) => class.volume(&bus),
         } * gate.factor();
         if sink.volume().to_linear() != volume {
@@ -272,6 +363,7 @@ fn volume_fields(bus: &mut VolumeBus) -> [&mut f32; 9] {
         vox_scenario,
         vox_ingame,
         bgm,
+        ..
     } = bus;
     [
         se_ingame,
@@ -287,9 +379,9 @@ fn volume_fields(bus: &mut VolumeBus) -> [&mut f32; 9] {
 }
 
 impl Default for VolumeBus {
-    /// 中性 1.0×9。真值由 [`init_settings`] 在 Startup 装载施加（本地档
-    /// System 组派生 + 环境变量初始覆写）——这里不再读环境变量（首写者
-    /// 已换成本地档）。
+    /// Neutral 1.0 everywhere. The player layer is applied by
+    /// [`init_settings`]; the category layer by [`parse`] when the category
+    /// table and the environment overrides are read.
     fn default() -> Self {
         VolumeBus {
             se_ingame: 1.0,
@@ -301,16 +393,25 @@ impl Default for VolumeBus {
             vox_scenario: 1.0,
             vox_ingame: 1.0,
             bgm: 1.0,
+            player: PlayerVolumes {
+                bgm: 1.0,
+                se: 1.0,
+                voice: 1.0,
+            },
+            acf_slots: Vec::new(),
         }
     }
 }
 
 impl VolumeBus {
-    /// 面板账目一行：九类逐类带值（日志推导用，不省略未接线的七类）。
+    /// One ledger line: the three players, then the nine categories.
     fn describe(&self) -> String {
         format!(
-            "se_ingame {:.2} · se_ui {:.2} · se_scenario {:.2} · se_sl {:.2} · se_sl_call {:.2} · \
+            "players bgm {:.2} · se {:.2} · voice {:.2} | categories se_ingame {:.2} · se_ui {:.2} · se_scenario {:.2} · se_sl {:.2} · se_sl_call {:.2} · \
              se_area_ambient {:.2} · vox_scenario {:.2} · vox_ingame {:.2} · bgm {:.2}",
+            self.player.bgm,
+            self.player.se,
+            self.player.voice,
             self.se_ingame,
             self.se_ui,
             self.se_scenario,
@@ -324,28 +425,18 @@ impl VolumeBus {
     }
 }
 
-/// System 三值施加（进场 `SetupVolume` 与选项页 `UpdateVolume` 同一条
-/// 律）：三播放器各设一档——BGM/Bgm、SE/Se、Voice/Voice（master 恒 1.0）。
-/// 映射到总线见 [`VolumeBus`] 的档头。`reason` 标写者（进场施加 / 选项页
-/// UpdateVolume）；值没变不记行（拖动逐档施加不重复报同一值）。
+/// The system group applied to the three players (`SetupVolume` at scene
+/// start and the option page's `UpdateVolume` follow one rule, master 1.0).
+/// The categories are not touched: MySekai never writes them. `reason` names
+/// the writer; an unchanged value logs nothing.
 pub(crate) fn apply_system_volume(bus: &mut VolumeBus, system: &VolumeSettingData, reason: &str) {
-    let changed = bus.bgm != system.bgm
-        || bus.se_ingame != system.se
-        || bus.se_scenario != system.se
-        || bus.se_sl != system.se
-        || bus.se_sl_call != system.se
-        || bus.se_area_ambient != system.se
-        || bus.vox_scenario != system.voice
-        || bus.vox_ingame != system.voice;
-    bus.bgm = system.bgm;
-    bus.se_ingame = system.se;
-    bus.se_ui = system.se;
-    bus.se_scenario = system.se;
-    bus.se_sl = system.se;
-    bus.se_sl_call = system.se;
-    bus.se_area_ambient = system.se;
-    bus.vox_scenario = system.voice;
-    bus.vox_ingame = system.voice;
+    let next = PlayerVolumes {
+        bgm: system.bgm,
+        se: system.se,
+        voice: system.voice,
+    };
+    let changed = bus.player != next;
+    bus.player = next;
     if changed {
         info!(
             "[option] 施加（{reason}）：SetupVolume(1.0, bgm={:.2}, se={:.2}, voice={:.2}) → 总线 \
@@ -362,7 +453,10 @@ pub(crate) fn apply_system_volume(bus: &mut VolumeBus, system: &VolumeSettingDat
 /// StopVoiceAll also cancels deferred line requests at this command boundary.
 /// The active dialogue owners are exclusive and share this global voice bus.
 pub(crate) fn stop_voice_all(channel: &mut VoiceChannel, commands: &mut Commands) {
-    if let Some(old) = channel.sink.take() {
+    for old in [channel.sink.take(), channel.preview.take()]
+        .into_iter()
+        .flatten()
+    {
         if let Ok(mut entity_commands) = commands.get_entity(old) {
             entity_commands.despawn();
         }
@@ -483,10 +577,16 @@ pub(crate) fn init_settings(mut commands: Commands, mut bus: ResMut<VolumeBus>) 
         &settings.system,
         "进场施加（SceneMysekai.Start → SetupVolume 同律：只读 SystemVolume）",
     );
-    // 环境变量初始覆写（mock 通则保留）：逐类覆写总线值，响亮记名。非锁
-    // ——施加链（进场之后的任何一次 UpdateVolume/保存）跑过即接管。
+    // The category layer (configuration volumes, then the environment
+    // overrides) is applied by `parse` when the category table is read.
+    commands.insert_resource(settings);
+}
+
+/// Load-time environment overrides of the category layer (mock rule):
+/// `MOLY_AUDIO_VOLUME_<CLASS>` in 0..=1 replaces that category's volume.
+fn apply_volume_overrides(bus: &mut VolumeBus) {
     let mut overridden: Vec<&str> = Vec::new();
-    for (name, slot) in VOLUME_ENTRY_NAMES.iter().zip(volume_fields(&mut bus)) {
+    for (name, slot) in VOLUME_ENTRY_NAMES.iter().zip(volume_fields(bus)) {
         let Ok(raw) = std::env::var(format!("MOLY_AUDIO_VOLUME_{name}")) else {
             continue;
         };
@@ -496,18 +596,46 @@ pub(crate) fn init_settings(mut commands: Commands, mut bus: ResMut<VolumeBus>) 
                 overridden.push(name);
             }
             _ => warn!(
-                "[option] MOLY_AUDIO_VOLUME_{name}={raw:?} 不是 0..=1 的数，不覆写（保留档派生值）"
+                "[option] MOLY_AUDIO_VOLUME_{name}={raw:?} 不是 0..=1 的数，不覆写（保留配置值）"
             ),
         }
     }
     if !overridden.is_empty() {
         info!(
-            "[option] 环境变量初始覆写 {} 类：{}（mock 通则；非锁——施加链跑过即接管）",
+            "[option] category volume overridden by environment for {}: {} (mock rule)",
             overridden.len(),
             overridden.join(" · ")
         );
     }
-    commands.insert_resource(settings);
+}
+
+/// The sound configuration's category table (`categories.json`): every row
+/// names a category, the configuration's index of it and its volume. The
+/// names are the client's category enum names; the fields take the volumes
+/// and `acf_slots` maps each index to its field.
+fn apply_category_table(bus: &mut VolumeBus, doc: &serde_json::Value) {
+    let rows = doc["categories"]
+        .as_array()
+        .unwrap_or_else(|| panic!("categories.json 缺 categories 数组"));
+    let mut slots: Vec<Option<usize>> = Vec::new();
+    for row in rows {
+        let name = field_str(row, "name");
+        let index = usize::try_from(field_i64(row, "index"))
+            .unwrap_or_else(|_| panic!("categories.json 里类别 {name} 的序为负"));
+        let volume = field_f64(row, "volume") as f32;
+        let slot = VOLUME_ENTRY_NAMES
+            .iter()
+            .position(|entry| *entry == name)
+            .unwrap_or_else(|| panic!("categories.json 的类别 {name} 不在客户端类别枚举里"));
+        if slots.len() <= index {
+            slots.resize(index + 1, None);
+        }
+        if slots[index].replace(slot).is_some() {
+            panic!("categories.json 里类别序 {index} 出现两次");
+        }
+        *volume_fields(bus)[slot] = volume;
+    }
+    bus.acf_slots = slots;
 }
 
 /// 写档（选项页 OK 的 SaveToStorage 对应物）：序列化 → 落盘 → 读回解析
@@ -587,10 +715,10 @@ struct StreamRow {
 }
 
 /// (cue, package) → 流。同一键带多条流（多 subsong）时那是一个多轨序列
-/// cue，流表只留最小 subsong 一条并记下波形条数：区域环境音通道见到多波形
-/// 键具名拒绝；其余消费者（时间线 SE、一次性 SE）仍取这一条，是具名的
-/// 替身（单流键 subsong 为空值，不与编号争——空值折算为最大，必输给任何
-/// 编号）。
+/// cue，流表只留最小 subsong 一条并记下波形条数：cue 引擎（环境音、一次性
+/// SE、时间线 SE 的新入口）见到没有序列导出的多波形键具名拒绝；仍按路径
+/// 取流的 [`Routing::timeline_se_asset_path`] 取这一条，是具名的替身（单流
+/// 键 subsong 为空值，不与编号争——空值折算为最大，必输给任何编号）。
 #[derive(Default)]
 struct Streams(HashMap<(String, String), StreamRow>);
 
@@ -753,7 +881,10 @@ impl Routing {
     }
 
     /// The timeline names both package and cue. A same-name cue in another
-    /// package or the public UI sound bank is not a substitute.
+    /// package or the public UI sound bank is not a substitute. One path per
+    /// key: for a multi-track cue it is the lowest-numbered waveform, a named
+    /// stand-in; [`Self::cue_asset_paths`] with [`start_timeline_cue`] plays
+    /// the cue as the middleware does.
     pub(crate) fn timeline_se_asset_path(&self, package: &str, cue: &str) -> Option<&str> {
         self.streams
             .0
@@ -785,6 +916,8 @@ pub(crate) struct AudioRequests {
     loops: Handle<JsonAsset>,
     corpus: Handle<JsonAsset>,
     partvoice: Handle<JsonAsset>,
+    /// The sound configuration's category table (may be absent: named).
+    categories: Handle<JsonAsset>,
 }
 
 /// Startup：请求三份必达路由档案与 partvoice 路由表。index.json 与天气域
@@ -804,8 +937,12 @@ pub(crate) fn load(mut commands: Commands, server: Res<AssetServer>) {
         loops,
         corpus,
         partvoice,
+        categories: server.load(CATEGORY_TABLE_PATH),
     });
 }
+
+/// Where the sound configuration's category table lives in the runtime root.
+const CATEGORY_TABLE_PATH: &str = "moly://phenomena/audio/categories.json";
 
 /// Update：两份档案到达后解出路由表。结构损伤（字段缺、区间倒挂、必有的
 /// 行不在、路由指向的流不在）在此响亮 panic——路由表与流表出自同一份
@@ -815,7 +952,7 @@ pub(crate) fn parse(
     server: Res<AssetServer>,
     jsons: Res<Assets<JsonAsset>>,
     requests: Option<ResMut<AudioRequests>>,
-    bus: Res<VolumeBus>,
+    mut bus: ResMut<VolumeBus>,
 ) {
     let Some(requests) = requests else {
         return; // 已解析并撤下
@@ -858,6 +995,27 @@ pub(crate) fn parse(
         }
         _ => return, // 在途：下一帧再吃（本地文件一帧内必达）
     };
+    let categories = match server.load_state(&requests.categories) {
+        LoadState::Failed(_) => None,
+        LoadState::Loaded => {
+            let doc = jsons
+                .get(&requests.categories)
+                .unwrap_or_else(|| panic!("categories.json 已装载但不在资产表里"));
+            Some(
+                serde_json::from_str::<serde_json::Value>(&doc.0)
+                    .unwrap_or_else(|err| panic!("categories.json 不是合法 JSON：{err}")),
+            )
+        }
+        _ => return,
+    };
+    match &categories {
+        Some(doc) => apply_category_table(&mut bus, doc),
+        None => error!(
+            "[audio] category table absent ({CATEGORY_TABLE_PATH}): every category volume stays 1.0 \
+             (the configuration's are 0.75-0.90); extraction gap, the table is read from the sound configuration"
+        ),
+    }
+    apply_volume_overrides(&mut bus);
     let Some(index) = jsons.get(&requests.index) else {
         panic!("音频 index.json 不在资产表里");
     };
@@ -909,8 +1067,23 @@ pub(crate) fn parse(
         voice_corpus.uncovered.len(),
     );
     info!(
-        "九类总线当前值（由本地档 System 组派生，环境变量降为装载期初始覆写）：{}",
+        "音量两层当前值（播放器层＝本地档 System 组；类别层＝配置类别表 {} + 环境变量覆写）：{}",
+        if categories.is_some() {
+            "已读"
+        } else {
+            "缺席"
+        },
         bus.describe()
+    );
+    info!(
+        "cue gain facts: {} keys (categories and volume commands); {} of them carry a random volume spread (base value used, spread not ported)",
+        routing.sequences.gains.len(),
+        routing
+            .sequences
+            .gains
+            .values()
+            .filter(|gain| gain.random_spread)
+            .count(),
     );
     commands.insert_resource(routing);
     commands.insert_resource(voice_corpus);
@@ -1152,6 +1325,10 @@ fn parse_streams(loops: &serde_json::Value, base: &str) -> Streams {
 /// 提取侧序列导出的版本（`sequenceExport.version`）。别的版本号响亮拒绝：
 /// 字段语义可能变了，按旧读法读会静默读错。
 const SEQUENCE_EXPORT_VERSION: i64 = 1;
+/// Version 2 adds, per entry, `cueCommands` (every listed cue's command
+/// lists in the block shape, plain cues included) and `acbVersion` (the cue
+/// sheet header's format number).
+const SEQUENCE_EXPORT_VERSION_GAINS: i64 = 2;
 
 /// 按轨取的一条流（多轨序列的一轨对应一个 subsong）。
 #[derive(Clone, Debug)]
@@ -1202,6 +1379,10 @@ struct SequenceBlock {
     /// 消费侧不读的参数，原样记一行（总线送量、参数 69、未解码的命令码）：
     /// 本仓的混音器没有总线效果器，这些不进声音。
     not_consumed: String,
+    /// Per-track weights of the random types (empty = the cue has none).
+    track_values: Vec<u16>,
+    /// The cue sheet's format number (export version 2), `None` before.
+    acb_version: Option<u32>,
 }
 
 /// 提取侧导出的序列结构（loop.json 包条目的 `sequenceExport`/`sequences`）。
@@ -1215,6 +1396,9 @@ struct SequenceIndex {
     blocks: HashMap<(String, String), SequenceBlock>,
     read: HashSet<(String, String)>,
     subsongs: HashMap<(String, String, i64), SubStream>,
+    /// Gain facts per (cue, package): every structured cue, and with export
+    /// version 2 every listed cue.
+    gains: HashMap<(String, String), CueGain>,
 }
 
 /// JSON 值取整数；缺或不是整数是结构损伤。
@@ -1228,6 +1412,7 @@ fn parse_sequence_block(
     block: &serde_json::Value,
     archive: &str,
     cue_label: &str,
+    acb_version: Option<u32>,
 ) -> SequenceBlock {
     let kind = value_i64(&block["type"], "type");
     let kind = u8::try_from(kind)
@@ -1294,6 +1479,17 @@ fn parse_sequence_block(
         "总线送量 {} · 参数69 {} · 未解码命令码 {}",
         block["busSends"], block["parameter69"], block["commandCodesNotDecoded"]
     );
+    let hex = block["trackValues"].as_str().unwrap_or("");
+    if hex.len() % 4 != 0 {
+        panic!("cue {cue_label} 的 trackValues {hex:?} 不是整 16 位");
+    }
+    let track_values = (0..hex.len())
+        .step_by(4)
+        .map(|i| {
+            u16::from_str_radix(&hex[i..i + 4], 16)
+                .unwrap_or_else(|_| panic!("cue {cue_label} 的 trackValues {hex:?} 不是十六进制"))
+        })
+        .collect();
     SequenceBlock {
         archive: archive.to_string(),
         sequence_index,
@@ -1308,6 +1504,8 @@ fn parse_sequence_block(
         ),
         tracks,
         not_consumed,
+        track_values,
+        acb_version,
     }
 }
 
@@ -1359,11 +1557,32 @@ fn parse_sequences(loops: &serde_json::Value, base: &str) -> SequenceIndex {
             continue; // 从没读过这个归档的 cue 表
         };
         let version = value_i64(&export["version"], "sequenceExport.version");
-        if version != SEQUENCE_EXPORT_VERSION {
+        if version != SEQUENCE_EXPORT_VERSION && version != SEQUENCE_EXPORT_VERSION_GAINS {
             panic!(
-                "包 {} 的序列导出版本 {version} 不认得（本仓读 {SEQUENCE_EXPORT_VERSION}）",
+                "包 {} 的序列导出版本 {version} 不认得（本仓读 {SEQUENCE_EXPORT_VERSION} 与 {SEQUENCE_EXPORT_VERSION_GAINS}）",
                 label(&package_name)
             );
+        }
+        let acb_version = (version >= SEQUENCE_EXPORT_VERSION_GAINS).then(|| {
+            u32::try_from(value_i64(
+                &export["acbVersion"],
+                "sequenceExport.acbVersion",
+            ))
+            .unwrap_or_else(|_| panic!("包 {} 的 acbVersion 超出 32 位", label(&package_name)))
+        });
+        if version >= SEQUENCE_EXPORT_VERSION_GAINS {
+            let rows = package["cueCommands"].as_object().unwrap_or_else(|| {
+                panic!(
+                    "包 {} 的序列导出版本 2 却没有 cueCommands 表",
+                    label(&package_name)
+                )
+            });
+            for (cue, row) in rows {
+                index.gains.insert(
+                    (cue.clone(), package_name.clone()),
+                    cue::gain_from_block(row, &label(cue)),
+                );
+            }
         }
         let archive = field_str(package, "archive").to_string();
         for stream in streams {
@@ -1379,7 +1598,11 @@ fn parse_sequences(loops: &serde_json::Value, base: &str) -> SequenceIndex {
         });
         for (cue, block) in blocks {
             let key = (cue.clone(), package_name.clone());
-            let parsed = parse_sequence_block(block, &archive, &label(cue));
+            let parsed = parse_sequence_block(block, &archive, &label(cue), acb_version);
+            index
+                .gains
+                .entry(key.clone())
+                .or_insert_with(|| cue::gain_from_block(block, &label(cue)));
             if index.blocks.insert(key, parsed).is_some() {
                 panic!("cue {} @ {} 有两个序列块", label(cue), label(&package_name));
             }
@@ -1396,26 +1619,47 @@ struct PlanVoice {
     stream: SubStream,
 }
 
-/// 一条可以按移植的律放的洗牌序列。
+/// What one start of a cue plays from: the sequence type, the authored track
+/// ids (the shuffle's order table holds them), the weights of the random
+/// types, one voice per track, the repeat flag, the gain facts. A plain cue is
+/// one polyphonic track without a work area.
 #[derive(Clone, Debug)]
-struct ShufflePlan {
-    /// 作者序的轨号表（顺序表的来源）。
-    tracks: Vec<u16>,
+pub(crate) struct CuePlan {
+    kind: SequenceKind,
+    /// (package, archive, sequence row): where the position and order live.
+    work_key: Option<(String, String, u16)>,
+    track_ids: Vec<u16>,
+    weights: Option<Vec<u16>>,
     voices: Vec<PlanVoice>,
     repeat: bool,
+    gain: Option<CueGain>,
+    /// A structured cue's parameters that do not reach the sound here (bus
+    /// sends to the effect buses, parameter 69, command codes not decoded).
+    not_consumed: Option<String>,
 }
 
-/// 从导出的结构里取洗牌计划；`Err` 是具名拒绝的理由（哪一样本仓没移植）。
-fn shuffle_plan(
+/// The plan of a structured cue; `Err` names what of its structure is not
+/// ported.
+fn structured_plan(
     index: &SequenceIndex,
     cue: &str,
     package: &str,
     block: &SequenceBlock,
-) -> Result<ShufflePlan, String> {
-    if block.kind != SEQUENCE_TYPE_SHUFFLE {
-        return Err(format!(
-            "序列类型 {}（{}）的律本仓没有移植（只移植了洗牌）",
+) -> Result<CuePlan, String> {
+    let kind = SequenceKind::from_code(block.kind).ok_or_else(|| {
+        format!(
+            "序列类型 {}（{}）的律本仓没有移植（移植了 0-4）",
             block.kind, block.type_name
+        )
+    })?;
+    if kind == SequenceKind::RandomNoRepeat
+        && block
+            .acb_version
+            .is_some_and(|version| version >= NO_REPEAT_HISTORY_FORMAT)
+    {
+        return Err(format!(
+            "不重复随机序列所在的 cue 表格式 {:#x} 用历史表选轨（本仓移植的是位置那一支）",
+            block.acb_version.unwrap_or_default()
         ));
     }
     if block.playback_ratio != 100 {
@@ -1483,11 +1727,92 @@ fn shuffle_plan(
             stream: stream.clone(),
         });
     }
-    Ok(ShufflePlan {
-        tracks: block.tracks.iter().map(|track| track.track_index).collect(),
+    Ok(CuePlan {
+        kind,
+        work_key: Some((
+            package.to_string(),
+            block.archive.clone(),
+            block.sequence_index,
+        )),
+        track_ids: block.tracks.iter().map(|track| track.track_index).collect(),
+        weights: (!block.track_values.is_empty()).then(|| block.track_values.clone()),
         voices,
         repeat: block.repeat.is_some_and(|flag| flag != 0),
+        not_consumed: Some(block.not_consumed.clone()),
+        gain: index
+            .gains
+            .get(&(cue.to_string(), package.to_string()))
+            .cloned(),
     })
+}
+
+impl Routing {
+    /// The plan one start of `(cue, package)` plays. `Err` is a named reason:
+    /// a structure this port does not play, a multi-waveform key whose entry
+    /// the sequence export never read (an extraction gap: the export reads
+    /// the archive's cue table), or a key with no decoded stream.
+    pub(crate) fn cue_plan(&self, cue: &str, package: &str) -> Result<CuePlan, String> {
+        let key = (cue.to_string(), package.to_string());
+        if let Some(block) = self.sequences.blocks.get(&key) {
+            return structured_plan(&self.sequences, cue, package, block)
+                .map_err(|reason| format!("{} 序列：{reason}", block.type_name));
+        }
+        let Some(stream) = self.streams.0.get(&key) else {
+            return Err("不在流表里".to_string());
+        };
+        if self.sequences.read.contains(&key) && stream.waveforms != 1 {
+            return Err(format!(
+                "序列导出判为 plain，流表里却有 {} 条波形",
+                stream.waveforms
+            ));
+        }
+        if stream.waveforms > 1 {
+            return Err(format!(
+                "带 {} 条波形——这是多轨序列 cue，它所在的条目没有序列导出（提取缺口：提取侧没读过这个归档的 cue 表）",
+                stream.waveforms
+            ));
+        }
+        Ok(CuePlan {
+            kind: SequenceKind::Polyphonic,
+            work_key: None,
+            track_ids: vec![0],
+            weights: None,
+            voices: vec![PlanVoice {
+                track_index: 0,
+                start_delay_us: 0,
+                stream: SubStream {
+                    ogg: stream.ogg.clone(),
+                    loops: stream.loops,
+                    loop_start: stream.loop_start,
+                    loop_end: stream.loop_end,
+                },
+            }],
+            repeat: false,
+            gain: self.sequences.gains.get(&key).cloned(),
+            not_consumed: None,
+        })
+    }
+
+    /// The gain facts of `(cue, package)`, when exported.
+    fn cue_gain(&self, cue: &str, package: &str) -> Option<&CueGain> {
+        self.sequences
+            .gains
+            .get(&(cue.to_string(), package.to_string()))
+    }
+
+    /// Timeline SE clips prepare their sounds through this.
+    #[allow(dead_code)]
+    /// The waveform paths one cue can play, in track order (what a caller
+    /// that prepares its sounds before starting must request), or the named
+    /// reason it cannot be played.
+    pub(crate) fn cue_asset_paths(&self, package: &str, cue: &str) -> Result<Vec<String>, String> {
+        self.cue_plan(cue, package).map(|plan| {
+            plan.voices
+                .iter()
+                .map(|voice| voice.stream.ogg.clone())
+                .collect()
+        })
+    }
 }
 
 /// JSON 行取字符串字段：缺字段是结构损伤，响亮拒绝。
@@ -1630,20 +1955,39 @@ struct BgmVoice {
     /// 循环区间（起播时从流表抄来；交接与账目用）。
     loop_start: f64,
     loop_end: f64,
+    /// The intro sink's position (seconds from its own start) at which the
+    /// loop sink takes over.
+    handoff_at: f64,
     /// loop 段已放行（intro 已到交接点或已播空）。
     handoff_done: bool,
     /// 淡入计时：`None` = 冷启全量起播（首次放曲没有旧声可让），
     /// `Some(elapsed)` = 换曲淡入中。
     fade_in: Option<f32>,
+    /// The crossfade time this voice started with.
+    fade_seconds: f32,
     /// 当前请求的包络音量（淡出起点与账目）；实际 sink 音量逐个校准。
     applied_volume: f32,
+    /// BGM player x the cue's categories and volume commands.
+    volume: CueVolume,
 }
 
-/// 淡出中的一路旧声：换曲时从现声里搬出来，0.25s 线性归零后拆除。
+/// 淡出中的一路旧声：换曲时从现声里搬出来，按换曲时的淡化时长线性归零后拆除。
 struct FadingBgm {
     entities: Vec<Entity>,
     from_volume: f32,
     elapsed: f32,
+    /// The crossfade time at the change.
+    seconds: f32,
+}
+
+/// Progress of a linear fade of `seconds` after `elapsed` (a zero time is
+/// already complete).
+fn fade_progress(elapsed: f32, seconds: f32) -> f32 {
+    if seconds > 0.0 {
+        (elapsed / seconds).min(1.0)
+    } else {
+        1.0
+    }
 }
 
 /// BGM 通道运行态。
@@ -1658,66 +2002,118 @@ pub(crate) struct BgmChannel {
     music_refused_for: Option<u32>,
 }
 
-/// 用户唱片 BGM 设定（真源 `UserMysekaiMusicPlayFixtureSetting`：每站一行，
-/// 唱片 id + 歌唱版本 id）。**服务端下发的用户态** ⇒ 具名 mock：默认为空
-/// （任何站点都没有设定，默认选曲照常生效）；环境变量
-/// `MOLY_AUDIO_MOCK_MUSIC_RECORD` 下发设定，条目语法 `站点id:唱片id:歌唱版本id`，
-/// 逗号分隔多站，格式不对响亮拒绝（panic）。
-///
-/// 客户端决定的部分：只在住宅类站点（站点主表类别 housing_home /
-/// housing_room）查设定，其余站点直接走默认选曲（已移植）；设定到 BGM 资源
-/// 的解析也在客户端（`MysekaiMusicRecordModel`：唱片主表的曲目类型分原声带
-/// 与乐曲两支，乐曲支经外部 id 查乐曲主表、按本机设置的默认歌唱类型与该曲的
-/// 歌唱版本设定挑歌唱版本，得出 BGM 包与 cue；解析不出资源时回落默认选曲），
-/// 这一半没有移植——运行时根没有乐曲音频集。于是一条设定在这里只会被 BGM
-/// 通道响亮拒绝、照放默认选曲：真源在能解析出资源时放的是那张唱片，两边
-/// 不一样，拒绝行说明这一点。
-#[derive(Resource)]
-pub(crate) struct UserMusicPlaySettings {
-    /// siteId → (唱片 id, 歌唱版本 id)。
-    per_site: HashMap<u32, (i64, i64)>,
+// The user's music-record settings (the server's
+// `UserMysekaiMusicPlayFixtureSetting` rows: per site, the record the jukebox
+// plays and the vocal version) are server state: the server model holds them
+// (document section `userMysekaiMusicPlayFixtureSettings`) and its responses
+// write the client copy `crate::server::client::music::ClientMusicPlaySettings`.
+// It is empty by default (no site has a record set; the default choice plays).
+// The native instrument `MOLY_AUDIO_MOCK_MUSIC_RECORD` (`site:record:vocal`,
+// comma separated, refused loudly when malformed) writes the native server
+// document; the game mode does not read it. Only housing sites (categories
+// `housing_home` / `housing_room`) look the setting up; what a set record
+// plays is the record path in [`record`].
+
+/// A `MysekaiBGMManager.StartFade` target: a volume, or the manager's
+/// `InitialVolume`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum BgmFadeTarget {
+    Volume(f32),
+    Initial,
 }
 
-/// 唱片设定 mock 的环境变量名。
-const MUSIC_RECORD_MOCK_ENV: &str = "MOLY_AUDIO_MOCK_MUSIC_RECORD";
+/// `MysekaiBGMManager`'s fade of the BGM player's volume (the value
+/// `SoundManager.SetupVolume` sets from the volume setting and
+/// `SoundManager.SetBGMVolume` overwrites; the manager is its only other
+/// writer).
+/// - Setup: `InitialVolume` = `GetCurrentBGMVolume()`, the player's volume.
+/// - `StartFade(target)`: a call in the frame the running fade started
+///   (`Mathf.Approximately(Time.time, _fadeStartTime)`) only replaces the
+///   target; otherwise the running fade is cancelled, and the target, the
+///   start time (this call's `Time.time`) and the current volume
+///   (`GetCurrentBGMVolume()`) are taken, and `FadeBGM` runs.
+/// - `FadeBGM`: from the current volume, once per frame (the first in the
+///   call's frame): `t = (Time.time - start time) * 0.5` clamped to [0, 1]
+///   (`FADE_TIME` 2 s), the volume `start + (target - start) t` clamped to
+///   [0, 1] goes to `SetBGMVolume`; when it is approximately the target the
+///   loop ends and, on the next frame, `SetBGMVolume(target)`.
+///
+/// Product mapping: the player's volume is the BGM player's system volume
+/// ([`PlayerVolumes::bgm`]) until the
+/// manager writes one; a changed volume setting (`SetupVolume`) replaces the
+/// manager's value again. Named differences: a cancelled fade hands over at
+/// once (the source waits for the cancelled loop's next frame, keeping the
+/// start time of the call); `Mathf.Epsilon` is taken as the smallest normal
+/// float.
+#[derive(Resource, Default)]
+pub(crate) struct MysekaiBgmFade {
+    requests: Vec<BgmFadeTarget>,
+    initial: Option<f32>,
+    player: Option<f32>,
+    setup_value: Option<f32>,
+    start: f32,
+    target: f32,
+    fade_start: f32,
+    fading: bool,
+    final_write: bool,
+}
 
-impl Default for UserMusicPlaySettings {
-    fn default() -> Self {
-        let mut per_site = HashMap::new();
-        let Ok(raw) = std::env::var(MUSIC_RECORD_MOCK_ENV) else {
-            return Self { per_site };
-        };
-        for entry in raw
-            .split(',')
-            .map(str::trim)
-            .filter(|entry| !entry.is_empty())
-        {
-            let parts: Vec<&str> = entry.split(':').map(str::trim).collect();
-            let [site, record, vocal] = parts.as_slice() else {
-                panic!("{MUSIC_RECORD_MOCK_ENV} 条目 {entry:?} 不是 站点id:唱片id:歌唱版本id");
+/// `Mathf.Approximately`.
+fn approximately(a: f32, b: f32) -> bool {
+    (b - a).abs() < (1e-6 * a.abs().max(b.abs())).max(f32::MIN_POSITIVE * 8.0)
+}
+
+impl MysekaiBgmFade {
+    /// `StartFade(target)`, run in this frame's BGM update.
+    pub(crate) fn start_fade(&mut self, target: BgmFadeTarget) {
+        self.requests.push(target);
+    }
+
+    /// The BGM player's volume.
+    fn player_volume(&self, setup: f32) -> f32 {
+        self.player.unwrap_or(setup)
+    }
+
+    fn advance(&mut self, now: f32, setup: f32) {
+        if self.setup_value != Some(setup) {
+            if self.setup_value.is_some() {
+                self.player = None;
+            }
+            self.setup_value = Some(setup);
+        }
+        let initial = *self.initial.get_or_insert(setup);
+        if self.final_write {
+            self.final_write = false;
+            self.player = Some(self.target);
+        }
+        for request in std::mem::take(&mut self.requests) {
+            let target = match request {
+                BgmFadeTarget::Volume(volume) => volume,
+                BgmFadeTarget::Initial => initial,
             };
-            let (Ok(site), Ok(record), Ok(vocal)) = (
-                site.parse::<u32>(),
-                record.parse::<i64>(),
-                vocal.parse::<i64>(),
-            ) else {
-                panic!("{MUSIC_RECORD_MOCK_ENV} 条目 {entry:?} 里有非整数");
-            };
-            if per_site.insert(site, (record, vocal)).is_some() {
-                panic!("{MUSIC_RECORD_MOCK_ENV} 里站点 {site} 出现两次");
+            self.final_write = false;
+            if self.fading && approximately(now, self.fade_start) {
+                self.target = target;
+                continue;
+            }
+            self.target = target;
+            self.fade_start = now;
+            self.start = self.player_volume(setup);
+            self.fading = true;
+            info!(
+                "[bgm-manager] StartFade({target:.3}): from {:.3} over 2 s (InitialVolume {initial:.3})",
+                self.start
+            );
+        }
+        if self.fading {
+            let t = ((now - self.fade_start) * 0.5).clamp(0.0, 1.0);
+            let current = (self.start + (self.target - self.start) * t).clamp(0.0, 1.0);
+            self.player = Some(current);
+            if approximately(current, self.target) {
+                self.fading = false;
+                self.final_write = true;
             }
         }
-        info!(
-            "[audio] 唱片 BGM 设定 mock：{} 站有设定（{MUSIC_RECORD_MOCK_ENV}）",
-            per_site.len()
-        );
-        Self { per_site }
-    }
-}
-
-impl UserMusicPlaySettings {
-    fn setting(&self, site_id: u32) -> Option<(i64, i64)> {
-        self.per_site.get(&site_id).copied()
     }
 }
 
@@ -1731,12 +2127,16 @@ pub(crate) fn advance_bgm(
     phenomenon: Res<CurrentPhenomenon>,
     site: Option<Res<SiteActive>>,
     configs: Option<Res<ClientConfigs>>,
-    music: Res<UserMusicPlaySettings>,
+    music: Res<crate::server::client::music::ClientMusicPlaySettings>,
     routing: Option<Res<Routing>>,
     mut channel: ResMut<BgmChannel>,
     mut sinks: Query<&mut AudioSink>,
     bgm_hold: Option<Res<crate::site_move::BgmHold>>,
+    mut manager_fade: ResMut<MysekaiBgmFade>,
+    mut record: record::RecordParams,
 ) {
+    manager_fade.advance(time.elapsed_secs(), bus.player.bgm);
+    let bgm_player = manager_fade.player_volume(bus.player.bgm);
     let Some(routing) = routing else {
         return; // 路由表未就绪
     };
@@ -1745,13 +2145,15 @@ pub(crate) fn advance_bgm(
     // 淡出推进：线性归零，到点拆除。
     channel.fading.retain_mut(|fading| {
         fading.elapsed += dt;
-        let level = fading.from_volume * (1.0 - (fading.elapsed / CROSS_FADE_SECONDS).min(1.0)) * gate.factor();
+        let level = fading.from_volume
+            * (1.0 - fade_progress(fading.elapsed, fading.seconds))
+            * gate.factor();
         for entity in &fading.entities {
             if let Ok(mut sink) = sinks.get_mut(*entity) {
                 sink.set_volume(Volume::Linear(level));
             }
         }
-        if fading.elapsed >= CROSS_FADE_SECONDS {
+        if fading.elapsed >= fading.seconds {
             for entity in &fading.entities {
                 if let Ok(mut entity_commands) = commands.get_entity(*entity) {
                     entity_commands.despawn();
@@ -1764,12 +2166,13 @@ pub(crate) fn advance_bgm(
     });
 
     // 当前声的音量与交接。
-    let target_volume = BGM_VOLUME_FACTOR * bus.bgm * gate.factor();
     if let Some(voice) = channel.voice.as_mut() {
+        let target_volume =
+            BGM_VOLUME_FACTOR * voice.volume.linear_at(&bus, bgm_player) * gate.factor();
         let envelope = match &mut voice.fade_in {
             Some(elapsed) => {
                 *elapsed += dt;
-                (*elapsed / CROSS_FADE_SECONDS).min(1.0)
+                fade_progress(*elapsed, voice.fade_seconds)
             }
             None => 1.0,
         };
@@ -1791,7 +2194,7 @@ pub(crate) fn advance_bgm(
             sinks.get(intro).ok().map(|sink| {
                 (
                     sink.position().as_secs_f32()
-                        >= voice.loop_start as f32 - BGM_HANDOFF_LEAD_SECONDS
+                        >= voice.handoff_at as f32 - BGM_HANDOFF_LEAD_SECONDS
                         || sink.empty(),
                     sink.empty(),
                 )
@@ -1808,7 +2211,7 @@ pub(crate) fn advance_bgm(
                         label(&voice.cue),
                         voice.loop_start,
                         voice.loop_end,
-                        voice.loop_start
+                        voice.handoff_at
                     );
                 }
             }
@@ -1839,16 +2242,33 @@ pub(crate) fn advance_bgm(
     )
     .then(|| music.setting(site.site_id))
     .flatten();
-    match music_setting {
-        Some((record, vocal)) => {
-            if channel.music_refused_for != Some(site.site_id) {
-                error!(
-                    "[audio] 唱片 BGM 设定拒绝：站点 {} 设了唱片 {record}（歌唱版本 {vocal}），唱片到 BGM 资源的解析未移植（运行时根无乐曲音频集）；真源能解析出资源时放这张唱片，这里照放默认选曲，两边不一样",
-                    site.site_id
-                );
-                channel.music_refused_for = Some(site.site_id);
-            }
-        }
+    // The select screen's choice stands over the setting (see [`record`]).
+    let request = match record::standing_choice(&mut record, &mut channel, site.site_id, &key.1) {
+        Some(record::Choice::Record {
+            record_id,
+            vocal_id,
+        }) => Some((record_id, vocal_id, record::Origin::Screen)),
+        Some(record::Choice::Default) => None,
+        None => music_setting
+            .map(|(record_id, vocal_id)| (record_id, vocal_id, record::Origin::Setting)),
+    };
+    match request {
+        Some((record_id, vocal_id, origin)) => match record::advance(
+            &mut record,
+            &mut commands,
+            &server,
+            &mut channel,
+            &bus,
+            bgm_player,
+            &gate,
+            site.site_id,
+            record_id,
+            vocal_id,
+            origin,
+        ) {
+            record::Step::Default => {}
+            record::Step::Hold | record::Step::Keep => return,
+        },
         None => channel.music_refused_for = None,
     }
     let delivery_phenomenon_id =
@@ -1890,6 +2310,7 @@ pub(crate) fn advance_bgm(
             entities,
             from_volume: voice.applied_volume,
             elapsed: 0.0,
+            seconds: record.fade_seconds(),
         });
     }
     // 冷启 = 此刻没有任何声在响（现声无、淡出也无）——首曲全量起播。
@@ -1908,6 +2329,13 @@ pub(crate) fn advance_bgm(
             label(&target.package)
         );
     };
+    let cue_volume = track_volume(
+        routing.cue_gain(&target.cue, &target.package),
+        Player::Bgm,
+        SLOT_BGM,
+        0,
+    );
+    let target_volume = BGM_VOLUME_FACTOR * cue_volume.linear_at(&bus, bgm_player) * gate.factor();
     let volume_now = if cold { target_volume } else { 0.0 };
     let settings_volume = Volume::Linear(volume_now);
     let handle = server.load::<AudioSource>(AssetPath::from(format!("moly://{}", stream.ogg)));
@@ -1963,18 +2391,27 @@ pub(crate) fn advance_bgm(
         loop_sink,
         loop_start: stream.loop_start,
         loop_end: stream.loop_end,
+        handoff_at: stream.loop_start,
         handoff_done,
         fade_in: if cold { None } else { Some(0.0) },
+        fade_seconds: record.fade_seconds(),
         applied_volume: volume_now,
+        volume: cue_volume.clone(),
     });
     info!(
-        "BGM 换曲：站点 {} · 档 {} → {}（{}，音量 {:.2} = {BGM_VOLUME_FACTOR:.2} × {:.2}，{}）",
+        "BGM 换曲：站点 {} · 档 {} → {}（{}，音量 {:.3} = {BGM_VOLUME_FACTOR:.2} × BGM 播放器 {:.2} × {:?} × cue {:.2}，{}）",
         site.site_id,
         label(&phenomenon.0),
         label(&target.cue),
-        if cold { "冷启" } else { "交叉淡化 0.25s" },
+        if cold {
+            "冷启".to_string()
+        } else {
+            format!("交叉淡化 {:.2}s", record.fade_seconds())
+        },
         target_volume,
-        bus.bgm,
+        bus.player.bgm,
+        cue_volume.categories,
+        cue_volume.gain,
         if stream.loops {
             format!(
                 "intro {:.3}s → 循环 [{:.3}, {:.3}]",
@@ -1988,146 +2425,30 @@ pub(crate) fn advance_bgm(
 
 // ---- 区域环境音通道 ----------------------------------------------------------
 
-/// 环境音通道运行态：单 sink，每次调用先停再放（同 cue 也从头放——真源现象
-/// SE 管理器无差别 Stop+Play）。
+/// 环境音通道运行态：一路 cue 播放（真源现象 SE 管理器记着的那一个播放
+/// id），每次调用先停再放（同 cue 也从头放——真源无差别 Stop+Play）。
 #[derive(Resource, Default)]
 pub(crate) struct AmbientChannel {
-    sink: Option<Entity>,
+    /// The cue playback entity (its sounding tracks are its children).
+    playback: Option<Entity>,
     /// 已处理到的天气提交序号（每次真实提交＝真源一次现象 SE 调用）。
     handled_commit: Option<u64>,
     /// 在响的 cue（账目用）。
     playing: Option<String>,
-    /// 在跑的洗牌序列（plain cue 与停着时为 `None`）。
-    sequence: Option<SequencePlayback>,
-    /// 这条通道的播放器抽签源：首次起序列时起种，此后整局沿用（真源在
-    /// 播放器建立时起种、由这个播放器放的所有 cue 共用；本仓这条通道只为
-    /// 洗牌序列抽签，别的 cue 在真源里对同一个源的抽签不在这里重演）。
-    rng: Option<SequenceRng>,
 }
 
-/// 洗牌序列的工作区（位置 + 顺序表），按 (包, 归档, 序列行号) 挂。真源把
-/// 它们存在已装载 cue 表的序列行上，装载时置 -1、此后只有起轮会写。本仓
-/// 的 cue 表随路由表整局常驻，所以这张表整局只建不清：停了再放接着走。
+/// Position and order of every structured cue, by (package, archive,
+/// sequence row). The middleware keeps them in the loaded cue table's
+/// sequence rows: -1 at load, written only by starts. The cue tables stay
+/// loaded for the whole session here, so the map is never cleared: a cue
+/// stopped and started again carries on.
 #[derive(Resource, Default)]
-pub(crate) struct SequenceWorkAreas(HashMap<(String, String, u16), ShuffleWork>);
-
-/// 一轮的阶段。
-enum RoundPhase {
-    /// 等这一轨的起播延迟。
-    Delay { slot: usize, due: f64 },
-    /// 这一轨的声音在响。
-    Voice { slot: usize, sink: Entity },
-}
-
-/// 在跑的一条洗牌序列。
-struct SequencePlayback {
-    cue: String,
-    work_key: (String, String, u16),
-    plan: ShufflePlan,
-    /// 各轨的音频句柄：起序列时一并请求并持有（句柄丢了装载就取消），
-    /// 到点起声时源已在内存里——真源的波形也在 cue 表自带的内存容器里。
-    handles: Vec<Handle<AudioSource>>,
-    site_id: i64,
-    phenomenon: String,
-    round: u64,
-    phase: RoundPhase,
-}
-
-/// 洗牌抽签种子的环境变量（十进制 u32）：给了就用它起种，便于把一局的
-/// 选轨拿去逐值复算；不给按本机时钟起种（真源的种子也是运行时时钟）。
-const SEQUENCE_SEED_ENV: &str = "MOLY_AUDIO_SEQUENCE_SEED";
-
-/// 时钟种子：纪元纳秒数的低 32 位。wasm 上 std 没有墙钟，取 JS 的毫秒数。
-#[cfg(not(target_arch = "wasm32"))]
-fn clock_seed() -> u32 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("系统时钟早于 Unix 纪元")
-        .as_nanos() as u32
-}
-
-#[cfg(target_arch = "wasm32")]
-fn clock_seed() -> u32 {
-    (js_sys::Date::now() * 1.0e6) as u64 as u32
-}
-
-fn seeded_sequence_rng() -> SequenceRng {
-    let (seed, source) = match std::env::var(SEQUENCE_SEED_ENV) {
-        Ok(raw) => (
-            raw.trim()
-                .parse::<u32>()
-                .unwrap_or_else(|_| panic!("{SEQUENCE_SEED_ENV} 不是十进制 u32：{raw:?}")),
-            "环境变量",
-        ),
-        Err(_) => (clock_seed(), "时钟"),
-    };
-    let rng = SequenceRng::seeded(seed);
-    info!(
-        "[audio-seq] 环境音通道抽签源起种：seed={seed} source={source} state={:?}",
-        rng.state()
-    );
-    rng
-}
-
-/// 起一轮：推进位置、按需重洗，进入这一轨的延迟阶段。
-fn start_round(
-    playback: &mut SequencePlayback,
-    work: &mut SequenceWorkAreas,
-    rng: &mut SequenceRng,
-    now: f64,
-) {
-    let tracks = playback.plan.tracks.len();
-    let area = work
-        .0
-        .entry(playback.work_key.clone())
-        .or_insert_with(|| ShuffleWork::loaded(tracks));
-    let old = area.position;
-    let track = advance_shuffle(area, &playback.plan.tracks, rng)
-        .unwrap_or_else(|| panic!("洗牌计划没有轨"));
-    let slot = playback
-        .plan
-        .tracks
-        .iter()
-        .position(|id| *id == track)
-        .unwrap_or_else(|| panic!("顺序表里的轨号 {track} 不在作者序轨表里"));
-    playback.round += 1;
-    let delay_us = playback.plan.voices[slot].start_delay_us;
-    playback.phase = RoundPhase::Delay {
-        slot,
-        due: now + delay_us as f64 / 1.0e6,
-    };
-    info!(
-        "[audio-seq] 序列轮起：站点 {} · 档 {} · cue={} round={} pos_before={} pos={} track={} delay_us={} order={:?} t={:.6}",
-        playback.site_id,
-        label(&playback.phenomenon),
-        label(&playback.cue),
-        playback.round,
-        old,
-        area.position,
-        track,
-        delay_us,
-        area.order,
-        now
-    );
-}
-
-/// 停掉在跑的序列（新一次现象 SE 调用先停旧声：延迟里的轨不再起声）。
-fn stop_sequence(channel: &mut AmbientChannel, now: f64) {
-    if let Some(playback) = channel.sequence.take() {
-        let phase = match playback.phase {
-            RoundPhase::Delay { .. } => "delay",
-            RoundPhase::Voice { .. } => "voice",
-        };
-        info!(
-            "[audio-seq] 序列停：cue={} round={} phase={phase} t={now:.6}",
-            label(&playback.cue),
-            playback.round
-        );
-    }
-}
+pub(crate) struct SequenceWorkAreas(pub(crate) HashMap<(String, String, u16), ShuffleWork>);
 
 /// Update：区域环境音——每次环境提交按「站点 × 现象」选行，平铺 2D，
-/// 音量 = 1.0 × 面板，先停后放。
+/// 先停后放。cue 按它的结构放（plain 或序列类型 0-4，见 [`cue`]），音量
+/// 是 SE 播放器 × cue 的类别 × cue 的音量命令。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn advance_ambient(
     mut commands: Commands,
     server: Res<AssetServer>,
@@ -2139,6 +2460,7 @@ pub(crate) fn advance_ambient(
     routing: Option<Res<Routing>>,
     mut channel: ResMut<AmbientChannel>,
     mut work: ResMut<SequenceWorkAreas>,
+    mut rngs: ResMut<CueRngs>,
 ) {
     let (Some(routing), Some(transition), Some(site)) = (routing, transition, site) else {
         return; // 路由表、天气链或站点未就绪
@@ -2157,12 +2479,15 @@ pub(crate) fn advance_ambient(
     channel.handled_commit = Some(serial);
     let now = time.elapsed_secs_f64();
     // 真源每一支都先停旧声（在跑的序列连同延迟里的轨一起停）。
-    if let Some(sink) = channel.sink.take() {
-        if let Ok(mut entity_commands) = commands.get_entity(sink) {
+    if let Some(playback) = channel.playback.take() {
+        if let Ok(mut entity_commands) = commands.get_entity(playback) {
             entity_commands.despawn();
         }
+        info!(
+            "[audio-seq] 环境音停：cue={} t={now:.6}",
+            channel.playing.as_deref().map(label).unwrap_or_default()
+        );
     }
-    stop_sequence(&mut channel, now);
     channel.playing = None;
     let site_id = i64::from(site.site_id);
     if !plays_site_phenomena_sound(&site.site_type) {
@@ -2200,215 +2525,104 @@ pub(crate) fn advance_ambient(
             return;
         }
     };
-    let Some(stream) = routing
-        .streams
-        .0
-        .get(&(route.cue.clone(), route.package.clone()))
-    else {
-        // 解析期已全量核过可达路由；到不了这支。
-        panic!(
-            "环境音路由的流不在表里：{} @ {}",
-            label(&route.cue),
-            label(&route.package)
-        );
-    };
-    let key = (route.cue.clone(), route.package.clone());
-    if let Some(block) = routing.sequences.blocks.get(&key) {
-        match shuffle_plan(&routing.sequences, &route.cue, &route.package, block) {
-            Ok(plan) => {
-                let handles = plan
-                    .voices
-                    .iter()
-                    .map(|voice| {
-                        server.load::<AudioSource>(AssetPath::from(format!(
-                            "moly://{}",
-                            voice.stream.ogg
-                        )))
-                    })
-                    .collect();
-                info!(
-                    "环境音：站点 {site_id} · 档 {} → {}（洗牌序列 {} 轨 · 重放 {} · 不进声音的参数：{}）",
-                    label(&committed.name),
-                    label(&route.cue),
-                    plan.tracks.len(),
-                    if plan.repeat { "有" } else { "无" },
-                    block.not_consumed
-                );
-                let mut playback = SequencePlayback {
-                    cue: route.cue.clone(),
-                    work_key: (
-                        route.package.clone(),
-                        block.archive.clone(),
-                        block.sequence_index,
-                    ),
-                    plan,
-                    handles,
-                    site_id,
-                    phenomenon: committed.name.clone(),
-                    round: 0,
-                    phase: RoundPhase::Delay { slot: 0, due: now },
-                };
-                let rng = channel.rng.get_or_insert_with(seeded_sequence_rng);
-                start_round(&mut playback, &mut work, rng, now);
-                channel.sequence = Some(playback);
-                channel.playing = Some(route.cue.clone());
-            }
-            Err(reason) => error!(
-                "[audio] 环境音拒绝：站点 {site_id} · 档 {} 的 cue {} @ {} 是 {} 序列，{reason}；不拿其中一条波形顶替",
+    let plan = match routing.cue_plan(&route.cue, &route.package) {
+        Ok(plan) => plan,
+        Err(reason) => {
+            error!(
+                "[audio] 环境音拒绝：站点 {site_id} · 档 {} 的 cue {} @ {}：{reason}；不拿其中一条波形顶替",
                 label(&committed.name),
                 label(&route.cue),
                 label(&route.package),
-                block.type_name
-            ),
+            );
+            return;
         }
-        return;
-    }
-    if routing.sequences.read.contains(&key) && stream.waveforms != 1 {
-        // 提取侧读过、判为 plain（恰一条波形），流表这个键下却有多条：两边
-        // 对不上（比如同一包里两个归档各有一个同名 cue），不猜哪一条。
-        error!(
-            "[audio] 环境音拒绝：站点 {site_id} · 档 {} 的 cue {} @ {} 被序列导出判为 plain，流表里却有 {} 条波形",
-            label(&committed.name),
-            label(&route.cue),
-            label(&route.package),
-            stream.waveforms
-        );
-        return;
-    }
-    if stream.waveforms > 1 {
-        error!(
-            "[audio] 环境音拒绝：站点 {site_id} · 档 {} 的 cue {} @ {} 带 {} 条波形——这是多轨序列 cue，它所在的条目没有序列导出（提取侧没读过这个归档的 cue 表），不拿其中一条顶替",
-            label(&committed.name),
-            label(&route.cue),
-            label(&route.package),
-            stream.waveforms
-        );
-        return;
-    }
-    let volume = bus.se_area_ambient * gate.factor();
-    let handle = server.load::<AudioSource>(AssetPath::from(format!("moly://{}", stream.ogg)));
-    let settings = if stream.loops {
-        PlaybackSettings::LOOP
-            .with_start_position(Duration::from_secs_f64(stream.loop_start))
-            .with_duration(Duration::from_secs_f64(stream.loop_end - stream.loop_start))
-    } else {
-        PlaybackSettings::ONCE
     };
-    channel.sink = Some(
-        commands
-            .spawn((
-                AudioPlayer::new(handle),
-                settings.with_volume(Volume::Linear(volume)),
-                BusVolume::Ambient,
-            ))
-            .id(),
-    );
-    channel.playing = Some(route.cue.clone());
     info!(
-        "环境音：站点 {site_id} · 档 {} → {}（平铺 2D，音量 {:.2} = 1.0 × {:.2}，{}）",
+        "环境音：站点 {site_id} · 档 {} → {}（{} {} 轨 · 重放 {} · 平铺 2D · {}）",
         label(&committed.name),
         label(&route.cue),
-        volume,
-        bus.se_area_ambient,
-        if stream.loops {
-            format!("循环 [{:.3}, {:.3}]", stream.loop_start, stream.loop_end)
-        } else {
-            "整轨一次性".to_string()
+        plan.kind.label(),
+        plan.voices.len(),
+        if plan.repeat { "有" } else { "无" },
+        match &plan.gain {
+            Some(gain) => format!(
+                "类别 {:?} · cue 音量 {:.2} · 轨音量 {:?}",
+                gain.categories, gain.sequence, gain.tracks
+            ),
+            None => "cue 的类别与音量命令未导出：按 SE_AREA_AMBIENT 类".to_string(),
         },
     );
+    if let Some(parameters) = &plan.not_consumed {
+        info!(
+            "环境音 cue {} 不进声音的参数：{parameters}",
+            label(&route.cue)
+        );
+    }
+    channel.playback = Some(cue::spawn_playback(
+        &mut commands,
+        cue::start_cue(
+            &server,
+            &mut work,
+            &mut rngs,
+            now,
+            &route.cue,
+            &route.package,
+            &plan,
+            Player::Se,
+            SLOT_SE_AREA_AMBIENT,
+            RngSlot::Ambient,
+            "ambient",
+        ),
+        &bus,
+        &gate,
+        now,
+    ));
+    channel.playing = Some(route.cue.clone());
 }
 
-/// Update：推进在跑的洗牌序列。延迟到点起声（平铺 2D、一次性、音量同
-/// 环境音通道）；这一轨的声音放完（sink 空了，或源装载失败）就收这一轮，
-/// 带重放标志则同帧起下一轮——真源在同一次更新里收轮并重起序列。叫停
-/// （新一次环境提交）由 [`advance_ambient`] 做，这里只见到还在跑的。
-///
-/// 起声点落在延迟到点后的第一帧，最多晚一帧（真源按音频服务器自己的
-/// 节拍推进，不按画面帧）；收轮同理最多晚一帧。没有音频输出设备时 sink
-/// 不会出现，轮次停在起声那一步，不拿墙钟冒充放完。
-pub(crate) fn advance_ambient_sequence(
-    mut commands: Commands,
-    server: Res<AssetServer>,
-    time: Res<Time<Real>>,
-    bus: Res<VolumeBus>,
-    gate: Res<AudioGate>,
-    mut channel: ResMut<AmbientChannel>,
-    mut work: ResMut<SequenceWorkAreas>,
-    players: Query<&AudioPlayer<AudioSource>>,
-    sinks: Query<&AudioSink>,
-) {
-    let now = time.elapsed_secs_f64();
-    let channel = &mut *channel;
-    let AmbientChannel {
-        sink,
-        sequence,
-        rng,
-        playing,
-        ..
-    } = channel;
-    let Some(playback) = sequence.as_mut() else {
-        return;
-    };
-    loop {
-        match playback.phase {
-            RoundPhase::Delay { slot, due } => {
-                if now < due {
-                    return;
-                }
-                let voice = &playback.plan.voices[slot];
-                let settings = if voice.stream.loops {
-                    PlaybackSettings::LOOP
-                        .with_start_position(Duration::from_secs_f64(voice.stream.loop_start))
-                        .with_duration(Duration::from_secs_f64(
-                            voice.stream.loop_end - voice.stream.loop_start,
-                        ))
-                } else {
-                    PlaybackSettings::ONCE
-                };
-                let volume = bus.se_area_ambient * gate.factor();
-                let entity = commands
-                    .spawn((
-                        AudioPlayer::new(playback.handles[slot].clone()),
-                        settings.with_volume(Volume::Linear(volume)),
-                        BusVolume::Ambient,
-                    ))
-                    .id();
-                *sink = Some(entity);
-                playback.phase = RoundPhase::Voice { slot, sink: entity };
-                info!(
-                    "[audio-seq] 序列轨起声：cue={} round={} track={} due={due:.6} t={now:.6} 音量 {volume:.2}{}",
-                    label(&playback.cue),
-                    playback.round,
-                    voice.track_index,
-                    if voice.stream.loops { "（波形带循环：这一轮不会自己收）" } else { "" }
-                );
-                return;
-            }
-            RoundPhase::Voice { slot, sink: entity } => {
-                if !one_shot_finished_or_failed(entity, &server, &players, &sinks) {
-                    return;
-                }
-                if let Ok(mut entity_commands) = commands.get_entity(entity) {
-                    entity_commands.despawn();
-                }
-                *sink = None;
-                info!(
-                    "[audio-seq] 序列轮终：cue={} round={} track={} t={now:.6} repeat={}",
-                    label(&playback.cue),
-                    playback.round,
-                    playback.plan.voices[slot].track_index,
-                    u8::from(playback.plan.repeat)
-                );
-                if !playback.plan.repeat {
-                    *sequence = None;
-                    *playing = None;
-                    return;
-                }
-                let rng = rng.get_or_insert_with(seeded_sequence_rng);
-                start_round(playback, &mut work, rng, now);
-            }
-        }
+/// Timeline SE clips start their cue through this.
+#[allow(dead_code)]
+/// Start a timeline's SE clip as the middleware plays the cue (plain or a
+/// sequence of type 0-4), with the waveforms the timeline prepared from
+/// [`Routing::cue_asset_paths`] (track order). Returns the playback entity:
+/// despawning it stops every track, and it despawns itself when played out.
+pub(crate) fn start_timeline_cue(
+    world: &mut World,
+    package: &str,
+    cue: &str,
+    handles: Vec<Handle<AudioSource>>,
+) -> Result<Entity, String> {
+    let plan = world
+        .get_resource::<Routing>()
+        .ok_or_else(|| "audio routing is not ready".to_string())?
+        .cue_plan(cue, package)?;
+    if handles.len() != plan.voices.len() {
+        return Err(format!(
+            "cue {} @ {} has {} tracks, {} waveforms were prepared",
+            label(cue),
+            label(package),
+            plan.voices.len(),
+            handles.len()
+        ));
     }
+    let now = world.resource::<Time<Real>>().elapsed_secs_f64();
+    let playback = world.resource_scope(|world, mut work: Mut<SequenceWorkAreas>| {
+        let mut rngs = world.resource_mut::<CueRngs>();
+        cue::start_cue_with_handles(
+            &mut work,
+            &mut rngs,
+            now,
+            cue,
+            package,
+            &plan,
+            handles,
+            Player::Se,
+            SLOT_SE_INGAME,
+            RngSlot::Timeline,
+            "timeline SE",
+        )
+    });
+    Ok(cue::spawn_playback_in_world(world, playback, now))
 }
 
 // ---- A 套邻近环境音管理器 -----------------------------------------------------
@@ -2524,13 +2738,19 @@ pub(crate) fn advance_proximity(
         // 同声源支：epsilon 门更新音量（门宽 = max(ε×8, 大者×1e-6)，
         // 逐位对齐真源：绝对差过门才写，并按「用户音量 × 距离音量」更新
         // 播放器）。
-        let epsilon =
-            (UNITY_MIN_FLOAT * 8.0).max(state.current_volume.abs().max(audible_volume.abs()) * 1e-6);
+        let epsilon = (UNITY_MIN_FLOAT * 8.0)
+            .max(state.current_volume.abs().max(audible_volume.abs()) * 1e-6);
         if (audible_volume - state.current_volume).abs() >= epsilon {
             state.current_volume = audible_volume;
             if let Some(entity) = state.playback {
                 if let Ok(mut sink) = sinks.get_mut(entity) {
-                    sink.set_volume(Volume::Linear(bus.se_area_ambient * audible_volume));
+                    let cue_volume = track_volume(
+                        routing.cue_gain(&nearest.cue, &nearest.package),
+                        Player::Se,
+                        SLOT_SE_AREA_AMBIENT,
+                        0,
+                    );
+                    sink.set_volume(Volume::Linear(cue_volume.linear(&bus) * audible_volume));
                 }
             }
         }
@@ -2701,6 +2921,11 @@ pub(crate) struct VoiceChannel {
     sink: Option<Entity>,
     /// 在播 cue（起播时记下，账目行用）。
     cue: Option<String>,
+    /// A volume preview on the voice player (`SoundManager.PlayVoice` /
+    /// `PlayVoiceFixedVolume` from the option volume page): a cue playback
+    /// entity. It is not a dialogue line: no playback identity, no mouth, no
+    /// analyzer.
+    preview: Option<Entity>,
 }
 
 impl VoiceChannel {
@@ -2905,9 +3130,15 @@ pub(crate) fn serve_voice(
                     // 裁决刚判过在表：同帧不可能被撤（流表是解析后只读资源）。
                     unreachable!("route_voice 判定在表后流表被改写")
                 };
-                // talk voice 的流全部非循环（整轨一次性）；音量 =
-                // 1.0（真源 PlayVoice 基量）× 面板 vox_scenario。
-                let volume = bus.vox_scenario * gate.factor();
+                // talk voice 的流全部非循环（整轨一次性）；音量 = voice
+                // 播放器 × cue 的类别与音量命令（PlayVoice 基量 1.0）。
+                let cue_volume = track_volume(
+                    routing.cue_gain(&line.cue, &package),
+                    Player::Voice,
+                    SLOT_VOX_SCENARIO,
+                    0,
+                );
+                let volume = cue_volume.linear(&bus) * gate.factor();
                 let path = format!("moly://{}", stream.ogg);
                 let cached = prefetch.get(&path);
                 let was_prefetched = cached.is_some();
@@ -2931,7 +3162,7 @@ pub(crate) fn serve_voice(
                                 raw_ready_at_command,
                             ),
                             PlaybackSettings::ONCE.with_volume(Volume::Linear(volume)),
-                            BusVolume::Voice,
+                            BusVolume::Cue(cue_volume),
                             VoicePlaybackIdentity {
                                 request: entity,
                                 speaker: line.speaker,
@@ -3030,10 +3261,11 @@ fn themed_se_cue(cue: &str) -> &str {
 /// 场景喂入的声源 cue 不带包名，挂组件时由此补上）。
 pub(crate) const SE_PACKAGE: &str = "mysekai__sound__se__se_mysekai";
 
-/// 一次性 SE 的音量类（九类面板的消费键；真源 SoundDefine.SeCategoryType
-/// 的两支）。类→cue 的绑定在 ACF 侧（盘上无 .acf 读不出），按 cue 家族
-/// 语义归：场景动作（采集受击）→ Ingame，界面动作（对话窗点跳/步进、
-/// 摆放编辑）→ Ui——归法是具名 mock。
+/// The family a one-shot request names (scene action -> Ingame, interface
+/// action -> Ui). The source's `PlaySE` takes no category: a cue's categories
+/// are the cue sheet's, and the SE channel uses them when the export carries
+/// them. The class is only the named stand-in for a cue whose facts are not
+/// exported (then its category is this family's).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SeClass {
     Ingame,
@@ -3041,18 +3273,17 @@ pub enum SeClass {
 }
 
 impl SeClass {
-    fn volume(self, bus: &VolumeBus) -> f32 {
+    /// Field slot of the family's category.
+    fn slot(self) -> usize {
         match self {
-            Self::Ingame => bus.se_ingame,
-            Self::Ui => bus.se_ui,
+            Self::Ingame => SLOT_SE_INGAME,
+            Self::Ui => SLOT_SE_UI,
         }
     }
 
-    fn label(self) -> &'static str {
-        match self {
-            Self::Ingame => "se_ingame",
-            Self::Ui => "se_ui",
-        }
+    /// SE player times the family's category (no cue facts).
+    fn volume(self, bus: &VolumeBus) -> f32 {
+        bus.player.se * bus.slot_volume(self.slot())
     }
 }
 
@@ -3075,7 +3306,24 @@ pub struct SeRequest {
 /// `CustomSelectableDefine.PlaySE` calls; they resolve against the cue bank
 /// when the queue drains.
 #[derive(Resource, Default)]
-pub struct SeRequests(pub Vec<SeRequest>, pub(crate) Vec<ButtonSe>);
+pub struct SeRequests(
+    pub Vec<SeRequest>,
+    pub(crate) Vec<ButtonSe>,
+    pub(crate) Vec<PreviewSound>,
+);
+
+/// One volume preview call of the option volume page.
+#[derive(Debug, Clone)]
+pub(crate) enum PreviewSound {
+    /// `PlayVoice(cue, 1)`: the voice player at its player volume times 1.
+    Voice(String),
+    /// `SamplePlaySE(cue, volume)`: the SE player's sample player (index 5)
+    /// at `volume`, without a player volume.
+    SampleSe(String, f32),
+    /// `PlayVoiceFixedVolume(cue, volume)`: the voice player at `volume`,
+    /// without its player volume.
+    VoiceFixed(String, f32),
+}
 
 /// One `CustomSelectableDefine.PlaySE(se, otherSeName)` call.
 #[derive(Debug, Clone)]
@@ -3098,17 +3346,36 @@ impl SeRequests {
     }
 
     /// Queues a `PlaySE(se, otherSeName)` call.
-    pub(crate) fn button(&mut self, se: moly_law::ui::custom_button::SeType, other_se_name: String) {
+    pub(crate) fn button(
+        &mut self,
+        se: moly_law::ui::custom_button::SeType,
+        other_se_name: String,
+    ) {
         self.1.push(ButtonSe { se, other_se_name });
+    }
+
+    /// Queues a volume preview call.
+    pub(crate) fn preview(&mut self, sound: PreviewSound) {
+        self.2.push(sound);
     }
 }
 
-/// The stream a plain cue name plays from: the shared MySekai SE bank, then
+/// The bank a plain cue name plays from: the shared MySekai SE bank, then
 /// the built-in and downloaded common menu banks.
-fn plain_se_stream<'a>(streams: &'a Streams, cue: &str) -> Option<&'a StreamRow> {
+fn plain_se_package(streams: &Streams, cue: &str) -> Option<&'static str> {
     [SE_PACKAGE, "MenuCommon_Built_in", "MenuCommon"]
-        .iter()
-        .find_map(|package| streams.0.get(&(cue.to_owned(), (*package).to_owned())))
+        .into_iter()
+        .find(|package| {
+            streams
+                .0
+                .contains_key(&(cue.to_owned(), (*package).to_owned()))
+        })
+}
+
+/// The stream a plain cue name plays from (see [`plain_se_package`]).
+fn plain_se_stream<'a>(streams: &'a Streams, cue: &str) -> Option<&'a StreamRow> {
+    plain_se_package(streams, cue)
+        .and_then(|package| streams.0.get(&(cue.to_owned(), package.to_owned())))
 }
 
 /// 一次性 SE 排空的排序锚：写者系统在各自插件里 `.before(Drain)` 自证
@@ -3129,29 +3396,35 @@ pub(crate) struct SeChannel {
 }
 
 /// Drain accepted requests through the same one-shot player on both targets.
-/// Missing decoded cues are reported without substituting another sound.
-/// Playback volume is the source player's unit volume times the selected bus.
+/// Every request starts its cue as the middleware does (plain, or a sequence
+/// of type 0-4: see [`cue`]); a cue this port cannot play, or one not
+/// decoded, is reported once and nothing else is played in its place. The
+/// volume of each track is the SE player times the cue's categories and
+/// volume commands.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn advance_se(
     mut commands: Commands,
     server: Res<AssetServer>,
+    time: Res<Time<Real>>,
     bus: Res<VolumeBus>,
     gate: Res<AudioGate>,
     routing: Option<Res<Routing>>,
     mut queue: ResMut<SeRequests>,
     mut channel: ResMut<SeChannel>,
-    sinks: Query<&AudioSink>,
-    players: Query<&AudioPlayer<AudioSource>>,
+    mut work: ResMut<SequenceWorkAreas>,
+    mut rngs: ResMut<CueRngs>,
+    playbacks: Query<(), With<CuePlayback>>,
     owners: Query<()>,
+    mut voice: ResMut<VoiceChannel>,
 ) {
-    channel.live.retain(|entity| {
-        if !one_shot_finished_or_failed(*entity, &server, &players, &sinks) {
-            return true;
-        }
-        if let Ok(mut entity_commands) = commands.get_entity(*entity) {
-            entity_commands.despawn();
-        }
-        false
-    });
+    // A playback despawns itself when it has played out.
+    channel.live.retain(|entity| playbacks.contains(*entity));
+    if voice
+        .preview
+        .is_some_and(|entity| !playbacks.contains(entity))
+    {
+        voice.preview = None;
+    }
     let Some(routing) = routing else {
         return; // 路由表未就绪：请求留队（就绪后排空，窗口照样去重）
     };
@@ -3175,6 +3448,69 @@ pub(crate) fn advance_se(
             None => {}
         }
     }
+    // The previews resolve like plain cue names and play as cues. The voice
+    // ones replace the preview on the voice player (StopVoiceAll ran at the
+    // call); the fixed ones play at the volume they were called with instead
+    // of the player's (the cue's categories and volume commands still apply).
+    for preview in std::mem::take(&mut queue.2) {
+        let (cue, fixed, on_voice) = match &preview {
+            PreviewSound::Voice(cue) => (cue.as_str(), None, true),
+            PreviewSound::SampleSe(cue, volume) => (cue.as_str(), Some(*volume), false),
+            PreviewSound::VoiceFixed(cue, volume) => (cue.as_str(), Some(*volume), true),
+        };
+        let plan = plain_se_package(&routing.streams, cue)
+            .ok_or_else(|| "not in a loaded bank".to_string())
+            .and_then(|package| routing.cue_plan(cue, package).map(|plan| (package, plan)));
+        let (package, plan) = match plan {
+            Ok(found) => found,
+            Err(reason) => {
+                if channel.warned_missing.insert(cue.to_owned()) {
+                    warn!("SE: preview cue {}: {reason}; nothing plays", label(cue));
+                }
+                continue;
+            }
+        };
+        let (player, slot) = match &preview {
+            PreviewSound::Voice(_) => (Player::Voice, SLOT_VOX_SCENARIO),
+            PreviewSound::VoiceFixed(..) => (Player::Unscaled, SLOT_VOX_SCENARIO),
+            PreviewSound::SampleSe(..) => (Player::Unscaled, SLOT_SE_INGAME),
+        };
+        let playback = cue::start_cue(
+            &server,
+            &mut work,
+            &mut rngs,
+            time.elapsed_secs_f64(),
+            cue,
+            package,
+            &plan,
+            player,
+            slot,
+            RngSlot::OneShot,
+            "option preview",
+        )
+        .scaled(fixed.unwrap_or(1.0));
+        let entity = cue::spawn_playback(
+            &mut commands,
+            playback,
+            &bus,
+            &gate,
+            time.elapsed_secs_f64(),
+        );
+        if on_voice {
+            if let Some(old) = voice.preview.replace(entity) {
+                if let Ok(mut entity_commands) = commands.get_entity(old) {
+                    entity_commands.despawn();
+                }
+            }
+        } else {
+            channel.live.push(entity);
+        }
+        channel.played += 1;
+        info!(
+            "SE preview: {} ({preview:?}, player {player:?})",
+            label(cue)
+        );
+    }
     for request in queue.0.drain(..) {
         if request
             .owner
@@ -3187,12 +3523,16 @@ pub(crate) fn advance_se(
             Some((_, cue)) => (cue, Some(request.cue.replace('/', "__"))),
             None => (themed_se_cue(&request.cue), None),
         };
-        let stream = if let Some(package) = source_package {
-            routing.streams.0.get(&(cue.to_owned(), package))
-        } else {
-            plain_se_stream(&routing.streams, cue)
+        let package = match source_package {
+            Some(package) => Some(package),
+            None => plain_se_package(&routing.streams, cue).map(str::to_owned),
         };
-        let Some(stream) = stream else {
+        let Some(package) = package.filter(|package| {
+            routing
+                .streams
+                .0
+                .contains_key(&(cue.to_owned(), package.clone()))
+        }) else {
             if channel.warned_missing.insert(request.cue.to_string()) {
                 warn!(
                     "SE 跳过：cue {} 不在本快照的流表（fail-closed 跳过；除非真源的包里也没有这个 cue，这是提取/流表缺口；每 cue 只告警一次）",
@@ -3201,27 +3541,56 @@ pub(crate) fn advance_se(
             }
             continue;
         };
-        let volume = request.class.volume(&bus) * gate.factor();
-        let handle = server.load::<AudioSource>(AssetPath::from(format!("moly://{}", stream.ogg)));
-        let entity = commands
-            .spawn((
-                AudioPlayer::new(handle),
-                PlaybackSettings::ONCE.with_volume(Volume::Linear(volume)),
-                BusVolume::Se(request.class),
-            ))
-            .id();
+        let plan = match routing.cue_plan(cue, &package) {
+            Ok(plan) => plan,
+            Err(reason) => {
+                if channel.warned_missing.insert(request.cue.to_string()) {
+                    error!(
+                        "SE 拒绝：cue {} @ {}：{reason}（不拿其中一条波形顶替；每 cue 只报一次）",
+                        label(cue),
+                        label(&package)
+                    );
+                }
+                continue;
+            }
+        };
+        let facts = plan.gain.is_some();
+        let playback = cue::start_cue(
+            &server,
+            &mut work,
+            &mut rngs,
+            time.elapsed_secs_f64(),
+            cue,
+            &package,
+            &plan,
+            Player::Se,
+            request.class.slot(),
+            RngSlot::OneShot,
+            "one-shot SE",
+        );
+        let entity = cue::spawn_playback(
+            &mut commands,
+            playback,
+            &bus,
+            &gate,
+            time.elapsed_secs_f64(),
+        );
         if let Some(owner) = request.owner {
             commands.entity(entity).insert(ScopedSe(owner));
         }
         channel.live.push(entity);
         channel.played += 1;
         info!(
-            "SE 起播：{}（{} · {} · 音量 {:.2} = 1.0 × {:.2} · 平铺 2D 一次性）",
+            "SE 起播：{}（{} · {} {} 轨 · {} · 平铺 2D）",
             label(cue),
             request.source,
-            request.class.label(),
-            volume,
-            volume,
+            plan.kind.label(),
+            plan.voices.len(),
+            if facts {
+                "音量＝SE 播放器 × cue 的类别 × 音量命令"
+            } else {
+                "cue 的类别与音量命令未导出：按请求的类"
+            },
         );
     }
 }
@@ -3244,6 +3613,7 @@ pub(crate) fn dispose_scoped_se(world: &mut World, owner: Entity) {
         if let Some(sink) = world.get::<AudioSink>(*entity) {
             sink.stop();
         }
+        // A playback's sounding tracks are its children: despawn takes them.
         if let Ok(entity) = world.get_entity_mut(*entity) {
             entity.despawn();
         }
@@ -3325,6 +3695,7 @@ pub(crate) fn report(
     voice: Res<VoiceChannel>,
     se: Res<SeChannel>,
     sinks: Query<&AudioSink>,
+    children: Query<&Children>,
 ) {
     if routing.is_none() {
         return; // 路由表未就绪：parse 的就绪行是首条账目
@@ -3353,8 +3724,9 @@ pub(crate) fn report(
         ),
     }
     let ambient_volume = ambient
-        .sink
-        .and_then(|entity| sinks.get(entity).ok())
+        .playback
+        .and_then(|entity| children.get(entity).ok())
+        .and_then(|tracks| tracks.iter().find_map(|track| sinks.get(track).ok()))
         .map(|sink| sink.volume().to_linear())
         .unwrap_or(0.0);
     match &ambient.playing {
@@ -3406,15 +3778,21 @@ pub(crate) fn install(app: &mut App) {
         .init_resource::<AudioGate>()
         .init_resource::<LocalVolumeSettings>()
         .init_resource::<CurrentPhenomenon>()
-        .init_resource::<UserMusicPlaySettings>()
+        .init_resource::<crate::server::client::music::ClientMusicPlaySettings>()
         .init_resource::<BgmChannel>()
+        .init_resource::<record::RecordLibrary>()
+        .init_resource::<RecordChoice>()
+        .init_resource::<MysekaiBgmFade>()
         .init_resource::<AmbientChannel>()
         .init_resource::<SequenceWorkAreas>()
+        .init_resource::<CueRngs>()
         .init_resource::<ProximityState>()
         .init_resource::<VoicePrefetchCache>()
         .init_resource::<VoiceChannel>()
         .init_resource::<SeRequests>()
         .init_resource::<SeChannel>();
+    #[cfg(not(target_arch = "wasm32"))]
+    app.add_systems(Update, record::autoplay_record_choice.before(advance_bgm));
 }
 
 #[cfg(test)]

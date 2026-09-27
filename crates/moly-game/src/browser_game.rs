@@ -49,13 +49,19 @@ pub struct GameSeed {
     pub asset_catalog: Option<String>,
     pub resource_base: Option<String>,
     pub resource_origin: Option<String>,
+    /// Replacements for the public storage and master hosts and their
+    /// mirrors (absent or null: the named hosts).
+    pub storage_base: Option<String>,
+    pub storage_mirror_base: Option<String>,
+    pub master_base: Option<String>,
+    pub master_mirror_base: Option<String>,
     pub writable: bool,
     settings: Option<String>,
     server: Option<String>,
     local: Option<String>,
 }
 
-const SEED_FIELDS: [&str; 13] = [
+const SEED_FIELDS: [&str; 17] = [
     "schemaVersion",
     "abi",
     "region",
@@ -67,6 +73,10 @@ const SEED_FIELDS: [&str; 13] = [
     "assetCatalog",
     "resourceBase",
     "resourceOrigin",
+    "storageBase",
+    "storageMirrorBase",
+    "masterBase",
+    "masterMirrorBase",
     "writable",
     "documents",
 ];
@@ -91,6 +101,15 @@ fn optional_text(seed: &Map<String, Value>, name: &str) -> Result<Option<String>
         _ => Err(format!(
             "seed field {name} must be a non-empty string or null"
         )),
+    }
+}
+
+/// Absent, null, or a non-empty string (fields later seeds may omit).
+fn absent_or_text(seed: &Map<String, Value>, name: &str) -> Result<Option<String>, String> {
+    if seed.contains_key(name) {
+        optional_text(seed, name)
+    } else {
+        Ok(None)
     }
 }
 
@@ -164,6 +183,10 @@ pub fn parse_game_seed(input: &str) -> Result<GameSeed, String> {
         asset_catalog: optional_text(seed, "assetCatalog")?,
         resource_base: optional_text(seed, "resourceBase")?,
         resource_origin: optional_text(seed, "resourceOrigin")?,
+        storage_base: absent_or_text(seed, "storageBase")?,
+        storage_mirror_base: absent_or_text(seed, "storageMirrorBase")?,
+        master_base: absent_or_text(seed, "masterBase")?,
+        master_mirror_base: absent_or_text(seed, "masterMirrorBase")?,
         writable: flag(seed, "writable")?,
         settings,
         server,

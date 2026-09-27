@@ -13,10 +13,10 @@
 //!   home or a floor), so the lottery's gate always passes.
 //! - The loop starts once, with the first loaded site (the source starts it
 //!   in the mysekai scene's setup), and waits on the scaled NPC clock.
-//! - The cap reads the master site levels and rank releases of the
-//!   player-data table and the rank the user's total experience reaches in
-//!   the master rank table; the talk list, the fixtures placed on the site and
-//!   the NPC list are the ones the other NPC lotteries read.
+//! - The cap reads the master site levels and rank releases and the rank the
+//!   user's total experience reaches in the master rank table, all three read
+//!   from the region's master mirror; the talk list, the fixtures placed on
+//!   the site and the NPC list are the ones the other NPC lotteries read.
 //!
 //! `ChangeSiteAsync`: the rows in list order; a row whose NPC stands on its
 //! target is skipped; otherwise `MoveNPC` orders the NPC to its target (see
@@ -27,10 +27,10 @@
 //! order goes out in one frame. The loop tests whether every NPC of the list
 //! stands on its target and waits again only after `ChangeSiteAsync` ends.
 
-use bevy::asset::LoadState;
 use bevy::prelude::*;
-use moly_assets::json::JsonAsset;
+use moly_assets::json::master::{self, MasterData, MasterTable};
 use moly_law::objective::change_site as law;
+use moly_law::ui::mysekai_rank::MasterMysekaiRank;
 
 use super::residency;
 
@@ -85,8 +85,6 @@ impl Masters {
 /// The controller's state.
 #[derive(Resource)]
 pub(crate) struct ChangeSiteController {
-    player_data: Option<Handle<JsonAsset>>,
-    rank_table: Option<Handle<JsonAsset>>,
     masters: Option<Result<Masters, String>>,
     /// The static change list; `None` = dropped.
     list: Option<Vec<law::ChangeSiteData>>,
@@ -112,8 +110,6 @@ struct ChangeAsync {
 impl Default for ChangeSiteController {
     fn default() -> Self {
         Self {
-            player_data: None,
-            rank_table: None,
             masters: None,
             list: None,
             wait: None,
@@ -127,117 +123,104 @@ impl Default for ChangeSiteController {
     }
 }
 
+/// `mysekaiSiteLevels` in master order.
+const SITE_LEVELS: MasterTable<Vec<SiteLevelRow>> = MasterTable {
+    table: "mysekaiSiteLevels",
+    name: "mysekaiSiteLevels (the change-site cap)",
+    parse: parse_site_levels,
+};
+
+/// `mysekaiRankReleases` in master order.
+const RANK_RELEASES: MasterTable<Vec<(i64, String, i64)>> = MasterTable {
+    table: "mysekaiRankReleases",
+    name: "mysekaiRankReleases (the change-site cap)",
+    parse: parse_rank_releases,
+};
+
+/// `mysekaiRanks` in master order.
+const RANKS: MasterTable<Vec<MasterMysekaiRank>> = MasterTable {
+    table: "mysekaiRanks",
+    name: "mysekaiRanks (the change-site cap)",
+    parse: crate::mysekai_rank::parse_ranks,
+};
+
 /// Startup: request the master tables.
-pub(crate) fn load(mut controller: ResMut<ChangeSiteController>, server: Res<AssetServer>) {
-    controller.player_data =
-        Some(server.load::<JsonAsset>("moly://fixture-models/player-data.json"));
-    controller.rank_table = Some(server.load::<JsonAsset>(moly_assets::mysekai_ranks()));
+pub(crate) fn load(mut masters: ResMut<MasterData>) {
+    masters.request(&SITE_LEVELS);
+    masters.request(&RANK_RELEASES);
+    masters.request(&RANKS);
 }
 
-fn parse_masters(player_data: &str, ranks: &str) -> Result<Masters, String> {
-    let data: serde_json::Value =
-        serde_json::from_str(player_data).map_err(|e| format!("player-data.json: {e}"))?;
-    let tables = &data["tables"];
-    let int = |row: &serde_json::Value, field: &str| -> Result<i64, String> {
-        row[field]
-            .as_i64()
-            .ok_or_else(|| format!("{field} is not an int in {row}"))
-    };
-    let mut masters = Masters::default();
-    for row in tables["mysekaiSiteLevels"]
-        .as_array()
-        .ok_or("no mysekaiSiteLevels")?
-    {
-        masters.levels.push(SiteLevelRow {
-            id: int(row, "id")?,
-            site_id: int(row, "mysekaiSiteId")?,
-            level: int(row, "level")?,
-            // The harvest sites' level rows carry no entry maximum; an absent
-            // int field of a master row reads as 0.
-            entry_max: i32::try_from(row["characterEntryMaxNum"].as_i64().unwrap_or(0))
-                .map_err(|_| "characterEntryMaxNum out of range".to_owned())?,
-        });
-    }
-    for row in tables["mysekaiRankReleases"]
-        .as_array()
-        .ok_or("no mysekaiRankReleases")?
-    {
-        masters.releases.push((
-            int(row, "mysekaiRank")?,
-            row["mysekaiRankRelaseType"]
-                .as_str()
-                .unwrap_or("")
-                .to_owned(),
-            int(row, "externalId")?,
-        ));
-    }
-    let ranks: serde_json::Value =
-        serde_json::from_str(ranks).map_err(|e| format!("mysekai-ranks.json: {e}"))?;
-    let entries = ranks["entries"]
-        .as_object()
-        .ok_or("mysekai-ranks.json has no entries")?;
-    for id in ranks["rowOrder"]
-        .as_array()
-        .ok_or("mysekai-ranks.json has no rowOrder")?
-    {
-        let key = id.as_i64().ok_or("rowOrder id is not an int")?.to_string();
-        let row = entries
-            .get(&key)
-            .ok_or_else(|| format!("rank row {key} missing"))?;
-        let field = |name: &str| -> Result<i32, String> {
-            row[name]
-                .as_i64()
-                .and_then(|v| i32::try_from(v).ok())
-                .ok_or_else(|| format!("rank row {key}: {name} is not an int"))
-        };
-        masters
-            .ranks
-            .push(moly_law::ui::mysekai_rank::MasterMysekaiRank {
-                id: field("id")?,
-                mysekai_rank: field("mysekaiRank")?,
-                total_exp: field("totalExp")?,
-            });
-    }
-    Ok(masters)
+fn parse_site_levels(text: &str) -> Result<Vec<SiteLevelRow>, String> {
+    master::rows(text)?
+        .iter()
+        .map(|row| {
+            Ok(SiteLevelRow {
+                id: master::int(row, "id")?,
+                site_id: master::int(row, "mysekaiSiteId")?,
+                level: master::int(row, "level")?,
+                // The harvest sites' level rows carry no entry maximum; an
+                // absent int field of a master row reads as 0.
+                entry_max: i32::try_from(row["characterEntryMaxNum"].as_i64().unwrap_or(0))
+                    .map_err(|_| "characterEntryMaxNum out of range".to_owned())?,
+            })
+        })
+        .collect()
 }
 
-/// Update: resolve the master tables once both documents are in.
-pub(crate) fn parse(
-    mut controller: ResMut<ChangeSiteController>,
-    server: Res<AssetServer>,
-    jsons: Res<Assets<JsonAsset>>,
-) {
-    if controller.masters.is_some() {
+fn parse_rank_releases(text: &str) -> Result<Vec<(i64, String, i64)>, String> {
+    master::rows(text)?
+        .iter()
+        .map(|row| {
+            Ok((
+                master::int(row, "mysekaiRank")?,
+                row["mysekaiRankRelaseType"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_owned(),
+                master::int(row, "externalId")?,
+            ))
+        })
+        .collect()
+}
+
+/// Update: resolve the master tables once all three have resolved. A table
+/// that is absent or malformed (named once by the master layer) leaves the
+/// cap unreadable: every floor lottery draws nobody.
+pub(crate) fn parse(mut controller: ResMut<ChangeSiteController>, mut masters: ResMut<MasterData>) {
+    if controller.masters.is_some()
+        || [SITE_LEVELS.key(), RANK_RELEASES.key(), RANKS.key()]
+            .into_iter()
+            .any(|key| !masters.is_resolved(key))
+    {
         return;
     }
-    let (Some(data), Some(ranks)) = (
-        controller.player_data.clone(),
-        controller.rank_table.clone(),
+    let (Some(levels), Some(releases), Some(ranks)) = (
+        masters.take(&SITE_LEVELS),
+        masters.take(&RANK_RELEASES),
+        masters.take(&RANKS),
     ) else {
         return;
     };
-    for (handle, name) in [(&data, "player-data.json"), (&ranks, "mysekai-ranks.json")] {
-        if let LoadState::Failed(error) = server.load_state(handle) {
-            let reason = format!("{name} is not in this runtime root ({error})");
-            warn!("[npc-change-site] {reason}: the cap cannot be read in this root, every floor lottery draws nobody (a root gap, not a source state)");
-            controller.masters = Some(Err(reason));
-            return;
-        }
-    }
-    let (Some(data), Some(ranks)) = (jsons.get(&data), jsons.get(&ranks)) else {
-        return;
-    };
-    let masters = parse_masters(&data.0, &ranks.0);
-    match &masters {
+    let resolved = (|| {
+        Ok::<_, master::MasterError>(Masters {
+            levels: levels?,
+            releases: releases?,
+            ranks: ranks?,
+        })
+    })();
+    match &resolved {
         Ok(m) => info!(
             "[npc-change-site] masters: {} site levels, {} rank releases, {} ranks",
             m.levels.len(),
             m.releases.len(),
             m.ranks.len()
         ),
-        Err(reason) => warn!("[npc-change-site] masters refused: {reason}"),
+        Err(_) => info!(
+            "[npc-change-site] the cap cannot be read in this root: every floor lottery draws nobody"
+        ),
     }
-    controller.masters = Some(masters);
+    controller.masters = Some(resolved.map_err(|error| error.to_string()));
 }
 
 /// Update: the lottery on entering home or a floor, and the loop.

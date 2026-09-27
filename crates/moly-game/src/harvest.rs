@@ -29,11 +29,13 @@
 //! - `tone`: the HarvestTone camera (state 14) and the tone view's SE.
 //! - `learn`: learning today's phenomenon on arrival (GameState 6, camera
 //!   state 17, `ReleaseApiMock`).
+//! - `obstacles`: what the views write to their NavMeshObstacles (the Setup
+//!   radius, the driftage and treasure switches); the obstacles carve through
+//!   the walk field's runtime carving.
 //!
-//! Named gaps: harvest objects do not carve the walk field (the source's
-//! NavMeshObstacle, also the ones the driftage and treasure views switch);
-//! the particle systems the driftage, toolbox and treasure views play and
-//! stop are not drawn; drop models keep their glb materials.
+//! Named gaps: the views' particle systems are played and stopped through
+//! the particle host ([`particles`]), but the harvest packages' particle
+//! archives are not exported yet, so none is drawn.
 
 pub(crate) mod action;
 mod airplane;
@@ -49,6 +51,10 @@ mod prop_animator;
 mod queue;
 pub(crate) mod server_mock;
 mod learn;
+pub(crate) mod notice;
+mod obstacles;
+pub(crate) mod particles;
+mod possession;
 mod tone;
 mod tool_model;
 mod ui;
@@ -415,6 +421,8 @@ pub(crate) struct HarvestDropBatches(pub(crate) Vec<DropBatch>);
 #[derive(Component)]
 pub struct HarvestDropItem {
     pub uid: u64,
+    /// The drop model's package (its prefab and document).
+    pub(crate) package: String,
     /// 0 while scattering; 1.0 once landed.
     pub radius: f32,
     pub rarity: i32,
@@ -422,7 +430,6 @@ pub struct HarvestDropItem {
     pub resource_id: i64,
     pub(crate) site_id: u32,
     pub(crate) row: UserDrop,
-    pub(crate) material_type: i32,
     /// `_acceleration` of the approach.
     pub(crate) acceleration: f32,
     /// `_isAttractToPlayer` (constructor default true).
@@ -510,8 +517,8 @@ pub(crate) struct HarvestGltfs {
 #[derive(Resource, Default)]
 pub(crate) struct HarvestDocs(pub(crate) HashMap<String, Handle<moly_assets::json::JsonAsset>>);
 
-/// Every placed scene of the arrival has expanded (the material swap and the
-/// stay particles wait for it).
+/// Every placed scene of the arrival has expanded (the material swap waits
+/// for it).
 #[derive(Resource)]
 pub struct HarvestScenesReady;
 
@@ -619,7 +626,7 @@ pub(crate) fn prefab_scene_index(document: &str, leaf: &str) -> usize {
 }
 
 /// Global observer: count the arrival's expanded scenes; all expanded opens
-/// the material swap and the stay particles.
+/// the material swap.
 fn on_scene_ready(
     trigger: On<SceneInstanceReady>,
     roots: Query<&HarvestRoot>,
@@ -741,6 +748,10 @@ impl Plugin for HarvestPlugin {
             .init_resource::<tool_model::HarvestToolModels>()
             .init_resource::<tool_model::ToolModelRequests>()
             .init_resource::<queue::HarvestLogQueue>()
+            .init_resource::<pickup::HarvestDropManager>()
+            .init_resource::<particles::HarvestParticleCalls>()
+            .init_resource::<possession::PossessionMock>()
+            .add_message::<notice::CollectNotice>()
             .init_resource::<effects::HarvestEffects>()
             .init_resource::<prop_animator::PropAnimatorCalls>()
             .init_resource::<damage::HarvestStartHides>()
@@ -753,17 +764,24 @@ impl Plugin for HarvestPlugin {
             .add_message::<learn::LearnPhenomenaDialogClosed>()
             .add_systems(
                 Startup,
-                (catalog::load, clips::load, tool_model::load),
+                (
+                    catalog::load,
+                    clips::load,
+                    tool_model::load,
+                    possession::load,
+                ),
             )
             .add_observer(on_scene_ready)
             .add_systems(
                 Update,
                 (
                     catalog::build,
+                    possession::build,
                     clips::parse,
                     tool_model::parse,
                     arrival::place,
                     arrival::bind_views,
+                    obstacles::set_up,
                     prop_animator::bind,
                     airplane::advance,
                     // The learn flow's dialog request is read the frame it
@@ -792,7 +810,7 @@ impl Plugin for HarvestPlugin {
                     drops::advance_animations,
                     pickup::collect_on_leave,
                     pickup::advance,
-                    tool_model::apply,
+                    (tool_model::apply, tool_model::swap_materials).chain(),
                     ui::place,
                     queue::advance,
                 )
@@ -809,6 +827,7 @@ impl Plugin for HarvestPlugin {
                     effects::advance
                         .after(HarvestActionSet)
                         .after(crate::home_action::HomeActionSet),
+                    particles::advance.after(HarvestActionSet),
                 ),
             )
             .add_systems(

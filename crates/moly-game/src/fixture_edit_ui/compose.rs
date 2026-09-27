@@ -524,11 +524,13 @@ pub(super) fn apply_static(
         enabled(view, doc, &tab.button, tab.primary);
     }
     for cell in &bindings.cells {
-        view.set_texture(&cell.image, &icons.by_fixture[&cell.choice.fixture_id]);
-        view.set_text(
-            &cell.quantity,
-            if cell.choice.unlimited() { "∞" } else { "1" }.to_owned(),
-        );
+        let icon = cell
+            .choice
+            .icon(icons)
+            .expect("the editor lists only fixtures with a registered thumbnail");
+        view.set_texture(&cell.image, icon);
+        // UIPartsThumbnail.SetQuantity: "×{0}".
+        view.set_text(&cell.quantity, format!("×{}", cell.choice.count));
         view.set_visible(&cell.placed, cell.choice.is_placed());
         for path in &cell.hide {
             view.set_visible(path, false);

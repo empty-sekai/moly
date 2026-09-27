@@ -5,9 +5,15 @@
 //! mesh colliders as the release lists them (the scene's collision rows in
 //! the site index), in world space, and the nearest hit within the distance
 //! wins. Mesh colliders are hit only from their front side (the physics
-//! default does not hit back faces). Named gaps: collider layers are not
-//! exported, so every row is cast against; colliders of other shapes and the
-//! colliders of placed fixtures are not among the rows.
+//! default does not hit back faces). The call is the four-argument
+//! overload, whose layer mask is `DefaultRaycastLayers` (every layer but
+//! Ignore Raycast, layer 2); the site scenes' colliders, as the collision
+//! scene export lists them with their layers, sit on layers 0, 4 and 9, none
+//! on layer 2, so casting against every row is the source's set.
+//!
+//! Named gap: colliders of other shapes and the colliders of placed
+//! fixtures are not among the rows (the fixtures' colliders are in the
+//! physics scene, which has no ray query here).
 
 use bevy::prelude::*;
 
