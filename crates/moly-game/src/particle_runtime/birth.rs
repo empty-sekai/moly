@@ -256,8 +256,8 @@ pub(super) fn advance_frame(
         let previous = frame.previous_position;
         frame.velocity = std::array::from_fn(|axis| (current[axis] - previous[axis]) / frame_dt);
     }
-    let head = moly_law::particle::prewarm::FrameStep::new(
-        frame_dt, system.emitter.simulation_speed, PLAYER_TIME);
+    let head = moly_law::particle::prewarm::FrameStep::new_entry(
+        frame_dt, system.emitter.simulation_speed, PLAYER_TIME, entry);
     let result = if head.skips() {
         Ok(false)
     } else {
@@ -772,6 +772,10 @@ pub(super) fn shape_emitter_state(
             }
             [1.0; 3]
         }
+        // The owner update's shape scale under Shape scaling: the chain's
+        // lossy global scale, which the host composes every frame from the
+        // instance with the rotation-and-translation owner it hands in.
+        crate::particle_geometry::Scaling::Shape { shape_scale } => shape_scale.to_array(),
     };
     Ok(Some(ShapeEmitterState {
         emitter_scale,
