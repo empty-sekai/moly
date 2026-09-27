@@ -222,12 +222,9 @@ pub(crate) fn apply(
     let Some(content) = state.content.as_ref() else {
         return;
     };
-    let format = layouts
-        .wordings
-        .get(COUNT_FORMAT)
-        .unwrap_or_else(|| panic!("UI wording missing: {COUNT_FORMAT}"));
+    let format = layouts.wording(COUNT_FORMAT);
     let text =
-        moly_law::text::custom_text_mesh::format_wording(format, &[content.quantity.to_string()])
+        moly_law::text::custom_text_mesh::format_wording(&format, &[content.quantity.to_string()])
             .unwrap_or_else(|error| panic!("UI wording {COUNT_FORMAT}: {error}"));
     view.set_text(&marks.count_text, text);
     view.set_visible(&marks.icon, false);

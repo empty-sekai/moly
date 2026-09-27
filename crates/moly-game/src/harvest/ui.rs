@@ -534,11 +534,7 @@ pub(crate) fn place(
             None => view.set_visible(&marks.icon, false),
         }
         if button.balloon.stage != BalloonStage::Idle {
-            let text = layouts
-                .wordings
-                .get(BALLOON_WORDING)
-                .unwrap_or_else(|| panic!("UI wording missing: {BALLOON_WORDING}"));
-            view.set_text(&marks.balloon_text, text.clone());
+            view.set_text(&marks.balloon_text, layouts.wording(BALLOON_WORDING));
         }
         view.set_alpha(&marks.balloon, balloon_alpha);
         super::tool_view::apply(&mut button.tools, &marks.tools, &mut view, &layouts);

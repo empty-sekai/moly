@@ -467,12 +467,9 @@ pub(crate) fn open(
                 .unwrap_or_else(|e| panic!("[learn-phenomena] {e}"));
             dialog.edited_document = false;
         }
-        let wording = layouts
-            .wordings
-            .get(MESSAGE_KEY)
-            .unwrap_or_else(|| panic!("UI wording missing: {MESSAGE_KEY}"));
+        let wording = layouts.wording(MESSAGE_KEY);
         let message =
-            moly_law::text::custom_text_mesh::format_wording(wording, &[master.name.clone()])
+            moly_law::text::custom_text_mesh::format_wording(&wording, &[master.name.clone()])
                 .unwrap_or_else(|e| panic!("UI wording {MESSAGE_KEY}: {e}"));
         view.set_texture(&bindings.item_image, &alias);
         view.set_text(&bindings.message_text, message.clone());
