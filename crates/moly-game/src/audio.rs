@@ -2194,7 +2194,7 @@ pub(crate) fn advance_bgm(
                         label(&voice.cue),
                         voice.loop_start,
                         voice.loop_end,
-                        voice.loop_start
+                        voice.handoff_at
                     );
                 }
             }
