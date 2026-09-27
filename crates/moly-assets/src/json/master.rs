@@ -115,6 +115,21 @@ impl Default for MasterBases {
     }
 }
 
+/// Tables a region's master hosts do not publish. A request for one could
+/// only fail on every base, so it resolves as absent, by name, without one;
+/// its consumer names what it reads instead.
+const UNPUBLISHED: &[(RemoteRegion, &str)] = &[
+    // Both CN master hosts answer 404 for it.
+    (RemoteRegion::Cn, "configs"),
+];
+
+fn unpublished(region: RemoteRegion, table: &str) -> Option<String> {
+    UNPUBLISHED
+        .iter()
+        .any(|(only, name)| *only == region && *name == table)
+        .then(|| format!("the {} master hosts do not publish it", region_directory(region)))
+}
+
 /// The region's directory on a master host, as upstream names it.
 fn region_directory(region: RemoteRegion) -> &'static str {
     match region {
@@ -357,6 +372,12 @@ impl Pending {
     ) -> Option<Result<Parsed, MasterError>> {
         if let Some(reason) = data.absent.get(self.table) {
             return Some(Err(self.error(reason.clone())));
+        }
+        if let Some(reason) = unpublished(region, self.table) {
+            let error = self.error(reason.clone());
+            data.absent.insert(self.table, reason);
+            data.name_missing(&error, true);
+            return Some(Err(error));
         }
         let Some(base) = bases.0.get(self.base) else {
             let reason = if self.failures.is_empty() {
