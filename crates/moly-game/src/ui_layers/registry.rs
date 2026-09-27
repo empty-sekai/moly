@@ -18,8 +18,8 @@
 //! dialogType.ToString()` from Resources; a missing prefab returns null, and
 //! the show wrappers return null with it. The table lists the dialog types the
 //! MySekai code references (87) and the shared generic dialogs it reuses
-//! (17), with their enum values and whether the game's Resources carry the
-//! prefab (98 of the 104 do).
+//! (19), with their enum values and whether the game's Resources carry the
+//! prefab (100 of the 106 do).
 
 use std::collections::{HashMap, HashSet};
 
@@ -522,6 +522,16 @@ const DIALOG_TYPES: &[(u16, &str, DialogScope, bool)] = &[
     (2, "Common2ButtonDialog", DialogScope::Shared, true),
     (3, "Common2ButtonMediumDialog", DialogScope::Shared, true),
     (5, "RankUpDialog", DialogScope::Shared, true),
+    // `UIUtility.ShowRewardDialog` shows six or more rewards in this list
+    // dialog (`ShowCommonRewardVerticalDialog`); the MySekai rank-up on the
+    // way home (`MysekaiUtility.ShowPlayerRankUpDialogIfNeededAsync`) passes
+    // the rank rewards to it with no unlock topics.
+    (
+        23,
+        "CommonRewardVerticalListDialog",
+        DialogScope::Shared,
+        true,
+    ),
     (
         58,
         "AdditionalDownloadConfirmDialog",
