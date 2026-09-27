@@ -51,6 +51,9 @@ impl ParticleStreams {
                 ("in_NORMAL0", "vec3", None) => VertexFormat::Float32x3,
                 ("in_COLOR0", "vec4", None) => VertexFormat::Float32x4,
                 ("in_TEXCOORD0", "vec2", None) => VertexFormat::Float32x2,
+                // The default layout's UV stream is two floats; a float4 input
+                // gets the vertex fetch's fill for the absent components, 0 and 1.
+                ("in_TEXCOORD0", "vec4", None) if !self.custom => VertexFormat::Float32x4,
                 ("in_TEXCOORD1" | "in_TEXCOORD2", "vec4", None) => {
                     VertexFormat::Float32x4
                 }
@@ -116,18 +119,19 @@ impl ParticleStreams {
                     // space. Original source programs and material vectors use
                     // source world space; undo that reflection at this boundary.
                     reflect: matches!(field.name.as_str(), "in_POSITION0" | "in_NORMAL0"),
+                    fill_zw: field.name == "in_TEXCOORD0" && field.ty == "vec4",
                 }
             })
             .collect();
         let mut bytes = Vec::with_capacity(count * layout.array_stride as usize);
         for vertex in 0..count {
             for column in &columns {
-                let (name, data, width, reflect) = match column {
+                let (name, data, width, reflect, fill_zw) = match column {
                     Column::Zero => {
                         bytes.extend_from_slice(&[0; 16]);
                         continue;
                     }
-                    Column::Values { name, data, width, reflect } => (name, data, *width, *reflect),
+                    Column::Values { name, data, width, reflect, fill_zw } => (name, data, *width, *reflect, *fill_zw),
                 };
                 let values = (width > 0)
                     .then(|| data.get(vertex * width..(vertex + 1) * width))
@@ -140,6 +144,15 @@ impl ParticleStreams {
                 for (component, value) in values.iter().enumerate() {
                     let value = if component == 0 && reflect { -*value } else { *value };
                     bytes.extend_from_slice(&value.to_le_bytes());
+                }
+                if fill_zw {
+                    if width != 2 {
+                        return Err(SourceShaderError(format!(
+                            "particle geometry {name} has {width} components, not the UV stream's two"
+                        )));
+                    }
+                    bytes.extend_from_slice(&0.0f32.to_le_bytes());
+                    bytes.extend_from_slice(&1.0f32.to_le_bytes());
                 }
             }
         }
@@ -164,6 +177,8 @@ enum Column<'a> {
         data: &'a [f32],
         width: usize,
         reflect: bool,
+        /// A float4 input over the two-float UV stream: z = 0 and w = 1 follow.
+        fill_zw: bool,
     },
 }
 
