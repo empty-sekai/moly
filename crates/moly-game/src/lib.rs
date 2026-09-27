@@ -142,6 +142,7 @@ pub mod talk_camera;
 mod zoom_player_camera;
 mod talk_ingest;
 pub mod talk_window;
+mod two_button_dialog;
 pub mod uber_particle;
 pub mod ui_layers;
 pub mod ui_layout;

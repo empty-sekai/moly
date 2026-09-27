@@ -399,8 +399,13 @@ pub(crate) fn settled_host_view(doc: &UiPrefab, key: &str) -> UiPrefabView {
     view
 }
 
+/// The leave confirmation and the addresses of its three buttons.
 #[derive(Component)]
-pub(crate) struct ShellDialogRoot;
+pub(crate) struct ShellDialogRoot {
+    accept: String,
+    cancel: String,
+    close: String,
+}
 
 /// These are identities, not a second copy of layout data.
 struct ShellBindings {
@@ -642,12 +647,16 @@ pub(crate) fn spawn_when_ready(
             RenderLayers::layer(BALLOON_LAYER), view,
         ));
     }
+    let doc = layouts.document("Common2").expect("ready dialog prefab");
+    let dialog = crate::two_button_dialog::resolve(doc)
+        .unwrap_or_else(|e| panic!("leave confirmation: {e}"));
     let mut view = UiPrefabView::new("Common2", SITEMAP_LAYER);
     view.set_visible("WindowRoot/Tabs", false);
-    view.set_text("@34358", layouts.wordings["WORD_CANCEL"].clone());
-    view.set_text("@11788", layouts.wordings["WORD_LEFT_ROOM"].clone());
+    view.set_text(&dialog.negative_label, layouts.wordings["WORD_CANCEL"].clone());
+    view.set_text(&dialog.positive_label, layouts.wordings["WORD_LEFT_ROOM"].clone());
+    let root = ShellDialogRoot { accept: dialog.positive, cancel: dialog.negative, close: dialog.close };
     commands.spawn((
-        ShellDialogRoot, Visibility::Hidden, Transform::default(),
+        root, Visibility::Hidden, Transform::default(),
         RenderLayers::layer(SITEMAP_LAYER), view,
     ));
     commands.insert_resource(ShellSpawned);
@@ -885,7 +894,7 @@ pub(crate) fn click(
     (mut stack, entry): (ResMut<UiLayerStack>, Option<Res<crate::entry::EntrySequence>>),
     active: Option<Res<SiteActive>>,
     roots: Query<(&MenuShellRoot, &UiPrefabView)>,
-    dialogs: Query<&UiPrefabView, With<ShellDialogRoot>>,
+    dialogs: Query<(&ShellDialogRoot, &UiPrefabView)>,
     root_canvas: Option<Res<RootCanvas>>,
     mut sounds: ResMut<crate::audio::SeRequests>,
 ) {
@@ -904,12 +913,12 @@ pub(crate) fn click(
         consumed.0 = true;
         let Some(context) = dialog.leave_context.as_ref() else { return; };
         let on_confirm = context.on_confirm;
-        let Ok(view) = dialogs.single() else { return; };
+        let Ok((buttons, view)) = dialogs.single() else { return; };
         for position in taps {
             let canvas = to_canvas(position, window, root_canvas);
-            let accept = hit(view, &layouts, "@137046", canvas, size);
-            let cancel = hit(view, &layouts, "@113613", canvas, size)
-                || hit(view, &layouts, "WindowRoot/UIPartsCloseButton", canvas, size)
+            let accept = hit(view, &layouts, &buttons.accept, canvas, size);
+            let cancel = hit(view, &layouts, &buttons.cancel, canvas, size)
+                || hit(view, &layouts, &buttons.close, canvas, size)
                 || !hit(view, &layouts, "WindowRoot", canvas, size);
             if accept || cancel {
                 close_leave_confirm(&mut dialog, &mut stack);
