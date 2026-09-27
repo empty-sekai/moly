@@ -86,7 +86,7 @@
 //!
 //! 真源使能律由 user 态派生（上表右列）；本仓再叠一层「路由目标是否
 //! 已建」：目标未建的钮**置灰**（点按不响应、响亮记账），已建的走真
-//! 路由。当前已建目标唯一：情报层。两层门都报在开框行里
+//! 路由。已建目标：情报层、白图写生、库存层。两层门都报在开框行里
 //! （源使能 + 目标已建与否），不合成一个数。
 //!
 //! ## 生命周期（Setup 装配序，真源逐句）
@@ -142,7 +142,7 @@
 //! - 恢复体力对话框 `MysekaiRecoverBoostStaminaDialog`（DialogType 321）：
 //!   预制体不在任何 UI 根里（提取缺口）；钮保持置灰。建它时由它的
 //!   `onRecoverFinish` 调 [`update_stamina_gate_view`]。
-//! - 层栈目标未建的 5 钮（宝箱/换装/水晶商店/写生/素材交换）+ 相册
+//! - 层栈目标未建的 3 钮（换装/水晶商店/素材交换）+ 相册
 //!   （PhotoAlbum 域非层栈）+ 场景迁移 2 钮（回标题/退出）。
 //! - SE_SUBWINDOW_CLOSE · 教程/生日置灰覆盖。
 
@@ -265,9 +265,9 @@ impl MenuButton {
 
     /// 路由目标是否已建（本仓叠加门：未建 ⇒ 置灰；真源没有这层门——
     /// 它的全部目标都在）。已建目标：情报层、白图写生（写生态由
-    /// `home_action` 承接）。
+    /// `home_action` 承接）、库存层（`crate::inventory`）。
     fn target_built(self) -> bool {
-        matches!(self, MenuButton::Info | MenuButton::WhiteBlueprintSketch)
+        matches!(self, MenuButton::Info | MenuButton::WhiteBlueprintSketch | MenuButton::Chest)
     }
 
     /// 路由目标名（开框行与点按行用）。
@@ -1129,8 +1129,19 @@ pub(crate) fn click(
                 let built = which.target_built();
                 if source && built {
                     sounds.source_button(&layouts, view.key, which.source_path());
-                    // 已建目标：走真路由（情报层、白图写生）。
+                    // 已建目标：走真路由（情报层、白图写生、库存层）。
                     match which {
+                        MenuButton::Chest => {
+                            // OnClickChestButton: when ScreenManager.IsActiveScreen(607)
+                            // it only closes; else it reports a state to the
+                            // multiplayer room (no multiplayer domain here),
+                            // PushUIScreen(607) with no boot argument, then Close.
+                            info!(
+                                "[menu_dialog] 宝箱钮按下 → OnClickChestButton → PushUIScreen(MysekaiInventory 607)（已开即丢弃，IsActiveScreen(607) 同形；多人房状态上报无对应域）→ 关框"
+                            );
+                            layer_commands.write(LayerCommand::Push(LayerId::MysekaiInventory));
+                            close_requested = true;
+                        }
                         MenuButton::Info => {
                             // 真源 OnClickMysekaiInfoButton：先查已开 622
                             // （层栈同层重复压丢弃同形）→ 压层 → Close。
@@ -1151,8 +1162,8 @@ pub(crate) fn click(
                             sketch_modes.write(crate::home_action::SketchModeRequest::Enter);
                             close_requested = true;
                         }
-                        // 已建目标路由臂只有这两条（见 target_built）。
-                        _ => unreachable!("已建目标路由臂：情报、白图写生"),
+                        // 已建目标路由臂只有这三条（见 target_built）。
+                        _ => unreachable!("已建目标路由臂：情报、白图写生、宝箱"),
                     }
                 } else {
                     // 置灰钮点按不响应（真源里 enabled=false 的钮同样不

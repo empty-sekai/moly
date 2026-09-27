@@ -71,6 +71,7 @@ mod harvest_particles;
 pub mod inactive_nodes;
 pub mod info;
 mod interaction;
+mod inventory;
 pub mod joystick;
 pub mod light;
 mod material_order;

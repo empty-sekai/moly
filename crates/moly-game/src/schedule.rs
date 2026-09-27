@@ -1100,6 +1100,35 @@ pub fn install(app: &mut App) {
                 .after(menu_shell::place)
                 .after(info::click),
         );
+    // The inventory screen (screen 607): the masters at start-up (their names
+    // join the shell charset before the shared atlas bakes), the view once
+    // its layouts, the fixture thumbnails and the masters are in; taps in the
+    // same chain as the info screen; placement after the screen manager and
+    // before the prefab views draw.
+    app.add_systems(Startup, crate::inventory::load)
+        .add_systems(
+            Update,
+            (
+                crate::inventory::parse_glyphs.before(menu_shell::parse),
+                crate::inventory::spawn_when_ready,
+            ),
+        )
+        .add_systems(
+            Update,
+            crate::inventory::click
+                .run_if(crate::game_settings::scene_input_enabled)
+                .after(menu_shell::click)
+                .before(pick::pick)
+                .before(ui_layers::advance),
+        )
+        .add_systems(
+            Update,
+            crate::inventory::place
+                .after(ui_layers::advance)
+                .after(menu_shell::place)
+                .after(crate::inventory::click)
+                .before(crate::ui_layout::render),
+        );
     // ---- 菜单对话框（追加段：外壳菜单钮的目标，Dialog 槽） ----
     // The menu's named mock enable inputs (visiting and three permissions,
     // native instruments); stamina and rank are the server model's client
