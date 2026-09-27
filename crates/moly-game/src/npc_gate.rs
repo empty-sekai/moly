@@ -4,9 +4,13 @@
 //! Every visiting NPC is created on the entry-site objective, hidden. When
 //! every one of them runs it, the controller draws the gathering and places
 //! the members one after another on the home site: each placement is the
-//! agent's warp to the position, the show, and the cancel of the entry-site
-//! objective with its ForceUpdateObjective (a reset and a new talk data);
-//! a member at a random cell also raises the flag that skips its next Rest.
+//! agent's warp to the position, the show, and the presenter's
+//! TryCancelCurrentObjective on its current objective (normally the
+//! entry-site one, whose cancel does nothing; a member a group talk drafted
+//! meanwhile holds its sub objective, whose cancel changes to Idle and makes
+//! one ForceUpdateObjective) followed, when that reports true, by the
+//! presenter's ForceUpdateObjective (a reset and a new talk data); a member
+//! at a random cell also raises the flag that skips its next Rest.
 //!
 //! Frames follow the controller's awaits: a member placed at a random cell
 //! waits one frame for its character (the pick is made then) and one more
@@ -56,7 +60,7 @@ use crate::client_config::{
 };
 use crate::npc::{CharacterUnitId, WalkState};
 use crate::npc_objective::{
-    cell_of, owe_force_updates, platform_seed, BodyWait, MemberRng, ObjectiveFace, ObjectiveMind,
+    cell_of, platform_seed, BodyWait, MemberRng, ObjectiveFace, ObjectiveMind,
 };
 
 /// Which part of the plan a member belongs to.
@@ -180,16 +184,26 @@ fn entity_of(world: &mut World, unit: u32) -> Option<Entity> {
 }
 
 /// Update (after the AI loop): hide the characters that started the
-/// entry-site objective on this frame, then run the appearance.
-pub(crate) fn appear(world: &mut World) {
+/// entry-site objective on this frame, then run the appearance. The random
+/// cells and the near ring read the site's walkable list (see
+/// `npc::walkable`); while it is not available the appearance holds.
+pub(crate) fn appear(
+    world: &mut World,
+    walkable: &mut bevy::ecs::system::SystemState<crate::npc::walkable::WalkableSource>,
+) {
     let frame = world.resource::<FrameCount>().0;
     hide_entry_site_starts(world, frame);
     let state = std::mem::take(&mut world.resource_mut::<GateAppearance>().state);
-    let state = match state {
-        State::Waiting => match start(world, frame) {
+    let cells = match state {
+        State::Waiting | State::Running(_) => walkable.get_mut(world).cells(),
+        _ => Ok(Vec::new()),
+    };
+    let state = match (state, cells) {
+        (state @ (State::Waiting | State::Running(_)), Err(_)) => state,
+        (State::Waiting, Ok(cells)) => match start(world, frame, &cells) {
             Begin::Run(run) => {
                 let mut run = Box::new(run);
-                if advance(world, &mut run, frame) {
+                if advance(world, &mut run, frame, &cells) {
                     State::Done
                 } else {
                     State::Running(run)
@@ -198,15 +212,15 @@ pub(crate) fn appear(world: &mut World) {
             Begin::NotYet => State::Waiting,
             Begin::Ended => State::Ended,
         },
-        State::Running(mut run) => {
-            if advance(world, &mut run, frame) {
+        (State::Running(mut run), Ok(cells)) => {
+            if advance(world, &mut run, frame, &cells) {
                 State::Done
             } else {
                 State::Running(run)
             }
         }
-        State::Done => State::Done,
-        State::Ended => State::Ended,
+        (State::Done, _) => State::Done,
+        (State::Ended, _) => State::Ended,
     };
     world.resource_mut::<GateAppearance>().state = state;
     crate::npc::entry_probe::step(world);
@@ -231,7 +245,7 @@ fn hide_entry_site_starts(world: &mut World, frame: u32) {
 /// on the home site (the appearance takes the home site model whatever site
 /// the player starts on; this host holds that ground only while home is
 /// loaded, so a floor start's appearance runs when home is first loaded).
-fn start(world: &mut World, frame: u32) -> Begin {
+fn start(world: &mut World, frame: u32, cells: &[Cell]) -> Begin {
     if world.get_resource::<crate::npc::Spawned>().is_none() {
         return Begin::NotYet;
     }
@@ -275,10 +289,7 @@ fn start(world: &mut World, frame: u32) -> Begin {
         error!("[npc-gate] frame={frame} the gathering is empty: its minimum raises, the appearance ends and no character appears (the appeared flags stay unset; the entry's wait ends on its timeout)");
         return Begin::Ended;
     };
-    let walkable: Vec<Cell> = world
-        .get_resource::<ObjectiveFace>()
-        .map(|face| face.walkable().to_vec())
-        .unwrap_or_default();
+    let walkable: Vec<Cell> = cells.to_vec();
     emit(json!({
         "step": "start",
         "frame": frame,
@@ -310,7 +321,7 @@ fn start(world: &mut World, frame: u32) -> Begin {
 }
 
 /// Runs every step due on `frame`; `true` when the last member is placed.
-fn advance(world: &mut World, run: &mut Run, frame: u32) -> bool {
+fn advance(world: &mut World, run: &mut Run, frame: u32, cells: &[Cell]) -> bool {
     loop {
         let Some(&(unit, kind)) = run.members.get(run.index) else {
             return true;
@@ -321,7 +332,7 @@ fn advance(world: &mut World, run: &mut Run, frame: u32) -> bool {
                     return false;
                 }
                 if kind == Kind::Near {
-                    match near_position(world, run, unit, frame) {
+                    match near_position(world, run, unit, frame, cells) {
                         Some(position) => {
                             run.phase = Phase::Place {
                                 at: frame + 2,
@@ -347,7 +358,7 @@ fn advance(world: &mut World, run: &mut Run, frame: u32) -> bool {
                 if at > frame {
                     return false;
                 }
-                let position = random_position(world, run, unit, kind, fallback, frame);
+                let position = random_position(run, unit, kind, fallback, frame, cells);
                 run.phase = Phase::Place {
                     at: frame + 1,
                     position,
@@ -384,20 +395,13 @@ fn advance(world: &mut World, run: &mut Run, frame: u32) -> bool {
 /// GetRandomPosition over the rebuilt walkable list: one engine pick, the
 /// picked cell's corner; an empty list gives zero without a draw.
 fn random_position(
-    world: &mut World,
     run: &mut Run,
     unit: u32,
     kind: Kind,
     fallback: bool,
     frame: u32,
+    walkable: &[Cell],
 ) -> [f32; 3] {
-    let Some(face) = world.get_resource::<ObjectiveFace>() else {
-        emit(
-            json!({"step": "pick", "frame": frame, "unit": unit, "kind": kind.word(), "refused": "no walk face"}),
-        );
-        return [0.0; 3];
-    };
-    let walkable = face.walkable();
     let before = run.rand.state;
     let (pick, cell) = if walkable.is_empty() {
         (None, None)
@@ -427,7 +431,13 @@ fn random_position(
 /// radii from the panel distances, then the wander search over the walkable
 /// cells minus the player's and the NPCs' cells. `None` when the answer is
 /// (almost) zero.
-fn near_position(world: &mut World, run: &mut Run, unit: u32, frame: u32) -> Option<[f32; 3]> {
+fn near_position(
+    world: &mut World,
+    run: &mut Run,
+    unit: u32,
+    frame: u32,
+    cells: &[Cell],
+) -> Option<[f32; 3]> {
     let first = run.first_position.unwrap_or([0.0; 3]);
     let (overlap, communication) = {
         let configs = world.resource::<ClientConfigs>();
@@ -454,9 +464,7 @@ fn near_position(world: &mut World, run: &mut Run, unit: u32, frame: u32) -> Opt
             occupied.push(cell_of(transform.translation.x, transform.translation.z));
         }
     }
-    let face = world.get_resource::<ObjectiveFace>()?;
-    let eligible: Vec<Cell> = face
-        .walkable()
+    let eligible: Vec<Cell> = cells
         .iter()
         .copied()
         .filter(|cell| !occupied.contains(cell))
@@ -466,6 +474,7 @@ fn near_position(world: &mut World, run: &mut Run, unit: u32, frame: u32) -> Opt
         .copied()
         .filter(|&cell| objective::ring_filter(origin, cell, min_cells, max_cells))
         .collect();
+    let face = world.get_resource::<ObjectiveFace>()?;
     let mut permute = GuidPermute {
         keys: &mut run.keys,
         count: 0,
@@ -502,11 +511,11 @@ fn near_position(world: &mut World, run: &mut Run, unit: u32, frame: u32) -> Opt
     (!none).then_some(answer)
 }
 
-/// ForceSetPosition (the agent's warp), Show, then the cancel of the
-/// current objective: when it reports true, ForceUpdateObjective (owed to
-/// the next AI pass; the objective ends on the next frame), and for a
-/// random-cell member SetImmediatelyExecuteNextObjective. Returns the
-/// placed position.
+/// ForceSetPosition (the agent's warp), Show, then
+/// TryCancelCurrentObjective: when it reports true, the presenter's
+/// ForceUpdateObjective (owed to the next AI pass; the objective ends on the
+/// next frame), and for a random-cell member
+/// SetImmediatelyExecuteNextObjective. Returns the placed position.
 fn place(
     world: &mut World,
     unit: u32,
@@ -545,15 +554,22 @@ fn place(
     if let Some(mut visibility) = world.get_mut::<Visibility>(entity) {
         *visibility = Visibility::Inherited;
     }
-    let cancelled = world
+    // TryCancelCurrentObjective with the cancelled objective's own OnCancel
+    // (the entry-site objective's does nothing; a drafted member's
+    // while-doing-wait sub objective changes to Idle and makes one
+    // ForceUpdateObjective), then on true the presenter's ForceUpdateObjective
+    // (its own cancel reports true again on the cancelled objective, then one
+    // more ForceUpdateObjective) and, for a random-cell member,
+    // SetImmediatelyExecuteNextObjective.
+    let current = world
         .get::<ObjectiveMind>(entity)
-        .is_some_and(ObjectiveMind::cancel_reports);
+        .and_then(|mind| mind.current)
+        .map(|kind| kind as u8);
+    let cancelled = crate::npc::gate_entries::try_cancel_current_objective(world, entity);
     if cancelled {
-        if let Some(mut mind) = world.get_mut::<ObjectiveMind>(entity) {
-            owe_force_updates(&mut mind, frame.wrapping_add(1), 1);
-            if immediate {
-                mind.skip_next_rest = true;
-            }
+        crate::npc::gate_entries::force_update_objective(world, entity);
+        if immediate {
+            crate::npc::gate_entries::set_immediately_execute_next_objective(world, entity, true);
         }
     }
     let placed = world.get::<WalkState>(entity).map(|walk| walk.0.position);
@@ -565,6 +581,7 @@ fn place(
         "position": position,
         "warped": warped,
         "placed": placed,
+        "current": current,
         "cancelled": cancelled,
         "immediate": cancelled && immediate,
     }));

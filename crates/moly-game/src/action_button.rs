@@ -357,6 +357,10 @@ impl FixtureFacts {
         let package = self.package_by_glb.get(glb)?;
         self.by_package.get(package)
     }
+
+    fn package_for_glb(&self, glb: &str) -> Option<&str> {
+        self.package_by_glb.get(glb).map(String::as_str)
+    }
 }
 
 /// One placed fixture's table facts, resolved once. The root's model handle
@@ -965,6 +969,7 @@ pub(crate) fn advance(
     site_move: Option<Res<crate::site_move::SiteMoveActive>>,
     homes: Option<Res<crate::entry::house::HomeFixtures>>,
     room_door: Option<Res<crate::site_move::room_door::RoomDoor>>,
+    system_fixtures: Res<crate::system_fixture::SystemFixtures>,
 ) {
     let state = &mut *state;
     // A saved layout re-fires entry once the scan next runs.
@@ -1037,6 +1042,11 @@ pub(crate) fn advance(
         let facts_of = match cached {
             Some(cached) => cached,
             None => {
+                // The cached answer includes SetupSystemFixture's table: wait
+                // until it has resolved (to a table or a named failure).
+                if !system_fixtures.resolved() {
+                    continue;
+                }
                 let Some(path) = server.get_path(&source.0) else {
                     continue;
                 };
@@ -1047,8 +1057,12 @@ pub(crate) fn advance(
                     .unwrap_or_default()
                     .to_owned();
                 let row = facts.row_for_glb(&glb).copied();
+                let package = facts.package_for_glb(&glb);
                 resolved = ActionButtonFixture {
-                    button: row.as_ref().and_then(fixture_button),
+                    button: row.as_ref().and_then(|row| {
+                        fixture_button(row)
+                            .or_else(|| system_fixture_button(row, package, &system_fixtures))
+                    }),
                     row,
                     glb,
                 };
@@ -1427,6 +1441,15 @@ fn fixture_enter(
                 }
             })
         }
+        // A system fixture button; IsCanActionFixture passes a system
+        // fixture (fixture type system).
+        _ if system_button_available(candidate.button).is_some() => {
+            Ok(if system_button_available(candidate.button) == Some(true) {
+                Enter::Push
+            } else {
+                Enter::Skip("IsActionButtonTypeAvailable is false")
+            })
+        }
         _ => inputs.enter(&probe),
     };
     match entered {
@@ -1642,6 +1665,13 @@ fn remove_not_colliding(
                     }
                 })
             }
+            _ if system_button_available(candidate.button).is_some() => {
+                Ok(if system_button_available(candidate.button) == Some(true) {
+                    Availability::Available
+                } else {
+                    Availability::Unavailable
+                })
+            }
             _ => inputs.availability(&probe),
         };
         match available {
@@ -1704,10 +1734,40 @@ fn fixture_button(row: &FixtureRow) -> Option<ButtonType> {
         return None;
     }
     // 无动作类别的家具走另一张表：家具视图上那个「玩家能做什么」的
-    // 字段，源从系统家具的建立处写入，不在家具主表里。本仓没有那个
-    // 字段，所以这一支目前只能到这里——`system` 与 `gate` 两类家具
-    // 会被上面的类别门放行，但出哪个按钮定不下来。
+    // 字段，源从系统家具的建立处写入，不在家具主表里。That table
+    // (SetupSystemFixture) is `crate::system_fixture`; see
+    // [`system_fixture_button`].
     None
+}
+
+/// The by-category branch's sensor type: `SetupSystemFixture`'s table
+/// (`crate::system_fixture`), for a system or gate fixture, mapped to its
+/// button. Only the actions in `STACKED_ACTIONS` show a button; the others
+/// are classified and withheld. A table that failed is named once where it
+/// resolved, and no system fixture shows a button.
+fn system_fixture_button(
+    row: &FixtureRow,
+    package: Option<&str>,
+    table: &crate::system_fixture::SystemFixtures,
+) -> Option<ButtonType> {
+    if !row.fixture_type.can_action() {
+        return None;
+    }
+    let action = table.player_action(row.fixture_type, package?).ok()??;
+    crate::system_fixture::STACKED_ACTIONS
+        .contains(&action)
+        .then(|| crate::system_fixture::system_fixture_button(action))
+}
+
+/// IsActionButtonTypeAvailable of a stacked system fixture button (after
+/// CheckTargetSite, which holds by construction); `None` for every other
+/// button type. `OpenMysekaiBgmSelect`: `CanShowBGMSelectButton` is
+/// `!IsVisiting`, and the product is never visiting.
+fn system_button_available(button: ButtonType) -> Option<bool> {
+    match button {
+        ButtonType::OpenMysekaiBgmSelect => Some(true),
+        _ => None,
+    }
 }
 
 /// Update（advance 之后）：按栈首摆件、换图标。
@@ -2155,10 +2215,14 @@ fn dispatch(
             info!("[action_button] 情报按钮按下 → PushUIScreen(家具情报 622，源带启动参数) → 层栈压层");
         }
         (ButtonType::OpenMysekaiBgmSelect, _) => {
-            // 教程门（教程未完不弹层）本仓无对应域，直接压层——具名挂账
-            // 见本函数头。
-            layer_commands.write(LayerCommand::Push(LayerId::MysekaiBgmSelect));
-            info!("[action_button] 选曲按钮按下 → PushUIScreen(选曲 626，教程门未建直接压层) → 层栈压层");
+            // OnOpenMysekaiBGMSelect -> MoveScreenLayerMysekaiBGMSelect(the
+            // current site, the head's fixture): the BGM select screen
+            // re-checks IsMusicPlay and pushes screen 626 with its boot data.
+            // 教程门（教程未完不弹层）本仓无对应域——具名挂账见本函数头。
+            commands.insert_resource(crate::bgm_select::BgmSelectOpenRequest(
+                fixture_target.cloned(),
+            ));
+            info!("[action_button] 选曲按钮按下 → MoveScreenLayerMysekaiBGMSelect（教程门未建）");
         }
         (ButtonType::OpenMysekaiConvert, _) => {
             layer_commands.write(LayerCommand::Push(LayerId::MysekaiConvert));

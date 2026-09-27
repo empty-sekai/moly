@@ -60,6 +60,16 @@ impl ShellHost {
         self != Self::MyRoom
     }
 
+    /// The host's field screen (the site controller's base screen).
+    fn screen(self) -> LayerId {
+        match self {
+            Self::Home => LayerId::MysekaiHome,
+            Self::MyRoom => LayerId::MysekaiMyRoom,
+            Self::Harvest => LayerId::MysekaiHarvest,
+            Self::Delivery => LayerId::MysekaiDelivery,
+        }
+    }
+
     /// The host of the harvest site category (MysekaiSiteCategory 2); the
     /// other three hosts are housing_home 0, housing_room 1 and delivery 3.
     fn is_harvest(self) -> bool {
@@ -556,6 +566,10 @@ pub(crate) fn parse(
         Option<Res<crate::delivery::screen::DeliveryScreen>>,
         Option<Res<crate::delivery::screen::DeliveryCharset>>,
     ),
+    (get_resource_inputs, get_resource): (
+        Option<Res<crate::get_resource::GetResourceInputs>>,
+        Option<Res<crate::get_resource::GetResourceCharset>>,
+    ),
 ) {
     let Some(handle) = handle else { return; };
     // A stage does not render prefab-based menus or their fixed button labels.
@@ -582,6 +596,9 @@ pub(crate) fn parse(
     // The delivery screen's item names (read from materials.json), when the
     // delivery screen is installed.
     if delivery_screen.is_some() && delivery.is_none() { return; }
+    // The acquisition dialogs' names and wordings (masters and wordings
+    // read), when the acquisition dialogs are installed.
+    if get_resource_inputs.is_some() && get_resource.is_none() { return; }
     let parsed: Value = serde_json::from_str(&asset.0).expect("site name document");
     let rows = parsed["sites"].as_array().expect("site name rows");
     let mut chars = layouts.text_chars();
@@ -596,6 +613,9 @@ pub(crate) fn parse(
     }
     if let Some(delivery) = delivery.as_deref() {
         chars.extend(delivery.chars.iter().copied());
+    }
+    if let Some(get_resource) = get_resource.as_deref() {
+        chars.extend(get_resource.chars.iter().copied());
     }
     for wording in ["WORD_LEFT_ROOM", "WORD_CANCEL", "MSG_CONFIRM_LEAVE_MYSEKAI",
         "WORD_NOT_SAVE_RETURN", "WORD_SAVE_RETURN", "WORD_EDIT_SAVE_CONFIRMATION", "MSG_LEARN_PHENOMENA"]
@@ -684,11 +704,19 @@ pub(crate) fn place(
         let is_host = host == Some(root.host);
         let set_up = is_host && !root.active;
         root.active = is_host;
-        // The home HUD appears in the entry's OnFinishEnterAsync.
-        let visible = crate::entry::hud_open(entry.as_deref()) && stack.on_field() && is_host;
+        // The home HUD appears in the entry's OnFinishEnterAsync. The field
+        // screen draws while its layer is active, its exit animation included.
+        let screen = root.host.screen();
+        let visible = crate::entry::hud_open(entry.as_deref())
+            && (stack.on_field() || stack.is_active(screen))
+            && is_host;
         *visibility = if visible { Visibility::Inherited } else { Visibility::Hidden };
         transform.scale = Vec3::splat(scale);
         let doc = layouts.document(root.host.key()).expect("spawned field prefab");
+        // The screen animations write the root's CanvasGroup alpha.
+        if let Some(alpha) = stack.screen_visual(screen).alpha {
+            view.set_alpha(&doc.prefab, alpha);
+        }
         // TimeUtility.GetCurrentTimestamp: the client's server date plus the
         // real time since it.
         let now_ms = || {

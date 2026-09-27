@@ -2,8 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 const origin = "https://host.example", cdn = "https://cdn.example", MiB = 1048576;
-const current = cdn + "/moly/snapshots/cn-6.0.0-current/assets/";
-const old = cdn + "/moly/snapshots/cn-6.0.0-old/assets/";
+const current = cdn + "/moly/snapshots/cn-1.2.3-current/assets/";
+const old = cdn + "/moly/snapshots/cn-1.2.3-old/assets/";
 const engine = cdn + "/moly/releases/current/pkg/webgpu/moly-app_bg.wasm";
 const oldEngine = cdn + "/moly/releases/old/pkg/webgpu/moly-app_bg.wasm";
 let serial = 0;

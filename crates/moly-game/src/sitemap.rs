@@ -1313,6 +1313,76 @@ fn bake_text_atlas(
 #[derive(Component)]
 pub(crate) struct SitemapRoot;
 
+/// A drawn part's own alpha under the site map's screen root, before the
+/// root's `CanvasGroup` alpha multiplies it. The screen's start and exit
+/// animations (`ScreenAlphaInOut` on the screen root) write that group alpha;
+/// a Sprite has no inherited alpha, so the two passes below apply it.
+#[derive(Component)]
+pub(crate) struct ScreenAlphaBase(f32);
+
+/// PreUpdate: the parts the last frame multiplied get their own alpha back,
+/// so this frame's writers read and write the parts' own values.
+pub(crate) fn screen_alpha_restore(
+    mut sprites: Query<(&mut Sprite, &ScreenAlphaBase)>,
+    mut hosts: Query<(&mut crate::ui_particle::UiParticleHost, &ScreenAlphaBase), Without<Sprite>>,
+) {
+    for (mut sprite, base) in &mut sprites {
+        sprite.color.set_alpha(base.0);
+    }
+    for (mut host, base) in &mut hosts {
+        host.alpha = base.0;
+    }
+}
+
+/// PostUpdate: after this frame's writers, every part under the root keeps
+/// its own alpha and shows it times the site map layer's group alpha
+/// ([`crate::ui_layers::ScreenManager::screen_visual`]; 1 while no animation
+/// wrote it).
+pub(crate) fn screen_alpha_apply(
+    mut commands: Commands,
+    manager: Option<Res<crate::ui_layers::ScreenManager>>,
+    roots: Query<Entity, With<SitemapRoot>>,
+    children: Query<&Children>,
+    mut sprites: Query<(&mut Sprite, Option<&mut ScreenAlphaBase>)>,
+    mut hosts: Query<
+        (
+            &mut crate::ui_particle::UiParticleHost,
+            Option<&mut ScreenAlphaBase>,
+        ),
+        Without<Sprite>,
+    >,
+) {
+    let Ok(root) = roots.single() else {
+        return;
+    };
+    let group = manager
+        .as_deref()
+        .and_then(|manager| manager.screen_visual(MenuScreenType::MysekaiSiteMap).alpha)
+        .unwrap_or(1.0);
+    let parts: Vec<Entity> = children.iter_descendants(root).collect();
+    for entity in parts {
+        if let Ok((mut sprite, base)) = sprites.get_mut(entity) {
+            let own = sprite.color.alpha();
+            match base {
+                Some(mut base) => base.0 = own,
+                None => {
+                    commands.entity(entity).insert(ScreenAlphaBase(own));
+                }
+            }
+            sprite.color.set_alpha(own * group);
+        } else if let Ok((mut host, base)) = hosts.get_mut(entity) {
+            let own = host.alpha;
+            match base {
+                Some(mut base) => base.0 = own,
+                None => {
+                    commands.entity(entity).insert(ScreenAlphaBase(own));
+                }
+            }
+            host.alpha = own * group;
+        }
+    }
+}
+
 /// 地图根（底图 + 图标列；缩放 = map_fit × canvas_scale）。
 #[derive(Component)]
 pub(crate) struct MapRoot;
@@ -2563,8 +2633,17 @@ pub(crate) fn click(
     leave_dialog: Option<Res<crate::menu_shell::ShellDialogState>>,
     root_canvas: Option<Res<crate::canvas::RootCanvas>>,
     mut layer_commands: MessageWriter<LayerCommand>,
+    manager: Option<Res<crate::ui_layers::ScreenManager>>,
 ) {
     if !buttons.just_pressed(MouseButton::Left) {
+        return;
+    }
+    // The screen's start and exit disable taps on the UI layer
+    // (`DisableTapScreen` until `EnableTapScreen`; the site map's data does
+    // not enable tap animation), and a map in its exit is no longer current.
+    if manager.as_deref().is_some_and(|manager| {
+        manager.current_screen() != Some(MenuScreenType::MysekaiSiteMap) || !manager.can_tap_ui()
+    }) {
         return;
     }
     // A dialog over the map takes the tap (the Dialog slot blocks the layers
@@ -2620,8 +2699,9 @@ pub(crate) fn click(
 /// `MOLY_SITEMAP_AUTOCLICK_SITE` set, after that many seconds the hook opens
 /// the map (a `PushUIScreen`, as the menu button does) and then taps the
 /// site's icon at its position through [`tap`], the path a real tap takes.
-/// It retries each frame until a branch takes the tap (the map not yet open,
-/// the icon not yet shown, or an open animation running).
+/// It retries each frame until a branch takes the tap (the map not yet open
+/// or still in its start animation, the icon not yet shown, or an open
+/// animation running).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn smoke_autoclick(
     time: Res<Time>,
@@ -2638,6 +2718,7 @@ pub(crate) fn smoke_autoclick(
     ),
     mut layer_commands: MessageWriter<LayerCommand>,
     mut armed: Local<Option<Option<(f32, String, bool)>>>,
+    manager: Option<Res<crate::ui_layers::ScreenManager>>,
 ) {
     let (Some(data), Some(text)) = (data, text) else {
         return;
@@ -2677,6 +2758,13 @@ pub(crate) fn smoke_autoclick(
             layer_commands.write(LayerCommand::Push(MenuScreenType::MysekaiSiteMap));
             info!("sitemap: auto click opens the map (PushUIScreen MysekaiSiteMap)");
         }
+        return;
+    }
+    // A real tap goes through `click`, which the screen's start and exit
+    // block (`DisableTapScreen`); the instrument waits the same way.
+    if manager.as_deref().is_some_and(|manager| {
+        manager.current_screen() != Some(MenuScreenType::MysekaiSiteMap) || !manager.can_tap_ui()
+    }) {
         return;
     }
     let canvas = spot.position;

@@ -272,9 +272,9 @@ mod public_resource_tests {
     fn public_immutable_roots_accept_different_configured_https_origins() {
         for value in [
             "/moly/sources/local/",
-            "https://assets-one.example/moly/snapshots/cn-6.0.0-a/assets/",
+            "https://assets-one.example/moly/snapshots/cn-1.2.3-a/assets/",
             "https://cdn-two.example:8443/moly/asset-store/",
-            "https://assets.pjsk.moe/sekai-extra-assets/snapshots/cn-6.0.0-a/assets/",
+            "https://assets.pjsk.moe/sekai-extra-assets/snapshots/cn-1.2.3-a/assets/",
             "https://assets.pjsk.moe/sekai-extra-assets/asset-store/",
         ] {
             assert!(validate_asset_prefix(value).is_ok(), "{value}");

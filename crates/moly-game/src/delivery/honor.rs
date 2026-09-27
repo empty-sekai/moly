@@ -27,13 +27,11 @@
 //! (`OnHardwareBackKeyProcess` -> `CloseProcess`), and the dialog view's own
 //! close taps.
 //!
-//! Named gaps: neither dialog has a view in this product. The root carries
-//! no `CommonRewardSubWindowDialog` prefab; the `HonorRewardSubWindowDialog`
-//! prefab is on the root, but its message key (`MSG_RECEIVED_BIRTHDAY_HONOR`
-//! or `WORD_ACHIEVEMENT_GET` by the honor's rarity and level) and its honor
-//! image need the honors master and the honor images, which the root does
-//! not carry. Without a view the open and close animations pass in the frame
-//! they start, and a dialog closes only on the back key.
+//! The views are the acquisition module's ([`crate::get_resource`]): each
+//! shown dialog hands it its message and Setup argument
+//! (`set_reward_payload`), and a tap on a view's close area sends the close
+//! request the back key sends. The open and close animations are not built
+//! and pass in the frame they start.
 //!
 //! State 9: `Initialize` switches the camera to the honor reward state
 //! (`delivery_camera`), turns the avatar toward the camera (DOLookAt of
@@ -99,7 +97,7 @@ fn show(
             screens.open_dialog(id);
             screens.dialog_open_finished(id);
             info!(
-                "[delivery] {caller}: {dialog:?} shown and opened ({what}); no view in this product: the open animation passes at once; awaiting its onClose (the back key closes it)"
+                "[delivery] {caller}: {dialog:?} shown and opened ({what}); the view is the acquisition module's; the open animation passes at once; awaiting its onClose (its close area or the back key closes it)"
             );
             Some(Shown { id, dialog })
         }
@@ -224,7 +222,12 @@ pub(crate) fn advance(
     mut states: ResMut<PlayerAvatarStates>,
     mut progress: MessageWriter<DeliveryProgress>,
     mut back_keys: MessageReader<DialogBackKeyEvent>,
-    mut screens: ResMut<ScreenManager>,
+    // The acquisition module's opener takes each shown dialog's payload
+    // (paired with the screen manager: a system takes at most 16 params).
+    (mut screens, mut openers): (
+        ResMut<ScreenManager>,
+        ResMut<crate::get_resource::GetResourceOpeners>,
+    ),
     mut awaiting: ResMut<DialogAwait>,
     mut face: ResMut<super::flow::DeliveryFace>,
     site: Res<super::site::DeliverySite>,
@@ -284,6 +287,15 @@ pub(crate) fn advance(
                             "DialogUtility.ShowGetResourceDialogAsync",
                             &what,
                         );
+                        if let Some(shown) = shown {
+                            openers.set_reward_payload(
+                                shown.id,
+                                crate::get_resource::RewardPayload::Common {
+                                    message_key: TOTAL_REWARD_MESSAGE.to_owned(),
+                                    resources: run.others.len(),
+                                },
+                            );
+                        }
                         dialog_open = shown.map(|s| s.id);
                         run.phase = RewardPhase::OthersDialog(shown);
                         false
@@ -379,7 +391,7 @@ pub(crate) fn advance(
                         run.honor.len(),
                         run.honor.iter().map(|r| (r.resource_id, r.level)).collect::<Vec<_>>()
                     );
-                    let shown = show_honor(&mut screens, &run.honor, 0);
+                    let shown = show_honor(&mut screens, &mut openers, &run.honor, 0);
                     dialog_open = shown.map(|s| s.id);
                     run.phase = RewardPhase::HonorDialog { shown, next: 1 };
                 }
@@ -394,7 +406,7 @@ pub(crate) fn advance(
                     if *next >= run.honor.len() {
                         break;
                     }
-                    *shown = show_honor(&mut screens, &run.honor, *next);
+                    *shown = show_honor(&mut screens, &mut openers, &run.honor, *next);
                     *next += 1;
                     if shown.is_some() {
                         break;
@@ -438,20 +450,35 @@ pub(crate) fn advance(
 
 /// The chain's dialog of honor `index` (its `Setup(resource,
 /// OpenSE.MysekaiGetBlueprint)`).
-fn show_honor(screens: &mut ScreenManager, honor: &[Reward], index: usize) -> Option<Shown> {
+fn show_honor(
+    screens: &mut ScreenManager,
+    openers: &mut crate::get_resource::GetResourceOpeners,
+    honor: &[Reward],
+    index: usize,
+) -> Option<Shown> {
     let reward = &honor[index];
-    show(
+    let shown = show(
         screens,
         HONOR_REWARD_DIALOG,
         "ChainDialogPlayer.ChainSubWindowDialog",
         &format!(
-            "honor {} of {}: honor id {} level {:?}; its message key needs the honor's master rarity",
+            "honor {} of {}: honor id {} level {:?}; the view picks its message key from the honor's rarity",
             index + 1,
             honor.len(),
             reward.resource_id,
             reward.level
         ),
-    )
+    );
+    if let Some(shown) = shown {
+        openers.set_reward_payload(
+            shown.id,
+            crate::get_resource::RewardPayload::Honor {
+                honor_id: reward.resource_id as i32,
+                level: reward.level.unwrap_or(0) as i32,
+            },
+        );
+    }
+    shown
 }
 
 /// After the reward dialog (or without one), with an honor: the

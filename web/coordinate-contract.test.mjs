@@ -7,18 +7,18 @@ import { createHash } from "node:crypto";
 import { COORDINATE_CONTRACT as contract, COORDINATE_DOCUMENTS, preflightCoordinates, validateCoordinatePair, validateCoordinateSources } from "./coordinate-contract.mjs";
 import { validatePublicationCoordinates } from "./coordinate-publication.mjs";
 const sha = bytes => createHash("sha256").update(bytes).digest("hex");
-const identity = { region: "cn", version: "6.0.0" };
+const identity = { region: "cn", version: "1.2.3" };
 function sourceDocuments() {
   return {
-    "source.json": { coordinateContract: contract, source: { region: "cn", appVersion: "6.0.0" } },
+    "source.json": { coordinateContract: contract, source: { region: "cn", appVersion: "1.2.3" } },
     "fixture-models/index.json": { version: 3, coordinateContract: contract, packages: { sample: { status: "exported", glb: "sample.glb", coordinateContract: contract } } },
     "fixture-attach/attach-points.json": { version: 2, coordinateContract: contract, packages: {} },
   };
 }
 function descriptors(documents) {
   const release = { schemaVersion: 1, releaseId: "new", contractVersion: 2, coordinateContract: contract };
-  const snapshot = { id: "cn-6.0.0-test", ...identity, coordinateContract: contract,
-    assets: "/moly/snapshots/cn-6.0.0-test/assets/",
+  const snapshot = { id: "cn-1.2.3-test", ...identity, coordinateContract: contract,
+    assets: "/moly/snapshots/cn-1.2.3-test/assets/",
     provenance: { coordinateContract: contract, coordinateModels: {files: 1,sha256:"a".repeat(64)}, coordinateDocuments: Object.fromEntries(Object.entries(documents).map(([name, value]) => [name, sha(JSON.stringify(value))])) } };
   return { release, snapshot };
 }
@@ -56,7 +56,7 @@ test("preflight checks exact immutable descriptor pair and bytes before engine a
   };
   assert.equal((await preflightCoordinates(options,{fetchImpl})).coordinateContract, contract);
   assert.equal(calls.length, 5);
-  assert.ok(calls.includes("https://cdn.test/moly/snapshots/cn-6.0.0-test/snapshot.json"));
+  assert.ok(calls.includes("https://cdn.test/moly/snapshots/cn-1.2.3-test/snapshot.json"));
   delete snapshot.coordinateContract; calls.length = 0;
   await assert.rejects(preflightCoordinates(options,{fetchImpl}), /snapshot: coordinate contract/);
   assert.equal(calls.length, 2, "legacy snapshot fails before source downloads or WASM");

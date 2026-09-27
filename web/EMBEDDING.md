@@ -155,7 +155,7 @@ is no implicit CDN or legacy OSS fallback:
 
 ```js
 resourceBase: "https://assets.pjsk.moe/sekai-extra-assets/",
-assets: "https://assets.pjsk.moe/sekai-extra-assets/snapshots/cn-6.0.0-.../assets/",
+assets: "https://assets.pjsk.moe/sekai-extra-assets/snapshots/<region>-<gameVersion>-.../assets/",
 ```
 
 Release objects use `releases/<id>/...`, snapshots use `snapshots/<id>/...`,
@@ -263,5 +263,4 @@ Each engine has decoded `.wasm`, lossless `.gz` and `.br` representations.
 `downloadBytes` identifies Brotli bytes; `decodedBytes`, `gzipBytes` and
 `brotliBytes` remain separate. Servers must negotiate `Accept-Encoding`, respect
 explicit `q=0`, use representation-specific lengths/ETags, and preserve WASM MIME.
-The default browser build uses the `wasm-size` profile. See the size closeout
-record for feature retention and actual measured results.
+The default browser build uses the `wasm-size` profile.

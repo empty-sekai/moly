@@ -17,8 +17,8 @@ const origin = "https://moesekai.test";
 
 test("only open stage versions protect engines and the selected base resources", () => {
   const cdn = "https://cdn.example";
-  const base = cdn + "/moly/snapshots/cn-6.0.0-current/assets/";
-  const oldBase = cdn + "/moly/snapshots/cn-6.0.0-old/assets/";
+  const base = cdn + "/moly/snapshots/cn-1.2.3-current/assets/";
+  const oldBase = cdn + "/moly/snapshots/cn-1.2.3-old/assets/";
   const clients = [{ url: origin + "/moly/releases/current/stage.html?resource_origin=" + encodeURIComponent(cdn) + "&assets=" + encodeURIComponent(base) }];
   const required = new Set([base + "base.json", oldBase + "base.json"]);
   const active = activeResourceRoots(clients, origin);
@@ -37,16 +37,16 @@ test("only open stage versions protect engines and the selected base resources",
 
 test("CDN retention preserves immutable identities and excludes private routes", () => {
   for (const cdn of ["https://assets-one.example", "https://cdn-two.example:8443"]) {
-  const descriptor = cdn + "/moly/snapshots/cn-6.0.0-test/assets/browser-base.json";
+  const descriptor = cdn + "/moly/snapshots/cn-1.2.3-test/assets/browser-base.json";
   const client = origin + "/moly/releases/stage-a/stage.html?resource_origin=" + encodeURIComponent(cdn);
   assert.equal(clientResourceOrigin(client, origin), cdn);
   assert.ok(resourceIdentity(descriptor, origin, clientResourceOrigin(client, origin)));
   assert.equal(resourceIdentity(descriptor, origin), null);
   assert.equal(resourceIdentity(descriptor, origin, "https://unselected.example"), null);
   assert.deepEqual(requiredResourceURLs({
-    schemaVersion: 1, generator: "moly-browser-base-v1", region: "cn", gameVersion: "6.0.0",
+    schemaVersion: 1, generator: "moly-browser-base-v1", region: "cn", gameVersion: "1.2.3",
     files: [{ path: "audio/loop.json" }],
-  }, descriptor, origin, cdn), [descriptor, cdn + "/moly/snapshots/cn-6.0.0-test/assets/audio/loop.json"]);
+  }, descriptor, origin, cdn), [descriptor, cdn + "/moly/snapshots/cn-1.2.3-test/assets/audio/loop.json"]);
   for (const url of [cdn + "/api/player", cdn + "/moly/manifest.json", cdn + ".evil.test/moly/asset-store/"])
     assert.equal(resourceIdentity(url, origin, cdn), null);
   }
@@ -54,7 +54,7 @@ test("CDN retention preserves immutable identities and excludes private routes",
 test("production S3 prefix admits only its configured logical resources", () => {
   const cdn = "https://assets.pjsk.moe";
   const root = cdn + "/sekai-extra-assets/";
-  const descriptor = root + "snapshots/cn-6.0.0-test/assets/browser-base.json";
+  const descriptor = root + "snapshots/cn-1.2.3-test/assets/browser-base.json";
   const client = origin + "/moly/releases/stage-a/stage.html?resource_base=" + encodeURIComponent(root) +
     "&resource_origin=" + encodeURIComponent(cdn);
   assert.equal(clientResourceBase(client, origin), root);
@@ -67,7 +67,7 @@ test("production S3 prefix admits only its configured logical resources", () => 
 test("production S3 prefix pins release and snapshot roots by the stage selection", () => {
   const cdn = "https://assets.pjsk.moe";
   const root = cdn + "/sekai-extra-assets/";
-  const assets = root + "snapshots/cn-6.0.0-test/assets/";
+  const assets = root + "snapshots/cn-1.2.3-test/assets/";
   const client = origin + "/moly/releases/stage-a/stage.html?resource_base=" + encodeURIComponent(root) +
     "&resource_origin=" + encodeURIComponent(cdn) + "&assets=" + encodeURIComponent(assets);
   const active = activeResourceRoots([{ url: client }], origin);

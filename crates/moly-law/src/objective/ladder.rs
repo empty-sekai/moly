@@ -118,8 +118,13 @@ impl Decision {
         }
     }
 
-    /// 是否可取消：源在四档构造后写 `CanCancel = 1`——两处反应档、换站
-    /// 保持档与问候档；其余目标一律不可取消。
+    /// Whether the ladder itself writes `CanCancel = 1` on the objective it
+    /// constructs: after the two reaction rows, the change-site keep row and
+    /// the greeting row, and inside the interrupt dispatch for markers 5
+    /// (change site), 12 (the immediately-played fixture timeline) and 14
+    /// (entry site). Every other row leaves it to the objective's own
+    /// constructor (see `presenter::objective_can_cancel` for the value each
+    /// class ends with).
     pub fn can_cancel(&self) -> bool {
         matches!(
             self,
@@ -127,6 +132,13 @@ impl Decision {
                 | Decision::AfterEditLayoutReaction
                 | Decision::ChangeSite
                 | Decision::Greeting
+                | Decision::Interrupt {
+                    dispatch: InterruptDispatch::Direct(
+                        ObjectiveType::ChangeSite
+                            | ObjectiveType::ImmediatelyFixtureTimeline
+                            | ObjectiveType::EntrySite
+                    ),
+                }
         )
     }
 

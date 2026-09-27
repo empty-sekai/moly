@@ -525,7 +525,7 @@ fn sdiv(a: i32, b: i32) -> i32 {
 
 /// `HarvestUtility.GetBoostStaminaStockCount(boost)`: the boost pool over a
 /// tenth of the boost master's `maxStamina` (C# integer division, both).
-fn boost_stamina_stock_count(boost: i32, max: crate::server::StaminaMax) -> i32 {
+pub(crate) fn boost_stamina_stock_count(boost: i32, max: crate::server::StaminaMax) -> i32 {
     sdiv(boost, max.boost / 10)
 }
 
@@ -533,7 +533,7 @@ fn boost_stamina_stock_count(boost: i32, max: crate::server::StaminaMax) -> i32 
 /// maximum, enhance / enhance maximum, (boost mod the boost stock unit) /
 /// unit), each quotient in single precision. The unit is a tenth of the boost
 /// maximum (integer), the remainder is `boost - sdiv(boost, unit) * unit`.
-fn stamina_gage_rate(stamina: crate::server::Stamina, max: crate::server::StaminaMax) -> (f32, f32, f32) {
+pub(crate) fn stamina_gage_rate(stamina: crate::server::Stamina, max: crate::server::StaminaMax) -> (f32, f32, f32) {
     let unit = max.boost / 10;
     let rest = stamina.boost.wrapping_sub(sdiv(stamina.boost, unit).wrapping_mul(unit));
     (
@@ -547,35 +547,35 @@ fn stamina_gage_rate(stamina: crate::server::Stamina, max: crate::server::Stamin
 /// isForceBoostView)` and `UpdateStaminaGageRate(staminaData, rates,
 /// isBoostMode)` leave on the view.
 #[derive(Debug, Clone, PartialEq)]
-struct StaminaViewState {
+pub(crate) struct StaminaViewState {
     /// `_staminaGageImage.color`: white, or the palette entry
     /// [`STAMINA_GAUGE_COLOR_ENTRY`] when neither enhance nor boost is held.
-    gauge_palette: bool,
+    pub(crate) gauge_palette: bool,
     /// `_staminaGradiantImage.enabled`.
-    gradient: bool,
+    pub(crate) gradient: bool,
     /// `_staminaIcon.SpriteName`.
-    icon: &'static str,
+    pub(crate) icon: &'static str,
     /// `_staminaIcon.color`: the palette entry
     /// [`STAMINA_EMPTY_ICON_COLOR_ENTRY`] when the stamina is empty, else white.
-    icon_palette: bool,
+    pub(crate) icon_palette: bool,
     /// `_staminaGageImageOnStock.enabled`; `_staminaGageImageOnNoStock` is
     /// its opposite.
-    on_stock: bool,
+    pub(crate) on_stock: bool,
     /// `_boostStaminaCount`: enabled with sprite `txt_stamina_{n}`, or disabled.
-    boost_count: Option<i32>,
+    pub(crate) boost_count: Option<i32>,
     /// `_staminaGageImage.fillAmount`.
-    fill: f32,
+    pub(crate) fill: f32,
 }
 
 /// `SetStaminaGaugeColor`'s palette entry of a gauge without enhance or boost.
-const STAMINA_GAUGE_COLOR_ENTRY: usize = 55;
+pub(crate) const STAMINA_GAUGE_COLOR_ENTRY: usize = 55;
 /// `SetStaminaGaugeColor`'s palette entry of the icon of an empty stamina.
-const STAMINA_EMPTY_ICON_COLOR_ENTRY: usize = 5;
+pub(crate) const STAMINA_EMPTY_ICON_COLOR_ENTRY: usize = 5;
 
 /// `UpdateStaminaGateView`'s two view calls: `UpdateStaminaView(staminaData,
 /// GetStaminaData's stock count, false)` and `UpdateStaminaGageRate(
 /// staminaData, GetStaminaGageRate(staminaData), false)`.
-fn stamina_view_state(stamina: crate::server::Stamina, max: crate::server::StaminaMax) -> StaminaViewState {
+pub(crate) fn stamina_view_state(stamina: crate::server::Stamina, max: crate::server::StaminaMax) -> StaminaViewState {
     let stock = boost_stamina_stock_count(stamina.boost, max);
     stamina_view_state_with(stamina, stock, stamina_gage_rate(stamina, max))
 }
@@ -1212,7 +1212,7 @@ fn rank_gauge_targets(doc: &moly_assets::ui_layout::UiPrefab) -> RankGaugeTarget
 }
 
 /// A serialized reference inside the layout file: its path id.
-fn reference(doc: &moly_assets::ui_layout::UiPrefab, fields: &serde_json::Value, name: &str) -> i64 {
+pub(crate) fn reference(doc: &moly_assets::ui_layout::UiPrefab, fields: &serde_json::Value, name: &str) -> i64 {
     let pointer = fields[name].as_array().filter(|p| p.len() == 2)
         .unwrap_or_else(|| panic!("{}: {name} is not a reference", doc.prefab));
     assert_eq!(pointer[0].as_i64(), Some(0), "{}: {name} points outside the layout file", doc.prefab);

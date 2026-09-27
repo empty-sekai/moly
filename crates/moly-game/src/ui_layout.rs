@@ -215,6 +215,25 @@ const DOCUMENTS: &[(&str, &str)] = &[
     ("HarvestSummary", "hud/ScreenLayerMysekaiHarvestSummary.json"),
 ];
 
+/// Documents a root may lack. A missing one (absent, or refused by the
+/// region root's manifest) is named once and left out; the view that draws
+/// it refuses by name. Every other document is required.
+const OPTIONAL_DOCUMENTS: &[(&str, &str)] = &[
+    ("CommonReward", "menu/CommonRewardSubWindowDialog.json"),
+    ("HonorReward", "menu/HonorRewardSubWindowDialog.json"),
+    ("RefreshBirthdayPlant", "menu/MysekaiRefreshBirthdayPlantSubWindowDialog.json"),
+    ("HonorImage", "menu/UIPartsHonorImage.json"),
+    ("BgmSelect", "bgmselect/ScreenLayerMysekaiBGMSelect.json"),
+    ("BgmSelectListCell", "bgmselect/MysekaiBGMSelectListCell.json"),
+    ("Inventory", "inventory/ScreenLayerMysekaiInventory.json"),
+    ("InventoryFixtureList", "inventory/FixtureContentList.json"),
+    ("InventoryMaterialList", "inventory/MaterialContentList.json"),
+    ("InventoryItemList", "inventory/ItemContentList.json"),
+    ("InventoryToolList", "inventory/ToolContentList.json"),
+    ("InventoryItemCell", "inventory/UIPartsItemThumbnailListViewItem.json"),
+    ("InventoryTabCell", "inventory/ContentListSelectorCell.json"),
+];
+
 #[derive(Resource, Default)]
 pub(crate) struct UiLayouts {
     /// Active-theme colour of every colour palette entry, by `ColorEntry`
@@ -223,6 +242,8 @@ pub(crate) struct UiLayouts {
     /// The tween defaults, when the root carries them (a region root only).
     tween_defaults: Option<TweenDefaults>,
     docs: HashMap<String, UiPrefab>,
+    /// Optional documents the root lacks (named once when found missing).
+    missing_documents: HashSet<String>,
     document_revisions: HashMap<String, u64>,
     images: HashMap<String, Handle<Image>>,
     pub(crate) wordings: HashMap<String, String>,
@@ -303,6 +324,7 @@ impl UiSources {
         let root = region.map_or_else(|| ROOT.to_owned(), |region| format!("moly://ui-{region}/"));
         let docs = DOCUMENTS
             .iter()
+            .chain(OPTIONAL_DOCUMENTS)
             .filter(|(name, _)| !stage_only || *name == "Talk")
             .map(|(name, path)| (*name, *path, server.load(format!("{root}{path}"))))
             .collect();
@@ -507,22 +529,49 @@ pub(crate) fn parse(
     }
     let mut pending = false;
     for (name, path, handle) in &sources.docs {
-        if layouts.docs.contains_key(*name) {
+        if layouts.docs.contains_key(*name) || layouts.missing_documents.contains(*name) {
             continue;
         }
+        let optional = OPTIONAL_DOCUMENTS.iter().any(|(candidate, _)| candidate == name);
         if let LoadState::Failed(e) = server.load_state(handle) {
+            if optional {
+                error!(
+                    "UI {name}: its document {path} is not in {} ({e}); the view that draws it refuses by name",
+                    sources.root
+                );
+                layouts.missing_documents.insert((*name).to_owned());
+                continue;
+            }
             panic!("UI {name} source asset failed in {}: {e:?}", sources.root);
         }
         let Some(source) = json.get(handle) else {
             pending = true;
             continue;
         };
-        let mut doc = UiPrefab::parse(&source.0).unwrap_or_else(|e| panic!("UI {name}: {e}"));
+        let mut doc = match UiPrefab::parse(&source.0) {
+            Ok(doc) => doc,
+            Err(e) if optional => {
+                error!("UI {name}: its document {path} is refused ({e}); the view that draws it refuses by name");
+                layouts.missing_documents.insert((*name).to_owned());
+                continue;
+            }
+            Err(e) => panic!("UI {name}: {e}"),
+        };
         match sources.region.as_ref() {
             Some(region) => {
                 let manifest = region.parsed.as_ref().expect("UI region manifest parsed");
-                let identity = manifest.admit_prefab(path, &source.0, &doc)
-                    .unwrap_or_else(|e| panic!("UI {name}: {e}"));
+                let identity = match manifest.admit_prefab(path, &source.0, &doc) {
+                    Ok(identity) => identity,
+                    Err(e) if optional => {
+                        error!(
+                            "UI {name}: the {} root refuses its document {path} ({e}); the view that draws it refuses by name",
+                            region.region
+                        );
+                        layouts.missing_documents.insert((*name).to_owned());
+                        continue;
+                    }
+                    Err(e) => panic!("UI {name}: {e}"),
+                };
                 doc.rebase_images(&sources.root);
                 info!(
                     "UI prefab {name}: {} source nodes from the {} UI root {path}; client {} unity {}; \
