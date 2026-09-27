@@ -179,6 +179,7 @@ fn emitter_scale(system: &Runtime) -> Result<[f32; 3], &'static str> {
         Some(crate::particle_geometry::Scaling::Hierarchy) => system.trail.as_ref().and_then(|trail| trail.owner)
             .map(|owner| owner.emitter_scale)
             .ok_or("Hierarchy scaling: the trail job's emitter scale comes with the owner words, which are not attached"),
+        Some(crate::particle_geometry::Scaling::Shape { .. }) => Err("Shape scaling: the trail job's reading of it is not transcribed"),
         None => Err("legacy billboard carries no authored scaling mode"),
     }
 }
@@ -194,6 +195,7 @@ pub(crate) fn draw_eligible(emitter: &EmitterParams, evidence: Option<ShapeEmitt
         // The owner words the host attaches to a Local simulation carry it.
         Some(crate::particle_geometry::Scaling::Hierarchy) if emitter.simulation_space == SimulationSpace::Local => Ok(()),
         Some(crate::particle_geometry::Scaling::Hierarchy) => Err("Hierarchy scaling of a World simulation: the trail job's emitter scale is not produced here"),
+        Some(crate::particle_geometry::Scaling::Shape { .. }) => Err("Shape scaling: the trail job's reading of it is not transcribed"),
         None => Err("legacy billboard carries no authored scaling mode"),
     }
 }

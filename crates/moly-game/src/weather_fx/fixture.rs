@@ -661,6 +661,45 @@ pub(crate) fn instance_owner(anchor: Entity, scaling: moly_law::particle::owner:
     Ok(moly_law::particle::child_emit::ChildOwner::from_owner(&owner))
 }
 
+/// The owner update of a Shape-scaled system from its spawned instance (the
+/// chain from the top of the instance down to its node, as
+/// [`instance_owner`] reads it): the matrix of the chain's rotation and
+/// translation only, in runtime axes, which the host hands to the system as
+/// its owner (births, the World-space outer owner and the draw), and the
+/// chain's lossy global scale, the shape scale the Shape module places
+/// births with. The particle scale is one (see
+/// [`crate::particle_geometry::Scaling::Shape`]).
+pub(crate) fn shape_owner(anchor: Entity, transform: impl Fn(Entity) -> Option<Transform>,
+    parent: impl Fn(Entity) -> Option<Entity>) -> Result<(GlobalTransform, Vec3), String> {
+    use moly_assets::coordinates::{source_position, source_rotation};
+    let mut chain = Vec::new();
+    let mut current = Some(anchor);
+    while let Some(entity) = current {
+        let local = transform(entity).unwrap_or_default();
+        chain.push(moly_law::particle::owner::SourceTrs {
+            t: source_position(local.translation).to_array(),
+            q: source_rotation(local.rotation).to_array(),
+            s: local.scale.to_array(),
+        });
+        current = parent(entity);
+    }
+    chain.reverse();
+    let owner = moly_law::particle::owner::owner_matrices(&chain, moly_law::particle::owner::OwnerScaling::Shape)
+        .map_err(|refused| format!("Shape scaling owner words {refused:?}"))?;
+    // Runtime axes are the source axes with x reflected: the matrix's x row
+    // and x column change sign, each element in exactly one of them.
+    let mut m = owner.local_to_world;
+    for c in 0..4 {
+        for r in 0..4 {
+            if (r == 0) != (c == 0) {
+                m[4 * c + r] = -m[4 * c + r];
+            }
+        }
+    }
+    let matrix = Mat4::from_cols_array(&m);
+    Ok((GlobalTransform::from(bevy::math::Affine3A::from_mat4(matrix)), Vec3::from_array(owner.shape_scale)))
+}
+
 /// On a played parent: its installed sub-emitter targets by node, which the
 /// host hands its commands to after each frame's updates.
 #[derive(Component, Clone)]

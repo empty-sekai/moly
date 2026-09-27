@@ -1691,6 +1691,7 @@ fn owner_scaling(scaling: crate::particle_geometry::Scaling) -> moly_law::partic
     match scaling {
         crate::particle_geometry::Scaling::Hierarchy => moly_law::particle::owner::OwnerScaling::Hierarchy,
         crate::particle_geometry::Scaling::Local { .. } => moly_law::particle::owner::OwnerScaling::Local,
+        crate::particle_geometry::Scaling::Shape { .. } => moly_law::particle::owner::OwnerScaling::Shape,
     }
 }
 
@@ -2896,6 +2897,18 @@ pub(crate) fn source_scaling(system: &Value, by_path: &HashMap<String, &Value>, 
                 unit_chain: if authored_chain { unit_scale_chain(by_path, node) } else { document_unit_chain(by_path, node) },
             })
         }
+        // Shape: the owner update's matrix drops every scale and its shape
+        // scale is the chain's lossy global scale, which only a host that
+        // composes the owner from the instance hands in every frame (the
+        // fixture host, see `fixture::shape_owner`); a host that draws the
+        // authored chain with its full transform refuses it.
+        Some(2) if !authored_chain => {
+            let chain = authored_trs(by_path, node)?;
+            let owner = moly_law::particle::owner::owner_matrices(&chain, moly_law::particle::owner::OwnerScaling::Shape)
+                .map_err(|refused| format!("Shape scaling owner words {refused:?}"))?;
+            Ok(crate::particle_geometry::Scaling::Shape { shape_scale: Vec3::from_array(owner.shape_scale) })
+        }
+        Some(2) => Err("Shape scaling: this host draws the authored chain with its full transform, not the owner update's rotation and translation".into()),
         value => Err(format!("unconsumed source particle scalingMode {value:?}")),
     }
 }

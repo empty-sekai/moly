@@ -768,6 +768,26 @@ impl Geometry {
         }
     }
 
+    /// A Shape-scaled system's lossy global scale of this frame (see
+    /// [`crate::particle_geometry::Scaling::Shape`]); nothing for another
+    /// scaling mode.
+    pub(crate) fn set_shape_scale(&mut self, value: Vec3) {
+        let scaling = match self {
+            Self::Billboard { .. } => return,
+            Self::Mesh(draw) => &mut draw.scaling,
+            Self::SourceBillboard(draw) => &mut draw.scaling,
+        };
+        if let crate::particle_geometry::Scaling::Shape { shape_scale } = scaling {
+            *shape_scale = value;
+        }
+    }
+
+    /// Whether the authored scaling mode is Shape.
+    pub(crate) fn shape_scaled(&self) -> bool {
+        matches!(self.shape_evidence().map(|evidence| evidence.scaling),
+            Some(crate::particle_geometry::Scaling::Shape { .. }))
+    }
+
     pub(crate) fn shape_evidence(&self) -> Option<ShapeEmitterEvidence> {
         match self {
             Self::Billboard { .. } => None,

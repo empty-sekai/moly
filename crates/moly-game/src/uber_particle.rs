@@ -1394,7 +1394,28 @@ pub(crate) fn advance_fixture_particles(
             clear_trail_mesh(&mut meshes, trail);
             continue;
         }
-        let Some(anchor) = system.anchor.and_then(|e| anchors.get(e).ok()).copied() else { commands.entity(entity).despawn(); continue; };
+        let Some(mut anchor) = system.anchor.and_then(|e| anchors.get(e).ok()).copied() else { commands.entity(entity).despawn(); continue; };
+        // A Shape-scaled system's owner is the owner update's matrix of the
+        // instance chain's rotation and translation only, and its shape
+        // scale is that chain's lossy global scale, both of this frame.
+        if system.geometry.shape_scaled() {
+            let node = system.anchor.expect("anchored above");
+            match crate::weather_fx::fixture::shape_owner(node,
+                |entity| locals.get(entity).ok().map(|(transform, _)| *transform),
+                |entity| locals.get(entity).ok().and_then(|(_, parent)| parent.map(ChildOf::parent))) {
+                Ok((owner, shape_scale)) => {
+                    anchor = owner;
+                    system.geometry.set_shape_scale(shape_scale);
+                }
+                Err(reason) => {
+                    error!(%reason, effect=%system.effect, node=%system.node, "Shape scaling owner refused: the system draws nothing");
+                    if let Some(mesh) = meshes.get_mut(&system.mesh) {
+                        if mesh.count_vertices() != 0 { *mesh = billboard::empty_mesh(); }
+                    }
+                    continue;
+                }
+            }
+        }
         // A Director's cached sub-emitter target: its root's Simulate steps
         // it, and it draws after that root's family ran.
         if director_targets.get(entity).is_ok() {

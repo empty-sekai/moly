@@ -1057,6 +1057,13 @@ pub(crate) fn child_target_eligible(emitter: &EmitterParams, evidence: Option<Sh
     -> Result<(), String> {
     birth::qualify_emitter(&own_clock_emitter(emitter)).map_err(|refused| format!("{refused:?}"))?;
     native_shape_state_eligible(emitter, evidence)?;
+    // A Shape-scaled system's owner and shape scale are composed by the
+    // fixture host's per-frame loop for a system it steps itself; a target's
+    // owner words and draw context are composed elsewhere and do not take
+    // that rule, so such a target is refused by name.
+    if matches!(evidence.map(|evidence| evidence.scaling), Some(crate::particle_geometry::Scaling::Shape { .. })) {
+        return Err("Shape-scaled sub-emitter target: its owner is not composed by the Shape rule on the target path".into());
+    }
     qualify_target(emitter).map_err(|refused| format!("{refused:?}"))?;
     if let Some(params) = &emitter.shape {
         let law = ShapeBirthLaw::from_params(params).map_err(|refused| format!("target Shape {refused:?}"))?;

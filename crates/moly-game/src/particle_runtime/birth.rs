@@ -772,6 +772,10 @@ pub(super) fn shape_emitter_state(
             }
             [1.0; 3]
         }
+        // The owner update's shape scale under Shape scaling: the chain's
+        // lossy global scale, which the host composes every frame from the
+        // instance with the rotation-and-translation owner it hands in.
+        crate::particle_geometry::Scaling::Shape { shape_scale } => shape_scale.to_array(),
     };
     Ok(Some(ShapeEmitterState {
         emitter_scale,
