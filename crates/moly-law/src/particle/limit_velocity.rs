@@ -357,3 +357,92 @@ pub fn advance_age_percent(
     new = new.min(cap);
     *age_percent = if 100.0 < old { old } else { new };
 }
+
+#[cfg(test)]
+mod native_magnitude_tests {
+    use super::*;
+    use crate::particle::json::{parse, Value};
+
+    fn word(v: &Value) -> u32 { v.as_f64().unwrap() as u32 }
+
+    /// Deliberate misreadings of the clamp section, for the mutant arms.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Mutant { None, NoHashOffset, LerpFromMax, AgeUnscaled, DtUnscaled, AnimatedIgnored }
+
+    fn mutant_step(law: &LimitVelocity, v: &mut [f32; 3], anim: [f32; 3], seed: u32, age: f32, dt: f32, m: Mutant) {
+        let k = if m == Mutant::DtUnscaled { 1.0 - (1.0 - law.dampen).powf(dt.abs()) } else { clamp_k(law.dampen, dt) };
+        let limit = match &law.magnitude {
+            MagnitudeLaw::TwoConstants { min, max } => {
+                let r = if m == Mutant::NoHashOffset {
+                    hash_mix(seed, seed.wrapping_mul(HASH_M).wrapping_add(HASH_C_CONST))
+                } else {
+                    clamp_lerp_hash(seed)
+                };
+                if m == Mutant::LerpFromMax { (min - max) * r + max } else { (max - min) * r + min }
+            }
+            MagnitudeLaw::Baked(b) if m == Mutant::AgeUnscaled => b.evaluate(if age > 0.0 { age } else { 0.0 }),
+            other => other.limit(seed, age),
+        };
+        if m == Mutant::AnimatedIgnored { clamp_body(v, [0.0; 3], limit, k) } else { clamp_body(v, anim, limit, k) }
+    }
+
+    // Native ClampVelocityModule rows on the two-constant and optimized-curve
+    // magnitude paths (drag 0, as every data row), at dt lanes whose powf
+    // exponent is 0, 1 or 2. Each admitted row must match bit for bit (a NaN
+    // matches a NaN); every mutant arm must turn rows red.
+    #[test]
+    #[ignore = "MOLY_CLAMP_MAGNITUDE_NATIVE must identify the native clamp-velocity magnitude rows"]
+    fn clamp_magnitude_paths_match_native() {
+        let path = std::env::var_os("MOLY_CLAMP_MAGNITUDE_NATIVE").expect("MOLY_CLAMP_MAGNITUDE_NATIVE");
+        let receipt = parse(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(receipt.get("summary").unwrap().get("sourceSha256").unwrap().as_str(),
+            Some("937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9"));
+        let arms = [Mutant::NoHashOffset, Mutant::LerpFromMax, Mutant::AgeUnscaled, Mutant::DtUnscaled, Mutant::AnimatedIgnored];
+        let mut red = vec![0usize; arms.len()];
+        let (mut cases, mut refused, mut rows, mut two, mut baked) = (0, 0, 0, 0, 0);
+        let size = DragSize { components: [1.0; 3], size3d: false };
+        for case in receipt.get("cases").unwrap().as_array().unwrap() {
+            cases += 1;
+            let magnitude = crate::particle::schema::min_max_curve(case.get("magnitude"), "magnitude").unwrap();
+            let dampen = case.get("dampen").unwrap().as_f64().unwrap() as f32;
+            let optimized = case.get("optimized").unwrap().as_bool().unwrap();
+            let law = match LimitVelocity::from_parts(false, &magnitude, dampen, Some(&MinMaxCurve::Constant(0.0)),
+                Some(true), Some(true)) {
+                Ok(law) => law,
+                Err(reason) => {
+                    assert!(!optimized, "case {cases}: an optimized magnitude refused: {reason}");
+                    refused += 1;
+                    continue;
+                }
+            };
+            assert!(optimized, "case {cases}: the law admitted a magnitude the reader leaves unoptimized");
+            match law.magnitude { MagnitudeLaw::TwoConstants { .. } => two += 1, MagnitudeLaw::Baked(_) => baked += 1, _ => {} }
+            for row in case.get("rows").unwrap().as_array().unwrap() {
+                let r: Vec<u32> = row.as_array().unwrap().iter().map(word).collect();
+                let (seed, age, dt) = (r[0], f32::from_bits(r[1]), f32::from_bits(r[2]));
+                let start = [f32::from_bits(r[3]), f32::from_bits(r[4]), f32::from_bits(r[5])];
+                let anim = [f32::from_bits(r[6]), f32::from_bits(r[7]), f32::from_bits(r[8])];
+                let native = [r[9], r[10], r[11]];
+                let same = |v: [f32; 3]| v.iter().zip(native).all(|(a, n)| (a.is_nan() && f32::from_bits(n).is_nan()) || a.to_bits() == n);
+                let mut v = start;
+                law.step(&mut v, anim, seed, age, dt, size).unwrap();
+                assert!(same(v), "case {cases} seed {seed:#x} age {:#x} dt {:#x}: {:?} vs native {:?}",
+                    r[1], r[2], v.map(f32::to_bits), native);
+                let mut m = start;
+                mutant_step(&law, &mut m, anim, seed, age, dt, Mutant::None);
+                assert!(same(m));
+                for (arm, count) in arms.iter().zip(red.iter_mut()) {
+                    let mut m = start;
+                    mutant_step(&law, &mut m, anim, seed, age, dt, *arm);
+                    *count += usize::from(!same(m));
+                }
+                rows += 1;
+            }
+        }
+        let tally: Vec<String> = arms.iter().zip(&red).map(|(a, n)| format!("{a:?} {n}")).collect();
+        println!("clamp magnitude: cases {cases}, refused {refused}, two constants {two}, baked {baked}, rows {rows}, mismatches 0; mutants red: {}",
+            tally.join(", "));
+        assert!(two > 0 && baked > 0);
+        assert!(red.iter().all(|n| *n > 0), "a mutant arm stayed green: {tally:?}");
+    }
+}

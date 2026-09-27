@@ -81,17 +81,31 @@
 //!   变换，不读 convex；物理凸包不是导航输入）；Box/Sphere/Capsule
 //!   仍是实心体。
 //! * **重烘触发沿**：执行侧监听放稳足迹变化，每次变化重烘。
+//! * **NavMeshObstacle carving, two treatments.** The engine carves every
+//!   carving obstacle after the bake, per tile (`CarveNavMeshTile`: the
+//!   shape's hull pushed out by the agent radius, then `ClipPolys`). Runtime
+//!   obstacles (objects spawned after the bake, e.g. harvest objects) follow
+//!   that path here ([`obstacle`], [`WalkField::carve_obstacles`]); the hull
+//!   is pinned to the engine library by native rows. The placed fixtures'
+//!   obstacles still go through this bake as colliders (voxel null, then the
+//!   agent-radius erosion), so their carved edge is the eroded raster rather
+//!   than the hull's planes; moving them onto the runtime clip is the
+//!   remaining step. The runtime clip keeps this mesh's triangles: the
+//!   engine's `Subtract`/`MergePolygons` rebuild of the kept part into merged
+//!   convex polygons is not ported (same family as the missing convex merge),
+//!   and the tile position the engine subtracts is the origin here.
 
 mod contour;
 mod funnel;
 mod grid;
+pub mod obstacle;
 mod polymesh;
 mod query;
 mod region;
 
 use crate::fixture::position::{layout_type, TILE_SIZE};
 use crate::fixture::GridPosition;
-pub use polymesh::SurfaceMove;
+pub use polymesh::{RuntimeCarve, SurfaceMove};
 pub use query::SNAP_MAX_DISTANCE;
 
 /// 烘焙 agent 半径（米）：`"MysekaiCharacter"` agent 类型的表值。
@@ -276,6 +290,27 @@ fn walkable_height_world(voxel: f32) -> f32 {
     (AGENT_HEIGHT / ch).floor() * ch
 }
 
+/// A runtime NavMeshObstacle carve for [`WalkField::carve_obstacles`]: the
+/// shape's hull (`CarveNavMeshTile` with the MysekaiCharacter agent's height
+/// and radius, the build settings the carve job passes), converted to the
+/// moly frame, tested at the navigation surface height `floor` under it.
+/// `None` when the hull is degenerate (the engine skips such a shape).
+///
+/// The tile position the engine subtracts before building the hull is the
+/// tile's centre; this field is untiled and uses the origin, which changes
+/// only the rounding of the hull's coordinates.
+pub fn runtime_carve(shape: &obstacle::CarveShape, floor: f32) -> Option<RuntimeCarve> {
+    let pos = [0.0; 3];
+    let points = obstacle::carve_points(shape, pos);
+    let hull = obstacle::carve_hull(&points, shape, pos, AGENT_HEIGHT, AGENT_RADIUS)?.to_moly(pos);
+    Some(RuntimeCarve {
+        planes: hull.planes,
+        min: [hull.bounds_min[0], hull.bounds_min[2]],
+        max: [hull.bounds_max[0], hull.bounds_max[2]],
+        floor,
+    })
+}
+
 /// 一条阻挡足迹（世界系 xz 矩形，半开 [min, max)）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Obstacle {
@@ -365,6 +400,8 @@ pub struct BakeCounts {
     pub contour_verts: usize,
     /// 导航多边形网的单元数（三角形；凸合并未实现，见 polymesh 模块注释）。
     pub polygons: usize,
+    /// Walk cells runtime obstacle carving removed (0 for a plain bake).
+    pub carved: usize,
 }
 
 /// 烘好的可行走场：格面 + 分区 + 轮廓 + 账目。查询全部走它。
@@ -378,6 +415,16 @@ pub struct WalkField {
     /// Relative to the source ground, not an absolute replacement for sloped
     /// terrain sampling. Empty when no low physical support was encountered.
     height_offsets: Vec<f32>,
+    /// The baked field before runtime carving, kept once a carve is applied
+    /// (the engine rebuilds a carved tile from its baked data).
+    base: Option<std::sync::Arc<CarveBase>>,
+}
+
+/// What [`WalkField::carve_obstacles`] starts from.
+struct CarveBase {
+    walkable: Vec<bool>,
+    polys: polymesh::PolyMesh,
+    counts: BakeCounts,
 }
 
 impl WalkField {
@@ -435,12 +482,52 @@ impl WalkField {
                 contours: contours.len(),
                 contour_verts: contours.iter().map(|c| c.verts.len()).sum(),
                 polygons: polys.polygon_count(),
+                carved: 0,
             },
             regions,
             contours,
             polys,
             grid,
             height_offsets,
+            base: None,
+        }
+    }
+
+    /// This field with the runtime NavMeshObstacle carves `carves` (the
+    /// complete current set) applied to its baked state, as the engine's
+    /// carving rebuilds a tile from its baked data with every shape on it:
+    /// the navigation cells lose the part inside each hull
+    /// (`DynamicMesh::ClipPolys`, see `polymesh::carving`) and the walk cells
+    /// whose centre is inside a hull become unwalkable. An empty set gives
+    /// the baked field back. Build the carves with [`runtime_carve`].
+    pub fn carve_obstacles(&self, carves: &[RuntimeCarve]) -> WalkField {
+        let base = self.base.clone().unwrap_or_else(|| {
+            std::sync::Arc::new(CarveBase {
+                walkable: self.grid.walkable.clone(),
+                polys: self.polys.clone(),
+                counts: self.counts,
+            })
+        });
+        let mut grid = self.grid.clone();
+        grid.walkable.clone_from(&base.walkable);
+        let carved = polymesh::carve_cells(&mut grid, carves);
+        let polys = if carves.is_empty() {
+            base.polys.clone()
+        } else {
+            base.polys.carved(&grid, carves)
+        };
+        let mut counts = base.counts;
+        counts.walkable -= carved;
+        counts.carved = carved;
+        counts.polygons = polys.polygon_count();
+        WalkField {
+            grid,
+            regions: self.regions.clone(),
+            contours: Vec::new(),
+            polys,
+            counts,
+            height_offsets: self.height_offsets.clone(),
+            base: Some(base),
         }
     }
 
@@ -852,6 +939,96 @@ impl WalkField {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `DynamicMesh::ClipPolys` removes exactly each polygon's intersection
+    /// with the carve hull: on a flat field with a harvest-sized capsule and a
+    /// yawed box carved at runtime, every sample point clearly inside a hull
+    /// (by the hull's own planes, which the native rows pin) is on no
+    /// navigation cell (nor, beyond half a cell diagonal, on a walk cell),
+    /// every point clearly outside the
+    /// hulls and the eroded border is on a cell, a path across the carve goes
+    /// around it without entering it, and an empty carve set gives the baked
+    /// field back.
+    #[test]
+    fn runtime_carve_removes_the_hull_and_nothing_else() {
+        let surface: Vec<[[f32; 3]; 3]> = vec![
+            [[-6.0, 0.0, -6.0], [6.0, 0.0, -6.0], [6.0, 0.0, 6.0]],
+            [[-6.0, 0.0, -6.0], [6.0, 0.0, 6.0], [-6.0, 0.0, 6.0]],
+        ];
+        let baked = WalkField::bake_colliders(&surface, &[], 0.05);
+        let yaw = |a: f32| {
+            let (s, c) = a.sin_cos();
+            [[c, 0.0, -s], [0.0, 1.0, 0.0], [s, 0.0, c]]
+        };
+        let capsule = obstacle::CarveShape::from_moly(
+            obstacle::CarveKind::Capsule,
+            [-1.2, 0.456, 0.3],
+            yaw(0.4),
+            [1.1, 1.1, 1.1],
+            [0.479, 0.98, 0.479],
+        );
+        let cube = obstacle::CarveShape::from_moly(
+            obstacle::CarveKind::Box,
+            [1.5, 0.3, -0.7],
+            yaw(0.9),
+            [1.0, 1.0, 1.0],
+            [0.6, 0.3, 0.25],
+        );
+        let carves: Vec<_> = [capsule, cube]
+            .iter()
+            .map(|shape| runtime_carve(shape, 0.0).expect("hull"))
+            .collect();
+        let field = baked.carve_obstacles(&carves);
+        let eps = 0.05 * 0.015625;
+        let depth = |p: [f32; 2]| {
+            carves
+                .iter()
+                .map(|c| {
+                    c.planes
+                        .iter()
+                        .map(|plane| obstacle::plane_distance(plane, [p[0], 0.0, p[1]], eps))
+                        .fold(f32::MIN, f32::max)
+                })
+                .fold(f32::MAX, f32::min)
+        };
+        let (mut inside, mut outside) = (0, 0);
+        for i in 0..160 {
+            for j in 0..160 {
+                let p = [-4.0 + i as f32 * 0.05 + 0.013, -4.0 + j as f32 * 0.05 + 0.007];
+                let d = depth(p);
+                if d < -0.01 {
+                    inside += 1;
+                    assert!(!field.on_cell(p), "{p:?} inside a hull is on a cell");
+                    // Walk cells are carved by their centre: allow half a
+                    // cell diagonal (0.05 m voxel).
+                    if d < -0.04 {
+                        assert!(!field.walkable_at(p), "{p:?} inside a hull is walkable");
+                    }
+                } else if d > 0.01 && baked.walkable_at(p) && baked.on_cell(p) {
+                    outside += 1;
+                    assert!(field.on_cell(p), "{p:?} outside the hulls lost its cell");
+                }
+            }
+        }
+        assert!(inside > 100 && outside > 10_000, "{inside} {outside}");
+        let path = field
+            .calculate_path([-3.0, 0.3], [3.0, -0.6], STATIC_QUERY_HALF_EXTENT)
+            .expect("path");
+        assert!(path.complete);
+        for pair in path.corners.windows(2) {
+            for k in 0..=50 {
+                let t = k as f32 / 50.0;
+                let p = [
+                    pair[0][0] + (pair[1][0] - pair[0][0]) * t,
+                    pair[0][1] + (pair[1][1] - pair[0][1]) * t,
+                ];
+                assert!(depth(p) > -1e-3, "path enters a hull at {p:?}");
+            }
+        }
+        let restored = field.carve_obstacles(&[]);
+        assert_eq!(restored.counts().walkable, baked.counts().walkable);
+        assert_eq!(restored.counts().polygons, baked.counts().polygons);
+    }
 
     #[test]
     fn source_triangle_does_not_turn_into_its_occupancy_rectangle() {

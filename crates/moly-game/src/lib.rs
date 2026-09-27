@@ -67,7 +67,6 @@ mod gpu_image_release;
 pub mod harvest;
 pub mod harvest_material;
 mod home_action;
-mod harvest_particles;
 pub mod inactive_nodes;
 pub mod info;
 mod interaction;
@@ -78,6 +77,7 @@ mod mesh_buffer_release;
 pub mod menu_dialog;
 pub mod menu_shell;
 pub mod notice_banner;
+pub mod collect_notice;
 mod mysekai_rank;
 #[cfg(not(target_arch = "wasm32"))]
 mod native_graphics_diagnostics;
@@ -143,6 +143,7 @@ pub mod talk_window;
 pub mod uber_particle;
 pub mod ui_layers;
 pub mod ui_layout;
+mod ui_particle;
 mod voice_mouth;
 mod voice_pcm;
 pub mod walk_face;
@@ -225,6 +226,7 @@ pub fn app(
     moly_assets::material_textures::register(&mut app);
     sky::install(&mut app);
     emoticon::install(&mut app);
+    collect_notice::install(&mut app);
     app.add_plugins(weather::WeatherPlugin);
     uber_particle::install(&mut app);
     audio::install(&mut app);
@@ -260,9 +262,9 @@ pub fn app(
     app.add_plugins((
         harvest::HarvestPlugin,
         harvest_material::HarvestMaterialPlugin,
-        harvest_particles::HarvestParticlePlugin,
     ));
     app.add_plugins(delivery::DeliveryPlugin);
+    app.add_plugins(ui_particle::UiParticlePlugin);
     home_action::install(&mut app);
     app
 }

@@ -35,27 +35,15 @@
 //! (a product cell x is the source cell -x - 1); a candidate's product center
 //! and direction come from the mirror the saved layouts go through.
 //!
-//! `CanPutFloor` is the editor's put check (`validation::put`, the check the
-//! decide button uses): every cell of the footprint inside the floor grid and
-//! not in a fixture of the same layout table. Named differences from the
-//! source's `CanPutFloor`:
-//! - the source checks only the bottom layer of the footprint; the put check
-//!   also rejects cells above the grid's height;
-//! - the site layout's unavailable zones (the master has them only for the
-//!   room levels 8 to 12), joint objects, and the plant and rug branches are
-//!   not ported;
-//! - a raised candidate (the put_target search) whose cells stand on a fixture
-//!   goes to the source's stacking branch, which is not ported: it is
-//!   rejected as such. A raised candidate over an empty cell is rejected by
-//!   the source too (`CanPutOnBaseFixture` needs an object below).
+//! `CanPutFloor` is the source's put check (`tile_rules`), with the new
+//! fixture at the candidate: it has no stacked fixtures yet, and its own tile
+//! data is not in the grid (the state adds the fixture after the search).
 
 use bevy::prelude::*;
-use moly_law::fixture::position::layout_type;
 use moly_law::fixture::{Direction, GridPosition};
 
-use super::{validation, PutStatus};
+use super::tile_rules::{self, Board, Missing, Piece, Refusal, Rules, TileBox};
 use crate::fixture::EditableFixture;
-use crate::site::FloorGridLayout;
 
 /// `MysekaiConstants.TILE_SIZE` (all three axes).
 const TILE_SIZE: f32 = 0.25;
@@ -96,47 +84,6 @@ pub(super) fn to_grid(position: Vec3) -> GridPosition {
         grid_axis(position.y.max(0.0) / TILE_SIZE),
         grid_axis(position.z / TILE_SIZE),
     )
-}
-
-/// The tiles `GridData.SetupGridData` adds for a layout's grid size.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct TileBox {
-    pub min: [i32; 3],
-    pub max: [i32; 3],
-    /// `GridData.TileCount` x and z.
-    pub count_x: i32,
-    pub count_z: i32,
-}
-
-impl TileBox {
-    /// The floor layout's grid, or the rug grid (the same width and depth,
-    /// height 1) for the other ground layouts.
-    pub(super) fn of(floor: FloorGridLayout, layout: u8) -> Self {
-        // `x / 2`, plus one for a positive odd count.
-        let half = |n: i32| n / 2 + i32::from(n % 2 == 1);
-        let height = if layout == layout_type::FLOOR {
-            floor.height
-        } else {
-            1
-        };
-        let (hx, hz) = (half(floor.width), half(floor.depth));
-        Self {
-            min: [-hx, 0, -hz],
-            max: [hx - 1, height - 1, hz - 1],
-            count_x: floor.width,
-            count_z: floor.depth,
-        }
-    }
-
-    /// `TileDataDictionary.ContainsKey`.
-    fn contains(&self, p: GridPosition) -> bool {
-        let v = [i32::from(p.x), i32::from(p.y), i32::from(p.z)];
-        (0..3).all(|axis| (self.min[axis]..=self.max[axis]).contains(&v[axis]))
-    }
-
-    fn height(&self) -> i32 {
-        self.max[1] + 1
-    }
 }
 
 /// `GetCurrentLockAtGrid` after the look-at's grid position.
@@ -182,16 +129,12 @@ pub(super) fn ring(center: GridPosition, radius: i32, y: i32) -> Vec<GridPositio
 /// Why a spiral candidate was not taken.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Reject {
-    /// Not a tile of the layout's grid.
+    /// Not a tile of the layout's grid (`ContainsKey`).
     NotATile,
-    /// The editor's put check refused it.
-    Put(PutStatus),
-    /// The footprint leaves the signed grid domain in the mirror.
-    Mirror(String),
-    /// A raised cell has no object below (`CanPutOnBaseFixture`).
-    NoBase,
-    /// A raised cell stands on a fixture: the stacking branch, not ported.
-    Stacking,
+    /// `CanPutFloor` refused it.
+    Put(Refusal),
+    /// The footprint leaves the signed grid domain.
+    Footprint(Missing),
 }
 
 /// The whole search, for the log.
@@ -216,38 +159,24 @@ pub(super) fn searches_raised(put_type: Option<&str>) -> bool {
     matches!(put_type, Some("put_target" | "put_either"))
 }
 
-fn occupies(rows: &[(GridPosition, GridPosition)], x: i32, y: i32, z: i32) -> bool {
-    rows.iter().any(|(a, b)| {
-        (i32::from(a.x)..=i32::from(b.x)).contains(&x)
-            && (i32::from(a.y)..=i32::from(b.y)).contains(&y)
-            && (i32::from(a.z)..=i32::from(b.z)).contains(&z)
-    })
-}
-
 /// `GetPlaceableTile(GetCurrentLockAtGrid(lookAt))` for `item` (its layout,
 /// fixture and grid size; its center and direction are replaced).
 pub(super) fn place(
     item: &EditableFixture,
     source_direction: Direction,
     look_at: Vec3,
-    rows: &[EditableFixture],
-    floor: FloorGridLayout,
+    board: &Board,
+    rules: &Rules,
     put_type: Option<&str>,
 ) -> Placement {
-    let tiles = TileBox::of(floor, item.layout);
+    let tiles = board.tiles(item.layout);
     let look_at_grid = to_grid(look_at);
     let start = nearest_ground_tile(look_at_grid, tiles);
     let search_raised = searches_raised(put_type);
     let max_radius = tiles.count_x.max(tiles.count_z).min(MAX_RADIUS);
-    let occupied: Vec<_> = rows
-        .iter()
-        .filter(|row| row.uid != item.uid && row.layout == item.layout)
-        .filter_map(|row| row.footprint().ok())
-        .collect();
     let mut rejected = Vec::new();
     let mut try_place = |p: GridPosition| -> Option<(GridPosition, Direction)> {
-        let verdict = candidate(item, source_direction, p, tiles, rows, &occupied, floor);
-        match verdict {
+        match candidate(item, source_direction, p, tiles, board, rules) {
             Ok(found) => Some(found),
             Err(reason) => {
                 rejected.push((p, reason));
@@ -286,80 +215,36 @@ pub(super) fn place(
     }
 }
 
-/// `TryPlaceAt` for one candidate (source frame).
+/// `TryPlaceAt` for one candidate (source frame): a tile of the grid, and
+/// `CanPutFloor` with the fixture's center there.
 fn candidate(
     item: &EditableFixture,
     source_direction: Direction,
     p: GridPosition,
     tiles: TileBox,
-    rows: &[EditableFixture],
-    occupied: &[(GridPosition, GridPosition)],
-    floor: FloorGridLayout,
+    board: &Board,
+    rules: &Rules,
 ) -> Result<(GridPosition, Direction), Reject> {
     if !tiles.contains(p) {
         return Err(Reject::NotATile);
     }
-    let (center, direction, layout) = moly_assets::player_data::mirror_fixture_layout(
+    let piece =
+        Piece::at(item, rules, p, source_direction, item.layout).map_err(Reject::Footprint)?;
+    board.can_put_floor(&piece, &[]).map_err(Reject::Put)?;
+    let (center, direction, _) = moly_assets::player_data::mirror_fixture_layout(
         p,
         item.grid_size,
         source_direction,
         item.layout,
     )
-    .map_err(Reject::Mirror)?;
-    let moved = EditableFixture {
-        center,
-        direction,
-        layout,
-        ..item.clone()
-    };
-    if p.y == 0 {
-        return match validation::put(&moved, rows, Some(floor)) {
-            PutStatus::Ok => Ok((center, direction)),
-            status => Err(Reject::Put(status)),
-        };
-    }
-    let (min, max) = moved.footprint().map_err(Reject::Mirror)?;
-    let y = i32::from(min.y);
-    let mut outside = 0;
-    let mut overlap = 0;
-    for x in i32::from(min.x)..=i32::from(max.x) {
-        for z in i32::from(min.z)..=i32::from(max.z) {
-            // The product cell x is the source cell -x - 1.
-            if !tiles.contains(GridPosition::new(-(x + 1) as i8, y as i8, z as i8)) {
-                outside += 1;
-            } else if occupies(occupied, x, y, z) {
-                overlap += 1;
-            }
-        }
-    }
-    if outside > 0 {
-        return Err(Reject::Put(PutStatus::OutOfBounds { cells: outside }));
-    }
-    if overlap > 0 {
-        return Err(Reject::Put(PutStatus::Overlap { cells: overlap }));
-    }
-    let bare = (i32::from(min.x)..=i32::from(max.x))
-        .flat_map(|x| (i32::from(min.z)..=i32::from(max.z)).map(move |z| (x, z)))
-        .any(|(x, z)| !occupies(occupied, x, y - 1, z));
-    if bare {
-        Err(Reject::NoBase)
-    } else {
-        Err(Reject::Stacking)
-    }
+    .map_err(|_| Reject::Footprint(Missing::Footprint))?;
+    Ok((center, direction))
 }
 
 pub(super) fn reject_label(reason: &Reject) -> String {
     match reason {
         Reject::NotATile => "not a tile of the grid".into(),
-        Reject::Put(PutStatus::OutOfBounds { cells }) => {
-            format!("footprint outside the floor grid ({cells} cells)")
-        }
-        Reject::Put(PutStatus::Overlap { cells }) => {
-            format!("overlaps a fixture of the same layout ({cells} cells)")
-        }
-        Reject::Put(status) => format!("put check {status:?}"),
-        Reject::Mirror(error) => format!("mirror: {error}"),
-        Reject::NoBase => "raised cell with nothing below".into(),
-        Reject::Stacking => "raised cell on a fixture (stacking branch not ported)".into(),
+        Reject::Put(refusal) => tile_rules::refusal_label(*refusal),
+        Reject::Footprint(missing) => format!("footprint: {missing:?}"),
     }
 }

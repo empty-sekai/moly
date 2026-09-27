@@ -8,12 +8,23 @@ pub(crate) struct ResponsiveDialogueMetrics {
     pub(crate) bounds: Rect,
 }
 
-pub(super) fn source_metrics(placement: Transform, text: &str) -> ResponsiveDialogueMetrics {
-    let center = placement.transform_point(PANEL_CENTER.extend(0.)).truncate();
-    let half = Vec2::new(PANEL_W, PANEL_H) * placement.scale.truncate() * 0.5;
+/// The panel's resolved rect in logical window pixels (origin at the canvas
+/// centre, y up) and the content text's font size in logical pixels.
+pub(super) fn source_metrics(
+    scale: f32,
+    panel: &UiRect,
+    font_size: f32,
+    text: &str,
+) -> ResponsiveDialogueMetrics {
+    let min = -panel.pivot * panel.size;
+    let max = min + panel.size;
+    let corners = [min, Vec2::new(max.x, min.y), max, Vec2::new(min.x, max.y)]
+        .map(|corner| panel.world.transform_point3(corner.extend(0.)).truncate() * scale);
+    let low = corners.into_iter().reduce(Vec2::min).unwrap_or_default();
+    let high = corners.into_iter().reduce(Vec2::max).unwrap_or_default();
     ResponsiveDialogueMetrics {
-        font_px: CONTENT_FONT * placement.scale.y,
+        font_px: font_size * scale,
         line_count: text.split('\n').count(),
-        bounds: Rect::from_corners(center - half, center + half),
+        bounds: Rect::from_corners(low, high),
     }
 }

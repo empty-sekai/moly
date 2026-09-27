@@ -38,13 +38,17 @@
 //! callback, the NPCs shown, the fixtures shown, the player shown, then the
 //! fade out with the view's end colour.
 //!
+//! The NPC calls go through the NPC runtime's entries
+//! (`npc::gate_entries`): the takeover (TryCancelCurrentObjective,
+//! ForceUpdateCutSceneObjective, SetImmediatelyExecuteNextObjective(true)),
+//! `Hide` of the NPCs not bound (their AI loop yields while hidden) and
+//! `Show` of them at `EndAsync`, and `ChangeState(Idle)` at `RestoreStates`.
+//!
 //! Named differences: a new avatar is created while the package loads (the
 //! runner binds its animator before the director starts), hidden until the
 //! director's first frame, not after the fade in; its NPC objective is not
-//! started (the product's NPC objective does not stop under the cut-scene
-//! state); the taken-over NPC's objective calls are the NPC runtime's and are
-//! named only; humanoid foot IK and the motion clips' own root motion are
-//! not applied.
+//! started; humanoid foot IK and the motion clips' own root motion are not
+//! applied.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -514,7 +518,8 @@ pub(super) fn prepare(
             let present = present_npc(world, unit);
             let (entity, taken_over) = match (cast.play.use_already_exist_character, present) {
                 (true, Some(npc)) => {
-                    info!("[cutscene-cast] Setup: unit {unit}: FindNPC found it; useAlreadyExistCharacter: taken over (TryCancelCurrentObjective, ForceUpdateCutSceneObjective, SetImmediatelyExecuteNextObjective are the NPC runtime's: not called here)");
+                    let cancelled = crate::npc::gate_entries::take_over_for_cut_scene(world, npc);
+                    info!("[cutscene-cast] Setup: unit {unit}: FindNPC found it; useAlreadyExistCharacter: taken over (TryCancelCurrentObjective {cancelled}, ForceUpdateCutSceneObjective, SetImmediatelyExecuteNextObjective(true))");
                     (npc, true)
                 }
                 (use_existing, present) => {
@@ -794,7 +799,15 @@ pub(super) fn setup(
         .collect();
     for (entity, _, prior) in &others {
         cast.hidden_npcs.push((*entity, *prior));
-        world.entity_mut(*entity).insert(Visibility::Hidden);
+        if world
+            .get::<crate::npc_objective::ObjectiveMind>(*entity)
+            .is_some()
+        {
+            // NPCAvatarPresenter.Hide: the model's visibility too.
+            crate::npc::gate_entries::hide(world, *entity);
+        } else {
+            world.entity_mut(*entity).insert(Visibility::Hidden);
+        }
     }
     info!(
         "[cutscene-cast] Setup: the NPCs not bound are hidden: units {:?}",
@@ -1108,9 +1121,10 @@ pub(super) fn restore_states(world: &mut World, cast: &mut Cast) {
             world
                 .entity_mut(member.entity)
                 .remove::<CutSceneCastLease>();
+            crate::npc::gate_entries::restore_state(world, member.entity);
             let idle = crate::character::resume_idle_after_fixture(world, member.entity);
             info!(
-                "[cutscene-cast] RestoreStates: unit {}: ChangeState(Idle) is the NPC runtime's (not called here); its idle motion resumes: {idle:?}",
+                "[cutscene-cast] RestoreStates: unit {}: ChangeState(Idle); its idle motion resumes: {idle:?}",
                 member.unit
             );
         }
@@ -1178,7 +1192,17 @@ pub(super) fn after_dispose(world: &mut World, cast: &mut Cast, definition: &Tim
         .drain(..)
         .filter_map(|(entity, prior)| {
             world.get_entity(entity).is_ok().then(|| {
-                world.entity_mut(entity).insert(prior);
+                // NPCAvatarPresenter.Show for an NPC on the loaded site; a
+                // member away from it keeps the host's residency hide.
+                let npc = world
+                    .get::<crate::npc_objective::ObjectiveMind>(entity)
+                    .is_some()
+                    && world.get::<crate::npc::residency::Away>(entity).is_none();
+                if npc {
+                    crate::npc::gate_entries::show(world, entity);
+                } else {
+                    world.entity_mut(entity).insert(prior);
+                }
                 entity
             })
         })
@@ -1223,6 +1247,10 @@ pub(super) fn release_refused(world: &mut World, cast: &mut Cast) {
     {
         if world.get_entity(entity).is_ok() {
             world.entity_mut(entity).insert(prior);
+            // The model's visibility the Hide above took.
+            world
+                .entity_mut(entity)
+                .remove::<crate::npc::gate_entries::ModelHidden>();
         }
     }
 }

@@ -18,8 +18,8 @@
 //! dialogType.ToString()` from Resources; a missing prefab returns null, and
 //! the show wrappers return null with it. The table lists the dialog types the
 //! MySekai code references (87) and the shared generic dialogs it reuses
-//! (17), with their enum values and whether the game's Resources carry the
-//! prefab (98 of the 104 do).
+//! (18), with their enum values and whether the game's Resources carry the
+//! prefab (99 of the 105 do).
 
 use std::collections::{HashMap, HashSet};
 
@@ -528,6 +528,7 @@ const DIALOG_TYPES: &[(u16, &str, DialogScope, bool)] = &[
         DialogScope::Shared,
         true,
     ),
+    (82, "OptionDialog", DialogScope::Shared, true),
     (87, "ValueShopBuyConfirmDialog", DialogScope::Shared, true),
     (99, "CommonWebviewDialog", DialogScope::Shared, true),
     (103, "ItemDetailDialog", DialogScope::Shared, true),
@@ -541,6 +542,7 @@ const DIALOG_TYPES: &[(u16, &str, DialogScope, bool)] = &[
     ),
     (242, "SubWindowDialog", DialogScope::Shared, true),
     (243, "ConnectingSubWindowDialog", DialogScope::Shared, true),
+    (250, "CommonRewardSubWindowDialog", DialogScope::Shared, true),
     (262, "HonorRewardSubWindowDialog", DialogScope::Shared, true),
     (
         266,

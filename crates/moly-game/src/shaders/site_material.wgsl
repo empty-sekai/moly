@@ -33,7 +33,9 @@
 //   SITE_SELECTED_ALPHA_CLIP  _USE_ALPHA_CLIP 的被选 alpha 阈
 //                         （Ground/Water/Birthday：selected − 0.5 < 0）。
 //   SITE_GROUND_HEIGHT_FADE   _USE_HEIGHT_FADE：Ground 高度淡出（雾后）。
-//   SITE_TREE_HEIGHT_FADE     _USE_HEIGHT_FADE：Tree 三色两段高度渐变。
+//   SITE_TREE_HEIGHT_FADE     _USE_HEIGHT_FADE：Tree 三色两段高度渐变
+//                         (JP 6.8.1 form: object-space height, applied to the
+//                         texel before the vertex colour and lighting).
 //   SITE_BIRTHDAY_DITHER  !_DISABLE_DITHER：Birthday 抖动（0.125）。
 //   SITE_TREE_DITHER      !_DISABLE_DITHER on a Tree material: Bayer dither
 //                         (0.125) right after the constant alpha clip.
@@ -308,6 +310,11 @@ struct SiteVertexOutput {
     // (0.5 x + 0.5 w, 0.5 y + 0.5 w, z, w); the rare overlay reads xy / w.
     @location(11) screen_pos: vec4<f32>,
 #endif
+#ifdef SITE_TREE_HEIGHT_FADE
+    // The source's TEXCOORD7.y: the raw POSITION's y, before the tree
+    // animation (the reflection in x leaves y unchanged).
+    @location(12) object_y: f32,
+#endif
 }
 
 @vertex
@@ -348,6 +355,9 @@ fn vertex(mesh: Vertex) -> SiteVertexOutput {
     );
 
     var out: SiteVertexOutput;
+#ifdef SITE_TREE_HEIGHT_FADE
+    out.object_y = mesh.position.y;
+#endif
     out.position = position_world_to_clip(world_position.xyz);
     out.world_position = world_position;
 
@@ -848,12 +858,53 @@ fn fragment(in: SiteVertexOutput) -> @location(0) vec4<f32> {
     }
 #endif
 
+    // JP 6.8.1 height gradient: on the texel, before the vertex colour and
+    // outside the lighting gate (CN 6.0.0 applied it last inside the gate, on
+    // the world height). h reads the object-space height; above 3.0 the span
+    // is rebuilt from _HeightFadePosition + 45 and _HeightFadeLength instead of
+    // the material's two reciprocal values. The Pos01 = 0 division is kept
+    // literally (0/0 at h = 0, as in the source).
+    var faded = srgb_format_encode(base.rgb);
+#ifdef SITE_TREE_HEIGHT_FADE
+    if params.use_height_fade.x > 0.5 {
+        let lifted = params.height_fade_position.x + 45.0;
+        let span = lifted + params.height_fade_length.x;
+        let rcp_start = select(
+            vec2<f32>(params.height_fade_rcp_length.x, params.height_fade_start_time_rcp_length.x),
+            vec2<f32>(1.0 / span, lifted / span),
+            3.0 < in.object_y,
+        );
+        let h = clamp(in.object_y * rcp_start.x - rcp_start.y, 0.0, 1.0);
+        var g0 = clamp(h / params.height_gradient_pos01.x, 0.0, 1.0);
+        g0 = min(exp2(log2(g0) * params.height_fade_exponent.x), 1.0);
+        let seg0 = params.height_gradient_color0.rgb
+            + g0 * (params.height_gradient_color1.rgb - params.height_gradient_color0.rgb);
+        var g1 = clamp(
+            (h + -params.height_gradient_pos01.x)
+                / (-params.height_gradient_pos01.x + params.height_gradient_pos12.x),
+            0.0,
+            1.0,
+        );
+        g1 = min(exp2(log2(g1) * params.height_fade_exponent.x), 1.0);
+        let seg1 = params.height_gradient_color1.rgb
+            + g1 * (params.height_gradient_color2.rgb - params.height_gradient_color1.rgb);
+        // 源 greaterThanEqual：Pos12 >= h 选 seg1，再 Pos01 >= h 选 seg0
+        // （边界点归低位段一侧）。
+        var grad = select(
+            params.height_gradient_color2.rgb,
+            seg1,
+            params.height_gradient_pos12.x >= h,
+        );
+        grad = select(grad, seg0, params.height_gradient_pos01.x >= h);
+        faded = h * (grad - faded) + faded;
+    }
+#endif
+
     // 顶点色是原始色的布尔选择（区别于 FO 的平方/浮点 lerp）：源门取
     // 「use < 0.5 为真选原色」，select 语义相反故取反写。
-    let base_rgb = srgb_format_encode(base.rgb);
-    var rgb = select(base_rgb, base_rgb * in.color.rgb, params.use_vertex_color_blend.x >= 0.5);
+    var rgb = select(faded, faded * in.color.rgb, params.use_vertex_color_blend.x >= 0.5);
 
-    // 现象光照门：关时 rgb 直通（雾与高度渐变也在门内），开时走完整链。
+    // 现象光照门：关时 rgb 直通（雾在门内），开时走完整链。
     if params.use_phenomena_lighting.x > 0.5 {
 #ifdef SITE_MODULE_FRESNEL
         // EMF fresnel 在门内第一：法线 renorm + 视线按 ortho 位选。
@@ -899,40 +950,6 @@ fn fragment(in: SiteVertexOutput) -> @location(0) vec4<f32> {
 
         rgb = apply_fog(rgb, in.world_position.y, in.fog_ramp);
 
-#ifdef SITE_TREE_HEIGHT_FADE
-        // 三色两段高度渐变（门内末尾）。h 用淡出参数 t（倒数长度形），
-        // 非原始高度。Pos01=0 的行除法按源字面保留（h=0 处 0/0 与源同形）。
-        if params.use_height_fade.x > 0.5 {
-            var h = clamp(
-                in.world_position.y * params.height_fade_rcp_length.x
-                    + -params.height_fade_start_time_rcp_length.x,
-                0.0,
-                1.0,
-            );
-            var g0 = clamp(h / params.height_gradient_pos01.x, 0.0, 1.0);
-            g0 = min(exp2(log2(g0) * params.height_fade_exponent.x), 1.0);
-            let seg0 = params.height_gradient_color0.rgb
-                + g0 * (params.height_gradient_color1.rgb - params.height_gradient_color0.rgb);
-            var g1 = clamp(
-                (h + -params.height_gradient_pos01.x)
-                    / (-params.height_gradient_pos01.x + params.height_gradient_pos12.x),
-                0.0,
-                1.0,
-            );
-            g1 = min(exp2(log2(g1) * params.height_fade_exponent.x), 1.0);
-            let seg1 = params.height_gradient_color1.rgb
-                + g1 * (params.height_gradient_color2.rgb - params.height_gradient_color1.rgb);
-            // 源 greaterThanEqual：Pos12 >= h 选 seg1，再 Pos01 >= h 选 seg0
-            // （边界点归低位段一侧）。
-            var grad = select(
-                params.height_gradient_color2.rgb,
-                seg1,
-                params.height_gradient_pos12.x >= h,
-            );
-            grad = select(grad, seg0, params.height_gradient_pos01.x >= h);
-            rgb = h * (grad - rgb) + rgb;
-        }
-#endif
     }
     // 输出 alpha 恒 1.0：源的 tex.a 只喂 clip，不进输出。
     // ⚠ 现象光照门关时 rgb 是**未经任何算术的存储域底色**，同样要解一次

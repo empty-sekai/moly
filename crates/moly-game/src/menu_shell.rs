@@ -74,12 +74,53 @@ const GAUGE_HIDE_OFFSET_Y: f32 = 400.;
 /// UIPartsEventBreakTimeGauge's position tween duration.
 const GAUGE_SLIDE_SECONDS: f32 = 0.3;
 
-/// Server-decided input of the event break-time gauge: the user's current
-/// event, whose break-time master row the gauge model reads. There is no mock
-/// panel for it yet; the default is "no current event".
-#[derive(Resource, Default)]
-pub(crate) struct EventBreakTimeMock {
-    pub(crate) current_event: Option<i64>,
+/// The server's event state the break-time gauge reads.
+///
+/// `EventBreakTimeUtility.IsSetEventBreakTimeMaster` asks
+/// `EventUtility.GetMasterEventInSession` for the master event whose session
+/// holds the server clock, and `EventBreakTimeModel.Initialize` reads the
+/// user's break-time record (`UserDataManager.userEventBreakTime`). The event
+/// schedule and the user's record are the server's; the server model carries
+/// neither yet, and the runtime roots carry no events master. Until they do,
+/// [`EVENT_BREAK_TIME_SERVER`] is the one named value.
+pub(crate) struct EventBreakTimeServer {
+    /// The master event in session, `None` for no event.
+    pub(crate) event_in_session: Option<SessionEvent>,
+    /// The user's break-time record. It has no value: the gauge view the
+    /// model sets up is not built, so a record cannot be supplied.
+    pub(crate) user_break_time: Option<NoUserBreakTime>,
+}
+
+/// The fields of a master event `IsSetEventBreakTimeMaster` reads.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SessionEvent {
+    /// `MasterEvent.startAt` (epoch ms).
+    pub(crate) start_at: i64,
+    /// `MasterEvent.aggregateAt` (epoch ms).
+    pub(crate) aggregate_at: i64,
+    /// `MasterEvent.eventBreakTimeId` (nullable).
+    pub(crate) event_break_time_id: Option<i32>,
+}
+
+/// A user break-time record; uninhabited until the gauge view exists.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum NoUserBreakTime {}
+
+/// No event in session, no user record (named server value; see
+/// [`EventBreakTimeServer`]).
+pub(crate) const EVENT_BREAK_TIME_SERVER: EventBreakTimeServer =
+    EventBreakTimeServer { event_in_session: None, user_break_time: None };
+
+/// `EventBreakTimeUtility.IsSetEventBreakTimeMaster`: an event in session
+/// with a break time, started (`startAt <= now`) and before its aggregation
+/// (`now < aggregateAt`).
+fn is_set_event_break_time_master(event: Option<SessionEvent>, now_ms: impl FnOnce() -> i64) -> bool {
+    let Some(event) = event else { return false; };
+    if event.event_break_time_id.is_none() {
+        return false;
+    }
+    let now = now_ms();
+    event.start_at <= now && now < event.aggregate_at
 }
 
 /// The gauge behind `MysekaiMenuUIContent._eventBreakTimeController`: the
@@ -141,29 +182,28 @@ impl BreakTimeGauge {
     /// host's screen is set up: on the harvest site it calls
     /// Initialize(false, true, 0), everywhere else HideGauge(false) and
     /// StopUpdate (which only stops the controller's per-frame refresh).
-    fn setup(&mut self, host: ShellHost, mock: &EventBreakTimeMock, view: &mut UiPrefabView) {
+    fn setup(&mut self, host: ShellHost, server: &EventBreakTimeServer, now_ms: impl FnOnce() -> i64, view: &mut UiPrefabView) {
         if host.is_harvest() {
-            self.initialize(mock, view);
+            self.initialize(server, now_ms, view);
         } else {
             self.hide(false, view);
         }
     }
 
     /// EventBreakTimeController.Initialize(useInfoButton false, useAnimation
-    /// true, display mode 0): the gauge view is set up only when an event
-    /// with a break time is in session (event master and server clock) and
-    /// the model initializes, which needs the user's break-time record for
-    /// that event; otherwise HideGauge(useAnimation) and the refresh stops.
-    /// Without a record the model does not initialize whatever the master
-    /// says, so the gauge hides with its slide. (When an event is in session
-    /// the model also logs an error first; the event master is not loaded
-    /// here, so that line is not reproduced.)
-    fn initialize(&mut self, mock: &EventBreakTimeMock, view: &mut UiPrefabView) {
-        if let Some(event) = mock.current_event {
-            panic!(
-                "field menu: the break-time gauge for current event {event} needs the event master \
-                 and the gauge view, which are not built"
-            );
+    /// true, display mode 0): when an event with a break time is in session
+    /// and `InitializeModel` succeeds, the display mode is kept and the gauge
+    /// view is set up; otherwise `HideGauge(useAnimation)` and the refresh
+    /// stops. `InitializeModel` creates the model and runs its `Initialize`,
+    /// which fails without the user's break-time record (then the
+    /// controller logs its failure line), and otherwise looks up the event
+    /// and its break-time master rows.
+    fn initialize(&mut self, server: &EventBreakTimeServer, now_ms: impl FnOnce() -> i64, view: &mut UiPrefabView) {
+        if is_set_event_break_time_master(server.event_in_session, now_ms) {
+            match server.user_break_time {
+                None => error!("[EventBreakTimeController] EventBreakTimeModel初期化失敗"),
+                Some(record) => match record {},
+            }
         }
         self.hide(true, view);
     }
@@ -265,6 +305,8 @@ pub(crate) struct ShellDialogState {
     /// The learn-phenomenon dialog, from its request to the end of its close animation.
     pub(crate) learn_phenomena_open: bool,
     leave_context: Option<LeaveContext>,
+    /// The screen manager's instance of the leave confirm.
+    leave_dialog: Option<crate::ui_layers::DialogId>,
 }
 
 impl ShellDialogState {
@@ -320,7 +362,7 @@ impl MenuShellRoot {
         drawn: bool,
         hidden: bool,
         delta: f32,
-        break_time: &EventBreakTimeMock,
+        now_ms: impl FnOnce() -> i64,
         doc: &UiPrefab,
         view: &mut UiPrefabView,
     ) {
@@ -328,7 +370,7 @@ impl MenuShellRoot {
         if let Some(gauge) = self.bindings.gauge.as_mut() {
             gauge.advance(delta, view);
             if set_up {
-                gauge.setup(host, break_time, view);
+                gauge.setup(host, &EVENT_BREAK_TIME_SERVER, now_ms, view);
             }
         }
         if !drawn { return; }
@@ -350,10 +392,10 @@ pub(crate) fn settled_host_view(doc: &UiPrefab, key: &str) -> UiPrefabView {
         .unwrap_or_else(|| panic!("{key} is not a field-menu host"));
     let mut view = UiPrefabView::new(host.key(), BALLOON_LAYER);
     let mut root = MenuShellRoot::new(host, doc, &mut view);
-    let mock = EventBreakTimeMock::default();
-    root.advance_view(true, true, false, 0., &mock, doc, &mut view);
+    let no_clock = || unreachable!("no event is in session");
+    root.advance_view(true, true, false, 0., no_clock, doc, &mut view);
     // Long enough for the gauge slide and the chrome motion to end.
-    root.advance_view(false, true, false, GAUGE_SLIDE_SECONDS.max(CHROME_MOVE_DURATION), &mock, doc, &mut view);
+    root.advance_view(false, true, false, GAUGE_SLIDE_SECONDS.max(CHROME_MOVE_DURATION), no_clock, doc, &mut view);
     view
 }
 
@@ -494,7 +536,6 @@ pub(crate) fn load(mut commands: Commands, server: Res<AssetServer>) {
     commands.insert_resource(ShellNamesHandle(server.load(SITES_DATA)));
     commands.init_resource::<ShellUiState>();
     commands.init_resource::<ShellDialogState>();
-    commands.init_resource::<EventBreakTimeMock>();
 }
 
 pub(crate) fn parse(
@@ -505,6 +546,10 @@ pub(crate) fn parse(
     layouts: Res<UiLayouts>,
     stage: Option<Res<crate::browser_stage::BrowserStage>>,
     phenomena: Option<Res<crate::learn_phenomena_dialog::PhenomenonGlyphs>>,
+    (delivery_screen, delivery): (
+        Option<Res<crate::delivery::screen::DeliveryScreen>>,
+        Option<Res<crate::delivery::screen::DeliveryCharset>>,
+    ),
 ) {
     let Some(handle) = handle else { return; };
     // A stage does not render prefab-based menus or their fixed button labels.
@@ -526,6 +571,9 @@ pub(crate) fn parse(
     }
     // The phenomenon names the learn dialog and the notice banner print.
     let Some(phenomenon_names) = phenomena.as_deref().and_then(|p| p.texts.as_ref()) else { return; };
+    // The delivery screen's item names (read from materials.json), when the
+    // delivery screen is installed.
+    if delivery_screen.is_some() && delivery.is_none() { return; }
     let parsed: Value = serde_json::from_str(&asset.0).expect("site name document");
     let rows = parsed["sites"].as_array().expect("site name rows");
     let mut chars = layouts.text_chars();
@@ -535,15 +583,29 @@ pub(crate) fn parse(
     for name in phenomenon_names {
         chars.extend(name.chars());
     }
+    if let Some(delivery) = delivery.as_deref() {
+        chars.extend(delivery.chars.iter().copied());
+    }
     for wording in ["WORD_LEFT_ROOM", "WORD_CANCEL", "MSG_CONFIRM_LEAVE_MYSEKAI",
         "WORD_NOT_SAVE_RETURN", "WORD_SAVE_RETURN", "WORD_EDIT_SAVE_CONFIRMATION", "MSG_LEARN_PHENOMENA"]
         .into_iter().chain(crate::menu_dialog::RANK_GAUGE_WORDINGS) {
         chars.extend(layouts.wordings.get(wording).unwrap_or_else(|| panic!("UI wording missing: {wording}")).chars());
     }
+    // The option dialog, the info screen and the delivery screen write these
+    // wordings; a root without one is named by the screen that writes it.
+    for wording in crate::option_dialog::WORDINGS
+        .iter()
+        .chain(crate::info::WORDINGS)
+        .chain(crate::delivery::screen::WORDINGS.iter())
+    {
+        if let Some(text) = layouts.wordings.get(*wording) {
+            chars.extend(text.chars());
+        }
+    }
     for texts in [
         crate::info::FIXED_TEXTS, crate::menu_dialog::FIXED_TEXTS,
         crate::get_resource::FIXED_TEXTS, crate::option_dialog::FIXED_TEXTS,
-        crate::fixture_edit_ui::FIXED_TEXTS,
+        crate::fixture_edit_ui::FIXED_TEXTS, crate::delivery::screen::FIXED_TEXTS,
     ] {
         for text in texts { chars.extend(text.chars()); }
     }
@@ -596,7 +658,7 @@ pub(crate) fn place(
     mut dialogs: Query<(&mut Visibility, &mut Transform, &mut UiPrefabView), (With<ShellDialogRoot>, Without<MenuShellRoot>)>,
     mut solved: Local<std::collections::HashSet<&'static str>>,
     root_canvas: Option<Res<RootCanvas>>,
-    break_time: Res<EventBreakTimeMock>,
+    (user, real): (Option<Res<crate::server::ClientUserData>>, Res<Time<Real>>),
 ) {
     let (Ok(window), Some(root_canvas)) = (windows.single(), root_canvas.as_deref()) else { return; };
     let scale = root_canvas.scale(window);
@@ -610,7 +672,14 @@ pub(crate) fn place(
         *visibility = if visible { Visibility::Inherited } else { Visibility::Hidden };
         transform.scale = Vec3::splat(scale);
         let doc = layouts.document(root.host.key()).expect("spawned field prefab");
-        root.advance_view(set_up, visible, ui.hidden, time.delta_secs(), &break_time, doc, &mut view);
+        // TimeUtility.GetCurrentTimestamp: the client's server date plus the
+        // real time since it.
+        let now_ms = || {
+            user.as_deref()
+                .expect("TimeUtility.GetCurrentTimestamp before the server model's first response")
+                .current_timestamp(real.elapsed_secs())
+        };
+        root.advance_view(set_up, visible, ui.hidden, time.delta_secs(), now_ms, doc, &mut view);
         if !visible { continue; }
         let canvas = root_canvas.size(window);
         if !solved.contains(view.key) {
@@ -647,11 +716,32 @@ pub(crate) fn place(
 pub(crate) fn advance_dialogs(
     mut requests: MessageReader<ShellDialogRequest>,
     mut dialog: ResMut<ShellDialogState>,
+    mut screens: ResMut<crate::ui_layers::ScreenManager>,
+    mut back_keys: MessageReader<crate::ui_layers::DialogBackKeyEvent>,
 ) {
     for request in requests.read() {
         match request {
             ShellDialogRequest::LeaveConfirm { owner_name, on_confirm } => {
                 if !dialog.leave_confirm {
+                    // MysekaiLeaveConfirmDialog.Show: ShowDialog(type 465),
+                    // Initialize, Open. The view draws no open animation, so
+                    // the open finishes at once.
+                    match screens.show_dialog(
+                        crate::ui_layers::DialogType::MysekaiLeaveConfirmDialog,
+                        crate::ui_layers::DisplayLayerType::LayerDialog,
+                        crate::ui_layers::DialogBackKey::Close,
+                        "MysekaiLeaveConfirmDialog.Show",
+                    ) {
+                        Ok(id) => {
+                            screens.open_dialog(id);
+                            screens.dialog_open_finished(id);
+                            dialog.leave_dialog = Some(id);
+                        }
+                        Err(error) => {
+                            error!("[field menu] {error}: the leave confirm does not open");
+                            continue;
+                        }
+                    }
                     dialog.leave_context = Some(LeaveContext {
                         owner_name: owner_name.clone(), on_confirm: *on_confirm,
                     });
@@ -660,6 +750,26 @@ pub(crate) fn advance_dialogs(
             }
             ShellDialogRequest::MysekaiMenu => dialog.menu_open = true,
         }
+    }
+    // The back key the manager hands the leave confirm: its
+    // OnHardwareBackKeyProcess makes one virtual call on the dialog, drawn
+    // here as the close button's path (no leave).
+    for key in back_keys.read() {
+        if dialog.leave_dialog == Some(key.id) {
+            info!("[field menu] back key on the leave confirm: closed without leaving");
+            close_leave_confirm(&mut dialog, &mut screens);
+        }
+    }
+}
+
+/// The leave confirm's close: `DialogBase.Close`, then its destruction (the
+/// view draws no close animation).
+fn close_leave_confirm(dialog: &mut ShellDialogState, screens: &mut crate::ui_layers::ScreenManager) {
+    dialog.leave_confirm = false;
+    dialog.leave_context = None;
+    if let Some(id) = dialog.leave_dialog.take() {
+        screens.close_dialog(id);
+        screens.dialog_destroyed(id);
     }
 }
 
@@ -764,7 +874,7 @@ pub(crate) fn click(
     mut layer_commands: MessageWriter<LayerCommand>,
     requests: (MessageWriter<CaptureFrame>, MessageWriter<crate::fixture_edit::EditCommand>),
     // Paired in one parameter: this system is at the parameter-count limit.
-    (stack, entry): (Res<UiLayerStack>, Option<Res<crate::entry::EntrySequence>>),
+    (mut stack, entry): (ResMut<UiLayerStack>, Option<Res<crate::entry::EntrySequence>>),
     active: Option<Res<SiteActive>>,
     roots: Query<(&MenuShellRoot, &UiPrefabView)>,
     dialogs: Query<&UiPrefabView, With<ShellDialogRoot>>,
@@ -794,8 +904,7 @@ pub(crate) fn click(
                 || hit(view, &layouts, "WindowRoot/UIPartsCloseButton", canvas, size)
                 || !hit(view, &layouts, "WindowRoot", canvas, size);
             if accept || cancel {
-                dialog.leave_confirm = false;
-                dialog.leave_context = None;
+                close_leave_confirm(&mut dialog, &mut stack);
                 if accept { commands.run_system(on_confirm); }
                 break;
             }
@@ -1131,13 +1240,25 @@ pub(crate) fn camera_reset_disable(
     }
 }
 
+/// One `GraphicButtonTapEffect` a button's view interaction drives: its
+/// component id, the Graphic components it fades (`_effectGraphic`, and
+/// `_effectGraphicIcon` when set) and its serialized colour fields.
+struct GraphicTapEffect {
+    id: i64,
+    graphics: Vec<i64>,
+    config: tap_rule::TapEffectConfig,
+}
+
 /// The camera reset button's view interaction: the CustomButton's
-/// `buttonViewInteraction`, a `GraphicButtonTapEffect`, with the Graphic
-/// components it fades (`_effectGraphic`, and `_effectGraphicIcon` when set)
-/// and its serialized colour fields. None when the button has no view
-/// interaction (the press and release then play nothing). Another
-/// interaction class, or a missing field, is refused.
-fn tap_effect(doc: &UiPrefab, button: i64) -> Option<(Vec<i64>, tap_rule::TapEffectConfig)> {
+/// `buttonViewInteraction`, as the `GraphicButtonTapEffect`s it drives, in
+/// call order. Empty when the button has no view interaction (the press and
+/// release then play nothing). A `MultiButtonTapEffect` forwards each call to
+/// the entries of its `_tapEffectList` in order (nothing when the list is
+/// empty), so its entries are expanded in place. A class that is not ported
+/// (`CoverButtonTapEffect`, `HarvestButtonInteraction`; none is the camera
+/// reset button's on any root) is reported and drives nothing; a missing
+/// field is refused.
+fn tap_effect(doc: &UiPrefab, button: i64) -> Vec<GraphicTapEffect> {
     let components = || doc.nodes.iter().flat_map(|node| node.components.iter());
     let component = |id: i64| components().find(|c| c.path_id == id)
         .unwrap_or_else(|| panic!("{}: component {id} is not in the layout", doc.prefab));
@@ -1148,14 +1269,43 @@ fn tap_effect(doc: &UiPrefab, button: i64) -> Option<(Vec<i64>, tap_rule::TapEff
         pointer[1].as_i64().unwrap_or_else(|| panic!("{}: {name} has no path id", doc.prefab))
     };
     let interaction = reference(&component(button).fields, "buttonViewInteraction");
-    if interaction == 0 {
-        return None;
+    let mut effects = Vec::new();
+    let mut pending = vec![interaction];
+    while let Some(id) = pending.pop() {
+        if id == 0 {
+            continue;
+        }
+        let effect = component(id);
+        match effect.class.as_str() {
+            "Sekai.UI.GraphicButtonTapEffect" => effects.push(graphic_tap_effect(doc, effect, &reference)),
+            "Sekai.UI.MultiButtonTapEffect" => {
+                let list = effect.fields["_tapEffectList"].as_array()
+                    .unwrap_or_else(|| panic!("{}: MultiButtonTapEffect {id} has no _tapEffectList", doc.prefab));
+                // Multi calls each entry in list order; a null entry throws
+                // on the press.
+                for entry in list.iter().rev() {
+                    let pointer = entry.as_array().filter(|p| p.len() == 2 && p[0].as_i64() == Some(0))
+                        .unwrap_or_else(|| panic!("{}: MultiButtonTapEffect {id} entry is not a local reference", doc.prefab));
+                    let entry_id = pointer[1].as_i64().filter(|id| *id != 0)
+                        .unwrap_or_else(|| panic!("{}: MultiButtonTapEffect {id} has a null entry", doc.prefab));
+                    pending.push(entry_id);
+                }
+            }
+            other => error_once!(
+                "{}: button {button}'s view interaction {id} is a {other}, which is not ported; its press and release play nothing",
+                doc.prefab
+            ),
+        }
     }
-    let effect = component(interaction);
-    assert_eq!(
-        effect.class, "Sekai.UI.GraphicButtonTapEffect",
-        "{}: button {button}'s view interaction class is not ported", doc.prefab
-    );
+    effects
+}
+
+/// A `GraphicButtonTapEffect`'s graphics and serialized colour fields.
+fn graphic_tap_effect(
+    doc: &UiPrefab,
+    effect: &moly_assets::ui_layout::UiComponent,
+    reference: &dyn Fn(&Value, &str) -> i64,
+) -> GraphicTapEffect {
     let f = &effect.fields;
     let number = |name: &str| f[name].as_f64()
         .unwrap_or_else(|| panic!("{}: GraphicButtonTapEffect {name} is missing", doc.prefab));
@@ -1176,11 +1326,11 @@ fn tap_effect(doc: &UiPrefab, button: i64) -> Option<(Vec<i64>, tap_rule::TapEff
         custom_effect_alpha: number("_customEffectAlpha") as f32,
         refresh_color_when_awake: flag("_refreshColorWhenAwake"),
     };
-    Some((graphics, config))
+    GraphicTapEffect { id: effect.path_id, graphics, config }
 }
 
-/// Per host view: whether Awake ran, the running fade and the effect
-/// graphics' current colours.
+/// Per tap effect of a host view: whether Awake ran, the running fade and the
+/// effect graphics' current colours.
 #[derive(Default)]
 struct TapEffectView {
     awake: bool,
@@ -1188,10 +1338,10 @@ struct TapEffectView {
     colors: std::collections::HashMap<i64, [f32; 4]>,
 }
 
-/// The camera reset buttons' tap effects, one per host view.
+/// The camera reset buttons' tap effects, by host view and effect component.
 #[derive(Resource, Default)]
 pub(crate) struct CameraResetTapEffect {
-    views: std::collections::HashMap<&'static str, TapEffectView>,
+    views: std::collections::HashMap<(&'static str, i64), TapEffectView>,
     unported_root_reported: bool,
 }
 
@@ -1220,10 +1370,10 @@ pub(crate) fn camera_reset_tap_effect(
     for (root, mut view) in &mut roots {
         let Some(doc) = layouts.document(view.key) else { continue; };
         let Some(button) = camera_reset_button(doc) else { continue; };
-        let Some((graphics, config)) = tap_effect(doc, button) else { continue; };
+        for GraphicTapEffect { id, graphics, config } in tap_effect(doc, button) {
         let colors = config.colors(|entry| layouts.palette_color(entry))
             .unwrap_or_else(|error| panic!("{}: camera reset tap effect: {error}", doc.prefab));
-        let entry = effects.views.entry(view.key).or_default();
+        let entry = effects.views.entry((view.key, id)).or_default();
         if !entry.awake {
             entry.awake = true;
             for &graphic in &graphics {
@@ -1263,6 +1413,7 @@ pub(crate) fn camera_reset_tap_effect(
                 entry.colors.insert(graphic, color);
                 view.set_graphic_color(graphic, color);
             }
+        }
         }
     }
 }

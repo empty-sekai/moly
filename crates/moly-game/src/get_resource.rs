@@ -78,11 +78,30 @@
 //! （SE 域未接，具名挂账，只记账不发声）。开关动画未接（对话框族既有
 //! 简化同款）。
 //!
-//! ## 服务端域与 mock 面板
+//! ## Server data and the native instrument
 //!
-//! `UserResource` 载荷（resourceId/resourceType/resourceLevel/quantity）与
-//! 四开门者的触发上下文都是服务端响应 ⇒ 具名 mock（环境变量
-//! `MOLY_GET_RESOURCE_MOCK_OPENER` = reward|collect|secret_shop|sketch ·
+//! The dialog's payload is a `UserResource` list
+//! (resourceId/resourceType/resourceLevel/quantity). Where it comes from is
+//! the opener's business, and the openers are client code:
+//! - `NoticeCollectItem` reads the reply of the request its caller made. The
+//!   callers in the source are `DeliverySiteController`, `HarvestUtility`,
+//!   `PlayerAvatarHarvestView`, `MysekaiPlayerTalkAction`,
+//!   `ScreenLayerMysekaiNotice`, `MysekaiUtility` and
+//!   `MysekaiTutorialProcessor`. The server model's delivery and gather
+//!   replies carry `updatedResources` (`crate::server`).
+//! - `ShowSketchResultDialog` is called by `ScreenLayerMysekaiSketchPresenter`
+//!   and builds `UserResource(blueprintId, 40, 0, 1)` itself; the sketch reply
+//!   carries no resource list.
+//! - `ShowRewardDialog` is called in MySekai by `ScreenLayerMysekaiMission`
+//!   (and by screens outside MySekai) with the reply's reward list.
+//! - The secret shop is out of scope (paid content).
+//!
+//! No product opener is wired yet: nothing in the product sets the shell's
+//! `get_resource_open` bit, so the dialog opens only through the native
+//! instrument. The instrument is read through
+//! `crate::server::client::instrument_env`
+//! (game mode reads none) and is not a server value
+//! (`MOLY_GET_RESOURCE_MOCK_OPENER` = reward|collect|secret_shop|sketch ·
 //! `MOLY_GET_RESOURCE_MOCK_ENTRIES` 条目语法
 //! `blueprint:id:level:qty:素材名` · `item:id:level:qty[:文案]` ·
 //! `record:id:level:qty:曲名` · `other:id:level:qty:名:文案`，逗号分隔多
@@ -103,9 +122,10 @@
 //!   这道门（既有具名挂账，本模块不动它的判定面）。
 //!
 //! 具名挂账（本模块不实现，收工报里重列）：
-//! - 四开门者的门一个未建：通用奖励 API（UIUtility 调用方）· 采集结算域
-//!   （NoticeCollectItem）· 写生域（SketchUtility）——三件待建；秘密商店
-//!   课金域出范围（范围通则）。菜单对话框的水晶商店钮走 PushUIScreen
+//! - No opener is wired to this dialog: `ScreenLayerMysekaiMission`
+//!   (`ShowRewardDialog`), the `NoticeCollectItem` callers listed above and
+//!   `ScreenLayerMysekaiSketchPresenter` (`ShowSketchResultDialog`); the
+//!   secret shop is out of scope (paid content).菜单对话框的水晶商店钮走 PushUIScreen
 //!   (CrystalShop) 不走此窗（已核）。
 //! - 蓝图 3D 预览 · 缩略图贴图（卡片/道具/蓝图/唱片四类专用缩略图）·
 //!   名称气球自动调宽 · 富文本跨段色 · 开关动画 · SE（开窗 se_get_blueprint
@@ -119,6 +139,7 @@ use bevy::window::PrimaryWindow;
 use crate::action_button::ActionTapConsumed;
 use crate::gesture::{GestureEvent, GestureState};
 use crate::menu_shell::ShellDialogState;
+use crate::server::client::instrument_env;
 use crate::sitemap::SITEMAP_LAYER;
 
 // ---------------------------------------------------------------------------
@@ -282,10 +303,18 @@ impl GetResourceOpener {
     /// 门账（未建/出范围定谳；开门行末尾报）。
     fn gate_note(self) -> &'static str {
         match self {
-            GetResourceOpener::RewardDialog => "调用方（通用奖励 API 域）未建，具名挂账",
-            GetResourceOpener::NoticeCollect => "采集结算域未建，具名挂账",
-            GetResourceOpener::SecretShop => "课金域出范围（范围通则），具名挂账",
-            GetResourceOpener::Sketch => "写生域未建，具名挂账",
+            GetResourceOpener::RewardDialog => {
+                "caller ScreenLayerMysekaiMission is not wired to this dialog"
+            }
+            GetResourceOpener::NoticeCollect => {
+                "callers DeliverySiteController, HarvestUtility, PlayerAvatarHarvestView, \
+                 MysekaiPlayerTalkAction, ScreenLayerMysekaiNotice, MysekaiUtility and \
+                 MysekaiTutorialProcessor are not wired to this dialog"
+            }
+            GetResourceOpener::SecretShop => "out of scope (paid content)",
+            GetResourceOpener::Sketch => {
+                "caller ScreenLayerMysekaiSketchPresenter is not wired to this dialog"
+            }
         }
     }
 }
@@ -294,10 +323,11 @@ impl GetResourceOpener {
 // mock 面板（服务端态，具名「mock 值」；照菜单对话框面板的形）
 // ---------------------------------------------------------------------------
 
-/// 获得子窗的具名 mock 服务端状态（开门者 + 资源队列）。真值住服务端响应
-/// （四开门者的载荷）；本仓读不到 ⇒ 面板下发。默认三件走链形（一窗一条，
-/// 关一格出队开下一格）演示 ChainDialogPlayer；单开门者（商店/写生）给
-/// 单条目即单窗形。
+/// The native instrument's opener and resource queue. It is not a server
+/// value: the product's openers pass the list their reply or their own
+/// code gives (module head). The default three entries play the chain form
+/// (one window per entry, closing one opens the next) of ChainDialogPlayer; a
+/// single entry gives the single-window form of the shop and sketch openers.
 #[derive(Resource)]
 pub(crate) struct GetResourceMock {
     opener: GetResourceOpener,
@@ -306,7 +336,7 @@ pub(crate) struct GetResourceMock {
 
 impl Default for GetResourceMock {
     fn default() -> Self {
-        let opener = match std::env::var("MOLY_GET_RESOURCE_MOCK_OPENER")
+        let opener = match instrument_env("MOLY_GET_RESOURCE_MOCK_OPENER")
             .unwrap_or_default()
             .trim()
         {
@@ -323,8 +353,8 @@ impl Default for GetResourceMock {
                 GetResourceOpener::NoticeCollect
             }
         };
-        let entries = match std::env::var("MOLY_GET_RESOURCE_MOCK_ENTRIES") {
-            Ok(spec) => {
+        let entries = match instrument_env("MOLY_GET_RESOURCE_MOCK_ENTRIES") {
+            Some(spec) => {
                 let parsed = parse_entries(&spec);
                 if parsed.is_empty() {
                     warn!("[get_resource] mock 面板：条目全废，回默认三件");
@@ -333,7 +363,7 @@ impl Default for GetResourceMock {
                     parsed
                 }
             }
-            Err(_) => default_entries(),
+            None => default_entries(),
         };
         GetResourceMock { opener, entries }
     }

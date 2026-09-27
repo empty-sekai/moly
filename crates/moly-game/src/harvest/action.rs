@@ -474,6 +474,7 @@ pub(crate) struct ActionWorld<'w> {
     shakes: ResMut<'w, HarvestCameraShakes>,
     animator_calls: ResMut<'w, PropAnimatorCalls>,
     start_hides: ResMut<'w, super::damage::HarvestStartHides>,
+    particles: ResMut<'w, super::particles::HarvestParticleCalls>,
     effect_only: ResMut<'w, super::damage::HarvestEffectOnly>,
     turns: ResMut<'w, super::damage::HarvestTurnRequests>,
     navigation: Option<Res<'w, PlayerFixtureNavigation>>,
@@ -491,6 +492,7 @@ pub(crate) fn update_targets(
     mut targeting: ResMut<HarvestTargeting>,
     mut button: ResMut<HarvestButton>,
     mut tool_models: ResMut<ToolModelRequests>,
+    mut bgm_fade: Option<ResMut<crate::audio::MysekaiBgmFade>>,
 ) {
     let (Some(catalog), Some(model)) = (catalog, model.as_deref_mut()) else {
         return;
@@ -518,6 +520,19 @@ pub(crate) fn update_targets(
                     "[harvest] OnCollisionEnter {}#{} (radius {:.2})",
                     object.leaf, object.fixture_id, object.radius
                 );
+                super::tone::on_collision(object, true, bgm_fade.as_deref_mut());
+            }
+        }
+    }
+    // An exit is dispatched only for an object still registered: a removed
+    // one (RemoveCollisionObject) leaves the lists without an exit.
+    for entity in &targeting.contacts {
+        if contacts.contains(entity) {
+            continue;
+        }
+        if let Ok((_, _, object)) = objects.get(*entity) {
+            if object.collision {
+                super::tone::on_collision(object, false, bgm_fade.as_deref_mut());
             }
         }
     }
@@ -1409,7 +1424,23 @@ fn swing(
                     .start_hides
                     .0
                     .push((target, crate::site_move::timeline::Delay::new(1.0, frame)));
+                world.particles.queue_after(
+                    target,
+                    "_junkNormalCutEffect",
+                    super::particles::ParticleOp::Stop,
+                    super::particles::NullRef::Unchecked,
+                    "OnPlayerActionStart",
+                    1.0,
+                    frame,
+                );
             }
+            "MysekaiBirthdayPlantView" => world.particles.queue(
+                target,
+                "_objectParticle",
+                super::particles::ParticleOp::Stop,
+                super::particles::NullRef::Checked,
+                "OnPlayerActionStart",
+            ),
             "MysekaiAreaTreasureBoxView" => {
                 calls.push((target, PropCall::Speed(current.speed)));
             }

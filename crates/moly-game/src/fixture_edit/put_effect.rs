@@ -97,6 +97,8 @@ struct SoundTables {
     put_sound_of: HashMap<i32, i64>,
     handle_of: HashMap<i32, String>,
     put_type_of: HashMap<i32, String>,
+    /// The `MysekaiFixtureUtility` predicates of each row (`tile_rules`).
+    traits_of: Arc<HashMap<i32, super::tile_rules::Traits>>,
     cue_of: HashMap<i64, String>,
 }
 
@@ -108,6 +110,7 @@ impl SoundTables {
         let mut put_sound_of = HashMap::with_capacity(rows.len());
         let mut handle_of = HashMap::with_capacity(rows.len());
         let mut put_type_of = HashMap::with_capacity(rows.len());
+        let mut traits_of = HashMap::with_capacity(rows.len());
         for row in rows {
             let id = row["id"].as_i64().ok_or("a fixture row has no id")?;
             let Some(sound) = row["putSoundId"].as_i64() else {
@@ -121,6 +124,21 @@ impl SoundTables {
             let put_type = row["putType"]
                 .as_str()
                 .ok_or_else(|| format!("fixture row {id} carries no putType"))?;
+            let fixture_type = row["fixtureType"]
+                .as_str()
+                .ok_or_else(|| format!("fixture row {id} carries no fixtureType"))?;
+            let settable_layout = row["layoutType"]
+                .as_str()
+                .ok_or_else(|| format!("fixture row {id} carries no layoutType"))?;
+            traits_of.insert(
+                id as i32,
+                super::tile_rules::Traits::from_row(
+                    fixture_type,
+                    settable_layout,
+                    put_type,
+                    handle,
+                ),
+            );
             put_sound_of.insert(id as i32, sound);
             handle_of.insert(id as i32, handle.to_owned());
             put_type_of.insert(id as i32, put_type.to_owned());
@@ -142,6 +160,7 @@ impl SoundTables {
             put_sound_of,
             handle_of,
             put_type_of,
+            traits_of: Arc::new(traits_of),
             cue_of,
         })
     }
@@ -372,6 +391,35 @@ pub(crate) fn put_type(world: &World, fixture_id: i32) -> Result<Option<String>,
         Tables::Read(Err(error)) => Err(format!("the fixture table failed: {error}")),
         Tables::Read(Ok(tables)) => Ok(tables.put_type_of.get(&fixture_id).cloned()),
     }
+}
+
+/// The master predicates of every fixture row, once the fixture table is
+/// read.
+pub(crate) fn traits_table(world: &World) -> Option<Arc<HashMap<i32, super::tile_rules::Traits>>> {
+    let effect = world.get_resource::<FixturePutEffect>()?;
+    match &effect.tables {
+        Tables::Read(Ok(tables)) => Some(tables.traits_of.clone()),
+        _ => None,
+    }
+}
+
+/// Test hook: the fixture table owner with a read table of these rows'
+/// predicates only.
+#[cfg(test)]
+pub(super) fn insert_test_tables(world: &mut World, traits: &[(i32, super::tile_rules::Traits)]) {
+    world.insert_resource(FixturePutEffect {
+        tables: Tables::Read(Ok(SoundTables {
+            put_sound_of: HashMap::new(),
+            handle_of: HashMap::new(),
+            put_type_of: HashMap::new(),
+            traits_of: Arc::new(traits.iter().copied().collect()),
+            cue_of: HashMap::new(),
+        })),
+        instance: Instance::NotCreated,
+        queue: Vec::new(),
+        puts: 0,
+        sample: None,
+    });
 }
 
 /// `FixtureController.PlayPutSound`: the put sound alone.

@@ -1365,9 +1365,13 @@ pub(crate) fn resolve_tree_textures(
         read_module_fresnel("Tree", slot, &get, &mut params)?;
     }
     if height_fade {
-        // 渐变形：倒数长度参数算 h，Pos01/Pos12/三色做两段混合。
+        // 渐变形：倒数长度参数算 h，Pos01/Pos12/三色做两段混合。The JP
+        // program rebuilds the span from position and length above an
+        // object-space height of 3.0.
         params.height_fade_rcp_length = get("_HeightFadeRcpLength")?;
         params.height_fade_start_time_rcp_length = get("_HeightFadeStartTimeRcpLength")?;
+        params.height_fade_position = get("_HeightFadePosition")?;
+        params.height_fade_length = get("_HeightFadeLength")?;
         params.height_fade_exponent = get("_HeightFadeExponent")?;
         params.use_height_fade = get("_UseHeightFade")?;
         params.height_gradient_pos01 = get("_HeightGradientPos01")?;
@@ -1662,7 +1666,7 @@ pub(crate) fn resolve_object(
 
 /// DropItem 解析。值域门：_UVSelection 只在 {0, 1}；clip 是常量阈 0.5
 /// （`_AlphaClip` 标量不被消费）；alpha = tex.a（无 _BaseOpacity）。
-fn resolve_dropitem(
+pub(crate) fn resolve_dropitem(
     sidecar: &SiteSidecar,
     slot: &MaterialSlot,
     load_texture: impl Fn(&str) -> Handle<Image>,
@@ -1876,9 +1880,11 @@ fn resolve_fixture_basic(
         let uri = sidecar.texture_uris.get(index).ok_or_else(|| {
             format!("Fixture/Basic 材质 {} 的 _EmissionMaskTex 下标越界", slot.name)
         })?;
-        Some((load_texture(uri), basic.bright, basic.dark))
+        Some((load_texture(uri), basic.bright, basic.dark, basic.colour_picker))
     } else {
-        None
+        // The colour picker replaces the mask texel: the main texture fills
+        // the unread mask slot.
+        basic.colour_picker.map(|picker| (basic.material.main_tex.clone(), basic.bright, basic.dark, Some(picker)))
     };
     Ok(PlannedMaterial::FixtureBasic { material: basic.material, emission })
 }
@@ -1915,8 +1921,10 @@ enum PlannedMaterial {
     Site(SiteMaterial),
     FixtureBasic {
         material: crate::fixture_material::FixtureMaterial,
-        /// `(_EmissionMaskTex, bright int, dark int)` when the slot is bound.
-        emission: Option<(Handle<Image>, f32, f32)>,
+        /// `(_EmissionMaskTex, bright int, dark int, colour picker)` when the
+        /// slot is bound or the colour picker is on (then the main texture
+        /// fills the unread mask slot).
+        emission: Option<(Handle<Image>, f32, f32, Option<[f32; 3]>)>,
     },
 }
 
@@ -1929,7 +1937,7 @@ impl PlannedMaterial {
                 .chain(material.leaf_mask_tex.iter())
                 .collect(),
             Self::FixtureBasic { material, emission } => std::iter::once(&material.main_tex)
-                .chain(emission.as_ref().map(|(mask, _, _)| mask))
+                .chain(emission.as_ref().map(|(mask, _, _, _)| mask))
                 .collect(),
         }
     }
@@ -2096,7 +2104,7 @@ fn switch_materials(
                             target
                                 .remove::<MeshMaterial3d<StandardMaterial>>()
                                 .insert(MeshMaterial3d(handle.clone()));
-                            if let Some((mask, bright, dark)) = emission {
+                            if let Some((mask, bright, dark, colour_picker)) = emission {
                                 target.insert(crate::fixture_emission::FixtureEmission {
                                     force_emission: false,
                                     mask: mask.clone(),
@@ -2106,6 +2114,8 @@ fn switch_materials(
                                     blend: material.blend,
                                     bright: *bright,
                                     dark: *dark,
+                                    colour_picker: *colour_picker,
+                                    crystal: material.crystal.clone(),
                                 });
                             }
                         }

@@ -59,11 +59,12 @@ mod bv4_query;
 mod cook;
 mod mtd;
 mod overlap;
+pub mod physics_steps;
 pub mod static_pruner;
 mod sweep;
 mod vector;
 
-pub use box_sweep::{box_world_bounds, pool_bounds_box, sweep_sphere_box, BoxSweepTrace};
+pub use box_sweep::{box_world_bounds, flush_bounds_box, pool_bounds_box, sweep_sphere_box, BoxSweepTrace};
 pub use convex_cook::{cook_convex, engine_cooks_nothing};
 pub use convex_sweep::{convex_world_bounds, pool_bounds_convex, sweep_sphere_convex, GaussMap, HullSupport};
 pub use cook::{cook, CookedMesh};

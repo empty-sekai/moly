@@ -10,8 +10,8 @@
 //! - `{"type": "server.edit", "action": "sync"}`
 //!
 //! Delivery: `clock`, `policies` and the schedule apply live; the game data,
-//! the stamina and the pass apply as the next server response; the gate
-//! actions are server replies at once. Visitors and layouts are not edited
+//! the stamina, the pass and the birthday-party sections apply as the next
+//! server response; the gate actions are server replies at once. Visitors and layouts are not edited
 //! here (they apply on re-entry, a later milestone).
 
 use bevy::log::info;
@@ -24,7 +24,20 @@ use super::{
 };
 
 /// Sections a response carries (the `pending` names).
-pub(crate) const PENDING_SECTIONS: [&str; 3] = [SECTION_GAMEDATA, SECTION_STAMINA, SECTION_PASS];
+pub(crate) const PENDING_SECTIONS: [&str; 12] = [
+    super::music::SECTION,
+    super::avatar::SECTION,
+    SECTION_GAMEDATA,
+    SECTION_STAMINA,
+    SECTION_PASS,
+    super::delivery::SECTION_BIRTHDAY_PARTIES,
+    super::delivery::SECTION_MATERIALS,
+    super::delivery::SECTION_MYSEKAI_MATERIALS,
+    super::delivery::SECTION_CARDS,
+    super::delivery::SECTION_HONORS,
+    super::delivery::SECTION_MASTER_CONFIGS,
+    super::music_play::RECORDS_SECTION,
+];
 
 /// How an accepted edit reaches the client.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,6 +123,9 @@ pub(crate) fn check_masters(doc: &ServerDocument, masters: &Masters) -> Result<(
             }
         }
     }
+    super::music::check_records(&doc.music_settings, masters.music_records.as_deref())?;
+    super::avatar::check(&masters.avatar, &doc.avatar)?;
+    super::music_play::check_owned(&doc.music_records, masters.music_records.as_deref())?;
     if let Some((gates, skins)) = &masters.gates {
         if !gates.contains(&doc.gate.gate_id) {
             return Err(format!(
@@ -136,6 +152,27 @@ fn edit_path(
     value: &Value,
 ) -> Result<Delivery, String> {
     let parts: Vec<&str> = path.split('.').collect();
+    if let Some(result) = super::delivery::edit_path(&mut doc.delivery, &parts, path, value) {
+        return result.map(|section| match section {
+            Some(section) => Delivery::NextResponse(section),
+            None => Delivery::Live,
+        });
+    }
+    if let Some(result) = super::home_action::edit_path(&mut doc.home_action_reply, &parts, value) {
+        return result.map(|()| Delivery::Live);
+    }
+    if let Some(result) = super::music::edit_path(&mut doc.music_settings, &parts, value) {
+        return result.map(|()| Delivery::NextResponse(super::music::SECTION));
+    }
+    if let Some(result) = super::avatar::edit_path(&mut doc.avatar, &parts, path, value) {
+        return result.map(|()| Delivery::NextResponse(super::avatar::SECTION));
+    }
+    if let Some(result) = super::music_play::edit_policy(&mut doc.music_play_reply, &parts, value) {
+        return result.map(|()| Delivery::Live);
+    }
+    if let Some(result) = super::music_play::edit_records(&mut doc.music_records, &parts, value) {
+        return result.map(|()| Delivery::NextResponse(super::music_play::RECORDS_SECTION));
+    }
     match parts.as_slice() {
         ["clock"] => {
             doc.clock = document::parse_clock(value)?;
@@ -534,6 +571,14 @@ fn masters_value(masters: &Masters) -> Value {
         "ranks": masters.ranks.as_ref().map(|rows| rows.iter().map(|(rank, exp)| json!({"mysekaiRank": rank, "totalExp": exp})).collect::<Vec<_>>()),
         "gates": masters.gates.as_ref().map(|(gates, _)| gates.clone()),
         "gateSkins": masters.gates.as_ref().map(|(_, skins)| skins.clone()),
+        "musicRecords": masters.music_records.as_ref().map(Vec::len),
+        "configs": masters.configs.as_ref().map(|configs| configs.len()),
+        "avatar": {
+            "costumes": masters.avatar.costumes.as_ref().map(|rows| rows.len()),
+            "accessories": masters.avatar.accessories.as_ref().map(|rows| rows.len()),
+            "skinColors": masters.avatar.skin_colors.as_ref().map(|rows| rows.len()),
+            "coordinates": masters.avatar.coordinates.as_ref().map(|rows| rows.len()),
+        },
         "missing": masters.missing,
     })
 }
@@ -637,13 +682,39 @@ fn policies() -> Value {
     ])
 }
 
+/// The document's sections: the core ones, the delivery's, the home
+/// actions', the music settings' and the avatar's.
+fn other_sections(core: Value, delivery: Value) -> Value {
+    [
+        delivery,
+        super::home_action::schema_sections(),
+        super::music::schema_sections(),
+        super::avatar::schema_sections(),
+        super::music_play::schema_sections(),
+    ]
+    .into_iter()
+    .fold(core, concat)
+}
+
+/// Two JSON arrays as one.
+fn concat(first: Value, second: Value) -> Value {
+    let mut out = match first {
+        Value::Array(rows) => rows,
+        other => vec![other],
+    };
+    if let Value::Array(rows) = second {
+        out.extend(rows);
+    }
+    Value::Array(out)
+}
+
 pub(crate) fn schema(model: &ServerModel) -> Value {
     json!({
         "schemaVersion": document::SCHEMA_VERSION,
         "command": "server.edit",
-        "sections": sections(&model.masters),
+        "sections": other_sections(sections(&model.masters), super::delivery::schema_sections(Some(model))),
         "actions": actions(),
-        "policies": policies(),
+        "policies": concat(concat(policies(), super::delivery::schema_policies()), concat(super::home_action::schema_policies(), super::music_play::schema_policies())),
         "masters": masters_value(&model.masters),
         "joined": model.joined,
     })
@@ -653,9 +724,9 @@ pub(crate) fn schema_without_model() -> Value {
     json!({
         "schemaVersion": document::SCHEMA_VERSION,
         "command": "server.edit",
-        "sections": sections(&Masters::default()),
+        "sections": other_sections(sections(&Masters::default()), super::delivery::schema_sections(None)),
         "actions": actions(),
-        "policies": policies(),
+        "policies": concat(concat(policies(), super::delivery::schema_policies()), concat(super::home_action::schema_policies(), super::music_play::schema_policies())),
         "masters": null,
         "joined": false,
     })
