@@ -67,10 +67,10 @@ mod gpu_image_release;
 pub mod harvest;
 pub mod harvest_material;
 mod home_action;
-mod harvest_particles;
 pub mod inactive_nodes;
 pub mod info;
 mod interaction;
+mod inventory;
 pub mod joystick;
 pub mod light;
 mod material_order;
@@ -78,6 +78,8 @@ mod mesh_buffer_release;
 pub mod menu_dialog;
 pub mod menu_shell;
 pub mod notice_banner;
+pub mod collect_notice;
+pub mod item_icon;
 mod mysekai_rank;
 #[cfg(not(target_arch = "wasm32"))]
 mod native_graphics_diagnostics;
@@ -140,6 +142,7 @@ pub mod talk_camera;
 mod zoom_player_camera;
 mod talk_ingest;
 pub mod talk_window;
+mod two_button_dialog;
 pub mod uber_particle;
 pub mod ui_layers;
 pub mod ui_layout;
@@ -189,13 +192,18 @@ pub fn app(
     browser_log::install();
     // Asset sources must be registered before AssetPlugin is built.
     moly_assets::install(&mut app, source);
-    let plugins = DefaultPlugins.set(bevy::window::WindowPlugin {
-        primary_window: Some(Window {
-            title: format!("moly v{VERSION}"),
+    // The web asset plugin would add an `https` source that reaches any host;
+    // remote resources go only through the admitted bases of
+    // `moly_assets::remote`, which use the same reader.
+    let plugins = DefaultPlugins
+        .set(bevy::window::WindowPlugin {
+            primary_window: Some(Window {
+                title: format!("moly v{VERSION}"),
+                ..default()
+            }),
             ..default()
-        }),
-        ..default()
-    });
+        })
+        .disable::<bevy::asset::io::web::WebAssetPlugin>();
     #[cfg(target_arch = "wasm32")]
     // The browser host reports failures to its retry page. Keep that hook.
     let plugins =
@@ -226,6 +234,8 @@ pub fn app(
     moly_assets::material_textures::register(&mut app);
     sky::install(&mut app);
     emoticon::install(&mut app);
+    collect_notice::install(&mut app);
+    item_icon::install(&mut app);
     app.add_plugins(weather::WeatherPlugin);
     uber_particle::install(&mut app);
     audio::install(&mut app);
@@ -261,7 +271,6 @@ pub fn app(
     app.add_plugins((
         harvest::HarvestPlugin,
         harvest_material::HarvestMaterialPlugin,
-        harvest_particles::HarvestParticlePlugin,
     ));
     app.add_plugins(delivery::DeliveryPlugin);
     app.add_plugins(ui_particle::UiParticlePlugin);

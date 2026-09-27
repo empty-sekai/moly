@@ -103,8 +103,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use bevy::{asset::LoadState, prelude::*};
-use moly_assets::json::JsonAsset;
+use bevy::prelude::*;
+use moly_assets::json::master::{self, MasterData, MasterTable};
 
 use moly_law::objective::random_fixture_action as fixture_action;
 use moly_law::objective::{ObjectiveType, TalkType};
@@ -192,9 +192,10 @@ impl FixtureTagGroups {
     }
 }
 
-/// Talk tables the fixture-talk paths read beyond the activity tables. Each
-/// loads on its own: an asset source without one keeps the others, and the
-/// path that reads it names the missing table when it is reached.
+/// Talk tables the fixture-talk paths read beyond the activity tables, read
+/// from the region's master mirror. Each loads on its own: a table that is
+/// absent or malformed (named once by the master layer) keeps the others,
+/// and the path that reads it names the missing table when it is reached.
 #[derive(Resource)]
 pub(crate) struct TalkExtraTables {
     /// Fixture-common rows, in source row order.
@@ -206,154 +207,161 @@ pub(crate) struct TalkExtraTables {
     pub(crate) fixture_tags: Result<FixtureTagGroups, String>,
 }
 
-/// The pending loads of [`TalkExtraTables`]; present until they settle.
+/// Present while [`TalkExtraTables`] loads.
 #[derive(Resource)]
-pub(crate) struct TalkExtraRequests([Handle<JsonAsset>; 4]);
+pub(crate) struct TalkExtraRequests;
 
-const TALK_EXTRA_PATHS: [&str; 4] = [
-    "moly://mysekai-character-talk-fixture-commons.json",
-    "moly://mysekai-character-talk-fixture-common-fixture-groups.json",
-    "moly://mysekai-character-talk-some-character-talks.json",
-    "moly://mysekai-fixture-tag-groups.json",
-];
+const FIXTURE_COMMONS: MasterTable<Vec<FixtureCommonRow>> = MasterTable {
+    table: "mysekaiCharacterTalkFixtureCommons",
+    name: "mysekaiCharacterTalkFixtureCommons (fixture-common talks)",
+    parse: parse_fixture_commons,
+};
 
-pub(crate) fn load_talk_extras(mut commands: Commands, server: Res<AssetServer>) {
-    commands.insert_resource(TalkExtraRequests(
-        TALK_EXTRA_PATHS.map(|path| server.load::<JsonAsset>(path)),
-    ));
+const FIXTURE_COMMON_GROUPS: MasterTable<HashMap<i32, Vec<i32>>> = MasterTable {
+    table: "mysekaiCharacterTalkFixtureCommonMysekaiFixtureGroups",
+    name: "mysekaiCharacterTalkFixtureCommonMysekaiFixtureGroups (fixture-common talks)",
+    parse: parse_fixture_common_groups,
+};
+
+const SOME_CHARACTER_TALKS: MasterTable<Vec<SomeCharacterTalkRow>> = MasterTable {
+    table: "mysekaiCharacterTalkSomeCharacterTalks",
+    name: "mysekaiCharacterTalkSomeCharacterTalks (some-character talks)",
+    parse: parse_some_character_talks,
+};
+
+/// The fixture tag groups are each fixture master's embedded
+/// `mysekaiFixtureTagGroup`; the master has no table of its own for them.
+const FIXTURE_TAG_GROUPS: MasterTable<FixtureTagGroups> = MasterTable {
+    table: "mysekaiFixtures",
+    name: "mysekaiFixtures (fixture tag groups)",
+    parse: parse_fixture_tag_groups,
+};
+
+pub(crate) fn load_talk_extras(mut commands: Commands, mut masters: ResMut<MasterData>) {
+    commands.insert_resource(TalkExtraRequests);
+    masters.request(&FIXTURE_COMMONS);
+    masters.request(&FIXTURE_COMMON_GROUPS);
+    masters.request(&SOME_CHARACTER_TALKS);
+    masters.request(&FIXTURE_TAG_GROUPS);
 }
 
-pub(crate) fn parse_talk_extras(
-    mut commands: Commands,
-    server: Res<AssetServer>,
-    jsons: Res<Assets<JsonAsset>>,
-    request: Option<Res<TalkExtraRequests>>,
-) {
-    let Some(request) = request else {
+pub(crate) fn parse_talk_extras(mut commands: Commands, mut masters: ResMut<MasterData>) {
+    if [
+        FIXTURE_COMMONS.key(),
+        FIXTURE_COMMON_GROUPS.key(),
+        SOME_CHARACTER_TALKS.key(),
+        FIXTURE_TAG_GROUPS.key(),
+    ]
+    .into_iter()
+    .any(|key| !masters.is_resolved(key))
+    {
+        return;
+    }
+    let (Some(commons), Some(groups), Some(some), Some(tags)) = (
+        masters.take(&FIXTURE_COMMONS),
+        masters.take(&FIXTURE_COMMON_GROUPS),
+        masters.take(&SOME_CHARACTER_TALKS),
+        masters.take(&FIXTURE_TAG_GROUPS),
+    ) else {
         return;
     };
-    let mut documents: Vec<Result<Value, String>> = Vec::with_capacity(4);
-    for (path, handle) in TALK_EXTRA_PATHS.iter().zip(&request.0) {
-        if let LoadState::Failed(error) = server.load_state(handle) {
-            documents.push(Err(format!("{path} is not in this asset source ({error:?})")));
-            continue;
-        }
-        let Some(asset) = jsons.get(handle) else {
-            return;
-        };
-        documents.push(
-            serde_json::from_str::<Value>(&asset.0).map_err(|error| format!("{path}: {error}")),
-        );
-    }
-    let [commons, groups, some, tags]: [Result<Value, String>; 4] = documents
-        .try_into()
-        .expect("one document per path");
+    let reason = |error: master::MasterError| error.to_string();
     let tables = TalkExtraTables {
-        fixture_commons: commons.and_then(|doc| {
-            table_rows(&doc, |row| {
-                Ok(FixtureCommonRow {
-                    id: row_int(row, "id")?,
-                    unit: row_int(row, "gameCharacterUnitId")?,
-                    fixture_group_id: row_int(
-                        row,
-                        "mysekaiCharacterTalkFixtureCommonMysekaiFixtureGroupId",
-                    )?,
-                })
-            })
-        }),
-        fixture_common_groups: groups.and_then(|doc| {
-            let mut groups: HashMap<i32, Vec<i32>> = HashMap::new();
-            for (group, fixture) in table_rows(&doc, |row| {
-                Ok((row_int(row, "groupId")?, row_int(row, "mysekaiFixtureId")?))
-            })? {
-                groups.entry(group).or_default().push(fixture);
-            }
-            Ok(groups)
-        }),
-        some_character_talks: some.and_then(|doc| {
-            table_rows(&doc, |row| {
-                Ok(SomeCharacterTalkRow {
-                    id: row_int(row, "id")?,
-                    talk_id: row_int(row, "mysekaiCharacterTalkId")?,
-                    main_unit: row_int(row, "mainGameCharacterUnitId")?,
-                })
-            })
-        }),
-        fixture_tags: tags.and_then(|doc| {
-            let mut tags = FixtureTagGroups::default();
-            for (fixture, (group, ids)) in table_rows(&doc, |row| {
-                let group = row
-                    .get("mysekaiFixtureTagGroup")
-                    .ok_or("missing mysekaiFixtureTagGroup")?;
-                let mut ids = [0; 5];
-                for (slot, id) in ids.iter_mut().enumerate() {
-                    // An absent field is the member's default, 0.
-                    *id = match group.get(format!("mysekaiFixtureTagId{}", slot + 1)) {
-                        None => 0,
-                        Some(value) => value_i32(value)?,
-                    };
-                }
-                Ok((row_int(row, "id")?, (row_int(group, "id")?, ids)))
-            })? {
-                tags.group_of_fixture.insert(fixture, group);
-                tags.tags_of_group.entry(group).or_insert(ids);
-            }
-            Ok(tags)
-        }),
+        fixture_commons: commons.map_err(reason),
+        fixture_common_groups: groups.map_err(reason),
+        some_character_talks: some.map_err(reason),
+        fixture_tags: tags.map_err(reason),
     };
     let counts = [
-        tables.fixture_commons.as_ref().map(Vec::len),
-        tables
-            .fixture_common_groups
-            .as_ref()
-            .map(|groups| groups.values().map(Vec::len).sum()),
-        tables.some_character_talks.as_ref().map(Vec::len),
-        tables.fixture_tags.as_ref().map(|tags| tags.group_of_fixture.len()),
+        (FIXTURE_COMMONS.name, tables.fixture_commons.as_ref().ok().map(Vec::len)),
+        (
+            FIXTURE_COMMON_GROUPS.name,
+            tables
+                .fixture_common_groups
+                .as_ref()
+                .ok()
+                .map(|groups| groups.values().map(Vec::len).sum()),
+        ),
+        (
+            SOME_CHARACTER_TALKS.name,
+            tables.some_character_talks.as_ref().ok().map(Vec::len),
+        ),
+        (
+            FIXTURE_TAG_GROUPS.name,
+            tables.fixture_tags.as_ref().ok().map(|tags| tags.group_of_fixture.len()),
+        ),
     ];
-    for (path, count) in TALK_EXTRA_PATHS.iter().zip(counts) {
-        match count {
-            Ok(rows) => info!("[npc-talk] {path}: {rows} rows"),
-            Err(reason) => warn!("[npc-talk] {reason}"),
+    for (name, count) in counts {
+        if let Some(rows) = count {
+            info!("[npc-talk] {name}: {rows} rows");
         }
     }
     commands.insert_resource(tables);
     commands.remove_resource::<TalkExtraRequests>();
 }
 
-/// The rows of an exported master table, in its `rowOrder`.
-fn table_rows<T>(
-    doc: &Value,
-    mut parse: impl FnMut(&Value) -> Result<T, String>,
-) -> Result<Vec<T>, String> {
-    let entries = doc
-        .get("entries")
-        .and_then(Value::as_object)
-        .ok_or("table entries must be an object")?;
-    let order = doc
-        .get("rowOrder")
-        .and_then(Value::as_array)
-        .ok_or("missing array rowOrder")?;
-    order
+fn parse_fixture_commons(text: &str) -> Result<Vec<FixtureCommonRow>, String> {
+    master::rows(text)?
         .iter()
-        .map(|id| {
-            let key = value_i32(id)?.to_string();
-            let row = entries
-                .get(&key)
-                .ok_or_else(|| format!("rowOrder references absent id {key}"))?;
-            parse(row)
+        .map(|row| {
+            Ok(FixtureCommonRow {
+                id: master::int32(row, "id")?,
+                unit: master::int32(row, "gameCharacterUnitId")?,
+                fixture_group_id: master::int32(
+                    row,
+                    "mysekaiCharacterTalkFixtureCommonMysekaiFixtureGroupId",
+                )?,
+            })
         })
         .collect()
 }
 
-fn value_i32(value: &Value) -> Result<i32, String> {
-    value
-        .as_i64()
-        .and_then(|value| i32::try_from(value).ok())
-        .ok_or_else(|| format!("{value} is not a 32-bit integer"))
+fn parse_fixture_common_groups(text: &str) -> Result<HashMap<i32, Vec<i32>>, String> {
+    let mut groups: HashMap<i32, Vec<i32>> = HashMap::new();
+    for row in master::rows(text)? {
+        let group = master::int32(&row, "groupId")?;
+        groups
+            .entry(group)
+            .or_default()
+            .push(master::int32(&row, "mysekaiFixtureId")?);
+    }
+    Ok(groups)
 }
 
-fn row_int(row: &Value, key: &str) -> Result<i32, String> {
-    value_i32(row.get(key).ok_or_else(|| format!("missing integer {key}"))?)
+fn parse_some_character_talks(text: &str) -> Result<Vec<SomeCharacterTalkRow>, String> {
+    master::rows(text)?
+        .iter()
+        .map(|row| {
+            Ok(SomeCharacterTalkRow {
+                id: master::int32(row, "id")?,
+                talk_id: master::int32(row, "mysekaiCharacterTalkId")?,
+                main_unit: master::int32(row, "mainGameCharacterUnitId")?,
+            })
+        })
+        .collect()
+}
+
+/// Every fixture master's id and its embedded tag group (id and the five tag
+/// id fields in order, an absent field being the member's default, 0).
+fn parse_fixture_tag_groups(text: &str) -> Result<FixtureTagGroups, String> {
+    let mut tags = FixtureTagGroups::default();
+    for row in master::rows(text)? {
+        let fixture = master::int32(&row, "id")?;
+        let group = row
+            .get("mysekaiFixtureTagGroup")
+            .ok_or_else(|| format!("fixture {fixture} has no mysekaiFixtureTagGroup"))?;
+        let mut ids = [0; 5];
+        for (slot, id) in ids.iter_mut().enumerate() {
+            let field = format!("mysekaiFixtureTagId{}", slot + 1);
+            if group.get(&field).is_some() {
+                *id = master::int32(group, &field)?;
+            }
+        }
+        let group = master::int32(group, "id")?;
+        tags.group_of_fixture.insert(fixture, group);
+        tags.tags_of_group.entry(group).or_insert(ids);
+    }
+    Ok(tags)
 }
 
 /// One NPC as the talk lotteries read it from the avatar store.

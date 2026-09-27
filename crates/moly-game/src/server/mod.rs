@@ -3,7 +3,11 @@
 //! server's values to the client's copies.
 //!
 //! **What is server and what is client.** The document (schemaVersion 2,
-//! [`document`]) holds only server-decided values. The client's copies are
+//! [`document`]) holds only server-decided values. The client side of the
+//! newer sections ([`client`]: the music record settings, the avatar wear and
+//! its masters, the home actions' requests, the native instruments) depends
+//! on no server internals, so it can sit below the server in the crate
+//! graph; the model here is its only writer. The client's copies are
 //! [`ClientUserData`] (`UserDataManager`'s `UserMysekaiGamedata`,
 //! `UserMysekaiStamina`, `UserMysekaiColorfulPass` and the server date it
 //! last got) and the application's local lists (the local document,
@@ -76,20 +80,30 @@
 //! fixed server clock) to the native document; game mode reads no
 //! environment variable ([`instrument_env`]).
 
+pub(crate) mod avatar;
+pub(crate) mod client;
 pub(crate) mod clock;
+pub(crate) mod craft;
 pub(crate) mod delivery;
 pub(crate) mod document;
 pub(crate) mod edit;
+pub(crate) mod home_action;
+pub(crate) mod housing_layout;
+pub(crate) mod inventory;
 pub(crate) mod local;
+pub(crate) mod music;
+pub(crate) mod music_play;
+pub(crate) mod talk_read;
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use bevy::asset::io::{AssetReaderError, AssetSourceId, Reader};
-use bevy::asset::LoadState;
+use bevy::asset::AssetPath;
 use bevy::prelude::*;
 use bevy::tasks::{block_on, futures_lite::future, IoTaskPool, Task};
-use moly_assets::json::JsonAsset;
+use moly_assets::json::master::{self, MasterData, MasterTable};
+use moly_assets::remote::RemoteRegion;
 use serde_json::{json, Value};
 
 pub(crate) use document::{ColorfulPass, Gamedata, GateCharacter, ScheduleRow, Stamina};
@@ -104,9 +118,6 @@ const SLICE_FILE: &str = "server-panel/npc.json";
 const CHECKED_IN_SLICE: &str = include_str!("../server_panel/npc.json");
 
 const PHENOMENA_INDEX: &str = "moly://phenomena/index.json";
-const STAMINAS: &str = "moly://mysekai-staminas.json";
-const STAMINA_RECOVERY: &str = "moly://mysekai-stamina-recovery.json";
-const GATE_CATALOG: &str = "moly://fixture-models/player-data.json";
 
 /// Seconds between the running clock's refresh checks.
 const TICK_SECONDS: f32 = 1.0;
@@ -130,7 +141,7 @@ pub(crate) struct StaminaMax {
 }
 
 /// The master data the model reads. Each is `None` while loading or when
-/// the root has none ([`Masters::missing`] names those).
+/// its table is missing ([`Masters::missing`] names those).
 #[derive(Default, Debug)]
 pub(crate) struct Masters {
     pub(crate) periods: Option<Vec<RefreshPeriod>>,
@@ -142,12 +153,84 @@ pub(crate) struct Masters {
     pub(crate) ranks: Option<Vec<(i32, i32)>>,
     /// Gate ids and gate skin ids.
     pub(crate) gates: Option<(Vec<i32>, Vec<i32>)>,
-    /// The birthday-party delivery tables (`birthday-party-delivery.json`).
+    /// `mysekaiGates` ids, until the skin ids join them in `gates`.
+    gate_ids: Option<Vec<i32>>,
+    /// `mysekaiGateSkins` ids, until they join the gate ids in `gates`.
+    gate_skin_ids: Option<Vec<i32>>,
+    /// The birthday-party delivery tables.
     pub(crate) delivery: Option<delivery::DeliveryTables>,
+    /// The delivery tables as they resolve, until all three are in.
+    delivery_parts: delivery::DeliveryParts,
+    /// The total reward boxes (deferred): what each granted box holds.
+    pub(crate) reward_boxes: Deferred<Vec<(i64, delivery::Reward)>>,
+    /// The master configs (`configs`): configKey -> value.
+    pub(crate) configs: Option<std::collections::BTreeMap<String, String>>,
+    /// The music record ids (`mysekaiMusicRecords`).
+    pub(crate) music_records: Option<Vec<i32>>,
+    /// The avatar wear masters.
+    pub(crate) avatar: client::avatar::AvatarMasters,
+    /// The craft masters (blueprints, costs, terms, first-craft bonus,
+    /// material types, the white blueprint item).
+    pub(crate) craft: client::craft::CraftMasters,
+    /// The fixture and material possession masters.
+    pub(crate) possession: client::inventory::PossessionMasters,
+    /// The cards master (deferred): card id -> its character and rarity.
+    pub(crate) cards: Deferred<std::collections::BTreeMap<i32, craft::CardRow>>,
     pub(crate) missing: Vec<String>,
 }
 
+/// A master table the model loads in the background once the join's tables
+/// are in (the two large ones: the total reward boxes and the cards), and
+/// why it is not there yet. The join does not wait for it; a request that
+/// needs it before it arrives is refused by name.
+#[derive(Debug)]
+pub(crate) enum Deferred<T> {
+    /// Not requested yet: the join's tables are still loading.
+    Waiting,
+    /// Requested (the upstream table name); not arrived yet.
+    Loading(&'static str),
+    /// The master layer could not give it (named once there).
+    Failed(String),
+    Ready(T),
+}
+
+impl<T> Default for Deferred<T> {
+    fn default() -> Self {
+        Self::Waiting
+    }
+}
+
+impl<T> Deferred<T> {
+    /// The table, or the refusal: `refused` says what cannot be done, and
+    /// the reason says why the table is not there.
+    pub(crate) fn get(&self, refused: &str) -> Result<&T, String> {
+        match self {
+            Self::Waiting => Err(format!(
+                "{refused}: its master table is requested once the join's tables are in"
+            )),
+            Self::Loading(table) => Err(format!(
+                "{refused}: the {table} master table is still loading"
+            )),
+            Self::Failed(reason) => Err(format!("{refused}: {reason}")),
+            Self::Ready(value) => Ok(value),
+        }
+    }
+}
+
 impl Masters {
+    /// Joins the tables that resolve apart: the gate and gate skin ids, and
+    /// the three delivery tables.
+    fn join_parts(&mut self) {
+        if self.gates.is_none() {
+            if let (Some(gates), Some(skins)) = (&self.gate_ids, &self.gate_skin_ids) {
+                self.gates = Some((gates.clone(), skins.clone()));
+            }
+        }
+        if self.delivery.is_none() {
+            self.delivery = self.delivery_parts.complete();
+        }
+    }
+
     /// `MysekaiRankModel`'s rank of a total experience.
     pub(crate) fn rank_of(&self, total_exp: i32) -> Option<i32> {
         self.ranks
@@ -184,6 +267,13 @@ pub(crate) enum ResponseKind {
     BirthdayPartyDelivery,
     BirthdayPartyGather,
     BirthdayPartySeat,
+    HomeActionCraft,
+    HomeActionCanvas,
+    HomeActionSketch,
+    HousingLayout,
+    CharacterTalkRead,
+    MusicPlaySet,
+    MusicPlayEject,
 }
 
 impl ResponseKind {
@@ -198,9 +288,16 @@ impl ResponseKind {
             Self::Sync => "sync (panel action)",
             Self::BirthdayPartyDelivery => "PutUserMysekaiBirthdayPartyDeliveryApi",
             Self::BirthdayPartyGather => "PutUserMysekaiBirthdayPartyGatherApi",
+            Self::HomeActionCraft => "PostUserMysekaiCraftApi (craft)",
+            Self::HomeActionCanvas => "PostUserMysekaiCraftApi (canvas)",
+            Self::HomeActionSketch => "PostUserMysekaiHousingSketchApi",
+            Self::HousingLayout => "PostUserMysekaiHousingLayoutApi",
+            Self::CharacterTalkRead => "PutUserMysekaiCharacterTalkReadApi",
             Self::BirthdayPartySeat => {
                 "user data (the rows of the birthday parties now in session)"
             }
+            Self::MusicPlaySet => "PutUserMysekaiMusicPlaySetApi",
+            Self::MusicPlayEject => "PutUserMysekaiMusicPlayEjectApi",
         }
     }
 }
@@ -219,6 +316,15 @@ pub(crate) struct ServerResponse {
     pub(crate) schedules: Option<Vec<ScheduleRow>>,
     /// The birthday-party delivery sections it carries.
     pub(crate) delivery: delivery::DeliveryUpdate,
+    /// `userMysekaiMusicPlayFixtureSettings` when it carries them.
+    pub(crate) music: Option<Vec<client::music::MusicPlaySetting>>,
+    /// `userAvatar` when it carries it.
+    pub(crate) avatar: Option<client::avatar::UserAvatar>,
+    /// The owned MySekai tables it carries (materials, their possession,
+    /// fixtures, canvases, blueprints, items, the gamedata's levels).
+    pub(crate) inventory: client::inventory::SuiteUserSections,
+    /// `userMysekaiMusicRecords` when it carries them.
+    pub(crate) music_records: Option<Vec<client::music_play::OwnedMusicRecord>>,
 }
 
 /// A reply's talk list (`mysekaiCharacterTalkWithReadHistories`): the rows
@@ -390,6 +496,15 @@ pub(crate) struct ServerModel {
     /// The birthday parties in session at the server clock, as the server
     /// last seated them.
     pub(super) party_masters: Vec<delivery::PartyMaster>,
+    /// Why no party can be in session: the birthday parties table is
+    /// missing.
+    pub(super) parties_missing: Option<String>,
+    /// Home-action requests answered (craft, canvas, sketch).
+    pub(super) home_action_replies: [u64; 3],
+    /// The native avatar instrument, applied once the masters resolve.
+    pub(super) avatar_instrument: avatar::AvatarInstrument,
+    /// Music player requests answered (set, eject).
+    pub(super) music_play_replies: [u64; 2],
 }
 
 static MODEL: Mutex<Option<ServerModel>> = Mutex::new(None);
@@ -437,6 +552,10 @@ impl ServerModel {
             client: Value::Null,
             persist,
             party_masters: Vec::new(),
+            parties_missing: None,
+            home_action_replies: [0; 3],
+            avatar_instrument: avatar::AvatarInstrument::default(),
+            music_play_replies: [0; 2],
         }
     }
 
@@ -614,6 +733,10 @@ impl ServerModel {
             colorful_pass: has(SECTION_PASS).then_some(self.doc.colorful_pass),
             schedules,
             delivery: self.delivery_update(&sections),
+            music: has(music::SECTION).then(|| self.doc.music_settings.clone()),
+            avatar: has(avatar::SECTION).then_some(self.doc.avatar),
+            inventory: self.inventory_update(&sections),
+            music_records: has(music_play::RECORDS_SECTION).then(|| self.doc.music_records.clone()),
         };
         info!(
             "[server] response {}: sections {sections:?}, isRefreshed {is_refreshed}, server date {now}",
@@ -639,8 +762,21 @@ impl ServerModel {
                 "the stored server document disagrees with the masters: {error} (kept as stored)"
             ));
         }
+        if !self.avatar_instrument.is_empty() {
+            let instrument = std::mem::take(&mut self.avatar_instrument);
+            let (avatar, unresolved) = instrument.resolve(&self.masters.avatar);
+            for line in unresolved {
+                self.push_error(format!("native avatar instrument: {line}"));
+            }
+            info!("[server] native overlay: MOLY_AVATAR_MOCK_* -> userAvatar {avatar:?}");
+            self.doc.avatar = avatar;
+            self.commit();
+        }
         let mut carries = vec![SECTION_GAMEDATA, SECTION_STAMINA, SECTION_PASS];
         carries.extend(delivery::SECTIONS);
+        carries.extend([music::SECTION, avatar::SECTION]);
+        carries.extend(inventory::SECTIONS);
+        carries.push(music_play::RECORDS_SECTION);
         self.respond(ResponseKind::Join, refreshed, &carries);
     }
 
@@ -692,6 +828,8 @@ pub(crate) fn check_seed_local(text: &str) -> Result<(), String> {
 /// The browser game: the seed's documents (checked by the seed parser),
 /// persisted through the page backend.
 pub(crate) fn install_from_seed(server: Option<String>, local_text: Option<String>) {
+    // The page's game mode: every native instrument is off from here on.
+    client::enter_game_mode();
     let model = match server {
         Some(text) => {
             let (doc, pending) = document::parse_v2(&text).unwrap_or_else(|reason| {
@@ -716,25 +854,14 @@ pub(crate) fn installed() -> bool {
     with_model(|_| ()).is_some()
 }
 
-/// The environment variable of a native instrument. Game mode reads none:
-/// every instrument is off there, and the one document is the only input.
-pub(crate) fn instrument_env(name: &str) -> Option<String> {
-    if crate::browser_game::game_mode_active() {
-        return None;
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = name;
-        None
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        std::env::var(name).ok()
-    }
-}
+/// The native instruments' environment variables (read by the owners'
+/// seams as `crate::server::instrument_env`; the function lives with the
+/// client side).
+pub(crate) use client::instrument_env;
 
-/// The native overlay of the menu mock's instruments onto the document.
-fn native_overlay(doc: &mut ServerDocument) {
+/// The native overlay of the groups' instruments onto the document; the
+/// avatar instrument names bundles and a colour, so it waits for the masters.
+fn native_overlay(doc: &mut ServerDocument) -> avatar::AvatarInstrument {
     let int = |name: &str| -> Option<i32> {
         let raw = instrument_env(name)?;
         match raw.trim().parse::<i32>() {
@@ -787,6 +914,27 @@ fn native_overlay(doc: &mut ServerDocument) {
     }
     if instrument_env("MOLY_MENU_MOCK_STAMINA_MAX").is_some() {
         warn!("[server] MOLY_MENU_MOCK_STAMINA_MAX is not applied: the gauge maximum is the master maxStamina");
+    }
+    const MUSIC: &str = "MOLY_AUDIO_MOCK_MUSIC_RECORD";
+    if let Some(raw) = instrument_env(MUSIC) {
+        doc.music_settings = music::parse_instrument(MUSIC, &raw);
+        info!(
+            "[server] native overlay: {MUSIC} -> userMysekaiMusicPlayFixtureSettings ({} sites)",
+            doc.music_settings.len()
+        );
+    }
+    inventory::native_overlay(doc);
+    music_play::native_overlay(doc);
+    let text = |name: &str| {
+        instrument_env(name)
+            .map(|raw| raw.trim().to_owned())
+            .filter(|raw| !raw.is_empty())
+    };
+    avatar::AvatarInstrument {
+        coordinate: text("MOLY_AVATAR_MOCK_COORDINATE"),
+        costume: text("MOLY_AVATAR_MOCK_COSTUME"),
+        accessory: text("MOLY_AVATAR_MOCK_ACCESSORY"),
+        skin_color: text("MOLY_AVATAR_MOCK_SKIN_COLOR"),
     }
 }
 
@@ -868,9 +1016,264 @@ struct SliceRead(Task<Result<Option<String>, String>>);
 
 type Parser = fn(&str, &mut Masters) -> Result<(), String>;
 
-/// The masters still loading: handle, name and parser.
+/// A root document's read, while it runs: `Ok(None)` when the asset source
+/// does not hold the file.
+type RootRead = Task<Result<Option<String>, String>>;
+
+/// The root documents still reading: name, parser and the read.
 #[derive(Resource)]
-struct MasterHandles(Vec<(Handle<JsonAsset>, &'static str, Parser)>);
+struct RootReads(Vec<(&'static str, Parser, RootRead)>);
+
+/// A root document's text through the asset source. Reading it here rather
+/// than through an asset load lets a document the runtime root lacks be only
+/// the model's named missing entry, with no load error for the absent file.
+async fn read_root_document(
+    server: AssetServer,
+    path: AssetPath<'static>,
+) -> Result<Option<String>, String> {
+    let source = server
+        .get_source(path.source().clone_owned())
+        .map_err(|error| error.to_string())?;
+    let mut reader = match source.reader().read(path.path()).await {
+        Ok(reader) => reader,
+        Err(AssetReaderError::NotFound(_)) => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|error| error.to_string())?;
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+/// A master table the model reads. The master layer parses it into a fresh
+/// [`Masters`] (the parser fills one field) and `seat` moves that field into
+/// the model's.
+struct ServerTable {
+    table: MasterTable<Masters>,
+    seat: fn(&mut Masters, Masters),
+    /// The region whose master carries the table; `None`: every region.
+    region: Option<RemoteRegion>,
+    /// A deferred table's field markers; `None`: the join waits for it.
+    deferred: Option<DeferredSeat>,
+}
+
+/// How a deferred table's field in the model says where it is.
+struct DeferredSeat {
+    /// Requested: the field reads as loading.
+    requested: fn(&mut Masters, &'static str),
+    /// The master layer could not give it: the field carries the reason.
+    failed: fn(&mut Masters, String),
+}
+
+/// A [`ServerTable`] whose parser fills the given field of [`Masters`].
+macro_rules! server_table {
+    ($table:literal, $name:literal, $parse:path, $($field:ident).+) => {
+        ServerTable {
+            table: server_table!(@table $table, $name, $parse),
+            seat: |masters, partial| masters.$($field).+ = partial.$($field).+,
+            region: None,
+            deferred: None,
+        }
+    };
+    (@table $table:literal, $name:literal, $parse:path) => {
+        MasterTable {
+            table: $table,
+            name: $name,
+            parse: |text| {
+                let mut partial = Masters::default();
+                $parse(text, &mut partial)?;
+                Ok(partial)
+            },
+        }
+    };
+}
+
+/// A deferred [`ServerTable`]: its parser fills the given [`Deferred`] field.
+macro_rules! deferred_table {
+    ($table:literal, $name:literal, $parse:path, $field:ident, $region:expr) => {
+        ServerTable {
+            table: server_table!(@table $table, $name, $parse),
+            seat: |masters, partial| masters.$field = partial.$field,
+            region: $region,
+            deferred: Some(DeferredSeat {
+                requested: |masters, table| masters.$field = Deferred::Loading(table),
+                failed: |masters, reason| masters.$field = Deferred::Failed(reason),
+            }),
+        }
+    };
+}
+
+/// The model's master tables. The join waits for all but the deferred ones,
+/// which are requested once the others are in and seated when they arrive.
+static SERVER_TABLES: &[ServerTable] = &[
+    server_table!(
+        "mysekaiStaminas",
+        "mysekaiStaminas (the server's pool maxima)",
+        parse_staminas,
+        stamina_max
+    ),
+    server_table!(
+        "mysekaiStaminaRecovery",
+        "mysekaiStaminaRecovery (the server's boost grant)",
+        parse_recovery,
+        boost_grant
+    ),
+    server_table!(
+        "mysekaiRanks",
+        "mysekaiRanks (the server's rank table)",
+        parse_ranks,
+        ranks
+    ),
+    server_table!(
+        "mysekaiGates",
+        "mysekaiGates (the server's gate ids)",
+        parse_gates,
+        gate_ids
+    ),
+    server_table!(
+        "mysekaiGateSkins",
+        "mysekaiGateSkins (the server's gate skin ids)",
+        parse_gate_skins,
+        gate_skin_ids
+    ),
+    server_table!(
+        "configs",
+        "configs (master configs; without it the delivery reads policies.masterConfigsStandIn)",
+        parse_configs,
+        configs
+    ),
+    server_table!(
+        "mysekaiMusicRecords",
+        "mysekaiMusicRecords (the server's music records)",
+        music::parse_records,
+        music_records
+    ),
+    server_table!(
+        "avatarCostumes",
+        "avatarCostumes (the server's avatar costumes)",
+        avatar::parse_costumes,
+        avatar.costumes
+    ),
+    server_table!(
+        "avatarAccessories",
+        "avatarAccessories (the server's avatar accessories)",
+        avatar::parse_accessories,
+        avatar.accessories
+    ),
+    server_table!(
+        "avatarSkinColors",
+        "avatarSkinColors (the server's avatar skin colours)",
+        avatar::parse_skin_colors,
+        avatar.skin_colors
+    ),
+    server_table!(
+        "avatarCoordinates",
+        "avatarCoordinates (the server's avatar coordinates)",
+        avatar::parse_coordinates,
+        avatar.coordinates
+    ),
+    server_table!(
+        "mysekaiBlueprints",
+        "mysekaiBlueprints (the server's blueprints)",
+        craft::parse_blueprints,
+        craft.blueprints
+    ),
+    server_table!(
+        "mysekaiBlueprintMysekaiMaterialCosts",
+        "mysekaiBlueprintMysekaiMaterialCosts (the server's blueprint material costs)",
+        craft::parse_costs,
+        craft.costs
+    ),
+    server_table!(
+        "mysekaiBlueprintTerms",
+        "mysekaiBlueprintTerms (the server's blueprint craft terms)",
+        craft::parse_terms,
+        craft.terms
+    ),
+    server_table!(
+        "mysekaiRankObtainedExps",
+        "mysekaiRankObtainedExps (the server's first-craft bonus)",
+        craft::parse_rank_obtained_exps,
+        craft.first_craft_bonus
+    ),
+    server_table!(
+        "mysekaiFixturePossessions",
+        "mysekaiFixturePossessions (the server's fixture possession limits)",
+        inventory::parse_fixture_possessions,
+        possession.fixture
+    ),
+    server_table!(
+        "mysekaiMaterialPossessions",
+        "mysekaiMaterialPossessions (the server's material possession limits)",
+        inventory::parse_material_possessions,
+        possession.material
+    ),
+    server_table!(
+        "mysekaiMaterials",
+        "mysekaiMaterials (the server's material types)",
+        inventory::parse_materials,
+        craft.material_types
+    ),
+    server_table!(
+        "mysekaiItems",
+        "mysekaiItems (the server's white blueprint item)",
+        inventory::parse_items_master,
+        craft.white_blueprint_item
+    ),
+    server_table!(
+        "birthdayPartyDeliveryRewards",
+        "birthdayPartyDeliveryRewards (the delivery's reward rows)",
+        delivery::parse_rewards,
+        delivery_parts.rewards
+    ),
+    server_table!(
+        "birthdayPartyDeliveryPointBonuses",
+        "birthdayPartyDeliveryPointBonuses (the delivery's point bonus rows)",
+        delivery::parse_point_bonuses,
+        delivery_parts.bonuses
+    ),
+    server_table!(
+        "birthdayPartyDeliveryTotalRewards",
+        "birthdayPartyDeliveryTotalRewards (the delivery's total reward rows)",
+        delivery::parse_total_rewards,
+        delivery_parts.totals
+    ),
+    // The total reward boxes: the CN master carries their rows as a table of
+    // their own; the JP master nests them in each box's `details`.
+    deferred_table!(
+        "resourceBoxDetails",
+        "resourceBoxDetails (the delivery's total reward boxes)",
+        delivery::parse_box_details,
+        reward_boxes,
+        Some(RemoteRegion::Cn)
+    ),
+    deferred_table!(
+        "resourceBoxes",
+        "resourceBoxes (the delivery's total reward boxes)",
+        delivery::parse_nested_boxes,
+        reward_boxes,
+        Some(RemoteRegion::Jp)
+    ),
+    deferred_table!(
+        "cards",
+        "cards (the canvas craft's card character and rarity)",
+        craft::parse_cards,
+        cards,
+        None
+    ),
+];
+
+/// The model's master tables not seated yet, and whether the deferred ones
+/// have been requested.
+#[derive(Resource)]
+struct MasterSeats {
+    pending: Vec<&'static ServerTable>,
+    deferred_requested: bool,
+}
 
 async fn read_slice(server: AssetServer) -> Result<Option<String>, String> {
     let source = server
@@ -891,45 +1294,32 @@ async fn read_slice(server: AssetServer) -> Result<Option<String>, String> {
         .map_err(|error| error.to_string())
 }
 
-fn load(mut commands: Commands, server: Res<AssetServer>) {
+fn load(mut commands: Commands, server: Res<AssetServer>, mut masters: ResMut<MasterData>) {
     if !installed() {
         let reader = server.clone();
         commands.insert_resource(SliceRead(
             IoTaskPool::get().spawn(async move { read_slice(reader).await }),
         ));
     }
-    commands.insert_resource(MasterHandles(vec![
-        (
-            server.load(PHENOMENA_INDEX),
-            "phenomena/index.json (refresh windows, phenomena)",
-            parse_phenomena as Parser,
-        ),
-        (
-            server.load(STAMINAS),
-            "mysekai-staminas.json (pool maxima)",
-            parse_staminas,
-        ),
-        (
-            server.load(STAMINA_RECOVERY),
-            "mysekai-stamina-recovery.json (boost grant)",
-            parse_recovery,
-        ),
-        (
-            server.load(moly_assets::mysekai_ranks()),
-            "mysekai-ranks.json (rank table)",
-            parse_ranks,
-        ),
-        (
-            server.load(GATE_CATALOG),
-            "fixture-models/player-data.json (gates, gate skins)",
-            parse_gates,
-        ),
-        (
-            server.load(moly_assets::birthday_party_delivery()),
-            "birthday-party-delivery.json (delivery reward, point bonus and total reward tables)",
-            delivery::parse_tables,
-        ),
-    ]));
+    let reader = server.clone();
+    commands.insert_resource(RootReads(vec![(
+        "phenomena/index.json (refresh windows, phenomena)",
+        parse_phenomena as Parser,
+        IoTaskPool::get().spawn(async move {
+            read_root_document(reader, AssetPath::from(PHENOMENA_INDEX)).await
+        }),
+    )]));
+    // The deferred tables are requested once these are in.
+    for table in SERVER_TABLES
+        .iter()
+        .filter(|table| table.deferred.is_none())
+    {
+        masters.request(&table.table);
+    }
+    commands.insert_resource(MasterSeats {
+        pending: SERVER_TABLES.iter().collect(),
+        deferred_requested: false,
+    });
 }
 
 /// Native: the asset source's slice when present, else the checked-in one.
@@ -955,27 +1345,49 @@ fn install_native(mut commands: Commands, read: Option<ResMut<SliceRead>>) {
     let mut doc = document::migrate_v1(&text, migration).unwrap_or_else(|reason| {
         panic!("server document ({}) is refused: {reason}", origin.name())
     });
-    native_overlay(&mut doc);
-    install(ServerModel::new(doc, origin, Vec::new(), false));
+    let instrument = native_overlay(&mut doc);
+    let mut model = ServerModel::new(doc, origin, Vec::new(), false);
+    model.avatar_instrument = instrument;
+    install(model);
 }
 
-fn keyed_rows(value: &Value, table: &str) -> Result<Vec<Value>, String> {
-    if value["semantics"]["table"].as_str() != Some(table) {
-        return Err(format!("it is not the {table} table"));
-    }
-    let entries = value["entries"]
-        .as_object()
-        .ok_or_else(|| format!("{table} has no entries"))?;
-    let mut rows: Vec<Value> = entries.values().cloned().collect();
+/// The rows of an upstream master table, in id order.
+pub(super) fn master_rows(value: &Value, table: &str) -> Result<Vec<Value>, String> {
+    let mut rows = value
+        .as_array()
+        .ok_or_else(|| format!("{table} is not an array of rows"))?
+        .clone();
     rows.sort_by_key(|row| row["id"].as_i64().unwrap_or(i64::MAX));
     Ok(rows)
 }
 
-fn int32(value: &Value, key: &str) -> Result<i32, String> {
+pub(super) fn int32(value: &Value, key: &str) -> Result<i32, String> {
     value[key]
         .as_i64()
         .and_then(|v| i32::try_from(v).ok())
         .ok_or_else(|| format!("{key} of {value} is not an int"))
+}
+
+/// `configs`: configKey -> value (the value is a string in the master).
+fn parse_configs(text: &str, masters: &mut Masters) -> Result<(), String> {
+    let configs = master::rows(text)?
+        .iter()
+        .map(|row| {
+            let key = master::text(row, "configKey")?;
+            let text = match &row["value"] {
+                Value::String(text) => text.clone(),
+                Value::Number(number) => number.to_string(),
+                other => {
+                    return Err(format!(
+                        "configs {key} has a value {other} that is not text"
+                    ))
+                }
+            };
+            Ok((key.to_owned(), text))
+        })
+        .collect::<Result<std::collections::BTreeMap<_, _>, String>>()?;
+    masters.configs = Some(configs);
+    Ok(())
 }
 
 fn parse_phenomena(text: &str, masters: &mut Masters) -> Result<(), String> {
@@ -1014,7 +1426,7 @@ fn parse_phenomena(text: &str, masters: &mut Masters) -> Result<(), String> {
 
 fn parse_staminas(text: &str, masters: &mut Masters) -> Result<(), String> {
     let value: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
-    let rows = keyed_rows(&value, "mysekaiStaminas")?;
+    let rows = master_rows(&value, "mysekaiStaminas")?;
     let max = |kind: &str| -> Result<i32, String> {
         rows.iter()
             .find(|row| row["mysekaiStaminaType"].as_str() == Some(kind))
@@ -1029,97 +1441,166 @@ fn parse_staminas(text: &str, masters: &mut Masters) -> Result<(), String> {
     Ok(())
 }
 
+/// `mysekaiStaminaRecovery`: one object.
 fn parse_recovery(text: &str, masters: &mut Masters) -> Result<(), String> {
-    let value: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
-    let rows = keyed_rows(&value, "mysekaiStaminaRecovery")?;
-    let first = rows.first().ok_or("no stamina recovery row")?;
-    masters.boost_grant = Some(int32(first, "recoveryBoostStamina")?);
+    let row = Value::Object(master::object(text)?);
+    masters.boost_grant = Some(int32(&row, "recoveryBoostStamina")?);
     Ok(())
 }
 
+/// `mysekaiRanks`: (rank, cumulative totalExp), master order.
 fn parse_ranks(text: &str, masters: &mut Masters) -> Result<(), String> {
-    let value: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
-    let entries = value["entries"].as_object().ok_or("no entries")?;
-    let order = value["rowOrder"].as_array().ok_or("no rowOrder")?;
-    let ranks = order
+    let ranks = master::rows(text)?
         .iter()
-        .map(|id| {
-            let row = entries
-                .get(&id.to_string())
-                .ok_or_else(|| format!("rowOrder id {id} has no entry"))?;
-            Ok((int32(row, "mysekaiRank")?, int32(row, "totalExp")?))
-        })
+        .map(|row| Ok((int32(row, "mysekaiRank")?, int32(row, "totalExp")?)))
         .collect::<Result<Vec<_>, String>>()?;
     masters.ranks = Some(ranks);
     Ok(())
 }
 
+/// The ids of a master table, master order.
+fn master_ids(text: &str) -> Result<Vec<i32>, String> {
+    master::rows(text)?
+        .iter()
+        .map(|row| int32(row, "id"))
+        .collect()
+}
+
 fn parse_gates(text: &str, masters: &mut Masters) -> Result<(), String> {
-    let value: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
-    let ids = |name: &str| -> Result<Vec<i32>, String> {
-        value["tables"][name]
-            .as_array()
-            .ok_or_else(|| format!("the catalog has no {name} table"))?
-            .iter()
-            .map(|row| int32(row, "id"))
-            .collect()
-    };
-    masters.gates = Some((ids("mysekaiGates")?, ids("mysekaiGateSkins")?));
+    masters.gate_ids = Some(master_ids(text)?);
+    Ok(())
+}
+
+fn parse_gate_skins(text: &str, masters: &mut Masters) -> Result<(), String> {
+    masters.gate_skin_ids = Some(master_ids(text)?);
     Ok(())
 }
 
 /// Each master as it resolves, once the model is installed; a missing or
-/// malformed one is named once and the model goes on without it.
+/// malformed one (named once by the master layer, or here for a root
+/// document) is listed and the model goes on without it.
 fn resolve_masters(
     mut commands: Commands,
-    server: Res<AssetServer>,
-    jsons: Res<Assets<JsonAsset>>,
-    handles: Option<ResMut<MasterHandles>>,
+    reads: Option<ResMut<RootReads>>,
+    seats: Option<ResMut<MasterSeats>>,
+    mut masters: ResMut<MasterData>,
 ) {
-    let Some(mut handles) = handles else {
-        return;
-    };
     if !installed() {
         return;
     }
-    let mut outcomes: Vec<(&'static str, Parser, Result<String, String>)> = Vec::new();
-    handles.0.retain(|(handle, name, parser)| {
-        let outcome = match server.load_state(handle) {
-            LoadState::Failed(error) => Some(Err(format!("{error}"))),
-            _ => jsons.get(handle).map(|json| Ok(json.0.clone())),
-        };
-        match outcome {
-            Some(outcome) => {
-                outcomes.push((*name, *parser, outcome));
-                false
-            }
-            None => true,
+    let mut outcomes: Vec<(&'static str, Parser, Result<Option<String>, String>)> = Vec::new();
+    let mut reads_done = true;
+    if let Some(mut reads) = reads {
+        reads.0.retain_mut(
+            |(name, parser, read)| match block_on(future::poll_once(read)) {
+                Some(outcome) => {
+                    outcomes.push((*name, *parser, outcome));
+                    false
+                }
+                None => true,
+            },
+        );
+        if reads.0.is_empty() {
+            commands.remove_resource::<RootReads>();
+        } else {
+            reads_done = false;
         }
-    });
-    let all_done = handles.0.is_empty();
-    if all_done {
-        commands.remove_resource::<MasterHandles>();
     }
-    if outcomes.is_empty() && !all_done {
+    let mut seated: Vec<(&'static ServerTable, _)> = Vec::new();
+    let mut requested: Vec<&'static ServerTable> = Vec::new();
+    let mut join_waits = false;
+    if let Some(mut seats) = seats {
+        seats
+            .pending
+            .retain(|table| match masters.take(&table.table) {
+                Some(result) => {
+                    seated.push((*table, result));
+                    false
+                }
+                None => true,
+            });
+        join_waits = seats.pending.iter().any(|table| table.deferred.is_none());
+        if !seats.deferred_requested && reads_done && !join_waits {
+            // The join's tables are in: the deferred ones load in the
+            // background now. Without a region (named by the master layer)
+            // every candidate is requested and each fails with that reason.
+            seats.deferred_requested = true;
+            let region = masters.region();
+            seats.pending.retain(|table| match (table.region, region) {
+                (Some(only), Some(region)) => only == region,
+                _ => true,
+            });
+            for table in &seats.pending {
+                masters.request(&table.table);
+                requested.push(*table);
+            }
+        }
+        if seats.pending.is_empty() {
+            commands.remove_resource::<MasterSeats>();
+        }
+    }
+    if outcomes.is_empty() && seated.is_empty() && requested.is_empty() {
         return;
     }
+    let requested_names: Vec<&str> = requested.iter().map(|table| table.table.table).collect();
     with_model(|model| {
         for (name, parser, outcome) in outcomes {
-            if let Err(error) = outcome.and_then(|text| parser(&text, &mut model.masters)) {
-                warn!("[server] master {name} is absent or malformed: {error}");
-                model.masters.missing.push(format!("{name}: {error}"));
+            let error = match outcome {
+                Ok(Some(text)) => match parser(&text, &mut model.masters) {
+                    Ok(()) => continue,
+                    Err(error) => format!("malformed: {error}"),
+                },
+                Ok(None) => {
+                    let error = "not in the runtime root".to_owned();
+                    info!("[server] root document {name} is {error}");
+                    model.masters.missing.push(format!("{name}: {error}"));
+                    continue;
+                }
+                Err(error) => format!("unreadable: {error}"),
+            };
+            warn!("[server] root document {name} is {error}");
+            model.masters.missing.push(format!("{name}: {error}"));
+        }
+        for (table, result) in seated {
+            match result {
+                Ok(partial) => (table.seat)(&mut model.masters, partial),
+                Err(error) => {
+                    if let Some(deferred) = &table.deferred {
+                        (deferred.failed)(&mut model.masters, error.to_string());
+                    }
+                    model.masters.missing.push(error.to_string());
+                }
+            }
+            if table.deferred.is_some() {
+                info!("[server] deferred master {} seated", table.table.name);
             }
         }
-        if all_done {
+        let had_delivery = model.masters.delivery.is_some();
+        model.masters.join_parts();
+        if !had_delivery {
+            // The client reads the same delivery tables.
+            if let Some(tables) = model.masters.delivery.clone() {
+                commands.insert_resource(tables);
+            }
+        }
+        if !model.masters_ready && reads_done && !join_waits {
             info!(
                 "[server] masters resolved; missing: {:?}",
                 model.masters.missing
             );
             model.masters_ready = true;
             // The client reads the same master tables.
-            if let Some(tables) = model.masters.delivery.clone() {
-                commands.insert_resource(tables);
+            commands.insert_resource(model.masters.avatar.clone());
+            commands.insert_resource(model.masters.craft.clone());
+            commands.insert_resource(model.masters.possession.clone());
+        }
+        for table in requested {
+            if let Some(deferred) = &table.deferred {
+                (deferred.requested)(&mut model.masters, table.table.table);
             }
+        }
+        if !requested_names.is_empty() {
+            info!("[server] deferred masters requested: {requested_names:?}");
         }
     });
 }
@@ -1132,6 +1613,7 @@ fn seat_birthday_parties(parties: Option<Res<crate::birthday::BirthdayParties>>)
         return;
     };
     with_model(|model| {
+        model.parties_missing = parties.missing().map(str::to_owned);
         if !model.joined {
             return;
         }
@@ -1208,6 +1690,10 @@ fn deliver(
     mut local: Option<ResMut<crate::site_expansion::MysekaiLocalSettings>>,
     mut total_exp: Option<ResMut<crate::mysekai_rank::UserTotalExp>>,
     mut birthday: ResMut<delivery::ClientBirthdayPartyData>,
+    mut music_copy: ResMut<client::music::ClientMusicPlaySettings>,
+    mut avatar_copy: ResMut<client::avatar::ClientUserAvatar>,
+    mut inventory_copy: ResMut<client::inventory::ClientMysekaiInventory>,
+    mut records_copy: ResMut<client::music_play::ClientMusicRecords>,
 ) {
     let taken = with_model(|model| {
         (
@@ -1225,6 +1711,16 @@ fn deliver(
     let mut schedule = live_rows;
     for mut response in responses {
         birthday.apply(std::mem::take(&mut response.delivery));
+        if let Some(rows) = response.music.take() {
+            music_copy.apply(rows);
+        }
+        if let Some(avatar) = response.avatar.take() {
+            avatar_copy.apply(avatar);
+        }
+        inventory_copy.apply(std::mem::take(&mut response.inventory));
+        if let Some(rows) = response.music_records.take() {
+            records_copy.apply(rows);
+        }
         let previous_rank = copy.as_ref().and_then(|copy| copy.gamedata.mysekai_rank);
         let next = match copy.take() {
             None => ClientUserData {
@@ -1317,6 +1813,10 @@ fn deliver(
         "hasMysekaiColorfulPass": copy.has_mysekai_colorful_pass(realtime),
         "currentTimestamp": copy.current_timestamp(realtime),
         "birthdayParty": birthday.view(),
+        "userMysekaiMusicPlayFixtureSettings": music_copy.view(),
+        "userAvatar": client::avatar::value(&avatar_copy.avatar),
+        "mysekaiInventory": inventory_copy.view(),
+        "userMysekaiMusicRecords": records_copy.view(),
     });
     with_model(|model| model.client = view);
     match client.as_deref_mut() {
@@ -1391,6 +1891,9 @@ impl Plugin for ServerPlugin {
             .init_resource::<ServerGateReplies>()
             .init_resource::<ClientTalkListUpdates>()
             .init_resource::<delivery::ClientBirthdayPartyData>()
+            .init_resource::<client::music::ClientMusicPlaySettings>()
+            .init_resource::<client::avatar::ClientUserAvatar>()
+            .init_resource::<client::music_play::ClientMusicRecords>()
             .add_systems(PreStartup, seat_local)
             .add_systems(Startup, load)
             .add_systems(
@@ -1406,6 +1909,13 @@ impl Plugin for ServerPlugin {
                     .chain(),
             )
             .add_systems(Last, persist_local);
+        let endpoint = app.world_mut().register_system(home_action::handle);
+        app.insert_resource(client::home_action::HomeActionEndpoint(endpoint));
+        let endpoint = app.world_mut().register_system(housing_layout::handle);
+        app.insert_resource(client::housing_layout::HousingLayoutEndpoint(endpoint));
+        craft::install(app);
+        let endpoint = app.world_mut().register_system(music_play::handle);
+        app.insert_resource(client::music_play::MusicPlayEndpoint(endpoint));
     }
 }
 
@@ -1427,6 +1937,15 @@ pub(crate) fn document_view() -> String {
             "client": model.client,
             "joined": model.joined,
             "missingMasters": model.masters.missing,
+            "homeActionReplies": {
+                "craft": model.home_action_replies[0],
+                "canvas": model.home_action_replies[1],
+                "sketch": model.home_action_replies[2],
+            },
+            "musicPlayReplies": {
+                "set": model.music_play_replies[0],
+                "eject": model.music_play_replies[1],
+            },
             "errors": model.errors,
         })
         .to_string()

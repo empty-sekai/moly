@@ -117,6 +117,8 @@ pub(crate) enum PlayerActionOwner {
     SwitchGimmick,
     /// The step item's director (`PlayerAvatarItemTimelineView`).
     StepItem,
+    /// The delivery pre-action's AutoMove state (`PlayerAvatarAutoMoveState`).
+    Delivery,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -411,6 +413,54 @@ impl AvatarDriver {
         self.action = None;
         self.playing = Some(Locomotion::Idle);
         true
+    }
+
+    /// A conversation's `change_animation` step for the player: the talk
+    /// engine lower-cases the name and calls
+    /// `PlayerAvatarPresenter.PlayAnimation(name, speed)`, which is the view's
+    /// `PlayAnimation(name, 0.25, speed)`; `ChangeMotion` sets the speed back
+    /// to 1 before the crossfade, so the clip plays at 1. The conversation
+    /// holds the animator until it ends; a later step of the same
+    /// conversation replays through the same token.
+    pub(crate) fn play_conversation_motion(
+        &mut self,
+        literal: &str,
+        graphs: &mut Assets<AnimationGraph>,
+        animator: &mut AnimationPlayer,
+        transitions: &mut AnimationTransitions,
+    ) -> Result<(), PlayerMotionError> {
+        let motion = PlayerActionMotion {
+            clip: literal,
+            speed: 1.0,
+            blend: STATE_FADE,
+            blocks_manual_movement: false,
+        };
+        match self.action.as_ref().map(|action| action.token) {
+            Some(token) if token.owner == PlayerActionOwner::Conversation => {
+                self.play_owned_action(token, motion, graphs, animator, transitions)
+            }
+            Some(token) => Err(PlayerMotionError::Owned(token.owner)),
+            None => self
+                .start_action(
+                    PlayerActionOwner::Conversation,
+                    motion,
+                    graphs,
+                    animator,
+                    transitions,
+                )
+                .map(|_| ()),
+        }
+    }
+
+    /// The conversation's end. Nothing replays there (the player's Talk state
+    /// stays until the next move), so the clip the conversation played keeps
+    /// playing and locomotion takes the animator back as [`Self::hand_back`]
+    /// does. False when the conversation played nothing on the player.
+    pub(crate) fn end_conversation_motion(&mut self) -> bool {
+        match self.action.as_ref().map(|action| action.token) {
+            Some(token) if token.owner == PlayerActionOwner::Conversation => self.hand_back(token),
+            _ => false,
+        }
     }
 
     pub(crate) fn release_action(

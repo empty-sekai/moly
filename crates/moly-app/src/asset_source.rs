@@ -129,6 +129,132 @@ pub fn validate_asset_selection(
     validate_asset_prefix(base, resource_root(configured_origin, configured_base)?)
 }
 
+/// The public asset storage host the product reads song and soundtrack
+/// audio from (one directory per region below it); these files are not in
+/// the asset root. [`STORAGE_MIRROR_BASE`] serves the same layout.
+pub const STORAGE_BASE: &str = "https://storage.pjsk.moe/";
+pub const STORAGE_MIRROR_BASE: &str = "https://storage.exmeaning.com/";
+
+/// The public master host the product reads master tables from
+/// (`<region>/master/<table>.json` below it). [`MASTER_MIRROR_BASE`] serves
+/// the same layout.
+pub const MASTER_BASE: &str = "https://metadata.pjsk.moe/";
+pub const MASTER_MIRROR_BASE: &str = "https://metadata.exmeaning.com/";
+
+/// One remote base: the named default, or a configured replacement that is a
+/// canonical HTTPS directory like `resource_base`.
+fn remote_base(name: &str, configured: Option<&str>, default: &str) -> Result<String, String> {
+    let Some(base) = configured else {
+        return Ok(default.to_owned());
+    };
+    public_asset_parts(base)
+        .filter(|(_, path)| is_canonical_directory(path))
+        .map(|_| base.to_owned())
+        .ok_or_else(|| format!("{name} must be a canonical HTTPS directory ending in /"))
+}
+
+/// Configured replacements of the four remote bases (each `None` keeps its
+/// named default). Which host is tried first is the consumer's rule.
+#[derive(Default)]
+pub struct RemoteBaseOverrides<'a> {
+    pub storage: Option<&'a str>,
+    pub storage_mirror: Option<&'a str>,
+    pub master: Option<&'a str>,
+    pub master_mirror: Option<&'a str>,
+}
+
+/// The four remote bases, each defaulting to its named host.
+pub fn remote_bases(
+    overrides: RemoteBaseOverrides<'_>,
+) -> Result<moly_assets::remote::RemoteBases, String> {
+    let bases = moly_assets::remote::RemoteBases {
+        storage: remote_base("storage_base", overrides.storage, STORAGE_BASE)?,
+        storage_mirror: remote_base(
+            "storage_mirror_base",
+            overrides.storage_mirror,
+            STORAGE_MIRROR_BASE,
+        )?,
+        master: remote_base("master_base", overrides.master, MASTER_BASE)?,
+        master_mirror: remote_base(
+            "master_mirror_base",
+            overrides.master_mirror,
+            MASTER_MIRROR_BASE,
+        )?,
+    };
+    #[cfg(target_arch = "wasm32")]
+    for base in [
+        &bases.storage,
+        &bases.storage_mirror,
+        &bases.master,
+        &bases.master_mirror,
+    ] {
+        let url = web_sys::Url::new(base).map_err(|_| format!("Invalid remote base {base}"))?;
+        if url.href() != *base || !url.search().is_empty() || !url.hash().is_empty() {
+            return Err(format!("remote base {base} must be its canonical HTTPS directory"));
+        }
+    }
+    Ok(bases)
+}
+
+/// Native: `MOLY_STORAGE_BASE`, `MOLY_STORAGE_MIRROR_BASE`,
+/// `MOLY_MASTER_BASE` and `MOLY_MASTER_MIRROR_BASE` replace the hosts.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn resolve_remote() -> Result<moly_assets::remote::RemoteBases, String> {
+    let read = |name: &str| std::env::var(name).ok();
+    let (storage, storage_mirror, master, master_mirror) = (
+        read("MOLY_STORAGE_BASE"),
+        read("MOLY_STORAGE_MIRROR_BASE"),
+        read("MOLY_MASTER_BASE"),
+        read("MOLY_MASTER_MIRROR_BASE"),
+    );
+    remote_bases(RemoteBaseOverrides {
+        storage: storage.as_deref(),
+        storage_mirror: storage_mirror.as_deref(),
+        master: master.as_deref(),
+        master_mirror: master_mirror.as_deref(),
+    })
+}
+
+/// Pages: `?storage_base=`, `?storage_mirror_base=`, `?master_base=` and
+/// `?master_mirror_base=` replace the hosts.
+#[cfg(target_arch = "wasm32")]
+pub fn resolve_remote() -> Result<moly_assets::remote::RemoteBases, String> {
+    let window =
+        web_sys::window().ok_or_else(|| "the wasm build only runs inside a page".to_owned())?;
+    let search = window
+        .location()
+        .search()
+        .map_err(|e| format!("could not read the page query string: {e:?}"))?;
+    let params = web_sys::UrlSearchParams::new_with_str(&search)
+        .map_err(|e| format!("could not parse the query string {search:?}: {e:?}"))?;
+    let (storage, storage_mirror, master, master_mirror) = (
+        params.get("storage_base"),
+        params.get("storage_mirror_base"),
+        params.get("master_base"),
+        params.get("master_mirror_base"),
+    );
+    remote_bases(RemoteBaseOverrides {
+        storage: storage.as_deref(),
+        storage_mirror: storage_mirror.as_deref(),
+        master: master.as_deref(),
+        master_mirror: master_mirror.as_deref(),
+    })
+}
+
+/// The browser game: the seed's `storageBase`, `storageMirrorBase`,
+/// `masterBase` and `masterMirrorBase` mean what the page parameters mean.
+#[cfg(target_arch = "wasm32")]
+pub fn resolve_remote_seed(
+    seed: &moly_game::GameSeed,
+) -> Result<moly_assets::remote::RemoteBases, String> {
+    remote_bases(RemoteBaseOverrides {
+        storage: seed.storage_base.as_deref(),
+        storage_mirror: seed.storage_mirror_base.as_deref(),
+        master: seed.master_base.as_deref(),
+        master_mirror: seed.master_mirror_base.as_deref(),
+    })
+}
+
 #[cfg(test)]
 mod public_resource_tests {
     use super::{public_asset_parts, validate_asset_selection};

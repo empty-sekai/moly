@@ -30,97 +30,33 @@ pub(crate) struct CleanUpBindings {
     pub positive: String,
 }
 
-/// The dialog component itself is not decoded in the layout data, so its
-/// `positiveButton` and `negativeButton` are found as the two footer
-/// buttons whose serialized labels are the prefab's own OK and cancel texts.
 pub(super) fn clean_up(
     doc: &UiPrefab,
     layouts: &UiLayouts,
     view: &mut UiPrefabView,
 ) -> Result<CleanUpBindings, String> {
-    let footer = doc.find("WindowRoot/FooterButtons")?;
-    let footer_path = doc.nodes[footer].path.clone();
-    let mut buttons = Vec::new();
-    for node in &doc.nodes {
-        if node.path != format!("{footer_path}/UIPartsCommonButton") {
-            continue;
-        }
-        let button = node
-            .components
-            .iter()
-            .find(|c| c.class.ends_with(".CustomButton"))
-            .ok_or("a footer button has no CustomButton")?;
-        buttons.push((node.transform_id, button.path_id));
-    }
-    let label_of = |transform: i64| -> Result<(i64, String), String> {
-        let text = doc
-            .nodes
-            .iter()
-            .find(|node| node.parent_transform_id == transform && node.path.ends_with("/Text"))
-            .ok_or("a footer button has no Text child")?;
-        let mesh = text
-            .components
-            .iter()
-            .find(|c| c.class.ends_with(".CustomTextMesh"))
-            .ok_or("a footer button label has no CustomTextMesh")?;
-        let serialized = mesh.fields["m_text"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned();
-        Ok((mesh.path_id, serialized))
-    };
-    let (mut positive, mut negative) = (None, None);
-    for (transform, button) in &buttons {
-        let (label, serialized) = label_of(*transform)?;
-        match serialized.as_str() {
-            "OK" => positive = Some((*button, label)),
-            "キャンセル" => negative = Some((*button, label)),
-            other => {
-                return Err(format!(
-                    "a footer button's label {other:?} is neither OK nor cancel"
-                ))
-            }
-        }
-    }
-    let (Some((positive, positive_label)), Some((negative, negative_label))) = (positive, negative)
-    else {
-        return Err(format!(
-            "the dialog footer has {} buttons, not one OK and one cancel",
-            buttons.len()
-        ));
-    };
+    let dialog = crate::two_button_dialog::resolve(doc)?;
     view.set_visible("WindowRoot/Tabs", false);
     view.set_text(
-        &format!("@{positive_label}"),
+        &dialog.positive_label,
         layouts.wordings["WORD_CLEAN_UP"].clone(),
     );
     view.set_text(
-        &format!("@{negative_label}"),
+        &dialog.negative_label,
         layouts.wordings["WORD_CANCEL"].clone(),
     );
     view.set_text(
         "Content/MessageBody",
         layouts.wordings["MSG_MYSEKAI_SITE_LAYOUT_EDIT_CLEAN_UP_CONFIRM"].clone(),
     );
-    let close = doc.find("WindowRoot/UIPartsCloseButton")?;
-    let close = doc.nodes[close]
-        .components
-        .iter()
-        .find(|c| c.class.ends_with(".CustomButton"))
-        .ok_or("the close button has no CustomButton")?;
-    let (positive, negative, close) = (
-        format!("@{positive}"),
-        format!("@{negative}"),
-        format!("@{}", close.path_id),
-    );
-    for button in [&positive, &negative, &close] {
+    for button in [&dialog.positive, &dialog.negative, &dialog.close] {
         enabled(view, doc, button, true);
     }
     Ok(CleanUpBindings {
         window: "WindowRoot".to_owned(),
-        close,
-        negative,
-        positive,
+        close: dialog.close,
+        negative: dialog.negative,
+        positive: dialog.positive,
     })
 }
 

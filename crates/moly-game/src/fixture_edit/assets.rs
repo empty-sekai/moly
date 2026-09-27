@@ -2,39 +2,8 @@
 
 use bevy::{asset::LoadState, gltf::Gltf, prelude::*};
 use moly_assets::json::JsonAsset;
-use moly_law::fixture::Vector3Int;
 use std::collections::HashMap;
 use std::sync::Arc;
-
-pub(super) struct CatalogRow {
-    pub package: &'static str,
-    pub fixture_id: i32,
-    pub grid_size: Vector3Int,
-}
-
-/// Product-owned unlimited inventory mock; source master identities/dimensions.
-pub(super) const CANDIDATES: [CatalogRow; 4] = [
-    CatalogRow {
-        package: "mysekai__fixture__mdl_bir1103_fixture_chair1",
-        fixture_id: 853,
-        grid_size: Vector3Int { x: 2, y: 4, z: 2 },
-    },
-    CatalogRow {
-        package: "mysekai__fixture__mdl_bir1103_fixture_balloon1",
-        fixture_id: 850,
-        grid_size: Vector3Int { x: 2, y: 5, z: 2 },
-    },
-    CatalogRow {
-        package: "mysekai__fixture__mdl_bir1103_fixture_cake1",
-        fixture_id: 849,
-        grid_size: Vector3Int { x: 4, y: 3, z: 4 },
-    },
-    CatalogRow {
-        package: "mysekai__fixture__mdl_env0002_fixture_byoubu1",
-        fixture_id: 455,
-        grid_size: Vector3Int { x: 6, y: 5, z: 1 },
-    },
-];
 
 #[derive(Clone)]
 pub(crate) struct MetaGrid {
@@ -173,8 +142,8 @@ pub(super) fn plan_candidates(
         .get("packages")
         .and_then(|packages| packages.as_object())
         .expect("fixture model index must contain packages");
-    // Parse paths, do not load the whole furniture catalog. An inventory item
-    // from another map requests its own package only when it needs a preview.
+    // Parse paths, do not load the whole furniture catalog. A listed or stored
+    // fixture requests its own package only when it needs a preview.
     for (name, entry) in packages {
         if entry.get("status").and_then(|v| v.as_str()) == Some("exported")
             && entry.get("hasFixtureView").and_then(|v| v.as_bool()) == Some(true)
@@ -186,26 +155,6 @@ pub(super) fn plan_candidates(
                     .insert(name.clone(), format!("moly://fixture-models/{path}"));
             }
         }
-    }
-    for row in &CANDIDATES {
-        let path = candidates
-            .paths
-            .get(row.package)
-            .unwrap_or_else(|| {
-                panic!(
-                    "offline editor package is not a source fixture: {}",
-                    row.package
-                )
-            })
-            .clone();
-        candidates.glbs.insert(
-            row.package.into(),
-            moly_assets::residency::load_gltf(
-                &server,
-                path,
-                moly_assets::residency::GltfResidency::CpuTextures,
-            ),
-        );
     }
     candidates.index = None;
 }

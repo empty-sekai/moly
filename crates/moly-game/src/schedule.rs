@@ -421,7 +421,7 @@ pub fn install(app: &mut App) {
                     // 装载请求。
                     player_talk::load,
                     content_library::load,
-                    // 对话窗体的纹源（面板页 + 尾标替身）与常驻状态机。
+                    // 对话窗体的常驻状态机（绘制输入等布局文档到了再读）。
                     talk_window::load,
                     // 摇杆两件（底盘 + 手柄）的纹源（UI atlas 整页，两件
                     // 共用一次装载）。
@@ -1100,9 +1100,39 @@ pub fn install(app: &mut App) {
                 .after(menu_shell::place)
                 .after(info::click),
         );
+    // The inventory screen (screen 607): the masters at start-up (their names
+    // join the shell charset before the shared atlas bakes), the view once
+    // its layouts, the fixture thumbnails and the masters are in; taps in the
+    // same chain as the info screen; placement after the screen manager and
+    // before the prefab views draw.
+    app.add_systems(Startup, crate::inventory::load)
+        .add_systems(
+            Update,
+            (
+                crate::inventory::parse_glyphs.before(menu_shell::parse),
+                crate::inventory::spawn_when_ready,
+            ),
+        )
+        .add_systems(
+            Update,
+            crate::inventory::click
+                .run_if(crate::game_settings::scene_input_enabled)
+                .after(menu_shell::click)
+                .before(pick::pick)
+                .before(ui_layers::advance),
+        )
+        .add_systems(
+            Update,
+            crate::inventory::place
+                .after(ui_layers::advance)
+                .after(menu_shell::place)
+                .after(crate::inventory::click)
+                .before(crate::ui_layout::render),
+        );
     // ---- 菜单对话框（追加段：外壳菜单钮的目标，Dialog 槽） ----
-    // mock 面板资源（服务端态具名：体力/等级两格 + 四个使能输入，环境
-    // 变量覆写）。
+    // The menu's named mock enable inputs (visiting and two permissions,
+    // native instruments); stamina and rank are the server model's client
+    // copies, the photo permission is the active site's type.
     app.add_systems(Startup, menu_dialog::init)
         // 铺件：图集到齐一次铺成（外壳字符集已并菜单对话框固定文案，
         // 烘制门四员到齐条件不变——菜单对话框的字随外壳成员一起进图集）。
@@ -1129,8 +1159,9 @@ pub fn install(app: &mut App) {
                 .after(menu_shell::place),
         );
     // ---- 获得子窗（追加段：Dialog 槽的第三件，四开门者共用的获得窗） ----
-    // mock 面板资源（服务端态具名：开门者 + 资源队列，环境变量覆写）与
-    // 链播放态（关一格出队开下一格）。
+    // The native instrument's opener and resource queue (not a server value;
+    // game mode reads no instrument) and the chain player state (closing one
+    // window opens the next).
     app.add_systems(Startup, get_resource::init)
         // 铺件：图集到齐一次铺成（外壳字符集已并获得子窗固定文案，烘制
         // 门四员到齐条件不变——获得子窗的字随外壳成员一起进图集）。

@@ -14,12 +14,21 @@
 //! - `userCards`: `UserCard` rows reduced to `cardId`; read when
 //!   `policies.ownedCards` is `stated`.
 //! - `userHonors`: `UserHonor` (`honorId`, `level`, `obtainedAt`).
-//! - `masterConfigs`: the two master configs the delivery reads with
-//!   `MasterDataManager.GetMasterConfigToInt` (no master copy on disk has
-//!   them, so the server document holds them).
 //!
-//! The mock's own keys: `policies.ownedCards` and
-//! `policies.birthdayPlantRefreshPoints`. Every key is optional when a
+//! The two master configs the delivery reads with
+//! `MasterDataManager.GetMasterConfigToInt`
+//! (`birthday_party_delivery_base_point`,
+//! `birthday_party_delivery_reward_drop_upper_limit`) are master data: the
+//! server model reads them from the configs master (`configs.json`) and the
+//! join hands them to the client's copy, standing in for the master download.
+//! A document written before this was known may carry a `masterConfigs` key;
+//! it is read and ignored by name. A runtime root without the configs master
+//! (the CN roots have no source for it) reads the two values from
+//! `policies.masterConfigsStandIn` instead, named in the missing-master list.
+//!
+//! The mock's own keys: `policies.ownedCards`,
+//! `policies.birthdayPlantRefreshPoints` and `policies.masterConfigsStandIn`.
+//! Every key is optional when a
 //! document is read (a document written before this section had none) and
 //! is always written.
 //!
@@ -101,14 +110,15 @@ const MYSEKAI_MATERIAL: &str = "mysekai_material";
 pub(crate) const NEW_PARTY_DROPPED: i32 = 3;
 /// The delivery item stock policy's have-quantity.
 pub(crate) const DELIVERY_ITEM_STOCK: i32 = 300;
-/// `birthday_party_delivery_base_point` of a document that states none.
-pub(crate) const DEFAULT_BASE_POINT: i32 = 100;
-/// `birthday_party_delivery_reward_drop_upper_limit` of a document that
-/// states none.
-pub(crate) const DEFAULT_DROP_UPPER_LIMIT: i32 = 5;
 /// `policies.birthdayPlantRefreshPoints` of a document that states none (the
 /// repeat-refresh requirement of every party row on disk).
 pub(crate) const DEFAULT_PLANT_REFRESH_POINTS: i32 = 10_000;
+/// `policies.masterConfigsStandIn` of a document that states none: the JP
+/// configs master's values of the two keys. Read only when the runtime root
+/// has no configs master.
+pub(crate) const DEFAULT_CONFIGS_STAND_IN: [(&str, i32); 2] =
+    [(CONFIG_BASE_POINT, 100), (CONFIG_DROP_UPPER_LIMIT, 25)];
+const POLICY_CONFIGS_STAND_IN: &str = "masterConfigsStandIn";
 
 pub(crate) const OWNED_EVERY_BONUS_CARD: &str = "everyPointBonusCard";
 pub(crate) const OWNED_STATED: &str = "stated";
@@ -149,9 +159,10 @@ pub(crate) struct DeliveryDoc {
     /// `userCards` card ids (read when the owned cards policy is stated).
     pub(crate) cards: Vec<i64>,
     pub(crate) honors: Vec<HonorRow>,
-    pub(crate) base_point: i32,
-    pub(crate) drop_upper_limit: i32,
     pub(crate) plant_refresh_points: i32,
+    /// `policies.masterConfigsStandIn`: the two master configs for a runtime
+    /// root without the configs master.
+    pub(crate) configs_stand_in: BTreeMap<String, i32>,
 }
 
 impl Default for DeliveryDoc {
@@ -163,9 +174,11 @@ impl Default for DeliveryDoc {
             owned_cards: OwnedCards::EveryPointBonusCard,
             cards: Vec::new(),
             honors: Vec::new(),
-            base_point: DEFAULT_BASE_POINT,
-            drop_upper_limit: DEFAULT_DROP_UPPER_LIMIT,
             plant_refresh_points: DEFAULT_PLANT_REFRESH_POINTS,
+            configs_stand_in: DEFAULT_CONFIGS_STAND_IN
+                .iter()
+                .map(|&(key, value)| (key.to_owned(), value))
+                .collect(),
         }
     }
 }
@@ -177,7 +190,8 @@ impl Default for DeliveryDoc {
 /// The document keys this section reads at the top level.
 pub(crate) const DOCUMENT_KEYS: [&str; 6] = SECTIONS;
 /// The keys this section reads under `policies`.
-pub(crate) const POLICY_KEYS: [&str; 2] = ["ownedCards", "birthdayPlantRefreshPoints"];
+pub(crate) const POLICY_KEYS: [&str; 3] =
+    ["ownedCards", "birthdayPlantRefreshPoints", POLICY_CONFIGS_STAND_IN];
 
 pub(crate) fn parse_parties(value: &Value) -> Result<Vec<BirthdayPartyRow>, String> {
     let rows = value
@@ -274,20 +288,6 @@ pub(crate) fn parse_owned_cards(value: &Value) -> Result<OwnedCards, String> {
     }
 }
 
-/// `masterConfigs`: (base point, drop upper limit).
-pub(crate) fn parse_master_configs(value: &Value) -> Result<(i32, i32), String> {
-    let configs = object(value, SECTION_MASTER_CONFIGS)?;
-    only(
-        configs,
-        &[CONFIG_BASE_POINT, CONFIG_DROP_UPPER_LIMIT],
-        SECTION_MASTER_CONFIGS,
-    )?;
-    Ok((
-        int32(configs, CONFIG_BASE_POINT, SECTION_MASTER_CONFIGS)?,
-        int32(configs, CONFIG_DROP_UPPER_LIMIT, SECTION_MASTER_CONFIGS)?,
-    ))
-}
-
 impl DeliveryDoc {
     /// The section from a schemaVersion 2 document: each key optional (the
     /// default when absent), each present one strict.
@@ -312,14 +312,17 @@ impl DeliveryDoc {
         if let Some(value) = doc.get(SECTION_HONORS) {
             out.honors = parse_honors(value)?;
         }
-        if let Some(value) = doc.get(SECTION_MASTER_CONFIGS) {
-            (out.base_point, out.drop_upper_limit) = parse_master_configs(value)?;
+        if doc.contains_key(SECTION_MASTER_CONFIGS) {
+            warn!("[server] the document's {SECTION_MASTER_CONFIGS} is ignored: {CONFIG_BASE_POINT} and {CONFIG_DROP_UPPER_LIMIT} are master data (configs.json)");
         }
         if let Some(value) = policies.get("ownedCards") {
             out.owned_cards = parse_owned_cards(value)?;
         }
         if policies.contains_key("birthdayPlantRefreshPoints") {
             out.plant_refresh_points = int32(policies, "birthdayPlantRefreshPoints", "policies")?;
+        }
+        if let Some(value) = policies.get(POLICY_CONFIGS_STAND_IN) {
+            out.configs_stand_in = parse_configs_stand_in(value)?;
         }
         out.check_structure()?;
         Ok(out)
@@ -390,16 +393,6 @@ impl DeliveryDoc {
                 ));
             }
         }
-        for (name, value) in [
-            (CONFIG_BASE_POINT, self.base_point),
-            (CONFIG_DROP_UPPER_LIMIT, self.drop_upper_limit),
-        ] {
-            if value < 0 {
-                return Err(format!(
-                    "{SECTION_MASTER_CONFIGS}.{name} = {value} is negative"
-                ));
-            }
-        }
         if self.plant_refresh_points < 0 {
             return Err(format!(
                 "policies.birthdayPlantRefreshPoints = {} is negative (0 turns the refresh off)",
@@ -437,10 +430,6 @@ impl DeliveryDoc {
             SECTION_HONORS.into(),
             Value::Array(self.honors.iter().map(|row| honor_value(*row)).collect()),
         );
-        doc.insert(
-            SECTION_MASTER_CONFIGS.into(),
-            json!({CONFIG_BASE_POINT: self.base_point, CONFIG_DROP_UPPER_LIMIT: self.drop_upper_limit}),
-        );
         policies.insert(
             "ownedCards".into(),
             json!(match self.owned_cards {
@@ -452,6 +441,7 @@ impl DeliveryDoc {
             "birthdayPlantRefreshPoints".into(),
             json!(self.plant_refresh_points),
         );
+        policies.insert(POLICY_CONFIGS_STAND_IN.into(), json!(self.configs_stand_in));
     }
 
     fn party_mut(&mut self, id: i32) -> Option<&mut BirthdayPartyRow> {
@@ -459,6 +449,28 @@ impl DeliveryDoc {
             .iter_mut()
             .find(|row| row.birthday_party_id == id)
     }
+}
+
+/// `policies.masterConfigsStandIn`: an object of the two master config keys,
+/// each an int32; a key it leaves out takes its default.
+fn parse_configs_stand_in(value: &Value) -> Result<BTreeMap<String, i32>, String> {
+    let at = format!("policies.{POLICY_CONFIGS_STAND_IN}");
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{at} is not an object"))?;
+    if let Some(key) = object
+        .keys()
+        .find(|key| !DEFAULT_CONFIGS_STAND_IN.iter().any(|(name, _)| name == key))
+    {
+        return Err(format!("{at} has {key}, which is not one of the delivery's master configs"));
+    }
+    DEFAULT_CONFIGS_STAND_IN
+        .iter()
+        .map(|&(key, default)| {
+            let value = if object.contains_key(key) { int32(object, key, &at)? } else { default };
+            Ok((key.to_owned(), value))
+        })
+        .collect()
 }
 
 pub(crate) fn party_value(row: BirthdayPartyRow) -> Value {
@@ -483,7 +495,8 @@ fn quantities_value(map: &BTreeMap<i32, i32>, id_key: &str) -> Value {
 }
 
 // ---------------------------------------------------------------------------
-// Master tables (`birthday-party-delivery.json`)
+// Master tables (the delivery reward, point bonus and total reward tables
+// and the total reward boxes)
 // ---------------------------------------------------------------------------
 
 /// One resource of a reply (`UserResource`).
@@ -496,36 +509,35 @@ pub(crate) struct Reward {
 }
 
 #[derive(Clone, Debug)]
-struct RewardRow {
+pub(super) struct RewardRow {
     party: i64,
     requirement: i32,
 }
 
 #[derive(Clone, Debug)]
-struct BonusRow {
+pub(super) struct BonusRow {
     party: i64,
     card: i64,
     rate: i32,
 }
 
 #[derive(Clone, Debug)]
-struct TotalRow {
+pub(super) struct TotalRow {
     id: i64,
     party: i64,
     requirement: i32,
     box_id: i64,
 }
 
-/// The delivery master tables (`birthday-party-delivery.json`): the reward
-/// rows and point bonus rows the client reads, and the total reward rows and
-/// their boxes the server grants from. The server model reads them as a
+/// The delivery master tables: the reward rows and point bonus rows the
+/// client reads, and the total reward rows the server grants from (their
+/// boxes are the deferred [`Masters::reward_boxes`]). The server model reads them as a
 /// master and inserts this resource for the client's readers.
 #[derive(Resource, Clone, Debug)]
 pub(crate) struct DeliveryTables {
     rewards: Vec<RewardRow>,
     bonuses: Vec<BonusRow>,
     totals: Vec<TotalRow>,
-    boxes: Vec<(i64, Reward)>,
 }
 
 impl DeliveryTables {
@@ -557,14 +569,6 @@ impl DeliveryTables {
         self.bonuses.iter().map(|row| row.card).collect()
     }
 
-    fn box_contents(&self, box_id: i64) -> Vec<Reward> {
-        self.boxes
-            .iter()
-            .filter(|(id, _)| *id == box_id)
-            .map(|(_, reward)| reward.clone())
-            .collect()
-    }
-
     /// The total reward rows of a party an obtained count newly reaches:
     /// `before < requirement <= after`, master order.
     fn totals_reached(&self, party: i64, before: i32, after: i32) -> Vec<(i64, i32, i64)> {
@@ -584,76 +588,155 @@ fn table_int(row: &Value, table: &str, key: &str) -> Result<i64, String> {
         .ok_or_else(|| format!("{table} row {:?} has no integer {key}", row.get("id")))
 }
 
-fn table_rows<'a>(doc: &'a Value, key: &str) -> Result<&'a Vec<Value>, String> {
-    doc.get(key)
-        .and_then(Value::as_array)
-        .ok_or_else(|| format!("no {key} array"))
+/// The delivery tables as their master tables resolve.
+#[derive(Default, Debug)]
+pub(crate) struct DeliveryParts {
+    pub(super) rewards: Option<Vec<RewardRow>>,
+    pub(super) bonuses: Option<Vec<BonusRow>>,
+    pub(super) totals: Option<Vec<TotalRow>>,
 }
 
-/// The master parser of `birthday-party-delivery.json`.
-pub(crate) fn parse_tables(text: &str, masters: &mut Masters) -> Result<(), String> {
-    let doc: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
-    let rewards = table_rows(&doc, "rewards")?
+impl DeliveryParts {
+    /// The tables, once all three are in.
+    pub(super) fn complete(&mut self) -> Option<DeliveryTables> {
+        if self.rewards.is_none() || self.bonuses.is_none() || self.totals.is_none() {
+            return None;
+        }
+        let tables = DeliveryTables {
+            rewards: self.rewards.take()?,
+            bonuses: self.bonuses.take()?,
+            totals: self.totals.take()?,
+        };
+        info!(
+            "[server] delivery tables: {} reward rows, {} point bonus rows, {} total reward rows",
+            tables.rewards.len(),
+            tables.bonuses.len(),
+            tables.totals.len()
+        );
+        Some(tables)
+    }
+}
+
+/// Logs the total reward box rows once they arrive.
+fn log_boxes(boxes: &[(i64, Reward)], table: &str) {
+    info!(
+        "[server] total reward boxes ({table}): {} box rows",
+        boxes.len()
+    );
+}
+
+/// `birthdayPartyDeliveryRewards`, master order.
+pub(crate) fn parse_rewards(text: &str, masters: &mut Masters) -> Result<(), String> {
+    const TABLE: &str = "birthdayPartyDeliveryRewards";
+    let rewards = moly_assets::json::master::rows(text)?
         .iter()
         .map(|row| {
             Ok(RewardRow {
-                party: table_int(row, "rewards", "birthdayPartyId")?,
-                requirement: table_int(row, "rewards", "requirement")? as i32,
+                party: table_int(row, TABLE, "birthdayPartyId")?,
+                requirement: table_int(row, TABLE, "requirement")? as i32,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let bonuses = table_rows(&doc, "pointBonuses")?
+    masters.delivery_parts.rewards = Some(rewards);
+    Ok(())
+}
+
+/// `birthdayPartyDeliveryPointBonuses`, master order.
+pub(crate) fn parse_point_bonuses(text: &str, masters: &mut Masters) -> Result<(), String> {
+    const TABLE: &str = "birthdayPartyDeliveryPointBonuses";
+    let bonuses = moly_assets::json::master::rows(text)?
         .iter()
         .map(|row| {
             Ok(BonusRow {
-                party: table_int(row, "pointBonuses", "birthdayPartyId")?,
-                card: table_int(row, "pointBonuses", "cardId")?,
-                rate: table_int(row, "pointBonuses", "rate")? as i32,
+                party: table_int(row, TABLE, "birthdayPartyId")?,
+                card: table_int(row, TABLE, "cardId")?,
+                rate: table_int(row, TABLE, "rate")? as i32,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let totals = table_rows(&doc, "totalRewards")?
+    masters.delivery_parts.bonuses = Some(bonuses);
+    Ok(())
+}
+
+/// `birthdayPartyDeliveryTotalRewards`, master order.
+pub(crate) fn parse_total_rewards(text: &str, masters: &mut Masters) -> Result<(), String> {
+    const TABLE: &str = "birthdayPartyDeliveryTotalRewards";
+    let totals = moly_assets::json::master::rows(text)?
         .iter()
         .map(|row| {
             Ok(TotalRow {
-                id: table_int(row, "totalRewards", "id")?,
-                party: table_int(row, "totalRewards", "birthdayPartyId")?,
-                requirement: table_int(row, "totalRewards", "requirement")? as i32,
-                box_id: table_int(row, "totalRewards", "resourceBoxId")?,
+                id: table_int(row, TABLE, "id")?,
+                party: table_int(row, TABLE, "birthdayPartyId")?,
+                requirement: table_int(row, TABLE, "requirement")? as i32,
+                box_id: table_int(row, TABLE, "resourceBoxId")?,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let boxes = table_rows(&doc, "totalRewardBoxes")?
-        .iter()
+    masters.delivery_parts.totals = Some(totals);
+    Ok(())
+}
+
+/// The purpose of the boxes a total reward row names.
+const TOTAL_REWARD_BOX_PURPOSE: &str = "birthday_party_delivery_total_reward";
+
+/// The box rows of the total reward purpose: what each granted box holds,
+/// master order.
+fn total_reward_boxes<'a>(
+    rows: impl Iterator<Item = &'a Value>,
+    table: &str,
+) -> Result<Vec<(i64, Reward)>, String> {
+    rows.filter(|row| row["resourceBoxPurpose"].as_str() == Some(TOTAL_REWARD_BOX_PURPOSE))
         .map(|row| {
             Ok((
-                table_int(row, "totalRewardBoxes", "resourceBoxId")?,
+                table_int(row, table, "resourceBoxId")?,
                 Reward {
                     resource_type: row
                         .get("resourceType")
                         .and_then(Value::as_str)
-                        .ok_or("a total reward box row has no resourceType")?
+                        .ok_or_else(|| format!("a {table} row has no resourceType"))?
                         .to_owned(),
-                    resource_id: table_int(row, "totalRewardBoxes", "resourceId")?,
-                    quantity: table_int(row, "totalRewardBoxes", "resourceQuantity")? as i32,
+                    resource_id: table_int(row, table, "resourceId")?,
+                    quantity: table_int(row, table, "resourceQuantity")? as i32,
                     level: row.get("resourceLevel").and_then(Value::as_i64),
                 },
             ))
         })
-        .collect::<Result<Vec<_>, String>>()?;
-    info!(
-        "[server] delivery tables: {} reward rows, {} point bonus rows, {} total reward rows, {} box rows",
-        rewards.len(),
-        bonuses.len(),
-        totals.len(),
-        boxes.len()
-    );
-    masters.delivery = Some(DeliveryTables {
-        rewards,
-        bonuses,
-        totals,
-        boxes,
-    });
+        .collect()
+}
+
+/// `resourceBoxDetails`: a master that carries the box rows as a table of
+/// their own.
+pub(crate) fn parse_box_details(text: &str, masters: &mut Masters) -> Result<(), String> {
+    let rows = moly_assets::json::master::rows(text)?;
+    let boxes = total_reward_boxes(rows.iter(), "resourceBoxDetails")?;
+    log_boxes(&boxes, "resourceBoxDetails");
+    masters.reward_boxes = super::Deferred::Ready(boxes);
+    Ok(())
+}
+
+/// `resourceBoxes`: a master that nests each box's rows in its `details`,
+/// read box by box in master order.
+pub(crate) fn parse_nested_boxes(text: &str, masters: &mut Masters) -> Result<(), String> {
+    let boxes = moly_assets::json::master::rows(text)?;
+    let mut details = Vec::new();
+    for resource_box in &boxes {
+        if resource_box["resourceBoxPurpose"].as_str() != Some(TOTAL_REWARD_BOX_PURPOSE) {
+            continue;
+        }
+        match resource_box.get("details") {
+            None | Some(Value::Null) => {}
+            Some(Value::Array(rows)) => details.extend(rows),
+            Some(_) => {
+                return Err(format!(
+                    "resourceBoxes box {:?}: details is not a list",
+                    resource_box.get("id")
+                ))
+            }
+        }
+    }
+    let boxes = total_reward_boxes(details.into_iter(), "resourceBoxes[].details")?;
+    log_boxes(&boxes, "resourceBoxes[].details");
+    masters.reward_boxes = super::Deferred::Ready(boxes);
     Ok(())
 }
 
@@ -722,6 +805,11 @@ impl ClientBirthdayPartyData {
             .get(&mysekai_material_id)
             .copied()
             .unwrap_or(0)
+    }
+
+    /// The `userMysekaiMaterials` rows: mysekai material id -> quantity.
+    pub(crate) fn mysekai_materials(&self) -> &BTreeMap<i32, i32> {
+        &self.mysekai_materials
     }
 
     /// The card ids of `userCards` (`UserDataManager.GetCard(id) != null`).
@@ -833,13 +921,44 @@ impl ServerModel {
                 .then(|| doc.mysekai_materials.clone()),
             cards: has(SECTION_CARDS).then(|| self.owned_cards()),
             honors: has(SECTION_HONORS).then(|| doc.honors.clone()),
-            configs: has(SECTION_MASTER_CONFIGS).then(|| {
-                BTreeMap::from([
-                    (CONFIG_BASE_POINT.to_owned(), doc.base_point),
-                    (CONFIG_DROP_UPPER_LIMIT.to_owned(), doc.drop_upper_limit),
-                ])
-            }),
+            configs: has(SECTION_MASTER_CONFIGS)
+                .then(|| self.delivery_configs())
+                .flatten(),
         }
+    }
+
+    /// The delivery's master configs the configs master holds as integers;
+    /// the document's stand-in when the runtime root has no configs master.
+    fn delivery_configs(&self) -> Option<BTreeMap<String, i32>> {
+        let Some(configs) = self.masters.configs.as_ref() else {
+            return Some(self.doc.delivery.configs_stand_in.clone());
+        };
+        Some(
+            [CONFIG_BASE_POINT, CONFIG_DROP_UPPER_LIMIT]
+                .into_iter()
+                .filter_map(|key| {
+                    let value = configs.get(key)?.trim().parse::<i32>().ok()?;
+                    Some((key.to_owned(), value))
+                })
+                .collect(),
+        )
+    }
+
+    /// One delivery master config (`GetMasterConfigToInt`), refused by name.
+    /// Without the configs master (requests come after the masters resolve)
+    /// the document's stand-in answers.
+    fn master_config_int(&self, key: &str) -> Result<i32, String> {
+        let Some(configs) = self.masters.configs.as_ref() else {
+            return self.doc.delivery.configs_stand_in.get(key).copied().ok_or_else(|| {
+                format!("policies.{POLICY_CONFIGS_STAND_IN} has no {key}")
+            });
+        };
+        let raw = configs
+            .get(key)
+            .ok_or_else(|| format!("the configs master has no {key}"))?;
+        raw.trim()
+            .parse::<i32>()
+            .map_err(|_| format!("the configs master's {key} = {raw:?} is not an integer"))
     }
 
     /// The new party row and delivery item stock policies for the parties in
@@ -888,9 +1007,28 @@ impl ServerModel {
             .iter()
             .find(|party| party.birthday_party_id == birthday_party_id)
             .copied()
-            .ok_or_else(|| {
-                format!("party {birthday_party_id} is not in session at the server clock")
+            .ok_or_else(|| match &self.parties_missing {
+                Some(reason) => format!(
+                    "party {birthday_party_id} is not in session at the server clock: no party is, since {reason}"
+                ),
+                None => format!("party {birthday_party_id} is not in session at the server clock"),
             })
+    }
+
+    /// Refuses, before a reply changes anything, an obtained count that
+    /// newly reaches a total reward row while the box rows are not in.
+    fn check_totals_grantable(&self, party: i32, before: i32, after: i32) -> Result<(), String> {
+        if after <= before {
+            return Ok(());
+        }
+        let tables = self.masters.delivery.as_ref().ok_or(TABLES_ABSENT)?;
+        if tables
+            .totals_reached(i64::from(party), before, after)
+            .is_empty()
+        {
+            return Ok(());
+        }
+        self.masters.reward_boxes.get(BOXES_REFUSED).map(|_| ())
     }
 
     /// The total reward rows the obtained count newly reaches, granted.
@@ -905,14 +1043,21 @@ impl ServerModel {
         if after <= before {
             return Ok(Vec::new());
         }
-        let tables = self.masters.delivery.as_ref().ok_or(
-            "the delivery tables (birthday-party-delivery.json) are absent: the total rewards cannot be granted",
-        )?;
+        let tables = self.masters.delivery.as_ref().ok_or(TABLES_ABSENT)?;
         let rows = tables.totals_reached(i64::from(party), before, after);
-        let rewards: Vec<Reward> = rows
-            .iter()
-            .flat_map(|(_, _, box_id)| tables.box_contents(*box_id))
-            .collect();
+        let rewards: Vec<Reward> = if rows.is_empty() {
+            Vec::new()
+        } else {
+            let boxes = self.masters.reward_boxes.get(BOXES_REFUSED)?;
+            rows.iter()
+                .flat_map(|(_, _, box_id)| {
+                    boxes
+                        .iter()
+                        .filter(move |(id, _)| id == box_id)
+                        .map(|(_, reward)| reward.clone())
+                })
+                .collect()
+        };
         let mut untracked = Vec::new();
         for reward in &rewards {
             let id = i32::try_from(reward.resource_id)
@@ -963,7 +1108,7 @@ impl ServerModel {
         }
         let (requirement, member_bonus) = {
             let tables = self.masters.delivery.as_ref().ok_or(
-                "the delivery tables (birthday-party-delivery.json) are absent: the points cannot be counted",
+                "the delivery tables are absent (not all three delivery master tables are in): the points cannot be counted",
             )?;
             let owned = self.owned_cards();
             (
@@ -971,6 +1116,8 @@ impl ServerModel {
                 tables.member_bonus(i64::from(birthday_party_id), &owned),
             )
         };
+        let base_point = self.master_config_int(CONFIG_BASE_POINT)?;
+        let drop_upper_limit = self.master_config_int(CONFIG_DROP_UPPER_LIMIT)?;
         let now = self.now_ms();
         let delivery = &self.doc.delivery;
         let row = *delivery
@@ -988,22 +1135,27 @@ impl ServerModel {
             unsynchronized_cost: 0,
             synchronized_points: row.delivery_total_point,
             unsynchronized_points: 0,
-            base_point: delivery.base_point,
+            base_point,
             member_bonus,
             reward_loop_requirement: requirement,
-            max_drop_item_count: delivery.drop_upper_limit,
+            max_drop_item_count: drop_upper_limit,
         };
         let loops_before = tally.total_drop_count();
         let spent = tally.spend(consumed);
         let loops_after = tally.total_drop_count();
         let new_loops = loops_after - loops_before;
-        let free = (delivery.drop_upper_limit - row.dropped_mysekai_material_count).max(0);
+        let free = (drop_upper_limit - row.dropped_mysekai_material_count).max(0);
         let dropped = new_loops.min(free);
         let obtained = new_loops - dropped;
         let points_before = row.delivery_total_point;
         let points_after = tally.current_points();
         let refresh = delivery.plant_refresh_points;
         let is_refreshed = refresh > 0 && points_after / refresh > points_before / refresh;
+        self.check_totals_grantable(
+            birthday_party_id,
+            row.obtained_mysekai_material_count,
+            row.obtained_mysekai_material_count + obtained,
+        )?;
         let delivery = &mut self.doc.delivery;
         let party = delivery
             .party_mut(birthday_party_id)
@@ -1031,9 +1183,7 @@ impl ServerModel {
             &mut changed,
         )?;
         info!(
-            "[server] delivery reply party {birthday_party_id}: sent {consumed}, spent {spent} (have {have}); points {points_before} -> {points_after} (base {}, bonus {member_bonus}, loop requirement {requirement}); loops {loops_before} -> {loops_after}; dropped {dropped} (limit {}), obtained {obtained}; isRefreshed {is_refreshed} (birthday plant refresh every {refresh} points, an inference)",
-            self.doc.delivery.base_point,
-            self.doc.delivery.drop_upper_limit
+            "[server] delivery reply party {birthday_party_id}: sent {consumed}, spent {spent} (have {have}); points {points_before} -> {points_after} (base {base_point}, bonus {member_bonus}, loop requirement {requirement}); loops {loops_before} -> {loops_after}; dropped {dropped} (limit {drop_upper_limit}), obtained {obtained}; isRefreshed {is_refreshed} (birthday plant refresh every {refresh} points, an inference)"
         );
         Ok((
             DeliveryResponse {
@@ -1054,6 +1204,22 @@ impl ServerModel {
         let mut changed = vec![SECTION_BIRTHDAY_PARTIES];
         let mut rewards = Vec::new();
         let mut seen = BTreeSet::new();
+        for content in contents {
+            let row = self
+                .doc
+                .delivery
+                .parties
+                .iter()
+                .find(|row| row.birthday_party_id == content.birthday_party_id);
+            if let Some(party) = row {
+                let before = party.obtained_mysekai_material_count;
+                self.check_totals_grantable(
+                    content.birthday_party_id,
+                    before,
+                    before + content.gathered_count.max(0),
+                )?;
+            }
+        }
         for content in contents {
             if !seen.insert(content.birthday_party_id) {
                 return Err(format!(
@@ -1125,6 +1291,12 @@ impl ServerModel {
         update
     }
 }
+
+/// The refusal of a total reward grant without the delivery tables.
+const TABLES_ABSENT: &str =
+    "the delivery tables are absent (not all three delivery master tables are in): the total rewards cannot be granted";
+/// What a total reward grant cannot do without the box rows.
+const BOXES_REFUSED: &str = "the total rewards cannot be granted";
 
 fn push_once(list: &mut Vec<&'static str>, section: &'static str) {
     if !list.contains(&section) {
@@ -1253,15 +1425,6 @@ pub(crate) fn edit_path(
             doc.honors = rows;
             Some(SECTION_HONORS)
         }),
-        [SECTION_MASTER_CONFIGS, key] => (|| {
-            let amount = edit_int(value, path)?;
-            match *key {
-                CONFIG_BASE_POINT => doc.base_point = amount,
-                CONFIG_DROP_UPPER_LIMIT => doc.drop_upper_limit = amount,
-                _ => return Err(format!("{path} is not a delivery master config")),
-            }
-            Ok(Some(SECTION_MASTER_CONFIGS))
-        })(),
         ["policies", "ownedCards"] => parse_owned_cards(value).map(|policy| {
             doc.owned_cards = policy;
             // The client's card copy follows the policy.
@@ -1313,10 +1476,6 @@ pub(crate) fn schema_sections(model: Option<&ServerModel>) -> Value {
                 {"path": "userHonors", "type": "rows", "row": {"honorId": "int", "level": "int", "obtainedAt": "epoch-ms"}},
                 {"path": "userCards", "type": "rows", "row": {"cardId": "int"},
                     "when": {"policies.ownedCards": OWNED_STATED}},
-                {"path": format!("{SECTION_MASTER_CONFIGS}.{CONFIG_BASE_POINT}"), "type": "int", "min": 0,
-                    "note": "a master config no master copy on disk has"},
-                {"path": format!("{SECTION_MASTER_CONFIGS}.{CONFIG_DROP_UPPER_LIMIT}"), "type": "int", "min": 0,
-                    "note": "a master config no master copy on disk has"},
             ],
         },
         {
@@ -1352,24 +1511,43 @@ mod tests {
     use super::*;
 
     fn tables() -> DeliveryTables {
-        let text = json!({
-            "rewards": [{"id": 1, "birthdayPartyId": 1, "requirement": 10000}],
-            "pointBonuses": [{"id": 1, "birthdayPartyId": 1, "cardId": 7, "rate": 50}],
-            "totalRewards": [
+        let mut masters = Masters::default();
+        let rows = |rows: Value| rows.to_string();
+        parse_rewards(
+            &rows(json!([{"id": 1, "birthdayPartyId": 1, "requirement": 10000}])),
+            &mut masters,
+        )
+        .unwrap();
+        parse_point_bonuses(
+            &rows(json!([{"id": 1, "birthdayPartyId": 1, "cardId": 7, "rate": 50}])),
+            &mut masters,
+        )
+        .unwrap();
+        parse_total_rewards(
+            &rows(json!([
                 {"id": 1, "birthdayPartyId": 1, "requirement": 2, "resourceBoxId": 20},
                 {"id": 2, "birthdayPartyId": 1, "requirement": 3, "resourceBoxId": 30},
-            ],
-            "totalRewardBoxes": [
-                {"resourceBoxId": 20, "resourceType": "honor", "resourceId": 6818, "resourceQuantity": 1, "resourceLevel": 1},
-                {"resourceBoxId": 20, "resourceType": "boost_item", "resourceId": 1, "resourceQuantity": 2},
-                {"resourceBoxId": 30, "resourceType": "honor", "resourceId": 6818, "resourceQuantity": 1, "resourceLevel": 2},
-                {"resourceBoxId": 30, "resourceType": "material", "resourceId": 15, "resourceQuantity": 50},
-            ],
-        })
-        .to_string();
+            ])),
+            &mut masters,
+        )
+        .unwrap();
+        masters.delivery_parts.complete().unwrap()
+    }
+
+    fn boxes() -> super::super::Deferred<Vec<(i64, Reward)>> {
         let mut masters = Masters::default();
-        parse_tables(&text, &mut masters).unwrap();
-        masters.delivery.unwrap()
+        parse_box_details(
+            &json!([
+                {"resourceBoxPurpose": "birthday_party_delivery_total_reward", "resourceBoxId": 20, "resourceType": "honor", "resourceId": 6818, "resourceQuantity": 1, "resourceLevel": 1},
+                {"resourceBoxPurpose": "birthday_party_delivery_total_reward", "resourceBoxId": 20, "resourceType": "boost_item", "resourceId": 1, "resourceQuantity": 2},
+                {"resourceBoxPurpose": "birthday_party_delivery_total_reward", "resourceBoxId": 30, "resourceType": "honor", "resourceId": 6818, "resourceQuantity": 1, "resourceLevel": 2},
+                {"resourceBoxPurpose": "birthday_party_delivery_total_reward", "resourceBoxId": 30, "resourceType": "material", "resourceId": 15, "resourceQuantity": 50},
+            ])
+            .to_string(),
+            &mut masters,
+        )
+        .unwrap();
+        masters.reward_boxes
     }
 
     const PARTY: PartyMaster = PartyMaster {
@@ -1381,6 +1559,11 @@ mod tests {
     fn model() -> ServerModel {
         let mut model = super::super::tests::model();
         model.masters.delivery = Some(tables());
+        model.masters.reward_boxes = boxes();
+        model.masters.configs = Some(BTreeMap::from([
+            (CONFIG_BASE_POINT.to_owned(), "100".to_owned()),
+            (CONFIG_DROP_UPPER_LIMIT.to_owned(), "5".to_owned()),
+        ]));
         model.joined = true;
         model
     }
@@ -1441,6 +1624,20 @@ mod tests {
     }
 
     #[test]
+    fn the_delivery_reads_the_stand_in_without_the_configs_master() {
+        let mut model = model();
+        model.seat_parties(&[PARTY]);
+        model.masters.configs = None;
+        assert!(model.birthday_party_delivery(1, 10).is_ok());
+        assert_eq!(
+            model
+                .delivery_update(&[SECTION_MASTER_CONFIGS.to_owned()])
+                .configs,
+            Some(model.doc.delivery.configs_stand_in.clone())
+        );
+    }
+
+    #[test]
     fn a_gather_can_reach_a_total_reward() {
         let mut model = model();
         model.seat_parties(&[PARTY]);
@@ -1497,7 +1694,12 @@ mod tests {
         doc.owned_cards = OwnedCards::Stated;
         let (mut top, mut policies) = (Map::new(), Map::new());
         doc.write(&mut top, &mut policies);
+        assert!(!top.contains_key(SECTION_MASTER_CONFIGS));
         assert_eq!(DeliveryDoc::parse(&top, &policies).unwrap(), doc);
+        // An earlier document's masterConfigs reads and is ignored.
+        let mut earlier = top.clone();
+        earlier.insert(SECTION_MASTER_CONFIGS.into(), json!({CONFIG_BASE_POINT: 1}));
+        assert_eq!(DeliveryDoc::parse(&earlier, &policies).unwrap(), doc);
         assert_eq!(
             DeliveryDoc::parse(&Map::new(), &Map::new()).unwrap(),
             DeliveryDoc::default()
@@ -1524,10 +1726,8 @@ mod tests {
             NEW_PARTY_DROPPED
         );
         assert!(client.cards().contains(&7));
-        assert_eq!(
-            client.master_config_int(CONFIG_BASE_POINT),
-            Some(DEFAULT_BASE_POINT)
-        );
+        assert_eq!(client.master_config_int(CONFIG_BASE_POINT), Some(100));
+        assert_eq!(client.master_config_int(CONFIG_DROP_UPPER_LIMIT), Some(5));
         let (_, changed) = model.birthday_party_delivery(1, 10).unwrap();
         let update = model.delivery_reply(ResponseKind::BirthdayPartyDelivery, &changed);
         client.apply(update);

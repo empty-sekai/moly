@@ -26,16 +26,16 @@ use bevy::{
 };
 pub(crate) use icons::{EditorIcons, load, parse};
 
-/// Included with every pristine template before the existing glyph-atlas bake.
-/// Infinity identifies the four existing unlimited offline catalog mocks; it
-/// is not a claim about real-account inventory.
-pub(crate) const FIXED_TEXTS: &[&str] = &["0123456789∞"];
+/// Included with every pristine template before the existing glyph-atlas bake:
+/// the cells' counts (`UIPartsThumbnail.SetQuantity`, format `×{0}`).
+pub(crate) const FIXED_TEXTS: &[&str] = &["×0123456789"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ChoiceOrigin {
     Placed(String),
     Inventory(String),
-    OfflineCatalog(usize),
+    /// A row of the owned fixture list (`EditView::catalog`).
+    Owned(usize),
 }
 
 /// Identity/data-set signature only: moving a selected item must not clone its
@@ -43,13 +43,20 @@ enum ChoiceOrigin {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ItemChoice {
     fixture_id: i32,
+    texture_id: u32,
+    /// The cell's count: an owned row's placeable count, 1 for a single
+    /// placed or stored fixture.
+    count: i32,
     origin: ChoiceOrigin,
     editable: bool,
 }
 
 impl ItemChoice {
-    fn unlimited(&self) -> bool {
-        matches!(self.origin, ChoiceOrigin::OfflineCatalog(_))
+    /// The registered thumbnail of this fixture colour.
+    fn icon<'a>(&self, icons: &'a EditorIcons) -> Option<&'a str> {
+        i32::try_from(self.texture_id)
+            .ok()
+            .and_then(|texture| icons.variant(self.fixture_id, texture))
     }
 
     fn is_placed(&self) -> bool {
@@ -60,7 +67,7 @@ impl ItemChoice {
         match &self.origin {
             ChoiceOrigin::Placed(uid) => EditCommand::SelectPlaced { uid: uid.clone() },
             ChoiceOrigin::Inventory(uid) => EditCommand::SelectInventory { uid: uid.clone() },
-            ChoiceOrigin::OfflineCatalog(index) => EditCommand::SelectCatalog { index: *index },
+            ChoiceOrigin::Owned(index) => EditCommand::SelectCatalog { index: *index },
         }
     }
 
@@ -70,8 +77,10 @@ impl ItemChoice {
         };
         match &self.origin {
             ChoiceOrigin::Placed(uid) | ChoiceOrigin::Inventory(uid) => selected.item.uid == *uid,
-            ChoiceOrigin::OfflineCatalog(_) => {
-                selected.is_new_mock && selected.item.fixture_id == self.fixture_id
+            ChoiceOrigin::Owned(_) => {
+                (selected.is_new || selected.from_inventory)
+                    && selected.item.fixture_id == self.fixture_id
+                    && selected.item.texture_id == self.texture_id
             }
         }
     }
@@ -79,33 +88,45 @@ impl ItemChoice {
 
 fn choices(edit: &EditView, icons: &EditorIcons) -> Vec<ItemChoice> {
     let mut result = Vec::new();
+    // A stored fixture of a listed owned row is counted in that row.
+    let owned_row = |row: &crate::fixture_edit::EditItemView| {
+        edit.catalog
+            .iter()
+            .any(|owned| owned.fixture_id == row.fixture_id && owned.texture_id == row.texture_id)
+    };
     for (rows, inventory) in [(&edit.placed_rows, false), (&edit.inventory, true)] {
         for row in rows {
-            // The ordinary texture-1 provider covers the shipped editable set.
-            // An unknown image is an explicit source gap, never a generated icon.
-            if !icons.by_fixture.contains_key(&row.fixture_id) {
+            if inventory && owned_row(row) {
                 continue;
             }
-            result.push(ItemChoice {
+            let choice = ItemChoice {
                 fixture_id: row.fixture_id,
+                texture_id: row.texture_id,
+                count: 1,
                 origin: if inventory {
                     ChoiceOrigin::Inventory(row.uid.clone())
                 } else {
                     ChoiceOrigin::Placed(row.uid.clone())
                 },
                 editable: row.editable,
-            });
+            };
+            // An unknown image is an explicit source gap, never a generated icon.
+            if choice.icon(icons).is_some() {
+                result.push(choice);
+            }
         }
     }
     for row in &edit.catalog {
-        if !row.unlimited_mock || !icons.by_fixture.contains_key(&row.fixture_id) {
-            continue;
-        }
-        result.push(ItemChoice {
+        let choice = ItemChoice {
             fixture_id: row.fixture_id,
-            origin: ChoiceOrigin::OfflineCatalog(row.index),
+            texture_id: row.texture_id,
+            count: row.placeable,
+            origin: ChoiceOrigin::Owned(row.index),
             editable: true,
-        });
+        };
+        if choice.icon(icons).is_some() {
+            result.push(choice);
+        }
     }
     result
 }
@@ -116,6 +137,7 @@ pub(crate) struct EditorRoot {
     choices: Vec<ItemChoice>,
     site_id: u32,
     seen_revision: u64,
+    seen_owned_revision: u64,
 }
 
 #[derive(Component)]
@@ -187,7 +209,7 @@ pub(crate) fn spawn_when_ready(
     spawned: Option<Res<EditorSpawned>>,
 ) {
     if spawned.is_some()
-        || !icons.ready
+        || !icons.is_ready()
         || [
             "EditorSource",
             "EditorFloor",
@@ -222,6 +244,7 @@ pub(crate) fn spawn_when_ready(
             choices,
             site_id: edit.site_id,
             seen_revision: u64::MAX,
+            seen_owned_revision: u64::MAX,
         },
         Visibility::Hidden,
         Transform::default(),
@@ -548,7 +571,7 @@ pub(crate) fn click(
             if hit(view, &layouts, &bindings.cancel, point, canvas) {
                 Some((&bindings.cancel, EditCommand::Cancel))
             } else if !selected.from_inventory
-                && !selected.is_new_mock
+                && !selected.is_new
                 && selected.can_clean_up
                 && hit(view, &layouts, &bindings.delete, point, canvas)
             {
@@ -689,7 +712,7 @@ pub(crate) fn refresh(
     };
     transform.scale = Vec3::splat(scale);
     if active {
-        if root.seen_revision != edit.revision {
+        if root.seen_revision != edit.revision || root.seen_owned_revision != edit.owned_revision {
             let next_choices = choices(&edit, &icons);
             if root.site_id != edit.site_id || root.choices != next_choices {
                 let (document, bindings) = compose::compose(&layouts, &edit, next_choices.clone())
@@ -712,15 +735,19 @@ pub(crate) fn refresh(
                 .placed_rows
                 .iter()
                 .chain(&edit.inventory)
-                .filter(|row| !icons.by_fixture.contains_key(&row.fixture_id))
-                .map(|row| row.fixture_id)
+                .map(|row| (row.fixture_id, row.texture_id))
+                .chain(edit.catalog.iter().map(|row| (row.fixture_id, row.texture_id)))
+                .filter(|(fixture, texture)| {
+                    i32::try_from(*texture).map_or(true, |texture| icons.variant(*fixture, texture).is_none())
+                })
                 .collect();
             if !missing.is_empty() {
                 warn!(
-                    "editor thumbnail provider lacks fixture IDs {missing:?}; not manufacturing list images"
+                    "editor thumbnail provider lacks (fixture id, texture id) {missing:?}; not manufacturing list images"
                 );
             }
             root.seen_revision = edit.revision;
+            root.seen_owned_revision = edit.owned_revision;
         }
         let bindings = &root.bindings;
         if !ui.was_active {
@@ -773,7 +800,7 @@ pub(crate) fn refresh(
         if let Some(selected) = &edit.selected {
             view.set_visible(
                 &bindings.delete,
-                !selected.from_inventory && !selected.is_new_mock && selected.can_clean_up,
+                !selected.from_inventory && !selected.is_new && selected.can_clean_up,
             );
             compose::enabled(&mut view, document, &bindings.cancel, true);
             compose::enabled(

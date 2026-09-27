@@ -82,8 +82,8 @@
 
 use std::collections::HashSet;
 
-use bevy::asset::LoadState;
 use bevy::prelude::*;
+use moly_assets::json::master::{self, MasterData, MasterError, MasterTable};
 use moly_assets::json::JsonAsset;
 use moly_law::objective::appearance::EngineRand;
 use serde_json::Value;
@@ -101,7 +101,6 @@ use crate::server::{GateCharacter, GateReply, ReplyTalkList, TalkListUpdate};
 
 const INVITE: &str = "MOLY_GATE_INVITE";
 const CHANGE: &str = "MOLY_GATE_CHANGE";
-const PLAYER_DATA: &str = "moly://fixture-models/player-data.json";
 const FIXTURE_INDEX: &str = "moly://fixture-models/index.json";
 const INVITE_CONDITION: &str = "mysekai_character_talk_character_invite_game_character_unit_id";
 const LEAVE_CONDITION: &str = "mysekai_character_talk_character_leave_game_character_unit_id";
@@ -203,53 +202,132 @@ struct Tables {
     gate_masters: HashSet<i32>,
 }
 
-impl Tables {
-    fn parse(document: &Value) -> Result<Self, String> {
-        let tables = &document["tables"];
-        let rows = |name: &str| -> Result<&Vec<Value>, String> {
-            tables[name]
-                .as_array()
-                .ok_or_else(|| format!("the catalog has no {name} table"))
-        };
-        let text = |row: &Value, key: &str| row[key].as_str().unwrap_or_default().to_owned();
-        let id = |row: &Value, key: &str| row[key].as_i64().unwrap_or(0);
-        let pairs = |name: &str| -> Result<Vec<(i64, String)>, String> {
-            Ok(rows(name)?
-                .iter()
-                .map(|row| (id(row, "id"), text(row, "assetbundleName")))
-                .collect())
-        };
-        Ok(Self {
-            cut_scenes: rows("mysekaiCutScenes")?
-                .iter()
-                .map(|row| {
-                    (
-                        id(row, "id"),
-                        text(row, "mysekaiCutSceneConditionType"),
-                        id(row, "externalId"),
-                        text(row, "timelineAssetbundleName"),
-                    )
-                })
-                .collect(),
-            gates: pairs("mysekaiGates")?,
-            skins: rows("mysekaiGateSkins")?
-                .iter()
-                .map(|row| {
-                    (
-                        id(row, "id"),
-                        text(row, "mysekaiGateSkinType"),
-                        id(row, "mysekaiGateSkinTypeId"),
-                    )
-                })
-                .collect(),
-            unit_skins: pairs("mysekaiGateUnitSkins")?,
-            common_skins: pairs("mysekaiGateCommonSkins")?,
-            gate_masters: rows("mysekaiFixtures")?
-                .iter()
-                .filter(|row| row["mysekaiFixtureType"].as_str() == Some("gate"))
-                .map(|row| id(row, "id") as i32)
-                .collect(),
+/// A text field of a gate table row; an absent field reads as empty.
+fn row_text(row: &Value, key: &str) -> String {
+    row[key].as_str().unwrap_or_default().to_owned()
+}
+
+/// An integer field of a gate table row; an absent field reads as 0.
+fn row_id(row: &Value, key: &str) -> i64 {
+    row[key].as_i64().unwrap_or(0)
+}
+
+/// (id, assetbundleName) of every row.
+fn parse_pairs(text: &str) -> Result<Vec<(i64, String)>, String> {
+    Ok(master::rows(text)?
+        .iter()
+        .map(|row| (row_id(row, "id"), row_text(row, "assetbundleName")))
+        .collect())
+}
+
+fn parse_cut_scenes(text: &str) -> Result<Vec<(i64, String, i64, String)>, String> {
+    Ok(master::rows(text)?
+        .iter()
+        .map(|row| {
+            (
+                row_id(row, "id"),
+                row_text(row, "mysekaiCutSceneConditionType"),
+                row_id(row, "externalId"),
+                row_text(row, "timelineAssetbundleName"),
+            )
         })
+        .collect())
+}
+
+fn parse_skins(text: &str) -> Result<Vec<(i64, String, i64)>, String> {
+    Ok(master::rows(text)?
+        .iter()
+        .map(|row| {
+            (
+                row_id(row, "id"),
+                row_text(row, "mysekaiGateSkinType"),
+                row_id(row, "mysekaiGateSkinTypeId"),
+            )
+        })
+        .collect())
+}
+
+/// The masters whose fixture type is gate.
+fn parse_gate_masters(text: &str) -> Result<HashSet<i32>, String> {
+    Ok(master::rows(text)?
+        .iter()
+        .filter(|row| row["mysekaiFixtureType"].as_str() == Some("gate"))
+        .map(|row| row_id(row, "id") as i32)
+        .collect())
+}
+
+const CUT_SCENES: MasterTable<Vec<(i64, String, i64, String)>> = MasterTable {
+    table: "mysekaiCutScenes",
+    name: "mysekaiCutScenes (the gate flows)",
+    parse: parse_cut_scenes,
+};
+const GATES: MasterTable<Vec<(i64, String)>> = MasterTable {
+    table: "mysekaiGates",
+    name: "mysekaiGates (the gate flows)",
+    parse: parse_pairs,
+};
+const GATE_SKINS: MasterTable<Vec<(i64, String, i64)>> = MasterTable {
+    table: "mysekaiGateSkins",
+    name: "mysekaiGateSkins (the gate flows)",
+    parse: parse_skins,
+};
+const UNIT_SKINS: MasterTable<Vec<(i64, String)>> = MasterTable {
+    table: "mysekaiGateUnitSkins",
+    name: "mysekaiGateUnitSkins (the gate flows)",
+    parse: parse_pairs,
+};
+const COMMON_SKINS: MasterTable<Vec<(i64, String)>> = MasterTable {
+    table: "mysekaiGateCommonSkins",
+    name: "mysekaiGateCommonSkins (the gate flows)",
+    parse: parse_pairs,
+};
+const GATE_MASTERS: MasterTable<HashSet<i32>> = MasterTable {
+    table: "mysekaiFixtures",
+    name: "mysekaiFixtures (the gate masters)",
+    parse: parse_gate_masters,
+};
+
+impl Tables {
+    /// Requests the six master tables.
+    fn request(masters: &mut MasterData) {
+        masters.request(&CUT_SCENES);
+        masters.request(&GATES);
+        masters.request(&GATE_SKINS);
+        masters.request(&UNIT_SKINS);
+        masters.request(&COMMON_SKINS);
+        masters.request(&GATE_MASTERS);
+    }
+
+    /// The tables once all six have resolved; a table that is absent or
+    /// malformed (named once by the master layer) is the error.
+    fn take(masters: &mut MasterData) -> Option<Result<Self, MasterError>> {
+        let keys = [
+            CUT_SCENES.key(),
+            GATES.key(),
+            GATE_SKINS.key(),
+            UNIT_SKINS.key(),
+            COMMON_SKINS.key(),
+            GATE_MASTERS.key(),
+        ];
+        if keys.into_iter().any(|key| !masters.is_resolved(key)) {
+            return None;
+        }
+        let cut_scenes = masters.take(&CUT_SCENES)?;
+        let gates = masters.take(&GATES)?;
+        let skins = masters.take(&GATE_SKINS)?;
+        let unit_skins = masters.take(&UNIT_SKINS)?;
+        let common_skins = masters.take(&COMMON_SKINS)?;
+        let gate_masters = masters.take(&GATE_MASTERS)?;
+        Some((|| {
+            Ok(Self {
+                cut_scenes: cut_scenes?,
+                gates: gates?,
+                skins: skins?,
+                unit_skins: unit_skins?,
+                common_skins: common_skins?,
+                gate_masters: gate_masters?,
+            })
+        })())
     }
 
     /// `GetMasterMysekaiCutScene(externalId, condition)`.
@@ -389,7 +467,8 @@ struct PendingHide {
 #[derive(Resource)]
 pub(crate) struct GateFlow {
     stage: Stage,
-    tables: Option<Handle<JsonAsset>>,
+    /// The gate tables have not resolved yet.
+    tables_pending: bool,
     parsed: Option<Tables>,
     /// The fixture package index, read once for the packages it lists.
     index: Option<Handle<JsonAsset>>,
@@ -494,7 +573,7 @@ fn engine_state() -> [u32; 4] {
 }
 
 /// Startup: the gate tables, the fixture index and the instruments.
-fn start(mut commands: Commands, server: Res<AssetServer>) {
+fn start(mut commands: Commands, server: Res<AssetServer>, mut masters: ResMut<MasterData>) {
     let request = parse_instruments();
     let stage = match request {
         Some(request) => {
@@ -506,9 +585,10 @@ fn start(mut commands: Commands, server: Res<AssetServer>) {
         }
         None => Stage::Idle,
     };
+    Tables::request(&mut masters);
     commands.insert_resource(GateFlow {
         stage,
-        tables: Some(server.load::<JsonAsset>(PLAYER_DATA)),
+        tables_pending: true,
         parsed: None,
         index: Some(server.load::<JsonAsset>(FIXTURE_INDEX)),
         indexed: None,
@@ -522,26 +602,17 @@ fn start(mut commands: Commands, server: Res<AssetServer>) {
     });
 }
 
-/// The catalog's gate tables; also publishes the gate model packages.
+/// The gate tables; also publishes the gate model packages.
 fn tables(world: &mut World) -> Option<()> {
     if world.resource::<GateFlow>().parsed.is_some() {
         return Some(());
     }
-    let handle = world.resource::<GateFlow>().tables.clone()?;
-    let server = world.resource::<AssetServer>().clone();
-    if let LoadState::Failed(error) = server.load_state(&handle) {
-        error!("[gate] the fixture catalog failed to load: {error}; no gate table");
-        world.resource_mut::<GateFlow>().tables = None;
+    if !world.resource::<GateFlow>().tables_pending {
         return None;
     }
-    let text = world
-        .resource::<Assets<JsonAsset>>()
-        .get(&handle)
-        .map(|json| json.0.clone())?;
-    match serde_json::from_str::<Value>(&text)
-        .map_err(|error| error.to_string())
-        .and_then(|document| Tables::parse(&document))
-    {
+    let resolved = Tables::take(&mut world.resource_mut::<MasterData>())?;
+    world.resource_mut::<GateFlow>().tables_pending = false;
+    match resolved {
         Ok(parsed) => {
             let packages = parsed.model_packages();
             info!(
@@ -553,14 +624,11 @@ fn tables(world: &mut World) -> Option<()> {
                 packages.len()
             );
             world.insert_resource(GateModelPackages(packages));
-            let mut flow = world.resource_mut::<GateFlow>();
-            flow.parsed = Some(parsed);
-            flow.tables = None;
+            world.resource_mut::<GateFlow>().parsed = Some(parsed);
             Some(())
         }
-        Err(reason) => {
-            error!("[gate] the fixture catalog's gate tables: {reason}; the gate flows do not run");
-            world.resource_mut::<GateFlow>().tables = None;
+        Err(_) => {
+            info!("[gate] no gate tables: the gate flows do not run");
             None
         }
     }
@@ -658,7 +726,7 @@ fn publish_home_gate(world: &mut World) {
                 (tables.gate_masters.clone(), bundle)
             }
             // The gate tables could not be read.
-            None if flow.tables.is_none() => (HashSet::new(), None),
+            None if !flow.tables_pending => (HashSet::new(), None),
             None => return,
         }
     };

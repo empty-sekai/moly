@@ -56,7 +56,12 @@ pub(crate) struct FixtureFace {
     pub(crate) mouths: Vec<Handle<FixtureMaterial>>,
 }
 
-/// 家具转体（源 DORotate 的替身形状；from/to 已取同叶短弧）。
+/// 家具转体：`FixtureView.LookAtToNpc(unit, t)` 的
+/// `transform.DORotate(LookRotation((家具 − 角色) 取水平).eulerAngles, t)`
+/// （RotateMode.Fast，无自设缓动 ⇒ 设置表缺省 OutQuad）。Fast 档逐轴取
+/// [-180, 180] 的欧拉差线性插值；起点（摆放朝向）与终点都是纯偏航，
+/// 所以欧拉插值与这里的同叶短弧 slerp 在同一缓动下逐帧同角（差恰为
+/// ±180° 时两者选边可能不同）。
 #[derive(Component)]
 pub(crate) struct FixtureTurn {
     from: Quat,

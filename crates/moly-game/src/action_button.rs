@@ -32,6 +32,7 @@
 //! runs ObjectCollisionManager.ForceUpdate.
 
 pub(crate) mod admission;
+pub(crate) mod dash;
 
 use std::collections::HashMap;
 
@@ -129,6 +130,9 @@ struct ActionButtonSkin {
     geometry: UiPrefabView,
     button_node: &'static str,
     icon_node: &'static str,
+    /// `MyRoomSiteSelector._fadeTime` of the go-home view, when the layout
+    /// export decodes the component; the shared button has no fade.
+    fade_time: Option<f32>,
 }
 
 impl ActionButtonSkin {
@@ -182,6 +186,16 @@ impl ActionButtonSkin {
         // calls HideCover, so it must not be mistaken for the normal gray base.
         let mut geometry = UiPrefabView::new(layout, BALLOON_LAYER);
         geometry.set_visible(button_node, true);
+        // SetShowAction's DOFade(1, _fadeTime): the serialized field of the
+        // view's MyRoomSiteSelector (the class default 0.2 is not the
+        // prefab's value, so only the exported one is used).
+        let fade_time = background_node
+            .components
+            .iter()
+            .find(|component| component.class == "Sekai.Mysekai.MyRoomSiteSelector")
+            .and_then(|component| component.fields.get("_fadeTime"))
+            .and_then(|value| value.as_f64())
+            .map(|value| value as f32);
         Some(Self {
             // The prefab UI loads its images through the same asset path for
             // the GPU only; the first request's settings win, so this one agrees.
@@ -195,8 +209,22 @@ impl ActionButtonSkin {
             geometry,
             button_node,
             icon_node,
+            fade_time,
         })
     }
+}
+
+/// The go-home view's `SetShowAction`: `InitializeShowAction` sets the
+/// circle Image's opacity to 0, then `_button.image.DOFade(1, _fadeTime)`
+/// with the settings' default ease (OutQuad). The child home icon is another
+/// graphic and is not faded. The tween's first update is the frame after
+/// the show (the order against DOTween's own update is not fixed here).
+#[derive(Default)]
+pub(crate) struct GoHomeFade {
+    /// Seconds since the view was shown, None before its first update.
+    elapsed: Option<f32>,
+    shown: bool,
+    warned: bool,
 }
 
 /// Keep the existing input systems within the system-parameter limit while
@@ -1685,6 +1713,8 @@ fn fixture_button(row: &FixtureRow) -> Option<ButtonType> {
 /// Update（advance 之后）：按栈首摆件、换图标。
 pub(crate) fn place_ui(
     state: Res<ActionButtonState>,
+    time: Res<Time>,
+    mut fade: Local<GoHomeFade>,
     screen: ActionButtonScreen,
     mut roots: Query<(&mut Visibility, &mut Transform), (With<ActionButtonRoot>, Without<Sprite>)>,
     mut parts: Query<
@@ -1715,12 +1745,52 @@ pub(crate) fn place_ui(
             transform.scale = Vec3::new(scale, scale, 1.0);
         }
     }
+    let go_home_shown = head.is_some_and(|(button, _)| button == ButtonType::GoHomeSite)
+        && roots
+            .iter()
+            .any(|(visibility, _)| *visibility != Visibility::Hidden);
+    if go_home_shown && !fade.shown {
+        // ShowObject(true) -> SetShowAction: the opacity starts at 0.
+        fade.elapsed = None;
+    } else if go_home_shown {
+        *fade.elapsed.get_or_insert(0.0) += time.delta_secs();
+    }
+    fade.shown = go_home_shown;
     let Some((button, _)) = head else { return };
     let (Some(art), Some((background_rect, icon_rect))) = (screen.art.as_deref(), rects) else {
         return;
     };
     let Some(skin) = art.skin_for(button) else {
         return;
+    };
+    let circle_alpha = if button != ButtonType::GoHomeSite {
+        1.0
+    } else {
+        let eased = screen
+            .layouts
+            .as_deref()
+            .and_then(|layouts| layouts.tween_defaults())
+            .and(skin.fade_time);
+        match eased {
+            Some(duration) => {
+                let t = fade.elapsed.map_or(0.0, |elapsed| {
+                    if duration > 0.0 {
+                        (elapsed / duration).min(1.0)
+                    } else {
+                        1.0
+                    }
+                });
+                // DOTween OutQuad.
+                -t * (t - 2.0)
+            }
+            None => {
+                if !fade.warned {
+                    fade.warned = true;
+                    warn!("[action_button] go-home DOFade not drawn: MyRoomSiteSelector._fadeTime is not in the layout export or the root has no tween defaults; the circle shows at full alpha");
+                }
+                1.0
+            }
+        }
     };
     for (mut transform, mut sprite, icon) in &mut parts {
         let rect = if icon.is_some() {
@@ -1752,7 +1822,8 @@ pub(crate) fn place_ui(
         sprite.color = if icon.is_some() {
             skin.icon_color
         } else {
-            skin.background_color
+            let base = skin.background_color.to_srgba();
+            Color::srgba(base.red, base.green, base.blue, base.alpha * circle_alpha)
         };
     }
 }
@@ -2109,7 +2180,9 @@ fn dispatch(
             info!("[action_button] 生日演出按钮按下（目标 {target:?}；生日演出域未建，具名挂账）——按下沿到此");
         }
         (ButtonType::Dash, _) => {
-            info!("[action_button] 冲刺按钮按下 → 冲刺域未建（具名挂账）——按下沿到此");
+            // The dash button is its own view (see `dash`); the target stack
+            // never carries its type.
+            error!("[action_button] Dash reached the stack dispatch; the dash button has its own click");
         }
         (ButtonType::ChangeActionTarget, _) => {
             info!("[action_button] 换目标按钮按下 → 目标切换域未建（具名挂账）——按下沿到此");

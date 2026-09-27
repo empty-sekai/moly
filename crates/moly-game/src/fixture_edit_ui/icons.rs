@@ -9,10 +9,26 @@ use crate::ui_layout::{SpriteLayoutMetrics, UiLayouts};
 
 #[derive(Resource, Default)]
 pub(crate) struct EditorIcons {
-    pub(super) by_fixture: BTreeMap<i32, String>,
+    /// Every registered thumbnail by (fixture id, texture id).
+    variants: BTreeMap<(i32, i32), String>,
     handles: Vec<Handle<Image>>,
     parsed: bool,
-    pub(super) ready: bool,
+    ready: bool,
+}
+
+impl EditorIcons {
+    /// Every registered thumbnail has loaded.
+    pub(crate) fn is_ready(&self) -> bool {
+        self.ready
+    }
+
+    /// The registered thumbnail of one fixture colour (`UserMysekaiFixture`
+    /// id and texture id).
+    pub(crate) fn variant(&self, fixture_id: i32, texture_id: i32) -> Option<&str> {
+        self.variants
+            .get(&(fixture_id, texture_id))
+            .map(String::as_str)
+    }
 }
 
 /// The fixture thumbnail catalogue. The runtime Sprite metrics of the editor
@@ -77,10 +93,8 @@ pub(crate) fn parse(
                     &server,
                 );
                 icons.handles.push(handle);
-                // EditView currently models the ordinary texture-1 offline
-                // fixture rows. It does not pretend to provide skin selection.
-                if texture_id == 1 {
-                    icons.by_fixture.insert(id, alias);
+                if let Ok(texture) = i32::try_from(texture_id) {
+                    icons.variants.insert((id, texture), alias);
                 }
             }
         }

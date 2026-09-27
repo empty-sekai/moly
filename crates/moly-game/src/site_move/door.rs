@@ -23,6 +23,17 @@
 //! anchor (admission, the arrival at the door, the destination standing),
 //! the source offset from that anchor, the measured one and the frames.
 //!
+//! What leads into a room in the source: the house-entry button
+//! (`first_floor`), the room screen's floor selector (the other floors) and
+//! the home and room screen presenters' `ChangeSite` (`first_floor`). The
+//! site map publishes a room-to-anywhere change as the nested
+//! `ChangeSite(home_site, next)` and an outdoor change directly
+//! (`PublishMoveMapEvent`: the current site in home or the outdoor sites,
+//! mask 0x1F1), and it has no icon for a floor. So no source path goes from
+//! an outdoor site to a room: the product composition that serves that pair
+//! (the cannon home, then HomeToMyRoom as its second leg) is reached only by
+//! a request the source never makes, such as a dev site switch.
+//!
 //! Named differences:
 //! - `HomeSiteController.ExecuteNPCRandomFixtureAction` (room to home, the
 //!   NPCs take random fixture actions while the wipe opens) belongs to the
@@ -38,9 +49,10 @@
 //! - `MysekaiTransitioner.SafeFinish` does nothing in solo play: no white
 //!   transitioner exists (`UIUtility.PlayMysekaiTransition` has one caller,
 //!   the multiplay layout update). Logged at its step.
-//! - `CullingWallFixture` (home to room, 0.03 s after HouseEntry) and the
-//!   player's render layer have no product counterpart; each is logged at
-//!   its step. The room's expansion
+//! - `CullingWallFixture` 0.03 s after HouseEntry is one more call of what
+//!   the room's own update loop does every frame
+//!   (`room_door::cull_wall_fixtures`). The player's render layer has no
+//!   product counterpart; it is logged at its step. The room's expansion
 //!   performance in `OnFinishEnterAsync` is `site_expansion`.
 //! - Normal's private camera model is written on its exit only while no
 //!   camera tween is in flight: the source clears that flag only during its
@@ -969,7 +981,7 @@ impl DoorMove {
         set_player_visible(world, true);
         self.house_entry_camera(world);
         info!(
-            "[site-move] player.Show; DelayCall({}, CullingWallFixture): no product counterpart",
+            "[site-move] player.Show; DelayCall({}, CullingWallFixture): the room update loop culls every frame",
             door_law::CULLING_WALL_DELAY
         );
         self.fade_in(world);

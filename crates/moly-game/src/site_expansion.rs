@@ -47,18 +47,16 @@
 
 pub(crate) mod law;
 
-use bevy::asset::LoadState;
 use bevy::prelude::*;
-use moly_assets::json::JsonAsset;
+use moly_assets::json::master::MasterData;
 
 use crate::camera::{CameraStateType, FieldCameraModel, FieldCameraState};
 use crate::game_state::{self, GameStateType};
 use crate::player::PlayerControlled;
 use crate::site::{SiteActive, SiteSelection};
-use law::{LocalLists, Masters};
+use law::{LocalLists, Masters, EXPANSION_TABLES};
 
 const INSTRUMENT: &str = "MOLY_RANK_CHANGE";
-const PLAYER_DATA: &str = "moly://fixture-models/player-data.json";
 /// `SiteActionExecutor.DEFAULT_FADE_OUT_TIME`.
 const FADE_OUT_TIME: f32 = 0.25;
 /// `SiteActionExecutor.DEFAULT_FADE_IN_TIME`.
@@ -88,8 +86,15 @@ pub(crate) struct UserMysekaiRank(pub(crate) i32);
 #[derive(Resource)]
 pub(crate) struct ExpansionMasters(pub(crate) Result<Masters, String>);
 
+/// Present while the master tables of a rank change are requested.
 #[derive(Resource)]
-struct MastersHandle(Handle<JsonAsset>);
+struct MastersRequested;
+
+/// Requests the four master tables a rank change reads.
+fn request_masters(commands: &mut Commands, masters: &mut MasterData) {
+    commands.insert_resource(MastersRequested);
+    EXPANSION_TABLES.request(masters);
+}
 
 /// The rank change the instrument delivers.
 #[derive(Resource, Clone, Copy, Debug)]
@@ -128,7 +133,7 @@ fn parse_instrument() -> Option<PendingRankChange> {
 
 /// Startup: the browser game's join hold, the master request and the
 /// instrument.
-fn load(mut commands: Commands, server: Res<AssetServer>) {
+fn load(mut commands: Commands, mut masters: ResMut<MasterData>) {
     if crate::browser_game::game_mode_active() {
         info!("[site-expansion] the join delivers UserMysekaiGamedata.mysekaiRank; the site loader waits for the displayed levels");
         commands.insert_resource(LevelHold);
@@ -143,7 +148,7 @@ fn load(mut commands: Commands, server: Res<AssetServer>) {
     );
     commands.insert_resource(change);
     commands.insert_resource(LevelHold);
-    commands.insert_resource(MastersHandle(server.load::<JsonAsset>(PLAYER_DATA)));
+    request_masters(&mut commands, &mut masters);
 }
 
 /// Update, before the site loader: a rank the server model delivered becomes
@@ -151,7 +156,7 @@ fn load(mut commands: Commands, server: Res<AssetServer>) {
 /// delivered no rank releases the browser game's hold.
 fn take_server_rank(
     mut commands: Commands,
-    server: Res<AssetServer>,
+    mut masters: ResMut<MasterData>,
     mut ranks: MessageReader<crate::server::RankDelivered>,
     pending: Option<Res<PendingRankChange>>,
     join_hold: Option<Res<JoinHold>>,
@@ -179,7 +184,7 @@ fn take_server_rank(
             Some(change) if change.prev > 0 && change.current > 0 => {
                 commands.insert_resource(change);
                 commands.insert_resource(LevelHold);
-                commands.insert_resource(MastersHandle(server.load::<JsonAsset>(PLAYER_DATA)));
+                request_masters(&mut commands, &mut masters);
             }
             other => {
                 error!("[site-expansion] the delivered rank change {other:?} is not two positive ranks; nothing is delivered");
@@ -200,27 +205,19 @@ fn take_server_rank(
 /// change and set the housing sites' displayed levels.
 fn apply_rank_change(
     mut commands: Commands,
-    server: Res<AssetServer>,
-    jsons: Res<Assets<JsonAsset>>,
-    handle: Option<Res<MastersHandle>>,
+    mut tables: ResMut<MasterData>,
+    requested: Option<Res<MastersRequested>>,
     pending: Option<Res<PendingRankChange>>,
     mut local: ResMut<MysekaiLocalSettings>,
     selection: Option<ResMut<SiteSelection>>,
 ) {
-    let (Some(handle), Some(pending)) = (handle, pending) else {
+    let (Some(_), Some(pending), Some(mut selection)) = (requested, pending, selection) else {
         return;
     };
-    let masters = match server.load_state(&handle.0) {
-        LoadState::Failed(error) => Err(format!("player-data.json is not in this root ({error})")),
-        _ => match jsons.get(&handle.0) {
-            Some(json) => Masters::parse(&json.0),
-            None => return,
-        },
-    };
-    let Some(mut selection) = selection else {
+    let Some(masters) = EXPANSION_TABLES.take(&mut tables) else {
         return;
     };
-    commands.remove_resource::<MastersHandle>();
+    commands.remove_resource::<MastersRequested>();
     commands.remove_resource::<PendingRankChange>();
     commands.remove_resource::<LevelHold>();
     let masters = match masters {

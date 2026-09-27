@@ -6,10 +6,13 @@
 ## Resource Han Rounded（字体子集）
 
 `crates/moly-game/assets/font/ResourceHanRoundedSC-Medium.subset.ttf` 是
-Resource Han Rounded SC Medium 的一个字形子集，运行时用于烘焙文字图集。
-按 SIL Open Font License 1.1 授权，许可全文及版权声明见
+Resource Han Rounded SC Medium 0.990（作者 GitHub 发布的 TTF 版本）的一个
+字形子集，运行时用于烘焙文字图集。子集保留此前全部码点，并覆盖日服、国服
+产品可显示文本（界面文案、对话与推文语料、主表文本字段）以及产品自身写入的
+文字；[tools/subset_catalog_font.py](tools/subset_catalog_font.py) 可由原字体与
+同一组输入重建它。按 SIL Open Font License 1.1 授权，许可全文及版权声明见
 [OFL-1.1.txt](crates/moly-game/assets/font/OFL-1.1.txt)
-（© 2018–2022 Cyano Hao；部分 © 2014–2021 Adobe）。
+（© 2018–2019 Cyano Hao；部分 © 2014、2015、2018 Adobe）。
 
 子集化是 OFL 意义上的修改版本，文件名以 `.subset` 后缀标注。字体名不含
 Adobe 的保留字体名（Reserved Font Name "Source"）。

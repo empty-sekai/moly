@@ -3,8 +3,11 @@
 //! Source: FloorEditState.SelectFixture snapshots StartPosition/StartDirection;
 //! Reset restores them (or removes a pre-placement preview); Decide updates
 //! tile/layout data before unselecting. SiteLayoutEditor keeps an explicit
-//! Cancel / Save / Discard exit dialog. The offline storage envelope and four
-//! unlimited catalog rows are product-owned inputs, not real account data.
+//! Cancel / Save / Discard exit dialog. The offline storage envelope is a
+//! product-owned input, not real account data. The fixture list offers the
+//! owned fixtures with their placeable counts (`owned`); a save posts the
+//! site's layout to the server model (`PostUserMysekaiHousingLayoutApi`)
+//! before the offline envelope is written.
 //!
 //! Existing world roots can display draft poses, but FixturePlacements and
 //! returned inventory are published only after the shared store succeeds.
@@ -19,6 +22,7 @@ mod autoplay;
 mod edit_grid;
 mod game_state;
 mod input;
+mod owned;
 mod placement;
 mod presentation;
 mod put_effect;
@@ -30,7 +34,7 @@ mod tests;
 
 use crate::audio::{SeClass, SeRequest, SeRequests};
 use crate::fixture::{EditableFixture, FixturePlacements, OccupancyRow};
-use assets::{CANDIDATES, FixtureAreas};
+use assets::FixtureAreas;
 use bevy::prelude::*;
 use moly_law::fixture::position::layout_type;
 use moly_law::fixture::{Direction, GridPosition, Vector3Int};
@@ -56,6 +60,7 @@ pub struct LayoutSaved;
 #[derive(Message, Clone, Debug)]
 pub(crate) enum EditCommand {
     Enter,
+    /// A cell of the owned fixture list (`EditView::catalog`), by its index.
     SelectCatalog { index: usize },
     SelectPlaced { uid: String },
     SelectInventory { uid: String },
@@ -136,19 +141,24 @@ pub(crate) enum PutStatus {
 pub(crate) struct EditSelectionView {
     pub item: EditItemView,
     pub from_inventory: bool,
-    pub is_new_mock: bool,
+    /// A new placement of an owned fixture.
+    pub is_new: bool,
     /// The store (return to inventory) action is offered.
     pub can_clean_up: bool,
     pub put_status: PutStatus,
 }
 
+/// One owned fixture row of the list: `GetFixturePlaceableCount` above 0.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct EditCatalogView {
     pub index: usize,
-    pub package: &'static str,
+    pub package: String,
     pub fixture_id: i32,
+    pub texture_id: u32,
     pub grid_size: Vector3Int,
-    pub unlimited_mock: bool,
+    /// `GetFixturePlaceableCount(id, texture)`: the owned quantity less the
+    /// layouted count.
+    pub placeable: i32,
 }
 
 #[derive(Resource, Clone, Debug, Default, PartialEq, Eq)]
@@ -166,6 +176,8 @@ pub(crate) struct EditView {
     pub placed_rows: Vec<EditItemView>,
     pub inventory: Vec<EditItemView>,
     pub catalog: Vec<EditCatalogView>,
+    /// The owned copy's revision the catalog was built from.
+    pub owned_revision: u64,
     pub can_save: bool,
     pub feedback: String,
 }
@@ -174,7 +186,8 @@ pub(crate) struct EditView {
 enum SelectionOrigin {
     Placed,
     Inventory,
-    Mock,
+    /// A new placement of an owned fixture.
+    Owned,
 }
 
 #[derive(Clone)]
@@ -1017,7 +1030,7 @@ fn decide(session: &mut EditSession, world: &mut World) {
             session.inventory.remove(index);
             session.rows.push(selection.item);
         }
-        SelectionOrigin::Mock => session.rows.push(selection.item),
+        SelectionOrigin::Owned => session.rows.push(selection.item),
     }
     // UpdateTileData: the stacked fixtures moved with the base keep their
     // new places too.
@@ -1199,8 +1212,24 @@ fn save(session: &mut EditSession, world: &mut World, exit_after: bool) {
             return;
         }
     };
-    let Some(storage_baseline) = session.storage_baseline.as_ref() else {
+    if session.storage_baseline.is_none() {
         session.say("保存失败：缺少本次编辑的存档快照。布局、库存及退出窗口均未提交。");
+        return;
+    }
+    // PostUserMysekaiHousingLayoutApi first: the saved copy is written only
+    // once the server has accepted the layout; a refusal keeps the draft.
+    let reply = crate::server::client::housing_layout::post(
+        world,
+        crate::fixture::layouts::housing_layout_request(&next),
+    );
+    if !reply.success {
+        session.say(format!(
+            "保存失败：服务器拒绝了布局（{}）。布局、库存及退出窗口均未提交，草稿仍保留。",
+            reply.refusal.unwrap_or_default()
+        ));
+        return;
+    }
+    let Some(storage_baseline) = session.storage_baseline.as_ref() else {
         return;
     };
     let receipt = match crate::fixture::layouts::persist_edit(&next, &session.inventory, storage_baseline) {
@@ -1263,19 +1292,38 @@ fn apply_command(world: &mut World, session: &mut EditSession, command: EditComm
     match command {
         EditCommand::Enter => {}
         EditCommand::SelectCatalog { index } => {
-            let Some(row) = CANDIDATES.get(index) else {
-                session.say("未知的离线清单项。");
-                return;
-            };
             let Some(base) = session.baseline.as_ref() else {
                 return;
             };
+            let site_id = base.site_id();
+            let row = match owned::catalog(world, site_id, &session.rows) {
+                Ok((rows, _)) => rows.into_iter().nth(index),
+                Err(error) => {
+                    session.say(format!("持有家具清单不可用：{error}。"));
+                    return;
+                }
+            };
+            let Some(row) = row else {
+                session.say("该持有家具已没有可摆放的数量。");
+                return;
+            };
+            // A stored fixture of this row keeps its UID: it is taken first.
+            if let Some(stored) = session
+                .inventory
+                .iter()
+                .find(|item| item.fixture_id == row.fixture_id && item.texture_id == row.texture_id)
+                .map(|item| item.uid.clone())
+            {
+                session.catalog_index = index;
+                apply_command(world, session, EditCommand::SelectInventory { uid: stored });
+                return;
+            }
             let serial = session.next_fixture_uid;
             let Some(next_serial) = serial.checked_add(1) else {
                 session.say("离线UID已耗尽。");
                 return;
             };
-            let uid = format!("offline-edit-{}-{serial}", base.site_id());
+            let uid = format!("offline-edit-{site_id}-{serial}");
             if session
                 .rows
                 .iter()
@@ -1285,21 +1333,22 @@ fn apply_command(world: &mut World, session: &mut EditSession, command: EditComm
                 session.say("离线UID冲突，未覆盖已有物品。");
                 return;
             }
-            let mut item = EditableFixture { texture_id: 1,
-                uid,
-                package: row.package.to_owned(),
-                fixture_id: row.fixture_id,
-                center: GridPosition::ZERO,
-                grid_size: row.grid_size,
-                layout: layout_type::FLOOR,
-                direction: Direction::Front,
-            };
-            if !place_new(world, session, &mut item, "catalog") {
+            let mut item = row.fixture(uid);
+            if !place_new(world, session, &mut item, "owned") {
                 return;
             }
+            info!(
+                "[edit-owned] SelectCatalog {index}: fixture {} texture {} (quantity {}, layouted {}, placeable {}) -> new placement {}",
+                row.fixture_id,
+                row.texture_id,
+                row.quantity,
+                row.layouted,
+                row.placeable(),
+                item.uid
+            );
             session.next_fixture_uid = next_serial;
             session.catalog_index = index;
-            select(session, item, SelectionOrigin::Mock, world);
+            select(session, item, SelectionOrigin::Owned, world);
         }
         EditCommand::SelectPlaced { uid } => {
             let Some(item) = session.rows.iter().find(|row| row.uid == uid).cloned() else {
@@ -1477,7 +1526,10 @@ fn publish_view(world: &mut World) {
     ) else {
         return;
     };
-    if view.revision == session.revision {
+    let owned_revision = world
+        .get_resource::<crate::server::client::inventory::ClientMysekaiInventory>()
+        .map_or(0, |owned| owned.revision);
+    if view.revision == session.revision && view.owned_revision == owned_revision {
         return;
     }
     let selected = session
@@ -1486,11 +1538,16 @@ fn publish_view(world: &mut World) {
         .map(|selection| EditSelectionView {
             item: (&selection.item).into(),
             from_inventory: selection.origin == SelectionOrigin::Inventory,
-            is_new_mock: selection.origin == SelectionOrigin::Mock,
+            is_new: selection.origin == SelectionOrigin::Owned,
             can_clean_up: selection.can_clean_up,
             put_status: put_status(world, session, selection),
         });
     let active = session.phase != EditPhase::Idle;
+    let catalog = if active {
+        owned_catalog_view(world, session)
+    } else {
+        Vec::new()
+    };
     // A fence or a road is edited by its own state (the floor editor's
     // touch skips it).
     let traits = put_effect::traits_table(world);
@@ -1519,21 +1576,50 @@ fn publish_view(world: &mut World) {
         selected,
         placed_rows: session.rows.iter().map(&editable).collect(),
         inventory: session.inventory.iter().map(&editable).collect(),
-        catalog: CANDIDATES
-            .iter()
-            .enumerate()
-            .map(|(index, row)| EditCatalogView {
-                index,
-                package: row.package,
-                fixture_id: row.fixture_id,
-                grid_size: row.grid_size,
-                unlimited_mock: true,
-            })
-            .collect(),
+        catalog,
+        owned_revision,
         can_save: active && session.selected.is_none() && session.pending_reload.is_none(),
         feedback: session.feedback.clone(),
     };
     world.insert_resource(next);
+}
+
+/// The owned fixture list of the edited site; the list's account is logged
+/// whenever it changes.
+fn owned_catalog_view(world: &World, session: &EditSession) -> Vec<EditCatalogView> {
+    let site_id = session.baseline.as_ref().map_or(0, FixturePlacements::site_id);
+    let (rows, note) = match owned::catalog(world, site_id, &session.rows) {
+        Ok((rows, omitted)) => {
+            let note = format!(
+                "{} rows listed (placeable {:?}); left out: {} without a master row, {} not floor or rug (their own edit states), {} without an exported fixture view, {} with no placeable count",
+                rows.len(),
+                rows.iter().map(|row| (row.fixture_id, row.texture_id, row.placeable())).collect::<Vec<_>>(),
+                omitted.no_master,
+                omitted.other_layout,
+                omitted.no_model,
+                omitted.none_placeable
+            );
+            (rows, note)
+        }
+        Err(error) => (Vec::new(), format!("no owned list: {error}")),
+    };
+    static LAST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+    let mut last = LAST.lock().expect("owned list note");
+    if *last != note {
+        info!("[edit-owned] ConvertUserFixturesToThumbnailData: {note}");
+        *last = note;
+    }
+    rows.into_iter()
+        .enumerate()
+        .map(|(index, row)| EditCatalogView {
+            index,
+            placeable: row.placeable(),
+            package: row.package,
+            fixture_id: row.fixture_id,
+            texture_id: row.texture_id,
+            grid_size: row.grid_size,
+        })
+        .collect()
 }
 
 pub struct FixtureEditPlugin;
@@ -1550,6 +1636,7 @@ impl Plugin for FixtureEditPlugin {
                 Startup,
                 (
                     assets::load,
+                    owned::load,
                     put_effect::request_tables,
                     tile_rules::request_zones,
                 ),
@@ -1559,6 +1646,7 @@ impl Plugin for FixtureEditPlugin {
                 (assets::parse_areas, assets::plan_candidates).chain(),
             )
             .add_systems(Update, tile_rules::read_zones)
+            .add_systems(Update, owned::parse)
             .add_systems(
                 Update,
                 read_keyboard

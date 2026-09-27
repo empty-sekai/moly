@@ -1,6 +1,6 @@
 //! Keyboard and mouse adapters. They emit commands; there is no second editor.
 
-use super::{EditCommand, EditPhase, EditSession, assets::CANDIDATES, presentation::DraftPreview};
+use super::{EditCommand, EditPhase, EditSession, EditView, presentation::DraftPreview};
 use bevy::{
     input::mouse::AccumulatedMouseMotion,
     mesh::{Indices, PrimitiveTopology, VertexAttributeValues},
@@ -12,6 +12,7 @@ use moly_law::fixture::{GridPosition, position::TILE_SIZE};
 pub(crate) fn read_keyboard(
     keys: Res<ButtonInput<KeyCode>>,
     session: Res<EditSession>,
+    view: Res<EditView>,
     mut actions: MessageWriter<EditCommand>,
 ) {
     if keys.just_pressed(KeyCode::KeyE) {
@@ -46,9 +47,10 @@ pub(crate) fn read_keyboard(
     }
     let delta = i32::from(keys.just_pressed(KeyCode::BracketRight))
         - i32::from(keys.just_pressed(KeyCode::BracketLeft));
-    if delta != 0 {
+    // The brackets step through the owned fixture list.
+    if delta != 0 && !view.catalog.is_empty() {
         let index =
-            (session.catalog_index as i32 + delta).rem_euclid(CANDIDATES.len() as i32) as usize;
+            (session.catalog_index as i32 + delta).rem_euclid(view.catalog.len() as i32) as usize;
         actions.write(EditCommand::SelectCatalog { index });
     }
     if keys.just_pressed(KeyCode::KeyR) {

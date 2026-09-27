@@ -12,6 +12,7 @@
 //!   grows only through the expansion performances (the cutscene path saves
 //!   the unlocked level whether or not a cutscene exists for it).
 
+use moly_assets::json::master::{MasterData, MasterTable};
 use serde_json::Value;
 
 /// `MysekaiTopicEnum.SiteExpansion`.
@@ -57,7 +58,8 @@ pub(crate) struct Masters {
     pub(crate) site_types: Vec<(i32, String)>,
     pub(crate) levels: Vec<SiteLevelRow>,
     pub(crate) releases: Vec<RankReleaseRow>,
-    /// `mysekaiCutScenes`; `None` when the catalog carries no such table.
+    /// `mysekaiCutScenes`; `None` when the table is missing (named once by
+    /// the master layer).
     pub(crate) cutscenes: Option<Vec<CutSceneRow>>,
 }
 
@@ -68,33 +70,138 @@ fn int(row: &Value, field: &str) -> Result<i32, String> {
         .ok_or_else(|| format!("{field} is not an int"))
 }
 
-impl Masters {
-    /// The three tables of the player-data catalog.
-    pub(crate) fn parse(text: &str) -> Result<Self, String> {
-        let document: Value =
-            serde_json::from_str(text).map_err(|error| format!("player-data.json: {error}"))?;
-        let tables = &document["tables"];
-        let rows = |name: &str| {
-            tables[name]
-                .as_array()
-                .ok_or_else(|| format!("player-data.json has no {name}"))
-        };
-        let mut masters = Masters::default();
-        for row in rows("mysekaiSites")? {
+/// The rows of a plain master table.
+fn rows(text: &str) -> Result<Vec<Value>, String> {
+    moly_assets::json::master::rows(text)
+}
+
+/// The four master tables of [`Masters`] as one consumer reads them, each
+/// under that consumer's name.
+pub(crate) struct MasterTables {
+    pub(crate) site_types: MasterTable<Vec<(i32, String)>>,
+    pub(crate) levels: MasterTable<Vec<SiteLevelRow>>,
+    pub(crate) releases: MasterTable<Vec<RankReleaseRow>>,
+    pub(crate) cutscenes: MasterTable<Vec<CutSceneRow>>,
+}
+
+impl MasterTables {
+    /// Requests the four tables.
+    pub(crate) fn request(&self, masters: &mut MasterData) {
+        masters.request(&self.site_types);
+        masters.request(&self.levels);
+        masters.request(&self.releases);
+        masters.request(&self.cutscenes);
+    }
+
+    /// The tables once all four have resolved. A missing site, level or
+    /// release table (named once by the master layer) is the error; a
+    /// missing cut-scene table leaves the cut scenes out.
+    pub(crate) fn take(&self, masters: &mut MasterData) -> Option<Result<Masters, String>> {
+        let keys = [
+            self.site_types.key(),
+            self.levels.key(),
+            self.releases.key(),
+            self.cutscenes.key(),
+        ];
+        if keys.into_iter().any(|key| !masters.is_resolved(key)) {
+            return None;
+        }
+        let site_types = masters.take(&self.site_types)?;
+        let levels = masters.take(&self.levels)?;
+        let releases = masters.take(&self.releases)?;
+        let cutscenes = masters.take(&self.cutscenes)?;
+        Some((|| {
+            Ok(Masters {
+                site_types: site_types.map_err(|error| error.to_string())?,
+                levels: levels.map_err(|error| error.to_string())?,
+                releases: releases.map_err(|error| error.to_string())?,
+                cutscenes: cutscenes.ok(),
+            })
+        })())
+    }
+}
+
+/// The table set of the site expansion.
+pub(crate) const EXPANSION_TABLES: MasterTables = MasterTables {
+    site_types: MasterTable {
+        table: "mysekaiSites",
+        name: "mysekaiSites (the site expansion)",
+        parse: parse_site_types,
+    },
+    levels: MasterTable {
+        table: "mysekaiSiteLevels",
+        name: "mysekaiSiteLevels (the site expansion)",
+        parse: parse_levels,
+    },
+    releases: MasterTable {
+        table: "mysekaiRankReleases",
+        name: "mysekaiRankReleases (the site expansion)",
+        parse: parse_releases,
+    },
+    cutscenes: MasterTable {
+        table: "mysekaiCutScenes",
+        name: "mysekaiCutScenes (the site expansion)",
+        parse: parse_cutscenes,
+    },
+};
+
+/// The table set of the room's floor buttons.
+pub(crate) const FLOOR_BUTTON_TABLES: MasterTables = MasterTables {
+    site_types: MasterTable {
+        table: "mysekaiSites",
+        name: "mysekaiSites (the floor buttons)",
+        parse: parse_site_types,
+    },
+    levels: MasterTable {
+        table: "mysekaiSiteLevels",
+        name: "mysekaiSiteLevels (the floor buttons)",
+        parse: parse_levels,
+    },
+    releases: MasterTable {
+        table: "mysekaiRankReleases",
+        name: "mysekaiRankReleases (the floor buttons)",
+        parse: parse_releases,
+    },
+    cutscenes: MasterTable {
+        table: "mysekaiCutScenes",
+        name: "mysekaiCutScenes (the floor buttons)",
+        parse: parse_cutscenes,
+    },
+};
+
+/// `mysekaiSites`: (id, mysekaiSiteType), master order.
+pub(crate) fn parse_site_types(text: &str) -> Result<Vec<(i32, String)>, String> {
+    rows(text)?
+        .iter()
+        .map(|row| {
             let kind = row["mysekaiSiteType"]
                 .as_str()
                 .ok_or("mysekaiSiteType is not a string")?;
-            masters.site_types.push((int(row, "id")?, kind.to_owned()));
-        }
-        for row in rows("mysekaiSiteLevels")? {
-            masters.levels.push(SiteLevelRow {
+            Ok((int(row, "id")?, kind.to_owned()))
+        })
+        .collect()
+}
+
+/// `mysekaiSiteLevels`, master order.
+pub(crate) fn parse_levels(text: &str) -> Result<Vec<SiteLevelRow>, String> {
+    rows(text)?
+        .iter()
+        .map(|row| {
+            Ok(SiteLevelRow {
                 id: int(row, "id")?,
                 site_id: int(row, "mysekaiSiteId")?,
                 level: int(row, "level")?,
-            });
-        }
-        for row in rows("mysekaiRankReleases")? {
-            masters.releases.push(RankReleaseRow {
+            })
+        })
+        .collect()
+}
+
+/// `mysekaiRankReleases`, master order.
+pub(crate) fn parse_releases(text: &str) -> Result<Vec<RankReleaseRow>, String> {
+    rows(text)?
+        .iter()
+        .map(|row| {
+            Ok(RankReleaseRow {
                 rank: int(row, "mysekaiRank")?,
                 // The master column carries the source's own misspelling.
                 kind: row["mysekaiRankRelaseType"]
@@ -102,29 +209,33 @@ impl Masters {
                     .unwrap_or("")
                     .to_owned(),
                 external_id: int(row, "externalId")?,
-            });
-        }
-        if let Some(rows) = tables["mysekaiCutScenes"].as_array() {
-            let mut cutscenes = Vec::new();
-            for row in rows {
-                cutscenes.push(CutSceneRow {
-                    id: int(row, "id")?,
-                    external_id: int(row, "externalId")?,
-                    condition: row["mysekaiCutSceneConditionType"]
-                        .as_str()
-                        .ok_or("mysekaiCutSceneConditionType is not a string")?
-                        .to_owned(),
-                    bundle: row["timelineAssetbundleName"]
-                        .as_str()
-                        .ok_or("timelineAssetbundleName is not a string")?
-                        .to_owned(),
-                });
-            }
-            masters.cutscenes = Some(cutscenes);
-        }
-        Ok(masters)
-    }
+            })
+        })
+        .collect()
+}
 
+/// `mysekaiCutScenes`, master order.
+pub(crate) fn parse_cutscenes(text: &str) -> Result<Vec<CutSceneRow>, String> {
+    rows(text)?
+        .iter()
+        .map(|row| {
+            Ok(CutSceneRow {
+                id: int(row, "id")?,
+                external_id: int(row, "externalId")?,
+                condition: row["mysekaiCutSceneConditionType"]
+                    .as_str()
+                    .ok_or("mysekaiCutSceneConditionType is not a string")?
+                    .to_owned(),
+                bundle: row["timelineAssetbundleName"]
+                    .as_str()
+                    .ok_or("timelineAssetbundleName is not a string")?
+                    .to_owned(),
+            })
+        })
+        .collect()
+}
+
+impl Masters {
     /// `MasterDataManager.GetMasterMysekaiCutScene(externalId, conditionType)`
     /// for the site-level condition: the first row with that external id and
     /// condition. `Err` when the catalog has no cut-scene table.
@@ -135,7 +246,7 @@ impl Masters {
         let rows = self
             .cutscenes
             .as_ref()
-            .ok_or("player-data.json has no mysekaiCutScenes table")?;
+            .ok_or("the mysekaiCutScenes table is missing")?;
         Ok(rows
             .iter()
             .find(|row| row.external_id == external_id && row.condition == SITE_LEVEL))
