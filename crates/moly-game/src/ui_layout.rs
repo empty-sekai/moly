@@ -16,7 +16,8 @@ pub(crate) fn install(app: &mut App) {
 
 use crate::balloon::{BalloonArt, BAKE_PPEM};
 use bevy::asset::RenderAssetUsages;
-use bevy::asset::{AssetEvent, AssetId, AssetLoadFailedEvent, LoadState};
+use bevy::asset::io::AssetReaderError;
+use bevy::asset::{AssetEvent, AssetId, AssetLoadError, AssetLoadFailedEvent, LoadState};
 use bevy::camera::visibility::RenderLayers;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
@@ -63,10 +64,11 @@ enum UiSourceFile {
     HostCanvas,
     /// The TMP font assets texts are laid out with (a region root only).
     TmpFontAssets,
-    /// The colour palette palette-bound graphics read (a region root only).
+    /// The colour palette palette-bound graphics read (a region root; the
+    /// shared root when it carries one).
     Palette,
     /// The tween defaults tweens without their own settings run with (a
-    /// region root only).
+    /// region root; the shared root when it carries them).
     TweenSettings,
 }
 
@@ -78,7 +80,14 @@ impl UiSourceFile {
 
     /// Files only a region root carries.
     fn region_only(self) -> bool {
-        matches!(self, Self::TmpFontAssets | Self::Palette | Self::TweenSettings)
+        matches!(self, Self::TmpFontAssets)
+    }
+
+    /// Files the shared root may lack: absent, their readers keep their named
+    /// fallback; present, each must be well formed and name the runtime's
+    /// region in its source block.
+    fn shared_optional(self) -> bool {
+        matches!(self, Self::Palette | Self::TweenSettings)
     }
 
     fn file(self) -> &'static str {
@@ -112,6 +121,24 @@ impl UiSourceFile {
 /// root are relative to it, names of a region root were rebased to full paths.
 pub(crate) fn image_asset_path(name: &str) -> String {
     if name.contains("://") { name.to_owned() } else { format!("{ROOT}{name}") }
+}
+
+/// Whether a load failed because the root does not carry the file.
+fn not_found(error: &AssetLoadError) -> bool {
+    matches!(error, AssetLoadError::AssetReaderError(AssetReaderError::NotFound(_)))
+}
+
+/// The region and client version a settings document of the shared root names
+/// in its source block; the region must be the runtime's, since the shared
+/// root is read by every region without a root of its own.
+fn shared_source(doc: &Value, runtime_region: &str) -> Result<(String, String), String> {
+    let source = &doc["source"];
+    let region = source["region"].as_str().ok_or("its source block names no region")?;
+    let client = source["clientVersion"].as_str().ok_or("its source block names no client version")?;
+    if region != runtime_region {
+        return Err(format!("it is a {region} document, and the runtime's region is {runtime_region}"));
+    }
+    Ok((region.to_owned(), client.to_owned()))
 }
 
 /// The runtime's source region, from the snapshot identity document.
@@ -306,6 +333,8 @@ pub(crate) struct UiLayoutRequests {
 /// root, admitted through its manifest, or the shared root.
 struct UiSources {
     root: String,
+    /// The runtime's region (the shared root's settings documents must name it).
+    runtime_region: String,
     /// None for the shared root.
     region: Option<RegionRoot>,
     files: Vec<(UiSourceFile, Handle<JsonAsset>)>,
@@ -320,7 +349,7 @@ struct RegionRoot {
 
 impl UiSources {
     /// The stage reads only the Talk layout and needs no editor sprites.
-    fn request(server: &AssetServer, region: Option<&str>, stage_only: bool) -> Self {
+    fn request(server: &AssetServer, runtime_region: &str, region: Option<&str>, stage_only: bool) -> Self {
         let root = region.map_or_else(|| ROOT.to_owned(), |region| format!("moly://ui-{region}/"));
         let docs = DOCUMENTS
             .iter()
@@ -331,7 +360,8 @@ impl UiSources {
         let files = UiSourceFile::ALL
             .into_iter()
             .filter(|file| !(stage_only && *file == UiSourceFile::RuntimeSprites))
-            // The shared root carries no TMP font assets, palette or tween defaults.
+            // The shared root carries no TMP font assets; its palette and tween
+            // defaults are optional.
             .filter(|file| region.is_some() || !file.region_only())
             .map(|file| {
                 let path = match (region, file) {
@@ -346,7 +376,7 @@ impl UiSources {
             manifest: server.load(format!("{root}ui-manifest.json")),
             parsed: None,
         });
-        Self { root, region, files, docs }
+        Self { root, runtime_region: runtime_region.to_owned(), region, files, docs }
     }
 
     fn file(&self, file: UiSourceFile) -> Option<&Handle<JsonAsset>> {
@@ -391,7 +421,8 @@ pub(crate) fn parse(
             info!("UI sources for region {region}: the shared UI root {ROOT}");
         }
         let stage_only = request.stage_only;
-        request.sources = Some(UiSources::request(&server, own_root.then_some(region.as_str()), stage_only));
+        request.sources =
+            Some(UiSources::request(&server, &region, own_root.then_some(region.as_str()), stage_only));
         request.source = None;
     }
     let stage_only = request.stage_only;
@@ -413,6 +444,9 @@ pub(crate) fn parse(
     if !layouts.metadata_loaded {
         for (file, handle) in &sources.files {
             if let LoadState::Failed(e) = server.load_state(handle) {
+                if sources.region.is_none() && file.shared_optional() && not_found(&e) {
+                    continue;
+                }
                 panic!("UI source {} failed in {}: {e:?}", file.file(), sources.root);
             }
             if json.get(handle).is_none() {
@@ -492,10 +526,39 @@ pub(crate) fn parse(
                         .unwrap_or_else(|e| panic!("UI {} root tween defaults: {e}", region.region)),
                 );
             }
-            None => warn!(
-                "UI sources of the shared root carry no colour palette or tween defaults: palette-bound \
-                 button press effects are not drawn"
-            ),
+            None => {
+                // The shared root's settings, when it carries them: each names
+                // the runtime's region, or the root is refused.
+                let shared = |file: UiSourceFile| -> Option<Value> {
+                    json.get(sources.file(file)?)?;
+                    let doc = parse_json(file);
+                    let (region, client) = shared_source(&doc, &sources.runtime_region)
+                        .unwrap_or_else(|e| panic!("UI shared root {}{}: {e}", sources.root, file.file()));
+                    info!("UI {} from the shared UI root {}{}: region {region}, client {client}",
+                        file.kind(), sources.root, file.file());
+                    Some(doc)
+                };
+                layouts.palette = shared(UiSourceFile::Palette).map(|doc| {
+                    parse_palette(&doc).unwrap_or_else(|e| panic!("UI shared root palette: {e}"))
+                });
+                layouts.tween_defaults = shared(UiSourceFile::TweenSettings).map(|doc| {
+                    TweenDefaults::parse(&doc).unwrap_or_else(|e| panic!("UI shared root tween defaults: {e}"))
+                });
+                if let Some(palette) = layouts.palette.as_ref() {
+                    info!("UI shared root palette: {} colour entries", palette.len());
+                } else {
+                    warn!(
+                        "UI sources of the shared root carry no colour palette: palette-bound graphics keep \
+                         their named fallback"
+                    );
+                }
+                if layouts.tween_defaults.is_none() {
+                    warn!(
+                        "UI sources of the shared root carry no tween defaults: palette-bound button press \
+                         effects are not drawn"
+                    );
+                }
+            }
         }
         let textures: HashMap<String, String> = serde_json::from_str(text(UiSourceFile::RuntimeTextures))
             .expect("UI runtime texture inventory");
