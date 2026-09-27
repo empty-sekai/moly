@@ -14,7 +14,10 @@
 //! sliding in from the left ([`slide`]).
 //!
 //! [`NoticeCollectItem`] is that layer call, with the same seven values. The
-//! openers resolve them; this module draws the cells ([`cell`]) in the notice
+//! harvest opener raises its notice by id; [`bridge`] resolves the name and
+//! the icon's bundle and asset names from the masters, as
+//! `MysekaiResourceUtility.NoticeCollectItem` does, and makes the layer call.
+//! This module draws the cells ([`cell`]) in the notice
 //! layer's view ([`crate::notice_banner`]), which shows only while the notice
 //! layer is active. A call while the layer is not active, or before the
 //! cells are composed, is reported and not drawn.
@@ -111,19 +114,31 @@ pub(crate) struct CollectNoticeCharset {
 #[derive(Resource)]
 struct Inputs(Vec<(&'static str, Handle<JsonAsset>)>);
 
-/// A master row the instrument can notice.
+/// A material or item master row.
 #[derive(Clone, Debug)]
 struct MasterRow {
+    id: i64,
     name: String,
     icon: String,
     /// `MysekaiMaterialRarityType` as its enum value; None for an item.
     rarity: Option<i64>,
 }
 
+/// A fixture master row.
+#[derive(Clone, Debug)]
+struct FixtureRow {
+    name: String,
+    assetbundle: String,
+    /// `MysekaiFixtureType.plant`.
+    plant: bool,
+}
+
+/// The masters' rows the opener's names and icons come from, by id order.
 #[derive(Resource, Default)]
 struct Masters {
     materials: Vec<MasterRow>,
     items: Vec<MasterRow>,
+    fixtures: HashMap<i64, FixtureRow>,
 }
 
 struct Bound {
@@ -241,9 +256,26 @@ fn settle(
                 continue;
             };
             chars.extend(name.chars());
+            let Some(id) = row["id"].as_i64() else {
+                continue;
+            };
+            if path == "mysekai-fixtures.json" {
+                if let Some(assetbundle) = row["assetbundleName"].as_str() {
+                    masters.fixtures.insert(
+                        id,
+                        FixtureRow {
+                            name: name.to_owned(),
+                            assetbundle: assetbundle.to_owned(),
+                            plant: row["fixtureType"].as_str() == Some("plant"),
+                        },
+                    );
+                }
+                continue;
+            }
             let icon = row["iconAssetbundleName"].as_str().map(str::to_owned);
             match (path, icon) {
                 ("mysekai-materials.json", Some(icon)) => masters.materials.push(MasterRow {
+                    id,
                     name: name.to_owned(),
                     icon,
                     rarity: row["mysekaiMaterialRarityType"]
@@ -251,6 +283,7 @@ fn settle(
                         .and_then(rarity_value),
                 }),
                 ("mysekai-items.json", Some(icon)) => masters.items.push(MasterRow {
+                    id,
                     name: name.to_owned(),
                     icon,
                     rarity: None,
@@ -265,10 +298,11 @@ fn settle(
         warn!("[notice] collect-item input absent: {line}");
     }
     info!(
-        "[notice] collect-item charset: {} characters; instrument rows: {} materials, {} items",
+        "[notice] collect-item charset: {} characters; master rows: {} materials, {} items, {} fixtures",
         chars.len(),
         masters.materials.len(),
-        masters.items.len()
+        masters.items.len(),
+        masters.fixtures.len()
     );
     commands.insert_resource(CollectNoticeCharset { chars });
     commands.insert_resource(masters);
@@ -578,6 +612,105 @@ fn advance(
     }
 }
 
+/// `MysekaiResourceUtility.NoticeCollectItem`'s name and icon arms, for the
+/// harvest opener's notice (which carries the id and the flags):
+/// - `mysekai_material`: the row's `name`, `AssetBundleNames.
+///   GetMysekaiMaterialPreview(iconAssetbundleName)` and the icon name;
+/// - `mysekai_item`: the row's `name`, `GetMysekaiItemPreview(
+///   iconAssetbundleName)` and the icon name;
+/// - `mysekai_fixture`: the row's `name`; a plant fixture takes
+///   `GetMysekaiFixturePlantPreviewImage(assetbundleName, id)` with the
+///   resource `{assetbundleName}_{id}`, any other fixture
+///   `GetMysekaiFixtureThumbnail(assetbundleName)` with the resource
+///   `assetbundleName`;
+/// - any other type: an empty name and no icon names.
+fn resolve(
+    masters: &Masters,
+    notice: &crate::harvest::notice::CollectNotice,
+) -> Result<NoticeCollectItem, String> {
+    use crate::harvest::notice::NoticeArm;
+    let id = notice.resource_id;
+    let (item_name, asset_bundle_name, resource_name) = match notice.arm {
+        NoticeArm::MysekaiMaterial => {
+            let row = masters
+                .materials
+                .iter()
+                .find(|row| row.id == id)
+                .ok_or_else(|| format!("mysekai material {id} has no master row here"))?;
+            (
+                row.name.clone(),
+                format!("mysekai/item_preview/material/{}", row.icon),
+                row.icon.clone(),
+            )
+        }
+        NoticeArm::MysekaiItem => {
+            let row = masters
+                .items
+                .iter()
+                .find(|row| row.id == id)
+                .ok_or_else(|| format!("mysekai item {id} has no master row here"))?;
+            (
+                row.name.clone(),
+                format!("mysekai/item_preview/item/{}", row.icon),
+                row.icon.clone(),
+            )
+        }
+        NoticeArm::MysekaiFixture => {
+            let row = masters
+                .fixtures
+                .get(&id)
+                .ok_or_else(|| format!("mysekai fixture {id} has no master row here"))?;
+            if row.plant {
+                let resource = format!("{}_{id}", row.assetbundle);
+                (
+                    row.name.clone(),
+                    format!("mysekai/item_preview/fixture/{resource}"),
+                    resource,
+                )
+            } else {
+                (
+                    row.name.clone(),
+                    format!("mysekai/thumbnail/fixture/{}", row.assetbundle),
+                    row.assetbundle.clone(),
+                )
+            }
+        }
+        NoticeArm::Other => (String::new(), String::new(), String::new()),
+    };
+    Ok(NoticeCollectItem {
+        item_name,
+        asset_bundle_name,
+        resource_name,
+        get_count: notice.get_count,
+        is_limit: notice.is_limit,
+        is_new: notice.is_new,
+        is_rare: notice.is_rare,
+    })
+}
+
+/// The harvest opener's notices, resolved and handed to the notice layer.
+fn bridge(
+    mut raised: MessageReader<crate::harvest::notice::CollectNotice>,
+    masters: Option<Res<Masters>>,
+    mut writer: MessageWriter<NoticeCollectItem>,
+) {
+    for notice in raised.read() {
+        let resolved = match masters.as_deref() {
+            Some(masters) => resolve(masters, notice),
+            None => Err("the masters are not loaded yet".to_owned()),
+        };
+        match resolved {
+            Ok(call) => {
+                writer.write(call);
+            }
+            Err(reason) => error!(
+                "[notice] harvest notice {:?} {} x{}: {reason}: not drawn",
+                notice.arm, notice.resource_id, notice.get_count
+            ),
+        }
+    }
+}
+
 /// The opener's rare rule for a material: `rarity - 1 < 3` compared
 /// unsigned on the `MysekaiMaterialRarityType` value.
 fn material_is_rare(rarity: i64) -> bool {
@@ -679,5 +812,5 @@ pub(crate) fn install(app: &mut App) {
     app.add_message::<NoticeCollectItem>()
         .init_resource::<CollectNotices>()
         .add_systems(Startup, load)
-        .add_systems(Update, (settle, compose, autoplay, advance).chain());
+        .add_systems(Update, (settle, compose, bridge, autoplay, advance).chain());
 }

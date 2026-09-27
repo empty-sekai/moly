@@ -51,7 +51,7 @@ mod prop_animator;
 mod queue;
 pub(crate) mod server_mock;
 mod learn;
-mod notice;
+pub(crate) mod notice;
 mod obstacles;
 pub(crate) mod particles;
 mod possession;
