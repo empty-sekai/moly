@@ -178,8 +178,11 @@ pub(crate) fn load(
     mut commands: Commands, server: Res<AssetServer>,
     stage: Option<Res<crate::browser_stage::BrowserStage>>,
 ) {
-    if stage.is_some() {
-        catalog_stream::load(&mut commands, &server);
+    // A browser publication carries the per-package documents, not the native
+    // monolith, so every browser profile streams. The game profile also
+    // streams the placed house's record, which its entry and door read.
+    if stage.is_some() || cfg!(target_arch = "wasm32") {
+        catalog_stream::load(&mut commands, &server, stage.is_none());
         return;
     }
     commands.insert_resource(CatalogLoad(

@@ -135,6 +135,11 @@ impl HouseCatalog {
         self.0.insert(name.to_owned(), definition);
     }
 
+    /// A streamed package whose record could not be read.
+    pub(crate) fn refuse(&mut self, name: &str, reason: String) {
+        self.0.insert(name.to_owned(), Err(reason));
+    }
+
     fn get(&self, package: &str) -> Option<&Result<Arc<HouseDefinition>, String>> {
         self.0.get(package)
     }
@@ -515,6 +520,9 @@ pub(crate) fn find_house(world: &mut World) -> HouseLookup {
             home_rows.len(),
             identity.uid
         );
+    }
+    if let Some(reason) = super::catalog_stream::house_pending(world, &identity.model_package) {
+        return HouseLookup::Pending(reason);
     }
     let Some(definition) = world
         .resource::<HouseCatalog>()
