@@ -672,8 +672,8 @@ pub(crate) fn spawn_when_ready(
         .unwrap_or_else(|e| panic!("leave confirmation: {e}"));
     let mut view = UiPrefabView::new("Common2", SITEMAP_LAYER);
     view.set_visible("WindowRoot/Tabs", false);
-    view.set_text(&dialog.negative_label, layouts.wordings["WORD_CANCEL"].clone());
-    view.set_text(&dialog.positive_label, layouts.wordings["WORD_LEFT_ROOM"].clone());
+    view.set_text(&dialog.negative_label, layouts.wording_or_key("WORD_CANCEL"));
+    view.set_text(&dialog.positive_label, layouts.wording_or_key("WORD_LEFT_ROOM"));
     let root = ShellDialogRoot { accept: dialog.positive, cancel: dialog.negative, close: dialog.close };
     commands.spawn((
         root, Visibility::Hidden, Transform::default(),
@@ -752,7 +752,7 @@ pub(crate) fn place(
         *visibility = if context.is_some() { Visibility::Inherited } else { Visibility::Hidden };
         transform.scale = Vec3::splat(scale);
         if let Some(context) = context {
-            view.set_text("Content/MessageBody", layouts.wordings["MSG_CONFIRM_LEAVE_MYSEKAI"]
+            view.set_text("Content/MessageBody", layouts.wording_or_key("MSG_CONFIRM_LEAVE_MYSEKAI")
                 .replace("{0}", &context.owner_name));
         }
     }
