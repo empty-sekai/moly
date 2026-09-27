@@ -22,10 +22,13 @@
 //! server model reads them from the configs master (`configs.json`) and the
 //! join hands them to the client's copy, standing in for the master download.
 //! A document written before this was known may carry a `masterConfigs` key;
-//! it is read and ignored by name.
+//! it is read and ignored by name. A runtime root without the configs master
+//! (the CN roots have no source for it) reads the two values from
+//! `policies.masterConfigsStandIn` instead, named in the missing-master list.
 //!
-//! The mock's own keys: `policies.ownedCards` and
-//! `policies.birthdayPlantRefreshPoints`. Every key is optional when a
+//! The mock's own keys: `policies.ownedCards`,
+//! `policies.birthdayPlantRefreshPoints` and `policies.masterConfigsStandIn`.
+//! Every key is optional when a
 //! document is read (a document written before this section had none) and
 //! is always written.
 //!
@@ -110,6 +113,12 @@ pub(crate) const DELIVERY_ITEM_STOCK: i32 = 300;
 /// `policies.birthdayPlantRefreshPoints` of a document that states none (the
 /// repeat-refresh requirement of every party row on disk).
 pub(crate) const DEFAULT_PLANT_REFRESH_POINTS: i32 = 10_000;
+/// `policies.masterConfigsStandIn` of a document that states none: the JP
+/// configs master's values of the two keys. Read only when the runtime root
+/// has no configs master.
+pub(crate) const DEFAULT_CONFIGS_STAND_IN: [(&str, i32); 2] =
+    [(CONFIG_BASE_POINT, 100), (CONFIG_DROP_UPPER_LIMIT, 25)];
+const POLICY_CONFIGS_STAND_IN: &str = "masterConfigsStandIn";
 
 pub(crate) const OWNED_EVERY_BONUS_CARD: &str = "everyPointBonusCard";
 pub(crate) const OWNED_STATED: &str = "stated";
@@ -151,6 +160,9 @@ pub(crate) struct DeliveryDoc {
     pub(crate) cards: Vec<i64>,
     pub(crate) honors: Vec<HonorRow>,
     pub(crate) plant_refresh_points: i32,
+    /// `policies.masterConfigsStandIn`: the two master configs for a runtime
+    /// root without the configs master.
+    pub(crate) configs_stand_in: BTreeMap<String, i32>,
 }
 
 impl Default for DeliveryDoc {
@@ -163,6 +175,10 @@ impl Default for DeliveryDoc {
             cards: Vec::new(),
             honors: Vec::new(),
             plant_refresh_points: DEFAULT_PLANT_REFRESH_POINTS,
+            configs_stand_in: DEFAULT_CONFIGS_STAND_IN
+                .iter()
+                .map(|&(key, value)| (key.to_owned(), value))
+                .collect(),
         }
     }
 }
@@ -174,7 +190,8 @@ impl Default for DeliveryDoc {
 /// The document keys this section reads at the top level.
 pub(crate) const DOCUMENT_KEYS: [&str; 6] = SECTIONS;
 /// The keys this section reads under `policies`.
-pub(crate) const POLICY_KEYS: [&str; 2] = ["ownedCards", "birthdayPlantRefreshPoints"];
+pub(crate) const POLICY_KEYS: [&str; 3] =
+    ["ownedCards", "birthdayPlantRefreshPoints", POLICY_CONFIGS_STAND_IN];
 
 pub(crate) fn parse_parties(value: &Value) -> Result<Vec<BirthdayPartyRow>, String> {
     let rows = value
@@ -304,6 +321,9 @@ impl DeliveryDoc {
         if policies.contains_key("birthdayPlantRefreshPoints") {
             out.plant_refresh_points = int32(policies, "birthdayPlantRefreshPoints", "policies")?;
         }
+        if let Some(value) = policies.get(POLICY_CONFIGS_STAND_IN) {
+            out.configs_stand_in = parse_configs_stand_in(value)?;
+        }
         out.check_structure()?;
         Ok(out)
     }
@@ -421,6 +441,7 @@ impl DeliveryDoc {
             "birthdayPlantRefreshPoints".into(),
             json!(self.plant_refresh_points),
         );
+        policies.insert(POLICY_CONFIGS_STAND_IN.into(), json!(self.configs_stand_in));
     }
 
     fn party_mut(&mut self, id: i32) -> Option<&mut BirthdayPartyRow> {
@@ -428,6 +449,28 @@ impl DeliveryDoc {
             .iter_mut()
             .find(|row| row.birthday_party_id == id)
     }
+}
+
+/// `policies.masterConfigsStandIn`: an object of the two master config keys,
+/// each an int32; a key it leaves out takes its default.
+fn parse_configs_stand_in(value: &Value) -> Result<BTreeMap<String, i32>, String> {
+    let at = format!("policies.{POLICY_CONFIGS_STAND_IN}");
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{at} is not an object"))?;
+    if let Some(key) = object
+        .keys()
+        .find(|key| !DEFAULT_CONFIGS_STAND_IN.iter().any(|(name, _)| name == key))
+    {
+        return Err(format!("{at} has {key}, which is not one of the delivery's master configs"));
+    }
+    DEFAULT_CONFIGS_STAND_IN
+        .iter()
+        .map(|&(key, default)| {
+            let value = if object.contains_key(key) { int32(object, key, &at)? } else { default };
+            Ok((key.to_owned(), value))
+        })
+        .collect()
 }
 
 pub(crate) fn party_value(row: BirthdayPartyRow) -> Value {
@@ -693,6 +736,11 @@ impl ClientBirthdayPartyData {
             .unwrap_or(0)
     }
 
+    /// The `userMysekaiMaterials` rows: mysekai material id -> quantity.
+    pub(crate) fn mysekai_materials(&self) -> &BTreeMap<i32, i32> {
+        &self.mysekai_materials
+    }
+
     /// The card ids of `userCards` (`UserDataManager.GetCard(id) != null`).
     pub(crate) fn cards(&self) -> &BTreeSet<i64> {
         &self.cards
@@ -808,10 +856,12 @@ impl ServerModel {
         }
     }
 
-    /// The delivery's master configs the configs master holds as integers
-    /// (`None` while the master is absent).
+    /// The delivery's master configs the configs master holds as integers;
+    /// the document's stand-in when the runtime root has no configs master.
     fn delivery_configs(&self) -> Option<BTreeMap<String, i32>> {
-        let configs = self.masters.configs.as_ref()?;
+        let Some(configs) = self.masters.configs.as_ref() else {
+            return Some(self.doc.delivery.configs_stand_in.clone());
+        };
         Some(
             [CONFIG_BASE_POINT, CONFIG_DROP_UPPER_LIMIT]
                 .into_iter()
@@ -824,10 +874,14 @@ impl ServerModel {
     }
 
     /// One delivery master config (`GetMasterConfigToInt`), refused by name.
+    /// Without the configs master (requests come after the masters resolve)
+    /// the document's stand-in answers.
     fn master_config_int(&self, key: &str) -> Result<i32, String> {
-        let configs = self.masters.configs.as_ref().ok_or_else(|| {
-            format!("the configs master (configs.json) is absent: {key} cannot be read")
-        })?;
+        let Some(configs) = self.masters.configs.as_ref() else {
+            return self.doc.delivery.configs_stand_in.get(key).copied().ok_or_else(|| {
+                format!("policies.{POLICY_CONFIGS_STAND_IN} has no {key}")
+            });
+        };
         let raw = configs
             .get(key)
             .ok_or_else(|| format!("the configs master has no {key}"))?;
@@ -1426,19 +1480,16 @@ mod tests {
     }
 
     #[test]
-    fn the_delivery_refuses_without_the_configs_master() {
+    fn the_delivery_reads_the_stand_in_without_the_configs_master() {
         let mut model = model();
         model.seat_parties(&[PARTY]);
         model.masters.configs = None;
-        assert!(model
-            .birthday_party_delivery(1, 10)
-            .unwrap_err()
-            .contains("configs.json"));
+        assert!(model.birthday_party_delivery(1, 10).is_ok());
         assert_eq!(
             model
                 .delivery_update(&[SECTION_MASTER_CONFIGS.to_owned()])
                 .configs,
-            None
+            Some(model.doc.delivery.configs_stand_in.clone())
         );
     }
 

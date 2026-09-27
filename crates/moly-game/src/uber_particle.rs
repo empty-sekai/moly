@@ -379,7 +379,7 @@ struct Planned {
     emitter: EmitterParams,
     /// 发射节点实体：世界变换逐帧从它读（局部空间仿真要它）。
     anchor: Entity,
-    alignment: Alignment,
+    geometry: UberGeometry,
     cone_angle: Option<f32>,
     rol: Option<RotationOverLifetime>,
     limit: Option<LimitVelocity>,
@@ -391,6 +391,83 @@ struct Planned {
     pivot: [f32; 3],
     texture: Handle<Image>,
     effect: Option<ParticleEmission>,
+}
+
+/// How an admitted Billboard system builds its quads.
+///
+/// The engine's Billboard geometry for the View, World and Local render
+/// spaces is one body that branches on the renderer's render space: World
+/// lays the quad on the world axes, Local on the owner's rotation, View on
+/// the camera's. World and Local are drawn with the source construction
+/// (`source_billboard`), which also carries the source pivot, renderer scale
+/// and rotation order. View stays on the older quad writer: the source View
+/// arm reads the renderer's allow-roll flag, and this path's renderer record
+/// does not carry it, so building it here would take a default the source
+/// never gave.
+#[derive(Clone)]
+enum UberGeometry {
+    Legacy(Alignment),
+    Source(crate::source_billboard::Draw),
+}
+
+/// The Billboard render space of one renderer: World and Local get the source
+/// construction, View the older writer; Facing and Velocity have no user on
+/// this path and are refused by name, with any value outside the engine's
+/// enumeration.
+///
+/// The source Draw's `allow_roll` is read only by the View and Facing arms,
+/// neither of which is built here; World and Local never read it, so the
+/// value set below reaches no output.
+fn uber_billboard_geometry(
+    renderer: &ParticleRenderer,
+    system: &serde_json::Value,
+    node_scale: Option<Vec3>,
+) -> Result<UberGeometry, String> {
+    billboard_geometry(renderer.alignment, renderer.pivot, [renderer.min_particle_size, renderer.max_particle_size],
+        system, node_scale)
+}
+
+/// [`uber_billboard_geometry`] over the renderer fields it reads.
+fn billboard_geometry(
+    render_space: i64,
+    pivot: [f32; 3],
+    screen_size: [f32; 2],
+    system: &serde_json::Value,
+    node_scale: Option<Vec3>,
+) -> Result<UberGeometry, String> {
+    use crate::particle_geometry::{Alignment as Space, Scaling};
+    let name = || Alignment::render_space_name(render_space);
+    let space = Space::from_source(render_space).ok_or_else(|| name().to_owned())?;
+    let space = match space {
+        Space::View => return Ok(UberGeometry::Legacy(Alignment::View)),
+        Space::World | Space::Local => space,
+        Space::Facing | Space::Velocity => {
+            return Err(name().to_owned())
+        }
+    };
+    // MainModule scaling: Hierarchy reads the owner's lossy scale, Local the
+    // emitter node's own scale; Shape is not consumed here.
+    let scaling = match system.get("scalingMode").and_then(serde_json::Value::as_u64) {
+        Some(0) => Scaling::Hierarchy,
+        Some(1) => Scaling::Local {
+            scale: node_scale.ok_or_else(|| {
+                format!("{}: Local scaling without the emitter node transform", name())
+            })?,
+            // Gates only the native birth path, which this host does not install.
+            unit_chain: false,
+        },
+        other => {
+            return Err(format!("{}: scalingMode {other:?}", name()))
+        }
+    };
+    Ok(UberGeometry::Source(crate::source_billboard::Draw {
+        mode: crate::source_billboard::Mode::Billboard,
+        alignment: space,
+        pivot: Vec3::from_array(pivot),
+        screen_size: Vec2::from_array(screen_size),
+        allow_roll: true,
+        scaling,
+    }))
 }
 
 /// 判读结果：放行的计划 + 逐档拒绝盘点。
@@ -465,6 +542,7 @@ pub(crate) fn plan(
     names: Query<&Name>,
     children: Query<&Children>,
     stale: Query<Entity, With<UberParticleDraw>>,
+    transforms: Query<&Transform>,
 ) {
     if planned.is_some() || state.is_some() {
         return;
@@ -513,6 +591,7 @@ pub(crate) fn plan(
             &active.scene,
             &format!("site/scenes/{}", active.scene),
             &by_path,
+            &|entity| transforms.get(entity).ok().map(|t| t.scale),
             &server,
             &mut tally,
         ) {
@@ -601,6 +680,7 @@ fn judge(
     scene: &str,
     texture_dir: &str,
     by_path: &HashMap<String, Vec<Entity>>,
+    node_scale: &dyn Fn(Entity) -> Option<Vec3>,
     server: &AssetServer,
     tally: &mut Tally,
 ) -> Option<Planned> {
@@ -643,12 +723,6 @@ fn judge(
         });
         return None;
     }
-    let Some(alignment) = Alignment::from_render_space(renderer.alignment) else {
-        tally
-            .alignment
-            .push(Alignment::render_space_name(renderer.alignment).to_owned());
-        return None;
-    };
 
     // ---- 仿真侧的门 ----
     // `system` 块原样存在装载层（不在那里解析：律对求值不了的曲线形状具名
@@ -660,6 +734,15 @@ fn judge(
     let Some(system_block) = system.system.as_ref() else {
         tally.no_system_block += 1;
         return None;
+    };
+    // The render-space gate reads the MainModule scaling mode, so it sits
+    // right after the system block's own gate.
+    let geometry = match uber_billboard_geometry(renderer, system_block, node_scale(anchor)) {
+        Ok(geometry) => geometry,
+        Err(name) => {
+            tally.alignment.push(name);
+            return None;
+        }
     };
     let archive = serde_json::json!({
         "effects": {
@@ -829,9 +912,9 @@ fn judge(
         match keyword.as_str() {
             "_BASE_MAP_MODE_2D" | "_EMISSION_MAP_MODE_2D" | "_TINT_COLOR_ENABLED"
             | "_EMISSION_AREA_ALL" | "_TINT_AREA_ALL" => {}
-            "_SOFT_PARTICLES_ENABLED" => {
-                tally.shading_shortfall.push("软粒子（关键字在场）".to_owned());
-            }
+            // Soft particles are drawn: the fragment tail fades alpha by the
+            // eye-depth gap to the opaque depth snapshot (`soften_alpha`).
+            "_SOFT_PARTICLES_ENABLED" => {}
             other => {
                 tally.state_arm.push(format!("keyword {other}"));
                 return None;
@@ -877,8 +960,13 @@ fn judge(
 
     let soft_enabled = material.keywords.iter().any(|k| k == "_SOFT_PARTICLES_ENABLED");
     let soft_intensity = if soft_enabled {
-        get("_SoftParticlesIntensity").filter(|v| v.is_finite())
-            .expect("active source soft particles require exported intensity")
+        match get("_SoftParticlesIntensity").filter(|v| v.is_finite()) {
+            Some(intensity) => intensity,
+            None => {
+                tally.state_arm.push("_SoftParticlesIntensity absent with the soft keyword".to_owned());
+                return None;
+            }
+        }
     } else { 0.0 };
     let shader_coords = Vec4::new(tint_blend_rate_coord, soft_intensity,
         f32::from(soft_enabled), get("_EmissionIntensityCoord").unwrap_or(0.0));
@@ -886,7 +974,7 @@ fn judge(
         node: system.node.clone(),
         emitter,
         anchor,
-        alignment,
+        geometry,
         cone_angle,
         rol,
         limit,
@@ -1139,8 +1227,11 @@ fn runtime_from_plan(planned: &Planned, mesh: Handle<Mesh>, index: usize) -> Run
             kind: EffectKind::Site,
             camera_rotation: false,
             node_affine: GlobalTransform::IDENTITY,
-            geometry: crate::particle_runtime::Geometry::Billboard {
-                alignment: planned.alignment, clamp: planned.clamp, pivot: planned.pivot,
+            geometry: match &planned.geometry {
+                UberGeometry::Legacy(alignment) => crate::particle_runtime::Geometry::Billboard {
+                    alignment: *alignment, clamp: planned.clamp, pivot: planned.pivot,
+                },
+                UberGeometry::Source(draw) => crate::particle_runtime::Geometry::SourceBillboard(draw.clone()),
             },
             ring_cursor: 0,
             prewarmed: false,
@@ -1224,7 +1315,7 @@ pub(crate) fn plan_fixture_particles(
     mut commands: Commands, server: Res<AssetServer>, jsons: Res<Assets<moly_assets::json::JsonAsset>>,
     mut roots: Query<(Entity, &mut FixtureParticleRequest)>,
     ready: Option<Res<crate::fixture::FixtureScenesReady>>,
-    names: Query<&Name>, children: Query<&Children>,
+    names: Query<&Name>, children: Query<&Children>, transforms: Query<&Transform>,
 ) {
     if ready.is_none() { return; }
     for (entity, mut request) in &mut roots {
@@ -1265,7 +1356,8 @@ pub(crate) fn plan_fixture_particles(
                 not_play_on_awake += 1;
                 continue;
             }
-            if let Some(mut plan) = judge(particle, &doc, "", "fixture-particles-v2/textures", &by_path, &server, &mut tally) {
+            if let Some(mut plan) = judge(particle, &doc, "", "fixture-particles-v2/textures", &by_path,
+                &|entity| transforms.get(entity).ok().map(|t| t.scale), &server, &mut tally) {
                 // The fixture setup forces `_PhenomenaLightEnabled` to 1 on every
                 // fixture material (SetPhenomenaLighting(true); see the source
                 // adapter in weather_fx/fixture.rs). Both regions' exports put
@@ -1537,4 +1629,171 @@ fn deliver_played_commands(live: &mut Query<(Entity, &mut FixtureParticleLive,
 pub(crate) fn teardown(commands: &mut Commands) {
     commands.remove_resource::<UberParticlePlan>();
     commands.remove_resource::<UberParticleState>();
+}
+
+#[cfg(test)]
+mod billboard_native {
+    use super::*;
+    use crate::particle_geometry::{Alignment as Space, Frame, Instance};
+    use crate::source_billboard::{vertices, Draw};
+    use bevy::math::Mat3;
+    use serde_json::Value;
+
+    /// Research instrument: the engine's Billboard geometry for the World and
+    /// Local render spaces (the body the View space shares, four
+    /// instantiations: with and without a pivot, 2D and 3D rotation) executed
+    /// in an ARMv8 emulator on the current engine library, its corners read at
+    /// the vertex writer's entry, over sampled cameras, World (identity) and
+    /// rigid Local owners, unit and non-unit renderer scale, pivots and roll on
+    /// and off. Local runs with both states of the temp-data flag that picks
+    /// the owner basis: set, the owner matrix columns with the owner's scale
+    /// in them and the renderer scale not applied (the source construction's
+    /// Local-simulation order, basis x scale x rotation); clear, the emitter
+    /// rotation quaternion with the renderer scale applied first (its
+    /// World-simulation order). The replay reads the flag as Local simulation,
+    /// the same pairing the independent engine cases in tests/data carry for
+    /// every alignment and simulation space; the two fields the renderer's
+    /// preparation derives the flag from are not yet named. Rows must lie in
+    /// the caller's dispatch domain: the pivot-less instantiations are taken
+    /// only for a zero pivot and a uniform (not 3D) size. Each row goes
+    /// through this path's own construction (`billboard_geometry`, then the
+    /// renderer scale through the Draw's scaling as the host applies it) and
+    /// every corner must match within the billboard receipts' 2.5e-5. The View
+    /// rows ride along as a control on the harness: the source View arm must
+    /// match them, and World must not. Point MOLY_UBER_BILLBOARD_NATIVE at the
+    /// rows; MOLY_UBER_BILLBOARD_MUTANT names a deliberate defect that must fail.
+    #[test]
+    #[ignore = "needs MOLY_UBER_BILLBOARD_NATIVE"]
+    fn world_and_local_billboards_match_native_rows() {
+        let path = std::env::var("MOLY_UBER_BILLBOARD_NATIVE").expect("MOLY_UBER_BILLBOARD_NATIVE");
+        let data: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(data["sourceSha256"], "937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9");
+        assert_eq!(data["staticInitializer"]["ran"], true, "the geometry job's static initializer must run first");
+        let mutant = std::env::var("MOLY_UBER_BILLBOARD_MUTANT").unwrap_or_default();
+        let word = |v: &Value| f32::from_bits(v.as_u64().unwrap() as u32);
+        let v3 = |v: &Value| Vec3::new(word(&v[0]), word(&v[1]), word(&v[2]));
+        let mut arms: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+        let (mut failures, mut maximum, mut world_as_view) = (Vec::new(), 0.0f32, 0usize);
+        for (index, row) in data["rows"].as_array().unwrap().iter().enumerate() {
+            let o: Vec<f32> = row["owner"].as_array().unwrap().iter().map(word).collect();
+            let owner = Mat3::from_cols(Vec3::new(o[0], o[1], o[2]), Vec3::new(o[4], o[5], o[6]), Vec3::new(o[8], o[9], o[10]));
+            let translation = Vec3::new(o[12], o[13], o[14]);
+            let c: Vec<f32> = row["cameraRotation"].as_array().unwrap().iter().map(word).collect();
+            let e: Vec<f32> = row["emitterRotation"].as_array().expect("rows from the domain-checked harness").iter().map(word).collect();
+            let bit28 = row["flagBit28"].as_i64().unwrap() == 1;
+            // With the flag set the owner columns carry the scale; clear, the
+            // renderer scale word does.
+            let scale = if bit28 {
+                Vec3::new(owner.x_axis.length(), owner.y_axis.length(), owner.z_axis.length())
+            } else {
+                v3(&row["rendererScale"])
+            };
+            let frame = Frame {
+                rotation: Mat3::from_cols_slice(&e),
+                scale: Vec3::ONE,
+                camera_rotation: Mat3::from_cols_slice(&c),
+                camera_position: v3(&row["cameraPosition"]),
+            };
+            let local = bit28;
+            let entry = row["entry"].as_str().unwrap();
+            if entry == "0xfa5300" || entry == "0xfa2860" {
+                let size = v3(&row["size"]);
+                assert!(
+                    row["size3D"] == 0 && v3(&row["pivot"]) == Vec3::ZERO && size.x == size.y && size.y == size.z,
+                    "row {index}: pivot-less instantiation {entry} called outside its dispatch domain"
+                );
+            }
+            let p = Instance {
+                position: owner * v3(&row["position"]) + translation,
+                velocity: Vec3::ZERO,
+                rotation: v3(&row["rotation"]),
+                size: v3(&row["size"]),
+                colour: Vec4::ONE,
+                custom1: Vec4::ZERO,
+                custom2: Vec4::ZERO,
+                seed: 0,
+                age_percent: 0.0,
+                axis: Vec3::Z,
+            };
+            let pivot = v3(&row["pivot"]);
+            let render_space = row["alignment"].as_i64().unwrap();
+            let arm = format!("{}/bit28={}", Alignment::render_space_name(render_space), row["flagBit28"]);
+            // Half the rows carry the renderer scale as Hierarchy scaling (the
+            // frame's own scale), half as Local scaling (the node scale the
+            // Draw substitutes), so both scaling arms of the host are read.
+            let by_node = index % 2 == 1;
+            let system = serde_json::json!({ "scalingMode": if by_node { 1 } else { 0 } });
+            let expected: Vec<Vec3> = (0..4).map(|k| v3(&row["corners"][k])).collect();
+            let compare = |corners: &[Vec3; 4]| -> f32 {
+                corners.iter().zip(&expected).map(|(a, b)| (*a - *b).abs().max_element()).fold(0.0, f32::max)
+            };
+            if render_space == 0 {
+                // Harness control: the source View arm matches, World does not.
+                let view = Draw {
+                    mode: crate::source_billboard::Mode::Billboard,
+                    alignment: Space::View,
+                    pivot,
+                    screen_size: Vec2::new(0.0, 10000.0),
+                    allow_roll: row["allowRoll"].as_bool().unwrap(),
+                    scaling: crate::particle_geometry::Scaling::Hierarchy,
+                };
+                let f = Frame { scale, ..frame };
+                let error = compare(&vertices(&p, &f, &view, local).0);
+                let entry = arms.entry("View (source arm, control)".into()).or_default();
+                entry.0 += 1;
+                if !(error <= 0.000025) {
+                    entry.1 += 1;
+                }
+                let world = Draw { alignment: Space::World, ..view };
+                if compare(&vertices(&p, &f, &world, local).0) <= 0.000025 {
+                    world_as_view += 1;
+                }
+                continue;
+            }
+            let geometry = billboard_geometry(render_space, pivot.to_array(), [0.0, 10000.0], &system, Some(scale))
+                .unwrap_or_else(|name| panic!("row {index}: refused {name}"));
+            let UberGeometry::Source(mut draw) = geometry else {
+                panic!("row {index}: {arm} took the older writer")
+            };
+            let mut f = if by_node { draw.scaling.apply(frame) } else { Frame { scale, ..frame } };
+            let mut local_arg = local;
+            // Mutants: the camera basis, the pivot sign, the renderer scale
+            // dropped, the older writer's world X axis, the Local order swapped.
+            match mutant.as_str() {
+                "view-basis" => draw.alignment = Space::View,
+                "pivot-sign" => draw.pivot = -draw.pivot,
+                "no-scale" => f.scale = Vec3::ONE,
+                "legacy-axes" if draw.alignment == Space::World => {
+                    draw.alignment = Space::Local;
+                    f.rotation = Mat3::from_diagonal(Vec3::new(-1.0, 1.0, 1.0));
+                    local_arg = true;
+                }
+                "local-order" if draw.alignment == Space::Local => local_arg = !local_arg,
+                _ => {}
+            }
+            let error = compare(&vertices(&p, &f, &draw, local_arg).0);
+            maximum = maximum.max(if error.is_finite() { error } else { f32::INFINITY });
+            let entry = arms.entry(arm.clone()).or_default();
+            entry.0 += 1;
+            if !(error <= 0.000025) {
+                entry.1 += 1;
+                failures.push(format!("row {index} ({} {arm} {}): max corner error {error}", row["entry"], row["simulation"]));
+            }
+        }
+        println!(
+            "uber billboard arms (particles, mismatched): {arms:?}; World construction matching View rows: {world_as_view}; max corner error {maximum}; mutant {mutant:?}"
+        );
+        assert!(arms.values().any(|(n, _)| *n > 0), "no rows");
+        let view = arms.get("View (source arm, control)").copied().unwrap_or_default();
+        assert!(
+            view.0 > 0 && view.1 == 0 && world_as_view == 0,
+            "harness control failed: View {view:?}, World matching View rows {world_as_view}"
+        );
+        assert!(
+            failures.is_empty(),
+            "{} mismatched particles:\n{}",
+            failures.len(),
+            failures.iter().take(12).cloned().collect::<Vec<_>>().join("\n")
+        );
+    }
 }

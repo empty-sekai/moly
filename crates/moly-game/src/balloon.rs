@@ -362,6 +362,9 @@ pub(crate) fn bake_atlas(
     // 场地屏外壳字符集（固定文案 + 站名）：第四个并集成员。与上面三个
     // 同一定格语义：外壳文案全部装载期可枚举（站点主表是根级小表）。
     shell_charset: Option<Res<crate::menu_shell::ShellTextCharset>>,
+    // Collect-item notice characters (the masters' names and the count):
+    // the fifth member, same once-baked semantics.
+    collect_charset: Option<Res<crate::collect_notice::CollectNoticeCharset>>,
     skin: Option<Res<SkinHandle>>,
     art: Option<Res<BalloonArt>>,
 ) {
@@ -409,8 +412,19 @@ pub(crate) fn bake_atlas(
             ARROW_H
         );
     }
-    let (Some(tables), Some(talk_charset), Some(player_talk_charset), Some(shell_charset)) =
-        (tables, talk_charset, player_talk_charset, shell_charset)
+    let (
+        Some(tables),
+        Some(talk_charset),
+        Some(player_talk_charset),
+        Some(shell_charset),
+        Some(collect_charset),
+    ) = (
+        tables,
+        talk_charset,
+        player_talk_charset,
+        shell_charset,
+        collect_charset,
+    )
     else {
         return;
     };
@@ -435,6 +449,11 @@ pub(crate) fn bake_atlas(
         }
     }
     for ch in &shell_charset.chars {
+        if *ch != '\n' && !chars.contains(ch) {
+            chars.push(*ch);
+        }
+    }
+    for ch in &collect_charset.chars {
         if *ch != '\n' && !chars.contains(ch) {
             chars.push(*ch);
         }

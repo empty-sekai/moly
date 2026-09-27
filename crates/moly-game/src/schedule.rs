@@ -421,7 +421,7 @@ pub fn install(app: &mut App) {
                     // 装载请求。
                     player_talk::load,
                     content_library::load,
-                    // 对话窗体的纹源（面板页 + 尾标替身）与常驻状态机。
+                    // 对话窗体的常驻状态机（绘制输入等布局文档到了再读）。
                     talk_window::load,
                     // 摇杆两件（底盘 + 手柄）的纹源（UI atlas 整页，两件
                     // 共用一次装载）。
@@ -1130,9 +1130,9 @@ pub fn install(app: &mut App) {
                 .before(crate::ui_layout::render),
         );
     // ---- 菜单对话框（追加段：外壳菜单钮的目标，Dialog 槽） ----
-    // The menu's named mock enable inputs (visiting and three permissions,
+    // The menu's named mock enable inputs (visiting and two permissions,
     // native instruments); stamina and rank are the server model's client
-    // copies.
+    // copies, the photo permission is the active site's type.
     app.add_systems(Startup, menu_dialog::init)
         // 铺件：图集到齐一次铺成（外壳字符集已并菜单对话框固定文案，
         // 烘制门四员到齐条件不变——菜单对话框的字随外壳成员一起进图集）。

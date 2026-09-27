@@ -83,22 +83,25 @@
 pub(crate) mod avatar;
 pub(crate) mod client;
 pub(crate) mod clock;
+pub(crate) mod craft;
 pub(crate) mod delivery;
 pub(crate) mod document;
 pub(crate) mod edit;
 pub(crate) mod home_action;
 pub(crate) mod housing_layout;
+pub(crate) mod inventory;
 pub(crate) mod local;
 pub(crate) mod music;
+pub(crate) mod music_play;
+pub(crate) mod talk_read;
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use bevy::asset::io::{AssetReaderError, AssetSourceId, Reader};
-use bevy::asset::LoadState;
+use bevy::asset::AssetPath;
 use bevy::prelude::*;
 use bevy::tasks::{block_on, futures_lite::future, IoTaskPool, Task};
-use moly_assets::json::JsonAsset;
 use serde_json::{json, Value};
 
 pub(crate) use document::{ColorfulPass, Gamedata, GateCharacter, ScheduleRow, Stamina};
@@ -122,6 +125,12 @@ const AVATAR_COSTUMES: &str = "moly://avatar-costumes.json";
 const AVATAR_ACCESSORIES: &str = "moly://avatar-accessories.json";
 const AVATAR_SKIN_COLORS: &str = "moly://avatar-skin-colors.json";
 const AVATAR_COORDINATES: &str = "moly://avatar-coordinates.json";
+const BLUEPRINT_COSTS: &str = "moly://mysekai-blueprint-material-costs.json";
+const BLUEPRINT_TERMS: &str = "moly://mysekai-blueprint-terms.json";
+const RANK_OBTAINED_EXPS: &str = "moly://mysekai-rank-obtained-exps.json";
+const FIXTURE_POSSESSIONS: &str = "moly://mysekai-fixture-possessions.json";
+const MATERIAL_POSSESSIONS: &str = "moly://mysekai-material-possessions.json";
+const MYSEKAI_MATERIALS: &str = "moly://mysekai-materials.json";
 
 /// Seconds between the running clock's refresh checks.
 const TICK_SECONDS: f32 = 1.0;
@@ -165,6 +174,11 @@ pub(crate) struct Masters {
     pub(crate) music_records: Option<Vec<i32>>,
     /// The avatar wear masters.
     pub(crate) avatar: client::avatar::AvatarMasters,
+    /// The craft masters (blueprints, costs, terms, first-craft bonus,
+    /// material types, the white blueprint item).
+    pub(crate) craft: client::craft::CraftMasters,
+    /// The fixture and material possession masters.
+    pub(crate) possession: client::inventory::PossessionMasters,
     pub(crate) missing: Vec<String>,
 }
 
@@ -209,6 +223,9 @@ pub(crate) enum ResponseKind {
     HomeActionCanvas,
     HomeActionSketch,
     HousingLayout,
+    CharacterTalkRead,
+    MusicPlaySet,
+    MusicPlayEject,
 }
 
 impl ResponseKind {
@@ -227,9 +244,12 @@ impl ResponseKind {
             Self::HomeActionCanvas => "PostUserMysekaiCraftApi (canvas)",
             Self::HomeActionSketch => "PostUserMysekaiHousingSketchApi",
             Self::HousingLayout => "PostUserMysekaiHousingLayoutApi",
+            Self::CharacterTalkRead => "PutUserMysekaiCharacterTalkReadApi",
             Self::BirthdayPartySeat => {
                 "user data (the rows of the birthday parties now in session)"
             }
+            Self::MusicPlaySet => "PutUserMysekaiMusicPlaySetApi",
+            Self::MusicPlayEject => "PutUserMysekaiMusicPlayEjectApi",
         }
     }
 }
@@ -252,6 +272,11 @@ pub(crate) struct ServerResponse {
     pub(crate) music: Option<Vec<client::music::MusicPlaySetting>>,
     /// `userAvatar` when it carries it.
     pub(crate) avatar: Option<client::avatar::UserAvatar>,
+    /// The owned MySekai tables it carries (materials, their possession,
+    /// fixtures, canvases, blueprints, items, the gamedata's levels).
+    pub(crate) inventory: client::inventory::SuiteUserSections,
+    /// `userMysekaiMusicRecords` when it carries them.
+    pub(crate) music_records: Option<Vec<client::music_play::OwnedMusicRecord>>,
 }
 
 /// A reply's talk list (`mysekaiCharacterTalkWithReadHistories`): the rows
@@ -427,6 +452,8 @@ pub(crate) struct ServerModel {
     pub(super) home_action_replies: [u64; 3],
     /// The native avatar instrument, applied once the masters resolve.
     pub(super) avatar_instrument: avatar::AvatarInstrument,
+    /// Music player requests answered (set, eject).
+    pub(super) music_play_replies: [u64; 2],
 }
 
 static MODEL: Mutex<Option<ServerModel>> = Mutex::new(None);
@@ -476,6 +503,7 @@ impl ServerModel {
             party_masters: Vec::new(),
             home_action_replies: [0; 3],
             avatar_instrument: avatar::AvatarInstrument::default(),
+            music_play_replies: [0; 2],
         }
     }
 
@@ -655,6 +683,8 @@ impl ServerModel {
             delivery: self.delivery_update(&sections),
             music: has(music::SECTION).then(|| self.doc.music_settings.clone()),
             avatar: has(avatar::SECTION).then_some(self.doc.avatar),
+            inventory: self.inventory_update(&sections),
+            music_records: has(music_play::RECORDS_SECTION).then(|| self.doc.music_records.clone()),
         };
         info!(
             "[server] response {}: sections {sections:?}, isRefreshed {is_refreshed}, server date {now}",
@@ -693,6 +723,8 @@ impl ServerModel {
         let mut carries = vec![SECTION_GAMEDATA, SECTION_STAMINA, SECTION_PASS];
         carries.extend(delivery::SECTIONS);
         carries.extend([music::SECTION, avatar::SECTION]);
+        carries.extend(inventory::SECTIONS);
+        carries.push(music_play::RECORDS_SECTION);
         self.respond(ResponseKind::Join, refreshed, &carries);
     }
 
@@ -839,6 +871,8 @@ fn native_overlay(doc: &mut ServerDocument) -> avatar::AvatarInstrument {
             doc.music_settings.len()
         );
     }
+    inventory::native_overlay(doc);
+    music_play::native_overlay(doc);
     let text = |name: &str| {
         instrument_env(name)
             .map(|raw| raw.trim().to_owned())
@@ -930,9 +964,38 @@ struct SliceRead(Task<Result<Option<String>, String>>);
 
 type Parser = fn(&str, &mut Masters) -> Result<(), String>;
 
-/// The masters still loading: handle, name and parser.
+/// A master's read, while it runs: `Ok(None)` when the asset source does not
+/// hold the file.
+type MasterRead = Task<Result<Option<String>, String>>;
+
+/// The masters still reading: name, parser and the read.
 #[derive(Resource)]
-struct MasterHandles(Vec<(Handle<JsonAsset>, &'static str, Parser)>);
+struct MasterReads(Vec<(&'static str, Parser, MasterRead)>);
+
+/// A master's text through the asset source. Reading it here rather than
+/// through an asset load lets a master the runtime root lacks be only the
+/// model's named missing entry, with no load error for the absent file.
+async fn read_master(
+    server: AssetServer,
+    path: AssetPath<'static>,
+) -> Result<Option<String>, String> {
+    let source = server
+        .get_source(path.source().clone_owned())
+        .map_err(|error| error.to_string())?;
+    let mut reader = match source.reader().read(path.path()).await {
+        Ok(reader) => reader,
+        Err(AssetReaderError::NotFound(_)) => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|error| error.to_string())?;
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
 
 async fn read_slice(server: AssetServer) -> Result<Option<String>, String> {
     let source = server
@@ -960,68 +1023,119 @@ fn load(mut commands: Commands, server: Res<AssetServer>) {
             IoTaskPool::get().spawn(async move { read_slice(reader).await }),
         ));
     }
-    commands.insert_resource(MasterHandles(vec![
+    let masters: Vec<(AssetPath<'static>, &'static str, Parser)> = vec![
         (
-            server.load(PHENOMENA_INDEX),
+            AssetPath::from(PHENOMENA_INDEX),
             "phenomena/index.json (refresh windows, phenomena)",
             parse_phenomena as Parser,
         ),
         (
-            server.load(STAMINAS),
+            AssetPath::from(STAMINAS),
             "mysekai-staminas.json (pool maxima)",
             parse_staminas,
         ),
         (
-            server.load(STAMINA_RECOVERY),
+            AssetPath::from(STAMINA_RECOVERY),
             "mysekai-stamina-recovery.json (boost grant)",
             parse_recovery,
         ),
         (
-            server.load(moly_assets::mysekai_ranks()),
+            AssetPath::from(moly_assets::mysekai_ranks()),
             "mysekai-ranks.json (rank table)",
             parse_ranks,
         ),
         (
-            server.load(GATE_CATALOG),
+            AssetPath::from(GATE_CATALOG),
             "fixture-models/player-data.json (gates, gate skins)",
             parse_gates,
         ),
         (
-            server.load(moly_assets::birthday_party_delivery()),
+            AssetPath::from(moly_assets::birthday_party_delivery()),
             "birthday-party-delivery.json (delivery reward, point bonus and total reward tables)",
             delivery::parse_tables,
         ),
         (
-            server.load(CONFIGS),
-            "configs.json (master configs)",
+            AssetPath::from(CONFIGS),
+            "configs.json (master configs; without it the delivery reads policies.masterConfigsStandIn)",
             parse_configs,
         ),
         (
-            server.load(MUSIC_RECORDS),
+            AssetPath::from(MUSIC_RECORDS),
             "mysekai-music-records.json (music records)",
             music::parse_records,
         ),
         (
-            server.load(AVATAR_COSTUMES),
+            AssetPath::from(AVATAR_COSTUMES),
             "avatar-costumes.json (avatar costumes)",
             avatar::parse_costumes,
         ),
         (
-            server.load(AVATAR_ACCESSORIES),
+            AssetPath::from(AVATAR_ACCESSORIES),
             "avatar-accessories.json (avatar accessories)",
             avatar::parse_accessories,
         ),
         (
-            server.load(AVATAR_SKIN_COLORS),
+            AssetPath::from(AVATAR_SKIN_COLORS),
             "avatar-skin-colors.json (avatar skin colours)",
             avatar::parse_skin_colors,
         ),
         (
-            server.load(AVATAR_COORDINATES),
+            AssetPath::from(AVATAR_COORDINATES),
             "avatar-coordinates.json (avatar coordinates)",
             avatar::parse_coordinates,
         ),
-    ]));
+        (
+            AssetPath::from(moly_assets::mysekai_blueprints()),
+            "mysekai-blueprints.json (blueprints)",
+            craft::parse_blueprints,
+        ),
+        (
+            AssetPath::from(BLUEPRINT_COSTS),
+            "mysekai-blueprint-material-costs.json (blueprint material costs)",
+            craft::parse_costs,
+        ),
+        (
+            AssetPath::from(BLUEPRINT_TERMS),
+            "mysekai-blueprint-terms.json (blueprint craft terms)",
+            craft::parse_terms,
+        ),
+        (
+            AssetPath::from(RANK_OBTAINED_EXPS),
+            "mysekai-rank-obtained-exps.json (first-craft bonus)",
+            craft::parse_rank_obtained_exps,
+        ),
+        (
+            AssetPath::from(FIXTURE_POSSESSIONS),
+            "mysekai-fixture-possessions.json (fixture possession limits)",
+            inventory::parse_fixture_possessions,
+        ),
+        (
+            AssetPath::from(MATERIAL_POSSESSIONS),
+            "mysekai-material-possessions.json (material possession limits)",
+            inventory::parse_material_possessions,
+        ),
+        (
+            AssetPath::from(MYSEKAI_MATERIALS),
+            "mysekai-materials.json (material types)",
+            inventory::parse_materials,
+        ),
+        (
+            AssetPath::from(moly_assets::mysekai_items()),
+            "mysekai-items.json (the white blueprint item)",
+            inventory::parse_items_master,
+        ),
+    ];
+    let pool = IoTaskPool::get();
+    commands.insert_resource(MasterReads(
+        masters
+            .into_iter()
+            .map(|(path, name, parser)| {
+                let server = server.clone();
+                let read = pool.spawn(async move { read_master(server, path).await });
+                (name, parser, read)
+            })
+            .collect(),
+    ));
 }
 
 /// Native: the asset source's slice when present, else the checked-in one.
@@ -1192,45 +1306,47 @@ fn parse_gates(text: &str, masters: &mut Masters) -> Result<(), String> {
 
 /// Each master as it resolves, once the model is installed; a missing or
 /// malformed one is named once and the model goes on without it.
-fn resolve_masters(
-    mut commands: Commands,
-    server: Res<AssetServer>,
-    jsons: Res<Assets<JsonAsset>>,
-    handles: Option<ResMut<MasterHandles>>,
-) {
-    let Some(mut handles) = handles else {
+fn resolve_masters(mut commands: Commands, reads: Option<ResMut<MasterReads>>) {
+    let Some(mut reads) = reads else {
         return;
     };
     if !installed() {
         return;
     }
-    let mut outcomes: Vec<(&'static str, Parser, Result<String, String>)> = Vec::new();
-    handles.0.retain(|(handle, name, parser)| {
-        let outcome = match server.load_state(handle) {
-            LoadState::Failed(error) => Some(Err(format!("{error}"))),
-            _ => jsons.get(handle).map(|json| Ok(json.0.clone())),
-        };
-        match outcome {
+    let mut outcomes: Vec<(&'static str, Parser, Result<Option<String>, String>)> = Vec::new();
+    reads.0.retain_mut(
+        |(name, parser, read)| match block_on(future::poll_once(read)) {
             Some(outcome) => {
                 outcomes.push((*name, *parser, outcome));
                 false
             }
             None => true,
-        }
-    });
-    let all_done = handles.0.is_empty();
+        },
+    );
+    let all_done = reads.0.is_empty();
     if all_done {
-        commands.remove_resource::<MasterHandles>();
+        commands.remove_resource::<MasterReads>();
     }
     if outcomes.is_empty() && !all_done {
         return;
     }
     with_model(|model| {
         for (name, parser, outcome) in outcomes {
-            if let Err(error) = outcome.and_then(|text| parser(&text, &mut model.masters)) {
-                warn!("[server] master {name} is absent or malformed: {error}");
-                model.masters.missing.push(format!("{name}: {error}"));
-            }
+            let error = match outcome {
+                Ok(Some(text)) => match parser(&text, &mut model.masters) {
+                    Ok(()) => continue,
+                    Err(error) => format!("malformed: {error}"),
+                },
+                Ok(None) => {
+                    let error = "not in the runtime root".to_owned();
+                    info!("[server] master {name} is {error}");
+                    model.masters.missing.push(format!("{name}: {error}"));
+                    continue;
+                }
+                Err(error) => format!("unreadable: {error}"),
+            };
+            warn!("[server] master {name} is {error}");
+            model.masters.missing.push(format!("{name}: {error}"));
         }
         if all_done {
             info!(
@@ -1243,6 +1359,8 @@ fn resolve_masters(
                 commands.insert_resource(tables);
             }
             commands.insert_resource(model.masters.avatar.clone());
+            commands.insert_resource(model.masters.craft.clone());
+            commands.insert_resource(model.masters.possession.clone());
         }
     });
 }
@@ -1333,6 +1451,8 @@ fn deliver(
     mut birthday: ResMut<delivery::ClientBirthdayPartyData>,
     mut music_copy: ResMut<client::music::ClientMusicPlaySettings>,
     mut avatar_copy: ResMut<client::avatar::ClientUserAvatar>,
+    mut inventory_copy: ResMut<client::inventory::ClientMysekaiInventory>,
+    mut records_copy: ResMut<client::music_play::ClientMusicRecords>,
 ) {
     let taken = with_model(|model| {
         (
@@ -1355,6 +1475,10 @@ fn deliver(
         }
         if let Some(avatar) = response.avatar.take() {
             avatar_copy.apply(avatar);
+        }
+        inventory_copy.apply(std::mem::take(&mut response.inventory));
+        if let Some(rows) = response.music_records.take() {
+            records_copy.apply(rows);
         }
         let previous_rank = copy.as_ref().and_then(|copy| copy.gamedata.mysekai_rank);
         let next = match copy.take() {
@@ -1450,6 +1574,8 @@ fn deliver(
         "birthdayParty": birthday.view(),
         "userMysekaiMusicPlayFixtureSettings": music_copy.view(),
         "userAvatar": client::avatar::value(&avatar_copy.avatar),
+        "mysekaiInventory": inventory_copy.view(),
+        "userMysekaiMusicRecords": records_copy.view(),
     });
     with_model(|model| model.client = view);
     match client.as_deref_mut() {
@@ -1526,6 +1652,7 @@ impl Plugin for ServerPlugin {
             .init_resource::<delivery::ClientBirthdayPartyData>()
             .init_resource::<client::music::ClientMusicPlaySettings>()
             .init_resource::<client::avatar::ClientUserAvatar>()
+            .init_resource::<client::music_play::ClientMusicRecords>()
             .add_systems(PreStartup, seat_local)
             .add_systems(Startup, load)
             .add_systems(
@@ -1545,6 +1672,9 @@ impl Plugin for ServerPlugin {
         app.insert_resource(client::home_action::HomeActionEndpoint(endpoint));
         let endpoint = app.world_mut().register_system(housing_layout::handle);
         app.insert_resource(client::housing_layout::HousingLayoutEndpoint(endpoint));
+        craft::install(app);
+        let endpoint = app.world_mut().register_system(music_play::handle);
+        app.insert_resource(client::music_play::MusicPlayEndpoint(endpoint));
     }
 }
 
@@ -1570,6 +1700,10 @@ pub(crate) fn document_view() -> String {
                 "craft": model.home_action_replies[0],
                 "canvas": model.home_action_replies[1],
                 "sketch": model.home_action_replies[2],
+            },
+            "musicPlayReplies": {
+                "set": model.music_play_replies[0],
+                "eject": model.music_play_replies[1],
             },
             "errors": model.errors,
         })

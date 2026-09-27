@@ -29,6 +29,7 @@ enum StartMode {
 struct GameStart {
     seed: moly_game::GameSeed,
     source: moly_assets::AssetSource,
+    remote: moly_assets::remote::RemoteBases,
 }
 
 /// 起一次 app。资产源与站点选择在这里解析、经 `moly_game::app` 装上——
@@ -50,12 +51,17 @@ fn run_app(
         Ok(site) => site,
         Err(message) => fail_loud(&message),
     };
+    let remote = match asset_source::resolve_remote() {
+        Ok(remote) => remote,
+        Err(message) => fail_loud(&message),
+    };
     // 渲染后端只在 wasm 分支选（取舍在 `render_backend`）；native 展开后
     // 与双后端升级前逐行一致。
     #[cfg(target_arch = "wasm32")]
     let mut app = moly_game::app(source, site, web_render_settings);
     #[cfg(not(target_arch = "wasm32"))]
     let mut app = moly_game::app(source, site);
+    moly_assets::remote::admit(&mut app, remote);
     moly_game::insert_dev_tools(&mut app);
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(directory) = std::env::var_os("MOLY_PORTRAITS_OUT") {
@@ -89,6 +95,7 @@ fn run_app(
 #[cfg(target_arch = "wasm32")]
 fn run_game(web_render_settings: bevy::render::settings::WgpuSettings, start: GameStart) {
     let mut app = moly_game::app(start.source, site_request::game(), web_render_settings);
+    moly_assets::remote::admit(&mut app, start.remote);
     moly_game::configure_browser_game(&mut app, start.seed);
     attach_canvas(&mut app);
     announce_ready(&mut app);
@@ -165,10 +172,11 @@ pub fn start_game(backend: &str, seed: &str) -> Result<(), wasm_bindgen::JsValue
     let refuse = |error: String| wasm_bindgen::JsValue::from_str(&error);
     let mut seed = moly_game::parse_game_seed(seed).map_err(refuse)?;
     let source = asset_source::resolve_seed(&seed).map_err(refuse)?;
+    let remote = asset_source::resolve_remote_seed(&seed).map_err(refuse)?;
     let settings = render_backend::settings(backend).map_err(refuse)?;
     install_panic_hook();
     moly_game::install_game_storage(&mut seed);
-    run_app(settings, StartMode::Game(GameStart { seed, source }));
+    run_app(settings, StartMode::Game(GameStart { seed, source, remote }));
     Ok(())
 }
 

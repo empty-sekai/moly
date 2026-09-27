@@ -56,10 +56,16 @@
 //! The owned rows and the possession levels are the client's copy of the
 //! server data (`crate::server::client::inventory`); the possession limits
 //! are master data the server model installs. The thumbnail and preview
-//! images are resolved by their client load path through the item icon
-//! export's index on the runtime root (`mysekai-item-icons/index.json`); a
-//! path the index does not carry, or a root without the index, is refused by
-//! name and the image stays off.
+//! images are resolved by their client load path and resource through the
+//! shared item icon index ([`crate::item_icon`]); a path the index does not
+//! carry, or a root without the index, is refused by name and the image stays
+//! off.
+//!
+//! The screen's own prefab, its four list prefabs, its tab cell and its item
+//! cell are documents a root may lack (the CN roots carry none of them). A
+//! root without one of them names the absent documents once; the screen then
+//! refuses by name in the frame it is pushed and asks the screen manager to
+//! pop it.
 //!
 //! ## Named gaps (not built here)
 //!
@@ -87,6 +93,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use crate::action_button::ActionTapConsumed;
 use crate::gesture::{GestureEvent, GestureKind, GestureState};
+use crate::item_icon::ItemIcons;
 use crate::server::client::inventory::{ClientMysekaiInventory, PossessionMasters};
 use crate::sitemap::SITEMAP_LAYER;
 use crate::ui_layers::{LayerCommand, LayerId, UiLayerStack};
@@ -210,21 +217,21 @@ impl Masters {
         }
     }
 
-    /// The client load path of a row's cell image (`GetMysekaiMaterialThumbnail`
+    /// The client load of a row's cell image (`GetMysekaiMaterialThumbnail`
     /// / `GetMysekaiItemThumbnail`) or preview image (`GetMysekaiMaterialPreview`
-    /// / `GetMysekaiItemPreview`): the folder then the master's icon name.
-    fn icon_path(&self, kind: ContentListType, row: Row, family: &str) -> Option<String> {
+    /// / `GetMysekaiItemPreview`): the load path (the folder then the master's
+    /// icon name) and the resource, the icon name itself.
+    fn icon_path(&self, kind: ContentListType, row: Row, family: &str) -> Option<IconLoad> {
         let folder = kind.icon_folder()?;
         let icon = self.row(kind, row)?.icon.as_deref()?;
-        Some(format!("mysekai/{family}/{folder}/{icon}"))
+        Some(IconLoad {
+            path: format!("mysekai/{family}/{folder}/{icon}"),
+            resource: icon.to_owned(),
+        })
     }
 }
 
 const FIXTURE_MASTER: &str = "moly://mysekai-fixtures.json";
-/// The item icon export: `icons` maps the client load path to its image,
-/// relative to the index's directory.
-const ICON_INDEX: &str = "moly://mysekai-item-icons/index.json";
-const ICON_ROOT: &str = "moly://mysekai-item-icons/";
 const MATERIAL_MASTER: &str = "moly://mysekai-materials.json";
 const ITEM_MASTER: &str = "moly://mysekai-items.json";
 
@@ -237,89 +244,33 @@ pub(crate) struct InventoryGlyphs {
     pub(crate) texts: Option<Vec<String>>,
 }
 
-/// The item icon export's index, or why it is not available.
-#[derive(Resource, Default)]
-pub(crate) struct ItemIconIndex {
-    handle: Option<Handle<JsonAsset>>,
-    /// `None` until the index has loaded or failed.
-    images: Option<Result<HashMap<String, String>, String>>,
+/// A client texture load: `UITextureLoader.LoadAsync(path, resource)`.
+#[derive(Clone)]
+struct IconLoad {
+    path: String,
+    resource: String,
 }
 
-impl ItemIconIndex {
-    /// Whether the index has loaded or failed (the screen waits for one).
-    fn resolve(&mut self, server: &AssetServer, jsons: &Assets<JsonAsset>) -> bool {
-        if self.images.is_some() {
-            return true;
-        }
-        let Some(handle) = self.handle.clone() else {
-            self.images = Some(Err("no index is requested (a stage)".into()));
-            return true;
-        };
-        let parsed: Result<HashMap<String, String>, String> = match server.load_state(&handle) {
-            bevy::asset::LoadState::Failed(error) => {
-                Err(format!("{ICON_INDEX} is not on this root ({error})"))
-            }
-            _ => match jsons.get(&handle) {
-                None => return false,
-                Some(asset) => serde_json::from_str::<Value>(&asset.0)
-                    .map_err(|error| format!("{ICON_INDEX}: {error}"))
-                    .and_then(|value| -> Result<HashMap<String, String>, String> {
-                        value["icons"]
-                            .as_object()
-                            .ok_or_else(|| format!("{ICON_INDEX} has no icons map"))?
-                            .iter()
-                            .map(|(key, entry)| -> Result<(String, String), String> {
-                                let image = entry["image"].as_str().ok_or_else(|| {
-                                    format!("{ICON_INDEX}: icon {key} has no image")
-                                })?;
-                                Ok((key.clone(), format!("{ICON_ROOT}{image}")))
-                            })
-                            .collect()
-                    }),
-            },
-        };
-        match &parsed {
-            Ok(images) => info!("[inventory] item icon index: {} load paths", images.len()),
-            Err(reason) => warn!("[inventory] {reason}; every item icon is refused by name"),
-        }
-        self.images = Some(parsed);
-        true
-    }
-
-    /// The one resolver: the image of a client load path, or why there is
-    /// none.
-    fn image(&self, load_path: &str) -> Result<&str, String> {
-        match &self.images {
-            Some(Ok(images)) => images
-                .get(load_path)
-                .map(String::as_str)
-                .ok_or_else(|| "the item icon index does not carry it".to_owned()),
-            Some(Err(reason)) => Err(reason.clone()),
-            None => Err("the item icon index has not loaded".to_owned()),
-        }
-    }
-}
-
-/// Registers the images of the rows' cell and preview load paths the index
-/// carries, keyed by the load path, before a view binds them.
+/// Registers the images of the rows' cell and preview loads the shared icon
+/// index answers, keyed by the load path, before a view binds them.
 fn register_icons(
     layouts: &mut UiLayouts,
     server: &AssetServer,
-    index: &ItemIconIndex,
+    icons: &ItemIcons,
     masters: &Masters,
     kind: ContentListType,
     rows: &[Row],
 ) {
     for row in rows {
         for family in ["thumbnail", "item_preview"] {
-            let Some(path) = masters.icon_path(kind, *row, family) else {
+            let Some(load) = masters.icon_path(kind, *row, family) else {
                 continue;
             };
-            if layouts.has_runtime_texture(&path) {
+            if layouts.has_runtime_texture(&load.path) {
                 continue;
             }
-            if let Ok(image) = index.image(&path) {
-                layouts.register_runtime_texture(&path, image, server);
+            if let Ok(image) = icons.texture(&load.path, &load.resource) {
+                layouts.register_runtime_texture(&load.path, &image, server);
             }
         }
     }
@@ -331,10 +282,6 @@ pub(crate) fn load(
     stage: Option<Res<crate::browser_stage::BrowserStage>>,
 ) {
     commands.init_resource::<InventoryState>();
-    commands.insert_resource(ItemIconIndex {
-        handle: stage.is_none().then(|| server.load(ICON_INDEX)),
-        images: None,
-    });
     // A stage draws no screens: nothing to request, nothing to add.
     let handles = stage
         .is_none()
@@ -875,6 +822,10 @@ pub(crate) struct InventoryState {
     map_pending: bool,
     /// Load paths already refused by name (each is named once).
     refused_icons: BTreeSet<String>,
+    /// Why the screen cannot be drawn: the root lacks some of its documents.
+    absent: Option<String>,
+    /// The refused screen's pop has been requested (reset once it is gone).
+    refusal_popped: bool,
 }
 
 #[derive(Component)]
@@ -979,17 +930,17 @@ fn set_icon(
     view: &mut UiPrefabView,
     layouts: &UiLayouts,
     node: &str,
-    path: Option<String>,
-    refused: &mut Vec<String>,
+    load: Option<IconLoad>,
+    refused: &mut Vec<IconLoad>,
 ) {
-    match path {
-        Some(path) if layouts.has_runtime_texture(&path) => {
+    match load {
+        Some(load) if layouts.has_runtime_texture(&load.path) => {
             view.set_visible(node, true);
-            view.set_texture(node, &path);
+            view.set_texture(node, &load.path);
         }
-        Some(path) => {
+        Some(load) => {
             view.set_visible(node, false);
-            refused.push(path);
+            refused.push(load);
         }
         None => view.set_visible(node, false),
     }
@@ -1002,7 +953,7 @@ fn apply_static(
     bindings: &Bindings,
     masters: &Masters,
     icons: &crate::fixture_edit_ui::EditorIcons,
-    refused: &mut Vec<String>,
+    refused: &mut Vec<IconLoad>,
 ) {
     for path in &bindings.hidden {
         view.set_visible(path, false);
@@ -1047,15 +998,35 @@ fn apply_static(
     view.set_visible(&bindings.nothing_text, bindings.rows.is_empty());
 }
 
-fn name_refusals(state: &mut InventoryState, index: &ItemIconIndex, refused: Vec<String>) {
-    let new: Vec<String> = refused
+fn name_refusals(state: &mut InventoryState, icons: &ItemIcons, refused: Vec<IconLoad>) {
+    let new: Vec<IconLoad> = refused
         .into_iter()
-        .filter(|path| state.refused_icons.insert(path.clone()))
+        .filter(|load| state.refused_icons.insert(load.path.clone()))
         .collect();
-    for path in new {
-        let reason = index.image(&path).err().unwrap_or_default();
-        warn!("[inventory] icon {path} refused: {reason}; the image stays off");
+    for load in new {
+        let reason = icons
+            .texture(&load.path, &load.resource)
+            .err()
+            .unwrap_or_else(|| "the icon index answers it but it is not registered".into());
+        warn!(
+            "[inventory] icon {} refused: {reason}; the image stays off",
+            load.path
+        );
     }
+}
+
+/// The documents the screen draws that this root lacks, once the root's
+/// documents have settled (the shared header, a required document, has
+/// loaded); `None` while they are still loading.
+fn absent_documents(layouts: &UiLayouts) -> Option<Vec<&'static str>> {
+    layouts.document(HEADER)?;
+    Some(
+        [SCREEN, TAB_CELL, ITEM_CELL]
+            .into_iter()
+            .chain(CONTENT_LIST_TYPES.map(ContentListType::list_document))
+            .filter(|key| layouts.document(key).is_none())
+            .collect(),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1067,11 +1038,26 @@ pub(crate) fn spawn_when_ready(
     icons: Res<crate::fixture_edit_ui::EditorIcons>,
     owned: Option<Res<ClientMysekaiInventory>>,
     mut state: ResMut<InventoryState>,
-    mut icon_index: ResMut<ItemIconIndex>,
-    jsons: Res<Assets<JsonAsset>>,
+    icon_index: Option<Res<ItemIcons>>,
     spawned: Option<Res<InventorySpawned>>,
 ) {
-    if spawned.is_some() || !icons.is_ready() || !icon_index.resolve(&server, &jsons) {
+    if spawned.is_some() || state.absent.is_some() {
+        return;
+    }
+    match absent_documents(&layouts) {
+        None => return,
+        Some(absent) if !absent.is_empty() => {
+            let reason = format!("this root lacks the inventory documents {absent:?}");
+            error!("[inventory] {reason}; the screen refuses by name when it is pushed");
+            state.absent = Some(reason);
+            return;
+        }
+        Some(_) => {}
+    }
+    let Some(icon_index) = icon_index else {
+        return;
+    };
+    if !icons.is_ready() {
         return;
     }
     let Some(masters) = glyphs.masters.as_ref() else {
@@ -1216,7 +1202,7 @@ pub(crate) fn place(
     icons: Res<crate::fixture_edit_ui::EditorIcons>,
     owned: Option<Res<ClientMysekaiInventory>>,
     possession: Option<Res<PossessionMasters>>,
-    icon_index: Res<ItemIconIndex>,
+    icon_index: Option<Res<ItemIcons>>,
     mut roots: Query<
         (
             &mut InventoryRoot,
@@ -1297,20 +1283,13 @@ pub(crate) fn place(
     if !open {
         return;
     }
-    let Some(masters) = glyphs.masters.as_ref() else {
+    let (Some(masters), Some(icon_index)) = (glyphs.masters.as_ref(), icon_index.as_deref()) else {
         return;
     };
     let kind = CONTENT_LIST_TYPES[state.tab];
     let next_rows = rows(kind, owned.as_deref(), masters);
     if root.bindings.kind != kind || root.bindings.rows != next_rows {
-        register_icons(
-            &mut layouts,
-            &server,
-            &icon_index,
-            masters,
-            kind,
-            &next_rows,
-        );
+        register_icons(&mut layouts, &server, icon_index, masters, kind, &next_rows);
         let (document, bindings) = compose(&layouts, kind, next_rows)
             .unwrap_or_else(|error| panic!("inventory list update: {error}"));
         layouts
@@ -1328,7 +1307,7 @@ pub(crate) fn place(
             &icons,
             &mut refused,
         );
-        name_refusals(&mut state, &icon_index, refused);
+        name_refusals(&mut state, icon_index, refused);
         let count = root.bindings.rows.len();
         let tab = state.tab;
         if state.selected[tab] >= count {
@@ -1396,7 +1375,7 @@ pub(crate) fn place(
             view.set_visible(&bindings.recycle_button, false);
         }
     }
-    name_refusals(&mut state, &icon_index, refused);
+    name_refusals(&mut state, icon_index, refused);
     let mut scroll = state.scroll;
     layout_cells(bindings, &mut view, &layouts, canvas, &mut scroll);
     state.scroll = scroll;
@@ -1468,6 +1447,20 @@ pub(crate) fn click(
     let scrolls: Vec<MouseWheel> = wheel.read().copied().collect();
     if stack.current() != LayerId::MysekaiInventory {
         state.dragging_list = false;
+        state.refusal_popped = false;
+        return;
+    }
+    if let Some(reason) = &state.absent {
+        // The screen has no view on this root: refused by name and popped
+        // once its push has settled; its taps go nowhere.
+        consumed.0 |= !events.is_empty();
+        if !state.refusal_popped && !stack.is_ui_layer_working() {
+            error!(
+                "[inventory] PushUIScreen(MysekaiInventory) refused: {reason}; the screen is popped"
+            );
+            layer_commands.write(LayerCommand::Pop);
+            state.refusal_popped = true;
+        }
         return;
     }
     let (Ok((window_entity, window)), Some(root_canvas)) =

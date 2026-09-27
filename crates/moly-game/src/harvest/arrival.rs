@@ -560,6 +560,7 @@ pub(crate) fn bind_views(
     identities: Query<&SourceObjectIdentity>,
     names: Query<&Name>,
     mut visibility: Query<&mut Visibility>,
+    mut particles: ResMut<super::particles::HarvestParticleCalls>,
 ) {
     for (root, object, _) in &roots {
         let mut nodes = Vec::new();
@@ -658,5 +659,9 @@ pub(crate) fn bind_views(
             bound.delete_at
         );
         commands.entity(root).insert(bound);
+        // Setup's particle calls (a harvested object is hidden and keeps none).
+        if object.status != super::STATUS_HARVESTED {
+            particles.setup(root);
+        }
     }
 }
