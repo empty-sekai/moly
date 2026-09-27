@@ -1,7 +1,10 @@
 //! Transport-only, source-scoped loading for the existing fixture controller.
-//! Native keeps its original full catalogue. Browser stages fetch an index,
-//! then only the definitions for actual placed gimmick fixtures. Definition
-//! compilation, admission, leases, source events and restoration are unchanged.
+//! Native keeps its original full catalogue. The browser fetches an index,
+//! then only the definitions for actual placed gimmick fixtures; the game
+//! profile also fetches the placed house's package for its `HouseView` record.
+//! Definition compilation, admission, leases, source events and restoration are
+//! unchanged.
+use super::house_door::HouseCatalog;
 use super::*;
 use std::collections::HashSet;
 
@@ -18,10 +21,15 @@ pub(crate) struct Stream {
     legacy: bool,
     fallback_requested: bool,
     error: Option<String>,
+    /// Whether this profile drives a house (the game, not a stage).
+    houses: bool,
 }
 
-pub(super) fn load(commands: &mut Commands, server: &AssetServer) {
+pub(super) fn load(commands: &mut Commands, server: &AssetServer, houses: bool) {
     commands.insert_resource(Catalog::default());
+    if houses {
+        commands.insert_resource(HouseCatalog::default());
+    }
     commands.insert_resource(Stream {
         index: server.load(INDEX),
         master: server.load("moly://mysekai-fixtures.json"),
@@ -32,6 +40,7 @@ pub(super) fn load(commands: &mut Commands, server: &AssetServer) {
         legacy: false,
         fallback_requested: false,
         error: None,
+        houses,
     });
 }
 
@@ -86,6 +95,8 @@ pub(crate) fn advance(
     stream: Option<ResMut<Stream>>,
     catalog: Option<ResMut<Catalog>>,
     tables: Option<Res<FixtureActivityTables>>,
+    homes: Option<Res<crate::entry::house::HomeFixtures>>,
+    mut houses: Option<ResMut<HouseCatalog>>,
     fixtures: Query<&FixtureActivityIdentity>,
 ) {
     let (Some(mut stream), Some(mut catalog), Some(tables)) = (stream, catalog, tables) else {
@@ -142,8 +153,18 @@ pub(crate) fn advance(
         })
         .map(|identity| identity.model_package.clone())
         .collect();
+    // The house door reads the first placed home fixture's record
+    // (house_door::find_house), so every placed home package is fetched.
+    let house_needed: HashSet<String> = match (stream.houses, homes.as_deref()) {
+        (true, Some(homes)) => fixtures
+            .iter()
+            .filter(|identity| homes.is_home(&identity.model_package) == Ok(true))
+            .map(|identity| identity.model_package.clone())
+            .collect(),
+        _ => HashSet::new(),
+    };
     if stream.legacy {
-        if !needed.is_empty() && !stream.fallback_requested {
+        if !(needed.is_empty() && house_needed.is_empty()) && !stream.fallback_requested {
             commands.insert_resource(CatalogLoad(
                 server.load("moly://fixture-gimmick/gimmicks.json"),
             ));
@@ -151,38 +172,43 @@ pub(crate) fn advance(
         }
         return;
     }
-    for name in &needed {
+    for name in needed.iter().chain(house_needed.difference(&needed)) {
         if catalog.0.contains_key(name) || stream.pending.contains_key(name) {
             continue;
         }
-        if let Some(error) = &stream.error {
-            catalog.0.insert(name.clone(), Err(error.clone()));
+        let refusal = if let Some(error) = &stream.error {
+            error.clone()
+        } else if let Some(path) = stream.paths.get(name) {
+            let handle = server.load(format!("moly://{path}"));
+            stream.pending.insert(name.clone(), handle);
             continue;
-        }
-        let Some(path) = stream.paths.get(name) else {
-            catalog.0.insert(
-                name.clone(),
-                Err("fixture controller metadata is not supplied for this package".into()),
-            );
-            continue;
+        } else {
+            "fixture controller metadata is not supplied for this package".to_owned()
         };
-        let handle = server.load(format!("moly://{path}"));
-        stream.pending.insert(name.clone(), handle);
+        if let Some(houses) = houses
+            .as_deref_mut()
+            .filter(|_| house_needed.contains(name))
+        {
+            houses.refuse(name, refusal.clone());
+        }
+        catalog.0.insert(name.clone(), Err(refusal));
     }
     // A content replacement can drop requests that nobody needs. Active leases
     // retain their Arc<Definition>; cancelling a transfer never resets an owner.
-    stream.pending.retain(|name, _| needed.contains(name));
+    stream
+        .pending
+        .retain(|name, _| needed.contains(name) || house_needed.contains(name));
     let mut names: Vec<_> = stream.pending.keys().cloned().collect();
     names.sort();
     for name in names {
         let handle = stream.pending[&name].clone();
-        let result = if let LoadState::Failed(error) = server.load_state(&handle) {
+        let document = if let LoadState::Failed(error) = server.load_state(&handle) {
             Err(format!("fixture controller package load failed: {error}"))
         } else {
             let Some(asset) = jsons.get(&handle) else {
                 continue;
             };
-            (|| {
+            (|| -> Result<Value, String> {
                 let doc: Value = serde_json::from_str(&asset.0).map_err(|e| e.to_string())?;
                 let (region, version) = stream
                     .source
@@ -195,12 +221,27 @@ pub(crate) fn advance(
                 {
                     return Err("fixture controller package provenance/identity mismatch".into());
                 }
-                // The one existing compiler remains authoritative.
-                definition(&doc["package"]).map(Arc::new)
+                Ok(doc)
             })()
         };
+        // The one existing compiler remains authoritative.
+        let result = document
+            .as_ref()
+            .map_err(Clone::clone)
+            .and_then(|doc| definition(&doc["package"]).map(Arc::new));
+        if let Some(houses) = houses
+            .as_deref_mut()
+            .filter(|_| house_needed.contains(&name))
+        {
+            match &document {
+                Ok(doc) => houses.insert(&name, &doc["package"]),
+                Err(error) => houses.refuse(&name, error.clone()),
+            }
+        }
         if let Err(error) = &result {
-            warn!("[fixture-gimmick] {name} rejected: {error}");
+            if needed.contains(&name) {
+                warn!("[fixture-gimmick] {name} rejected: {error}");
+            }
         }
         catalog.0.insert(name.clone(), result);
         stream.pending.remove(&name);
@@ -208,8 +249,48 @@ pub(crate) fn advance(
         break;
     }
     if catalog.0.len() > 64 {
-        catalog.0.retain(|name, _| needed.contains(name));
+        catalog
+            .0
+            .retain(|name, _| needed.contains(name) || house_needed.contains(name));
     }
+}
+
+/// Why the game still waits for `package`'s streamed house record: the index
+/// or the package document is in flight. A settled failure is not waited on;
+/// the house catalogue names it. `None` wherever no stream supplies houses.
+pub(crate) fn house_pending(world: &World, package: &str) -> Option<String> {
+    let stream = world
+        .get_resource::<Stream>()
+        .filter(|stream| stream.houses)?;
+    if stream.legacy {
+        return (!stream.fallback_requested || world.contains_resource::<CatalogLoad>())
+            .then(|| "house controller catalogue is loading".to_owned());
+    }
+    let settled = stream.initialized
+        && world
+            .get_resource::<Catalog>()
+            .is_some_and(|catalog| catalog.0.contains_key(package));
+    (!settled).then(|| format!("{package}: house controller record is loading"))
+}
+
+/// [`house_pending`] over the placed home fixtures, for the entry's wait.
+pub(crate) fn home_pending(world: &mut World) -> Option<String> {
+    if !world
+        .get_resource::<Stream>()
+        .is_some_and(|stream| stream.houses)
+    {
+        return None;
+    }
+    let packages: Vec<String> = world
+        .query::<&FixtureActivityIdentity>()
+        .iter(world)
+        .map(|identity| identity.model_package.clone())
+        .collect();
+    let homes = world.get_resource::<crate::entry::house::HomeFixtures>()?;
+    packages
+        .iter()
+        .filter(|package| homes.is_home(package) == Ok(true))
+        .find_map(|package| house_pending(world, package))
 }
 
 /// Resource readiness only, not another eligibility implementation. Ordinary

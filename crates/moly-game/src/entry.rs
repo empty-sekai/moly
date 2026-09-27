@@ -272,6 +272,10 @@ fn join_blocker(world: &mut World) -> Option<String> {
     {
         return Some("house controller catalogue is loading".into());
     }
+    // The browser streams the house's record; a settled failure is not waited on either.
+    if let Some(reason) = crate::fixture_gimmick::catalog_stream::home_pending(world) {
+        return Some(reason);
+    }
     None
 }
 
