@@ -12,9 +12,11 @@
 //!   limit, new or rare (the general `material` master is not an input here,
 //!   so that arm is refused with an error line);
 //! - `mysekai_item` (a master row): `se_get_material`, rare;
-//! - `mysekai_blueprint` and `mysekai_music_record`: no notice; a
-//!   get-resource sub-window dialog is chained instead (a repeated blueprint
-//!   or record becomes the surplus item's row);
+//! - `mysekai_blueprint` and `mysekai_music_record`: no notice and no cue;
+//!   a get-resource sub-window dialog is chained instead (a repeated
+//!   blueprint or record becomes the surplus item's row). The message
+//!   carries the arm and the acquisition module ([`crate::get_resource`])
+//!   chains the dialog;
 //! - any other type: a notice with an empty name, no cue.
 //!
 //! A type whose master row is absent raises nothing. The notice then goes
@@ -28,11 +30,12 @@
 //! already holds the id (both builds read that way), so it stays empty: a
 //! material is new at every notice until the user holds a row of it.
 //!
-//! Named gaps: the notice is a message here ([`CollectNotice`]) and nothing
-//! draws it yet (the notice layer's view); the names and preview bundles are
-//! the drawer's to resolve from the masters by id. The blueprint and record
-//! dialogs are named in the log and not opened (the get-resource dialog's
-//! collect opener has no entry from here).
+//! The notice is a message here ([`CollectNotice`]). The acquisition module
+//! ([`crate::get_resource`]) reads it: it resolves the name, the preview
+//! bundle and the resource name from the masters by id and hands the notice
+//! layer's call (`crate::collect_notice::NoticeCollectItem`) the seven
+//! values, or chains the get-resource dialog for a blueprint or a record.
+//! The cues play here, once; that module plays none for these messages.
 
 use bevy::prelude::*;
 
@@ -53,6 +56,10 @@ pub(crate) enum NoticeArm {
     MysekaiMaterial,
     MysekaiFixture,
     MysekaiItem,
+    /// `mysekai_blueprint`: the get-resource dialog, no notice.
+    MysekaiBlueprint,
+    /// `mysekai_music_record`: the get-resource dialog, no notice.
+    MysekaiMusicRecord,
     /// A type outside the switch (empty name).
     Other,
 }
@@ -142,17 +149,20 @@ pub(crate) fn notice_collect_item(
                 is_rare: arm == NoticeArm::MysekaiItem,
             }
         }
-        RT_MYSEKAI_BLUEPRINT | RT_MYSEKAI_MUSIC_RECORD => {
-            let word = if resource_type == RT_MYSEKAI_BLUEPRINT {
-                "blueprint"
+        // No cue: the get-resource dialog is chained by the acquisition
+        // module, which checks the master rows and the user's copies.
+        RT_MYSEKAI_BLUEPRINT | RT_MYSEKAI_MUSIC_RECORD => CollectNotice {
+            arm: if resource_type == RT_MYSEKAI_BLUEPRINT {
+                NoticeArm::MysekaiBlueprint
             } else {
-                "music record"
-            };
-            warn!(
-                "[harvest-pickup] NoticeCollectItem ({reason}): {word} {resource_id} qty {quantity}: MysekaiGetResourceSubWindowDialog chained in the source; not opened (the dialog has no entry from the harvest path)"
-            );
-            return;
-        }
+                NoticeArm::MysekaiMusicRecord
+            },
+            resource_id,
+            get_count: quantity,
+            is_limit: false,
+            is_new: false,
+            is_rare: false,
+        },
         _ => CollectNotice {
             arm: NoticeArm::Other,
             resource_id,
@@ -163,7 +173,7 @@ pub(crate) fn notice_collect_item(
         },
     };
     info!(
-        "[harvest-pickup] NoticeCollectItem ({reason}): {:?} {} x{} limit {} new {} rare {} (ScreenLayerMysekaiNotice: not drawn)",
+        "[harvest-pickup] NoticeCollectItem ({reason}): {:?} {} x{} limit {} new {} rare {} (to the acquisition module, which draws it in the collect-item notice cells)",
         notice.arm, notice.resource_id, notice.get_count, notice.is_limit, notice.is_new, notice.is_rare
     );
     notices.push(notice);

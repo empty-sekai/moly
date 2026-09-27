@@ -212,6 +212,7 @@ fn parse_tools(text: &str) -> Result<Vec<ToolDef>, String> {
                     as f32,
                 max_durability: master::int32(row, "maxDurability")?,
                 assetbundle: master::text(row, "assetbundleName")?.to_owned(),
+                sprite_name: master::text(row, "spriteName")?.to_owned(),
             })
         })
         .collect()
@@ -319,6 +320,8 @@ pub(crate) struct ToolDef {
     pub(crate) cool_time: f32,
     pub(crate) max_durability: i32,
     pub(crate) assetbundle: String,
+    /// `spriteName`: the tool thumbnail's file stem (`<spriteName>_t`).
+    pub(crate) sprite_name: String,
 }
 
 #[derive(Resource)]
