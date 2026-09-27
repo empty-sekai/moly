@@ -78,6 +78,7 @@ pub mod menu_dialog;
 pub mod menu_shell;
 pub mod notice_banner;
 pub mod collect_notice;
+pub mod item_icon;
 mod mysekai_rank;
 #[cfg(not(target_arch = "wasm32"))]
 mod native_graphics_diagnostics;
@@ -232,6 +233,7 @@ pub fn app(
     sky::install(&mut app);
     emoticon::install(&mut app);
     collect_notice::install(&mut app);
+    item_icon::install(&mut app);
     app.add_plugins(weather::WeatherPlugin);
     uber_particle::install(&mut app);
     audio::install(&mut app);
