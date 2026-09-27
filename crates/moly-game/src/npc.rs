@@ -28,6 +28,7 @@ pub(crate) mod entry_probe;
 pub(crate) mod gate_entries;
 pub(crate) mod random_fixture_action;
 pub(crate) mod residency;
+pub(crate) mod walkable;
 
 // The door move inserts the pending resource and orders itself after the
 // answer set (see `random_fixture_action`).
