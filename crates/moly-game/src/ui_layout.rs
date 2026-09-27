@@ -275,6 +275,8 @@ pub(crate) struct UiLayouts {
     docs: HashMap<String, UiPrefab>,
     /// Optional documents the root lacks (named once when found missing).
     missing_documents: HashSet<String>,
+    /// Wording keys the root lacks that a text has drawn (named once).
+    missing_wordings: std::sync::Mutex<HashSet<String>>,
     document_revisions: HashMap<String, u64>,
     images: HashMap<String, Handle<Image>>,
     pub(crate) wordings: HashMap<String, String>,
@@ -1316,6 +1318,18 @@ impl UiLayouts {
     /// The flag says whether the text is the component's serialized text:
     /// TMP parses the backslash escapes of that one only (its text input
     /// box source), not of a wording `Start` assigns through the text setter.
+    /// `WordingManager.Get`: a key the dictionary lacks returns the key
+    /// itself, so the client draws the key; each such key is named once.
+    pub(crate) fn wording_or_key(&self, key: &str) -> String {
+        if let Some(wording) = self.wordings.get(key) {
+            return wording.clone();
+        }
+        let mut named = self.missing_wordings.lock().unwrap_or_else(|poison| poison.into_inner());
+        if named.insert(key.to_owned()) {
+            warn!("UI wording {key} is not in this root's wordings; its text draws the key, as the client does");
+        }
+        key.to_owned()
+    }
     pub(crate) fn text_source(&self, component: &UiComponent) -> (String, bool) {
         assert_eq!(
             component.class, "Sekai.UI.CustomTextMesh",
@@ -1333,11 +1347,7 @@ impl UiLayouts {
         let serialized = field("m_text").as_str()
             .unwrap_or_else(|| panic!("UI CustomTextMesh {}: m_text is not a string", component.path_id));
         if use_key && !key.is_empty() {
-            let wording = self.wordings
-                .get(key)
-                .unwrap_or_else(|| panic!("UI wording missing: {key}"))
-                .clone();
-            (wording, false)
+            (self.wording_or_key(key), false)
         } else {
             (serialized.to_owned(), true)
         }
@@ -1362,11 +1372,11 @@ impl UiLayouts {
         if !use_key || key.is_empty() {
             return None;
         }
-        let wording = self.wordings.get(key).unwrap_or_else(|| panic!("UI wording missing: {key}"));
+        let wording = self.wording_or_key(key);
         Some(match args {
-            Some(args) => moly_law::text::custom_text_mesh::format_wording(wording, args)
+            Some(args) => moly_law::text::custom_text_mesh::format_wording(&wording, args)
                 .unwrap_or_else(|error| panic!("UI wording {key}: {error}")),
-            None => wording.clone(),
+            None => wording,
         })
     }
     pub(crate) fn text_chars(&self) -> Vec<char> {
