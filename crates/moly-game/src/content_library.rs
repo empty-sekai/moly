@@ -57,7 +57,7 @@ pub(crate) use qa::qa_open;
 pub(crate) use staging::{stage_fixture_talk_observer, prepare_pending, retire_scene};
 pub(crate) use view::{refresh, setup};
 
-const FONT: &[u8] = include_bytes!("../assets/font/ResourceHanRoundedSC-Medium.subset.ttf");
+use crate::ui_font::UI_FONT as FONT;
 const CHARACTERS: &str = "moly://characters.json";
 const FIXTURES: &str = "moly://mysekai-fixtures.json";
 const THUMBNAILS: &str = "moly://fixture-thumbnails/fixture-thumbnails.json";

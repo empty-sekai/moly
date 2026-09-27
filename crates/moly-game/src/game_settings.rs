@@ -20,7 +20,7 @@ use crate::{
 
 const COMPOSITE_LAYER: usize = 30;
 const UI_ORDER: isize = 100;
-const FONT: &[u8] = include_bytes!("../assets/font/ResourceHanRoundedSC-Medium.subset.ttf");
+use crate::ui_font::UI_FONT as FONT;
 
 /// What the source `SetImageQuality` writes for one image quality: the target
 /// DPI it passes to `SetTargetDpi` and `IsFXAAEnable`. High is (299, on),

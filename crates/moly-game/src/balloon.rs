@@ -224,7 +224,7 @@ pub(crate) const ASCENT_RATIO: f32 = 66.0 / 75.0;
 pub(crate) const DESCENT_RATIO: f32 = 9.0 / 75.0;
 
 /// 仓内开源字体（OFL-1.1 授权文本与字体同目录进仓）。
-const FONT_BYTES: &[u8] = include_bytes!("../assets/font/ResourceHanRoundedSC-Medium.subset.ttf");
+use crate::ui_font::UI_FONT as FONT_BYTES;
 
 /// Code points TMP synthesizes into a static font asset that lacks them when
 /// it reads the asset: a glyph of index 0 with all-zero metrics, so the
