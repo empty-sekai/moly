@@ -3,6 +3,11 @@
 //! 这类文件不匹配任何内置装载器的形状；自定义装载器让它们走与 glb 同一条
 //! AssetServer 通路——native 与 web 同路，装载延迟与失败归同一套判据，不另
 //! 开旁路。schema 的解释归各域模块，这里只管把字节变成字符串。
+//!
+//! Master tables are JSON assets too; [`master`] loads them from the region's
+//! master mirror and names each one it cannot give its consumer.
+
+pub mod master;
 
 use bevy::app::App;
 use bevy::asset::io::Reader;
@@ -62,4 +67,5 @@ impl AssetLoader for JsonAssetLoader {
 pub fn register(app: &mut App) {
     app.init_asset::<JsonAsset>()
         .register_asset_loader(JsonAssetLoader);
+    master::register(app);
 }

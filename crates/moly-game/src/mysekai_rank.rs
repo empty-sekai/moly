@@ -1,21 +1,24 @@
-//! The master rank table (`mysekai-ranks.json`) and the rank model the menu
+//! The master rank table (`mysekaiRanks`) and the rank model the menu
 //! dialog and the info screen build from it.
 //!
-//! The table is master data, so it comes from the runtime root. The user's
-//! total experience is server-side user state from the server document, one
-//! value both screens read ([`UserTotalExp`]). A root without the table does not stop the
-//! start; the first rank model asked of it panics with the missing file
-//! named, as the source throws when its table is absent.
+//! The table is master data, read from the region's master mirror
+//! (`mysekaiRanks`). The user's total experience is server-side user state
+//! from the server document, one value both screens read ([`UserTotalExp`]).
+//! A root whose table is absent or malformed does not stop the start: the
+//! table is named once, and the first rank model asked of it panics with that
+//! name, as the source throws when its table is absent.
 
-use bevy::asset::{Assets, LoadState};
 use bevy::prelude::*;
 
-use moly_assets::json::JsonAsset;
+use moly_assets::json::master::{self, MasterData, MasterTable};
 use moly_law::ui::mysekai_rank::{MasterMysekaiRank, MysekaiRankModel};
 
-/// The table's load request; removed once it resolves.
-#[derive(Resource)]
-pub(crate) struct MysekaiRanksHandle(Handle<JsonAsset>);
+/// The rank table the rank gauges read.
+const RANKS: MasterTable<Vec<MasterMysekaiRank>> = MasterTable {
+    table: "mysekaiRanks",
+    name: "mysekaiRanks (the rank gauges)",
+    parse: parse_ranks,
+};
 
 /// The resolved table: its rows in master order, or why the root has none.
 #[derive(Resource)]
@@ -48,65 +51,46 @@ impl Default for UserTotalExp {
 }
 
 /// Startup: request the table and seat the user's total experience.
-pub(crate) fn load(mut commands: Commands, server: Res<AssetServer>) {
+pub(crate) fn load(mut commands: Commands, mut masters: ResMut<MasterData>) {
     commands.init_resource::<UserTotalExp>();
-    commands.insert_resource(MysekaiRanksHandle(server.load::<JsonAsset>(moly_assets::mysekai_ranks())));
+    masters.request(&RANKS);
 }
 
-/// Update: parse the table once it arrives. A malformed table panics; a
-/// missing file is recorded and named once.
-pub(crate) fn parse(
-    mut commands: Commands,
-    server: Res<AssetServer>,
-    jsons: Res<Assets<JsonAsset>>,
-    handle: Option<Res<MysekaiRanksHandle>>,
-) {
-    let Some(handle) = handle else { return; };
-    if let LoadState::Failed(err) = server.load_state(&handle.0) {
-        let reason = format!("mysekai-ranks.json is not in this runtime root ({err})");
-        warn!("[mysekai-rank] {reason}; the rank gauges refuse when a screen shows them");
-        commands.insert_resource(MysekaiRanks(Err(reason)));
-        commands.remove_resource::<MysekaiRanksHandle>();
+/// Update: seat the table once it resolves. An absent or malformed table is
+/// named once by the master layer and kept as the reason the rank gauges
+/// refuse.
+pub(crate) fn parse(mut commands: Commands, mut masters: ResMut<MasterData>) {
+    let Some(result) = masters.take(&RANKS) else {
         return;
+    };
+    match result {
+        Ok(rows) => {
+            info!(
+                "[mysekai-rank] master rank table: {} rows, highest rank {}",
+                rows.len(),
+                rows.iter().map(|row| row.mysekai_rank).max().unwrap_or(0)
+            );
+            commands.insert_resource(MysekaiRanks(Ok(rows)));
+        }
+        Err(error) => {
+            info!("[mysekai-rank] no rank table: the rank gauges refuse when a screen shows them");
+            commands.insert_resource(MysekaiRanks(Err(error.to_string())));
+        }
     }
-    let Some(json) = jsons.get(&handle.0) else { return; };
-    let value: serde_json::Value = serde_json::from_str(&json.0)
-        .unwrap_or_else(|err| panic!("mysekai-ranks.json is not JSON: {err}"));
-    let rows = rows(&value).unwrap_or_else(|err| panic!("mysekai-ranks.json: {err}"));
-    info!("[mysekai-rank] master rank table: {} rows, highest rank {}", rows.len(),
-        rows.iter().map(|row| row.mysekai_rank).max().unwrap_or(0));
-    commands.insert_resource(MysekaiRanks(Ok(rows)));
-    commands.remove_resource::<MysekaiRanksHandle>();
 }
 
-/// The rows in the table's master order (`rowOrder`), each read from its
-/// keyed entry.
-fn rows(value: &serde_json::Value) -> Result<Vec<MasterMysekaiRank>, String> {
-    if value["version"].as_i64() != Some(1) {
-        return Err(format!("version {} is not 1", value["version"]));
-    }
-    let semantics = &value["semantics"];
-    if semantics["table"].as_str() != Some("mysekaiRanks") || semantics["keyField"].as_str() != Some("id") {
-        return Err("it is not the mysekaiRanks table keyed by id".into());
-    }
-    let order = value["rowOrder"].as_array().ok_or("no rowOrder")?;
-    let entries = value["entries"].as_object().ok_or("no entries")?;
-    if order.len() != entries.len() {
-        return Err(format!("rowOrder has {} ids for {} entries", order.len(), entries.len()));
-    }
-    let int = |row: &serde_json::Value, field: &str| -> Result<i32, String> {
-        row[field].as_i64().and_then(|v| i32::try_from(v).ok())
-            .ok_or_else(|| format!("{field} of row {row} is not an int"))
-    };
-    order.iter().map(|id| {
-        let id = id.as_i64().ok_or_else(|| format!("rowOrder id {id} is not an integer"))?;
-        let row = entries.get(&id.to_string()).ok_or_else(|| format!("rowOrder id {id} has no entry"))?;
-        let parsed = MasterMysekaiRank { id: int(row, "id")?, mysekai_rank: int(row, "mysekaiRank")?, total_exp: int(row, "totalExp")? };
-        if i64::from(parsed.id) != id {
-            return Err(format!("entry {id} carries id {}", parsed.id));
-        }
-        Ok(parsed)
-    }).collect()
+/// `mysekaiRanks`: the rows in master order.
+pub(crate) fn parse_ranks(text: &str) -> Result<Vec<MasterMysekaiRank>, String> {
+    master::rows(text)?
+        .iter()
+        .map(|row| {
+            Ok(MasterMysekaiRank {
+                id: master::int32(row, "id")?,
+                mysekai_rank: master::int32(row, "mysekaiRank")?,
+                total_exp: master::int32(row, "totalExp")?,
+            })
+        })
+        .collect()
 }
 
 impl MysekaiRanks {
