@@ -102,6 +102,7 @@ pub mod option_dialog;
 mod particle_runtime;
 mod particle_geometry;
 mod source_billboard;
+mod system_fixture;
 mod particle_mesh_emission;
 pub mod pick;
 pub mod player;
@@ -235,6 +236,7 @@ pub fn app(
     sky::install(&mut app);
     emoticon::install(&mut app);
     collect_notice::install(&mut app);
+    system_fixture::install(&mut app);
     item_icon::install(&mut app);
     app.add_plugins(weather::WeatherPlugin);
     uber_particle::install(&mut app);
