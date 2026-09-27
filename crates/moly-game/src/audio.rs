@@ -87,6 +87,7 @@
 
 mod cue;
 mod cue_law;
+mod record;
 
 pub(crate) use self::cue::advance_cue_playbacks as advance_ambient_sequence;
 use self::cue::{track_volume, CueGain, CueVolume};
@@ -1951,6 +1952,9 @@ struct BgmVoice {
     /// 循环区间（起播时从流表抄来；交接与账目用）。
     loop_start: f64,
     loop_end: f64,
+    /// The intro sink's position (seconds from its own start) at which the
+    /// loop sink takes over.
+    handoff_at: f64,
     /// loop 段已放行（intro 已到交接点或已播空）。
     handoff_done: bool,
     /// 淡入计时：`None` = 冷启全量起播（首次放曲没有旧声可让），
@@ -1989,18 +1993,9 @@ pub(crate) struct BgmChannel {
 // It is empty by default (no site has a record set; the default choice plays).
 // The native instrument `MOLY_AUDIO_MOCK_MUSIC_RECORD` (`site:record:vocal`,
 // comma separated, refused loudly when malformed) writes the native server
-// document; the game mode does not read it.
-//
-// The client side, which is ported: only housing sites (categories
-// `housing_home` / `housing_room`) look the setting up; other sites go
-// straight to the default choice. Resolving a record to its music (the
-// record master's track type: soundtrack or song; a song through the music
-// master, the vocal version by the local default vocal type and the song's
-// vocal setting; then the music's audio package and cue, with the default
-// choice when nothing resolves) needs the song audio, which the runtime
-// root does not carry: a set record is refused by name by the BGM channel,
-// and the default choice plays, which differs from the source whenever the
-// record resolves.
+// document; the game mode does not read it. Only housing sites (categories
+// `housing_home` / `housing_room`) look the setting up; what a set record
+// plays is the record path in [`record`].
 
 /// A `MysekaiBGMManager.StartFade` target: a volume, or the manager's
 /// `InitialVolume`.
@@ -2121,6 +2116,7 @@ pub(crate) fn advance_bgm(
     mut sinks: Query<&mut AudioSink>,
     bgm_hold: Option<Res<crate::site_move::BgmHold>>,
     mut manager_fade: ResMut<MysekaiBgmFade>,
+    mut record: record::RecordParams,
 ) {
     manager_fade.advance(time.elapsed_secs(), bus.player.bgm);
     let bgm_player = manager_fade.player_volume(bus.player.bgm);
@@ -2181,7 +2177,7 @@ pub(crate) fn advance_bgm(
             sinks.get(intro).ok().map(|sink| {
                 (
                     sink.position().as_secs_f32()
-                        >= voice.loop_start as f32 - BGM_HANDOFF_LEAD_SECONDS
+                        >= voice.handoff_at as f32 - BGM_HANDOFF_LEAD_SECONDS
                         || sink.empty(),
                     sink.empty(),
                 )
@@ -2230,15 +2226,21 @@ pub(crate) fn advance_bgm(
     .then(|| music.setting(site.site_id))
     .flatten();
     match music_setting {
-        Some((record, vocal)) => {
-            if channel.music_refused_for != Some(site.site_id) {
-                error!(
-                    "[audio] 唱片 BGM 设定拒绝：站点 {} 设了唱片 {record}（歌唱版本 {vocal}），唱片到 BGM 资源的解析未移植（运行时根无乐曲音频集）；真源能解析出资源时放这张唱片，这里照放默认选曲，两边不一样",
-                    site.site_id
-                );
-                channel.music_refused_for = Some(site.site_id);
-            }
-        }
+        Some((record_id, vocal_id)) => match record::advance(
+            &mut record,
+            &mut commands,
+            &server,
+            &mut channel,
+            &bus,
+            bgm_player,
+            &gate,
+            site.site_id,
+            record_id,
+            vocal_id,
+        ) {
+            record::Step::Default => {}
+            record::Step::Hold | record::Step::Keep => return,
+        },
         None => channel.music_refused_for = None,
     }
     let delivery_phenomenon_id =
@@ -2360,6 +2362,7 @@ pub(crate) fn advance_bgm(
         loop_sink,
         loop_start: stream.loop_start,
         loop_end: stream.loop_end,
+        handoff_at: stream.loop_start,
         handoff_done,
         fade_in: if cold { None } else { Some(0.0) },
         applied_volume: volume_now,
@@ -3743,6 +3746,7 @@ pub(crate) fn install(app: &mut App) {
         .init_resource::<CurrentPhenomenon>()
         .init_resource::<crate::server::client::music::ClientMusicPlaySettings>()
         .init_resource::<BgmChannel>()
+        .init_resource::<record::RecordLibrary>()
         .init_resource::<MysekaiBgmFade>()
         .init_resource::<AmbientChannel>()
         .init_resource::<SequenceWorkAreas>()
