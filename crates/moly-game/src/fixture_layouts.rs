@@ -260,6 +260,49 @@ impl SiteFixtureLayouts {
         Ok((snapshot, returned))
     }
 
+    /// The fixtures placed on every site but `current`, counted by (master
+    /// fixture id, texture id): a site this session has visited counts its
+    /// kept layout, any other site its saved record. A site with neither
+    /// (the home starter before the home site is first visited) counts none.
+    pub(crate) fn placed_elsewhere(&self, current: u32) -> Result<HashMap<(i32, u32), i32>, String> {
+        let mut counts: HashMap<(i32, u32), i32> = HashMap::new();
+        for (site, layout) in &self.visited {
+            if *site == current {
+                continue;
+            }
+            for row in &layout.rows {
+                *counts.entry((row.fixture_id, row.texture_id)).or_default() += 1;
+            }
+        }
+        let document = self.document.as_ref().map_err(Clone::clone)?;
+        let Some(section) = document.get(SECTION) else {
+            return Ok(counts);
+        };
+        let sites = section["sites"]
+            .as_object()
+            .ok_or("OfflineSiteLayouts.sites must be an object")?;
+        for (key, site) in sites {
+            let site_id: u32 = key
+                .parse()
+                .map_err(|_| format!("layout bucket {key} is not a site id"))?;
+            if site_id == current || self.visited.contains_key(&site_id) {
+                continue;
+            }
+            for record in site["fixtures"]
+                .as_array()
+                .ok_or_else(|| format!("saved site {site_id} fixtures must be an array"))?
+            {
+                let fixture_id = record["mysekaiFixtureId"]
+                    .as_i64()
+                    .and_then(|v| i32::try_from(v).ok())
+                    .ok_or_else(|| format!("saved site {site_id}: mysekaiFixtureId must be i32"))?;
+                let texture_id = positive_u32(&record["textureId"], "saved textureId")?;
+                *counts.entry((fixture_id, texture_id)).or_default() += 1;
+            }
+        }
+        Ok(counts)
+    }
+
     /// Called only after a durable receipt. Its exact written document is
     /// installed directly; a separate read can neither invalidate this success
     /// nor replace the baseline with some later writer's unrelated document.
@@ -644,6 +687,35 @@ pub(crate) fn validate_floor_layout(
         }
     }
     Ok(())
+}
+
+/// The layout as the editor's save posts it to the server model
+/// (`PostUserMysekaiHousingLayoutApi`): every row in the served housing
+/// layout's record form, the form the server document's
+/// `userMysekaiSiteHousingLayouts` rows and the starter decoder use.
+pub(crate) fn housing_layout_request(
+    layout: &FixturePlacements,
+) -> crate::server::client::housing_layout::UserMysekaiHousingEditLayoutRequest {
+    crate::server::client::housing_layout::UserMysekaiHousingEditLayoutRequest {
+        mysekai_site_id: layout.site_id,
+        site_type: layout.site_type.clone(),
+        fixtures: layout
+            .rows
+            .iter()
+            .map(|row| {
+                json!({
+                    "package": row.package,
+                    "mysekaiFixtureId": row.fixture_id,
+                    "minimum": grid_json(row.min),
+                    "maximum": grid_json(row.max),
+                    "centerY": row.center_y,
+                    "layoutType": row.layout,
+                    "rotation": row.direction as u8,
+                    "textureId": row.texture_id,
+                })
+            })
+            .collect(),
+    }
 }
 
 /// Layout and returned items share the existing settings write. Validate the

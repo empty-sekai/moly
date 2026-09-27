@@ -87,6 +87,7 @@ pub(crate) mod delivery;
 pub(crate) mod document;
 pub(crate) mod edit;
 pub(crate) mod home_action;
+pub(crate) mod housing_layout;
 pub(crate) mod local;
 pub(crate) mod music;
 
@@ -207,6 +208,7 @@ pub(crate) enum ResponseKind {
     HomeActionCraft,
     HomeActionCanvas,
     HomeActionSketch,
+    HousingLayout,
 }
 
 impl ResponseKind {
@@ -224,6 +226,7 @@ impl ResponseKind {
             Self::HomeActionCraft => "PostUserMysekaiCraftApi (craft)",
             Self::HomeActionCanvas => "PostUserMysekaiCraftApi (canvas)",
             Self::HomeActionSketch => "PostUserMysekaiHousingSketchApi",
+            Self::HousingLayout => "PostUserMysekaiHousingLayoutApi",
             Self::BirthdayPartySeat => {
                 "user data (the rows of the birthday parties now in session)"
             }
@@ -1540,6 +1543,8 @@ impl Plugin for ServerPlugin {
             .add_systems(Last, persist_local);
         let endpoint = app.world_mut().register_system(home_action::handle);
         app.insert_resource(client::home_action::HomeActionEndpoint(endpoint));
+        let endpoint = app.world_mut().register_system(housing_layout::handle);
+        app.insert_resource(client::housing_layout::HousingLayoutEndpoint(endpoint));
     }
 }
 
