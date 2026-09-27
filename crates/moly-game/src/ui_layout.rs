@@ -224,6 +224,13 @@ const OPTIONAL_DOCUMENTS: &[(&str, &str)] = &[
     ("RefreshBirthdayPlant", "menu/MysekaiRefreshBirthdayPlantSubWindowDialog.json"),
     ("BgmSelect", "bgmselect/ScreenLayerMysekaiBGMSelect.json"),
     ("BgmSelectListCell", "bgmselect/MysekaiBGMSelectListCell.json"),
+    ("Inventory", "inventory/ScreenLayerMysekaiInventory.json"),
+    ("InventoryFixtureList", "inventory/FixtureContentList.json"),
+    ("InventoryMaterialList", "inventory/MaterialContentList.json"),
+    ("InventoryItemList", "inventory/ItemContentList.json"),
+    ("InventoryToolList", "inventory/ToolContentList.json"),
+    ("InventoryItemCell", "inventory/UIPartsItemThumbnailListViewItem.json"),
+    ("InventoryTabCell", "inventory/ContentListSelectorCell.json"),
 ];
 
 #[derive(Resource, Default)]
