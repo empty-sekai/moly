@@ -773,6 +773,8 @@ pub(crate) struct InventoryState {
     scroll: f32,
     dragging_list: bool,
     was_open: bool,
+    /// The tap map is written after the next placement.
+    map_pending: bool,
     /// Load paths already refused by name (each is named once).
     refused_icons: BTreeSet<String>,
 }
@@ -1124,8 +1126,13 @@ pub(crate) fn place(
         Without<InventoryHeader>,
     >,
     mut headers: Query<
-        (&mut Visibility, &mut Transform),
-        (With<InventoryHeader>, Without<InventoryRoot>),
+        (
+            &InventoryHeader,
+            &UiPrefabView,
+            &mut Visibility,
+            &mut Transform,
+        ),
+        Without<InventoryRoot>,
     >,
     root_canvas: Option<Res<crate::canvas::RootCanvas>>,
 ) {
@@ -1136,6 +1143,7 @@ pub(crate) fn place(
         state.tab = 0;
         state.selected = [0; 4];
         state.scroll = 0.;
+        state.map_pending = true;
         let copy = owned.as_deref();
         info!(
             "[inventory] OnBoot: no boot argument; OnInitComponent: ContentListTypes Fixture, Material, Item, Tool; \
@@ -1168,7 +1176,7 @@ pub(crate) fn place(
     };
     let scale = root_canvas.scale(window);
     let canvas = root_canvas.size(window);
-    for (mut visibility, mut transform) in &mut headers {
+    for (_, _, mut visibility, mut transform) in &mut headers {
         *visibility = if open {
             Visibility::Inherited
         } else {
@@ -1218,6 +1226,7 @@ pub(crate) fn place(
             state.selected[tab] = 0;
         }
         info!("[inventory] {kind:?} list: {count} rows");
+        state.map_pending = true;
     }
     let bindings = &root.bindings;
     for (index, tab) in bindings.tabs.iter().enumerate() {
@@ -1282,6 +1291,38 @@ pub(crate) fn place(
     let mut scroll = state.scroll;
     layout_cells(bindings, &mut view, &layouts, canvas, &mut scroll);
     state.scroll = scroll;
+    if std::mem::take(&mut state.map_pending) {
+        // Window-pixel centres of the controls, for harness taps.
+        let size = Vec2::new(window.width(), window.height());
+        let pixel = |view: &UiPrefabView, path: &str| {
+            view.rect(&layouts, path, canvas).map(|rect| {
+                let centre = rect.center() * scale;
+                (
+                    (centre.x + size.x * 0.5).round() as i32,
+                    (size.y * 0.5 - centre.y).round() as i32,
+                )
+            })
+        };
+        let back = headers
+            .single()
+            .ok()
+            .and_then(|(header, header_view, _, _)| pixel(header_view, &header.back));
+        let tabs: Vec<_> = bindings
+            .tabs
+            .iter()
+            .map(|tab| pixel(&*view, &tab.button))
+            .collect();
+        let cells: Vec<_> = bindings
+            .cells
+            .iter()
+            .take(5)
+            .map(|cell| pixel(&*view, &cell.button))
+            .collect();
+        info!(
+            "[inventory] tap map (window px, window {}x{}): back {back:?}, tabs Fixture/Material/Item/Tool {tabs:?}, first cells {cells:?}",
+            size.x, size.y
+        );
+    }
 }
 
 fn canvas_position(position: Vec2, window_size: Vec2, scale: f32) -> Vec2 {
