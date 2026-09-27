@@ -38,6 +38,10 @@ bevy = { version = "0.18.1", default-features = false, features = [
     "smaa_luts", "tonemapping_luts", "zstd_rust", "bevy_anti_alias",
     "bevy_gltf", "bevy_pbr", "bevy_post_process", "gltf_animation",
     "bevy_ui", "bevy_ui_render", "bevy_scene", "bevy_audio", "vorbis", "debug",
+    # Public remote resources read at runtime (audio storage and master
+    # mirrors): Bevy's web asset reader (ureq on native, fetch on wasm) and
+    # the MP3 decoder the storage mirror's audio needs.
+    "https", "mp3",
 ] }
 serde_json = { version = "1", features = ["preserve_order"] }
 

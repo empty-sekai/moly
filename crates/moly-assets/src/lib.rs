@@ -21,6 +21,7 @@ pub mod material_textures;
 mod packs;
 pub mod player_data;
 mod read_limits;
+pub mod remote;
 pub mod residency;
 pub mod scene_state;
 pub mod sidecar;
@@ -63,6 +64,7 @@ pub enum AssetSource {
 /// 必须在 `DefaultPlugins` 之前调用：AssetPlugin 构建时固化全部资产源，
 /// 之后注册只打一行 error 并被丢弃。
 pub fn install(app: &mut App, source: AssetSource) {
+    remote::register(app);
     #[cfg(target_arch = "wasm32")]
     if let AssetSource::HttpBase { url } = &source {
         let root = url.clone();
