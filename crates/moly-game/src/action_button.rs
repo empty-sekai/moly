@@ -296,7 +296,7 @@ impl ActionButtonScreen<'_, '_> {
         button.active && button.contains(canvas_point)
     }
 
-    fn button_position(&self, window: &Window, shown: ButtonType) -> Option<Vec2> {
+    pub(crate) fn button_position(&self, window: &Window, shown: ButtonType) -> Option<Vec2> {
         let (button, _) = self.rects(window, shown)?;
         let center = button.center() * self.scale(window)?;
         Some(Vec2::new(window.width() * 0.5 + center.x, window.height() * 0.5 - center.y))
@@ -601,6 +601,8 @@ struct Candidate<'a> {
     world: &'a GlobalTransform,
     /// The house's inside-door point, for a HouseEntry candidate.
     house_entry: Option<Vec3>,
+    /// A party fixture's button state (the birthday cut-scene's).
+    birthday: Option<crate::cutscene::birthday::BirthdayButton>,
 }
 
 /// A registered NPC, as the scan saw it this frame.
@@ -962,6 +964,7 @@ pub(crate) fn advance(
             Option<&FixtureActivityIdentity>,
             Option<&ActionButtonFixture>,
             Option<&crate::site_move::door::HouseEntryPoint>,
+            Option<&crate::cutscene::birthday::BirthdayButton>,
         ),
         With<FixtureRoot>,
     >,
@@ -1036,7 +1039,7 @@ pub(crate) fn advance(
     let mut with_button: Vec<(ButtonType, [f32; 3], String)> = Vec::new();
 
     let mut frame: Vec<Candidate> = Vec::new();
-    for (entity, transform, source, world, identity, cached, house) in &fixtures {
+    for (entity, transform, source, world, identity, cached, house, birthday) in &fixtures {
         placed += 1;
         let resolved;
         let facts_of = match cached {
@@ -1085,7 +1088,16 @@ pub(crate) fn advance(
             (is_home && row.fixture_type.can_action() && house_entry.is_some())
                 .then(|| ButtonType::from_action_type(PlayerActionType::Home, false))
         };
-        let Some(button) = facts_of.button.or_else(home) else {
+        // GetPlayerActionButtonType: a party fixture within its party's
+        // window gets the birthday cut-scene button (the cached button is the
+        // gimmick or timeline one, which comes first, or the action type's,
+        // which a birthday system fixture does not have).
+        let party = || {
+            birthday
+                .is_some_and(|button| button.within)
+                .then_some(ButtonType::BirthdayCutScene)
+        };
+        let Some(button) = facts_of.button.or_else(party).or_else(home) else {
             continue;
         };
         if survey {
@@ -1103,6 +1115,7 @@ pub(crate) fn advance(
             identity,
             world,
             house_entry,
+            birthday: birthday.copied(),
         });
     }
 
@@ -1441,6 +1454,16 @@ fn fixture_enter(
                 }
             })
         }
+        // IsActionButtonTypeAvailable(BirthdayCutScene):
+        // CanShowBirthdayCutSceneButton; the party fixture is a system
+        // fixture, which IsCanActionFixture passes.
+        _ if candidate.button == ButtonType::BirthdayCutScene => Ok(
+            if candidate.birthday.is_some_and(|button| button.can_show) {
+                Enter::Push
+            } else {
+                Enter::Skip("CanShowBirthdayCutSceneButton is false")
+            },
+        ),
         // A system fixture button; IsCanActionFixture passes a system
         // fixture (fixture type system).
         _ if system_button_available(candidate.button).is_some() => {
@@ -1665,6 +1688,13 @@ fn remove_not_colliding(
                     }
                 })
             }
+            _ if candidate.button == ButtonType::BirthdayCutScene => Ok(
+                if candidate.birthday.is_some_and(|button| button.can_show) {
+                    Availability::Available
+                } else {
+                    Availability::Unavailable
+                },
+            ),
             _ if system_button_available(candidate.button).is_some() => {
                 Ok(if system_button_available(candidate.button) == Some(true) {
                     Availability::Available
@@ -1762,10 +1792,16 @@ fn system_fixture_button(
 /// IsActionButtonTypeAvailable of a stacked system fixture button (after
 /// CheckTargetSite, which holds by construction); `None` for every other
 /// button type. `OpenMysekaiBgmSelect`: `CanShowBGMSelectButton` is
-/// `!IsVisiting`, and the product is never visiting.
+/// `!IsVisiting`, and the product is never visiting. `OpenCraftTool`:
+/// `CanShowCraftToolButton` is `CanShowTutorialCraftToolButton` (true
+/// outside the tutorial, which the product does not run) and `!IsVisiting`.
 fn system_button_available(button: ButtonType) -> Option<bool> {
     match button {
         ButtonType::OpenMysekaiBgmSelect => Some(true),
+        // The dispatch arm is taken from earlier builds; this build's table is
+        // an indirect jump that is not decoded, so the arm is not confirmed
+        // here.
+        ButtonType::OpenCraftTool => Some(true),
         _ => None,
     }
 }
@@ -2207,6 +2243,17 @@ fn dispatch(
             info!("[action_button] 门邀请按钮按下 → PushUIScreen(传送门邀请 645，源带启动参数) → 层栈压层");
         }
         (ButtonType::OpenCraftTool, _) => {
+            // The pressed workbench is the craft's target (the source's
+            // action data): the craft screen crafts at it.
+            match fixture_target {
+                Some(target) => {
+                    commands.insert_resource(crate::home_action::CraftWorkbench(target.clone()))
+                }
+                None => {
+                    commands.remove_resource::<crate::home_action::CraftWorkbench>();
+                    warn!("[action_button] OpenCraftTool: the candidate's instance identity is not ready; the craft screen has no workbench");
+                }
+            }
             layer_commands.write(LayerCommand::Push(LayerId::MysekaiCraft));
             info!("[action_button] 工作台按钮按下 → PushUIScreen(工坊 615) → 层栈压层");
         }
@@ -2240,9 +2287,16 @@ fn dispatch(
             layer_commands.write(LayerCommand::Push(LayerId::MysekaiSecretShop));
             info!("[action_button] 秘密商店按钮按下 → PushUIScreen(秘密商店 625) → 层栈压层");
         }
-        (ButtonType::BirthdayCutScene, target) => {
-            info!("[action_button] 生日演出按钮按下（目标 {target:?}；生日演出域未建，具名挂账）——按下沿到此");
-        }
+        (ButtonType::BirthdayCutScene, target) => match fixture_target {
+            // OnClickBirthdayCutScene runs in the birthday party's presenter.
+            Some(fixture) => {
+                commands.write_message(crate::cutscene::birthday::BirthdayCutSceneClick {
+                    fixture: fixture.entity,
+                });
+                info!("[action_button] birthday cut-scene button pressed on {target:?} ({:?}): OnClickBirthdayCutScene", fixture.entity);
+            }
+            None => error!("[action_button] birthday cut-scene button pressed on {target:?}, which names no placed fixture"),
+        },
         (ButtonType::Dash, _) => {
             // The dash button is its own view (see `dash`); the target stack
             // never carries its type.

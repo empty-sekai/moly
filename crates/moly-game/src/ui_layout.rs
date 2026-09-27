@@ -232,6 +232,10 @@ const OPTIONAL_DOCUMENTS: &[(&str, &str)] = &[
     ("InventoryToolList", "inventory/ToolContentList.json"),
     ("InventoryItemCell", "inventory/UIPartsItemThumbnailListViewItem.json"),
     ("InventoryTabCell", "inventory/ContentListSelectorCell.json"),
+    ("CraftScreen", "craft/ScreenLayerMysekaiCraft.json"),
+    ("CraftFixtureList", "craft/CraftFixtureContentList.json"),
+    ("CraftCell", "craft/CraftThumbnailViewItem.json"),
+    ("CraftResult", "craft/CraftResultSubWindowDialog.json"),
 ];
 
 #[derive(Resource, Default)]

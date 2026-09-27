@@ -58,7 +58,10 @@
 //! - control clips: driven by the runner through the particle host where
 //!   the director's exposed reference resolves to a spawned node, refused
 //!   by name otherwise;
-//! - SE: played by the runner; an SE with no audio route plays silent.
+//! - SE: `SEBehaviour.OnBehaviourPlay` under the cut-scene root plays the
+//!   clip's cue through `SoundManager.PlaySEOneShot(cueName)`, the one-shot
+//!   channel (the clip's bundle name is not read), not stopped when the
+//!   cut-scene ends.
 //!
 //! Named differences: the cut-scene root's own pose is not in any package and
 //! is taken as the identity; the level-release dialog, the rank-up dialog,
@@ -83,9 +86,10 @@ use crate::cutscene_camera::{self, Shot};
 use crate::fixture_activity_provider::FixtureActivityProvider;
 use crate::fixture_activity_state::{FixtureActivityIdentity, FixtureActivityOwner};
 use crate::fixture_activity_timeline::{
-    self as timeline, CutScenePayload, ExpansionEffect, FixtureActivityTimelines, StartTimeline,
-    TimelineBindings, TimelineClip, TimelineClipKey, TimelineDefinition, TimelineOwner,
-    TimelineOwnerKind, TimelinePayload, TimelineStatus, TimelineTimeoutBudget, TimelineToken,
+    self as timeline, CutScenePayload, ExpansionEffect, FixtureActivityTimelines, SourceAssetId,
+    StartTimeline, TimelineBindings, TimelineClip, TimelineClipKey, TimelineDefinition,
+    TimelineOwner, TimelineOwnerKind, TimelinePayload, TimelineStatus, TimelineTimeoutBudget,
+    TimelineToken,
 };
 use crate::fixture_timeline_particles::{self as particles, ParticlePlayBinding};
 use crate::game_state::{self, GameStateType};
@@ -93,7 +97,10 @@ use crate::site::{HomeObstacleLevel, HomeObstacleRing, SiteActive, SiteSelection
 use crate::site_expansion::law::SiteLevelRow;
 use crate::site_expansion::{ExpansionMasters, MysekaiLocalSettings, UserMysekaiRank};
 
+pub(crate) mod birthday;
 mod cast;
+mod hidden_effects;
+mod screen;
 
 pub(crate) use cast::{
     dispose_avatar, Cast, CastCaller, CastPlay, CutSceneAvatar, CutSceneCastLease,
@@ -115,6 +122,9 @@ const FADE_HOLD: f32 = 0.95;
 /// named every this many real seconds (the source awaits it with no
 /// timeout).
 const LOAD_REPORT_REAL: f64 = 30.0;
+/// `EffectBehaviour.OnBehaviourPlay`: a clip time past this float first
+/// fast-forwards the root particle.
+const SIMULATE_AFTER: f32 = 0.1;
 
 /// `ScreenLayerMysekaiHome.OnFinishStartAnimation`: the home screen became
 /// current (the entry's home setup, a door or cannon arrival at home).
@@ -183,6 +193,36 @@ struct EffectInstance {
     offset: Vec3,
 }
 
+impl EffectInstance {
+    /// The view a later clip of the same prefab on the same track has of
+    /// this instance: the same object, systems and bindings, with that
+    /// clip's own name and template fields.
+    fn shared_with(
+        &self,
+        name: String,
+        matched_duration: bool,
+        random_seed: bool,
+        offset: [f64; 3],
+    ) -> Self {
+        Self {
+            name,
+            prefab: self.prefab.clone(),
+            root: self.root,
+            root_particle: self.root_particle.clone(),
+            played: self.played.clone(),
+            not_played: self.not_played.clone(),
+            listed: self.listed,
+            listed_nodes: self.listed_nodes.clone(),
+            auto_seeded: self.auto_seeded.clone(),
+            awake: self.awake,
+            included_loop: self.included_loop,
+            matched_duration,
+            random_seed,
+            offset: Vec3::new(offset[0] as f32, offset[1] as f32, offset[2] as f32),
+        }
+    }
+}
+
 /// An effect clip's instance while it is being built and prepared.
 enum EffectSlot {
     Pending(Option<Entity>),
@@ -228,6 +268,9 @@ struct Load {
     since_real: f64,
     /// How many report intervals the wait has passed.
     reported: u32,
+    /// The view's nodes are spawned (callers without a cast; a cast
+    /// spawns them itself).
+    view_spawned: bool,
 }
 
 struct Plan {
@@ -243,12 +286,14 @@ struct Plan {
     hide_distance: i64,
     white: Vec<String>,
     black: Vec<String>,
-    /// SE clips that play silent.
-    silent: HashSet<TimelineClipKey>,
     /// The effect clips' prepared instances.
     instances: HashMap<TimelineClipKey, EffectInstance>,
     /// The Control clips the runner drives.
     controls: HashSet<TimelineClipKey>,
+    /// The Control clips the runner refused, with its reason.
+    refused_controls: HashMap<TimelineClipKey, String>,
+    /// The screen tracks the cut-scene drives.
+    screen: screen::ScreenTracks,
 }
 
 #[derive(Default)]
@@ -331,6 +376,7 @@ pub(crate) fn play_async(world: &mut World, play: CastPlay) -> Result<(), String
         waiting: None,
         since_real: now_real(world),
         reported: 0,
+        view_spawned: false,
     };
     world.insert_resource(CastPerform {
         stage: Stage::Load(Box::new(load)),
@@ -480,7 +526,7 @@ fn step(world: &mut World, slot: &mut Stage) -> bool {
                         world.despawn(root);
                     }
                     cast.outcome = Some(Err(reason));
-                    crate::gate_flow::cut_scene_returned(world, *cast);
+                    cast_returned(world, *cast);
                     return true;
                 }
                 if let Some(root) = root {
@@ -532,7 +578,7 @@ fn step(world: &mut World, slot: &mut Stage) -> bool {
             info!("[cutscene] CutScenePresenter.FadeOutAsync done; CutSceneExecutor.PlayAsync: Dispose; the cut-scene screen closes (UI interactable again; hold {:?} released)", hold.map(|hold| hold.0));
             if let Caller::Cast(mut cast) = caller {
                 cast.outcome = Some(Ok(()));
-                crate::gate_flow::cut_scene_returned(world, *cast);
+                cast_returned(world, *cast);
                 return true;
             }
             let pending = world.remove_resource::<PendingDialog>();
@@ -543,6 +589,38 @@ fn step(world: &mut World, slot: &mut Stage) -> bool {
             );
             after_cutscene_step(world);
             true
+        }
+    }
+}
+
+/// The screen tracks' view of the caller: its name, the voice bank it
+/// downloaded (the birthday party's `DownloadVoiceAsync`:
+/// `mysekai/talk/birthday/voice/<timeline>`) and the cast's characters.
+fn screen_cast(caller: &Caller, timeline: &str) -> screen::ScreenCast {
+    match caller {
+        Caller::Cast(cast) => screen::ScreenCast {
+            caller: cast.play.caller.name(),
+            voice_bank: (cast.play.caller == CastCaller::Birthday).then(|| {
+                crate::audio::cutscene::bundle_package(&format!(
+                    "mysekai/talk/birthday/voice/{timeline}"
+                ))
+            }),
+            members: cast.members(),
+        },
+        _ => screen::ScreenCast {
+            caller: "PlayUnlockSiteLevelCutScene",
+            voice_bank: None,
+            members: Vec::new(),
+        },
+    }
+}
+
+/// `CutSceneExecutor.PlayAsync` returned to a cast caller.
+fn cast_returned(world: &mut World, cast: cast::Cast) {
+    match cast.play.caller {
+        CastCaller::Birthday => birthday::cut_scene_returned(world, &cast),
+        CastCaller::Invite | CastCaller::GoHome => {
+            crate::gate_flow::cut_scene_returned(world, cast)
         }
     }
 }
@@ -608,6 +686,7 @@ fn unlock_cutscene(world: &mut World, unlock: SiteLevelRow, rank: i32) -> Option
         waiting: None,
         since_real: now_real(world),
         reported: 0,
+        view_spawned: false,
     })
 }
 
@@ -970,6 +1049,14 @@ fn try_load(world: &mut World, load: &mut Load) -> Result<Option<Plan>, String> 
         timeout_secs: NO_TIMEOUT,
         timeout_budget: TimelineTimeoutBudget::PlayerWall,
     };
+    // The screen tracks (text, label, talk window, voice, BGM) are the
+    // cut-scene's to drive; the runner has no payload for their clips.
+    let screen = {
+        let mut stripped = (*request.definition).clone();
+        let screen = screen::take(&mut stripped);
+        request.definition = Arc::new(stripped);
+        screen
+    };
     let cast_caller = matches!(load.caller, Caller::Cast(_));
     if let Some(previous) = load.draft.take() {
         request.bindings.silent_sounds = previous.silent_sounds;
@@ -977,6 +1064,30 @@ fn try_load(world: &mut World, load: &mut Load) -> Result<Option<Plan>, String> 
         if cast_caller {
             // The Control clips an earlier attempt prepared stay prepared.
             request.bindings.controls = previous.controls;
+        }
+    }
+    // Without a cast the view prefab is instantiated under the cut-scene
+    // root all the same; its nodes are what the director's Control clips
+    // name, so they are spawned when the director has any.
+    let has_controls = definition
+        .tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .any(|clip| matches!(clip.payload, TimelinePayload::Control(_)));
+    if !cast_caller && has_controls && !load.view_spawned {
+        match particle_document(world, load) {
+            Ok(Some(particles)) => {
+                cast::spawn_view_without_cast(world, &document, &particles, &load.prefab, root)?;
+                load.view_spawned = true;
+            }
+            Ok(None) => {
+                wait(load, "the package's particle document is loading");
+                return Ok(None);
+            }
+            Err(reason) => {
+                warn!("[cutscene] {}/{}: the package's particle document: {reason}; the view's nodes are not spawned (its Control clips have no source object)", load.package, load.prefab);
+                load.view_spawned = true;
+            }
         }
     }
     // A cast: the view placed at the start transform, its nodes, the
@@ -1015,11 +1126,13 @@ fn try_load(world: &mut World, load: &mut Load) -> Result<Option<Plan>, String> 
         }
     }
     let definition = request.definition.clone();
-    // An SE with no audio route plays silent (the runner's player-owner
-    // rule); the cut-scene logs its play edge either way.
-    for silenced in timeline::silence_unavailable_sounds(world, &mut request) {
-        warn!("[cutscene] SE {silenced}; it plays silent");
-    }
+    // Every SE clip of a cut-scene is played by the cut-scene itself, through
+    // the one-shot channel (see `play_se_one_shot`), so the runner neither
+    // routes nor plays it.
+    request
+        .bindings
+        .silent_sounds
+        .extend(cut_scene_se_clips(&definition));
     let sounds = timeline::prepare_source_sounds(world, &mut request);
     load.draft = Some(request.bindings.clone());
     if let Err(error) = sounds {
@@ -1057,6 +1170,14 @@ fn try_load(world: &mut World, load: &mut Load) -> Result<Option<Plan>, String> 
             cast::describe(cast, &definition)
         );
     }
+    if !screen.is_empty() {
+        info!(
+            "[cutscene] {}/{}: {}",
+            load.package,
+            load.prefab,
+            screen.describe()
+        );
+    }
     info!(
         "[cutscene] {}/{}: Factory: view instantiated, CutSceneView.Setup(CutSceneRoot, the start transform at ({:.1},{:.1},{:.1})); director {} (duration {:.4} s, {} tracks, {} virtual cameras by exposed name, {} Control clips driven, {} Control clips refused, {} effect clip instances prepared); CutScenePresenter: SetIsNeedLowHeightDither (logged only); LoadAssetAndSetUpAsync done",
         load.package,
@@ -1075,8 +1196,8 @@ fn try_load(world: &mut World, load: &mut Load) -> Result<Option<Plan>, String> 
             .filter(|slot| matches!(slot, EffectSlot::Ready(_)))
             .count()
     );
-    let silent = request.bindings.silent_sounds.clone();
     let controls = request.bindings.controls.keys().cloned().collect();
+    let refused_controls = request.bindings.refused_controls.clone();
     let instances = std::mem::take(&mut load.effects)
         .into_iter()
         .filter_map(|(key, slot)| match slot {
@@ -1086,8 +1207,9 @@ fn try_load(world: &mut World, load: &mut Load) -> Result<Option<Plan>, String> 
         .collect();
     Ok(Some(Plan {
         instances,
-        silent,
         controls,
+        refused_controls,
+        screen,
         caller: std::mem::replace(&mut load.caller, Caller::Moved),
         prefab: load.prefab.clone(),
         root,
@@ -1109,6 +1231,46 @@ fn wait(load: &mut Load, reason: &str) {
         );
         load.waiting = Some(reason.to_owned());
     }
+}
+
+/// The director's SE clips. A cut-scene's director is on the view root, the
+/// child of the cut-scene root, so every one of them takes
+/// `SEBehaviour.OnBehaviourPlay`'s cut-scene branch ([`play_se_one_shot`]).
+fn cut_scene_se_clips(definition: &TimelineDefinition) -> Vec<TimelineClipKey> {
+    definition
+        .tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .filter(|clip| matches!(clip.payload, TimelinePayload::Se { .. }))
+        .map(|clip| clip.key.clone())
+        .collect()
+}
+
+/// `SEBehaviour.OnBehaviourPlay` of a cut-scene SE clip: the director's
+/// parent is named `CutSceneRoot`, so the clip's cue goes to
+/// `PlaySE(cueName, assetBundleName)`, which reads only the cue: an empty cue
+/// logs an error and plays nothing, any other is
+/// `SoundManager.PlaySEOneShot(cueName)`, a 2-D one-shot of the cue as the
+/// loaded banks hold it. The other branch (`Play3DSE` at the director's
+/// position) is for directors outside the cut-scene root. Nothing in the
+/// presenter stops SEs, so the sound outlives the cut-scene. The category is
+/// the cue's own where the export carries it, else the in-game family.
+fn play_se_one_shot(world: &mut World, cue: &str, package: &str, t: f64, bounds: &str) {
+    if cue.is_empty() {
+        error!("[cutscene] t={t:.4} SEClip {bounds}: SEBehaviour.PlaySE: the cue name is empty: the source logs that the SE does not exist; nothing plays");
+        return;
+    }
+    let Some(mut requests) = world.get_resource_mut::<crate::audio::SeRequests>() else {
+        error!("[cutscene] t={t:.4} SEClip {bounds}: PlaySEOneShot({cue}): the SE channel is not installed; nothing plays");
+        return;
+    };
+    requests.0.push(crate::audio::SeRequest {
+        owner: None,
+        cue: cue.to_owned(),
+        class: crate::audio::SeClass::Ingame,
+        source: "cut-scene SEClip",
+    });
+    info!("[cutscene] t={t:.4} SEClip {bounds}: SEBehaviour.OnBehaviourPlay under CutSceneRoot: PlaySEOneShot({cue}) (the clip's bundle {package:?} is not read); queued to the SE channel");
 }
 
 /// The package's particle document; `Ok(None)` while it loads.
@@ -1203,7 +1365,13 @@ fn prepare_effects(
         }
     };
     let mut pending = false;
-    let mut prefabs_seen: HashSet<i64> = HashSet::new();
+    // `EffectTrack.CreateEffectObject` keeps one instance per prefab in the
+    // track's own dictionary: the first clip of a prefab on a track
+    // instantiates it, a later clip of that prefab on the same track takes
+    // the same instance (`TryGetValue` hands it back into `EffectObject`),
+    // and a clip on another track gets its own. (Track, prefab) -> the clip
+    // that owns the instance.
+    let mut owners: HashMap<(SourceAssetId, String, i64), TimelineClipKey> = HashMap::new();
     for clip in clips {
         let TimelinePayload::CutScene(CutScenePayload::Effect(template)) = &clip.payload else {
             continue;
@@ -1221,12 +1389,59 @@ fn prepare_effects(
             );
             continue;
         };
-        // `CreateEffectObject` keys its instances by the prefab: a second
-        // clip of the same prefab shares the first one's instance, which is
-        // not handled here.
-        if !prefabs_seen.insert(prefab.game_object) {
-            refuse_effect(world, load, clip, "another effect clip of this cut-scene names the same prefab; a shared instance is not handled");
-            continue;
+        let name = clip.source_envelope["m_DisplayName"]
+            .as_str()
+            .unwrap_or("?")
+            .to_owned();
+        let prefab_key = (
+            clip.key.track.clone(),
+            prefab.file.clone(),
+            prefab.game_object,
+        );
+        match owners.get(&prefab_key) {
+            None => {
+                owners.insert(prefab_key, clip.key.clone());
+            }
+            Some(owner) => {
+                if matches!(
+                    load.effects.get(&clip.key),
+                    Some(EffectSlot::Ready(_)) | Some(EffectSlot::Refused)
+                ) {
+                    continue;
+                }
+                let shared = match load.effects.get(owner) {
+                    Some(EffectSlot::Ready(first)) => Ok(first.shared_with(
+                        name.clone(),
+                        template.matched_duration,
+                        template.random_seed,
+                        template.offset,
+                    )),
+                    Some(EffectSlot::Refused) => Err(()),
+                    _ => {
+                        pending = true;
+                        continue;
+                    }
+                };
+                match shared {
+                    Ok(instance) => {
+                        info!(
+                            "[cutscene] {}/{}: EffectTrack.CreateEffectObject({}): EffectClip {name} takes the instance an earlier clip of this prefab on its track made",
+                            load.package, load.prefab, prefab.name
+                        );
+                        load.effects
+                            .insert(clip.key.clone(), EffectSlot::Ready(Box::new(instance)));
+                    }
+                    Err(()) => {
+                        refuse_effect(
+                            world,
+                            load,
+                            clip,
+                            "the instance it shares with an earlier clip of this prefab on its track was refused",
+                        );
+                    }
+                }
+                continue;
+            }
         }
         let spawned = match load.effects.get(&clip.key) {
             Some(EffectSlot::Ready(_)) | Some(EffectSlot::Refused) => continue,
@@ -1283,10 +1498,6 @@ fn prepare_effects(
             );
             continue;
         }
-        let name = clip.source_envelope["m_DisplayName"]
-            .as_str()
-            .unwrap_or("?")
-            .to_owned();
         info!(
             "[cutscene] {}/{}: EffectTrack.CreateEffectObject({}): the template is deactivated and instantiated with no parent ({} nodes); GetComponentsInChildren<ParticleSystem>() lists {} systems, rootParticle {}; prepared on the particle host: {}",
             load.package,
@@ -1635,8 +1846,14 @@ fn presenter_fade_in(world: &mut World, plan: &Plan) {
 
 /// `SetupInternal`, then `CutSceneView.PlayAsync` starts the director.
 fn setup_internal(world: &mut World, plan: &mut Plan) -> Play {
+    // The caller's `onStartFadeInCallBack`, awaited first in `SetupInternal`.
     if let Caller::Cast(cast) = &plan.caller {
-        crate::gate_flow::cut_scene_started(world, cast);
+        match cast.play.caller {
+            CastCaller::Birthday => birthday::start_fade_in_callback(world, cast),
+            CastCaller::Invite | CastCaller::GoHome => {
+                crate::gate_flow::cut_scene_started(world, cast)
+            }
+        }
     }
     // Setup: ChangeState(CutScene) -> CutSceneGameState.OnEnter.
     game_state::enter(world, GameStateType::CutScene, "CutScenePresenter.Setup");
@@ -1657,7 +1874,11 @@ fn setup_internal(world: &mut World, plan: &mut Plan) -> Play {
             plan.hide_distance, plan.white, plan.black
         );
     }
-    info!("[cutscene] SetupInternal: SetupCamera; HideEffects (no hidden effect list); UI shown; SetupSkipEvent; BindComopnents: the brain on the field camera, the fade panel on the cut-scene screen, the obstacle tracks on the home site controller; DisableIK; LoadBgms; LoadVoice; PlayPreprocess");
+    match &mut plan.caller {
+        Caller::Cast(cast) => cast::hide_effects(world, cast),
+        _ => info!("[cutscene] SetupInternal: HideEffects: no focus object (the site-level caller passes none)"),
+    }
+    info!("[cutscene] SetupInternal: SetupCamera; UI shown; SetupSkipEvent; BindComopnents: the brain on the field camera, the fade panel on the cut-scene screen, the obstacle tracks on the home site controller; DisableIK; LoadBgms; LoadVoice; PlayPreprocess");
     let request = plan.request.take().expect("prepared request");
     let token = world
         .resource_mut::<FixtureActivityTimelines>()
@@ -1927,7 +2148,7 @@ fn play_frame(world: &mut World, plan: &mut Plan, play: &mut Play) -> bool {
                             template.random_seed
                         );
                         match instance {
-                            Some(instance) => effect_play(world, instance, t, local),
+                            Some(instance) => effect_play(world, instance, t, local, clip.duration),
                             None => info!("[cutscene] t={t:.4} EffectClip {name}: no instance (its template is null or it was refused at load): nothing plays"),
                         }
                     } else if exited {
@@ -1939,15 +2160,7 @@ fn play_frame(world: &mut World, plan: &mut Plan, play: &mut Play) -> bool {
                 }
                 TimelinePayload::Se { package, cue } => {
                     if entered {
-                        info!(
-                            "[cutscene] t={t:.4} SEClip {bounds}: cue {cue} of package {:?} starts: {}",
-                            package,
-                            if plan.silent.contains(&clip.key) {
-                                "silent (no audio route for it in this root)"
-                            } else {
-                                "played by the runner"
-                            }
-                        );
+                        play_se_one_shot(world, cue, package, t, &bounds);
                     }
                 }
                 TimelinePayload::Control(_) => {
@@ -1958,7 +2171,12 @@ fn play_frame(world: &mut World, plan: &mut Plan, play: &mut Play) -> bool {
                         if plan.controls.contains(&clip.key) {
                             info!("[cutscene] t={t:.4} Control clip {name} {bounds} play: driven by the runner through the particle host");
                         } else {
-                            info!("[cutscene] t={t:.4} Control clip {name} {bounds} play: refused by name (see the runner's coverage)");
+                            info!(
+                                "[cutscene] t={t:.4} Control clip {name} {bounds} play: refused at load: {}",
+                                plan.refused_controls
+                                    .get(&clip.key)
+                                    .map_or("not prepared by the runner", String::as_str)
+                            );
                         }
                     } else if exited {
                         info!("[cutscene] t={t:.4} Control clip {name} {bounds} stop");
@@ -1969,6 +2187,8 @@ fn play_frame(world: &mut World, plan: &mut Plan, play: &mut Play) -> bool {
         }
     }
     play.active = active;
+    let screen_cast = screen_cast(&plan.caller, &plan.prefab);
+    screen::frame(world, &mut plan.screen, t, &screen_cast);
     if let Caller::Cast(cast) = &mut plan.caller {
         cast::frame(world, cast, &definition, t);
     }
@@ -2124,8 +2344,13 @@ fn sample_effects(world: &mut World, plan: &Plan, play: &mut Play, t: f64) {
         return;
     }
     play.effect_sampled = now_real(world);
+    // Clips sharing an instance share its systems: each is sampled once.
+    let mut sampled = HashSet::new();
     for instance in plan.instances.values() {
         for (path, binding) in &instance.played {
+            if !sampled.insert(binding.root) {
+                continue;
+            }
             let (systems, live, born) = timeline::played_particles(world, binding.root);
             if live > 0 {
                 info!(
@@ -2153,17 +2378,36 @@ fn play_subtrees(world: &mut World, instance: &EffectInstance) -> usize {
     played
 }
 
-/// `EffectBehaviour.OnBehaviourPlay` at run time: no parent is set (the
-/// parent is looked up only outside play mode); a matched-duration clip
-/// without a looping system rewrites the systems' durations; the instance
-/// is placed at the clip's offset with the identity rotation; past 0.1 s of
-/// clip time the root particle is first simulated to it; then the root
+/// `EffectBehaviour.OnBehaviourPlay` at run time, in the source's order:
+/// the clip time is read as a float; a matched-duration clip without a
+/// looping system writes `main.duration = (float)clip duration - time` on
+/// every listed system; no parent is set (the parent is looked up only
+/// outside play mode); the instance is placed at the clip's offset with the
+/// identity rotation; when the clip time is past `0.1f` the root particle is
+/// first `Simulate(time, withChildren true, restart true)`; then the root
 /// particle plays with its children.
-fn effect_play(world: &mut World, instance: &EffectInstance, t: f64, local: f64) {
+///
+/// The duration write and the fast-forward go through the particle host's
+/// played-object calls on each played subtree; a refusal is named with the
+/// value the source writes, and the play goes on.
+fn effect_play(world: &mut World, instance: &EffectInstance, t: f64, local: f64, duration: f64) {
+    // `(float)playable.GetTime()`.
+    let time = local as f32;
     if instance.matched_duration && !instance.included_loop {
-        error!(
-            "[cutscene] t={t:.4} EffectClip {}: isMatchedDuration: the systems' main.duration writes are not in the particle host's API (named gap)",
-            instance.name
+        let value = duration as f32 - time;
+        let mut written = 0;
+        for (path, binding) in &instance.played {
+            match particles::set_played_object_duration(world, binding, &instance.listed_nodes, value) {
+                Ok(count) => written += count,
+                Err(error) => error!(
+                    "[cutscene] t={t:.4} EffectClip {}: {path}: main.duration = {value:.4} refused by the particle host: {error}",
+                    instance.name
+                ),
+            }
+        }
+        info!(
+            "[cutscene] t={t:.4} EffectClip {}: isMatchedDuration without a looping system: main.duration = {value:.4} written on {written} of the {} listed systems",
+            instance.name, instance.listed
         );
     }
     let position = moly_assets::coordinates::source_position(instance.offset);
@@ -2171,15 +2415,25 @@ fn effect_play(world: &mut World, instance: &EffectInstance, t: f64, local: f64)
         transform.translation = position;
         transform.rotation = Quat::IDENTITY;
     }
-    if local > 0.1 {
-        error!(
-            "[cutscene] t={t:.4} EffectClip {}: clip time {local:.4} > 0.1: rootParticle.Simulate({local:.4}, true, true) is not in the particle host's played API (named gap); the systems keep their clocks",
+    if time > SIMULATE_AFTER {
+        let mut simulated = 0;
+        for (path, binding) in &instance.played {
+            match particles::simulate_played_object(world, binding, time, true, true) {
+                Ok(count) => simulated += count,
+                Err(error) => error!(
+                    "[cutscene] t={t:.4} EffectClip {}: {path}: Simulate({time:.4}, true, true) refused by the particle host: {error}",
+                    instance.name
+                ),
+            }
+        }
+        info!(
+            "[cutscene] t={t:.4} EffectClip {}: clip time {time:.4} > 0.1: rootParticle.Simulate({time:.4}, true, true): {simulated} systems took the time update",
             instance.name
         );
     }
     let played = play_subtrees(world, instance);
     info!(
-        "[cutscene] t={t:.4} EffectClip {}: localPosition = offset {:?} (product {:?}), localRotation = identity; clip time {local:.4}; rootParticle {}.Play(): {played} systems played (the particle host keeps a playing object as it is)",
+        "[cutscene] t={t:.4} EffectClip {}: localPosition = offset {:?} (product {:?}), localRotation = identity; clip time {time:.4}; rootParticle {}.Play(): {played} systems played (the particle host keeps a playing object as it is)",
         instance.name,
         instance.offset,
         position,
@@ -2262,6 +2516,7 @@ fn end_async(world: &mut World, plan: &mut Plan, play: &Play) {
     } else {
         info!("[cutscene] RestoreStates (no cut-scene characters); ChangeParentCharacters; CutSceneView.Dispose: the director's graph stops");
     }
+    screen::stop(world, &mut plan.screen);
     for (level, value) in &play.dither {
         let (_, below) = rings_at(world, (*level).max(0) as u32);
         info!(
@@ -2285,8 +2540,16 @@ fn end_async(world: &mut World, plan: &mut Plan, play: &Play) {
     if let Caller::Cast(cast) = &mut plan.caller {
         let definition = plan.definition.clone();
         cast::after_dispose(world, cast, &definition);
-        info!("[cutscene] BGM restored (no cut-scene BGM)");
+        if cast.play.caller == CastCaller::Birthday {
+            crate::audio::cutscene::release_bgm(world, "EndAsync(restoreBGM false): the party sequence that takes the music over is not run here, so the cut-scene's BGM is handed back to the site's choice (named)");
+        } else {
+            crate::audio::cutscene::release_bgm(
+                world,
+                "EndAsync(restoreBGM true): the site's BGM plays again",
+            );
+        }
         show_all_fixtures(world);
+        cast::restore_effects(world, cast);
         let (_, end) = cast.fade_colors();
         info!("[cutscene] RestoreEffects; CutScenePresenter.FadeOutAsync(_endFadeColor ({:.2},{:.2},{:.2},{:.2})): ScreenLayerMysekaiMysekaiCutScene.FadeOut({LAYER_FADE} s)", end[0], end[1], end[2], end[3]);
         crate::screen_fade::cutscene_fade_out_color(
@@ -2297,13 +2560,15 @@ fn end_async(world: &mut World, plan: &mut Plan, play: &Play) {
         );
         return;
     }
-    info!("[cutscene] BGM restored (no cut-scene BGM); NPC Show; player Show");
+    crate::audio::cutscene::release_bgm(world, "EndAsync: the site's BGM plays again");
+    info!("[cutscene] NPC Show; player Show");
     show_all_fixtures(world);
     info!("[cutscene] RestoreEffects; CutScenePresenter.FadeOutAsync: ScreenLayerMysekaiMysekaiCutScene.FadeOut({LAYER_FADE} s)");
     crate::screen_fade::cutscene_fade_out(world, LAYER_FADE, "CutScenePresenter.FadeOutAsync");
 }
 
 pub(crate) fn install(app: &mut App) {
+    birthday::install(app);
     app.add_message::<HomeScreenStartAnimation>().add_systems(
         Update,
         (

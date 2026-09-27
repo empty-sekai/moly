@@ -83,6 +83,8 @@ pub(crate) enum CastCaller {
     Invite,
     /// `MysekaiGateUtility.TryShowGoHomeCutSceneAsync`.
     GoHome,
+    /// `BirthdayPartyPresenter.PlayCutSceneAsync` (see `super::birthday`).
+    Birthday,
 }
 
 impl CastCaller {
@@ -90,6 +92,7 @@ impl CastCaller {
         match self {
             Self::Invite => "PlayInviteCutSceneAsync",
             Self::GoHome => "TryShowGoHomeCutSceneAsync",
+            Self::Birthday => "BirthdayPartyPresenter.PlayCutSceneAsync",
         }
     }
 }
@@ -128,6 +131,8 @@ struct ViewFields {
     /// `_characterRoot`'s GameObject.
     character_root: Option<i64>,
     ik_list: usize,
+    /// `_setHiddenEffectDataList`.
+    hidden_effects: Vec<super::hidden_effects::HiddenEffect>,
 }
 
 /// A cast cut-scene from its load to the caller's return.
@@ -146,6 +151,8 @@ pub(crate) struct Cast {
     hidden_npcs: Vec<(Entity, Visibility)>,
     hidden_player: Vec<(Entity, Visibility)>,
     hidden_fixtures: Vec<Entity>,
+    /// `HideEffects` / `RestoreEffects` on the start object.
+    hidden_effects: super::hidden_effects::HiddenEffects,
     /// Activation tracks active on the last frame.
     active_tracks: HashSet<SourceAssetId>,
     /// Player activation and skip clips active on the last frame.
@@ -174,6 +181,7 @@ impl Cast {
             hidden_npcs: Vec::new(),
             hidden_player: Vec::new(),
             hidden_fixtures: Vec::new(),
+            hidden_effects: Default::default(),
             active_tracks: HashSet::new(),
             active_clips: HashSet::new(),
             pose_logged: HashMap::new(),
@@ -201,6 +209,15 @@ impl Cast {
 
     pub(crate) fn start(&self) -> Entity {
         self.play.start
+    }
+
+    /// Every member's character by unit, taken-over NPCs included (the
+    /// tracks bound to the unit's view).
+    pub(super) fn members(&self) -> Vec<(u32, Entity)> {
+        self.members
+            .iter()
+            .map(|member| (member.unit, member.entity))
+            .collect()
     }
 }
 
@@ -242,6 +259,7 @@ fn read_view(document: &Value, prefab: &str) -> Result<ViewFields, String> {
         root,
         character_root,
         ik_list: fields["_IKDataList"].as_array().map_or(0, Vec::len),
+        hidden_effects: super::hidden_effects::parse(fields),
     })
 }
 
@@ -395,6 +413,42 @@ fn spawn_view_nodes(
     Ok(count)
 }
 
+/// `CutSceneFactory` instantiates the view prefab under the cut-scene root:
+/// its nodes from the package's particle document, under `root`, which
+/// stands for the prefab root. Returns how many nodes were spawned.
+fn spawn_view(
+    world: &mut World,
+    particles: &Value,
+    root: Entity,
+    view: &ViewFields,
+) -> Result<usize, String> {
+    match view.root.as_ref() {
+        Some((file, id)) => {
+            let count = spawn_view_nodes(world, particles, root, (file, *id))?;
+            info!("[cutscene-cast] the view's {count} nodes are spawned from the package's particle document under the view root");
+            Ok(count)
+        }
+        None => {
+            warn!("[cutscene-cast] the view record names no root GameObject; no view node is spawned (the Control clips have no source object)");
+            Ok(0)
+        }
+    }
+}
+
+/// The view prefab's nodes for a caller without a cast (the site-level
+/// cut-scenes): the same instantiation, so that the director's Control
+/// clips find their exposed objects.
+pub(super) fn spawn_view_without_cast(
+    world: &mut World,
+    tracks_document: &Value,
+    particles: &Value,
+    prefab: &str,
+    root: Entity,
+) -> Result<usize, String> {
+    let view = read_view(tracks_document, prefab)?;
+    spawn_view(world, particles, root, &view)
+}
+
 /// The object spawned for a source GameObject under `root`.
 fn node_of(world: &World, root: Entity, game_object: i64) -> Option<Entity> {
     let mut stack = vec![root];
@@ -440,6 +494,14 @@ pub(super) fn prepare(
         cast.view = Some(read_view(tracks_document, prefab)?);
     }
     let view = cast.view.clone().unwrap_or_default();
+    if let Some(reason) = super::hidden_effects::prepare(
+        world,
+        &mut cast.hidden_effects,
+        &view.hidden_effects,
+        start,
+    )? {
+        return Ok(Step::Wait(reason));
+    }
     if !cast.placed {
         let Some(global) = world.get::<GlobalTransform>(start).copied() else {
             return Ok(Step::Wait(
@@ -470,20 +532,12 @@ pub(super) fn prepare(
         );
     }
     if !cast.nodes_spawned {
-        match (particles, view.root.as_ref()) {
-            (Some(document), Some((file, id))) => {
-                let count = spawn_view_nodes(world, document, root, (file, *id))?;
-                info!("[cutscene-cast] the view's {count} nodes are spawned from the package's particle document under the view root");
-            }
-            (None, _) => {
-                return Ok(Step::Wait(
-                    "the package's particle document is loading".into(),
-                ))
-            }
-            (_, None) => {
-                warn!("[cutscene-cast] the view record names no root GameObject; no view node is spawned (the Control clips have no source object)")
-            }
-        }
+        let Some(document) = particles else {
+            return Ok(Step::Wait(
+                "the package's particle document is loading".into(),
+            ));
+        };
+        spawn_view(world, document, root, &view)?;
         cast.character_root = view.character_root.and_then(|id| node_of(world, root, id));
         cast.nodes_spawned = true;
         info!(
@@ -516,13 +570,20 @@ pub(super) fn prepare(
             serde_json::from_str(&text).map_err(|error| format!("character registry: {error}"))?;
         for &unit in &cast.play.units.clone() {
             let present = present_npc(world, unit);
-            let (entity, taken_over) = match (cast.play.use_already_exist_character, present) {
+            // The birthday caller's start callback destroys every NPC and
+            // creates a new character of the unit before the presenter's
+            // FindNPC, so its member is a new avatar even when the unit is
+            // present now (see `super::birthday`).
+            let takes_over =
+                cast.play.use_already_exist_character && cast.play.caller != CastCaller::Birthday;
+            let (entity, taken_over) = match (takes_over, present) {
                 (true, Some(npc)) => {
                     let cancelled = crate::npc::gate_entries::take_over_for_cut_scene(world, npc);
                     info!("[cutscene-cast] Setup: unit {unit}: FindNPC found it; useAlreadyExistCharacter: taken over (TryCancelCurrentObjective {cancelled}, ForceUpdateCutSceneObjective, SetImmediatelyExecuteNextObjective(true))");
                     (npc, true)
                 }
-                (use_existing, present) => {
+                (_, present) => {
+                    let use_existing = cast.play.use_already_exist_character;
                     let clips = motion_clips(&registry, unit)
                         .ok_or_else(|| format!("unit {unit} is not in the character registry"))?;
                     let entity = world
@@ -846,6 +907,21 @@ pub(super) fn setup(
         error!("[cutscene-cast] SetupInternal: the view has no _characterRoot node; the characters keep their parents (named gap)");
     }
     info!("[cutscene-cast] SetupInternal: DisableIKCharacters: the characters' IK is off (the product has no character IK solver)");
+}
+
+/// `CutSceneView.HideEffects` on the start object (in `SetupInternal`).
+pub(super) fn hide_effects(world: &mut World, cast: &mut Cast) {
+    let list = cast
+        .view
+        .as_ref()
+        .map(|view| view.hidden_effects.clone())
+        .unwrap_or_default();
+    super::hidden_effects::hide(world, &mut cast.hidden_effects, &list, cast.play.start);
+}
+
+/// `CutSceneView.RestoreEffects` on the start object (in `EndAsync`).
+pub(super) fn restore_effects(world: &mut World, cast: &mut Cast) {
+    super::hidden_effects::restore(world, &mut cast.hidden_effects, cast.play.start);
 }
 
 /// `HideNearFixtures(hideFixtureDistance)`: every fixture whose master id is
@@ -1186,7 +1262,13 @@ pub(super) fn after_dispose(world: &mut World, cast: &mut Cast, definition: &Tim
                 .remove::<CutSceneCastLease>();
         }
     }
-    crate::gate_flow::cut_scene_end_callback(world, cast);
+    // The caller's `onEndFadeOutCallback`.
+    match cast.play.caller {
+        CastCaller::Birthday => super::birthday::end_fade_out_callback(world, cast),
+        CastCaller::Invite | CastCaller::GoHome => {
+            crate::gate_flow::cut_scene_end_callback(world, cast)
+        }
+    }
     let shown: Vec<Entity> = cast
         .hidden_npcs
         .drain(..)

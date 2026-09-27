@@ -24,13 +24,11 @@
 //! do); the transitioner canvas is a screen-space overlay canvas with its
 //! own scaler (1920 x 1080, match width), and the
 //! particle bakes against the root canvas as every UIParticle host here does.
-//! Named gaps, both the host's (its warn line names the first): its document
-//! reader wants a RectTransform on every node of the root, and three of this
-//! prefab's nine nodes (`root`, `tri_02`, `tri_03`) are plain Transforms; and
-//! it draws only the `Mysekai/Effect/UI-Uber` program, while this prefab's
-//! systems use `Sekai/Particles/UI-Default` (the two triangle systems) and
-//! `Sekai/Particles/UI/Additive` (the four flares). The placement, pause,
-//! head start, resume and destroy above are in place for when it admits them.
+//! The two triangle systems sit on plain Transforms and draw with
+//! `Sekai/Particles/UI-Default`, the four flares with
+//! `Sekai/Particles/UI/Additive`; the host is marked as on an overlay canvas
+//! (the transitioner's canvas is screen-space overlay), which sets
+//! UI-Default's depth test to Always.
 
 use bevy::{
     camera::visibility::RenderLayers,
@@ -39,7 +37,9 @@ use bevy::{
 };
 
 use super::law::WHITE_ALPHA_1;
-use crate::ui_particle::{UiParticleHeadStart, UiParticleHost, UiParticlePaused};
+use crate::ui_particle::{
+    UiParticleHeadStart, UiParticleHost, UiParticleOverlayCanvas, UiParticlePaused,
+};
 
 const COVER_LAYER: usize = 29;
 /// Above the balloon (1), site map (2), settings (100) and library (104)
@@ -155,6 +155,7 @@ pub(crate) fn spawn(mut commands: Commands, server: Res<AssetServer>) {
                 frame: HEAD_START_FRAME,
             },
             UiParticlePaused,
+            UiParticleOverlayCanvas,
             EntryStartParticle,
         ))
         .id();

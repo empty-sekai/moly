@@ -1,7 +1,9 @@
 //! Admission of one particle row under a UIParticle: the row's system runs
 //! on the shared particle runtime (its law parse, curve dispatch and the
 //! native birth owner the fixture host installs at Play), and its renderer
-//! draws the `Mysekai/Effect/UI-Uber` program through the canvas bake.
+//! draws one of the three UI particle programs through the canvas bake:
+//! `Mysekai/Effect/UI-Uber`, `Sekai/Particles/UI-Default` or
+//! `Sekai/Particles/UI/Additive`, selected by the material's shader name.
 //!
 //! Every control this path does not carry is refused by name; nothing is
 //! read as a default. The gates are the shared runtime's own entry points,
@@ -26,23 +28,48 @@ use serde_json::Value;
 
 use crate::particle_runtime::{EffectKind, Geometry, Rng, Runtime, SourceRoute};
 
-/// The one program this path draws.
+/// The programs this path draws, by shader name.
 pub(crate) const UI_UBER: &str = "Mysekai/Effect/UI-Uber";
+pub(crate) const UI_DEFAULT: &str = "Sekai/Particles/UI-Default";
+pub(crate) const UI_ADDITIVE: &str = "Sekai/Particles/UI/Additive";
+
+/// The program a UI particle material draws with. The values are the
+/// selector the wgsl reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UiProgram {
+    Uber = 0,
+    Default = 1,
+    Additive = 2,
+}
+
+/// `unity_GUIZTestMode`, the global the engine's canvas manager sets before
+/// it draws a canvas and that `Sekai/Particles/UI-Default`'s ZTest reads:
+/// `UI::InitializeDeviceForOverlay` (a screen-space overlay canvas) sets 8
+/// (Always), `UI::CanvasManager::EmitGeometryForCamera` (a canvas drawn by a
+/// camera) sets 4 (LessEqual).
+pub(crate) const GUI_ZTEST_OVERLAY: u8 = 8;
+pub(crate) const GUI_ZTEST_CAMERA: u8 = 4;
 
 /// Birth stream of this path, distinct from the weather, fixture and harvest
 /// streams (only the legacy step reads it; admitted rows run the native
 /// birth owner).
 const RNG_SEED: u64 = 0x7569_7061_0001_0001;
 
-/// How a UI-Uber material draws: its texture, `_MainTex_ST`, `_BlendMode`
-/// and the pass state of the pass the UI draw takes.
+/// How a UI particle material draws: its program, texture, `_MainTex_ST`,
+/// the program's own material values and the pass state of the pass the UI
+/// draw takes.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct UiUberDraw {
+pub(crate) struct UiDraw {
+    pub(crate) program: UiProgram,
     /// `_MainTex`, relative to the document's directory.
     pub(crate) texture: String,
     pub(crate) main_tex_st: [f32; 4],
-    /// `_BlendMode` (0 and 1 keep the colour, 2 multiplies it by alpha).
+    /// UI-Uber's `_BlendMode` (0 and 1 keep the colour, 2 multiplies it by
+    /// alpha); 0 for the other programs, which have no such property.
     pub(crate) blend_mode: u32,
+    /// UI-Default's `_Color` (the vertex program multiplies the vertex colour
+    /// by all four channels); `None` for the other programs, which have none.
+    pub(crate) color: Option<[f32; 4]>,
     pub(crate) state: SourceRenderState,
     /// The material as exported; equal materials merge into one submesh the
     /// way `GetMaterialHash` merges them.
@@ -53,7 +80,7 @@ pub(crate) struct UiUberDraw {
 pub(crate) struct Admitted {
     pub(crate) runtime: Runtime,
     pub(crate) route: SourceRoute,
-    pub(crate) draw: UiUberDraw,
+    pub(crate) draw: UiDraw,
     pub(crate) space: super::bake::Space,
     /// The renderer's `maxParticleSize`, checked against the baking camera.
     pub(crate) max_particle_size: f32,
@@ -83,13 +110,17 @@ fn ui_pass<'a>(material: &'a Value) -> Result<&'a Value, String> {
 }
 
 /// A render-state field: a property-bound one reads the material float (or
-/// the shader's default), a fixed one its compiled value.
-fn state_value(field: &Value, floats: &Value, label: &str) -> Result<u8, String> {
+/// the shader's default), a fixed one its compiled value, and one bound to
+/// `unity_GUIZTestMode` the value the canvas manager sets for the host's
+/// canvas (`gui_ztest`).
+fn state_value(field: &Value, floats: &Value, gui_ztest: u8, label: &str) -> Result<u8, String> {
     let name = field["name"]
         .as_str()
         .ok_or_else(|| format!("pass {label} has no binding name"))?;
     let value = if name.is_empty() || name == "<noninit>" {
         field["val"].as_f64()
+    } else if name == "unity_GUIZTestMode" {
+        Some(f64::from(gui_ztest))
     } else {
         floats
             .get(name)
@@ -103,20 +134,28 @@ fn state_value(field: &Value, floats: &Value, label: &str) -> Result<u8, String>
     Ok(value as u8)
 }
 
-/// The draw of a UI-Uber material.
-pub(crate) fn ui_uber_draw(material: &Value) -> Result<UiUberDraw, String> {
+/// The draw of a UI particle material. Each of the three programs has one
+/// variant, compiled without keywords, so a material with keywords is
+/// refused. `gui_ztest` is the canvas manager's `unity_GUIZTestMode` for the
+/// host's canvas.
+pub(crate) fn ui_draw(material: &Value, gui_ztest: u8) -> Result<UiDraw, String> {
     let shader = material["shader"]["name"].as_str().unwrap_or("<unnamed>");
-    if shader != UI_UBER {
-        return Err(format!(
-            "material shader {shader}: only {UI_UBER} draws on a canvas bake here"
-        ));
-    }
+    let program = match shader {
+        UI_UBER => UiProgram::Uber,
+        UI_DEFAULT => UiProgram::Default,
+        UI_ADDITIVE => UiProgram::Additive,
+        _ => {
+            return Err(format!(
+                "material shader {shader}: only {UI_UBER}, {UI_DEFAULT} and {UI_ADDITIVE} draw on a canvas bake here"
+            ))
+        }
+    };
     if material["keywords"]
         .as_array()
         .is_none_or(|k| !k.is_empty())
     {
         return Err(format!(
-            "material keywords {}: the UI-Uber program has none",
+            "material keywords {}: the {shader} program has one variant, without keywords",
             material["keywords"]
         ));
     }
@@ -124,7 +163,7 @@ pub(crate) fn ui_uber_draw(material: &Value) -> Result<UiUberDraw, String> {
     let pass = ui_pass(material)?;
     let state = &pass["renderState"];
     let blend = &state["blend"];
-    let read = |field: &Value, label: &str| state_value(field, floats, label);
+    let read = |field: &Value, label: &str| state_value(field, floats, gui_ztest, label);
     let state = SourceRenderState {
         cull: read(&state["culling"], "culling")?,
         depth_test: read(&state["zTest"], "zTest")?,
@@ -153,14 +192,35 @@ pub(crate) fn ui_uber_draw(material: &Value) -> Result<UiUberDraw, String> {
     {
         return Err(format!("pass state {state:?} is outside the engine enums"));
     }
-    let blend_mode = floats["_BlendMode"]
-        .as_f64()
-        .ok_or("material lacks _BlendMode")?;
-    // The program switches on the int: 0 and 1 keep the colour, 2 multiplies
-    // it by alpha, any other value keeps it (the default arm).
-    if blend_mode.fract() != 0.0 || !(0.0..=u32::MAX as f64).contains(&blend_mode) {
-        return Err(format!("_BlendMode {blend_mode} is not an int"));
-    }
+    let blend_mode = if program == UiProgram::Uber {
+        let blend_mode = floats["_BlendMode"]
+            .as_f64()
+            .ok_or("material lacks _BlendMode")?;
+        // The program switches on the int: 0 and 1 keep the colour, 2
+        // multiplies it by alpha, any other value keeps it (the default arm).
+        if blend_mode.fract() != 0.0 || !(0.0..=u32::MAX as f64).contains(&blend_mode) {
+            return Err(format!("_BlendMode {blend_mode} is not an int"));
+        }
+        blend_mode as u32
+    } else {
+        0
+    };
+    let color = if program == UiProgram::Default {
+        let value = material["colors"]["_Color"]
+            .as_array()
+            .filter(|v| v.len() == 4)
+            .ok_or("material has no four-channel _Color")?;
+        let mut color = [0.0f32; 4];
+        for (slot, channel) in color.iter_mut().zip(value) {
+            *slot = channel
+                .as_f64()
+                .filter(|v| v.is_finite())
+                .ok_or("_Color channel not finite")? as f32;
+        }
+        Some(color)
+    } else {
+        None
+    };
     let texture = material["textures"]["_MainTex"]
         .as_str()
         .ok_or("material has no _MainTex texture")?
@@ -176,10 +236,12 @@ pub(crate) fn ui_uber_draw(material: &Value) -> Result<UiUberDraw, String> {
             .filter(|v| v.is_finite())
             .ok_or("_MainTex scale and offset not finite")? as f32;
     }
-    Ok(UiUberDraw {
+    Ok(UiDraw {
+        program,
         texture,
         main_tex_st,
-        blend_mode: blend_mode as u32,
+        blend_mode,
+        color,
         state,
         identity: material.to_string(),
     })
@@ -198,11 +260,14 @@ fn triple(value: &Value) -> Option<[f32; 3]> {
 /// system node's own local scale (the Local scaling mode reads it);
 /// `has_rigidbody` whether the prefab carries a Rigidbody (the Rigidbody
 /// emitter velocity mode falls back to the Transform mode without one, as the
-/// weather host resolves it).
+/// weather host resolves it); `gui_ztest` the canvas manager's
+/// `unity_GUIZTestMode` for the host's canvas.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn admit(
     row: &Value,
     local_scale: Vec3,
     has_rigidbody: bool,
+    gui_ztest: u8,
     mesh: Handle<Mesh>,
     host: Entity,
     ordinal: u64,
@@ -212,12 +277,16 @@ pub(crate) fn admit(
         .get("renderer")
         .filter(|v| v.is_object())
         .ok_or("no renderer")?;
-    let draw = ui_uber_draw(&renderer["material"])?;
-    if renderer["sortingLayerId"].as_i64() != Some(0)
-        || renderer["maskInteraction"].as_i64() != Some(0)
-    {
-        return Err("sorting layer or sprite mask needs its renderer owner".into());
-    }
+    let draw = ui_draw(&renderer["material"], gui_ztest)?;
+    // The renderer's sorting layer, sorting order and sprite-mask interaction
+    // are not read on this path. The UIParticle turns the renderer off at
+    // OnEnable, so the renderer's own draw (where the engine picks its render
+    // function by mask interaction and sorts by layer and order) never runs;
+    // the engine's BakeMesh does not read the mask interaction field, and no
+    // managed code can (the build has no accessor for it on any renderer).
+    // The one managed reader of the sorting layer and order is the
+    // UIParticle's SortForRendering, which runs only when OnEnable finds
+    // `m_Particles` empty; the host refuses an empty list.
     let mode = match renderer["renderMode"].as_str().unwrap_or("") {
         "Billboard" => crate::source_billboard::Mode::Billboard,
         "HorizontalBillboard" => crate::source_billboard::Mode::Horizontal,
@@ -340,8 +409,14 @@ pub(crate) fn admit(
     if emitter.ring_buffer_mode != moly_law::particle::RingBufferMode::Disabled {
         return Err("ring buffer mode: not verified on this host".into());
     }
-    if crate::particle_runtime::has_start_delay(&emitter) {
-        return Err("start delay: not verified on this host".into());
+    // A constant start delay: the first Play writes it to the system state's
+    // start delay word and the native update counts it down (the native birth
+    // path is required below). A random one is evaluated with the system
+    // seed's hash, which is not transcribed.
+    if crate::particle_runtime::has_start_delay(&emitter)
+        && crate::particle_runtime::play_start_delay(&emitter).is_none()
+    {
+        return Err("random start delay: Play's seed-hash evaluation is not transcribed".into());
     }
     if crate::particle_runtime::has_distance_emission(&emitter) {
         return Err(
