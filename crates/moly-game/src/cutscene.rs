@@ -2387,16 +2387,26 @@ fn play_subtrees(world: &mut World, instance: &EffectInstance) -> usize {
 /// first `Simulate(time, withChildren true, restart true)`; then the root
 /// particle plays with its children.
 ///
-/// The duration write and the fast-forward are the particle host's
-/// played-object calls, which it does not have yet: each is refused by name
-/// with the exact value the source writes, and the play goes on.
+/// The duration write and the fast-forward go through the particle host's
+/// played-object calls on each played subtree; a refusal is named with the
+/// value the source writes, and the play goes on.
 fn effect_play(world: &mut World, instance: &EffectInstance, t: f64, local: f64, duration: f64) {
     // `(float)playable.GetTime()`.
     let time = local as f32;
     if instance.matched_duration && !instance.included_loop {
-        let written = duration as f32 - time;
-        error!(
-            "[cutscene] t={t:.4} EffectClip {}: isMatchedDuration without a looping system: main.duration = {written:.4} on each of the {} listed systems is not in the particle host's played API (named gap); the systems keep their serialized durations",
+        let value = duration as f32 - time;
+        let mut written = 0;
+        for (path, binding) in &instance.played {
+            match particles::set_played_object_duration(world, binding, &instance.listed_nodes, value) {
+                Ok(count) => written += count,
+                Err(error) => error!(
+                    "[cutscene] t={t:.4} EffectClip {}: {path}: main.duration = {value:.4} refused by the particle host: {error}",
+                    instance.name
+                ),
+            }
+        }
+        info!(
+            "[cutscene] t={t:.4} EffectClip {}: isMatchedDuration without a looping system: main.duration = {value:.4} written on {written} of the {} listed systems",
             instance.name, instance.listed
         );
     }
@@ -2406,8 +2416,18 @@ fn effect_play(world: &mut World, instance: &EffectInstance, t: f64, local: f64,
         transform.rotation = Quat::IDENTITY;
     }
     if time > SIMULATE_AFTER {
-        error!(
-            "[cutscene] t={t:.4} EffectClip {}: clip time {time:.4} > 0.1: rootParticle.Simulate({time:.4}, true, true) is not in the particle host's played API (named gap); the systems keep their clocks",
+        let mut simulated = 0;
+        for (path, binding) in &instance.played {
+            match particles::simulate_played_object(world, binding, time, true, true) {
+                Ok(count) => simulated += count,
+                Err(error) => error!(
+                    "[cutscene] t={t:.4} EffectClip {}: {path}: Simulate({time:.4}, true, true) refused by the particle host: {error}",
+                    instance.name
+                ),
+            }
+        }
+        info!(
+            "[cutscene] t={t:.4} EffectClip {}: clip time {time:.4} > 0.1: rootParticle.Simulate({time:.4}, true, true): {simulated} systems took the time update",
             instance.name
         );
     }
