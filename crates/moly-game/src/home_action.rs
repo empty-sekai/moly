@@ -176,8 +176,10 @@ pub(crate) enum HomeActionRequest {
     Craft { fixture: FixtureTarget },
     /// A canvas painting, started from the same workbench's craft screen.
     Draw { fixture: FixtureTarget },
-    /// A sketch from the sketch screen (game state 9).
-    Sketch,
+    /// A sketch from the sketch screen (game state 9) of the target
+    /// fixture's blueprint (`sketchTargetBpId`; None while the sketch screen,
+    /// which picks it, is not built).
+    Sketch { blueprint: Option<i32> },
 }
 
 /// The skip button.
@@ -268,6 +270,8 @@ struct Sequence {
     se_scope: Option<Entity>,
     /// The target fixture's kept craft effect (its ticket).
     effect: Option<u64>,
+    /// The sketch's target blueprint (`sketchTargetBpId`).
+    sketch_blueprint: Option<i32>,
     events: Vec<(f32, String, String)>,
     fired: usize,
     last_probe: f32,
@@ -682,10 +686,14 @@ fn start(world: &mut World, actions: &mut HomeActions, request: HomeActionReques
         warn!("[home-action] {request:?} dropped: {:?} is still playing", sequence.action);
         return;
     }
+    let mut sketch_blueprint = None;
     let (action, target) = match request {
         HomeActionRequest::Craft { fixture } => (HomeAction::Craft, Some(fixture)),
         HomeActionRequest::Draw { fixture } => (HomeAction::Draw, Some(fixture)),
-        HomeActionRequest::Sketch => (HomeAction::Sketch, None),
+        HomeActionRequest::Sketch { blueprint } => {
+            sketch_blueprint = blueprint;
+            (HomeAction::Sketch, None)
+        }
     };
     if action == HomeAction::Sketch && world.get_resource::<SketchGameState>().is_none() {
         warn!("[home-action] Sketch requested outside game state 9; the sketch screen sends it from that state");
@@ -714,6 +722,7 @@ fn start(world: &mut World, actions: &mut HomeActions, request: HomeActionReques
         skipped: false,
         se_scope: None,
         effect: None,
+        sketch_blueprint,
         events: Vec::new(),
         fired: 0,
         last_probe: f32::NEG_INFINITY,
@@ -834,7 +843,18 @@ fn end(world: &mut World, actions: &mut HomeActions, sequence: &mut Sequence) ->
             set_gate(world, true);
             change_state(world, sequence, PlayerActionState::Idle);
             info!("[home-action] t={t:.3} SetInterceptFlag(true), ChangeState(Idle); SetNoticeWait: no counterpart");
-            info!("[home-action] t={t:.3} SketchUtility.ShowSketchResultDialog and UpdateInfo: the screen's owner; no time passes here");
+            // `await SketchUtility.ShowSketchResultDialog(sketchTargetBpId,
+            // onClose)` awaits the dialog's Setup, not its close (the onClose
+            // re-enables the sketch screen's UI, the screen's owner's).
+            match sequence.sketch_blueprint {
+                Some(blueprint) => {
+                    let ticket = world
+                        .resource_mut::<crate::get_resource::GetResourceOpeners>()
+                        .show_sketch_result(blueprint);
+                    info!("[home-action] t={t:.3} SketchUtility.ShowSketchResultDialog({blueprint}) (ticket {ticket}); its Setup takes no time here; UpdateInfo: the screen's owner");
+                }
+                None => warn!("[home-action] t={t:.3} SketchUtility.ShowSketchResultDialog not called: the request names no target blueprint (the sketch screen that picks it is not built)"),
+            }
             camera_back(world, sequence);
             // Created after this frame's check: counts from the next frame.
             sequence.phase = Phase::ClearDelay(Delay::new(SKETCH_CLEAR_DELAY));
@@ -958,6 +978,13 @@ pub(crate) fn advance(world: &mut World) {
     });
 }
 
+/// The sketch target blueprint the instruments name
+/// (`MOLY_HOME_ACTION_SKETCH_BLUEPRINT`; game mode reads none).
+fn sketch_blueprint_instrument() -> Option<i32> {
+    crate::server::client::instrument_env("MOLY_HOME_ACTION_SKETCH_BLUEPRINT")
+        .and_then(|raw| raw.trim().parse::<i32>().ok())
+}
+
 /// Update: the stand-in keys (J craft, K canvas, L sketch mode then sketch,
 /// U skip, I leave sketch mode).
 #[allow(clippy::too_many_arguments)]
@@ -981,7 +1008,9 @@ pub(crate) fn stand_in(
     }
     if keys.just_pressed(KeyCode::KeyL) {
         if sketch_state.is_some() {
-            requests.write(HomeActionRequest::Sketch);
+            requests.write(HomeActionRequest::Sketch {
+                blueprint: sketch_blueprint_instrument(),
+            });
             info!("[home-action] stand-in L: sketch");
         } else {
             sketch.write(SketchModeRequest::Enter);
@@ -1133,7 +1162,9 @@ pub(crate) fn autoplay(
         if run.arrived_at.is_some_and(|at| now - at >= 1.0) {
             run.sent = true;
             run.sent_at = Some(now);
-            requests.write(HomeActionRequest::Sketch);
+            requests.write(HomeActionRequest::Sketch {
+                blueprint: sketch_blueprint_instrument(),
+            });
             info!("[home-action] instrument: the sketch screen's request");
         }
         return;

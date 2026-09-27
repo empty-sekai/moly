@@ -556,6 +556,10 @@ pub(crate) fn parse(
         Option<Res<crate::delivery::screen::DeliveryScreen>>,
         Option<Res<crate::delivery::screen::DeliveryCharset>>,
     ),
+    (get_resource_inputs, get_resource): (
+        Option<Res<crate::get_resource::GetResourceInputs>>,
+        Option<Res<crate::get_resource::GetResourceCharset>>,
+    ),
 ) {
     let Some(handle) = handle else { return; };
     // A stage does not render prefab-based menus or their fixed button labels.
@@ -582,6 +586,9 @@ pub(crate) fn parse(
     // The delivery screen's item names (read from materials.json), when the
     // delivery screen is installed.
     if delivery_screen.is_some() && delivery.is_none() { return; }
+    // The acquisition dialogs' names and wordings (masters and wordings
+    // read), when the acquisition dialogs are installed.
+    if get_resource_inputs.is_some() && get_resource.is_none() { return; }
     let parsed: Value = serde_json::from_str(&asset.0).expect("site name document");
     let rows = parsed["sites"].as_array().expect("site name rows");
     let mut chars = layouts.text_chars();
@@ -596,6 +603,9 @@ pub(crate) fn parse(
     }
     if let Some(delivery) = delivery.as_deref() {
         chars.extend(delivery.chars.iter().copied());
+    }
+    if let Some(get_resource) = get_resource.as_deref() {
+        chars.extend(get_resource.chars.iter().copied());
     }
     for wording in ["WORD_LEFT_ROOM", "WORD_CANCEL", "MSG_CONFIRM_LEAVE_MYSEKAI",
         "WORD_NOT_SAVE_RETURN", "WORD_SAVE_RETURN", "WORD_EDIT_SAVE_CONFIRMATION", "MSG_LEARN_PHENOMENA"]

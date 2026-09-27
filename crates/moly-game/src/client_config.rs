@@ -115,6 +115,10 @@ pub(crate) const KEY_DROP_ITEM_APPROACH_DISTANCE: i32 = 90;
 /// FloatConfigs key 91).
 pub(crate) const KEY_BOOST_STAMINA_ANIMATION_SPEED: i32 = 91;
 
+/// Delay before the harvest stamina gauge's decrease animation, seconds
+/// (StaminaUIAnimationAwaitTime, FloatConfigs key 92).
+pub(crate) const KEY_STAMINA_UI_ANIMATION_AWAIT_TIME: i32 = 92;
+
 /// Random scale bounds of trees and stones (HarvestObjectScaleMin /
 /// HarvestObjectScaneMax, FloatConfigs keys 130 / 131).
 pub(crate) const KEY_HARVEST_OBJECT_SCALE_MIN: i32 = 130;

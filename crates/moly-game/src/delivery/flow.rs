@@ -76,10 +76,11 @@
 //! token; the Idle state it changes to on arrival plays `c_000_mov_idle_00`
 //! (0.25 s) and the animator goes back to locomotion.
 //!
-//! Named gaps: the refresh dialog has no view in this product (as the reward dialogs in
-//! `honor`): `Setup`'s icon (`icon_refresh.png` of the party's bundle
-//! through `_iconLoader`) is not drawn, the open animation passes at once
-//! and the dialog closes on the screen manager's back key.
+//! The refresh dialog's view is the acquisition module's
+//! ([`crate::get_resource`]), which gets the party as its Setup argument;
+//! `Setup`'s icon (`icon_refresh.png` of the party's bundle through
+//! `_iconLoader`) is not on the roots and is not drawn, and the open
+//! animation passes at once.
 
 use bevy::diagnostic::FrameCount;
 use bevy::ecs::system::SystemParam;
@@ -302,6 +303,7 @@ pub(crate) struct FlowWorld<'w, 's> {
     timelines: Option<Res<'w, crate::fixture_activity_timeline::FixtureActivityTimelines>>,
     bloom: ResMut<'w, super::bloom::DeliveryBloom>,
     screens: ResMut<'w, ScreenManager>,
+    openers: ResMut<'w, crate::get_resource::GetResourceOpeners>,
     back_keys: MessageReader<'w, 's, DialogBackKeyEvent>,
     awaiting: ResMut<'w, DialogAwait>,
     graphs: ResMut<'w, Assets<AnimationGraph>>,
@@ -524,9 +526,13 @@ fn show_refresh(world: &mut FlowWorld, party_id: i32) -> Option<DialogId> {
         Ok(dialog) => {
             world.screens.open_dialog(dialog);
             world.screens.dialog_open_finished(dialog);
+            world.openers.set_reward_payload(
+                dialog,
+                crate::get_resource::RewardPayload::Refresh { party_id },
+            );
             world.awaiting.refresh = Some(dialog);
             info!(
-                "[delivery] {caller}: {REFRESH_DIALOG:?} shown on {} and opened; Setup(birthday party {party_id}): icon_refresh.png of the party's bundle (no view in this product); DestroySiteAllHarvestFixtures: no HarvestSiteController is listed at a delivery site; awaiting its onClose (the back key closes it)",
+                "[delivery] {caller}: {REFRESH_DIALOG:?} shown on {} and opened; Setup(birthday party {party_id}): icon_refresh.png of the party's bundle (not on the roots; the view is the acquisition module's); DestroySiteAllHarvestFixtures: no HarvestSiteController is listed at a delivery site; awaiting its onClose (the back key closes it)",
                 DisplayLayerType::LayerOverlay.label()
             );
             Some(dialog)

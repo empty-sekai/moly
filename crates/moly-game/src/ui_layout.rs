@@ -222,6 +222,7 @@ const OPTIONAL_DOCUMENTS: &[(&str, &str)] = &[
     ("CommonReward", "menu/CommonRewardSubWindowDialog.json"),
     ("HonorReward", "menu/HonorRewardSubWindowDialog.json"),
     ("RefreshBirthdayPlant", "menu/MysekaiRefreshBirthdayPlantSubWindowDialog.json"),
+    ("HonorImage", "menu/UIPartsHonorImage.json"),
     ("BgmSelect", "bgmselect/ScreenLayerMysekaiBGMSelect.json"),
     ("BgmSelectListCell", "bgmselect/MysekaiBGMSelectListCell.json"),
     ("Inventory", "inventory/ScreenLayerMysekaiInventory.json"),

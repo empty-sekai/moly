@@ -57,6 +57,8 @@ pub(crate) mod particles;
 mod possession;
 mod tone;
 mod tool_model;
+mod stamina_hud;
+mod tool_view;
 mod ui;
 
 use std::collections::HashMap;
@@ -745,6 +747,7 @@ impl Plugin for HarvestPlugin {
             .init_resource::<action::HarvestCameraShakes>()
             .init_resource::<action::HarvestAutoplay>()
             .init_resource::<ui::HarvestButton>()
+            .init_resource::<stamina_hud::HarvestStaminaHud>()
             .init_resource::<tool_model::HarvestToolModels>()
             .init_resource::<tool_model::ToolModelRequests>()
             .init_resource::<queue::HarvestLogQueue>()
@@ -793,8 +796,8 @@ impl Plugin for HarvestPlugin {
             .add_systems(
                 Update,
                 (
-                    ui::spawn_when_ready,
-                    ui::read_input,
+                    (ui::spawn_when_ready, stamina_hud::spawn_when_ready).chain(),
+                    (ui::read_input, tool_view::open_tool_selector).chain(),
                     action::autoplay_press,
                     action::update_targets,
                     (action::advance, action::hold_for_auto_move).chain(),
@@ -811,7 +814,7 @@ impl Plugin for HarvestPlugin {
                     pickup::collect_on_leave,
                     pickup::advance,
                     (tool_model::apply, tool_model::swap_materials).chain(),
-                    ui::place,
+                    (ui::place, stamina_hud::advance).chain(),
                     queue::advance,
                 )
                     .chain()

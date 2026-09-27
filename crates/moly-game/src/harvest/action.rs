@@ -45,8 +45,8 @@
 //! effect part of a hit, `damage::on_effect_only`) and the camera shake;
 //! `PostStartAction` turns a treasure box away from the player.
 //!
-//! Named gaps: the tone camera; the stamina gauge, HUD and AISAC; the tool
-//! selector; `EnableMysekaiHarvestButton` (menu, mission, site map and
+//! Named gaps: the tone camera; the AISAC; the stamina gauge's fill tweens
+//! (see `stamina_hud`); the tool selector's drawing (see `tool_view`); `EnableMysekaiHarvestButton` (menu, mission, site map and
 //! selected-tool views are not disabled during the action). The AutoMove's
 //! agent is the walk-field stepper (steering corner by corner at the agent
 //! speed, clamped at each corner), not a NavMeshAgent; the pitch `LookAt`
@@ -72,6 +72,7 @@ use super::law::{
 use super::prop_animator::{PropAnimatorCalls, PropCall};
 use super::queue::{HarvestLogQueue, HarvestStack, Stack};
 use super::server_mock::UserTool;
+use super::stamina_hud::HarvestStaminaHud;
 use super::tool_model::{ToolModelRequest, ToolModelRequests};
 use super::ui::HarvestButton;
 use super::{
@@ -159,6 +160,24 @@ impl HarvestPlayerModel {
         }
         self.selected = choice;
         choice
+    }
+
+    /// `GetTargetTools()`: with a selected tool, the user tools of its type
+    /// with a quantity above zero, in user list order; none without one.
+    pub(crate) fn target_tools(&self, catalog: &HarvestCatalog) -> Option<Vec<i64>> {
+        let tool_type = catalog.tool(self.selected?)?.tool_type;
+        Some(
+            self.tools
+                .iter()
+                .filter(|tool| {
+                    tool.quantity > 0
+                        && catalog
+                            .tool(tool.tool_id)
+                            .is_some_and(|def| def.tool_type == tool_type)
+                })
+                .map(|tool| tool.tool_id)
+                .collect(),
+        )
     }
 
     /// Event 30: the tool list from the server; the choice survives while
@@ -325,6 +344,7 @@ fn tool_clock(def: &ToolDef) -> ToolClock {
 /// `UpdateHarvestUI(model)`.
 fn update_harvest_ui(
     button: &mut HarvestButton,
+    hud: &mut HarvestStaminaHud,
     model: &HarvestPlayerModel,
     catalog: &HarvestCatalog,
     object: &HarvestObject,
@@ -332,6 +352,22 @@ fn update_harvest_ui(
     if object.status == STATUS_HARVESTED {
         button.hide();
         return;
+    }
+    // ShowHarvestUI: UpdateToolView, then UpdateToolIcon and the button's
+    // SetActive(true) (at once for a cached icon, else once it loads).
+    let target_tool_count = model.target_tools(catalog).map_or(0, |tools| tools.len());
+    super::tool_view::update_tool_view(
+        &mut button.tools,
+        model
+            .selected
+            .and_then(|id| super::tool_view::content_of(model, catalog, id)),
+        target_tool_count,
+        object.fixture_type,
+    );
+    button.show_harvest_ui(object.fixture_type);
+    // The HUD's Show when the stamina is empty.
+    if model.stamina.is_empty() {
+        hud.show();
     }
     let tool = model
         .selected
@@ -348,7 +384,6 @@ fn update_harvest_ui(
         object.last_attack_stamina,
         tool.map(|(def, _)| def.attack_power),
     );
-    button.shown = true;
     button.interactable = has_tool;
     button.cover = !has_tool || !has_stamina;
     button.cannot = !has_tool;
@@ -478,6 +513,7 @@ pub(crate) struct ActionWorld<'w> {
     effect_only: ResMut<'w, super::damage::HarvestEffectOnly>,
     turns: ResMut<'w, super::damage::HarvestTurnRequests>,
     navigation: Option<Res<'w, PlayerFixtureNavigation>>,
+    hud: ResMut<'w, HarvestStaminaHud>,
 }
 
 /// Update: contacts and the target (`OnCollisionEnter/Exit`, `OnUpdate`,
@@ -493,6 +529,7 @@ pub(crate) fn update_targets(
     mut button: ResMut<HarvestButton>,
     mut tool_models: ResMut<ToolModelRequests>,
     mut bgm_fade: Option<ResMut<crate::audio::MysekaiBgmFade>>,
+    mut hud: ResMut<HarvestStaminaHud>,
 ) {
     let (Some(catalog), Some(model)) = (catalog, model.as_deref_mut()) else {
         return;
@@ -538,8 +575,9 @@ pub(crate) fn update_targets(
     }
     targeting.contacts = contacts;
     if had && targeting.contacts.is_empty() {
-        info!("[harvest] OnCollisionExit of the last object: harvest UI hidden, tool model hidden");
+        info!("[harvest] OnCollisionExit of the last object: harvest UI hidden, tool model hidden, HUD Hide");
         button.hide();
+        hud.hide();
         tool_models.0.push(ToolModelRequest::Hide);
     }
     if targeting.contacts.is_empty() {
@@ -567,7 +605,13 @@ pub(crate) fn update_targets(
     };
     let tool = model.set_appropriate_tool(&catalog, object.fixture_type);
     show_tool_model(&mut tool_models, model, &catalog, tool, object.fixture_type);
-    update_harvest_ui(&mut button, model, &catalog, object);
+    // ChangeTool(selected)'s view part: the selector hidden; with a tool, the
+    // selected-tool view active unless the target is harvested, its content
+    // and the tool name.
+    if let Some(content) = tool.and_then(|id| super::tool_view::content_of(model, &catalog, id)) {
+        super::tool_view::change_tool(&mut button.tools, content, object.status == STATUS_HARVESTED);
+    }
+    update_harvest_ui(&mut button, &mut hud, model, &catalog, object);
     info!(
         "[harvest] OnChangeTargetHarvestObject {}#{} ({}) at ({}, {}): tool {:?}; button interactable {} cover {}",
         object.leaf,
@@ -938,6 +982,7 @@ fn admit(
         object.last_attack_stamina,
     );
     if model.stamina.is_empty() || !can_attack {
+        world.hud.lack_of_stamina();
         super::damage::push_se(&mut world.se, "se_emo_surprise", "harvest-stamina");
         info!(
             "[harvest] PlayHarvestAction: LackOfStamina (stamina {:?}, tool power {:?}, hp {}, last-attack stamina {}): se_emo_surprise",
@@ -1404,6 +1449,8 @@ fn swing(
         target,
     );
     current.swings += 1;
+    // The gauge animation's cancellation and the HUD's Show.
+    world.hud.action_start();
     // OnPlayerActionStart(speed) (fire and forget): the swing-start SE and,
     // on the three views with an Animator, its speed and parameter.
     if let Ok((_, object)) = objects.get(target) {
@@ -1676,11 +1723,12 @@ fn finish_action(
         .and_then(|entity| objects.get(entity).ok());
     match target {
         Some((_, object)) if object.status != STATUS_HARVESTED => {
-            update_harvest_ui(&mut world.button, model, catalog, object);
+            update_harvest_ui(&mut world.button, &mut world.hud, model, catalog, object);
         }
         _ => {
             world.targeting.contacts.clear();
             world.button.hide();
+            world.hud.hide();
         }
     }
     // 11.
@@ -1726,6 +1774,7 @@ pub(crate) fn after_hits(
     mut queue: ResMut<HarvestLogQueue>,
     mut shakes: ResMut<HarvestCameraShakes>,
     mut tool_models: ResMut<ToolModelRequests>,
+    mut hud: ResMut<HarvestStaminaHud>,
 ) {
     let (Some(catalog), Some(model)) = (catalog, model.as_deref_mut()) else {
         results.0.clear();
@@ -1743,6 +1792,9 @@ pub(crate) fn after_hits(
             result.used
         };
         model.stamina.decrease(amount);
+        // OnAnimationEvent: UpdateStaminaViewAnimation and
+        // DecreaseStaminaAnimation(StaminaUIAnimationAwaitTime).
+        hud.hit(before, model.stamina);
         let mut tool_log = None;
         if let Some(id) = result.tool {
             let max = catalog.tool(id).map_or(0, |def| def.max_durability);
@@ -1813,7 +1865,7 @@ pub(crate) fn after_hits(
             queue.destroyed.insert(object.uid);
         }
         if targeting.target == Some(result.target) {
-            update_harvest_ui(&mut button, model, &catalog, object);
+            update_harvest_ui(&mut button, &mut hud, model, &catalog, object);
         }
         if let Some(id) = result.tool {
             push_shake(&mut shakes, id);

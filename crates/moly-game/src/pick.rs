@@ -1,154 +1,93 @@
-//! Host world-pick mapping for NPCs and fixtures.
+//! The world end of the field's tap chain: in single play a tap on the field
+//! picks nothing.
 //!
-//! NPC ray picking is a host input convenience, not the source NPC-button
-//! collision implementation. It shares proximity/site/visibility qualification
-//! with the existing action stack, then emits PlayerTalkRequest for the single
-//! dispatcher. No general fixture-radius gate or story selection lives here.
-//! UI consumption, drag exclusion and the existing fixture path remain.
-//! Harvest objects are not picked: the source harvest flow has no
-//! tap-on-object; its target is the proximity target and its action the
-//! harvest button (see the harvest module).
+//! The source has no world tap on NPCs or fixtures in single play. The field
+//! gesture layer publishes every gesture to the field event dispatcher, and
+//! the whole program registers exactly nine handlers for that event (every
+//! registration call site was counted in the native code, by the event type
+//! it passes; the wrapper-object registrations carry other event types):
+//!
+//! 1. the field camera manager, at its setup: drag, two-finger drag and pinch
+//!    move the camera; a tap is ignored;
+//! 2. the field menu content, in the screenshot-only mode: a gesture shows
+//!    the hide-UI button and the screenshot button again;
+//! 3. the talk screen, in its screenshot mode: the same for the talk;
+//! 4-6. the talk engine, from its two initializers and its debug
+//!    initializer: taps advance or skip the talk while it plays;
+//! 7. the layout editor: its own selection, in the edit mode only;
+//! 8. the action buttons' presenter, while a fixture timeline action plays:
+//!    a tap ends that action (the action buttons own this path);
+//! 9. the multiplay player controller, once a multiplay room has made the
+//!    player network objects: a tap casts a ray and opens the info of the
+//!    nearest other player's avatar. It never runs in single play, and it
+//!    looks for player avatars, never NPCs or fixtures.
+//!
+//! None of them picks an NPC or a fixture. The field's other physics queries
+//! (camera collision, drop landing, the paper airplane, the avatar's ground
+//! probe, the talk camera, the edit tiles) are not tap picks either. Talk and
+//! fixture actions start only from the proximity action buttons, whose press
+//! writes the talk request (see the action button module). So there is no
+//! pick radius to read and no fixture tap to port: a pick here would be a
+//! second, non-source way to start a talk.
+//!
+//! What stays: this system is the tail of the tap order (the screen buttons,
+//! the dialogs and the edit pointer run before it), and it logs a field tap
+//! that nothing took, so a run can show that such a tap starts nothing.
+//!
+//! Instrument: `MOLY_PICK_NPC_TAP_SECS` (off by default; read through the
+//! instrument environment, which game mode never reads) synthesizes a tap on
+//! each present NPC's screen position in turn, to show that a tap on an NPC
+//! starts no talk.
 
 use bevy::prelude::*;
 
 use crate::action_button::ActionTapConsumed;
-use crate::fixture::{FixturePlacement, FixtureRoot};
 use crate::gesture::{GestureEvent, GestureKind, GestureState};
 use crate::npc::CharacterUnitId;
 use crate::player::PlayerControlled;
-use crate::player_talk::PlayerTalkRequest;
+use crate::server::client::instrument_env;
 
-/// NPC 预留沿的拾取半径（我方选值，非真源——真源走物理碰撞体，胶囊
-/// 尺寸未提取；按角色近似身宽取 0.5，具名挂账，提取到尺寸后替换）。
-const NPC_PICK_RADIUS: f32 = 0.5;
-
-/// 家具预留沿的拾取半径（同上，按一格摆件的近似半宽取 0.75）。
-const FIXTURE_PICK_RADIUS: f32 = 0.75;
-
-/// 冒烟合成的点按节奏（秒）。
+/// The instrument's tap interval, seconds.
 const SMOKE_TAP_INTERVAL: f32 = 0.8;
 
-/// 拾取候选（按路程排序前的具名形状）。
-enum Candidate {
-    Npc(Entity, u32),
-    Fixture(Entity, i32),
-}
-/// Update（手势链尾）：TAP 收场沿 + 右键收起沿 → 世界射线 → 两族候选
-/// 按路程取最近 → NPC 对话请求 / 家具预留沿记日志。
-#[allow(clippy::type_complexity)]
+/// Update (the tail of the tap chain): read the field taps and log those no
+/// earlier consumer took. Nothing is picked (module head).
 pub(crate) fn pick(
     mut gestures: MessageReader<GestureEvent>,
     buttons: Res<ButtonInput<MouseButton>>,
-    windows: Query<&Window>,
-    cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
-    npcs: Query<(Entity, &Transform, &CharacterUnitId), Without<PlayerControlled>>,
-    fixtures: Query<(Entity, &Transform, &FixturePlacement), With<FixtureRoot>>,
-    mut talk_requests: MessageWriter<PlayerTalkRequest>,
     consumed: Res<ActionTapConsumed>,
-    eligibility: crate::interaction::InteractionEligibility,
 ) {
-    // 读沿先于消费门：被吃掉的点按也要把读数沿推过去——消息缓冲两天
-    // 有效，不读的话下一帧这同一次点按会被当新事件重放成一条世界射线
-    // （真源里 UI 吃掉的点按，世界射线本来就拿不到那一次——重放违反
-    // 同一条次序）。
-    let mut taps: Vec<Vec2> = gestures
+    // The reader advances even for a consumed tap, so a tap is never read
+    // again in a later frame.
+    let taps: Vec<Vec2> = gestures
         .read()
         .filter(|event| {
             event.kind == GestureKind::Tap && event.state == GestureState::End && !event.ui_owned
         })
         .map(|event| event.position)
         .collect();
-    // 屏幕按钮先手：接近触发的动作按钮与场地屏外壳都排在本系统之前，
-    // 落在按钮上的那一下由它们吃掉。
-    if consumed.0 || !eligibility.available() {
+    if consumed.0 {
         return;
     }
-    // 触发沿：手势层的 TAP 收场（真源只认 TAP；双击的第二次与长按都不
-    // 拾取）+ 右键收起（PC 映射，取当帧光标位）。
-    if buttons.just_released(MouseButton::Right) {
-        if let Some(position) = windows
-            .single()
-            .ok()
-            .and_then(|window| window.cursor_position())
-        {
-            taps.push(position);
-        }
-    }
-    if taps.is_empty() {
-        return;
-    }
-    let Ok((camera, camera_transform)) = cameras.single() else {
-        return; // 相机没立（站点未取景）：这一帧的点按无处落，丢弃
-    };
     for position in taps {
-        let Some(ray) = camera.viewport_to_world(camera_transform, position).ok() else {
-            info!(
-                "[pick] 屏位 ({:.0},{:.0}) 出不了射线（在相机视口外）",
-                position.x, position.y
-            );
-            continue;
-        };
-        // 两族候选各测命中。
-        let mut candidates: Vec<(f32, Candidate)> = Vec::new();
-        for (entity, transform, unit) in &npcs {
-            if let Some(distance) =
-                ray_cylinder_entry(&ray, transform.translation.xz(), NPC_PICK_RADIUS)
-            {
-                candidates.push((distance, Candidate::Npc(entity, unit.0)));
-            }
-        }
-        for (entity, transform, placement) in &fixtures {
-            if let Some(distance) =
-                ray_cylinder_entry(&ray, transform.translation.xz(), FIXTURE_PICK_RADIUS)
-            {
-                candidates.push((distance, Candidate::Fixture(entity, placement.fixture_id)));
-            }
-        }
-        // 真源 RaycastAll 的距离升序 + 首个类型匹配：非候选命中（地面、
-        // 建筑网格）不遮挡——它们本来就不在候选集里。
-        candidates.sort_by(|a, b| a.0.partial_cmp(&b.0).expect("路程没有 NaN"));
-        match candidates.first() {
-            Some((_, Candidate::Npc(entity, index))) => {
-                if !eligibility.allows(*entity, *index) {
-                    continue;
-                }
-                // This host mapping shares appearance qualification with the
-                // proximity button. The dispatcher owns safe positioning and
-                // click-time state checks; no nearby fixture selects a script.
-                talk_requests.write(PlayerTalkRequest {
-                    entity: *entity,
-                    unit: *index,
-                    exact: None,
-                    target_fixture: None,
-                });
-                info!(
-                    "[pick] 点按 ({:.0},{:.0}) → 命中 NPC {entity:?}（unit {}）→ 玩家对话请求入队",
-                    position.x, position.y, index
-                );
-            }
-            Some((_, Candidate::Fixture(entity, fixture_id))) => {
-                info!(
-                    "[pick] 点按 ({:.0},{:.0}) → 命中家具 {fixture_id}（{entity:?}）——预留沿：家具交互域未接",
-                    position.x, position.y
-                );
-            }
-            None => {
-                info!(
-                    "[pick] 点按 ({:.0},{:.0}) → 射线未命中任何候选（真源不命中即无事）",
-                    position.x, position.y
-                );
-            }
-        }
+        info!(
+            "[pick] tap ({:.0},{:.0}) on the field: no world pick in single play (none of the nine gesture handlers picks an NPC or a fixture); nothing happens",
+            position.x, position.y
+        );
+    }
+    if buttons.just_released(MouseButton::Right) {
+        info!(
+            "[pick] right button release on the field: no world pick in single play; nothing happens"
+        );
     }
 }
 
-/// Update（手势链内、拾取前）：NPC 臂冒烟口（`MOLY_PICK_NPC_TAP_SECS`）
-/// ——窗口期内每隔 [`SMOKE_TAP_INTERVAL`] 秒把一个在场角色的世界位投影
-/// 到屏面、按该屏位合成一次 TAP，走与真实输入**同一条**拾取链（投影
-/// → 射线 → 圆柱测试 → 配对门 → 入队/拒绝）。事件面
-/// 注入；目标按实体序循环点名——名册里配对与未配对混居，门的两列
-/// 样本（拒绝/放行）都会自然攒出来。投影屏位恰好压在对话按钮上时
-/// 那一拍会被按钮层吃掉，算无样本。
+/// Update (in the gesture chain, before [`pick`]): the NPC tap instrument
+/// (`MOLY_PICK_NPC_TAP_SECS`). Within the window, every
+/// [`SMOKE_TAP_INTERVAL`] seconds it projects one present NPC's world
+/// position to the screen and injects a TAP end there, through the same
+/// gesture events real input uses. Targets rotate in entity order. A tap that
+/// lands on a screen button is that button's.
 pub(crate) fn smoke_npc_autotap(
     mut events: MessageWriter<GestureEvent>,
     cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
@@ -165,21 +104,18 @@ pub(crate) fn smoke_npc_autotap(
     let Ok((camera, camera_transform)) = cameras.single() else {
         return;
     };
-    // 名册按实体序排定，循环点名。
     let mut targets: Vec<(Entity, Vec3, u32)> = npcs
         .iter()
         .map(|(entity, transform, unit)| (entity, transform.translation, unit.0))
         .collect();
     targets.sort_by(|a, b| a.0.cmp(&b.0));
     if targets.is_empty() {
-        return; // 还没有在场角色：等下一拍
-    }
-    let Some((_, world, unit)) = targets.get(*index % targets.len()) else {
         return;
-    };
+    }
+    let (_, world, unit) = targets[*index % targets.len()];
     *index += 1;
-    let Some(position) = camera.world_to_viewport(camera_transform, *world).ok() else {
-        info!("[pick-smoke] unit {unit} 的世界位投影失败（相机视口外），跳过");
+    let Ok(position) = camera.world_to_viewport(camera_transform, world) else {
+        info!("[pick-smoke] unit {unit}: its world position is outside the viewport; skipped");
         return;
     };
     events.write(GestureEvent {
@@ -190,44 +126,14 @@ pub(crate) fn smoke_npc_autotap(
         ui_owned: false,
     });
     info!(
-        "[pick-smoke] 合成 TAP @({:.0},{:.0})（投影 unit {unit} 的世界位，事件面注入）",
+        "[pick-smoke] TAP injected at ({:.0},{:.0}) on unit {unit}'s screen position",
         position.x, position.y
     );
 }
 
-/// 射线对竖直圆柱（XZ 圆）的入口路程：解 |(o + t·d)_xz − c|² = r² 的
-/// 最小非负根。d 是三维单位方向，其 XZ 投影自然不大于 1——t 仍是沿
-/// 射线的真实路程（与真源 RaycastHit.distance 同口径）。起点在圆柱内
-/// 视作路程 0（最近）；射线竖直（XZ 无前进量）按未命中处理。
-fn ray_cylinder_entry(ray: &Ray3d, center: Vec2, radius: f32) -> Option<f32> {
-    let offset = Vec2::new(ray.origin.x - center.x, ray.origin.z - center.y);
-    let dir = Vec2::new(ray.direction.x, ray.direction.z);
-    let a = dir.dot(dir);
-    if a <= f32::EPSILON {
-        return None;
-    }
-    let b = 2.0 * offset.dot(dir);
-    let c = offset.dot(offset) - radius * radius;
-    let discriminant = b * b - 4.0 * a * c;
-    if discriminant < 0.0 {
-        return None;
-    }
-    let root = discriminant.sqrt();
-    let near = (-b - root) / (2.0 * a);
-    let far = (-b + root) / (2.0 * a);
-    if near >= 0.0 {
-        Some(near)
-    } else if far >= 0.0 {
-        Some(0.0)
-    } else {
-        None
-    }
-}
-
-/// 环境变量秒数（缺省 0）：与各域冒烟钩子同款读法。
+/// An instrument's seconds (0 when unset or in game mode).
 fn env_secs(name: &str) -> f32 {
-    std::env::var(name)
-        .ok()
+    instrument_env(name)
         .and_then(|raw| raw.trim().parse::<f64>().ok())
         .map(|v| v.max(0.0) as f32)
         .unwrap_or(0.0)
