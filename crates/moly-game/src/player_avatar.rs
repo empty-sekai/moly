@@ -117,6 +117,8 @@ pub(crate) enum PlayerActionOwner {
     SwitchGimmick,
     /// The step item's director (`PlayerAvatarItemTimelineView`).
     StepItem,
+    /// The delivery pre-action's AutoMove state (`PlayerAvatarAutoMoveState`).
+    Delivery,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

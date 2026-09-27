@@ -3815,6 +3815,7 @@ dependencies = [
  "moly-perf",
  "naga",
  "parry3d",
+ "regex",
  "reqwest",
  "rfd",
  "serde",

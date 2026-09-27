@@ -378,28 +378,21 @@ fn format_pattern(pattern: &str, bundle: &str, color_id: u32) -> Result<String, 
     Ok(formatted)
 }
 
-/// `Regex.Match(name, pattern).Groups[1]` for the one pattern shape the room
-/// configs use: literal text around a single greedy `(.*)` group. The match
-/// is unanchored (leftmost start) and the group greedy (the last occurrence
-/// of the tail). `Ok(None)` when the name does not match.
+/// `FindAssetByPattern(new Regex(pattern))` then `Regex.Match(texture.name,
+/// pattern).Groups[1]`: an unanchored match of the formatted pattern, the
+/// first group's text (empty when the pattern has no first group or it did
+/// not take part, as .NET's unsuccessful group reads). `Ok(None)` when the
+/// name does not match. A pattern the regex engine here does not accept
+/// (.NET-only syntax such as backreferences or lookaround) is refused.
 fn match_single_group<'a>(name: &'a str, pattern: &str) -> Result<Option<&'a str>, String> {
-    let Some((head, tail)) = pattern.split_once("(.*)") else {
-        return Err(format!("房间外观贴图名模式 {pattern} 没有分组"));
-    };
-    let literal = |text: &str| {
-        text.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-    };
-    if !literal(head) || !literal(tail) {
-        return Err(format!("房间外观贴图名模式 {pattern} 含未移植的正则语法"));
-    }
-    let Some(at) = name.find(head) else {
-        return Ok(None);
-    };
-    let start = at + head.len();
-    Ok(name[start..]
-        .rfind(tail)
-        .map(|end| &name[start..start + end]))
+    // .NET syntax the regex crate lacks (lookaround, backreferences, some
+    // inline options) fails here and is refused by name: the caller logs the
+    // error and the room keeps its module materials.
+    let regex = regex::Regex::new(pattern)
+        .map_err(|error| format!("房间外观贴图名模式 {pattern} 不是可移植的正则：{error}"))?;
+    Ok(regex
+        .captures(name)
+        .map(|captures| captures.get(1).map_or("", |group| group.as_str())))
 }
 
 /// The engine texture name of an extracted texture file: the extractor
