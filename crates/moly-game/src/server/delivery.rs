@@ -495,7 +495,8 @@ fn quantities_value(map: &BTreeMap<i32, i32>, id_key: &str) -> Value {
 }
 
 // ---------------------------------------------------------------------------
-// Master tables (`birthday-party-delivery.json`)
+// Master tables (the delivery reward, point bonus and total reward tables
+// and the total reward boxes)
 // ---------------------------------------------------------------------------
 
 /// One resource of a reply (`UserResource`).
@@ -508,36 +509,35 @@ pub(crate) struct Reward {
 }
 
 #[derive(Clone, Debug)]
-struct RewardRow {
+pub(super) struct RewardRow {
     party: i64,
     requirement: i32,
 }
 
 #[derive(Clone, Debug)]
-struct BonusRow {
+pub(super) struct BonusRow {
     party: i64,
     card: i64,
     rate: i32,
 }
 
 #[derive(Clone, Debug)]
-struct TotalRow {
+pub(super) struct TotalRow {
     id: i64,
     party: i64,
     requirement: i32,
     box_id: i64,
 }
 
-/// The delivery master tables (`birthday-party-delivery.json`): the reward
-/// rows and point bonus rows the client reads, and the total reward rows and
-/// their boxes the server grants from. The server model reads them as a
+/// The delivery master tables: the reward rows and point bonus rows the
+/// client reads, and the total reward rows the server grants from (their
+/// boxes are the deferred [`Masters::reward_boxes`]). The server model reads them as a
 /// master and inserts this resource for the client's readers.
 #[derive(Resource, Clone, Debug)]
 pub(crate) struct DeliveryTables {
     rewards: Vec<RewardRow>,
     bonuses: Vec<BonusRow>,
     totals: Vec<TotalRow>,
-    boxes: Vec<(i64, Reward)>,
 }
 
 impl DeliveryTables {
@@ -569,14 +569,6 @@ impl DeliveryTables {
         self.bonuses.iter().map(|row| row.card).collect()
     }
 
-    fn box_contents(&self, box_id: i64) -> Vec<Reward> {
-        self.boxes
-            .iter()
-            .filter(|(id, _)| *id == box_id)
-            .map(|(_, reward)| reward.clone())
-            .collect()
-    }
-
     /// The total reward rows of a party an obtained count newly reaches:
     /// `before < requirement <= after`, master order.
     fn totals_reached(&self, party: i64, before: i32, after: i32) -> Vec<(i64, i32, i64)> {
@@ -596,76 +588,155 @@ fn table_int(row: &Value, table: &str, key: &str) -> Result<i64, String> {
         .ok_or_else(|| format!("{table} row {:?} has no integer {key}", row.get("id")))
 }
 
-fn table_rows<'a>(doc: &'a Value, key: &str) -> Result<&'a Vec<Value>, String> {
-    doc.get(key)
-        .and_then(Value::as_array)
-        .ok_or_else(|| format!("no {key} array"))
+/// The delivery tables as their master tables resolve.
+#[derive(Default, Debug)]
+pub(crate) struct DeliveryParts {
+    pub(super) rewards: Option<Vec<RewardRow>>,
+    pub(super) bonuses: Option<Vec<BonusRow>>,
+    pub(super) totals: Option<Vec<TotalRow>>,
 }
 
-/// The master parser of `birthday-party-delivery.json`.
-pub(crate) fn parse_tables(text: &str, masters: &mut Masters) -> Result<(), String> {
-    let doc: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
-    let rewards = table_rows(&doc, "rewards")?
+impl DeliveryParts {
+    /// The tables, once all three are in.
+    pub(super) fn complete(&mut self) -> Option<DeliveryTables> {
+        if self.rewards.is_none() || self.bonuses.is_none() || self.totals.is_none() {
+            return None;
+        }
+        let tables = DeliveryTables {
+            rewards: self.rewards.take()?,
+            bonuses: self.bonuses.take()?,
+            totals: self.totals.take()?,
+        };
+        info!(
+            "[server] delivery tables: {} reward rows, {} point bonus rows, {} total reward rows",
+            tables.rewards.len(),
+            tables.bonuses.len(),
+            tables.totals.len()
+        );
+        Some(tables)
+    }
+}
+
+/// Logs the total reward box rows once they arrive.
+fn log_boxes(boxes: &[(i64, Reward)], table: &str) {
+    info!(
+        "[server] total reward boxes ({table}): {} box rows",
+        boxes.len()
+    );
+}
+
+/// `birthdayPartyDeliveryRewards`, master order.
+pub(crate) fn parse_rewards(text: &str, masters: &mut Masters) -> Result<(), String> {
+    const TABLE: &str = "birthdayPartyDeliveryRewards";
+    let rewards = moly_assets::json::master::rows(text)?
         .iter()
         .map(|row| {
             Ok(RewardRow {
-                party: table_int(row, "rewards", "birthdayPartyId")?,
-                requirement: table_int(row, "rewards", "requirement")? as i32,
+                party: table_int(row, TABLE, "birthdayPartyId")?,
+                requirement: table_int(row, TABLE, "requirement")? as i32,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let bonuses = table_rows(&doc, "pointBonuses")?
+    masters.delivery_parts.rewards = Some(rewards);
+    Ok(())
+}
+
+/// `birthdayPartyDeliveryPointBonuses`, master order.
+pub(crate) fn parse_point_bonuses(text: &str, masters: &mut Masters) -> Result<(), String> {
+    const TABLE: &str = "birthdayPartyDeliveryPointBonuses";
+    let bonuses = moly_assets::json::master::rows(text)?
         .iter()
         .map(|row| {
             Ok(BonusRow {
-                party: table_int(row, "pointBonuses", "birthdayPartyId")?,
-                card: table_int(row, "pointBonuses", "cardId")?,
-                rate: table_int(row, "pointBonuses", "rate")? as i32,
+                party: table_int(row, TABLE, "birthdayPartyId")?,
+                card: table_int(row, TABLE, "cardId")?,
+                rate: table_int(row, TABLE, "rate")? as i32,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let totals = table_rows(&doc, "totalRewards")?
+    masters.delivery_parts.bonuses = Some(bonuses);
+    Ok(())
+}
+
+/// `birthdayPartyDeliveryTotalRewards`, master order.
+pub(crate) fn parse_total_rewards(text: &str, masters: &mut Masters) -> Result<(), String> {
+    const TABLE: &str = "birthdayPartyDeliveryTotalRewards";
+    let totals = moly_assets::json::master::rows(text)?
         .iter()
         .map(|row| {
             Ok(TotalRow {
-                id: table_int(row, "totalRewards", "id")?,
-                party: table_int(row, "totalRewards", "birthdayPartyId")?,
-                requirement: table_int(row, "totalRewards", "requirement")? as i32,
-                box_id: table_int(row, "totalRewards", "resourceBoxId")?,
+                id: table_int(row, TABLE, "id")?,
+                party: table_int(row, TABLE, "birthdayPartyId")?,
+                requirement: table_int(row, TABLE, "requirement")? as i32,
+                box_id: table_int(row, TABLE, "resourceBoxId")?,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let boxes = table_rows(&doc, "totalRewardBoxes")?
-        .iter()
+    masters.delivery_parts.totals = Some(totals);
+    Ok(())
+}
+
+/// The purpose of the boxes a total reward row names.
+const TOTAL_REWARD_BOX_PURPOSE: &str = "birthday_party_delivery_total_reward";
+
+/// The box rows of the total reward purpose: what each granted box holds,
+/// master order.
+fn total_reward_boxes<'a>(
+    rows: impl Iterator<Item = &'a Value>,
+    table: &str,
+) -> Result<Vec<(i64, Reward)>, String> {
+    rows.filter(|row| row["resourceBoxPurpose"].as_str() == Some(TOTAL_REWARD_BOX_PURPOSE))
         .map(|row| {
             Ok((
-                table_int(row, "totalRewardBoxes", "resourceBoxId")?,
+                table_int(row, table, "resourceBoxId")?,
                 Reward {
                     resource_type: row
                         .get("resourceType")
                         .and_then(Value::as_str)
-                        .ok_or("a total reward box row has no resourceType")?
+                        .ok_or_else(|| format!("a {table} row has no resourceType"))?
                         .to_owned(),
-                    resource_id: table_int(row, "totalRewardBoxes", "resourceId")?,
-                    quantity: table_int(row, "totalRewardBoxes", "resourceQuantity")? as i32,
+                    resource_id: table_int(row, table, "resourceId")?,
+                    quantity: table_int(row, table, "resourceQuantity")? as i32,
                     level: row.get("resourceLevel").and_then(Value::as_i64),
                 },
             ))
         })
-        .collect::<Result<Vec<_>, String>>()?;
-    info!(
-        "[server] delivery tables: {} reward rows, {} point bonus rows, {} total reward rows, {} box rows",
-        rewards.len(),
-        bonuses.len(),
-        totals.len(),
-        boxes.len()
-    );
-    masters.delivery = Some(DeliveryTables {
-        rewards,
-        bonuses,
-        totals,
-        boxes,
-    });
+        .collect()
+}
+
+/// `resourceBoxDetails`: a master that carries the box rows as a table of
+/// their own.
+pub(crate) fn parse_box_details(text: &str, masters: &mut Masters) -> Result<(), String> {
+    let rows = moly_assets::json::master::rows(text)?;
+    let boxes = total_reward_boxes(rows.iter(), "resourceBoxDetails")?;
+    log_boxes(&boxes, "resourceBoxDetails");
+    masters.reward_boxes = super::Deferred::Ready(boxes);
+    Ok(())
+}
+
+/// `resourceBoxes`: a master that nests each box's rows in its `details`,
+/// read box by box in master order.
+pub(crate) fn parse_nested_boxes(text: &str, masters: &mut Masters) -> Result<(), String> {
+    let boxes = moly_assets::json::master::rows(text)?;
+    let mut details = Vec::new();
+    for resource_box in &boxes {
+        if resource_box["resourceBoxPurpose"].as_str() != Some(TOTAL_REWARD_BOX_PURPOSE) {
+            continue;
+        }
+        match resource_box.get("details") {
+            None | Some(Value::Null) => {}
+            Some(Value::Array(rows)) => details.extend(rows),
+            Some(_) => {
+                return Err(format!(
+                    "resourceBoxes box {:?}: details is not a list",
+                    resource_box.get("id")
+                ))
+            }
+        }
+    }
+    let boxes = total_reward_boxes(details.into_iter(), "resourceBoxes[].details")?;
+    log_boxes(&boxes, "resourceBoxes[].details");
+    masters.reward_boxes = super::Deferred::Ready(boxes);
     Ok(())
 }
 
@@ -936,9 +1007,28 @@ impl ServerModel {
             .iter()
             .find(|party| party.birthday_party_id == birthday_party_id)
             .copied()
-            .ok_or_else(|| {
-                format!("party {birthday_party_id} is not in session at the server clock")
+            .ok_or_else(|| match &self.parties_missing {
+                Some(reason) => format!(
+                    "party {birthday_party_id} is not in session at the server clock: no party is, since {reason}"
+                ),
+                None => format!("party {birthday_party_id} is not in session at the server clock"),
             })
+    }
+
+    /// Refuses, before a reply changes anything, an obtained count that
+    /// newly reaches a total reward row while the box rows are not in.
+    fn check_totals_grantable(&self, party: i32, before: i32, after: i32) -> Result<(), String> {
+        if after <= before {
+            return Ok(());
+        }
+        let tables = self.masters.delivery.as_ref().ok_or(TABLES_ABSENT)?;
+        if tables
+            .totals_reached(i64::from(party), before, after)
+            .is_empty()
+        {
+            return Ok(());
+        }
+        self.masters.reward_boxes.get(BOXES_REFUSED).map(|_| ())
     }
 
     /// The total reward rows the obtained count newly reaches, granted.
@@ -953,14 +1043,21 @@ impl ServerModel {
         if after <= before {
             return Ok(Vec::new());
         }
-        let tables = self.masters.delivery.as_ref().ok_or(
-            "the delivery tables (birthday-party-delivery.json) are absent: the total rewards cannot be granted",
-        )?;
+        let tables = self.masters.delivery.as_ref().ok_or(TABLES_ABSENT)?;
         let rows = tables.totals_reached(i64::from(party), before, after);
-        let rewards: Vec<Reward> = rows
-            .iter()
-            .flat_map(|(_, _, box_id)| tables.box_contents(*box_id))
-            .collect();
+        let rewards: Vec<Reward> = if rows.is_empty() {
+            Vec::new()
+        } else {
+            let boxes = self.masters.reward_boxes.get(BOXES_REFUSED)?;
+            rows.iter()
+                .flat_map(|(_, _, box_id)| {
+                    boxes
+                        .iter()
+                        .filter(move |(id, _)| id == box_id)
+                        .map(|(_, reward)| reward.clone())
+                })
+                .collect()
+        };
         let mut untracked = Vec::new();
         for reward in &rewards {
             let id = i32::try_from(reward.resource_id)
@@ -1011,7 +1108,7 @@ impl ServerModel {
         }
         let (requirement, member_bonus) = {
             let tables = self.masters.delivery.as_ref().ok_or(
-                "the delivery tables (birthday-party-delivery.json) are absent: the points cannot be counted",
+                "the delivery tables are absent (not all three delivery master tables are in): the points cannot be counted",
             )?;
             let owned = self.owned_cards();
             (
@@ -1054,6 +1151,11 @@ impl ServerModel {
         let points_after = tally.current_points();
         let refresh = delivery.plant_refresh_points;
         let is_refreshed = refresh > 0 && points_after / refresh > points_before / refresh;
+        self.check_totals_grantable(
+            birthday_party_id,
+            row.obtained_mysekai_material_count,
+            row.obtained_mysekai_material_count + obtained,
+        )?;
         let delivery = &mut self.doc.delivery;
         let party = delivery
             .party_mut(birthday_party_id)
@@ -1102,6 +1204,22 @@ impl ServerModel {
         let mut changed = vec![SECTION_BIRTHDAY_PARTIES];
         let mut rewards = Vec::new();
         let mut seen = BTreeSet::new();
+        for content in contents {
+            let row = self
+                .doc
+                .delivery
+                .parties
+                .iter()
+                .find(|row| row.birthday_party_id == content.birthday_party_id);
+            if let Some(party) = row {
+                let before = party.obtained_mysekai_material_count;
+                self.check_totals_grantable(
+                    content.birthday_party_id,
+                    before,
+                    before + content.gathered_count.max(0),
+                )?;
+            }
+        }
         for content in contents {
             if !seen.insert(content.birthday_party_id) {
                 return Err(format!(
@@ -1173,6 +1291,12 @@ impl ServerModel {
         update
     }
 }
+
+/// The refusal of a total reward grant without the delivery tables.
+const TABLES_ABSENT: &str =
+    "the delivery tables are absent (not all three delivery master tables are in): the total rewards cannot be granted";
+/// What a total reward grant cannot do without the box rows.
+const BOXES_REFUSED: &str = "the total rewards cannot be granted";
 
 fn push_once(list: &mut Vec<&'static str>, section: &'static str) {
     if !list.contains(&section) {
@@ -1387,24 +1511,43 @@ mod tests {
     use super::*;
 
     fn tables() -> DeliveryTables {
-        let text = json!({
-            "rewards": [{"id": 1, "birthdayPartyId": 1, "requirement": 10000}],
-            "pointBonuses": [{"id": 1, "birthdayPartyId": 1, "cardId": 7, "rate": 50}],
-            "totalRewards": [
+        let mut masters = Masters::default();
+        let rows = |rows: Value| rows.to_string();
+        parse_rewards(
+            &rows(json!([{"id": 1, "birthdayPartyId": 1, "requirement": 10000}])),
+            &mut masters,
+        )
+        .unwrap();
+        parse_point_bonuses(
+            &rows(json!([{"id": 1, "birthdayPartyId": 1, "cardId": 7, "rate": 50}])),
+            &mut masters,
+        )
+        .unwrap();
+        parse_total_rewards(
+            &rows(json!([
                 {"id": 1, "birthdayPartyId": 1, "requirement": 2, "resourceBoxId": 20},
                 {"id": 2, "birthdayPartyId": 1, "requirement": 3, "resourceBoxId": 30},
-            ],
-            "totalRewardBoxes": [
-                {"resourceBoxId": 20, "resourceType": "honor", "resourceId": 6818, "resourceQuantity": 1, "resourceLevel": 1},
-                {"resourceBoxId": 20, "resourceType": "boost_item", "resourceId": 1, "resourceQuantity": 2},
-                {"resourceBoxId": 30, "resourceType": "honor", "resourceId": 6818, "resourceQuantity": 1, "resourceLevel": 2},
-                {"resourceBoxId": 30, "resourceType": "material", "resourceId": 15, "resourceQuantity": 50},
-            ],
-        })
-        .to_string();
+            ])),
+            &mut masters,
+        )
+        .unwrap();
+        masters.delivery_parts.complete().unwrap()
+    }
+
+    fn boxes() -> super::super::Deferred<Vec<(i64, Reward)>> {
         let mut masters = Masters::default();
-        parse_tables(&text, &mut masters).unwrap();
-        masters.delivery.unwrap()
+        parse_box_details(
+            &json!([
+                {"resourceBoxPurpose": "birthday_party_delivery_total_reward", "resourceBoxId": 20, "resourceType": "honor", "resourceId": 6818, "resourceQuantity": 1, "resourceLevel": 1},
+                {"resourceBoxPurpose": "birthday_party_delivery_total_reward", "resourceBoxId": 20, "resourceType": "boost_item", "resourceId": 1, "resourceQuantity": 2},
+                {"resourceBoxPurpose": "birthday_party_delivery_total_reward", "resourceBoxId": 30, "resourceType": "honor", "resourceId": 6818, "resourceQuantity": 1, "resourceLevel": 2},
+                {"resourceBoxPurpose": "birthday_party_delivery_total_reward", "resourceBoxId": 30, "resourceType": "material", "resourceId": 15, "resourceQuantity": 50},
+            ])
+            .to_string(),
+            &mut masters,
+        )
+        .unwrap();
+        masters.reward_boxes
     }
 
     const PARTY: PartyMaster = PartyMaster {
@@ -1416,6 +1559,7 @@ mod tests {
     fn model() -> ServerModel {
         let mut model = super::super::tests::model();
         model.masters.delivery = Some(tables());
+        model.masters.reward_boxes = boxes();
         model.masters.configs = Some(BTreeMap::from([
             (CONFIG_BASE_POINT.to_owned(), "100".to_owned()),
             (CONFIG_DROP_UPPER_LIMIT.to_owned(), "5".to_owned()),

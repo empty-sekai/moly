@@ -655,7 +655,7 @@ pub(crate) fn native_overlay(doc: &mut super::document::ServerDocument) {
 
 fn possession_rows(text: &str, table: &str) -> Result<Vec<PossessionRow>, String> {
     let value: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
-    super::keyed_rows(&value, table)?
+    super::master_rows(&value, table)?
         .iter()
         .map(|row| {
             Ok(PossessionRow {
@@ -666,22 +666,22 @@ fn possession_rows(text: &str, table: &str) -> Result<Vec<PossessionRow>, String
         .collect()
 }
 
-/// `mysekai-fixture-possessions.json`.
+/// `mysekaiFixturePossessions`.
 pub(crate) fn parse_fixture_possessions(text: &str, masters: &mut Masters) -> Result<(), String> {
     masters.possession.fixture = Some(possession_rows(text, "mysekaiFixturePossessions")?);
     Ok(())
 }
 
-/// `mysekai-material-possessions.json`.
+/// `mysekaiMaterialPossessions`.
 pub(crate) fn parse_material_possessions(text: &str, masters: &mut Masters) -> Result<(), String> {
     masters.possession.material = Some(possession_rows(text, "mysekaiMaterialPossessions")?);
     Ok(())
 }
 
-/// `mysekai-materials.json`: material id -> `mysekaiMaterialType`.
+/// `mysekaiMaterials`: material id -> `mysekaiMaterialType`.
 pub(crate) fn parse_materials(text: &str, masters: &mut Masters) -> Result<(), String> {
     let value: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
-    let types = super::keyed_rows(&value, "mysekaiMaterials")?
+    let types = super::master_rows(&value, "mysekaiMaterials")?
         .iter()
         .map(|row| {
             let kind = row["mysekaiMaterialType"]
@@ -694,10 +694,10 @@ pub(crate) fn parse_materials(text: &str, masters: &mut Masters) -> Result<(), S
     Ok(())
 }
 
-/// `mysekai-items.json`: the first `white_blueprint` item.
+/// `mysekaiItems`: the first `white_blueprint` item.
 pub(crate) fn parse_items_master(text: &str, masters: &mut Masters) -> Result<(), String> {
     let value: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
-    let rows = super::keyed_rows(&value, "mysekaiItems")?;
+    let rows = super::master_rows(&value, "mysekaiItems")?;
     let white = rows
         .iter()
         .find(|row| row["mysekaiItemType"].as_str() == Some("white_blueprint"))

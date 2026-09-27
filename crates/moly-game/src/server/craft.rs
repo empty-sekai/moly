@@ -53,8 +53,9 @@
 //!
 //! *Refused by name*: a tool blueprint (the tool rows belong to the harvest
 //! mock), a canvas blueprint (its character material needs the card's
-//! character and rarity from the cards master, which the runtime root lacks),
-//! and the material type (no master blueprint has it).
+//! character and rarity from the cards master, which loads after the join;
+//! with it in, the character material rule is still not modelled), and the
+//! material type (no master blueprint has it).
 //!
 //! *Sketch* (the client offers it only in another user's MySekai,
 //! `SketchUtility.IsSketchAvailable`, and visiting is not in the product, so
@@ -98,7 +99,7 @@ const FIRST_BONUS_TYPE: &str = "craft_mysekai_fixture_first_bonus";
 
 fn table_rows(text: &str, table: &str) -> Result<Vec<Value>, String> {
     let value: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
-    super::keyed_rows(&value, table)
+    super::master_rows(&value, table)
 }
 
 fn optional_int(row: &Value, key: &str) -> Result<i32, String> {
@@ -114,7 +115,38 @@ fn flag(row: &Value, key: &str) -> Result<bool, String> {
         .ok_or_else(|| format!("{key} of {row} is not a boolean"))
 }
 
-/// `mysekai-blueprints.json`.
+/// A cards master row as the canvas craft reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // Read by the canvas craft once it is modelled.
+pub(crate) struct CardRow {
+    pub(crate) character_id: i32,
+    /// `cardRarityType` (`rarity_1` to `rarity_4`, `rarity_birthday`).
+    pub(crate) rarity: String,
+}
+
+/// `cards`: card id -> the card's character and rarity.
+pub(crate) fn parse_cards(text: &str, masters: &mut Masters) -> Result<(), String> {
+    let cards = moly_assets::json::master::rows(text)?
+        .iter()
+        .map(|row| {
+            let id = super::int32(row, "id")?;
+            let rarity = row["cardRarityType"]
+                .as_str()
+                .ok_or_else(|| format!("card {id} has no cardRarityType"))?;
+            Ok((
+                id,
+                CardRow {
+                    character_id: super::int32(row, "characterId")?,
+                    rarity: rarity.to_owned(),
+                },
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>, String>>()?;
+    masters.cards = super::Deferred::Ready(cards);
+    Ok(())
+}
+
+/// `mysekaiBlueprints`.
 pub(crate) fn parse_blueprints(text: &str, masters: &mut Masters) -> Result<(), String> {
     let rows = table_rows(text, "mysekaiBlueprints")?;
     let blueprints = rows
@@ -142,7 +174,7 @@ pub(crate) fn parse_blueprints(text: &str, masters: &mut Masters) -> Result<(), 
     Ok(())
 }
 
-/// `mysekai-blueprint-material-costs.json`: the rows per blueprint.
+/// `mysekaiBlueprintMysekaiMaterialCosts`: the rows per blueprint.
 pub(crate) fn parse_costs(text: &str, masters: &mut Masters) -> Result<(), String> {
     let rows = table_rows(text, "mysekaiBlueprintMysekaiMaterialCosts")?;
     let mut costs: BTreeMap<i32, Vec<MaterialCost>> = BTreeMap::new();
@@ -163,7 +195,7 @@ pub(crate) fn parse_costs(text: &str, masters: &mut Masters) -> Result<(), Strin
     Ok(())
 }
 
-/// `mysekai-blueprint-terms.json`.
+/// `mysekaiBlueprintTerms`.
 pub(crate) fn parse_terms(text: &str, masters: &mut Masters) -> Result<(), String> {
     let rows = table_rows(text, "mysekaiBlueprintTerms")?;
     let terms = rows
@@ -180,7 +212,7 @@ pub(crate) fn parse_terms(text: &str, masters: &mut Masters) -> Result<(), Strin
     Ok(())
 }
 
-/// `mysekai-rank-obtained-exps.json`: the first-craft bonus row.
+/// `mysekaiRankObtainedExps`: the first-craft bonus row.
 pub(crate) fn parse_rank_obtained_exps(text: &str, masters: &mut Masters) -> Result<(), String> {
     let rows = table_rows(text, "mysekaiRankObtainedExps")?;
     let bonus = rows
@@ -233,10 +265,16 @@ impl ServerModel {
         match blueprint.craft_type {
             MysekaiCraftType::MysekaiFixture => {}
             MysekaiCraftType::MysekaiCanvas => {
+                let reason = match self.masters.cards.get(
+                    "its character material needs the card's character and rarity",
+                ) {
+                    Err(reason) => reason,
+                    Ok(_) => "the cards master is in, but the canvas craft's character material is not modelled".to_owned(),
+                };
                 return Err(format!(
-                    "blueprint {} is a canvas: its character material needs the card's character and rarity (cardId {:?}) from the cards master, which the runtime root lacks; the canvas craft is not modelled",
+                    "blueprint {} is a canvas (cardId {:?}): {reason}",
                     blueprint.id, request.card_id
-                ))
+                ));
             }
             MysekaiCraftType::MysekaiTool => {
                 return Err(format!(
@@ -677,7 +715,7 @@ pub(crate) fn schema_policies() -> Value {
         {"name": "craft spend", "rule": "each cost row's material loses cost.quantity x quantity (MaterialCostList need quantity)"},
         {"name": "craft grant", "rule": "the userMysekaiFixtures row of (craft target, texture) gains quantity, lastObtainedAt = server clock (CraftPreview.SetFixtureQuantityText reads that row); no texture -> 1 (an inference: the base colour)"},
         {"name": "first-craft experience", "rule": "IsFirstCraft before the grant -> totalExp + mysekaiRankObtainedExps craft_mysekai_fixture_first_bonus (CraftResultSubWindowDialog.SetupFirstCraftBonus); the rank follows totalExp. Inferences: once per request, and no experience for a craft that is not a first craft"},
-        {"name": "craft types refused by name", "rule": "tool (the harvest mock's tool rows), canvas (its character material needs the cards master), material"},
+        {"name": "craft types refused by name", "rule": "tool (the harvest mock's tool rows), canvas (its character material needs the cards master, which loads after the join, and a rule that is not modelled), material"},
         {"name": "sketch", "rule": "refuse unless a master blueprint with isEnableSketch (IsFixtureCanSketch), not owned (HasTargetBluePrint) and a white_blueprint item above 0 (IsSketchAvailable); spend 1 white blueprint (an inference) and add the userMysekaiBlueprints row at the server clock; the owner and site are taken as stated (visiting is not in the product)"},
     ])
 }
@@ -687,19 +725,9 @@ mod tests {
     use super::super::client::inventory::UserMysekaiFixture;
     use super::*;
 
-    /// A master table in the runtime root's keyed form.
-    fn keyed(table: &str, rows: Value) -> String {
-        let rows = rows.as_array().expect("rows").clone();
-        json!({
-            "version": 1,
-            "semantics": {"table": table},
-            "rowOrder": rows.iter().map(|row| row["id"].clone()).collect::<Vec<_>>(),
-            "entries": rows
-                .iter()
-                .map(|row| (row["id"].to_string(), row.clone()))
-                .collect::<serde_json::Map<_, _>>(),
-        })
-        .to_string()
+    /// A master table in its upstream form.
+    fn upstream(rows: Value) -> String {
+        rows.to_string()
     }
 
     /// The JP master's rows verbatim: blueprints 1 (limited to one craft) and
@@ -708,11 +736,11 @@ mod tests {
     fn model() -> ServerModel {
         let mut model = super::super::tests::model();
         let masters = &mut model.masters;
-        parse_blueprints(&keyed("mysekaiBlueprints", json!([
+        parse_blueprints(&upstream(json!([
             {"id": 1, "mysekaiCraftType": "mysekai_fixture", "craftTargetId": 1, "isEnableSketch": true, "isObtainedByConvert": true, "craftCountLimit": 1, "isAvailableWithoutPossession": false},
             {"id": 4, "mysekaiCraftType": "mysekai_fixture", "craftTargetId": 4, "isEnableSketch": true, "isObtainedByConvert": true, "isAvailableWithoutPossession": false},
         ])), masters).unwrap();
-        parse_costs(&keyed("mysekaiBlueprintMysekaiMaterialCosts", json!([
+        parse_costs(&upstream(json!([
             {"id": 1, "mysekaiBlueprintId": 1, "mysekaiMaterialId": 1, "seq": 1, "quantity": 100},
             {"id": 2, "mysekaiBlueprintId": 1, "mysekaiMaterialId": 2, "seq": 2, "quantity": 20},
             {"id": 3, "mysekaiBlueprintId": 1, "mysekaiMaterialId": 14, "seq": 3, "quantity": 20},
@@ -722,19 +750,16 @@ mod tests {
             {"id": 11, "mysekaiBlueprintId": 4, "mysekaiMaterialId": 21, "seq": 2, "quantity": 3},
             {"id": 12, "mysekaiBlueprintId": 4, "mysekaiMaterialId": 10, "seq": 3, "quantity": 3},
         ])), masters).unwrap();
-        parse_terms(&keyed("mysekaiBlueprintTerms", json!([
+        parse_terms(&upstream(json!([
             {"id": 1, "mysekaiBlueprintId": 844, "startAt": 1_759_330_800_000_i64, "endAt": 1_759_849_199_000_i64},
         ])), masters).unwrap();
-        parse_rank_obtained_exps(&keyed("mysekaiRankObtainedExps", json!([
+        parse_rank_obtained_exps(&upstream(json!([
             {"id": 1, "mysekaiRankObtainedExpType": "craft_mysekai_fixture_first_bonus", "quantity": 1000},
         ])), masters).unwrap();
         super::super::inventory::parse_fixture_possessions(
-            &keyed(
-                "mysekaiFixturePossessions",
-                json!([
-                    {"id": 1, "level": 1, "possessionLimit": 1000},
-                ]),
-            ),
+            &upstream(json!([
+                {"id": 1, "level": 1, "possessionLimit": 1000},
+            ])),
             masters,
         )
         .unwrap();

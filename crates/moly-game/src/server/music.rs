@@ -89,10 +89,10 @@ pub(crate) fn check_records(
     Ok(())
 }
 
-/// The master parser of `mysekai-music-records.json`: the record ids.
+/// The master parser of `mysekaiMusicRecords`: the record ids.
 pub(crate) fn parse_records(text: &str, masters: &mut super::Masters) -> Result<(), String> {
     let value: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
-    let rows = super::keyed_rows(&value, "mysekaiMusicRecords")?;
+    let rows = super::master_rows(&value, "mysekaiMusicRecords")?;
     let ids = rows
         .iter()
         .map(|row| super::int32(row, "id"))

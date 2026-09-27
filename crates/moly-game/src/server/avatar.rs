@@ -115,7 +115,7 @@ fn id_of(map: &Option<BTreeMap<i32, String>>, wanted: &str) -> Option<i32> {
 
 fn string_rows(text: &str, table: &str, column: &str) -> Result<BTreeMap<i32, String>, String> {
     let value: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
-    super::keyed_rows(&value, table)?
+    super::master_rows(&value, table)?
         .iter()
         .map(|row| {
             let id = super::int32(row, "id")?;
@@ -145,7 +145,7 @@ pub(crate) fn parse_skin_colors(text: &str, masters: &mut super::Masters) -> Res
 pub(crate) fn parse_coordinates(text: &str, masters: &mut super::Masters) -> Result<(), String> {
     let value: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
     let text_of = |row: &Value, column: &str| row[column].as_str().map(str::to_owned);
-    let rows = super::keyed_rows(&value, "avatarCoordinates")?
+    let rows = super::master_rows(&value, "avatarCoordinates")?
         .iter()
         .map(|row| {
             Ok((
