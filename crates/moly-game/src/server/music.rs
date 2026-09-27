@@ -144,7 +144,7 @@ pub(crate) fn schema_sections() -> Value {
             "path": SECTION,
             "type": "rows",
             "row": {"mysekaiSiteId": "int", "mysekaiMusicRecordId": "int", "musicVocalId": "int", "isInstrumental": "bool"},
-            "note": "one row per site; the BGM of a housing site plays the record set for it (the record's BGM resolution is not ported, so the BGM owner names the refusal and plays the default choice)",
+            "note": "one row per site; the BGM of a housing site plays the record set for it (a record whose package the root's record sidecar has not swept is refused by name and the default choice plays)",
         }],
     }])
 }

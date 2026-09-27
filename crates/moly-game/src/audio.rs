@@ -87,7 +87,9 @@
 
 mod cue;
 mod cue_law;
+mod record;
 
+pub use self::record::RecordChoice;
 pub(crate) use self::cue::advance_cue_playbacks as advance_ambient_sequence;
 use self::cue::{track_volume, CueGain, CueVolume};
 pub(crate) use self::cue::{CuePlayback, CueRngs, Player, RngSlot};
@@ -143,10 +145,12 @@ fn plays_site_phenomena_sound(site_type: &str) -> bool {
 /// BGM 音量因子（真源声明级常量；乘在总线音量上）。
 const BGM_VOLUME_FACTOR: f32 = 0.7;
 
-/// BGM 切曲的淡入淡出时长（秒）：BGM 控制器构造时的默认淡化时长 0.25（BGM
-/// 选曲界面打开后会改成 0.3/1.0，本仓没有那个界面）。真源把它按毫秒交给
+/// BGM 切曲的淡入淡出时长（秒）：BGM 控制器构造时的默认淡化时长 0.25。BGM
+/// 选曲界面 Resume 时改成 0.3、Dispose 时改成 1.0（经
+/// [`RecordChoice::set_fade_time`]），改后对之后每次换曲都生效，直到管理器
+/// 重建——本产品不离开 MySekai，不重建。每路淡化按起跑时的值走完。真源把它按毫秒交给
 /// CRI 播放器的淡入淡出器：旧声从它当时已到的电平线性降到 0、新声从 0 线性
-/// 升到 1，两条同时起跑、各 0.25s（淡化曲线取默认的线性档，无起点偏移）。
+/// 升到 1，两条同时起跑、各走完同一个淡化时长（淡化曲线取默认的线性档，无起点偏移）。
 /// CRI 的推进节拍是音频服务线程，每拍增量封顶 67ms；这边按渲染帧推进，帧长
 /// 不是那个量，封顶不移植。旧声在电平归零后再保留 500ms 才停（静音段），
 /// 这边归零即拆。
@@ -1951,22 +1955,39 @@ struct BgmVoice {
     /// 循环区间（起播时从流表抄来；交接与账目用）。
     loop_start: f64,
     loop_end: f64,
+    /// The intro sink's position (seconds from its own start) at which the
+    /// loop sink takes over.
+    handoff_at: f64,
     /// loop 段已放行（intro 已到交接点或已播空）。
     handoff_done: bool,
     /// 淡入计时：`None` = 冷启全量起播（首次放曲没有旧声可让），
     /// `Some(elapsed)` = 换曲淡入中。
     fade_in: Option<f32>,
+    /// The crossfade time this voice started with.
+    fade_seconds: f32,
     /// 当前请求的包络音量（淡出起点与账目）；实际 sink 音量逐个校准。
     applied_volume: f32,
     /// BGM player x the cue's categories and volume commands.
     volume: CueVolume,
 }
 
-/// 淡出中的一路旧声：换曲时从现声里搬出来，0.25s 线性归零后拆除。
+/// 淡出中的一路旧声：换曲时从现声里搬出来，按换曲时的淡化时长线性归零后拆除。
 struct FadingBgm {
     entities: Vec<Entity>,
     from_volume: f32,
     elapsed: f32,
+    /// The crossfade time at the change.
+    seconds: f32,
+}
+
+/// Progress of a linear fade of `seconds` after `elapsed` (a zero time is
+/// already complete).
+fn fade_progress(elapsed: f32, seconds: f32) -> f32 {
+    if seconds > 0.0 {
+        (elapsed / seconds).min(1.0)
+    } else {
+        1.0
+    }
 }
 
 /// BGM 通道运行态。
@@ -1989,18 +2010,9 @@ pub(crate) struct BgmChannel {
 // It is empty by default (no site has a record set; the default choice plays).
 // The native instrument `MOLY_AUDIO_MOCK_MUSIC_RECORD` (`site:record:vocal`,
 // comma separated, refused loudly when malformed) writes the native server
-// document; the game mode does not read it.
-//
-// The client side, which is ported: only housing sites (categories
-// `housing_home` / `housing_room`) look the setting up; other sites go
-// straight to the default choice. Resolving a record to its music (the
-// record master's track type: soundtrack or song; a song through the music
-// master, the vocal version by the local default vocal type and the song's
-// vocal setting; then the music's audio package and cue, with the default
-// choice when nothing resolves) needs the song audio, which the runtime
-// root does not carry: a set record is refused by name by the BGM channel,
-// and the default choice plays, which differs from the source whenever the
-// record resolves.
+// document; the game mode does not read it. Only housing sites (categories
+// `housing_home` / `housing_room`) look the setting up; what a set record
+// plays is the record path in [`record`].
 
 /// A `MysekaiBGMManager.StartFade` target: a volume, or the manager's
 /// `InitialVolume`.
@@ -2121,6 +2133,7 @@ pub(crate) fn advance_bgm(
     mut sinks: Query<&mut AudioSink>,
     bgm_hold: Option<Res<crate::site_move::BgmHold>>,
     mut manager_fade: ResMut<MysekaiBgmFade>,
+    mut record: record::RecordParams,
 ) {
     manager_fade.advance(time.elapsed_secs(), bus.player.bgm);
     let bgm_player = manager_fade.player_volume(bus.player.bgm);
@@ -2133,14 +2146,14 @@ pub(crate) fn advance_bgm(
     channel.fading.retain_mut(|fading| {
         fading.elapsed += dt;
         let level = fading.from_volume
-            * (1.0 - (fading.elapsed / CROSS_FADE_SECONDS).min(1.0))
+            * (1.0 - fade_progress(fading.elapsed, fading.seconds))
             * gate.factor();
         for entity in &fading.entities {
             if let Ok(mut sink) = sinks.get_mut(*entity) {
                 sink.set_volume(Volume::Linear(level));
             }
         }
-        if fading.elapsed >= CROSS_FADE_SECONDS {
+        if fading.elapsed >= fading.seconds {
             for entity in &fading.entities {
                 if let Ok(mut entity_commands) = commands.get_entity(*entity) {
                     entity_commands.despawn();
@@ -2159,7 +2172,7 @@ pub(crate) fn advance_bgm(
         let envelope = match &mut voice.fade_in {
             Some(elapsed) => {
                 *elapsed += dt;
-                (*elapsed / CROSS_FADE_SECONDS).min(1.0)
+                fade_progress(*elapsed, voice.fade_seconds)
             }
             None => 1.0,
         };
@@ -2181,7 +2194,7 @@ pub(crate) fn advance_bgm(
             sinks.get(intro).ok().map(|sink| {
                 (
                     sink.position().as_secs_f32()
-                        >= voice.loop_start as f32 - BGM_HANDOFF_LEAD_SECONDS
+                        >= voice.handoff_at as f32 - BGM_HANDOFF_LEAD_SECONDS
                         || sink.empty(),
                     sink.empty(),
                 )
@@ -2198,7 +2211,7 @@ pub(crate) fn advance_bgm(
                         label(&voice.cue),
                         voice.loop_start,
                         voice.loop_end,
-                        voice.loop_start
+                        voice.handoff_at
                     );
                 }
             }
@@ -2229,16 +2242,33 @@ pub(crate) fn advance_bgm(
     )
     .then(|| music.setting(site.site_id))
     .flatten();
-    match music_setting {
-        Some((record, vocal)) => {
-            if channel.music_refused_for != Some(site.site_id) {
-                error!(
-                    "[audio] 唱片 BGM 设定拒绝：站点 {} 设了唱片 {record}（歌唱版本 {vocal}），唱片到 BGM 资源的解析未移植（运行时根无乐曲音频集）；真源能解析出资源时放这张唱片，这里照放默认选曲，两边不一样",
-                    site.site_id
-                );
-                channel.music_refused_for = Some(site.site_id);
-            }
-        }
+    // The select screen's choice stands over the setting (see [`record`]).
+    let request = match record::standing_choice(&mut record, &mut channel, site.site_id, &key.1) {
+        Some(record::Choice::Record {
+            record_id,
+            vocal_id,
+        }) => Some((record_id, vocal_id, record::Origin::Screen)),
+        Some(record::Choice::Default) => None,
+        None => music_setting
+            .map(|(record_id, vocal_id)| (record_id, vocal_id, record::Origin::Setting)),
+    };
+    match request {
+        Some((record_id, vocal_id, origin)) => match record::advance(
+            &mut record,
+            &mut commands,
+            &server,
+            &mut channel,
+            &bus,
+            bgm_player,
+            &gate,
+            site.site_id,
+            record_id,
+            vocal_id,
+            origin,
+        ) {
+            record::Step::Default => {}
+            record::Step::Hold | record::Step::Keep => return,
+        },
         None => channel.music_refused_for = None,
     }
     let delivery_phenomenon_id =
@@ -2280,6 +2310,7 @@ pub(crate) fn advance_bgm(
             entities,
             from_volume: voice.applied_volume,
             elapsed: 0.0,
+            seconds: record.fade_seconds(),
         });
     }
     // 冷启 = 此刻没有任何声在响（现声无、淡出也无）——首曲全量起播。
@@ -2360,8 +2391,10 @@ pub(crate) fn advance_bgm(
         loop_sink,
         loop_start: stream.loop_start,
         loop_end: stream.loop_end,
+        handoff_at: stream.loop_start,
         handoff_done,
         fade_in: if cold { None } else { Some(0.0) },
+        fade_seconds: record.fade_seconds(),
         applied_volume: volume_now,
         volume: cue_volume.clone(),
     });
@@ -2370,7 +2403,11 @@ pub(crate) fn advance_bgm(
         site.site_id,
         label(&phenomenon.0),
         label(&target.cue),
-        if cold { "冷启" } else { "交叉淡化 0.25s" },
+        if cold {
+            "冷启".to_string()
+        } else {
+            format!("交叉淡化 {:.2}s", record.fade_seconds())
+        },
         target_volume,
         bus.player.bgm,
         cue_volume.categories,
@@ -3743,6 +3780,8 @@ pub(crate) fn install(app: &mut App) {
         .init_resource::<CurrentPhenomenon>()
         .init_resource::<crate::server::client::music::ClientMusicPlaySettings>()
         .init_resource::<BgmChannel>()
+        .init_resource::<record::RecordLibrary>()
+        .init_resource::<RecordChoice>()
         .init_resource::<MysekaiBgmFade>()
         .init_resource::<AmbientChannel>()
         .init_resource::<SequenceWorkAreas>()
@@ -3752,6 +3791,8 @@ pub(crate) fn install(app: &mut App) {
         .init_resource::<VoiceChannel>()
         .init_resource::<SeRequests>()
         .init_resource::<SeChannel>();
+    #[cfg(not(target_arch = "wasm32"))]
+    app.add_systems(Update, record::autoplay_record_choice.before(advance_bgm));
 }
 
 #[cfg(test)]

@@ -141,6 +141,15 @@ impl RemoteAdmission {
     fn base(&self, remote: Remote) -> Option<String> {
         self.bases().map(|bases| remote.base(&bases).to_owned())
     }
+
+    /// The HTTPS URL a remote asset path is read from, once admitted.
+    pub fn url(&self, path: &AssetPath) -> Option<String> {
+        let source = path.source().as_str()?;
+        let remote = Remote::ALL
+            .into_iter()
+            .find(|remote| remote.source() == source)?;
+        Some(format!("{}{}", self.base(remote)?, path.path().to_str()?))
+    }
 }
 
 /// Registers the four sources; must run before `AssetPlugin` is built.
