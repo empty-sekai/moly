@@ -1131,14 +1131,35 @@ fn apply_schedule_edits(
     }
 }
 
+/// The phenomenon a site other than home took when it was entered.
+#[derive(Default)]
+struct HeldPhenomenon {
+    /// (site id, phenomenon id) of the site the player is on.
+    held: Option<(u32, i32)>,
+    /// The phenomenon of the day last reported as waiting for the next move.
+    reported: Option<i32>,
+}
+
 /// The only writer of the phenomenon request: ask the weather chain for the
 /// phenomenon of the day until it is the current one.
+///
+/// Only home changes the phenomenon in place. In the source the cross-fade
+/// has ten callers: the home site controller's timed update (with its 0.25 s
+/// fade) and its layout reply, the moves between home and the rooms, the
+/// cannon's environment change, the layout editor's revert, the tutorial and
+/// the housing competition. No harvest or delivery site controller is among
+/// them, so a harvest or delivery site takes the phenomenon of the day when it
+/// is entered and keeps it until the next move, even when the day's
+/// phenomenon changes. The rooms follow home: the moves between them
+/// cross-fade, and the environment view hides the weather indoors.
 fn publish_today_phenomena(
     today: Res<TodayPhenomena>,
     catalogue: Res<crate::weather::PhenomenonCatalogue>,
     current: Res<crate::weather::CurrentPhenomenonId>,
+    site: Option<Res<crate::site::SiteActive>>,
     mut requests: MessageWriter<crate::weather::WeatherRequest>,
     mut refused: Local<Option<i32>>,
+    mut hold: Local<HeldPhenomenon>,
 ) {
     let Some(id) = today.phenomena_id else {
         return;
@@ -1153,8 +1174,47 @@ fn publish_today_phenomena(
         }
         return;
     }
-    if current.0 != id {
-        requests.write(crate::weather::WeatherRequest(id));
+    let name = |id: i32| {
+        catalogue
+            .0
+            .iter()
+            .find(|option| option.id == id)
+            .map_or("?", |option| option.name.as_str())
+            .to_owned()
+    };
+    let target = match site.as_deref() {
+        Some(active) if active.site_type != "home_site" && !active.is_indoor() => match hold.held {
+            Some((site_id, held)) if site_id == active.site_id => {
+                if held != id && hold.reported != Some(id) {
+                    info!(
+                        "[server-panel] {} holds phenomenon {held} ({}); the phenomenon of the day {id} ({}) applies at the next move (only home changes it in place)",
+                        active.site_type,
+                        name(held),
+                        name(id)
+                    );
+                    hold.reported = Some(id);
+                }
+                held
+            }
+            _ => {
+                info!(
+                    "[server-panel] {} entered: it takes phenomenon {id} ({}) of the day and holds it until the next move",
+                    active.site_type,
+                    name(id)
+                );
+                hold.held = Some((active.site_id, id));
+                hold.reported = None;
+                id
+            }
+        },
+        _ => {
+            hold.held = None;
+            hold.reported = None;
+            id
+        }
+    };
+    if current.0 != target {
+        requests.write(crate::weather::WeatherRequest(target));
     }
 }
 
