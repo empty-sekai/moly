@@ -1568,8 +1568,12 @@ impl ScreenManager {
             },
         );
         // The coroutine runs on until its first yield: an exit already done
-        // ends here, before the caller goes on.
-        self.exits.retain(|exit| *exit != screen);
+        // ends here, before the caller goes on. Each ExitScreen is its own
+        // coroutine, and the source's checks only that the layer's game
+        // object exists: a second exit of a layer already exiting runs the
+        // exit start again (PlayExitAnimation destroys the running animation
+        // first), and both coroutines end with SetActive(false) and
+        // OnScreenLayerExited once isExitDone is set.
         if self.layer(screen).exit_done {
             self.finish_exit(screen);
         } else {
