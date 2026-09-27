@@ -190,13 +190,18 @@ pub fn app(
     browser_log::install();
     // Asset sources must be registered before AssetPlugin is built.
     moly_assets::install(&mut app, source);
-    let plugins = DefaultPlugins.set(bevy::window::WindowPlugin {
-        primary_window: Some(Window {
-            title: format!("moly v{VERSION}"),
+    // The web asset plugin would add an `https` source that reaches any host;
+    // remote resources go only through the admitted bases of
+    // `moly_assets::remote`, which use the same reader.
+    let plugins = DefaultPlugins
+        .set(bevy::window::WindowPlugin {
+            primary_window: Some(Window {
+                title: format!("moly v{VERSION}"),
+                ..default()
+            }),
             ..default()
-        }),
-        ..default()
-    });
+        })
+        .disable::<bevy::asset::io::web::WebAssetPlugin>();
     #[cfg(target_arch = "wasm32")]
     // The browser host reports failures to its retry page. Keep that hook.
     let plugins =
