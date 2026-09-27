@@ -39,15 +39,15 @@ pub(super) fn clean_up(
     view.set_visible("WindowRoot/Tabs", false);
     view.set_text(
         &dialog.positive_label,
-        layouts.wording_or_key("WORD_CLEAN_UP"),
+        layouts.wording("WORD_CLEAN_UP"),
     );
     view.set_text(
         &dialog.negative_label,
-        layouts.wording_or_key("WORD_CANCEL"),
+        layouts.wording("WORD_CANCEL"),
     );
     view.set_text(
         "Content/MessageBody",
-        layouts.wording_or_key("MSG_MYSEKAI_SITE_LAYOUT_EDIT_CLEAN_UP_CONFIRM"),
+        layouts.wording("MSG_MYSEKAI_SITE_LAYOUT_EDIT_CLEAN_UP_CONFIRM"),
     );
     for button in [&dialog.positive, &dialog.negative, &dialog.close] {
         enabled(view, doc, button, true);
@@ -114,7 +114,7 @@ pub(super) fn exit(
         view.set_visible(&button, true);
         view.set_text(
             &field(row, "dialogButtonLabelMesh")?,
-            layouts.wording_or_key(word),
+            layouts.wording(word),
         );
         enabled(view, doc, &button, true);
         Ok(button)
@@ -125,7 +125,7 @@ pub(super) fn exit(
     view.set_visible("WindowRoot/Tabs", false);
     view.set_text(
         &field(fields, "messageBodyTextMesh")?,
-        layouts.wording_or_key("WORD_EDIT_SAVE_CONFIRMATION"),
+        layouts.wording("WORD_EDIT_SAVE_CONFIRMATION"),
     );
     Ok(ExitBindings {
         window: field(fields, "windowObject")?,

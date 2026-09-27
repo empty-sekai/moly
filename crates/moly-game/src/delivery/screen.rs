@@ -850,11 +850,8 @@ fn tween_ease(layouts: &UiLayouts) -> Ease {
 }
 
 fn wording(layouts: &UiLayouts, key: &str, args: &[String]) -> String {
-    let format = layouts
-        .wordings
-        .get(key)
-        .unwrap_or_else(|| panic!("UI wording missing: {key}"));
-    moly_law::text::custom_text_mesh::format_wording(format, args)
+    let format = layouts.wording(key);
+    moly_law::text::custom_text_mesh::format_wording(&format, args)
         .unwrap_or_else(|e| panic!("UI wording {key}: {e}"))
 }
 

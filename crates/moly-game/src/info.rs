@@ -1251,9 +1251,9 @@ pub(crate) fn place(
             if let (Some([home, room]), Ok(tables)) = (&bindings.rank_page.put_limit_costs, &put_limit) {
                 let rank = i64::from(rank.mysekai_rank);
                 view.set_text(home, tables.cost(rank, SiteCategory::HousingHome).to_string());
-                let format = layouts.wordings.get(MYROOM_COST_WORDING).unwrap_or_else(|| panic!("UI wording missing: {MYROOM_COST_WORDING}"));
+                let format = layouts.wording(MYROOM_COST_WORDING);
                 let room_cost = tables.cost(rank, SiteCategory::HousingRoom).to_string();
-                let text = moly_law::text::custom_text_mesh::format_wording(format, &[room_cost])
+                let text = moly_law::text::custom_text_mesh::format_wording(&format, &[room_cost])
                     .unwrap_or_else(|e| panic!("UI wording {MYROOM_COST_WORDING}: {e}"));
                 view.set_text(room, text);
             }
@@ -1264,8 +1264,7 @@ pub(crate) fn place(
         }
         // SetVoiceDLButtonState(IsMysekaiVoice).
         let voice_key = if MYSEKAI_VOICE_DOWNLOADED { "WORD_DOWNLOADED" } else { "WORD_BULK_DOWNLOAD" };
-        let voice_text = layouts.wordings.get(voice_key).unwrap_or_else(|| panic!("UI wording missing: {voice_key}"));
-        view.set_text(&bindings.voice_download_text, voice_text.clone());
+        view.set_text(&bindings.voice_download_text, layouts.wording(voice_key));
         for cover in &bindings.voice_download_covers {
             view.set_visible(cover, MYSEKAI_VOICE_DOWNLOADED);
         }
