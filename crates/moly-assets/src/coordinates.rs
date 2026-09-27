@@ -1,4 +1,4 @@
-//! The only source-to-runtime spatial basis boundary. See coordinate-contract.md.
+//! The only source-to-runtime spatial basis boundary.
 use bevy::prelude::*;
 use serde_json::Value;
 
