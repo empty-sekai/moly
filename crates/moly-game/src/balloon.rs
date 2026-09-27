@@ -365,6 +365,9 @@ pub(crate) fn bake_atlas(
     // Collect-item notice characters (the masters' names and the count):
     // the fifth member, same once-baked semantics.
     collect_charset: Option<Res<crate::collect_notice::CollectNoticeCharset>>,
+    // The BGM select screen's record titles, artists, vocal texts and
+    // wordings: the sixth member, same once-baked semantics.
+    bgm_select_charset: Option<Res<crate::bgm_select::BgmSelectCharset>>,
     skin: Option<Res<SkinHandle>>,
     art: Option<Res<BalloonArt>>,
 ) {
@@ -418,12 +421,14 @@ pub(crate) fn bake_atlas(
         Some(player_talk_charset),
         Some(shell_charset),
         Some(collect_charset),
+        Some(bgm_select_charset),
     ) = (
         tables,
         talk_charset,
         player_talk_charset,
         shell_charset,
         collect_charset,
+        bgm_select_charset,
     )
     else {
         return;
@@ -438,6 +443,7 @@ pub(crate) fn bake_atlas(
         .chain(player_talk_charset.chars.iter().copied())
         .chain(shell_charset.chars.iter().copied())
         .chain(collect_charset.chars.iter().copied())
+        .chain(bgm_select_charset.chars.iter().copied())
         .collect();
     chars.sort_unstable();
     chars.dedup();

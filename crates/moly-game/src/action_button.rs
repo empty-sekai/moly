@@ -2215,10 +2215,14 @@ fn dispatch(
             info!("[action_button] 情报按钮按下 → PushUIScreen(家具情报 622，源带启动参数) → 层栈压层");
         }
         (ButtonType::OpenMysekaiBgmSelect, _) => {
-            // 教程门（教程未完不弹层）本仓无对应域，直接压层——具名挂账
-            // 见本函数头。
-            layer_commands.write(LayerCommand::Push(LayerId::MysekaiBgmSelect));
-            info!("[action_button] 选曲按钮按下 → PushUIScreen(选曲 626，教程门未建直接压层) → 层栈压层");
+            // OnOpenMysekaiBGMSelect -> MoveScreenLayerMysekaiBGMSelect(the
+            // current site, the head's fixture): the BGM select screen
+            // re-checks IsMusicPlay and pushes screen 626 with its boot data.
+            // 教程门（教程未完不弹层）本仓无对应域——具名挂账见本函数头。
+            commands.insert_resource(crate::bgm_select::BgmSelectOpenRequest(
+                fixture_target.cloned(),
+            ));
+            info!("[action_button] 选曲按钮按下 → MoveScreenLayerMysekaiBGMSelect（教程门未建）");
         }
         (ButtonType::OpenMysekaiConvert, _) => {
             layer_commands.write(LayerCommand::Push(LayerId::MysekaiConvert));

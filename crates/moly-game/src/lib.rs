@@ -12,6 +12,7 @@ pub mod avatar_material;
 pub mod avatar_wear;
 pub mod balloon;
 pub mod billboard;
+mod bgm_select;
 pub mod birthday;
 mod browser_game;
 mod browser_stage;
@@ -237,6 +238,7 @@ pub fn app(
     emoticon::install(&mut app);
     collect_notice::install(&mut app);
     system_fixture::install(&mut app);
+    bgm_select::install(&mut app);
     item_icon::install(&mut app);
     app.add_plugins(weather::WeatherPlugin);
     uber_particle::install(&mut app);
