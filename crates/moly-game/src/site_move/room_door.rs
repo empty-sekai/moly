@@ -38,6 +38,12 @@
 //!   Its only callers are `SetUpDoor` and `ChangeDoor`, and every room entry
 //!   path then reaches `SetupRoom`'s `ShowDoor`, so the door is spawned
 //!   shown and the test has no visible result.
+//! - The go-home view's floor buttons (`MyRoomSiteSelector.
+//!   SetActiveSmallButton`): [`small_buttons_active`] over the player-data
+//!   catalog's release rows and the client copy's rank
+//!   ([`FloorReleaseMasters`]); the view itself is the action button's.
+//!   The rank is a server value (`UserMysekaiGamedata.mysekaiRank`, the
+//!   server model's); the rule over it is the client's.
 //!
 //! Named differences:
 //! - The base material is `Mysekai/Fixture/Basic`, whose parameters the
@@ -62,6 +68,7 @@ use serde_json::Value;
 
 use super::{InstanceReady, PendingInstance};
 use crate::character_silhouette::{door_part_attribute, SourceStencilAttribute};
+use crate::site_expansion::law::Masters;
 
 /// `SetUpDoor`'s search: a Transform named exactly this under the wall.
 const DOOR_ANCHOR: &str = "Loc_door";
@@ -170,7 +177,89 @@ struct DoorPrefab {
 struct RoomDoorRefusals(Option<u64>);
 
 pub(crate) fn install(app: &mut App) {
-    app.init_resource::<RoomDoorRefusals>();
+    app.init_resource::<RoomDoorRefusals>()
+        .add_systems(Startup, load_floor_release_masters)
+        .add_systems(
+            Update,
+            (
+                cull_wall_fixtures,
+                (parse_floor_release_masters, report_small_buttons).chain(),
+            ),
+        );
+}
+
+/// A renderer `CullingWallFixture` switched off.
+#[derive(Component)]
+struct WallCulled;
+
+/// `MyRoomSiteController.CullingWallFixture`, called every frame by the
+/// room's `UpdateRoomSite` loop (started at the end of `OnEnterSite`, one
+/// call per `UniTask.Yield` in Update) and once more 0.03 s into
+/// HomeToMyRoom's `MoveMyRoom`, which the loop already covers. For every
+/// fixture of a grid whose layout type has a wall flag (`HasAnyFlag(type,
+/// 0xF0)`): `d = normalize(view.position - camera.position)` (zero below
+/// 1e-5), and `SetRendererActive(dot(view.forward, d) >= 0)`, which enables
+/// or disables every renderer of the view that was enabled at load. The
+/// camera is the field camera's view as the frame starts (its LateUpdate
+/// pose of the previous frame).
+///
+/// Here a renderer is a mesh entity under the placed fixture's root; one
+/// hidden for another reason (an inactive node, a switched-off renderer) is
+/// never touched, and only the ones this system hid are shown again.
+/// Particle renderers of a wall fixture are not covered.
+fn cull_wall_fixtures(
+    active: Option<Res<crate::site::SiteActive>>,
+    cameras: Query<&GlobalTransform, With<Camera3d>>,
+    fixtures: Query<
+        (Entity, &crate::fixture::FixtureVisualRoot, &GlobalTransform),
+        With<crate::fixture::FixtureRoot>,
+    >,
+    children: Query<&Children>,
+    mut renderers: Query<(&mut Visibility, Has<WallCulled>), With<Mesh3d>>,
+    mut commands: Commands,
+) {
+    if !active.is_some_and(|site| site.is_indoor()) {
+        return;
+    }
+    let Ok(camera) = cameras.single() else {
+        return;
+    };
+    let camera = camera.translation();
+    let (mut off, mut on) = (0usize, 0usize);
+    for (root, placed, view) in &fixtures {
+        if !placed.is_wall_layout() {
+            continue;
+        }
+        let offset = view.translation() - camera;
+        let length = offset.length();
+        let direction = if length > 1e-5 {
+            offset / length
+        } else {
+            Vec3::ZERO
+        };
+        // The source forward is the root's local +Z (see door.rs's facing).
+        let forward = view.rotation() * Vec3::Z;
+        let visible = forward.dot(direction) >= 0.0;
+        for entity in children.iter_descendants(root) {
+            let Ok((mut visibility, culled)) = renderers.get_mut(entity) else {
+                continue;
+            };
+            if visible {
+                if culled {
+                    *visibility = Visibility::Inherited;
+                    commands.entity(entity).remove::<WallCulled>();
+                    on += 1;
+                }
+            } else if !culled && *visibility != Visibility::Hidden {
+                *visibility = Visibility::Hidden;
+                commands.entity(entity).insert(WallCulled);
+                off += 1;
+            }
+        }
+    }
+    if off + on > 0 {
+        info!("[room-door] CullingWallFixture: {off} wall-fixture renderer(s) off, {on} on");
+    }
 }
 
 fn current(world: &World) -> Option<&RoomDoor> {
@@ -807,6 +896,179 @@ pub(crate) fn advance(world: &mut World) {
         }
     }
     world.insert_resource(door);
+}
+
+// ---------------------------------------------------------------------------
+// The floor buttons' show rule
+// ---------------------------------------------------------------------------
+
+/// `MyRoomSiteSelector`'s three floor buttons in field order
+/// (`_goFirstFloorButton`, `_goSecondFloorButton`, `_goThirdFloorButton`),
+/// with the `MysekaiSiteType` value `SetActiveSmallButton` passes for each
+/// (1, 2, 3).
+pub(crate) const SMALL_BUTTON_FLOORS: [&str; 3] = ["first_floor", "second_floor", "third_floor"];
+
+/// `MysekaiUtility.IsReleasedSiteType(siteType)`: the master site row of
+/// that type exists (`GetMasterMysekaiSite(type)`) and
+/// `GetMasterMysekaiSiteLevel(site.id, GetMysekaiRank())` is not null, that
+/// is a `mysekai_site_level` rank release of rank at most `rank` names one
+/// of the site's levels. The source then has a visiting branch
+/// (`MysekaiHousingCompetitionUtility.IsVisiting()` returns the visited
+/// room's `IsPublishedSite(site.id)`); this product has no visit, so that
+/// branch is not reachable and the result is the release test alone.
+pub(crate) fn is_released_site_type(masters: &Masters, site_type: &str, rank: i32) -> bool {
+    masters
+        .site_id(site_type)
+        .is_some_and(|site_id| masters.master_site_level(site_id, rank).is_some())
+}
+
+/// `MyRoomSiteSelector.SetActiveSmallButton`, called by `SetShowAction`:
+/// each floor button of [`SMALL_BUTTON_FLOORS`] is set active when the
+/// current site (`SiteManager.CurrentSiteType`) is not that floor and
+/// [`is_released_site_type`] holds for it. The current floor's button is
+/// set inactive without the release test.
+pub(crate) fn small_buttons_active(
+    masters: &Masters,
+    current_site_type: &str,
+    rank: i32,
+) -> [bool; 3] {
+    SMALL_BUTTON_FLOORS
+        .map(|floor| floor != current_site_type && is_released_site_type(masters, floor, rank))
+}
+
+/// `MysekaiUtility.GetMysekaiRank()`: `UserMysekaiGamedata.mysekaiRank` of
+/// the client copy. With no copy or no rank the source logs an error and
+/// returns 1; so does this. (Its visiting branch reads the multiplay
+/// controller's rank; no visit exists here.)
+pub(crate) fn mysekai_rank(client: Option<&crate::server::ClientUserData>) -> i32 {
+    match client.and_then(|client| client.gamedata.mysekai_rank) {
+        Some(rank) => rank,
+        None => {
+            error!("[room-door] GetMysekaiRank: the client copy of UserMysekaiGamedata has no mysekaiRank; rank 1, as the source returns after its LogError");
+            1
+        }
+    }
+}
+
+/// The player-data catalog's `mysekaiSites`, `mysekaiSiteLevels` and
+/// `mysekaiRankReleases` rows the floor buttons' show rule reads (master
+/// data from the runtime root), or why the root has none.
+#[derive(Resource)]
+pub(crate) enum FloorReleaseMasters {
+    Loading(Handle<JsonAsset>),
+    Ready(Result<Masters, String>),
+}
+
+impl FloorReleaseMasters {
+    /// [`small_buttons_active`] for the view: the current site type and the
+    /// client copy the rank comes from. `Err` names why the rows are not
+    /// there (still loading, file absent, a table malformed); the source
+    /// always has its master data, so the view should keep the buttons
+    /// hidden and say so rather than guess.
+    #[allow(dead_code)] // Called by the go-home view's SetShowAction.
+    pub(crate) fn small_buttons_active(
+        &self,
+        current_site_type: &str,
+        client: Option<&crate::server::ClientUserData>,
+    ) -> Result<[bool; 3], String> {
+        match self {
+            FloorReleaseMasters::Loading(_) => {
+                Err("the player-data catalog is still loading".to_owned())
+            }
+            FloorReleaseMasters::Ready(Err(reason)) => Err(reason.clone()),
+            FloorReleaseMasters::Ready(Ok(masters)) => Ok(small_buttons_active(
+                masters,
+                current_site_type,
+                mysekai_rank(client),
+            )),
+        }
+    }
+}
+
+fn load_floor_release_masters(mut commands: Commands, server: Res<AssetServer>) {
+    commands.insert_resource(FloorReleaseMasters::Loading(
+        server.load::<JsonAsset>("moly://fixture-models/player-data.json"),
+    ));
+}
+
+fn parse_floor_release_masters(
+    server: Res<AssetServer>,
+    jsons: Res<Assets<JsonAsset>>,
+    masters: Option<ResMut<FloorReleaseMasters>>,
+) {
+    let Some(mut masters) = masters else {
+        return;
+    };
+    let FloorReleaseMasters::Loading(handle) = &*masters else {
+        return;
+    };
+    let parsed = if let bevy::asset::LoadState::Failed(error) = server.load_state(handle) {
+        Err(format!("player-data.json is not in this root ({error})"))
+    } else {
+        let Some(json) = jsons.get(handle) else {
+            return;
+        };
+        Masters::parse(&json.0).map_err(|error| format!("player-data.json: {error}"))
+    };
+    match &parsed {
+        Ok(rows) => info!(
+            "[room-door] floor buttons' show rule: {} site rows, {} site levels, {} rank releases",
+            rows.site_types.len(),
+            rows.levels.len(),
+            rows.releases.len()
+        ),
+        Err(reason) => error!(
+            "[room-door] floor buttons' show rule refused: {reason}; the view cannot decide which floor buttons show"
+        ),
+    }
+    *masters = FloorReleaseMasters::Ready(parsed);
+}
+
+/// Instrument line: once per room entered, what `SetActiveSmallButton`
+/// gives for that room at the client copy's rank. The source evaluates it
+/// in `SetShowAction`; the view calls
+/// [`FloorReleaseMasters::small_buttons_active`] there.
+fn report_small_buttons(
+    active: Option<Res<crate::site::SiteActive>>,
+    masters: Option<Res<FloorReleaseMasters>>,
+    client: Option<Res<crate::server::ClientUserData>>,
+    mut last: Local<Option<u32>>,
+) {
+    let Some(site) = active.filter(|site| site.is_indoor()) else {
+        *last = None;
+        return;
+    };
+    if *last == Some(site.site_id) {
+        return;
+    }
+    let Some(masters) = masters else {
+        return;
+    };
+    let rows = match &*masters {
+        FloorReleaseMasters::Loading(_) => return,
+        FloorReleaseMasters::Ready(rows) => rows,
+    };
+    *last = Some(site.site_id);
+    let rank = mysekai_rank(client.as_deref());
+    match rows
+        .as_ref()
+        .map(|rows| small_buttons_active(rows, &site.site_type, rank))
+    {
+        Ok(active) => info!(
+            "[room-door] SetActiveSmallButton in {} at rank {rank}: {} {}, {} {}, {} {}",
+            site.site_type,
+            SMALL_BUTTON_FLOORS[0],
+            active[0],
+            SMALL_BUTTON_FLOORS[1],
+            active[1],
+            SMALL_BUTTON_FLOORS[2],
+            active[2]
+        ),
+        Err(reason) => error!(
+            "[room-door] SetActiveSmallButton in {} refused: {reason}",
+            site.site_type
+        ),
+    }
 }
 
 #[cfg(test)]

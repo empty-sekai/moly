@@ -23,26 +23,41 @@
 //! `ShouldEnableInfoButton = !IsVisiting()`。单机（无多人域）⇒ 恒真；
 //! 访客态走 mock 面板一格。
 //!
-//! ## 12 个可按件（字段表穷举定谳：CustomButton 恰 11 + DialogBase 关闭钮）
+//! ## The eleven buttons: source handler, source rule, product
 //!
-//! | 钮（字段名） | 路由（方法体直读） | 使能律 |
-//! |---|---|---|
-//! | 体力恢复 `_recoverStaminaButton` | `Show2ButtonDialog(MysekaiRecoverBoostStaminaDialog)` + 自身 `Close` | Setup 恒 true |
-//! | 宝箱 `_chestButton` | `PushUIScreen(MysekaiInventory 607)` + `Close`（先查多人房） | `!IsVisiting()` |
-//! | 情报 `_mysekaiInfoButton` | `MysekaiInfoUtility.TryMoveScreenLayerMysekaiInfo`（先查已开 622）+ `Close` | `!IsVisiting()` |
-//! | 换装 `_mysekaiAvtarChangeButton`（源侧拼写照录） | `PushUIScreen(MysekaiAvatarCostumeSetting 629)` + `Close` | Setup 恒 true |
-//! | 回标题 `_transitionToTitleButton` | `MysekaiUtility.TransitionToTitle`：`Disconnect` 后 `SceneManager.RequestScene(0)`（标题场景） | 无 Setup，恒可按 |
-//! | 退出 mysekai `_exitMysekaiButton` | `TransitionToOutGame`：一次性闩 `_isTransitionOutGame` → `DisableTapScreen` + `StopBGM(0.25)` + `FadeOutAsync(0.25)` → `Yield` → `MysekaiUtility.TransitionToOutGame` = `Disconnect` 后 `RequestScene(1)`（游戏外场景） | Setup 显式置 true |
-//! | 拍照 `_photoShotButton` | `ChangeState(GameStateType.PhotoShot)` + `Close`（先查已在 PhotoShot 态） | `MysekaiPhotoShotUtility.IsAllowedToPhotoShotInCurrentSite()` = `CurrentSiteType < 4` |
-//! | 相册 `_photoAlbumButton` | `MysekaiPhotoAlbumUtility.TryShowPhotoAlbumScreen()` + `Close` | 无 Setup，恒可按 |
-//! | 水晶商店 `_crystalShopButton` | `BootArg` + `PushUIScreen(CrystalShop)` + `Close` | `MysekaiUtility.IsAllowedToOpenCrystalShop()` = `!IsVisiting(竞赛) && (IsOwner || 离线模式)` |
-//! | 白图写生 `_whiteBlueprintSketchButton` | `Player.ChangeState(SelectSketchItem)` + `ChangeState(Sketch)` + `Close`；他人编辑中 → `MSG_SKETCH_WARNING_OWNER_EDIT_MODE` 子窗（Overlay 层） | `SketchUtility.IsSketchAvailable()`（master+user 道具查） |
-//! | 素材交换 `_exchangeButton` | `BootData(CallerSceneType.Mysekai)` + `PushUIScreen(MasterLessonMaterialExchange)` + `Close` | 无 Setup，恒可按 |
-//! | 关闭（`DialogBase.closeButton`） | `Close` → `CloseProcess` = `HideAsync` + `PlaySEOneShot("SE_SUBWINDOW_CLOSE")` + `Dispose` 资产包 | 恒可按 |
+//! The dialog serializes exactly 11 `CustomButton` fields; the twelfth
+//! tappable part is `DialogBase.closeButton`. Every handler but the two scene
+//! transitions ends in the dialog's own `Close()`. `Setup` writes each
+//! button's `enabled` once (a disabled `CustomButton` dispatches nothing and
+//! `ShowCover` shows its grey cover: every one of these buttons is
+//! `DisableActionType.Grayout` with its `Cover` child as the cover image).
 //!
-//! 计数修正：普查记「13 钮 / 12 导航钮」，序列化字段表穷举为 **11 个
-//! CustomButton + 关闭钮**（逐字段点名，无第 12 个导航钮）。每条路由句
-//! 尾的 `Close()` 是对话框自己的关框（路由后收框），不进层栈。
+//! A button whose target has no counterpart in this product is greyed with
+//! the target named. That is this product's adaptation, not the source: in
+//! [`MenuButton::setup`] each button carries its source rule and, next to it,
+//! the adaptation line "greyed until X exists". When X lands the adaptation
+//! line is deleted and the button follows its source rule again. Buttons
+//! whose target exists follow the source rule exactly. A tap on a greyed
+//! button logs the reason.
+//!
+//! | button (field) | source handler and target | source enabled rule | product |
+//! |---|---|---|---|
+//! | recover stamina (`_recoverStaminaButton`) | `ScreenManager.Show2ButtonDialog<MysekaiRecoverBoostStaminaDialog>` (DialogType 321), its `Setup(onRecoverFinish = UpdateStaminaGateView)`, `Close` | `true` | greyed until the dialog has a view. The game carries its `Dialog/` prefab, so `ShowDialog` would return a dialog, not an error; no view of this product draws it and the UI root carries no layout of it, so `ShowDialog` is not called (an instance nobody draws would take the back key) |
+//! | chest (`_chestButton`) | unless `IsActiveScreen(MysekaiInventory)`: `PushUIScreen(MysekaiInventory)` (607); `Close` | `ViewData.ShouldEnableInventoryButton` = `!IsVisiting()` | greyed until a MysekaiInventory view exists (registered, no view) |
+//! | info (`_mysekaiInfoButton`) | `MysekaiInfoUtility.TryMoveScreenLayerMysekaiInfo`: unless `IsActiveScreen(MysekaiInfo)`, `PushUIScreen(MysekaiInfo, ScreenLayerMysekaiInfoBootData)` (622); `Close` | `ViewData.ShouldEnableInfoButton` = `!IsVisiting()` | opens: the screen manager's `PushUIScreen` with this caller |
+//! | avatar change (`_mysekaiAvtarChangeButton`, the source's spelling) | unless active: `PushUIScreen(MysekaiAvatarCostumeSetting)` (629); `Close` | `true` | greyed until a MysekaiAvatarCostumeSetting view exists (registered, no view) |
+//! | back to title (`_transitionToTitleButton`, `TitleCell`) | `MysekaiUtility.TransitionToTitle`: `Disconnect`, then `SceneManager.RequestScene(Title)` | no write (the serialized `true`) | hidden, as in the source: `TitleCell` is inactive in the prefab and nothing activates it |
+//! | leave MySekai (`_exitMysekaiButton`, `Home`) | `TransitionToOutGame`: once (`_isTransitionOutGame`), tap off, BGM stop and fade out, then `MysekaiUtility.TransitionToOutGame`: `Disconnect`, then `RequestScene(OutGame)` | `true` | greyed until an out-game scene exists (this product has only the MySekai scene) |
+//! | photo (`_photoShotButton`) | unless in it: `GameStateManager.ChangeState(PhotoShot)`, whose `OnEnter` pushes MysekaiPhotoShot (632); `Close` | `MysekaiPhotoShotUtility.IsAllowedToPhotoShotInCurrentSite()` = `CurrentSiteType < grassland`, read from the active site | greyed until a MysekaiPhotoShot view exists (registered, no view) |
+//! | album (`_photoAlbumButton`) | `MysekaiPhotoAlbumUtility.TryShowPhotoAlbumScreen`: unless active, `PushUIScreen(MysekaiPhotoAlbum)` (642); `Close` | no write (the serialized `true`) | greyed until a MysekaiPhotoAlbum view exists (registered, no view) |
+//! | crystal shop (`_crystalShopButton`) | active: `Close`; else `BootArgObject`, `PushUIScreen(CrystalShop)` (89), `Close` | `MysekaiUtility.IsAllowedToOpenCrystalShop()` = not visiting a housing competition entry, and the room owner or an offline boot | greyed until a CrystalShop screen exists (outside this product's screen table) |
+//! | sketch (`_whiteBlueprintSketchButton`) | unless in it: `Player.ChangeState(SelectSketchItem)`, `ChangeState(Sketch)`; `Close` (the owner-editing warning needs another player) | `SketchUtility.IsSketchAvailable()` | enters the sketch state (unchanged) |
+//! | material exchange (`_exchangeButton`) | unless active: `BootArgObject = BootData(CallerSceneType.Mysekai)`, `PushUIScreen(MasterLessonMaterialExchange)` (50); `Close` | no write (the serialized `true`) | greyed until a MasterLessonMaterialExchange screen exists (outside this product's screen table) |
+//! | close (`closeButton`) | `Close` = `CloseProcess`: `HideAsync`, `PlaySEOneShot("SE_SUBWINDOW_CLOSE")`, `Dispose` of the menu bundle | no write (the serialized `true`) | closes |
+//!
+//! The site map and the option dialog are not targets of this dialog: no
+//! field reaches them, and `ViewData.OnChangeSite` is stored but never
+//! invoked here.
 //!
 //! ## 两格取值链（+ 一处普查修正）
 //!
@@ -82,12 +97,8 @@
 //! `Show2ButtonDialog` 时传 `onRecoverFinish = UpdateStaminaGateView`。
 //!   恢复对话框未建 ⇒ 回调对应物具名挂账（建它时接同一条回调律）。
 //!
-//! ## 钮使能的两层门（本仓形态）
-//!
-//! 真源使能律由 user 态派生（上表右列）；本仓再叠一层「路由目标是否
-//! 已建」：目标未建的钮**置灰**（点按不响应、响亮记账），已建的走真
-//! 路由。当前已建目标唯一：情报层。两层门都报在开框行里
-//! （源使能 + 目标已建与否），不合成一个数。
+//! The open line reports both layers for each button (the source rule and
+//! the adaptation) and does not merge them into one number.
 //!
 //! ## 生命周期（Setup 装配序，真源逐句）
 //!
@@ -116,11 +127,12 @@
 //! login reads; the gauge maximum is the master normal `maxStamina`. Total
 //! experience (`UserMysekaiGamedata.totalExp`) comes from the same server
 //! document through `crate::mysekai_rank::UserTotalExp`. The visiting state
-//! and the photo, crystal-shop and sketch permissions stay named mock values
-//! of this module (native instruments `MOLY_MENU_MOCK_VISITING`,
-//! `MOLY_MENU_MOCK_PHOTO_SHOT_ALLOWED`, `MOLY_MENU_MOCK_CRYSTAL_SHOP_ALLOWED`,
-//! `MOLY_MENU_MOCK_SKETCH_AVAILABLE`; game mode reads none). The stamina
-//! and total-experience instruments land in the native server document.
+//! and the crystal-shop and sketch permissions stay named mock values of this
+//! module (native instruments `MOLY_MENU_MOCK_VISITING`,
+//! `MOLY_MENU_MOCK_CRYSTAL_SHOP_ALLOWED`, `MOLY_MENU_MOCK_SKETCH_AVAILABLE`;
+//! game mode reads none). The photo permission is not server state: it is the
+//! current site's type, read from the active site. The stamina and
+//! total-experience instruments land in the native server document.
 //!
 //! ## 我方选值与具名缺口（改这里之前先读）
 //!
@@ -132,19 +144,15 @@
 //!   形）；外壳点按与小地图点按的门都读同一个 menu_open 位（与离开
 //!   确认框同族门）。已知偏差与外壳确认框同款：动作按钮的点按消费
 //!   不过这道门（它不读对话框态，既有具名挂账），本模块不动它的判定面。
-//! - 退出/回标题两钮的目标是**场景迁移**（RequestScene 0/1），整个场景
-//!   域在产品外（本仓只有 mysekai 场景）⇒ 置灰 + 具名记账。
-//! - 冒烟口：`MOLY_MENU_DIALOG_AUTOSMOKE_SECS` 给秒数后按 2 秒一拍五步
-//!   （开框 → 置灰钮 → 关闭钮收框 → 再开框 → 情报真跳转），点按走事件面
-//!   注入，与真实点按同一条分派路。
+//! - When the menu finishes opening, one line lists each button's centre in
+//!   window pixels (the tap map for driving the menu with real taps).
 //!
-//! 具名挂账（本模块不实现，收工报里重列）：
-//! - 恢复体力对话框 `MysekaiRecoverBoostStaminaDialog`（DialogType 321）：
-//!   预制体不在任何 UI 根里（提取缺口）；钮保持置灰。建它时由它的
-//!   `onRecoverFinish` 调 [`update_stamina_gate_view`]。
-//! - 层栈目标未建的 5 钮（宝箱/换装/水晶商店/写生/素材交换）+ 相册
-//!   （PhotoAlbum 域非层栈）+ 场景迁移 2 钮（回标题/退出）。
-//! - SE_SUBWINDOW_CLOSE · 教程/生日置灰覆盖。
+//! Named gaps (not implemented here):
+//! - The eight greyed targets of the table above, and the title scene behind
+//!   the hidden title button. When the recover dialog lands, its
+//!   `onRecoverFinish` calls [`update_stamina_gate_view`].
+//! - `SE_SUBWINDOW_CLOSE`. `SetupTutorial` (the tutorial is out of scope) and
+//!   `SetupForBirthday` (no birthday context runs in this product).
 
 
 use bevy::camera::visibility::RenderLayers;
@@ -157,7 +165,7 @@ use crate::gesture::{GestureEvent, GestureState};
 use crate::menu_shell::ShellDialogState;
 use crate::sitemap::SITEMAP_LAYER;
 use crate::ui_layers::{
-    DialogBackKey, DialogBackKeyEvent, DialogId, DialogType, DisplayLayerType, LayerCommand, LayerId, ScreenManager,
+    DialogBackKey, DialogBackKeyEvent, DialogId, DialogType, DisplayLayerType, MenuScreenType, ScreenManager,
 };
 use crate::ui_layout::{UiLayouts, UiPrefabView};
 
@@ -227,66 +235,216 @@ impl MenuButton {
         }
     }
 
-    /// 主文案（全部我方自写——真源是资产字符串未提取；字表已对仓内
-    /// 字体子集核过全量可烘）。
-    fn label(self) -> &'static str {
+    /// The source field of the button.
+    fn field(self) -> &'static str {
         match self {
-            MenuButton::RecoverStamina => "恢复体力",
-            MenuButton::Chest => "宝箱",
-            MenuButton::Info => "情报",
-            MenuButton::AvatarChange => "换装",
-            MenuButton::TransitionToTitle => "回标题",
-            MenuButton::ExitMysekai => "退出mysekai",
-            MenuButton::PhotoShot => "拍照",
-            MenuButton::PhotoAlbum => "相册",
-            MenuButton::CrystalShop => "水晶商店",
-            MenuButton::WhiteBlueprintSketch => "白图写生",
-            MenuButton::Exchange => "素材交换",
-            MenuButton::Close => "关闭",
+            MenuButton::RecoverStamina => "_recoverStaminaButton",
+            MenuButton::Chest => "_chestButton",
+            MenuButton::Info => "_mysekaiInfoButton",
+            MenuButton::AvatarChange => "_mysekaiAvtarChangeButton",
+            MenuButton::TransitionToTitle => "_transitionToTitleButton",
+            MenuButton::ExitMysekai => "_exitMysekaiButton",
+            MenuButton::PhotoShot => "_photoShotButton",
+            MenuButton::PhotoAlbum => "_photoAlbumButton",
+            MenuButton::CrystalShop => "_crystalShopButton",
+            MenuButton::WhiteBlueprintSketch => "_whiteBlueprintSketchButton",
+            MenuButton::Exchange => "_exchangeButton",
+            MenuButton::Close => "closeButton",
         }
     }
 
-    /// 真源使能律（上表右列；输入全部来自 mock 面板，见 [`MenuMock`]）。
-    fn source_enabled(self, mock: &MenuMock) -> bool {
+    /// `Setup`'s `enabled` write for this button: the source rule, then this
+    /// product's adaptation next to it. Deleting an adaptation line (setting
+    /// `greyed_until: None`) returns the button to its source rule; its
+    /// route then goes into [`click`]. The tutorial and birthday overrides
+    /// (`SetupTutorial`, `SetupForBirthday`) are not ported.
+    fn setup(self, inputs: &SetupInputs) -> ButtonSetup {
         match self {
-            // !IsVisiting()（ViewData 派生，原生核过）。
-            MenuButton::Chest | MenuButton::Info => !mock.visiting,
-            // IsAllowedToPhotoShotInCurrentSite = CurrentSiteType < 4。
-            MenuButton::PhotoShot => mock.photo_shot_allowed,
-            // IsAllowedToOpenCrystalShop = !竞赛访客 && (站主 || 离线)。
-            MenuButton::CrystalShop => mock.crystal_shop_allowed,
-            // IsSketchAvailable（master+user 道具查）。
-            MenuButton::WhiteBlueprintSketch => mock.sketch_available,
-            // Setup 显式置 true（体力恢复/换装/退出）；其余无 Setup 调用，
-            // 预制体初值取可按。
-            _ => true,
+            MenuButton::RecoverStamina => ButtonSetup {
+                rule: "SetupRecoverStaminaButton: enabled = true",
+                source: true,
+                // Adaptation: greyed until the MysekaiRecoverBoostStaminaDialog view exists.
+                greyed_until: Some(Missing::Dialog(RECOVER_BOOST_STAMINA_DIALOG)),
+            },
+            MenuButton::Chest => ButtonSetup {
+                rule: "SetupChestButton: enabled = ViewData.ShouldEnableInventoryButton = !IsVisiting()",
+                source: !inputs.visiting,
+                // Adaptation: greyed until the MysekaiInventory view exists.
+                greyed_until: Some(Missing::Screen(MenuScreenType::MysekaiInventory)),
+            },
+            MenuButton::Info => ButtonSetup {
+                rule: "SetupMysekaiInfoButton: enabled = ViewData.ShouldEnableInfoButton = !IsVisiting()",
+                source: !inputs.visiting,
+                greyed_until: None,
+            },
+            MenuButton::AvatarChange => ButtonSetup {
+                rule: "SetupAvatarChangeButton: enabled = true",
+                source: true,
+                // Adaptation: greyed until the MysekaiAvatarCostumeSetting view exists.
+                greyed_until: Some(Missing::Screen(MenuScreenType::MysekaiAvatarCostumeSetting)),
+            },
+            MenuButton::TransitionToTitle => ButtonSetup {
+                rule: "no Setup write: the serialized enabled (true); TitleCell stays inactive",
+                source: true,
+                // Adaptation: greyed until the title scene exists (the cell is
+                // hidden in the source, so this only speaks if it is shown).
+                greyed_until: Some(Missing::Scene("Title")),
+            },
+            MenuButton::ExitMysekai => ButtonSetup {
+                rule: "Setup: _exitMysekaiButton.enabled = true",
+                source: true,
+                // Adaptation: greyed until the out-game scene exists.
+                greyed_until: Some(Missing::Scene("OutGame")),
+            },
+            MenuButton::PhotoShot => ButtonSetup {
+                rule: "SetupMysekaiPhotoShotButton: enabled = IsAllowedToPhotoShotInCurrentSite() = CurrentSiteType < grassland",
+                source: inputs.photo_shot_allowed,
+                // Adaptation: greyed until the MysekaiPhotoShot view exists.
+                greyed_until: Some(Missing::Screen(MenuScreenType::MysekaiPhotoShot)),
+            },
+            MenuButton::PhotoAlbum => ButtonSetup {
+                rule: "SetupMysekaiPhotoAlbumButton: no enabled write (the serialized true)",
+                source: true,
+                // Adaptation: greyed until the MysekaiPhotoAlbum view exists.
+                greyed_until: Some(Missing::Screen(MenuScreenType::MysekaiPhotoAlbum)),
+            },
+            MenuButton::CrystalShop => ButtonSetup {
+                rule: "SetupCrystalShopButton: enabled = IsAllowedToOpenCrystalShop()",
+                source: inputs.crystal_shop_allowed,
+                // Adaptation: greyed until the CrystalShop screen exists.
+                greyed_until: Some(Missing::OutGameScreen("CrystalShop", 89)),
+            },
+            MenuButton::WhiteBlueprintSketch => ButtonSetup {
+                rule: "SetupMysekaiWhiteBluePrintSketchButton: enabled = SketchUtility.IsSketchAvailable()",
+                source: inputs.sketch_available,
+                greyed_until: None,
+            },
+            MenuButton::Exchange => ButtonSetup {
+                rule: "no Setup write: the serialized enabled (true)",
+                source: true,
+                // Adaptation: greyed until the MasterLessonMaterialExchange screen exists.
+                greyed_until: Some(Missing::OutGameScreen("MasterLessonMaterialExchange", 50)),
+            },
+            MenuButton::Close => ButtonSetup {
+                rule: "DialogBase.closeButton: no Setup write (the serialized true)",
+                source: true,
+                greyed_until: None,
+            },
         }
     }
 
-    /// 路由目标是否已建（本仓叠加门：未建 ⇒ 置灰；真源没有这层门——
-    /// 它的全部目标都在）。已建目标：情报层、白图写生（写生态由
-    /// `home_action` 承接）。
-    fn target_built(self) -> bool {
-        matches!(self, MenuButton::Info | MenuButton::WhiteBlueprintSketch)
-    }
-
-    /// 路由目标名（开框行与点按行用）。
-    fn route_target(self) -> &'static str {
+    /// The source handler and its target (the open and tap lines).
+    fn handler(self) -> &'static str {
         match self {
-            MenuButton::RecoverStamina => "恢复体力对话框（二钮框）",
-            MenuButton::Chest => "库存层 PushUIScreen(MysekaiInventory 607)",
-            MenuButton::Info => "情报层 TryMoveScreenLayerMysekaiInfo(622)",
-            MenuButton::AvatarChange => "换装层 PushUIScreen(MysekaiAvatarCostumeSetting 629)",
-            MenuButton::TransitionToTitle => "标题场景 SceneManager.RequestScene(0)",
-            MenuButton::ExitMysekai => "游戏外场景 SceneManager.RequestScene(1)",
-            MenuButton::PhotoShot => "拍照态 ChangeState(GameStateType.PhotoShot)",
-            MenuButton::PhotoAlbum => "相册域 TryShowPhotoAlbumScreen",
-            MenuButton::CrystalShop => "水晶商店层 PushUIScreen(CrystalShop)",
-            MenuButton::WhiteBlueprintSketch => "写生态 ChangeState(GameStateType.Sketch)",
-            MenuButton::Exchange => "素材交换层 PushUIScreen(MasterLessonMaterialExchange)",
-            MenuButton::Close => "关框（HideAsync+SE+Dispose 资产包）",
+            MenuButton::RecoverStamina => "OnClickRecoverBoostStaminaButton: Show2ButtonDialog<MysekaiRecoverBoostStaminaDialog>, Setup(onRecoverFinish), Close",
+            MenuButton::Chest => "OnClickChestButton: unless IsActiveScreen(MysekaiInventory), PushUIScreen(MysekaiInventory); Close",
+            MenuButton::Info => "OnClickMysekaiInfoButton: MysekaiInfoUtility.TryMoveScreenLayerMysekaiInfo; Close",
+            MenuButton::AvatarChange => "OnClickAvtarChangeButton: unless IsActiveScreen(MysekaiAvatarCostumeSetting), PushUIScreen(MysekaiAvatarCostumeSetting); Close",
+            MenuButton::TransitionToTitle => "TransitionToTitle: MysekaiUtility.TransitionToTitle (Disconnect, RequestScene(Title))",
+            MenuButton::ExitMysekai => "TransitionToOutGame: fade out, MysekaiUtility.TransitionToOutGame (Disconnect, RequestScene(OutGame))",
+            MenuButton::PhotoShot => "OnClickMysekaiPhotoShotButton: unless in it, ChangeState(GameStateType.PhotoShot) (OnEnter pushes MysekaiPhotoShot); Close",
+            MenuButton::PhotoAlbum => "OnClickMysekaiPhotoAlbumButton: MysekaiPhotoAlbumUtility.TryShowPhotoAlbumScreen (PushUIScreen(MysekaiPhotoAlbum)); Close",
+            MenuButton::CrystalShop => "OnClickMysekaiCrystalShopButton: unless IsActiveScreen(CrystalShop), BootArgObject, PushUIScreen(CrystalShop); Close",
+            MenuButton::WhiteBlueprintSketch => "OnClickMysekaiWhiteBluePrintSketchButton: unless in it, Player.ChangeState(SelectSketchItem), ChangeState(GameStateType.Sketch); Close",
+            MenuButton::Exchange => "OnClickExchangeButton: unless IsActiveScreen(MasterLessonMaterialExchange), BootData(Mysekai), PushUIScreen(MasterLessonMaterialExchange); Close",
+            MenuButton::Close => "Close: CloseProcess (HideAsync, SE_SUBWINDOW_CLOSE, Dispose of the menu bundle)",
         }
     }
+}
+
+/// `DialogType.MysekaiRecoverBoostStaminaDialog`.
+const RECOVER_BOOST_STAMINA_DIALOG: DialogType = DialogType(321);
+
+/// A source target with no counterpart in this product: the subject of a
+/// greyed button's adaptation.
+#[derive(Debug, Clone, Copy)]
+enum Missing {
+    /// A MySekai screen id that no view of this product draws.
+    Screen(MenuScreenType),
+    /// A `MenuScreenType` outside the MySekai block (its source name and
+    /// value); the product's screen table holds the MySekai block only.
+    OutGameScreen(&'static str, u16),
+    /// A dialog type that no view of this product draws.
+    Dialog(DialogType),
+    /// A `SceneManager.Scene` other than MySekai.
+    Scene(&'static str),
+}
+
+impl Missing {
+    /// The named reason, read against the screen and dialog registries.
+    fn reason(self) -> String {
+        let table = |screen: MenuScreenType| {
+            if screen.registered() {
+                "registered in the screen table, but no view of this product draws it"
+            } else {
+                "not in this product's screen table, and no view of this product draws it"
+            }
+        };
+        match self {
+            Missing::Screen(screen) => format!("{screen:?} is {}", table(screen)),
+            Missing::OutGameScreen(name, id) => format!("{name}({id}) is {}", table(MenuScreenType(id))),
+            Missing::Dialog(dialog) => match dialog.prefab() {
+                Some(prefab) => format!(
+                    "{dialog:?}: the game carries {prefab}, so ShowDialog would return a dialog, but no view of this product draws it; ShowDialog is not called"
+                ),
+                None => format!("{dialog:?}: ShowDialog returns an error (no Dialog/ prefab in the game's Resources)"),
+            },
+            Missing::Scene(scene) => format!("SceneManager.Scene.{scene} is not in this product (it has only the MySekai scene)"),
+        }
+    }
+}
+
+/// One button's `Setup` result.
+#[derive(Debug, Clone, Copy)]
+struct ButtonSetup {
+    /// The source's enabled rule, as written.
+    rule: &'static str,
+    /// The value the source rule gives.
+    source: bool,
+    /// This product's adaptation: greyed until this target exists.
+    greyed_until: Option<Missing>,
+}
+
+impl ButtonSetup {
+    /// Enabled in this product: the source rule, unless the adaptation greys it.
+    fn enabled(&self) -> bool {
+        self.source && self.greyed_until.is_none()
+    }
+}
+
+/// `Setup`'s inputs: the named mock values (server state) and the current
+/// site's photo permission.
+struct SetupInputs {
+    visiting: bool,
+    photo_shot_allowed: bool,
+    crystal_shop_allowed: bool,
+    sketch_available: bool,
+}
+
+impl SetupInputs {
+    fn read(mock: &MenuMock, site: Option<&crate::site::SiteActive>) -> Self {
+        SetupInputs {
+            visiting: mock.visiting,
+            photo_shot_allowed: photo_shot_allowed_in(site),
+            crystal_shop_allowed: mock.crystal_shop_allowed,
+            sketch_available: mock.sketch_available,
+        }
+    }
+}
+
+/// `MysekaiPhotoShotUtility.IsAllowedToPhotoShotInCurrentSite`:
+/// `SiteManager.CurrentSiteType < MysekaiSiteType.grassland`: the home site
+/// and the three floors allow it, the five site types from grassland on do
+/// not.
+fn photo_shot_allowed_in(site: Option<&crate::site::SiteActive>) -> bool {
+    const GRASSLAND: u32 = 4;
+    let Some(site) = site else {
+        error!("[menu_dialog] IsAllowedToPhotoShotInCurrentSite: no site is active; the photo button stays disabled");
+        return false;
+    };
+    let site_type = moly_law::carve::site_type_value(&site.site_type)
+        .unwrap_or_else(|| panic!("[menu_dialog] site type {} is not a MysekaiSiteType", site.site_type));
+    site_type < GRASSLAND
 }
 
 /// 菜单对话框全部渲染文案的字符闭包（静态标签 + 数字位）——并入外壳
@@ -325,9 +483,6 @@ pub(crate) struct MenuMock {
     /// `MysekaiMultiplayController.IsVisiting()`——多人访客态（使能输入；
     /// 本仓无多人域，默认 false）。
     visiting: bool,
-    /// `MysekaiPhotoShotUtility.IsAllowedToPhotoShotInCurrentSite()` =
-    /// `CurrentSiteType < 4`（当前站语义 mock；默认 true）。
-    photo_shot_allowed: bool,
     /// `MysekaiUtility.IsAllowedToOpenCrystalShop()`（默认 true：单机恒站主）。
     crystal_shop_allowed: bool,
     /// `SketchUtility.IsSketchAvailable()`（master+user 道具查；默认 true）。
@@ -614,7 +769,6 @@ impl Default for MenuMock {
     fn default() -> Self {
         MenuMock {
             visiting: env_bool("MOLY_MENU_MOCK_VISITING", false),
-            photo_shot_allowed: env_bool("MOLY_MENU_MOCK_PHOTO_SHOT_ALLOWED", true),
             crystal_shop_allowed: env_bool("MOLY_MENU_MOCK_CRYSTAL_SHOP_ALLOWED", true),
             sketch_available: env_bool("MOLY_MENU_MOCK_SKETCH_AVAILABLE", true),
         }
@@ -637,6 +791,16 @@ pub(crate) struct MenuDialogRoot {
     /// The screen manager's instance of this dialog, from `ShowDialog` to
     /// its destruction after the close animation.
     dialog: Option<DialogId>,
+    /// The last `Setup`'s button writes, in [`ALL_BUTTONS`] order.
+    setup: Option<[ButtonSetup; 12]>,
+}
+
+impl MenuDialogRoot {
+    /// The last `Setup`'s write for one button.
+    fn button(&self, which: MenuButton) -> Option<ButtonSetup> {
+        let index = ALL_BUTTONS.iter().position(|button| *button == which)?;
+        self.setup.map(|setup| setup[index])
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -746,7 +910,7 @@ pub(crate) fn spawn_when_ready(
     let binding = MenuSlideBinding::from_document(layouts.document("Menu").expect("menu layout missing"));
     commands.spawn((MenuDialogRoot {
             binding, phase: MenuSlidePhase::Hidden, requested_open: false,
-            elapsed: 0., slide_width: 0., canvas: None, dialog: None,
+            elapsed: 0., slide_width: 0., canvas: None, dialog: None, setup: None,
         }, Visibility::Hidden, Transform::default(),
         RenderLayers::layer(SITEMAP_LAYER), crate::ui_layout::UiPrefabView::new("Menu", SITEMAP_LAYER)));
     commands.insert_resource(MenuDialogSpawned);
@@ -757,9 +921,11 @@ pub(crate) fn spawn_when_ready(
 // ---------------------------------------------------------------------------
 
 /// 开框沿（Setup 装配序的日志同形：八钮 Setup → exit 置亮 → 图标/等级/
-/// 体力三读数 → 三监听）。逐钮报源使能与目标已建两层门——不合成一个数。
+/// 体力三读数 → 三监听）。Each button reports its source rule and the
+/// adaptation separately; they are not merged into one number.
 fn on_open(
     mock: &MenuMock,
+    setup: &[ButtonSetup; 12],
     user: Option<&crate::server::ClientUserData>,
     rank: &moly_law::ui::mysekai_rank::MysekaiRankModel,
 ) {
@@ -773,16 +939,19 @@ fn on_open(
          （访客态为面板下发 mock 值）",
         !mock.visiting, !mock.visiting
     );
-    for which in ALL_BUTTONS {
-        let source = which.source_enabled(mock);
-        let built = which.target_built();
+    for (which, button) in ALL_BUTTONS.iter().zip(setup) {
+        let adaptation = match button.greyed_until {
+            Some(missing) => format!("greyed until its target exists: {}", missing.reason()),
+            None => "no adaptation".to_owned(),
+        };
         info!(
-            "[menu_dialog]   钮「{}」：源使能={} · 目标已建={} · 可点击={} —— 路由：{}",
-            which.label(),
-            source,
-            built,
-            source && built,
-            which.route_target()
+            "[menu_dialog]   {which:?} ({}): source {} -> {}; {adaptation}; enabled {}{} -- {}",
+            which.field(),
+            button.rule,
+            button.source,
+            button.enabled(),
+            if *which == MenuButton::TransitionToTitle { "; hidden (TitleCell is inactive in the prefab and nothing activates it)" } else { "" },
+            which.handler()
         );
     }
     let stamina = user.and_then(|user| user.stamina);
@@ -849,8 +1018,8 @@ fn on_close() {
 /// Update：摆位与逐帧状态。每帧——
 /// 1. 开关沿（开框沿逐钮报路由表 + 两格读值；关框沿一行）；
 /// 2. 根可见性包含滑出阶段；根缩放 = canvas 缩放；
-/// 3. 逐件：可按件底框色按「可点击 = 源使能 ∧ 目标已建」摆置灰态，
-///    文案变了整组重建；显示件同（恢复提示随体力空律）。
+/// 3. 逐件：each button's cover shows while the last `Setup` left it
+///    disabled (the source rule, or the adaptation that greys it).
 pub(crate) fn place(
     windows: Query<&Window, With<PrimaryWindow>>, mut dialog: ResMut<ShellDialogState>, mock: Res<MenuMock>,
     layouts: Res<UiLayouts>, time: Res<Time>,
@@ -860,6 +1029,7 @@ pub(crate) fn place(
     total_exp: Res<crate::mysekai_rank::UserTotalExp>,
     user: Option<Res<crate::server::ClientUserData>>,
     (mut screens, mut back_keys): (ResMut<ScreenManager>, MessageReader<DialogBackKeyEvent>),
+    site: Option<Res<crate::site::SiteActive>>,
 ) {
     // SubWindowDialog.OnHardwareBackKeyProcess is CloseProcess: the back key
     // the screen manager hands this dialog closes it.
@@ -897,6 +1067,9 @@ pub(crate) fn place(
                     Ok(id) => {
                         screens.open_dialog(id);
                         root.dialog = Some(id);
+                        // Setup's enabled writes, once per open.
+                        let inputs = SetupInputs::read(&mock, site.as_deref());
+                        root.setup = Some(ALL_BUTTONS.map(|which| which.setup(&inputs)));
                     }
                     Err(error) => {
                         error!("[menu_dialog] {error}: the menu does not open");
@@ -926,6 +1099,7 @@ pub(crate) fn place(
             root.slide_width = slide_width;
             root.canvas = Some(canvas);
         }
+        let mut opened_now = false;
         if !changed && matches!(root.phase, MenuSlidePhase::Opening | MenuSlidePhase::Closing) {
             root.elapsed = (root.elapsed + time.delta_secs()).min(MENU_SLIDE_DURATION);
             if root.elapsed >= MENU_SLIDE_DURATION {
@@ -934,6 +1108,7 @@ pub(crate) fn place(
                     if let Some(id) = root.dialog {
                         screens.dialog_open_finished(id);
                     }
+                    opened_now = true;
                     MenuSlidePhase::Open
                 } else {
                     if let Some(id) = root.dialog.take() {
@@ -953,6 +1128,9 @@ pub(crate) fn place(
             MenuSlidePhase::Hidden => root.slide_width,
         };
         view.set_anchored_position(&root.binding.animated, Vec2::new(offset, 0.));
+        if opened_now {
+            log_tap_map(&view, &layouts, canvas, scale, size);
+        }
         *visibility=if root.phase != MenuSlidePhase::Hidden {Visibility::Inherited}else{Visibility::Hidden};
         transform.scale=Vec3::splat(scale);
         for (button,texture) in [
@@ -963,8 +1141,18 @@ pub(crate) fn place(
             (MenuButton::Exchange,"btn_mysekai_menu_change"),
         ] {
             view.set_texture(button.source_path(),texture);
-            view.set_visible(&format!("{}/Cover",button.source_path()),!button.source_enabled(&mock)||!button.target_built());
         }
+        // CustomButton.OnDisable -> ShowCover: every button here greys out
+        // (DisableActionType.Grayout) with its Cover child, so the cover
+        // shows while Setup left the button disabled.
+        if let Some(setup) = root.setup {
+            for (which, button) in ALL_BUTTONS.iter().zip(setup) {
+                if *which != MenuButton::TransitionToTitle {
+                    view.set_visible(&format!("{}/Cover", which.source_path()), !button.enabled());
+                }
+            }
+        }
+        // TitleCell is inactive in the prefab and nothing activates it.
         view.set_visible("MenuRoot/TitleCell",false);
         // SetupMysekaiRankGauge, then UpdateStaminaGateView: the rank model
         // from the user's total experience through the gauge the dialog
@@ -974,7 +1162,7 @@ pub(crate) fn place(
             let model = ranks.as_deref()
                 .unwrap_or_else(|| panic!("rank model: the master rank table has not resolved when the menu opens"))
                 .model(total_exp.0);
-            on_open(&mock, user.as_deref(), &model);
+            on_open(&mock, root.setup.as_ref().expect("Setup ran at the open edge"), user.as_deref(), &model);
             apply_rank_gauge(&mut view, &layouts, &rank_gauge_targets(doc), &model);
             update_stamina_gate_view(&mut view, &layouts, doc, user.as_deref());
         }
@@ -1067,6 +1255,27 @@ fn hit_test(canvas: Vec2, which: MenuButton, layouts: &crate::ui_layout::UiLayou
     view.rect(layouts,which.source_path(),size).is_some_and(|rect| rect.active && rect.contains(canvas))
 }
 
+/// The open menu's tap map: each button's centre in window pixels (top-left
+/// origin, the inverse of [`to_canvas`]), and whether it is active.
+fn log_tap_map(view: &UiPrefabView, layouts: &UiLayouts, canvas: Vec2, scale: f32, window: Vec2) {
+    let cells: Vec<String> = ALL_BUTTONS
+        .iter()
+        .map(|which| match view.rect(layouts, which.source_path(), canvas) {
+            Some(rect) => {
+                let centre = rect.center();
+                format!(
+                    "{which:?} ({:.0},{:.0}){}",
+                    centre.x * scale + window.x / 2.0,
+                    window.y / 2.0 - centre.y * scale,
+                    if rect.active { "" } else { " inactive" }
+                )
+            }
+            None => format!("{which:?} (no rect)"),
+        })
+        .collect();
+    info!("[menu_dialog] open: tap map in window pixels: {}", cells.join(" · "));
+}
+
 /// 点按分派：对话框开着 ⇒ 模态（全部点按先过它，真源 Dialog 槽
 /// blockRaycasts 同形；外壳与小地图的点按门都读同一个 menu_open 位）。
 /// 框外点按收框（allowCloseExternal=true）。已知偏差与外壳确认框同款：
@@ -1076,12 +1285,11 @@ pub(crate) fn click(
     mut gestures: MessageReader<GestureEvent>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut dialog: ResMut<ShellDialogState>,
-    mock: Res<MenuMock>,
     layouts: Res<crate::ui_layout::UiLayouts>,
     mut consumed: ResMut<ActionTapConsumed>,
-    mut layer_commands: MessageWriter<LayerCommand>,
+    mut screens: ResMut<ScreenManager>,
     mut sketch_modes: MessageWriter<crate::home_action::SketchModeRequest>,
-    views: Query<&crate::ui_layout::UiPrefabView, With<MenuDialogRoot>>,
+    views: Query<(&crate::ui_layout::UiPrefabView, &MenuDialogRoot)>,
     mut sounds: ResMut<crate::audio::SeRequests>,
     root_canvas: Option<Res<crate::canvas::RootCanvas>>,
 ) {
@@ -1097,7 +1305,7 @@ pub(crate) fn click(
         consumed.0 = true;
         return;
     }
-    let Ok(view) = views.single() else { return; };
+    let Ok((view, root)) = views.single() else { return; };
     let Ok(window) = windows.single() else {
         return;
     };
@@ -1120,25 +1328,49 @@ pub(crate) fn click(
                 sounds.source_button(&layouts, view.key, MenuButton::Close.source_path());
                 info!(
                     "[menu_dialog] 关闭钮按下 → {}——开始窗口滑出",
-                    MenuButton::Close.route_target()
+                    MenuButton::Close.handler()
                 );
                 close_requested = true;
             }
             Some(which) => {
-                let source = which.source_enabled(&mock);
-                let built = which.target_built();
-                if source && built {
+                let Some(setup) = root.button(which) else {
+                    error!("[menu_dialog] {which:?} tapped before Setup wrote the buttons; nothing");
+                    continue;
+                };
+                if !setup.source {
+                    // A disabled CustomButton dispatches nothing.
+                    info!(
+                        "[menu_dialog] {which:?} ({}) tapped: disabled by the source rule {}; nothing",
+                        which.field(),
+                        setup.rule
+                    );
+                } else if let Some(missing) = setup.greyed_until {
+                    // This product's adaptation: greyed until the target exists.
+                    info!(
+                        "[menu_dialog] {which:?} ({}) tapped: greyed until its target exists: {}; source handler {}",
+                        which.field(),
+                        missing.reason(),
+                        which.handler()
+                    );
+                } else {
                     sounds.source_button(&layouts, view.key, which.source_path());
-                    // 已建目标：走真路由（情报层、白图写生）。
                     match which {
                         MenuButton::Info => {
-                            // 真源 OnClickMysekaiInfoButton：先查已开 622
-                            // （层栈同层重复压丢弃同形）→ 压层 → Close。
-                            info!(
-                                "[menu_dialog] 情报钮按下 → TryMoveScreenLayerMysekaiInfo → \
-                                 层栈压层（已开即丢弃，真源 IsActiveScreen(622) 同形）→ 关框"
-                            );
-                            layer_commands.write(LayerCommand::Push(LayerId::MysekaiInfo));
+                            // OnClickMysekaiInfoButton:
+                            // MysekaiInfoUtility.TryMoveScreenLayerMysekaiInfo
+                            // pushes the info screen with its boot data unless
+                            // the screen is active; then Close.
+                            let caller = "MysekaiMenuDialog.OnClickMysekaiInfoButton (MysekaiInfoUtility.TryMoveScreenLayerMysekaiInfo)";
+                            if screens.is_active(MenuScreenType::MysekaiInfo) {
+                                info!("[menu_dialog] {caller}: IsActiveScreen(MysekaiInfo); no push; Close");
+                            } else {
+                                info!("[menu_dialog] {caller}: PushUIScreen(MysekaiInfo, ScreenLayerMysekaiInfoBootData); Close");
+                                screens.push_ui_screen(
+                                    MenuScreenType::MysekaiInfo,
+                                    Some("ScreenLayerMysekaiInfoBootData".to_owned()),
+                                    caller,
+                                );
+                            }
                             close_requested = true;
                         }
                         MenuButton::WhiteBlueprintSketch => {
@@ -1151,22 +1383,10 @@ pub(crate) fn click(
                             sketch_modes.write(crate::home_action::SketchModeRequest::Enter);
                             close_requested = true;
                         }
-                        // 已建目标路由臂只有这两条（见 target_built）。
-                        _ => unreachable!("已建目标路由臂：情报、白图写生"),
+                        // A button whose adaptation line is deleted gets its
+                        // source route here.
+                        other => unreachable!("{other:?} has no adaptation and no route"),
                     }
-                } else {
-                    // 置灰钮点按不响应（真源里 enabled=false 的钮同样不
-                    // 派发；本仓叠加门：源使能真而目标未建的也置灰）。
-                    let reason = if !source {
-                        "源使能=false（user 态派生，mock 面板）"
-                    } else {
-                        "路由目标未建（具名挂账）"
-                    };
-                    info!(
-                        "[menu_dialog] 钮「{}」置灰，点按不响应（{reason}）——路由：{}",
-                        which.label(),
-                        which.route_target()
-                    );
                 }
             }
             None if view.rect(&layouts, "Window/ContentRoot", Vec2::new(width,height)/scale).is_some_and(|r|r.active && r.contains(canvas)) => {}

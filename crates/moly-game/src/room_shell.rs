@@ -223,8 +223,11 @@ pub(crate) fn resolve(
             let index = match uv_index {
                 Some(index) => index as f32,
                 None => {
-                    // _BaseTextureMappingMode: 0 uv0, 2 uv1, 3 uv2 (1, world
-                    // xz, is not ported here).
+                    // _BaseTextureMappingMode: 0 uv0, 2 uv1, 3 uv2. Mode 1
+                    // (world xz) is carried by no room material: the room
+                    // modules, shells and skins hold only 0 and 2 (the skin
+                    // wall slot writes 0 / 2 / 3), so a 1 is refused by name
+                    // by the domain check here.
                     let mapping = get("_BaseTextureMappingMode")?;
                     domain(&name, "_BaseTextureMappingMode", mapping, &[0.0, 2.0, 3.0])?;
                     match mapping as u32 {

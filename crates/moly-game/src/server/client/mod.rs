@@ -16,12 +16,15 @@
 //! - [`talk_read`]: the talk read report and its reply.
 //! - [`instrument_env`]: the native instruments' environment variables,
 //!   which game mode never reads.
+//! - [`music_play`]: the owned `UserMysekaiMusicRecord` rows and the music
+//!   player's set and eject requests.
 
 pub(crate) mod avatar;
 pub(crate) mod craft;
 pub(crate) mod home_action;
 pub(crate) mod inventory;
 pub(crate) mod music;
+pub(crate) mod music_play;
 pub(crate) mod talk_read;
 
 use std::sync::atomic::{AtomicBool, Ordering};

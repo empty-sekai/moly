@@ -6,12 +6,16 @@
 //! Flow, each piece in its module:
 //! - `site`: the delivery site's scene objects (`DeliverySiteView` and the
 //!   views it references), the place and board collision circles and their
-//!   enter / exit message, the start / end requests the delivery screen
-//!   sends, the named keyboard stand-in and the `MOLY_DELIVERY_AUTOPLAY`
-//!   instrument.
-//! - `server_mock`: `DeliveryServerMock`, the one panel for what the server
-//!   decides (user rows, the two master configs not on disk, the API
-//!   replies).
+//!   enter / exit message, and the `MOLY_DELIVERY_AUTOPLAY` instrument.
+//! - `screen`: `ScreenLayerMysekaiDelivery`'s view, presenter and model
+//!   (the gauge, the party cells, the delivery button and the information
+//!   button), following the screen manager's layer, and the controller's
+//!   `OnChangeUILayer`: the delivery button's press and release are the
+//!   start / end requests.
+//! - The server's side is the server model's delivery section
+//!   (`crate::server::delivery`): the user rows and the two master configs
+//!   the client reads as its copies (`ClientBirthdayPartyData`), the two API
+//!   replies, and the delivery master tables (`DeliveryTables`).
 //! - `flow`: `OnStartDelivery` / `ExecuteDelivery`: the approach, the start
 //!   wait, the hold loop, the release window, the end action and the API.
 //! - `drops`: `OnDropItem`, the drop hop, auto-gather above the limit, the
@@ -36,7 +40,7 @@ pub(crate) mod bloom;
 pub(crate) mod drops;
 pub(crate) mod flow;
 pub(crate) mod honor;
-pub(crate) mod server_mock;
+pub(crate) mod screen;
 pub(crate) mod site;
 
 use bevy::prelude::*;
@@ -88,24 +92,27 @@ pub enum DeliveryActionState {
     Gather = 6,
 }
 
-/// `PublishBirthdayPartyProgressView(state, party, beforePoint, dt)`: what
-/// the screen's gauge reads (the UI lane's).
+/// Event 66 (`UpdateBirthdayPartyProgressView`,
+/// `UpdateBirthdayPartyProgressViewEventData`) as
+/// `PublishBirthdayPartyProgressView(state, siteData, beforeDeliveryPoint,
+/// deltaTime)` builds it (see [`publish`]); the delivery screen reads it.
 #[derive(Message, Clone, Copy, Debug)]
 pub struct DeliveryProgress {
     pub state: DeliveryActionState,
     pub party_id: Option<i32>,
-    pub current_points: i32,
-    /// `CurrentDeliveryPoint - beforeDeliveryPoint`.
-    pub gained_points: i32,
-    pub remaining_items: i32,
-    pub dt: f32,
+    /// `IsProgressUpdate`: state InDelivery and some point added.
+    pub is_progress_update: bool,
+    /// `CurrentMaterialQuantity`: the have-quantity minus the spent count.
+    pub current_material_quantity: i32,
+    /// `BeforeBirthdayDeliveryPoint`: the synchronized points.
+    pub before_point: i32,
+    /// `CurrentBirthdayDeliveryPoint`: synchronized plus unsynchronized.
+    pub current_point: i32,
+    /// `AddBirthdayDeliveryPoint`: `CurrentDeliveryPoint - beforeDeliveryPoint`.
+    pub add_point: i32,
+    /// `AnimationTime`: the frame time, or the first item's animation time.
+    pub animation_time: f32,
 }
-
-/// The screen closed a dialog the flow awaits: the get-resource dialog of a
-/// reward or the honor reward chain. The dialogs are the UI lane's; this
-/// message is their close.
-#[derive(Message, Clone, Copy, Debug)]
-pub struct DeliveryDialogClosed;
 
 /// GameState Delivery (12): set by the pre-action of a visit's first press,
 /// gone with the site.
@@ -197,6 +204,20 @@ impl PartySite {
     /// the delivery points come back from the user data, the unsynchronized
     /// cost and points clear; unsynchronized drops join the synchronized
     /// list; the auto-gather list clears and the range is the full circle.
+    /// The user rows `UpdateSynchronizedData` reads: the delivery item's
+    /// have-quantity and the party's `deliveryTotalPoint` (0 without a row).
+    pub(crate) fn user_rows(
+        &self,
+        client: &crate::server::delivery::ClientBirthdayPartyData,
+    ) -> (i32, i32) {
+        (
+            i32::try_from(self.item_material_id).map_or(0, |id| client.have_quantity(id)),
+            client
+                .user_birthday_party(self.id)
+                .map_or(0, |row| row.delivery_total_point),
+        )
+    }
+
     pub(crate) fn update_synchronized(&mut self, have_quantity: i32, delivery_total_point: i32) {
         self.tally.synchronized_cost_quantity = have_quantity;
         self.tally.unsynchronized_cost = 0;
@@ -285,10 +306,14 @@ impl DeliveryModel {
     }
 
     /// `DeliverySiteModel.UpdateSynchronizedData`: every party, from the
-    /// user rows the panel last replied.
-    pub(crate) fn update_synchronized(&mut self, mock: &server_mock::DeliveryServerMock) {
+    /// client's copies of the user data (`GetHaveQuantity` of the delivery
+    /// item, `GetUserBirthdayParty(id).deliveryTotalPoint`, 0 without a row).
+    pub(crate) fn update_synchronized(
+        &mut self,
+        client: &crate::server::delivery::ClientBirthdayPartyData,
+    ) {
         for party in &mut self.parties {
-            let (have, points) = mock.user_rows(party.id, party.item_material_id);
+            let (have, points) = party.user_rows(client);
             party.update_synchronized(have, points);
         }
     }
@@ -299,30 +324,72 @@ impl DeliveryModel {
     }
 }
 
-/// `PublishBirthdayPartyProgressView`.
+/// `DeliverySiteModel.GetFirstAnimationTime`: `(sqrt(v * v + a * 4) - v) /
+/// a` with `v` the minimum rate and `a` the acceleration, in single
+/// precision.
+pub(crate) fn first_animation_time(min: f32, acceleration: f32) -> f32 {
+    ((min * min + acceleration * 4.0).sqrt() - min) / acceleration
+}
+
+/// `PublishBirthdayPartyProgressView(state, siteData, beforeDeliveryPoint,
+/// deltaTime)`: with site data the added points are `CurrentDeliveryPoint -
+/// beforeDeliveryPoint`, the event is a progress update when the state is
+/// InDelivery and the added points are above 0, and the first item of a
+/// delivery (the spent count is 1) of a progress update carries
+/// `GetFirstAnimationTime` instead of the frame time. The event's quantity
+/// and points are filled only for a progress update with site data.
 pub(crate) fn publish(
     progress: &mut MessageWriter<DeliveryProgress>,
     state: DeliveryActionState,
     party: Option<&PartySite>,
     before_points: i32,
     dt: f32,
+    rate: moly_law::delivery::DeliveryRate,
 ) {
-    let (party_id, current, remaining) = match party {
-        Some(p) => (Some(p.id), p.tally.current_points(), p.tally.remaining()),
-        None => (None, 0, 0),
+    let (add, is_progress_update, first) = match party {
+        Some(p) => {
+            let add = p.tally.current_points() - before_points;
+            (
+                add,
+                state == DeliveryActionState::InDelivery && add > 0,
+                p.tally.unsynchronized_cost == 1,
+            )
+        }
+        None => (0, false, false),
+    };
+    let animation_time = if first && is_progress_update {
+        first_animation_time(rate.min, rate.acceleration)
+    } else {
+        dt
+    };
+    let (quantity, before, current) = match (is_progress_update, party) {
+        (true, Some(p)) => (
+            p.tally.remaining(),
+            p.tally.synchronized_points,
+            p.tally.current_points(),
+        ),
+        _ => (0, 0, 0),
     };
     progress.write(DeliveryProgress {
         state,
-        party_id,
-        current_points: current,
-        gained_points: if party.is_some() {
-            current - before_points
-        } else {
-            0
-        },
-        remaining_items: remaining,
-        dt,
+        party_id: party.map(|p| p.id),
+        is_progress_update,
+        current_material_quantity: quantity,
+        before_point: before,
+        current_point: current,
+        add_point: if is_progress_update { add } else { 0 },
+        animation_time,
     });
+}
+
+/// `ObjectCollisionManager.TriggerOnEnterCollisions` (the controller's
+/// `OnChangeUILayer` of the delivery screen): every object the player
+/// collides with runs its enter callback again, the place and the board in
+/// `site::scan`, the drops in `drops::scan`, on the next scan.
+#[derive(Resource, Default)]
+pub(crate) struct DeliveryEnterRetrigger {
+    pub(crate) site: bool,
+    pub(crate) drops: bool,
 }
 
 /// Queued by the site transition: the drops go with the site, GameState 12
@@ -348,12 +415,29 @@ pub(crate) fn clear_for_site_change(world: &mut World) {
     let had_state = world.remove_resource::<DeliveryGameState>().is_some();
     let was_executing = world.resource::<DeliveryModel>().executing;
     *world.resource_mut::<DeliveryModel>() = DeliveryModel::default();
+    flow::release_auto_move(world);
     world.resource_mut::<flow::DeliveryFlow>().cancel();
     world.resource_mut::<flow::DeliveryFace>().0 = None;
     world.resource_mut::<drops::DeliveryGatherLoop>().cancel();
     world.resource_mut::<drops::DeliveryDropSpawns>().clear();
-    world.resource_mut::<honor::RewardRuns>().cancel();
-    world.resource_mut::<honor::DialogAwait>().open = false;
+    let shown = world.resource_mut::<honor::RewardRuns>().cancel();
+    if !shown.is_empty() {
+        let mut screens = world.resource_mut::<crate::ui_layers::ScreenManager>();
+        for id in &shown {
+            screens.close_dialog(*id);
+            screens.dialog_destroyed(*id);
+        }
+        info!("[delivery] site change: the reward dialogs {shown:?} close with their run");
+    }
+    let refresh = std::mem::take(&mut *world.resource_mut::<honor::DialogAwait>()).refresh;
+    if let Some(id) = refresh {
+        // The site's enable token cancels the refresh's `WaitUntil`; the
+        // dialog goes with the site's UI.
+        let mut screens = world.resource_mut::<crate::ui_layers::ScreenManager>();
+        screens.close_dialog(id);
+        screens.dialog_destroyed(id);
+        info!("[delivery] site change: the refresh dialog {id:?} closes with the end action");
+    }
     world.resource_mut::<site::DeliverySite>().clear();
     if count > 0 || had_state || was_executing {
         info!(
@@ -375,7 +459,6 @@ impl Plugin for DeliveryPlugin {
         app.add_message::<DeliveryCollision>()
             .add_message::<DeliveryRequest>()
             .add_message::<DeliveryProgress>()
-            .add_message::<DeliveryDialogClosed>()
             .init_resource::<DeliveryModel>()
             .init_resource::<site::DeliverySite>()
             .init_resource::<site::DeliveryAutoplay>()
@@ -387,17 +470,19 @@ impl Plugin for DeliveryPlugin {
             .init_resource::<honor::DialogAwait>()
             .init_resource::<crate::delivery_camera::DeliveryHonorCamera>()
             .init_resource::<bloom::DeliveryBloom>()
-            .add_systems(Startup, server_mock::load)
+            .init_resource::<screen::DeliveryScreen>()
+            .init_resource::<DeliveryEnterRetrigger>()
+            .add_systems(Startup, screen::load)
+            .add_systems(Update, (screen::load_names, screen::spawn_when_ready))
             .add_systems(
                 Update,
                 (
-                    server_mock::parse,
-                    server_mock::open_panel,
                     site::resolve,
                     site::arrive,
                     site::scan,
                     drops::scan,
-                    site::keyboard,
+                    screen::follow_screen,
+                    screen::input.run_if(crate::game_settings::scene_input_enabled),
                     site::autoplay,
                     flow::advance,
                     drops::spawn,
@@ -406,6 +491,8 @@ impl Plugin for DeliveryPlugin {
                     drops::gather_loop,
                     honor::advance,
                     flow::apply_face,
+                    screen::update_model,
+                    screen::advance,
                 )
                     .chain()
                     .after(crate::player::read_input)

@@ -13,9 +13,16 @@
 //!   半边）。死区 0（只捕精确 0）、上限 1.0（超限归一 × 1）、中段
 //!   原始比例 ⇒ 实效 = 把比值夹到单位长。handleRange 1.0、轴双向、
 //!   snap 关。
-//! * **事件流**：按下 → BEGAN（按下帧差值恰为零，方向零，本层无
-//!   动作）；每次拖动 → UPDATE（方向 + 相机基烘移动向量）；松开/
-//!   系统取消 → END（清活跃）。真源 presenter 的 UPDATE 式
+//! * **事件流**：按下 → 基类 OnPointerDown 先虚调一次 OnDrag，发
+//!   UPDATE（底盘生于触点，差值恰为零 ⇒ 方向零），再发 BEGAN（presenter
+//!   不理 BEGAN）⇒ **按下即活跃、移动向量为零**：玩家进 Move 态、朝向
+//!   atan2(0,0)=0、走姿以速率下限 0.55 原地播；此后引擎输入模块只在
+//!   拖动开始后才派 OnDrag——拖动开始 = 距按下点的平方距离 ≥ 事件系统
+//!   `m_DragThreshold`²（序列化 10，设备像素；预制体与场景两处同值，
+//!   无运行时改写者）；开始后每次移动 → UPDATE（方向 + 相机基烘移动
+//!   向量）；松开/系统取消 → END（清活跃）。按下那一下真源经画布相机
+//!   往返一次浮点，得零或微小噪声；本层没有那次往返，取精确零（具名：
+//!   噪声不复现）。真源 presenter 的 UPDATE 式
 //!   （OnTouchJoyStick）：移动向量 = 相机前（去 y 归一，水平模长
 //!   近零时**该项**回零、右项保留）× 方向.y + 相机右 × 方向.x，
 //!   和向量不归一。烘基取 UPDATE 时刻的相机——按住不动时相机转
@@ -76,6 +83,25 @@ const DEAD_ZONE: f32 = 0.0;
 /// 方向上限（序列化 Limit 1.0：超限归一 × 1，中段保持原始差值）。
 const LIMIT: f32 = 1.0;
 
+/// The EventSystem's serialized `m_DragThreshold`, in device pixels: the
+/// input module sends OnDrag only once the pointer is this far from where it
+/// was pressed (`(press - position).sqrMagnitude >= threshold²`).
+const DRAG_THRESHOLD_DEVICE_PIXELS: f32 = 10.0;
+
+/// HandleInput's clamp of a raw stick ratio: the dead zone 0 keeps only an
+/// exact zero at zero, above the limit the ratio is normalised times the
+/// limit, in between it is kept.
+pub(crate) fn handle_input(raw: Vec2) -> Vec2 {
+    let magnitude = raw.length();
+    if magnitude <= DEAD_ZONE {
+        Vec2::ZERO
+    } else if magnitude > LIMIT {
+        raw / magnitude * LIMIT
+    } else {
+        raw
+    }
+}
+
 /// 摇杆两件所在页（UI atlas 的 MysekaiAtlas 页）。
 const PAGE: &str =
     "moly://ui/atlas/textures/sactx-0-1024x1024-ASTC 4x4-MysekaiAtlas-0a6c3f39-000001d9.png";
@@ -110,8 +136,12 @@ pub(crate) struct JoystickState {
     /// 捕获中的手指 id（真源 _handlingPointerId 的 Nullable<int>）。
     /// 手势层读它跳过捕获指的事件。
     pub(crate) captured: Option<u64>,
-    /// 底盘心（屏坐标、顶原点——捕获时等于触点）。
+    /// 底盘心（屏坐标、顶原点——捕获时等于触点）。也是拖动阈值的
+    /// 按下点（PointerEventData.pressPosition）。
     base: Vec2,
+    /// The captured finger's drag has started (PointerEventData.dragging):
+    /// its moves reach OnDrag.
+    dragging: bool,
     /// 最近一次 UPDATE 的方向（真源屏坐标语义：y 向上；已按上限夹）。
     direction: Vec2,
     /// presenter 的 _isJoyStickInput：收到过 UPDATE 且未收 END。
@@ -138,6 +168,7 @@ pub(crate) fn force_reset(
         let finger = state.captured.take();
         let was_active = state.active;
         state.active = false;
+        state.dragging = false;
         state.direction = Vec2::ZERO;
         state.move_vector = Vec3::ZERO;
         info!(
@@ -208,6 +239,7 @@ pub(crate) fn advance(
             // 真源状态切换收场：发布 END（ResetStateByCurrentPos 同拍发
             // 一条 END 态事件，presenter 清 _isJoyStickInput）。
             state.active = false;
+            state.dragging = false;
             state.direction = Vec2::ZERO;
             state.move_vector = Vec3::ZERO;
             info!("[joystick] 让位门落下，拖动中的指以 END 收场");
@@ -221,26 +253,52 @@ pub(crate) fn advance(
         return;
     };
     let radius = HANDLE_SIZE * root_canvas.scale(window);
+    // Touch positions are logical pixels; the threshold is in device pixels.
+    let drag_threshold = DRAG_THRESHOLD_DEVICE_PIXELS / window.scale_factor();
     for touch in touches.read() {
         match touch.phase {
             TouchPhase::Started => {
                 if state.captured.is_none() && in_zone(touch.position, width, height) {
-                    // 首指捕获：底盘生于触点，方向零（真源基类按下即虚调
-                    // 一次拖动，差值恰为零）。已捕获时区内第二指吞掉
-                    //（真源早退 + 射线归摇杆件）；区外指不归本层。
+                    // 首指捕获：底盘生于触点（浮动式）。已捕获时区内第二指
+                    // 吞掉（真源早退 + 射线归摇杆件）；区外指不归本层。
                     state.captured = Some(touch.id);
                     state.base = touch.position;
+                    state.dragging = false;
                     state.direction = Vec2::ZERO;
                     state.active = false;
                     *last_logged = Vec2::ZERO;
+                    // OnPointerDown -> OnDrag: UPDATE with the press-point
+                    // difference, zero, so the input is on with a zero
+                    // vector (then BEGAN, which the presenter ignores).
+                    if let Some(vector) = bake_move_vector(state.direction, &cameras) {
+                        state.move_vector = vector;
+                        state.active = true;
+                    }
                     info!(
-                        "[joystick] 捕获指 {} @({:.0},{:.0})，底盘半径 {:.0}px（死区 {} 上限 {}）",
-                        touch.id, touch.position.x, touch.position.y, radius, DEAD_ZONE, LIMIT
+                        "[joystick] 捕获指 {} @({:.0},{:.0})，底盘半径 {:.0}px（死区 {} 上限 {}）；按下即 UPDATE 零向量，输入 {}，拖动阈值 {:.2}px",
+                        touch.id, touch.position.x, touch.position.y, radius, DEAD_ZONE, LIMIT,
+                        if state.active { "开" } else { "未开（相机不在场）" },
+                        drag_threshold
                     );
                 }
             }
             TouchPhase::Moved => {
                 if state.captured == Some(touch.id) {
+                    if !state.dragging {
+                        // ProcessDrag: the drag starts once the pointer is
+                        // at least the threshold from the press point.
+                        if (state.base - touch.position).length_squared()
+                            < drag_threshold * drag_threshold
+                        {
+                            continue;
+                        }
+                        state.dragging = true;
+                        info!(
+                            "[joystick] 拖动开始：距按下点 {:.2}px ≥ 阈值 {:.2}px",
+                            (state.base - touch.position).length(),
+                            drag_threshold
+                        );
+                    }
                     // OnDrag：差值翻成真源屏坐标（y 向上）除以底盘半径，
                     // 再过 HandleInput 的夹（死区 0 只捕精确 0；超上限
                     // 归一 × 1；中段保持原始比例）。
@@ -248,14 +306,7 @@ pub(crate) fn advance(
                         touch.position.x - state.base.x,
                         state.base.y - touch.position.y,
                     ) / radius;
-                    let magnitude = raw.length();
-                    state.direction = if magnitude <= DEAD_ZONE {
-                        Vec2::ZERO
-                    } else if magnitude > LIMIT {
-                        raw / magnitude * LIMIT
-                    } else {
-                        raw
-                    };
+                    state.direction = handle_input(raw);
                     // presenter 的 UPDATE：烘移动向量并置活跃。相机不在
                     // 场（装载期触摸）真源整式短路——不置活跃，等下一
                     // 次 UPDATE 重烘。
@@ -286,6 +337,7 @@ pub(crate) fn advance(
                     // 触屏产品的让位路径按松开处理）。
                     state.captured = None;
                     state.active = false;
+                    state.dragging = false;
                     state.direction = Vec2::ZERO;
                     state.move_vector = Vec3::ZERO;
                     info!("[joystick] 指收场：END，方向清零，输入停止");
@@ -303,7 +355,14 @@ fn bake_move_vector(
     direction: Vec2,
     cameras: &Query<&GlobalTransform, With<Camera3d>>,
 ) -> Option<Vec3> {
-    let global = cameras.single().ok()?;
+    Some(bake(direction, cameras.single().ok()?))
+}
+
+/// OnTouchJoyStick's bake of one direction on one camera: camera forward
+/// with y removed and normalised (that term zero when its horizontal length
+/// is not above 1e-5) times direction.y, plus camera right times
+/// direction.x, the sum not normalised.
+pub(crate) fn bake(direction: Vec2, global: &GlobalTransform) -> Vec3 {
     let forward = global.forward();
     let horizontal = (forward.x * forward.x + forward.z * forward.z).sqrt();
     let forward_flat = if horizontal <= 0.00001 {
@@ -311,7 +370,7 @@ fn bake_move_vector(
     } else {
         Vec3::new(forward.x / horizontal, 0.0, forward.z / horizontal)
     };
-    Some(forward_flat * direction.y + global.right().as_vec3() * direction.x)
+    forward_flat * direction.y + global.right().as_vec3() * direction.x
 }
 
 /// 摇杆 UI 根（两件 sprite 的父；可见性随捕获态，子件沿父链继承）。
