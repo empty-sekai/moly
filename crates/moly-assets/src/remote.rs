@@ -6,7 +6,9 @@
 //! below the source is joined to that base, and nothing outside the base is
 //! reachable through it. Which host a consumer tries first, and whether it
 //! falls back to the other, is the consumer's rule. The transfer is Bevy's
-//! web asset reader (`ureq` on native, the page's `fetch` on wasm).
+//! web asset reader (`ureq` on native, the page's `fetch` on wasm), except a
+//! master read on wasm: its own `fetch`, which fails as `TimedOut` when the
+//! response headers do not arrive within [`MASTER_FIRST_BYTE_MS`].
 //!
 //! The bases are admitted by the entry crate, the one refusal point for asset
 //! locations, once the app is built and before it runs. A read before
@@ -23,6 +25,10 @@ use bevy::asset::{AssetApp, AssetPath};
 use bevy::prelude::Resource;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, RwLock};
+
+/// How long a master host has to send its response headers on the browser
+/// before the read fails as `TimedOut` (the body is not bounded).
+pub const MASTER_FIRST_BYTE_MS: i32 = 10_000;
 
 /// The admitted bases, each a canonical HTTPS directory ending in `/`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -230,6 +236,17 @@ fn plain_relative(path: &Path) -> Option<String> {
 impl AssetReader for RemoteReader {
     async fn read<'a>(&'a self, path: &'a Path) -> Result<impl Reader + 'a, AssetReaderError> {
         let target = self.target(path)?;
+        // A master host that does not answer within the bound fails the read
+        // as `TimedOut`, and the master layer tries its next host. Bevy's
+        // fetch has no bound: a connect the network drops waits for the
+        // system's own connect limit (about two minutes). Native reads keep
+        // Bevy's reader.
+        #[cfg(target_arch = "wasm32")]
+        if matches!(self.remote, Remote::Master | Remote::MasterMirror) {
+            let url = format!("https://{}", target.display());
+            let bytes = crate::http::read_first_byte_bounded(&url, MASTER_FIRST_BYTE_MS).await?;
+            return Ok(VecReader::new(bytes));
+        }
         let web = WebAssetReader::Https;
         let mut reader = AssetReader::read(&web, &target).await?;
         let mut bytes = Vec::new();
