@@ -783,6 +783,61 @@ pub(crate) fn simulate_object(world: &mut World, binding: &ParticlePlayBinding, 
     result
 }
 
+/// `ParticleSystem.Simulate(t, withChildren, restart)` from script on the
+/// played object's own system: the restart with children is
+/// [`simulate_object`]; the other combinations are refused by name.
+pub(crate) fn simulate_played_object(world: &mut World, binding: &ParticlePlayBinding, t: f32, with_children: bool,
+    restart: bool) -> Result<usize, String> {
+    if !(with_children && restart) {
+        return Err(format!(
+            "Simulate(withChildren: {with_children}, restart: {restart}) on a played object: only the restart with children is ported"
+        ));
+    }
+    simulate_object(world, binding, t)
+}
+
+/// `main.duration = duration` on each listed system node `systems` (the
+/// caller's `GetComponentsInChildren` order) that the played object's
+/// `binding` plays. The engine's setter writes at once, playing or not
+/// ([`moly_law::particle::main_duration::set_length_in_sec`]: an equal value
+/// kept, others clamped to [0.05, 100000]); on a system that is not stopped
+/// it also turns procedural simulation off for it. That second effect has a
+/// reader here only on the procedural route, so a playing procedural-route
+/// system refuses the call by name before anything is written. A listed node
+/// this host does not play has nothing to write. Returns how many systems were
+/// written.
+pub(crate) fn set_played_object_duration(world: &mut World, binding: &ParticlePlayBinding, systems: &[Entity],
+    duration: f32) -> Result<usize, String> {
+    if world.get::<PreparedPlay>(binding.root).is_none() {
+        return Err("played object was released".into());
+    }
+    let now = world.resource::<Time>().elapsed_secs_f64();
+    let mut written = Vec::new();
+    for &node in systems {
+        let Some(&draw) = binding.draws.iter().find(|&&draw| {
+            world.get::<crate::uber_particle::FixtureParticleLive>(draw).is_some_and(|live| live.0.anchor == Some(node))
+        }) else {
+            continue;
+        };
+        if let (Some(played), Some(live)) = (world.get::<crate::weather_fx::fixture::Played>(draw),
+            world.get::<crate::uber_particle::FixtureParticleLive>(draw)) {
+            if *played.route() == SourceRoute::Procedural && played.playing(&live.0, now) {
+                return Err(format!(
+                    "{}: main.duration on a playing procedural-route system turns its procedural simulation off, which this host does not model; nothing written",
+                    live.0.node
+                ));
+            }
+        }
+        written.push(draw);
+    }
+    for &draw in &written {
+        if let Some(mut live) = world.get_mut::<crate::uber_particle::FixtureParticleLive>(draw) {
+            live.0.emitter.duration = moly_law::particle::main_duration::set_length_in_sec(live.0.emitter.duration, duration);
+        }
+    }
+    Ok(written.len())
+}
+
 /// `ParticleSystem.Stop()` on the object's system: `Stop(withChildren: true,
 /// StopEmitting)`, so the live particles finish their lifetimes. Returns how
 /// many systems it stopped.
