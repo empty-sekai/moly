@@ -34,7 +34,7 @@
 //                         （Ground/Water/Birthday：selected − 0.5 < 0）。
 //   SITE_GROUND_HEIGHT_FADE   _USE_HEIGHT_FADE：Ground 高度淡出（雾后）。
 //   SITE_TREE_HEIGHT_FADE     _USE_HEIGHT_FADE：Tree 三色两段高度渐变
-//                         (JP 6.8.1 form: object-space height, applied to the
+//                         (JP client form: object-space height, applied to the
 //                         texel before the vertex colour and lighting).
 //   SITE_BIRTHDAY_DITHER  !_DISABLE_DITHER：Birthday 抖动（0.125）。
 //   SITE_TREE_DITHER      !_DISABLE_DITHER on a Tree material: Bayer dither
@@ -858,8 +858,8 @@ fn fragment(in: SiteVertexOutput) -> @location(0) vec4<f32> {
     }
 #endif
 
-    // JP 6.8.1 height gradient: on the texel, before the vertex colour and
-    // outside the lighting gate (CN 6.0.0 applied it last inside the gate, on
+    // JP client height gradient: on the texel, before the vertex colour and
+    // outside the lighting gate (the CN client applies it last inside the gate, on
     // the world height). h reads the object-space height; above 3.0 the span
     // is rebuilt from _HeightFadePosition + 45 and _HeightFadeLength instead of
     // the material's two reciprocal values. The Pos01 = 0 division is kept

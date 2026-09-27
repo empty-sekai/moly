@@ -135,7 +135,7 @@ fn native_install_draws_one_owner_for_birth_streams_and_noise() {
 }
 
 #[test]
-#[ignore = "MOLY_PARTICLE_NOISE_SOURCE must identify current JP 6.8.1 effects.json"]
+#[ignore = "MOLY_PARTICLE_NOISE_SOURCE must identify the current JP client's effects.json"]
 fn current_snow_noise_source_installs_only_the_qualified_consumer() {
     let path = std::env::var("MOLY_PARTICLE_NOISE_SOURCE").unwrap();
     let bytes = std::fs::read(path).unwrap();
@@ -184,7 +184,7 @@ fn current_snow_noise_source_installs_only_the_qualified_consumer() {
 }
 
 #[test]
-#[ignore = "MOLY_PARTICLE_NOISE_SOURCE must identify current JP 6.8.1 effects.json"]
+#[ignore = "MOLY_PARTICLE_NOISE_SOURCE must identify the current JP client's effects.json"]
 fn source_snow_legacy_composition_smoke_is_not_native_prewarm() {
     let path = std::env::var("MOLY_PARTICLE_NOISE_SOURCE").unwrap();
     let effects = Effects::from_json_str(&std::fs::read(path).unwrap()).unwrap();

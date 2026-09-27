@@ -48,12 +48,12 @@
 //                       Only admitted together with FIXTURE_CRYSTAL: that is
 //                       the only variant the data uses it with, and the
 //                       variants differ in which normal later stages read.
-//   FIXTURE_CRYSTAL     `_ENABLE_CRYSTAL_FIXTURE` (JP 6.8.1): after the fogged
+//   FIXTURE_CRYSTAL     `_ENABLE_CRYSTAL_FIXTURE` (JP client): after the fogged
 //                       and clamped colour, the light-influence mix towards the
 //                       texel, the normal-driven colour remap and the bright
 //                       fresnel add. Its programs always carry the fresnel and
 //                       reflection keywords too.
-//   FIXTURE_MULTI_UV    `_ENABLE_MULTI_UV_SCROLL` (JP 6.8.1): the base colour is
+//   FIXTURE_MULTI_UV    `_ENABLE_MULTI_UV_SCROLL` (JP client): the base colour is
 //                       not `_MainTex` but up to three `_LayerTex*` layers,
 //                       sampled at world-planar coordinates (the position
 //                       projected on a horizontal tangent frame built in the

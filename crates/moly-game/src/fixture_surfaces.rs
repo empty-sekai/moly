@@ -36,7 +36,7 @@ pub(super) fn owns_shader(shader: &str) -> bool { matches!(shader, CANVAS | BLOC
 pub(super) struct FixtureSurfaceReadiness(pub bool);
 
 /// Source BlockFixtureViewManager starts at one and clamps its global to [0,1].
-/// The JP 6.8.1 program multiplies the final alpha by it, after the outline
+/// The JP client's program multiplies the final alpha by it, after the outline
 /// mix, so the edges fade with the faces.
 #[derive(Resource)]
 pub struct TransparentBlockAppearance { pub face_opacity: f32 }

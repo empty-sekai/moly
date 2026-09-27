@@ -1,4 +1,4 @@
-//! The gate's and the cut-scene's calls into the NPC runtime (JP 6.8.1): the
+//! The gate's and the cut-scene's calls into the NPC runtime (JP client): the
 //! presenter's objective calls (TryCancelCurrentObjective,
 //! ForceUpdateObjective, Show, Hide, HideAndCancelObjective,
 //! SetImmediatelyExecuteNextObjective, ForceUpdateCutSceneObjective,

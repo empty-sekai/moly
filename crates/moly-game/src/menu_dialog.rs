@@ -1,4 +1,4 @@
-//! 菜单对话框（真源 `MysekaiMenuDialog`，DialogType 312（JP 6.8.1 的枚举值），Dialog 槽）——
+//! 菜单对话框（真源 `MysekaiMenuDialog`，DialogType 312（日服客户端的枚举值），Dialog 槽）——
 //! 场地屏外壳菜单钮的目标：体力/等级两格 + 12 个可按件的导航中枢。
 //!
 //! ## 入口与身份（Dialog 槽，不是层栈）
@@ -1423,7 +1423,7 @@ mod tests {
 
     /// `MysekaiStaminaView.UpdateStaminaView` (with its `SetStaminaGaugeColor`
     /// and `StaminaData.IsEmptyStamina`) and `UpdateStaminaGageRate`, executed
-    /// from the game's 6.8.1 binary on these inputs with the engine calls
+    /// from the JP client's binary on these inputs with the engine calls
     /// recorded (the lane harness runs the machine code; the stock count
     /// comes from the boost master's maxStamina 10000). Per row: normal,
     /// enhance, boost; the gauge coloured by palette entry 55; the gradient

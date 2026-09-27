@@ -563,7 +563,7 @@ pub(crate) fn click(
             break;
         }
         let choice = if edit.can_save && hit(view, &layouts, &bindings.save, point, canvas) {
-            // CN 6.0.0: OnReceiveSaveLayout -> SaveLayoutWithValidation ->
+            // CN client: OnReceiveSaveLayout -> SaveLayoutWithValidation ->
             // GetSaveLayoutEventData(..., true). The successful save returns
             // from the editor; the reducer retains the draft/UI on failure.
             Some((&bindings.save, EditCommand::SaveAndExit))

@@ -1,6 +1,6 @@
 //! Current JP InitialModule::Start, one dispatched four-lane group.
 //!
-//! Transcribed from the current JP 6.8.1 libunity. The caller owns
+//! Transcribed from the current JP client's engine library. The caller owns
 //! capacity, aligned birth storage and packing. Every nonempty group consumes
 //! all four random lanes, including discarded tail lanes. This law excludes
 //! Shape, StartVelocity, module updates and the game seed/lifecycle owner.
@@ -356,7 +356,7 @@ fn nonnegative(value: f32) -> f32 {
     if value > 0.0 { value } else { 0.0 }
 }
 
-// Current JP 6.8.1 InitialModule::Start: the start-lifetime reciprocal, an ARM
+// Current JP client InitialModule::Start: the start-lifetime reciprocal, an ARM
 // FRECPE estimate refined by FRECPS steps.
 // Contract: FPCR round-to-nearest ties-to-even, FZ=0, input already clamped by
 // Initial's FMAX to at least f32::from_bits(0x3727c5ac), or positive infinity.

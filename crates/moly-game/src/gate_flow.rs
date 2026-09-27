@@ -1,5 +1,5 @@
 //! The gate's presentations after a server reply: the invite cut-scene and
-//! the gate change with its visitors coming out of the gate (JP 6.8.1).
+//! the gate change with its visitors coming out of the gate (the JP client).
 //!
 //! Invite (`ScreenLayerMysekaiGateInvitationPresenter.ReserveProcessAsync`):
 //! the pass check (`HasMysekaiColorfulPass`, else the expired-pass dialog and
@@ -1774,7 +1774,7 @@ fn warm(world: &mut World, gate: Entity, name: &'static str) -> bool {
 }
 
 /// `PlayGateCharacterAppearTimelineInternal`'s NPC side after the chime and
-/// its delay (JP 6.8.1 native): `character = FindNPC(unit)`, then
+/// its delay (JP client native): `character = FindNPC(unit)`, then
 /// `character.ForceUpdateObjectiveImmediatelyTimeline(VISIT_BUNDLE,
 /// timeline, gate.UId, character, [FindNPC(character's unit)],
 /// [FixtureNpcActionLocateData(character's unit, index 0, slotId 0)])`;
