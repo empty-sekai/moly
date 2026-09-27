@@ -60,6 +60,16 @@ impl ShellHost {
         self != Self::MyRoom
     }
 
+    /// The host's field screen (the site controller's base screen).
+    fn screen(self) -> LayerId {
+        match self {
+            Self::Home => LayerId::MysekaiHome,
+            Self::MyRoom => LayerId::MysekaiMyRoom,
+            Self::Harvest => LayerId::MysekaiHarvest,
+            Self::Delivery => LayerId::MysekaiDelivery,
+        }
+    }
+
     /// The host of the harvest site category (MysekaiSiteCategory 2); the
     /// other three hosts are housing_home 0, housing_room 1 and delivery 3.
     fn is_harvest(self) -> bool {
@@ -684,11 +694,19 @@ pub(crate) fn place(
         let is_host = host == Some(root.host);
         let set_up = is_host && !root.active;
         root.active = is_host;
-        // The home HUD appears in the entry's OnFinishEnterAsync.
-        let visible = crate::entry::hud_open(entry.as_deref()) && stack.on_field() && is_host;
+        // The home HUD appears in the entry's OnFinishEnterAsync. The field
+        // screen draws while its layer is active, its exit animation included.
+        let screen = root.host.screen();
+        let visible = crate::entry::hud_open(entry.as_deref())
+            && (stack.on_field() || stack.is_active(screen))
+            && is_host;
         *visibility = if visible { Visibility::Inherited } else { Visibility::Hidden };
         transform.scale = Vec3::splat(scale);
         let doc = layouts.document(root.host.key()).expect("spawned field prefab");
+        // The screen animations write the root's CanvasGroup alpha.
+        if let Some(alpha) = stack.screen_visual(screen).alpha {
+            view.set_alpha(&doc.prefab, alpha);
+        }
         // TimeUtility.GetCurrentTimestamp: the client's server date plus the
         // real time since it.
         let now_ms = || {
