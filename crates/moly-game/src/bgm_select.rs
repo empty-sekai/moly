@@ -342,9 +342,17 @@ fn optional_cloned(
     fields: &Value,
     names: &[&str],
 ) -> Result<Vec<String>, String> {
+    if !fields.is_object() {
+        return Err("the contents are not a decoded object".into());
+    }
     let mut out = Vec::new();
     for name in names {
-        let id = pointer(&fields[*name])?;
+        // A field the region's class does not declare has no object to turn
+        // off: that region's code never reaches it.
+        let Some(value) = fields.get(*name) else {
+            continue;
+        };
+        let id = pointer(value).map_err(|error| format!("{name}: {error}"))?;
         if id != 0 {
             out.push(instance.selector(id)?);
         }
@@ -740,8 +748,15 @@ pub(crate) fn spawn_when_ready(
         return;
     }
     let sprites = register_sprites(&mut layouts);
-    let (document, bindings) =
-        compose(&layouts).unwrap_or_else(|error| panic!("BGM select composition: {error}"));
+    let (document, bindings) = match compose(&layouts) {
+        Ok(composed) => composed,
+        Err(error) => {
+            let reason = format!("its composition is refused: {error}");
+            error!("[bgm-select] {reason}; the screen refuses by name when it is pushed");
+            state.absent = Some(reason);
+            return;
+        }
+    };
     layouts
         .replace_runtime_document(RUNTIME, document, &server)
         .expect("BGM select screen installation");
