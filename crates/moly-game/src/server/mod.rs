@@ -1003,7 +1003,7 @@ fn load(mut commands: Commands, server: Res<AssetServer>) {
         ),
         (
             server.load(CONFIGS),
-            "configs.json (master configs)",
+            "configs.json (master configs; without it the delivery reads policies.masterConfigsStandIn)",
             parse_configs,
         ),
         (
