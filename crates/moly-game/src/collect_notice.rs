@@ -126,17 +126,6 @@ struct Masters {
     items: Vec<MasterRow>,
 }
 
-/// The texture `UITextureLoader.LoadAsync(bundle, resource)` loads, by the
-/// client's own load path (`mysekai/item_preview/material/<icon>` and the
-/// other item preview and thumbnail packages): the asset path of the file,
-/// or why there is none. The icons are generic decoded resources that the
-/// upstream asset source is to serve by exactly this key; that source is not
-/// built yet, so every icon is refused by name.
-fn icon_texture(load_path: &str, resource: &str) -> Result<String, String> {
-    let _ = (load_path, resource);
-    Err("no upstream asset source serves item icons yet".to_owned())
-}
-
 struct Bound {
     cells: Vec<CellBinding>,
     slides: SlideNotices<NoticeCollectItem>,
@@ -370,6 +359,7 @@ fn setup_cell(
     layouts: &mut UiLayouts,
     server: &AssetServer,
     art: Option<&crate::balloon::BalloonArt>,
+    icons: Option<&crate::item_icon::ItemIcons>,
 ) {
     let data = bound
         .slides
@@ -408,7 +398,10 @@ fn setup_cell(
     }
     view.set_visible(&cell.loading, false);
     let key = data.asset_bundle_name.clone();
-    let found = icon_texture(&key, &data.resource_name);
+    let found = match icons {
+        Some(icons) => icons.texture(&key, &data.resource_name),
+        None => Err("the icon index is not settled yet".to_owned()),
+    };
     match found {
         Ok(asset) => {
             if bound.registered.insert(key.clone()) {
@@ -416,6 +409,11 @@ fn setup_cell(
             }
             view.set_texture(&cell.icon, &key);
             view.set_visible(&cell.icon, true);
+            info!(
+                "[notice] collect-item cell {index} icon {}: {}",
+                crate::balloon::ascii_or(&key),
+                crate::balloon::ascii_or(&asset)
+            );
         }
         Err(reason) => {
             if bound.refused_icons.insert(key.clone()) {
@@ -440,6 +438,7 @@ fn advance(
     mut layouts: ResMut<UiLayouts>,
     server: Res<AssetServer>,
     art: Option<Res<crate::balloon::BalloonArt>>,
+    icons: Option<Res<crate::item_icon::ItemIcons>>,
     mut state: ResMut<CollectNotices>,
     mut views: Query<&mut UiPrefabView, With<NoticeRoot>>,
 ) {
@@ -526,6 +525,7 @@ fn advance(
                     &mut layouts,
                     &server,
                     art.as_deref(),
+                    icons.as_deref(),
                 );
             }
             CellCall::Wakeup => {

@@ -25,8 +25,8 @@
 //!   resource)`: the raw image is disabled and the loading object shown
 //!   during the load; when it ends the loading object is hidden and the raw
 //!   image enabled. Here the texture is resolved by the client's load path
-//!   and bound at `Setup`, and the loading object stays hidden (the load
-//!   phase has no duration here). A load path with no texture is refused by
+//!   ([`crate::item_icon`]) and bound at `Setup`, and the loading object
+//!   stays hidden (the load phase has no duration here). A load path with no texture is refused by
 //!   name and the image stays hidden: the source's failed load would show the
 //!   raw image with no texture.
 //! - The new mark (`_newObject`): its `ColorFader` has no target, no colour
