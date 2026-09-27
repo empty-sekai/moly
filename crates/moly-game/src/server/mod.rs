@@ -1306,9 +1306,15 @@ async fn read_slice(server: AssetServer) -> Result<Option<String>, String> {
 fn load(mut commands: Commands, server: Res<AssetServer>, mut masters: ResMut<MasterData>) {
     if !installed() {
         let reader = server.clone();
-        commands.insert_resource(SliceRead(
-            IoTaskPool::get().spawn(async move { read_slice(reader).await }),
-        ));
+        commands.insert_resource(SliceRead(IoTaskPool::get().spawn(async move {
+            // A published snapshot never carries the slice (it is not in the
+            // browser membership), so the page asks for none and takes the
+            // checked-in default, as a native root without one does.
+            if cfg!(target_arch = "wasm32") {
+                return Ok(None);
+            }
+            read_slice(reader).await
+        })));
     }
     let reader = server.clone();
     commands.insert_resource(RootReads(vec![(
