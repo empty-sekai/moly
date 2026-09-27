@@ -61,12 +61,16 @@
 //! `PlayStartAnimation` sets Starting and, with no animation, finishes at
 //! once: state Playing, `OnFinishStartAnimation`, `EnableTapScreen`. So with
 //! no animation the hooks run `OnInitComponent`, `OnFinishStartAnimation`,
-//! `OnScreenStart`.
+//! `OnScreenStart`; with one, `OnInitComponent`, `OnScreenStart`, and
+//! `OnFinishStartAnimation` when it completes.
 //!
 //! **ExitScreen.** Not instantiated: nothing. A backward exit reverses its
 //! exit animation; `OnScreenLayerExitStart` (`DisableTapScreen` unless tap
-//! animation, state Exiting, `OnExitStart`, `PlayExitAnimation`); then
-//! `SetActive(false)` and `OnScreenLayerExited` (state Exit, `OnExited`).
+//! animation, state Exiting, `OnExitStart`, `PlayExitAnimation`, then the wait
+//! for `isExitDone`); then `SetActive(false)` and `OnScreenLayerExited` (state
+//! Exit, `OnExited`). Push, pop and change do not wait for that exit unless
+//! asked (`isWaitExitAnimation`): the old screen's exit and the new screen's
+//! start run together.
 //! **ExitScene** calls `OnExitScene` on every instantiated layer and leaves
 //! the stack as it is.
 //!
@@ -87,20 +91,25 @@
 //!
 //! ## Product mapping (read before changing)
 //!
-//! - Views have no screen transition animations yet, so every wait point
-//!   passes in the frame it is reached, unless a view holds its layer
-//!   ([`ScreenManager::hold`]); a transition started in a frame then ends in
-//!   that frame, and the hook order above is kept.
+//! - Screen animations ([`transition`]): the start and exit animations of
+//!   the types the MySekai screen data use (0, 5 alpha, 6 scale, 8) run here
+//!   on the scaled frame delta; a layer keeps its `ExitScreen` open and stays
+//!   active until its exit animation completes, and a transition holds the
+//!   slot until its target plays. Views read [`ScreenManager::screen_visual`]
+//!   for the alpha and scale of their root. Slides and the mask (1 to 4, 7)
+//!   are not ported and say so. Without an animation or a view's hold
+//!   ([`ScreenManager::hold`]) every wait point passes in the frame it is
+//!   reached, and the hook order above is kept.
 //! - The site controllers: the product has one site module, so this module
 //!   issues each controller's `ChangeUIScreen` of its base screen when a site
 //!   becomes active with no screen current, and resolves a change to
 //!   [`MenuScreenType::HomeField`] by the current site's category.
 //! - The scene setup's `AddScreen` of the common, HUD and notice layers runs
 //!   on the first frame the manager runs.
-//! - The site map's view writes its own visibility (its toggle, its M key,
-//!   its tap on the current site); the manager treats that view as the truth
-//!   of its layer and reconciles once a frame: an open view the stack does not
-//!   record is pushed, a closed view the stack still records is backed.
+//! - The site map opens and closes through [`LayerCommand`] (the menu's site
+//!   map button, its M key, its tap on the current site); the manager shows
+//!   the view while its layer is active and the view applies the layer's
+//!   group alpha to its parts.
 //! - The layout editor's back override (`ScreenLayerSiteEditMode` sets
 //!   `OnBackUIScreenOverride`): while the editor is active a back request asks
 //!   the editor to leave (it resolves its dirty-work dialog first); the
@@ -114,9 +123,12 @@ use crate::sitemap::SitemapRoot;
 
 pub(crate) mod harvest_summary;
 pub(crate) mod registry;
+pub(crate) mod transition;
 
 use registry::HeaderDisplay;
 pub(crate) use registry::{DialogType, MenuScreenType, ScreenRegistry};
+pub(crate) use transition::ScreenVisual;
+use transition::{AnimPhase, Built, ScreenAnim};
 
 /// The earlier slot table's name for a screen id.
 pub(crate) type LayerId = MenuScreenType;
@@ -274,6 +286,13 @@ struct LayerRuntime {
     stack_object: Option<String>,
     /// `ScreenInsertDirection`: Back for a backward mount.
     inserted_back: bool,
+    /// `screenAnim`: the running start or exit animation.
+    anim: Option<ScreenAnim>,
+    /// The root's values the animations wrote.
+    visual: ScreenVisual,
+    /// `isExitDone` / `isManualExit` of the running exit.
+    exit_done: bool,
+    manual_exit: bool,
 }
 
 /// One `uiScreenStack` entry: (layer, its stack object, a boot argument).
@@ -467,6 +486,8 @@ pub(crate) struct ScreenManager {
     transition: Option<Transition>,
     mounts: Vec<Mount>,
     removals: Vec<Removal>,
+    /// `ExitScreen` coroutines waiting for `isExitDone`.
+    exits: Vec<MenuScreenType>,
     back_override: Option<BackOverride>,
     auto_clear_back_override: bool,
     is_pop: bool,
@@ -497,6 +518,7 @@ impl Default for ScreenManager {
             transition: None,
             mounts: Vec::new(),
             removals: Vec::new(),
+            exits: Vec::new(),
             back_override: None,
             auto_clear_back_override: false,
             is_pop: false,
@@ -552,6 +574,16 @@ impl ScreenManager {
         self.layers
             .get(&screen)
             .is_some_and(|layer| layer.instantiated && layer.active)
+    }
+
+    /// The values the screen animations wrote on the layer's root (its
+    /// `CanvasGroup` alpha and local scale), for the view that draws it.
+    #[allow(dead_code)]
+    pub(crate) fn screen_visual(&self, screen: MenuScreenType) -> ScreenVisual {
+        self.layers
+            .get(&screen)
+            .map(|layer| layer.visual)
+            .unwrap_or_default()
     }
 
     /// `IsUILayerWorking`: a transition holds the slot.
@@ -1004,14 +1036,18 @@ impl ScreenManager {
                 self.transition.as_ref().map(|t| t.stage),
                 self.mounts.len(),
                 self.removals.len(),
+                self.exits.len(),
             );
+            self.step_exits();
             self.step_transition(ctx);
             self.step_mounts(ctx);
             self.step_removals(ctx);
+            self.step_exits();
             let after = (
                 self.transition.as_ref().map(|t| t.stage),
                 self.mounts.len(),
                 self.removals.len(),
+                self.exits.len(),
             );
             if before == after {
                 break;
@@ -1347,20 +1383,63 @@ impl ScreenManager {
         }
         self.set_state(screen, ScreenLayerState::InitComponent);
         self.hook(screen, ScreenHook::OnInitComponent);
+        // PlayStartAnimation: state Starting, the previous animation
+        // destroyed, then the animation of `inAnimType` (reversed above for a
+        // backward mount).
         self.set_state(screen, ScreenLayerState::Starting);
+        let tap = data.as_ref().map(|d| d.enable_tap_screen_animation);
         let held = self.layer(screen).hold.start;
-        if !held {
-            self.finish_start(screen, data.as_ref().map(|d| d.enable_tap_screen_animation));
-        }
+        let built = match &data {
+            Some(data) => {
+                let animation = if is_forward {
+                    data.start_animation
+                } else {
+                    transition::reverse(data.start_animation)
+                };
+                let layer = self.layer(screen);
+                layer.anim = None;
+                (
+                    Some(animation),
+                    ScreenAnim::start(animation, data.include_child_canvas, &mut layer.visual),
+                )
+            }
+            None => (None, Built::None),
+        };
+        let start_note = match built {
+            (Some(animation), Built::Anim(anim)) => {
+                let note = format!(
+                    "type {animation}: {} from its start value, OnComplete StartAnimationDone",
+                    anim.label()
+                );
+                self.layer(screen).anim = Some(anim);
+                note
+            }
+            (animation, Built::NotPorted) => {
+                error!(
+                    "[screen]   {screen:?}: PlayStartAnimation type {animation:?} (a slide or the mask) is not in this port; the start finishes at once"
+                );
+                if !held {
+                    self.finish_start(screen, tap);
+                }
+                format!("type {animation:?} not ported: finished at once")
+            }
+            (animation, _) => {
+                if !held {
+                    self.finish_start(screen, tap);
+                }
+                match animation {
+                    Some(animation) => format!(
+                        "type {animation}: no animation: state Playing, OnFinishStartAnimation, EnableTapScreen"
+                    ),
+                    None => "no data: the animation type is unread; finished at once".to_owned(),
+                }
+            }
+        };
         self.hook(screen, ScreenHook::OnScreenStart);
         info!(
-            "[screen]   {screen:?}: {}; OnScreenLayerInitComponent: state InitComponent, ShowComponentRoot, OnInitComponent, PlayStartAnimation (state Starting{}); OnScreenLayerStart: OnScreenStart",
+            "[screen]   {screen:?}: {}; OnScreenLayerInitComponent: state InitComponent, ShowComponentRoot, OnInitComponent, PlayStartAnimation (state Starting; {start_note}{}); OnScreenLayerStart: OnScreenStart",
             steps.join(", "),
-            if held {
-                ", held by its view"
-            } else {
-                "; no animation: state Playing, OnFinishStartAnimation, EnableTapScreen"
-            }
+            if held { ", held by its view" } else { "" }
         );
         if screen == MenuScreenType::SiteEditMode {
             self.set_back_override(
@@ -1377,8 +1456,11 @@ impl ScreenManager {
         }
     }
 
+    /// `OnFinishStartAnim`: state Playing, the animation destroyed,
+    /// `OnFinishStartAnimation`, `EnableTapScreen` unless tap animation.
     fn finish_start(&mut self, screen: MenuScreenType, tap_animation: Option<bool>) {
         self.set_state(screen, ScreenLayerState::Playing);
+        self.layer(screen).anim = None;
         self.hook(screen, ScreenHook::OnFinishStartAnimation);
         if tap_animation == Some(false) {
             self.tap_disablers.retain(|disabler| *disabler != screen);
@@ -1393,7 +1475,9 @@ impl ScreenManager {
         registry: &mut ScreenRegistry,
     ) {
         self.layer(screen).hold.start = false;
-        if self.layer(screen).state == Some(ScreenLayerState::Starting) {
+        if self.layer(screen).state == Some(ScreenLayerState::Starting)
+            && self.layer(screen).anim.is_none()
+        {
             let tap = registry.data(screen).map(|d| d.enable_tap_screen_animation);
             self.finish_start(screen, tap);
             info!(
@@ -1402,38 +1486,187 @@ impl ScreenManager {
         }
     }
 
-    /// `ExitScreen` with `executeOnWillExit = false` (the gate already ran).
+    /// `ExitScreen` with `executeOnWillExit = false` (the gate already ran):
+    /// `OnScreenLayerExitStart` (`DisableTapScreen` unless tap animation,
+    /// `isExitDone` and `isManualExit` cleared, state Exiting, `OnExitStart`,
+    /// `PlayExitAnimation`), then the coroutine waits for `isExitDone`; see
+    /// [`Self::step_exits`]. The layer stays active while its exit animation
+    /// runs.
     fn exit_screen(&mut self, ctx: &mut Ctx, screen: MenuScreenType, is_forward: bool) {
         if !self.layer(screen).instantiated {
             return;
         }
         let data = ctx.registry.data(screen).cloned();
-        let tap_animation = data.as_ref().map(|d| d.enable_tap_screen_animation);
-        self.set_state(screen, ScreenLayerState::Exiting);
-        self.hook(screen, ScreenHook::OnExitStart);
+        let tap = data.as_ref().map(|d| d.enable_tap_screen_animation);
+        if tap == Some(false) {
+            self.tap_disablers.push(screen);
+        }
         {
             let layer = self.layer(screen);
-            layer.active = false;
+            layer.exit_done = false;
+            layer.manual_exit = false;
         }
-        self.siblings.retain(|sibling| *sibling != screen);
-        self.set_state(screen, ScreenLayerState::Exit);
-        self.hook(screen, ScreenHook::OnExited);
+        self.set_state(screen, ScreenLayerState::Exiting);
+        self.hook(screen, ScreenHook::OnExitStart);
+        let (animation, built) = match &data {
+            Some(data) => {
+                let animation = if is_forward {
+                    data.exit_animation
+                } else {
+                    transition::reverse(data.exit_animation)
+                };
+                let layer = self.layer(screen);
+                layer.anim = None;
+                (
+                    Some(animation),
+                    ScreenAnim::exit(animation, data.include_child_canvas, &mut layer.visual),
+                )
+            }
+            None => (None, Built::None),
+        };
+        let note = match built {
+            Built::Anim(anim) => {
+                let note = format!(
+                    "type {}: {} from its start value, OnComplete ExitAnimationDone",
+                    anim.animation,
+                    anim.label()
+                );
+                self.layer(screen).anim = Some(anim);
+                note
+            }
+            Built::ManualExit => {
+                self.layer(screen).manual_exit = true;
+                self.finish_exit_animation(screen, tap);
+                "type 8: isManualExit, no animation; the exit waits for the layer's manual end"
+                    .to_owned()
+            }
+            Built::NotPorted => {
+                error!(
+                    "[screen]   {screen:?}: PlayExitAnimation type {animation:?} (a slide or the mask) is not in this port; the exit finishes at once"
+                );
+                self.finish_exit_animation(screen, tap);
+                format!("type {animation:?} not ported: finished at once")
+            }
+            Built::None => {
+                self.finish_exit_animation(screen, tap);
+                match animation {
+                    Some(animation) => format!("type {animation}: no animation"),
+                    None => "no data: the animation type is unread; finished at once".to_owned(),
+                }
+            }
+        };
         info!(
-            "[screen]   {screen:?}: ExitScreen{}: OnScreenLayerExitStart ({}state Exiting, OnExitStart, PlayExitAnimation: none), SetActive(false), OnScreenLayerExited (state Exit, OnExited)",
+            "[screen]   {screen:?}: ExitScreen{}: OnScreenLayerExitStart ({}state Exiting, OnExitStart, PlayExitAnimation: {note})",
             if is_forward {
                 ""
             } else {
                 " backward (ReverseExitAnimationType)"
             },
-            match tap_animation {
-                Some(false) => "DisableTapScreen then EnableTapScreen at the end, ",
+            match tap {
+                Some(false) => "DisableTapScreen, ",
                 _ => "",
             },
+        );
+        // The coroutine runs on until its first yield: an exit already done
+        // ends here, before the caller goes on. Each ExitScreen is its own
+        // coroutine, and the source's checks only that the layer's game
+        // object exists: a second exit of a layer already exiting runs the
+        // exit start again (PlayExitAnimation destroys the running animation
+        // first), and both coroutines end with SetActive(false) and
+        // OnScreenLayerExited once isExitDone is set.
+        if self.layer(screen).exit_done {
+            self.finish_exit(screen);
+        } else {
+            self.exits.push(screen);
+        }
+    }
+
+    /// `OnFinishExitAnim`: `EnableTapScreen` unless tap animation, the
+    /// animation destroyed, `isExitDone` unless `isManualExit`.
+    fn finish_exit_animation(&mut self, screen: MenuScreenType, tap: Option<bool>) {
+        if tap == Some(false) {
+            self.tap_disablers.retain(|disabler| *disabler != screen);
+        }
+        let layer = self.layer(screen);
+        layer.anim = None;
+        if !layer.manual_exit {
+            layer.exit_done = true;
+        }
+    }
+
+    /// The `ExitScreen` coroutines past `isExitDone`: `SetActive(false)` and
+    /// `OnScreenLayerExited` (state Exit, `OnExited`).
+    fn step_exits(&mut self) {
+        let exits = std::mem::take(&mut self.exits);
+        for screen in exits {
+            if self.layer(screen).exit_done {
+                self.finish_exit(screen);
+            } else {
+                self.exits.push(screen);
+            }
+        }
+    }
+
+    fn finish_exit(&mut self, screen: MenuScreenType) {
+        self.layer(screen).active = false;
+        self.siblings.retain(|sibling| *sibling != screen);
+        self.set_state(screen, ScreenLayerState::Exit);
+        self.hook(screen, ScreenHook::OnExited);
+        info!(
+            "[screen]   {screen:?}: isExitDone: SetActive(false), OnScreenLayerExited (state Exit, OnExited)"
         );
         if screen == MenuScreenType::SiteEditMode
             && self.back_override == Some(BackOverride::SiteEdit)
         {
             self.set_back_override(None, false, "ScreenLayerSiteEditMode exit");
+        }
+    }
+
+    /// One DOTween update of every running screen animation with the frame's
+    /// scaled delta; a completed start runs `StartAnimationDone`, a completed
+    /// exit `ExitAnimationDone`.
+    fn animate(&mut self, ctx: &mut Ctx, delta: f32) {
+        let mut screens: Vec<_> = self
+            .layers
+            .iter()
+            .filter(|(_, layer)| layer.anim.is_some())
+            .map(|(screen, _)| *screen)
+            .collect();
+        screens.sort();
+        for screen in screens {
+            let layer = self.layer(screen);
+            let Some(mut anim) = layer.anim.take() else {
+                continue;
+            };
+            let done = anim.step(delta, &mut layer.visual);
+            let visual = layer.visual;
+            if !done {
+                layer.anim = Some(anim);
+                continue;
+            }
+            let tap = ctx
+                .registry
+                .data(screen)
+                .map(|d| d.enable_tap_screen_animation);
+            match anim.phase {
+                AnimPhase::Start => {
+                    info!(
+                        "[screen]   {screen:?}: start animation type {} completes at {:.4} s (alpha {:?}, scale {:.3}): StartAnimationDone",
+                        anim.animation, anim.elapsed, visual.alpha, visual.scale.x
+                    );
+                    if self.layer(screen).hold.start {
+                        continue;
+                    }
+                    self.finish_start(screen, tap);
+                }
+                AnimPhase::Exit => {
+                    info!(
+                        "[screen]   {screen:?}: exit animation type {} completes at {:.4} s (alpha {:?}, scale {:.3}): ExitAnimationDone",
+                        anim.animation, anim.elapsed, visual.alpha, visual.scale.x
+                    );
+                    self.finish_exit_animation(screen, tap);
+                }
+            }
         }
     }
 
@@ -1496,11 +1729,16 @@ pub(crate) fn advance(
     mut editor_commands: MessageWriter<crate::fixture_edit::EditCommand>,
     site: Option<Res<crate::site::SiteActive>>,
     mut events: MessageWriter<ScreenLayerEvent>,
+    time: Res<Time>,
 ) {
     let stack = &mut *stack;
     let mut ctx = Ctx {
         registry: &mut *screen_registry,
     };
+    // The screen animations' DOTween update comes first: an animation built
+    // later in this frame takes its first delta on the next frame.
+    stack.animate(&mut ctx, time.delta_secs());
+    stack.step(&mut ctx);
     if !stack.scene_set_up {
         stack.scene_set_up = true;
         let (total, live) = registry::screen_counts();
@@ -1546,22 +1784,6 @@ pub(crate) fn advance(
         stack.back_ui_screen(false, "SiteEditModeUtility (the editor left)");
     }
     stack.step(&mut ctx);
-    // The site map view is the truth of its layer.
-    let view_open = match sitemap_roots.single() {
-        Ok(visible) => *visible != Visibility::Hidden,
-        Err(_) => false,
-    };
-    let slot_open = stack.current == Some(MenuScreenType::MysekaiSiteMap);
-    if view_open && !slot_open && stack.transition.is_none() {
-        stack.push_ui_screen(
-            MenuScreenType::MysekaiSiteMap,
-            None,
-            "MysekaiMenuUIContent (site map view opened)",
-        );
-    } else if !view_open && slot_open {
-        stack.back_ui_screen(false, "ScreenLayerMysekaiSiteMap (site map view closed)");
-    }
-    stack.step(&mut ctx);
     for command in commands.read() {
         match command {
             LayerCommand::Push(screen) => stack.push_ui_screen(*screen, None, "LayerCommand::Push"),
@@ -1605,15 +1827,18 @@ pub(crate) fn advance(
             LayerCommand::Remove(screen) => stack.remove_screen(*screen, "LayerCommand::Remove"),
         }
         // With no animation or hold every wait point passes in this frame, so
-        // one request ends before the next is read.
+        // such a request ends before the next is read; an animated one holds
+        // the slot until its animation completes.
         stack.step(&mut ctx);
     }
     stack.step(&mut ctx);
     for event in stack.events.drain(..) {
         events.write(event);
     }
+    // The site map view draws while its layer is active, its exit animation
+    // included.
     if let Ok(mut visible) = sitemap_roots.single_mut() {
-        *visible = if stack.current == Some(MenuScreenType::MysekaiSiteMap) {
+        *visible = if stack.is_active(MenuScreenType::MysekaiSiteMap) {
             Visibility::Inherited
         } else {
             Visibility::Hidden
@@ -1702,6 +1927,8 @@ pub(crate) fn install(app: &mut App) {
             },
         )
         .add_systems(Update, registry::load.before(advance))
-        .add_systems(Update, back_key.before(advance));
+        .add_systems(Update, back_key.before(advance))
+        .add_systems(PreUpdate, crate::sitemap::screen_alpha_restore)
+        .add_systems(PostUpdate, crate::sitemap::screen_alpha_apply);
     harvest_summary::install(app);
 }

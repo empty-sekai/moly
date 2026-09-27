@@ -58,6 +58,17 @@
 //!   clamped to its duration; each nested tween reads its start value on
 //!   its first step. The sequence completes when its position reaches its
 //!   duration (2.5 s).
+//! - The Play frame's delta counts. In the source the cannon move's end
+//!   action waits with `UniTask.Delay(0.5 s, PlayerLoopTiming.Update)`; the
+//!   delay's promise completes inside UniTask's Update runner and runs the
+//!   continuation at once, and UniTask injects that runner first in Unity's
+//!   Update phase, ahead of the behaviour updates. `ShowHarvestPointSummary`
+//!   and `Play` run there, so `DOTweenComponent.Update` of the same frame
+//!   updates the new sequence, and `TweenManager.Update` adds the frame's
+//!   whole delta to its position (no first-update skip). The sequence thus
+//!   completes when the deltas from the Play frame's own sum to 2.5 s, which
+//!   is less than 2.5 s of elapsed time after the Play frame: the log
+//!   reports both.
 //! - Drawing needs the layer's prefab on the UI root (layout key
 //!   [`KEY`]); a root without it runs the calls and the sequence and draws
 //!   nothing, reported once.
@@ -512,7 +523,8 @@ pub(crate) fn advance(
         let complete = sequence.step(dt, values);
         if complete {
             info!(
-                "[harvest-summary] t {now:.4}: sequence complete ({:.4}s after Play): y {:.4}, canvas alpha {:.4}, bg alpha {:.4}; OnComplete",
+                "[harvest-summary] t {now:.4}: sequence complete at position {:.4}s (the frame deltas summed from the Play frame's own; {:.4}s elapsed after the Play frame): y {:.4}, canvas alpha {:.4}, bg alpha {:.4}; OnComplete",
+                sequence.position,
                 now - sequence.started_at,
                 values.root_y,
                 values.canvas_alpha,

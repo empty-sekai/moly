@@ -63,6 +63,10 @@ pub(super) struct Bindings {
     pub change_look: String,
     /// SiteEditView's remove-all button (`OnRemoveFixtureAll`).
     pub remove_all: String,
+    /// The screen's `_groundEditTargetIcon` (an `EditTargetIcon`) and its
+    /// `_fixtureThumbnail`.
+    pub target_icon: String,
+    pub target_thumbnail: String,
     pub unsupported_buttons: Vec<String>,
     pub panel: String,
     pub panel_y: f32,
@@ -312,6 +316,27 @@ pub(super) fn compose(
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
+    // The screen's own two fixture thumbnails carry frame masks whose graphic
+    // has alpha 0, so an enabled one writes no stencil and hides its
+    // thumbnail. The source shows neither in the lists this host opens:
+    // - the selector handle's FixtureThumbnail has no serialized reference, no
+    //   code of the selector or the screen touches it, and it is inactive in
+    //   the prefab, so it stays hidden (listed below);
+    // - the ground target icon is shown only by SetupGroundEditTargetIcon when
+    //   the open list is Road or Fence; it then activates the thumbnail and
+    //   runs UIPartsFixtureThumbnail.Setup, i.e. SetupMysekaiFixture (base and
+    //   frame hidden, frame mask disabled) like a list cell. For every other
+    //   list, and on exit, EditTargetIcon.Hide turns off the icon and its
+    //   thumbnail; see apply_static.
+    let target_icon_fields = component(
+        &doc,
+        &field(&screen, "_groundEditTargetIcon")?,
+        ".EditTargetIcon",
+    )?
+    .fields
+    .clone();
+    let target_icon = field(&screen, "_groundEditTargetIcon")?;
+    let target_thumbnail = field(&target_icon_fields, "_fixtureThumbnail")?;
     // Elements without a presenter here. The screen reaches these through its
     // serialized references; the two paths below have no serialized
     // reference in the layout (no other component points at them).
@@ -430,6 +455,8 @@ pub(super) fn compose(
         camera_rotate: field(&action, "_rotateButton")?,
         change_look: field(&action, "_changeLookButton")?,
         remove_all: field(&action, "_removeAllButton")?,
+        target_icon,
+        target_thumbnail,
         unsupported_buttons,
         panel,
         panel_y: panel_rect.anchored_position[1],
@@ -472,6 +499,12 @@ pub(super) fn apply_static(
     for path in &bindings.hidden {
         view.set_visible(path, false);
     }
+    // SetupGroundEditTargetIcon: ShouldShowGroundEditTargetIcon is true only
+    // for the Road (1) and Fence (2) lists; otherwise EditTargetIcon.Hide.
+    // This host opens its primary tab, OutDoor (0) or Floor (3), so the icon
+    // and its thumbnail are hidden.
+    view.set_visible(&bindings.target_icon, false);
+    view.set_visible(&bindings.target_thumbnail, false);
     for path in &bindings.unsupported_buttons {
         enabled(view, doc, path, false);
     }
