@@ -265,6 +265,27 @@ const OPTIONAL_DOCUMENTS: &[(&str, &str)] = &[
     ("CraftResult", "craft/CraftResultSubWindowDialog.json"),
 ];
 
+/// How a region's `WordingManager.Get` answers a key its dictionary lacks
+/// or holds empty.
+#[derive(Clone, Copy, Default)]
+enum WordingRule {
+    /// CN: a missing or empty value returns the key itself.
+    KeyWhenMissingOrEmpty,
+    /// JP: the stored value as it is; a missing key sets no text.
+    #[default]
+    ValueAsStored,
+}
+
+impl WordingRule {
+    fn for_region(region: &str) -> Self {
+        match region {
+            "cn" => Self::KeyWhenMissingOrEmpty,
+            "jp" => Self::ValueAsStored,
+            other => panic!("UI: no wording lookup rule is read for region {other}"),
+        }
+    }
+}
+
 #[derive(Resource, Default)]
 pub(crate) struct UiLayouts {
     /// Active-theme colour of every colour palette entry, by `ColorEntry`
@@ -277,6 +298,8 @@ pub(crate) struct UiLayouts {
     missing_documents: HashSet<String>,
     /// Wording keys the root lacks that a text has drawn (named once).
     missing_wordings: std::sync::Mutex<HashSet<String>>,
+    /// How the region's wording lookup answers a missing or empty value.
+    wording_rule: WordingRule,
     document_revisions: HashMap<String, u64>,
     images: HashMap<String, Handle<Image>>,
     pub(crate) wordings: HashMap<String, String>,
@@ -501,6 +524,7 @@ pub(crate) fn parse(
             &words,
             camera_fields,
         );
+        layouts.wording_rule = WordingRule::for_region(&sources.runtime_region);
         commands.insert_resource(root_canvas);
         match sources.region.as_ref() {
             Some(region) => {
@@ -1318,17 +1342,25 @@ impl UiLayouts {
     /// The flag says whether the text is the component's serialized text:
     /// TMP parses the backslash escapes of that one only (its text input
     /// box source), not of a wording `Start` assigns through the text setter.
-    /// `WordingManager.Get`: a key the dictionary lacks returns the key
-    /// itself, so the client draws the key; each such key is named once.
-    pub(crate) fn wording_or_key(&self, key: &str) -> String {
-        if let Some(wording) = self.wordings.get(key) {
-            return wording.clone();
+    /// `WordingManager.Get`, by the region's rule. A key the dictionary
+    /// lacks is named once.
+    pub(crate) fn wording(&self, key: &str) -> String {
+        let value = self.wordings.get(key);
+        if value.is_none() {
+            let mut named = self.missing_wordings.lock().unwrap_or_else(|poison| poison.into_inner());
+            if named.insert(key.to_owned()) {
+                let drawn = match self.wording_rule {
+                    WordingRule::KeyWhenMissingOrEmpty => "draws the key",
+                    WordingRule::ValueAsStored => "draws nothing",
+                };
+                warn!("UI wording {key} is not in this root's wordings; its text {drawn}, as the client does");
+            }
         }
-        let mut named = self.missing_wordings.lock().unwrap_or_else(|poison| poison.into_inner());
-        if named.insert(key.to_owned()) {
-            warn!("UI wording {key} is not in this root's wordings; its text draws the key, as the client does");
+        match (self.wording_rule, value) {
+            (WordingRule::KeyWhenMissingOrEmpty, Some(value)) if !value.is_empty() => value.clone(),
+            (WordingRule::KeyWhenMissingOrEmpty, _) => key.to_owned(),
+            (WordingRule::ValueAsStored, value) => value.cloned().unwrap_or_default(),
         }
-        key.to_owned()
     }
     pub(crate) fn text_source(&self, component: &UiComponent) -> (String, bool) {
         assert_eq!(
@@ -1347,7 +1379,7 @@ impl UiLayouts {
         let serialized = field("m_text").as_str()
             .unwrap_or_else(|| panic!("UI CustomTextMesh {}: m_text is not a string", component.path_id));
         if use_key && !key.is_empty() {
-            (self.wording_or_key(key), false)
+            (self.wording(key), false)
         } else {
             (serialized.to_owned(), true)
         }
@@ -1372,7 +1404,7 @@ impl UiLayouts {
         if !use_key || key.is_empty() {
             return None;
         }
-        let wording = self.wording_or_key(key);
+        let wording = self.wording(key);
         Some(match args {
             Some(args) => moly_law::text::custom_text_mesh::format_wording(&wording, args)
                 .unwrap_or_else(|error| panic!("UI wording {key}: {error}")),
