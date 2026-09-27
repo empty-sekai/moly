@@ -155,7 +155,7 @@ is no implicit CDN or legacy OSS fallback:
 
 ```js
 resourceBase: "https://assets.pjsk.moe/sekai-extra-assets/",
-assets: "https://assets.pjsk.moe/sekai-extra-assets/snapshots/cn-6.0.0-.../assets/",
+assets: "https://assets.pjsk.moe/sekai-extra-assets/snapshots/<region>-<gameVersion>-.../assets/",
 ```
 
 Release objects use `releases/<id>/...`, snapshots use `snapshots/<id>/...`,

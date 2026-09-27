@@ -5,7 +5,7 @@ test("worker retains each stage's configured CDN without authorizing other origi
   const origin = "https://host.example";
   const first = "https://cdn-one.example";
   const second = "https://cdn-two.example:8443";
-  const path = "/moly/snapshots/cn-6.0.0-test/assets/audio/loop.json";
+  const path = "/moly/snapshots/cn-1.2.3-test/assets/audio/loop.json";
   const stores = new Map(), requests = [], handlers = new Map();
   const cacheApi = {
     async open(name) {
