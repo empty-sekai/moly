@@ -867,6 +867,15 @@ fn boot_talk_list(
                 return; // the booted site's layout is not restored yet
             }
             let site_id = i32::try_from(placements.site_id()).expect("site id fits i32");
+            if selection.site_type() != "home_site" {
+                // The source sets the talk list when the scene loads, which
+                // always lands at home, and no site move sets it again; the
+                // list below is for a site the source never boots on.
+                warn!(
+                    "[server-panel] booted on {}: the source sets the talk list on the scene load, which lands at home, and no site move replaces it; this list is built for the booted site",
+                    selection.site_type()
+                );
+            }
             let placed = placements.fixture_ids();
             let rows = policy_talk_list(
                 &tables,

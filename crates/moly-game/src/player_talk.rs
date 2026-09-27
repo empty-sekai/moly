@@ -179,8 +179,7 @@ pub(crate) fn is_general_row(row: &TalkRow) -> bool {
 
 impl TalkCatalog<'_> {
     /// The talk content, the site table and the phenomenon of the day are
-    /// in: the panel's first schedule write has run, so no talk condition
-    /// reads a phenomenon from before it.
+    /// in: the panel's first schedule write has run.
     pub(crate) fn ready(&self) -> bool {
         self.store.is_some() && self.sites.is_some() && self.today.written()
     }
@@ -195,14 +194,15 @@ impl TalkCatalog<'_> {
         self.sites.as_deref()?.type_value_of_site(site_id)
     }
 
-    /// Today's phenomenon id, as the talk conditions compare it.
-    /// The phenomenon talk conditions compare with: the one the schedule
-    /// write selected (the environment manager's current id, which the
-    /// schedule alone writes). Before any row was selected (an empty
-    /// schedule, or a clock outside every window) the manager keeps the
-    /// weather's current phenomenon.
+    /// The phenomenon id the talk and greeting conditions compare with: the
+    /// environment manager's current id, not the schedule's. The source's
+    /// phenomenon condition of a talk and the greeting's phenomenon check
+    /// both read the environment manager's current phenomenon, which the
+    /// environment writes when it is created and when each cross-fade
+    /// starts. At home that is the phenomenon of the day; a harvest site
+    /// keeps the one it was entered with, and a delivery site shows its own.
     pub(crate) fn phenomena_id(&self) -> i32 {
-        self.today.phenomena_id().unwrap_or(self.phenomena.0)
+        self.phenomena.0
     }
 
     fn site_id(&self, site_type: &str) -> Option<i32> {
