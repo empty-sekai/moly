@@ -1,6 +1,6 @@
 //! Keyboard and mouse adapters. They emit commands; there is no second editor.
 
-use super::{EditCommand, EditPhase, EditSession, assets::CANDIDATES, presentation::DraftPreview};
+use super::{EditCommand, EditPhase, EditSession, EditView, presentation::DraftPreview};
 use bevy::{
     input::mouse::AccumulatedMouseMotion,
     mesh::{Indices, PrimitiveTopology, VertexAttributeValues},
@@ -12,6 +12,7 @@ use moly_law::fixture::{GridPosition, position::TILE_SIZE};
 pub(crate) fn read_keyboard(
     keys: Res<ButtonInput<KeyCode>>,
     session: Res<EditSession>,
+    view: Res<EditView>,
     mut actions: MessageWriter<EditCommand>,
 ) {
     if keys.just_pressed(KeyCode::KeyE) {
@@ -46,13 +47,22 @@ pub(crate) fn read_keyboard(
     }
     let delta = i32::from(keys.just_pressed(KeyCode::BracketRight))
         - i32::from(keys.just_pressed(KeyCode::BracketLeft));
-    if delta != 0 {
+    // The brackets step through the owned fixture list.
+    if delta != 0 && !view.catalog.is_empty() {
         let index =
-            (session.catalog_index as i32 + delta).rem_euclid(CANDIDATES.len() as i32) as usize;
+            (session.catalog_index as i32 + delta).rem_euclid(view.catalog.len() as i32) as usize;
         actions.write(EditCommand::SelectCatalog { index });
     }
     if keys.just_pressed(KeyCode::KeyR) {
         actions.write(EditCommand::Rotate);
+    }
+    // Desktop stand-ins for the edit screen's camera rotate and change-look
+    // buttons, which send the same commands.
+    if keys.just_pressed(KeyCode::KeyQ) {
+        actions.write(EditCommand::RotateCamera);
+    }
+    if keys.just_pressed(KeyCode::KeyT) {
+        actions.write(EditCommand::ChangeLookCamera);
     }
     if keys.just_pressed(KeyCode::KeyD) || keys.just_pressed(KeyCode::Enter) {
         actions.write(EditCommand::Decide);
@@ -103,7 +113,11 @@ pub(crate) fn read_pointer(
     mut consumed: ResMut<crate::action_button::ActionTapConsumed>,
     mut actions: MessageWriter<EditCommand>,
 ) {
-    if session.phase == EditPhase::Idle || session.exit_dialog || consumed.0 {
+    if session.phase == EditPhase::Idle
+        || session.exit_dialog
+        || session.clean_up_dialog
+        || consumed.0
+    {
         return;
     }
     let Ok(window) = windows.single() else {
@@ -113,7 +127,7 @@ pub(crate) fn read_pointer(
         return;
     };
     // Covers source-prefab UI and the product-owned Bevy settings/editor UI.
-    if ui.captures(cursor, Vec2::new(window.width(), window.height()))
+    if ui.captures(cursor, window)
         || node_interactions
             .iter()
             .any(|state| *state != Interaction::None)

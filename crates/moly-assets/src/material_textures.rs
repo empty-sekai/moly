@@ -4,8 +4,8 @@
 //! after import. Loading its TextureN label later reloads the entire GLB, which
 //! respawns its scenes and discards installed materials and animation bindings.
 
-use std::collections::BTreeMap;
 use crate::material_passes::SourceMaterialPasses;
+use std::collections::BTreeMap;
 
 use bevy::{
     asset::LoadContext,

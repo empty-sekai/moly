@@ -13,7 +13,8 @@
 //! 现象切换是天气系统的活，本单只挂一个默认：001_sunny 是 id 1 的白天
 //! 基准档（刷新时段 5–17 时），光照取景用的太阳角就是它的 config 值，
 //! 用户验收过的环境层画面描述也是它——同基线，视觉联调时变量最少。
-//! D7 落地前不切换；shader 与律都已带双渐变槽与淡化进度，到时只翻参数。
+//! 默认档只管装载后的第一帧；之后的切换由天气系统驱动：`weather` 的环境写入
+//! 每帧把淡化两端的渐变条与进度交给 [`SkyGradient::set_ramps`]。
 //!
 //! # 上屏形状：自定义 Material，不是 StandardMaterial
 //!
@@ -24,8 +25,10 @@
 //! `AssetEvent::Added` 进管线缓存，导入解析照常）。
 //!
 //! 挂载：glb 默认 scene 里其余节点（Timeline/PostProcess/EffectRoot 等）
-//! 都是天气系统的货，本单不展开；只取天空网格自身成一个实体，每帧钉在
-//! 相机水平位置（真源把天空钉在玩家位置：天空永远不被走出去）。
+//! 都是天气系统的货，本单不展开；只取天空网格自身成一个实体，每帧把它的
+//! 世界位置写成玩家视变换的世界位置（`EnvironmentSkyView.OnUpdate`：天空
+//! 渲染器的 `transform.position = Player.GetViewTransform().position`，三个
+//! 分量整份照搬，不是相机、也不只取水平分量）。
 
 use bevy::asset::{AssetPath, LoadState, RecursiveDependencyLoadState};
 use bevy::asset::uuid::Uuid;
@@ -79,6 +82,11 @@ impl Material for SkyGradient {
 }
 
 impl SkyGradient {
+    pub(crate) fn set_timeline_additive(&mut self, color: [f32; 4], intensity: f32) {
+        self.additive_color = Vec4::from_array(color);
+        self.params.x = intensity;
+    }
+
     /// 天气系统切换现象时翻渐变条与淡化进度（L25 双 ramp mix 的喂入点）：
     /// 淡化期两槽各持一侧、进度 0→1；稳态两槽同持当前档、进度 0（mix 退化
     /// 为直通）。附加强度（params.x）不在这里动——它是时间轴域的量，底值
@@ -92,6 +100,24 @@ impl SkyGradient {
         self.ramp1 = ramp1;
         self.ramp2 = ramp2;
         self.params.y = progress.clamp(0.0, 1.0);
+    }
+
+    /// Whether `set_ramps(ramp1, ramp2, progress)` followed by
+    /// `set_timeline_additive(color, intensity)` would change this material:
+    /// ramps compare by asset id, floats by bit pattern.
+    pub(crate) fn differs_from(
+        &self,
+        ramp1: &Handle<Image>,
+        ramp2: &Handle<Image>,
+        progress: f32,
+        color: [f32; 4],
+        intensity: f32,
+    ) -> bool {
+        self.ramp1 != *ramp1
+            || self.ramp2 != *ramp2
+            || self.params.y.to_bits() != progress.clamp(0.0, 1.0).to_bits()
+            || self.params.x.to_bits() != intensity.to_bits()
+            || self.additive_color.to_array().map(f32::to_bits) != color.map(f32::to_bits)
     }
 }
 
@@ -137,6 +163,7 @@ pub(crate) struct Spawned;
 /// App；不挂它，任何引用该材质资产的 system 都会在参数校验上响亮失败。
 /// 在 `app()` 里 DefaultPlugins 之后调用一次。
 pub(crate) fn install(app: &mut App) {
+    crate::gpu_image_release::prepare_after_images::<SkyGradient>(app);
     app.add_plugins(MaterialPlugin::<SkyGradient>::default());
 }
 
@@ -480,26 +507,36 @@ pub(crate) fn spawn_when_ready(
     );
 }
 
-/// PostUpdate：天空钉在相机水平位置（y 归 0），天空永远不被走出去。
-pub(crate) fn follow_camera(
-    mut domes: Query<&mut Transform, With<SkyDome>>,
-    cameras: Query<&Transform, (With<Camera3d>, Without<SkyDome>)>,
+/// PostUpdate：天空渲染器的世界位置 = 玩家视变换的世界位置，每帧一次。
+///
+/// 真源 `EnvironmentSkyView.OnUpdate`：头像数据仓在、且持有玩家时，取
+/// `PlayerAvatarPresenter.GetViewTransform()`（玩家头像视图自身的变换）的
+/// `position`，原样写进天空渲染器变换的 `position`——三个分量整份照搬，
+/// 旋转与缩放不碰。玩家不在时这一步整段跳过，天空留在上一次的位置。
+/// 本侧的玩家视变换就是相机域跟随的那名成员（`AvatarRoot`）的世界变换。
+///
+/// 本系统排在变换传播之后：天空实体是根实体（没有父），所以世界变换与
+/// 局部变换同值，这里两份一起写，当帧画出的就是当帧玩家位置——真源在
+/// 更新阶段写、同帧渲染读，不隔一帧。
+pub(crate) fn follow_player_view(
+    mut domes: Query<(&mut Transform, &mut GlobalTransform), With<SkyDome>>,
+    players: Query<&GlobalTransform, (With<crate::character::AvatarRoot>, Without<SkyDome>)>,
     mut announced: Local<bool>,
 ) {
     let count = domes.iter().len();
-    let Ok(camera) = cameras.single() else {
+    let Ok(player) = players.single() else {
         return;
     };
-    for mut transform in &mut domes {
-        transform.translation.x = camera.translation.x;
-        transform.translation.z = camera.translation.z;
-        transform.translation.y = 0.0;
+    let position = player.translation();
+    for (mut transform, mut global) in &mut domes {
+        transform.translation = position;
+        *global = GlobalTransform::from(*transform);
     }
     if !*announced && count > 0 {
         *announced = true;
         info!(
-            "天空每帧钉在相机水平位置：天空实体 {count}，相机水平位 ({:.2},{:.2})",
-            camera.translation.x, camera.translation.z
+            "天空每帧钉在玩家视变换的世界位置：天空实体 {count}，玩家位 ({:.2},{:.2},{:.2})",
+            position.x, position.y, position.z
         );
     }
 }

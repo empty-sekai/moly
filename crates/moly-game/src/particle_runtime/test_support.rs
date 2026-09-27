@@ -1,0 +1,52 @@
+//! Synthetic shared-runtime fixtures. No original-client assets.
+use super::*;
+use crate::billboard::{Alignment, SizeClamp};
+use moly_law::particle::schema::{StartParams, EmissionParams};
+use moly_law::particle::{MinMaxCurve, MinMaxGradient, RingBufferMode};
+
+/// Source-billboard geometry with an authored MainModule scaling mode, for
+/// receipts that drive the native Shape boundary. Only `scaling` and the
+/// non-Mesh render mode are read by the birth path; the draw fields are inert.
+pub(crate) fn source_billboard(scaling: crate::particle_geometry::Scaling) -> crate::particle_runtime::Geometry {
+    crate::particle_runtime::Geometry::SourceBillboard(crate::source_billboard::Draw {
+        mode: crate::source_billboard::Mode::Billboard,
+        alignment: crate::particle_geometry::Alignment::View,
+        pivot: Vec3::ZERO, screen_size: Vec2::new(0.0, 1.0), allow_roll: true, scaling,
+    })
+}
+
+pub(crate) fn runtime() -> Runtime {
+    let zero = MinMaxCurve::Constant(0.0);
+    let one = MinMaxCurve::Constant(1.0);
+    Runtime {
+        node: "test".into(), effect: "test".into(),
+        emitter: EmitterParams {
+            effect:"test".into(),node:"test".into(), duration:5.0, looping:true, prewarm:true,
+            play_on_awake:true, simulation_speed:1.0, use_unscaled_time:Some(false), simulation_space:SimulationSpace::Local,
+            emitter_velocity_mode:Some(0),
+            random_seed:None,auto_random_seed:None,noise:None,
+            start_delay:zero.clone(),ring_buffer_mode:RingBufferMode::Disabled,
+            ring_buffer_loop_range:[0.0,1.0], max_particles:100,
+            start:StartParams { lifetime:MinMaxCurve::Constant(10.0),speed:zero.clone(),size:one,
+                size_y:None,size_z:None,size3d:false,rotation:zero.clone(),rotation_x:None,rotation_y:None,rotation3d:false,
+                color:MinMaxGradient::Color([1.0;4]),gravity_modifier:zero.clone() },
+            emission:Some(EmissionParams { rate_over_time:MinMaxCurve::Constant(100.0),
+                rate_over_distance:zero,bursts:Vec::new() }),
+            shape:None,shape_enabled:Some(false),velocity_over_lifetime:None,color_over_lifetime:None,
+            size_over_lifetime:None,rotation_over_lifetime:None,rotation_by_speed:None,limit_velocity:None,
+            custom_data:None,sub_emitters:Vec::new(),collision:None,trails:None,force:None,inherit_velocity:None,texture_sheet:None,unmapped:Vec::new(),
+        },
+        kind:EffectKind::Camera,camera_rotation:false,node_affine:GlobalTransform::IDENTITY,
+        mesh:Handle::default(),anchor:None,ring_cursor:0,emission_surface:None,
+        geometry:crate::particle_runtime::Geometry::Billboard {alignment:Alignment::View,
+            clamp:SizeClamp { min_size:0.0,max_screen_fraction:1.0 },pivot:[0.0;3]},
+        pool:vec![Particle::born([0.0;3],[2.0,0.0,0.0],10.0)],
+        side:vec![Side {rand:0.5,seed:123,rot:[0.0;3],size:[1.0;3],gravity:0.0,colour:[1.0;4],total_velocity:[0.0;3],custom_data:[[0.0;4];2],emit_carry:[0.0;2],animated:[0.0;3],current_size:0.0,axis:[0.0,0.0,1.0]}],
+        emission:EmissionState::default(),playback_head:0.0,previous_head:0.0,emission_started:false,rng:Rng(123),native_birth:None,noise:None,trail:None,collision:None,
+        prewarmed:false,pending:0.0,sub_emitter_max_lifetime:0.0,cone_angle:None,rol:None,limit:None,velocity_law:None,force_law:None,size_law:None,color_law:None,texture_sheet:None,
+        sort_mode: moly_law::particle::sort::ParticleSort::None,
+        gravity_law: moly_law::particle::gravity::Gravity::new(&MinMaxCurve::Constant(0.0)).unwrap(),
+        custom_law:None,
+        born_total:1,died_total:0,full_total:0,refused_total:0,
+    }
+}

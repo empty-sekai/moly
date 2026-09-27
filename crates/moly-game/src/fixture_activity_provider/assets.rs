@@ -8,6 +8,7 @@ use std::{
 use bevy::{
     animation::{AnimatedBy, AnimationClip, AnimationTargetId},
     asset::LoadState,
+    ecs::change_detection::Tick,
     gltf::Gltf,
     prelude::*,
     scene::{SceneInstance, SceneSpawner},
@@ -16,6 +17,7 @@ use moly_assets::{json::JsonAsset, scene_state::SourceInactive};
 use serde_json::Value;
 
 use super::ProviderPending;
+use crate::asset_cache::AssetCache;
 use crate::{
     fixture::FixtureSource,
     fixture_activity_state::{FixtureActivityIdentity, FixtureTarget},
@@ -23,32 +25,105 @@ use crate::{
         AnimationCoverage, SourceAnimationEvidence, StartTimeline, TimelineAnimationBinding,
         TimelineDefinition, TimelinePackage, TimelinePayload,
     },
+    fixture_talk::FixtureAnimation,
 };
 
 struct Package {
+    /// 校验这份套件时 `Assets<JsonAsset>` 的 `last_changed`。见
+    /// [`ActivityAssets::json_generation`]。
+    validated_at: Option<Tick>,
     text: [String; 3],
     parsed: TimelinePackage,
-    definitions: HashMap<String, Arc<TimelineDefinition>>,
+    definitions: AssetCache<Arc<TimelineDefinition>, 32>,
+}
+
+/// A directory of three-table timeline documents and its package keys.
+#[derive(Clone, Copy)]
+pub(crate) struct TimelineFamily {
+    root: &'static str,
+    prefix: &'static str,
+}
+
+impl TimelineFamily {
+    /// Furniture timelines (`mysekai/fixture_timeline/...` bundles).
+    pub(crate) const FIXTURE: Self = Self {
+        root: "fixture-timeline",
+        prefix: "mysekai__fixture_timeline__",
+    };
+    /// Timelines of site packages, such as a site's step items.
+    pub(crate) const SITE: Self = Self {
+        root: "site-timeline",
+        prefix: "mysekai__site__",
+    };
+    /// Cut-scene timelines (`mysekai/cut_scene/...` bundles).
+    pub(crate) const CUTSCENE: Self = Self {
+        root: "cutscene-timeline",
+        prefix: "mysekai__cut_scene__",
+    };
 }
 
 #[derive(Default)]
 pub(super) struct ActivityAssets {
-    json: HashMap<String, Handle<JsonAsset>>,
-    documents: HashMap<String, (String, Arc<Value>)>,
-    gltf: HashMap<String, Handle<Gltf>>,
-    packages: HashMap<String, Package>,
+    json: AssetCache<Handle<JsonAsset>, 96>,
+    documents: AssetCache<(Option<Tick>, String, Arc<Value>), 96>,
+    gltf: AssetCache<Handle<Gltf>, 24>,
+    packages: AssetCache<Package, 24>,
 }
 
 impl ActivityAssets {
-    fn json_text(&mut self, world: &World, path: &str) -> Result<String, ProviderPending> {
+    pub(super) fn cache_counts(&self) -> Value {
+        serde_json::json!({"json":self.json.len(),"documents":self.documents.len(),
+            "gltf":self.gltf.len(),"packages":self.packages.len()})
+    }
+
+    /// Release only lookup ownership which has gone cold. Prepared profiles
+    /// retain their parsed definitions and animation/audio handles, so this
+    /// cannot invalidate a playing request. A complete unused frame retires
+    /// the lookup, never an in-flight request touched by preparation that frame.
+    pub(super) fn sweep_lookup_caches(&mut self) -> usize {
+        let mut removed = self.json.sweep_unused();
+        removed += self.documents.sweep_unused();
+        removed += self.gltf.sweep_unused();
+        for package in self.packages.values_mut() {
+            removed += package.definitions.sweep_unused();
+        }
+        removed += self.packages.sweep_unused();
+        removed
+    }
+    /// `Assets<JsonAsset>` 最后一次被改动的 tick。
+    ///
+    /// 缓存条目记下它在**哪个代**校验过；只要这个代没变，就说明期间没有
+    /// 任何 json 资产被加载、替换或移除，那条缓存必然仍然成立。这是 O(1)
+    /// 的，而下面的慢路径要把整份 json 文本克隆一遍再逐字节比对——命中
+    /// 缓存的代价因此和重新解析同量级，实测占稳态帧时约 46%
+    /// （`definition` 18.3% + `memcmp` 17% + `json_text` 11.2%）。
+    ///
+    /// 拿不到资源时返回 `None`，而 `None != None` 的判据写在调用点：一律
+    /// 走慢路径。**慢路径原样保留原来的逐字节比对**，所以这条快路径最坏
+    /// 情况只是没命中，不可能给出与原来不同的结果。
+    fn json_generation(world: &World) -> Option<Tick> {
+        world
+            .get_resource_ref::<Assets<JsonAsset>>()
+            .map(|assets| assets.last_changed())
+    }
+
+    /// 两个代是否确定相同。`None`（资源不在）一律判不同。
+    fn same_generation(a: Option<Tick>, b: Option<Tick>) -> bool {
+        matches!((a, b), (Some(x), Some(y)) if x == y)
+    }
+
+    /// 资产里那份 json 文本的**借用**。
+    ///
+    /// 它以前返回 `String`，于是每次调用都把整份文档克隆一遍——而绝大多数
+    /// 调用只是想拿它去和缓存比对。借用不改变任何判定结果。
+    fn json_text<'w>(&mut self, world: &'w World, path: &str) -> Result<&'w str, ProviderPending> {
         safe_path(path)?;
         let server = world
             .get_resource::<AssetServer>()
             .ok_or_else(|| ProviderPending::new("asset-server", "asset server is not installed"))?;
         let handle = self
             .json
-            .entry(path.into())
-            .or_insert_with(|| server.load(format!("moly://{path}")));
+            .get_or_insert_with(path, || server.load(format!("moly://{path}")));
         if let LoadState::Failed(error) = server.load_state(&*handle) {
             return Err(ProviderPending::new(
                 "json-load-failed",
@@ -58,21 +133,47 @@ impl ActivityAssets {
         world
             .get_resource::<Assets<JsonAsset>>()
             .and_then(|assets| assets.get(&*handle))
-            .map(|asset| asset.0.clone())
+            .map(|asset| asset.0.as_str())
             .ok_or_else(|| ProviderPending::new("json-loading", path))
     }
 
+    /// Start loading `path` without reading it, so tables that are read one
+    /// after another still arrive together. It requests exactly the handle
+    /// `json_text` would request; any error is reported when that reads it.
+    fn request_json(&mut self, world: &World, path: &str) {
+        if safe_path(path).is_err() {
+            return;
+        }
+        if let Some(server) = world.get_resource::<AssetServer>() {
+            self.json
+                .get_or_insert_with(path, || server.load(format!("moly://{path}")));
+        }
+    }
+
     fn document(&mut self, world: &World, path: &str) -> Result<Arc<Value>, ProviderPending> {
-        let text = self.json_text(world, path)?;
-        if let Some((old, value)) = self.documents.get(path) {
-            if old == &text {
+        // A cached parse still depends on this live JSON generation. Touch its
+        // handle too, or retirement would cause a reload on the next tick.
+        self.json.get(path);
+        let generation = Self::json_generation(world);
+        if let Some((validated_at, _, value)) = self.documents.get(path) {
+            if Self::same_generation(*validated_at, generation) {
                 return Ok(value.clone());
             }
         }
-        let value: Value = serde_json::from_str(&text)
+        let text = self.json_text(world, path)?;
+        if let Some((_, old, value)) = self.documents.get(path) {
+            if old.as_str() == text {
+                let value = value.clone();
+                self.documents.get_mut(path).expect("cached document").0 = generation;
+                return Ok(value);
+            }
+        }
+        let value: Value = serde_json::from_str(text)
             .map_err(|error| ProviderPending::new("json-shape", format!("{path}: {error}")))?;
         let value = Arc::new(value);
-        self.documents.insert(path.into(), (text, value.clone()));
+        let text = text.to_owned();
+        self.documents
+            .insert(path.into(), (generation, text, value.clone()));
         Ok(value)
     }
 
@@ -82,41 +183,78 @@ impl ActivityAssets {
         package: &str,
         prefab: &str,
     ) -> Result<Arc<TimelineDefinition>, ProviderPending> {
+        self.family_definition(world, TimelineFamily::FIXTURE, package, prefab)
+    }
+
+    /// One prefab's timeline from the three tables of `family`.
+    pub(super) fn family_definition(
+        &mut self,
+        world: &World,
+        family: TimelineFamily,
+        package: &str,
+        prefab: &str,
+    ) -> Result<Arc<TimelineDefinition>, ProviderPending> {
+        let root = family.root;
         if package.contains('/')
             || package.contains('\\')
             || package.contains(':')
-            || !package.starts_with("mysekai__fixture_timeline__")
+            || !package.starts_with(family.prefix)
         {
             return Err(ProviderPending::new(
                 "timeline-route",
                 "package is not an exact timeline package key",
             ));
         }
-        let text = [
-            self.json_text(world, &format!("fixture-timeline/tracks/{package}.json"))?,
-            self.json_text(world, &format!("fixture-timeline/clips/{package}.json"))?,
-            self.json_text(
-                world,
-                &format!("fixture-timeline/clip-targets/{package}.json"),
-            )?,
-        ];
-        if self
+        for kind in ["tracks", "clips", "clip-targets"] {
+            self.json.get(&format!("{root}/{kind}/{package}.json"));
+        }
+        let generation = Self::json_generation(world);
+        // 快路：这份套件在当前代校验过 ⇒ 三份 json 都没被动过，不必再取、
+        // 再比。慢路径（下面）原样保留原来的「取三份文本 + 逐份比对」。
+        let validated = self
             .packages
             .get(package)
-            .is_none_or(|cached| cached.text != text)
-        {
-            let parsed =
-                TimelinePackage::from_jsons(&text[0], &text[1], &text[2]).map_err(|error| {
-                    ProviderPending::new("timeline-three-table-join", format!("{package}: {error}"))
-                })?;
-            self.packages.insert(
-                package.into(),
-                Package {
-                    text,
-                    parsed,
-                    definitions: HashMap::new(),
-                },
-            );
+            .is_some_and(|cached| Self::same_generation(cached.validated_at, generation));
+        if !validated {
+            // Request all three tables before reading the first, so a cold
+            // package costs one load round instead of three in sequence.
+            for kind in ["tracks", "clips", "clip-targets"] {
+                self.request_json(world, &format!("{root}/{kind}/{package}.json"));
+            }
+            let text = [
+                self.json_text(world, &format!("{root}/tracks/{package}.json"))?,
+                self.json_text(world, &format!("{root}/clips/{package}.json"))?,
+                self.json_text(world, &format!("{root}/clip-targets/{package}.json"))?,
+            ];
+            let unchanged = self.packages.get(package).is_some_and(|cached| {
+                cached
+                    .text
+                    .iter()
+                    .zip(text.iter())
+                    .all(|(old, new)| old.as_str() == *new)
+            });
+            if unchanged {
+                if let Some(cached) = self.packages.get_mut(package) {
+                    cached.validated_at = generation;
+                }
+            } else {
+                let parsed =
+                    TimelinePackage::from_jsons(text[0], text[1], text[2]).map_err(|error| {
+                        ProviderPending::new(
+                            "timeline-three-table-join",
+                            format!("{package}: {error}"),
+                        )
+                    })?;
+                self.packages.insert(
+                    package.into(),
+                    Package {
+                        validated_at: generation,
+                        text: text.map(str::to_owned),
+                        parsed,
+                        definitions: AssetCache::default(),
+                    },
+                );
+            }
         }
         let cached = self.packages.get_mut(package).expect("prepared package");
         if let Some(definition) = cached.definitions.get(prefab) {
@@ -143,6 +281,7 @@ impl ActivityAssets {
         world: &World,
         package: &str,
         clip_name: &str,
+        expected: &SourceAnimationEvidence,
     ) -> Result<Handle<AnimationClip>, ProviderPending> {
         let index = self.document(world, "fixture-models/index.json")?;
         let row = index
@@ -155,6 +294,9 @@ impl ActivityAssets {
                     format!("source package {package} is absent"),
                 )
             })?;
+        if package != expected.package {
+            validate_relocated_fixture_clip(row, clip_name, expected)?;
+        }
         let file = row.get("glb").and_then(Value::as_str).ok_or_else(|| {
             ProviderPending::new(
                 "fixture-source-catalog",
@@ -174,8 +316,7 @@ impl ActivityAssets {
             .ok_or_else(|| ProviderPending::new("asset-server", "asset server is not installed"))?;
         let handle = self
             .gltf
-            .entry(path.clone())
-            .or_insert_with(|| server.load(format!("moly://{path}")));
+            .get_or_insert_with(&path, || server.load(format!("moly://{path}")));
         if let LoadState::Failed(error) = server.load_state(&*handle) {
             return Err(ProviderPending::new(
                 "fixture-clip-load-failed",
@@ -206,7 +347,10 @@ impl ActivityAssets {
     ) -> Result<(), ProviderPending> {
         let mut bindings = Vec::new();
         for track in &request.definition.tracks {
-            if track.class != "AnimationTrack" || track.name == "CharacterAnimator" {
+            if track.class != "AnimationTrack"
+                || (track.name == "CharacterAnimator"
+                    || request.bindings.actors.contains_key(&track.identity))
+            {
                 continue;
             }
             for clip in &track.clips {
@@ -220,8 +364,21 @@ impl ActivityAssets {
                     SourceAnimationEvidence::from_clip_target(target).map_err(|error| {
                         ProviderPending::new("fixture-source-metadata", error.to_string())
                     })?;
+                // JP stores some fixture Transform clips in a Timeline
+                // AssetBundle. They are exported into the bound fixture's GLB;
+                // source package identity is evidence, never a guessed model path.
+                let model_package = world
+                    .get::<FixtureActivityIdentity>(request.fixture)
+                    .ok_or_else(|| {
+                        ProviderPending::new(
+                            "fixture-instance",
+                            "placed fixture identity is unavailable",
+                        )
+                    })?
+                    .model_package
+                    .clone();
                 let animation =
-                    self.source_fixture_clip(world, &target.target_package, &target.clip_name)?;
+                    self.source_fixture_clip(world, &model_package, &target.clip_name, &evidence)?;
                 let ids = {
                     let assets =
                         world
@@ -249,6 +406,20 @@ impl ActivityAssets {
                     }
                     ids
                 };
+                // The source binds the FixtureView's own serialized Animator,
+                // present from the moment the view exists. Here the placed
+                // fixture's animator is installed later, once its visual setup
+                // has finished (after the material swap), and only then does
+                // the root carry `FixtureAnimation`. Until that, the animator is
+                // still-arriving input: wait for it. Once it is resolved, zero
+                // or several matching animators (including a root whose
+                // animation targets are ambiguous) are final.
+                if world.get::<FixtureAnimation>(request.fixture).is_none() {
+                    return Err(ProviderPending::new(
+                        "fixture-animation-surface",
+                        "placed fixture's animator is not installed yet",
+                    ));
+                }
                 let mut target_sets: HashMap<Entity, HashSet<AnimationTargetId>> = HashMap::new();
                 for (entity, id, by) in world
                     .query::<(Entity, &AnimationTargetId, &AnimatedBy)>()
@@ -302,6 +473,72 @@ impl ActivityAssets {
         }
         request.bindings.animations.extend(bindings);
         Ok(())
+    }
+}
+
+fn validate_relocated_fixture_clip(
+    row: &Value,
+    clip_name: &str,
+    expected: &SourceAnimationEvidence,
+) -> Result<(), ProviderPending> {
+    let clips = row
+        .pointer("/animations/clips")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            ProviderPending::new(
+                "fixture-source-evidence",
+                "relocated clip has no exported identity ledger",
+            )
+        })?;
+    let matches: Vec<_> = clips
+        .iter()
+        .filter(|clip| {
+            clip["name"].as_str() == Some(clip_name)
+                && clip.pointer("/sourceClip/file").and_then(Value::as_str)
+                    == Some(expected.asset.file.as_str())
+                && clip.pointer("/sourceClip/pathId").and_then(Value::as_str)
+                    == Some(expected.asset.path_id.as_str())
+        })
+        .collect();
+    let [clip] = matches.as_slice() else {
+        return Err(ProviderPending::new(
+            "fixture-source-evidence",
+            "relocated clip does not uniquely match the authored source identity",
+        ));
+    };
+    if clip["sourceStartTime"].as_f64() != Some(expected.start_time)
+        || clip["sourceStopTime"].as_f64() != Some(expected.stop_time)
+        || clip["sourceLoopTime"].as_bool() != Some(expected.looping)
+    {
+        return Err(ProviderPending::new(
+            "fixture-source-evidence",
+            "relocated clip changed authored time bounds or loop state",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod relocated_clip_tests {
+    use super::*;
+    #[test]
+    fn external_fixture_clip_requires_exact_source_identity_and_time_domain() {
+        let expected = SourceAnimationEvidence {
+            package: "mysekai__fixture_timeline__bike".into(),
+            clip_name: "bike_L".into(),
+            asset: crate::fixture_activity_timeline::SourceAssetId {
+                file: "CAB-source".into(),
+                path_id: "7".into(),
+            },
+            start_time: 0.,
+            stop_time: 2.,
+            looping: true,
+        };
+        let mut row = serde_json::json!({"animations":{"clips":[{"name":"bike_L","sourceClip":{"file":"CAB-source","pathId":"7"},
+            "sourceStartTime":0.,"sourceStopTime":2.,"sourceLoopTime":true}]}});
+        assert!(validate_relocated_fixture_clip(&row, "bike_L", &expected).is_ok());
+        row["animations"]["clips"][0]["sourceClip"]["file"] = serde_json::json!("CAB-other");
+        assert!(validate_relocated_fixture_clip(&row, "bike_L", &expected).is_err());
     }
 }
 

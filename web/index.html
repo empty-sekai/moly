@@ -1,33 +1,302 @@
 <!doctype html>
 <html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>moly</title>
-  <style>
-    /* 画布由 Rust 侧按 #app-canvas 认领。父元素高度固定，避免 resize 反馈。 */
-    html, body { margin: 0; height: 100%; }
-    #app-canvas { display: block; width: 100%; height: 100%; }
-    #boot-panel {
-      position: fixed; inset: 0; z-index: 1;
-      display: grid; place-content: center; justify-items: center; gap: 1rem;
-      background: #17232b; color: #f5f7f8;
-      font: 1rem/1.5 system-ui, sans-serif;
-    }
-    #boot-panel[hidden] { display: none; }
-    #boot-panel button { padding: .65rem 2rem; font: inherit; cursor: pointer; }
-    #boot-start:disabled { cursor: wait; }
-    #boot-status { margin: 0 1.5rem; text-align: center; white-space: pre-wrap; }
-  </style>
-</head>
-<body>
-  <canvas id="app-canvas"></canvas>
-  <section id="boot-panel" aria-label="启动游戏">
-    <p id="boot-status" role="status" aria-live="polite">正在加载游戏…</p>
-    <button id="boot-start" type="button" aria-describedby="boot-status" disabled>开始</button>
-    <button id="boot-retry" type="button" hidden>重新加载</button>
-    <button id="boot-webgl" type="button" hidden>使用 WebGL2 重试</button>
-  </section>
-  <script type="module" src="./main.mjs"></script>
-</body>
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#f5f9f9" />
+    <meta
+      name="description"
+      content="浏览 MYSEKAI 的日常对话、家具与角色互动，在 Moly 中体验原作演出。"
+    />
+    <title>MYSEKAI 对话与互动 · Moly</title>
+    <link rel="stylesheet" href="./shell.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#catalog-search">跳至内容搜索</a>
+    <header class="site-header">
+      <a class="brand" href="https://pjsk.moe/zh-cn/" aria-label="返回 Moesekai"
+        ><span class="brand-mark" aria-hidden="true">m<span>✳</span></span
+        ><span>Moesekai</span></a
+      >
+      <span class="breadcrumb"
+        ><span>/</span> MYSEKAI <span>/</span> 对话与互动</span
+      >
+      <nav class="header-actions" aria-label="页面工具">
+        <span id="source-label" class="source-chip">Moly</span
+        ><button
+          id="help-button"
+          class="icon-button"
+          title="操作帮助"
+          aria-label="操作帮助"
+        >
+          ?</button
+        ><button
+          id="theme-button"
+          class="icon-button"
+          title="切换明暗主题"
+          aria-label="切换明暗主题"
+        >
+          ◐
+        </button>
+      </nav>
+    </header>
+    <main class="workspace" id="workspace">
+      <aside class="catalog-panel" id="catalog-panel" aria-label="内容浏览">
+        <div class="catalog-heading">
+          <div>
+            <p class="eyebrow">MYSEKAI · MOLY</p>
+            <h1>对话与互动</h1>
+          </div>
+          <button
+            id="collapse-button"
+            class="icon-button"
+            title="收起目录，专注演出"
+            aria-label="收起目录"
+          >
+            ‹
+          </button>
+        </div>
+        <p class="intro">寻找一段日常，体验一件家具。</p>
+        <nav id="catalog-tabs" class="catalog-tabs" aria-label="内容分类">
+          <button data-tab="conversations" class="active" aria-pressed="true">
+            对话</button
+          ><button data-tab="furniture" aria-pressed="false">家具</button
+          ><button data-tab="performances" aria-pressed="false">家具故事</button
+          ><button data-tab="activities" aria-pressed="false">角色互动</button>
+        </nav>
+        <div class="filter-area">
+          <div class="search-box">
+            <span aria-hidden="true">⌕</span
+            ><input
+              id="catalog-search"
+              type="search"
+              maxlength="200"
+              autocomplete="off"
+              placeholder="搜索角色、台词或名称"
+              aria-label="搜索角色、台词或名称"
+            /><kbd>/</kbd>
+          </div>
+          <div class="filter-row">
+            <label
+              ><span class="sr-only">筛选角色</span
+              ><select id="character-filter">
+                <option value="">全部角色</option>
+              </select></label
+            ><label
+              ><span class="sr-only">可用性筛选</span
+              ><select id="availability-filter">
+                <option value="all">全部内容</option>
+                <option value="ready">可体验</option>
+                <option value="here">当前场景</option>
+              </select></label
+            ><button id="reset-filters" class="text-button" title="重置筛选">
+              重置
+            </button>
+          </div>
+          <div id="related-filter" class="related-filter" hidden>
+            <span></span><button aria-label="清除家具关联筛选">×</button>
+          </div>
+        </div>
+        <div class="results-heading">
+          <span id="result-count">等待载入内容</span
+          ><span id="result-hint">选择后查看详情</span>
+        </div>
+        <details id="catalog-issues" class="catalog-issues" hidden>
+          <summary>部分展示数据暂不可用</summary>
+          <div></div>
+        </details>
+        <div
+          id="catalog-list"
+          class="catalog-list"
+          aria-label="内容列表"
+          tabindex="0"
+        >
+          <div class="empty-state">
+            <span class="empty-icon" aria-hidden="true">♫</span>
+            <h2>从一段日常开始</h2>
+            <p>进入 MYSEKAI 后，即可按角色、台词和家具寻找内容。</p>
+          </div>
+        </div>
+        <footer class="pagination">
+          <button
+            id="previous-page"
+            class="icon-button"
+            aria-label="上一页"
+            disabled
+          >
+            ←</button
+          ><span id="page-label">—</span
+          ><button
+            id="next-page"
+            class="icon-button"
+            aria-label="下一页"
+            disabled
+          >
+            →
+          </button>
+        </footer>
+      </aside>
+      <section class="experience-panel" aria-label="演出与详情">
+        <div class="stage-toolbar">
+          <div class="stage-heading">
+            <button
+              id="expand-button"
+              class="icon-button"
+              title="打开内容目录"
+              aria-label="打开内容目录"
+              hidden
+            >
+              ☰</button
+            ><span class="live-dot" id="live-dot"></span
+            ><span id="stage-label">你的 MYSEKAI</span>
+          </div>
+          <div class="stage-actions">
+            <button
+              id="settings-button"
+              class="icon-button"
+              title="画质、音量与玩家数据"
+              aria-label="游戏设置"
+            >
+              ⚙
+            </button>
+            <button id="focus-button" class="text-button" aria-pressed="false">
+              专注演出</button
+            ><button
+              id="fullscreen-button"
+              class="icon-button"
+              title="全屏演出"
+              aria-label="全屏演出"
+            >
+              ⛶
+            </button>
+          </div>
+        </div>
+        <div class="stage" id="stage">
+          <canvas
+            id="app-canvas"
+            tabindex="0"
+            aria-label="MYSEKAI 互动场景"
+          ></canvas>
+          <section id="boot-panel" class="boot-panel" aria-label="进入 MYSEKAI">
+            <div class="boot-art" aria-hidden="true">
+              <span class="orbit orbit-one"></span
+              ><span class="orbit orbit-two"></span
+              ><span class="boot-house">⌂</span><span class="art-note">♪</span
+              ><span class="art-star">✦</span>
+            </div>
+            <p class="eyebrow">A LITTLE MOMENT IN MYSEKAI</p>
+            <h2>让日常，在这里发生。</h2>
+            <p class="boot-description">
+              看看熟悉的他们聊些什么，<br />也试试家具里藏着的小小互动。
+            </p>
+            <button id="boot-start" class="primary-button" disabled>
+              <span aria-hidden="true">▷</span> 进入 MYSEKAI
+            </button>
+            <p id="boot-status" role="status" aria-live="polite">
+              正在检查运行环境…
+            </p>
+            <div class="boot-recovery">
+              <button id="boot-retry" class="secondary-button" hidden>
+                重新加载</button
+              ><button id="boot-webgl" class="secondary-button" hidden>
+                兼容模式重试
+              </button>
+            </div>
+          </section>
+          <div id="stage-loading" class="stage-loading" hidden>
+            <span class="spinner"></span
+            ><span id="stage-loading-label">正在准备场景…</span>
+          </div>
+        </div>
+        <div class="transport" id="transport">
+          <div class="transport-description">
+            <span id="playback-state" class="playback-state">尚未开始</span
+            ><strong id="playback-title">选择内容，开启一段日常</strong>
+          </div>
+          <button id="stop-button" class="stop-button" disabled>
+            <span aria-hidden="true">■</span> 停止</button
+          ><button id="restore-button" class="text-button" hidden>
+            返回原场景
+          </button>
+        </div>
+        <p id="playback-error" class="playback-error" role="status" hidden></p>
+        <section
+          id="detail-panel"
+          class="detail-panel"
+          aria-label="所选内容详情"
+        >
+          <div class="detail-empty">
+            <span class="detail-empty-symbol" aria-hidden="true">✦</span>
+            <div>
+              <h2>你想先看看什么？</h2>
+              <p>在左侧选择一段对话，或从家具开始探索。</p>
+            </div>
+          </div>
+        </section>
+        <footer class="experience-footer">
+          <span>Moly · MYSEKAI 互动体验</span
+          ><button id="shortcuts-button" class="text-button">
+            快捷键与操作
+          </button>
+        </footer>
+      </section>
+    </main>
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+    <dialog id="help-dialog">
+      <form method="dialog">
+        <header>
+          <div>
+            <p class="eyebrow">让浏览更顺手</p>
+            <h2>操作帮助</h2>
+          </div>
+          <button class="icon-button" aria-label="关闭帮助">×</button>
+        </header>
+        <p>
+          先浏览、再播放。切换目录和查看详情不会打断正在进行的演出；播放另一段内容会先结束上一段。
+        </p>
+        <div class="help-modes">
+          <h3>独立体验</h3>
+          <p>
+            自动准备所需角色与家具，在临时场景中体验；结束或停止后恢复原场景。
+          </p>
+          <h3>当前场景</h3>
+          <p>使用场景中已有的角色与家具。暂时无法体验时，详情会说明原因。</p>
+        </div>
+        <dl class="shortcuts">
+          <div>
+            <dt><kbd>/</kbd> 或 <kbd>Ctrl K</kbd></dt>
+            <dd>搜索内容</dd>
+          </div>
+          <div>
+            <dt><kbd>↑</kbd> <kbd>↓</kbd></dt>
+            <dd>在列表中选择</dd>
+          </div>
+          <div>
+            <dt><kbd>Ctrl Enter</kbd></dt>
+            <dd>播放所选内容</dd>
+          </div>
+          <div>
+            <dt><kbd>Esc</kbd></dt>
+            <dd>停止演出／退出专注模式</dd>
+          </div>
+          <div>
+            <dt><kbd>W A S D</kbd></dt>
+            <dd>走动观察角色互动</dd>
+          </div>
+          <div>
+            <dt>拖拽画面 · 滚轮</dt>
+            <dd>旋转镜头 · 拉近或拉远</dd>
+          </div>
+        </dl>
+        <p class="help-note">
+          先点击画面使其获得焦点。对话时点击继续；观看角色互动时可以自由走动和调整镜头。持续拉近可进入第一人称，并进一步放大；反向滚动可退回。停止后会恢复原位置与镜头。
+        </p>
+        <button class="primary-button">知道了</button>
+      </form>
+    </dialog>
+    <script type="module" src="./main.mjs"></script>
+  </body>
 </html>

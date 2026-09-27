@@ -1,8 +1,8 @@
-//! 站点材质：八个站点族的 Base 程序共用一个 Bevy Material。
+//! 站点材质：九个站点族的 Base 程序共用一个 Bevy Material。
 //!
 //! 材质值来自 sidecar 的 [`MaterialSlot`]（key 是 Unity 属性名的原拼写），
 //! 族与 keyword 变体由 [`SiteMaterialKey`] 编码进管线特化；WGSL 在
-//! `shaders/site_material.wgsl`，八族共用一份、按宏分派。
+//! `shaders/site_material.wgsl`，九族共用一份、按宏分派。
 //!
 //! 族门（按真源重定）：门 = 「序列化 keyword 全部落在本族的
 //! 已实现轴清单内」+「族要求的必在键都在」+「值域开关在已实现的取值上」。
@@ -73,11 +73,14 @@ pub(crate) fn load_dir_texture(
                  前提已经不成立：要么提取侧的声明错了，要么本族真的开始消费\
                  非颜色贴图、着色器需要一个按槽的域旋钮。"
             );
-            server.load_with_settings::<Image, _>(path, |settings: &mut ImageLoaderSettings| {
+            moly_assets::residency::load_image_with(server, path, |settings: &mut ImageLoaderSettings| {
                 settings.is_srgb = false;
             })
         }
-        _ => server.load::<Image>(path),
+        // Only the GPU samples these textures (site, harvest and particle
+        // materials bind them; nothing reads their texels on the CPU), and
+        // every request of these paths comes through this function.
+        _ => moly_assets::residency::load_image(server, path),
     }
 }
 
@@ -94,8 +97,10 @@ use moly_law::material::{texture_slot, FloatLookup, MaterialSlot};
 use moly_law::shading::fieldobject;
 
 use crate::env::SiteEnvGpuBuffer;
+use crate::render::gpu::SharedSamplers;
 use crate::shadowmap::ShadowMapGpu;
-use crate::site::{SiteAssets, SiteScenesReady};
+use crate::site::{SiteAssets, SiteScenesReady, SiteVisualPending};
+use crate::site_extension::SiteExtensionGpuBuffer;
 
 /// Ground-Birthday 族名（真源 shader 名）。law 侧只收了四个老族；
 /// 这四个新族的族名在本层声明。
@@ -106,10 +111,15 @@ pub const OBJECT_SHADER_NAME: &str = "Mysekai/Object";
 pub const DROPITEM_SHADER_NAME: &str = "Mysekai/DropItem";
 /// UI-Uber 族名。
 pub const UI_UBER_SHADER_NAME: &str = "Mysekai/Effect/UI-Uber";
+/// TreasureBox family (the base shape of the two treasure harvest objects).
+pub const TREASUREBOX_SHADER_NAME: &str = "Mysekai/TreasureBox";
+/// The furniture Basic shader, also authored on site props (the festival
+/// garden's birthday tree). Drawn with the furniture material.
+pub const FIXTURE_BASIC_SHADER_NAME: &str = "Mysekai/Fixture/Basic";
 
 /// 材质 uniform 的槽数与字节数。槽序是本文件与
 /// `shaders/site_material.wgsl` 里 `SiteParams` 结构体之间的契约，两边同改。
-pub const PARAMS_SLOTS: usize = 46;
+pub const PARAMS_SLOTS: usize = 50;
 pub const PARAMS_BYTES: usize = PARAMS_SLOTS * 16;
 
 /// 每条 Unity 属性一个 vec4 槽；族不消费的槽写零。
@@ -141,7 +151,8 @@ pub struct SiteParams {
     pub texture_coord_overlay1st: f32,
     /// `_OverlayColorMap` 的 `(scaleX, scaleY, offsetX, offsetY)`。
     pub overlay_st: [f32; 4],
-    /// `(_UVScrollX, _UVScrollY)`。Ground/Water/Birthday/Object 专属。
+    /// `(_UVScrollX, _UVScrollY)`。Ground/Water/Birthday/Object 专属；
+    /// TreasureBox reads the same pair (main texture scroll, no fract).
     pub uv_scroll: [f32; 2],
     /// `(_UVScrollX_Overlay1st, _UVScrollY_Overlay1st)`。
     pub uv_scroll_overlay1st: [f32; 2],
@@ -205,8 +216,24 @@ pub struct SiteParams {
     pub additive_color: [f32; 4],
     /// `_BaseTextureMappingMode`。Object 主贴图坐标源开关。
     pub object_texture_mapping: f32,
+    /// `_ObjectShaderUsage` of an Object material (0 for every other family).
+    /// Only the site-extension arm reads it (`== 8` selects the dissolve
+    /// edge); it rides in the unused `.y` lane of the mapping slot, so the
+    /// slot table is unchanged.
+    pub object_shader_usage: f32,
     /// `_MainTextureLocalMapping`。Object 的 uv0 覆写开关。
     pub object_main_texture_local_mapping: f32,
+    /// TreasureBox rare arm: `(_RareBlendRate, _RareFresnelIntensity,
+    /// _RareFresnelEmission, _RareFresnelEdge)`.
+    pub treasure_rare_blend: [f32; 4],
+    /// TreasureBox rare arm: `(_RareFresnelSmoothness, _RareScrollX,
+    /// _RareScrollY, 0)`.
+    pub treasure_rare_fresnel: [f32; 4],
+    /// `_RareOverlayTexture_ST`; the rare program reads only `.xy` (the
+    /// overlay is sampled in screen space, scaled, with no offset).
+    pub treasure_rare_overlay_st: [f32; 4],
+    /// `_RareBaseColor` (lerp towards `rgb * c.rgb` by `c.a`).
+    pub treasure_rare_base_color: [f32; 4],
 }
 
 impl SiteParams {
@@ -260,7 +287,12 @@ impl SiteParams {
             ui_uber_main_st: [0.0; 4],
             additive_color: [0.0; 4],
             object_texture_mapping: 0.0,
+            object_shader_usage: 0.0,
             object_main_texture_local_mapping: 0.0,
+            treasure_rare_blend: [0.0; 4],
+            treasure_rare_fresnel: [0.0; 4],
+            treasure_rare_overlay_st: [0.0; 4],
+            treasure_rare_base_color: [0.0; 4],
         }
     }
 
@@ -317,8 +349,17 @@ impl SiteParams {
             [self.dropitem_uv_scroll[0], self.dropitem_uv_scroll[1], 0.0, 0.0],
             self.ui_uber_main_st,
             self.additive_color,
-            [self.object_texture_mapping, 0.0, 0.0, 0.0],
+            [
+                self.object_texture_mapping,
+                self.object_shader_usage,
+                0.0,
+                0.0,
+            ],
             [self.object_main_texture_local_mapping, 0.0, 0.0, 0.0],
+            self.treasure_rare_blend,
+            self.treasure_rare_fresnel,
+            self.treasure_rare_overlay_st,
+            self.treasure_rare_base_color,
         ] {
             for component in slot {
                 bytes.extend_from_slice(&component.to_le_bytes());
@@ -340,6 +381,9 @@ pub enum SiteFamily {
     Object,
     DropItem,
     UiUber,
+    /// `Mysekai/TreasureBox`; `rare` is the `_USE_RARE` keyword axis (only
+    /// the harvest swap resolves this family).
+    TreasureBox { rare: bool },
 }
 
 /// 管线特化键：族 + keyword 变体。作为 `AsBindGroup::Data` 进管线缓存。
@@ -375,6 +419,13 @@ pub struct SiteMaterialKey {
     /// `!_DISABLE_DITHER`：Birthday 的抖动（量化 0.125；FO 恒抖动不
     /// 走这个键，Tree 全带 _DD 无抖动）。
     pub birthday_dither: bool,
+    /// `!_DISABLE_DITHER` on a Tree material: the same Bayer dither at
+    /// quantization 0.125, right after the constant alpha clip (the Tree
+    /// program without `_DISABLE_DITHER`). Every serialized Tree material
+    /// carries `_DISABLE_DITHER`, so resolution always gives false; a view
+    /// that fades a tree part (`SetDitherAlpha` below 0.999 turns the keyword
+    /// off) sets it on its own copy of the material.
+    pub tree_dither: bool,
 }
 
 /// 站点族的材质资产。
@@ -399,6 +450,8 @@ impl AsBindGroup for SiteMaterial {
         SRes<RenderAssets<GpuImage>>,
         SRes<FallbackImage>,
         SRes<FallbackImageZero>,
+        SRes<SharedSamplers>,
+        SRes<SiteExtensionGpuBuffer>,
     );
 
     fn label() -> &'static str {
@@ -408,8 +461,8 @@ impl AsBindGroup for SiteMaterial {
     fn unprepared_bind_group(
         &self,
         _layout: &BindGroupLayout,
-        render_device: &RenderDevice,
-        (env_buffer, shadow, images, fallback, fallback_zero): &mut SystemParamItem<'_, '_, Self::Param>,
+        _render_device: &RenderDevice,
+        (env_buffer, shadow, images, fallback, fallback_zero, samplers, site_extension): &mut SystemParamItem<'_, '_, Self::Param>,
         _force_no_bindless: bool,
     ) -> Result<UnpreparedBindGroup, AsBindGroupError> {
         let main = images
@@ -439,15 +492,9 @@ impl AsBindGroup for SiteMaterial {
         // 站点贴图按源语义平铺（uv 滚动与 ST 缩放都会越出 [0,1]）；
         // GpuImage 自带的 sampler 是引擎默认的 ClampToEdge，在这里换成
         // 三向 Repeat、过滤模式与引擎默认图像 sampler 同为三级线性。
-        let repeat = render_device.create_sampler(&SamplerDescriptor {
-            address_mode_u: AddressMode::Repeat,
-            address_mode_v: AddressMode::Repeat,
-            address_mode_w: AddressMode::Repeat,
-            mag_filter: FilterMode::Linear,
-            min_filter: FilterMode::Linear,
-            mipmap_filter: FilterMode::Linear,
-            ..Default::default()
-        });
+        // The sampler is created once at render startup and shared by every
+        // site material; its descriptor never varies per material.
+        let repeat = samplers.repeat_linear.clone();
         let bindings = BindingResources(vec![
             // binding 0：材质自己的参数块。
             (0, OwnedBindingResource::Data(OwnedData(self.params.bytes()))),
@@ -510,6 +557,12 @@ impl AsBindGroup for SiteMaterial {
                     SamplerBindingType::Comparison,
                     shadow.cmp_sampler.clone(),
                 ),
+            ),
+            // binding 13: the site-extension globals (keyword and nine
+            // values), one buffer for every site material.
+            (
+                13,
+                OwnedBindingResource::Buffer(site_extension.buffer.clone()),
             ),
         ]);
         Ok(UnpreparedBindGroup { bindings })
@@ -597,6 +650,18 @@ impl AsBindGroup for SiteMaterial {
                 ty: BindingType::Sampler(SamplerBindingType::Comparison),
                 count: None,
             },
+            // binding 13: the site-extension globals (site_extension.rs),
+            // read by the fragment stage only.
+            BindGroupLayoutEntry {
+                binding: 13,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
         ]
     }
 }
@@ -635,6 +700,11 @@ impl Material for SiteMaterial {
             SiteFamily::DropItem => 2010,
             SiteFamily::FieldObject => 2040,
             SiteFamily::Tree => 2050,
+            // Both treasure materials author renderQueue -1 (take the shader's
+            // queue) and `Mysekai/TreasureBox` declares no Queue tag (its tags
+            // are RenderType only), so the queue is the shader default,
+            // Geometry = 2000.
+            SiteFamily::TreasureBox { .. } => 2000,
             _ => 2065,
         });
         let mut defs: Vec<&str> = Vec::new();
@@ -658,6 +728,12 @@ impl Material for SiteMaterial {
             }
             SiteFamily::Object => defs.push("SITE_OBJECT"),
             SiteFamily::DropItem => defs.push("SITE_DROPITEM"),
+            SiteFamily::TreasureBox { rare } => {
+                defs.push("SITE_TREASUREBOX");
+                if rare {
+                    defs.push("SITE_TREASURE_RARE");
+                }
+            }
             SiteFamily::UiUber => {
                 defs.push("SITE_UI_UBER");
                 // 源 _SrcBlend=5（SrcAlpha）/_DstBlend=10（OneMinusSrcAlpha）：
@@ -700,6 +776,9 @@ impl Material for SiteMaterial {
         }
         if key.birthday_dither {
             defs.push("SITE_BIRTHDAY_DITHER");
+        }
+        if key.tree_dither {
+            defs.push("SITE_TREE_DITHER");
         }
         for def in defs {
             descriptor.vertex.shader_defs.push(def.into());
@@ -789,6 +868,12 @@ const DROPITEM_KEYWORDS: [&str; 2] = ["_RECEIVE_SHADOWS_OFF", "_USE_ALPHA_CLIP"]
 /// UI-Uber：无 keyword 轴；值域门另查 _BlendMode（2 = premultiplied 形未
 /// 移植）。
 const UI_UBER_KEYWORDS: [&str; 0] = [];
+
+/// TreasureBox: the material keyword space of this shader is `_USE_RARE`
+/// only (its program table varies `_MAIN_LIGHT_SHADOWS`, `_USE_RARE` and
+/// `_USE_MYSEKAI_SITE_EXTENSION`; the first and last are engine or global
+/// keywords, never serialized on a material).
+const TREASUREBOX_KEYWORDS: [&str; 1] = ["_USE_RARE"];
 
 fn keywords_within(material: &MaterialSlot, allowed: &[&str]) -> bool {
     material
@@ -928,6 +1013,7 @@ pub(crate) fn resolve_fieldobject(
             ground_height_fade: false,
             tree_height_fade: false,
             birthday_dither: false,
+            tree_dither: false,
         },
         params,
         main_tex: load_texture(uri),
@@ -1114,6 +1200,7 @@ fn resolve_ground(
                 ground_height_fade: height_fade,
                 tree_height_fade: false,
                 birthday_dither: false,
+                tree_dither: false,
             },
             texture,
             None,
@@ -1144,6 +1231,7 @@ fn resolve_ground(
                 ground_height_fade: height_fade,
                 tree_height_fade: false,
                 birthday_dither: false,
+                tree_dither: false,
             },
             None,
             texture,
@@ -1167,6 +1255,7 @@ fn resolve_ground(
             ground_height_fade: height_fade,
             tree_height_fade: false,
             birthday_dither: false,
+            tree_dither: false,
         },
         None,
         None,
@@ -1276,9 +1365,13 @@ pub(crate) fn resolve_tree_textures(
         read_module_fresnel("Tree", slot, &get, &mut params)?;
     }
     if height_fade {
-        // 渐变形：倒数长度参数算 h，Pos01/Pos12/三色做两段混合。
+        // 渐变形：倒数长度参数算 h，Pos01/Pos12/三色做两段混合。The JP
+        // program rebuilds the span from position and length above an
+        // object-space height of 3.0.
         params.height_fade_rcp_length = get("_HeightFadeRcpLength")?;
         params.height_fade_start_time_rcp_length = get("_HeightFadeStartTimeRcpLength")?;
+        params.height_fade_position = get("_HeightFadePosition")?;
+        params.height_fade_length = get("_HeightFadeLength")?;
         params.height_fade_exponent = get("_HeightFadeExponent")?;
         params.use_height_fade = get("_UseHeightFade")?;
         params.height_gradient_pos01 = get("_HeightGradientPos01")?;
@@ -1315,6 +1408,7 @@ pub(crate) fn resolve_tree_textures(
             ground_height_fade: false,
             tree_height_fade: height_fade,
             birthday_dither: false,
+            tree_dither: false,
         },
         params,
         main_tex,
@@ -1389,6 +1483,7 @@ fn resolve_water(
             ground_height_fade: false,
             tree_height_fade: false,
             birthday_dither: false,
+            tree_dither: false,
         },
         overlay_tex,
         overlay2nd_tex,
@@ -1465,6 +1560,7 @@ fn resolve_ground_birthday(
             ground_height_fade: false,
             tree_height_fade: false,
             birthday_dither: dither,
+            tree_dither: false,
         },
         params,
         main_tex,
@@ -1474,11 +1570,11 @@ fn resolve_ground_birthday(
     })
 }
 
-/// Object 解析。值域门（未实现的分支具名拒）：usage 只在 {8, 12}
+/// Object 解析。值域门（未实现的分支具名拒）：usage 只在 {4, 8, 12}
 /// （2 = 墙 AO、11 = 道路、14 = 直通、其余未见过）、mapping 只在
 /// {0, 1, 2}（3 = uv2）、localMapping 只在 {0, 1}、_Cull 必须是 2
 /// （背面剔除——_BackFaceColor 路径因此恒死）、预览灯必须关。
-fn resolve_object(
+pub(crate) fn resolve_object(
     sidecar: &SiteSidecar,
     slot: &MaterialSlot,
     load_texture: impl Fn(&str) -> Handle<Image>,
@@ -1495,7 +1591,16 @@ fn resolve_object(
             .ok_or_else(|| format!("Object 材质 {} 缺浮点属性 {key}", slot.name))
     };
     let usage = get("_ObjectShaderUsage")?;
-    float_domain(slot, "Object", "_ObjectShaderUsage", usage, &[8.0, 12.0])?;
+    // The Base program reads the usage three times, in both keyword variants
+    // this gate admits: `== 11` (the road texture scale, alpha tiling and road
+    // shadow), `!= 0` (the shadow mask forced to 1) and a switch whose arms are
+    // 2 (wall AO), 14 (pass-through) and default (the toon ramp). Usage 4 (the
+    // item usage, e.g. the cannon's `mat_base`) takes the same three answers
+    // as 8 and 12, so it is the same program path; no other stage reads it.
+    // With the global `_USE_MYSEKAI_SITE_EXTENSION` keyword on, the program
+    // reads it a fourth time: `== 8` takes the dissolve edge (and its
+    // discard), which is why the value is kept in the parameter block.
+    float_domain(slot, "Object", "_ObjectShaderUsage", usage, &[4.0, 8.0, 12.0])?;
     let mapping = get("_BaseTextureMappingMode")?;
     float_domain(slot, "Object", "_BaseTextureMappingMode", mapping, &[0.0, 1.0, 2.0])?;
     let local_mapping = get("_MainTextureLocalMapping")?;
@@ -1526,6 +1631,7 @@ fn resolve_object(
         .get("_AdditiveColor")
         .ok_or_else(|| format!("Object 材质 {} 缺 _AdditiveColor", slot.name))?;
     params.object_texture_mapping = mapping;
+    params.object_shader_usage = usage;
     params.object_main_texture_local_mapping = local_mapping;
     // 高度淡出在源里无 keyword、恒编译；当前数据 _UseHeightFade 全 0，
     // 块保留（运行时选择）。
@@ -1548,6 +1654,7 @@ fn resolve_object(
             ground_height_fade: false,
             tree_height_fade: false,
             birthday_dither: false,
+            tree_dither: false,
         },
         params,
         main_tex,
@@ -1559,7 +1666,7 @@ fn resolve_object(
 
 /// DropItem 解析。值域门：_UVSelection 只在 {0, 1}；clip 是常量阈 0.5
 /// （`_AlphaClip` 标量不被消费）；alpha = tex.a（无 _BaseOpacity）。
-fn resolve_dropitem(
+pub(crate) fn resolve_dropitem(
     sidecar: &SiteSidecar,
     slot: &MaterialSlot,
     load_texture: impl Fn(&str) -> Handle<Image>,
@@ -1594,10 +1701,115 @@ fn resolve_dropitem(
             ground_height_fade: false,
             tree_height_fade: false,
             birthday_dither: false,
+            tree_dither: false,
         },
         params,
         main_tex,
         overlay_tex: None,
+        overlay2nd_tex: None,
+        leaf_mask_tex: None,
+    })
+}
+
+/// TreasureBox resolve (the Base pass of `Mysekai/TreasureBox`). Its
+/// programs read no `_UsePhenomenaLighting`: the phenomena light and shade
+/// always apply. The keyword axes are `_USE_RARE` (material) and
+/// `_MAIN_LIGHT_SHADOWS` (the site pipeline's main light casts shadows, so
+/// the shadow-receiving program is the drawn one; there is no
+/// `_RECEIVE_SHADOWS_OFF` variant). Value gates: the pass render state
+/// properties must be the opaque arm this pipeline draws (`_SrcBlend` 1,
+/// `_DstBlend` 0, `_ZWrite` 1, `_Cull` 2, and the Base pass's `zTest` and
+/// `colMask` bindings `_ZTest` 4 (less-equal) and `_ColorMask` 15 (all
+/// channels)); the two vertex-colour switches are
+/// int properties compared against 0.5, admitted on {0, 1}. The rare overlay
+/// texture takes the overlay binding (this family has no other overlay).
+/// The second colour target (rare fresnel emission times the overlay) is not
+/// drawn: this pipeline has one colour target, as for every site family.
+pub(crate) fn resolve_treasurebox(
+    sidecar: &SiteSidecar,
+    slot: &MaterialSlot,
+    load_texture: impl Fn(&str) -> Handle<Image>,
+) -> Result<SiteMaterial, String> {
+    if !keywords_within(slot, &TREASUREBOX_KEYWORDS) {
+        return Err(format!(
+            "TreasureBox material {} keywords {:?} are outside the ported axes",
+            slot.name, slot.keywords
+        ));
+    }
+    let get = |key: &str| -> Result<f32, String> {
+        slot.get(key)
+            .ok_or_else(|| format!("TreasureBox material {} lacks float {key}", slot.name))
+    };
+    for (key, domain) in [
+        ("_SrcBlend", &[1.0][..]),
+        ("_DstBlend", &[0.0][..]),
+        ("_ZWrite", &[1.0][..]),
+        ("_Cull", &[2.0][..]),
+        ("_ZTest", &[4.0][..]),
+        ("_ColorMask", &[15.0][..]),
+        ("_UseVertexColorBlend", &[0.0, 1.0][..]),
+        ("_UseVertexAlphaOpacity", &[0.0, 1.0][..]),
+    ] {
+        float_domain(slot, "TreasureBox", key, get(key)?, domain)?;
+    }
+    let rare = has_keyword(slot, "_USE_RARE");
+    let mut params = SiteParams::zeroed();
+    params.use_vertex_color_blend = get("_UseVertexColorBlend")?;
+    params.use_vertex_alpha_opacity = get("_UseVertexAlphaOpacity")?;
+    params.base_opacity = get("_BaseOpacity")?;
+    params.uv_scroll = [get("_UVScrollX")?, get("_UVScrollY")?];
+    params.receive_shadow = 1.0;
+    let mut overlay_tex = None;
+    if rare {
+        let smoothness = get("_RareFresnelSmoothness")?;
+        if smoothness.is_nan() || smoothness <= 0.0 {
+            // The smooth arm divides by twice this value.
+            return Err(format!(
+                "TreasureBox material {} _RareFresnelSmoothness = {smoothness} makes the source's smooth-step divide by zero",
+                slot.name
+            ));
+        }
+        params.treasure_rare_blend = [
+            get("_RareBlendRate")?,
+            get("_RareFresnelIntensity")?,
+            get("_RareFresnelEmission")?,
+            get("_RareFresnelEdge")?,
+        ];
+        params.treasure_rare_fresnel = [smoothness, get("_RareScrollX")?, get("_RareScrollY")?, 0.0];
+        params.treasure_rare_overlay_st = *slot
+            .texture_scale_offsets
+            .get("_RareOverlayTexture")
+            .ok_or_else(|| format!("TreasureBox material {} lacks _RareOverlayTexture_ST", slot.name))?;
+        params.treasure_rare_base_color = *slot
+            .colors
+            .get("_RareBaseColor")
+            .ok_or_else(|| format!("TreasureBox material {} lacks _RareBaseColor", slot.name))?;
+        let index = texture_slot(slot, "_RareOverlayTexture")
+            .ok_or_else(|| format!("TreasureBox material {} lacks a _RareOverlayTexture slot", slot.name))?;
+        let uri = sidecar.texture_uris.get(index).ok_or_else(|| {
+            format!("TreasureBox material {} _RareOverlayTexture index is out of range", slot.name)
+        })?;
+        overlay_tex = Some(load_texture(uri));
+    }
+    let main_tex = read_main_tex("TreasureBox", sidecar, slot, &load_texture)?;
+    Ok(SiteMaterial {
+        key: SiteMaterialKey {
+            family: SiteFamily::TreasureBox { rare },
+            overlay_1st: false,
+            overlay_2nd: false,
+            module_fresnel: false,
+            tree_animation: false,
+            uniform_alpha_clip: false,
+            const_alpha_clip: false,
+            selected_alpha_clip: false,
+            ground_height_fade: false,
+            tree_height_fade: false,
+            birthday_dither: false,
+            tree_dither: false,
+        },
+        params,
+        main_tex,
+        overlay_tex,
         overlay2nd_tex: None,
         leaf_mask_tex: None,
     })
@@ -1642,6 +1854,7 @@ fn resolve_ui_uber(
             ground_height_fade: false,
             tree_height_fade: false,
             birthday_dither: false,
+            tree_dither: false,
         },
         params,
         main_tex,
@@ -1649,6 +1862,31 @@ fn resolve_ui_uber(
         overlay2nd_tex: None,
         leaf_mask_tex: None,
     })
+}
+
+/// A furniture Basic material on a site: the furniture resolution on the
+/// sidecar slot, textures by the sidecar's URIs. With `_EmissionMaskTex`, the
+/// entity also joins the furniture emission pass (the program's second target).
+fn resolve_fixture_basic(
+    sidecar: &SiteSidecar,
+    slot: &MaterialSlot,
+    load_texture: &dyn Fn(&str) -> Handle<Image>,
+) -> Result<PlannedMaterial, String> {
+    let main_tex = read_main_tex("Fixture/Basic", sidecar, slot, load_texture)?;
+    let basic = crate::fixture_material::resolve_site_basic(slot, main_tex)?;
+    let emission = if basic.has_mask {
+        let index = texture_slot(slot, "_EmissionMaskTex")
+            .ok_or_else(|| format!("Fixture/Basic 材质 {} 缺 _EmissionMaskTex 槽", slot.name))?;
+        let uri = sidecar.texture_uris.get(index).ok_or_else(|| {
+            format!("Fixture/Basic 材质 {} 的 _EmissionMaskTex 下标越界", slot.name)
+        })?;
+        Some((load_texture(uri), basic.bright, basic.dark, basic.colour_picker))
+    } else {
+        // The colour picker replaces the mask texel: the main texture fills
+        // the unread mask slot.
+        basic.colour_picker.map(|picker| (basic.material.main_tex.clone(), basic.bright, basic.dark, Some(picker)))
+    };
+    Ok(PlannedMaterial::FixtureBasic { material: basic.material, emission })
 }
 
 // ---- 换装 ----
@@ -1673,7 +1911,36 @@ pub struct SiteMaterialsSwapped;
 /// 一条换装计划：解析好的站点材质与逐实体要求。
 struct Planned {
     name: String,
-    material: SiteMaterial,
+    material: PlannedMaterial,
+}
+
+/// A site material is drawn by its family's material; a furniture Basic
+/// material authored on a site is drawn by the furniture material, with its
+/// second colour target in the furniture emission pass when it has a mask.
+enum PlannedMaterial {
+    Site(SiteMaterial),
+    FixtureBasic {
+        material: crate::fixture_material::FixtureMaterial,
+        /// `(_EmissionMaskTex, bright int, dark int, colour picker)` when the
+        /// slot is bound or the colour picker is on (then the main texture
+        /// fills the unread mask slot).
+        emission: Option<(Handle<Image>, f32, f32, Option<[f32; 3]>)>,
+    },
+}
+
+impl PlannedMaterial {
+    fn textures(&self) -> Vec<&Handle<Image>> {
+        match self {
+            Self::Site(material) => std::iter::once(&material.main_tex)
+                .chain(material.overlay_tex.iter())
+                .chain(material.overlay2nd_tex.iter())
+                .chain(material.leaf_mask_tex.iter())
+                .collect(),
+            Self::FixtureBasic { material, emission } => std::iter::once(&material.main_tex)
+                .chain(emission.as_ref().map(|(mask, _, _, _)| mask))
+                .collect(),
+        }
+    }
 }
 
 /// glb 材质句柄的归类：换装的指向 plan 下标，其余保留原材质、按桶计数。
@@ -1717,6 +1984,8 @@ struct SwapTally {
     dropitem_entities: usize,
     ui_uber_materials: usize,
     ui_uber_entities: usize,
+    fixture_basic_materials: usize,
+    fixture_basic_entities: usize,
     other_entities: usize,
     /// 具名拒绝：族门/必需槽/keyword 域/值域不过。
     refused: Vec<String>,
@@ -1756,9 +2025,10 @@ fn switch_materials(
     gltfs: Res<Assets<Gltf>>,
     json: Res<Assets<MolyJson>>,
     mut materials: ResMut<Assets<SiteMaterial>>,
+    mut fixture_materials: ResMut<Assets<crate::fixture_material::FixtureMaterial>>,
     site: Option<Res<SiteAssets>>,
     parts: Query<(Entity, &Mesh3d, &MeshMaterial3d<StandardMaterial>)>,
-    mut plan: Local<Option<SwapPlan>>,
+    mut plan: Local<Option<(bevy::asset::AssetId<Gltf>, String, SwapPlan)>>,
 ) {
     if swapped.is_some() {
         return;
@@ -1778,8 +2048,12 @@ fn switch_materials(
     let MolyJson::SiteSidecar(sidecar) = asset else {
         panic!("站点 sidecar 路径装载到了别的资产类型（{scene}）");
     };
-    let Some(mut state) = plan
-        .take()
+    // Local state outlives teardown. Never apply a half-loaded plan from a
+    // retired site to the next generation's entities (including rapid A/B/A).
+    let cached = plan.take().filter(|(gltf, name, _)| {
+        *gltf == site.gltf.id() && name == scene
+    }).map(|(_, _, plan)| plan);
+    let Some(mut state) = cached
         .or_else(|| build_swap_plan(&gltfs, &site, sidecar, scene, &server))
     else {
         return;
@@ -1788,11 +2062,7 @@ fn switch_materials(
     // 等贴图到齐：换装早于贴图到位会让实体闪回默认材质。装载失败具名 panic。
     let mut all_loaded = true;
     for item in &state.planned {
-        let textures = std::iter::once(&item.material.main_tex)
-            .chain(item.material.overlay_tex.iter())
-            .chain(item.material.overlay2nd_tex.iter())
-            .chain(item.material.leaf_mask_tex.iter());
-        for texture in textures {
+        for texture in item.material.textures() {
             match server.load_state(texture) {
                 LoadState::Failed(err) => {
                     panic!("材质 {} 的贴图装载失败：{err:?}", item.name)
@@ -1803,7 +2073,7 @@ fn switch_materials(
         }
     }
     if !all_loaded {
-        *plan = Some(state);
+        *plan = Some((site.gltf.id(), scene.to_owned(), state));
         return;
     }
 
@@ -1825,7 +2095,38 @@ fn switch_materials(
         match classification.map(|entry| entry.colour) {
             Some(GltfClass::Swap(index)) => {
                 let item = &state.planned[index];
-                let site_handle = materials.add(item.material.clone());
+                let site_material = match &item.material {
+                    PlannedMaterial::Site(material) => material,
+                    PlannedMaterial::FixtureBasic { material, emission } => {
+                        let handle = fixture_materials.add(material.clone());
+                        for entity in entities {
+                            let mut target = commands.entity(*entity);
+                            target
+                                .remove::<MeshMaterial3d<StandardMaterial>>()
+                                .insert(MeshMaterial3d(handle.clone()));
+                            if let Some((mask, bright, dark, colour_picker)) = emission {
+                                target.insert(crate::fixture_emission::FixtureEmission {
+                                    force_emission: false,
+                                    mask: mask.clone(),
+                                    main_tex: material.main_tex.clone(),
+                                    params: material.params,
+                                    key: material.key,
+                                    blend: material.blend,
+                                    bright: *bright,
+                                    dark: *dark,
+                                    colour_picker: *colour_picker,
+                                    crystal: material.crystal.clone(),
+                                });
+                            }
+                        }
+                        if !entities.is_empty() {
+                            state.tally.fixture_basic_materials += 1;
+                            state.tally.fixture_basic_entities += entities.len();
+                        }
+                        continue;
+                    }
+                };
+                let site_handle = materials.add(site_material.clone());
                 let mut swapped_entities = 0;
                 for entity in entities {
                     commands
@@ -1836,7 +2137,7 @@ fn switch_materials(
                 }
                 if swapped_entities > 0 {
                     let tally = &mut state.tally;
-                    let (materials_count, entities_count) = match item.material.key.family {
+                    let (materials_count, entities_count) = match site_material.key.family {
                         SiteFamily::FieldObject => {
                             let r = (&mut tally.fieldobject_materials, &mut tally.fieldobject_entities);
                             r
@@ -1853,6 +2154,11 @@ fn switch_materials(
                             (&mut tally.dropitem_materials, &mut tally.dropitem_entities)
                         }
                         SiteFamily::UiUber => (&mut tally.ui_uber_materials, &mut tally.ui_uber_entities),
+                        // The site-scene dispatch never resolves this family;
+                        // only the harvest swap does.
+                        family @ SiteFamily::TreasureBox { .. } => panic!(
+                            "site scene swap produced the harvest-only family {family:?}"
+                        ),
                     };
                     *materials_count += 1;
                     *entities_count += swapped_entities;
@@ -1865,8 +2171,8 @@ fn switch_materials(
     info!(
         "{scene} 材质换装：FieldObject {} 材质 {} 实体，Ground {} 材质 {} 实体，\
          Tree {} 材质 {} 实体，Water {} 材质 {} 实体，Ground-Birthday {} 材质 {} 实体，\
-         Object {} 材质 {} 实体，DropItem {} 材质 {} 实体，UI-Uber {} 材质 {} 实体；\
-         其他 {} 实体",
+         Object {} 材质 {} 实体，DropItem {} 材质 {} 实体，UI-Uber {} 材质 {} 实体，\
+         Fixture/Basic {} 材质 {} 实体；其他 {} 实体",
         state.tally.fieldobject_materials,
         state.tally.fieldobject_entities,
         state.tally.ground_materials,
@@ -1883,6 +2189,8 @@ fn switch_materials(
         state.tally.dropitem_entities,
         state.tally.ui_uber_materials,
         state.tally.ui_uber_entities,
+        state.tally.fixture_basic_materials,
+        state.tally.fixture_basic_entities,
         state.tally.other_entities,
     );
     if !state.tally.refused.is_empty() {
@@ -1905,6 +2213,21 @@ fn switch_materials(
         state.tally.sidecar_only, state.tally.unmatched_texture_slots,
     );
     commands.insert_resource(SiteMaterialsSwapped);
+}
+
+/// Only presentation is delayed. The deferred material replacements must be
+/// applied before this system can reveal the roots; `.chain()` supplies that
+/// barrier. Source-inactive descendants and navigation roots remain hidden.
+fn reveal_material_ready_roots(
+    mut commands: Commands,
+    ready: Option<Res<SiteMaterialsSwapped>>,
+    mut roots: Query<(Entity, &mut Visibility), With<SiteVisualPending>>,
+) {
+    if ready.is_none() { return; }
+    for (entity, mut visibility) in &mut roots {
+        *visibility = Visibility::Inherited;
+        commands.entity(entity).remove::<SiteVisualPending>();
+    }
 }
 
 /// 建 plan：按 glb 材质下标 join sidecar（glb `materials[i]` 与 sidecar
@@ -1946,7 +2269,7 @@ fn build_swap_plan(
                         Ok(material) => {
                             planned.push(Planned {
                                 name: slot.name.clone(),
-                                material,
+                                material: PlannedMaterial::Site(material),
                             });
                             GltfClass::Swap(planned.len() - 1)
                         }
@@ -1997,6 +2320,16 @@ fn build_swap_plan(
                         &mut planned,
                         &mut tally,
                     ),
+                    FIXTURE_BASIC_SHADER_NAME => match resolve_fixture_basic(sidecar, slot, &load) {
+                        Ok(material) => {
+                            planned.push(Planned { name: slot.name.clone(), material });
+                            GltfClass::Swap(planned.len() - 1)
+                        }
+                        Err(reason) => {
+                            tally.refused.push(reason);
+                            GltfClass::Retain
+                        }
+                    },
                     // 其他（URP/Lit、粒子族等）：保留。
                     _ => GltfClass::Retain,
                 }
@@ -2023,13 +2356,40 @@ pub struct SiteMaterialPlugin;
 
 impl Plugin for SiteMaterialPlugin {
     fn build(&self, app: &mut App) {
+        crate::render::gpu::install_shared_samplers(app);
+        crate::gpu_image_release::prepare_after_images::<SiteMaterial>(app);
         app.add_plugins((
             crate::env::SiteEnvPlugin,
+            crate::site_extension::SiteExtensionPlugin,
             MaterialPlugin::<SiteMaterial>::default(),
         ))
         .init_asset::<MolyJson>()
         .init_asset_loader::<MolyJsonLoader>()
-        .add_systems(Update, switch_materials);
+        .add_systems(Update, (switch_materials, reveal_material_ready_roots).chain());
         bevy::asset::embedded_asset!(app, "shaders/site_material.wgsl");
+    }
+}
+
+#[cfg(test)]
+mod visual_readiness_tests {
+    use super::*;
+
+    #[test]
+    fn source_material_barrier_does_not_reveal_navigation_or_inactive_nodes() {
+        let mut app = App::new();
+        app.add_systems(Update, reveal_material_ready_roots);
+        let root = app.world_mut().spawn((SiteVisualPending, Visibility::Hidden)).id();
+        let nav = app.world_mut().spawn(Visibility::Hidden).id();
+        app.update();
+        assert_eq!(*app.world().get::<Visibility>(root).unwrap(), Visibility::Hidden);
+        app.world_mut().insert_resource(SiteMaterialsSwapped);
+        app.update();
+        assert_eq!(*app.world().get::<Visibility>(root).unwrap(), Visibility::Inherited);
+        assert!(app.world().get::<SiteVisualPending>(root).is_none());
+        assert_eq!(*app.world().get::<Visibility>(nav).unwrap(), Visibility::Hidden);
+        // A later ready signal must not overwrite an intentional hiding.
+        *app.world_mut().get_mut::<Visibility>(root).unwrap() = Visibility::Hidden;
+        app.update();
+        assert_eq!(*app.world().get::<Visibility>(root).unwrap(), Visibility::Hidden);
     }
 }

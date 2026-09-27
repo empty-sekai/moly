@@ -9,24 +9,45 @@ use crate::ui_layout::{SpriteLayoutMetrics, UiLayouts};
 
 #[derive(Resource, Default)]
 pub(crate) struct EditorIcons {
-    pub(super) by_fixture: BTreeMap<i32, String>,
+    /// Every registered thumbnail by (fixture id, texture id).
+    variants: BTreeMap<(i32, i32), String>,
     handles: Vec<Handle<Image>>,
     parsed: bool,
-    pub(super) ready: bool,
+    ready: bool,
 }
 
+impl EditorIcons {
+    /// Every registered thumbnail has loaded.
+    pub(crate) fn is_ready(&self) -> bool {
+        self.ready
+    }
+
+    /// The registered thumbnail of one fixture colour (`UserMysekaiFixture`
+    /// id and texture id).
+    pub(crate) fn variant(&self, fixture_id: i32, texture_id: i32) -> Option<&str> {
+        self.variants
+            .get(&(fixture_id, texture_id))
+            .map(String::as_str)
+    }
+}
+
+/// The fixture thumbnail catalogue. The runtime Sprite metrics of the editor
+/// tabs come with the UI root's other sources (UiLayouts::runtime_sprites).
 #[derive(Resource)]
 pub(crate) struct EditorAssetRequests {
     thumbnails: Handle<JsonAsset>,
-    sprites: Handle<JsonAsset>,
 }
 
-pub(crate) fn load(mut commands: Commands, server: Res<AssetServer>) {
+pub(crate) fn load(
+    mut commands: Commands,
+    server: Res<AssetServer>,
+    stage: Option<Res<crate::browser_stage::BrowserStage>>,
+) {
     commands.init_resource::<EditorIcons>();
     commands.init_resource::<super::EditorUiState>();
+    if stage.is_some() { return; }
     commands.insert_resource(EditorAssetRequests {
         thumbnails: server.load("moly://fixture-thumbnails/fixture-thumbnails.json"),
-        sprites: server.load("moly://ui-layout-v2/runtime-sprites.json"),
     });
 }
 
@@ -45,13 +66,11 @@ pub(crate) fn parse(
         let Some(request) = request else {
             return;
         };
-        for handle in [&request.thumbnails, &request.sprites] {
-            if let LoadState::Failed(error) = server.load_state(handle) {
-                panic!("furniture editor source metadata failed: {error:?}");
-            }
-            if json.get(handle).is_none() {
-                return;
-            }
+        if let LoadState::Failed(error) = server.load_state(&request.thumbnails) {
+            panic!("furniture editor source metadata failed: {error:?}");
+        }
+        if json.get(&request.thumbnails).is_none() {
+            return;
         }
         let thumbs: Value = serde_json::from_str(&json.get(&request.thumbnails).unwrap().0)
             .expect("source fixture thumbnail manifest");
@@ -74,15 +93,15 @@ pub(crate) fn parse(
                     &server,
                 );
                 icons.handles.push(handle);
-                // EditView currently models the ordinary texture-1 offline
-                // fixture rows. It does not pretend to provide skin selection.
-                if texture_id == 1 {
-                    icons.by_fixture.insert(id, alias);
+                if let Ok(texture) = i32::try_from(texture_id) {
+                    icons.variants.insert((id, texture), alias);
                 }
             }
         }
-        let sprites: Value = serde_json::from_str(&json.get(&request.sprites).unwrap().0)
-            .expect("source runtime Sprite metadata");
+        let sprites = layouts
+            .runtime_sprites()
+            .expect("the UI root's runtime Sprite metadata is loaded with its layouts")
+            .clone();
         for (name, sprite) in sprites.as_object().expect("runtime Sprite map") {
             if !name.starts_with("editor-tab-") {
                 continue;

@@ -26,9 +26,16 @@
 //! 不是消费缺口。⇒ 本模块**缺 z 分量时响亮拒绝**，**不拆绘制**（拆成多绘制
 //! 是另一个结构，真源是单网格单材质靠 UV0.z 分派）；着色器按「UV0.z 会在」写。
 //!
-//! ⚠ `_USE_DITHER` 具名挂账：代码明确 `EnableKeyword`，而 4 个 program record
-//! 里出现的 keyword 只有 `_USE_ALPHA_CLIP`——它要么不产生变体，要么 census
-//! 采集口径漏了；本程序的 bayer 抖动段无条件执行（无 `_UseDither` 门）。
+//! Dither: the runtime material creation (`AvatarUtility`) enables the
+//! keyword `_USE_DITHER`, and the dither writer (`SetDitherAlpha`) switches
+//! `_ENABLE_DITHER` / `_DISABLE_DITHER` and the ints `_UseDither` /
+//! `_DisableDither` besides writing `_DitherAlpha`. The program's four records
+//! carry only the keyword `_USE_ALPHA_CLIP` and no dither toggle property, so
+//! none of those switches selects anything: the bayer discard runs on every
+//! fragment with `_DitherAlpha` as its threshold, which is what this shader
+//! does. The records read are an earlier client build's shader bundle; the
+//! current build's was not read. The writers of `_DitherAlpha` are ported in
+//! [`player_dither`].
 
 use bevy::asset::LoadState;
 use bevy::prelude::*;
@@ -42,8 +49,8 @@ use crate::avatar_wear::{AvatarWear, WearPart};
 use crate::player::PlayerControlled;
 use moly_law::shading::avatar as law;
 
-/// Explicit audience-body marker. Normal SD players never carry this, so the
-/// retained audience material helper cannot recolour SD bodies or their tools.
+/// The player's audience body (the avatar model): the swap below recolours
+/// only this body, never an SD character or a tool.
 #[derive(Component)]
 pub struct AudienceBody;
 
@@ -442,11 +449,21 @@ pub fn plan_and_swap(
                 .insert(MeshMaterial3d(handle.clone()));
         }
         commands.entity(player).insert(AvatarToon);
+        let stored = materials
+            .get(&handle)
+            .expect("the material was added this frame")
+            .params;
         info!(
-            "[player] avatar 换肤：材质贴图引用 PBR（基础色贴图 {}） -> Mysekai/Avatar（_SkinTex {}，_SkinColor {}），{entity_count} 个网格实体",
+            "[player] avatar 换肤：材质贴图引用 PBR（基础色贴图 {}） -> Mysekai/Avatar（_SkinTex {}，_SkinColor {}），{entity_count} 个网格实体；材质值 _SkinColor {:?} _Alpha {} _DitherAlpha {} _EnablePenlightLighting {} _LeftPenlightActive {} _RightPenlightActive {}",
             if old_textured { "有" } else { "无" },
             wear.skin_bundle,
             wear.skin_color_code,
+            stored.skin_color,
+            stored.alpha_dither_gate[0],
+            stored.alpha_dither_gate[1],
+            stored.alpha_dither_gate[2],
+            stored.left_active[0],
+            stored.right_active[0],
         );
     }
 }
@@ -470,15 +487,257 @@ fn assert_part_index(mesh: &Mesh) {
     }
 }
 
-/// avatar 材质插件：材质管线 + 全局量桥（含渲染侧 buffer）。
+// ---------------------------------------------------------------------------
+// The player avatar's dither (`PlayerAvatar.UpdateDitherValue`)
+// ---------------------------------------------------------------------------
+
+/// The talk camera states' `_ditherRange` (degrees).
+const TALK_DITHER_RANGE: f32 = 45.0;
+/// `NormalCameraState.FadeInPlayerIfNeeded`: after the first-person state
+/// the player fades in from 0 by `DOTween.To(.., 1, 0.2)` on the default ease.
+const FADE_IN_SECONDS: f32 = 0.2;
+/// `Vector3.kEpsilonNormalSqrt`, the angle's zero-length guard.
+const ANGLE_EPSILON: f32 = 1e-15;
+/// `Mathf.Rad2Deg`.
+const RAD_TO_DEG: f32 = 57.295_78;
+
+/// `TalkCameraState.SetPlayerDitherValue` (the SomeCharacterTalk state's is
+/// the same code) on one frame: unless the camera is within 1 of its minimum
+/// distance the player is fully shown. Otherwise, for each target after the
+/// first, the signed planar angle at that target between the first target
+/// and the camera; within `range` of ±180 degrees (the target stands between
+/// the first target and the camera) it gives `1 - (1 - (1 - t)^5)` with
+/// `t = (range - (180 - |angle|)) / range`, and the player takes the smallest.
+/// Operation order and precision follow the compiled method: the angle and
+/// the power are taken in double, the rest in single precision.
+pub(crate) fn talk_player_dither(
+    distance: f32,
+    min_distance: f32,
+    targets: &[Vec3],
+    camera: Vec3,
+    range: f32,
+) -> f32 {
+    if distance - min_distance > 1.0 {
+        return 1.0;
+    }
+    let Some((first, others)) = targets.split_first() else {
+        return 1.0;
+    };
+    let mut value = 1.0f32;
+    for other in others {
+        let (ax, az) = (first.x - other.x, first.z - other.z);
+        let (bx, bz) = (camera.x - other.x, camera.z - other.z);
+        let denominator = ((az * az + (ax * ax + 0.0)) * (bz * bz + (bx * bx + 0.0))).sqrt();
+        let mut angle = 0.0f32;
+        if !(denominator < ANGLE_EPSILON) {
+            let cosine = (az * bz + (ax * bx + 0.0)) / denominator;
+            let clamped = if cosine >= -1.0 {
+                cosine.min(1.0)
+            } else {
+                -1.0
+            };
+            angle = ((clamped as f64).acos() as f32) * RAD_TO_DEG;
+        }
+        let signed = if az * bx - ax * bz < 0.0 {
+            -angle
+        } else {
+            angle
+        };
+        let between = (signed >= -180.0 && signed < range + -180.0)
+            || (signed <= 180.0 && signed > 180.0 - range);
+        if between {
+            let t = (range - (180.0 - angle.abs())) / range;
+            let power = ((1.0 - t) as f64).powf(5.0);
+            let candidate = 1.0 - (1.0 - power) as f32;
+            value = if value < candidate { value } else { candidate };
+        }
+    }
+    if value >= 1.0 {
+        1.0
+    } else {
+        value
+    }
+}
+
+/// The dither driver's state across frames.
+pub(crate) struct PlayerDither {
+    last: Option<crate::camera::CameraStateType>,
+    value: f32,
+    fade: Option<moly_law::ui::dotween::FloatTween>,
+    /// Whether the talk framing's value has been logged in this state.
+    talk_logged: bool,
+}
+
+impl Default for PlayerDither {
+    fn default() -> Self {
+        Self {
+            last: None,
+            value: 1.0,
+            fade: None,
+            talk_logged: false,
+        }
+    }
+}
+
+fn is_talk_state(state: crate::camera::CameraStateType) -> bool {
+    use crate::camera::CameraStateType as S;
+    matches!(state, S::Talk | S::SomeCharacterTalk)
+}
+
+/// PostUpdate, after the transforms are propagated: the camera states'
+/// writes of the player's dither value, into the avatar material's
+/// `_DitherAlpha` (`MysekaiMaterialExtension.SetDitherAlpha`; the avatar
+/// program has neither the dither keywords nor the dither toggles that
+/// method also sets, so the alpha is the only part it reads).
+/// * Normal: entered from the first-person state, the value goes to 0 and
+///   tweens to 1 over 0.2 s; leaving Normal kills that tween and writes 1.
+/// * Talk and SomeCharacterTalk: from the talk camera's framing on, every
+///   frame [`talk_player_dither`] on the targets it frames (the talking
+///   NPCs' hips, bound fixtures, then the player's view) and the camera's
+///   position; leaving writes 1.
+/// The screenshot capture's writes have no counterpart (no photo mode).
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub(crate) fn player_dither(
+    time: Res<Time>,
+    state: Res<crate::camera::FieldCameraState>,
+    model: Option<Res<crate::camera::FieldCameraModel>>,
+    talk_camera: Option<Res<crate::talk_camera::TalkCamera>>,
+    talk: Option<Res<crate::talk::ActiveTalk>>,
+    session: Option<Res<crate::player_talk::PlayerTalkSession>>,
+    skeletons: Query<&crate::character_material::ToonMaterials>,
+    transforms: Query<&GlobalTransform>,
+    players: Query<&GlobalTransform, With<crate::character::AvatarRoot>>,
+    cameras: Query<&GlobalTransform, With<Camera3d>>,
+    bodies: Query<&MeshMaterial3d<AvatarMaterial>>,
+    mut materials: ResMut<Assets<AvatarMaterial>>,
+    mut local: Local<PlayerDither>,
+) {
+    use crate::camera::CameraStateType as S;
+    let current = state.0;
+    if local.last != Some(current) {
+        match local.last {
+            Some(S::Normal) => {
+                local.fade = None;
+                local.value = 1.0;
+            }
+            Some(previous) if is_talk_state(previous) => local.value = 1.0,
+            _ => {}
+        }
+        if current == S::Normal && local.last == Some(S::Fps) {
+            local.value = 0.0;
+            local.fade = Some(moly_law::ui::dotween::FloatTween::new(
+                1.0,
+                FADE_IN_SECONDS,
+                moly_law::ui::dotween::Ease::OutQuad,
+            ));
+            info!("[player-dither] Normal after first person: fade in over {FADE_IN_SECONDS}s");
+        }
+        local.last = Some(current);
+        local.talk_logged = false;
+    } else {
+        let this = &mut *local;
+        if let Some(fade) = this.fade.as_mut() {
+            let next = fade.update(this.value, time.delta_secs());
+            let complete = fade.is_complete();
+            if let Some(next) = next {
+                this.value = next;
+            }
+            if complete {
+                this.fade = None;
+            }
+        }
+    }
+    if is_talk_state(current) && talk_camera.is_some() {
+        let hip = |entity: Entity| {
+            let skeleton = skeletons.get(entity).ok()?;
+            transforms
+                .get(skeleton.hips_entity())
+                .ok()
+                .map(GlobalTransform::translation)
+        };
+        let mut targets = Vec::new();
+        if let Some(talk) = talk.as_deref() {
+            targets.extend(
+                talk.participants()
+                    .iter()
+                    .filter_map(|&(_, entity)| hip(entity)),
+            );
+            targets.extend(talk.fixture_instances().iter().filter_map(|&(_, entity)| {
+                transforms
+                    .get(entity)
+                    .ok()
+                    .map(GlobalTransform::translation)
+            }));
+        } else if let Some(session) = session.as_deref() {
+            targets.extend(hip(session.npc_entity()));
+        }
+        targets.extend(players.iter().next().map(GlobalTransform::translation));
+        if let (Some(model), Ok(camera)) = (model.as_deref(), cameras.single()) {
+            let previous = local.value;
+            local.value = talk_player_dither(
+                model.distance,
+                model.min_distance,
+                &targets,
+                camera.translation(),
+                TALK_DITHER_RANGE,
+            );
+            if !local.talk_logged || (previous < 1.0) != (local.value < 1.0) {
+                local.talk_logged = true;
+                info!(
+                    "[player-dither] {current:?} framing: {} targets, distance {:.3} over minimum {:.3}, dither {:.4}",
+                    targets.len(),
+                    model.distance,
+                    model.min_distance,
+                    local.value
+                );
+            }
+        }
+    }
+    let value = local.value;
+    let mut ids: Vec<AssetId<AvatarMaterial>> =
+        bodies.iter().map(|material| material.0.id()).collect();
+    ids.sort();
+    ids.dedup();
+    for id in ids {
+        let stale = materials
+            .get(id)
+            .is_some_and(|material| material.params.alpha_dither_gate[1] != value);
+        if stale {
+            if let Some(material) = materials.get_mut(id) {
+                material.params.alpha_dither_gate[1] = value;
+            }
+        }
+    }
+}
+
+/// avatar 材质插件：材质管线 + 全局量桥（含渲染侧 buffer）+ 玩家身体的
+/// 换装链（穿戴集面板 → 身体网格换 `Mysekai/Avatar` → 饰件/荧光棒）。
 pub struct AvatarMaterialPlugin;
 
 impl Plugin for AvatarMaterialPlugin {
     fn build(&self, app: &mut App) {
+        crate::gpu_image_release::prepare_after_images::<AvatarMaterial>(app);
+        // The player domain's own systems ride on this registration.
+        app.add_plugins(crate::player::PlayerPlugin);
         app.add_plugins((
             MaterialPlugin::<AvatarMaterial>::default(),
             ExtractResourcePlugin::<AvatarEnv>::default(),
         ));
+        app.add_systems(Startup, insert_neutral)
+            // The wear lands once the server's join and the avatar masters
+            // are in; the swap chain below waits for it.
+            .add_systems(
+                Update,
+                crate::avatar_wear::load.run_if(not(resource_exists::<AvatarWear>)),
+            )
+            .add_systems(
+                Update,
+                (plan_and_swap, crate::avatar_wear::attach_accessory)
+                    .chain()
+                    .after(crate::player_avatar::body::wire)
+                    .run_if(resource_exists::<AvatarWear>),
+            )
+            .add_systems(PostUpdate, write_frame_state);
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app
                 .add_systems(RenderStartup, create_env_buffer)

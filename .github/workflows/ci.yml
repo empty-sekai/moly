@@ -26,6 +26,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+      - name: Install browser test dependencies
+        run: npm ci --prefix web --ignore-scripts
+      - name: Check browser formatting
+        run: npm run --prefix web format:check
+      - name: Test browser protocols and resource transport
+        run: npm test --prefix web
       - name: Check workspace version
         run: python tools/version/check.py
       - name: Check JavaScript syntax

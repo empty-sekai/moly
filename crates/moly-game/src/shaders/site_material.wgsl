@@ -1,4 +1,4 @@
-// 站点族的 Base 程序：八个 shader 族共用一份，族与 keyword 变体用宏分派。
+// 站点族的 Base 程序：九个 shader 族共用一份，族与 keyword 变体用宏分派。
 // 式子照源程序的运算顺序逐句翻译。
 //
 // 变体键（specialize 注入；每条管线恰有一个族键）：
@@ -33,10 +33,25 @@
 //   SITE_SELECTED_ALPHA_CLIP  _USE_ALPHA_CLIP 的被选 alpha 阈
 //                         （Ground/Water/Birthday：selected − 0.5 < 0）。
 //   SITE_GROUND_HEIGHT_FADE   _USE_HEIGHT_FADE：Ground 高度淡出（雾后）。
-//   SITE_TREE_HEIGHT_FADE     _USE_HEIGHT_FADE：Tree 三色两段高度渐变。
+//   SITE_TREE_HEIGHT_FADE     _USE_HEIGHT_FADE：Tree 三色两段高度渐变
+//                         (JP 6.8.1 form: object-space height, applied to the
+//                         texel before the vertex colour and lighting).
 //   SITE_BIRTHDAY_DITHER  !_DISABLE_DITHER：Birthday 抖动（0.125）。
+//   SITE_TREE_DITHER      !_DISABLE_DITHER on a Tree material: Bayer dither
+//                         (0.125) right after the constant alpha clip.
+//   SITE_TREASUREBOX      TreasureBox family: selected vertex colour (squared)
+//                         and alpha, phenomena light and shade always on,
+//                         mask-ramped drop shadow, treasure shadows, fog.
+//   SITE_TREASURE_RARE    _USE_RARE: rare base colour lerp plus the
+//                         screen-space rare overlay behind a fract fresnel.
+// The global keyword _USE_MYSEKAI_SITE_EXTENSION is not a pipeline key: it
+// flips at run time, so it is the flag in binding 13 and every arm whose
+// source program changes with it tests that flag (see "Site expansion
+// dissolve" below). With the flag off those arms run exactly as before.
 // 顶点属性键由引擎按网格布局注入：VERTEX_COLORS / VERTEX_UVS_A /
-// VERTEX_UVS_B；网格没有顶点色时按源语义回白色 (1,1,1,1)。
+// VERTEX_UVS_B；网格没有顶点色时按源语义回白色 (1,1,1,1)。SKINNED (a
+// skinned mesh renderer, e.g. a lid) deforms the position and normal by the
+// joint palette before every family's arithmetic.
 //
 // 源程序写两个颜色目标（SV_Target1 = 0 或 emission）；本管线的主 pass
 // 只有一个颜色目标，第二目标不在此列（Object 的 emission 块同此放弃）。
@@ -47,6 +62,7 @@
 
 #import bevy_pbr::forward_io::Vertex
 #import bevy_pbr::mesh_functions
+#import bevy_pbr::skinning
 #import bevy_pbr::view_transformations::position_world_to_clip
 
 // ---- 材质 uniform（group 3 binding 0）：每条 Unity 属性一个 vec4 槽 ----
@@ -100,6 +116,14 @@ struct SiteParams {
     additive_color: vec4<f32>,
     object_texture_mapping: vec4<f32>,
     object_main_texture_local_mapping: vec4<f32>,
+    // TreasureBox rare arm: (_RareBlendRate, _RareFresnelIntensity,
+    // _RareFresnelEmission, _RareFresnelEdge).
+    treasure_rare_blend: vec4<f32>,
+    // (_RareFresnelSmoothness, _RareScrollX, _RareScrollY, 0).
+    treasure_rare_fresnel: vec4<f32>,
+    // _RareOverlayTexture_ST (the program reads .xy only).
+    treasure_rare_overlay_st: vec4<f32>,
+    treasure_rare_base_color: vec4<f32>,
 }
 
 // ---- 全局量（group 3 binding 1）：一帧一份，全部站点材质共用 ----
@@ -169,6 +193,32 @@ struct SiteShadow {
 @group(3) @binding(10) var<uniform> shadow: SiteShadow;
 @group(3) @binding(11) var shadow_tex: texture_depth_2d;
 @group(3) @binding(12) var shadow_cmp: sampler_comparison;
+
+// ---- Site expansion dissolve (group 3 binding 13) ----
+// The keyword `_USE_MYSEKAI_SITE_EXTENSION` and its globals, written once a
+// frame for every site material (site_extension.rs; slot order is the
+// contract with its gpu_bytes, the same struct as in room_shell.wgsl).
+// Channel counts of the source declarations: Radius, InnerRadius,
+// Smoothness, FadeMinRadius and FadeMaxRadius are floats; Center is a vec3
+// of which the programs read x and z; EdgeColor and FadeColor are vec4 (rgb
+// and w read). Ground, Water, Ground-Birthday and TreasureBox declare six of
+// them (no Smoothness, no EdgeColor); Object declares eight. LimitLineWidth
+// is declared by no program.
+
+struct SiteExtension {
+    // (_SiteExtensionRadius, _SiteExtensionInnerRadius,
+    //  _SiteExtensionSmoothness, keyword: 1 enabled, 0 disabled)
+    radii: vec4<f32>,
+    // _SiteExtensionCenter in this pipeline's world (xz read).
+    center: vec4<f32>,
+    edge_color: vec4<f32>,
+    fade_color: vec4<f32>,
+    // (_SiteExtensionFadeMinRadius, _SiteExtensionFadeMaxRadius,
+    //  _SiteExtensionLimitLineWidth, 0)
+    fade_range: vec4<f32>,
+}
+
+@group(3) @binding(13) var<uniform> site_extension: SiteExtension;
 
 // ---- 色彩域（改这个文件里任何一条算术之前先读）----
 //
@@ -255,6 +305,16 @@ struct SiteVertexOutput {
     @location(9) overlay_uv: vec2<f32>,
     // 第二层 overlay：同上（量名带 2nd）。
     @location(10) overlay2nd_uv: vec2<f32>,
+#ifdef SITE_TREASUREBOX
+    // TreasureBox: the source's screen position (TEXCOORD5), clip
+    // (0.5 x + 0.5 w, 0.5 y + 0.5 w, z, w); the rare overlay reads xy / w.
+    @location(11) screen_pos: vec4<f32>,
+#endif
+#ifdef SITE_TREE_HEIGHT_FADE
+    // The source's TEXCOORD7.y: the raw POSITION's y, before the tree
+    // animation (the reflection in x leaves y unchanged).
+    @location(12) object_y: f32,
+#endif
 }
 
 @vertex
@@ -279,21 +339,37 @@ fn vertex(mesh: Vertex) -> SiteVertexOutput {
     swayed = swayed * inverseSqrt(dot(swayed, swayed)) * length(mesh.position);
     local_position = vec4<f32>(swayed, 1.0);
 #endif
+#ifdef SKINNED
+    // A skinned renderer draws in the pose of its joint palette (which
+    // already carries the joints' world transforms and the bind poses); the
+    // mesh instance transform alone would leave it in the bind pose.
+    let world_from_local = skinning::skin_model(
+        mesh.joint_indices, mesh.joint_weights, mesh.instance_index,
+    );
+#else
     let world_from_local = mesh_functions::get_world_from_local(mesh.instance_index);
+#endif
     let world_position = mesh_functions::mesh_position_local_to_world(
         world_from_local,
         local_position,
     );
 
     var out: SiteVertexOutput;
+#ifdef SITE_TREE_HEIGHT_FADE
+    out.object_y = mesh.position.y;
+#endif
     out.position = position_world_to_clip(world_position.xyz);
     out.world_position = world_position;
 
 #ifdef VERTEX_NORMALS
+#ifdef SKINNED
+    out.world_normal = skinning::skin_normals(world_from_local, mesh.normal);
+#else
     out.world_normal = mesh_functions::mesh_normal_local_to_world(
         mesh.normal,
         mesh.instance_index,
     );
+#endif
 #else
     out.world_normal = vec3<f32>(0.0);
 #endif
@@ -447,6 +523,29 @@ fn vertex(mesh: Vertex) -> SiteVertexOutput {
     out.overlay2nd_uv = vec2<f32>(0.0);
 #endif
 
+#ifdef SITE_TREASUREBOX
+    // TreasureBox vertex outputs, as its vertex program writes them: the view
+    // direction (TEXCOORD3; perspective: camera minus position through
+    // inversesqrt with no epsilon, orthographic: the view matrix z row), the
+    // vertex colour with squared rgb (TEXCOORD4) and the screen position
+    // (TEXCOORD5). Both clip conventions have y up and the same w, so the
+    // screen position keeps the source's bottom-left origin.
+    let to_camera_tb = env.camera_position.xyz - world_position.xyz;
+    var view_tb = to_camera_tb * inverseSqrt(dot(to_camera_tb, to_camera_tb));
+    if env.ortho_params.w != 0.0 {
+        view_tb = vec3<f32>(env.view_matrix_c0.z, env.view_matrix_c1.z, env.view_matrix_c2.z);
+    }
+    out.view_dir = view_tb;
+    out.color_sq = vec4<f32>(out.color.rgb * out.color.rgb, out.color.a);
+    let clip_tb = out.position;
+    out.screen_pos = vec4<f32>(
+        clip_tb.x * 0.5 + clip_tb.w * 0.5,
+        clip_tb.y * 0.5 + clip_tb.w * 0.5,
+        clip_tb.z,
+        clip_tb.w,
+    );
+#endif
+
     return out;
 }
 
@@ -476,6 +575,35 @@ fn apply_fog(rgb: vec3<f32>, world_y: f32, fog_ramp: f32) -> vec3<f32> {
     let delta = distance_blended - rgb;
     let height = min(exp2(-world_y * env.fog_params.z), 1.0) * fog_color.w;
     return clamp(height * delta + rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// Whether this frame's programs are the `_USE_MYSEKAI_SITE_EXTENSION` ones.
+fn site_extension_on() -> bool {
+    return site_extension.radii.w > 0.5;
+}
+
+// Horizontal distance of a world position from _SiteExtensionCenter:
+// sqrt(dot(p.xz - C.xz, p.xz - C.xz)).
+fn site_extension_distance(world_xz: vec2<f32>) -> f32 {
+    let delta = world_xz + -site_extension.center.xz;
+    return sqrt(dot(delta, delta));
+}
+
+// The fade band every keyword program applies, in the source's operation
+// order: t = clamp((d - Ri) / (R - Ri), 0, 1); c moves toward the fade colour
+// by t * F.w where 0.999 >= t, FadeMax >= d and d >= FadeMin, and stays c
+// elsewhere.
+fn site_extension_band(c: vec3<f32>, d: f32) -> vec3<f32> {
+    let toward = -c + site_extension.fade_color.rgb;
+    let span = -site_extension.radii.y + site_extension.radii.x;
+    var t = d + -site_extension.radii.y;
+    t = t / span;
+    t = clamp(t, 0.0, 1.0);
+    let w = t * site_extension.fade_color.w;
+    let mixed = vec3<f32>(w) * toward + c;
+    var o = select(c, mixed, 0.999000013 >= t);
+    o = select(c, o, site_extension.fade_range.y >= d);
+    return select(c, o, d >= site_extension.fade_range.x);
 }
 
 // 源像素坐标是 GL 约定：原点左下、y 向上、半像素偏移。本管线的帧缓冲
@@ -722,13 +850,61 @@ fn fragment(in: SiteVertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 #endif
+#ifdef SITE_TREE_DITHER
+    // The Tree program without _DISABLE_DITHER: Bayer dither at quantization
+    // 0.125 after the clip (_DitherAlpha - threshold < 0 discards).
+    if params.dither_alpha.x - bayer_value(bayer_pixel(in.position), 0.125) < 0.0 {
+        discard;
+    }
+#endif
+
+    // JP 6.8.1 height gradient: on the texel, before the vertex colour and
+    // outside the lighting gate (CN 6.0.0 applied it last inside the gate, on
+    // the world height). h reads the object-space height; above 3.0 the span
+    // is rebuilt from _HeightFadePosition + 45 and _HeightFadeLength instead of
+    // the material's two reciprocal values. The Pos01 = 0 division is kept
+    // literally (0/0 at h = 0, as in the source).
+    var faded = srgb_format_encode(base.rgb);
+#ifdef SITE_TREE_HEIGHT_FADE
+    if params.use_height_fade.x > 0.5 {
+        let lifted = params.height_fade_position.x + 45.0;
+        let span = lifted + params.height_fade_length.x;
+        let rcp_start = select(
+            vec2<f32>(params.height_fade_rcp_length.x, params.height_fade_start_time_rcp_length.x),
+            vec2<f32>(1.0 / span, lifted / span),
+            3.0 < in.object_y,
+        );
+        let h = clamp(in.object_y * rcp_start.x - rcp_start.y, 0.0, 1.0);
+        var g0 = clamp(h / params.height_gradient_pos01.x, 0.0, 1.0);
+        g0 = min(exp2(log2(g0) * params.height_fade_exponent.x), 1.0);
+        let seg0 = params.height_gradient_color0.rgb
+            + g0 * (params.height_gradient_color1.rgb - params.height_gradient_color0.rgb);
+        var g1 = clamp(
+            (h + -params.height_gradient_pos01.x)
+                / (-params.height_gradient_pos01.x + params.height_gradient_pos12.x),
+            0.0,
+            1.0,
+        );
+        g1 = min(exp2(log2(g1) * params.height_fade_exponent.x), 1.0);
+        let seg1 = params.height_gradient_color1.rgb
+            + g1 * (params.height_gradient_color2.rgb - params.height_gradient_color1.rgb);
+        // 源 greaterThanEqual：Pos12 >= h 选 seg1，再 Pos01 >= h 选 seg0
+        // （边界点归低位段一侧）。
+        var grad = select(
+            params.height_gradient_color2.rgb,
+            seg1,
+            params.height_gradient_pos12.x >= h,
+        );
+        grad = select(grad, seg0, params.height_gradient_pos01.x >= h);
+        faded = h * (grad - faded) + faded;
+    }
+#endif
 
     // 顶点色是原始色的布尔选择（区别于 FO 的平方/浮点 lerp）：源门取
     // 「use < 0.5 为真选原色」，select 语义相反故取反写。
-    let base_rgb = srgb_format_encode(base.rgb);
-    var rgb = select(base_rgb, base_rgb * in.color.rgb, params.use_vertex_color_blend.x >= 0.5);
+    var rgb = select(faded, faded * in.color.rgb, params.use_vertex_color_blend.x >= 0.5);
 
-    // 现象光照门：关时 rgb 直通（雾与高度渐变也在门内），开时走完整链。
+    // 现象光照门：关时 rgb 直通（雾在门内），开时走完整链。
     if params.use_phenomena_lighting.x > 0.5 {
 #ifdef SITE_MODULE_FRESNEL
         // EMF fresnel 在门内第一：法线 renorm + 视线按 ortho 位选。
@@ -774,40 +950,6 @@ fn fragment(in: SiteVertexOutput) -> @location(0) vec4<f32> {
 
         rgb = apply_fog(rgb, in.world_position.y, in.fog_ramp);
 
-#ifdef SITE_TREE_HEIGHT_FADE
-        // 三色两段高度渐变（门内末尾）。h 用淡出参数 t（倒数长度形），
-        // 非原始高度。Pos01=0 的行除法按源字面保留（h=0 处 0/0 与源同形）。
-        if params.use_height_fade.x > 0.5 {
-            var h = clamp(
-                in.world_position.y * params.height_fade_rcp_length.x
-                    + -params.height_fade_start_time_rcp_length.x,
-                0.0,
-                1.0,
-            );
-            var g0 = clamp(h / params.height_gradient_pos01.x, 0.0, 1.0);
-            g0 = min(exp2(log2(g0) * params.height_fade_exponent.x), 1.0);
-            let seg0 = params.height_gradient_color0.rgb
-                + g0 * (params.height_gradient_color1.rgb - params.height_gradient_color0.rgb);
-            var g1 = clamp(
-                (h + -params.height_gradient_pos01.x)
-                    / (-params.height_gradient_pos01.x + params.height_gradient_pos12.x),
-                0.0,
-                1.0,
-            );
-            g1 = min(exp2(log2(g1) * params.height_fade_exponent.x), 1.0);
-            let seg1 = params.height_gradient_color1.rgb
-                + g1 * (params.height_gradient_color2.rgb - params.height_gradient_color1.rgb);
-            // 源 greaterThanEqual：Pos12 >= h 选 seg1，再 Pos01 >= h 选 seg0
-            // （边界点归低位段一侧）。
-            var grad = select(
-                params.height_gradient_color2.rgb,
-                seg1,
-                params.height_gradient_pos12.x >= h,
-            );
-            grad = select(grad, seg0, params.height_gradient_pos01.x >= h);
-            rgb = h * (grad - rgb) + rgb;
-        }
-#endif
     }
     // 输出 alpha 恒 1.0：源的 tex.a 只喂 clip，不进输出。
     // ⚠ 现象光照门关时 rgb 是**未经任何算术的存储域底色**，同样要解一次
@@ -815,7 +957,7 @@ fn fragment(in: SiteVertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(srgb_format_decode(rgb), 1.0);
 #endif
 #ifdef SITE_OBJECT
-    // ---- Object 族（usage∈{8,12} 走 default 光照分支；2/11/14 在解析层
+    // ---- Object 族（usage∈{4,8,12} 走 default 光照分支；2/11/14 在解析层
     // 具名拒绝，此处不编译它们的支路）----
     // 法线 renorm + 视线选择（正交用 MatrixV 列 z）。
     let normal = normalize(in.world_normal);
@@ -858,7 +1000,7 @@ fn fragment(in: SiteVertexOutput) -> @location(0) vec4<f32> {
     let selected = select(main.a, main.a * in.color.w, params.use_vertex_alpha_opacity.x > 0.0);
 
     // ndotl 先 clamp 后用（toon 的 half 用 clamp 副本；maskramp 的 r 在
-    // usage!=0 时被强制 1.0——本族 usage∈{8,12} 恒死，不编译）。
+    // usage!=0 时被强制 1.0——本族 usage∈{4,8,12} 恒死，不编译）。
     let ndotl_clamped = clamp(dot(env.light_vector.xyz, normal), 0.0, 1.0);
 
     // vc1：浮点 lerp、**原始未平方** vc.rgb（区别于 FO 的平方形）。
@@ -900,6 +1042,35 @@ fn fragment(in: SiteVertexOutput) -> @location(0) vec4<f32> {
         // usage != 11：道路纹理缩放与落影整块不编译（恒等跳过）。
         // 雾在门内。
         rgb = apply_fog(rgb, in.world_position.y, in.fog_ramp);
+    }
+
+    // Site expansion dissolve (the _USE_MYSEKAI_SITE_EXTENSION program):
+    // after the phenomena gate, before the additive colour, on the gate's
+    // output. Every usage takes the fade band; usage 8 then takes the edge:
+    // h = smoothstep of clamp(clamp(d - R, 0, 1) / Smoothness, 0, 1);
+    // discarded where d < FadeMax and h < 0.001 (inside the radius), the edge
+    // colour mixed in by (1 - h) * E.w where FadeMax >= d and 0.999 >= h.
+    if site_extension_on() {
+        let d = site_extension_distance(in.world_position.xz);
+        rgb = site_extension_band(rgb, d);
+        if params.object_texture_mapping.y == 8.0 {
+            var e = d + -site_extension.radii.x;
+            e = clamp(e, 0.0, 1.0);
+            let inverse = 1.0 / site_extension.radii.z;
+            e = inverse * e;
+            e = clamp(e, 0.0, 1.0);
+            let k = e * -2.0 + 3.0;
+            let e2 = e * e;
+            let h = e2 * k;
+            if d < site_extension.fade_range.y && h < 0.00100000005 {
+                discard;
+            }
+            var w = -k * e2 + 1.0;
+            w = w * site_extension.edge_color.w;
+            var edged = vec3<f32>(w) * (-rgb + site_extension.edge_color.rgb) + rgb;
+            edged = select(rgb, edged, site_extension.fade_range.y >= d);
+            rgb = select(rgb, edged, 0.999000013 >= h);
+        }
     }
 
     // 门后无条件加色：rgb += _AdditiveColor.rgb · .w。
@@ -964,6 +1135,91 @@ fn fragment(in: SiteVertexOutput) -> @location(0) vec4<f32> {
     let tex_rgb = srgb_format_encode(tex.rgb);
     let col = vec4<f32>(tex_rgb * in.color.rgb, tex.a * in.color.a);
     return vec4<f32>(srgb_format_decode(col.rgb), col.a);
+#endif
+#ifdef SITE_TREASUREBOX
+    // ---- TreasureBox (Base, _MAIN_LIGHT_SHADOWS program; rare arm by
+    // SITE_TREASURE_RARE) ----
+    // Main texture: uv0 - t * (_UVScrollX, _UVScrollY), no fract; the y term
+    // flips sign in the exported v' = 1 - v space (as for Object).
+    let t = env.time.y;
+    let uv = vec2<f32>(in.uv.x - t * params.uv_scroll.x, in.uv.y + t * params.uv_scroll.y);
+    let tex = textureSampleBias(main_tex, main_sampler, uv, env.mip_bias.x);
+    let normal = normalize(in.world_normal);
+    // Main-light shadow first (strength, [0,1) depth range, distance fade),
+    // then the mask ramp on the clamped N.L: atten' = r * (atten - 1) + 1.
+    let shadow_atten_value = main_light_shadow_atten(in.world_position);
+    let ndotl = dot(env.light_vector.xyz, normal);
+    let ndotl_clamped = clamp(ndotl, 0.0, 1.0);
+    let mask_r = clamp(
+        (ndotl_clamped + -env.shadow_mask_edges.x)
+            / (-env.shadow_mask_edges.x + env.shadow_mask_edges.y),
+        0.0,
+        1.0,
+    );
+    let atten_prime = mask_r * (shadow_atten_value + -1.0) + 1.0;
+    // Toon ramp on the global edge pair (no local override in this family).
+    let half_lambert = ndotl * 0.5 + 0.5;
+    let toon = toon_ramp(half_lambert, env.edge_threshold.x, env.edge_smoothness.x);
+    // Vertex colour and alpha: int switches compared against 0.5; the colour
+    // arm multiplies by the squared vertex rgb. `tex_rgb` is the stored-domain
+    // texel (see the colour-domain section).
+    let tex_rgb = srgb_format_encode(tex.rgb);
+    let colour = select(tex_rgb, tex_rgb * in.color_sq.rgb, params.use_vertex_color_blend.x > 0.5);
+    let alpha = select(tex.a, tex.a * in.color_sq.w, params.use_vertex_alpha_opacity.x > 0.5);
+    // Phenomena light and shade: unconditional in this family.
+    var rgb = phenomena_light_blend(colour);
+    rgb = toon * (env.phenomena_shade_color.rgb * rgb - rgb) + rgb;
+    rgb = apply_drop_shadow(rgb, atten_prime);
+#ifdef SITE_TREASURE_RARE
+    // Rare base colour: lerp(rgb, rgb * c.rgb, c.a).
+    let rare_base = params.treasure_rare_base_color;
+    rgb = rare_base.w * (rgb * rare_base.rgb - rgb) + rgb;
+    // Rare overlay in screen space: (screen.xy / w) * ST.xy - t * scroll,
+    // in the source's bottom-left texture space; the exported image rows
+    // start at the top, so the sample takes 1 - y.
+    let screen = in.screen_pos.xy / in.screen_pos.w;
+    let overlay_coord = screen * params.treasure_rare_overlay_st.xy
+        - vec2<f32>(t) * params.treasure_rare_fresnel.yz;
+    let overlay = textureSampleBias(
+        overlay_tex, overlay_sampler, vec2<f32>(overlay_coord.x, 1.0 - overlay_coord.y), env.mip_bias.x,
+    );
+    let overlay_rgb = srgb_format_encode(overlay.rgb);
+    // Fresnel weight: x = fract(-N.V); a hard step at the edge, or a smooth
+    // step of half-width `smoothness` when the edge exceeds 0.004; capped at
+    // 1, scaled by the blend rate, then by (intensity, emission), clamped.
+    let edge = params.treasure_rare_blend.w;
+    let smoothness = params.treasure_rare_fresnel.x;
+    let view = normalize(in.view_dir);
+    let fresnel_x = fract(-dot(normal, view));
+    let hard = select(0.0, 1.0, fresnel_x >= edge);
+    var soft = fresnel_x + -edge;
+    soft = soft + smoothness;
+    soft = (1.0 / (smoothness + smoothness)) * soft;
+    soft = clamp(soft, 0.0, 1.0);
+    let soft_k = soft * -2.0 + 3.0;
+    soft = soft * soft;
+    soft = soft * soft_k;
+    var fresnel_w = select(hard, soft, 0.00400000019 < edge);
+    fresnel_w = min(fresnel_w, 1.0);
+    fresnel_w = fresnel_w * params.treasure_rare_blend.x;
+    let weights = clamp(
+        vec2<f32>(fresnel_w) * params.treasure_rare_blend.yz,
+        vec2<f32>(0.0),
+        vec2<f32>(1.0),
+    );
+    rgb = clamp(weights.x * (overlay_rgb - rgb) + rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+    // weights.y scales the overlay into the second colour target (emission),
+    // which this single-target pipeline does not draw.
+#endif
+    rgb = treasure_shadow(rgb, in.world_position.xz, env.treasure_position_0.xz, env.treasure_shadow_intensity.x);
+    rgb = treasure_shadow(rgb, in.world_position.xz, env.treasure_position_1.xz, env.treasure_shadow_intensity.y);
+    rgb = apply_fog(rgb, in.world_position.y, in.fog_ramp);
+    // Site expansion dissolve: the fade band on the fogged colour (apply_fog
+    // returns it clamped to [0, 1], the value the source program reads).
+    if site_extension_on() {
+        rgb = site_extension_band(rgb, site_extension_distance(in.world_position.xz));
+    }
+    return vec4<f32>(srgb_format_decode(rgb), alpha * params.base_opacity.x);
 #endif
 #ifdef SITE_SCROLL
     // ---- Ground / Water / Ground-Birthday 共用臂 ----
@@ -1056,6 +1312,15 @@ fn fragment(in: SiteVertexOutput) -> @location(0) vec4<f32> {
 #endif
 
     rgb = apply_fog(rgb, in.world_position.y, in.fog_ramp);
+
+    // Site expansion dissolve: the fade band on the fogged colour (apply_fog
+    // returns it clamped to [0, 1], the value the source program reads),
+    // before the height fade. The admitted Ground/Water/Birthday materials
+    // carry no _SKIP_PHENOMENA_LIGHT, the one variant family the keyword
+    // leaves unchanged.
+    if site_extension_on() {
+        rgb = site_extension_band(rgb, site_extension_distance(in.world_position.xz));
+    }
 
 #ifdef SITE_GROUND_HEIGHT_FADE
     // Ground 高度淡出：倒数长度形，雾后、臂末（runtime 0.5<_UseHeightFade）。

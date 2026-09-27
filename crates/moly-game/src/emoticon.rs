@@ -21,6 +21,8 @@
 //! 逐项计数，收工报告具名。锚定与收场时序按演示件（锚挂骨骼、
 //! `disposeDelaySeconds` 宽限）。
 
+pub(crate) mod timeline;
+
 use std::collections::HashMap;
 use std::marker::PhantomData;
 
@@ -28,7 +30,7 @@ use bevy::asset::uuid::Uuid;
 use bevy::asset::{AssetPath, LoadState, RenderAssetUsages};
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::math::Affine3A;
-use bevy::mesh::{Indices, PrimitiveTopology};
+use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 use bevy::render::render_resource::AsBindGroup;
 use bevy::shader::ShaderRef;
@@ -42,15 +44,14 @@ use moly_law::particle::{
 };
 
 use crate::npc::CharacterUnitId;
+use crate::particle_geometry::{reflect, source_frame, Alignment, Scaling};
+use crate::source_billboard;
 
 /// 表情档案的资产目录（提取产物布局，内联成 `moly://` 路径）。
 const EMOTICON_DIR: &str = "moly://emoticons";
 
 /// 重力常量：引擎侧 Vector3(0, -9.81, 0) 的口径，演示件同值。
 const GRAVITY: [f32; 3] = [0.0, -9.81, 0.0];
-
-/// 零缩放粒子会被背面剔除吞掉，尺寸下限同演示件。
-const MIN_PARTICLE_SCALE: f32 = 0.0001;
 
 /// 单帧 dt 钳制（切件/卡顿帧会把新生粒子一帧推出老远）。演示件同值。
 const DT_CLAMP: f32 = 0.1;
@@ -98,6 +99,7 @@ impl Material for EmoticonMaterial {
 
 /// Material 管线注册：在 `app()` 里 DefaultPlugins 之后调用一次（同天空壳）。
 pub(crate) fn install(app: &mut App) {
+    crate::gpu_image_release::prepare_after_images::<EmoticonMaterial>(app);
     app.add_plugins(MaterialPlugin::<EmoticonMaterial>::default());
 }
 
@@ -127,7 +129,11 @@ pub(crate) struct EmoteDraw {
 }
 
 /// Startup：请求表情档案，内联表情着色程序。
-pub(crate) fn load(mut commands: Commands, mut shaders: ResMut<Assets<Shader>>, server: Res<AssetServer>) {
+pub(crate) fn load(
+    mut commands: Commands,
+    mut shaders: ResMut<Assets<Shader>>,
+    server: Res<AssetServer>,
+) {
     // 返回的句柄就是钉死的 EMOTICON_SHADER，丢弃以免 must_use 告警。
     let _ = shaders.insert(
         EMOTICON_SHADER.id(),
@@ -136,9 +142,9 @@ pub(crate) fn load(mut commands: Commands, mut shaders: ResMut<Assets<Shader>>, 
             "moly_game/src/shaders/emoticon.wgsl".to_owned(),
         ),
     );
-    commands.insert_resource(EmoticonsHandle(server.load::<JsonAsset>(AssetPath::from(format!(
-        "{EMOTICON_DIR}/emoticons.json"
-    )))));
+    commands.insert_resource(EmoticonsHandle(
+        server.load::<JsonAsset>(AssetPath::from(format!("{EMOTICON_DIR}/emoticons.json"))),
+    ));
     commands.init_resource::<RestEmoteRequests>();
 }
 
@@ -179,13 +185,23 @@ pub(crate) struct Driver {
 pub(crate) struct RestEmoteRequests(Vec<RestEmoteCommand>);
 
 enum RestEmoteCommand {
-    Show { npc: Entity, name: String, not_play_se: bool },
-    Hide { npc: Entity },
+    Show {
+        npc: Entity,
+        name: String,
+        not_play_se: bool,
+    },
+    Hide {
+        npc: Entity,
+    },
 }
 
 impl RestEmoteRequests {
     pub(crate) fn show(&mut self, npc: Entity, name: String, not_play_se: bool) {
-        self.0.push(RestEmoteCommand::Show { npc, name, not_play_se });
+        self.0.push(RestEmoteCommand::Show {
+            npc,
+            name,
+            not_play_se,
+        });
     }
     pub(crate) fn hide(&mut self, npc: Entity) {
         self.0.push(RestEmoteCommand::Hide { npc });
@@ -215,20 +231,47 @@ struct LoadCounts {
     acc_z_test_less: u32,
     acc_z_offset: u32,
     acc_soft_particles: u32,
-    acc_rotation3d: u32,
     acc_sorting_order: u32,
     acc_uv_turns: u32,
-    acc_alignment: u32,
-    acc_renderer_pivot: u32,
-    acc_stretch: u32,
+    // ---- consumed renderer inputs, counted over drawn emitters ----
+    /// Emitters with a 3D start rotation (all three angles drawn).
+    drawn_rotation3d: u32,
+    /// Emitters whose render space is not View (World / Local / Facing /
+    /// Velocity), drawn in that space.
+    drawn_alignment: u32,
+    /// Emitters with a non-zero renderer pivot, drawn with it.
+    drawn_renderer_pivot: u32,
+    /// Emitters drawn with the Stretch geometry.
+    drawn_stretch: u32,
+    /// Material textures that live in a declared dependency bundle's item
+    /// (the file is that item's), resolved through the dependency.
+    cross_item_textures: u32,
+    // ---- unmodelled modes the data does not carry: loud named refusals ----
+    /// Emitters refused because a field holds a mode this module does not
+    /// model (reason logged at error level).
+    gate_mode_refused: u32,
+    /// Sprite slots refused for the same reason.
+    refused_sprite_slots: u32,
+    /// Whole items refused (anchor or clip channel outside the modelled set).
+    refused_items: u32,
     acc_sound_input: u32,
     acc_loop_end_flag: u32,
     acc_unsupported_text: u32,
-    /// 自旋模块整块拒绝的发射器数（形状未按原生路径实现/提取面缺键；
-    /// 拒绝后自旋冻结，发射器照跑）。
+    /// Emitters whose rotationOverLifetime the engine curve dispatch refuses
+    /// (a lane shape outside the transcribed evaluator, or a lane the export
+    /// lacks a field for). The emitter is refused, not drawn with its
+    /// rotation frozen at the birth angle.
     acc_rol_refused: u32,
-    /// 限速模块整块拒绝的发射器数（同上；拒绝后不钳速）。
+    /// Emitters whose limitVelocity construction refuses; likewise refused,
+    /// not drawn unclamped.
     acc_lim_refused: u32,
+    /// Emitters whose texture sheet the source kernels refuse (a mode, time
+    /// mode, row animation or frame curve shape outside them, or a field the
+    /// export lacks); likewise refused, not drawn with a guessed tile.
+    acc_sheet_refused: u32,
+    /// Emitters refused because a module the source runs cannot be evaluated
+    /// (the two counts above, once per emitter).
+    gate_module_refused: u32,
 }
 
 /// 一个表情条目：两族共用节点树，族差异落在绘制槽上。
@@ -252,6 +295,10 @@ struct Item {
     /// 粒子族：顶挂旋转走 Hips 参照的偏航单轴律（只门控旋转，与挂父
     /// 无关——世界/局部挂父由 simulationSpace 决定）。语料 13 条全在粒子族。
     keep_position: bool,
+    /// Set when the item holds a mode this module does not model (an anchor
+    /// or a clip channel property outside the modelled set): the item is not
+    /// shown, and every show request logs the reason.
+    refusal: Option<String>,
 }
 
 /// item.textures 的一行：句柄 + 采样归一用的尺寸。
@@ -343,6 +390,9 @@ struct EmitterDef {
     gate: Gate,
     params: Box<SimParams>,
     material: EmitterMat,
+    /// The renderer's draw inputs for the source billboard writer; `Some`
+    /// exactly for the emitters that pass the render-mode gate.
+    draw: Option<source_billboard::Draw>,
 }
 
 /// 停发门（分类口径与装载日志逐条对账）。
@@ -350,7 +400,8 @@ enum Gate {
     Simulated,
     /// 渲染器 enabled=false：数据明写的门。
     DisabledRenderer,
-    /// 绘制模式无实现（语料 1 条 Stretch；模式名在分类时的记账行里）。
+    /// Render mode or renderer input outside the source billboard writer
+    /// (reason logged when the archive loads).
     UnsupportedRenderer,
     /// 发射节点（含祖先）active=false。
     InactiveNode,
@@ -358,6 +409,12 @@ enum Gate {
     MissingTexture,
     /// 子发射目标：不自主播放，只由父粒子死亡触发。
     SubEmitterDriven,
+    /// A module the source runs cannot be evaluated here (reason logged at
+    /// error level when the archive loads); the emitter is not drawn.
+    ModuleRefused,
+    /// A field holds a mode this module does not model (reason logged at
+    /// error level when the archive loads); the emitter is not drawn.
+    ModeRefused,
 }
 
 /// 发射器材质槽（绘制需要的那几个量，其余在装载时断言或挂账）。
@@ -367,10 +424,6 @@ struct EmitterMat {
     /// `_BaseMapRotationEnabled` 开时的整圈数（0.25 = 90°）。
     uv_turns: f32,
     cull: f32,
-    /// 视口占比截断的上下限（渲染器记录的 min/maxParticleSize；米制
-    /// billboard 的全尺寸对视口全宽的占比，0.5 是运行时默认值）。
-    min_frac: f32,
-    max_frac: f32,
 }
 
 /// 一条发射器的仿真参数（手解；值类型复用律的）。
@@ -389,9 +442,11 @@ struct SimParams {
     start_size_z: Option<MinMaxCurve>,
     start_color: MinMaxGradient,
     start_rotation: MinMaxCurve,
-    /// 三轴旋转声明（X/Y 两轴 billboard 不画，但出生流照抽两次值——
-    /// 抽签次数是式的组成部分）。
+    /// 三轴旋转声明（rotation3D）：X/Y 两轴的出生角（弧度），与 Z 一起交给
+    /// 源绘制件（非 View 的渲染空间里三轴都可见）。None = 未声明三轴。
     rotation3d: bool,
+    start_rotation_x: Option<MinMaxCurve>,
+    start_rotation_y: Option<MinMaxCurve>,
     start_speed: MinMaxCurve,
     start_gravity: MinMaxCurve,
     color_over_lifetime: Option<MinMaxGradient>,
@@ -425,10 +480,137 @@ struct VolDef {
     speed_modifier: MinMaxCurve,
 }
 
+/// The texture-sheet module, sampled as the source's UV module samples it
+/// when it builds the particle geometry: the table position of each particle
+/// from its seed (and, for a frame curve, its current age percent), expanded
+/// into the grid rectangle that every corner UV maps through.
 struct TexSheetDef {
-    tiles_x: u32,
-    tiles_y: u32,
-    frame_over_time: MinMaxCurve,
+    tiles: [u32; 2],
+    law: SheetLaw,
+}
+
+/// Which source kernel the frame value takes: constant or two-constant frames
+/// do not advance with age; a curve or two curves take the Lifetime
+/// curve-time kernel. What either kernel refuses refuses the emitter.
+enum SheetLaw {
+    Constant(moly_law::particle::texture_sheet::TextureSheet),
+    Curve(moly_law::particle::texture_sheet::CurveTimeSheet),
+}
+
+impl TexSheetDef {
+    /// The rectangle of one particle's table position (applied to each
+    /// authored corner UV).
+    fn rect(&self, seed: u32, age_percent: f32) -> moly_law::particle::texture_sheet::UvRect {
+        match &self.law {
+            SheetLaw::Constant(sheet) => sheet.rect(seed),
+            SheetLaw::Curve(sheet) => sheet.rect(seed, age_percent),
+        }
+    }
+
+    /// The kernel's name in the log lines.
+    fn kernel(&self) -> &'static str {
+        match self.law {
+            SheetLaw::Constant(_) => "constant frames",
+            SheetLaw::Curve(_) => "curve-time kernel",
+        }
+    }
+
+    /// The tile a rectangle shows, counted row by row from the top (for the
+    /// log lines only).
+    fn tile(&self, rect: moly_law::particle::texture_sheet::UvRect) -> i64 {
+        let [dx, dy] = rect.scale;
+        let column = (rect.offset[0] / dx).round() as i64;
+        let row = ((1.0 - dy - rect.offset[1]) / dy).round() as i64;
+        row * i64::from(self.tiles[0]) + column
+    }
+
+    /// The tiles a particle with `seed` shows over its life, as (age percent,
+    /// tile) at each change, sampled every 0.5 percent from 0 to 100.
+    fn path(&self, seed: u32) -> Vec<(f32, i64)> {
+        let mut path: Vec<(f32, i64)> = Vec::new();
+        for step in 0..=200u32 {
+            let age = step as f32 * 0.5;
+            let tile = self.tile(self.rect(seed, age));
+            if path.last().is_none_or(|(_, last)| *last != tile) {
+                path.push((age, tile));
+            }
+        }
+        path
+    }
+}
+
+/// A tile path as one log field: `age%->tile` at each change.
+fn format_tile_path(path: &[(f32, i64)]) -> String {
+    path.iter()
+        .map(|(age, tile)| format!("{age:.1}%->{tile}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The texture-sheet controls as the particle law types them. A field the
+/// export lacks is refused by name, not given a default.
+fn texture_sheet_params(
+    t: &Value,
+    modes: &mut ModeNote,
+) -> Result<moly_law::particle::schema::TextureSheetParams, String> {
+    let integer = |key: &str| -> Result<f64, String> {
+        t.get(key)
+            .and_then(Value::as_f64)
+            .filter(|n| n.is_finite() && n.fract() == 0.0)
+            .ok_or_else(|| format!("textureSheet.{key}: integer expected"))
+    };
+    let unsigned = |key: &str| -> Result<u32, String> {
+        let n = integer(key)?;
+        if (0.0..=u32::MAX as f64).contains(&n) {
+            Ok(n as u32)
+        } else {
+            Err(format!("textureSheet.{key}: unsigned integer expected"))
+        }
+    };
+    let signed = |key: &str| -> Result<i32, String> {
+        let n = integer(key)?;
+        if (i32::MIN as f64..=i32::MAX as f64).contains(&n) {
+            Ok(n as i32)
+        } else {
+            Err(format!("textureSheet.{key}: signed integer expected"))
+        }
+    };
+    let number = |key: &str| -> Result<f32, String> {
+        t.get(key)
+            .and_then(Value::as_f64)
+            .map(|n| n as f32)
+            .ok_or_else(|| format!("textureSheet.{key} not exported"))
+    };
+    let speed_range = match t.get("speedRange").and_then(Value::as_array) {
+        Some(a) if a.len() == 2 && a.iter().all(Value::is_number) => [
+            a[0].as_f64().unwrap_or(0.0) as f32,
+            a[1].as_f64().unwrap_or(0.0) as f32,
+        ],
+        _ => return Err("textureSheet.speedRange not exported".into()),
+    };
+    let frame = t
+        .get("frameOverTime")
+        .map(|v| modes.curve(v))
+        .ok_or("textureSheet.frameOverTime not exported")?;
+    let start = t
+        .get("startFrame")
+        .map(|v| modes.curve(v))
+        .ok_or("textureSheet.startFrame not exported")?;
+    Ok(moly_law::particle::schema::TextureSheetParams {
+        mode: unsigned("mode")?,
+        time_mode: unsigned("timeMode")?,
+        animation_type: unsigned("animationType")?,
+        tiles: [unsigned("tilesX")?, unsigned("tilesY")?],
+        row_mode: unsigned("rowMode")?,
+        row_index: signed("rowIndex")?,
+        cycles: number("cycles")?,
+        fps: number("fps")?,
+        speed_range,
+        uv_channel_mask: signed("uvChannelMask")?,
+        flip: [number("flipU")?, number("flipV")?],
+        frame,
+        start,
+    })
 }
 
 struct SubEmitterDef {
@@ -464,11 +646,17 @@ enum ShapeKind {
 use serde_json::Value;
 
 fn f_field(obj: &Value, key: &str, default: f32) -> f32 {
-    obj.get(key).and_then(Value::as_f64).map(|v| v as f32).unwrap_or(default)
+    obj.get(key)
+        .and_then(Value::as_f64)
+        .map(|v| v as f32)
+        .unwrap_or(default)
 }
 
 fn i_field(obj: &Value, key: &str, default: u32) -> u32 {
-    obj.get(key).and_then(Value::as_i64).map(|v| v as u32).unwrap_or(default)
+    obj.get(key)
+        .and_then(Value::as_i64)
+        .map(|v| v as u32)
+        .unwrap_or(default)
 }
 
 fn b_field(obj: &Value, key: &str, default: bool) -> bool {
@@ -525,76 +713,131 @@ fn quat_field(obj: &Value) -> Quat {
     }
 }
 
-/// 空曲线（twoCurves 模式缺某一侧键表时的兜底：乘子 1、无键）。
-fn empty_curve() -> Curve {
-    Curve { multiplier: 1.0, keys: Vec::new() }
-}
-
-/// 解一根键曲线。斜率缺省（null）按 0 处理——片表那一族实测如此；
-/// 加权键按位解析（求值走律的加权 Bezier 路），激活位的权重缺失即拒
-/// （缺会左右结果的键不当默认值）。
-fn parse_curve(obj: &Value) -> Curve {
-    Curve {
-        multiplier: f_field(obj, "multiplier", 1.0),
-        keys: obj
-            .get("keys")
-            .and_then(Value::as_array)
-            .map(|keys| {
-                keys.iter()
-                    .map(|k| {
-                        let weighted = i_field(k, "weightedMode", 0) as u8;
-                        let inert = f32::from_bits(0x3eaa_aaab);
-                        let in_weight = if weighted & 1 != 0 {
-                            k.get("inWeight")
-                                .and_then(Value::as_f64)
-                                .unwrap_or_else(|| {
-                                    panic!("加权键缺 inWeight（入权位激活）：{k}")
-                                }) as f32
-                        } else {
-                            inert
-                        };
-                        let out_weight = if weighted & 2 != 0 {
-                            k.get("outWeight")
-                                .and_then(Value::as_f64)
-                                .unwrap_or_else(|| {
-                                    panic!("加权键缺 outWeight（出权位激活）：{k}")
-                                }) as f32
-                        } else {
-                            inert
-                        };
-                        CurveKey {
-                            time: f_field(k, "time", 0.0),
-                            value: f_field(k, "value", 0.0),
-                            in_slope: f_field(k, "inSlope", 0.0),
-                            out_slope: f_field(k, "outSlope", 0.0),
-                            weighted_mode: weighted,
-                            in_weight,
-                            out_weight,
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
+/// One key lane, decoded as the particle law's curve reader decodes it.
+///
+/// - An infinite tangent is a step and keeps its sign (`"Infinity"`,
+///   `"-Infinity"`). A null or missing tangent is an older export that lost
+///   that sign: refused (re-extract), not read as zero. Reading it as zero
+///   turns a stepped lane into a smooth one.
+/// - Key time, value and weighted mode are required. The active weights are
+///   required; an inactive one is inert (1/3).
+/// - Keys out of time order are refused (the evaluator does not sort).
+/// - The wrap modes stay unknown when the export lacks them (an absent or null
+///   field); the engine curve evaluator refuses an unknown wrap on a lane it
+///   reads. A present wrap that is not a non-negative integer is refused.
+///
+/// `keys` is the key array itself: `keys` of a curve, `minKeys` / `maxKeys` of
+/// two curves, each with its own wrap fields.
+fn parse_curve(
+    keys: Option<&Value>,
+    pre: Option<&Value>,
+    post: Option<&Value>,
+) -> Result<Curve, String> {
+    let wrap = |field: Option<&Value>, name: &str| -> Result<Option<u32>, String> {
+        match field {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => v
+                .as_u64()
+                .and_then(|w| u32::try_from(w).ok())
+                .map(Some)
+                .ok_or_else(|| format!("curve {name} wrap is not a non-negative integer: {v}")),
+        }
+    };
+    let keys = keys
+        .and_then(Value::as_array)
+        .ok_or("curve key array missing")?;
+    let number = |k: &Value, name: &str| -> Result<f32, String> {
+        k.get(name)
+            .and_then(Value::as_f64)
+            .map(|v| v as f32)
+            .ok_or_else(|| format!("curve key {name} missing: {k}"))
+    };
+    let slope = |k: &Value, name: &str| -> Result<f32, String> {
+        match k.get(name) {
+            Some(Value::String(s)) if s == "Infinity" => Ok(f32::INFINITY),
+            Some(Value::String(s)) if s == "-Infinity" => Ok(f32::NEG_INFINITY),
+            Some(v) if v.is_number() => Ok(v.as_f64().unwrap_or(0.0) as f32),
+            _ => Err(format!(
+                "curve key {name} is missing or null (an export that lost the step sign; re-extract): {k}"
+            )),
+        }
+    };
+    let mut out = Vec::with_capacity(keys.len());
+    for k in keys {
+        let weighted = k
+            .get("weightedMode")
+            .and_then(Value::as_u64)
+            .and_then(|w| u8::try_from(w).ok())
+            .ok_or_else(|| format!("curve key weightedMode missing: {k}"))?;
+        let inert = f32::from_bits(0x3eaa_aaab);
+        let in_weight = if weighted & 1 != 0 {
+            number(k, "inWeight")?
+        } else {
+            inert
+        };
+        let out_weight = if weighted & 2 != 0 {
+            number(k, "outWeight")?
+        } else {
+            inert
+        };
+        out.push(CurveKey {
+            time: number(k, "time")?,
+            value: number(k, "value")?,
+            in_slope: slope(k, "inSlope")?,
+            out_slope: slope(k, "outSlope")?,
+            weighted_mode: weighted,
+            in_weight,
+            out_weight,
+        });
     }
+    if out.windows(2).any(|w| w[0].time > w[1].time) {
+        return Err("curve keys not sorted by time".into());
+    }
+    Ok(Curve {
+        // The min-max value carries the multiplier; no evaluator reads this one.
+        multiplier: 1.0,
+        keys: out,
+        pre_wrap: wrap(pre, "pre")?,
+        post_wrap: wrap(post, "post")?,
+    })
 }
 
 /// 模式标签不认识就响亮拒绝：值域是数据决定的，猜一个默认会静默错整族。
-fn parse_min_max_curve(obj: &Value) -> MinMaxCurve {
-    let mode = s_field(obj, "mode").unwrap_or_else(|| panic!("粒子值缺 mode：{obj}"));
-    match mode.as_str() {
+/// The four tags are the engine's whole curve-mode set; any other tag is
+/// refused by name (the emitter holding it is not drawn), not a panic.
+fn parse_min_max_curve(obj: &Value) -> Result<MinMaxCurve, String> {
+    let mode =
+        s_field(obj, "mode").ok_or_else(|| format!("particle value without a mode: {obj}"))?;
+    Ok(match mode.as_str() {
         "constant" => MinMaxCurve::Constant(f_field(obj, "value", 0.0)),
         "twoConstants" => MinMaxCurve::TwoConstants {
             min: f_field(obj, "min", 0.0),
             max: f_field(obj, "max", 0.0),
         },
-        "curve" => MinMaxCurve::Curve { multiplier: f_field(obj, "multiplier", 1.0), max: parse_curve(obj) },
+        "curve" => MinMaxCurve::Curve {
+            multiplier: f_field(obj, "multiplier", 1.0),
+            max: parse_curve(
+                obj.get("keys"),
+                obj.get("preInfinity"),
+                obj.get("postInfinity"),
+            )?,
+        },
+        // Each side is its own key array with its own wrap fields.
         "twoCurves" => MinMaxCurve::TwoCurves {
             multiplier: f_field(obj, "multiplier", 1.0),
-            min: obj.get("minKeys").map(parse_curve).unwrap_or_else(empty_curve),
-            max: obj.get("maxKeys").map(parse_curve).unwrap_or_else(empty_curve),
+            min: parse_curve(
+                obj.get("minKeys"),
+                obj.get("minPreInfinity"),
+                obj.get("minPostInfinity"),
+            )?,
+            max: parse_curve(
+                obj.get("maxKeys"),
+                obj.get("maxPreInfinity"),
+                obj.get("maxPostInfinity"),
+            )?,
         },
-        other => panic!("未建模的粒子值模式：{other}"),
-    }
+        other => return Err(format!("particle value mode {other} is not modelled")),
+    })
 }
 
 fn parse_gradient(obj: &Value) -> Gradient {
@@ -623,23 +866,31 @@ fn parse_gradient(obj: &Value) -> Gradient {
                     .collect()
             })
             .unwrap_or_default(),
+        ..Default::default()
     }
 }
 
-fn parse_min_max_gradient(obj: &Value) -> MinMaxGradient {
-    let mode = s_field(obj, "mode").unwrap_or_else(|| panic!("粒子色缺 mode：{obj}"));
-    match mode.as_str() {
+fn parse_min_max_gradient(obj: &Value) -> Result<MinMaxGradient, String> {
+    let mode =
+        s_field(obj, "mode").ok_or_else(|| format!("particle colour without a mode: {obj}"))?;
+    Ok(match mode.as_str() {
         "color" => MinMaxGradient::Color(vec4_field(obj, "color", [1.0, 1.0, 1.0, 1.0])),
-        "gradient" => MinMaxGradient::Gradient(
-            obj.get("gradient").map(parse_gradient).unwrap_or_default(),
-        ),
+        "gradient" => {
+            MinMaxGradient::Gradient(obj.get("gradient").map(parse_gradient).unwrap_or_default())
+        }
         "twoColors" => MinMaxGradient::TwoColors {
             min: vec4_field(obj, "min", [1.0, 1.0, 1.0, 1.0]),
             max: vec4_field(obj, "max", [1.0, 1.0, 1.0, 1.0]),
         },
         "twoGradients" => MinMaxGradient::TwoGradients {
-            min: obj.get("minGradient").map(parse_gradient).unwrap_or_default(),
-            max: obj.get("maxGradient").map(parse_gradient).unwrap_or_default(),
+            min: obj
+                .get("minGradient")
+                .map(parse_gradient)
+                .unwrap_or_default(),
+            max: obj
+                .get("maxGradient")
+                .map(parse_gradient)
+                .unwrap_or_default(),
         },
         "randomColor" => {
             // 随机色把随机因子当梯度时刻求值（maxGradient 缺席时按 gradient）。
@@ -650,8 +901,8 @@ fn parse_min_max_gradient(obj: &Value) -> MinMaxGradient {
                 .unwrap_or_default();
             MinMaxGradient::RandomColor(g)
         }
-        other => panic!("未建模的粒子色模式：{other}"),
-    }
+        other => return Err(format!("particle colour mode {other} is not modelled")),
+    })
 }
 
 // ===== 档案装配（两份 JSON → 本模块的类型 + 贴图句柄） =====
@@ -673,8 +924,8 @@ pub(crate) fn parse(
     let Some(doc) = docs.get(&handle.0) else {
         return;
     };
-    let value: Value = serde_json::from_str(&doc.0)
-        .unwrap_or_else(|err| panic!("表情档案不是合法 JSON：{err}"));
+    let value: Value =
+        serde_json::from_str(&doc.0).unwrap_or_else(|err| panic!("表情档案不是合法 JSON：{err}"));
 
     let mut counts = LoadCounts::default();
     let mut items = Vec::new();
@@ -683,8 +934,21 @@ pub(crate) fn parse(
         .get("items")
         .and_then(Value::as_object)
         .unwrap_or_else(|| panic!("表情档案缺 items 对象"));
+    // Every item's texture table by item name: a material that lives in a
+    // bundle the item declares as a dependency names that item's file.
+    let shared: HashMap<&str, &Value> = entries
+        .iter()
+        .filter_map(|(name, entry)| entry.get("textures").map(|t| (name.as_str(), t)))
+        .collect();
     for (name, entry) in entries {
-        items.push(build_item(name, entry, &server, &mut counts, &mut unsupported_text));
+        items.push(build_item(
+            name,
+            entry,
+            &server,
+            &shared,
+            &mut counts,
+            &mut unsupported_text,
+        ));
     }
     // 摘要交叉核对：条目数与 unsupported 总数两处独立数，不等就说明解析漏了。
     let summary_items = value.pointer("/summary/items").and_then(Value::as_u64);
@@ -728,9 +992,13 @@ fn build_item(
     name: &str,
     entry: &Value,
     server: &AssetServer,
+    shared: &HashMap<&str, &Value>,
     counts: &mut LoadCounts,
     unsupported_text: &mut Vec<UnsupportedRec>,
 ) -> Item {
+    // Item-level refusal (first reason wins); the item is kept in the index
+    // so show requests name it rather than report it missing.
+    let mut item_refusal: Option<String> = None;
     // unsupported 按原文具名记账：条目名 + 键 + 理由（不猜语义、不改写，
     // 原始记录在源档案里按条目名可复查），供装载报告归并。
     for u in entry
@@ -781,11 +1049,67 @@ fn build_item(
     {
         let tname = s_field(t, "name").unwrap_or_default();
         let file = s_field(t, "file").unwrap_or_default();
-        let handle = server.load::<Image>(AssetPath::from(format!("{EMOTICON_DIR}/{file}")));
+        let handle = moly_assets::residency::load_image(
+            &server,
+            AssetPath::from(format!("{EMOTICON_DIR}/{file}")),
+        );
         tex_by_name.insert(tname.clone(), textures.len());
         tex_by_file.insert(file, textures.len());
         textures.push(TexEntry {
             name: tname,
+            width: i_field(t, "width", 1) as f32,
+            height: i_field(t, "height", 1) as f32,
+            handle,
+        });
+    }
+    // A particle material may live in a bundle this item declares as a
+    // dependency (the `_single` variants draw one emitter with the `_loop`
+    // bundle's material); its texture is then that item's file, on disk under
+    // that item's name. Only declared dependencies are searched, so a file
+    // outside them stays a missing base map.
+    let dependency_items: Vec<&str> = entry
+        .get("dependencies")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter_map(|bundle| bundle.rsplit('/').next())
+        .collect();
+    for file in entry
+        .get("particles")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|r| r.pointer("/renderer/material/textures"))
+        .filter_map(Value::as_object)
+        .flat_map(|t| t.values())
+        .filter_map(Value::as_str)
+    {
+        if tex_by_file.contains_key(file) {
+            continue;
+        }
+        let foreign = dependency_items.iter().find_map(|dep| {
+            shared
+                .get(dep)
+                .and_then(|t| t.as_array())
+                .and_then(|list| {
+                    list.iter()
+                        .find(|t| s_field(t, "file").as_deref() == Some(file))
+                })
+                .map(|t| (*dep, t))
+        });
+        let Some((owner, t)) = foreign else {
+            continue;
+        };
+        let handle = moly_assets::residency::load_image(
+            server,
+            AssetPath::from(format!("{EMOTICON_DIR}/{file}")),
+        );
+        info!("[emoticon] {name}: material texture {file} resolved in dependency item {owner}");
+        counts.cross_item_textures += 1;
+        tex_by_file.insert(file.to_owned(), textures.len());
+        textures.push(TexEntry {
+            name: s_field(t, "name").unwrap_or_default(),
             width: i_field(t, "width", 1) as f32,
             height: i_field(t, "height", 1) as f32,
             handle,
@@ -799,13 +1123,14 @@ fn build_item(
         .unwrap_or_else(|| panic!("{name} 缺 nodes"));
     let mut path_index: HashMap<String, usize> = HashMap::new();
     let mut nodes: Vec<PNode> = Vec::new();
+    // Nodes whose sprite renderer flips (flipX/flipY): a flip is a negative
+    // scale that reverses the winding and is not modelled; the sprite slot on
+    // such a node is refused by name (the data carries none).
+    let mut flipped: Vec<bool> = Vec::new();
     for (i, n) in node_values.iter().enumerate() {
         let path = s_field(n, "path").unwrap_or_default();
         path_index.insert(path.clone(), i);
-        // flip 用负缩放实现，会翻绕序；语料 47 个 sprite 槽全 False，出现即拒。
-        if b_field(n, "flipX", false) || b_field(n, "flipY", false) {
-            panic!("{name}/{path}：flipX/flipY 未建模（语料全 False）");
-        }
+        flipped.push(b_field(n, "flipX", false) || b_field(n, "flipY", false));
         let position = vec3_field(n, "position", [0.0, 0.0, 0.0]);
         let rotation = quat_field(n);
         // 粒子族的本地系做过 x 镜像（与骨架同一套反射右手系；sprite 族留在
@@ -860,8 +1185,16 @@ fn build_item(
         sprites.push(SpriteDef {
             rect: vec4_field(spec, "rect", [0.0, 0.0, 1.0, 1.0]),
             pivot: [
-                spec.get("pivot").and_then(Value::as_array).and_then(|a| a.first()).and_then(Value::as_f64).unwrap_or(0.5) as f32,
-                spec.get("pivot").and_then(Value::as_array).and_then(|a| a.get(1)).and_then(Value::as_f64).unwrap_or(0.5) as f32,
+                spec.get("pivot")
+                    .and_then(Value::as_array)
+                    .and_then(|a| a.first())
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.5) as f32,
+                spec.get("pivot")
+                    .and_then(Value::as_array)
+                    .and_then(|a| a.get(1))
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.5) as f32,
             ],
             ppu: f_field(spec, "pixelsToUnits", 100.0),
             texture,
@@ -882,29 +1215,40 @@ fn build_item(
                 counts.gate_inactive_sprite += 1;
                 continue;
             }
+            if flipped[i] {
+                counts.refused_sprite_slots += 1;
+                error!("[emoticon] {name}: sprite slot on node {i} refused: flipX/flipY is not modelled");
+                continue;
+            }
+            // 绕序的单双面由节点材质的 `_Cull` 定（0=双面、2=正面朝观察者）；
+            // 无材质记录的节点按演示件口径退化成双面。其它值响亮拒绝——
+            // 绕序装反的画面是「整片消失」，比报错难查。
+            let double_side = match n.get("material") {
+                None => Some(true),
+                Some(m) => {
+                    let floats = m.get("floats").cloned().unwrap_or(Value::Null);
+                    let c = f_field(&floats, "_Cull", 2.0);
+                    if c == 0.0 {
+                        Some(true)
+                    } else if c == 2.0 {
+                        Some(false)
+                    } else {
+                        counts.refused_sprite_slots += 1;
+                        error!("[emoticon] {name}: sprite slot on node {i} refused: sprite material _Cull {c} is not modelled");
+                        None
+                    }
+                }
+            };
+            let Some(double_side) = double_side else {
+                continue;
+            };
             nodes[i].sprite = Some(
                 sprite_index
                     .get(&sname)
                     .copied()
                     .unwrap_or_else(|| panic!("{name} 的节点 {i} 引用了不存在的 sprite {sname}")),
             );
-            // 绕序的单双面由节点材质的 `_Cull` 定（0=双面、2=正面朝观察者）；
-            // 无材质记录的节点按演示件口径退化成双面。其它值响亮拒绝——
-            // 绕序装反的画面是「整片消失」，比报错难查。
-            nodes[i].sprite_double_side = match n.get("material") {
-                None => true,
-                Some(m) => {
-                    let floats = m.get("floats").cloned().unwrap_or(Value::Null);
-                    let c = f_field(&floats, "_Cull", 2.0);
-                    if c == 0.0 {
-                        true
-                    } else if c == 2.0 {
-                        false
-                    } else {
-                        panic!("{name} 的槽节点 {i}：sprite 材质的 _Cull {c} 未建模")
-                    }
-                }
-            };
+            nodes[i].sprite_double_side = double_side;
             if let Some(m) = n.get("material") {
                 let floats = m.get("floats").cloned().unwrap_or(Value::Null);
                 // sprite 族的着色器把背面剔除在 pass 里写死成关（材质里的
@@ -933,7 +1277,12 @@ fn build_item(
     let mut clips = None;
     if let Some(clips_obj) = entry.get("clips").and_then(Value::as_object) {
         if !clips_obj.is_empty() {
-            clips = Some(build_clips(name, clips_obj));
+            match build_clips(name, clips_obj) {
+                Ok(built) => clips = Some(built),
+                Err(reason) => {
+                    item_refusal.get_or_insert(reason);
+                }
+            }
         }
     }
 
@@ -957,50 +1306,83 @@ fn build_item(
         if system.is_null() {
             panic!("{name}/{node_path}：发射器记录缺 system");
         }
-        let (params, material) = build_emitter(name, &system, &renderer, &tex_by_file, counts);
-        // 门分类（次序与演示件一致：渲染器开关 → 绘制模式 → 节点链 → 贴图槽）。
+        let (params, material, refusal, mode_refusal) =
+            build_emitter(&system, &renderer, &tex_by_file, counts);
+        // 门分类（次序：渲染器开关 → 未建模模式 → 模块拒绝 → 绘制输入 → 节点链 → 贴图槽）。
+        let mut draw = None;
         let gate = if !b_field(&renderer, "enabled", true) {
             counts.gate_disabled += 1;
             Gate::DisabledRenderer
+        } else if let Some(reason) = mode_refusal {
+            counts.gate_mode_refused += 1;
+            error!("[emoticon] {name}/{node_path}: emitter refused, a mode it holds is not modelled: {reason}");
+            Gate::ModeRefused
+        } else if let Some(reason) = refusal {
+            counts.gate_module_refused += 1;
+            error!("[emoticon] {name}/{node_path}: emitter refused, a module the source runs cannot be evaluated: {reason}");
+            Gate::ModuleRefused
         } else {
-            let mode = s_field(&renderer, "renderMode").unwrap_or_else(|| "Billboard".into());
-            if mode != "Billboard" {
-                counts.gate_unsupported += 1;
-                info!("[emoticon] {name}/{node_path}：发射器绘制模式 {mode} 未建模（不画）");
-                if mode == "Stretch" {
-                    counts.acc_stretch += 1;
+            match renderer_draw(&renderer, &system, &params, &nodes, node) {
+                Err(reason) => {
+                    counts.gate_unsupported += 1;
+                    error!("[emoticon] {name}/{node_path}: emitter refused, renderer input outside the source billboard writer: {reason}");
+                    Gate::UnsupportedRenderer
                 }
-                Gate::UnsupportedRenderer
-            } else if !chain_active(&nodes, node) {
-                counts.gate_inactive += 1;
-                Gate::InactiveNode
-            } else if material.base_map.is_none() {
-                counts.gate_missing_texture += 1;
-                Gate::MissingTexture
-            } else {
-                // 渲染器旁挂账项（数据在、本管线的 billboard 不消费）。
-                if f_field(&renderer, "alignment", 0.0) != 0.0 {
-                    counts.acc_alignment += 1;
+                Ok(_) if !chain_active(&nodes, node) => {
+                    counts.gate_inactive += 1;
+                    Gate::InactiveNode
                 }
-                if vec3_field(&renderer, "pivot", [0.0, 0.0, 0.0]) != [0.0, 0.0, 0.0] {
-                    counts.acc_renderer_pivot += 1;
+                Ok(_) if material.base_map.is_none() => {
+                    counts.gate_missing_texture += 1;
+                    Gate::MissingTexture
                 }
-                if i_field(&renderer, "sortingOrder", 0) != 0 {
-                    counts.acc_sorting_order += 1;
+                Ok(built) => {
+                    if matches!(built.mode, source_billboard::Mode::Stretch(_)) {
+                        counts.drawn_stretch += 1;
+                    } else if !matches!(built.alignment, Alignment::View) {
+                        counts.drawn_alignment += 1;
+                    }
+                    if built.pivot != Vec3::ZERO {
+                        counts.drawn_renderer_pivot += 1;
+                    }
+                    if params.rotation3d {
+                        counts.drawn_rotation3d += 1;
+                    }
+                    if i_field(&renderer, "sortingOrder", 0) != 0 {
+                        counts.acc_sorting_order += 1;
+                    }
+                    draw = Some(built);
+                    Gate::Simulated
                 }
-                Gate::Simulated
             }
         };
+        if let (Some(sheet), true) = (params.texture_sheet.as_ref(), draw.is_some()) {
+            // The frame path the law gives a particle over its life (seed 0:
+            // a curve's kernel draws nothing; two curves and random constant
+            // frames vary by seed).
+            info!(
+                "[emoticon] {name}/{node_path}: texture sheet {}x{} through the {}; tile by age percent (seed 0): {}",
+                sheet.tiles[0],
+                sheet.tiles[1],
+                sheet.kernel(),
+                format_tile_path(&sheet.path(0))
+            );
+        }
         emitter_by_node.insert(node_path, emitters.len());
         emitters.push(EmitterDef {
             node,
             gate,
             params: Box::new(params),
             material,
+            draw,
         });
     }
     // 第二遍：子发射目标回填（死亡触发；目标下标在同一包的记录表里）。
+    // A trigger other than death, or declared inheritance (parent-to-child
+    // birth synthesis), is not modelled: the parent emitter is refused by
+    // name instead of drawn without the children the source spawns.
     for (i, r) in records.iter().enumerate() {
+        let mut sub_refusal: Option<String> = None;
         for sub in r
             .pointer("/system/subEmitters")
             .and_then(Value::as_array)
@@ -1008,13 +1390,17 @@ fn build_item(
             .flatten()
         {
             if s_field(sub, "type").as_deref() != Some("death") {
-                panic!("{name}：未建模的子发射触发型 {sub}");
+                sub_refusal.get_or_insert(format!(
+                    "sub-emitter trigger {:?} is not modelled",
+                    s_field(sub, "type")
+                ));
+                continue;
             }
-            // 继承（出生参数从父粒子合成）的规则没有可读来源，声明了即拒——
-            // 拿错尺寸错颜色的粒子画出来什么都看不出来。
             if let Some(inh) = sub.get("inherit").and_then(Value::as_object) {
                 if inh.values().any(|v| v.as_bool() == Some(true)) {
-                    panic!("{name}：子发射记录声明了继承（未建模）：{sub}");
+                    sub_refusal
+                        .get_or_insert(format!("sub-emitter inheritance {inh:?} is not modelled"));
+                    continue;
                 }
             }
             let target = sub
@@ -1026,6 +1412,15 @@ fn build_item(
                 target,
                 probability: f_field(sub, "emitProbability", 1.0),
             });
+        }
+        if let Some(reason) = sub_refusal {
+            if !matches!(emitters[i].gate, Gate::DisabledRenderer | Gate::ModeRefused) {
+                counts.gate_mode_refused += 1;
+                error!("[emoticon] {name}/{}: emitter refused, a mode it holds is not modelled: {reason}",
+                    s_field(r, "node").unwrap_or_default());
+                emitters[i].gate = Gate::ModeRefused;
+                emitters[i].draw = None;
+            }
         }
     }
     // 子发射目标标记（要等全部记录建完）。目标已被前几道门摘掉的保持原门。
@@ -1056,8 +1451,15 @@ fn build_item(
         Some("Hips") => AnchorName::Hips,
         None if !mirror => AnchorName::HeadRoot,
         None => AnchorName::Hips,
-        Some(other) => panic!("{name}：未建模的挂点 {other}"),
+        Some(other) => {
+            item_refusal.get_or_insert(format!("anchor {other} is not modelled"));
+            AnchorName::HeadRoot
+        }
     };
+    if let Some(reason) = &item_refusal {
+        counts.refused_items += 1;
+        error!("[emoticon] {name}: item refused, a mode it holds is not modelled: {reason}");
+    }
     Item {
         name: name.to_owned(),
         family,
@@ -1069,6 +1471,7 @@ fn build_item(
         textures,
         anchor,
         keep_position: b_field(&view, "keepPosition", false),
+        refusal: item_refusal,
     }
 }
 
@@ -1085,46 +1488,51 @@ fn chain_active(nodes: &[PNode], from: usize) -> bool {
 }
 
 /// 三段剪辑装配。通道按 animationPath 匹配节点；通道属性出现未建模的
-/// 即响亮拒绝。
-fn build_clips(name: &str, clips: &serde_json::Map<String, Value>) -> Clips {
-    let build = |key: &str| -> Option<Clip> {
-        clips.get(key).map(|c| Clip {
+/// 即响亮拒绝（整个条目不出件，理由具名）。
+fn build_clips(name: &str, clips: &serde_json::Map<String, Value>) -> Result<Clips, String> {
+    let build = |key: &str| -> Result<Option<Clip>, String> {
+        let Some(c) = clips.get(key) else {
+            return Ok(None);
+        };
+        let mut channels = Vec::new();
+        for ch in c
+            .get("channels")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let prop = match s_field(ch, "property").as_deref() {
+                Some("position") => ChannelProp::Position,
+                Some("scale") => ChannelProp::Scale,
+                Some("eulerAngles") => ChannelProp::EulerAngles,
+                Some(other) => {
+                    return Err(format!(
+                        "clip {key} channel property {other} is not modelled"
+                    ))
+                }
+                None => panic!("{name}：通道缺 property"),
+            };
+            channels.push(Channel {
+                anim_path: s_field(ch, "path").unwrap_or_default(),
+                prop,
+                values: ch
+                    .get("values")
+                    .and_then(Value::as_array)
+                    .map(|vs| vs.iter().map(frame_vec3).collect())
+                    .unwrap_or_default(),
+            });
+        }
+        Ok(Some(Clip {
             rate: f_field(c, "rate", 60.0),
             duration: f_field(c, "duration", 0.0),
-            channels: c
-                .get("channels")
-                .and_then(Value::as_array)
-                .map(|chs| {
-                    chs.iter()
-                        .map(|ch| {
-                            let prop = match s_field(ch, "property").as_deref() {
-                                Some("position") => ChannelProp::Position,
-                                Some("scale") => ChannelProp::Scale,
-                                Some("eulerAngles") => ChannelProp::EulerAngles,
-                                Some(other) => panic!("{name}：未建模的通道属性 {other}"),
-                                None => panic!("{name}：通道缺 property"),
-                            };
-                            Channel {
-                                anim_path: s_field(ch, "path").unwrap_or_default(),
-                                prop,
-                                values: ch
-                                    .get("values")
-                                    .and_then(Value::as_array)
-                                    .map(|vs| vs.iter().map(frame_vec3).collect())
-                                    .unwrap_or_default(),
-                            }
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-        })
+            channels,
+        }))
     };
-    let end = build("end");
-    Clips {
-        start: build("start"),
-        loop_: build("loop"),
-        end,
-    }
+    Ok(Clips {
+        start: build("start")?,
+        loop_: build("loop")?,
+        end: build("end")?,
+    })
 }
 
 /// 通道帧值：3 元数组原样（缺项按 0）。
@@ -1139,25 +1547,51 @@ fn frame_vec3(v: &Value) -> [f32; 3] {
     }
 }
 
-/// 一条发射器的仿真参数与材质槽。
+/// The first unmodelled-mode refusal of one emitter record. Parsing goes on
+/// with an inert placeholder so the record is still classified; the emitter
+/// is then refused by name and never drawn.
+#[derive(Default)]
+struct ModeNote(Option<String>);
+
+impl ModeNote {
+    fn refuse(&mut self, reason: String) {
+        self.0.get_or_insert(reason);
+    }
+    fn curve(&mut self, obj: &Value) -> MinMaxCurve {
+        parse_min_max_curve(obj).unwrap_or_else(|reason| {
+            self.refuse(reason);
+            MinMaxCurve::Constant(0.0)
+        })
+    }
+    fn gradient(&mut self, obj: &Value) -> MinMaxGradient {
+        parse_min_max_gradient(obj).unwrap_or_else(|reason| {
+            self.refuse(reason);
+            MinMaxGradient::Color([1.0, 1.0, 1.0, 1.0])
+        })
+    }
+}
+
+/// 一条发射器的仿真参数与材质槽，外加两类拒绝理由：模块拒绝（源运行、
+/// 此处算不了的模块）与未建模模式（数据里没有、此处不建模的取值）。
 fn build_emitter(
-    name: &str,
     system: &Value,
     renderer: &Value,
     tex_by_file: &HashMap<String, usize>,
     counts: &mut LoadCounts,
-) -> (SimParams, EmitterMat) {
+) -> (SimParams, EmitterMat, Option<String>, Option<String>) {
+    // The first module refusal, if any: it refuses the whole emitter, since
+    // dropping the module would draw a silently wrong value.
+    let mut refusal: Option<String> = None;
+    let mut modes = ModeNote::default();
     let start = system.get("start").cloned().unwrap_or(Value::Null);
     let size3d = b_field(&start, "size3D", false);
+    let rotation3d = b_field(&start, "rotation3D", false);
     // ---- 挂账项（模块在位而未建模/未消费）----
     if system.get("noise").is_some() {
         counts.acc_noise += 1;
     }
     if system.get("customData").is_some() {
         counts.acc_custom_data += 1;
-    }
-    if b_field(&start, "rotation3D", false) {
-        counts.acc_rotation3d += 1;
     }
     // ---- 形状 ----
     let shape_obj = system.get("shape").cloned().unwrap_or(Value::Null);
@@ -1168,7 +1602,10 @@ fn build_emitter(
         Some("Cone") => ShapeKind::Cone,
         Some("SingleSidedEdge") => ShapeKind::SingleSidedEdge,
         Some("BoxEdge") => ShapeKind::BoxEdge,
-        Some(other) => panic!("{name}：未建模的发射形状 {other}"),
+        Some(other) => {
+            modes.refuse(format!("emission shape {other} is not modelled"));
+            ShapeKind::None
+        }
     };
     let shape = ShapeDef {
         kind,
@@ -1183,50 +1620,56 @@ fn build_emitter(
     // ---- 发射 ----
     let emission = system.get("emission");
     let rate_over_time = emission
-        .and_then(|e| e.get("rateOverTime").map(parse_min_max_curve))
+        .and_then(|e| e.get("rateOverTime"))
+        .map(|v| modes.curve(v))
         .unwrap_or(MinMaxCurve::Constant(0.0));
-    let bursts = emission
+    let mut bursts = Vec::new();
+    for b in emission
         .and_then(|e| e.get("bursts"))
         .and_then(Value::as_array)
-        .map(|bs| {
-            bs.iter()
-                .map(|b| BurstDef {
-                    time: f_field(b, "time", 0.0),
-                    count: b
-                        .get("count")
-                        .map(parse_min_max_curve)
-                        .unwrap_or(MinMaxCurve::Constant(0.0)),
-                    cycle_count: i_field(b, "cycleCount", 1),
-                    repeat_interval: f_field(b, "repeatInterval", 0.01),
-                    probability: f_field(b, "probability", 1.0),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+        .into_iter()
+        .flatten()
+    {
+        bursts.push(BurstDef {
+            time: f_field(b, "time", 0.0),
+            count: b
+                .get("count")
+                .map(|v| modes.curve(v))
+                .unwrap_or(MinMaxCurve::Constant(0.0)),
+            cycle_count: i_field(b, "cycleCount", 1),
+            repeat_interval: f_field(b, "repeatInterval", 0.01),
+            probability: f_field(b, "probability", 1.0),
+        });
+    }
     // ---- 生命期模块 ----
     let sol = system.get("sizeOverLifetime");
-    let size_over_lifetime = sol.and_then(|s| s.get("curve").map(parse_min_max_curve));
+    let size_over_lifetime = sol.and_then(|s| s.get("curve")).map(|v| modes.curve(v));
     let size_over_lifetime_y = sol
         .filter(|s| b_field(s, "separateAxes", false))
-        .and_then(|s| s.get("y").map(parse_min_max_curve));
-    let vol = system.get("velocityOverLifetime").map(|v| VolDef {
-        x: v.get("x").map(parse_min_max_curve).unwrap_or(MinMaxCurve::Constant(0.0)),
-        y: v.get("y").map(parse_min_max_curve).unwrap_or(MinMaxCurve::Constant(0.0)),
-        z: v.get("z").map(parse_min_max_curve).unwrap_or(MinMaxCurve::Constant(0.0)),
-        speed_modifier: v
-            .get("speedModifier")
-            .map(parse_min_max_curve)
-            .unwrap_or(MinMaxCurve::Constant(1.0)),
+        .and_then(|s| s.get("y"))
+        .map(|v| modes.curve(v));
+    let vol = system.get("velocityOverLifetime").map(|v| {
+        let mut axis = |key: &str, default: f32| {
+            v.get(key)
+                .map(|x| modes.curve(x))
+                .unwrap_or(MinMaxCurve::Constant(default))
+        };
+        VolDef {
+            x: axis("x", 0.0),
+            y: axis("y", 0.0),
+            z: axis("z", 0.0),
+            speed_modifier: axis("speedModifier", 1.0),
+        }
     });
     // 限速：构造拒绝（separateAxis / 通用曲线幅值 / 非常数或非零拖拽——
-    // 非零拖拽还叠加「尺寸数组取出生还是当前」的未解读选择）时模块整块
-    // 摘除并计数，发射器照跑（不钳速）。
+    // 非零拖拽还叠加「尺寸数组取出生还是当前」的未解读选择）时整个发射器
+    // 被拒（不画一个不钳速的发射器）。
     let limit_velocity = system.get("limitVelocity").and_then(|l| {
-        let magnitude = l.get("magnitude").map(parse_min_max_curve)?;
+        let magnitude = modes.curve(l.get("magnitude")?);
         let drag = l
             .get("drag")
             .filter(|d| !d.is_null())
-            .map(parse_min_max_curve);
+            .map(|d| modes.curve(d));
         match LimitVelocity::from_parts(
             b_field(l, "separateAxis", false),
             &magnitude,
@@ -1238,24 +1681,93 @@ fn build_emitter(
             Ok(law) => Some(law),
             Err(reason) => {
                 counts.acc_lim_refused += 1;
-                info!("[emoticon] {name}：limitVelocity 模块拒绝（不钳速）：{reason}");
+                refusal.get_or_insert(format!("limitVelocity: {reason}"));
                 None
             }
         }
     });
-    let texture_sheet = system.get("textureSheet").map(|t| TexSheetDef {
-        tiles_x: i_field(t, "tilesX", 1),
-        tiles_y: i_field(t, "tilesY", 1),
-        frame_over_time: t
-            .get("frameOverTime")
-            .map(parse_min_max_curve)
-            .unwrap_or(MinMaxCurve::Constant(0.0)),
+    // The texture sheet through the source's kernels (constant frames or the
+    // curve-time kernel); what the law refuses refuses the emitter.
+    let texture_sheet = system.get("textureSheet").and_then(|t| {
+        let built = texture_sheet_params(t, &mut modes).and_then(|p| {
+            let law = match p.frame {
+                MinMaxCurve::Curve { .. } | MinMaxCurve::TwoCurves { .. } => {
+                    moly_law::particle::texture_sheet::CurveTimeSheet::from_params(&p)
+                        .map(SheetLaw::Curve)
+                }
+                _ => moly_law::particle::texture_sheet::TextureSheet::from_params(&p)
+                    .map(SheetLaw::Constant),
+            }?;
+            Ok(TexSheetDef {
+                tiles: p.tiles,
+                law,
+            })
+        });
+        match built {
+            Ok(sheet) => Some(sheet),
+            Err(reason) => {
+                counts.acc_sheet_refused += 1;
+                refusal.get_or_insert(format!("textureSheet: {reason}"));
+                None
+            }
+        }
+    });
+    // 自旋：构造拒绝（separateAxes 开而 x/y 键缺 = 提取面缺键，或曲线道
+    // 在引擎曲线分派之外，如缺导出的 wrap 模式、ping-pong wrap）时整个发射器被拒，
+    // 不把自旋冻结在出生角照画。
+    let rotation_over_lifetime = system.get("rotationOverLifetime").and_then(|r| {
+        let curve = modes.curve(r.get("curve")?);
+        let x = r.get("x").map(|v| modes.curve(v));
+        let y = r.get("y").map(|v| modes.curve(v));
+        match RotationOverLifetime::from_parts(
+            b_field(r, "separateAxes", false),
+            x.as_ref(),
+            y.as_ref(),
+            &curve,
+        ) {
+            Ok(law) => Some(law),
+            Err(reason) => {
+                counts.acc_rol_refused += 1;
+                refusal.get_or_insert(reason);
+                None
+            }
+        }
     });
 
-    // 片表真的分格时才进采样链（1×1 的片表声明不进，与演示件同判）。
+    // 片表真的分格时，下面的 ST 折算前提才需要成立（1×1 的片表把每个
+    // 角 UV 原样映回自身）。
     let sheet_tiled = texture_sheet
         .as_ref()
-        .is_some_and(|t| t.tiles_x > 1 || t.tiles_y > 1);
+        .is_some_and(|t| t.tiles[0] > 1 || t.tiles[1] > 1);
+    let mut curve_or = |key: &str, default: f32| {
+        start
+            .get(key)
+            .map(|v| modes.curve(v))
+            .unwrap_or(MinMaxCurve::Constant(default))
+    };
+    let start_lifetime = curve_or("lifetime", 0.0);
+    let start_size = curve_or("size", 0.0);
+    let start_rotation = curve_or("rotation", 0.0);
+    let start_speed = curve_or("speed", 0.0);
+    let start_gravity = curve_or("gravityModifier", 0.0);
+    let (start_size_y, start_size_z) = if size3d {
+        (Some(curve_or("sizeY", 0.0)), Some(curve_or("sizeZ", 0.0)))
+    } else {
+        (None, None)
+    };
+    let (start_rotation_x, start_rotation_y) = if rotation3d {
+        (
+            Some(curve_or("rotationX", 0.0)),
+            Some(curve_or("rotationY", 0.0)),
+        )
+    } else {
+        (None, None)
+    };
+    let start_color = start
+        .get("color")
+        .map(|v| modes.gradient(v))
+        .unwrap_or(MinMaxGradient::Color([1.0, 1.0, 1.0, 1.0]));
+    let color_over_lifetime = system.get("colorOverLifetime").map(|v| modes.gradient(v));
     let params = SimParams {
         duration: f_field(system, "duration", 1.0),
         looping: b_field(system, "looping", false),
@@ -1265,64 +1777,21 @@ fn build_emitter(
         rate_over_time,
         bursts,
         shape,
-        start_lifetime: start
-            .get("lifetime")
-            .map(parse_min_max_curve)
-            .unwrap_or(MinMaxCurve::Constant(0.0)),
-        start_size: start
-            .get("size")
-            .map(parse_min_max_curve)
-            .unwrap_or(MinMaxCurve::Constant(0.0)),
-        start_size_y: if size3d {
-            start.get("sizeY").map(parse_min_max_curve)
-        } else {
-            None
-        },
-        start_size_z: if size3d {
-            start.get("sizeZ").map(parse_min_max_curve)
-        } else {
-            None
-        },
-        start_color: start
-            .get("color")
-            .map(parse_min_max_gradient)
-            .unwrap_or(MinMaxGradient::Color([1.0, 1.0, 1.0, 1.0])),
-        start_rotation: start
-            .get("rotation")
-            .map(parse_min_max_curve)
-            .unwrap_or(MinMaxCurve::Constant(0.0)),
-        rotation3d: b_field(&start, "rotation3D", false),
-        start_speed: start
-            .get("speed")
-            .map(parse_min_max_curve)
-            .unwrap_or(MinMaxCurve::Constant(0.0)),
-        start_gravity: start
-            .get("gravityModifier")
-            .map(parse_min_max_curve)
-            .unwrap_or(MinMaxCurve::Constant(0.0)),
-        color_over_lifetime: system.get("colorOverLifetime").map(parse_min_max_gradient),
+        start_lifetime,
+        start_size,
+        start_size_y,
+        start_size_z,
+        start_color,
+        start_rotation,
+        rotation3d,
+        start_rotation_x,
+        start_rotation_y,
+        start_speed,
+        start_gravity,
+        color_over_lifetime,
         size_over_lifetime,
         size_over_lifetime_y,
-        // 自旋：构造拒绝（separateAxes 开而 x/y 键缺 = 提取面缺键）时模块
-        // 整块摘除并计数，发射器照跑（自旋冻结在出生角）。
-        rotation_over_lifetime: system.get("rotationOverLifetime").and_then(|r| {
-            let curve = r.get("curve").map(parse_min_max_curve)?;
-            let x = r.get("x").map(parse_min_max_curve);
-            let y = r.get("y").map(parse_min_max_curve);
-            match RotationOverLifetime::from_parts(
-                b_field(r, "separateAxes", false),
-                x.as_ref(),
-                y.as_ref(),
-                &curve,
-            ) {
-                Ok(law) => Some(law),
-                Err(reason) => {
-                    counts.acc_rol_refused += 1;
-                    info!("[emoticon] {name}：rotationOverLifetime 模块拒绝（自旋冻结）：{reason}");
-                    None
-                }
-            }
-        }),
+        rotation_over_lifetime,
         limit_velocity,
         vol,
         texture_sheet,
@@ -1337,13 +1806,19 @@ fn build_emitter(
     let base_key = match base_mode {
         0 => "_BaseMap",
         1 => "_BaseMap2DArray",
-        other => panic!("{name}：未建模的基础图模式 {other}"),
+        other => {
+            modes.refuse(format!("base map mode {other} is not modelled"));
+            "_BaseMap"
+        }
     };
     let base_map = textures_obj
         .get(base_key)
         .and_then(Value::as_str)
         .and_then(|f| tex_by_file.get(f).copied());
-    let tso = material.get("textureScaleOffset").cloned().unwrap_or(Value::Null);
+    let tso = material
+        .get("textureScaleOffset")
+        .cloned()
+        .unwrap_or(Value::Null);
     let uv_turns = if f_field(&floats, "_BaseMapRotationEnabled", 0.0) != 0.0 {
         counts.acc_uv_turns += 1;
         f_field(&floats, "_BaseMapRotation", 0.0)
@@ -1354,10 +1829,10 @@ fn build_emitter(
     // 旋转量不含逐粒子项，出现即拒（不静默画错 uv）。
     if uv_turns != 0.0 {
         if f_field(&floats, "_BaseMapRotationCoord", 0.0) != 0.0 {
-            panic!("{name}：基础图旋转带逐粒子选择器，未建模");
+            modes.refuse("base map rotation with a per-particle selector is not modelled".into());
         }
         if vec2_field(&floats, "_BaseMapRotationOffsets", [0.0, 0.0]) != [0.0, 0.0] {
-            panic!("{name}：基础图旋转轴心偏移非零，未建模");
+            modes.refuse("base map rotation about an offset pivot is not modelled".into());
         }
     }
     if f_field(&floats, "_SoftParticlesEnabled", 0.0) != 0.0 {
@@ -1372,22 +1847,17 @@ fn build_emitter(
     if f_field(&floats, "_ZOffset", 0.0) != 0.0 {
         counts.acc_z_offset += 1;
     }
+    // CULL_SIDE：0=双面、1=背面、2=正面（朝相机）。语料只有 0/2；
+    // 出现 1（只画背面）先具名拒绝——绕序反了的画面是「整片消失」。
+    let cull = f_field(&floats, "_Cull", 2.0);
+    if cull != 0.0 && cull != 2.0 {
+        modes.refuse(format!("particle material _Cull {cull} is not modelled"));
+    }
     let mat = EmitterMat {
         base_map,
         base_st: vec4_field(&tso, "_BaseMap", [1.0, 1.0, 0.0, 0.0]),
         uv_turns,
-        cull: {
-            // CULL_SIDE：0=双面、1=背面、2=正面（朝相机）。语料只有 0/2；
-            // 出现 1（只画背面）时单绕序取反向即可，但先响亮拒绝——
-            // 绕序反了的画面是「整片消失」，比报错难查得多。
-            let c = f_field(&floats, "_Cull", 2.0);
-            if c != 0.0 && c != 2.0 {
-                panic!("{name}：未建模的 _Cull {c}");
-            }
-            c
-        },
-        min_frac: f_field(renderer, "minParticleSize", 0.0),
-        max_frac: f_field(renderer, "maxParticleSize", 0.0),
+        cull,
     };
     // 采样链的折算前提：基础图旋转与片表动画都折进 UV_0 顶点流时，材质侧的
     // ST 与「先缩放后旋转」的次序必须恒等才能等价（源链是 sheet → 旋转 → ST，
@@ -1395,12 +1865,147 @@ fn build_emitter(
     // 片表挂账只在真的分格时成立（1×1 的片表声明不进采样链，与演示件同判）。
     let identity_st = mat.base_st == [1.0, 1.0, 0.0, 0.0];
     if uv_turns != 0.0 && !identity_st {
-        panic!("{name}：基础图旋转与非恒等 ST 并存，采样链折算不成立");
+        panic!("基础图旋转与非恒等 ST 并存，采样链折算不成立");
     }
     if sheet_tiled && !identity_st {
-        panic!("{name}：片表动画与非恒等 ST 并存，采样链折算不成立");
+        panic!("片表动画与非恒等 ST 并存，采样链折算不成立");
     }
-    (params, mat)
+    (params, mat, refusal, modes.0)
+}
+
+/// The renderer record as the source billboard writer reads it. Billboard,
+/// HorizontalBillboard, VerticalBillboard and Stretch are drawn by that
+/// writer (every render space, pivot, allowRoll and the screen-size limits);
+/// any other render mode, and the inputs the writer does not read, refuse by
+/// name.
+fn renderer_draw(
+    renderer: &Value,
+    system: &Value,
+    params: &SimParams,
+    nodes: &[PNode],
+    node: usize,
+) -> Result<source_billboard::Draw, String> {
+    let mode = s_field(renderer, "renderMode").ok_or("renderMode not exported")?;
+    let finite = |key: &str| {
+        renderer
+            .get(key)
+            .and_then(Value::as_f64)
+            .filter(|v| v.is_finite())
+            .map(|v| v as f32)
+    };
+    let normal_direction = finite("normalDirection").ok_or("normalDirection not exported")?;
+    let pivot = match renderer.get("pivot").and_then(Value::as_array) {
+        Some(p) if p.len() == 3 && p.iter().all(|v| v.as_f64().is_some_and(f64::is_finite)) => {
+            Vec3::new(
+                p[0].as_f64().unwrap_or(0.0) as f32,
+                p[1].as_f64().unwrap_or(0.0) as f32,
+                p[2].as_f64().unwrap_or(0.0) as f32,
+            )
+        }
+        _ => return Err("renderer pivot not exported".into()),
+    };
+    if renderer
+        .get("flip")
+        .and_then(Value::as_array)
+        .is_none_or(|v| v.len() != 3 || v.iter().any(|x| x.as_f64() != Some(0.0)))
+    {
+        return Err("particle flip is not consumed".into());
+    }
+    let (Some(min_size), Some(max_size)) = (finite("minParticleSize"), finite("maxParticleSize"))
+    else {
+        return Err("min/maxParticleSize not exported".into());
+    };
+    if min_size < 0.0 || max_size < min_size {
+        return Err(format!(
+            "screen size limits {min_size}..{max_size} out of order"
+        ));
+    }
+    let allow_roll = renderer
+        .get("allowRoll")
+        .and_then(Value::as_bool)
+        .ok_or("allowRoll not exported")?;
+    let alignment = renderer
+        .get("alignment")
+        .and_then(Value::as_i64)
+        .and_then(Alignment::from_source)
+        .ok_or_else(|| {
+            format!(
+                "render space {:?} is not modelled",
+                renderer.get("alignment")
+            )
+        })?;
+    let scaling = match system.get("scalingMode").and_then(Value::as_u64) {
+        Some(0) => Scaling::Hierarchy,
+        // Local: the renderer scale is the emitter node's own scale, not the
+        // chain's.
+        Some(1) => {
+            let mut unit_chain = true;
+            let mut cursor = Some(node);
+            while let Some(i) = cursor {
+                unit_chain &= nodes[i].scale == Vec3::ONE;
+                cursor = nodes[i].parent;
+            }
+            Scaling::Local {
+                scale: nodes[node].scale,
+                unit_chain,
+            }
+        }
+        other => return Err(format!("scalingMode {other:?} is not modelled")),
+    };
+    let draw_mode = match mode.as_str() {
+        "Billboard" => source_billboard::Mode::Billboard,
+        "HorizontalBillboard" => source_billboard::Mode::Horizontal,
+        "VerticalBillboard" => source_billboard::Mode::Vertical,
+        "Stretch" => {
+            let (Some(velocity_scale), Some(length_scale), Some(camera_velocity_scale)) = (
+                finite("velocityScale"),
+                finite("lengthScale"),
+                finite("cameraVelocityScale"),
+            ) else {
+                return Err("Stretch scales not exported".into());
+            };
+            if renderer.get("freeformStretching").and_then(Value::as_bool) != Some(false) {
+                return Err("Stretch freeform stretching is not transcribed".into());
+            }
+            if pivot != Vec3::ZERO {
+                return Err("Stretch with a renderer pivot is not transcribed".into());
+            }
+            if camera_velocity_scale != 0.0 {
+                return Err(
+                    "Stretch cameraVelocityScale other than zero: the camera velocity is not tracked here"
+                        .into(),
+                );
+            }
+            if params
+                .vol
+                .as_ref()
+                .is_some_and(|v| v.speed_modifier != MinMaxCurve::Constant(1.0))
+            {
+                return Err(
+                    "Stretch with a velocity speed modifier other than the constant one is not transcribed"
+                        .into(),
+                );
+            }
+            source_billboard::Mode::Stretch(source_billboard::Stretch {
+                velocity_scale,
+                length_scale,
+                camera_velocity_scale,
+                normal_direction,
+            })
+        }
+        other => return Err(format!("render mode {other} is not modelled")),
+    };
+    if !matches!(draw_mode, source_billboard::Mode::Stretch(_)) && normal_direction != 1.0 {
+        return Err("billboard normalDirection other than one is not verified".into());
+    }
+    Ok(source_billboard::Draw {
+        mode: draw_mode,
+        alignment,
+        pivot,
+        screen_size: Vec2::new(min_size, max_size),
+        allow_roll,
+        scaling,
+    })
 }
 
 // ===== 档案容器与待机编排解析 =====
@@ -1442,37 +2047,46 @@ pub(crate) fn spawn_when_ready(
     }
     let c = &archive.archive.counts;
     info!(
-        "[emoticon] 档案 {} 项：sprite {} · particle {}；发射器记录 {}（仿真 {} · 渲染器关 {} · 绘制模式未实现 {} · 节点链断 {} · 缺基础图 {} · 子发射驱动 {}）；sprite 槽节点链断 {}",
+        "[emoticon] 档案 {} 项：sprite {} · particle {}；发射器记录 {}（仿真 {} · 渲染器关 {} · 未建模模式拒绝 {} · 模块拒绝 {} · 绘制输入拒绝 {} · 节点链断 {} · 缺基础图 {} · 子发射驱动 {}）；sprite 槽节点链断 {} · sprite 槽未建模模式拒绝 {}；条目未建模模式拒绝 {}；依赖包贴图 {}",
         archive.archive.items.len(),
         c.sprite_items,
         c.particle_items,
         c.records,
         c.simulated,
         c.gate_disabled,
+        c.gate_mode_refused,
+        c.gate_module_refused,
         c.gate_unsupported,
         c.gate_inactive,
         c.gate_missing_texture,
         c.gate_sub_driven,
         c.gate_inactive_sprite,
+        c.refused_sprite_slots,
+        c.refused_items,
+        c.cross_item_textures,
     );
     info!(
-        "[emoticon] 挂账（能力在数据里、本管线无对应开关或消费面，逐项计数）：noise {} · customData {} · rotation3D {} · alignment {} · 渲染器 pivot {} · sortingOrder {} · ZWrite {} · ZTest=2 {} · ZOffset {} · 软粒子 {} · uv 旋转 {} · stretch 绘制 {} · loopEndFlag {} · soundInput {} · 自旋模块拒 {} · 限速模块拒 {}",
+        "[emoticon] 源绘制件消费（仿真发射器中）：非 View 渲染空间 {} · 渲染器 pivot {} · 三轴旋转 {} · Stretch {}",
+        c.drawn_alignment,
+        c.drawn_renderer_pivot,
+        c.drawn_rotation3d,
+        c.drawn_stretch,
+    );
+    info!(
+        "[emoticon] 挂账（能力在数据里、本管线无对应开关或消费面，逐项计数）：noise {} · customData {} · sortingOrder {} · ZWrite {} · ZTest=2 {} · ZOffset {} · 软粒子 {} · uv 旋转 {} · loopEndFlag {} · soundInput {} · 发射器因自旋模块被拒 {} · 发射器因限速模块被拒 {} · 发射器因片表模块被拒 {}",
         c.acc_noise,
         c.acc_custom_data,
-        c.acc_rotation3d,
-        c.acc_alignment,
-        c.acc_renderer_pivot,
         c.acc_sorting_order,
         c.acc_z_write,
         c.acc_z_test_less,
         c.acc_z_offset,
         c.acc_soft_particles,
         c.acc_uv_turns,
-        c.acc_stretch,
         c.acc_loop_end_flag,
         c.acc_sound_input,
         c.acc_rol_refused,
         c.acc_lim_refused,
+        c.acc_sheet_refused,
     );
     // unsupported 归并：键 × 理由 →（条数、去重条目名），按条数降序（键是
     // attribute 的整哈希或对象类型名；原始记录在源档案按条目名可复查）。
@@ -1488,9 +2102,12 @@ pub(crate) fn spawn_when_ready(
                     items.push(rec.item.as_str());
                 }
             }
-            None => {
-                groups.push((rec.key.as_str(), rec.reason.as_str(), 1, vec![rec.item.as_str()]))
-            }
+            None => groups.push((
+                rec.key.as_str(),
+                rec.reason.as_str(),
+                1,
+                vec![rec.item.as_str()],
+            )),
         }
     }
     groups.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(b.0)));
@@ -1499,9 +2116,14 @@ pub(crate) fn spawn_when_ready(
         .map(|(k, r, n, items)| format!("{k}（{r}）×{n} [{}]", items.join("、")))
         .collect::<Vec<_>>()
         .join(" · ");
-    info!("[emoticon] unsupported 记账 {} 条：{census}", c.acc_unsupported_text);
+    info!(
+        "[emoticon] unsupported 记账 {} 条：{census}",
+        c.acc_unsupported_text
+    );
     commands.insert_resource(Emotes::default());
-    commands.insert_resource(Driver { showcase: Showcase::from_env(&archive.archive) });
+    commands.insert_resource(Driver {
+        showcase: Showcase::from_env(&archive.archive),
+    });
     // 一次性：此后靠本标记短路，Emotes/Driver 不再被逐帧重建。
     commands.insert_resource(Spawned);
 }
@@ -1514,10 +2136,9 @@ pub(crate) struct Spawned;
 
 /// 一帧的相机读数（面相机旋转、屏幕占比截断、出场投影共用）。
 struct CamInfo {
+    /// The camera transform the source billboard writer builds its view from.
+    global: GlobalTransform,
     pos: Vec3,
-    right: Vec3,
-    up: Vec3,
-    forward: Vec3,
     /// 纵向视场（弧度）。
     fov_y: f32,
     /// 横纵比（无视口时 0，屏幕占比截断会因此自然让位）。
@@ -1555,13 +2176,23 @@ struct EmitterRun {
     loop_n: i64,
     particles: Vec<PRt>,
     peak: usize,
-    /// 屏幕占比截断改过尺寸的粒子数（累计）。
-    clamped: u32,
     spawned_total: u64,
     /// 出生速率攒满一颗但池满时的拒发数（累计）。
     refused: u64,
     /// 本帧死亡的粒子世界位（死亡路由用，帧末清空）。
     deaths: Vec<Vec3>,
+    /// The texture-sheet tiles of this run's first particle (log only).
+    sheet_trace: SheetTrace,
+}
+
+/// The tiles one particle showed at draw time, as (age percent, tile) at
+/// each change, logged once when it dies.
+#[derive(Default)]
+struct SheetTrace {
+    seed: Option<u32>,
+    path: Vec<(f32, i64)>,
+    frames: u32,
+    logged: bool,
 }
 
 impl EmitterRun {
@@ -1574,10 +2205,46 @@ impl EmitterRun {
             loop_n: 0,
             particles: Vec::new(),
             peak: 0,
-            clamped: 0,
             spawned_total: 0,
             refused: 0,
             deaths: Vec::new(),
+            sheet_trace: SheetTrace::default(),
+        }
+    }
+}
+
+/// Follows the first particle of a texture-sheet emitter through its life
+/// and logs, once, when it dies, the tiles the law gave it at the age percent
+/// it is drawn with this frame: the frame path observed on the product path
+/// (once per shown instance).
+fn trace_sheet(item: &Item, def: usize, sheet: &TexSheetDef, run: &mut EmitterRun) {
+    let trace = &mut run.sheet_trace;
+    if trace.logged {
+        return;
+    }
+    let seed = match (trace.seed, run.particles.first()) {
+        (Some(seed), _) => seed,
+        (None, Some(first)) => *trace.seed.insert(first.seed),
+        (None, None) => return,
+    };
+    match run.particles.iter().find(|p| p.seed == seed) {
+        Some(p) => {
+            let tile = sheet.tile(sheet.rect(p.seed, p.core.age_percent));
+            if trace.path.last().is_none_or(|(_, last)| *last != tile) {
+                trace.path.push((p.core.age_percent, tile));
+            }
+            trace.frames += 1;
+        }
+        None => {
+            trace.logged = true;
+            let node = item.emitters[def].node;
+            info!(
+                "[emoticon] {}/{}: texture sheet frame path of the first particle (seed {seed:#010x}, {} frames drawn): {}",
+                item.name,
+                item.nodes[node].anim_path.as_deref().unwrap_or("?"),
+                trace.frames,
+                format_tile_path(&trace.path)
+            );
         }
     }
 }
@@ -1592,9 +2259,9 @@ struct PRt {
     /// 逐粒子 u32 种子（出生抽一次，取值表末尾）：自旋/限速族引擎原生
     /// 路的全部杂凑因子是它的纯函数，终生恒定、每帧 0 次流抽取。
     seed: u32,
-    /// 三轴自旋角（弧度；出生时 z 轴来自 startRotation，x/y 恒 0——
-    /// 出生取值表对三轴声明照抽两次但只留 z，公告板也只画 z）。
-    /// 此后按 rotationOverLifetime 的角速度累加。
+    /// 三轴自旋角（弧度，源欧拉角；出生时 z 来自 startRotation，三轴声明时
+    /// x/y 来自 startRotationX/Y，否则恒 0）。此后按 rotationOverLifetime
+    /// 的角速度累加；三轴都交给源绘制件。
     rot: [f32; 3],
     /// 出生尺寸两轴（米；sizeOverLifetime 的乘子另算）。
     size_x: f32,
@@ -1603,13 +2270,16 @@ struct PRt {
     gravity: f32,
     /// 逐粒子色（colorOverLifetime 每帧整组覆写；无模块则恒出生色）。
     color: [f32; 4],
-    /// 片表帧（无模块恒 0）。
-    frame: u32,
     /// 世界位（局部空间粒子是「节点本地坐标 + 本帧节点世界系」的绘制量）。
     world: Vec3,
-    /// 屏幕占比截断与节点缩放折算后的两轴有效尺寸。
-    sx: f32,
-    sy: f32,
+    /// Current size (birth size times sizeOverLifetime), before the screen
+    /// limits and the renderer scale, which the source writer applies.
+    size: Vec3,
+    /// World velocity (state plus velocityOverLifetime), for the Stretch
+    /// geometry.
+    velocity: Vec3,
+    /// Elapsed lifetime in percent.
+    age_percent: f32,
 }
 
 /// 一个绘制位：网格与材质句柄成对持有（回收时三处同撤）。
@@ -1646,14 +2316,28 @@ impl SlotMesh {
         self.indices.clear();
     }
 
-    fn quad(&mut self, corners: &[[f32; 3]; 4], uv: &[[f32; 2]; 4], color: [f32; 4], double_side: bool) {
+    fn quad(
+        &mut self,
+        corners: &[[f32; 3]; 4],
+        uv: &[[f32; 2]; 4],
+        color: [f32; 4],
+        double_side: bool,
+    ) {
         let base = self.positions.len() as u32;
         self.positions.extend_from_slice(corners);
         self.uvs.extend_from_slice(uv);
         self.colors.extend([color; 4]);
-        self.indices.extend_from_slice(&[base, base + 2, base + 1, base + 2, base + 3, base + 1]);
+        self.indices
+            .extend_from_slice(&[base, base + 2, base + 1, base + 2, base + 3, base + 1]);
         if double_side {
-            self.indices.extend_from_slice(&[base, base + 1, base + 2, base + 1, base + 3, base + 2]);
+            self.indices.extend_from_slice(&[
+                base,
+                base + 1,
+                base + 2,
+                base + 1,
+                base + 3,
+                base + 2,
+            ]);
         }
     }
 }
@@ -1663,6 +2347,7 @@ struct Instance {
     key: u64,
     item: usize,
     npc: Entity,
+    timeline_rotation_reference: Option<Entity>,
     /// 节点 TRS 的运行副本（剪辑通道写这里；顶挂旋转写 top）。
     node_pos: Vec<Vec3>,
     node_scale: Vec<Vec3>,
@@ -1729,7 +2414,11 @@ impl Showcase {
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
             .unwrap_or(6.0);
-        Some(Showcase { idx: items.len() - 1, items, show_secs })
+        Some(Showcase {
+            idx: items.len() - 1,
+            items,
+            show_secs,
+        })
     }
 }
 
@@ -1744,11 +2433,7 @@ fn num(v: f32, d: f32) -> f32 {
 
 /// 深度优先找挂点骨（先父后子；第一个同名命中即挂，与演示件
 /// `getObjectByName` 同判）。返回顺序对应 [Head, Spine, Hips, HeadRoot]。
-fn find_mounts(
-    root: Entity,
-    children: &Query<&Children>,
-    names: &Query<&Name>,
-) -> MountSet {
+fn find_mounts(root: Entity, children: &Query<&Children>, names: &Query<&Name>) -> MountSet {
     const WANTED: [&str; 4] = ["Head", "Spine", "Hips", "HeadRoot"];
     let mut found = [None; 4];
     let mut stack = vec![root];
@@ -1770,7 +2455,12 @@ fn find_mounts(
             }
         }
     }
-    MountSet { face: found[0], spine: found[1], hips: found[2], head_root: found[3] }
+    MountSet {
+        face: found[0],
+        spine: found[1],
+        hips: found[2],
+        head_root: found[3],
+    }
 }
 
 /// 条目的挂点实体（缺骨 → None，由 `mount_frame` 落头部参考点）。
@@ -1785,11 +2475,17 @@ fn mount_entity(anchor: AnchorName, mounts: &MountSet) -> Option<Entity> {
 
 /// 挂点骨的世界系；缺骨时落头部参考点（NPC 世界系里的固定偏移、旋转恒等，
 /// 与演示件的兜底同口径——兜底锚不随骨骼动）。
-fn mount_frame(mount: Option<Entity>, globals: &Query<&GlobalTransform>, npc_global: Affine3A) -> Affine3A {
+fn mount_frame(
+    mount: Option<Entity>,
+    globals: &Query<&GlobalTransform>,
+    npc_global: Affine3A,
+) -> Affine3A {
     mount
         .and_then(|entity| globals.get(entity).ok())
         .map(|g| g.affine())
-        .unwrap_or_else(|| Affine3A::from_translation(npc_global.transform_point3(Vec3::from(HEAD_LOCAL))))
+        .unwrap_or_else(|| {
+            Affine3A::from_translation(npc_global.transform_point3(Vec3::from(HEAD_LOCAL)))
+        })
 }
 
 /// 相位对应的剪辑段。
@@ -1825,7 +2521,11 @@ fn request_hide(inst: &mut Instance, clips: Option<&Clips>) {
     if inst.phase == Phase::Idle || inst.phase == Phase::End {
         return;
     }
-    inst.phase = if clips.is_some_and(|c| c.end.is_some()) { Phase::End } else { Phase::Closing };
+    inst.phase = if clips.is_some_and(|c| c.end.is_some()) {
+        Phase::End
+    } else {
+        Phase::Closing
+    };
     inst.end_clock = 0.0;
 }
 
@@ -1835,7 +2535,9 @@ fn request_hide(inst: &mut Instance, clips: Option<&Clips>) {
 fn apply_clip(inst: &mut Instance, clip: Option<&Clip>, t: f32) {
     let Some(clip) = clip else { return };
     for ch in &clip.channels {
-        let Some(&node) = inst.channel_nodes.get(&ch.anim_path) else { continue };
+        let Some(&node) = inst.channel_nodes.get(&ch.anim_path) else {
+            continue;
+        };
         if ch.values.is_empty() {
             continue;
         }
@@ -1891,7 +2593,11 @@ fn lenient_normalize(v: Vec3) -> Vec3 {
 /// 退化分支（forward 平行上轴）按演示件微扰再归一。
 fn look_rotation(forward: Vec3) -> Quat {
     let up = Vec3::Y;
-    let mut z = if forward.length_squared() > 0.0 { forward.normalize() } else { Vec3::Z };
+    let mut z = if forward.length_squared() > 0.0 {
+        forward.normalize()
+    } else {
+        Vec3::Z
+    };
     let mut x = up.cross(z);
     if x.length_squared() == 0.0 {
         if up.z.abs() == 1.0 {
@@ -1920,42 +2626,12 @@ fn particle_yaw_rad(anchor_pos: Vec3, anchor_quat: Quat, cam_pos: Vec3) -> f32 {
     } else {
         0.0
     };
-    let signed = if (dx * f.z - dz * f.x) < 0.0 { -deg } else { deg };
-    signed * -0.017453292
-}
-
-/// 屏幕占比截断的比例（演示件 `_screenClampRatio`）：粒子的全尺寸对
-/// 该深度处视口的世界宽度（横向）之比钳到 [min, max] 占比，两轴同乘同一
-/// 比例（各轴独立裁会毁掉作者写的长宽比）。相机在背后、深度/宽度非有限
-/// 或占比上下限全关时返回 1（不截）。
-fn screen_clamp_ratio(cam: &CamInfo, world: Vec3, size: f32, min_frac: f32, max_frac: f32) -> f32 {
-    if min_frac <= 0.0 && max_frac <= 0.0 {
-        return 1.0;
-    }
-    if !(size > 1e-6) {
-        return 1.0;
-    }
-    let depth = cam.forward.dot(world - cam.pos);
-    if !depth.is_finite() || depth <= 1e-4 {
-        return 1.0;
-    }
-    let width = 2.0 * depth * cam.aspect * (cam.fov_y / 2.0).tan();
-    if !width.is_finite() || width <= 1e-6 {
-        return 1.0;
-    }
-    let mut target = size;
-    if min_frac > 0.0 {
-        target = target.max(min_frac * width);
-    }
-    if max_frac > 0.0 {
-        target = target.min(max_frac * width);
-    }
-    let ratio = target / size;
-    if ratio.is_finite() && ratio > 0.0 {
-        ratio
+    let signed = if (dx * f.z - dz * f.x) < 0.0 {
+        -deg
     } else {
-        1.0
-    }
+        deg
+    };
+    signed * -0.017453292
 }
 
 /// 出件（演示件 `playEmoticon` + `EmoticonView` 的装配）：同 NPC 换件先撤
@@ -1985,6 +2661,10 @@ fn show_emote(
         return;
     };
     let item = &archive.items[item_idx];
+    if let Some(reason) = &item.refusal {
+        error!("[emoticon] show {item_name} refused: {reason}");
+        return;
+    }
     if let Some(old) = emotes.instances.iter().position(|i| i.npc == npc) {
         clear_instance(commands, meshes, materials, emotes, old);
     }
@@ -1999,7 +2679,10 @@ fn show_emote(
         }
     }
     let top = item.nodes.iter().position(|n| n.parent.is_none());
-    let npc_global = globals.get(npc).map(|g| g.affine()).unwrap_or(Affine3A::IDENTITY);
+    let npc_global = globals
+        .get(npc)
+        .map(|g| g.affine())
+        .unwrap_or(Affine3A::IDENTITY);
     let mounts = find_mounts(npc, children, names);
 
     // 发射器运行时：仿真门与子发射驱动门（其余四类门在装载侧已摘）。
@@ -2017,10 +2700,14 @@ fn show_emote(
     let mut draws = Vec::new();
     for &slot in &item.sprite_slots {
         let node = &item.nodes[slot];
-        let Some(sprite_idx) = node.sprite else { continue };
+        let Some(sprite_idx) = node.sprite else {
+            continue;
+        };
         let texture = item.sprites[sprite_idx].texture;
-        let mesh_handle =
-            meshes.add(Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default()));
+        let mesh_handle = meshes.add(Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        ));
         let material_handle = materials.add(EmoticonMaterial {
             base_st: Vec4::new(1.0, 1.0, 0.0, 0.0),
             base_map: item.textures[texture].handle.clone(),
@@ -2034,7 +2721,12 @@ fn show_emote(
                 EmoteDraw { instance: key },
             ))
             .id();
-        draws.push(DrawSlot { entity, mesh: mesh_handle, material: material_handle, kind: DrawKind::Sprite(slot) });
+        draws.push(DrawSlot {
+            entity,
+            mesh: mesh_handle,
+            material: material_handle,
+            kind: DrawKind::Sprite(slot),
+        });
     }
     for (i, e) in item.emitters.iter().enumerate() {
         if !matches!(e.gate, Gate::Simulated | Gate::SubEmitterDriven) {
@@ -2043,8 +2735,10 @@ fn show_emote(
         let Some(texture) = e.material.base_map else {
             panic!("{} 的发射器 {i} 过了缺基础图门却没有贴图", item.name);
         };
-        let mesh_handle =
-            meshes.add(Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default()));
+        let mesh_handle = meshes.add(Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        ));
         let material_handle = materials.add(EmoticonMaterial {
             base_st: Vec4::from_array(e.material.base_st),
             base_map: item.textures[texture].handle.clone(),
@@ -2058,7 +2752,12 @@ fn show_emote(
                 EmoteDraw { instance: key },
             ))
             .id();
-        draws.push(DrawSlot { entity, mesh: mesh_handle, material: material_handle, kind: DrawKind::Emitter(i) });
+        draws.push(DrawSlot {
+            entity,
+            mesh: mesh_handle,
+            material: material_handle,
+            kind: DrawKind::Emitter(i),
+        });
     }
 
     let clips = item.clips.as_ref();
@@ -2073,6 +2772,7 @@ fn show_emote(
         key,
         item: item_idx,
         npc,
+        timeline_rotation_reference: None,
         node_pos: item.nodes.iter().map(|n| n.position).collect(),
         node_scale: item.nodes.iter().map(|n| n.scale).collect(),
         node_rot: item.nodes.iter().map(|n| n.rotation).collect(),
@@ -2082,7 +2782,11 @@ fn show_emote(
         phase,
         clock: 0.0,
         end_clock: 0.0,
-        hide_at: if show_seconds > 0.0 { Some(show_seconds.max(0.0)) } else { None },
+        hide_at: if show_seconds > 0.0 {
+            Some(show_seconds.max(0.0))
+        } else {
+            None
+        },
         emitters,
         emitter_index,
         draws,
@@ -2099,7 +2803,11 @@ fn show_emote(
     let mount = mount_entity(item.anchor, &inst.mounts);
     let anchor = mount_frame(mount, globals, npc_global);
     let anchor_pos = Vec3::from(anchor.translation);
-    let mount_note = if mount.is_some() { "骨" } else { "缺骨兜底" };
+    let mount_note = if mount.is_some() {
+        "骨"
+    } else {
+        "缺骨兜底"
+    };
     let family = match item.family {
         Family::Sprite => "sprite",
         Family::Particle => "particle",
@@ -2166,7 +2874,12 @@ fn sample_shape(shape: &ShapeDef, rng: &mut Rng) -> (Vec3, Vec3) {
         ShapeKind::Cone => {
             // 底圆在局部 XY 平面，主轴 +Z；angle=0 时方向恰为 (0,0,1)。
             // 这一支才有「arc 为 0 当整圈」的回退。
-            let a = rng.next_f32() * (if arc != 0.0 { arc } else { std::f32::consts::TAU });
+            let a = rng.next_f32()
+                * (if arc != 0.0 {
+                    arc
+                } else {
+                    std::f32::consts::TAU
+                });
             let rr = sample_shape_radius(radius, shape.radius_thickness, 2.0, rng.next_f32());
             pos = Vec3::new(a.cos() * rr, a.sin() * rr, 0.0);
             let spread = num(shape.angle_deg, 0.0).to_radians();
@@ -2238,24 +2951,30 @@ fn spawn_particle(
     // ---- 出生取值表（每一项各取自己的一次值）----
     // 稳定因子：生命期里所有「每颗稳定」的求值共用它。
     let r = rng.next_f32();
-    let life = params.start_lifetime.evaluate(0.0, rng.next_f32()).max(0.01);
+    let life = params
+        .start_lifetime
+        .evaluate(0.0, rng.next_f32())
+        .max(0.01);
     let size_x = params.start_size.evaluate(0.0, rng.next_f32());
     let size_y = match &params.start_size_y {
         Some(curve) => curve.evaluate(0.0, rng.next_f32()),
         None => size_x,
     };
-    // 第三轴只有网格绘制件用得上（billboard 是二维片），取值照抽——
-    // 抽签次数是式的组成部分，值弃掉。
-    if let Some(curve) = &params.start_size_z {
-        let _ = curve.evaluate(0.0, rng.next_f32());
-    }
+    // 第三轴只有网格绘制件读（billboard 是二维片），取值照抽并存下。
+    let size_z = match &params.start_size_z {
+        Some(curve) => curve.evaluate(0.0, rng.next_f32()),
+        None => size_x,
+    };
     let color = params.start_color.evaluate(0.0, rng.next_f32());
     let spin0 = params.start_rotation.evaluate(0.0, rng.next_f32());
-    // 三轴旋转声明：X/Y 两轴 billboard 不画，取值照抽两次。
-    if params.rotation3d {
-        let _ = rng.next_f32();
-        let _ = rng.next_f32();
-    }
+    // 三轴旋转声明：X/Y 两轴的出生角各取一次值（非 View 渲染空间里可见）。
+    let (spin_x, spin_y) = match (&params.start_rotation_x, &params.start_rotation_y) {
+        (Some(x), Some(y)) => (
+            x.evaluate(0.0, rng.next_f32()),
+            y.evaluate(0.0, rng.next_f32()),
+        ),
+        _ => (0.0, 0.0),
+    };
     let speed = params.start_speed.evaluate(0.0, r);
     let gravity = params.start_gravity.evaluate(0.0, r);
     // 逐粒子种子：取值表的最后一抽（引擎侧是出生时写好的专用数组，写入
@@ -2270,15 +2989,15 @@ fn spawn_particle(
         core: Particle::born(pos.to_array(), (dir * speed).to_array(), life),
         r,
         seed,
-        rot: [0.0, 0.0, spin0],
+        rot: [spin_x, spin_y, spin0],
         size_x,
         size_y,
         gravity,
         color,
-        frame: 0,
         world,
-        sx: 0.0,
-        sy: 0.0,
+        size: Vec3::new(size_x, size_y, size_z),
+        velocity: Vec3::ZERO,
+        age_percent: 0.0,
     });
     run.spawned_total += 1;
 }
@@ -2292,7 +3011,9 @@ fn emit_burst_zero(
     origin: &Vec3,
     rng: &mut Rng,
 ) {
-    let Some(burst) = params.bursts.first() else { return };
+    let Some(burst) = params.bursts.first() else {
+        return;
+    };
     if rng.next_f32() > num(burst.probability, 1.0) {
         return;
     }
@@ -2306,16 +3027,14 @@ fn emit_burst_zero(
 
 /// 一条发射器的一帧（演示件 update 的转录）。发射环（率 + burst 游标 +
 /// 循环回绕复位）只在自主播放时跑；粒子环按「寿限判定 → 重力 → 速度
-/// 钳制 → 有效速度合成 → 积分 → 世界位 → 尺寸/截断/颜色/自旋/片表」
-/// 的次序推进。年寿与发射钟走仿真速度，重力/积分/自旋走原始 dt——
+/// 钳制 → 有效速度合成 → 积分 → 世界位 → 尺寸/截断/颜色/自旋」
+/// 的次序推进（片表格位不在这里：绘制时按粒子当时的寿命百分比取）。年寿与发射钟走仿真速度，重力/积分/自旋走原始 dt——
 /// 演示件就是这么分的。
 #[allow(clippy::too_many_arguments)]
 fn advance_emitter(
     run: &mut EmitterRun,
     params: &SimParams,
-    mat: &EmitterMat,
     node_world: &Affine3A,
-    cam: Option<&CamInfo>,
     rng: &mut Rng,
     auto: bool,
     dt: f32,
@@ -2375,7 +3094,6 @@ fn advance_emitter(
         }
     }
     // ---- 粒子环 ----
-    let node_scale = node_world.to_scale_rotation_translation().0;
     let mut i = 0;
     while i < run.particles.len() {
         // 寿限：倒计时走律。寿限非正的按演示件「出生即死」——律对非正
@@ -2383,9 +3101,13 @@ fn advance_emitter(
         // 引擎的模块批（自旋/叠加速/限速）先于推进跑，读的是**推进前**
         // 的年寿进程量。
         let start_lifetime = run.particles[i].core.start_lifetime;
-        let pre_remaining = run.particles[i].core.remaining_lifetime;
-        let verdict =
-            advance_lifetime(&mut run.particles[i].core, sim_dt, RingBufferMode::Disabled, [0.0, 1.0]);
+        let age_pre = run.particles[i].core.normalized_age();
+        let verdict = advance_lifetime(
+            &mut run.particles[i].core,
+            sim_dt,
+            RingBufferMode::Disabled,
+            [0.0, 1.0],
+        );
         if matches!(verdict, LifetimeVerdict::Died) || !(start_lifetime > 0.0) {
             let p = run.particles.remove(i);
             // 死亡事件在回收之前送出：子发射要在死亡那一点的世界位上发射
@@ -2401,13 +3123,19 @@ fn advance_emitter(
         let p = &mut run.particles[i];
         // 推进前年寿进程量：模块批的曲线时刻（0..1 口径；喂引擎原生律时
         // ×100 成 agePercent 口径）。
-        let age_pre = (1.0 - pre_remaining / start_lifetime).clamp(0.0, 1.0);
         // ---- 模块批（引擎次序：自旋 → 叠加速度 → 限速）----
         // 自旋：弧度每秒；公告板只画 z 轴，三轴声明时 x/y 角速度照积
         // （状态存三轴，绘制件只读 z）。randomizeDirection 本作资产结构
         // 上恒 0，按参数喂 0（律不硬编码）。
         if let Some(rol) = &params.rotation_over_lifetime {
-            let _ = rol.advance_rotation(&mut p.rot, p.seed, 0.0, age_pre * 100.0, params.rotation3d, dt);
+            let _ = rol.advance_rotation(
+                &mut p.rot,
+                p.seed,
+                0.0,
+                age_pre * 100.0,
+                params.rotation3d,
+                dt,
+            );
         }
         // velocityOverLifetime 的逐帧叠加值（不入状态）：限速段同帧要读
         // 它，先于限速算好。
@@ -2426,13 +3154,16 @@ fn advance_emitter(
                 p.seed,
                 age_pre * 100.0,
                 dt,
-                DragSize { components: [p.size_x, p.size_y, 0.0], size3d: false },
+                DragSize {
+                    components: [p.size_x, p.size_y, 0.0],
+                    size3d: false,
+                },
             );
         }
         // ---- 推进（引擎的 Simulate 段）----
         // 有效速度 = 状态速度 + 叠加速度，再整体乘 speedModifier（叠加
         // 值不入状态）。
-        let u = (1.0 - p.core.remaining_lifetime / p.core.start_lifetime).clamp(0.0, 1.0);
+        let u = p.core.normalized_age();
         let mut eff = Vec3::from(p.core.velocity) + anim;
         if let Some(vol) = &params.vol {
             let modifier = vol.speed_modifier.evaluate(u, p.r);
@@ -2455,6 +3186,7 @@ fn advance_emitter(
             node_world.transform_point3(Vec3::from(p.core.position))
         };
         // 尺寸：sizeOverLifetime 的 X 轴乘子（Y 轴另有曲线，否则共用 X）。
+        // 屏幕占比上下限与渲染器缩放由源绘制件施加（不在这里折算）。
         let kx = match &params.size_over_lifetime {
             Some(curve) => curve.evaluate(u, p.r),
             None => 1.0,
@@ -2463,33 +3195,19 @@ fn advance_emitter(
             Some(curve) => curve.evaluate(u, p.r),
             None => kx,
         };
-        let mut sx = (p.size_x * kx).abs().max(MIN_PARTICLE_SCALE);
-        let mut sy = (p.size_y * ky).abs().max(MIN_PARTICLE_SCALE);
-        // 屏幕占比截断：比的是全尺寸对视口全宽，两轴同乘一个比例（保持
-        // 作者写的长宽比）。
-        if let Some(cam) = cam {
-            let ratio = screen_clamp_ratio(cam, p.world, sx.max(sy), mat.min_frac, mat.max_frac);
-            if ratio != 1.0 {
-                sx *= ratio;
-                sy *= ratio;
-                run.clamped += 1;
-            }
-        }
-        // 节点链缩放折算进有效尺寸（世界空间粒子挂在世界父节点下，不吃）。
-        p.sx = if params.world_space { sx } else { sx * node_scale.x };
-        p.sy = if params.world_space { sy } else { sy * node_scale.y };
+        p.size.x = p.size_x * kx;
+        p.size.y = p.size_y * ky;
+        // 绘制速度（Stretch 读）：状态速度 + 叠加速度，换到世界系。
+        let drawn = Vec3::from(p.core.velocity) + anim;
+        p.velocity = if params.world_space {
+            drawn
+        } else {
+            node_world.transform_vector3(drawn)
+        };
+        p.age_percent = p.core.age_percent;
         // 颜色：colorOverLifetime 每帧整组覆写。
         if let Some(col) = &params.color_over_lifetime {
             p.color = col.evaluate(u, p.r);
-        }
-        // 片表帧。
-        if let Some(sheet) = &params.texture_sheet {
-            let total = sheet.tiles_x * sheet.tiles_y;
-            if total > 0 {
-                p.frame = (sheet.frame_over_time.evaluate(u, p.r) * total as f32)
-                    .floor()
-                    .clamp(0.0, (total - 1) as f32) as u32;
-            }
         }
         i += 1;
     }
@@ -2514,7 +3232,10 @@ fn advance_instance(
         return false;
     }
     // ---- 挂点帧（根的父）----
-    let npc_global = globals.get(inst.npc).map(|g| g.affine()).unwrap_or(Affine3A::IDENTITY);
+    let npc_global = globals
+        .get(inst.npc)
+        .map(|g| g.affine())
+        .unwrap_or(Affine3A::IDENTITY);
     let anchor = mount_frame(mount_entity(item.anchor, &inst.mounts), globals, npc_global);
     let anchor_quat = anchor.to_scale_rotation_translation().1;
     // ---- 顶挂旋转 ----
@@ -2530,7 +3251,11 @@ fn advance_instance(
                 inst.node_rot[top] = anchor_quat.inverse() * q;
             }
         } else if item.keep_position {
-            let hips = mount_frame(inst.mounts.hips, globals, npc_global);
+            let hips = mount_frame(
+                inst.timeline_rotation_reference.or(inst.mounts.hips),
+                globals,
+                npc_global,
+            );
             let (_, hips_quat, hips_pos) = hips.to_scale_rotation_translation();
             let yaw = particle_yaw_rad(hips_pos, hips_quat, cam.pos);
             inst.node_rot[top] = Quat::from_rotation_x(-yaw);
@@ -2559,18 +3284,21 @@ fn advance_instance(
         advance_emitter(
             &mut inst.emitters[ri],
             &item.emitters[def].params,
-            &item.emitters[def].material,
             &node_world,
-            cam,
             &mut inst.rng,
             auto,
             dt,
         );
+        if let Some(sheet) = item.emitters[def].params.texture_sheet.as_ref() {
+            trace_sheet(item, def, sheet, &mut inst.emitters[ri]);
+        }
         // 死亡路由（演示件 onDeath 内联）：记录概率门 → 目标的第一发
         // burst。目标没建运行时（被别的门摘掉）就不触发。
         let deaths = std::mem::take(&mut inst.emitters[ri].deaths);
         for sub in &item.emitters[def].params.sub_emitters {
-            let Some(&ti) = inst.emitter_index.get(&sub.target) else { continue };
+            let Some(&ti) = inst.emitter_index.get(&sub.target) else {
+                continue;
+            };
             let target_node = item.emitters[sub.target].node;
             let target_world = inst.worlds[target_node];
             for death_pos in &deaths {
@@ -2597,11 +3325,18 @@ fn advance_instance(
             apply_clip(inst, start, inst.clock);
             return true;
         }
-        inst.phase = if clips.is_some_and(|c| c.loop_.is_some()) { Phase::Loop } else { Phase::Live };
+        inst.phase = if clips.is_some_and(|c| c.loop_.is_some()) {
+            Phase::Loop
+        } else {
+            Phase::Live
+        };
     }
     if inst.phase == Phase::Loop {
         if let Some(loop_clip) = clips.and_then(|c| c.loop_.as_ref()) {
-            let base = clips.and_then(|c| c.start.as_ref()).map(|c| c.duration).unwrap_or(0.0);
+            let base = clips
+                .and_then(|c| c.start.as_ref())
+                .map(|c| c.duration)
+                .unwrap_or(0.0);
             let span = num(loop_clip.duration, 0.0).max(0.001);
             let t = (inst.clock - num(base, 0.0)) % span;
             apply_clip(inst, Some(loop_clip), t);
@@ -2612,7 +3347,11 @@ fn advance_instance(
         inst.end_clock += dt;
         let end = clips.and_then(|c| c.end.as_ref());
         if let Some(clip) = end {
-            apply_clip(inst, Some(clip), inst.end_clock.min(num(clip.duration, 0.0)));
+            apply_clip(
+                inst,
+                Some(clip),
+                inst.end_clock.min(num(clip.duration, 0.0)),
+            );
         }
         // 收场宽限：end 段时长 + disposeDelaySeconds（语料恒 1.0）。
         let dur = end.map(|c| c.duration).unwrap_or(0.0);
@@ -2630,7 +3369,9 @@ fn advance_instance(
 /// 缺省 100。
 fn fill_sprite_buffer(item: &Item, inst: &Instance, node_idx: usize, buffer: &mut SlotMesh) {
     let node = &item.nodes[node_idx];
-    let Some(sprite_idx) = node.sprite else { return };
+    let Some(sprite_idx) = node.sprite else {
+        return;
+    };
     let sprite = &item.sprites[sprite_idx];
     let tex = &item.textures[sprite.texture];
     let ppu = num(sprite.ppu, 100.0);
@@ -2648,7 +3389,10 @@ fn fill_sprite_buffer(item: &Item, inst: &Instance, node_idx: usize, buffer: &mu
     // 角序 [TL, TR, BL, BR]（v=1 是贴图上沿；pivot 是 0..1 系里的锚点）。
     let mut pos = [[0.0f32; 3]; 4];
     let mut uv = [[0.0f32; 2]; 4];
-    for (c, (u, v)) in [(0.0, 1.0), (1.0, 1.0), (0.0, 0.0), (1.0, 0.0)].into_iter().enumerate() {
+    for (c, (u, v)) in [(0.0, 1.0), (1.0, 1.0), (0.0, 0.0), (1.0, 0.0)]
+        .into_iter()
+        .enumerate()
+    {
         let local = Vec3::new((u - px) * w, (v - py) * h, 0.0);
         let world = inst.worlds[node_idx].transform_point3(local);
         pos[c] = [world.x, world.y, world.z];
@@ -2657,9 +3401,11 @@ fn fill_sprite_buffer(item: &Item, inst: &Instance, node_idx: usize, buffer: &mu
     buffer.quad(&pos, &uv, node.color, node.sprite_double_side);
 }
 
-/// 发射器位的一帧顶点流：逐粒子 billboard——四角走粒子世界位 + 相机基
-/// （自旋角转正交基），uv 走「片表折格 → 基础图旋转」链（材质级 ST 在
-/// 着色器里乘）。相机缺席时不画（billboard 基不存在，退化成空流）。
+/// 发射器位的一帧顶点流：逐粒子四角由源绘制件（`source_billboard::write`，
+/// 与站点粒子同一份）按渲染器记录算出——渲染空间、pivot、allowRoll、屏幕
+/// 占比上下限、三轴欧拉角与 Stretch 几何都在那里，本函数不另写角点式。
+/// uv 在其角序上走「片表折格 → 基础图旋转」链（材质级 ST 在着色器里乘）。
+/// 相机缺席时不画（观察基不存在，退化成空流）。
 fn fill_emitter_buffer(
     item: &Item,
     inst: &Instance,
@@ -2667,40 +3413,132 @@ fn fill_emitter_buffer(
     cam: Option<&CamInfo>,
     buffer: &mut SlotMesh,
 ) {
-    let Some(&ri) = inst.emitter_index.get(&emitter_idx) else { return };
+    let Some(&ri) = inst.emitter_index.get(&emitter_idx) else {
+        return;
+    };
     let run = &inst.emitters[ri];
     let e = &item.emitters[emitter_idx];
+    let (Some(cam), Some(draw)) = (cam, e.draw.as_ref()) else {
+        return;
+    };
+    if run.particles.is_empty() {
+        return;
+    }
     let double = e.material.cull == 0.0;
-    let Some(cam) = cam else { return };
-    let sheet = e
-        .params
-        .texture_sheet
-        .as_ref()
-        .filter(|t| t.tiles_x > 0 && t.tiles_y > 0);
-    for p in &run.particles {
-        let (cs, sn) = p.rot[2].sin_cos();
-        let tx = sheet.map(|t| t.tiles_x as f32).unwrap_or(1.0);
-        let ty = sheet.map(|t| t.tiles_y as f32).unwrap_or(1.0);
+    let local = !e.params.world_space;
+    // The simulation space to world: the emitter node's world transform for a
+    // Local system, the identity for a World one; the owner is the node.
+    let node_world = inst.worlds[e.node];
+    let to_world = if local {
+        node_world
+    } else {
+        Affine3A::IDENTITY
+    };
+    let frame = draw.scaling.apply(source_frame(
+        &GlobalTransform::from(node_world),
+        &cam.global,
+    ));
+    let m = to_world.matrix3;
+    let simulation = Mat3::from_cols(
+        -reflect(Vec3::from(m.x_axis)),
+        reflect(Vec3::from(m.y_axis)),
+        reflect(Vec3::from(m.z_axis)),
+    );
+    let velocity_aligned = matches!(draw.mode, source_billboard::Mode::Billboard)
+        && draw.alignment == Alignment::Velocity;
+    if velocity_aligned {
+        // The Velocity basis composition is read for unit-scale owners only
+        // (as on the site path); a scaled owner draws nothing, loudly.
+        let unit = |s: Vec3| (s - Vec3::ONE).abs().max_element() <= 1.0e-5;
+        if !(unit(frame.scale) && unit(to_world.to_scale_rotation_translation().0)) {
+            warn_once!(
+                "[emoticon] {}: Velocity billboard over a non-unit owner scale is not read; drawn empty",
+                item.name
+            );
+            return;
+        }
+    }
+    let instances: Vec<crate::particle_geometry::Instance> = run
+        .particles
+        .iter()
+        .map(|p| crate::particle_geometry::Instance {
+            position: reflect(p.world),
+            // The Velocity basis reads the simulation-space velocity; the
+            // Stretch body reads the world velocity.
+            velocity: reflect(if velocity_aligned {
+                p.velocity
+            } else {
+                to_world.transform_vector3(p.velocity)
+            }),
+            rotation: Vec3::from_array(p.rot),
+            size: p.size,
+            colour: Vec4::from_array(p.color),
+            custom1: Vec4::ZERO,
+            custom2: Vec4::ZERO,
+            seed: p.seed,
+            age_percent: p.age_percent,
+            axis: Vec3::Z,
+        })
+        .collect();
+    let mut scratch = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::MAIN_WORLD,
+    );
+    source_billboard::write(
+        &mut scratch,
+        draw,
+        &instances,
+        &frame,
+        local,
+        cam.fov_y,
+        cam.aspect,
+        simulation,
+        Vec3::ZERO,
+    );
+    let (
+        Some(VertexAttributeValues::Float32x3(positions)),
+        Some(VertexAttributeValues::Float32x2(uvs)),
+    ) = (
+        scratch.attribute(Mesh::ATTRIBUTE_POSITION),
+        scratch.attribute(Mesh::ATTRIBUTE_UV_0),
+    )
+    else {
+        return;
+    };
+    let sheet = e.params.texture_sheet.as_ref();
+    for (k, p) in run.particles.iter().enumerate() {
+        // The writer's four corners per particle, placed by their UV into
+        // this buffer's corner order [TL, TR, BL, BR] (v=1 is the top edge).
         let mut pos = [[0.0f32; 3]; 4];
+        for c in 4 * k..4 * k + 4 {
+            let slot = match (uvs[c][0] > 0.5, uvs[c][1] > 0.5) {
+                (false, true) => 0,
+                (true, true) => 1,
+                (false, false) => 2,
+                (true, false) => 3,
+            };
+            pos[slot] = positions[c];
+        }
+        // The texture sheet: the rectangle of this particle's table position,
+        // from its seed and its age percent now (the source samples the UV
+        // module when it builds the geometry).
+        let rect = sheet.map(|s| s.rect(p.seed, p.core.age_percent));
         let mut uv = [[0.0f32; 2]; 4];
-        // 角序 [TL, TR, BL, BR]：v=1 是格子上沿。
-        for (c, (u, v)) in [(0.0, 1.0), (1.0, 1.0), (0.0, 0.0), (1.0, 0.0)].into_iter().enumerate() {
-            let ax = (u - 0.5) * p.sx;
-            let ay = (v - 0.5) * p.sy;
-            let corner = p.world + cam.right * (cs * ax - sn * ay) + cam.up * (sn * ax + cs * ay);
-            pos[c] = [corner.x, corner.y, corner.z];
-            // 片表：格内 (u,v) 折到该帧的格位（帧号行优先、从上往下）。
-            let (mut ux, mut uy) = match sheet {
-                Some(s) => (
-                    u / tx + (p.frame % s.tiles_x) as f32 / tx,
-                    v / ty + (1.0 - 1.0 / ty - (p.frame / s.tiles_x) as f32 / ty),
-                ),
-                None => (u, v),
+        for (c, (u, v)) in [(0.0, 1.0), (1.0, 1.0), (0.0, 0.0), (1.0, 0.0)]
+            .into_iter()
+            .enumerate()
+        {
+            // Each authored corner UV maps through the sheet rectangle.
+            let [mut ux, mut uy] = match rect {
+                Some(rect) => rect.apply([u, v]),
+                None => [u, v],
             };
             if e.material.uv_turns != 0.0 {
                 // 基础图旋转：轴心 (0.5, 0.5) 的整圈数旋转（装载侧已断言与
-                // 片表/非恒等 ST 互斥，此处只做旋转这一段）。
-                let (rc, rs) = (std::f32::consts::TAU * e.material.uv_turns).sin_cos();
+                // 片表/非恒等 ST 互斥，此处只做旋转这一段）。The source vertex
+                // program takes angle = turns * 2pi and writes u' = dx cos + dy sin,
+                // v' = -dx sin + dy cos about the pivot.
+                let (rs, rc) = (std::f32::consts::TAU * e.material.uv_turns).sin_cos();
                 let qx = ux - 0.5;
                 let qy = uy - 0.5;
                 ux = 0.5 + qx * rc + qy * rs;
@@ -2732,7 +3570,10 @@ fn build_and_write(
             }
         }
         if let Some(mesh) = meshes.get_mut(&mesh_handle) {
-            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, std::mem::take(&mut buffer.positions));
+            mesh.insert_attribute(
+                Mesh::ATTRIBUTE_POSITION,
+                std::mem::take(&mut buffer.positions),
+            );
             mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, std::mem::take(&mut buffer.uvs));
             mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, std::mem::take(&mut buffer.colors));
             mesh.insert_indices(Indices::U32(std::mem::take(&mut buffer.indices)));
@@ -2763,9 +3604,7 @@ pub(crate) fn advance(
     holds: Query<&crate::talk::TalkHold>,
     time: Res<Time>,
 ) {
-    let (Some(mut driver), Some(mut emotes), Some(archive)) =
-        (driver, emotes, archive)
-    else {
+    let (Some(mut driver), Some(mut emotes), Some(archive)) = (driver, emotes, archive) else {
         return;
     };
     let dt = time.delta_secs().min(DT_CLAMP);
@@ -2781,10 +3620,8 @@ pub(crate) fn advance(
             .map(|s| s.x as f32 / s.y.max(1) as f32)
             .unwrap_or(0.0);
         CamInfo {
+            global: *g,
             pos: g.translation(),
-            right: g.right().as_vec3(),
-            up: g.up().as_vec3(),
-            forward: g.forward().as_vec3(),
             fov_y,
             aspect,
         }
@@ -2794,7 +3631,13 @@ pub(crate) fn advance(
 
     // ---- 展示轮播：第一名册成员没有在屏实例的帧推一轮（冒烟可复算）；
     // 对话持留的成员跳过（同一实例槽归对话侧）----
-    if let (Some(first), Some(showcase)) = (roster.iter().min_by_key(|(_, unit)| unit.0).map(|(npc, _)| npc), driver.showcase.as_mut()) {
+    if let (Some(first), Some(showcase)) = (
+        roster
+            .iter()
+            .min_by_key(|(_, unit)| unit.0)
+            .map(|(npc, _)| npc),
+        driver.showcase.as_mut(),
+    ) {
         if globals.get(first).is_ok()
             && !holds.contains(first)
             && !emotes.instances.iter().any(|i| i.npc == first)
@@ -2841,13 +3684,23 @@ pub(crate) fn advance(
             .get(inst.npc)
             .map(|g| g.affine())
             .unwrap_or(Affine3A::IDENTITY);
-        let anchor = mount_frame(mount_entity(item.anchor, &inst.mounts), &globals, npc_global);
+        let anchor = mount_frame(
+            mount_entity(item.anchor, &inst.mounts),
+            &globals,
+            npc_global,
+        );
         compute_worlds(item, inst, &anchor);
         build_and_write(item, inst, cam.as_ref(), &mut *meshes);
     }
     // 回收（倒序：swap_remove 动的是尾部，先删大下标不动小下标）。
     for &ii in dead.iter().rev() {
-        clear_instance(&mut commands, &mut *meshes, &mut *materials, &mut *emotes, ii);
+        clear_instance(
+            &mut commands,
+            &mut *meshes,
+            &mut *materials,
+            &mut *emotes,
+            ii,
+        );
     }
 }
 
@@ -2867,20 +3720,43 @@ pub(crate) fn serve_rest(
     names: Query<&Name>,
     cameras: Query<(&GlobalTransform, &Projection, &Camera), With<Camera3d>>,
 ) {
-    let (Some(mut emotes), Some(archive)) = (emotes, archive) else { return };
+    let (Some(mut emotes), Some(archive)) = (emotes, archive) else {
+        return;
+    };
     for request in requests.0.drain(..) {
         match request {
-            RestEmoteCommand::Show { npc, name, not_play_se } => {
+            RestEmoteCommand::Show {
+                npc,
+                name,
+                not_play_se,
+            } => {
                 if !not_play_se {
                     warn!("[emoticon] Rest 表情请求音效：当前表情 soundInput 播放器尚未供给");
                 }
-                show_emote(&mut commands, &mut meshes, &mut materials, &globals,
-                    &children, &names, &cameras, &mut emotes, &archive.archive,
-                    &name, npc, 0.0);
+                show_emote(
+                    &mut commands,
+                    &mut meshes,
+                    &mut materials,
+                    &globals,
+                    &children,
+                    &names,
+                    &cameras,
+                    &mut emotes,
+                    &archive.archive,
+                    &name,
+                    npc,
+                    0.0,
+                );
             }
             RestEmoteCommand::Hide { npc } => {
-                if let Some(index) = emotes.instances.iter().position(|instance| instance.npc == npc) {
-                    let clips = archive.archive.items[emotes.instances[index].item].clips.as_ref();
+                if let Some(index) = emotes
+                    .instances
+                    .iter()
+                    .position(|instance| instance.npc == npc)
+                {
+                    let clips = archive.archive.items[emotes.instances[index].item]
+                        .clips
+                        .as_ref();
                     request_hide(&mut emotes.instances[index], clips);
                 }
             }
@@ -2960,9 +3836,8 @@ pub(crate) fn report(
         let peak: usize = inst.emitters.iter().map(|r| r.peak).sum();
         let spawned: u64 = inst.emitters.iter().map(|r| r.spawned_total).sum();
         let refused: u64 = inst.emitters.iter().map(|r| r.refused).sum();
-        let clamped: u32 = inst.emitters.iter().map(|r| r.clamped).sum();
         debug!(
-            "[emoticon] 在屏 {}（{:?}）clock={:.2} 绘制位 {} · 活粒子 {} · 峰值 {} · 累计出生 {} · 拒发 {} · 截断 {}",
+            "[emoticon] 在屏 {}（{:?}）clock={:.2} 绘制位 {} · 活粒子 {} · 峰值 {} · 累计出生 {} · 拒发 {}",
             item.name,
             inst.phase,
             inst.clock,
@@ -2971,7 +3846,6 @@ pub(crate) fn report(
             peak,
             spawned,
             refused,
-            clamped
         );
     }
     let owned: usize = emotes.instances.iter().map(|i| i.draws.len()).sum();

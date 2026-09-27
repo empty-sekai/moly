@@ -4,19 +4,27 @@
 //! 各只有一族）：曲线 `constant{value}` / `twoConstants{min,max}` /
 //! `curve{multiplier,keys}` / `twoCurves{multiplier,minKeys,maxKeys}`；
 //! 梯度 `color{color}` / `gradient{gradient}` / `twoColors{min,max}` /
-//! `twoGradients{minGradient,maxGradient}` / `randomColor{color}`。
+//! `twoGradients{minGradient,maxGradient}` / `randomColor{gradient}`。
 //! 解析**失败响亮**：键在而形状不对是数据损伤，静默兜底会重建
 //! 「接没接线分不清」。
 //!
 //! 识别但**未映射**的键不丢弃也不报错——收进 `unmapped` 具名清单
-//! （customData、subEmitters、collision、forceOverLifetime、scalingMode、
-//! emitterVelocityMode、randomSeed、autoRandomSeed、renderer、以及 shape
+//! （scalingMode、renderer、以及 shape
 //! 的非圆参数族），消费侧可见「这条数据在，但律没管它」。
 
 use std::fmt;
 
+mod events;
+mod noise;
+mod texture_sheet;
+pub use noise::{NoiseParams, NoiseQuality};
+pub use texture_sheet::TextureSheetParams;
+pub use events::{CollisionMode, CollisionParams, CollisionQuality, CollisionType,
+    ForceParams, InheritVelocityMode, InheritVelocityParams, PlaneLink, PlaneSource, SubEmitterParams, SubEmitterSourcePointer,
+    SubEmitterTrigger, TrailMode, TrailParams, TrailTextureMode};
+
 use crate::particle::buffer::RingBufferMode;
-use crate::particle::emit::Burst;
+use crate::particle::emit::{Burst, BurstCycles};
 use crate::particle::json::{self, Value};
 use crate::particle::value::{
     Curve, CurveKey, Gradient, GradientAlphaKey, GradientColorKey, MinMaxCurve, MinMaxGradient,
@@ -105,6 +113,8 @@ pub struct StartParams {
     pub size_z: Option<MinMaxCurve>,
     pub size3d: bool,
     pub rotation: MinMaxCurve,
+    pub rotation_x: Option<MinMaxCurve>,
+    pub rotation_y: Option<MinMaxCurve>,
     pub rotation3d: bool,
     pub color: MinMaxGradient,
     pub gravity_modifier: MinMaxCurve,
@@ -130,7 +140,72 @@ pub struct ShapeParams {
     /// 欧拉旋转（度）。施加口径见 `shape::euler_rotate_deg`。
     pub rotation: [f32; 3],
     pub position: [f32; 3],
+    /// Authored controls are preserved even when a renderer cannot consume
+    /// them yet. Missing legacy metadata is distinguishable from authored zero.
+    pub controls: ShapeControls,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShapeMode { Random, Loop, PingPong, BurstSpread }
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ShapeControls {
+    pub source_version: Option<u32>,
+    pub angle: Option<f32>,
+    pub length: Option<f32>,
+    pub donut_radius: Option<f32>,
+    pub scale: Option<[f32; 3]>,
+    pub box_thickness: Option<[f32; 3]>,
+    pub arc_mode: Option<ShapeMode>,
+    pub arc_spread: Option<f32>,
+    pub arc_speed: Option<MinMaxCurve>,
+    pub radius_mode: Option<ShapeMode>,
+    pub radius_spread: Option<f32>,
+    pub radius_speed: Option<MinMaxCurve>,
+    pub align_to_direction: Option<bool>,
+    pub random_direction: Option<f32>,
+    pub spherical_direction: Option<f32>,
+    pub random_position: Option<f32>,
+    /// ShapeModule's texture reference. `None` means the export carries no
+    /// texture field (an older producer), so the value is undecided; it is
+    /// not the null reference.
+    pub texture: Option<ShapeTexture>,
+    /// The mesh shape's placement (0 vertex, 1 edge, 2 triangle).
+    pub mesh_placement: Option<u32>,
+    pub mesh_normal_offset: Option<f32>,
+    /// Whether the mesh shape takes its colours from the mesh and renderer
+    /// materials (the mesh-emission block of a Mesh shape).
+    pub mesh_use_colors: Option<bool>,
+    /// Whether the mesh shape emits from one submesh only.
+    pub mesh_use_material_index: Option<bool>,
+    /// That submesh's index; the export writes it only when the filter is on.
+    pub mesh_material_index: Option<u32>,
+}
+
+/// ShapeModule's texture reference. The exporter writes `null` for the null
+/// reference and `{fileId, pathId}` for any other. A reference whose file
+/// and path ids are both zero is the null reference too. The samplers read
+/// so far (torus and cone volume) branch on it: a non-null texture makes
+/// them read the texture controls and call ApplyTexture for each birth
+/// group, which is not transcribed; the null reference skips both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShapeTexture {
+    None,
+    Reference { file_id: i32, path_id: String },
+}
+
+impl ShapeTexture {
+    /// `Ok(None)` when the key is absent: the texture is undecided.
+    fn from_value(value: Option<&Value>, ctx: &str) -> Result<Option<Self>, EffectsError> {
+        Ok(match SubEmitterSourcePointer::from_value(value, ctx)? {
+            SubEmitterSourcePointer::Missing => None,
+            SubEmitterSourcePointer::Null => Some(Self::None),
+            pointer if pointer.is_authored_null() => Some(Self::None),
+            SubEmitterSourcePointer::Pointer { file_id, path_id } => Some(Self::Reference { file_id, path_id }),
+        })
+    }
+}
+
 
 /// velocityOverLifetime 模块。
 #[derive(Debug, Clone, PartialEq)]
@@ -140,6 +215,34 @@ pub struct VelocityOverLifetimeParams {
     pub z: MinMaxCurve,
     pub speed_modifier: MinMaxCurve,
     pub in_world_space: bool,
+    /// Orbital motion is emitter-local even when linear motion is world-space.
+    pub orbital: [MinMaxCurve; 3],
+    pub orbital_offset: [MinMaxCurve; 3],
+    pub radial: MinMaxCurve,
+}
+
+/// customData 模块的一个槽（`custom1` / `custom2`）。
+///
+/// 逐粒子自定义流：每个分量是一条独立的 MinMax 曲线，按归一化寿命逐粒子
+/// 求值，结果进顶点属性的对应分量。着色器侧的选择器按
+/// `coord = 分量号 × 10 + 来源号` 取值，来源 1 = `custom1`、2 = `custom2`、
+/// 0 = 常量零向量。
+///
+/// `componentCount` 之外的分量不写，留零——源程序的选择器可以指到那里，
+/// 取到的就是零。
+#[derive(Debug, Clone, PartialEq)]
+pub struct CustomDataSlot {
+    /// 实际产出的分量数（1..=4）。
+    pub component_count: usize,
+    /// 逐分量曲线，长度等于 `component_count`。
+    pub components: Vec<MinMaxCurve>,
+}
+
+/// customData 模块：两个槽，缺席或 `disabled` 为 None。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CustomDataParams {
+    pub custom1: Option<CustomDataSlot>,
+    pub custom2: Option<CustomDataSlot>,
 }
 
 /// sizeOverLifetime 模块（分轴时 `curve` 是 X 轴）。
@@ -161,6 +264,19 @@ pub struct RotationOverLifetimeParams {
     pub curve: MinMaxCurve,
     pub x: Option<MinMaxCurve>,
     pub y: Option<MinMaxCurve>,
+}
+
+/// rotationBySpeed block (RotationBySpeedModule). As in rotationOverLifetime,
+/// `curve` is the z axis and `x`/`y` are exported only with separate axes;
+/// `range` is the speed range the module remaps to [0, 1]. The export carries
+/// the block only for an enabled module.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RotationBySpeedParams {
+    pub separate_axes: bool,
+    pub curve: MinMaxCurve,
+    pub x: Option<MinMaxCurve>,
+    pub y: Option<MinMaxCurve>,
+    pub range: [f32; 2],
 }
 
 /// limitVelocity 模块。`drag` 为 null（提取面在拖拽曲线为空时写 null）
@@ -189,7 +305,17 @@ pub struct EmitterParams {
     pub prewarm: bool,
     pub play_on_awake: bool,
     pub simulation_speed: f32,
+    /// Serialized useUnscaledTime: the system's frame reads Time.unscaledDeltaTime
+    /// instead of Time.deltaTime. Missing/null stays unknown, never false.
+    pub use_unscaled_time: Option<bool>,
     pub simulation_space: SimulationSpace,
+    /// MainModule emitterVelocityMode as exported (0 Transform, 1 Rigidbody,
+    /// 2 Custom). None when the key is absent or not a non-negative integer;
+    /// the consumer refuses what it cannot read rather than assume Transform.
+    pub emitter_velocity_mode: Option<u32>,
+    /// Missing/null source ownership remains unknown; zero/false are authored values.
+    pub random_seed: Option<u32>,
+    pub auto_random_seed: Option<bool>,
     pub start_delay: MinMaxCurve,
     pub ring_buffer_mode: RingBufferMode,
     pub ring_buffer_loop_range: [f32; 2],
@@ -197,31 +323,44 @@ pub struct EmitterParams {
     pub start: StartParams,
     pub emission: Option<EmissionParams>,
     pub shape: Option<ShapeParams>,
+    /// None means legacy/unknown module state, not an implicitly disabled shape.
+    pub shape_enabled: Option<bool>,
     pub velocity_over_lifetime: Option<VelocityOverLifetimeParams>,
     pub color_over_lifetime: Option<MinMaxGradient>,
     pub size_over_lifetime: Option<SizeOverLifetimeParams>,
     pub rotation_over_lifetime: Option<RotationOverLifetimeParams>,
+    pub rotation_by_speed: Option<RotationBySpeedParams>,
     pub limit_velocity: Option<LimitVelocityParams>,
+    /// 逐粒子自定义流。两个槽都缺席或 `disabled` 时为 None。
+    pub custom_data: Option<CustomDataParams>,
+    pub sub_emitters: Vec<SubEmitterParams>,
+    pub collision: Option<CollisionParams>,
+    pub trails: Option<TrailParams>,
+    pub force: Option<ForceParams>,
+    pub inherit_velocity: Option<InheritVelocityParams>,
+    pub texture_sheet: Option<TextureSheetParams>,
+    pub noise: Option<NoiseParams>,
     /// system 层 + particle 层识别到但未映射的键（去重、按序）。
     pub unmapped: Vec<String>,
 }
 
 /// system 层已映射进参数的键——之外的键全部进 `unmapped`。
-/// 「识别但具名不迁」的那五个（scalingMode、emitterVelocityMode、
-/// randomSeed、autoRandomSeed、customData）**不在**此列：它们同样落
+/// 「识别但具名不迁」的 scalingMode **不在**此列：它落
 /// `unmapped`，让消费侧看见「数据在、律没管」。
-const MAPPED_SYSTEM_KEYS: [&str; 18] = [
-    "duration", "looping", "prewarm", "playOnAwake", "simulationSpeed",
-    "simulationSpace", "startDelay", "ringBufferMode", "ringBufferLoopRange",
+const MAPPED_SYSTEM_KEYS: [&str; 32] = [
+    "duration", "looping", "prewarm", "playOnAwake", "simulationSpeed", "useUnscaledTime",
+    "simulationSpace", "emitterVelocityMode", "startDelay", "ringBufferMode", "ringBufferLoopRange",
     "maxParticles", "start", "emission", "shape", "velocityOverLifetime",
-    "colorOverLifetime", "sizeOverLifetime", "rotationOverLifetime",
-    "limitVelocity",
+    "colorOverLifetime", "sizeOverLifetime", "rotationOverLifetime", "rotationBySpeed",
+    "limitVelocity", "customData", "shapeEnabled", "subEmitters", "collision",
+    "trails", "forceOverLifetime", "inheritVelocity", "textureSheet",
+    "noise", "randomSeed", "autoRandomSeed",
 ];
 
 /// start 层已映射键。
-const MAPPED_START_KEYS: [&str; 10] = [
+const MAPPED_START_KEYS: [&str; 12] = [
     "lifetime", "speed", "size", "sizeY", "sizeZ", "size3D", "rotation",
-    "rotation3D", "color", "gravityModifier",
+    "rotationX", "rotationY", "rotation3D", "color", "gravityModifier",
 ];
 
 impl EmitterParams {
@@ -293,9 +432,21 @@ impl EmitterParams {
             }
             _ => None,
         };
+        let custom_data = match system_get(system, "customData") {
+            Some(v) if !v.as_object().map(|o| o.is_empty()).unwrap_or(false) => {
+                CustomDataParams::from_value(v, &ctx)?
+            }
+            _ => None,
+        };
         let rotation_over_lifetime = match system_get(system, "rotationOverLifetime") {
             Some(v) if !v.as_object().map(|o| o.is_empty()).unwrap_or(false) => {
                 Some(RotationOverLifetimeParams::from_value(v, &ctx)?)
+            }
+            _ => None,
+        };
+        let rotation_by_speed = match system_get(system, "rotationBySpeed") {
+            Some(v) if !v.as_object().map(|o| o.is_empty()).unwrap_or(false) => {
+                Some(RotationBySpeedParams::from_value(v, &ctx)?)
             }
             _ => None,
         };
@@ -313,6 +464,12 @@ impl EmitterParams {
             prewarm: bool_of(system_get(system, "prewarm"), &format!("{ctx}.prewarm"))?,
             play_on_awake: bool_of(system_get(system, "playOnAwake"), &format!("{ctx}.playOnAwake"))?,
             simulation_speed: g("simulationSpeed")?,
+            use_unscaled_time: opt_bool_of(system_get(system, "useUnscaledTime"), &format!("{ctx}.useUnscaledTime"))?,
+            random_seed: match system_get(system, "randomSeed") {
+                None | Some(Value::Null) => None,
+                value => Some(u32_of(value, &format!("{ctx}.randomSeed"))?),
+            },
+            auto_random_seed: opt_bool_of(system_get(system, "autoRandomSeed"), &format!("{ctx}.autoRandomSeed"))?,
             simulation_space: {
                 let name = str_of(
                     system_get(system, "simulationSpace"),
@@ -320,6 +477,10 @@ impl EmitterParams {
                 )?;
                 SimulationSpace::from_str(&name, &ctx)?
             },
+            emitter_velocity_mode: system_get(system, "emitterVelocityMode")
+                .and_then(Value::as_f64)
+                .filter(|n| n.is_finite() && *n >= 0.0 && n.fract() == 0.0 && *n <= u32::MAX as f64)
+                .map(|n| n as u32),
             start_delay: min_max_curve(
                 system_get(system, "startDelay"),
                 &format!("{ctx}.startDelay"),
@@ -337,11 +498,31 @@ impl EmitterParams {
             )?,
             emission,
             shape,
+            shape_enabled: match system_get(system, "shapeEnabled") {
+                None | Some(Value::Null) => None,
+                value => Some(bool_of(value, &format!("{ctx}.shapeEnabled"))?),
+            },
             velocity_over_lifetime,
             color_over_lifetime,
             size_over_lifetime,
+            custom_data,
             rotation_over_lifetime,
+            rotation_by_speed,
             limit_velocity,
+            sub_emitters: system_get(system, "subEmitters")
+                .map(|v| events::sub_emitters(v, &ctx)).transpose()?.unwrap_or_default(),
+            collision: system_get(system, "collision")
+                .map(|v| CollisionParams::from_value(v, &ctx)).transpose()?,
+            trails: system_get(system, "trails")
+                .map(|v| TrailParams::from_value(v, &ctx)).transpose()?,
+            force: system_get(system, "forceOverLifetime")
+                .map(|v| ForceParams::from_value(v, &ctx)).transpose()?,
+            inherit_velocity: system_get(system, "inheritVelocity")
+                .map(|v| events::InheritVelocityParams::from_value(v, &ctx)).transpose()?,
+            texture_sheet: system_get(system, "textureSheet")
+                .map(|v| TextureSheetParams::from_value(v, &ctx)).transpose()?,
+            noise: system_get(system, "noise")
+                .map(|v| NoiseParams::from_value(v, &ctx)).transpose()?,
             unmapped,
         })
     }
@@ -361,25 +542,78 @@ impl StartParams {
                 unmapped.push(k.clone());
             }
         }
+        // The serialized scalars, as InitialModule's load clamps them.
+        let (life, speed, size, rotation) = (StartClamp::Lifetime, StartClamp::Speed, StartClamp::Size, StartClamp::Rotation);
         Ok(Self {
-            lifetime: lifetime_curve(obj_get(obj, "lifetime"), &format!("{ctx}.start.lifetime"))?,
-            speed: min_max_curve(obj_get(obj, "speed"), &format!("{ctx}.start.speed"))?,
-            size: min_max_curve(obj_get(obj, "size"), &format!("{ctx}.start.size"))?,
+            lifetime: life.apply(lifetime_curve(obj_get(obj, "lifetime"), &format!("{ctx}.start.lifetime"))?),
+            speed: speed.apply(min_max_curve(obj_get(obj, "speed"), &format!("{ctx}.start.speed"))?),
+            size: size.apply(min_max_curve(obj_get(obj, "size"), &format!("{ctx}.start.size"))?),
             size_y: obj_get(obj, "sizeY")
-                .map(|v| min_max_curve(Some(v), &format!("{ctx}.start.sizeY")))
+                .map(|v| min_max_curve(Some(v), &format!("{ctx}.start.sizeY")).map(|c| size.apply(c)))
                 .transpose()?,
             size_z: obj_get(obj, "sizeZ")
-                .map(|v| min_max_curve(Some(v), &format!("{ctx}.start.sizeZ")))
+                .map(|v| min_max_curve(Some(v), &format!("{ctx}.start.sizeZ")).map(|c| size.apply(c)))
                 .transpose()?,
             size3d: bool_of(obj_get(obj, "size3D"), &format!("{ctx}.start.size3D"))?,
-            rotation: min_max_curve(obj_get(obj, "rotation"), &format!("{ctx}.start.rotation"))?,
+            rotation: rotation.apply(min_max_curve(obj_get(obj, "rotation"), &format!("{ctx}.start.rotation"))?),
+            rotation_x: obj_get(obj, "rotationX")
+                .map(|v| min_max_curve(Some(v), &format!("{ctx}.start.rotationX")).map(|c| rotation.apply(c)))
+                .transpose()?,
+            rotation_y: obj_get(obj, "rotationY")
+                .map(|v| min_max_curve(Some(v), &format!("{ctx}.start.rotationY")).map(|c| rotation.apply(c)))
+                .transpose()?,
             rotation3d: bool_of(obj_get(obj, "rotation3D"), &format!("{ctx}.start.rotation3D"))?,
-            color: min_max_gradient(obj_get(obj, "color"), &format!("{ctx}.start.color"))?,
+            color: start_color(obj_get(obj, "color"), &format!("{ctx}.start.color"))?,
             gravity_modifier: min_max_curve(
                 obj_get(obj, "gravityModifier"),
                 &format!("{ctx}.start.gravityModifier"),
             )?,
         })
+    }
+}
+
+/// The ranges InitialModule's load (its Transfer) clamps the start curves'
+/// scalars into: first the scalar the curve's polynomial is built with (the
+/// constant, the two-constant maximum or the curve multiplier), then the
+/// two-constant minimum. The lifetime is at least 1e-4 (`fmax`); the speed
+/// lies within +-1e5; each size axis within [0, 1e5], a negative value
+/// becoming +0; each rotation axis within +-1745.3293 (1e5 degrees in
+/// radians). Each bounded clamp is a compare against the lower bound and an
+/// `fmin` against the upper, so a NaN scalar stays NaN, as through `fmax`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum StartClamp {
+    Lifetime,
+    Speed,
+    Size,
+    Rotation,
+}
+
+impl StartClamp {
+    pub(crate) fn scalar(self, v: f32) -> f32 {
+        let fmin = |a: f32, b: f32| if a.is_nan() { a } else { a.min(b) };
+        let bounded = |v: f32, lo: u32, hi: u32| {
+            if v < f32::from_bits(lo) { f32::from_bits(lo) } else { fmin(v, f32::from_bits(hi)) }
+        };
+        match self {
+            Self::Lifetime => if v.is_nan() { v } else { v.max(f32::from_bits(0x38d1_b717)) },
+            Self::Speed => bounded(v, 0xc7c3_5000, 0x47c3_5000),
+            Self::Size => if v < 0.0 { 0.0 } else { fmin(v, f32::from_bits(0x47c3_5000)) },
+            Self::Rotation => bounded(v, 0xc4da_2a89, 0x44da_2a89),
+        }
+    }
+
+    pub(crate) fn apply(self, curve: MinMaxCurve) -> MinMaxCurve {
+        match curve {
+            MinMaxCurve::Constant(v) => MinMaxCurve::Constant(self.scalar(v)),
+            MinMaxCurve::TwoConstants { min, max } => {
+                let max = self.scalar(max);
+                MinMaxCurve::TwoConstants { min: self.scalar(min), max }
+            }
+            MinMaxCurve::Curve { multiplier, max } => MinMaxCurve::Curve { multiplier: self.scalar(multiplier), max },
+            MinMaxCurve::TwoCurves { multiplier, min, max } => {
+                MinMaxCurve::TwoCurves { multiplier: self.scalar(multiplier), min, max }
+            }
+        }
     }
 }
 
@@ -393,17 +627,19 @@ impl EmissionParams {
                 .map(|(i, b)| {
                     let bctx = format!("{ctx}.emission.bursts[{i}]");
                     let count = min_max_curve(b.get("count"), &format!("{bctx}.count"))?;
-                    let cycles = u32_of(b.get("cycleCount"), &format!("{bctx}.cycleCount"))?;
-                    if cycles == 0 {
-                        return Err(EffectsError(format!(
-                            "{bctx}.cycleCount: 0 (user-facing counts are >= 1)"
-                        )));
-                    }
+                    // 序列化的 `cycleCount == 0` 是「无限重复」，不是非法值：
+                    // 引擎 Editor 的轮数下拉第 0 项写的就是字面量 0，托管
+                    // setter 也只拒 `< 0`。此处此前把 0 当非法整条拒掉，
+                    // 常驻发射器（喷泉水柱一族）因此一条都进不来。
+                    let cycles = BurstCycles::from_serialized(u32_of(
+                        b.get("cycleCount"),
+                        &format!("{bctx}.cycleCount"),
+                    )?);
                     Ok(Burst {
                         time: f32_of(b.get("time"), &format!("{bctx}.time"))?,
                         count,
                         cycles,
-                        repeat_interval: f32_of(
+                        repeat_interval: burst_repeat_interval(
                             b.get("repeatInterval"),
                             &format!("{bctx}.repeatInterval"),
                         )?,
@@ -430,11 +666,71 @@ impl EmissionParams {
     }
 }
 
-/// shape 层映射的闭集；其余（angle/length/boxThickness/donutRadius/
-/// mesh*/alignToDirection/randomDirectionAmount/sphericalDirectionAmount/
-/// scale）收 unmapped。
-const MAPPED_SHAPE_KEYS: [&str; 6] =
-    ["type", "radius", "radiusThickness", "arc", "rotation", "position"];
+/// Current source lens-flare bursts store +Infinity with cycleCount=0. Keep
+/// that exact interval and cycle count; this decoder does not qualify their
+/// runtime scheduling. Other fields retain their finite-number contracts.
+fn burst_repeat_interval(v: Option<&Value>, ctx: &str) -> Result<f32, EffectsError> {
+    if v.and_then(Value::as_str) == Some("Infinity") {
+        return Ok(f32::INFINITY);
+    }
+    f32_of(v, ctx)
+}
+
+/// shape 层映射的闭集；其余（meshes 与 texture 之外的六个贴图控制键）收
+/// unmapped。
+const MAPPED_SHAPE_KEYS: &[&str] = &[
+    "type", "radius", "radiusThickness", "arc", "rotation", "position", "sourceVersion",
+    "angle", "length", "donutRadius", "scale", "boxThickness", "arcMode", "arcSpread", "arcSpeed",
+    "radiusMode", "radiusSpread", "radiusSpeed", "alignToDirection", "randomDirectionAmount",
+    "sphericalDirectionAmount", "randomPositionAmount", "texture",
+    "meshPlacement", "meshNormalOffset", "meshMaterialIndex", "meshEmission",
+];
+
+impl ShapeMode {
+    fn from_value(value: &Value, ctx: &str) -> Result<Self, EffectsError> {
+        match value.as_str() {
+            Some("Random") => Ok(Self::Random), Some("Loop") => Ok(Self::Loop),
+            Some("PingPong") => Ok(Self::PingPong), Some("BurstSpread") => Ok(Self::BurstSpread),
+            _ => Err(EffectsError(format!("{ctx}: unknown source shape mode"))),
+        }
+    }
+}
+
+impl ShapeControls {
+    fn from_value(value: &Value, ctx: &str) -> Result<Self, EffectsError> {
+        let number = |key: &str| value.get(key).filter(|v| !matches!(v, Value::Null))
+            .map(|v| f32_of(Some(v), &format!("{ctx}.{key}"))).transpose();
+        let vector = |key: &str| value.get(key).filter(|v| !matches!(v, Value::Null))
+            .map(|v| vec3_of(Some(v), &format!("{ctx}.{key}"))).transpose();
+        let curve = |key: &str| value.get(key).filter(|v| !matches!(v, Value::Null))
+            .map(|v| min_max_curve(Some(v), &format!("{ctx}.{key}"))).transpose();
+        let mode = |key: &str| value.get(key).filter(|v| !matches!(v, Value::Null))
+            .map(|v| ShapeMode::from_value(v, &format!("{ctx}.{key}"))).transpose();
+        let mesh_flag = |key: &str| value.get("meshEmission").and_then(|m| m.get(key))
+            .filter(|v| !matches!(v, Value::Null))
+            .map(|v| bool_of(Some(v), &format!("{ctx}.meshEmission.{key}"))).transpose();
+        Ok(Self {
+            source_version:value.get("sourceVersion").map(|v|u32_of(Some(v),ctx)).transpose()?,
+            angle:number("angle")?,length:number("length")?,donut_radius:number("donutRadius")?,
+            scale:vector("scale")?,box_thickness:vector("boxThickness")?,
+            arc_mode:mode("arcMode")?,arc_spread:number("arcSpread")?,arc_speed:curve("arcSpeed")?,
+            radius_mode:mode("radiusMode")?,radius_spread:number("radiusSpread")?,radius_speed:curve("radiusSpeed")?,
+            align_to_direction:value.get("alignToDirection").filter(|v|!matches!(v,Value::Null))
+                .map(|v|bool_of(Some(v),ctx)).transpose()?,
+            random_direction:number("randomDirectionAmount")?,spherical_direction:number("sphericalDirectionAmount")?,
+            random_position:number("randomPositionAmount")?,
+            texture:ShapeTexture::from_value(value.get("texture"),&format!("{ctx}.texture"))?,
+            mesh_placement:value.get("meshPlacement").filter(|v|!matches!(v,Value::Null))
+                .map(|v|u32_of(Some(v),&format!("{ctx}.meshPlacement"))).transpose()?,
+            mesh_normal_offset:number("meshNormalOffset")?,
+            mesh_use_colors:mesh_flag("useColors")?,
+            mesh_use_material_index:mesh_flag("useMaterialIndex")?,
+            mesh_material_index:value.get("meshMaterialIndex").filter(|v|!matches!(v,Value::Null))
+                .map(|v|u32_of(Some(v),&format!("{ctx}.meshMaterialIndex"))).transpose()?,
+        })
+    }
+}
+
 
 impl ShapeParams {
     fn from_value(
@@ -458,6 +754,7 @@ impl ShapeParams {
             arc: f32_of(obj_get(obj, "arc"), &format!("{ctx}.shape.arc"))?,
             rotation: vec3_of(obj_get(obj, "rotation"), &format!("{ctx}.shape.rotation"))?,
             position: vec3_of(obj_get(obj, "position"), &format!("{ctx}.shape.position"))?,
+            controls: ShapeControls::from_value(v, &format!("{ctx}.shape"))?,
         })
     }
 }
@@ -465,7 +762,11 @@ impl ShapeParams {
 impl VelocityOverLifetimeParams {
     fn from_value(v: &Value, ctx: &str) -> Result<Self, EffectsError> {
         let obj = v.as_object().unwrap_or(&[]);
+        let curve = |key: &str| min_max_curve(obj_get(obj, key), &format!("{ctx}.velocityOverLifetime.{key}"));
         Ok(Self {
+            orbital: [curve("orbitalX")?, curve("orbitalY")?, curve("orbitalZ")?],
+            orbital_offset: [curve("orbitalOffsetX")?, curve("orbitalOffsetY")?, curve("orbitalOffsetZ")?],
+            radial: curve("radial")?,
             x: min_max_curve(obj_get(obj, "x"), &format!("{ctx}.velocityOverLifetime.x"))?,
             y: min_max_curve(obj_get(obj, "y"), &format!("{ctx}.velocityOverLifetime.y"))?,
             z: min_max_curve(obj_get(obj, "z"), &format!("{ctx}.velocityOverLifetime.z"))?,
@@ -481,10 +782,74 @@ impl VelocityOverLifetimeParams {
     }
 }
 
-impl SizeOverLifetimeParams {
-    fn from_value(v: &Value, ctx: &str) -> Result<Self, EffectsError> {
+impl CustomDataParams {
+    /// 两个槽都缺席或 `disabled` 时返回 None——没有流要产出。
+    fn from_value(v: &Value, ctx: &str) -> Result<Option<Self>, EffectsError> {
         let obj = v.as_object().unwrap_or(&[]);
-        Ok(Self {
+        let custom1 = CustomDataSlot::from_value(
+            obj_get(obj, "custom1"),
+            &format!("{ctx}.customData.custom1"),
+        )?;
+        let custom2 = CustomDataSlot::from_value(
+            obj_get(obj, "custom2"),
+            &format!("{ctx}.customData.custom2"),
+        )?;
+        if custom1.is_none() && custom2.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(Self { custom1, custom2 }))
+    }
+}
+
+impl CustomDataSlot {
+    fn from_value(v: Option<&Value>, ctx: &str) -> Result<Option<Self>, EffectsError> {
+        let Some(obj) = v.and_then(Value::as_object) else {
+            return Ok(None);
+        };
+        let mode = str_of(obj_get(obj, "mode"), &format!("{ctx}.mode"))?;
+        match mode.as_str() {
+            "disabled" => Ok(None),
+            // `color` 档存的是 MinMaxGradient 不是逐分量曲线，是另一种形状；
+            // 本站语料里 0 条，落这里要响亮拒，不要静默当 vector 读。
+            "vector" => {
+                let count = f32_of(
+                    obj_get(obj, "componentCount"),
+                    &format!("{ctx}.componentCount"),
+                )? as usize;
+                if count == 0 || count > 4 {
+                    return Err(EffectsError(format!(
+                        "{ctx}.componentCount: {count} 不在 1..=4"
+                    )));
+                }
+                let components = obj_get(obj, "components")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| EffectsError(format!("{ctx}.components: array missing")))?;
+                if components.len() < count {
+                    return Err(EffectsError(format!(
+                        "{ctx}.components: {} 条曲线不足 componentCount {count}",
+                        components.len()
+                    )));
+                }
+                let components = components
+                    .iter()
+                    .take(count)
+                    .enumerate()
+                    .map(|(i, c)| min_max_curve(Some(c), &format!("{ctx}.components[{i}]")))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Some(Self {
+                    component_count: count,
+                    components,
+                }))
+            }
+            other => Err(EffectsError(format!("{ctx}.mode: 未实现的档 {other}"))),
+        }
+    }
+}
+
+impl SizeOverLifetimeParams {
+    pub(crate) fn from_value(v: &Value, ctx: &str) -> Result<Self, EffectsError> {
+        let obj = v.as_object().unwrap_or(&[]);
+        let params = Self {
             separate_axes: bool_of(
                 obj_get(obj, "separateAxes"),
                 &format!("{ctx}.sizeOverLifetime.separateAxes"),
@@ -499,7 +864,11 @@ impl SizeOverLifetimeParams {
             z: obj_get(obj, "z")
                 .map(|v| min_max_curve(Some(v), &format!("{ctx}.sizeOverLifetime.z")))
                 .transpose()?,
-        })
+        };
+        if params.separate_axes && (params.y.is_none() || params.z.is_none()) {
+            return Err(EffectsError(format!("{ctx}.sizeOverLifetime: separate axes require Y and Z curves")));
+        }
+        Ok(params)
     }
 }
 
@@ -533,6 +902,20 @@ impl RotationOverLifetimeParams {
             y: obj_get(obj, "y")
                 .map(|v| min_max_curve(Some(v), &m("y")))
                 .transpose()?,
+        })
+    }
+}
+
+impl RotationBySpeedParams {
+    pub(crate) fn from_value(v: &Value, ctx: &str) -> Result<Self, EffectsError> {
+        let obj = v.as_object().unwrap_or(&[]);
+        let m = |k: &str| format!("{ctx}.rotationBySpeed.{k}");
+        Ok(Self {
+            separate_axes: bool_of(obj_get(obj, "separateAxes"), &m("separateAxes"))?,
+            curve: min_max_curve(obj_get(obj, "curve"), &m("curve"))?,
+            x: obj_get(obj, "x").map(|v| min_max_curve(Some(v), &m("x"))).transpose()?,
+            y: obj_get(obj, "y").map(|v| min_max_curve(Some(v), &m("y"))).transpose()?,
+            range: vec2_of(obj_get(obj, "range"), &m("range"))?,
         })
     }
 }
@@ -573,7 +956,7 @@ fn lifetime_curve(v: Option<&Value>, ctx: &str) -> Result<MinMaxCurve, EffectsEr
     min_max_curve(v, ctx)
 }
 
-fn min_max_curve(v: Option<&Value>, ctx: &str) -> Result<MinMaxCurve, EffectsError> {
+pub(crate) fn min_max_curve(v: Option<&Value>, ctx: &str) -> Result<MinMaxCurve, EffectsError> {
     let obj = v
         .and_then(Value::as_object)
         .ok_or_else(|| EffectsError(format!("{ctx}: MinMaxCurve object missing")))?;
@@ -589,20 +972,36 @@ fn min_max_curve(v: Option<&Value>, ctx: &str) -> Result<MinMaxCurve, EffectsErr
         }),
         "curve" => Ok(MinMaxCurve::Curve {
             multiplier: f32_of(obj_get(obj, "multiplier"), &format!("{ctx}.multiplier"))?,
-            max: curve_of(obj_get(obj, "keys"), &format!("{ctx}.keys"))?,
+            max: wrapped(curve_of(obj_get(obj, "keys"), &format!("{ctx}.keys"))?,
+                obj, ["preInfinity", "postInfinity"], ctx)?,
         }),
         "twoCurves" => Ok(MinMaxCurve::TwoCurves {
             multiplier: f32_of(obj_get(obj, "multiplier"), &format!("{ctx}.multiplier"))?,
-            min: curve_of(obj_get(obj, "minKeys"), &format!("{ctx}.minKeys"))?,
-            max: curve_of(obj_get(obj, "maxKeys"), &format!("{ctx}.maxKeys"))?,
+            min: wrapped(curve_of(obj_get(obj, "minKeys"), &format!("{ctx}.minKeys"))?,
+                obj, ["minPreInfinity", "minPostInfinity"], ctx)?,
+            max: wrapped(curve_of(obj_get(obj, "maxKeys"), &format!("{ctx}.maxKeys"))?,
+                obj, ["maxPreInfinity", "maxPostInfinity"], ctx)?,
         }),
         _ => Err(EffectsError(format!("{ctx}.mode: unknown {mode:?}"))),
     }
 }
 
-/// 键数组 → 曲线。null 斜率拒（阶跃键在语料模拟键里不存在，仅
-/// customData 出过 4 个 null 斜率键，而 customData 本就不迁移），出现
-/// 即是数据损伤。加权键按位解析：激活位（入权 bit0/出权 bit1）的权重
+/// The lane's serialized wrap modes (`m_PreInfinity`, `m_PostInfinity`). An
+/// absent or null field stays unknown: only a lane the reader leaves
+/// unoptimized reads it, and that evaluator refuses an unknown wrap. A present
+/// field that is not a non-negative integer is a parse error.
+fn wrapped(mut curve: Curve, obj: &[(String, Value)], keys: [&str; 2], ctx: &str) -> Result<Curve, EffectsError> {
+    let wrap = |key: &str| match obj_get(obj, key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => u32_of(Some(v), &format!("{ctx}.{key}")).map(Some),
+    };
+    curve.pre_wrap = wrap(keys[0])?;
+    curve.post_wrap = wrap(keys[1])?;
+    Ok(curve)
+}
+
+/// 键数组 → 曲线。阶跃切线保留有符号 Infinity；旧 null 编码丢失了符号，
+/// 必须从源重新提取，不能推断为任意一端。加权键按位解析：激活位的权重
 /// 必读，缺失即拒；未激活位的权重惰性（求值时代 1/3），缺失容。
 fn curve_of(v: Option<&Value>, ctx: &str) -> Result<Curve, EffectsError> {
     let arr = v
@@ -625,9 +1024,13 @@ fn curve_of(v: Option<&Value>, ctx: &str) -> Result<Curve, EffectsError> {
         };
         let slope = |name: &str| -> Result<f32, EffectsError> {
             let s = k.get(name).ok_or_else(|| {
-                EffectsError(format!("{kctx}.{name}: missing (null slope = step key)"))
+                EffectsError(format!("{kctx}.{name}: missing tangent"))
             })?;
-            f32_of(Some(s), &format!("{kctx}.{name}"))
+            match s.as_str() {
+                Some("Infinity") => Ok(f32::INFINITY),
+                Some("-Infinity") => Ok(f32::NEG_INFINITY),
+                _ => f32_of(Some(s), &format!("{kctx}.{name}")),
+            }
         };
         keys.push(CurveKey {
             time: f32_of(k.get("time"), &format!("{kctx}.time"))?,
@@ -645,16 +1048,41 @@ fn curve_of(v: Option<&Value>, ctx: &str) -> Result<Curve, EffectsError> {
             return Err(EffectsError(format!("{ctx}: keys not sorted by time")));
         }
     }
-    Ok(Curve { multiplier: 1.0, keys })
+    Ok(Curve { multiplier: 1.0, keys, pre_wrap: None, post_wrap: None })
 }
 
 /// `color{color:[r,g,b,a]}` / `gradient{gradient}` / `twoColors{min,max}` /
-/// `twoGradients{minGradient,maxGradient}` / `randomColor{color}`。
+/// `twoGradients{minGradient,maxGradient}` / `randomColor{gradient}`。
 ///
-/// `randomColor` 在引擎里读 `gradientMax`，但提取侧把它写成了平色
-/// [r,g,b,a]——按数据实际携带的翻成**单键常梯度**（任意时刻求值恒该
-/// 色），不做发明。若上游将来给出 `gradient` 键，同样接住。
-fn min_max_gradient(v: Option<&Value>, ctx: &str) -> Result<MinMaxGradient, EffectsError> {
+/// Random colour requires its authored gradient; a flat colour is lost source data.
+/// Every gradient consumer but the start colour takes 2..8 keys per group in
+/// time order: the start colour's evaluation is the only one transcribed for
+/// a single key and for keys out of order (`start_color`).
+pub(crate) fn min_max_gradient(v: Option<&Value>, ctx: &str) -> Result<MinMaxGradient, EffectsError> {
+    min_max_gradient_with(v, ctx, KeyTable::Ordered)
+}
+
+/// The start colour block: 1..8 keys per group in any time order, as the
+/// native table holds them. Crate-visible so native start-colour replays
+/// decode exported blocks with this decoder rather than a second one.
+pub(crate) fn start_color(v: Option<&Value>, ctx: &str) -> Result<MinMaxGradient, EffectsError> {
+    min_max_gradient_with(v, ctx, KeyTable::StartColor)
+}
+
+/// Which gradient key tables a decode admits.
+#[derive(Clone, Copy, PartialEq)]
+enum KeyTable {
+    /// 2..8 keys per group, times non-decreasing.
+    Ordered,
+    /// 1..8 keys per group, any order.
+    StartColor,
+}
+
+fn min_max_gradient_with(
+    v: Option<&Value>,
+    ctx: &str,
+    keys: KeyTable,
+) -> Result<MinMaxGradient, EffectsError> {
     let obj = v
         .and_then(Value::as_object)
         .ok_or_else(|| EffectsError(format!("{ctx}: MinMaxGradient object missing")))?;
@@ -667,45 +1095,42 @@ fn min_max_gradient(v: Option<&Value>, ctx: &str) -> Result<MinMaxGradient, Effe
         "gradient" => Ok(MinMaxGradient::Gradient(gradient_of(
             obj_get(obj, "gradient"),
             &format!("{ctx}.gradient"),
+            keys,
         )?)),
         "twoColors" => Ok(MinMaxGradient::TwoColors {
             min: vec4_of(obj_get(obj, "min"), &format!("{ctx}.min"))?,
             max: vec4_of(obj_get(obj, "max"), &format!("{ctx}.max"))?,
         }),
         "twoGradients" => Ok(MinMaxGradient::TwoGradients {
-            min: gradient_of(obj_get(obj, "minGradient"), &format!("{ctx}.minGradient"))?,
-            max: gradient_of(obj_get(obj, "maxGradient"), &format!("{ctx}.maxGradient"))?,
+            min: gradient_of(obj_get(obj, "minGradient"), &format!("{ctx}.minGradient"), keys)?,
+            max: gradient_of(obj_get(obj, "maxGradient"), &format!("{ctx}.maxGradient"), keys)?,
         }),
-        "randomColor" => {
-            if let Some(g) = obj_get(obj, "gradient") {
-                Ok(MinMaxGradient::RandomColor(gradient_of(
-                    Some(g),
-                    &format!("{ctx}.gradient"),
-                )?))
-            } else {
-                let color = vec4_of(obj_get(obj, "color"), &format!("{ctx}.color"))?;
-                Ok(MinMaxGradient::RandomColor(constant_gradient(color)))
-            }
-        }
+        "randomColor" => Ok(MinMaxGradient::RandomColor(gradient_of(
+            obj_get(obj, "gradient"), &format!("{ctx}.gradient"), keys,
+        )?)),
         _ => Err(EffectsError(format!("{ctx}.mode: unknown {mode:?}"))),
     }
 }
 
-/// 平色 → 单键常梯度（randomColor 的提取侧形状）。
-fn constant_gradient(color: [f32; 4]) -> Gradient {
-    Gradient {
-        color_keys: vec![GradientColorKey {
-            time: 0.0,
-            color: [color[0], color[1], color[2]],
-        }],
-        alpha_keys: vec![GradientAlphaKey { time: 0.0, alpha: color[3] }],
-    }
-}
-
-fn gradient_of(v: Option<&Value>, ctx: &str) -> Result<Gradient, EffectsError> {
+fn gradient_of(v: Option<&Value>, ctx: &str, keys: KeyTable) -> Result<Gradient, EffectsError> {
     let obj = v
         .and_then(Value::as_object)
         .ok_or_else(|| EffectsError(format!("{ctx}: gradient object missing")))?;
+    use super::gradient::{GradientColorSpace, GradientMode};
+    let mode = match str_of(obj_get(obj, "interpolation"), &format!("{ctx}.interpolation"))?.as_str() {
+        "blend" => GradientMode::Blend,
+        "fixed" => GradientMode::Fixed,
+        other => return Err(EffectsError(format!("{ctx}.interpolation: unsupported {other:?}"))),
+    };
+    // Decode integrity of the exported ColorSpace enum (-1 uninitialized, 0
+    // gamma, 1 linear). It is not a start-colour envelope: the native gradient
+    // kernels never read the colour-space byte.
+    let color_space = match obj_get(obj, "colorSpace").and_then(Value::as_f64) {
+        Some(-1.0) => GradientColorSpace::Unspecified,
+        Some(0.0) => GradientColorSpace::Gamma,
+        Some(1.0) => GradientColorSpace::Linear,
+        other => return Err(EffectsError(format!("{ctx}.colorSpace: invalid or missing {other:?}"))),
+    };
     let color_keys = obj_get(obj, "colorKeys")
         .and_then(Value::as_array)
         .ok_or_else(|| EffectsError(format!("{ctx}.colorKeys: array missing")))?
@@ -733,7 +1158,26 @@ fn gradient_of(v: Option<&Value>, ctx: &str) -> Result<Gradient, EffectsError> {
             })
         })
         .collect::<Result<Vec<_>, EffectsError>>()?;
-    Ok(Gradient { color_keys, alpha_keys })
+    let validate_times = |times: Vec<f32>, field: &str| -> Result<(), EffectsError> {
+        let in_range = times.iter().all(|time| (0.0..=1.0).contains(time));
+        let admitted = match keys {
+            KeyTable::Ordered => {
+                (2..=8).contains(&times.len()) && times.windows(2).all(|pair| pair[0] <= pair[1])
+            }
+            KeyTable::StartColor => (1..=8).contains(&times.len()),
+        };
+        if !in_range || !admitted {
+            let expected = match keys {
+                KeyTable::Ordered => "2..8 ordered keys in [0,1]",
+                KeyTable::StartColor => "1..8 keys in [0,1]",
+            };
+            return Err(EffectsError(format!("{ctx}.{field}: expected {expected}")));
+        }
+        Ok(())
+    };
+    validate_times(color_keys.iter().map(|key| key.time).collect(), "colorKeys")?;
+    validate_times(alpha_keys.iter().map(|key| key.time).collect(), "alphaKeys")?;
+    Ok(Gradient { color_keys, alpha_keys, mode, color_space })
 }
 
 // —— 基元读取 ————————————————————————————————————
@@ -883,12 +1327,21 @@ mod tests {
                   "y": {"mode": "twoConstants", "min": -0.5, "max": -1.0},
                   "z": {"mode": "twoConstants", "min": 0.0, "max": 0.0},
                   "speedModifier": {"mode": "constant", "value": 1.0},
+                  "orbitalX": {"mode": "constant", "value": 0.0},
+                  "orbitalY": {"mode": "constant", "value": 0.0},
+                  "orbitalZ": {"mode": "constant", "value": 0.0},
+                  "orbitalOffsetX": {"mode": "constant", "value": 0.0},
+                  "orbitalOffsetY": {"mode": "constant", "value": 0.0},
+                  "orbitalOffsetZ": {"mode": "constant", "value": 0.0},
+                  "radial": {"mode": "constant", "value": 0.0},
                   "inWorldSpace": false
                 },
                 "colorOverLifetime": {
                   "mode": "gradient",
                   "gradient": {
-                    "colorKeys": [{"time": 0.0, "color": [1.0, 1.0, 1.0]}],
+                    "interpolation": "blend", "colorSpace": -1,
+                    "colorKeys": [{"time": 0.0, "color": [1.0, 1.0, 1.0]},
+                                  {"time": 1.0, "color": [1.0, 1.0, 1.0]}],
                     "alphaKeys": [{"time": 0.0, "alpha": 0.0},
                                   {"time": 1.0, "alpha": 1.0}]
                   }
@@ -900,6 +1353,58 @@ mod tests {
         }
       }
     }"#;
+
+    #[test]
+    fn missing_orbital_curve_is_not_implicitly_neutral() {
+        let missing = SYNTHETIC.replace("\"orbitalX\": {\"mode\": \"constant\", \"value\": 0.0},", "");
+        let error = Effects::from_json_str(missing.as_bytes()).unwrap_err();
+        assert!(error.to_string().contains("orbitalX"));
+    }
+
+    #[test]
+    fn burst_interval_preserves_positive_infinity_and_original_cycle_count() {
+        for cycles in [0, 1, 3] {
+            let source = SYNTHETIC.replace(
+                "\"cycleCount\": 1, \"repeatInterval\": 0.01",
+                &format!("\"cycleCount\": {cycles}, \"repeatInterval\": \"Infinity\""),
+            );
+            let effects = Effects::from_json_str(source.as_bytes()).unwrap();
+            let burst = &effects.emitters[0].emission.as_ref().unwrap().bursts[0];
+            assert_eq!(burst.repeat_interval.to_bits(), f32::INFINITY.to_bits());
+            assert_eq!(burst.cycles, BurstCycles::from_serialized(cycles));
+        }
+        for interval in [0.0_f32, -0.0, 0.01, 2.0] {
+            let source = SYNTHETIC.replace(
+                "\"repeatInterval\": 0.01",
+                &format!("\"repeatInterval\": {interval:?}"),
+            );
+            let effects = Effects::from_json_str(source.as_bytes()).unwrap();
+            let burst = &effects.emitters[0].emission.as_ref().unwrap().bursts[0];
+            assert_eq!(burst.repeat_interval.to_bits(), interval.to_bits());
+        }
+    }
+
+    #[test]
+    fn burst_infinity_exception_is_field_specific_and_rejects_other_spellings() {
+        for interval in ["\"-Infinity\"", "\"NaN\"", "\"inf\"", "\"1\"", "null", "true", "1e300"] {
+            let source = SYNTHETIC.replace(
+                "\"repeatInterval\": 0.01",
+                &format!("\"repeatInterval\": {interval}"),
+            );
+            let error = Effects::from_json_str(source.as_bytes()).unwrap_err();
+            assert!(error.0.contains("effect fx_rain/root/drop.emission.bursts[0].repeatInterval"), "{error}");
+        }
+        for (before, after, field) in [
+            ("\"time\": 0.0, \"count\"", "\"time\": \"Infinity\", \"count\"", "time"),
+            ("\"probability\": 1.0", "\"probability\": \"Infinity\"", "probability"),
+            ("\"count\": {\"mode\": \"constant\", \"value\": 1.0}",
+             "\"count\": {\"mode\": \"constant\", \"value\": \"Infinity\"}", "count.value"),
+        ] {
+            let source = SYNTHETIC.replace(before, after);
+            let error = Effects::from_json_str(source.as_bytes()).unwrap_err();
+            assert!(error.0.contains(&format!("effect fx_rain/root/drop.emission.bursts[0].{field}")), "{error}");
+        }
+    }
 
     #[test]
     fn parses_full_synthetic_entry() {
@@ -928,7 +1433,7 @@ mod tests {
         }
         // burst 用户面口径直接落。
         let b = &e.emission.as_ref().unwrap().bursts[1];
-        assert_eq!(b.cycles, 3);
+        assert_eq!(b.cycles, BurstCycles::from_serialized(3));
         assert_eq!(b.repeat_interval, 2.0);
         assert_eq!(b.probability, 0.25);
         // shape 只映射圆参数。
@@ -941,15 +1446,73 @@ mod tests {
             e.velocity_over_lifetime.as_ref().unwrap().y,
             MinMaxCurve::TwoConstants { min: -0.5, max: -1.0 }
         );
-        // 未映射键可见：system 层 4 个 + shape 的 angle + renderer。
+        // Typed seed ownership preserves explicit zero/true without starting RNG.
+        assert_eq!(e.random_seed, Some(0));
+        assert_eq!(e.auto_random_seed, Some(true));
+        // 未映射键可见：system 层 scalingMode + renderer。
         assert!(e.unmapped.contains(&"scalingMode".to_string()));
-        assert!(e.unmapped.contains(&"emitterVelocityMode".to_string()));
-        assert!(e.unmapped.contains(&"randomSeed".to_string()));
-        assert!(e.unmapped.contains(&"autoRandomSeed".to_string()));
-        assert!(e.unmapped.contains(&"shape.angle".to_string()));
+        assert!(!e.unmapped.contains(&"randomSeed".to_string()));
+        assert!(!e.unmapped.contains(&"autoRandomSeed".to_string()));
+        assert_eq!(e.shape.as_ref().unwrap().controls.angle, Some(25.0));
+        assert!(!e.unmapped.contains(&"shape.angle".to_string()));
         assert!(e.unmapped.contains(&"renderer".to_string()));
         // effect 层键（kind 等）收在 Effects 清单。
         assert!(fx.unmapped_effect_keys.contains(&"kind".to_string()));
+    }
+
+    #[test]
+    fn source_seed_unknown_is_distinct_from_explicit_zero_and_manual_false() {
+        for source in [
+            SYNTHETIC.replace("\"randomSeed\": 0,", "").replace("\"autoRandomSeed\": true,", ""),
+            SYNTHETIC.replace("\"randomSeed\": 0", "\"randomSeed\": null")
+                .replace("\"autoRandomSeed\": true", "\"autoRandomSeed\": null"),
+        ] {
+            let emitter = Effects::from_json_str(source.as_bytes()).unwrap().emitters.remove(0);
+            assert_eq!(emitter.random_seed, None);
+            assert_eq!(emitter.auto_random_seed, None);
+        }
+        for seed in [0, u32::MAX] {
+            let source = SYNTHETIC.replace("\"randomSeed\": 0", &format!("\"randomSeed\": {seed}"))
+                .replace("\"autoRandomSeed\": true", "\"autoRandomSeed\": false");
+            let emitter = Effects::from_json_str(source.as_bytes()).unwrap().emitters.remove(0);
+            assert_eq!(emitter.random_seed, Some(seed));
+            assert_eq!(emitter.auto_random_seed, Some(false));
+        }
+    }
+
+    #[test]
+    fn malformed_seed_controls_fail_with_source_location_instead_of_defaulting() {
+        for seed in ["-1", "4294967296", "0.5", "true", "\"0\""] {
+            let source = SYNTHETIC.replace("\"randomSeed\": 0", &format!("\"randomSeed\": {seed}"));
+            let error = Effects::from_json_str(source.as_bytes()).unwrap_err();
+            assert!(error.0.contains("effect fx_rain/root/drop.randomSeed"), "{error}");
+        }
+        let source = SYNTHETIC.replace("\"autoRandomSeed\": true", "\"autoRandomSeed\": 0");
+        let error = Effects::from_json_str(source.as_bytes()).unwrap_err();
+        assert!(error.0.contains("effect fx_rain/root/drop.autoRandomSeed"), "{error}");
+    }
+
+    #[test]
+    fn emitter_preserves_noise_block_and_keeps_unqualified_controls_for_law_gate() {
+        let noise = r#""noise":{"separateAxes":true,
+            "strength":{"mode":"twoConstants","min":0.1,"max":0.9},
+            "strengthY":{"mode":"constant","value":2},"strengthZ":{"mode":"constant","value":3},
+            "frequency":0.5,"damping":false,"octaves":3,"octaveMultiplier":0.4,"octaveScale":2,
+            "quality":"medium","dimensions":2,"scrollSpeed":{"mode":"constant","value":-1},
+            "remapEnabled":true,"remap":{"mode":"constant","value":4},
+            "remapY":{"mode":"constant","value":5},"remapZ":{"mode":"constant","value":6},
+            "positionAmount":{"mode":"constant","value":7},"rotationAmount":{"mode":"constant","value":8},
+            "sizeAmount":{"mode":"constant","value":9}},"duration": 5.0"#;
+        let source = SYNTHETIC.replace("\"duration\": 5.0", noise);
+        let emitter = Effects::from_json_str(source.as_bytes()).unwrap().emitters.remove(0);
+        assert!(!emitter.unmapped.iter().any(|key| key == "noise"));
+        let params = emitter.noise.unwrap();
+        assert_eq!(params.quality, NoiseQuality::Medium);
+        assert_eq!(params.dimensions, 2);
+        assert_eq!(params.octaves, 3);
+        assert_eq!(params.strength, MinMaxCurve::TwoConstants { min: 0.1, max: 0.9 });
+        assert_eq!(params.remap_z, MinMaxCurve::Constant(6.0));
+        assert!(crate::particle::noise::NoiseLaw::from_params(&params).is_err());
     }
 
     #[test]
@@ -987,6 +1550,29 @@ mod tests {
     }
 
     #[test]
+    fn signed_step_tangents_survive_particle_schema() {
+        let keys = json::parse(br#"[
+            {"time":0.0,"value":2.0,"inSlope":0.0,"outSlope":"Infinity","weightedMode":0},
+            {"time":1.0,"value":7.0,"inSlope":"Infinity","outSlope":0.0,"weightedMode":0}
+        ]"#).unwrap();
+        let curve = curve_of(Some(&keys), "step").unwrap();
+        assert_eq!(curve.evaluate(0.5), 2.0);
+        assert_eq!(curve.evaluate(1.0), 7.0);
+        let keys = json::parse(br#"[
+            {"time":0.0,"value":2.0,"inSlope":0.0,"outSlope":"-Infinity","weightedMode":0},
+            {"time":1.0,"value":7.0,"inSlope":"-Infinity","outSlope":0.0,"weightedMode":0}
+        ]"#).unwrap();
+        assert_eq!(curve_of(Some(&keys), "step").unwrap().evaluate(0.5), 7.0);
+        // Native positive-infinity return precedes the negative check, even
+        // when an authored segment supplies opposite signs at its two ends.
+        let keys = json::parse(br#"[
+            {"time":0.0,"value":2.0,"inSlope":0.0,"outSlope":"Infinity","weightedMode":2,"outWeight":0.25},
+            {"time":1.0,"value":7.0,"inSlope":"-Infinity","outSlope":0.0,"weightedMode":1,"inWeight":0.4}
+        ]"#).unwrap();
+        assert_eq!(curve_of(Some(&keys), "step").unwrap().evaluate(0.5), 2.0);
+    }
+
+    #[test]
     fn rejects_unknown_mode_and_missing_particles() {
         let bad = r#"{"effects":{"e":{"particles":[{"node":"n","system":{"duration":1.0,"looping":true,"prewarm":false,"playOnAwake":true,"simulationSpeed":1.0,"simulationSpace":"Local","startDelay":{"mode":"wibble","value":0.0},"ringBufferMode":0,"ringBufferLoopRange":[0.0,1.0],"maxParticles":10,"start":{"lifetime":{"mode":"constant","value":1.0},"speed":{"mode":"constant","value":1.0},"size":{"mode":"constant","value":1.0},"rotation":{"mode":"constant","value":0.0},"color":{"mode":"color","color":[1.0,1.0,1.0,1.0]},"gravityModifier":{"mode":"constant","value":0.0},"size3D":false,"rotation3D":false}}}]}}}"#;
         let err = Effects::from_json_str(bad.as_bytes()).unwrap_err();
@@ -998,17 +1584,10 @@ mod tests {
     }
 
     #[test]
-    fn random_color_flat_form_becomes_constant_gradient() {
+    fn random_color_rejects_flattened_source_gradient() {
         let bad = r#"{"effects":{"e":{"particles":[{"node":"n","system":{"duration":1.0,"looping":true,"prewarm":false,"playOnAwake":true,"simulationSpeed":1.0,"simulationSpace":"Local","startDelay":{"mode":"constant","value":0.0},"ringBufferMode":0,"ringBufferLoopRange":[0.0,1.0],"maxParticles":10,"start":{"lifetime":{"mode":"constant","value":1.0},"speed":{"mode":"constant","value":1.0},"size":{"mode":"constant","value":1.0},"rotation":{"mode":"constant","value":0.0},"color":{"mode":"randomColor","color":[0.25,0.5,0.75,1.0]},"gravityModifier":{"mode":"constant","value":0.0},"size3D":false,"rotation3D":false}}}]}}}"#;
-        let fx = Effects::from_json_str(bad.as_bytes()).unwrap();
-        let color = fx.emitters[0].start.color.clone();
-        // randomColor 的求值把 lerp 当时间用；常梯度在任何入参下恒该色。
-        for t in [0.0, 0.3, 1.0] {
-            for lerp in [0.0, 0.7] {
-                let c = color.evaluate(t, lerp);
-                assert_eq!(c, [0.25, 0.5, 0.75, 1.0]);
-            }
-        }
+        let error = Effects::from_json_str(bad.as_bytes()).unwrap_err();
+        assert!(error.to_string().contains("gradient"));
     }
 
     #[test]
@@ -1016,5 +1595,73 @@ mod tests {
         let bad = r#"{"effects":{"e":{"particles":[{"node":"n","system":{"duration":null,"looping":true,"prewarm":false,"playOnAwake":true,"simulationSpeed":1.0,"simulationSpace":"Local","startDelay":{"mode":"constant","value":0.0},"ringBufferMode":0,"ringBufferLoopRange":[0.0,1.0],"maxParticles":10,"start":{"lifetime":{"mode":"constant","value":1.0},"speed":{"mode":"constant","value":1.0},"size":{"mode":"constant","value":1.0},"rotation":{"mode":"constant","value":0.0},"color":{"mode":"color","color":[1.0,1.0,1.0,1.0]},"gravityModifier":{"mode":"constant","value":0.0},"size3D":false,"rotation3D":false}}}]}}}"#;
         let err = Effects::from_json_str(bad.as_bytes()).unwrap_err();
         assert!(err.0.contains("e/n.duration"), "{}", err.0);
+    }
+    #[test]
+    fn source_shape_modes_and_curves_are_not_flattened() {
+        let value = super::super::json::parse(br#"{
+          "sourceVersion":1,"angle":25,"length":5,"donutRadius":2,
+          "scale":[2,0.25,-3],"boxThickness":[0.1,0.2,0.3],
+          "arcMode":"Loop","arcSpread":0.25,
+          "arcSpeed":{"mode":"constant","value":0.7},
+          "radiusMode":"BurstSpread","radiusSpread":0.5,
+          "radiusSpeed":{"mode":"constant","value":2},
+          "alignToDirection":false,"randomDirectionAmount":0,
+          "sphericalDirectionAmount":0,"randomPositionAmount":0.15
+        }"#).unwrap();
+        let controls = ShapeControls::from_value(&value, "shape").unwrap();
+        assert_eq!(controls.source_version,Some(1));
+        assert_eq!(controls.arc_mode,Some(ShapeMode::Loop));
+        assert_eq!(controls.radius_mode,Some(ShapeMode::BurstSpread));
+        assert_eq!(controls.scale,Some([2.0,0.25,-3.0]));
+        assert_eq!(controls.donut_radius,Some(2.0));
+        assert_eq!(controls.random_position,Some(0.15));
+        assert!(controls.arc_speed.is_some());
+        let missing = super::super::json::parse(b"{}").unwrap();
+        assert_eq!(ShapeControls::from_value(&missing,"shape").unwrap(),ShapeControls::default());
+    }
+
+    #[test]
+    fn unknown_source_shape_modes_are_rejected_not_randomised() {
+        let value = super::super::json::parse(br#"{"arcMode":"FutureMode"}"#).unwrap();
+        assert!(ShapeControls::from_value(&value,"shape").unwrap_err().0.contains("shape.arcMode"));
+    }
+
+    /// InitialModule's load clamps against the native instructions (rows
+    /// `field input output`: 0 lifetime maximum, 1 lifetime minimum, 2 speed
+    /// maximum, 3 speed minimum, 4 size, 5 rotation), NaN as a class. Each
+    /// plausible misreading must mismatch somewhere on the same rows.
+    #[test]
+    #[ignore = "MOLY_INITIAL_CLAMP_ROWS must identify the native load clamp rows"]
+    fn start_load_clamps_match_native_transfer() {
+        let text = std::fs::read_to_string(std::env::var_os("MOLY_INITIAL_CLAMP_ROWS").expect("MOLY_INITIAL_CLAMP_ROWS")).unwrap();
+        let rows: Vec<[u32; 3]> = text.lines().filter(|l| !l.trim().is_empty()).map(|l| {
+            let v: Vec<u32> = l.split_whitespace().map(|x| x.parse().unwrap()).collect();
+            [v[0], v[1], v[2]]
+        }).collect();
+        let rule = |field: u32| match field {
+            0 | 1 => StartClamp::Lifetime,
+            2 | 3 => StartClamp::Speed,
+            4 => StartClamp::Size,
+            5 => StartClamp::Rotation,
+            other => panic!("field {other}"),
+        };
+        let mismatches = |clamp: &dyn Fn(u32, f32) -> f32| rows.iter().filter(|&&[field, input, native]| {
+            let ours = clamp(field, f32::from_bits(input));
+            !(ours.to_bits() == native || (ours.is_nan() && f32::from_bits(native).is_nan()))
+        }).count();
+        let product = mismatches(&|field, v| rule(field).scalar(v));
+        println!("load clamp rows {}, mismatched {product}", rows.len());
+        assert!(rows.len() > 6 && product == 0);
+        let arms: [(&str, &dyn Fn(u32, f32) -> f32); 4] = [
+            ("lifetimeFloorIsStartMinimum", &|field, v| if field < 2 { v.max(f32::from_bits(0x3727_c5ac)) } else { rule(field).scalar(v) }),
+            ("negativeSizeKept", &|field, v| if field == 4 { v.min(f32::from_bits(0x47c3_5000)) } else { rule(field).scalar(v) }),
+            ("speedUnclamped", &|field, v| if field == 2 || field == 3 { v } else { rule(field).scalar(v) }),
+            ("rotationInDegrees", &|field, v| if field == 5 { v.clamp(-1.0e5, 1.0e5) } else { rule(field).scalar(v) }),
+        ];
+        for (name, arm) in arms {
+            let red = mismatches(arm);
+            println!("arm {name}: mismatched {red}");
+            assert!(red > 0, "arm {name} stays green");
+        }
     }
 }

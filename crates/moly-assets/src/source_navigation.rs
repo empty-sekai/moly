@@ -18,7 +18,7 @@ pub struct SourceNavMeshObstacle {
     pub component_id: i64,
     pub enabled: bool,
     pub shape: u8,
-    /// Authored Unity-local values; conversion happens at the world boundary.
+    /// Canonical node-local values, already converted by the exporter.
     pub center: Vec3,
     pub extents: Vec3,
     pub carve: bool,
@@ -44,31 +44,52 @@ pub struct SourceHarvestView {
 pub(crate) fn import(extras: &Value, entity: &mut EntityWorldMut) {
     if let Some(source) = extras.get("sourceObject") {
         entity.insert(SourceObjectIdentity {
-            file: source["file"].as_str().expect("source object file identity").into(),
+            file: source["file"]
+                .as_str()
+                .expect("source object file identity")
+                .into(),
             game_object: identity(&source["gameObjectId"]),
             transform: identity(&source["transformId"]),
-            components: extras["sourceComponentIds"].as_array().expect("source component identities")
-                .iter().map(identity).collect(),
-            child_order: extras["sourceChildOrder"].as_array().expect("source child order")
-                .iter().map(identity).collect(),
+            components: extras["sourceComponentIds"]
+                .as_array()
+                .expect("source component identities")
+                .iter()
+                .map(identity)
+                .collect(),
+            child_order: extras["sourceChildOrder"]
+                .as_array()
+                .expect("source child order")
+                .iter()
+                .map(identity)
+                .collect(),
         });
     }
     if let Some(obstacles) = extras.get("navMeshObstacles") {
-        let obstacles = obstacles.as_array().expect("source navigation obstacles").iter().map(|row| {
-            let shape = row["shape"].as_u64().filter(|shape| *shape <= 1)
-                .expect("source navigation shape must be Capsule or Box") as u8;
-            SourceNavMeshObstacle {
-                component_id: identity(&row["componentId"]),
-                enabled: boolean(&row["enabled"]),
-                shape,
-                center: vector(&row["center"]),
-                extents: vector(&row["extents"]),
-                carve: boolean(&row["carve"]),
-                only_stationary: boolean(&row["onlyStationary"]),
-                move_threshold: number(&row["moveThreshold"]),
-                stationary_time: number(&row["stationaryTime"]),
-            }
-        }).collect();
+        let obstacles = obstacles
+            .as_array()
+            .expect("source navigation obstacles")
+            .iter()
+            .map(|row| {
+                crate::coordinates::validate_document(row)
+                    .expect("navigation obstacle coordinate contract");
+                let shape = row["shape"]
+                    .as_u64()
+                    .filter(|shape| *shape <= 1)
+                    .expect("source navigation shape must be Capsule or Box")
+                    as u8;
+                SourceNavMeshObstacle {
+                    component_id: identity(&row["componentId"]),
+                    enabled: boolean(&row["enabled"]),
+                    shape,
+                    center: vector(&row["center"]),
+                    extents: vector(&row["extents"]),
+                    carve: boolean(&row["carve"]),
+                    only_stationary: boolean(&row["onlyStationary"]),
+                    move_threshold: number(&row["moveThreshold"]),
+                    stationary_time: number(&row["stationaryTime"]),
+                }
+            })
+            .collect();
         entity.insert(SourceNavMeshObstacles(obstacles));
     }
     if let Some(view) = extras.get("harvestView") {
@@ -81,7 +102,10 @@ pub(crate) fn import(extras: &Value, entity: &mut EntityWorldMut) {
 }
 
 fn identity(value: &Value) -> i64 {
-    value.as_str().and_then(|value| value.parse().ok()).expect("source signed identity")
+    value
+        .as_str()
+        .and_then(|value| value.parse().ok())
+        .expect("source signed identity")
 }
 
 fn boolean(value: &Value) -> bool {
@@ -94,12 +118,19 @@ fn boolean(value: &Value) -> bool {
 }
 
 fn number(value: &Value) -> f32 {
-    value.as_f64().map(|number| number as f32).filter(|number| number.is_finite())
+    value
+        .as_f64()
+        .map(|number| number as f32)
+        .filter(|number| number.is_finite())
         .expect("finite source navigation number")
 }
 
 fn vector(value: &Value) -> Vec3 {
-    Vec3::new(number(&value["x"]), number(&value["y"]), number(&value["z"]))
+    Vec3::new(
+        number(&value["x"]),
+        number(&value["y"]),
+        number(&value["z"]),
+    )
 }
 
 pub(crate) fn register(app: &mut App) {
@@ -107,4 +138,39 @@ pub(crate) fn register(app: &mut App) {
         .register_type::<SourceNavMeshObstacle>()
         .register_type::<SourceNavMeshObstacles>()
         .register_type::<SourceHarvestView>();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn obstacle() -> Value {
+        serde_json::json!({"navMeshObstacles": [{
+            "coordinateContract": crate::coordinates::CONTRACT,
+            "componentId": "123", "enabled": true, "shape": 1,
+            "center": {"x": -1.25, "y": 0.75, "z": 2.5},
+            "extents": {"x": 0.5, "y": 0.75, "z": 1.0},
+            "carve": true, "onlyStationary": true,
+            "moveThreshold": 0.1, "stationaryTime": 0.5
+        }]})
+    }
+
+    #[test]
+    fn canonical_obstacle_is_not_reflected_a_second_time() {
+        let mut world = World::new();
+        let mut entity = world.spawn_empty();
+        import(&obstacle(), &mut entity);
+        let row = &entity.get::<SourceNavMeshObstacles>().unwrap().0[0];
+        assert_eq!(row.center, Vec3::new(-1.25, 0.75, 2.5));
+        assert_eq!(row.extents, Vec3::new(0.5, 0.75, 1.0));
+    }
+
+    #[test]
+    #[should_panic(expected = "navigation obstacle coordinate contract")]
+    fn untagged_obstacles_cannot_mix_with_canonical_nodes() {
+        let mut document = obstacle();
+        document["navMeshObstacles"][0].as_object_mut().unwrap()
+            .remove("coordinateContract");
+        import(&document, &mut World::new().spawn_empty());
+    }
 }

@@ -1,0 +1,238 @@
+{
+  "version": 1,
+  "about": "Checked-in default of the server panel, NPC slice. Every value here is a named mock of server state. Visitors: one gate at level 1 with three single-unit groups (units 1, 2 and 3), each on its first visit. Housing layout: the home site's starter placements (chair, lamp, fridge, synthesizer, nenerobo, the CN star rug, the wood workbench the tutorial grants (the craft tool a home has), and the home gate, which the visit block places on the home site, set west of the entry's house footprint); a row whose piece the loaded snapshot's fixture master lacks (the star rug on a JP snapshot) takes the stand-in the product picks from that master by its stated rule, matching the row's authoredPiece traits. Talk list: built by the talk-list policy (all event stories read, every talk unread). Phenomena: three days of both refresh windows, all phenomenon 1, so every device offset from UTC-12 to UTC+14 selects phenomenon 1. Server clock: 2026-09-24 12:00 UTC+9. Controls: no automatic schedule advance.",
+  "userMysekaiGamedata": {
+    "refreshedAt": 1790218800000,
+    "isMysekaiTutorialEnd": true
+  },
+  "mysekaiPhenomenaSchedules": [
+    {
+      "mysekaiRefreshTimePeriodId": 1,
+      "scheduleDate": 1790089200000,
+      "mysekaiPhenomenaId": 1
+    },
+    {
+      "mysekaiRefreshTimePeriodId": 2,
+      "scheduleDate": 1790089200000,
+      "mysekaiPhenomenaId": 1
+    },
+    {
+      "mysekaiRefreshTimePeriodId": 1,
+      "scheduleDate": 1790175600000,
+      "mysekaiPhenomenaId": 1
+    },
+    {
+      "mysekaiRefreshTimePeriodId": 2,
+      "scheduleDate": 1790175600000,
+      "mysekaiPhenomenaId": 1
+    },
+    {
+      "mysekaiRefreshTimePeriodId": 1,
+      "scheduleDate": 1790262000000,
+      "mysekaiPhenomenaId": 1
+    },
+    {
+      "mysekaiRefreshTimePeriodId": 2,
+      "scheduleDate": 1790262000000,
+      "mysekaiPhenomenaId": 1
+    }
+  ],
+  "userMysekaiGateCharacterVisit": {
+    "userMysekaiGate": {
+      "mysekaiGateId": 1,
+      "mysekaiGateLevel": 1,
+      "visitCount": 1,
+      "lastRefreshedAt": 1790218800000,
+      "isSettingAtHomeSite": true
+    },
+    "userMysekaiGateCharacters": [
+      {
+        "mysekaiGateId": 1,
+        "mysekaiGameCharacterUnitGroupId": 1,
+        "isReservation": false,
+        "visitCount": 1
+      },
+      {
+        "mysekaiGateId": 1,
+        "mysekaiGameCharacterUnitGroupId": 2,
+        "isReservation": false,
+        "visitCount": 1
+      },
+      {
+        "mysekaiGateId": 1,
+        "mysekaiGameCharacterUnitGroupId": 3,
+        "isReservation": false,
+        "visitCount": 1
+      }
+    ]
+  },
+  "userMysekaiSiteHousingLayouts": [
+    {
+      "siteType": "home_site",
+      "content": "compact",
+      "mysekaiFixtures": [
+        {
+          "mysekaiFixtureId": 8,
+          "package": "mysekai__fixture__mdl_mis0001_fixture_chair1",
+          "textureId": 1,
+          "minimum": {
+            "x": -16,
+            "y": 0,
+            "z": 0
+          },
+          "maximum": {
+            "x": -15,
+            "y": 1,
+            "z": 1
+          },
+          "centerY": 0,
+          "layoutType": 2,
+          "rotation": 0
+        },
+        {
+          "mysekaiFixtureId": 146,
+          "package": "mysekai__fixture__mdl_ext0001_fixture_lamp1",
+          "textureId": 1,
+          "minimum": {
+            "x": -18,
+            "y": 0,
+            "z": 0
+          },
+          "maximum": {
+            "x": -17,
+            "y": 3,
+            "z": 1
+          },
+          "centerY": 0,
+          "layoutType": 2,
+          "rotation": 0
+        },
+        {
+          "mysekaiFixtureId": 157,
+          "package": "mysekai__fixture__mdl_ext0002_fixture_fridge1",
+          "textureId": 1,
+          "minimum": {
+            "x": -16,
+            "y": 0,
+            "z": 8
+          },
+          "maximum": {
+            "x": -15,
+            "y": 3,
+            "z": 9
+          },
+          "centerY": 0,
+          "layoutType": 2,
+          "rotation": 0
+        },
+        {
+          "mysekaiFixtureId": 297,
+          "package": "mysekai__fixture__mdl_ext0014_fixture_synthesizer1",
+          "textureId": 1,
+          "minimum": {
+            "x": -4,
+            "y": 0,
+            "z": 8
+          },
+          "maximum": {
+            "x": -1,
+            "y": 1,
+            "z": 9
+          },
+          "centerY": 0,
+          "layoutType": 2,
+          "rotation": 0
+        },
+        {
+          "mysekaiFixtureId": 423,
+          "package": "mysekai__fixture__mdl_chr0004_fixture_nenerobo1",
+          "textureId": 1,
+          "minimum": {
+            "x": -10,
+            "y": 0,
+            "z": 0
+          },
+          "maximum": {
+            "x": -9,
+            "y": 2,
+            "z": 1
+          },
+          "centerY": 0,
+          "layoutType": 2,
+          "rotation": 0
+        },
+        {
+          "mysekaiFixtureId": 90005,
+          "package": "mysekai__fixture__mdl_cncollect_rug_star3",
+          "textureId": 1,
+          "minimum": {
+            "x": -14,
+            "y": 0,
+            "z": 10
+          },
+          "maximum": {
+            "x": -7,
+            "y": 0,
+            "z": 17
+          },
+          "centerY": 0,
+          "layoutType": 4,
+          "rotation": 0,
+          "authoredPiece": {
+            "gridWidth": 8,
+            "gridDepth": 8,
+            "gridHeight": 1,
+            "layoutType": "rug",
+            "putType": "none",
+            "fixtureType": "normal",
+            "handleType": "none",
+            "playerActionType": "no_action"
+          }
+        },
+        {
+          "mysekaiFixtureId": 900002,
+          "package": "mysekai__fixture__mdl_non0006_gate_lon1",
+          "textureId": 1,
+          "minimum": {
+            "x": -4,
+            "y": 0,
+            "z": -17
+          },
+          "maximum": {
+            "x": 3,
+            "y": 5,
+            "z": -16
+          },
+          "centerY": 0,
+          "layoutType": 2,
+          "rotation": 0
+        },
+        {
+          "mysekaiFixtureId": 91,
+          "package": "mysekai__fixture__mdl_non0001_system_wood1",
+          "textureId": 1,
+          "minimum": {
+            "x": -8,
+            "y": 0,
+            "z": 4
+          },
+          "maximum": {
+            "x": -6,
+            "y": 1,
+            "z": 5
+          },
+          "centerY": 0,
+          "layoutType": 2,
+          "rotation": 0,
+          "mock": "The wood workbench, the craft tool the tutorial's resource list (mysekaiTutorialUseResources) grants with possession limit 1. Its cell is the mock's choice: clear of the other starter rows, the house and the gate and away from the walks to their doors."
+        }
+      ]
+    }
+  ],
+  "talkListPolicy": {
+    "readEventStoryEpisodes": "all"
+  },
+  "controls": {
+    "phenomenaScheduleAdvanceSeconds": null
+  }
+}

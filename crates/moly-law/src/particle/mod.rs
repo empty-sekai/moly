@@ -30,17 +30,63 @@ mod json;
 
 pub mod value;
 pub mod shape;
+pub mod shape_birth;
+pub mod shape_mesh;
 pub mod emit;
 pub mod step;
 pub mod buffer;
 pub mod schema;
 pub mod rotation;
+pub mod rotation_by_speed;
+pub mod mesh_selection;
 pub mod limit_velocity;
+pub mod velocity;
+pub mod random;
+pub mod curve;
+pub mod device_libm;
+pub mod size;
+pub mod gradient;
+pub mod color;
+pub mod custom_data;
+pub mod slot_tail;
+pub mod texture_sheet;
+pub mod force;
+pub mod gravity;
+pub mod sort;
+pub mod collision_response;
+pub mod collision_event;
+pub mod death_event;
+pub mod inherit;
+pub mod collision_query;
+pub mod collision_planes;
+pub mod current_size;
+pub mod collision_mesh;
+pub mod noise;
+pub mod seed_owner;
+pub mod initial;
+pub mod autonomous_emission;
+pub mod sub_emission;
+pub mod owner;
+pub mod placement;
+pub mod child_emit;
+pub mod prewarm;
+pub mod procedural;
+pub mod frame_time;
+pub mod culling;
+pub mod noise_size;
+mod armf;
+pub mod trail;
+pub mod trail_geometry;
+pub mod mesh_transform;
+pub mod stretch_geometry;
 
 #[cfg(test)]
 mod corpus;
+#[cfg(test)]
+mod ring_lifecycle_samples;
 
-pub use buffer::{compact, ring_push, RingBufferMode, RingPushVerdict};
+pub use buffer::{birth_capacity, compact, compact_with_side, compact_with_sides, compact_with_sides_indexed,
+    finish_births, finish_births_with, RingBufferMode};
 pub use emit::{accumulate_rate, burst_check, Burst, BurstOutcome, EmissionState};
 pub use limit_velocity::{advance_age_percent, DragLaw, DragSize, LimitVelocity, MagnitudeLaw};
 pub use rotation::{BakedCurve, RotationOverLifetime};

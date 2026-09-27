@@ -5,7 +5,6 @@
 use std::collections::HashMap;
 
 use bevy::{
-    asset::RenderAssetUsages,
     ecs::system::{lifetimeless::SRes, SystemParamItem},
     gltf::{GltfMaterialExtras, GltfMaterialName},
     pbr::{Material, MaterialPipeline, MaterialPipelineKey, MaterialPlugin},
@@ -37,7 +36,8 @@ pub(super) fn owns_shader(shader: &str) -> bool { matches!(shader, CANVAS | BLOC
 pub(super) struct FixtureSurfaceReadiness(pub bool);
 
 /// Source BlockFixtureViewManager starts at one and clamps its global to [0,1].
-/// This affects face opacity only: edges retain their authored outline alpha.
+/// The JP 6.8.1 program multiplies the final alpha by it, after the outline
+/// mix, so the edges fade with the faces.
 #[derive(Resource)]
 pub struct TransparentBlockAppearance { pub face_opacity: f32 }
 
@@ -214,11 +214,10 @@ impl Material for FixtureTreeMaterial {
 #[derive(Clone)]
 enum SurfaceHandle { Flat(Handle<FixtureSurfaceMaterial>), Tree(Handle<FixtureTreeMaterial>) }
 
-fn white_image(images: &mut Assets<Image>, white: &mut Option<Handle<Image>>) -> Handle<Image> {
-    white.get_or_insert_with(|| images.add(Image::new_fill(
-        Extent3d { width: 1, height: 1, depth_or_array_layers: 1 }, TextureDimension::D2,
-        &[255, 255, 255, 255], TextureFormat::Rgba8UnormSrgb, RenderAssetUsages::default(),
-    ))).clone()
+/// The shader's declared `white` default: Bevy's image plugin registers a 1x1
+/// image of all-255 bytes in the default sRGB format at the default handle.
+fn white_image() -> Handle<Image> {
+    Handle::default()
 }
 
 fn number(slot: &MaterialSlot, property: &str) -> f32 {
@@ -231,7 +230,6 @@ fn bind_surfaces(
     parts: Query<(&MeshMaterial3d<StandardMaterial>, &GltfMaterialName, &GltfMaterialExtras,
                  Option<&SourceMaterialTextures>, Option<&SourceMaterialPasses>)>,
     mut materials: ResMut<Assets<FixtureSurfaceMaterial>>, mut trees: ResMut<Assets<FixtureTreeMaterial>>,
-    mut images: ResMut<Assets<Image>>, mut white: Local<Option<Handle<Image>>>,
     mut cache: Local<HashMap<AssetId<StandardMaterial>, SurfaceHandle>>,
     mut readiness: ResMut<FixtureSurfaceReadiness>, appearance: Res<TransparentBlockAppearance>,
     revision: Res<crate::fixture::FixtureLayoutRevision>,
@@ -259,7 +257,7 @@ fn bind_surfaces(
                     if let Some(handle) = textures.and_then(|v| v.0.get(property)) { return handle.clone(); }
                     let default = value.get("shaderTextureDefaults").and_then(|v| v.get(property)).and_then(|v| v.as_str());
                     match default {
-                        Some("white") => white_image(&mut images, &mut white),
+                        Some("white") => white_image(),
                         _ => panic!("家具材质 {} 的 {property} 无已解析纹理或已支持的源默认值 ({default:?})", name.0),
                     }
                 };
@@ -282,7 +280,7 @@ fn bind_surfaces(
                             uniforms[i] = *slot.colors.get(property).unwrap_or_else(|| panic!("{} 缺 {property}", name.0));
                         }
                         uniforms[3] = [number(&slot, "_Scale"), number(&slot, "_EdgeSize"), 0.0, appearance.face_opacity.clamp(0.0, 1.0)];
-                        let white = white_image(&mut images, &mut white);
+                        let white = white_image();
                         (SurfaceKind::TransparentBlock, white.clone(), white, false, 3020)
                     };
                     let queue = (base_queue + slot.get("_RenderPriority").unwrap_or(0.0) as i32) as u32;
@@ -317,6 +315,8 @@ pub(super) struct FixtureSurfacePlugin;
 
 impl Plugin for FixtureSurfacePlugin {
     fn build(&self, app: &mut App) {
+        crate::gpu_image_release::prepare_after_images::<FixtureSurfaceMaterial>(app);
+        crate::gpu_image_release::prepare_after_images::<FixtureTreeMaterial>(app);
         app.add_plugins((MaterialPlugin::<FixtureSurfaceMaterial>::default(), MaterialPlugin::<FixtureTreeMaterial>::default()))
             .init_resource::<FixtureSurfaceReadiness>()
             .init_resource::<TransparentBlockAppearance>()

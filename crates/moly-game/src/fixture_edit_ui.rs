@@ -10,7 +10,7 @@ mod icons;
 use crate::{
     action_button::ActionTapConsumed,
     audio::SeRequests,
-    balloon::{BALLOON_LAYER, canvas_scale},
+    balloon::BALLOON_LAYER,
     fixture::EditableFixture,
     fixture_edit::{EditCommand, EditSelectionView, EditView, PutStatus},
     gesture::{GestureEvent, GestureKind, GestureState},
@@ -26,16 +26,16 @@ use bevy::{
 };
 pub(crate) use icons::{EditorIcons, load, parse};
 
-/// Included with every pristine template before the existing glyph-atlas bake.
-/// Infinity identifies the four existing unlimited offline catalog mocks; it
-/// is not a claim about real-account inventory.
-pub(crate) const FIXED_TEXTS: &[&str] = &["0123456789∞"];
+/// Included with every pristine template before the existing glyph-atlas bake:
+/// the cells' counts (`UIPartsThumbnail.SetQuantity`, format `×{0}`).
+pub(crate) const FIXED_TEXTS: &[&str] = &["×0123456789"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ChoiceOrigin {
     Placed(String),
     Inventory(String),
-    OfflineCatalog(usize),
+    /// A row of the owned fixture list (`EditView::catalog`).
+    Owned(usize),
 }
 
 /// Identity/data-set signature only: moving a selected item must not clone its
@@ -43,13 +43,20 @@ enum ChoiceOrigin {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ItemChoice {
     fixture_id: i32,
+    texture_id: u32,
+    /// The cell's count: an owned row's placeable count, 1 for a single
+    /// placed or stored fixture.
+    count: i32,
     origin: ChoiceOrigin,
     editable: bool,
 }
 
 impl ItemChoice {
-    fn unlimited(&self) -> bool {
-        matches!(self.origin, ChoiceOrigin::OfflineCatalog(_))
+    /// The registered thumbnail of this fixture colour.
+    fn icon<'a>(&self, icons: &'a EditorIcons) -> Option<&'a str> {
+        i32::try_from(self.texture_id)
+            .ok()
+            .and_then(|texture| icons.variant(self.fixture_id, texture))
     }
 
     fn is_placed(&self) -> bool {
@@ -60,7 +67,7 @@ impl ItemChoice {
         match &self.origin {
             ChoiceOrigin::Placed(uid) => EditCommand::SelectPlaced { uid: uid.clone() },
             ChoiceOrigin::Inventory(uid) => EditCommand::SelectInventory { uid: uid.clone() },
-            ChoiceOrigin::OfflineCatalog(index) => EditCommand::SelectCatalog { index: *index },
+            ChoiceOrigin::Owned(index) => EditCommand::SelectCatalog { index: *index },
         }
     }
 
@@ -70,8 +77,10 @@ impl ItemChoice {
         };
         match &self.origin {
             ChoiceOrigin::Placed(uid) | ChoiceOrigin::Inventory(uid) => selected.item.uid == *uid,
-            ChoiceOrigin::OfflineCatalog(_) => {
-                selected.is_new_mock && selected.item.fixture_id == self.fixture_id
+            ChoiceOrigin::Owned(_) => {
+                (selected.is_new || selected.from_inventory)
+                    && selected.item.fixture_id == self.fixture_id
+                    && selected.item.texture_id == self.texture_id
             }
         }
     }
@@ -79,33 +88,45 @@ impl ItemChoice {
 
 fn choices(edit: &EditView, icons: &EditorIcons) -> Vec<ItemChoice> {
     let mut result = Vec::new();
+    // A stored fixture of a listed owned row is counted in that row.
+    let owned_row = |row: &crate::fixture_edit::EditItemView| {
+        edit.catalog
+            .iter()
+            .any(|owned| owned.fixture_id == row.fixture_id && owned.texture_id == row.texture_id)
+    };
     for (rows, inventory) in [(&edit.placed_rows, false), (&edit.inventory, true)] {
         for row in rows {
-            // The ordinary texture-1 provider covers the shipped editable set.
-            // An unknown image is an explicit source gap, never a generated icon.
-            if !icons.by_fixture.contains_key(&row.fixture_id) {
+            if inventory && owned_row(row) {
                 continue;
             }
-            result.push(ItemChoice {
+            let choice = ItemChoice {
                 fixture_id: row.fixture_id,
+                texture_id: row.texture_id,
+                count: 1,
                 origin: if inventory {
                     ChoiceOrigin::Inventory(row.uid.clone())
                 } else {
                     ChoiceOrigin::Placed(row.uid.clone())
                 },
                 editable: row.editable,
-            });
+            };
+            // An unknown image is an explicit source gap, never a generated icon.
+            if choice.icon(icons).is_some() {
+                result.push(choice);
+            }
         }
     }
     for row in &edit.catalog {
-        if !row.unlimited_mock || !icons.by_fixture.contains_key(&row.fixture_id) {
-            continue;
-        }
-        result.push(ItemChoice {
+        let choice = ItemChoice {
             fixture_id: row.fixture_id,
-            origin: ChoiceOrigin::OfflineCatalog(row.index),
+            texture_id: row.texture_id,
+            count: row.placeable,
+            origin: ChoiceOrigin::Owned(row.index),
             editable: true,
-        });
+        };
+        if choice.icon(icons).is_some() {
+            result.push(choice);
+        }
     }
     result
 }
@@ -116,12 +137,14 @@ pub(crate) struct EditorRoot {
     choices: Vec<ItemChoice>,
     site_id: u32,
     seen_revision: u64,
+    seen_owned_revision: u64,
 }
 
 #[derive(Component)]
 pub(crate) enum EditorAuxiliary {
     Header { back: String },
     Exit(auxiliary::ExitBindings),
+    CleanUp(auxiliary::CleanUpBindings),
 }
 
 #[derive(Resource)]
@@ -186,7 +209,7 @@ pub(crate) fn spawn_when_ready(
     spawned: Option<Res<EditorSpawned>>,
 ) {
     if spawned.is_some()
-        || !icons.ready
+        || !icons.is_ready()
         || [
             "EditorSource",
             "EditorFloor",
@@ -195,6 +218,7 @@ pub(crate) fn spawn_when_ready(
             "EditorTab",
             auxiliary::HEADER,
             auxiliary::EXIT,
+            auxiliary::CLEAN_UP,
         ]
         .iter()
         .any(|key| !layouts.ready(key, &server))
@@ -220,6 +244,7 @@ pub(crate) fn spawn_when_ready(
             choices,
             site_id: edit.site_id,
             seen_revision: u64::MAX,
+            seen_owned_revision: u64::MAX,
         },
         Visibility::Hidden,
         Transform::default(),
@@ -249,6 +274,20 @@ pub(crate) fn spawn_when_ready(
         Transform::from_xyz(0., 0., 100.),
         RenderLayers::layer(SITEMAP_LAYER),
         exit,
+    ));
+    let mut clean_up = UiPrefabView::new(auxiliary::CLEAN_UP, SITEMAP_LAYER);
+    let clean_up_bindings = auxiliary::clean_up(
+        layouts.document(auxiliary::CLEAN_UP).unwrap(),
+        &layouts,
+        &mut clean_up,
+    )
+    .expect("original two-button clean-up confirmation");
+    commands.spawn((
+        EditorAuxiliary::CleanUp(clean_up_bindings),
+        Visibility::Hidden,
+        Transform::from_xyz(0., 0., 100.),
+        RenderLayers::layer(SITEMAP_LAYER),
+        clean_up,
     ));
     commands.insert_resource(EditorSpawned);
 }
@@ -294,9 +333,11 @@ pub(crate) fn click(
     mut ui: ResMut<EditorUiState>,
     mut consumed: ResMut<ActionTapConsumed>,
     mut actions: MessageWriter<EditCommand>,
+    mut library: ResMut<crate::content_library::ContentLibrary>,
     mut sounds: ResMut<SeRequests>,
     roots: Query<(&EditorRoot, &UiPrefabView)>,
     auxiliaries: Query<(&EditorAuxiliary, &UiPrefabView)>,
+    root_canvas: Option<Res<crate::canvas::RootCanvas>>,
 ) {
     let events: Vec<_> = gestures.read().copied().collect();
     let scroll_events: Vec<_> = wheel.read().copied().collect();
@@ -311,8 +352,11 @@ pub(crate) fn click(
     if !size.is_finite() || size.min_element() <= 0. {
         return;
     }
-    let scale = canvas_scale(size.x, size.y);
-    let canvas = size / scale;
+    let Some(root_canvas) = root_canvas.as_deref() else {
+        return;
+    };
+    let scale = root_canvas.scale(window);
+    let canvas = root_canvas.size(window);
     let Ok((root, view)) = roots.single() else {
         return;
     };
@@ -344,6 +388,42 @@ pub(crate) fn click(
             };
             if let Some((button, command)) = choice {
                 sounds.source_button(&layouts, dialog_view.key, button);
+                actions.write(command);
+                break;
+            }
+        }
+        return;
+    }
+    if edit.clean_up_dialog {
+        ui.drag = None;
+        for event in events
+            .iter()
+            .filter(|event| event.kind.is_tap_family() && event.state == GestureState::End)
+        {
+            consumed.0 = true;
+            let point = canvas_position(event.position, size, scale);
+            let Some((EditorAuxiliary::CleanUp(dialog), dialog_view)) = auxiliaries
+                .iter()
+                .find(|(auxiliary, _)| matches!(auxiliary, EditorAuxiliary::CleanUp(_)))
+            else {
+                continue;
+            };
+            let choice = if hit(dialog_view, &layouts, &dialog.positive, point, canvas) {
+                Some((Some(&dialog.positive), EditCommand::CleanUpAll))
+            } else if hit(dialog_view, &layouts, &dialog.negative, point, canvas) {
+                Some((Some(&dialog.negative), EditCommand::CancelCleanUp))
+            } else if hit(dialog_view, &layouts, &dialog.close, point, canvas) {
+                Some((Some(&dialog.close), EditCommand::CancelCleanUp))
+            } else if !hit(dialog_view, &layouts, &dialog.window, point, canvas) {
+                // allowCloseExternal: a tap outside the window closes it.
+                Some((None, EditCommand::CancelCleanUp))
+            } else {
+                None
+            };
+            if let Some((button, command)) = choice {
+                if let Some(button) = button {
+                    sounds.source_button(&layouts, dialog_view.key, button);
+                }
                 actions.write(command);
                 break;
             }
@@ -456,6 +536,32 @@ pub(crate) fn click(
             ui.motion.target(target);
             continue;
         }
+        if let Some(selected) = edit.selected.as_ref() {
+            if hit(view, &layouts, &bindings.info, point, canvas)
+                && library.inspect_fixture(selected.item.fixture_id) {
+                sounds.source_button(&layouts, view.key, &bindings.info);
+                break;
+            }
+        }
+        // The floor edit camera's two buttons answer with or without a
+        // selection.
+        let camera = if hit(view, &layouts, &bindings.camera_rotate, point, canvas) {
+            Some((&bindings.camera_rotate, EditCommand::RotateCamera))
+        } else if hit(view, &layouts, &bindings.change_look, point, canvas) {
+            Some((&bindings.change_look, EditCommand::ChangeLookCamera))
+        } else {
+            None
+        };
+        if let Some((button, command)) = camera {
+            sounds.source_button(&layouts, view.key, button);
+            actions.write(command);
+            break;
+        }
+        if hit(view, &layouts, &bindings.remove_all, point, canvas) {
+            sounds.source_button(&layouts, view.key, &bindings.remove_all);
+            actions.write(EditCommand::RequestCleanUp);
+            break;
+        }
         let choice = if edit.can_save && hit(view, &layouts, &bindings.save, point, canvas) {
             // CN 6.0.0: OnReceiveSaveLayout -> SaveLayoutWithValidation ->
             // GetSaveLayoutEventData(..., true). The successful save returns
@@ -465,7 +571,8 @@ pub(crate) fn click(
             if hit(view, &layouts, &bindings.cancel, point, canvas) {
                 Some((&bindings.cancel, EditCommand::Cancel))
             } else if !selected.from_inventory
-                && !selected.is_new_mock
+                && !selected.is_new
+                && selected.can_clean_up
                 && hit(view, &layouts, &bindings.delete, point, canvas)
             {
                 Some((&bindings.delete, EditCommand::ReturnToInventory))
@@ -580,6 +687,7 @@ pub(crate) fn refresh(
         ),
         Without<EditorRoot>,
     >,
+    root_canvas: Option<Res<crate::canvas::RootCanvas>>,
 ) {
     let Ok(window) = windows.single() else {
         return;
@@ -588,8 +696,11 @@ pub(crate) fn refresh(
     if !size.is_finite() || size.min_element() <= 0. {
         return;
     }
-    let scale = canvas_scale(size.x, size.y);
-    let canvas = size / scale;
+    let Some(root_canvas) = root_canvas.as_deref() else {
+        return;
+    };
+    let scale = root_canvas.scale(window);
+    let canvas = root_canvas.size(window);
     let active = edit.active && stack.current() == LayerId::MysekaiSiteEdit;
     let Ok((mut root, mut view, mut visibility, mut transform)) = roots.single_mut() else {
         return;
@@ -601,7 +712,7 @@ pub(crate) fn refresh(
     };
     transform.scale = Vec3::splat(scale);
     if active {
-        if root.seen_revision != edit.revision {
+        if root.seen_revision != edit.revision || root.seen_owned_revision != edit.owned_revision {
             let next_choices = choices(&edit, &icons);
             if root.site_id != edit.site_id || root.choices != next_choices {
                 let (document, bindings) = compose::compose(&layouts, &edit, next_choices.clone())
@@ -624,15 +735,19 @@ pub(crate) fn refresh(
                 .placed_rows
                 .iter()
                 .chain(&edit.inventory)
-                .filter(|row| !icons.by_fixture.contains_key(&row.fixture_id))
-                .map(|row| row.fixture_id)
+                .map(|row| (row.fixture_id, row.texture_id))
+                .chain(edit.catalog.iter().map(|row| (row.fixture_id, row.texture_id)))
+                .filter(|(fixture, texture)| {
+                    i32::try_from(*texture).map_or(true, |texture| icons.variant(*fixture, texture).is_none())
+                })
                 .collect();
             if !missing.is_empty() {
                 warn!(
-                    "editor thumbnail provider lacks fixture IDs {missing:?}; not manufacturing list images"
+                    "editor thumbnail provider lacks (fixture id, texture id) {missing:?}; not manufacturing list images"
                 );
             }
             root.seen_revision = edit.revision;
+            root.seen_owned_revision = edit.owned_revision;
         }
         let bindings = &root.bindings;
         if !ui.was_active {
@@ -674,6 +789,7 @@ pub(crate) fn refresh(
         view.set_visible(&bindings.show_ui, ui.hidden);
         let document = layouts.document(compose::RUNTIME).unwrap();
         compose::enabled(&mut view, document, &bindings.save, edit.can_save);
+        compose::enabled(&mut view, document, &bindings.info, edit.selected.is_some());
         view.set_visible(
             &bindings.hud,
             edit.selected.is_some() && !ui.hidden && !edit.exit_dialog,
@@ -684,7 +800,7 @@ pub(crate) fn refresh(
         if let Some(selected) = &edit.selected {
             view.set_visible(
                 &bindings.delete,
-                !selected.from_inventory && !selected.is_new_mock,
+                !selected.from_inventory && !selected.is_new && selected.can_clean_up,
             );
             compose::enabled(&mut view, document, &bindings.cancel, true);
             compose::enabled(
@@ -727,6 +843,7 @@ pub(crate) fn refresh(
                 }
                 active && edit.exit_dialog
             }
+            EditorAuxiliary::CleanUp(_) => active && edit.clean_up_dialog,
         };
         *visibility = if visible {
             Visibility::Inherited

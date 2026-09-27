@@ -15,9 +15,9 @@
 //! distance coupling or first-person transition. Its completed-zoom flag is
 //! retained across entries, matching the lifetime of the source state.
 //!
-//! Additional fixture targets and near-fixture/player dithering remain
-//! separate unfinished presentation paths; a correct basic camera transition
-//! is not a claim that those branches have been restored.
+//! Actual bound furniture is part of the subject group for furniture stories.
+//! Its combined footprint widens the existing camera, so a speaking furniture
+//! character cannot remain outside an NPC-only close-up.
 
 use crate::camera::{
     CameraSetting, CameraStateType, CameraTween, FieldCameraModel, FieldCameraState,
@@ -191,11 +191,12 @@ fn clamped_talk_yaw(list: &[Vec3], cam_pos: Vec3, yaw: f32) -> f32 {
         angle = yaw + if angle <= yaw { -90.0 } else { 90.0 };
     }
     if diff >= 110.0 {
-        angle = yaw + if angle <= yaw {
-            -TALK_BACK_CAMERA_ANGLE
-        } else {
-            TALK_BACK_CAMERA_ANGLE
-        };
+        angle = yaw
+            + if angle <= yaw {
+                -TALK_BACK_CAMERA_ANGLE
+            } else {
+                TALK_BACK_CAMERA_ANGLE
+            };
     }
     angle
 }
@@ -327,14 +328,18 @@ pub(crate) struct TalkSceneContext<'w, 's> {
     field_state: ResMut<'w, FieldCameraState>,
     transforms: Query<'w, 's, &'static GlobalTransform>,
     npc_bones: Query<'w, 's, &'static ToonMaterials>,
-    player_avatar: Query<'w, 's, (&'static GlobalTransform, &'static mut Visibility), With<AvatarRoot>>,
+    player_avatar:
+        Query<'w, 's, (&'static GlobalTransform, &'static mut Visibility), With<AvatarRoot>>,
     site_roots: Query<'w, 's, &'static GlobalTransform, With<SiteRoot>>,
 }
 
 impl TalkSceneContext<'_, '_> {
     fn npc_hip(&self, entity: Entity) -> Option<Vec3> {
         let skeleton = self.npc_bones.get(entity).ok()?;
-        self.transforms.get(skeleton.hips_entity()).ok().map(GlobalTransform::translation)
+        self.transforms
+            .get(skeleton.hips_entity())
+            .ok()
+            .map(GlobalTransform::translation)
     }
 }
 
@@ -366,9 +371,10 @@ pub(crate) fn advance(
     let epoch_changed = epoch_now != state.epoch_seen;
     state.epoch_seen = epoch_now;
     if epoch_changed && talk_cam.is_some() {
-        let fov_deg = snapshot
-            .as_ref()
-            .map_or_else(|| model.as_deref().map_or(0.0, |m| m.fov), |s| s.point.fov_deg);
+        let fov_deg = snapshot.as_ref().map_or_else(
+            || model.as_deref().map_or(0.0, |m| m.fov),
+            |s| s.point.fov_deg,
+        );
         let (mut projection, _) = cameras
             .single_mut()
             .expect("应恰有一台 3D 相机（站点守卫回写视场）");
@@ -404,6 +410,12 @@ pub(crate) fn advance(
         } else if let Some(session) = &session {
             if let Some(position) = scene.npc_hip(session.npc_entity()) {
                 list.push(position);
+            }
+        }
+        let has_fixtures = talk.as_ref().is_some_and(|talk| !talk.fixture_instances().is_empty());
+        if let Some(talk) = &talk {
+            for &(_, entity) in talk.fixture_instances() {
+                if let Ok(pose) = scene.transforms.get(entity) { list.push(pose.translation()); }
             }
         }
         let player_index = scene.player_avatar.single().ok().map(|(global, _)| {
@@ -465,6 +477,11 @@ pub(crate) fn advance(
         let yaw = model.yaw;
         let target_yaw = clamped_talk_yaw(&list, cam_pos, yaw);
         let target = talk_target(&list, player_index, site_root.translation().y);
+        let target_distance = if has_fixtures {
+            let radius = list.iter().enumerate().filter(|(i, _)| Some(*i) != player_index)
+                .map(|(_, point)| Vec2::new(point.x - target.x, point.z - target.z).length()).fold(0., f32::max);
+            TALK_CAMERA_DISTANCE.max((radius + 0.8) * 2.4)
+        } else { TALK_CAMERA_DISTANCE };
         let from = CamPoint {
             look_at: model.look_at,
             fov_deg: projection_fov_deg(&projection),
@@ -513,9 +530,16 @@ pub(crate) fn advance(
                 });
             }
         } else {
-            snapshot.transfer = Some(CamPoint { fov_deg: model.fov, ..from });
+            snapshot.transfer = Some(CamPoint {
+                fov_deg: model.fov,
+                ..from
+            });
         }
-        if let Some(active) = scene.active.as_deref().filter(|_| scene.field_state.0 != CameraStateType::Fps) {
+        if let Some(active) = scene
+            .active
+            .as_deref()
+            .filter(|_| scene.field_state.0 != CameraStateType::Fps)
+        {
             commands.insert_resource(NormalCameraMemory {
                 site: active.site_type.clone(),
                 look_at: model.look_at,
@@ -540,10 +564,10 @@ pub(crate) fn advance(
             // 源把当前俯仰原样传作缓动目标——俯仰不动。
             pitch: model.pitch,
             yaw: target_yaw,
-            distance: TALK_CAMERA_DISTANCE,
+            distance: target_distance,
         };
         info!(
-            "[talk-cam] 对话相机入场：目标 ({:.2},{:.2},{:.2}) 偏航 {yaw:+.1}→{target_yaw:+.1} 俯仰 {:+.1} 保持 距离 {:.2}→{TALK_CAMERA_DISTANCE} 视场 {:.1}→{:.1}，{ENGAGE_SECONDS}s OutQuad（参演 {} 名{}）",
+            "[talk-cam] 对话相机入场：目标 ({:.2},{:.2},{:.2}) 偏航 {yaw:+.1}→{target_yaw:+.1} 俯仰 {:+.1} 保持 距离 {:.2}→{target_distance:.2} 视场 {:.1}→{:.1}，{ENGAGE_SECONDS}s OutQuad（参演 {} 名{}）",
             to.look_at.x,
             to.look_at.y,
             to.look_at.z,
@@ -610,7 +634,11 @@ pub(crate) fn advance(
         let inherit = scene.active.as_deref().is_some_and(|active| {
             crate::camera::is_inherit_camera_setting(&active.category, &scene.previous_site.0)
         });
-        let to = if inherit { snapshot.transfer.unwrap_or(snapshot.point) } else { snapshot.point };
+        let to = if inherit {
+            snapshot.transfer.unwrap_or(snapshot.point)
+        } else {
+            snapshot.point
+        };
         let duration = if inherit { 0.5 } else { RESTORE_SECONDS };
         if let Some(setting) = scene.setting.as_deref() {
             model.min_distance = setting.min_distance;
@@ -664,7 +692,13 @@ pub(crate) fn advance(
             },
             Transition::None,
         ),
-        Phase::Restore { from, to, elapsed, duration, .. } => {
+        Phase::Restore {
+            from,
+            to,
+            elapsed,
+            duration,
+            ..
+        } => {
             let eased = out_quad((elapsed / duration).clamp(0.0, 1.0));
             let angles = FrameWrite::Angles {
                 fov_deg: from.fov_deg + (to.fov_deg - from.fov_deg) * eased,

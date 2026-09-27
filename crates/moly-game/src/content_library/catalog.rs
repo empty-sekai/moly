@@ -1,0 +1,1082 @@
+//! Source-backed catalog projection. It never chooses a random playback row.
+use super::*;
+use serde_json::Value;
+
+pub(crate) fn parse_assets(
+    mut commands: Commands,
+    server: Res<AssetServer>,
+    jsons: Res<Assets<JsonAsset>>,
+    handles: Option<ResMut<LibraryAssets>>,
+    mut catalog: ResMut<LibraryCatalog>,
+    state: Res<ContentLibrary>,
+) {
+    let Some(mut handles) = handles else {
+        return;
+    };
+    let sources = [
+        (0, handles.characters.clone()),
+        (1, handles.fixtures.clone()),
+        (2, handles.thumbnails.clone()),
+        (3, handles.models.clone()),
+        (4, handles.reactions.clone()),
+        (5, handles.portraits.clone()),
+    ];
+    for (slot, handle) in sources {
+        if handles.processed[slot] {
+            continue;
+        }
+        if slot == 3 && !handles.processed[1] {
+            continue;
+        }
+        if let LoadState::Failed(error) = server.load_state(&handle) {
+            warn!("[content-library] asset slot {slot} failed: {error:?}");
+            catalog.data_issues.push(
+                match slot {
+                    0 => "角色名称暂时无法载入，部分条目使用备用名称",
+                    1 => "家具图鉴暂时无法载入，对话仍可浏览",
+                    2 => "部分家具图片暂时无法载入",
+                    3 => "家具模型清单暂时无法载入，仍可浏览图鉴",
+                    4 => "家具的原生角色互动组合暂时无法载入",
+                    _ => "角色 SD 图标暂时无法载入，组合列表仍可按名称显示",
+                }
+                .into(),
+            );
+            handles.processed[slot] = true;
+            continue;
+        }
+        let Some(asset) = jsons.get(&handle) else {
+            continue;
+        };
+        match serde_json::from_str::<Value>(&asset.0) {
+            Ok(value) => match slot {
+                0 => parse_characters(&value, &mut catalog),
+                1 => parse_fixtures(&value, &mut catalog),
+                2 => parse_thumbnails(&value, &mut catalog),
+                3 => parse_model_index(&value, &mut catalog),
+                4 => parse_fixture_reactions(&value, &mut catalog),
+                _ => parse_character_portraits(&value, &mut catalog),
+            },
+            Err(error) => {
+                warn!("[content-library] invalid document slot {slot}: {error}");
+                catalog
+                    .data_issues
+                    .push("一份展示数据格式异常，其余内容仍可使用".into());
+            }
+        }
+        handles.processed[slot] = true;
+    }
+    if handles.processed.iter().all(|done| *done) {
+        load_thumbnail_handles(&mut catalog, state.external_ui, |path| {
+            moly_assets::residency::load_image(
+                &server,
+                AssetPath::from(format!("moly://fixture-thumbnails/{path}")),
+            )
+        });
+        load_character_portrait_handles(&mut catalog, state.external_ui, |path| {
+            moly_assets::residency::load_image(&server, AssetPath::from(format!("moly://{path}")))
+        });
+        catalog.fixtures.sort_by_key(|row| row.id);
+        catalog.source_ready = true;
+        catalog.revision = catalog.revision.wrapping_add(1);
+        commands.remove_resource::<LibraryAssets>();
+    }
+}
+
+/// The DOM loads only visible artwork. Importing the entire catalogue into
+/// Bevy as well duplicates thousands of requests and GPU textures in a web tab.
+fn load_thumbnail_handles(
+    catalog: &mut LibraryCatalog,
+    external_ui: bool,
+    mut load: impl FnMut(&str) -> Handle<Image>,
+) {
+    for row in &mut catalog.fixtures {
+        row.thumbnail = if external_ui {
+            None
+        } else {
+            catalog.thumbnail_paths.get(&row.id).map(|path| load(path))
+        };
+    }
+}
+
+fn load_character_portrait_handles(
+    catalog: &mut LibraryCatalog,
+    external_ui: bool,
+    mut load: impl FnMut(&str) -> Handle<Image>,
+) {
+    catalog.character_portraits.clear();
+    if external_ui {
+        return;
+    }
+    let paths: Vec<_> = catalog
+        .character_portrait_paths
+        .iter()
+        .map(|(unit, path)| (*unit, path.clone()))
+        .collect();
+    for (unit, path) in paths {
+        catalog.character_portraits.insert(unit, load(&path));
+    }
+}
+
+fn positive_id(value: Option<&Value>) -> Option<i32> {
+    value?
+        .as_i64()
+        .and_then(|id| i32::try_from(id).ok())
+        .filter(|id| *id > 0)
+}
+fn parse_characters(value: &Value, catalog: &mut LibraryCatalog) {
+    let Some(rows) = value.get("characters").and_then(Value::as_object) else {
+        catalog.data_issues.push("角色展示数据缺少名册".into());
+        return;
+    };
+    for (key, row) in rows {
+        let Ok(unit) = key.parse::<u32>() else {
+            continue;
+        };
+        if let Some(name) = row
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+        {
+            catalog.character_names.insert(unit, plain_text(name));
+        }
+        if let Some(group) = row.pointer("/identity/unit").and_then(Value::as_str) {
+            catalog.character_unit_types.insert(unit, group.to_owned());
+            if let Some(label) = character_group_label(group) {
+                catalog.character_groups.insert(unit, label.to_owned());
+            }
+        }
+        if let Some(color) = row.pointer("/identity/colorCode").and_then(Value::as_str) {
+            catalog.character_colors.insert(unit, color.to_owned());
+        }
+    }
+}
+fn character_group_label(group: &str) -> Option<&'static str> {
+    Some(match group {
+        "light_sound" => "Leo/need",
+        "idol" => "MORE MORE JUMP!",
+        "street" => "Vivid BAD SQUAD",
+        "theme_park" => "Wonderlands×Showtime",
+        "school_refusal" => "25时，在Nightcord。",
+        "piapro" => "VIRTUAL SINGER",
+        _ => return None,
+    })
+}
+fn parse_fixture_reactions(value: &Value, catalog: &mut LibraryCatalog) {
+    if value.get("schema").and_then(Value::as_str) != Some("moly-fixture-reactions/1") {
+        catalog
+            .data_issues
+            .push("家具角色组合数据的版本无法识别".into());
+        return;
+    }
+    let Some(rows) = value.get("fixtures").and_then(Value::as_array) else {
+        catalog
+            .data_issues
+            .push("家具角色组合数据缺少家具列表".into());
+        return;
+    };
+    let mut seen_fixtures = HashSet::new();
+    for (row_index, row) in rows.iter().enumerate() {
+        let Some(id) = positive_id(row.get("fixtureId")).filter(|id| seen_fixtures.insert(*id))
+        else {
+            catalog.data_issues.push(format!(
+                "第 {} 条家具角色组合缺少有效编号或重复",
+                row_index + 1
+            ));
+            continue;
+        };
+        let Some(raw_groups) = row.get("groups").and_then(Value::as_array) else {
+            catalog
+                .data_issues
+                .push(format!("家具 {id} 的角色组合不是数组"));
+            continue;
+        };
+        let mut groups = Vec::with_capacity(raw_groups.len());
+        let mut row_valid = true;
+        let mut seen_groups = HashSet::<Vec<u32>>::new();
+        for (group_index, raw_group) in raw_groups.iter().enumerate() {
+            let Some(raw_units) = raw_group.as_array().filter(|units| !units.is_empty()) else {
+                catalog.data_issues.push(format!(
+                    "家具 {id} 的第 {} 个角色组合为空或格式错误",
+                    group_index + 1
+                ));
+                row_valid = false;
+                break;
+            };
+            let mut group = Vec::with_capacity(raw_units.len());
+            let mut seen_units = HashSet::new();
+            for value in raw_units {
+                let Some(unit) = value
+                    .as_u64()
+                    .and_then(|unit| u32::try_from(unit).ok())
+                    .filter(|unit| *unit > 0 && seen_units.insert(*unit))
+                else {
+                    catalog.data_issues.push(format!(
+                        "家具 {id} 的第 {} 个角色组合包含无效或重复角色",
+                        group_index + 1
+                    ));
+                    row_valid = false;
+                    break;
+                };
+                group.push(unit);
+            }
+            if !row_valid {
+                break;
+            }
+            if !seen_groups.insert(group.clone()) {
+                catalog
+                    .data_issues
+                    .push(format!("家具 {id} 存在重复的角色组合"));
+                row_valid = false;
+                break;
+            }
+            groups.push(group);
+        }
+        if row_valid {
+            catalog.fixture_reactions.insert(id, groups);
+        }
+    }
+}
+
+fn safe_character_portrait_path(path: &str) -> bool {
+    path.starts_with("ui/character-portraits/")
+        && path.to_ascii_lowercase().ends_with(".png")
+        && !path.contains([':', '\\'])
+        && path.split('/').all(|part| !matches!(part, "" | "." | ".."))
+}
+
+fn parse_character_portraits(value: &Value, catalog: &mut LibraryCatalog) {
+    if value.get("version").and_then(Value::as_u64) != Some(1) {
+        catalog
+            .data_issues
+            .push("角色 SD 图标清单的版本无法识别".into());
+        return;
+    }
+    let Some(rows) = value.get("characters").and_then(Value::as_array) else {
+        catalog
+            .data_issues
+            .push("角色 SD 图标清单缺少角色列表".into());
+        return;
+    };
+    let mut seen = HashSet::new();
+    for row in rows {
+        let Some(unit) = row
+            .get("unitId")
+            .and_then(Value::as_u64)
+            .and_then(|unit| u32::try_from(unit).ok())
+            .filter(|unit| *unit > 0 && seen.insert(*unit))
+        else {
+            catalog
+                .data_issues
+                .push("角色 SD 图标清单含无效或重复 unit".into());
+            continue;
+        };
+        let Some(path) = row
+            .get("image")
+            .and_then(Value::as_str)
+            .filter(|path| safe_character_portrait_path(path))
+        else {
+            catalog
+                .data_issues
+                .push(format!("角色 {unit} 的 SD 图标路径无效"));
+            continue;
+        };
+        catalog
+            .character_portrait_paths
+            .insert(unit, path.to_owned());
+    }
+}
+
+fn parse_fixtures(value: &Value, catalog: &mut LibraryCatalog) {
+    catalog.source_region = value
+        .get("region")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_owned();
+    catalog.source_version = value
+        .get("gameVersion")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_owned();
+    let Some(rows) = value.get("fixtures").and_then(Value::as_array) else {
+        catalog.data_issues.push("家具展示数据缺少条目列表".into());
+        return;
+    };
+    let mut seen = HashSet::new();
+    for (index, row) in rows.iter().enumerate() {
+        let Some(id) = positive_id(row.get("id")).filter(|id| seen.insert(*id)) else {
+            catalog.data_issues.push(format!(
+                "第 {} 条家具数据缺少有效编号或与其他条目重复",
+                index + 1
+            ));
+            continue;
+        };
+        let name = row
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .map(plain_text)
+            .unwrap_or_else(|| format!("未命名家具 · {id}"));
+        let description = row
+            .get("description")
+            .and_then(Value::as_str)
+            .map(plain_text)
+            .unwrap_or_default();
+        let action = row
+            .get("playerActionType")
+            .and_then(Value::as_str)
+            .unwrap_or("no_action")
+            .to_owned();
+        let preview = &row["preview"];
+        let custom = (preview["kind"].as_str() == Some("custom"))
+            .then(|| preview["variants"].as_array())
+            .flatten()
+            .and_then(|variants| {
+                variants
+                    .iter()
+                    .find(|value| value["available"].as_bool() == Some(true))
+            });
+        let custom_base = custom
+            .and_then(|value| value["basePackage"].as_str())
+            .and_then(|name| name.strip_prefix("mysekai__fixture__"))
+            .and_then(source_leaf);
+        let model = row
+            .get("assetbundleName")
+            .and_then(Value::as_str)
+            .and_then(source_leaf);
+        let model = custom_base.or(model);
+        let presentation = if preview["kind"].as_str() == Some("surface") {
+            match (preview["skin"].as_str(), preview["channel"].as_str()) {
+                (Some(skin), Some(channel @ ("wall" | "floor")))
+                    if skin
+                        .bytes()
+                        .all(|ch| ch.is_ascii_alphanumeric() || ch == b'_' || ch == b'-')
+                        && !skin.is_empty() =>
+                {
+                    FixturePresentation::Surface {
+                        skin: skin.into(),
+                        wall: channel == "wall",
+                        available: preview["available"].as_bool() == Some(true),
+                    }
+                }
+                _ => FixturePresentation::default(),
+            }
+        } else if let Some(path) = custom
+            .and_then(|value| value["ornamentFile"].as_str())
+            .filter(|path| {
+                path.starts_with("custom-fixture-models/")
+                    && path.ends_with(".glb")
+                    && !path.contains([':', '\\'])
+                    && !path.split('/').any(|part| matches!(part, "" | ".." | "."))
+            })
+        {
+            FixturePresentation::Custom {
+                ornament: path.into(),
+            }
+        } else {
+            FixturePresentation::default()
+        };
+        let dimensions = ["gridWidth", "gridHeight", "gridDepth"].map(|field| {
+            row.get(field)
+                .and_then(Value::as_i64)
+                .and_then(|value| i32::try_from(value).ok())
+        });
+        let dimensions = if let Some(custom) = custom {
+            ["width", "height", "depth"].map(|axis| {
+                custom["gridSize"][axis]
+                    .as_i64()
+                    .and_then(|v| i32::try_from(v).ok())
+            })
+        } else {
+            dimensions
+        };
+        let source = model
+            .zip(dimensions.into_iter().collect::<Option<Vec<_>>>())
+            .and_then(|(model, size)| {
+                (size.iter().all(|value| *value > 0)).then(|| FixtureSource {
+                    package: format!("mysekai__fixture__{model}"),
+                    grid_size: moly_law::fixture::Vector3Int::new(size[0], size[1], size[2]),
+                    exported: false,
+                    layout: match row
+                        .get("layoutType")
+                        .and_then(Value::as_str)
+                        .or_else(|| row.get("handleType").and_then(Value::as_str))
+                    {
+                        Some("wall" | "windowpane" | "clock") => {
+                            moly_law::fixture::position::layout_type::WALL_FRONT
+                        }
+                        Some("road") => moly_law::fixture::position::layout_type::ROAD,
+                        _ if model.contains("_rug_") => {
+                            moly_law::fixture::position::layout_type::RUG
+                        }
+                        _ => moly_law::fixture::position::layout_type::FLOOR,
+                    },
+                    center_y: if matches!(
+                        row.get("layoutType")
+                            .and_then(Value::as_str)
+                            .or_else(|| row.get("handleType").and_then(Value::as_str)),
+                        Some("wall" | "windowpane" | "clock")
+                    ) {
+                        6
+                    } else {
+                        0
+                    },
+                })
+            });
+        let search = format!("{name} {description} #{id}").to_lowercase();
+        catalog.fixtures.push(LibraryFixture {
+            id,
+            name,
+            description,
+            action,
+            search,
+            thumbnail: None,
+            source,
+            presentation,
+        });
+    }
+}
+fn source_leaf(value: &str) -> Option<&str> {
+    let leaf = value
+        .rsplit(['/', '\\'])
+        .next()?
+        .strip_suffix(".prefab")
+        .unwrap_or_else(|| value.rsplit(['/', '\\']).next().unwrap_or(value));
+    (!leaf.is_empty() && !leaf.contains([':', '/', '\\'])).then_some(leaf)
+}
+fn parse_model_index(value: &Value, catalog: &mut LibraryCatalog) {
+    let Some(packages) = value.get("packages").and_then(Value::as_object) else {
+        catalog.data_issues.push("家具模型清单缺少包索引".into());
+        return;
+    };
+    for row in &mut catalog.fixtures {
+        let Some(source) = &mut row.source else {
+            continue;
+        };
+        let Some(package) = packages.get(&source.package) else {
+            continue;
+        };
+        let glb = package
+            .get("glb")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        source.exported = package.get("status").and_then(Value::as_str) == Some("exported")
+            && package.get("hasFixtureView").and_then(Value::as_bool) == Some(true)
+            && glb == format!("{}.glb", source.package);
+    }
+}
+fn safe_image_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path.contains([':', '\\'])
+        && path.split('/').all(|part| !matches!(part, "" | "." | ".."))
+        && path.to_ascii_lowercase().ends_with(".png")
+}
+fn parse_thumbnails(value: &Value, catalog: &mut LibraryCatalog) {
+    let Some(rows) = value.get("fixtures").and_then(Value::as_array) else {
+        catalog
+            .data_issues
+            .push("家具图片清单格式异常，仍可按名称浏览".into());
+        return;
+    };
+    for row in rows {
+        if let (Some(id), Some(path)) = (
+            positive_id(row.get("fixtureId")),
+            row.pointer("/variants/0/image").and_then(Value::as_str),
+        ) {
+            if safe_image_path(path) {
+                catalog
+                    .thumbnail_paths
+                    .entry(id)
+                    .or_insert_with(|| path.to_owned());
+            } else {
+                warn!("[content-library] ignored invalid thumbnail path for fixture {id}");
+            }
+        }
+    }
+}
+
+pub(crate) fn build_talk_catalog(
+    store: Option<Res<PlayerTalkStore>>,
+    fixtures: Option<Res<TalkStore>>,
+    activities: Option<Res<crate::fixture_activity_data::FixtureActivityTables>>,
+    mut catalog: ResMut<LibraryCatalog>,
+) {
+    if catalog.talks_ready || !catalog.source_ready {
+        return;
+    }
+    let (Some(store), Some(fixtures), Some(activities)) = (store, fixtures, activities) else {
+        return;
+    };
+    let mut talks = Vec::new();
+    let mut identities = HashSet::new();
+    let mut units: Vec<_> = store.units.iter().collect();
+    units.sort_by_key(|(unit, _)| *unit);
+    for (unit, rows) in units {
+        for row in rows {
+            if !identities.insert((0, row.talk_id)) {
+                catalog
+                    .data_issues
+                    .push(format!("对话 {} 的普通脚本重复，已保留第一份", row.talk_id));
+                continue;
+            }
+            let fixture_ids: Vec<i32> = row
+                .conditions
+                .iter()
+                .zip(&row.condition_values)
+                .filter_map(|(kind, value)| {
+                    (condition_type_discriminant(kind) == Some(CONDITION_MYSEKAI_FIXTURE_ID))
+                        .then_some(*value)
+                        .flatten()
+                })
+                .filter(|id| *id > 0)
+                .collect();
+            let related = row.conditions.iter().any(|kind| {
+                matches!(
+                    condition_type_discriminant(kind),
+                    Some(
+                        CONDITION_MYSEKAI_FIXTURE_ID
+                            | CONDITION_MYSEKAI_FIXTURE_TAG_ID
+                            | CONDITION_AFTER_SET_FIXTURE
+                    )
+                )
+            });
+            let lines = general_lines(&row.steps, &catalog.character(*unit), &row.tweet.text);
+            talks.push(make_talk(
+                TalkContent {
+                    master_id: row.talk_id,
+                    backend: TalkBackend::General,
+                    is_general: Some(crate::player_talk::is_general_row(row)),
+                },
+                vec![*unit],
+                fixture_ids,
+                lines,
+                related,
+                activities.has_talk_timeline(row.talk_id),
+                &catalog,
+                &row.tweet,
+            ));
+        }
+    }
+    for row in &fixtures.rows {
+        if !identities.insert((1, row.talk_id)) {
+            catalog
+                .data_issues
+                .push(format!("对话 {} 的家具脚本重复，已保留第一份", row.talk_id));
+            continue;
+        }
+        let mut fixture_ids = row.fixture_ids.clone();
+        fixture_ids.extend(row.pairs.iter().map(|pair| pair.fixture_id));
+        fixture_ids.extend(row.steps.iter().filter_map(fixture_step_id));
+        let mut seen = HashSet::new();
+        fixture_ids.retain(|id| *id > 0 && seen.insert(*id));
+        let units: Vec<u32> = row
+            .unit_ids
+            .iter()
+            .filter_map(|unit| u32::try_from(*unit).ok())
+            .filter(|unit| *unit > 0)
+            .collect();
+        let fallback = units
+            .first()
+            .map(|unit| catalog.character(*unit))
+            .unwrap_or_else(|| "旁白".into());
+        let lines = fixture_lines(&row.steps, &fallback, &row.tweet.text);
+        let drives = activities.has_talk_timeline(row.talk_id)
+            || row.steps.iter().any(is_fixture_operation);
+        // A backend filename is not a semantic category. Actual bindings and
+        // operations, not the fixture-script representation alone, imply it.
+        let related = !fixture_ids.is_empty() || drives;
+        talks.push(make_talk(
+            TalkContent {
+                master_id: row.talk_id,
+                backend: TalkBackend::Fixture,
+                is_general: None,
+            },
+            units,
+            fixture_ids,
+            lines,
+            related,
+            drives,
+            &catalog,
+            &row.tweet,
+        ));
+    }
+    catalog.talks = talks;
+    catalog.talks_ready = true;
+    catalog.revision = catalog.revision.wrapping_add(1);
+    info!(
+        "[content-library] indexed {} talks and {} furniture definitions",
+        catalog.talks.len(),
+        catalog.fixtures.len()
+    );
+}
+fn make_talk(
+    content: TalkContent,
+    units: Vec<u32>,
+    fixture_ids: Vec<i32>,
+    lines: Vec<DialogueLine>,
+    furniture_related: bool,
+    drives_fixture: bool,
+    catalog: &LibraryCatalog,
+    tweet: &moly_law::talk::TweetRef,
+) -> LibraryTalk {
+    let preview = lines
+        .iter()
+        .map(|line| format!("{}\n{}", line.speaker, line.text))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let title = lines
+        .first()
+        .map(|line| excerpt(&line.text, 44))
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| {
+            if drives_fixture {
+                "一段家具演出".into()
+            } else {
+                "一段日常对话".into()
+            }
+        });
+    let cast = units
+        .iter()
+        .map(|unit| catalog.character(*unit))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let furniture = fixture_ids
+        .iter()
+        .map(|id| catalog.fixture_name(*id))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let search = format!(
+        "#{id} {title} {preview} {cast} {furniture}",
+        id = content.master_id
+    )
+    .to_lowercase();
+    LibraryTalk {
+        preview_tweet: (tweet.id > 0 && !tweet.text.trim().is_empty()).then(|| tweet.clone()),
+        content,
+        units,
+        fixture_ids,
+        title,
+        preview,
+        lines,
+        search,
+        furniture_related,
+        drives_fixture,
+    }
+}
+fn general_lines(steps: &[TalkStep], fallback: &str, tweet: &str) -> Vec<DialogueLine> {
+    let mut speaker = fallback.to_owned();
+    let mut lines = Vec::new();
+    for step in steps {
+        match step {
+            TalkStep::Label { name } if !name.is_empty() => speaker = plain_text(name),
+            TalkStep::Text { text } if !text.is_empty() => lines.push(DialogueLine {
+                speaker: speaker.clone(),
+                text: plain_text(text),
+            }),
+            _ => {}
+        }
+    }
+    if lines.is_empty() && !tweet.is_empty() {
+        lines.push(DialogueLine {
+            speaker,
+            text: plain_text(tweet),
+        });
+    }
+    lines
+}
+fn fixture_lines(steps: &[FixtureStep], fallback: &str, tweet: &str) -> Vec<DialogueLine> {
+    let mut speaker = fallback.to_owned();
+    let mut lines = Vec::new();
+    for step in steps {
+        match step {
+            FixtureStep::Label { name } if !name.is_empty() => speaker = plain_text(name),
+            FixtureStep::Text { text } if !text.is_empty() => lines.push(DialogueLine {
+                speaker: speaker.clone(),
+                text: plain_text(text),
+            }),
+            _ => {}
+        }
+    }
+    if lines.is_empty() && !tweet.is_empty() {
+        lines.push(DialogueLine {
+            speaker,
+            text: plain_text(tweet),
+        });
+    }
+    lines
+}
+fn fixture_step_id(step: &FixtureStep) -> Option<i32> {
+    let value = match step {
+        FixtureStep::LookAtToNpc { fixture, .. }
+        | FixtureStep::FixtureVoice { fixture, .. }
+        | FixtureStep::ChangeFixtureCharacterEye { fixture, .. }
+        | FixtureStep::ChangeFixtureCharacterMouth { fixture, .. }
+        | FixtureStep::ChangeFixtureTimeline { fixture, .. }
+        | FixtureStep::ShowFixtureEmoticon { fixture, .. } => *fixture,
+        // LookAtFixture.fixture is an actor referent despite its extracted key.
+        _ => return None,
+    };
+    (value.is_finite() && value.fract() == 0. && value > 0. && value <= i32::MAX as f64)
+        .then_some(value as i32)
+}
+fn is_fixture_operation(step: &FixtureStep) -> bool {
+    matches!(
+        step,
+        FixtureStep::ChangeFixtureTimeline { .. }
+            | FixtureStep::PlayFixtureGimmick { .. }
+            | FixtureStep::StopFixtureGimmick { .. }
+    )
+}
+fn query_matches(haystack: &str, query: &str, id: i32) -> bool {
+    let query = query.trim();
+    if let Ok(number) = query.trim_start_matches('#').parse::<i32>() {
+        return id == number;
+    }
+    query.split_whitespace().all(|word| haystack.contains(word))
+}
+pub(super) fn filtered_keys(
+    state: &ContentLibrary,
+    catalog: &LibraryCatalog,
+    world: &LibraryContext,
+) -> Vec<EntryKey> {
+    let query = state.search.to_lowercase();
+    let mut keys = match state.tab {
+        LibraryTab::Activities => activities::filtered_keys(state, catalog, world),
+        LibraryTab::Furniture => catalog
+            .fixtures
+            .iter()
+            .filter(|row| {
+                query_matches(&row.search, &query, row.id)
+                    && state.related_fixture.is_none_or(|id| id == row.id)
+                    && (!state.special_only || row.interactive())
+                    && match state.scope {
+                        Scope::All => true,
+                        Scope::Here => world
+                            .instances
+                            .get(&row.id)
+                            .is_some_and(|items| !items.is_empty()),
+                        Scope::Ready => {
+                            if state.mode == ExperienceMode::Independent {
+                                context::independent_reason(EntryKey::Fixture(row.id), catalog)
+                                    .is_none()
+                            } else {
+                                row.interactive()
+                                    && world
+                                        .instances
+                                        .get(&row.id)
+                                        .is_some_and(|items| items.iter().any(|item| item.ready))
+                            }
+                        }
+                    }
+            })
+            .map(|row| EntryKey::Fixture(row.id))
+            .collect::<Vec<_>>(),
+        _ => catalog
+            .talks
+            .iter()
+            .filter(|row| {
+                (state.tab != LibraryTab::Performances || row.furniture_related)
+                    && (!state.special_only || row.drives_fixture)
+                    && state.character.is_none_or(|unit| row.units.contains(&unit))
+                    && state
+                        .related_fixture
+                        .is_none_or(|id| row.fixture_ids.contains(&id))
+                    && query_matches(&row.search, &query, row.content.master_id)
+                    && match state.scope {
+                        Scope::All => true,
+                        Scope::Here => context::talk_here(row, world),
+                        Scope::Ready => {
+                            if state.mode == ExperienceMode::Independent {
+                                context::independent_reason(row.key(), catalog).is_none()
+                            } else {
+                                context::talk_reason(row, catalog, world).is_none()
+                            }
+                        }
+                    }
+            })
+            .map(LibraryTalk::key)
+            .collect::<Vec<_>>(),
+    };
+    // Available content comes first without changing authored script order.
+    keys.sort_by_key(|key| {
+        if state.mode == ExperienceMode::Independent {
+            return context::independent_reason(*key, catalog).is_some();
+        }
+        match key {
+            EntryKey::Activity(id) => catalog
+                .activity(*id)
+                .is_none_or(|row| activities::current_reason(row, catalog, world).is_some()),
+            EntryKey::Fixture(id) => !world
+                .instances
+                .get(id)
+                .is_some_and(|items| !items.is_empty()),
+            _ => catalog
+                .talk(*key)
+                .is_none_or(|row| !context::talk_here(row, world)),
+        }
+    });
+    keys
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn dom_artwork_preserves_manifest_without_loading_gpu_thumbnails() {
+        let mut catalog = LibraryCatalog::default();
+        catalog.fixtures.push(LibraryFixture {
+            id: 7,
+            name: "椅子".into(),
+            description: String::new(),
+            action: String::new(),
+            search: String::new(),
+            thumbnail: Some(Handle::default()),
+            source: None,
+            presentation: FixturePresentation::Model,
+        });
+        catalog.thumbnail_paths.insert(7, "images/chair.png".into());
+        load_thumbnail_handles(&mut catalog, true, |_| {
+            panic!("DOM artwork must not request GPU images")
+        });
+        assert!(catalog.fixtures[0].thumbnail.is_none());
+        assert_eq!(catalog.thumbnail_paths[&7], "images/chair.png");
+        let mut requests = Vec::new();
+        load_thumbnail_handles(&mut catalog, false, |path| {
+            requests.push(path.to_owned());
+            Handle::default()
+        });
+        assert_eq!(requests, ["images/chair.png"]);
+        assert!(catalog.fixtures[0].thumbnail.is_some());
+    }
+    #[test]
+    fn transcript_keeps_all_lines_and_speakers() {
+        let lines = general_lines(
+            &[
+                TalkStep::Label {
+                    name: "一歌".into(),
+                },
+                TalkStep::Text {
+                    text: "第一句".into(),
+                },
+                TalkStep::Label { name: "奏".into() },
+                TalkStep::Text {
+                    text: "很长的第二句\n继续说".into(),
+                },
+            ],
+            "旁白",
+            "备用",
+        );
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1].speaker, "奏");
+        assert!(lines[1].text.contains('\n'));
+    }
+    #[test]
+    fn later_lines_are_searchable() {
+        let row = make_talk(
+            TalkContent {
+                master_id: 12,
+                backend: TalkBackend::General,
+                is_general: Some(true),
+            },
+            vec![1],
+            vec![],
+            vec![
+                DialogueLine {
+                    speaker: "一歌".into(),
+                    text: "开场".into(),
+                },
+                DialogueLine {
+                    speaker: "一歌".into(),
+                    text: "独特的关键词".into(),
+                },
+            ],
+            false,
+            false,
+            &LibraryCatalog::default(),
+            &moly_law::talk::TweetRef {
+                id: 0,
+                text: String::new(),
+                motion: String::new(),
+                eye: String::new(),
+                mouth: String::new(),
+            },
+        );
+        assert!(query_matches(&row.search, "独特的关键词", 12));
+        assert!(!query_matches(&row.search, "123", 12));
+        assert!(query_matches(&row.search, "#12", 12));
+    }
+    #[test]
+    fn actor_operand_is_not_a_furniture_master() {
+        assert_eq!(
+            fixture_step_id(&FixtureStep::LookAtFixture {
+                who: 0.5,
+                fixture: 1.0
+            }),
+            None
+        );
+    }
+    #[test]
+    fn thumbnail_paths_stay_under_the_manifest_root() {
+        assert!(safe_image_path("images/157_1.png"));
+        for path in [
+            "../private.png",
+            "https://example.test/image.png",
+            "C:\\secret.png",
+            "/absolute.png",
+            "images/../a.png",
+        ] {
+            assert!(!safe_image_path(path));
+        }
+    }
+    #[test]
+    fn absent_names_are_not_guessed_from_package_tokens() {
+        let mut catalog = LibraryCatalog::default();
+        parse_fixtures(
+            &serde_json::json!({"fixtures":[{"id":157,"assetbundleName":"mdl_ext0002_fixture_fridge1"}]}),
+            &mut catalog,
+        );
+        assert_eq!(catalog.fixtures[0].name, "未命名家具 · 157");
+    }
+
+    #[test]
+    fn source_paths_match_by_master_leaf_without_requiring_identical_full_paths() {
+        assert_eq!(
+            source_leaf("assets/source/mdl_demo_fixture_chair1.prefab"),
+            Some("mdl_demo_fixture_chair1")
+        );
+        assert_eq!(
+            source_leaf("mdl_demo_fixture_chair1"),
+            Some("mdl_demo_fixture_chair1")
+        );
+    }
+
+    #[test]
+    fn model_index_requires_the_exact_exported_fixture_view_package() {
+        let mut catalog = LibraryCatalog::default();
+        parse_fixtures(
+            &serde_json::json!({"fixtures":[{"id":8,"name":"椅子",
+            "assetbundleName":"source/path/mdl_fixture_chair.prefab","gridWidth":2,"gridHeight":2,"gridDepth":2}]}),
+            &mut catalog,
+        );
+        parse_model_index(
+            &serde_json::json!({"packages":{"mysekai__fixture__mdl_fixture_chair":{
+            "status":"exported","hasFixtureView":true,"glb":"mysekai__fixture__mdl_fixture_chair.glb"}}}),
+            &mut catalog,
+        );
+        assert!(catalog.fixtures[0].source.as_ref().unwrap().exported);
+        catalog.fixtures[0].source.as_mut().unwrap().exported = false;
+        parse_model_index(
+            &serde_json::json!({"packages":{"mysekai__fixture__mdl_fixture_chair":{
+            "status":"exported","hasFixtureView":true,"glb":"different.glb"}}}),
+            &mut catalog,
+        );
+        assert!(!catalog.fixtures[0].source.as_ref().unwrap().exported);
+    }
+    #[test]
+    fn native_fixture_reactions_preserve_source_group_order() {
+        let mut catalog = LibraryCatalog::default();
+        parse_fixture_reactions(
+            &serde_json::json!({
+                "schema":"moly-fixture-reactions/1",
+                "fixtures":[{"fixtureId":534,"groups":[
+                    [1,4],[27,42],[7,8],[28,33],[11,12],
+                    [29,49],[13,55],[14,15],[18,20]
+                ]}]
+            }),
+            &mut catalog,
+        );
+        assert_eq!(
+            catalog.fixture_reactions(534),
+            &[
+                vec![1, 4],
+                vec![27, 42],
+                vec![7, 8],
+                vec![28, 33],
+                vec![11, 12],
+                vec![29, 49],
+                vec![13, 55],
+                vec![14, 15],
+                vec![18, 20]
+            ]
+        );
+        assert!(catalog.data_issues.is_empty());
+    }
+
+    #[test]
+    fn malformed_fixture_reaction_row_fails_closed() {
+        let mut catalog = LibraryCatalog::default();
+        parse_fixture_reactions(
+            &serde_json::json!({
+                "schema":"moly-fixture-reactions/1",
+                "fixtures":[{"fixtureId":534,"groups":[[14,14]]}]
+            }),
+            &mut catalog,
+        );
+        assert!(catalog.fixture_reactions(534).is_empty());
+        assert!(!catalog.data_issues.is_empty());
+    }
+
+    #[test]
+    fn source_character_portrait_paths_are_confined_and_dom_does_not_load_them() {
+        let mut catalog = LibraryCatalog::default();
+        parse_character_portraits(
+            &serde_json::json!({"version":1,"characters":[
+                {"unitId":14,"image":"ui/character-portraits/chr_sp_14-demo.png"},
+                {"unitId":15,"image":"../escape.png"}
+            ]}),
+            &mut catalog,
+        );
+        assert_eq!(
+            catalog
+                .character_portrait_paths
+                .get(&14)
+                .map(String::as_str),
+            Some("ui/character-portraits/chr_sp_14-demo.png")
+        );
+        assert!(!catalog.character_portrait_paths.contains_key(&15));
+        load_character_portrait_handles(&mut catalog, true, |_| {
+            panic!("external DOM mode must not request native portrait textures")
+        });
+        assert!(catalog.character_portraits.is_empty());
+    }
+
+    #[test]
+    fn opening_tweet_preserves_source_break_and_missing_stays_missing() {
+        let original = "……对了，冰箱里好像还\n剩了一些望月同学……";
+        let tweet = moly_law::talk::TweetRef {
+            id: 11374,
+            text: original.into(),
+            motion: "mov_cw_silent_tilthead003".into(),
+            eye: "normal_l".into(),
+            mouth: "normal01".into(),
+        };
+        let build = |tweet: &moly_law::talk::TweetRef| {
+            make_talk(
+                TalkContent {
+                    master_id: 1374,
+                    backend: TalkBackend::Fixture,
+                    is_general: None,
+                },
+                vec![17],
+                vec![157],
+                vec![DialogueLine {
+                    speaker: "奏".into(),
+                    text: "这里是完整正式对白，不得截取替代气泡".into(),
+                }],
+                true,
+                true,
+                &LibraryCatalog::default(),
+                tweet,
+            )
+        };
+        assert_eq!(build(&tweet).preview_tweet.unwrap().text, original);
+        let missing = moly_law::talk::TweetRef {
+            id: 0,
+            text: String::new(),
+            motion: String::new(),
+            eye: String::new(),
+            mouth: String::new(),
+        };
+        assert!(build(&missing).preview_tweet.is_none());
+    }
+}

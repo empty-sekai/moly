@@ -1,0 +1,454 @@
+:root {
+  color-scheme: light;
+  --accent: #139f98;
+  --background: #f1f6f5;
+  --surface: #ffffff;
+  --text: #233438;
+  --muted: #627575;
+  --border: #d7e4e2;
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --background: #111d21;
+  --surface: #1b292e;
+  --text: #e7f0ee;
+  --muted: #a6bcba;
+  --border: #34504f;
+}
+* {
+  box-sizing: border-box;
+}
+html,
+body,
+#stage {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--background);
+}
+#stage {
+  position: relative;
+  isolation: isolate;
+}
+#app-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  outline: none;
+  touch-action: none;
+}
+#app-canvas:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: -3px;
+}
+.boot {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  overflow: auto;
+  padding: 24px;
+  background: var(--background);
+}
+.boot-inner {
+  text-align: center;
+  max-width: 470px;
+  margin: auto;
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+h1 {
+  font-size: clamp(20px, 3.8vw, 30px);
+  line-height: 1.3;
+  margin: 0;
+  color: var(--text);
+}
+#boot-message {
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--muted);
+  margin: 12px 0;
+  text-wrap: pretty;
+}
+.progress {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  min-height: 18px;
+}
+button {
+  appearance: none;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  padding: 12px 18px;
+  font: inherit;
+  font-weight: 650;
+  font-size: 14px;
+  line-height: 1.35;
+  min-height: 44px;
+  cursor: pointer;
+  transition:
+    background-color 0.16s ease,
+    border-color 0.16s ease;
+}
+button:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 3px;
+}
+.secondary {
+  background: var(--surface);
+  color: var(--text);
+  border-color: var(--border);
+  margin: 4px;
+}
+.secondary:hover {
+  border-color: var(--accent);
+}
+.note {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+  margin: 16px 0 0;
+}
+.hint {
+  position: absolute;
+  left: 12px;
+  bottom: 8px;
+  right: 12px;
+  margin: 0;
+  width: fit-content;
+  max-width: calc(100% - 24px);
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 7px 10px;
+  font-size: 11px;
+  pointer-events: none;
+}
+/* 天气钮：场景自带的一枚拨盘。它只写档位 id，档位表由运行时给出，
+   因此界面永远点不到不存在的档。 */
+.weather {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.3;
+  backdrop-filter: blur(6px);
+}
+.weather:hover {
+  border-color: var(--accent);
+}
+.site {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  display: inline-flex;
+  min-height: 34px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  backdrop-filter: blur(6px);
+}
+.site:hover,
+.site:focus-within {
+  border-color: var(--accent);
+}
+.site select {
+  appearance: none;
+  border: 0;
+  border-radius: inherit;
+  padding: 6px 28px 6px 12px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.3;
+  cursor: pointer;
+}
+.site::after {
+  content: "\25BE";
+  position: absolute;
+  top: 50%;
+  right: 12px;
+  transform: translateY(-50%);
+  color: var(--text);
+  font-size: 11px;
+  pointer-events: none;
+}
+.site select:disabled {
+  cursor: progress;
+  opacity: 0.65;
+}
+.site option {
+  background: var(--surface);
+  color: var(--text);
+}
+.weather-source-icon {
+  width: 28px;
+  height: 28px;
+  object-fit: contain;
+  flex: none;
+}
+[hidden] {
+  display: none !important;
+}
+@media (max-height: 360px) {
+  .boot {
+    padding: 14px;
+  }
+  .note {
+    display: none;
+  }
+  h1 {
+    font-size: 20px;
+  }
+  #boot-message {
+    margin: 8px 0;
+    font-size: 12px;
+  }
+  .progress {
+    margin: 4px 0 8px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .boot {
+    background: var(--background);
+  }
+}
+@media (prefers-contrast: more) {
+  :root {
+    --muted: var(--text);
+    --border: var(--text);
+  }
+  button {
+    border-width: 2px;
+  }
+}
+@media (forced-colors: active) {
+  button {
+    border: 1px solid ButtonText;
+  }
+}
+
+/* Source-icon selection surface; it does not replace the authored in-scene UI. */
+.weather-dialog {
+  width: min(560px, calc(100vw - 32px));
+  max-height: min(720px, calc(100dvh - 40px));
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 24px 90px #0004;
+  overflow: hidden;
+  margin: auto;
+}
+.weather-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+.weather-dialog::backdrop {
+  background: #061b2547;
+}
+.weather-panel-header {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 18px 20px 10px;
+  flex: none;
+}
+.weather-panel-title {
+  margin: 0;
+  font-size: 19px;
+  line-height: 1.4;
+  font-weight: 750;
+}
+.weather-preview-badge {
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+  border-radius: 6px;
+  padding: 3px 6px;
+}
+.weather-panel-close {
+  margin-left: auto;
+  background: transparent;
+  color: var(--text);
+  padding: 4px;
+  min-width: 40px;
+  min-height: 40px;
+  font-size: 25px;
+}
+.weather-periods {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 20px 14px;
+  flex: none;
+}
+.weather-period {
+  padding: 7px 12px;
+  min-height: 36px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
+}
+.weather-period[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  color: var(--text);
+}
+.weather-options {
+  display: grid;
+  flex: 1 1 auto;
+  min-height: 0;
+  align-content: start;
+  grid-auto-rows: minmax(144px, auto);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  padding: 4px 20px 16px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+.weather-option {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 10px 4px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  color: var(--text);
+  background: var(--surface);
+  min-width: 0;
+  font-size: 13px;
+}
+.weather-option:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface));
+}
+.weather-option[aria-selected="true"] {
+  border: 2px solid var(--accent);
+  padding: 9px 3px;
+  background: color-mix(in srgb, var(--accent) 9%, var(--surface));
+}
+.weather-option[data-pending="true"] {
+  border-style: dashed;
+  border-color: var(--accent);
+}
+.weather-option-picture {
+  width: 64px;
+  height: 64px;
+  flex: none;
+  display: grid;
+  place-items: center;
+}
+.weather-option-icon {
+  width: 64px;
+  height: 64px;
+  object-fit: contain;
+}
+.weather-option-no-art {
+  font-size: 32px;
+  color: var(--muted);
+  font-weight: 400;
+}
+.weather-option-label {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+.weather-option-state {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--muted);
+}
+.weather-panel-footer {
+  padding: 12px 20px 16px;
+  border-top: 1px solid var(--border);
+  flex: none;
+}
+.weather-panel-status {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 650;
+}
+.weather-panel-scope {
+  margin: 6px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.weather[data-phase="loading"],
+.weather[data-phase="transitioning"] {
+  border-style: dashed;
+}
+@media (max-width: 420px) {
+  .weather-dialog {
+    width: calc(100vw - 20px);
+    max-height: calc(100dvh - 24px);
+    border-radius: 20px;
+  }
+  .weather-panel-header {
+    padding: 14px 14px 8px;
+    gap: 8px;
+  }
+  .weather-panel-title {
+    font-size: 17px;
+  }
+  .weather-periods {
+    padding: 0 14px 10px;
+  }
+  .weather-options {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    padding: 4px 14px 12px;
+    gap: 8px;
+  }
+  .weather-option {
+    border-radius: 13px;
+  }
+  .weather-panel-footer {
+    padding: 10px 14px 12px;
+  }
+}

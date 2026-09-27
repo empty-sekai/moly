@@ -20,6 +20,7 @@ use bevy::prelude::*;
 
 use moly_assets::json::JsonAsset;
 use moly_law::alone_action as law;
+use moly_law::blink::EyePattern;
 use moly_law::facial::LipPattern;
 
 use crate::character::{MotionDriver, MotionKind, MotionLibrary, SEGMENT_BLEND};
@@ -72,12 +73,19 @@ struct UnitPool {
 impl FacialTables {
     /// Authored per-unit defaults; absence is not a request for a guessed face.
     pub(crate) fn default_patterns(&self, unit: u32) -> Option<(&str, &str)> {
-        self.defaults.get(&unit).map(|(eye, mouth)| (eye.as_str(), mouth.as_str()))
+        self.defaults
+            .get(&unit)
+            .map(|(eye, mouth)| (eye.as_str(), mouth.as_str()))
     }
 
     /// 眼表查键：pattern → open 格值（缺键 None——消费侧响亮失败用）。
     /// 对话步的眼图样与待机动作共用同一张眼表（键即 `PatternName`）。
     pub(crate) fn eye_open(&self, pattern: &str) -> Option<i32> {
+        self.eye.get(pattern).map(|row| row.open)
+    }
+
+    /// The whole eye row (open, close, blink) of a pattern name.
+    pub(crate) fn eye_pattern(&self, pattern: &str) -> Option<EyePattern> {
         self.eye.get(pattern).copied()
     }
 
@@ -96,7 +104,7 @@ impl FacialTables {
 /// preserve the full lip row for the separately owned speech continuation.
 #[derive(Resource)]
 pub(crate) struct FacialTables {
-    eye: HashMap<String, i32>,
+    eye: HashMap<String, EyePattern>,
     lip: HashMap<String, LipPattern>,
     defaults: HashMap<u32, (String, String)>,
 }
@@ -396,7 +404,10 @@ fn parse_steps(steps: &[serde_json::Value], unit: u32, scenario: &str) -> Vec<la
                 "emoticon" => law::Step::ShowEmoticon {
                     t,
                     name: string_of(step, "name", unit).to_owned(),
-                    show_seconds: step.get("showSeconds").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+                    show_seconds: step
+                        .get("showSeconds")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0) as f32,
                     time_arg: step.get("time").and_then(|v| v.as_f64()),
                     not_play_se_arg: step.get("notPlaySe").and_then(|v| v.as_bool()),
                     host_not_play_se: step
@@ -457,7 +468,22 @@ fn parse_facial(text: &str) -> FacialTables {
             .get("OpenEyeIndex")
             .and_then(|v| v.as_i64())
             .unwrap_or_else(|| panic!("眼表行 {name} 缺 OpenEyeIndex"));
-        eye.insert(name.to_owned(), open as i32);
+        let close = row
+            .get("CloseEyeIndex")
+            .and_then(|v| v.as_i64())
+            .unwrap_or_else(|| panic!("眼表行 {name} 缺 CloseEyeIndex"));
+        let blink = row
+            .get("BlinkEnabled")
+            .and_then(|v| v.as_i64().or_else(|| v.as_bool().map(i64::from)))
+            .unwrap_or_else(|| panic!("眼表行 {name} 缺 BlinkEnabled"));
+        eye.insert(
+            name.to_owned(),
+            EyePattern {
+                open: open as i32,
+                close: close as i32,
+                blink_enabled: blink != 0,
+            },
+        );
     }
     let mut lip = HashMap::new();
     for row in value
@@ -473,11 +499,22 @@ fn parse_facial(text: &str) -> FacialTables {
             .get("CloseLipSyncIndex")
             .and_then(|v| v.as_i64())
             .unwrap_or_else(|| panic!("口型表行 {name} 缺 CloseLipSyncIndex"));
-        let open = row.get("OpenLipSyncIndex").and_then(|v| v.as_i64())
+        let open = row
+            .get("OpenLipSyncIndex")
+            .and_then(|v| v.as_i64())
             .unwrap_or_else(|| panic!("口型表行 {name} 缺 OpenLipSyncIndex"));
-        let middle = row.get("MiddleLipSyncIndex").and_then(|v| v.as_i64())
+        let middle = row
+            .get("MiddleLipSyncIndex")
+            .and_then(|v| v.as_i64())
             .unwrap_or_else(|| panic!("口型表行 {name} 缺 MiddleLipSyncIndex"));
-        lip.insert(name.to_owned(), LipPattern { open: open as i32, middle: middle as i32, close: close as i32 });
+        lip.insert(
+            name.to_owned(),
+            LipPattern {
+                open: open as i32,
+                middle: middle as i32,
+                close: close as i32,
+            },
+        );
     }
     let mut defaults = HashMap::new();
     for row in value
@@ -504,8 +541,9 @@ fn parse_facial(text: &str) -> FacialTables {
 
 // ---- 随机源 ----
 
-/// 跨帧线性同余抽签（整数 0..99）：状态随调用前进、种子含 unitId，
-/// 跨帧连续——律只约束分布与掷点次数，引擎序列不在律内。
+/// 跨帧线性同余抽签：状态随调用前进、种子含 unitId，跨帧连续——律只
+/// 约束分布与掷点次数，引擎序列不在律内。脚本的整数抽签走脚本虚拟机
+/// 自己的映射（[`Lcg::percent`]）；`below` 是别的调用方的均匀区间。
 pub(crate) struct Lcg(u64);
 
 impl Lcg {
@@ -514,8 +552,16 @@ impl Lcg {
         Self(((unit_id as u64) << 32) | 0x00a10e_u64)
     }
 
+    /// One script `math.random(0, 99)`: one 31-bit value stands for the one
+    /// `rand()` of the script VM, mapped by the VM's own conversion (see
+    /// [`law::lua_math_random`]), not by an exact uniform 0..99.
     fn percent(&mut self) -> u32 {
-        self.below(100)
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let x = (self.0 >> 33) as u32;
+        law::lua_math_random(x, 0, 99) as u32
     }
 
     fn below(&mut self, upper: u32) -> u32 {
@@ -649,8 +695,12 @@ pub(crate) fn attach(
             .defaults
             .get(&unit.0)
             .unwrap_or_else(|| panic!("facial 默认脸表没有 unit {}", unit.0));
-        apply_eye(&mut materials, &eye_handle, tables.eye.get(eye_name));
-        apply_mouth_pattern(&mut materials, &mouth_handle, tables.lip.get(mouth_name).copied().unwrap_or_default());
+        apply_eye_pattern(&mut materials, &eye_handle, tables.eye_pattern(eye_name));
+        apply_mouth_pattern(
+            &mut materials,
+            &mouth_handle,
+            tables.lip.get(mouth_name).copied().unwrap_or_default(),
+        );
         commands.entity(npc).insert(AloneRuntime {
             program: pool.map(|pool| pool.program.clone()),
             scenarios: pool.map(|pool| pool.scenarios.clone()).unwrap_or_default(),
@@ -678,7 +728,7 @@ pub(crate) fn attach(
 /// 动作库里。缺什么报什么（键名/段名与单位 id——不带资产内容）。
 fn verify_step(
     step: &law::Step,
-    eye: &HashMap<String, i32>,
+    eye: &HashMap<String, EyePattern>,
     lip: &HashMap<String, LipPattern>,
     lib: &Gltf,
     unit: u32,
@@ -740,6 +790,20 @@ pub(crate) fn apply_eye(
     (col, row)
 }
 
+/// `ChangeEyePattern`: the view's pattern becomes the row (`FindBy`'s
+/// zero-valued row when the name is absent) and its open cell is written.
+pub(crate) fn apply_eye_pattern(
+    materials: &mut Assets<CharacterMaterial>,
+    handle: &Handle<CharacterMaterial>,
+    pattern: Option<EyePattern>,
+) -> (i32, i32) {
+    let pattern = crate::npc_view::pattern_or_zero(pattern);
+    if let Some(material) = materials.get_mut(handle) {
+        material.eye_pattern = Some(pattern);
+    }
+    apply_eye(materials, handle, Some(&pattern.open))
+}
+
 /// Write one mouth atlas index. Speech continuations use this same material
 /// path without changing the full authored pattern or its revision.
 pub(crate) fn apply_mouth(
@@ -757,7 +821,10 @@ pub(crate) fn apply_mouth(
     ];
     // UpdateMouth writes Close on idle frames too. Read without marking the
     // asset changed, so an already-selected cell does not upload every frame.
-    if materials.get(handle).is_some_and(|material| material.params.main_tex_st != st) {
+    if materials
+        .get(handle)
+        .is_some_and(|material| material.params.main_tex_st != st)
+    {
         if let Some(material) = materials.get_mut(handle) {
             material.params.main_tex_st = st;
         }
@@ -787,7 +854,7 @@ pub(crate) fn apply_mouth_pattern(
 /// activity owners keep their existing animation and presentation channels.
 #[allow(clippy::type_complexity)]
 pub(crate) fn advance(
-    time: Res<Time>,
+    clock: Res<crate::npc_clock::NpcClock>,
     gate: Res<AloneExecutionGate>,
     tables: Option<Res<FacialTables>>,
     library: Res<MotionLibrary>,
@@ -811,7 +878,7 @@ pub(crate) fn advance(
         return;
     };
     let wall = wall_second();
-    let now = time.elapsed_secs_f64();
+    let delta_time = clock.delta();
     for (npc, unit, rest, mut runtime, mut driver, talk) in &mut npcs {
         let rt = &mut *runtime;
         let driver = &mut *driver;
@@ -844,10 +911,16 @@ pub(crate) fn advance(
             values: Vec::new(),
         };
         let events: Vec<_> = script
-            .advance(program, &rt.scenarios, &rt.tail, wall, now, &mut draw)
+            .advance(program, &rt.scenarios, &rt.tail, wall, delta_time, &mut draw)
             .into_iter()
             .cloned()
             .collect();
+        if let Some(milliseconds) = script.failed_wait() {
+            error_once!(
+                "[alone] unit={} script wait of {milliseconds} ms is negative: the host delay raises, the script makes no further step",
+                unit.0
+            );
+        }
         if !draw.values.is_empty() {
             trace!("[alone] unit={} 整数掷点 {:?}", unit.0, draw.values);
         }
@@ -861,11 +934,15 @@ pub(crate) fn advance(
             rt.steps_fired += 1;
             match step {
                 law::Step::ChangeEye { pattern, .. } => {
-                    apply_eye(&mut materials, &rt.eye_handle, tables.eye.get(&pattern));
+                    apply_eye_pattern(&mut materials, &rt.eye_handle, tables.eye_pattern(&pattern));
                     rt.eye_pattern = pattern;
                 }
                 law::Step::ChangeMouth { pattern, .. } => {
-                    apply_mouth_pattern(&mut materials, &rt.mouth_handle, tables.lip.get(&pattern).copied().unwrap_or_default());
+                    apply_mouth_pattern(
+                        &mut materials,
+                        &rt.mouth_handle,
+                        tables.lip.get(&pattern).copied().unwrap_or_default(),
+                    );
                     rt.mouth_pattern = pattern;
                 }
                 law::Step::ChangeAnimation {
@@ -1018,7 +1095,12 @@ pub(crate) fn node_for(
     let graph = graphs
         .get_mut(graph_handle)
         .unwrap_or_else(|| panic!("unit {unit} 的动画图资产不在（装配时已建）"));
-    let node = graph.add_clip(clip.clone(), 1.0, graph.root);
+    // Talk sessions have short-lived name maps but share the character's
+    // graph. Reopening the same conversation must not append its clips again.
+    let existing = graph.graph.node_indices().find(|node| {
+        matches!(&graph.graph[*node].node_type, bevy::animation::graph::AnimationNodeType::Clip(handle) if handle == clip)
+    });
+    let node = existing.unwrap_or_else(|| graph.add_clip(clip.clone(), 1.0, graph.root));
     nodes.insert(clip_name.to_owned(), node);
     node
 }
@@ -1047,3 +1129,7 @@ pub(crate) fn report(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "npc_harness/alone.rs"]
+mod harness;

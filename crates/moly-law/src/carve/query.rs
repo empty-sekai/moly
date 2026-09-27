@@ -10,8 +10,10 @@
 //!   为「返回整条折线」（末拐点是折线的最后一个元素，消费侧自取），
 //!   全败折成 `None`（原地把不走折线的决定留给调用方）。
 //! * 同文件的 `CanNavmeshMoveTargetPosition` 证明严判形态（不吸附、
-//!   不拉回、按末拐点与目标的水平距离过阈）也在源里并存——本模块
-//!   不做严判变体，消费侧需要时对折线末点自比即可。
+//!   不拉回、按末拐点与目标的水平距离过阈）也在源里并存——严判与 NPC
+//!   出发门走 [`calculate_path`]：它转写引擎 `CalculatePath` 本身（两端
+//!   各经一只查询盒映射，连通给完整折线、不连通给部分折线，两种都算
+//!   成功），比对末拐点的事由各门自己做。
 //!
 //! 折线的整直：真源 `CalculatePath` 返回的 corners 是整直后的直线路
 //! 径（原生代理内部的搜索 + straight path 后处理在原生墙后）。本模块
@@ -21,8 +23,8 @@
 //! （保守侧：只有半径一格的站上，角点邻格可能是洞）。
 
 use super::grid::Grid;
-use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+use super::polymesh::PolyMesh;
+use super::region::Regions;
 
 /// 端点吸附上限：真源移动侧查询里 `SamplePosition` 的 maxDistance 字面量。
 pub const SNAP_MAX_DISTANCE: f32 = 5.0;
@@ -108,7 +110,13 @@ pub(crate) fn nearest_walkable(
 /// 都重新吸附）；首个「吸附成功 ∧ A\* 连通」的档出折线。全败 `None`。
 /// 折线首点是起点吸附点、末点是目标吸附点，中间路点是格中心，整段
 /// 都在可行走格上。
-pub(crate) fn path(grid: &Grid, start: [f32; 2], goal: [f32; 2]) -> Option<Vec<[f32; 2]>> {
+pub(crate) fn path(
+    grid: &Grid,
+    polys: &PolyMesh,
+    regions: &Regions,
+    start: [f32; 2],
+    goal: [f32; 2],
+) -> Option<Vec<[f32; 2]>> {
     let start_pt = nearest_walkable(grid, start, Some(SNAP_MAX_DISTANCE))?;
     for k in (0..=10).rev() {
         let t = k as f32 / 10.0;
@@ -119,141 +127,111 @@ pub(crate) fn path(grid: &Grid, start: [f32; 2], goal: [f32; 2]) -> Option<Vec<[
         let Some(goal_pt) = nearest_walkable(grid, candidate, Some(SNAP_MAX_DISTANCE)) else {
             continue;
         };
-        if let Some(points) = path_exact(grid, start_pt, goal_pt) {
+        if let Some(points) = path_exact(grid, polys, regions, start_pt, goal_pt) {
             return Some(points);
         }
     }
     None
 }
 
-pub(crate) fn path_exact(grid: &Grid, start: [f32; 2], goal: [f32; 2]) -> Option<Vec<[f32; 2]>> {
+/// 严格折线：起终点都当作已在面上（调用方吸附过）。
+///
+/// 搜索跑在**多边形网**上，不在 1 cm 的烘焙体素场上——这与原生一致：
+/// 体素场是烘焙的中间产物，Detour 查的是它产出的多边形 navmesh。
+/// 早先的转录把体素场自己当成了寻路图，单次查询要在数百万格上做八连通
+/// A\*；那条路已经撤掉。
+pub(crate) fn path_exact(
+    grid: &Grid,
+    polys: &PolyMesh,
+    regions: &Regions,
+    start: [f32; 2],
+    goal: [f32; 2],
+) -> Option<Vec<[f32; 2]>> {
     if !walkable_at(grid, start) || !walkable_at(grid, goal) {
         return None;
     }
-    if visible(grid, start, goal) {
-        return Some(vec![start, goal]);
+    polys.path(grid, regions, start, goal, super::STATIC_QUERY_HALF_EXTENT)
+}
+
+/// 方盒内最近可走点（引擎 `FindNearestPoly` 的格面形态）：点所在格可走
+/// 即原样返回；否则只在水平半宽 `half_extent` 的方盒里找格心欧氏距离最近
+/// 的可走格。方盒是查询包围盒，不是圆半径——与 [`nearest_walkable`] 的
+/// 吸附圆分开。
+pub(crate) fn nearest_walkable_in_box(
+    grid: &Grid,
+    p: [f32; 2],
+    half_extent: f32,
+) -> Option<[f32; 2]> {
+    if !p.into_iter().all(f32::is_finite) || !half_extent.is_finite() || half_extent < 0.0 {
+        return None;
     }
-    let cells = astar(grid, grid.cell_of(start[0], start[1]), grid.cell_of(goal[0], goal[1]))?;
-    // 保留起终格中心：任意格内端点直接替换中心会让首/末斜腿切角。
-    let mut points = Vec::with_capacity(cells.len() + 2);
-    points.push(start);
-    points.extend(cells.into_iter().map(|(x, z)| grid.cell_center(x, z)));
-    points.push(goal);
-    smooth(grid, &mut points);
-    Some(points)
-}
-
-// —— A* ——
-
-/// 基数步代价（十分之一格单位）：与斜向步 14 配成 octile 量纲。
-const COST_CARDINAL: u32 = 10;
-const COST_DIAGONAL: u32 = 14;
-
-struct HeapItem {
-    f: u32,
-    g: u32,
-    index: usize,
-}
-
-impl PartialEq for HeapItem {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == Ordering::Equal
+    let (cx, cz) = grid.cell_of(p[0], p[1]);
+    if grid.walkable_cell(cx, cz) {
+        return Some(p);
     }
-}
-impl Eq for HeapItem {}
-impl PartialOrd for HeapItem {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
+    let limit = (half_extent / grid.voxel).ceil() as isize + 1;
+    let mut best: Option<([f32; 2], f32)> = None;
+    for r in 1..=limit {
+        for dz in -r..=r {
+            let full_row = dz.abs() == r;
+            let count = if full_row { 2 * r + 1 } else { 2 };
+            for index in 0..count {
+                let dx = if full_row { index - r } else if index == 0 { -r } else { r };
+                if !grid.walkable_cell(cx + dx, cz + dz) {
+                    continue;
+                }
+                let center = grid.cell_center((cx + dx) as usize, (cz + dz) as usize);
+                if (center[0] - p[0]).abs() > half_extent || (center[1] - p[1]).abs() > half_extent {
+                    continue;
+                }
+                let d = (center[0] - p[0]).powi(2) + (center[1] - p[1]).powi(2);
+                if best.map_or(true, |(_, bd)| d < bd) {
+                    best = Some((center, d));
+                }
+            }
+        }
+        if let Some((_, bd)) = best {
+            let floor = ((r as f32 - 0.5) * grid.voxel).powi(2);
+            if bd <= floor {
+                break;
+            }
+        }
     }
-}
-impl Ord for HeapItem {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // BinaryHeap 是大顶堆：更小的 f、同 f 时更大的 g 排「更大」
-        // （先出堆），等值项按格下标稳定化。
-        other
-            .f
-            .cmp(&self.f)
-            .then(other.g.cmp(&self.g))
-            .then(self.index.cmp(&other.index))
-    }
+    best.map(|(center, _)| center)
 }
 
-/// 八连通 A\*（HashMap 存开放表状态，不按整格分配）。
-/// 斜向步不许切角：两个基数邻格都得可行走。
-/// 起终点已假定可行走（调用方吸附过）。
-fn astar(grid: &Grid, from: (isize, isize), to: (isize, isize)) -> Option<Vec<(usize, usize)>> {
-    let cols = grid.cols as isize;
-    let index = |cx: isize, cz: isize| (cz * cols + cx) as usize;
-    let octile = |a: (isize, isize), b: (isize, isize)| -> u32 {
-        let dx = (a.0 - b.0).unsigned_abs() as u32;
-        let dz = (a.1 - b.1).unsigned_abs() as u32;
-        COST_CARDINAL * dx.max(dz) + (COST_DIAGONAL - COST_CARDINAL) * dx.min(dz)
+/// 引擎 `CalculatePath`（`NavMeshManager.CalculatePolygonPath`）的格面形态：
+/// 起终点各经一次方盒映射，任一端映射失败即 `None`（引擎返回 false）；
+/// 两端连通给完整折线，不连通给部分折线（引擎同样返回 true）。折线首点
+/// 是映射后的起点，完整折线末点是映射后的目标。
+pub(crate) fn calculate_path(
+    grid: &Grid,
+    polys: &PolyMesh,
+    regions: &Regions,
+    source: [f32; 2],
+    target: [f32; 2],
+    half_extent: f32,
+) -> Option<(Vec<[f32; 2]>, bool)> {
+    let start = nearest_walkable_in_box(grid, source, half_extent)?;
+    let goal = nearest_walkable_in_box(grid, target, half_extent)?;
+    polys.path_or_partial(grid, regions, start, goal, half_extent)
+}
+
+/// [`calculate_path`] 的布尔结果，不做搜索：两端映射成功后，完整与部分
+/// 两种结果都算成功，所以它恰好等于「两端都映射到了网上的单元里」。
+pub(crate) fn calculate_path_succeeds(
+    grid: &Grid,
+    polys: &PolyMesh,
+    regions: &Regions,
+    source: [f32; 2],
+    target: [f32; 2],
+    half_extent: f32,
+) -> bool {
+    let located = |p: [f32; 2]| {
+        nearest_walkable_in_box(grid, p, half_extent)
+            .is_some_and(|mapped| polys.locates(grid, regions, mapped, half_extent))
     };
-    let start_i = index(from.0, from.1);
-    let goal_i = index(to.0, to.1);
-    let mut g_score: HashMap<usize, u32> = HashMap::new();
-    let mut came_from: HashMap<usize, usize> = HashMap::new();
-    g_score.insert(start_i, 0);
-    let mut heap = BinaryHeap::new();
-    heap.push(HeapItem {
-        f: octile(from, to),
-        g: 0,
-        index: start_i,
-    });
-    while let Some(item) = heap.pop() {
-        if item.g > *g_score.get(&item.index).unwrap_or(&u32::MAX) {
-            continue; // 陈旧堆项
-        }
-        if item.index == goal_i {
-            let mut cells = Vec::new();
-            let mut cur = goal_i;
-            loop {
-                cells.push(((cur % cols as usize), (cur / cols as usize)));
-                if cur == start_i {
-                    break;
-                }
-                cur = *came_from.get(&cur).expect("A* 回溯链断裂");
-            }
-            cells.reverse();
-            return Some(cells);
-        }
-        let cx = (item.index % cols as usize) as isize;
-        let cz = (item.index / cols as usize) as isize;
-        for dz in -1..=1 {
-            for dx in -1..=1 {
-                if dx == 0 && dz == 0 {
-                    continue;
-                }
-                let (nx, nz) = (cx + dx, cz + dz);
-                if !grid.walkable_cell(nx, nz) {
-                    continue;
-                }
-                if dx != 0 && dz != 0 {
-                    // 不切角：两个基数邻格都得可行走。
-                    if !grid.walkable_cell(cx + dx, cz) || !grid.walkable_cell(cx, cz + dz) {
-                        continue;
-                    }
-                }
-                let cost = if dx != 0 && dz != 0 {
-                    COST_DIAGONAL
-                } else {
-                    COST_CARDINAL
-                };
-                let next_i = index(nx, nz);
-                let next_g = item.g + cost;
-                if next_g < *g_score.get(&next_i).unwrap_or(&u32::MAX) {
-                    g_score.insert(next_i, next_g);
-                    came_from.insert(next_i, item.index);
-                    heap.push(HeapItem {
-                        f: next_g + octile((nx, nz), to),
-                        g: next_g,
-                        index: next_i,
-                    });
-                }
-            }
-        }
-    }
-    None
+    located(source) && located(target)
 }
 
 // —— 视线与整直 ——
@@ -347,22 +325,4 @@ pub(crate) fn visible(grid: &Grid, a: [f32; 2], b: [f32; 2]) -> bool {
             return true;
         }
     }
-}
-
-/// 贪心视线拉直：从首点起，每次直连最远的可见后继。
-fn smooth(grid: &Grid, pts: &mut Vec<[f32; 2]>) {
-    if pts.len() <= 2 {
-        return;
-    }
-    let mut result = vec![pts[0]];
-    let mut i = 0;
-    while i + 1 < pts.len() {
-        let mut j = pts.len() - 1;
-        while j > i + 1 && !visible(grid, pts[i], pts[j]) {
-            j -= 1;
-        }
-        result.push(pts[j]);
-        i = j;
-    }
-    *pts = result;
 }

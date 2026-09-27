@@ -56,13 +56,159 @@ pub(crate) struct FixtureFace {
     pub(crate) mouths: Vec<Handle<FixtureMaterial>>,
 }
 
-/// 家具转体（源 DORotate 的替身形状；from/to 已取同叶短弧）。
+/// 家具转体：`FixtureView.LookAtToNpc(unit, t)` 的
+/// `transform.DORotate(LookRotation((家具 − 角色) 取水平).eulerAngles, t)`
+/// （RotateMode.Fast，无自设缓动 ⇒ 设置表缺省 OutQuad）。Fast 档逐轴取
+/// [-180, 180] 的欧拉差线性插值；起点（摆放朝向）与终点都是纯偏航，
+/// 所以欧拉插值与这里的同叶短弧 slerp 在同一缓动下逐帧同角（差恰为
+/// ±180° 时两者选边可能不同）。
 #[derive(Component)]
 pub(crate) struct FixtureTurn {
     from: Quat,
     to: Quat,
     duration: f32,
     elapsed: f32,
+}
+
+#[derive(Component)]
+struct FixtureTalkEffects {
+    talk_id: i32,
+    rotation: Option<Quat>,
+    face_offsets: Vec<(Handle<FixtureMaterial>, [f32; 2])>,
+    animator: Option<Entity>,
+    animation_nodes: Vec<AnimationNodeIndex>,
+}
+
+pub(crate) fn start_talk_effects(commands: &mut Commands, fixture: Entity, talk_id: i32) {
+    commands.queue(move |world: &mut World| {
+        if world.get::<FixtureTalkEffects>(fixture).is_some() {
+            return;
+        }
+        if world.get::<Transform>(fixture).is_none() {
+            return;
+        }
+        world.entity_mut(fixture).insert(FixtureTalkEffects {
+            talk_id,
+            rotation: None,
+            face_offsets: Vec::new(),
+            animator: None,
+            animation_nodes: Vec::new(),
+        });
+    });
+}
+
+pub(crate) fn remember_talk_rotation(
+    commands: &mut Commands,
+    fixture: Entity,
+    talk_id: i32,
+    rotation: Quat,
+) {
+    commands.queue(move |world: &mut World| {
+        let Some(mut effects) = world.get_mut::<FixtureTalkEffects>(fixture) else {
+            return;
+        };
+        if effects.talk_id == talk_id && effects.rotation.is_none() {
+            effects.rotation = Some(rotation);
+        }
+    });
+}
+
+pub(crate) fn remember_talk_face(
+    commands: &mut Commands,
+    fixture: Entity,
+    talk_id: i32,
+    handles: &[Handle<FixtureMaterial>],
+    materials: &Assets<FixtureMaterial>,
+) {
+    let offsets: Vec<_> = handles
+        .iter()
+        .filter_map(|handle| {
+            materials
+                .get(handle)
+                .map(|material| (handle.clone(), material.params.main_tex_offset))
+        })
+        .collect();
+    commands.queue(move |world: &mut World| {
+        let Some(mut effects) = world.get_mut::<FixtureTalkEffects>(fixture) else {
+            return;
+        };
+        if effects.talk_id != talk_id {
+            return;
+        }
+        for (handle, offset) in offsets {
+            if !effects
+                .face_offsets
+                .iter()
+                .any(|(known, _)| *known == handle)
+            {
+                effects.face_offsets.push((handle, offset));
+            }
+        }
+    });
+}
+
+pub(crate) fn remember_talk_animation(
+    commands: &mut Commands,
+    fixture: Entity,
+    talk_id: i32,
+    animator: Entity,
+    nodes: Vec<AnimationNodeIndex>,
+) {
+    commands.queue(move |world: &mut World| {
+        let Some(mut effects) = world.get_mut::<FixtureTalkEffects>(fixture) else {
+            return;
+        };
+        if effects.talk_id != talk_id {
+            return;
+        }
+        effects.animator = Some(animator);
+        for node in nodes {
+            if !effects.animation_nodes.contains(&node) {
+                effects.animation_nodes.push(node);
+            }
+        }
+    });
+}
+
+/// Restore only state owned by this fixture-script generation. A stale cleanup
+/// cannot stop a replacement talk or an unrelated activity timeline.
+pub(crate) fn finish_talk_effects(commands: &mut Commands, fixture: Entity, talk_id: i32) {
+    commands.queue(move |world: &mut World| cleanup_talk_effects(world, fixture, talk_id));
+}
+
+fn cleanup_talk_effects(world: &mut World, fixture: Entity, talk_id: i32) {
+    let Some(effects) = world.get::<FixtureTalkEffects>(fixture) else {
+        return;
+    };
+    if effects.talk_id != talk_id {
+        return;
+    }
+    let rotation = effects.rotation;
+    let face_offsets = effects.face_offsets.clone();
+    let animator = effects.animator;
+    let animation_nodes = effects.animation_nodes.clone();
+    if let (Some(rotation), Some(mut transform)) = (rotation, world.get_mut::<Transform>(fixture)) {
+        transform.rotation = rotation;
+    }
+    if let Some(mut materials) = world.get_resource_mut::<Assets<FixtureMaterial>>() {
+        for (handle, offset) in face_offsets {
+            if let Some(material) = materials.get_mut(&handle) {
+                material.params.main_tex_offset = offset;
+            }
+        }
+    }
+    if let Some(mut animation) =
+        animator.and_then(|entity| world.get_mut::<AnimationPlayer>(entity))
+    {
+        for node in animation_nodes {
+            animation.stop(node);
+        }
+    }
+    world
+        .entity_mut(fixture)
+        .remove::<FixtureTurn>()
+        .remove::<FixtureTimelineSeq>()
+        .remove::<FixtureTalkEffects>();
 }
 
 impl FixtureTurn {
@@ -263,7 +409,9 @@ pub(crate) fn plan_timelines(
     if pending.is_some() || planned.is_some() {
         return;
     }
-    if placements.site_id() == 0 { return; }
+    if placements.site_id() == 0 {
+        return;
+    }
     let Some(store) = store else {
         return;
     };
@@ -459,9 +607,7 @@ fn parse_timeline_plans(
         let path_of = |class: &str| -> Option<&str> {
             track_list
                 .iter()
-                .find(|track| {
-                    track.get("class").and_then(|v| v.as_str()) == Some(class)
-                })
+                .find(|track| track.get("class").and_then(|v| v.as_str()) == Some(class))
                 .and_then(|track| track.get("pathId"))
                 .and_then(|v| v.as_str())
         };
@@ -473,8 +619,7 @@ fn parse_timeline_plans(
             continue;
         };
         // 剪辑按 (起点, 原始序) 排序；逐剪辑解名（悬空/非模型包 → 弃整条）。
-        let mut ordered: Vec<(usize, (f64, f64))> =
-            rows.iter().cloned().enumerate().collect();
+        let mut ordered: Vec<(usize, (f64, f64))> = rows.iter().cloned().enumerate().collect();
         ordered.sort_by(|a, b| {
             a.1 .0
                 .partial_cmp(&b.1 .0)
@@ -592,6 +737,67 @@ pub(crate) fn discover_animation(
     }
 }
 
+/// Update, after [`discover_animation`]: a root discovered before its
+/// animation target was bound (seen after a layout reload, where the swap
+/// latch closes on the first batch of visuals) gets its player and graph
+/// once its single animation target stands without one. A root whose player
+/// holds a graph is left alone; the hierarchy walk runs only on a frame
+/// where an `AnimatedBy` was added or a known player lost its graph.
+pub(crate) fn discover_late_animation(
+    mut commands: Commands,
+    added: Query<(), Added<AnimatedBy>>,
+    mut roots: Query<(Entity, &mut FixtureAnimation, &FixturePlacement), With<FixtureRoot>>,
+    children: Query<&Children>,
+    animated_by: Query<&AnimatedBy>,
+    installed: Query<(), With<AnimationGraphHandle>>,
+) {
+    let any_added = !added.is_empty();
+    for (root, mut animation, placement) in &mut roots {
+        let lost = animation
+            .player
+            .is_some_and(|player| !installed.contains(player));
+        if animation.player.is_some() && !lost {
+            continue;
+        }
+        if !lost && !any_added {
+            continue;
+        }
+        let mut targets: Vec<Entity> = Vec::new();
+        let mut stack = vec![root];
+        while let Some(entity) = stack.pop() {
+            if let Ok(by) = animated_by.get(entity) {
+                if !targets.contains(&by.0) {
+                    targets.push(by.0);
+                }
+            }
+            if let Ok(kids) = children.get(entity) {
+                stack.extend(kids.iter());
+            }
+        }
+        let [target] = targets.as_slice() else {
+            continue;
+        };
+        if installed.contains(*target) {
+            continue;
+        }
+        commands.entity(*target).insert((
+            AnimationPlayer::default(),
+            AnimationTransitions::new(),
+            AnimationGraphHandle(animation.graph.clone()),
+        ));
+        animation.player = Some(*target);
+        info!(
+            "[fixture-talk] fixture_id {}: animation root bound after discovery (player {})",
+            placement.fixture_id,
+            if lost {
+                "had lost its graph"
+            } else {
+                "was not bound yet"
+            }
+        );
+    }
+}
+
 /// 取（或首次补进图）一个家具动画剪辑的节点下标（角色侧共享动作库的
 /// `node_for` 同一条路径：图节点按剪辑名缓存）。
 pub(crate) fn fixture_node_for(
@@ -664,5 +870,68 @@ pub(crate) fn progress_timelines(
             );
             seq.next += 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn effects(talk_id: i32, rotation: Quat) -> FixtureTalkEffects {
+        FixtureTalkEffects {
+            talk_id,
+            rotation: Some(rotation),
+            face_offsets: Vec::new(),
+            animator: None,
+            animation_nodes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn stale_fixture_cleanup_cannot_touch_replacement_owner() {
+        let mut world = World::new();
+        world.insert_resource(Assets::<FixtureMaterial>::default());
+        let replacement = Quat::from_rotation_y(1.0);
+        let fixture = world
+            .spawn((
+                Transform::from_rotation(replacement),
+                effects(12, Quat::IDENTITY),
+                FixtureTurn::toward(replacement, Quat::IDENTITY, 1.0),
+            ))
+            .id();
+
+        cleanup_talk_effects(&mut world, fixture, 11);
+
+        assert_eq!(
+            world.get::<Transform>(fixture).unwrap().rotation,
+            replacement
+        );
+        assert_eq!(
+            world.get::<FixtureTalkEffects>(fixture).unwrap().talk_id,
+            12
+        );
+        assert!(world.get::<FixtureTurn>(fixture).is_some());
+    }
+
+    #[test]
+    fn owned_fixture_cleanup_restores_rotation_and_removes_only_talk_components() {
+        let mut world = World::new();
+        world.insert_resource(Assets::<FixtureMaterial>::default());
+        let original = Quat::from_rotation_y(-0.5);
+        let fixture = world
+            .spawn((
+                Transform::from_rotation(Quat::from_rotation_y(1.0)),
+                effects(12, original),
+                FixtureTurn::toward(Quat::IDENTITY, Quat::IDENTITY, 1.0),
+                FixtureTimelineSeq::new(vec![AnimationNodeIndex::new(0)], vec![0.0], usize::MAX),
+            ))
+            .id();
+
+        cleanup_talk_effects(&mut world, fixture, 12);
+
+        assert_eq!(world.get::<Transform>(fixture).unwrap().rotation, original);
+        assert!(world.get::<FixtureTalkEffects>(fixture).is_none());
+        assert!(world.get::<FixtureTurn>(fixture).is_none());
+        assert!(world.get::<FixtureTimelineSeq>(fixture).is_none());
     }
 }

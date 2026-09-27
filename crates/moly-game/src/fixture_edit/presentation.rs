@@ -1,7 +1,7 @@
 //! A reversible view of the private editor draft. This module owns temporary
 //! poses/previews only; it never commits layouts, inventory or gameplay leases.
 
-use super::{EditPhase, EditSession, PutStatus, assets::CandidateAssets, validation};
+use super::{EditPhase, EditSession, PutStatus, assets::CandidateAssets};
 use crate::fixture::{EditableFixture, FixtureRoot};
 use crate::fixture_scene_inputs::FixtureScenePlacement;
 use bevy::{gltf::Gltf, prelude::*};
@@ -41,6 +41,11 @@ struct ProjectionStamp {
 /// paths can remove only the editor's own overlays and restore captured poses.
 pub(super) fn clear(world: &mut World) {
     world.remove_resource::<ProjectionStamp>();
+    // Preview ownership ends with the session. The catalog keeps paths, not
+    // every GLB ever browsed; committed fixtures own their own source handles.
+    if let Some(mut candidates) = world.get_resource_mut::<CandidateAssets>() {
+        candidates.glbs.clear();
+    }
     let originals: Vec<_> = world
         .query::<(Entity, &OriginalPose)>()
         .iter(world)
@@ -96,11 +101,21 @@ pub(super) fn sync_visuals(world: &mut World) {
         .selected
         .as_ref()
         .map(|selected| selected.item.clone());
-    let floor = session
-        .baseline
+    // The fixtures stacked on the selection show at their draft places.
+    let stacked: Vec<EditableFixture> = session
+        .selected
         .as_ref()
-        .and_then(crate::fixture::FixturePlacements::floor_grid);
-    let by_uid: HashMap<_, _> = rows.iter().map(|row| (row.uid.as_str(), row)).collect();
+        .map(|selected| selected.stacked.clone())
+        .unwrap_or_default();
+    let status = session
+        .selected
+        .as_ref()
+        .map(|selection| super::put_status(world, session, selection));
+    let by_uid: HashMap<_, _> = rows
+        .iter()
+        .chain(stacked.iter())
+        .map(|row| (row.uid.as_str(), row))
+        .collect();
     let roots: Vec<_> = world
         .query_filtered::<(
             Entity,
@@ -167,7 +182,7 @@ pub(super) fn sync_visuals(world: &mut World) {
         }
     }
     let waiting_assets = !sync_previews(world, &transient);
-    sync_marker(world, selected.as_ref(), &rows, floor);
+    sync_marker(world, selected.as_ref(), status);
     world.insert_resource(ProjectionStamp {
         revision,
         roots: root_count,
@@ -176,6 +191,8 @@ pub(super) fn sync_visuals(world: &mut World) {
 }
 
 fn sync_previews(world: &mut World, rows: &[EditableFixture]) -> bool {
+    world.resource_mut::<CandidateAssets>().glbs
+        .retain(|package, _| rows.iter().any(|row| &row.package == package));
     let mut ready = true;
     let previews: Vec<_> = world
         .query::<(Entity, &DraftPreview)>()
@@ -205,7 +222,11 @@ fn sync_previews(world: &mut World, rows: &[EditableFixture]) -> bool {
                 return Some(handle.clone());
             }
             let path = candidates.paths.get(&row.package)?.clone();
-            let handle = world.resource::<AssetServer>().load::<Gltf>(path);
+            let handle = moly_assets::residency::load_gltf(
+                world.resource::<AssetServer>(),
+                path,
+                moly_assets::residency::GltfResidency::CpuTextures,
+            );
             candidates.glbs.insert(row.package.clone(), handle.clone());
             Some(handle)
         });
@@ -245,12 +266,7 @@ fn sync_previews(world: &mut World, rows: &[EditableFixture]) -> bool {
     ready
 }
 
-fn sync_marker(
-    world: &mut World,
-    selected: Option<&EditableFixture>,
-    rows: &[EditableFixture],
-    floor: Option<crate::site::FloorGridLayout>,
-) {
+fn sync_marker(world: &mut World, selected: Option<&EditableFixture>, status: Option<PutStatus>) {
     let markers: Vec<_> = world
         .query_filtered::<Entity, With<TileMarker>>()
         .iter(world)
@@ -295,10 +311,9 @@ fn sync_marker(
             1.0,
             (max.z as i32 - min.z as i32 + 1) as f32 * TILE_SIZE,
         ));
-    let status = validation::put(selected, rows, floor);
     let assets = world.resource::<TileAssets>();
     let mesh = assets.mesh.clone();
-    let material = if status == PutStatus::Ok {
+    let material = if status == Some(PutStatus::Ok) {
         assets.valid.clone()
     } else {
         assets.invalid.clone()

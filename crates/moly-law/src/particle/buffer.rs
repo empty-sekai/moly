@@ -1,243 +1,178 @@
-//! 粒子池的环形缓冲与压实。
-//!
-//! 模式语义 `C# 可读`（`ParticleSystemRingBufferMode` 枚注释逐条）：
-//! `Disabled = 0`；`PauseUntilReplaced = 1`（到寿命终点暂停，直到被
-//! 替换）；`LoopUntilReplaced = 2`（到淡出时刻回卷到淡入时刻；被替换
-//! 时先走完剩余寿命）。
-//!
-//! 替换游标的存在 `C# 可读（存在性）`：`PlaybackState.m_RingBufferIndex`。
-//! 谁在哪个模式被替换、何时替换，在 extern 墙后，行为口径给测量方案。
-//!
-//! 池的表示是**本仓自己的选择**（`Vec` + 交换删除），不是引擎律：引擎
-//! 原生池的内存布局不可见，也不必可见——本模块钉的是**替换与移除的
-//! 裁决语义**。
-
+//! Storage order from current native StartParticles, CopyParticlesToUnalignedDst
+//! and KillParticles. Parallel payloads move together; index is not identity.
 use crate::particle::step::Particle;
 
-/// 环形缓冲模式。数值与名字 `C# 可读`（枚声明）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RingBufferMode {
-    /// 死亡即移除；池满时停止出生（不覆写）。
-    Disabled,
-    /// 到寿命终点暂停等替换（见 `step::advance_lifetime`）。
-    PauseUntilReplaced,
-    /// 归一化寿命在 loop range 内回卷；池满时最老者被覆写。
-    LoopUntilReplaced,
-}
-
+pub enum RingBufferMode { Disabled, PauseUntilReplaced, LoopUntilReplaced }
 impl RingBufferMode {
-    /// 序列化数值（schema 层用 0/1/2 解析，失败响亮拒绝）。
     pub fn from_u32(v: u32) -> Option<Self> {
-        match v {
-            0 => Some(RingBufferMode::Disabled),
-            1 => Some(RingBufferMode::PauseUntilReplaced),
-            2 => Some(RingBufferMode::LoopUntilReplaced),
-            _ => None,
+        match v { 0 => Some(Self::Disabled), 1 => Some(Self::PauseUntilReplaced),
+            2 => Some(Self::LoopUntilReplaced), _ => None }
+    }
+}
+
+/// Capacity before a whole birth batch. Ring modes reserve a second span for
+/// newborns and, in Loop mode, the replaced particles finishing their lives.
+pub fn birth_capacity(current: usize, mode: RingBufferMode, maximum: usize, requested: usize) -> usize {
+    let capacity = maximum.saturating_mul(if mode == RingBufferMode::Disabled { 1 } else { 2 });
+    requested.min(capacity.saturating_sub(current))
+}
+
+/// Finish a batch already appended to both arrays. Native births start at
+/// align_up4(old_count); packing copies the last min(gap, births) elements into
+/// the alignment gap. This rotates the birth batch even in Disabled mode.
+///
+/// Pause records each victim's death before overwriting it, regardless of age.
+/// Loop swaps *every* newborn with the cursor when total count > maximum;
+/// displaced particles stay in the overflow span and stop looping.
+pub fn finish_births<T: Clone, U: Clone>(
+    pool: &mut Vec<T>, side: &mut Vec<U>, cursor: &mut usize,
+    mode: RingBufferMode, maximum: usize, old_count: usize,
+    on_death: impl FnMut(&T, &U),
+) {
+    let mut none = vec![(); pool.len()];
+    finish_births_with(pool, side, &mut none, cursor, mode, maximum, old_count, on_death);
+}
+
+/// `finish_births` over a second parallel payload, which every rotation,
+/// copy, swap and truncation moves exactly as it moves `side`.
+#[allow(clippy::too_many_arguments)]
+pub fn finish_births_with<T: Clone, U: Clone, V: Clone>(
+    pool: &mut Vec<T>, side: &mut Vec<U>, extra: &mut Vec<V>, cursor: &mut usize,
+    mode: RingBufferMode, maximum: usize, old_count: usize,
+    mut on_death: impl FnMut(&T, &U),
+) {
+    assert_eq!(pool.len(), side.len());
+    assert_eq!(pool.len(), extra.len());
+    let born = pool.len() - old_count;
+    let gap = ((4 - (old_count & 3)) & 3).min(born);
+    pool[old_count..].rotate_right(gap);
+    side[old_count..].rotate_right(gap);
+    extra[old_count..].rotate_right(gap);
+    if mode == RingBufferMode::Disabled || pool.len() <= maximum { return; }
+    if maximum == 0 {
+        if mode == RingBufferMode::PauseUntilReplaced {
+            for (p, s) in pool.iter().zip(side.iter()) { on_death(p, s); }
+            pool.clear(); side.clear(); extra.clear();
         }
+        *cursor = 0; return;
     }
-}
-
-/// 池满时一次出生尝试的裁决。
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum RingPushVerdict {
-    /// 池未满：新粒子追加在末尾。
-    Appended,
-    /// 池满且按模式允许替换：新粒子落在 `index` 槽位。
-    Replaced { index: usize },
-    /// 池满且无处可替换：本帧这个粒子**没有出生**。发射侧应停止
-    /// 呼叫（不是静默丢弃——调用方要能看见「满」）。
-    Full,
-}
-
-/// 往池里出生一个粒子。
-///
-/// `cursor` 是替换游标（对齐 `m_RingBufferIndex`，`C# 可读（存在性）`），
-/// 调用方跨帧携带。档位：**行为口径**。实现口径：
-///
-/// - 未满：一律追加（三种模式相同），游标不动；
-/// - 模式 0 满：`Full`——出生停止，等压实腾位；
-/// - 模式 1 满：替换**已到寿命终点**（`remaining_lifetime <= 0`，
-///   即 PausedAtEnd 的粒子）的最老者；一个都没有则 `Full`
-///   （枚注释的「系统暂停」）；游标不参与（真源在此模式用不用游标
-///   读不出来，具名留白）；
-/// - 模式 2 满：覆写游标处的槽位、游标 +1 回卷——最老者循环覆写。
-///
-/// Editor 测量方案：`maxParticles=4`、模式 1、寿命 1s、rate 10/s、
-/// 跑 3s 后 `particleCount` 应为 4 且系统 `isEmitting` 应为假
-/// （全部暂停在终点、无处替换）；同设置模式 2，粒子年龄分布应持续
-/// 均匀回卷而无暂停。模式 2 的「被替换者先走完剩余寿命」是渲染侧
-/// 的淡出宽限，不在本律（具名在 REPORT）。
-pub fn ring_push(
-    pool: &mut Vec<Particle>,
-    cursor: &mut usize,
-    mode: RingBufferMode,
-    max_particles: usize,
-    new: Particle,
-) -> RingPushVerdict {
-    if pool.len() < max_particles {
-        pool.push(new);
-        return RingPushVerdict::Appended;
-    }
-    if max_particles == 0 {
-        return RingPushVerdict::Full;
-    }
+    assert!(*cursor < maximum, "ring cursor must belong to its authored capacity");
     match mode {
-        RingBufferMode::Disabled => RingPushVerdict::Full,
         RingBufferMode::PauseUntilReplaced => {
-            // 替换最老的「停在终点」者：Vec 保序，扫描第一个即最老。
-            // 一个没有 -> 系统暂停（Full），不是错误。
-            match pool.iter().position(|p| p.remaining_lifetime <= 0.0) {
-                Some(index) => {
-                    pool[index] = new;
-                    RingPushVerdict::Replaced { index }
-                }
-                None => RingPushVerdict::Full,
+            for source in maximum..pool.len() {
+                on_death(&pool[*cursor], &side[*cursor]);
+                pool[*cursor] = pool[source].clone();
+                side[*cursor] = side[source].clone();
+                extra[*cursor] = extra[source].clone();
+                *cursor = (*cursor + 1) % maximum;
             }
+            pool.truncate(maximum); side.truncate(maximum); extra.truncate(maximum);
         }
         RingBufferMode::LoopUntilReplaced => {
-            let index = (*cursor).min(max_particles.saturating_sub(1));
-            pool[index] = new;
-            *cursor = (index + 1) % max_particles;
-            RingPushVerdict::Replaced { index }
+            for source in old_count..pool.len() {
+                pool.swap(*cursor, source); side.swap(*cursor, source); extra.swap(*cursor, source);
+                *cursor = (*cursor + 1) % maximum;
+            }
         }
+        RingBufferMode::Disabled => unreachable!(),
     }
 }
 
-/// 压实（模式 0 的移除侧）：交换删除全部死者，返回移除数。
-///
-/// 交换删除不保序（死者与末位活者互换）——渲染读全池不依赖序，
-/// 测试钉住该行为。这是**本仓的表示选择**；引擎原生池的移除机制
-/// 不可见，移除的**裁决**（模式 0 下死亡即移除）才是律。
-pub fn compact(pool: &mut Vec<Particle>) -> usize {
+/// Native death compaction scans four-wide groups, removes flagged lanes high
+/// to low, and retests the group after swap removal. A reverse scan over the
+/// entire pool gives a different order. Loop protects indices < maximum even
+/// when explicitly killed. Death never changes the ring cursor.
+pub fn compact_with_side<U>(
+    pool: &mut Vec<Particle>, side: &mut Vec<U>, mode: RingBufferMode, maximum: usize,
+    on_death: impl FnMut(&Particle, &U),
+) -> usize {
+    let mut none = vec![(); pool.len()];
+    compact_with_sides(pool, side, &mut none, mode, maximum, on_death)
+}
+
+/// `compact_with_side` over a second parallel payload, removed exactly where
+/// `side` is removed (the engine's KillParticle moves every per-particle
+/// array of the last particle into the dead slot).
+pub fn compact_with_sides<U, V>(
+    pool: &mut Vec<Particle>, side: &mut Vec<U>, extra: &mut Vec<V>, mode: RingBufferMode, maximum: usize,
+    mut on_death: impl FnMut(&Particle, &U),
+) -> usize {
+    compact_with_sides_indexed(pool, side, extra, mode, maximum, |_, particle, side| on_death(particle, side))
+}
+
+/// `compact_with_sides` that also hands `on_death` the slot the particle dies
+/// in. It is called before that slot is overwritten, in removal order (the
+/// order in which the engine's KillParticle records death events).
+pub fn compact_with_sides_indexed<U, V>(
+    pool: &mut Vec<Particle>, side: &mut Vec<U>, extra: &mut Vec<V>, mode: RingBufferMode, maximum: usize,
+    mut on_death: impl FnMut(usize, &Particle, &U),
+) -> usize {
+    assert_eq!(pool.len(), side.len());
+    assert_eq!(pool.len(), extra.len());
+    if mode == RingBufferMode::PauseUntilReplaced { return 0; }
+    let protected = if mode == RingBufferMode::LoopUntilReplaced { maximum } else { 0 };
+    let mut group = protected & !3;
     let mut removed = 0;
-    let mut i = 0;
-    while i < pool.len() {
-        if pool[i].remaining_lifetime <= 0.0 {
-            pool.swap_remove(i);
-            removed += 1;
-            // swap_remove 把末位换到 i：不前进，重扫本位（换上来的
-            // 可能也是死者）。
-        } else {
-            i += 1;
+    while group < pool.len() {
+        let end = (group + 4).min(pool.len());
+        let dead: [bool; 4] = std::array::from_fn(|lane| {
+            let index = group + lane;
+            index < end && index >= protected && pool[index].age_percent > 100.0
+        });
+        if !dead.iter().any(|&value| value) { group += 4; continue; }
+        for lane in (0..4).rev() {
+            if dead[lane] {
+                let index = group + lane;
+                on_death(index, &pool[index], &side[index]);
+                pool.swap_remove(index); side.swap_remove(index); extra.swap_remove(index); removed += 1;
+            }
         }
     }
     removed
 }
 
+pub fn compact(pool: &mut Vec<Particle>) -> usize {
+    let mut side = vec![(); pool.len()];
+    compact_with_side(pool, &mut side, RingBufferMode::Disabled, 0, |_, _| {})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn live(lifetime: f32) -> Particle {
-        Particle::born([0.0; 3], [0.0; 3], lifetime)
-    }
-
-    fn dead() -> Particle {
-        let mut p = live(0.5);
-        p.remaining_lifetime = 0.0;
-        p
-    }
-
     #[test]
-    fn append_until_full_then_gate_by_mode() {
-        // 三模式共享：未满追加。满了之后模式 0 -> Full。
-        let mut pool = Vec::new();
-        let mut cursor = 0;
-        let verdicts: Vec<RingPushVerdict> = (0..3)
-            .map(|_| ring_push(&mut pool, &mut cursor, RingBufferMode::Disabled, 2, live(1.0)))
-            .collect();
-        assert_eq!(
-            verdicts,
-            vec![RingPushVerdict::Appended, RingPushVerdict::Appended, RingPushVerdict::Full]
-        );
-        assert_eq!(pool.len(), 2);
+    fn alignment_rotation_and_ring_victims_match_native() {
+        for (mode, expected, deaths, cursor) in [
+            (RingBufferMode::Disabled, vec![0,1,2,102,100,101], vec![], 0),
+            (RingBufferMode::PauseUntilReplaced, vec![100,101,2,102], vec![0,1], 2),
+            (RingBufferMode::LoopUntilReplaced, vec![102,100,101,0,1,2], vec![], 3),
+        ] {
+            let mut pool = vec![0,1,2,100,101,102];
+            let mut side = pool.clone(); let mut actual = Vec::new(); let mut c = 0;
+            finish_births(&mut pool, &mut side, &mut c, mode, 4, 3, |p,s| {
+                assert_eq!(p,s); actual.push(*p);
+            });
+            assert_eq!(pool, expected); assert_eq!(pool, side);
+            assert_eq!(actual, deaths); assert_eq!(c, cursor);
+        }
     }
-
     #[test]
-    fn mode_one_replaces_oldest_held_particle() {
-        // 池满：两个活 + 一个停在终点。替换发生在最老的停终者（下标 2）。
-        let mut pool = vec![live(1.0), live(1.0), dead()];
-        let mut cursor = 0;
-        let v = ring_push(&mut pool, &mut cursor, RingBufferMode::PauseUntilReplaced, 3, live(9.0));
-        assert_eq!(v, RingPushVerdict::Replaced { index: 2 });
-        assert!((pool[2].remaining_lifetime - 9.0).abs() < 1e-6);
-        // 全活且满 -> 系统暂停（Full），池不动。
-        let mut all_alive = vec![live(1.0), live(1.0), live(1.0)];
-        let v = ring_push(
-            &mut all_alive,
-            &mut cursor,
-            RingBufferMode::PauseUntilReplaced,
-            3,
-            live(9.0),
-        );
-        assert_eq!(v, RingPushVerdict::Full);
-        assert_eq!(all_alive.len(), 3);
+    fn capacity_is_per_batch_and_loop_overflow_uses_it() {
+        assert_eq!(birth_capacity(4, RingBufferMode::Disabled, 4, 20), 0);
+        assert_eq!(birth_capacity(4, RingBufferMode::PauseUntilReplaced, 4, 20), 4);
+        assert_eq!(birth_capacity(7, RingBufferMode::LoopUntilReplaced, 4, 20), 1);
+        assert_eq!(birth_capacity(0, RingBufferMode::LoopUntilReplaced, 0, 20), 0);
     }
-
     #[test]
-    fn mode_two_overwrites_at_rotating_cursor() {
-        // 池满 max=3：覆写游标 0 -> 1 -> 2 -> 0，游标回卷。
-        let mut pool = vec![live(1.0), live(2.0), live(3.0)];
-        let mut cursor = 0;
-        let first = ring_push(&mut pool, &mut cursor, RingBufferMode::LoopUntilReplaced, 3, dead());
-        assert_eq!(first, RingPushVerdict::Replaced { index: 0 });
-        let second = ring_push(&mut pool, &mut cursor, RingBufferMode::LoopUntilReplaced, 3, dead());
-        assert_eq!(second, RingPushVerdict::Replaced { index: 1 });
-        let third = ring_push(&mut pool, &mut cursor, RingBufferMode::LoopUntilReplaced, 3, dead());
-        assert_eq!(third, RingPushVerdict::Replaced { index: 2 });
-        let fourth = ring_push(&mut pool, &mut cursor, RingBufferMode::LoopUntilReplaced, 3, dead());
-        assert_eq!(fourth, RingPushVerdict::Replaced { index: 0 });
-        // 被覆写的槽位换上了新粒子（此处用 dead() 当标记：剩 0）。
-        assert_eq!(pool[0].remaining_lifetime, 0.0);
-        assert_eq!(pool[1].remaining_lifetime, 0.0);
-    }
-
-    #[test]
-    fn zero_capacity_never_admits() {
-        let mut pool = Vec::new();
-        let mut cursor = 0;
-        assert_eq!(
-            ring_push(&mut pool, &mut cursor, RingBufferMode::Disabled, 0, live(1.0)),
-            RingPushVerdict::Full
-        );
-        assert!(pool.is_empty());
-    }
-
-    #[test]
-    fn compact_swap_removes_all_dead_including_chained() {
-        // [活A, 死, 死, 活B]：swap_remove 两次；末位换上来的可能又是
-        // 死者，while 不前进重扫——两个死者都清掉，活者保留（不保序）。
-        let mut a = live(1.0);
-        a.position = [1.0, 0.0, 0.0];
-        let mut b = live(2.0);
-        b.position = [2.0, 0.0, 0.0];
-        let mut pool = vec![a, dead(), dead(), b];
-        assert_eq!(compact(&mut pool), 2);
-        assert_eq!(pool.len(), 2);
-        let positions: Vec<[f32; 3]> = pool.iter().map(|p| p.position).collect();
-        assert!(positions.contains(&[1.0, 0.0, 0.0]));
-        assert!(positions.contains(&[2.0, 0.0, 0.0]));
-    }
-
-    #[test]
-    fn compact_keeps_live_order_when_no_dead() {
-        let mut pool = vec![live(1.0), live(2.0)];
-        assert_eq!(compact(&mut pool), 0);
-        assert_eq!(pool[0].remaining_lifetime, 1.0);
-        assert_eq!(pool[1].remaining_lifetime, 2.0);
-    }
-
-    #[test]
-    fn ring_mode_from_serialized_value() {
-        assert_eq!(RingBufferMode::from_u32(0), Some(RingBufferMode::Disabled));
-        assert_eq!(
-            RingBufferMode::from_u32(1),
-            Some(RingBufferMode::PauseUntilReplaced)
-        );
-        assert_eq!(
-            RingBufferMode::from_u32(2),
-            Some(RingBufferMode::LoopUntilReplaced)
-        );
-        assert_eq!(RingBufferMode::from_u32(3), None);
+    fn exact_endpoint_survives_and_loop_protects_only_inner_span() {
+        let mut pool: Vec<_> = [110.,110.,100.,110.,110.,90.].map(|age| {
+            let mut p = Particle::born([0.;3],[0.;3],1.); p.age_percent=age; p
+        }).to_vec();
+        let mut side: Vec<_> = (0..pool.len()).collect();
+        let mut deaths=Vec::new();
+        assert_eq!(compact_with_side(&mut pool, &mut side, RingBufferMode::LoopUntilReplaced,
+            1, |_,s| deaths.push(*s)), 3);
+        assert_eq!(side, vec![0,5,2]);
+        assert_eq!(deaths,vec![3,1,4]);
     }
 }

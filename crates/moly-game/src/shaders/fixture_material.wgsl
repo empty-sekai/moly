@@ -39,6 +39,29 @@
 //                       输出（两条分支读同一个顶点输出，源里两个变体的
 //                       这段构造逐行相同，所以只有一份）。由 Rust 侧按
 //                       「菲涅尔或反射」派生，不是独立的源 keyword。
+//   FIXTURE_NORMAL_MAP  JP Basic programs carry an int-gated normal-map block
+//                       (`_UseNormalMap` > 0.5) in every variant. The int is a
+//                       per-material constant, so the block is specialised on
+//                       it. The frame is the screen-derivative cotangent frame
+//                       built from uv1 (TEXCOORD9 = in_TEXCOORD1), sampled at
+//                       uv1 optionally shifted by `_NormalParallaxShift`.
+//                       Only admitted together with FIXTURE_CRYSTAL: that is
+//                       the only variant the data uses it with, and the
+//                       variants differ in which normal later stages read.
+//   FIXTURE_CRYSTAL     `_ENABLE_CRYSTAL_FIXTURE` (JP 6.8.1): after the fogged
+//                       and clamped colour, the light-influence mix towards the
+//                       texel, the normal-driven colour remap and the bright
+//                       fresnel add. Its programs always carry the fresnel and
+//                       reflection keywords too.
+//   FIXTURE_MULTI_UV    `_ENABLE_MULTI_UV_SCROLL` (JP 6.8.1): the base colour is
+//                       not `_MainTex` but up to three `_LayerTex*` layers,
+//                       sampled at world-planar coordinates (the position
+//                       projected on a horizontal tangent frame built in the
+//                       vertex stage) with per-layer tiling, scroll and a
+//                       view-dependent parallax offset, and composited over
+//                       each other by layer alpha. The rest of the chain is
+//                       the plain Basic one; its programs carry no clip,
+//                       dither or texture-branch keywords.
 // 两条质感分支的参数（菲涅尔两参 + 反射两参）合用 binding 4 的那一块，
 // 不并进 FixtureParams（那份 12 槽序与自发光 pass 的对象池布局共用）。
 // 顶点属性键由引擎按网格布局注入：VERTEX_NORMALS / VERTEX_UVS_A。
@@ -136,9 +159,38 @@ struct FixtureShadingBranch {
     // zw 填 0（源里这条分支没有别的数值输入——立方图那一项在本管线是
     // 折叠掉的常数，见片元里的说明）。
     reflection: vec4<f32>,
+    // Crystal: (_LightInfluenceScale, _UseNormalDrivenEmission,
+    // _NormalDarkToColor, _NormalBrightToEmission).
+    crystal_colour: vec4<f32>,
+    // Crystal: (_UseBrightFresnelAdd, _BrightFresnelAddIntensity, 0, 0).
+    crystal_fresnel: vec4<f32>,
+    // Normal map: (_BumpScale, _NormalExaggeration, _UseNormalParallaxShift,
+    // _NormalParallaxShift).
+    normal_map: vec4<f32>,
+    // Multi-UV layers: `_LayerTex1_ST`, `_LayerTex2_ST`, `_LayerTex3_ST`.
+    layer1_st: vec4<f32>,
+    layer2_st: vec4<f32>,
+    layer3_st: vec4<f32>,
+    // (_LayerTex1_UVScrollX, _LayerTex1_UVScrollY, _LayerTex2_UVScrollX, _LayerTex2_UVScrollY).
+    layer_scroll_12: vec4<f32>,
+    // (_LayerTex3_UVScrollX, _LayerTex3_UVScrollY, _UseLayerTex2, _UseLayerTex3).
+    layer_scroll_3_use: vec4<f32>,
+    // (_LayerTex1/2/3_ParallaxStrength, 0).
+    layer_parallax: vec4<f32>,
 }
 
 @group(3) @binding(4) var<uniform> branch_params: FixtureShadingBranch;
+// `_NormalMap`. Materials without the normal-map block bind a fallback that
+// no compiled variant reads (the layout is shared by every variant).
+@group(3) @binding(5) var normal_tex: texture_2d<f32>;
+@group(3) @binding(6) var normal_sampler: sampler;
+// `_LayerTex1/2/3` of the multi-UV variant (fallbacks elsewhere, unread).
+@group(3) @binding(7) var layer1_tex: texture_2d<f32>;
+@group(3) @binding(8) var layer1_sampler: sampler;
+@group(3) @binding(9) var layer2_tex: texture_2d<f32>;
+@group(3) @binding(10) var layer2_sampler: sampler;
+@group(3) @binding(11) var layer3_tex: texture_2d<f32>;
+@group(3) @binding(12) var layer3_sampler: sampler;
 
 // 未绑定的立方图采样器采出来的常数（每通道 128/255）。引擎按纹理**维度**
 // 索引它的内建默认贴图表顶上去，而立方图那一格是六面各自整面清成同一个
@@ -239,6 +291,19 @@ struct FixtureVertexOutput {
     // 输出，源里两个变体的这段构造逐行相同（同一个正交/透视选择、
     // 同一个相机位减片元位），所以只有一份，不按分支复制。
     @location(10) view_dir: vec3<f32>,
+#endif
+#ifdef FIXTURE_NORMAL_MAP
+    // The source's TEXCOORD9: raw uv1 in the source's bottom-left origin
+    // (no offset). The cotangent frame differentiates it as is; only the
+    // texture fetch converts the row origin.
+    @location(11) uv1: vec2<f32>,
+#endif
+#ifdef FIXTURE_MULTI_UV
+    // The source's TEXCOORD7 / TEXCOORD8 / TEXCOORD6: the horizontal tangent,
+    // the bitangent and the view direction in that frame.
+    @location(12) layer_tangent: vec3<f32>,
+    @location(13) layer_bitangent: vec3<f32>,
+    @location(14) layer_view: vec3<f32>,
 #endif
 }
 
@@ -349,6 +414,38 @@ fn vertex(mesh: Vertex) -> FixtureVertexOutput {
     );
 #endif
 
+#ifdef FIXTURE_NORMAL_MAP
+#ifdef VERTEX_UVS_B
+    out.uv1 = mesh.uv_b;
+#else
+    // A mesh without the channel reads the engine's zero vertex input.
+    out.uv1 = vec2<f32>(0.0);
+#endif
+#endif
+
+#ifdef FIXTURE_MULTI_UV
+    // Source: T = normalize_xz(N.z, 0, -N.x), B = cross(N, T), with N the
+    // renormalised world normal and V the normalised direction to the camera;
+    // TEXCOORD6 = (dot(V.xz, T.xz), dot(V, B), dot(V, N)). The constant axes in
+    // T do not reflect with the world, so in this pipeline's x-reflected world
+    // the reflected source frame is T = (-N.z, 0, N.x), B = cross(T, N); every
+    // dot product (and the planar coordinates in the fragment) then equals the
+    // source's.
+    let layer_normal = normalize(out.world_normal);
+    let layer_to_camera = env.camera_position.xyz - world_position.xyz;
+    let layer_view_dir = inverseSqrt(dot(layer_to_camera, layer_to_camera)) * layer_to_camera;
+    var layer_tangent = vec3<f32>(-layer_normal.z, 0.0, layer_normal.x);
+    layer_tangent = inverseSqrt(dot(layer_tangent.xz, layer_tangent.xz)) * layer_tangent;
+    let layer_bitangent = cross(layer_tangent, layer_normal);
+    out.layer_view = vec3<f32>(
+        dot(layer_view_dir.xz, layer_tangent.xz),
+        dot(layer_view_dir, layer_bitangent),
+        dot(layer_view_dir, layer_normal),
+    );
+    out.layer_tangent = layer_tangent;
+    out.layer_bitangent = layer_bitangent;
+#endif
+
     return out;
 }
 
@@ -408,10 +505,133 @@ fn fixture_bayer_value(pixel: vec2<f32>) -> f32 {
     return value * 0.0618750006 + 0.00999999978;
 }
 
+#ifdef FIXTURE_MULTI_UV
+// One layer's sample point: planar coordinates tiled by the layer's ST, the
+// scroll subtracted with `_Time.y`, then the parallax offset along `dir`.
+fn multi_uv_layer_uv(planar: vec2<f32>, st: vec4<f32>, scroll: vec2<f32>, strength: f32,
+                     weight: f32, dir: vec2<f32>) -> vec2<f32> {
+    var uv = planar * st.xy + st.zw;
+    uv = vec2<f32>(-env.time.y) * scroll + uv;
+    let offset = weight * strength * 0.5;
+    uv = vec2<f32>(offset) * dir + uv;
+    // Source uv space -> exported image rows (top first).
+    return vec2<f32>(uv.x, select(uv.y, 1.0 - uv.y, params.uv_v_flip.x > 0.5));
+}
+
+// The multi-UV base colour (rgb in the stored domain) and alpha, statement by
+// statement: layer 1 always, layers 2 and 3 behind their int gates, each
+// composited over the result by its own alpha.
+fn multi_uv_base(in: FixtureVertexOutput) -> vec4<f32> {
+    let planar = vec2<f32>(
+        dot(in.world_position, in.layer_tangent),
+        dot(in.world_position, in.layer_bitangent),
+    );
+    // Parallax weight: z = sat(V.N), t = sat((z - 0.5) * 2.50000024),
+    // w = smoothstep(t) * (z^3 - 1) + 1.
+    let z = clamp(in.layer_view.z, 0.0, 1.0);
+    let t = clamp((z + -0.5) * 2.50000024, 0.0, 1.0);
+    let smooth_t = t * t * (t * -2.0 + 3.0);
+    let weight = smooth_t * (z * z * z + -1.0) + 1.0;
+    // Offset direction: normalize(TEXCOORD6).xy / (normalize(TEXCOORD6).z + 0.42).
+    let view_scale = inverseSqrt(dot(in.layer_view, in.layer_view));
+    let dir = (view_scale * in.layer_view.xy) / (in.layer_view.z * view_scale + 0.419999987);
+    let uv1 = multi_uv_layer_uv(planar, branch_params.layer1_st,
+        branch_params.layer_scroll_12.xy, branch_params.layer_parallax.x, weight, dir);
+    let uv2 = multi_uv_layer_uv(planar, branch_params.layer2_st,
+        branch_params.layer_scroll_12.zw, branch_params.layer_parallax.y, weight, dir);
+    let uv3 = multi_uv_layer_uv(planar, branch_params.layer3_st,
+        branch_params.layer_scroll_3_use.xy, branch_params.layer_parallax.z, weight, dir);
+    // All three fetches run in uniform control flow; the int gates then select
+    // (the source fetches only behind the gates, the selected values are equal).
+    let l1 = textureSampleBias(layer1_tex, layer1_sampler, uv1, env.mip_bias.x);
+    let l2 = textureSampleBias(layer2_tex, layer2_sampler, uv2, env.mip_bias.x);
+    let l3 = textureSampleBias(layer3_tex, layer3_sampler, uv3, env.mip_bias.x);
+    let c1 = srgb_format_encode(l1.rgb);
+    let c2 = srgb_format_encode(l2.rgb);
+    let c3 = srgb_format_encode(l3.rgb);
+    var rgb = c1;
+    var alpha = l1.a;
+    if branch_params.layer_scroll_3_use.z > 0.5 {
+        rgb = vec3<f32>(l2.a) * (c2 - c1) + c1;
+        alpha = (1.0 - l1.a) * l2.a + l1.a;
+    }
+    if branch_params.layer_scroll_3_use.w > 0.5 {
+        rgb = vec3<f32>(l3.a) * (c3 - rgb) + rgb;
+        alpha = (1.0 - alpha) * l3.a + alpha;
+    }
+    return vec4<f32>(rgb, alpha);
+}
+#endif
+
+#ifdef FIXTURE_NORMAL_MAP
+// The JP Basic normal-map block, statement by statement. `n` is the
+// normalised interpolated normal, the result is the perturbed normal.
+//
+// Frame: the cotangent frame from screen derivatives of the world position
+// and of uv1. Two sign conventions meet here and cancel: WGSL's dpdy runs
+// down the framebuffer (the source's dFdy runs up, so dpdy = -dFdy for both
+// the position and the uv), and this pipeline's world is the source's world
+// reflected in x (a cross product of reflected vectors is minus the reflected
+// cross product). Worked through, T and B come out as the reflection of the
+// source's T and B, which is exactly how every other vector here relates to
+// the source, so the source statements are transcribed unchanged.
+//
+// The fetch is the only place the row origin changes (exported images start
+// at the top); the parallax shift is added in the source's uv space first.
+fn crystal_normal(n: vec3<f32>, world_position: vec3<f32>, uv1: vec2<f32>) -> vec3<f32> {
+    let duv_x = dpdx(uv1);
+    let duv_y = dpdy(uv1);
+    let dpos_x = dpdx(world_position);
+    let dpos_y = dpdy(world_position);
+    // dp1perp = N.yzx * dx.zxy - N.zxy * dx.yzx; dp2perp = dy.yzx * N.zxy - N.yzx * dy.zxy.
+    let dp1perp = n.yzx * dpos_x.zxy - n.zxy * dpos_x.yzx;
+    let dp2perp = dpos_y.yzx * n.zxy - n.yzx * dpos_y.zxy;
+    let tangent_raw = dp2perp * duv_x.x + duv_y.x * dp1perp;
+    let bitangent_raw = dp2perp * duv_x.y + duv_y.y * dp1perp;
+    let frame_scale = inverseSqrt(max(dot(tangent_raw, tangent_raw), dot(bitangent_raw, bitangent_raw)));
+    let tangent = frame_scale * tangent_raw;
+    let bitangent = frame_scale * bitangent_raw;
+    let to_camera = env.camera_position.xyz - world_position;
+    let view = inverseSqrt(dot(to_camera, to_camera)) * to_camera;
+    let shifted = vec2<f32>(dot(tangent, view), dot(bitangent, view))
+        * vec2<f32>(branch_params.normal_map.w) + uv1;
+    let uv = select(uv1, shifted, branch_params.normal_map.z > 0.5);
+    let fetch_uv = vec2<f32>(uv.x, select(uv.y, 1.0 - uv.y, params.uv_v_flip.x > 0.5));
+    // Stored-domain texel (see the colour-domain section): the source runs in
+    // gamma space and reads the stored bytes.
+    let texel = srgb_format_encode(
+        textureSampleBias(normal_tex, normal_sampler, fetch_uv, env.mip_bias.x).rgb,
+    );
+    var decoded = texel * vec3<f32>(2.0) + vec3<f32>(-1.0);
+    decoded = vec3<f32>(decoded.xy * vec2<f32>(branch_params.normal_map.x), decoded.z);
+    var bumped = bitangent * decoded.y;
+    bumped = decoded.x * tangent + bumped;
+    bumped = decoded.z * n + bumped;
+    bumped = bumped * inverseSqrt(dot(bumped, bumped)) - n;
+    bumped = vec3<f32>(branch_params.normal_map.y) * bumped + n;
+    return inverseSqrt(dot(bumped, bumped)) * bumped;
+}
+#endif
+
 @fragment
 fn fragment(in: FixtureVertexOutput) -> @location(0) vec4<f32> {
     // Sample before per-fragment clipping so implicit derivatives remain uniform.
     let base = textureSampleBias(main_tex, main_sampler, in.uv, env.mip_bias.x);
+#ifdef FIXTURE_MULTI_UV
+    // The layers replace the main texture as the base colour and alpha (the
+    // main texture is still sampled above; nothing reads it in this variant).
+    let multi_base = multi_uv_base(in);
+    let base_stored = multi_base.rgb;
+    let base_alpha = multi_base.a;
+#else
+    let base_stored = srgb_format_encode(base.rgb);
+    let base_alpha = base.a;
+#endif
+#ifdef FIXTURE_NORMAL_MAP
+    // The source runs the normal-map block before its discard as well; the
+    // screen derivatives and the fetch stay in uniform control flow here.
+    let lit_normal = crystal_normal(normalize(in.world_normal), in.world_position, in.uv1);
+#endif
 #ifdef FIXTURE_WINDOW_CLIP
     // 窗外观门（等价模板 Equal ref4）：片元 NDC 不在写零面投影凸四边形
     // 内 → discard。环向两种都可能（从背面看四边形翻转），按四边形自身
@@ -453,12 +673,23 @@ fn fragment(in: FixtureVertexOutput) -> @location(0) vec4<f32> {
 #else
     let normal = normalize(in.world_normal);
 #endif
+    // The normal the toon ramp and the reflection read. With the normal-map
+    // block it is the perturbed normal; the fresnel module and the crystal
+    // fresnel add keep reading the interpolated one (the crystal programs
+    // keep both in separate registers).
+#ifndef FIXTURE_NORMAL_MAP
+    let lit_normal = normal;
+#endif
+    // Half-lambert of the lit normal. The crystal tail reads it again, so it
+    // is computed outside the phenomena gate (the source computes it before
+    // the select, too; it has no side effects).
+    let half_lambert = dot(env.light_vector.xyz, lit_normal) * 0.5 + 0.5;
 
     // 现象光照门：关时 rgb 直通（源的 select 形状，两侧都算后选门）。
     // `base_rgb` 是编回存储域的主贴图色（见上方「色彩域」）——现象色、
     // 阴影色、菲涅尔色、雾色、`UNBOUND_CUBE_SAMPLE` 全在存储域，同域才
     // 是源的那个函数。
-    let base_rgb = srgb_format_encode(base.rgb);
+    let base_rgb = base_stored;
     var rgb = base_rgb;
     if params.use_phenomena_lighting.x > 0.5 {
         let lit = phenomena_light_blend(base_rgb);
@@ -470,8 +701,6 @@ fn fragment(in: FixtureVertexOutput) -> @location(0) vec4<f32> {
         let threshold = select(env.edge_threshold.x, params.local_edge_threshold.x, use_local);
         let smoothness = select(env.edge_smoothness.x, params.local_edge_smoothness.x, use_local);
         let intensity = select(1.0, params.local_shading_intensity.x, use_local);
-        var half_lambert = dot(env.light_vector.xyz, normal);
-        half_lambert = half_lambert * 0.5 + 0.5;
         let upper = threshold + smoothness;
         let lower = threshold - smoothness;
         var ramp = (half_lambert - upper) / (lower - upper);
@@ -521,7 +750,14 @@ fn fragment(in: FixtureVertexOutput) -> @location(0) vec4<f32> {
     // 乘法结合序照源：**采样常数先乘，intensity 后乘**，两次乘法不合并成
     // 一个预乘常数（f32 乘法不满足结合律，折叠只替换取值那一步）。
 #ifdef FIXTURE_MODULE_REFLECTION
-    let reflection_fresnel = exp2(log2(one_minus_raw) * branch_params.reflection.x);
+    // With the normal-map block the reflection reads the perturbed normal
+    // (its own dot product in the source); otherwise the shared subtraction.
+#ifdef FIXTURE_NORMAL_MAP
+    let reflection_one_minus = 1.0 - dot(view_dir, lit_normal);
+#else
+    let reflection_one_minus = one_minus_raw;
+#endif
+    let reflection_fresnel = exp2(log2(reflection_one_minus) * branch_params.reflection.x);
     let reflection_clamped = min(reflection_fresnel, 1.0);
     rgb = vec3<f32>((UNBOUND_CUBE_SAMPLE * reflection_clamped) * branch_params.reflection.y)
         + rgb;
@@ -533,9 +769,48 @@ fn fragment(in: FixtureVertexOutput) -> @location(0) vec4<f32> {
     rgb = apply_fog(rgb, in.world_position.y, in.fog_ramp);
 #endif
 
+#ifdef FIXTURE_CRYSTAL
+    // Crystal tail, after the fogged colour has been clamped (apply_fog ends
+    // with the source's clamp). Three steps, each an int or float gate read
+    // at run time as in the source:
+    // 1. `_LightInfluenceScale` < 1: mix from the texel towards the lit colour
+    //    by the clamped scale.
+    let influence = branch_params.crystal_colour.x;
+    let influenced = vec3<f32>(clamp(influence, 0.0, 1.0)) * (rgb - base_rgb) + base_rgb;
+    rgb = select(rgb, influenced, influence < 1.0);
+    // 2. `_UseNormalDrivenEmission`: rgb * dark + hl * (rgb + bright - rgb * dark),
+    //    hl being the half-lambert of the lit normal (unclamped).
+    let dark_to_colour = branch_params.crystal_colour.z;
+    let bright_to_emission = branch_params.crystal_colour.w;
+    let driven_dark = rgb * vec3<f32>(dark_to_colour);
+    var driven = rgb + vec3<f32>(bright_to_emission);
+    driven = -rgb * vec3<f32>(dark_to_colour) + driven;
+    driven = vec3<f32>(half_lambert) * driven + driven_dark;
+    rgb = select(rgb, driven, branch_params.crystal_colour.y > 0.5);
+    // 3. `_UseBrightFresnelAdd`: hl * (1 - sat(N.V))^max(power, 0.001) * fresnel
+    //    colour * intensity, the intensity capped at 0.1 when phenomena
+    //    lighting is off. V is rebuilt per fragment from the camera position
+    //    (not the vertex view direction), N is the interpolated normal.
+    let crystal_to_camera = env.camera_position.xyz - in.world_position;
+    let crystal_view = inverseSqrt(dot(crystal_to_camera, crystal_to_camera)) * crystal_to_camera;
+    let crystal_n_dot_v = clamp(dot(normal, crystal_view), 0.0, 1.0);
+    let crystal_power = max(branch_params.fresnel_power.x, 0.00100000005);
+    var crystal_rim = exp2(log2(1.0 - crystal_n_dot_v) * crystal_power);
+    let rim_intensity = select(
+        branch_params.crystal_fresnel.y,
+        min(branch_params.crystal_fresnel.y, 0.100000001),
+        params.use_phenomena_lighting.x < 0.5,
+    );
+    crystal_rim = half_lambert * crystal_rim;
+    let rim_added = (vec3<f32>(crystal_rim) * branch_params.fresnel_color.rgb) * vec3<f32>(rim_intensity) + rgb;
+    rgb = select(rgb, rim_added, branch_params.crystal_fresnel.x > 0.5);
+    // The source writes this without a further clamp; its colour target is
+    // 8-bit unorm, so the store clamps. `srgb_format_decode` clamps the same.
+#endif
+
     // 输出 alpha = tex.a（源的第二颜色目标连同自发光开关链挂账，见文件头
     // 注释；`_BaseOpacity` 在 Base 程序里不被消费）。
     // 源末行那次 `clamp(rgb, 0, 1)` 由 `srgb_format_decode` 里的钳承接
     // （它先钳后解，与「钳在存储域」逐值等价）——不是把 clamp 删了。
-    return vec4<f32>(srgb_format_decode(rgb), base.a);
+    return vec4<f32>(srgb_format_decode(rgb), base_alpha);
 }

@@ -1,0 +1,344 @@
+//! Source particle billboard vertices, before the original vertex program.
+//! This is distinct from the legacy convenience quad API: the source's pivot,
+//! scale/rotation order and non-unit normal are observable shader inputs.
+use crate::{
+    billboard::{ATTRIBUTE_CUSTOM1, ATTRIBUTE_CUSTOM2},
+    particle_geometry::{reflect, Alignment, Frame, Instance},
+};
+use bevy::{
+    math::Mat3,
+    mesh::{Indices, Mesh},
+    prelude::*,
+};
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Mode {
+    Billboard,
+    Horizontal,
+    Vertical,
+    /// The stretched billboard (freeform stretching off); its quad is
+    /// `moly_law::particle::stretch_geometry`.
+    Stretch(Stretch),
+}
+
+/// The Stretch renderer's own inputs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Stretch {
+    pub velocity_scale: f32,
+    pub length_scale: f32,
+    pub camera_velocity_scale: f32,
+    pub normal_direction: f32,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Draw {
+    pub mode: Mode,
+    pub alignment: Alignment,
+    pub pivot: Vec3,
+    pub screen_size: Vec2,
+    pub allow_roll: bool,
+    pub scaling: crate::particle_geometry::Scaling,
+}
+
+fn euler(v: Vec3) -> Mat3 {
+    Mat3::from_quat(Quat::from_euler(EulerRot::YXZ, v.y, v.x, v.z))
+}
+/// The renderer's Velocity billboard basis. `velocity` is the particle's
+/// velocity in the simulation space and `simulation` that space's rotation to
+/// world. The direction is normalized in the simulation space (+Z where the
+/// squared speed is at or below 1e-30), and both it and its cross with the
+/// simulation +Z (+Z x direction) are rotated into world before each is
+/// normalized; a rotated direction at or below 1e-30 squared takes world +Z,
+/// a rotated cross world +X. Z is the direction, X the cross and Y = Z x X,
+/// unnormalized on the fallback.
+fn velocity_basis(velocity: Vec3, simulation: Mat3) -> Mat3 {
+    let n = if velocity.length_squared() > 1.0e-30 { velocity.normalize() } else { Vec3::Z };
+    let z = simulation * n;
+    let z = if z.length_squared() > 1.0e-30 { z.normalize() } else { Vec3::Z };
+    let x = simulation * Vec3::new(-n.y, n.x, 0.0);
+    let x = if x.length_squared() > 1.0e-30 { x.normalize() } else { Vec3::X };
+    Mat3::from_cols(x, z.cross(x), z)
+}
+
+/// The VerticalBillboard side span: world +Y crossed with the camera's
+/// world-to-camera image of world +Z, normalized, and zero where its square is
+/// at or below 1e-30. With the camera rotation's columns right, up and
+/// forward, and the world-to-camera matrix flipping the camera Z, that image
+/// is (right.z, up.z, -forward.z), so the cross is (-forward.z, 0, -right.z).
+fn vertical_side(camera_rotation: Mat3) -> Vec3 {
+    let side = Vec3::new(-camera_rotation.z_axis.z, 0.0, -camera_rotation.x_axis.z);
+    if side.length_squared() > 1.0e-30 { side.normalize() } else { Vec3::ZERO }
+}
+
+fn facing(direction: Vec3, up: Vec3) -> Mat3 {
+    let z = direction.normalize_or_zero();
+    let x = up.cross(z).normalize_or_zero();
+    if x == Vec3::ZERO {
+        Mat3::IDENTITY
+    } else {
+        Mat3::from_cols(x, z.cross(x), z)
+    }
+}
+
+/// Actual source vertex order is top-left, top-right, bottom-right, bottom-left.
+/// Its normal is a cross product of normalized corner vectors, NOT a normalized
+/// face normal. The horizontal specialization excludes the pivot from this cross.
+pub(crate) fn vertices(
+    p: &Instance,
+    frame: &Frame,
+    draw: &Draw,
+    local_simulation: bool,
+) -> ([Vec3; 4], Vec3) {
+    vertices_sized(p, frame, draw, local_simulation, p.size, Mat3::IDENTITY)
+}
+
+fn vertices_sized(
+    p: &Instance,
+    frame: &Frame,
+    draw: &Draw,
+    local_simulation: bool,
+    size: Vec3,
+    simulation: Mat3,
+) -> ([Vec3; 4], Vec3) {
+    // The native pivot uses the UNCLAMPED authored size; screen limits affect
+    // corner extents, not the pivot offset. Keep the two inputs separate.
+    let scale = frame.scale;
+    let (offsets, normal) = match draw.mode {
+        Mode::Billboard => {
+            let s = Mat3::from_diagonal(scale);
+            let mut angles = p.rotation;
+            if !draw.allow_roll && matches!(draw.alignment, Alignment::View | Alignment::Facing) {
+                angles.z += frame
+                    .camera_rotation
+                    .x_axis
+                    .y
+                    .atan2(frame.camera_rotation.y_axis.y);
+            }
+            let rotation = euler(-angles);
+            let basis = match draw.alignment {
+                Alignment::View => {
+                    frame.camera_rotation * Mat3::from_diagonal(Vec3::new(1.0, 1.0, -1.0))
+                }
+                Alignment::World => Mat3::IDENTITY,
+                Alignment::Local => frame.rotation,
+                Alignment::Facing => facing(
+                    p.position - frame.camera_position,
+                    frame.camera_rotation.y_axis,
+                ),
+                Alignment::Velocity => velocity_basis(p.velocity, simulation),
+            };
+            let matrix = if draw.alignment == Alignment::View
+                || (draw.alignment == Alignment::Local && !local_simulation)
+            {
+                s * basis * rotation
+            } else {
+                basis * s * rotation
+            };
+            let pivot = Vec3::new(
+                p.size.x * draw.pivot.x,
+                p.size.y * draw.pivot.y,
+                p.size.x * draw.pivot.z,
+            );
+            let corners = [
+                Vec3::new(-size.x, size.y, 0.0),
+                Vec3::new(size.x, size.y, 0.0),
+                Vec3::new(size.x, -size.y, 0.0),
+                Vec3::new(-size.x, -size.y, 0.0),
+            ];
+            let offsets = corners.map(|v| matrix * (v * 0.5 + pivot));
+            let normal = offsets[0]
+                .normalize_or_zero()
+                .cross(offsets[1].normalize_or_zero());
+            (offsets, normal)
+        }
+        Mode::Stretch(_) => unreachable!("the Stretch quad has its own writer (write_stretch)"),
+        Mode::Horizontal | Mode::Vertical => {
+            // One geometry body serves both modes; they differ only in the
+            // two world spans the quad is laid on.
+            let (side, up) = match draw.mode {
+                Mode::Horizontal => (Vec3::NEG_X, Vec3::Z),
+                _ => (vertical_side(frame.camera_rotation), Vec3::Y),
+            };
+            let (sin, cos) = (p.rotation.z + std::f32::consts::FRAC_PI_4).sin_cos();
+            let (x, y) = (size.x * 0.5, size.y * 0.5);
+            let across = [cos * x, -sin * x, -cos * x, sin * x];
+            let along = [sin * y, cos * y, -sin * y, -cos * y];
+            let corners: [Vec3; 4] = std::array::from_fn(|k| (side * across[k] + up * along[k]) * scale);
+            let pivot = (-side * (p.size.x * draw.pivot.x * cos)
+                + up * (p.size.y * draw.pivot.y * sin)
+                + side.cross(up) * (p.size.x * draw.pivot.z))
+                * scale;
+            let normal = corners[0]
+                .normalize_or_zero()
+                .cross(corners[1].normalize_or_zero());
+            (corners.map(|v| v + pivot), normal)
+        }
+    };
+    let normal = if normal.length_squared() < 1.0e-30 {
+        Vec3::Z
+    } else {
+        normal
+    };
+    (offsets.map(|v| p.position + v), normal)
+}
+
+/// Source min/max limits operate on the largest XY size with a 1e-6 divisor
+/// floor, before renderer scale and the pivot transform. Zero dimensions remain
+/// zero; there is no visual minimum-size substitution. Negative limits carry
+/// the native disabled/behind-eye behavior, rather than Rust clamp panics.
+pub(crate) fn screen_limited(size: Vec3, minimum: f32, maximum: f32) -> Vec3 {
+    let largest = size.x.max(size.y).max(0.000001);
+    let lower = if minimum >= 0.0 {
+        largest.max(minimum)
+    } else {
+        0.0
+    };
+    let limited = if maximum >= 0.0 {
+        lower.min(maximum)
+    } else {
+        lower
+    };
+    let factor = limited / largest;
+    Vec3::new(size.x * factor, size.y * factor, size.z)
+}
+
+/// The camera as the Stretch body reads it, in the source basis: the world to
+/// camera matrix (rows right, up and minus forward, the camera looking down its
+/// -Z), its inverse, and the camera's velocity in camera axes.
+fn stretch_view(frame: &Frame, camera_velocity: Vec3) -> moly_law::particle::stretch_geometry::StretchView {
+    let r = frame.camera_rotation;
+    let inverse3 = Mat3::from_cols(r.x_axis, r.y_axis, -r.z_axis);
+    let view3 = inverse3.transpose();
+    let inverse = Mat4::from_cols(
+        inverse3.x_axis.extend(0.0),
+        inverse3.y_axis.extend(0.0),
+        inverse3.z_axis.extend(0.0),
+        frame.camera_position.extend(1.0),
+    );
+    let view = Mat4::from_cols(
+        view3.x_axis.extend(0.0),
+        view3.y_axis.extend(0.0),
+        view3.z_axis.extend(0.0),
+        (-(view3 * frame.camera_position)).extend(1.0),
+    );
+    moly_law::particle::stretch_geometry::StretchView {
+        view: view.to_cols_array(),
+        inverse_view: inverse.to_cols_array(),
+        camera_velocity: (view3 * camera_velocity).to_array(),
+    }
+}
+
+/// The Stretch mode's vertices: per particle four corners with a normal each
+/// (the writer bends each corner's normal toward its own edge), in the shared
+/// reflected world space. The screen limits use the billboards' coefficient
+/// (far-plane width over far distance, divided by renderer scale X) on the
+/// camera-space depth coordinate, which is negative in front of the camera.
+/// `camera_velocity` is the camera's world velocity in the source basis.
+fn write_stretch(
+    stretch: Stretch,
+    draw: &Draw,
+    particles: &[Instance],
+    frame: &Frame,
+    fov_y: f32,
+    aspect: f32,
+    camera_velocity: Vec3,
+    positions: &mut Vec<[f32; 3]>,
+    normals: &mut Vec<[f32; 3]>,
+) {
+    use moly_law::particle::stretch_geometry as law;
+    let view = stretch_view(frame, camera_velocity);
+    let coefficient = (2.0 * (fov_y * 0.5).tan() * aspect) / frame.scale.x.max(0.00001);
+    let renderer = law::StretchRenderer {
+        velocity_scale: stretch.velocity_scale,
+        length_scale: stretch.length_scale,
+        camera_velocity_scale: stretch.camera_velocity_scale,
+        scale: frame.scale.to_array(),
+        limits: [-(draw.screen_size.x * coefficient), -(draw.screen_size.y * coefficient), 0.0, 0.0],
+        normal_bend: law::normal_bend(stretch.normal_direction),
+    };
+    for p in particles {
+        let quad = law::stretch_quad(&view, &renderer, &law::StretchParticle {
+            position: p.position.to_array(),
+            velocity: p.velocity.to_array(),
+            size: [p.size.x, p.size.y],
+            age_percent: p.age_percent,
+        });
+        positions.extend(quad.positions.map(|v| reflect(Vec3::from_array(v)).to_array()));
+        normals.extend(quad.normals.map(|v| reflect(Vec3::from_array(v)).to_array()));
+    }
+}
+
+/// Preserve source UVs and custom streams. Geometry is stored in the shared
+/// reflected world space; the source-program upload restores source coordinates.
+/// `simulation` is the simulation space's rotation to world; with the Velocity
+/// alignment each instance's velocity is read in the simulation space.
+/// `camera_velocity` (the camera's world velocity, source basis) is read by the
+/// Stretch mode only.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write(
+    mesh: &mut Mesh,
+    draw: &Draw,
+    particles: &[Instance],
+    frame: &Frame,
+    local_simulation: bool,
+    fov_y: f32,
+    aspect: f32,
+    simulation: Mat3,
+    camera_velocity: Vec3,
+) {
+    let mut positions = Vec::with_capacity(particles.len() * 4);
+    let mut normals = Vec::with_capacity(particles.len() * 4);
+    let mut uv = Vec::with_capacity(particles.len() * 4);
+    let mut colours = Vec::with_capacity(particles.len() * 4);
+    let mut custom1 = Vec::with_capacity(particles.len() * 4);
+    let mut custom2 = Vec::with_capacity(particles.len() * 4);
+    let mut indices = Vec::with_capacity(particles.len() * 6);
+    if let Mode::Stretch(stretch) = draw.mode {
+        write_stretch(stretch, draw, particles, frame, fov_y, aspect, camera_velocity, &mut positions, &mut normals);
+    }
+    for p in particles {
+        // Four UVs per particle in every mode (the Stretch positions are
+        // already written).
+        let base = uv.len() as u32;
+        if matches!(draw.mode, Mode::Stretch(_)) {
+            uv.extend(moly_law::particle::stretch_geometry::UV);
+            colours.extend([p.colour.to_array(); 4]);
+            custom1.extend([p.custom1.to_array(); 4]);
+            custom2.extend([p.custom2.to_array(); 4]);
+            indices.extend([base, base + 2, base + 1, base, base + 3, base + 2]);
+            continue;
+        }
+        let depth = frame
+            .camera_rotation
+            .z_axis
+            .dot(p.position - frame.camera_position);
+        // The source camera writer supplies far-plane WIDTH / far distance,
+        // divided by renderer scale X. This is the same coefficient at depth.
+        let width = (2.0 * (fov_y * 0.5).tan() * aspect * depth) / frame.scale.x.max(0.00001);
+        let size = screen_limited(
+            p.size,
+            draw.screen_size.x * width,
+            draw.screen_size.y * width,
+        );
+        let (corners, normal) = vertices_sized(p, frame, draw, local_simulation, size, simulation);
+        positions.extend(corners.map(|v| reflect(v).to_array()));
+        normals.extend([reflect(normal).to_array(); 4]);
+        uv.extend([[0.0f32, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]);
+        colours.extend([p.colour.to_array(); 4]);
+        custom1.extend([p.custom1.to_array(); 4]);
+        custom2.extend([p.custom2.to_array(); 4]);
+        // Reflect the source triangle once, just as the mesh producer does.
+        indices.extend([base, base + 2, base + 1, base, base + 3, base + 2]);
+    }
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colours);
+    mesh.insert_attribute(ATTRIBUTE_CUSTOM1, custom1);
+    mesh.insert_attribute(ATTRIBUTE_CUSTOM2, custom2);
+    mesh.insert_indices(Indices::U32(indices));
+}
+
+#[cfg(test)]
+#[path = "source_billboard_tests.rs"]
+mod tests;

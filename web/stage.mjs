@@ -1,0 +1,586 @@
+import { warmBaseResources } from "./base-resources.mjs";
+import { preflightCoordinates } from "./coordinate-contract.mjs";
+import {
+  EMBED_VERSION,
+  isEnvelope,
+  locale as validateLocale,
+  theme as validateTheme,
+  filters,
+  intent,
+  resourceDirectory,
+  resourceBase,
+  resourceOrigin,
+} from "./embed-contract.mjs";
+import { loadEngine, releaseEnginePath } from "./engine-loader.mjs";
+import { audioActivation } from "./stage-audio.mjs";
+import { createStageController } from "./stage-controller.mjs";
+import { stageMessages } from "./stage-locale.mjs";
+import { presentWeather } from "./weather-presentation.mjs";
+import { createWeatherArtwork } from "./weather-artwork.mjs";
+import { createWeatherPicker } from "./weather-picker.mjs";
+import { weatherPhaseLabel } from "./weather-ui-locale.mjs";
+
+const params = new URLSearchParams(location.search);
+const $ = (id) => document.getElementById(id);
+// Installed before the engine module loads, so its output context is tracked.
+const resumeAudio = audioActivation(globalThis);
+for (const type of ["pointerdown", "pointerup", "keydown", "moly-activate"])
+  window.addEventListener(type, resumeAudio, true);
+let ui = {
+  locale: validateLocale(params.get("locale") || "zh-CN"),
+  theme: validateTheme(params.get("theme") || "light"),
+};
+let configuration = null,
+  wasm = null,
+  controller = null,
+  backend = null;
+let configuredResourceBase = null;
+let lastPlayerData = "";
+// The last weather block the runtime published. The dial is drawn from it and
+// the selector admits only IDs the runtime itself listed, so the stage never
+// invents an ID the catalogue does not contain.
+let weather = null;
+let weatherArtwork = null;
+const weatherPicker = createWeatherPicker({
+  dialog: $("weather-dialog"),
+  trigger: $("stage-weather"),
+  onSelect: (id) => {
+    if (weather?.options.some((option) => option.id === id))
+      controller?.dispatch("weather", id);
+  },
+  onFocus: (captured) => controller?.focus(captured),
+});
+// The last site block the runtime published, and whether a switch may be
+// asked for now: never while the scene is loading or an experience owns it.
+let site = null,
+  siteLocked = true;
+const siteSelect = $("site-select");
+siteSelect.addEventListener("change", () => {
+  const id = siteSelect.value;
+  if (!siteLocked && id !== site?.id && site?.options.some((option) => option.id === id))
+    controller?.dispatch("site", id);
+  else if (site) siteSelect.value = site.id;
+});
+// Keys pressed in the menu belong to it, not to the scene behind it.
+for (const type of ["keydown", "keyup"])
+  siteSelect.addEventListener(type, (event) => event.stopPropagation());
+siteSelect.addEventListener("focus", () => controller?.focus(true));
+siteSelect.addEventListener("blur", () => controller?.focus(false));
+const weatherIconUrls = new Map();
+const weatherIconRequests = new Set();
+function weatherPresentationOptions() {
+  return {
+    locale: ui.locale,
+    region,
+    assets: params.get("assets"),
+    baseUrl: location.href,
+    resourceBase: configuredResourceBase,
+    packed: params.get("packs") === "1" || Boolean(params.get("asset_catalog")),
+    iconUrls: weatherIconUrls,
+  };
+}
+function loadWeatherIcons(value) {
+  if (!weatherArtwork) return;
+  for (const option of value.options) {
+    if (!option.icon || weatherIconRequests.has(option.icon)) continue;
+    weatherIconRequests.add(option.icon);
+    weatherArtwork
+      .resolve(option.icon, option.iconSource)
+      .catch((error) => {
+        console.warn("[moly-weather:thumbnail-unavailable]", option.id, error);
+        return null;
+      })
+      .then((url) => {
+        weatherIconUrls.set(option.icon, url);
+        renderWeather();
+        const snapshot = controller?.getSnapshot();
+        if (snapshot) send("snapshot", decorateWeather(snapshot));
+      });
+  }
+}
+window.addEventListener("pagehide", () => weatherArtwork?.dispose());
+let phase = "idle",
+  loading = false,
+  started = false,
+  failed = false,
+  timer = null;
+let engineBytes = 0,
+  transferredBytes = 0,
+  decodedBytes = 0,
+  baseCompleted = 0,
+  baseTotal = 0,
+  lastProgress = performance.now();
+const timings = {},
+  pending = [];
+const initial = filters({
+  ...(params.get("tab") ? { tab: params.get("tab") } : {}),
+  ...(params.get("fixture") ? { fixture: Number(params.get("fixture")) } : {}),
+});
+const region = params.get("region");
+const version = params.get("version");
+const requested = params.get("renderer") || "auto";
+const send = (type, value) => {
+  if (parent !== window)
+    parent.postMessage(
+      { source: "moly", schemaVersion: EMBED_VERSION, type, value },
+      location.origin,
+    );
+};
+function mark(name) {
+  if (timings[name] === undefined) {
+    timings[name] = performance.now();
+    performance.mark(`moly:${name}`);
+  }
+}
+function report(next = phase) {
+  if (next !== phase && (next === "base" || next === "resources"))
+    lastProgress = performance.now();
+  phase = next;
+  send("boot", {
+    phase,
+    backend,
+    elapsedMs: Math.round(performance.now()),
+    engineDecodedBytes: engineBytes,
+    transferredBytes,
+    decodedBytes,
+    timings: { ...timings },
+  });
+  render();
+}
+function render() {
+  const t = stageMessages(ui.locale);
+  const stalled = (phase === "base" || phase === "resources")
+    && performance.now() - lastProgress > 30000;
+  document.documentElement.lang = ui.locale;
+  document.documentElement.dataset.theme = ui.theme.mode;
+  if (ui.theme.accent)
+    document.documentElement.style.setProperty("--accent", ui.theme.accent);
+  $("boot-title").textContent = t.title;
+  const text = failed
+    ? phase === "source_mismatch"
+      ? t.mismatch
+      : phase === "unsupported"
+        ? t.unsupported
+        : t.failed
+    : ({
+        idle: t.waiting,
+        downloading: t.loading,
+        initializing: t.initializing,
+        base: t.base,
+        renderer: t.renderer,
+        resources: t.scene,
+      }[phase] ?? t.scene);
+  $("boot-message").textContent = text;
+  $("stage-retry").textContent = t.retry;
+  $("stage-webgl").textContent = t.fallback;
+  $("stage-webgl").hidden = backend === "webgl2" || requested === "webgl2";
+  $("boot-recovery").hidden = !failed && !stalled;
+  $("boot-note").textContent = stalled ? t.stalled : "";
+  const amount = engineBytes || decodedBytes;
+  $("boot-progress").textContent = failed ? "" : phase === "base" && baseTotal
+    ? `${t.baseProgress} ${baseCompleted}/${baseTotal}`
+    : amount
+      ? `${t.progress} ${new Intl.NumberFormat(ui.locale, { maximumFractionDigits: 1 }).format(amount / 1e6)} MB`
+      : "";
+  $("stage-hint").textContent = t.controls;
+  renderWeather();
+  renderSite();
+}
+function renderSite() {
+  const field = $("stage-site");
+  if (!site) {
+    field.hidden = true;
+    return;
+  }
+  const names = JSON.stringify(site.options.map((option) => [option.id, option.name]));
+  if (siteSelect.dataset.options !== names) {
+    siteSelect.dataset.options = names;
+    siteSelect.replaceChildren(
+      ...site.options.map((option) => new Option(option.name, option.id)),
+    );
+  }
+  if (siteSelect.value !== site.id) siteSelect.value = site.id;
+  siteSelect.disabled = siteLocked;
+  siteSelect.setAttribute("aria-label", stageMessages(ui.locale).site);
+  field.hidden = false;
+}
+function renderWeather() {
+  const button = $("stage-weather");
+  if (!weather) {
+    button.hidden = true;
+    return;
+  }
+  const shown = presentWeather(weather, weatherPresentationOptions());
+  $("weather-label").textContent = shown.label;
+  const icon = $("weather-icon");
+  const source = shown.iconUrl;
+  if (source && icon.dataset.source !== source) {
+    icon.dataset.source = source;
+    icon.hidden = false;
+    icon.src = source;
+  } else if (!source) {
+    delete icon.dataset.source;
+    icon.removeAttribute("src");
+    icon.hidden = true;
+  }
+  button.hidden = false;
+  button.dataset.weatherId = String(shown.committedId ?? "");
+  button.dataset.requestedId = String(shown.transition?.requestedId ?? "");
+  button.dataset.phase = shown.transition?.phase ?? "ready";
+  button.title = weatherPhaseLabel(shown, ui.locale);
+  weatherPicker.update(shown, ui.locale);
+}
+// The runtime publishes the档位 in game terms (id + name). Names are localized
+// here, once, so the host can render the catalogue verbatim in the reader's
+// language instead of carrying its own copy of the weather table.
+function decorateWeather(state) {
+  if (!state?.weather) return state;
+  loadWeatherIcons(state.weather);
+  state.weather = presentWeather(state.weather, weatherPresentationOptions());
+  return state;
+}
+$("weather-icon").addEventListener("error", () => {
+  $("weather-icon").hidden = true;
+  $("stage-weather").dataset.iconState = "unavailable";
+});
+$("weather-icon").addEventListener("load", () => {
+  $("stage-weather").dataset.iconState = "ready";
+});
+$("stage-weather").addEventListener("click", () => weatherPicker.open());
+
+function fail(code, error) {
+  if (failed) return;
+  failed = true;
+  loading = false;
+  phase = code;
+  clearInterval(timer);
+  console.error(`[moly-stage:${code}]`, error);
+  $("stage-boot").hidden = false;
+  send("error", { code });
+  report(code);
+}
+function reload(renderer) {
+  // Reload tears down the entire previous WASM/renderer/audio realm before a
+  // different backend can be constructed. Never initialize both in one realm.
+  const url = new URL(location.href);
+  if (renderer) url.searchParams.set("renderer", renderer);
+  location.replace(url.href);
+}
+$("stage-retry").addEventListener("click", () => reload());
+$("stage-webgl").addEventListener("click", () => reload("webgl2"));
+
+performance.setResourceTimingBufferSize?.(10000);
+const observer = new PerformanceObserver((list) => {
+  for (const entry of list.getEntries()) {
+    transferredBytes += entry.transferSize || 0;
+    decodedBytes += entry.decodedBodySize || 0;
+    lastProgress = performance.now();
+  }
+});
+observer.observe({ type: "resource", buffered: true });
+
+async function loadStageEngine() {
+  if (loading || wasm || started || failed) return;
+  loading = true;
+  const releaseId = /^\/moly\/releases\/([a-z0-9][a-z0-9._-]{0,95})\/stage\.html$/.exec(location.pathname)?.[1];
+  let configuredBase, publicOrigin;
+  try {
+    const loaded = await loadEngine({
+      requested,
+      environment: { navigator, document },
+      mark,
+      report,
+      async prepare({ signal, progress }) {
+        if (!["cn", "jp", "tw", "en", "kr"].includes(region))
+          throw new Error("An explicit supported resource region is required");
+        configuredBase = params.get("resource_base")
+          ? resourceBase(params.get("resource_base"))
+          : undefined;
+        publicOrigin = resourceOrigin(params.get("resource_origin") ??
+          (configuredBase ? new URL(configuredBase).origin : undefined));
+        if (configuredBase && publicOrigin !== new URL(configuredBase).origin)
+          throw new Error("resource_origin must match resource_base");
+        resourceDirectory(
+          params.get("assets") || "",
+          location.href,
+          configuredBase ?? publicOrigin,
+        );
+        configuredResourceBase = configuredBase;
+        try {
+          await preflightCoordinates({
+            assets: new URL(params.get("assets"), location.href).href, region, version,
+            packs: params.get("packs") === "1", assetCatalog: params.get("asset_catalog") ?? undefined,
+            snapshotId: params.get("snapshot") ?? undefined, pageUrl: location.href,
+            releaseId, resourcePrefix: "/moly/",
+            resourceOrigin: publicOrigin, resourceBase: configuredBase,
+          }, { signal });
+          progress();
+        } catch (error) { fail("source_mismatch", error); throw error; }
+        weatherArtwork = createWeatherArtwork({
+          assets: params.get("assets"),
+          baseUrl: location.href,
+          resourceBase: configuredBase,
+          packs: params.get("packs") === "1",
+          assetCatalog: params.get("asset_catalog"),
+        });
+        const basePreparation = warmBaseResources(
+          {
+            region,
+            version,
+            assets: new URL(params.get("assets"), location.href).href,
+            resourceBase: configuredBase,
+            packs: params.get("packs") === "1",
+            assetCatalog: params.get("asset_catalog") ?? undefined,
+          },
+          {
+            signal,
+            onProgress({ completed, total }) {
+              baseCompleted = completed;
+              baseTotal = total;
+              lastProgress = performance.now();
+              if (phase === "base") render();
+            },
+          },
+        );
+        // The original promise remains rejectable at the join below.
+        void basePreparation.catch(() => {});
+        return { ready: basePreparation };
+      },
+      onBackend(selected) {
+        backend = selected;
+      },
+      resolve: (selected) =>
+        releaseEnginePath({
+          backend: selected,
+          moduleUrl: import.meta.url,
+          releaseId,
+          resourceBase: configuredBase,
+          publicOrigin,
+          prefix: "/moly/",
+        }),
+      exports: ["start_stage"],
+      contract: "stage",
+      onBytes(total) {
+        engineBytes = total;
+      },
+      waitTick() {
+        if (phase === "base") render();
+      },
+    });
+    wasm = loaded.module;
+    loading = false;
+  } catch (error) {
+    fail(backend ? "engine_failed" : "unsupported", error);
+  }
+  enter();
+}
+
+function enter() {
+  if (!wasm || started || failed) return;
+  started = true;
+  mark("stageStart");
+  report("renderer");
+  try {
+    controller = createStageController({
+      wasm,
+      region,
+      version,
+      initial,
+      content: params.get("content"),
+      post(type, value) {
+        if (type === "error" && value.code === "source_mismatch")
+          fail("source_mismatch", value);
+        if (type === "snapshot") decorateWeather(value);
+        send(type, value);
+      },
+    });
+    controller.configure(
+      configuration || { initial, content: params.get("content") },
+    );
+    for (const command of pending.splice(0))
+      controller.dispatch(command.type, command.value);
+    // The engine opens its only audio output here; a browser that is still
+    // holding audio back lets `resumeAudio` start it on the next activation.
+    wasm.start_stage(backend);
+  } catch (error) {
+    fail("renderer_failed", error);
+  }
+}
+
+window.addEventListener("message", (event) => {
+  if (
+    event.origin !== location.origin ||
+    event.source !== parent ||
+    parent === window ||
+    !isEnvelope(event.data, "moly-host")
+  )
+    return;
+  const { type, value } = event.data;
+  try {
+    if (type === "configure") {
+      ui = {
+        locale: validateLocale(value.locale),
+        theme: validateTheme(value.theme),
+      };
+      if (!configuration)
+        configuration = {
+          initial: filters(value.initial || {}),
+          content: value.content || null,
+          sound: value.sound !== false,
+        };
+      controller?.configure(configuration);
+      render();
+      // A locale change relabels the weather dial; the host keeps reading the
+      // same projection instead of caching a stale translation.
+      const snapshot = controller?.getSnapshot();
+      if (snapshot) send("snapshot", decorateWeather(snapshot));
+    } else if (type === "player-data") {
+      if (
+        !wasm ||
+        !controller?.getSnapshot()?.ready ||
+        value?.region !== region ||
+        !["preview", "explore", "restore", "cancel"].includes(
+          value.operation,
+        ) ||
+        (value.json !== undefined && typeof value.json !== "string") ||
+        (value.operation !== "preview" && value.json)
+      )
+        throw new Error("Invalid player data operation");
+      const json = value.json || "";
+      if (
+        json.length > 32 * 1048576 ||
+        new TextEncoder().encode(json).byteLength > 32 * 1048576
+      )
+        throw new Error("Player data is too large");
+      wasm.player_data_command(value.operation, region, json);
+    } else if (type === "intent") {
+      const command = intent(value?.type, value?.value);
+      if (controller) controller.dispatch(command.type, command.value);
+      else if (command.type === "close") {
+        pending.length = 0;
+        send("closed", { restored: true });
+      } else {
+        if (pending.length >= 64) throw new Error("Intent queue is full");
+        pending.push(command);
+      }
+    }
+  } catch {
+    send("error", { code: "invalid_intent" });
+  }
+});
+window.addEventListener("moly-ready", () => {
+  if (failed) return;
+  mark("rendererReady");
+  report("resources");
+  timer = setInterval(() => {
+    try {
+      const playerData = wasm?.player_data_snapshot?.();
+      if (playerData && playerData !== lastPlayerData) {
+        lastPlayerData = playerData;
+        send("player-data", JSON.parse(playerData));
+      }
+      const state = controller?.poll();
+      if (!state) return;
+      if (state.weather) {
+        weather = state.weather;
+        renderWeather();
+      }
+      if (state.site) {
+        site = state.site;
+        siteLocked = !state.scene?.ready || state.status.canStop;
+        renderSite();
+      }
+      if (state.ready) mark("catalogReady");
+      if (state.scene?.ready) {
+        mark("sceneReady");
+        $("stage-boot").hidden = true;
+        if (phase !== "ready") report("ready");
+      }
+      if (state.status.phase === "playing") mark("firstPlayback");
+      if (phase !== "ready") report();
+    } catch (error) {
+      fail("runtime_failed", error);
+    }
+  }, 100);
+});
+window.addEventListener("moly-error", (event) =>
+  fail("runtime_failed", event.detail),
+);
+window.addEventListener("error", (event) => {
+  if (event.error) fail("runtime_failed", event.error);
+});
+window.addEventListener("unhandledrejection", (event) =>
+  fail("runtime_failed", event.reason),
+);
+window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    send("exit-immersive", {});
+    event.preventDefault();
+  }
+});
+window.addEventListener("blur", () => controller?.focus(true));
+window.addEventListener("focus", () => controller?.focus(false));
+// Keep the source gesture alive after the cursor leaves the canvas. Winit
+// cancels its gesture layer on CursorLeft, so relying on browser hit testing
+// makes a camera drag stop at the canvas edge (especially in a small iframe).
+const stageCanvas = $("app-canvas");
+const capturedPointers = new Set();
+function captureStagePointer(event) {
+  const id = event.pointerId;
+  if (event.button !== undefined && event.button !== 0) return;
+  if (
+    !Number.isFinite(id) ||
+    typeof stageCanvas.setPointerCapture !== "function"
+  )
+    return;
+  try {
+    stageCanvas.setPointerCapture(id);
+    capturedPointers.add(id);
+  } catch {
+    // Pointer capture is optional; ordinary in-canvas input still works.
+  }
+}
+function recaptureStagePointer(event) {
+  const id = event.pointerId;
+  if (
+    !capturedPointers.has(id) ||
+    typeof stageCanvas.hasPointerCapture !== "function" ||
+    stageCanvas.hasPointerCapture(id)
+  )
+    return;
+  captureStagePointer(event);
+}
+function releaseStagePointer(event) {
+  const id = event.pointerId;
+  if (
+    !capturedPointers.delete(id) ||
+    typeof stageCanvas.releasePointerCapture !== "function"
+  )
+    return;
+  try {
+    stageCanvas.releasePointerCapture(id);
+  } catch {
+    /* browser released it */
+  }
+}
+stageCanvas.addEventListener("pointerdown", (event) => {
+  captureStagePointer(event);
+  controller?.focus(false);
+  stageCanvas.focus({ preventScroll: true });
+});
+stageCanvas.addEventListener("pointermove", recaptureStagePointer);
+stageCanvas.addEventListener("pointerup", releaseStagePointer);
+stageCanvas.addEventListener("pointercancel", releaseStagePointer);
+window.addEventListener("pagehide", () => {
+  clearInterval(timer);
+  observer.disconnect();
+  controller?.dispatch("close");
+});
+
+render();
+send("hello", {
+  contract: EMBED_VERSION,
+  instance:
+    globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
+});
+void loadStageEngine();

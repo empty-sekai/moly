@@ -7,6 +7,8 @@ use super::compose::{component, enabled, field};
 
 pub(super) const HEADER: &str = "EditorHeader";
 pub(super) const EXIT: &str = "EditorExit";
+/// `Common2ButtonDialog`, the remove-all confirmation.
+pub(super) const CLEAN_UP: &str = "Common2";
 
 pub(super) struct ExitBindings {
     pub window: String,
@@ -14,6 +16,48 @@ pub(super) struct ExitBindings {
     pub cancel: String,
     pub discard: String,
     pub save: String,
+}
+
+/// The remove-all confirmation: `ScreenManager.Show2ButtonDialog` with the
+/// message `MSG_MYSEKAI_SITE_LAYOUT_EDIT_CLEAN_UP_CONFIRM`, the positive
+/// label `WORD_CLEAN_UP` and the negative `WORD_CANCEL`
+/// (`ScreenLayerSiteEditMode.OnRemoveFixtureAll`); the close button and a
+/// tap outside the window (`allowCloseExternal`) cancel.
+pub(crate) struct CleanUpBindings {
+    pub window: String,
+    pub close: String,
+    pub negative: String,
+    pub positive: String,
+}
+
+pub(super) fn clean_up(
+    doc: &UiPrefab,
+    layouts: &UiLayouts,
+    view: &mut UiPrefabView,
+) -> Result<CleanUpBindings, String> {
+    let dialog = crate::two_button_dialog::resolve(doc)?;
+    view.set_visible("WindowRoot/Tabs", false);
+    view.set_text(
+        &dialog.positive_label,
+        layouts.wordings["WORD_CLEAN_UP"].clone(),
+    );
+    view.set_text(
+        &dialog.negative_label,
+        layouts.wordings["WORD_CANCEL"].clone(),
+    );
+    view.set_text(
+        "Content/MessageBody",
+        layouts.wordings["MSG_MYSEKAI_SITE_LAYOUT_EDIT_CLEAN_UP_CONFIRM"].clone(),
+    );
+    for button in [&dialog.positive, &dialog.negative, &dialog.close] {
+        enabled(view, doc, button, true);
+    }
+    Ok(CleanUpBindings {
+        window: "WindowRoot".to_owned(),
+        close: dialog.close,
+        negative: dialog.negative,
+        positive: dialog.positive,
+    })
 }
 
 pub(super) fn header(doc: &UiPrefab, view: &mut UiPrefabView) -> Result<String, String> {

@@ -18,15 +18,13 @@ use bevy::ecs::system::SystemParam;
 use bevy::gltf::Gltf;
 use bevy::prelude::*;
 use moly_assets::json::JsonAsset;
-use moly_law::path::{angle_between, facing_direction, turn_motion, TurnMotion};
+use moly_law::path::facing_direction;
 use moly_law::talk::{
     advance, effective_animation_speed, is_finished, FaceSlot, FixtureStep, FixtureTalkRow,
     PairRow, StepOp, StreamState, TweetRef,
 };
 
-use crate::alone_action_runtime::{
-    node_for, play_idle, FacialTables, EYE_CELL, MOUTH_CELL,
-};
+use crate::alone_action_runtime::{node_for, play_idle, FacialTables, EYE_CELL, MOUTH_CELL};
 use crate::audio::{VoiceLine, VoiceSpeaker, VoiceWho};
 use crate::character::{MotionDriver, MotionLibrary, SEGMENT_BLEND};
 use crate::character_material::{CharacterMaterial, ToonMaterials};
@@ -35,12 +33,12 @@ use crate::emoticon::EmoticonArchive;
 use crate::fixture::{FixturePlacement, FixturePlacements, FixtureRoot};
 use crate::fixture_material::FixtureMaterial;
 use crate::fixture_talk::{
-    apply_face, fixture_node_for, FixtureAnimation, FixtureFace, FixtureTimelines,
-    FixtureTimelineSeq, FixtureTurn,
+    apply_face, fixture_node_for, FixtureAnimation, FixtureFace, FixtureTimelineSeq,
+    FixtureTimelines, FixtureTurn,
 };
 use crate::npc::{CharacterUnitId, MotionPhase, Registry, WalkState};
 use crate::player::PlayerControlled;
-use crate::talk_window::{TalkSession, TalkWindowState, TalkWindowRoot};
+use crate::talk_window::{TalkSession, TalkWindowRoot, TalkWindowState};
 
 /// 对话剧本表的资产路径（提取产物目录布局，内联路径——moly-assets
 /// 没有这张表的取件函数，本单不碰那个 crate；待机动作表同款先例）。
@@ -59,7 +57,7 @@ pub(crate) struct TalkStoreHandle(Handle<JsonAsset>);
 /// `fixture_talk.rs`）。
 #[derive(Resource)]
 pub(crate) struct TalkStore {
-    rows: Vec<FixtureTalkRow>,
+    pub(crate) rows: Vec<FixtureTalkRow>,
     timeline_fixtures: Vec<i32>,
 }
 
@@ -103,6 +101,7 @@ pub(crate) fn load(mut commands: Commands, server: Res<AssetServer>) {
     ));
     commands.init_resource::<TalkLedger>();
     commands.init_resource::<crate::delayed_faces::DelayedFaces>();
+    commands.init_resource::<DelayedAnimations>();
     // 表情件请求通道与累计账本同批落地（Default 资源，消费者逐帧读，
     // 缺了会在系统参数校验处 panic）。窗体状态机在窗体模块装载
     // （常驻——真源层对象常驻，对话只是 show/hide 它）。
@@ -121,12 +120,21 @@ pub(crate) fn parse(
         return;
     };
     if let LoadState::Failed(err) = server.load_state(&handle.0) {
-        panic!("对话剧本表装载失败：{err:?}");
+        warn!("[talk-ingest] fixture conversation asset unavailable: {err:?}");
+        commands.insert_resource(TalkStore {
+            rows: Vec::new(),
+            timeline_fixtures: Vec::new(),
+        });
+        commands.remove_resource::<TalkStoreHandle>();
+        return;
     }
     let Some(json) = jsons.get(&handle.0) else {
         return;
     };
-    let store = parse_talks(&json.0);
+    let (store, issues) = parse_talks(&json.0);
+    for issue in &issues {
+        warn!("[talk-ingest] quarantined fixture row: {issue}");
+    }
     info!(
         "对话剧本表就绪：{} 段（pairs {} 对，步 {} 步）",
         store.rows.len(),
@@ -140,40 +148,70 @@ pub(crate) fn parse(
 /// 解析入口：顶层 `talks` 数组逐行折成律行。步的 op 词表与律枚举一一
 /// 对应；未知 op 响亮失败（提取词表外的新步型，静默跳过会把整段流播
 /// 残）。
-fn parse_talks(text: &str) -> TalkStore {
-    let value: serde_json::Value =
-        serde_json::from_str(text).unwrap_or_else(|err| panic!("对话剧本表不是合法 JSON：{err}"));
-    let talks = value
-        .get("talks")
-        .and_then(|v| v.as_array())
-        .unwrap_or_else(|| panic!("对话剧本表缺 talks 数组"));
+fn parse_talks(text: &str) -> (TalkStore, Vec<String>) {
+    let mut issues = Vec::new();
+    let value: serde_json::Value = match serde_json::from_str(text) {
+        Ok(value) => value,
+        Err(error) => {
+            issues.push(format!("document is not valid JSON: {error}"));
+            return (
+                TalkStore {
+                    rows: Vec::new(),
+                    timeline_fixtures: Vec::new(),
+                },
+                issues,
+            );
+        }
+    };
+    let Some(talks) = value.get("talks").and_then(|v| v.as_array()) else {
+        issues.push("document has no talks array".into());
+        return (
+            TalkStore {
+                rows: Vec::new(),
+                timeline_fixtures: Vec::new(),
+            },
+            issues,
+        );
+    };
     let mut rows = Vec::with_capacity(talks.len());
-    for row in talks {
-        rows.push(parse_row(row));
+    for (index, row) in talks.iter().enumerate() {
+        match crate::talk_ingest::fixture_row(row).and_then(|()| parse_row(row)) {
+            Ok(parsed) => rows.push(parsed),
+            Err(reason) => issues.push(format!("source row {}: {reason}", index + 1)),
+        }
     }
     // 时间轴步点名的家具 id 去重升序（装载白名单的语料侧）。
     let mut timeline_fixtures: Vec<i32> = rows
         .iter()
         .flat_map(|row| {
             row.steps.iter().filter_map(|step| match step {
-                FixtureStep::ChangeFixtureTimeline { fixture, .. } => {
-                    Some(*fixture as i32)
-                }
+                FixtureStep::ChangeFixtureTimeline { fixture, .. } => Some(*fixture as i32),
                 _ => None,
             })
         })
         .collect();
     timeline_fixtures.sort_unstable();
     timeline_fixtures.dedup();
-    TalkStore {
-        rows,
-        timeline_fixtures,
-    }
+    (
+        TalkStore {
+            rows,
+            timeline_fixtures,
+        },
+        issues,
+    )
 }
 
-fn parse_row(row: &serde_json::Value) -> FixtureTalkRow {
+fn parse_row(row: &serde_json::Value) -> Result<FixtureTalkRow, String> {
     let talk_id = i_field(row, "talkId");
-    FixtureTalkRow {
+    let steps = row
+        .get("steps")
+        .and_then(|v| v.as_array())
+        .unwrap_or_else(|| panic!("段 {talk_id} 缺 steps 数组"))
+        .iter()
+        .map(parse_step)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|reason| format!("talk {talk_id}: {reason}"))?;
+    Ok(FixtureTalkRow {
         talk_id,
         lua: s_field(row, "lua"),
         form: i_field(row, "form"),
@@ -220,14 +258,8 @@ fn parse_row(row: &serde_json::Value) -> FixtureTalkRow {
                     .collect()
             })
             .unwrap_or_default(),
-        steps: row
-            .get("steps")
-            .and_then(|v| v.as_array())
-            .unwrap_or_else(|| panic!("段 {talk_id} 缺 steps 数组"))
-            .iter()
-            .map(parse_step)
-            .collect(),
-    }
+        steps,
+    })
 }
 
 /// tweet 引用解析。源主表允许动作段等字段空引用；单角色提取产物实测
@@ -254,7 +286,12 @@ fn parse_tweet_ref(value: Option<&serde_json::Value>, talk_id: i32) -> TweetRef 
 /// 一步的解析：op 词表分派，载荷键与提取产物一一对应；数字载荷按
 /// f64 原样收（指称在步进律里是不透明值，小数指称照录不修）。缺键的
 /// 可选载荷（blend/playEndMotion/value/auto）按律的缺省折。
-fn parse_step(step: &serde_json::Value) -> FixtureStep {
+///
+/// 词表外的 op 返回错误（整行进隔离账，不 panic）。已知的一个词表外
+/// 入口：剧本库的 `play_animation`（转到引擎 `PlayAnimation`，参数是
+/// 角色、动作、延迟、速度、混合）——日服 6919 个对话脚本里共 2 次调用，
+/// 两份导出语料里 0 次；律的步枚举与入口核验都没有这个 op，未建模。
+fn parse_step(step: &serde_json::Value) -> Result<FixtureStep, String> {
     let op = step
         .get("op")
         .and_then(|v| v.as_str())
@@ -272,7 +309,7 @@ fn parse_step(step: &serde_json::Value) -> FixtureStep {
             .to_owned()
     };
     let opt_b = |name: &str| -> Option<bool> { step.get(name).and_then(|v| v.as_bool()) };
-    match op {
+    Ok(match op {
         "look_at_body" => FixtureStep::LookAtBody {
             who: f("who"),
             target: f("target"),
@@ -302,15 +339,29 @@ fn parse_step(step: &serde_json::Value) -> FixtureStep {
             delay_seconds: crate::delayed_faces::delay_seconds(step)
                 .unwrap_or_else(|reason| panic!("{op}: {reason}")),
         },
-        "change_animation" => FixtureStep::ChangeAnimation {
-            who: f("who"),
-            motion: s("motion"),
-            alias: s("alias"),
-            speed: opt_f("speed"),
-            playback_speed: opt_f("playbackSpeed").unwrap_or(1.0),
-            play_end_motion: opt_b("playEndMotion").unwrap_or(false),
-            blend: opt_f("blend"),
-        },
+        "change_animation" => {
+            // 剧本库签名 change_animation(角色, 动作, delay, animation_speed,
+            // play_end_motion, 混合, motionType)：第三参是**延迟秒**（引擎排进
+            // 延迟命令表），第四参才是速度。现行导出写 `delay`/`animationSpeed`；
+            // 旧导出把第三参记在 `speed` 键下、第四参丢弃——旧键照第三参读成
+            // 延迟，速度缺（按缺参走 1.0）。缺参/nil 的延迟按桥接层
+            // lua_tonumber 读 0。
+            let (delay, speed) = if step.get("delay").is_some() {
+                (opt_f("delay"), opt_f("animationSpeed"))
+            } else {
+                (opt_f("speed"), None)
+            };
+            FixtureStep::ChangeAnimation {
+                who: f("who"),
+                motion: s("motion"),
+                alias: s("alias"),
+                speed,
+                playback_speed: effective_animation_speed(speed),
+                play_end_motion: opt_b("playEndMotion").unwrap_or(false),
+                blend: opt_f("blend"),
+                delay_seconds: delay.unwrap_or(0.0) as f32,
+            }
+        }
         "text" => FixtureStep::Text { text: s("text") },
         "wait_click" => FixtureStep::WaitClick,
         "emoticon" => FixtureStep::Emoticon {
@@ -331,10 +382,11 @@ fn parse_step(step: &serde_json::Value) -> FixtureStep {
         "look_at_fixture" => FixtureStep::LookAtFixture {
             // 提取键位与引擎签名错位（源脚本位 1 是角色、位 2 是时长）：
             // `fixture` 键实为**角色指称**，`who` 键实为**转身时长**。
-            // who 键可缺（语料 122 步里 119 步无）；缺＝无时长（f64 无
-            // Option 变体，NaN 占位——消费侧按 0 走瞬时转身，源里缺参
-            // 经 lua_tonumber 读 0 同效）。
-            who: opt_f("who").unwrap_or(f64::NAN),
+            // who 键可缺（语料 122 步里 119 步无；日服脚本 125 次调用里
+            // 119 次只传一个参）。剧本库 `look_at_fixture(id, time)` 原样
+            // 转给引擎，引擎桥接层对第二参做 lua_tonumber——nil 读 0，
+            // 这就是真源取到的值，不是占位。
+            who: opt_f("who").unwrap_or(0.0),
             fixture: f("fixture"),
         },
         "look_at_to_npc" => FixtureStep::LookAtToNpc {
@@ -375,8 +427,8 @@ fn parse_step(step: &serde_json::Value) -> FixtureStep {
             fixture: s("fixture"),
             name: f("name"),
         },
-        other => panic!("对话步的 op 未建模：{other}"),
-    }
+        other => return Err(format!("unmodelled op {other:?}")),
+    })
 }
 
 fn s_field(row: &serde_json::Value, name: &str) -> String {
@@ -433,7 +485,12 @@ pub(crate) fn prepare(
     };
     let placed = placements.fixture_ids();
     let roster = registry.character_unit_ids.clone();
-    if prepared.as_ref().is_some_and(|key| *key == (placed.clone(), roster.clone())) { return; }
+    if prepared
+        .as_ref()
+        .is_some_and(|key| *key == (placed.clone(), roster.clone()))
+    {
+        return;
+    }
     let mut rows = Vec::new();
     let mut chars: Vec<char> = Vec::new();
     for row in &store.rows {
@@ -453,7 +510,9 @@ pub(crate) fn prepare(
         if !cast_in_roster || !anchored {
             continue;
         }
-        verify_row(row, &tables, lib, &archive);
+        for issue in verify_row(row, &tables, lib, &archive) {
+            warn!("[talk-preflight] talk {} degraded: {issue}", row.talk_id);
+        }
         rows.push(row.clone());
         collect_chars(&row.tweet.text, &mut chars);
         for step in &row.steps {
@@ -493,7 +552,8 @@ fn verify_row(
     tables: &FacialTables,
     lib: &Gltf,
     archive: &EmoticonArchive,
-) {
+) -> Vec<String> {
+    let mut issues = Vec::new();
     for step in &row.steps {
         if let Some((slot, pattern, _)) = step.face_change() {
             let missing = match slot {
@@ -501,10 +561,7 @@ fn verify_row(
                 FaceSlot::Mouth => tables.lip_close(pattern).is_none(),
             };
             if missing {
-                panic!(
-                    "段 {} 点播 {:?} 键 {pattern}，facial 表里没有",
-                    row.talk_id, slot
-                );
+                issues.push(format!("{slot:?} preset {pattern:?} is unavailable"));
             }
         }
         match step {
@@ -515,20 +572,18 @@ fn verify_row(
                 // 必同在。
                 let clip = format!("{motion}_S");
                 if !lib.named_animations.contains_key(clip.as_str()) {
-                    panic!(
-                        "共享动作库没有段 {motion}（段 {} 的对话步要点播它）",
-                        row.talk_id
-                    );
+                    issues.push(format!("motion {motion:?} has no start clip"));
                 }
             }
             FixtureStep::Emoticon { name, .. } => {
                 if !archive.has(name) {
-                    panic!("表情件档案没有条目 {name}（段 {} 点播它）", row.talk_id);
+                    issues.push(format!("emoticon {name:?} is unavailable"));
                 }
             }
             _ => {}
         }
     }
+    issues
 }
 
 /// Playback counters only; previous-content truth belongs to the NPC AI slot.
@@ -542,10 +597,16 @@ pub(crate) struct TalkLedger {
 /// 与等待点击状态。
 #[derive(Resource)]
 pub(crate) struct ActiveTalk {
+    /// Selected source pre-action gate; prevents body/voice racing source clips.
+    preparing: bool,
+    /// The dialogue closed; its source furniture Director is playing its tail.
+    ending: bool,
+    ending_tokens: Vec<crate::fixture_activity_timeline::TimelineToken>,
+    effect_owner: Entity,
     talk_id: i32,
     form: i32,
     fixture_id: i32,
-    target_fixture: Option<Entity>,
+    fixtures: Vec<(i32, Entity)>,
     row: FixtureTalkRow,
     state: StreamState,
     participants: Vec<(u32, Entity)>,
@@ -558,9 +619,26 @@ pub(crate) struct ActiveTalk {
     steps_fired: usize,
     texts: usize,
     click_releases: usize,
+    /// 在转的对话转身（引擎 `NPCLookAtBodyWait` 的视图朝向补间）。
+    turns: Vec<TalkTurn>,
+}
+
+/// 对话步的一次 NPC 转身。真源 `NPCLookAtBodyWait`：时长 `Approximately`
+/// 0 ⇒ `LookAt` 即时朝向；否则 `DoLookAtNoMotionAsync`——只补间视图的
+/// 朝向（缓动传 `Ease.Unset`，即补间库缺省），**不换动作**：没有转身剪辑，
+/// 角色在转身期间照播它原来的动作。
+struct TalkTurn {
+    entity: Entity,
+    from: Quat,
+    to: Quat,
+    duration: f32,
+    elapsed: f32,
 }
 
 impl ActiveTalk {
+    pub(crate) fn body_ready(&self) -> bool {
+        !self.preparing && !self.ending
+    }
     pub(crate) fn includes_player(&self) -> bool {
         self.player.is_some()
     }
@@ -575,6 +653,13 @@ impl ActiveTalk {
         self.fixture_id
     }
 
+    fn fixture_entity(&self, fixture_id: i32) -> Option<Entity> {
+        self.fixtures
+            .iter()
+            .find(|(master, _)| *master == fixture_id)
+            .map(|(_, entity)| *entity)
+    }
+
     /// 参演者清单（unit 与实体）——对话相机的取位面读它（真源取位表由
     /// 出场角色的髋变换构成，本链的出场角色就是参演者）。
     pub(crate) fn participants(&self) -> &[(u32, Entity)] {
@@ -582,8 +667,46 @@ impl ActiveTalk {
     }
 
     /// 会话的段 id（窗体日志的链名读取点用）。
+    pub(crate) fn fixture_instances(&self) -> &[(i32, Entity)] {
+        &self.fixtures
+    }
+
+    /// The dialogue has closed (PlayAsync returned); a joined furniture
+    /// Director may still be playing its tail.
+    pub(crate) fn is_closing(&self) -> bool {
+        self.ending
+    }
+
     pub(crate) fn talk_id(&self) -> i32 {
         self.talk_id
+    }
+
+    /// Exact future voice commands from the authored cursor onward. This is a
+    /// load hint only: command dispatch, StopVoiceAll and playback stay on the
+    /// normal line-order path.
+    pub(crate) fn voice_prefetches(&self) -> Vec<crate::audio::VoicePrefetch> {
+        self.row
+            .steps
+            .iter()
+            .skip(self.state.cursor)
+            .filter_map(|step| match step {
+                FixtureStep::Voice { cue, who, .. } => Some(crate::audio::VoicePrefetch::new(
+                    cue.clone(),
+                    partvoice_who(*who),
+                )),
+                FixtureStep::FixtureVoice { cue, fixture }
+                    if fixture.is_finite()
+                        && fixture.fract() == 0.0
+                        && *fixture as i32 == self.fixture_id =>
+                {
+                    Some(crate::audio::VoicePrefetch::new(
+                        cue.clone(),
+                        Some(VoiceWho::Fixture(*fixture as i32)),
+                    ))
+                }
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -596,7 +719,117 @@ pub(crate) struct TalkRuntime {
     eye_handle: Handle<CharacterMaterial>,
     mouth_handle: Handle<CharacterMaterial>,
     nodes: HashMap<String, AnimationNodeIndex>,
-    anim_node: Option<AnimationNodeIndex>,
+    /// 对话起播的动作在哪一段（None＝播放器归位移驱动）。
+    segment: Option<TalkSegment>,
+    /// 视图的 `_currentOriginalAnimationName`：最近一次交叉淡入的剪辑的
+    /// 基名（段后缀之前）。对话开场时未知（对话前 AI 在播什么不在这里
+    /// 记），首个对话动作之后才有值。
+    original: Option<String>,
+}
+
+/// 一次换动作（引擎 `ChangeAnimation` 排进延迟表的闭包的参数）。
+#[derive(Debug, Clone)]
+struct AnimationCommand {
+    unit: f64,
+    motion: String,
+    /// 已按「0 读作 1」换算的播放速度（Animator.speed）。
+    speed: f32,
+    /// 交叉淡入秒（剧本库缺参填 0.5）。
+    blend: f32,
+    play_end_motion: bool,
+    source_talk: i32,
+    source_step: usize,
+}
+
+/// 视图 `ChangeAnimationAsync` 的段链：`_S` 播完（剪辑长 / 速度）接
+/// `_L` 循环，直到下一次换动作；`play_end_motion` 时先把**上一个**
+/// 动作的 `_E` 以速度 1 播完，再起新动作的 `_S`。
+#[derive(Debug, Clone)]
+enum TalkSegment {
+    Start {
+        node: AnimationNodeIndex,
+        motion: String,
+        speed: f32,
+        blend: f32,
+    },
+    Loop,
+    End {
+        node: AnimationNodeIndex,
+        next: AnimationCommand,
+    },
+}
+
+/// 对话引擎延迟命令表里的换动作一族。真源只有一张静态表（脸、换动作
+/// 同表同钟）：`已过时间 + delay` 入表，LoopUpdate 冲到期的，WaitClick
+/// 放行后全冲，OnComplete 只冲到期的，Dispose 停钟不清表。脸的那一族在
+/// [`DelayedFaces`]，这里按同一套起停点与同一条钟律跑换动作——两张表
+/// 在同一帧的相对次序与真源单表的次序可能不同（它们写不同的通道）。
+#[derive(Resource, Default)]
+pub(crate) struct DelayedAnimations {
+    elapsed: f32,
+    running: bool,
+    awaiting_first_yield: bool,
+    pending: Vec<(f32, AnimationCommand)>,
+}
+
+impl DelayedAnimations {
+    fn start_loop(&mut self) {
+        self.elapsed = 0.0;
+        self.running = true;
+        self.awaiting_first_yield = true;
+    }
+    fn stop_loop(&mut self) {
+        self.running = false;
+        self.awaiting_first_yield = false;
+    }
+    fn cancel_talk(&mut self, talk_id: i32) {
+        self.pending
+            .retain(|(_, command)| command.source_talk != talk_id);
+        self.stop_loop();
+    }
+    fn enqueue(&mut self, delay_seconds: f32, command: AnimationCommand) {
+        self.pending.push((self.elapsed + delay_seconds, command));
+    }
+    fn advance(&mut self, delta_seconds: f32) -> Vec<AnimationCommand> {
+        if !self.running {
+            return Vec::new();
+        }
+        if self.awaiting_first_yield {
+            self.awaiting_first_yield = false;
+            return Vec::new();
+        }
+        self.elapsed += delta_seconds;
+        self.due()
+    }
+    fn on_complete(&mut self) -> Vec<AnimationCommand> {
+        self.due()
+    }
+    fn wait_clicked(&mut self) -> Vec<AnimationCommand> {
+        let mut all = std::mem::take(&mut self.pending);
+        all.sort_by(|a, b| a.0.total_cmp(&b.0));
+        all.into_iter().map(|(_, command)| command).collect()
+    }
+    fn due(&mut self) -> Vec<AnimationCommand> {
+        let elapsed = self.elapsed;
+        let (mut due, future): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending)
+            .into_iter()
+            .partition(|(deadline, _)| elapsed >= *deadline);
+        self.pending = future;
+        due.sort_by(|a, b| a.0.total_cmp(&b.0));
+        due.into_iter().map(|(_, command)| command).collect()
+    }
+}
+
+/// 两张延迟表同一个起播沿（对话构造处）。
+fn start_delay_loops(commands: &mut Commands) {
+    crate::delayed_faces::start_loop(commands);
+    commands.queue(|world: &mut World| world.resource_mut::<DelayedAnimations>().start_loop());
+}
+
+/// 两张延迟表同一个停钟沿（Dispose：停钟不清表）。
+fn stop_delay_loops(commands: &mut Commands) {
+    crate::delayed_faces::stop_loop(commands);
+    commands.queue(|world: &mut World| world.resource_mut::<DelayedAnimations>().stop_loop());
 }
 
 /// 对话参演者标记：位移推进、待机动作演出、tweet 驻留触发、表情件的
@@ -612,42 +845,101 @@ pub(crate) struct TalkActor {
     pub(crate) mouth: Handle<CharacterMaterial>,
 }
 
+#[path = "fixture_talk_action.rs"]
+pub(crate) mod fixture_action;
+
 /// Start the existing fixture-script backend from the dispatcher's final row.
 #[allow(clippy::type_complexity)]
 pub(crate) fn start_selected(
-    commands: &mut Commands, window: &mut TalkWindowState, row: FixtureTalkRow,
-    actors: &[TalkActor], player: Entity, target_fixture: Option<Entity>, now: f32,
+    commands: &mut Commands,
+    window: &mut TalkWindowState,
+    row: FixtureTalkRow,
+    actors: &[TalkActor],
+    player: Entity,
+    target_fixture: Option<Entity>,
+    fixture_bindings: Vec<(i32, Entity)>,
+    now: f32,
+    prepare_source_action: bool,
 ) {
-    crate::delayed_faces::start_loop(commands);
+    start_delay_loops(commands);
     commands.queue(|world: &mut World| {
-        if let Some(mut ledger) = world.get_resource_mut::<TalkLedger>() { ledger.selections += 1; }
+        if let Some(mut ledger) = world.get_resource_mut::<TalkLedger>() {
+            ledger.selections += 1;
+        }
     });
     let talk_id = row.talk_id;
     let mut participants = Vec::with_capacity(actors.len());
     for actor in actors {
-        commands.entity(actor.entity)
+        commands
+            .entity(actor.entity)
             .insert(TalkHold)
             .insert(TalkRuntime {
-                unit: actor.unit, eye_handle: actor.eye.clone(), mouth_handle: actor.mouth.clone(),
-                nodes: HashMap::new(), anim_node: None,
+                unit: actor.unit,
+                eye_handle: actor.eye.clone(),
+                mouth_handle: actor.mouth.clone(),
+                nodes: HashMap::new(),
+                segment: None,
+                original: None,
             })
             .insert(MotionPhase::Dwelling { remaining: None });
         participants.push((actor.unit, actor.entity));
     }
-    let fixture_id = row.pairs.first().map(|pair| pair.fixture_id).unwrap_or(0);
+    let fixture_id = target_fixture
+        .and_then(|target| {
+            fixture_bindings
+                .iter()
+                .find(|(_, entity)| *entity == target)
+                .map(|(fixture_id, _)| *fixture_id)
+        })
+        .or_else(|| row.pairs.first().map(|pair| pair.fixture_id))
+        .unwrap_or(0);
+    for (fixture_master, fixture) in &fixture_bindings {
+        crate::fixture_talk::start_talk_effects(commands, *fixture, talk_id);
+        info!(
+            "[talk] master {talk_id} owns fixture instance {fixture:?} (master {fixture_master})"
+        );
+    }
     let mut talk = ActiveTalk {
-        talk_id, form: row.form, fixture_id, target_fixture, row,
-        state: StreamState::new(), participants, player: Some(player), speaker: None,
-        hold_logged: None, started_at: now, steps_fired: 0,
-        texts: 0, click_releases: 0,
+        preparing: prepare_source_action && target_fixture.is_some(),
+        ending: false,
+        ending_tokens: Vec::new(),
+        effect_owner: commands.spawn_empty().id(),
+        talk_id,
+        form: row.form,
+        fixture_id,
+        fixtures: fixture_bindings,
+        row,
+        state: StreamState::new(),
+        participants,
+        player: Some(player),
+        speaker: None,
+        hold_logged: None,
+        started_at: now,
+        steps_fired: 0,
+        texts: 0,
+        click_releases: 0,
+        turns: Vec::new(),
     };
-    commands.entity(player).insert(TalkHold).insert(MotionPhase::Dwelling { remaining: None });
-    window.open(TalkSession::Pair(&mut talk));
-    info!("[talk] prepared master {} starts with actors {:?}", talk_id,
-        talk.participants.iter().map(|(unit, _)| *unit).collect::<Vec<_>>());
+    commands
+        .entity(player)
+        .insert(TalkHold)
+        .insert(MotionPhase::Dwelling { remaining: None });
+    crate::player_talk::snapshot_player_rotation(commands, player, talk_id, None);
+    if talk.preparing {
+        window.prepare(TalkSession::Pair(&mut talk));
+    } else {
+        window.open(TalkSession::Pair(&mut talk));
+    }
+    info!(
+        "[talk] prepared master {} starts with actors {:?}",
+        talk_id,
+        talk.participants
+            .iter()
+            .map(|(unit, _)| *unit)
+            .collect::<Vec<_>>()
+    );
     commands.insert_resource(talk);
 }
-
 
 // ---------------------------------------------------------------------------
 // 合成对话注入口（冒烟）
@@ -723,11 +1015,7 @@ pub(crate) fn voice_probe(
             }
         },
     };
-    let cues: Vec<(String, String)> = routing
-        .talk_voice_cues()
-        .into_iter()
-        .take(lines)
-        .collect();
+    let cues: Vec<(String, String)> = routing.talk_voice_cues().into_iter().take(lines).collect();
     if cues.len() < lines {
         warn!(
             "[talk-voice] 合成对话注入口：流表 talk-voice cue 不足 {lines} 条（{}），不注入",
@@ -752,10 +1040,14 @@ pub(crate) fn voice_probe(
     );
     commands.entity(gate).despawn();
     let mut talk = ActiveTalk {
+        preparing: false,
+        ending: false,
+        ending_tokens: Vec::new(),
+        effect_owner: commands.spawn_empty().id(),
         talk_id: 0,
         form: 0,
         fixture_id: 0,
-        target_fixture: None,
+        fixtures: Vec::new(),
         row: FixtureTalkRow {
             talk_id: 0,
             lua: "voice-probe".to_string(),
@@ -785,10 +1077,11 @@ pub(crate) fn voice_probe(
         steps_fired: 0,
         texts: 0,
         click_releases: 0,
+        turns: Vec::new(),
     };
     // 窗体开场同一条路（真实对话怎么开，合成段就怎么开）。
     window.open(TalkSession::Pair(&mut talk));
-    crate::delayed_faces::start_loop(&mut commands);
+    start_delay_loops(&mut commands);
     commands.insert_resource(talk);
     *done = true;
 }
@@ -878,8 +1171,7 @@ pub(crate) fn partvoice_probe(
             break;
         }
     }
-    let (Some((mysekai_cue, mysekai_who)), Some((egg_cue, egg_fixture))) = (&mysekai, &egg)
-    else {
+    let (Some((mysekai_cue, mysekai_who)), Some((egg_cue, egg_fixture))) = (&mysekai, &egg) else {
         warn!(
             "[partvoice] 合成对话注入口：候选里凑不齐选材（mysekai {} / 蛋 {}），不注入",
             mysekai.is_some(),
@@ -925,10 +1217,14 @@ pub(crate) fn partvoice_probe(
     );
     commands.entity(gate).despawn();
     let mut talk = ActiveTalk {
+        preparing: false,
+        ending: false,
+        ending_tokens: Vec::new(),
+        effect_owner: commands.spawn_empty().id(),
         talk_id: 0,
         form: 0,
         fixture_id: *egg_fixture, // 蛋臂的源门：步的家具 == 锚定家具
-        target_fixture: None,
+        fixtures: Vec::new(),
         row: FixtureTalkRow {
             talk_id: 0,
             lua: "partvoice-probe".to_string(),
@@ -958,10 +1254,11 @@ pub(crate) fn partvoice_probe(
         steps_fired: 0,
         texts: 0,
         click_releases: 0,
+        turns: Vec::new(),
     };
     // 窗体开场同一条路（真实对话怎么开，合成段就怎么开）。
     window.open(TalkSession::Pair(&mut talk));
-    crate::delayed_faces::start_loop(&mut commands);
+    start_delay_loops(&mut commands);
     commands.insert_resource(talk);
     *done = true;
 }
@@ -988,10 +1285,14 @@ pub(crate) struct TalkEmoteReqs {
 /// 冒出来）。这不是组织偏好，是上限逼出来的收拢。
 #[derive(SystemParam)]
 pub(crate) struct TalkPlayback<'w, 's> {
+    pub(crate) activity_timelines:
+        Option<Res<'w, crate::fixture_activity_timeline::FixtureActivityTimelines>>,
     pub(crate) graphs: ResMut<'w, Assets<AnimationGraph>>,
     pub(crate) players: Query<'w, 's, &'static mut AnimationPlayer>,
     pub(crate) transitions: Query<'w, 's, &'static mut AnimationTransitions>,
     pub(crate) delayed_faces: ResMut<'w, DelayedFaces>,
+    pub(crate) delayed_animations: ResMut<'w, DelayedAnimations>,
+    pub(crate) cancel: MessageReader<'w, 's, crate::player_talk::TalkCancelRequest>,
 }
 
 /// 步进分发的家具侧取数面（脸材质写 · 锚定摆放 · 玩家位 · 动画执行
@@ -1031,12 +1332,18 @@ pub(crate) fn advance_talk(
     mut emote_reqs: ResMut<TalkEmoteReqs>,
     mut window: ResMut<TalkWindowState>,
     window_roots: Query<Entity, With<TalkWindowRoot>>,
-    mut npcs: Query<(&mut MotionPhase, &mut WalkState, &mut MotionDriver, &Transform)>,
+    mut npcs: Query<(
+        &mut MotionPhase,
+        &mut WalkState,
+        &mut MotionDriver,
+        &Transform,
+    )>,
     mut talk_runtimes: Query<&mut TalkRuntime>,
     mut playback: TalkPlayback,
     mut side: FixtureSide,
     mut prev: ResMut<TalkLedger>,
 ) {
+    let explicit_cancel = crate::player_talk::drain_talk_cancellation(&mut playback.cancel);
     let Some(mut active) = active else {
         return;
     };
@@ -1044,6 +1351,95 @@ pub(crate) fn advance_talk(
     // 同一结构的互斥字段，经它取借用才分得开（经 ResMut 两次解引用则
     // 每次都是新借用，步进调用的两个实参撞车）。
     let active = &mut *active;
+    let interrupted = active
+        .participants
+        .iter()
+        .any(|(_, entity)| npcs.get(*entity).is_err())
+        || active
+            .fixtures
+            .iter()
+            .any(|(_, entity)| side.fixtures.get(*entity).is_err());
+    if explicit_cancel || interrupted {
+        if interrupted {
+            warn!(
+                "[talk] talk {} interrupted because an admitted actor or fixture disappeared",
+                active.talk_id
+            );
+        }
+        playback.delayed_faces.cancel_talk(active.talk_id);
+        playback.delayed_animations.cancel_talk(active.talk_id);
+        emote_reqs
+            .hides
+            .extend(active.participants.iter().map(|(_, entity)| *entity));
+        emote_reqs
+            .hides
+            .extend(active.fixtures.iter().map(|(_, entity)| *entity));
+        if let Some(tables) = tables.as_deref() {
+            for (unit, entity) in &active.participants {
+                if let Ok(runtime) = talk_runtimes.get(*entity) {
+                    crate::player_talk::reset_default_face(
+                        *unit,
+                        tables,
+                        &mut materials,
+                        &runtime.eye_handle,
+                        &runtime.mouth_handle,
+                    );
+                }
+            }
+        }
+        if active.player.is_some() {
+            if let Some(player) = active.player {
+                crate::player_talk::restore_cancelled_player_rotation(
+                    &mut commands,
+                    player,
+                    active.talk_id,
+                );
+            }
+            crate::player_talk::reset_cancelled_player_status(&mut commands);
+        }
+        finish_talk(
+            &mut commands,
+            active,
+            &mut window,
+            &window_roots,
+            &mut npcs,
+            &mut playback.players,
+            &mut playback.transitions,
+            &mut prev,
+            time.elapsed_secs(),
+        );
+        return;
+    }
+    if active.preparing {
+        return;
+    }
+    if active.ending {
+        let playing =
+            playback
+                .activity_timelines
+                .as_ref()
+                .is_some_and(|timelines| {
+                    active.ending_tokens.iter().any(|token| {
+                        timelines.status(*token).is_some_and(|status| matches!(status,
+                    crate::fixture_activity_timeline::TimelineStatus::Preparing |
+                    crate::fixture_activity_timeline::TimelineStatus::Playing { .. }))
+                    })
+                });
+        if !playing {
+            finish_talk(
+                &mut commands,
+                active,
+                &mut window,
+                &window_roots,
+                &mut npcs,
+                &mut playback.players,
+                &mut playback.transitions,
+                &mut prev,
+                time.elapsed_secs(),
+            );
+        }
+        return;
+    }
     let Some(tables) = tables else {
         return;
     };
@@ -1051,13 +1447,22 @@ pub(crate) fn advance_talk(
         return;
     };
     let dt = time.delta_secs();
-    let now = time.elapsed_secs();
-
     // LoopUpdate yields before its first clock increment. Afterwards, due
     // callbacks precede this frame's Lua continuation, including while waiting.
     for command in playback.delayed_faces.advance(dt) {
         apply_delayed_face(active, command, &tables, &mut materials, &talk_runtimes);
     }
+    let due = playback.delayed_animations.advance(dt);
+    run_animation_commands(
+        active,
+        due,
+        lib,
+        &mut playback.graphs,
+        &mut npcs,
+        &mut talk_runtimes,
+        &mut playback.players,
+        &mut playback.transitions,
+    );
     // The fixture-script representation does not opt the player into auto
     // mode. WaitClick is released only by the window's input latch.
     // 放行门 = IsWaitClick：闩置位且打字机已收尾。
@@ -1093,6 +1498,17 @@ pub(crate) fn advance_talk(
         for command in playback.delayed_faces.wait_clicked() {
             apply_delayed_face(active, command, &tables, &mut materials, &talk_runtimes);
         }
+        let flushed = playback.delayed_animations.wait_clicked();
+        run_animation_commands(
+            active,
+            flushed,
+            lib,
+            &mut playback.graphs,
+            &mut npcs,
+            &mut talk_runtimes,
+            &mut playback.players,
+            &mut playback.transitions,
+        );
         // 该击即耗尽：WaitClicked 放行后清闩（真源同款）。
         window.consume_click(TalkSession::Pair(&mut *active));
         active.click_releases += 1;
@@ -1108,7 +1524,10 @@ pub(crate) fn advance_talk(
         // Unlike the WaitClick Lua command, this branch does not flush faces.
         window.consume_click(TalkSession::Pair(&mut *active));
         active.hold_logged = None;
-        info!("[talk] 段 {} wait_time_on_auto_mode 手动跳过（点击闩耗尽）", active.talk_id);
+        info!(
+            "[talk] 段 {} wait_time_on_auto_mode 手动跳过（点击闩耗尽）",
+            active.talk_id
+        );
     }
 
     // 挂起侧账：游标回看一步（等待步消费后游标已过它）；步型变化才记
@@ -1163,9 +1582,10 @@ pub(crate) fn advance_talk(
             // Resolve within this cast only. A repeated unit is ambiguous even
             // if the world contains some other actor with the same unit id.
             let speaker = active.speaker.and_then(|unit| {
-                let mut actors = active.participants.iter().filter_map(|(candidate, entity)| {
-                    (*candidate == unit).then_some(*entity)
-                });
+                let mut actors = active
+                    .participants
+                    .iter()
+                    .filter_map(|(candidate, entity)| (*candidate == unit).then_some(*entity));
                 let entity = actors.next()?;
                 actors.next().is_none().then_some(VoiceSpeaker::Npc(entity))
             });
@@ -1188,11 +1608,11 @@ pub(crate) fn advance_talk(
             &step,
             index,
             &tables,
-            lib,
             &libraries,
             &timelines,
             &mut *playback.graphs,
             &mut playback.delayed_faces,
+            &mut playback.delayed_animations,
             &mut *side.materials,
             &mut window,
             &mut emote_reqs,
@@ -1200,14 +1620,22 @@ pub(crate) fn advance_talk(
             &mut npcs,
             &mut side.fixtures,
             &side.player_transforms,
-            &mut talk_runtimes,
             &mut playback.players,
             &mut playback.transitions,
         );
     }
 
-    // 对话动作的播完交还：在播节点已终态即让位（位移驱动接管回待机）。
-    release_finished_animations(&mut *active, &mut npcs, &mut talk_runtimes, &playback.players);
+    // 对话动作的段链推进：`_S` 播完接 `_L`、上一个动作的 `_E` 播完起新
+    // 动作的 `_S`。
+    advance_talk_segments(
+        active,
+        lib,
+        &mut playback.graphs,
+        &mut npcs,
+        &mut talk_runtimes,
+        &mut playback.players,
+        &mut playback.transitions,
+    );
 
     // 收口：全步消费且无挂起。
     if is_finished(active.row.steps.len(), &active.state) {
@@ -1216,28 +1644,63 @@ pub(crate) fn advance_talk(
         for command in playback.delayed_faces.on_complete() {
             apply_delayed_face(active, command, &tables, &mut materials, &talk_runtimes);
         }
-        emote_reqs.hides.extend(active.participants.iter().map(|(_, entity)| *entity));
-        for (unit, entity) in &active.participants {
-            if let Ok(runtime) = talk_runtimes.get(*entity) {
-                crate::player_talk::reset_default_face(*unit, &tables, &mut materials, &runtime.eye_handle, &runtime.mouth_handle);
-            }
-        }
-        finish_talk(
-            &mut commands,
-            &mut *active,
-            &mut window,
-            &window_roots,
+        let due = playback.delayed_animations.on_complete();
+        run_animation_commands(
+            active,
+            due,
+            lib,
+            &mut playback.graphs,
             &mut npcs,
+            &mut talk_runtimes,
             &mut playback.players,
             &mut playback.transitions,
-            &mut prev,
-            now,
         );
+        emote_reqs
+            .hides
+            .extend(active.participants.iter().map(|(_, entity)| *entity));
+        emote_reqs
+            .hides
+            .extend(active.fixtures.iter().map(|(_, entity)| *entity));
+        for (unit, entity) in &active.participants {
+            if let Ok(runtime) = talk_runtimes.get(*entity) {
+                crate::player_talk::reset_default_face(
+                    *unit,
+                    &tables,
+                    &mut materials,
+                    &runtime.eye_handle,
+                    &runtime.mouth_handle,
+                );
+            }
+        }
+        close_talk_body(&mut commands, active, &mut window, &window_roots);
+        active.ending = true;
+        let owner = active.effect_owner;
+        let actors: Vec<_> = active
+            .participants
+            .iter()
+            .map(|(_, entity)| *entity)
+            .collect();
+        let fixtures: Vec<_> = active.fixtures.iter().map(|(_, entity)| *entity).collect();
+        commands.queue(move |world: &mut World| {
+            let tokens = world
+                .get_resource_mut::<crate::fixture_activity_timeline::FixtureActivityTimelines>()
+                .map(|mut timelines| timelines.request_talk_end(&actors, &fixtures))
+                .unwrap_or_default();
+            if let Some(mut talk) = world.get_resource_mut::<ActiveTalk>() {
+                if talk.effect_owner == owner {
+                    talk.ending_tokens = tokens;
+                }
+            }
+        });
     }
 }
 
-/// 指称解析到说话人槽：0＝玩家槽（悬空，玩家域未接）；非整数＝悬空；
-/// 整数且在参演表＝该 unit；整数但不在参演表＝悬空。
+/// 指称解析到说话人槽（只用于 voice 行的口型绑定）：非整数＝悬空；
+/// 整数且在参演表＝该 unit；整数但不在参演表＝悬空。0 是玩家：玩家
+/// 身上没有口型可绑，说话人槽对它恒空——这不是未接，家具对话语料里
+/// voice/眼/口/动作/表情件的 0 号指称是 0 条；0 号实际出现的步只有转身
+/// 一族（look_at_body 两侧、look_at_fixture、look_at_to_npc），它们各自
+/// 走玩家的转身入口。
 fn resolve_speaker(active: &ActiveTalk, who: f64, index: usize) -> Option<u32> {
     if who == 0.0 {
         return None;
@@ -1270,15 +1733,26 @@ fn apply_delayed_face(
     materials: &mut Assets<CharacterMaterial>,
     runtimes: &Query<&mut TalkRuntime>,
 ) {
-    let Some((_, entity)) = active.participants.iter().find(|(unit, _)| *unit as i64 == command.unit) else {
+    let Some((_, entity)) = active
+        .participants
+        .iter()
+        .find(|(unit, _)| *unit as i64 == command.unit)
+    else {
         warn!(
             "[talk-face] source={} step={} unit={} is absent from current talk {}",
             command.source_talk, command.source_step, command.unit, active.talk_id,
         );
         return;
     };
-    let Ok(runtime) = runtimes.get(*entity) else { return; };
-    command.apply(tables, materials, &runtime.eye_handle, &runtime.mouth_handle);
+    let Ok(runtime) = runtimes.get(*entity) else {
+        return;
+    };
+    command.apply(
+        tables,
+        materials,
+        &runtime.eye_handle,
+        &runtime.mouth_handle,
+    );
 }
 
 /// 一步的分发：按 op 落到呈现通道。日志只带 id/步号/指称/键名。
@@ -1288,16 +1762,21 @@ fn dispatch_step(
     step: &FixtureStep,
     index: usize,
     tables: &FacialTables,
-    lib: &Gltf,
     libraries: &Assets<Gltf>,
     timelines: &FixtureTimelines,
     graphs: &mut Assets<AnimationGraph>,
     delayed_faces: &mut DelayedFaces,
+    delayed_animations: &mut DelayedAnimations,
     fixture_materials: &mut Assets<FixtureMaterial>,
     window: &mut TalkWindowState,
     emote_reqs: &mut TalkEmoteReqs,
     commands: &mut Commands,
-    npcs: &mut Query<(&mut MotionPhase, &mut WalkState, &mut MotionDriver, &Transform)>,
+    npcs: &mut Query<(
+        &mut MotionPhase,
+        &mut WalkState,
+        &mut MotionDriver,
+        &Transform,
+    )>,
     fixtures: &mut Query<
         (
             Entity,
@@ -1309,7 +1788,6 @@ fn dispatch_step(
         With<FixtureRoot>,
     >,
     player_transforms: &Query<&Transform, With<PlayerControlled>>,
-    talk_runtimes: &mut Query<&mut TalkRuntime>,
     players: &mut Query<&mut AnimationPlayer>,
     transitions: &mut Query<&mut AnimationTransitions>,
 ) {
@@ -1325,23 +1803,34 @@ fn dispatch_step(
             let target_entity = participant_entity(active, *target);
             match (entity, target_entity) {
                 (Some(entity), Some(target_entity)) => {
-                    let motion = turn_toward(entity, target_entity, *duration, npcs);
+                    turn_toward(active, entity, target_entity, *duration, npcs);
                     info!(
-                        "[talk] 段 {} 步 {} look_at_body who={} target={}：转身 {:.2}s（{}）",
-                        talk_id, index, who, target, duration, motion.label(),
+                        "[talk] 段 {} 步 {} look_at_body who={} target={}：转身 {:.2}s（朝向补间，无转身动作）",
+                        talk_id, index, who, target, duration,
                     );
                 }
                 (Some(entity), None) if *target == 0.0 => {
                     if let Some(player) = active.player {
                         if let Ok(transform) = player_transforms.get(player) {
-                            turn_toward_point(entity, transform.translation.to_array(), *duration, npcs);
+                            turn_toward_point(
+                                active,
+                                entity,
+                                transform.translation.to_array(),
+                                *duration,
+                                npcs,
+                            );
                         }
                     }
                 }
                 (None, Some(target_entity)) if *who == 0.0 => {
                     if let Some(player) = active.player {
                         if let Ok((_, walk, _, _)) = npcs.get(target_entity) {
-                            crate::player_talk::turn_player_to_point(commands, player, walk.0.position, *duration);
+                            crate::player_talk::turn_player_to_point(
+                                commands,
+                                player,
+                                walk.0.position,
+                                *duration,
+                            );
                         }
                     }
                 }
@@ -1378,93 +1867,75 @@ fn dispatch_step(
             // 起播与缺 cue 账归音频域（serve_voice）——行推进处已投递，
             // 这里无事可做。
         }
-        FixtureStep::ChangeNpcEye { who, pattern, delay_seconds, .. }
-        | FixtureStep::ChangeNpcMouth { who, pattern, delay_seconds, .. } => {
+        FixtureStep::ChangeNpcEye {
+            who,
+            pattern,
+            delay_seconds,
+            ..
+        }
+        | FixtureStep::ChangeNpcMouth {
+            who,
+            pattern,
+            delay_seconds,
+            ..
+        } => {
             if !who.is_finite() || who.fract() != 0.0 {
-                warn!("[talk] source={talk_id} step={index} {step_word} has a non-integral character id");
+                warn!(
+                    "[talk] source={talk_id} step={index} {step_word} has a non-integral character id"
+                );
                 return;
             }
-            let slot = if matches!(step, FixtureStep::ChangeNpcEye { .. }) { FaceSlot::Eye } else { FaceSlot::Mouth };
+            let slot = if matches!(step, FixtureStep::ChangeNpcEye { .. }) {
+                FaceSlot::Eye
+            } else {
+                FaceSlot::Mouth
+            };
             // Capture identity now, not a current entity/material. Even a
             // zero delay must pass through the shared queue before writing.
-            delayed_faces.enqueue(*delay_seconds, FaceCommand {
-                unit: *who as i64, slot, pattern: pattern.clone(),
-                source_talk: talk_id, source_step: index,
-            });
+            delayed_faces.enqueue(
+                *delay_seconds,
+                FaceCommand {
+                    unit: *who as i64,
+                    slot,
+                    pattern: pattern.clone(),
+                    source_talk: talk_id,
+                    source_step: index,
+                },
+            );
         }
         FixtureStep::ChangeAnimation {
             who,
             motion,
             speed,
-            playback_speed,
             play_end_motion,
             blend,
+            delay_seconds,
             ..
         } => {
-            let entity = participant_entity(active, *who);
-            let Some(entity) = entity else {
-                info!(
-                    "[talk] 段 {} 步 {} animation who={} motion={}：玩家侧/悬空指称，不起播",
-                    talk_id, index, who, ascii_or(motion),
-                );
-                return;
+            // 引擎 ChangeAnimation：速度 0 读作 1，闭包按 `已过时间 + delay`
+            // 排进延迟命令表——delay 为 0 也走表，下一次 LoopUpdate 才执行
+            // （与脸同一条路）。混合缺参时剧本库填 0.5。
+            let command = AnimationCommand {
+                unit: *who,
+                motion: motion.clone(),
+                speed: effective_animation_speed(*speed) as f32,
+                blend: blend.map_or(SEGMENT_BLEND.as_secs_f32(), |b| b as f32),
+                play_end_motion: *play_end_motion,
+                source_talk: talk_id,
+                source_step: index,
             };
-            if *play_end_motion {
-                warn!(
-                    "[talk] 段 {} 步 {} 动作步带 playEndMotion=true：End 段跟随未实现，本步只播主段",
-                    talk_id, index,
-                );
-            }
-            let Some(mut runtime) = talk_runtimes.get_mut(entity).ok() else {
-                return;
-            };
-            let unit = runtime.unit;
-            let Ok((_, _, mut driver, _)) = npcs.get_mut(entity) else {
-                warn!(
-                    "[talk] 段 {} 步 {} animation who={}：成员不在名册驱动里，不起播",
-                    talk_id, index, who
-                );
-                return;
-            };
-            // 起播段取 `_S` 变体（段族约定同待机动作族：基名＋后缀）。
-            let node = node_for(
-                &mut runtime.nodes,
-                graphs,
-                lib,
-                &driver.graph,
-                &format!("{motion}_S"),
-                unit,
-            );
-            let mut player = players
-                .get_mut(driver.player)
-                .expect("装配系统应已插上播放器");
-            let player = &mut *player;
-            let transitions = transitions
-                .get_mut(driver.player)
-                .expect("装配系统应已插上过渡组件")
-                .into_inner();
-            let blend_seconds = blend
-                .map(|b| b as f32)
-                .unwrap_or_else(|| SEGMENT_BLEND.as_secs_f32());
-            let animation = transitions.play(
-                player,
-                node,
-                Duration::from_secs_f32(blend_seconds),
-            );
-            // 速度换算走律（0 哨值读作 1.0）；playbackSpeed 载荷当前不
-            // 进换算（源里它与 speed 并存、语义未取证），记日志对账。
-            let effective = effective_animation_speed(*speed);
-            animation.set_speed(effective as f32);
-            runtime.anim_node = Some(node);
-            // 播放器归演出侧（位移驱动让位同款约定）；playing 的位移
-            // 簿记清空。
-            driver.playing = None;
-            driver.alone_holds = true;
             info!(
-                "[talk] 段 {} 步 {} animation who={} motion={}：起播（速度 {:.2}（载荷 speed {:?}），混合 {:.2}s，playbackSpeed 载荷 {:.2}）",
-                talk_id, index, who, ascii_or(motion), effective, speed, blend_seconds,
-                playback_speed,
+                "[talk] 段 {} 步 {} animation who={} motion={}：入延迟表 {:.2}s（速度 {:.2}，混合 {:.2}s，playEndMotion {}）",
+                talk_id,
+                index,
+                who,
+                ascii_or(motion),
+                delay_seconds,
+                command.speed,
+                command.blend,
+                play_end_motion,
             );
+            delayed_animations.enqueue(*delay_seconds, command);
         }
         FixtureStep::Text { text } => {
             // 正文进窗（ShowTextAsync 同款）：配对剧情与玩家对话共用这扇
@@ -1498,13 +1969,20 @@ fn dispatch_step(
                         .push((entity, name.clone(), *show_seconds as f32));
                     info!(
                         "[talk] 段 {} 步 {} emoticon who={} name={} showSeconds={:.1}（出件走表情件通道）",
-                        talk_id, index, who, ascii_or(name), show_seconds,
+                        talk_id,
+                        index,
+                        who,
+                        ascii_or(name),
+                        show_seconds,
                     );
                 }
                 None => {
                     info!(
                         "[talk] 段 {} 步 {} emoticon who={} name={}：玩家侧/悬空指称，不出件",
-                        talk_id, index, who, ascii_or(name),
+                        talk_id,
+                        index,
+                        who,
+                        ascii_or(name),
                     );
                 }
             }
@@ -1557,7 +2035,7 @@ fn dispatch_step(
             // 目标恒为会话锚定的那只家具）。提取键位错位：`fixture` 键
             // 是角色指称、`who` 键是时长（缺＝NaN＝瞬时，见步解析处）。
             let Some((_, _, fixture_transform, _, _)) =
-                anchored_fixture(active, fixtures)
+                anchored_fixture(active, active.fixture_id, fixtures)
             else {
                 warn!(
                     "[talk] 段 {} 步 {} look_at_fixture：锚定家具 {} 不在摆放里，不转",
@@ -1567,24 +2045,40 @@ fn dispatch_step(
             };
             match participant_entity(active, *fixture) {
                 Some(entity) => {
-                    let duration = if who.is_nan() { 0.0 } else { *who };
-                    let motion = turn_toward_point(
-                        entity,
-                        fixture_transform.translation.to_array(),
+                    let duration = *who;
+                    let target = fixture_transform.translation.to_array();
+                    turn_toward_point(active, entity, target, duration, npcs);
+                    info!(
+                        "[talk] 段 {} 步 {} look_at_fixture who={} fixture={}：角色 {} 转身面向锚定家具 {}（{:.2}s，朝向补间，无转身动作）",
+                        talk_id,
+                        index,
+                        who,
+                        fixture,
+                        *fixture as u32,
+                        active.fixture_id,
                         duration,
-                        npcs,
+                    );
+                }
+                None if *fixture == 0.0 && active.player.is_some() => {
+                    // 角色 id 0 是玩家：引擎走 PlayerLookAtBodyWait（玩家朝
+                    // 锚定家具的全局位置转，时长同一个参）——与 look_at_body
+                    // 的玩家侧同一个转身入口。
+                    let player = active.player.expect("checked");
+                    crate::player_talk::turn_player_to_point(
+                        commands,
+                        player,
+                        fixture_transform.translation.to_array(),
+                        *who,
                     );
                     info!(
-                        "[talk] 段 {} 步 {} look_at_fixture who={} fixture={}：角色 {} 转身面向锚定家具 {}（{:.2}s，{}）",
-                        talk_id, index, who, fixture, *fixture as u32, active.fixture_id,
-                        duration, motion.label(),
+                        "[talk] 段 {} 步 {} look_at_fixture fixture=0：玩家转向锚定家具 {}（{:.2}s）",
+                        talk_id, index, active.fixture_id, who,
                     );
                 }
                 None => {
-                    // 玩家槽（0 号）与悬空指称：玩家 Transform 的写者归
-                    // 玩家域（独占），具名记日志不转。
+                    // 不在当前演员组的角色：引擎按 id 找不到即无事。
                     info!(
-                        "[talk] 段 {} 步 {} look_at_fixture who={} fixture={}：玩家侧/悬空指称（玩家域独占），记日志不转身",
+                        "[talk] 段 {} 步 {} look_at_fixture who={} fixture={}：指称不在当前演员组，不转身",
                         talk_id, index, who, fixture,
                     );
                 }
@@ -1598,15 +2092,8 @@ fn dispatch_step(
             // 源门：引擎按「锚定家具的 FixtureId == 步的 fixtureId」才
             // 转发。源式（家具侧）＝ 家具位置 − 角色位置 取水平分量做
             // 朝向，LookRotation 后按时长缓动转到位（直读，不翻转方向）。
-            if *fixture as i32 != active.fixture_id {
-                info!(
-                    "[talk] 段 {} 步 {} look_at_to_npc who={} fixture={}：步的家具不是锚定家具 {}（源门），不转",
-                    talk_id, index, who, fixture, active.fixture_id,
-                );
-                return;
-            }
             let Some((root_entity, _, fixture_transform, _, _)) =
-                anchored_fixture(active, fixtures)
+                anchored_fixture(active, *fixture as i32, fixtures)
             else {
                 warn!(
                     "[talk] 段 {} 步 {} look_at_to_npc：锚定家具 {} 不在摆放里，不转",
@@ -1656,6 +2143,7 @@ fn dispatch_step(
             commands
                 .entity(root_entity)
                 .insert(FixtureTurn::toward(from, to, *duration));
+            crate::fixture_talk::remember_talk_rotation(commands, root_entity, talk_id, from);
             info!(
                 "[talk] 段 {} 步 {} look_at_to_npc who={} fixture={}：家具转向角色（+Z 沿「家具−角色」水平分量，源式直读）{:.2}s",
                 talk_id, index, who, fixture, duration,
@@ -1666,22 +2154,16 @@ fn dispatch_step(
             // 不等＝源侧静默无操作，无 else 无日志）。门过即投递音频域：
             // 真源同一 voice 单通道（StopVoiceAll 先行）、同一存在性门，
             // 蛋链无变体门——包随家具角色（单参，不拼 unit）。
-            if *fixture as i32 != active.fixture_id {
-                info!(
-                    "[talk] 段 {} 步 {} fixture_voice cue={} fixture={}：步的家具不是锚定家具 {}（源门），不投递",
-                    talk_id, index, ascii_or(cue), fixture, active.fixture_id,
-                );
-                return;
-            }
-            // Match anchored_fixture's explicit-target branch in the same
-            // query, without its no-target fallback or a mutable animation borrow.
-            let speaker = active.target_fixture.and_then(|target| {
-                fixtures.get(target).ok().map(|_| VoiceSpeaker::Fixture(target))
+            let speaker = active.fixture_entity(*fixture as i32).and_then(|target| {
+                fixtures
+                    .get(target)
+                    .ok()
+                    .map(|_| VoiceSpeaker::Fixture(target))
             });
             if speaker.is_none() {
                 warn!(
                     "[talk] source={} step={} fixture_voice has no live explicit target={:?}; preserving audio routing without mouth binding",
-                    talk_id, index, active.target_fixture,
+                    talk_id, index, speaker,
                 );
             }
             commands.spawn(VoiceLine {
@@ -1693,7 +2175,10 @@ fn dispatch_step(
             });
             info!(
                 "[talk] 段 {} 步 {} fixture_voice cue={} fixture={} 投递音频域（蛋链单参包，路由见 partvoice 面）",
-                talk_id, index, ascii_or(cue), fixture,
+                talk_id,
+                index,
+                ascii_or(cue),
+                fixture,
             );
         }
         FixtureStep::ChangeFixtureCharacterEye {
@@ -1703,14 +2188,9 @@ fn dispatch_step(
             // 与角色侧同一张（PatternName → OpenEyeIndex），格下标**原样**
             // 进源式（不钳不移——角色侧的下标族是另一族，见
             // `fixture_talk.rs` 模块注释）。
-            if *fixture as i32 != active.fixture_id {
-                info!(
-                    "[talk] 段 {} 步 {} change_fixture_character_eye fixture={} pattern={}：步的家具不是锚定家具 {}（源门），不写",
-                    talk_id, index, fixture, ascii_or(pattern), active.fixture_id,
-                );
-                return;
-            }
-            let Some((_, _, _, face, _)) = anchored_fixture(active, fixtures) else {
+            let Some((root_entity, _, _, face, _)) =
+                anchored_fixture(active, *fixture as i32, fixtures)
+            else {
                 warn!(
                     "[talk] 段 {} 步 {} change_fixture_character_eye：锚定家具 {} 不在摆放里，不写",
                     talk_id, index, active.fixture_id,
@@ -1721,29 +2201,51 @@ fn dispatch_step(
                 // 无脸家具：源侧静默无操作（待机动画件为空）。
                 info!(
                     "[talk] 段 {} 步 {} change_fixture_character_eye fixture={} pattern={}：无脸家具（源侧静默无操作），不写",
-                    talk_id, index, fixture, ascii_or(pattern),
+                    talk_id,
+                    index,
+                    fixture,
+                    ascii_or(pattern),
                 );
                 return;
             };
             if face.eyes.is_empty() {
                 info!(
                     "[talk] 段 {} 步 {} change_fixture_character_eye fixture={} pattern={}：该家具无 eye 材质，不写",
-                    talk_id, index, fixture, ascii_or(pattern),
+                    talk_id,
+                    index,
+                    fixture,
+                    ascii_or(pattern),
                 );
                 return;
             }
             match tables.eye_open(pattern) {
                 Some(open) => {
+                    crate::fixture_talk::remember_talk_face(
+                        commands,
+                        root_entity,
+                        talk_id,
+                        &face.eyes,
+                        fixture_materials,
+                    );
                     let cell = apply_face(fixture_materials, &face.eyes, open, EYE_CELL);
                     info!(
                         "[talk] 段 {} 步 {} change_fixture_character_eye fixture={} pattern={}（open {} -> 格 {},{}，ST 源式原样）",
-                        talk_id, index, fixture, ascii_or(pattern), open, cell.0, cell.1,
+                        talk_id,
+                        index,
+                        fixture,
+                        ascii_or(pattern),
+                        open,
+                        cell.0,
+                        cell.1,
                     );
                 }
                 None => {
                     warn!(
                         "[talk] 段 {} 步 {} change_fixture_character_eye fixture={} pattern={}：facial 眼表缺键，不写",
-                        talk_id, index, fixture, ascii_or(pattern),
+                        talk_id,
+                        index,
+                        fixture,
+                        ascii_or(pattern),
                     );
                 }
             }
@@ -1753,14 +2255,9 @@ fn dispatch_step(
         } => {
             // 同 eye：lip 表 PatternName → CloseLipSyncIndex，格下标原样
             // 进源式。
-            if *fixture as i32 != active.fixture_id {
-                info!(
-                    "[talk] 段 {} 步 {} change_fixture_character_mouth fixture={} pattern={}：步的家具不是锚定家具 {}（源门），不写",
-                    talk_id, index, fixture, ascii_or(pattern), active.fixture_id,
-                );
-                return;
-            }
-            let Some((_, _, _, face, _)) = anchored_fixture(active, fixtures) else {
+            let Some((root_entity, _, _, face, _)) =
+                anchored_fixture(active, *fixture as i32, fixtures)
+            else {
                 warn!(
                     "[talk] 段 {} 步 {} change_fixture_character_mouth：锚定家具 {} 不在摆放里，不写",
                     talk_id, index, active.fixture_id,
@@ -1770,50 +2267,68 @@ fn dispatch_step(
             let Some(face) = face else {
                 info!(
                     "[talk] 段 {} 步 {} change_fixture_character_mouth fixture={} pattern={}：无脸家具（源侧静默无操作），不写",
-                    talk_id, index, fixture, ascii_or(pattern),
+                    talk_id,
+                    index,
+                    fixture,
+                    ascii_or(pattern),
                 );
                 return;
             };
             if face.mouths.is_empty() {
                 info!(
                     "[talk] 段 {} 步 {} change_fixture_character_mouth fixture={} pattern={}：该家具无 mouth 材质，不写",
-                    talk_id, index, fixture, ascii_or(pattern),
+                    talk_id,
+                    index,
+                    fixture,
+                    ascii_or(pattern),
                 );
                 return;
             }
             match tables.lip_close(pattern) {
                 Some(close) => {
+                    crate::fixture_talk::remember_talk_face(
+                        commands,
+                        root_entity,
+                        talk_id,
+                        &face.mouths,
+                        fixture_materials,
+                    );
                     let cell = apply_face(fixture_materials, &face.mouths, close, MOUTH_CELL);
                     info!(
                         "[talk] 段 {} 步 {} change_fixture_character_mouth fixture={} pattern={}（close {} -> 格 {},{}，ST 源式原样）",
-                        talk_id, index, fixture, ascii_or(pattern), close, cell.0, cell.1,
+                        talk_id,
+                        index,
+                        fixture,
+                        ascii_or(pattern),
+                        close,
+                        cell.0,
+                        cell.1,
                     );
                 }
                 None => {
                     warn!(
                         "[talk] 段 {} 步 {} change_fixture_character_mouth fixture={} pattern={}：facial 口型表缺键，不写",
-                        talk_id, index, fixture, ascii_or(pattern),
+                        talk_id,
+                        index,
+                        fixture,
+                        ascii_or(pattern),
                     );
                 }
             }
         }
         FixtureStep::ChangeFixtureTimeline {
-            fixture, name, value,
+            fixture,
+            name,
+            value,
         } => {
             // 源门（与 eye/mouth 同门）：引擎闭包再核「锚定家具的
             // FixtureId == 步的 fixtureId」。过门后按源语义换时间轴：
             // 具名时间轴 → 逐剪辑起播（顺序播放 + 旗标段循环，解析规则
             // 见 `fixture_talk.rs`）。`value` 是步的数值载荷（语料全 0，
             // 源把它当延迟秒传进延迟队列，0 = 即时）。
-            if *fixture as i32 != active.fixture_id {
-                info!(
-                    "[talk] 段 {} 步 {} change_fixture_timeline fixture={} name={} value={}：步的家具不是锚定家具 {}（源门），不起播",
-                    talk_id, index, fixture, ascii_or(name), value, active.fixture_id,
-                );
-                return;
-            }
+            let fixture_id = *fixture as i32;
             let Some((root_entity, _, _, _, animation)) =
-                anchored_fixture(active, fixtures)
+                anchored_fixture(active, fixture_id, fixtures)
             else {
                 warn!(
                     "[talk] 段 {} 步 {} change_fixture_timeline：锚定家具 {} 不在摆放里，不起播",
@@ -1821,31 +2336,43 @@ fn dispatch_step(
                 );
                 return;
             };
-            let Some(plan) = timelines.plan(active.fixture_id, name) else {
+            let Some(plan) = timelines.plan(fixture_id, name) else {
                 warn!(
                     "[talk] 段 {} 步 {} change_fixture_timeline fixture={} name={}：时间轴不在可播集（剪辑解不到模型包或悬空引用），不起播",
-                    talk_id, index, fixture, ascii_or(name),
+                    talk_id,
+                    index,
+                    fixture,
+                    ascii_or(name),
                 );
                 return;
             };
             let Some(animation) = animation else {
                 warn!(
                     "[talk] 段 {} 步 {} change_fixture_timeline fixture={} name={}：该家具没有动画执行面（解析期未解析到动画根），不起播",
-                    talk_id, index, fixture, ascii_or(name),
+                    talk_id,
+                    index,
+                    fixture,
+                    ascii_or(name),
                 );
                 return;
             };
             let Some(player_entity) = animation.player else {
                 warn!(
                     "[talk] 段 {} 步 {} change_fixture_timeline fixture={} name={}：该家具模型无骨架动画根，不起播",
-                    talk_id, index, fixture, ascii_or(name),
+                    talk_id,
+                    index,
+                    fixture,
+                    ascii_or(name),
                 );
                 return;
             };
             let Some(gltf) = libraries.get(&animation.gltf) else {
                 warn!(
                     "[talk] 段 {} 步 {} change_fixture_timeline fixture={} name={}：源 glb 不在资产集，不起播",
-                    talk_id, index, fixture, ascii_or(name),
+                    talk_id,
+                    index,
+                    fixture,
+                    ascii_or(name),
                 );
                 return;
             };
@@ -1856,7 +2383,11 @@ fn dispatch_step(
                 let Some(clip) = gltf.named_animations.get(clip_name.as_str()) else {
                     warn!(
                         "[talk] 段 {} 步 {} change_fixture_timeline fixture={} name={}：剪辑 {} 不在 glb 动画集（悬空引用族），不起播",
-                        talk_id, index, fixture, ascii_or(name), ascii_or(clip_name),
+                        talk_id,
+                        index,
+                        fixture,
+                        ascii_or(name),
+                        ascii_or(clip_name),
                     );
                     return;
                 };
@@ -1865,7 +2396,10 @@ fn dispatch_step(
             let Ok(mut player) = players.get_mut(player_entity) else {
                 warn!(
                     "[talk] 段 {} 步 {} change_fixture_timeline fixture={} name={}：动画播放器不在（装载期已插），不起播",
-                    talk_id, index, fixture, ascii_or(name),
+                    talk_id,
+                    index,
+                    fixture,
+                    ascii_or(name),
                 );
                 return;
             };
@@ -1873,11 +2407,21 @@ fn dispatch_step(
             let Ok(transitions) = transitions.get_mut(player_entity) else {
                 warn!(
                     "[talk] 段 {} 步 {} change_fixture_timeline fixture={} name={}：动画过渡件不在（装载期已插），不起播",
-                    talk_id, index, fixture, ascii_or(name),
+                    talk_id,
+                    index,
+                    fixture,
+                    ascii_or(name),
                 );
                 return;
             };
             let transitions = transitions.into_inner();
+            crate::fixture_talk::remember_talk_animation(
+                commands,
+                root_entity,
+                talk_id,
+                player_entity,
+                nodes.clone(),
+            );
             let first = transitions.play(
                 player,
                 nodes[0],
@@ -1887,19 +2431,31 @@ fn dispatch_step(
                 first.repeat();
                 info!(
                     "[talk] 段 {} 步 {} change_fixture_timeline fixture={} name={} value={}：起播 {}（{} 段，首段即循环）",
-                    talk_id, index, fixture, ascii_or(name), value,
-                    ascii_or(&plan.clips[0]), plan.clips.len(),
+                    talk_id,
+                    index,
+                    fixture,
+                    ascii_or(name),
+                    value,
+                    ascii_or(&plan.clips[0]),
+                    plan.clips.len(),
                 );
             } else {
                 info!(
                     "[talk] 段 {} 步 {} change_fixture_timeline fixture={} name={} value={}：起播 {}（{} 段顺序，第 {} 段起循环）",
-                    talk_id, index, fixture, ascii_or(name), value,
-                    ascii_or(&plan.clips[0]), plan.clips.len(),
+                    talk_id,
+                    index,
+                    fixture,
+                    ascii_or(name),
+                    value,
+                    ascii_or(&plan.clips[0]),
+                    plan.clips.len(),
                     plan.loop_at + 1,
                 );
-                commands
-                    .entity(root_entity)
-                    .insert(FixtureTimelineSeq::new(nodes, plan.eases.clone(), plan.loop_at));
+                commands.entity(root_entity).insert(FixtureTimelineSeq::new(
+                    nodes,
+                    plan.eases.clone(),
+                    plan.loop_at,
+                ));
             }
         }
         FixtureStep::ShowFixtureEmoticon {
@@ -1910,14 +2466,9 @@ fn dispatch_step(
         } => {
             // 家具侧表情件走同一条出件通道（实例身份按实体键控，家具
             // 根直接可用；挂点解析归表情件模块）。
-            if *fixture as i32 != active.fixture_id {
-                info!(
-                    "[talk] 段 {} 步 {} show_fixture_emoticon fixture={} name={}：步的家具不是锚定家具 {}（源门），不折请求",
-                    talk_id, index, fixture, ascii_or(name), active.fixture_id,
-                );
-                return;
-            }
-            let Some((root_entity, _, _, _, _)) = anchored_fixture(active, fixtures) else {
+            let Some((root_entity, _, _, _, _)) =
+                anchored_fixture(active, *fixture as i32, fixtures)
+            else {
                 warn!(
                     "[talk] 段 {} 步 {} show_fixture_emoticon：锚定家具 {} 不在摆放里，不折请求",
                     talk_id, index, active.fixture_id,
@@ -1929,24 +2480,41 @@ fn dispatch_step(
                 .push((root_entity, name.clone(), *show_seconds as f32));
             info!(
                 "[talk] 段 {} 步 {} show_fixture_emoticon fixture={} name={} showSeconds={:.1}：折请求进表情件通道（对家具根）",
-                talk_id, index, fixture, ascii_or(name), show_seconds,
+                talk_id,
+                index,
+                fixture,
+                ascii_or(name),
+                show_seconds,
             );
         }
         FixtureStep::PlayFixtureGimmick { fixture } => {
-            // 机关步执行：执行面 = 本账目行。机关演出的本体未接（挂账，
-            // 不在本单范围）。机关对话段（四员同台）由机关家具的锚定
-            // 摆放触达——units 13–16 在名册里，整组过境进池即可中签。
-            info!(
-                "[talk] 段 {} 步 {} play_fixture_gimmick {}：机关步执行（演出本体未接，挂账）",
-                talk_id, index, ascii_or(fixture),
-            );
+            let owner = active.effect_owner;
+            if let Some(entity) = active.fixture_entity(active.fixture_id) {
+                let source = fixture.clone();
+                commands.queue(move |world: &mut World| {
+                    if let Err(reason) = crate::fixture_gimmick::session::talk_trigger(
+                        world, entity, owner, true, 0.,
+                    ) {
+                        warn!("[talk] gimmick {source} could not start: {reason}");
+                        world.write_message(crate::player_talk::TalkCancelRequest);
+                    }
+                });
+            }
         }
-        FixtureStep::StopFixtureGimmick { fixture, name } => {
-            // name 键实为停止延迟秒数（源脚本位 2）。
-            info!(
-                "[talk] 段 {} 步 {} stop_fixture_gimmick fixture={} delay={}：机关步执行（演出本体未接，同 play 挂账）",
-                talk_id, index, ascii_or(fixture), name,
-            );
+        FixtureStep::StopFixtureGimmick { name, .. } => {
+            // The extractor's `name` operand is the authored stop delay.
+            let owner = active.effect_owner;
+            let delay = *name as f32;
+            if let Some(entity) = active.fixture_entity(active.fixture_id) {
+                commands.queue(move |world: &mut World| {
+                    if let Err(reason) = crate::fixture_gimmick::session::talk_trigger(
+                        world, entity, owner, false, delay,
+                    ) {
+                        warn!("[talk] gimmick stop could not be applied: {reason}");
+                        world.write_message(crate::player_talk::TalkCancelRequest);
+                    }
+                });
+            }
         }
     }
 }
@@ -1956,6 +2524,7 @@ fn dispatch_step(
 /// 执行面（时间轴步用；无骨架家具 = None，多数摆件如此）。
 fn anchored_fixture<'a>(
     active: &ActiveTalk,
+    fixture_id: i32,
     fixtures: &'a mut Query<
         (
             Entity,
@@ -1975,9 +2544,9 @@ fn anchored_fixture<'a>(
 )> {
     fixtures
         .iter_mut()
-        .find(|(entity, placement, _, _, _)| match active.target_fixture {
-            Some(target) => *entity == target,
-            None => active.player.is_none() && placement.fixture_id == active.fixture_id,
+        .find(|(entity, placement, _, _, _)| {
+            active.fixture_entity(fixture_id) == Some(*entity)
+                || (active.player.is_none() && placement.fixture_id == fixture_id)
         })
         .map(|(entity, placement, transform, face, animation)| {
             (
@@ -2022,31 +2591,42 @@ fn participant_entity(active: &ActiveTalk, referent: f64) -> Option<Entity> {
 }
 
 /// 转身：从当前旋转（Transform 现值——转体中途的连环转身从当前角起
-/// 算）到面向目标成员——选段按折角差（转身律），终点取同叶短弧（位
-/// 移换腿的 depart 同一条式）。时长用步载荷（对话步自带时长；位移侧
-/// 的除 60 估时不适用这里）。相位进转体（动画侧读它播转身段），逐帧
-/// 推进归本模块（位移推进被持留跳过）。
+/// 算）到面向目标成员，终点取同叶短弧。时长用步载荷。只登记朝向补间
+/// （见 [`TalkTurn`]），不动位移相位——相位进转体会让动画侧播转身段，
+/// 而对话引擎的转身没有动作。
 fn turn_toward(
+    active: &mut ActiveTalk,
     entity: Entity,
     target: Entity,
     duration: f64,
-    npcs: &mut Query<(&mut MotionPhase, &mut WalkState, &mut MotionDriver, &Transform)>,
-) -> TurnMotion {
+    npcs: &mut Query<(
+        &mut MotionPhase,
+        &mut WalkState,
+        &mut MotionDriver,
+        &Transform,
+    )>,
+) {
     let target_pos = npcs
         .get(target)
         .map(|(_, walk, _, _)| walk.0.position)
         .unwrap_or([0.0, 0.0, 0.0]);
-    turn_toward_point(entity, target_pos, duration, npcs)
+    turn_toward_point(active, entity, target_pos, duration, npcs)
 }
 
 /// 转身到一点（目标位直接给定——家具目标不在名册里，没有 `WalkState`
 /// 可读，位置从它的 Transform 来）。其余同 [`turn_toward`]。
 fn turn_toward_point(
+    active: &mut ActiveTalk,
     entity: Entity,
     target_pos: [f32; 3],
     duration: f64,
-    npcs: &mut Query<(&mut MotionPhase, &mut WalkState, &mut MotionDriver, &Transform)>,
-) -> TurnMotion {
+    npcs: &mut Query<(
+        &mut MotionPhase,
+        &mut WalkState,
+        &mut MotionDriver,
+        &Transform,
+    )>,
+) {
     let from = npcs
         .get(entity)
         .map(|(_, _, _, transform)| transform.rotation)
@@ -2056,64 +2636,287 @@ fn turn_toward_point(
         .map(|(_, walk, _, _)| walk.0.position)
         .unwrap_or([0.0, 0.0, 0.0]);
     let to_forward = facing_direction(own_pos, target_pos);
-    let angle = angle_between([from * Vec3::Z][0].to_array(), to_forward);
-    let motion = turn_motion(angle);
     let mut to = Quat::from_rotation_arc(Vec3::Z, Vec3::from(to_forward));
     // 最短角路径：四元数双覆盖下取与起点同叶的那一枝（depart 同一条）。
     if from.dot(to) < 0.0 {
         to = Quat::from_xyzw(-to.x, -to.y, -to.z, -to.w);
     }
-    if let Ok((mut phase, _, _, _)) = npcs.get_mut(entity) {
-        *phase = MotionPhase::Turning {
-            motion,
-            from,
-            to,
-            duration: duration as f32,
-            elapsed: 0.0,
-        };
-    }
-    motion
+    // 同一角色的新转身接替旧的（视图朝向补间被新的 DoLookAt 覆盖）。
+    active.turns.retain(|turn| turn.entity != entity);
+    active.turns.push(TalkTurn {
+        entity,
+        from,
+        to,
+        duration: duration as f32,
+        elapsed: 0.0,
+    });
 }
 
-/// 对话动作播完交还播放器（位移驱动接管，回待机段）。
-fn release_finished_animations(
-    active: &mut ActiveTalk,
-    npcs: &mut Query<(&mut MotionPhase, &mut WalkState, &mut MotionDriver, &Transform)>,
+/// 到期的换动作逐条执行（延迟表冲出的顺序即执行顺序；同一帧后一条覆盖
+/// 前一条，与引擎取消上一条动作任务同效）。
+#[allow(clippy::too_many_arguments)]
+fn run_animation_commands(
+    active: &ActiveTalk,
+    due: Vec<AnimationCommand>,
+    lib: &Gltf,
+    graphs: &mut Assets<AnimationGraph>,
+    npcs: &mut Query<(
+        &mut MotionPhase,
+        &mut WalkState,
+        &mut MotionDriver,
+        &Transform,
+    )>,
     talk_runtimes: &mut Query<&mut TalkRuntime>,
-    players: &Query<&mut AnimationPlayer>,
+    players: &mut Query<&mut AnimationPlayer>,
+    transitions: &mut Query<&mut AnimationTransitions>,
 ) {
-    let participants = active.participants.clone();
-    for (unit, entity) in participants {
+    for command in due {
+        // 角色 id 0 是玩家：引擎走 `PlayerAvatarPresenter.PlayAnimation`
+        // （动作名转小写、带速度）。玩家的动画播放器归玩家域，这里不接；
+        // 家具对话语料里这种步 0 条。
+        if command.unit == 0.0 {
+            info!(
+                "[talk] source={} step={} animation motion={}：角色 0＝玩家，玩家侧 PlayAnimation 未接",
+                command.source_talk,
+                command.source_step,
+                ascii_or(&command.motion),
+            );
+            continue;
+        }
+        // FindNPCCharacter：按 id 在当前演员组里找；找不到即无事。
+        let Some(entity) = participant_entity(active, command.unit) else {
+            info!(
+                "[talk] source={} step={} animation who={}：当前演员组里没有该角色，不起播",
+                command.source_talk, command.source_step, command.unit,
+            );
+            continue;
+        };
         let Ok(mut runtime) = talk_runtimes.get_mut(entity) else {
             continue;
         };
-        let Some(node) = runtime.anim_node else {
+        // IsCurrentPlayingAnimationSameAs：请求的基名就是当前基名 ⇒ 整条
+        // 换动作什么都不做（不重起 `_S`）。
+        if runtime.original.as_deref() == Some(command.motion.as_str()) {
+            info!(
+                "[talk] source={} step={} animation motion={}：与当前动作同名，引擎不重播",
+                command.source_talk,
+                command.source_step,
+                ascii_or(&command.motion),
+            );
+            continue;
+        }
+        let Ok((_, _, mut driver, _)) = npcs.get_mut(entity) else {
             continue;
         };
-        let player_entity = npcs
-            .get(entity)
-            .map(|(_, _, driver, _)| driver.player)
-            .expect("参演者的驱动应已装配");
-        let done = players
-            .get(player_entity)
-            .map(|player| {
-                player
-                    .playing_animations()
-                    .any(|(n, animation)| *n == node && animation.is_finished())
-            })
-            .unwrap_or(false);
-        if !done {
+        let (Ok(mut player), Ok(transitions)) = (
+            players.get_mut(driver.player),
+            transitions.get_mut(driver.player),
+        ) else {
+            continue;
+        };
+        begin_animation(
+            &mut runtime,
+            command,
+            lib,
+            graphs,
+            &mut driver,
+            &mut player,
+            transitions.into_inner(),
+        );
+    }
+}
+
+/// 视图 `ChangeAnimationAsync` 的开头：要求播上一个动作的收尾段且库里有
+/// `上一个基名_E` ⇒ 先以速度 1 播它（播完再起新动作）；否则直接起新
+/// 动作的 `_S`。上一个基名在对话开场时未知（见 [`TalkRuntime::original`]），
+/// 那种情况不播收尾段。
+fn begin_animation(
+    runtime: &mut TalkRuntime,
+    command: AnimationCommand,
+    lib: &Gltf,
+    graphs: &mut Assets<AnimationGraph>,
+    driver: &mut MotionDriver,
+    player: &mut AnimationPlayer,
+    transitions: &mut AnimationTransitions,
+) {
+    if command.play_end_motion {
+        if let Some(previous) = runtime.original.clone() {
+            let end_clip = format!("{previous}_E");
+            if lib.named_animations.contains_key(end_clip.as_str()) {
+                let unit = runtime.unit;
+                let node = node_for(
+                    &mut runtime.nodes,
+                    graphs,
+                    lib,
+                    &driver.graph,
+                    &end_clip,
+                    unit,
+                );
+                transitions
+                    .play(
+                        player,
+                        node,
+                        Duration::from_secs_f32(command.blend.max(0.0)),
+                    )
+                    .set_speed(1.0);
+                driver.playing = None;
+                driver.alone_holds = true;
+                info!(
+                    "[talk] source={} step={} unit={} 先播上一个动作的收尾段 {}（速度 1）再起 {}",
+                    command.source_talk,
+                    command.source_step,
+                    unit,
+                    ascii_or(&end_clip),
+                    ascii_or(&command.motion),
+                );
+                runtime.segment = Some(TalkSegment::End {
+                    node,
+                    next: command,
+                });
+                return;
+            }
+        }
+    }
+    start_motion(runtime, command, lib, graphs, driver, player, transitions);
+}
+
+/// 起一个动作的 `_S`（交叉淡入 blend 秒、Animator 速度 = speed）。库里
+/// 没有该段时视图的 CrossFade 查表落空、什么都不播。
+fn start_motion(
+    runtime: &mut TalkRuntime,
+    command: AnimationCommand,
+    lib: &Gltf,
+    graphs: &mut Assets<AnimationGraph>,
+    driver: &mut MotionDriver,
+    player: &mut AnimationPlayer,
+    transitions: &mut AnimationTransitions,
+) {
+    let clip = format!("{}_S", command.motion);
+    if !lib.named_animations.contains_key(clip.as_str()) {
+        warn!(
+            "[talk] source={} step={} motion={}：动作库没有起始段，视图查表落空，不起播",
+            command.source_talk,
+            command.source_step,
+            ascii_or(&command.motion),
+        );
+        return;
+    }
+    let unit = runtime.unit;
+    let node = node_for(&mut runtime.nodes, graphs, lib, &driver.graph, &clip, unit);
+    transitions
+        .play(
+            player,
+            node,
+            Duration::from_secs_f32(command.blend.max(0.0)),
+        )
+        .set_speed(command.speed);
+    // 播放器归演出侧（位移驱动让位同款约定）；playing 的位移簿记清空。
+    driver.playing = None;
+    driver.alone_holds = true;
+    runtime.original = Some(command.motion.clone());
+    info!(
+        "[talk] source={} step={} unit={} motion={}：起播 _S（速度 {:.2}，混合 {:.2}s）",
+        command.source_talk,
+        command.source_step,
+        unit,
+        ascii_or(&command.motion),
+        command.speed,
+        command.blend,
+    );
+    runtime.segment = Some(TalkSegment::Start {
+        node,
+        motion: command.motion,
+        speed: command.speed,
+        blend: command.blend,
+    });
+}
+
+/// 段链逐帧推进：`_S` 播完（非循环剪辑到终态＝剪辑长 / 速度）接同名
+/// `_L` 循环，停在 `_L` 直到下一次换动作或对话收口；收尾段 `_E` 播完起
+/// 排在它后面的新动作。库里没有 `_L` 时退回位移驱动（待机）。
+#[allow(clippy::too_many_arguments)]
+fn advance_talk_segments(
+    active: &ActiveTalk,
+    lib: &Gltf,
+    graphs: &mut Assets<AnimationGraph>,
+    npcs: &mut Query<(
+        &mut MotionPhase,
+        &mut WalkState,
+        &mut MotionDriver,
+        &Transform,
+    )>,
+    talk_runtimes: &mut Query<&mut TalkRuntime>,
+    players: &mut Query<&mut AnimationPlayer>,
+    transitions: &mut Query<&mut AnimationTransitions>,
+) {
+    for (unit, entity) in active.participants.iter().copied() {
+        let Ok(mut runtime) = talk_runtimes.get_mut(entity) else {
+            continue;
+        };
+        let node = match &runtime.segment {
+            Some(TalkSegment::Start { node, .. }) | Some(TalkSegment::End { node, .. }) => *node,
+            Some(TalkSegment::Loop) | None => continue,
+        };
+        let Ok((_, _, mut driver, _)) = npcs.get_mut(entity) else {
+            continue;
+        };
+        let (Ok(mut player), Ok(transitions)) = (
+            players.get_mut(driver.player),
+            transitions.get_mut(driver.player),
+        ) else {
+            continue;
+        };
+        let finished = player
+            .playing_animations()
+            .any(|(n, animation)| *n == node && animation.is_finished());
+        if !finished {
             continue;
         }
-        runtime.anim_node = None;
-        if let Ok((_, _, mut driver, _)) = npcs.get_mut(entity) {
-            driver.alone_holds = false;
-            driver.playing = None;
+        let transitions = transitions.into_inner();
+        match runtime.segment.take() {
+            Some(TalkSegment::End { next, .. }) => {
+                start_motion(
+                    &mut runtime,
+                    next,
+                    lib,
+                    graphs,
+                    &mut driver,
+                    &mut player,
+                    transitions,
+                );
+            }
+            Some(TalkSegment::Start {
+                motion,
+                speed,
+                blend,
+                ..
+            }) => {
+                let clip = format!("{motion}_L");
+                if lib.named_animations.contains_key(clip.as_str()) {
+                    let node =
+                        node_for(&mut runtime.nodes, graphs, lib, &driver.graph, &clip, unit);
+                    transitions
+                        .play(&mut player, node, Duration::from_secs_f32(blend.max(0.0)))
+                        .set_speed(speed)
+                        .repeat();
+                    runtime.segment = Some(TalkSegment::Loop);
+                    info!(
+                        "[talk] 段 {} unit={unit} 起始段播完，接循环段 {}",
+                        active.talk_id,
+                        ascii_or(&clip)
+                    );
+                } else {
+                    driver.alone_holds = false;
+                    driver.playing = None;
+                    info!(
+                        "[talk] 段 {} unit={unit} 起始段播完，库里无循环段 {}：播放器交还位移驱动",
+                        active.talk_id,
+                        ascii_or(&clip)
+                    );
+                }
+            }
+            other => runtime.segment = other,
         }
-        info!(
-            "[talk] 段 {} unit={unit} 对话动作播完：播放器交还位移驱动（回待机）",
-            active.talk_id
-        );
     }
 }
 
@@ -2126,53 +2929,65 @@ fn finish_talk(
     active: &mut ActiveTalk,
     window: &mut TalkWindowState,
     window_roots: &Query<Entity, With<TalkWindowRoot>>,
-    npcs: &mut Query<(&mut MotionPhase, &mut WalkState, &mut MotionDriver, &Transform)>,
+    npcs: &mut Query<(
+        &mut MotionPhase,
+        &mut WalkState,
+        &mut MotionDriver,
+        &Transform,
+    )>,
     players: &mut Query<&mut AnimationPlayer>,
     transitions: &mut Query<&mut AnimationTransitions>,
     prev: &mut ResMut<TalkLedger>,
     now: f32,
 ) {
-    // Source Dispose stops the shared delay loop but does not clear future
-    // commands; the engine-scoped queue remains authoritative across talks.
-    crate::delayed_faces::stop_loop(commands);
-    crate::audio::dispose_talk_voice(commands);
+    if !active.ending {
+        close_talk_body(commands, active, window, window_roots);
+    }
+    let owner = active.effect_owner;
+    commands.queue(move |world: &mut World| {
+        fixture_action::cancel_owner(world, Some(owner));
+        crate::fixture_gimmick::session::finish_owner(world, owner);
+        if let Ok(entity) = world.get_entity_mut(owner) {
+            entity.despawn();
+        }
+    });
+    for (_, fixture) in &active.fixtures {
+        crate::fixture_talk::finish_talk_effects(commands, *fixture, active.talk_id);
+    }
     if let Some(player) = active.player {
-        commands.entity(player).remove::<TalkHold>().remove::<crate::player_talk::PlayerTurn>();
+        if let Ok(mut entity) = commands.get_entity(player) {
+            entity
+                .remove::<TalkHold>()
+                .remove::<crate::player_talk::PlayerTurn>()
+                .remove::<crate::player_talk::PlayerTalkRotationSnapshot>();
+        }
     }
     for (unit, entity) in active.participants.clone() {
-        // 转体未完：朝向钉到转身终点（相位里的 `to`），律状态 forward
+        // 转体未完：朝向钉到转身终点（补间的 `to`），律状态 forward
         // 同步——下一次转身从当前朝向起算，行走不回跳。
-        let turn_end = npcs.get(entity).ok().and_then(|(phase, _, _, _)| match phase {
-            MotionPhase::Turning { to, .. } => Some(*to),
-            _ => None,
-        });
+        let turn_end = active
+            .turns
+            .iter()
+            .find(|turn| turn.entity == entity)
+            .map(|turn| turn.to);
         if let Some(to) = turn_end {
             let fwd = to * Vec3::Z;
             if let Ok((_, mut walk, _, _)) = npcs.get_mut(entity) {
                 walk.0.forward = [fwd.x, fwd.y, fwd.z];
             }
         }
-        let Ok((mut phase, _, mut driver)) = npcs.get_mut(entity).map(|(p, w, d, _)| (p, w, d))
-        else {
-            continue;
-        };
-        *phase = MotionPhase::Dwelling { remaining: None };
-        driver.alone_holds = false;
-        driver.playing = None;
-        play_idle(&mut driver, players, transitions, unit);
-        commands
-            .entity(entity)
-            .remove::<TalkHold>()
-            .remove::<TalkRuntime>();
-        crate::npc::leave_player_talk(commands, entity);
+        if let Ok((mut phase, _, mut driver)) = npcs.get_mut(entity).map(|(p, w, d, _)| (p, w, d)) {
+            *phase = MotionPhase::Dwelling { remaining: None };
+            driver.alone_holds = false;
+            driver.playing = None;
+            play_idle(&mut driver, players, transitions, unit);
+        }
+        if let Ok(mut entity_commands) = commands.get_entity(entity) {
+            entity_commands.remove::<TalkHold>().remove::<TalkRuntime>();
+            drop(entity_commands);
+            crate::npc::leave_player_talk(commands, entity);
+        }
     }
-    // 窗体撤下（与玩家链同一条路）：层弹出路径无淡出，即时收树
-    // （α 回 1 供下次开场短路）。
-    for root in window_roots {
-        commands.entity(root).despawn();
-    }
-    window.close(TalkSession::Pair(&mut *active));
-    info!("[talkwin] 对话窗体撤下（层弹出：即时，无淡出）");
     // 段收口日志。
     info!(
         "[talk] 段收口：段 id={}（form {}，家具 {}，成员 {:?}）播完——步事件 {}、文本 {}、wait_click 放行 {}（窗体点击闩），用时 {:.1}s；AI Current/Previous保持",
@@ -2193,42 +3008,60 @@ fn finish_talk(
     commands.remove_resource::<ActiveTalk>();
 }
 
+fn close_talk_body(
+    commands: &mut Commands,
+    active: &mut ActiveTalk,
+    window: &mut TalkWindowState,
+    window_roots: &Query<Entity, With<TalkWindowRoot>>,
+) {
+    // Dispose stops the delay loop, retaining future callbacks for the next talk.
+    stop_delay_loops(commands);
+    crate::audio::dispose_talk_voice(commands);
+    for root in window_roots {
+        commands.entity(root).despawn();
+    }
+    window.close(TalkSession::Pair(active));
+    info!("[talkwin] dialogue closed; source activity ending remains owned");
+}
+
 // ---------------------------------------------------------------------------
 // 转身逐帧推进（参演者持留期间，位移推进被跳过）
 // ---------------------------------------------------------------------------
 
-/// Update：参演者的转体逐帧走——位置冻结，朝向按步时长插值（缓动同
-/// 位移转体的补间缺省：先快后慢的二次出线），完成帧相位回驻留并把
-/// 终点朝向回写律状态。只碰持留者（`TalkRuntime` 在身＝对话在播）。
+/// Update：参演者的对话转身逐帧走——位置冻结，朝向按步时长插值（缓动
+/// 取补间库缺省：先快后慢的二次出线），完成帧把终点朝向回写律状态。
+/// 位移相位不动（对话转身没有动作，见 [`TalkTurn`]）。时长
+/// `Approximately` 0 即当帧到位（`LookAt`）。
 pub(crate) fn progress_turns(
     time: Res<Time>,
-    mut npcs: Query<(&mut MotionPhase, &mut WalkState, &mut Transform), With<TalkRuntime>>,
+    active: Option<ResMut<ActiveTalk>>,
+    mut npcs: Query<(&mut WalkState, &mut Transform), With<TalkRuntime>>,
 ) {
+    let Some(mut active) = active else {
+        return;
+    };
     let dt = time.delta_secs();
-    for (mut phase, mut walk, mut transform) in &mut npcs {
-        let MotionPhase::Turning {
-            from,
-            to,
-            duration,
-            elapsed,
-            ..
-        } = &mut *phase
-        else {
-            continue;
+    active.turns.retain_mut(|turn| {
+        let Ok((mut walk, mut transform)) = npcs.get_mut(turn.entity) else {
+            return false;
         };
-        *elapsed += dt;
-        let t = (*elapsed / duration.max(1e-6)).clamp(0.0, 1.0);
-        // 缓动取补间库缺省（位移转体同一条式）。
+        let instant = turn.duration.abs() < f32::EPSILON * 8.0;
+        turn.elapsed += dt;
+        let t = if instant {
+            1.0
+        } else {
+            (turn.elapsed / turn.duration).clamp(0.0, 1.0)
+        };
         let eased = 1.0 - (1.0 - t) * (1.0 - t);
-        transform.rotation = from.slerp(*to, eased);
-        if *elapsed >= *duration {
-            // 完成：朝向钉在终点，律状态 forward 同步。
-            let fwd = *to * Vec3::Z;
+        transform.rotation = turn.from.slerp(turn.to, eased);
+        if instant || turn.elapsed >= turn.duration {
+            let fwd = turn.to * Vec3::Z;
             walk.0.forward = [fwd.x, fwd.y, fwd.z];
-            *phase = MotionPhase::Dwelling { remaining: None };
-            info!("[talk] 转体完成（对话侧）：朝向回写，相位回驻留");
+            info!("[talk] 转身完成（对话侧）：朝向回写");
+            return false;
         }
-    }
+        true
+    });
 }
 
 // ---------------------------------------------------------------------------

@@ -3,17 +3,31 @@
 //! 资产根怎么来——native 的 env、web 的 URL 参数——归入口 crate（moly-app）
 //! 解析；这里只消费解析结果，拒绝全树只在那一处发生。
 
-pub mod sidecar;
-pub mod material_passes;
-pub mod material_textures;
-pub mod scene_state;
-pub mod source_navigation;
-pub mod player_data;
-pub mod ui_layout;
-mod packs;
-mod read_limits;
 #[cfg(target_arch = "wasm32")]
 mod http;
+#[cfg(target_arch = "wasm32")]
+mod http_directory;
+#[cfg(any(target_arch = "wasm32", test))]
+mod http_path;
+pub mod material_passes;
+pub mod source_shader;
+pub mod weather_effect;
+pub mod weather_index;
+pub mod weather_icons;
+pub mod particle_geometry;
+pub mod particle_source;
+pub mod weather_timeline;
+pub mod material_textures;
+mod packs;
+pub mod player_data;
+mod read_limits;
+pub mod remote;
+pub mod residency;
+pub mod scene_state;
+pub mod sidecar;
+pub mod source_navigation;
+pub mod coordinates;
+pub mod ui_layout;
 
 use bevy::app::App;
 use bevy::asset::{io::AssetSourceBuilder, AssetApp, AssetPath};
@@ -33,8 +47,16 @@ pub enum AssetSource {
     /// web：同源绝对路径前缀（保证以 `/` 结尾）——`platform_default`
     /// 在 wasm 上就是按页源取 HTTP 的读取器。
     HttpBase { url: String },
-    NativePacks { path: std::path::PathBuf },
-    HttpPacks { url: String },
+    NativePacks {
+        path: std::path::PathBuf,
+        /// Immutable release catalog SHA-256; None selects the default release.
+        catalog: Option<String>,
+    },
+    HttpPacks {
+        url: String,
+        /// Same store URL across regions, independently pinned release selection.
+        catalog: Option<String>,
+    },
 }
 
 /// 装上 `moly` 资产源并把解析结果挂成资源。
@@ -42,21 +64,55 @@ pub enum AssetSource {
 /// 必须在 `DefaultPlugins` 之前调用：AssetPlugin 构建时固化全部资产源，
 /// 之后注册只打一行 error 并被丢弃。
 pub fn install(app: &mut App, source: AssetSource) {
+    remote::register(app);
     #[cfg(target_arch = "wasm32")]
-    if let AssetSource::HttpPacks { url } = &source {
+    if let AssetSource::HttpBase { url } = &source {
         let root = url.clone();
-        app.register_asset_source(SOURCE, AssetSourceBuilder::new(move || Box::new(packs::PackReader::http(root.clone()))));
+        app.register_asset_source(
+            SOURCE,
+            AssetSourceBuilder::new(move || {
+                Box::new(http_directory::HttpDirectoryReader::new(root.clone()))
+            }),
+        );
+        app.insert_resource(source);
+        return;
+    }
+    #[cfg(target_arch = "wasm32")]
+    if let AssetSource::HttpPacks { url, catalog } = &source {
+        let root = url.clone();
+        let catalog = catalog.clone();
+        app.register_asset_source(
+            SOURCE,
+            AssetSourceBuilder::new(move || {
+                Box::new(packs::PackReader::http(root.clone()).with_catalog(catalog.clone()))
+            }),
+        );
         app.insert_resource(source);
         return;
     }
     let root = match &source {
-        AssetSource::NativeDir { path } | AssetSource::NativePacks { path } => path.to_string_lossy().to_string(),
-        AssetSource::HttpBase { url } | AssetSource::HttpPacks { url } => url.clone(),
+        AssetSource::NativeDir { path } | AssetSource::NativePacks { path, .. } => {
+            path.to_string_lossy().to_string()
+        }
+        AssetSource::HttpBase { url } | AssetSource::HttpPacks { url, .. } => url.clone(),
     };
-    let builder = if matches!(source, AssetSource::NativePacks { .. } | AssetSource::HttpPacks { .. }) {
+    let builder = if matches!(
+        source,
+        AssetSource::NativePacks { .. } | AssetSource::HttpPacks { .. }
+    ) {
         let mut reader = bevy::asset::io::AssetSource::get_default_reader(root);
-        AssetSourceBuilder::new(move || Box::new(packs::PackReader::new(reader())))
-    } else { AssetSourceBuilder::platform_default(&root, None) };
+        let catalog = match &source {
+            AssetSource::NativePacks { catalog, .. } | AssetSource::HttpPacks { catalog, .. } => {
+                catalog.clone()
+            }
+            _ => None,
+        };
+        AssetSourceBuilder::new(move || {
+            Box::new(packs::PackReader::new(reader()).with_catalog(catalog.clone()))
+        })
+    } else {
+        AssetSourceBuilder::platform_default(&root, None)
+    };
     app.register_asset_source(SOURCE, builder);
     app.insert_resource(source);
 }
@@ -90,6 +146,12 @@ pub fn character_manifest() -> AssetPath<'static> {
 /// 角色名册的资产路径；位移段名（待机/走姿）从这里取。
 pub fn character_registry() -> AssetPath<'static> {
     AssetPath::from("moly://characters.json".to_owned())
+}
+
+/// 原生家具详情 `CharacterBandIcon` 使用的 SD icon 图鉴。每个 unit 行
+/// 保留从 CharacterSDIconAtlas 导出的真实 sprite 路径，不使用产品头像替代。
+pub fn character_portraits() -> AssetPath<'static> {
+    AssetPath::from("moly://ui/character-portraits/character-portraits.json".to_owned())
 }
 
 /// 单个角色包的资产路径；文件名来自清单行。
@@ -134,6 +196,13 @@ pub fn birthday_parties() -> AssetPath<'static> {
     AssetPath::from("moly://birthday-parties.json".to_owned())
 }
 
+/// The birthday-party delivery tables (the `birthday-party-delivery`
+/// extraction's output): reward rows, point bonus rows, total reward rows
+/// and the total reward boxes the delivery site reads.
+pub fn birthday_party_delivery() -> AssetPath<'static> {
+    AssetPath::from("moly://birthday-party-delivery.json".to_owned())
+}
+
 /// UI atlas 页纹图的资产路径（`ui` 提取命令的产物）：`textures/` 下的
 /// 整页 PNG，文件名沿用提取产物（含 atlas 名、页号与内容指纹）。
 pub fn ui_atlas_page(file: &str) -> AssetPath<'static> {
@@ -165,6 +234,13 @@ pub fn mysekai_fixtures() -> AssetPath<'static> {
     AssetPath::from("moly://mysekai-fixtures.json".to_owned())
 }
 
+/// 家具详情原生「角色互动」页的数据面：源
+/// `FixtureReactionDataSet.FixturerRactions` 的严格导出，按家具 id 保存
+/// CharacterBand 的角色 unit 组合与源顺序。它不是从对话语料反推的索引。
+pub fn fixture_reactions() -> AssetPath<'static> {
+    AssetPath::from("moly://fixture-reactions.json".to_owned())
+}
+
 /// 已提取的完整设计图、道具与唱片主表；行按各自 id 寻址。
 pub fn mysekai_blueprints() -> AssetPath<'static> {
     AssetPath::from("moly://mysekai-blueprints.json".to_owned())
@@ -176,6 +252,12 @@ pub fn mysekai_items() -> AssetPath<'static> {
 
 pub fn mysekai_music_records() -> AssetPath<'static> {
     AssetPath::from("moly://mysekai-music-records.json".to_owned())
+}
+
+/// The extracted master rank table (`mysekaiRanks`): each row's `id`,
+/// `mysekaiRank` and `totalExp`, keyed by `id`, with the master row order.
+pub fn mysekai_ranks() -> AssetPath<'static> {
+    AssetPath::from("moly://mysekai-ranks.json".to_owned())
 }
 
 /// 家具模型清单的资产路径：包名与 glb 文件名的对应表。

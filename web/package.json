@@ -1,0 +1,19 @@
+{
+  "name": "moly-browser-shell-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test --test-concurrency=1 *.test.mjs",
+    "format": "prettier --write \"*.{mjs,css,html,md,json,ts}\" \"qa/*.mjs\"",
+    "format:check": "prettier --check \"*.{mjs,css,html,md,json,ts}\" \"qa/*.mjs\"",
+    "qa": "node qa/acceptance.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^29.1.1",
+    "playwright": "1.58.2",
+    "prettier": "3.9.6"
+  },
+  "engines": {
+    "node": "^22.13.0 || >=24.0.0"
+  }
+}

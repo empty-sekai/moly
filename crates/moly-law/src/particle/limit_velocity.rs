@@ -4,7 +4,7 @@
 //!
 //! 同一模块两段，按序都跑：
 //!
-//! 1. **钳制段**（门 `dampen > 0`，非数 dampen 跳过）：每帧一次
+//! 1. **钳制段**（门 `dampen > 0`，非数 dampen 跳过）：每条道一次（该道的 dt）
 //!    `k = 1.0 − powf(1.0−dampen, |dt|·30.0)`；每颗粒子
 //!    合速度 = 状态速度 + 叠加速度；`mag2 = x² + (y²+z²)`；
 //!    `newmag = (limit < |mag|) ? |mag| + (limit−|mag|)·k : |mag|`；
@@ -16,9 +16,15 @@
 //!    `newmag = mag − factor`（下钳 0），单位向量除以 mag。
 //!
 //! 具名偏差（逐值比对处报告量级）：
-//! - powf 是库函数（IFUNC，CPU/实现相关），k 的逐位一致按构造不可达；
-//! - 钳制段单位向量引擎走 rsqrtps + 两步牛顿（CPU 相关），此处按
-//!   **精确除法**；拖拽段两处一致走精确除法（转储证实 divps）。
+//! - powf 是库函数（经动态链接器调用），k 取宿主 powf，与设备 libm 的
+//!   逐位一致未证；arm64 构建每条道各调一次（`|dt[道]|·30`），调用方按
+//!   道给 dt；
+//! - 钳制段单位向量已按 arm64 构建逐指令同形：`合速度 · rsqrt(mag2)`，
+//!   rsqrt 为 FRSQRTE 加两步 FRSQRTS（`armf::rsqrt2`，mag2 为 0 时取
+//!   估计值），门 `1e-30 < mag2` 之外取 +0，newmag 乘 (0 < mag) 的
+//!   1.0/0.0。（旧记述「rsqrtps + 两步牛顿，此处精确除法」转录自 x86
+//!   构建，不适用于 arm64。）拖拽段仍按精确除法（arm64 未逐指令读，
+//!   语料拖拽全为 0，拖拽段不跑）。
 //!
 //! 随机数消耗：**每帧 0 次流抽取**——唯一的杂凑（双常数 limit）是
 //! 逐粒子种子的纯函数，终生恒定。
@@ -27,8 +33,10 @@
 //! separateAxis 轴ewise 族 · 幅值通用曲线（模式 1/2 非烘制）· 幅值
 //! 模式 2 烘制 · 拖拽非常数（模式 1/2/3）。
 
+use crate::particle::armf as a;
 use crate::particle::buffer::RingBufferMode;
-use crate::particle::rotation::{hash_mix, normalized_age, BakedCurve};
+use crate::particle::curve::{curve_time_fmax, BakedCurve};
+use crate::particle::rotation::hash_mix;
 use crate::particle::value::MinMaxCurve;
 
 // ---- 杂凑（钳制段双常数） ----
@@ -67,7 +75,10 @@ pub enum MagnitudeLaw {
     Constant(f32),
     /// 模式 3：双常数。逐粒子杂凑一次，lerp 不钳制。
     TwoConstants { min: f32, max: f32 },
-    /// 模式 1 烘制：多项式自带乘子；t = max(agePercent·0.01, 0)。
+    /// Mode 1 with the reader's isOptimizedCurve bit set: ClampVelocityModule
+    /// evaluates the polynomial inline, operation for operation as
+    /// `EvaluateThreaded`'s optimized branch, at `t = fmax(agePercent * 0.01,
+    /// +0)` (a NaN age stays NaN); the coefficients carry the multiplier.
     Baked(BakedCurve),
 }
 
@@ -85,7 +96,7 @@ impl MagnitudeLaw {
             {
                 Some(b) => Ok(MagnitudeLaw::Baked(b)),
                 None => Err(
-                    "limitVelocity.magnitude: 通用曲线模式（非烘制形状）未按原生路径实现，拒绝"
+                    "limitVelocity.magnitude: a curve without the isOptimizedCurve bit takes MagnitudeUpdateTpl, which is not transcribed"
                         .to_string(),
                 ),
             },
@@ -103,7 +114,7 @@ impl MagnitudeLaw {
                 let r = clamp_lerp_hash(seed);
                 (max - min) * r + min
             }
-            MagnitudeLaw::Baked(b) => b.evaluate(normalized_age(age_percent)),
+            MagnitudeLaw::Baked(b) => b.evaluate(curve_time_fmax(age_percent)),
         }
     }
 }
@@ -253,14 +264,14 @@ fn clamp_body(velocity: &mut [f32; 3], anim: [f32; 3], limit: f32, k: f32) {
     } else {
         mag
     };
-    // 单位向量：引擎走 rsqrtps+两步牛顿（CPU 相关），此处精确除法
-    // （具名偏差）。门 1e-30 对 mag2。
-    let unit = if f32::from_bits(0x0da2_4260) < mag2 {
-        [total[0] / mag, total[1] / mag, total[2] / mag]
-    } else {
-        [0.0, 0.0, 0.0]
-    };
-    let newmag = if mag_positive { newmag } else { 0.0 };
+    // The unit vector as the arm64 build computes it: tot * FRSQRTE with two
+    // FRSQRTS refinements of mag2 (the estimate where mag2 is zero), masked
+    // to +0 unless 1e-30 < mag2; newmag is multiplied by the (0 < mag) mask
+    // as 1.0 or 0.0, then each axis is unit * newmag - animated.
+    let r = a::rsqrt2(mag2);
+    let keep = f32::from_bits(0x0da2_4260) < mag2;
+    let unit = total.map(|v| if keep { v * r } else { 0.0 });
+    let newmag = newmag * if mag_positive { 1.0 } else { 0.0 };
     velocity[0] = unit[0] * newmag - anim[0];
     velocity[1] = unit[1] * newmag - anim[1];
     velocity[2] = unit[2] * newmag - anim[2];
@@ -345,4 +356,93 @@ pub fn advance_age_percent(
     };
     new = new.min(cap);
     *age_percent = if 100.0 < old { old } else { new };
+}
+
+#[cfg(test)]
+mod native_magnitude_tests {
+    use super::*;
+    use crate::particle::json::{parse, Value};
+
+    fn word(v: &Value) -> u32 { v.as_f64().unwrap() as u32 }
+
+    /// Deliberate misreadings of the clamp section, for the mutant arms.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Mutant { None, NoHashOffset, LerpFromMax, AgeUnscaled, DtUnscaled, AnimatedIgnored }
+
+    fn mutant_step(law: &LimitVelocity, v: &mut [f32; 3], anim: [f32; 3], seed: u32, age: f32, dt: f32, m: Mutant) {
+        let k = if m == Mutant::DtUnscaled { 1.0 - (1.0 - law.dampen).powf(dt.abs()) } else { clamp_k(law.dampen, dt) };
+        let limit = match &law.magnitude {
+            MagnitudeLaw::TwoConstants { min, max } => {
+                let r = if m == Mutant::NoHashOffset {
+                    hash_mix(seed, seed.wrapping_mul(HASH_M).wrapping_add(HASH_C_CONST))
+                } else {
+                    clamp_lerp_hash(seed)
+                };
+                if m == Mutant::LerpFromMax { (min - max) * r + max } else { (max - min) * r + min }
+            }
+            MagnitudeLaw::Baked(b) if m == Mutant::AgeUnscaled => b.evaluate(if age > 0.0 { age } else { 0.0 }),
+            other => other.limit(seed, age),
+        };
+        if m == Mutant::AnimatedIgnored { clamp_body(v, [0.0; 3], limit, k) } else { clamp_body(v, anim, limit, k) }
+    }
+
+    // Native ClampVelocityModule rows on the two-constant and optimized-curve
+    // magnitude paths (drag 0, as every data row), at dt lanes whose powf
+    // exponent is 0, 1 or 2. Each admitted row must match bit for bit (a NaN
+    // matches a NaN); every mutant arm must turn rows red.
+    #[test]
+    #[ignore = "MOLY_CLAMP_MAGNITUDE_NATIVE must identify the native clamp-velocity magnitude rows"]
+    fn clamp_magnitude_paths_match_native() {
+        let path = std::env::var_os("MOLY_CLAMP_MAGNITUDE_NATIVE").expect("MOLY_CLAMP_MAGNITUDE_NATIVE");
+        let receipt = parse(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(receipt.get("summary").unwrap().get("sourceSha256").unwrap().as_str(),
+            Some("937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9"));
+        let arms = [Mutant::NoHashOffset, Mutant::LerpFromMax, Mutant::AgeUnscaled, Mutant::DtUnscaled, Mutant::AnimatedIgnored];
+        let mut red = vec![0usize; arms.len()];
+        let (mut cases, mut refused, mut rows, mut two, mut baked) = (0, 0, 0, 0, 0);
+        let size = DragSize { components: [1.0; 3], size3d: false };
+        for case in receipt.get("cases").unwrap().as_array().unwrap() {
+            cases += 1;
+            let magnitude = crate::particle::schema::min_max_curve(case.get("magnitude"), "magnitude").unwrap();
+            let dampen = case.get("dampen").unwrap().as_f64().unwrap() as f32;
+            let optimized = case.get("optimized").unwrap().as_bool().unwrap();
+            let law = match LimitVelocity::from_parts(false, &magnitude, dampen, Some(&MinMaxCurve::Constant(0.0)),
+                Some(true), Some(true)) {
+                Ok(law) => law,
+                Err(reason) => {
+                    assert!(!optimized, "case {cases}: an optimized magnitude refused: {reason}");
+                    refused += 1;
+                    continue;
+                }
+            };
+            assert!(optimized, "case {cases}: the law admitted a magnitude the reader leaves unoptimized");
+            match law.magnitude { MagnitudeLaw::TwoConstants { .. } => two += 1, MagnitudeLaw::Baked(_) => baked += 1, _ => {} }
+            for row in case.get("rows").unwrap().as_array().unwrap() {
+                let r: Vec<u32> = row.as_array().unwrap().iter().map(word).collect();
+                let (seed, age, dt) = (r[0], f32::from_bits(r[1]), f32::from_bits(r[2]));
+                let start = [f32::from_bits(r[3]), f32::from_bits(r[4]), f32::from_bits(r[5])];
+                let anim = [f32::from_bits(r[6]), f32::from_bits(r[7]), f32::from_bits(r[8])];
+                let native = [r[9], r[10], r[11]];
+                let same = |v: [f32; 3]| v.iter().zip(native).all(|(a, n)| (a.is_nan() && f32::from_bits(n).is_nan()) || a.to_bits() == n);
+                let mut v = start;
+                law.step(&mut v, anim, seed, age, dt, size).unwrap();
+                assert!(same(v), "case {cases} seed {seed:#x} age {:#x} dt {:#x}: {:?} vs native {:?}",
+                    r[1], r[2], v.map(f32::to_bits), native);
+                let mut m = start;
+                mutant_step(&law, &mut m, anim, seed, age, dt, Mutant::None);
+                assert!(same(m));
+                for (arm, count) in arms.iter().zip(red.iter_mut()) {
+                    let mut m = start;
+                    mutant_step(&law, &mut m, anim, seed, age, dt, *arm);
+                    *count += usize::from(!same(m));
+                }
+                rows += 1;
+            }
+        }
+        let tally: Vec<String> = arms.iter().zip(&red).map(|(a, n)| format!("{a:?} {n}")).collect();
+        println!("clamp magnitude: cases {cases}, refused {refused}, two constants {two}, baked {baked}, rows {rows}, mismatches 0; mutants red: {}",
+            tally.join(", "));
+        assert!(two > 0 && baked > 0);
+        assert!(red.iter().all(|n| *n > 0), "a mutant arm stayed green: {tally:?}");
+    }
 }

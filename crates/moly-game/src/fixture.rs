@@ -19,16 +19,18 @@
 //! Center.Y · LayoutType 位 · Direction），值是我方选择、逐条具名——
 //! 与巡逻环替身同一裁决形态。位置不写死，全部经律现算。
 
-#[path = "fixture_gallery.rs"]
-mod gallery;
-#[path = "fixture_compact.rs"]
-mod compact;
-#[path = "fixture_layouts.rs"]
-pub(crate) mod layouts;
 #[path = "fence.rs"]
 mod fence;
+#[path = "fixture_gallery.rs"]
+mod gallery;
+#[path = "fixture_region.rs"]
+pub(crate) mod region;
+#[path = "fixture_layouts.rs"]
+pub(crate) mod layouts;
 #[path = "road.rs"]
 pub(crate) mod road;
+
+use std::collections::HashMap;
 
 use bevy::asset::{LoadState, RecursiveDependencyLoadState};
 use bevy::ecs::observer::On;
@@ -53,23 +55,38 @@ use moly_law::fixture::{Direction, GridPosition};
 /// 家具动作点链的两条锚定臂（入座臂与「挂点条目缺」的环带反例臂，
 /// 见各自的行注释）。余下 21 条铺自发光族的可见面（材质参数
 /// `_BrightPhenomenaEmission` > 0 的 21 包全取，选位理由见该节注释）。
+///
+/// Region: these are the authored rows. On a snapshot whose fixture master
+/// lacks one of their pieces (a JP snapshot lacks the CN star rug and tea
+/// stand and the TW table and planter), the row takes a stand-in chosen from
+/// that master at load by the rule of [`region`]; the traits it matches are in
+/// [`AUTHORED_TRAITS`].
 const PLACEMENTS: [PlacementMock; 38] = [
     // Rug coverage: a rectangular picnic sheet under the birthday chair,
     // and an alpha-clipped star beside the player, in the initial camera.
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_env0001_rug_picnicsheet1",
         min: GridPosition { x: -22, y: 0, z: 3 },
         max: GridPosition { x: -17, y: 0, z: 8 },
-        center_y: 0, layout: layout_type::RUG, direction: Direction::Front, fixture_id: 0,
+        center_y: 0,
+        layout: layout_type::RUG,
+        direction: Direction::Front,
+        fixture_id: 0,
     },
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_cncollect_rug_star3",
         min: GridPosition { x: -12, y: 0, z: 9 },
         max: GridPosition { x: -9, y: 0, z: 12 },
-        center_y: 0, layout: layout_type::RUG, direction: Direction::Front, fixture_id: 0,
+        center_y: 0,
+        layout: layout_type::RUG,
+        direction: Direction::Front,
+        fixture_id: 0,
     },
     // 生日椅：不透明、无 clip 的基形。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_bir1103_fixture_chair1",
         min: GridPosition { x: -20, y: 0, z: 6 },
         max: GridPosition { x: -19, y: 0, z: 6 },
@@ -79,7 +96,8 @@ const PLACEMENTS: [PlacementMock; 38] = [
         fixture_id: 0,
     },
     // 生日蛋糕：clip 变体；同包还有一条粒子族材质（范围外保留桶）。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_bir1103_fixture_cake1",
         min: GridPosition { x: -13, y: 0, z: 0 },
         max: GridPosition { x: -12, y: 0, z: 0 },
@@ -89,7 +107,8 @@ const PLACEMENTS: [PlacementMock; 38] = [
         fixture_id: 0,
     },
     // 生日气球：基形。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_bir1103_fixture_balloon1",
         min: GridPosition { x: 1, y: 0, z: -31 },
         max: GridPosition { x: 1, y: 0, z: -31 },
@@ -99,7 +118,8 @@ const PLACEMENTS: [PlacementMock; 38] = [
         fixture_id: 0,
     },
     // 生日花饰：基形。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_bir1103_fixture_flower1",
         min: GridPosition { x: 3, y: 0, z: -31 },
         max: GridPosition { x: 3, y: 0, z: -31 },
@@ -110,7 +130,8 @@ const PLACEMENTS: [PlacementMock; 38] = [
     },
     // 墙架：墙布局（前墙，法线 (0,0,1)，z −= 0.125），Center.Y=6
     // （世界 y=1.5，墙面高度）。墙布局的 ShadowCaster 标记面挂在这条。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_con0004_fixture_wallshelf1",
         min: GridPosition { x: 0, y: 6, z: -34 },
         max: GridPosition { x: 0, y: 6, z: -34 },
@@ -122,7 +143,8 @@ const PLACEMENTS: [PlacementMock; 38] = [
     // 窗：墙布局（后墙，法线 (0,0,−1)，z += 0.125），Center.Y=8（世界
     // y=2.0）。窗外观材质是二维选择表 usage=1 的两格（26/27），同包
     // 还有 Object 族模板材质（范围外保留桶）。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_env0002_window_window1",
         min: GridPosition { x: 4, y: 8, z: -36 },
         max: GridPosition { x: 4, y: 8, z: -36 },
@@ -134,7 +156,8 @@ const PLACEMENTS: [PlacementMock; 38] = [
     // 屏风（对话锚定，fixtureId 455）：单人/两人对话剧本的锚点。格
     // 足迹 4 宽 × 2 深（motionArea 同形），落在广场中部——名册三名
     // 成员的巡区最近路点都在配对半径内（世界位 (0.75, 0, −7.375)）。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_env0002_fixture_byoubu1",
         min: GridPosition { x: 1, y: 0, z: -30 },
         max: GridPosition { x: 4, y: 0, z: -29 },
@@ -145,10 +168,19 @@ const PLACEMENTS: [PlacementMock; 38] = [
     },
     // 沙发（对话锚定，fixtureId 695）：三人目两人剧本的锚点，与屏风
     // 对称放在广场另一侧（世界位 (−0.5, 0, −7.375)）。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_ext0019_fixture_sofa1",
-        min: GridPosition { x: -4, y: 0, z: -30 },
-        max: GridPosition { x: -1, y: 0, z: -29 },
+        min: GridPosition {
+            x: -4,
+            y: 0,
+            z: -30,
+        },
+        max: GridPosition {
+            x: -1,
+            y: 0,
+            z: -29,
+        },
         center_y: 0,
         layout: layout_type::FLOOR,
         direction: Direction::Front,
@@ -164,10 +196,19 @@ const PLACEMENTS: [PlacementMock; 38] = [
     // 恒落两人档，蛋锚定的单人段（语料里该族全部单人）永远中不了签。
     // 摆在簇半径之外（4.1m）让「近蛋」成为独占状态：unit1 每圈路过东
     // 角，期间池里没有两人档段，单人段进得去也抽得出。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_clb1102_fixture_egg1",
-        min: GridPosition { x: 19, y: 0, z: -31 },
-        max: GridPosition { x: 19, y: 0, z: -31 },
+        min: GridPosition {
+            x: 19,
+            y: 0,
+            z: -31,
+        },
+        max: GridPosition {
+            x: 19,
+            y: 0,
+            z: -31,
+        },
         center_y: 0,
         layout: layout_type::FLOOR,
         direction: Direction::Front,
@@ -180,7 +221,8 @@ const PLACEMENTS: [PlacementMock; 38] = [
     // （3.3m）之外 ⇒ 走到北腿期间池里只有蛋锚定的单人段，单人段抽得出。
     // unit1 的环西北角 (1, −6) 也会进蛋 2 半径（2.7m）——那是附带的
     // 现场族，不破坏独占带。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_clb1102_fixture_egg2",
         min: GridPosition { x: 1, y: 0, z: -14 },
         max: GridPosition { x: 1, y: 0, z: -14 },
@@ -195,10 +237,19 @@ const PLACEMENTS: [PlacementMock; 38] = [
     // 南段。蛋 4（840）不放：三个角位里剩下的一族离 455/695 簇都在
     // 半径内（3.4m 边缘以内），摆不出独占带；语料族在，后续换巡逻域
     // 布局即可达。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_clb1102_fixture_egg3",
-        min: GridPosition { x: -14, y: 0, z: -43 },
-        max: GridPosition { x: -14, y: 0, z: -43 },
+        min: GridPosition {
+            x: -14,
+            y: 0,
+            z: -43,
+        },
+        max: GridPosition {
+            x: -14,
+            y: 0,
+            z: -43,
+        },
         center_y: 0,
         layout: layout_type::FLOOR,
         direction: Direction::Front,
@@ -213,7 +264,8 @@ const PLACEMENTS: [PlacementMock; 38] = [
     // 与出生清空带只读非 0 行 ⇒ 这批对对话域零扰动；个别件落在蛋锚
     // 的配对半径（3.3m）内也只改光照面，不进配对池。
     // 立灯与椅、蛋糕共同置于近景。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_ext0001_fixture_lamp1",
         min: GridPosition { x: -19, y: 0, z: 0 },
         max: GridPosition { x: -19, y: 0, z: 0 },
@@ -224,7 +276,8 @@ const PLACEMENTS: [PlacementMock; 38] = [
     },
     // 路灯（ext0009）：0.89m 立灯，屏风东北侧（世界位
     // (1.625, 0, −7.375)）。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_ext0009_fixture_lamp1",
         min: GridPosition { x: 6, y: 0, z: -30 },
         max: GridPosition { x: 6, y: 0, z: -30 },
@@ -234,20 +287,38 @@ const PLACEMENTS: [PlacementMock; 38] = [
         fixture_id: 0,
     },
     // 路灯（ext0010）：广场西北（世界位 (−2.125, 0, −8.375)）。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_ext0010_fixture_lamp1",
-        min: GridPosition { x: -9, y: 0, z: -34 },
-        max: GridPosition { x: -9, y: 0, z: -34 },
+        min: GridPosition {
+            x: -9,
+            y: 0,
+            z: -34,
+        },
+        max: GridPosition {
+            x: -9,
+            y: 0,
+            z: -34,
+        },
         center_y: 0,
         layout: layout_type::FLOOR,
         direction: Direction::Front,
         fixture_id: 0,
     },
     // 路灯（ext0008）：广场西南（世界位 (−2.125, 0, −6.875)）。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_ext0008_fixture_lamp1",
-        min: GridPosition { x: -9, y: 0, z: -28 },
-        max: GridPosition { x: -9, y: 0, z: -28 },
+        min: GridPosition {
+            x: -9,
+            y: 0,
+            z: -28,
+        },
+        max: GridPosition {
+            x: -9,
+            y: 0,
+            z: -28,
+        },
         center_y: 0,
         layout: layout_type::FLOOR,
         direction: Direction::Front,
@@ -255,7 +326,8 @@ const PLACEMENTS: [PlacementMock; 38] = [
     },
     // 路灯（ext0019）：细杆形（杆身 0.03m 见方），广场东北（世界位
     // (2.375, 0, −8.375)）。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_ext0019_fixture_lamp1",
         min: GridPosition { x: 9, y: 0, z: -34 },
         max: GridPosition { x: 9, y: 0, z: -34 },
@@ -266,17 +338,27 @@ const PLACEMENTS: [PlacementMock; 38] = [
     },
     // 灯（env0002）：立灯，广场中部（世界位 (−0.375, 0, −8.125)）。
     // 同包的 motionArea 是普查里唯一非空的一条（6×3 里 4 格真）。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_env0002_fixture_lamp1",
-        min: GridPosition { x: -2, y: 0, z: -33 },
-        max: GridPosition { x: -2, y: 0, z: -33 },
+        min: GridPosition {
+            x: -2,
+            y: 0,
+            z: -33,
+        },
+        max: GridPosition {
+            x: -2,
+            y: 0,
+            z: -33,
+        },
         center_y: 0,
         layout: layout_type::FLOOR,
         direction: Direction::Front,
         fixture_id: 0,
     },
     // 灯（env0012）：立灯，广场东南（世界位 (2.375, 0, −6.625)）。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_env0012_fixture_lamp1",
         min: GridPosition { x: 9, y: 0, z: -27 },
         max: GridPosition { x: 9, y: 0, z: -27 },
@@ -288,10 +370,19 @@ const PLACEMENTS: [PlacementMock; 38] = [
     // 台灯（mis0001）：mis 族六件同尺寸（实测包围盒 0.209×0.305×0.209m、
     // motionArea 空 ⇒ 足迹退化单格）之一，广场中部（世界位
     // (−0.375, 0, −7.625)）。同族余五件见下，铺桌群一侧。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_mis0001_fixture_lamp1",
-        min: GridPosition { x: -2, y: 0, z: -31 },
-        max: GridPosition { x: -2, y: 0, z: -31 },
+        min: GridPosition {
+            x: -2,
+            y: 0,
+            z: -31,
+        },
+        max: GridPosition {
+            x: -2,
+            y: 0,
+            z: -31,
+        },
         center_y: 0,
         layout: layout_type::FLOOR,
         direction: Direction::Front,
@@ -299,10 +390,19 @@ const PLACEMENTS: [PlacementMock; 38] = [
     },
     // 台灯（mis0002）：mis 族第二员，桌（西）与桌面电脑（东）之间的
     // 中缝南位（世界位 (3.125, 0, −8.125)）。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_mis0002_fixture_lamp1",
-        min: GridPosition { x: 12, y: 0, z: -33 },
-        max: GridPosition { x: 12, y: 0, z: -33 },
+        min: GridPosition {
+            x: 12,
+            y: 0,
+            z: -33,
+        },
+        max: GridPosition {
+            x: 12,
+            y: 0,
+            z: -33,
+        },
         center_y: 0,
         layout: layout_type::FLOOR,
         direction: Direction::Front,
@@ -310,20 +410,38 @@ const PLACEMENTS: [PlacementMock; 38] = [
     },
     // 台灯（mis0003）：中缝北位，与 mis0002 同列（世界位
     // (3.125, 0, −8.375)）。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_mis0003_fixture_lamp1",
-        min: GridPosition { x: 12, y: 0, z: -34 },
-        max: GridPosition { x: 12, y: 0, z: -34 },
+        min: GridPosition {
+            x: 12,
+            y: 0,
+            z: -34,
+        },
+        max: GridPosition {
+            x: 12,
+            y: 0,
+            z: -34,
+        },
         center_y: 0,
         layout: layout_type::FLOOR,
         direction: Direction::Front,
         fixture_id: 0,
     },
     // 台灯（mis0004）：笔记本电脑东侧（世界位 (3.625, 0, −7.875)）。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_mis0004_fixture_lamp1",
-        min: GridPosition { x: 14, y: 0, z: -32 },
-        max: GridPosition { x: 14, y: 0, z: -32 },
+        min: GridPosition {
+            x: 14,
+            y: 0,
+            z: -32,
+        },
+        max: GridPosition {
+            x: 14,
+            y: 0,
+            z: -32,
+        },
         center_y: 0,
         layout: layout_type::FLOOR,
         direction: Direction::Front,
@@ -331,10 +449,19 @@ const PLACEMENTS: [PlacementMock; 38] = [
     },
     // 台灯（mis0005）：桌面电脑东端、桌群北缘（世界位
     // (3.875, 0, −8.375)）。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_mis0005_fixture_lamp1",
-        min: GridPosition { x: 15, y: 0, z: -34 },
-        max: GridPosition { x: 15, y: 0, z: -34 },
+        min: GridPosition {
+            x: 15,
+            y: 0,
+            z: -34,
+        },
+        max: GridPosition {
+            x: 15,
+            y: 0,
+            z: -34,
+        },
         center_y: 0,
         layout: layout_type::FLOOR,
         direction: Direction::Front,
@@ -343,10 +470,19 @@ const PLACEMENTS: [PlacementMock; 38] = [
     // 台灯（mis0006）：桌群东南角（世界位 (3.875, 0, −7.875)）。与
     // mis0001 的包围盒逐轴相同、两 mesh 之一字节全同，另一 mesh 顶点
     // 数据不同——同形族里的近亲件，不是同一模型。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_mis0006_fixture_lamp1",
-        min: GridPosition { x: 15, y: 0, z: -32 },
-        max: GridPosition { x: 15, y: 0, z: -32 },
+        min: GridPosition {
+            x: 15,
+            y: 0,
+            z: -32,
+        },
+        max: GridPosition {
+            x: 15,
+            y: 0,
+            z: -32,
+        },
         center_y: 0,
         layout: layout_type::FLOOR,
         direction: Direction::Front,
@@ -355,7 +491,8 @@ const PLACEMENTS: [PlacementMock; 38] = [
     // 壁灯（env0004）：墙布局（前墙，法线 (0,0,1)，z −= 0.125），
     // Center.Y=6（世界 y=1.5）。扁平壁灯壳（0.33×0.38×0.15m），与
     // 墙架同一面墙线（世界位 (0.625, 1.5, −8.5)）。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_env0004_fixture_lamp1",
         min: GridPosition { x: 2, y: 6, z: -34 },
         max: GridPosition { x: 2, y: 6, z: -34 },
@@ -366,7 +503,8 @@ const PLACEMENTS: [PlacementMock; 38] = [
     },
     // 地灯（non9001）：2cm 薄圆盘，贴地单格（世界位
     // (0.125, 0, −6.625)）。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_non9001_fixture_groundlight1",
         min: GridPosition { x: 0, y: 0, z: -27 },
         max: GridPosition { x: 0, y: 0, z: -27 },
@@ -376,7 +514,8 @@ const PLACEMENTS: [PlacementMock; 38] = [
         fixture_id: 0,
     },
     // 桌（twcollect）：1.02m 高，2×2 足迹。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_twcollect_fixture_table1",
         min: GridPosition { x: -6, y: 0, z: 5 },
         max: GridPosition { x: -5, y: 0, z: 6 },
@@ -387,17 +526,27 @@ const PLACEMENTS: [PlacementMock; 38] = [
     },
     // 桌面电脑（non0005）：2×1 足迹，桌东北侧（世界位
     // (3.5, 0, −8.375)）。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_non0005_system_desktop1",
-        min: GridPosition { x: 13, y: 0, z: -34 },
-        max: GridPosition { x: 14, y: 0, z: -34 },
+        min: GridPosition {
+            x: 13,
+            y: 0,
+            z: -34,
+        },
+        max: GridPosition {
+            x: 14,
+            y: 0,
+            z: -34,
+        },
         center_y: 0,
         layout: layout_type::FLOOR,
         direction: Direction::Front,
         fixture_id: 0,
     },
     // 笔记本电脑（non0005）：单格，放在近景桌面高度。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_non0005_system_laptop1",
         min: GridPosition { x: -5, y: 4, z: 5 },
         max: GridPosition { x: -5, y: 4, z: 5 },
@@ -408,7 +557,8 @@ const PLACEMENTS: [PlacementMock; 38] = [
     },
     // 盆栽（twcollect）：0.85×0.72m，带水面材质，3×3 足迹（世界位
     // (1.625, 0, −6.625)）。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_twcollect_fixture_planter1",
         min: GridPosition { x: 5, y: 0, z: -28 },
         max: GridPosition { x: 7, y: 0, z: -26 },
@@ -419,20 +569,38 @@ const PLACEMENTS: [PlacementMock; 38] = [
     },
     // 茶摊（cncollect）：带 On/Off 动画的立件，2×1 足迹（世界位
     // (−0.75, 0, −8.125)）。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_cncollect_fixture_tea3",
-        min: GridPosition { x: -4, y: 0, z: -33 },
-        max: GridPosition { x: -3, y: 0, z: -33 },
+        min: GridPosition {
+            x: -4,
+            y: 0,
+            z: -33,
+        },
+        max: GridPosition {
+            x: -3,
+            y: 0,
+            z: -33,
+        },
         center_y: 0,
         layout: layout_type::FLOOR,
         direction: Direction::Front,
         fixture_id: 0,
     },
     // 珊瑚（con0002）：2×2 足迹，广场西侧（世界位 (−2.0, 0, −7.5)）。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_con0002_fixture_coral1",
-        min: GridPosition { x: -9, y: 0, z: -31 },
-        max: GridPosition { x: -8, y: 0, z: -30 },
+        min: GridPosition {
+            x: -9,
+            y: 0,
+            z: -31,
+        },
+        max: GridPosition {
+            x: -8,
+            y: 0,
+            z: -30,
+        },
         center_y: 0,
         layout: layout_type::FLOOR,
         direction: Direction::Front,
@@ -447,10 +615,19 @@ const PLACEMENTS: [PlacementMock; 38] = [
     // 盘外、丢掉第一圈过境，见 `npc.rs` 的 `tour_seed`）。
     // 锚定序号进对话抽签种子（`talk.rs` 的 `seed_for` 按锚序给成员
     // 号移位），重排本表条目会换掉抽签序列——追加在尾，别插队。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_chr0004_fixture_nenerobo1",
-        min: GridPosition { x: -46, y: 0, z: -17 },
-        max: GridPosition { x: -37, y: 0, z: -13 },
+        min: GridPosition {
+            x: -46,
+            y: 0,
+            z: -17,
+        },
+        max: GridPosition {
+            x: -37,
+            y: 0,
+            z: -13,
+        },
         center_y: 0,
         layout: layout_type::FLOOR,
         direction: Direction::Front,
@@ -462,7 +639,8 @@ const PLACEMENTS: [PlacementMock; 38] = [
     // 同蛋 1–3。蛋 3 注里「蛋 4 不放」是三员巡逻代的取位结论（角位
     // 离广场簇摆不出独占带）；31 员巡游环下该族的 30 段单员对话靠
     // 整环逐圈过境进池，不依赖独占带。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_clb1102_fixture_egg4",
         min: GridPosition { x: 41, y: 0, z: 0 },
         max: GridPosition { x: 41, y: 0, z: 0 },
@@ -479,10 +657,19 @@ const PLACEMENTS: [PlacementMock; 38] = [
     // 站定报出——冒烟照实抓到后迁到这里）。与全部既有摆放不重叠（最近
     // 的蛋 1 在 (19,-31)，距 15 格）。追加在尾：锚定序号进对话抽签种子，
     // 重排本表条目会换掉抽签序列。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_mis0001_fixture_chair1",
-        min: GridPosition { x: 33, y: 0, z: -25 },
-        max: GridPosition { x: 34, y: 0, z: -24 },
+        min: GridPosition {
+            x: 33,
+            y: 0,
+            z: -25,
+        },
+        max: GridPosition {
+            x: 34,
+            y: 0,
+            z: -24,
+        },
         center_y: 0,
         layout: layout_type::FLOOR,
         direction: Direction::Front,
@@ -493,10 +680,19 @@ const PLACEMENTS: [PlacementMock; 38] = [
     // 里），动作点解算按「挂点条目缺」回落环带并照实报。它是 1×1 格
     // 件，与椅隔一格摆在 (31, -24)，同在可行走面上（环带八格全中；
     // 对话道的座 13 挂点面门也过——unit 12 抽中它时走正臂）。
-    PlacementMock { texture_id: 1,
+    PlacementMock {
+        texture_id: 1,
         package: "mysekai__fixture__mdl_ext0008_fixture_gameconsole1",
-        min: GridPosition { x: 31, y: 0, z: -24 },
-        max: GridPosition { x: 31, y: 0, z: -24 },
+        min: GridPosition {
+            x: 31,
+            y: 0,
+            z: -24,
+        },
+        max: GridPosition {
+            x: 31,
+            y: 0,
+            z: -24,
+        },
         center_y: 0,
         layout: layout_type::FLOOR,
         direction: Direction::Front,
@@ -504,8 +700,173 @@ const PLACEMENTS: [PlacementMock; 38] = [
     },
 ];
 
+/// The master traits of the authored full-showcase pieces that some region's
+/// fixture master lacks, for the stand-in rule of [`region`]: grid size
+/// (width, depth, height), layout type, put type, fixture type, handle type,
+/// player action type. The CN pieces are the CN master's rows (ids 90005 and
+/// 90008). The TW pieces are the TW master's rows as recorded when the
+/// showcase was authored (ids 9000003 and 9000004); their fixture type is
+/// recorded as normal.
+const AUTHORED_TRAITS: [(&str, [i32; 3], [&str; 5]); 4] = [
+    (
+        "mysekai__fixture__mdl_cncollect_rug_star3",
+        [8, 8, 1],
+        ["rug", "none", "normal", "none", "no_action"],
+    ),
+    (
+        "mysekai__fixture__mdl_twcollect_fixture_table1",
+        [2, 2, 4],
+        ["floor", "none", "normal", "none", "no_action"],
+    ),
+    (
+        "mysekai__fixture__mdl_twcollect_fixture_planter1",
+        [4, 4, 2],
+        ["floor", "none", "normal", "none", "no_action"],
+    ),
+    (
+        "mysekai__fixture__mdl_cncollect_fixture_tea3",
+        [2, 2, 3],
+        ["floor", "none", "normal", "light", "loop"],
+    ),
+];
+
+/// The authored traits of a full-showcase row's piece, when recorded.
+fn authored_traits(package: &str) -> Option<region::PieceTraits> {
+    AUTHORED_TRAITS
+        .iter()
+        .find(|(name, _, _)| *name == package)
+        .map(|(_, grid, [layout, put, kind, handle, action])| region::PieceTraits {
+            grid: *grid,
+            layout_type: (*layout).to_owned(),
+            put_type: (*put).to_owned(),
+            fixture_type: (*kind).to_owned(),
+            handle_type: (*handle).to_owned(),
+            player_action_type: (*action).to_owned(),
+        })
+}
+
+/// The full offline HOME showcase rows for the loaded snapshot: the authored
+/// rows, each resolved against the snapshot's own fixture master (see
+/// [`region`]). A package still missing from the index is refused by the
+/// loader, never filtered out. (The compact starter is the server panel's
+/// housing layout.)
+fn full_starter_rows(
+    source_region: moly_law::carve::NavMeshRegion,
+) -> Result<Vec<PlacementMock<String>>, String> {
+    let rows = PLACEMENTS
+        .iter()
+        .map(|row| (row.into_owned(), authored_traits(row.package)))
+        .collect();
+    region::resolve_rows(rows, source_region)
+}
+
+/// The home site always has the player's house (a system fixture the
+/// server always includes). A home site layout, starter or saved, whose rows
+/// hold no home package gets the entry's named mock house row
+/// ([`crate::entry::house`]) appended with its own UID. Its footprint must
+/// not overlap any ground row of the layout; an overlap (or a UID already in
+/// use) refuses the house with an error naming both, and never moves the
+/// user's fixture: the entry then takes the source's no-house branch.
+/// `log` is false for the edit baseline, which repeats the completion to
+/// compare the loaded layout with the saved record.
+fn complete_home_site(
+    layout: &mut FixturePlacements,
+    homes: &crate::entry::house::HomeFixtures,
+    origin: &str,
+    log: bool,
+) -> Result<(), String> {
+    for (row, uid) in layout.rows.iter().zip(&layout.instance_uids) {
+        if homes.is_home(&row.package)? {
+            if log {
+                info!(
+                    "[entry] home site {origin} layout already has the player's house: {} ({uid})",
+                    row.package
+                );
+            }
+            return Ok(());
+        }
+    }
+    let house = &crate::entry::house::STARTER_HOUSE;
+    let row = PlacementMock {
+        package: house.package,
+        texture_id: house.texture_id,
+        min: house.min,
+        max: house.max,
+        center_y: 0,
+        layout: layout_type::FLOOR,
+        direction: house.direction,
+        fixture_id: house.fixture_id,
+    };
+    let uid = crate::entry::house::mock_house_uid(layout.site_id);
+    let placed = row.placed();
+    let overlapping: Vec<String> = layout
+        .rows
+        .iter()
+        .zip(&layout.instance_uids)
+        .filter(|(other, _)| other.layout & WALL_LAYOUT_MASK == 0)
+        .filter(|(other, _)| {
+            let other = other.placed();
+            other.min.x <= placed.max.x
+                && other.max.x >= placed.min.x
+                && other.min.z <= placed.max.z
+                && other.max.z >= placed.min.z
+        })
+        .map(|(other, uid)| format!("{} ({uid})", other.package))
+        .collect();
+    if !overlapping.is_empty() || layout.instance_uids.contains(&uid) {
+        if log {
+            error!(
+                "[entry] home site {origin} layout has no house and the player's house mock {} ({uid}) was not placed: {}",
+                house.package,
+                if overlapping.is_empty() {
+                    format!("the UID {uid} is already in use")
+                } else {
+                    format!(
+                        "its footprint ({},{})..({},{}) overlaps {}; the user's fixtures are not moved",
+                        placed.min.x,
+                        placed.min.z,
+                        placed.max.x,
+                        placed.max.z,
+                        overlapping.join(", ")
+                    )
+                }
+            );
+        }
+        return Ok(());
+    }
+    if log {
+        info!(
+            "[entry] home site {origin} layout has no house: appended the player's house (named server-decided mock) {} master {} as {uid}, footprint ({},{})..({},{}) direction {:?} at ({:.3}, {:.3}, {:.3}); overlaps 0 of {} rows",
+            house.package,
+            house.fixture_id,
+            placed.min.x,
+            placed.min.z,
+            placed.max.x,
+            placed.max.z,
+            house.direction,
+            placed.position[0],
+            placed.position[1],
+            placed.position[2],
+            layout.rows.len()
+        );
+    }
+    layout.rows.push(row.into_owned());
+    layout.instance_uids.push(uid);
+    Ok(())
+}
+
+/// Every committed placement root has had its activity identity and its
+/// source view resolution attempted; the entry looks for the house after.
+pub(crate) fn placements_resolved(world: &mut World) -> bool {
+    let mut roots = world.query_filtered::<
+        (Has<FixtureIdentityResolved>, Has<FixtureViewResolved>),
+        (With<FixtureInstanceSeed>, With<FixtureRoot>),
+    >();
+    roots.iter(world).all(|(identity, view)| identity && view)
+}
+
 /// 一条摆放（服务端域 mock 的行形状，与存档列一一对应）。
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct PlacementMock<P = &'static str> {
     package: P,
     texture_id: u32,
@@ -547,11 +908,17 @@ impl<P: std::fmt::Display> PlacementMock<P> {
     /// 足迹颠倒是摆放表的数据断点，具名 panic —— 与本模块其余对账同一
     /// 处置（静默取一个错落点远差于响亮拒绝）。
     fn placed(&self) -> PlacedRow {
-        let (mut center, size) = moly_law::fixture::position::footprint_to_center_size(self.min, self.max)
-            .expect("validated fixture grid");
+        let (mut center, size) =
+            moly_law::fixture::position::footprint_to_center_size(self.min, self.max)
+                .expect("validated fixture grid");
         center.y = self.center_y;
-        let (min, max) = moly_law::fixture::position::layout_footprint(center, size, self.direction, self.layout)
-            .unwrap_or_else(|err| panic!("摆放 mock 的足迹无效（{}）：{err}", self.package));
+        let (min, max) = moly_law::fixture::position::layout_footprint(
+            center,
+            size,
+            self.direction,
+            self.layout,
+        )
+        .unwrap_or_else(|err| panic!("摆放 mock 的足迹无效（{}）：{err}", self.package));
         let position = field_position(min, max, self.center_y, self.layout)
             .unwrap_or_else(|err| panic!("摆放 mock 的布局无格类别（{}）：{err}", self.package));
         PlacedRow {
@@ -565,9 +932,16 @@ impl<P: std::fmt::Display> PlacementMock<P> {
 
 impl PlacementMock {
     fn into_owned(self) -> PlacementMock<String> {
-        PlacementMock { texture_id: self.texture_id, package: self.package.to_owned(), min: self.min, max: self.max,
-            center_y: self.center_y, layout: self.layout, direction: self.direction,
-            fixture_id: self.fixture_id }
+        PlacementMock {
+            texture_id: self.texture_id,
+            package: self.package.to_owned(),
+            min: self.min,
+            max: self.max,
+            center_y: self.center_y,
+            layout: self.layout,
+            direction: self.direction,
+            fixture_id: self.fixture_id,
+        }
     }
 }
 
@@ -617,8 +991,9 @@ pub struct PlacedFixture<'a> {
 }
 
 /// Owned editable record. UID is the placed/offline item identity, not a
-/// package or a screen-space proxy. Center/grid_size stay in the source's
-/// unrotated layout frame; all readers derive the footprint through the law.
+/// package or a screen-space proxy. Center/direction/layout are canonical grid
+/// values (source imports were reflected once); grid_size is unrotated extent.
+/// All readers derive the footprint through the source arithmetic law.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct EditableFixture {
     pub uid: String,
@@ -634,24 +1009,41 @@ pub(crate) struct EditableFixture {
 impl EditableFixture {
     /// Editor candidates can leave the grid domain before Decide validates them.
     pub(crate) fn footprint(&self) -> Result<(GridPosition, GridPosition), String> {
-        moly_law::fixture::position::layout_footprint(self.center, self.grid_size, self.direction, self.layout)
+        moly_law::fixture::position::layout_footprint(
+            self.center,
+            self.grid_size,
+            self.direction,
+            self.layout,
+        )
     }
 
     pub(crate) fn occupancy(&self) -> Result<OccupancyRow, String> {
         let (min, max) = self.footprint()?;
         Ok(OccupancyRow {
-            uid: self.uid.clone(), package: self.package.clone(), min, max,
-            center_y: self.center.y, layout: self.layout, direction: self.direction,
-            layout_center: self.center, layout_grid_size: self.grid_size,
+            uid: self.uid.clone(),
+            package: self.package.clone(),
+            min,
+            max,
+            center_y: self.center.y,
+            layout: self.layout,
+            direction: self.direction,
+            layout_center: self.center,
+            layout_grid_size: self.grid_size,
         })
     }
 
     pub(crate) fn pose(&self) -> Result<Transform, String> {
         let (min, max) = self.footprint()?;
         let position = field_position(min, max, self.center.y, self.layout)?;
-        Ok(Transform::from_translation(Vec3::from(position)).with_rotation(
-            Quat::from_rotation_y(direction_yaw_degrees(self.direction).to_radians())))
+        Ok(source_transform(position, direction_yaw_degrees(self.direction).to_radians()))
     }
+}
+
+/// Placement rows and imported geometry share the canonical runtime frame.
+/// Source grid/direction conversion belongs to the player-data import boundary.
+pub(crate) fn source_transform(position: [f32; 3], yaw: f32) -> Transform {
+    Transform::from_translation(Vec3::from(position))
+        .with_rotation(Quat::from_rotation_y(yaw))
 }
 
 /// All local one-shot binders reset against this generation when a map's
@@ -662,34 +1054,97 @@ pub(crate) struct FixtureLayoutRevision(pub u64);
 #[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct FixtureLayoutSet;
 
+/// Marks a layout owned by a content-library session. It is never remembered
+/// by the saved-layout provider when the temporary site is left.
+#[derive(Resource)]
+pub(crate) struct TemporaryFixtureLayout;
+
+#[derive(Resource)]
+pub(crate) struct FixtureLoadFailure(pub(crate) String);
+
 impl FixturePlacements {
     #[cfg(test)]
-    pub(crate) fn test_layout(rows: &[EditableFixture], floor: crate::site::FloorGridLayout) -> Self {
-        Self { site_id: 1, site_type: "first_floor".into(), level: floor.level,
-            floor: Some(floor), ..Default::default() }
-            .with_editor_rows(rows, 1).expect("valid synthetic layout")
+    pub(crate) fn test_layout(
+        rows: &[EditableFixture],
+        floor: crate::site::FloorGridLayout,
+    ) -> Self {
+        Self {
+            site_id: 1,
+            site_type: "first_floor".into(),
+            level: floor.level,
+            floor: Some(floor),
+            ..Default::default()
+        }
+        .with_editor_rows(rows, 1)
+        .expect("valid synthetic layout")
     }
 
-    pub(crate) fn site_id(&self) -> u32 { self.site_id }
-    pub(crate) fn site_type(&self) -> &str { &self.site_type }
-    pub(crate) fn floor_grid(&self) -> Option<crate::site::FloorGridLayout> { self.floor }
-    pub(crate) fn next_edit_uid(&self) -> u64 { self.next_edit_uid.max(1) }
-    pub(crate) fn set_next_edit_uid(&mut self, next: u64) { self.next_edit_uid = next; }
+    pub(crate) fn site_id(&self) -> u32 {
+        self.site_id
+    }
+    pub(crate) fn site_type(&self) -> &str {
+        &self.site_type
+    }
+    pub(crate) fn floor_grid(&self) -> Option<crate::site::FloorGridLayout> {
+        self.floor
+    }
+    pub(crate) fn next_edit_uid(&self) -> u64 {
+        self.next_edit_uid.max(1)
+    }
+    pub(crate) fn set_next_edit_uid(&mut self, next: u64) {
+        self.next_edit_uid = next;
+    }
+
+    /// The home gate's rows show the gate model the server set at the home
+    /// site (a gate model the index lacks leaves the row as it is).
+    pub(crate) fn show_gate_model(&mut self, model: &crate::gate_flow::HomeGateModel) {
+        let Some(package) = model.package.as_deref() else {
+            return;
+        };
+        for (row, uid) in self.rows.iter_mut().zip(&self.instance_uids) {
+            if model.masters.contains(&row.fixture_id) && row.package != package {
+                info!(
+                    "[offline-layout] home gate {uid}: {} -> {package} (userMysekaiGates)",
+                    row.package
+                );
+                row.package = package.to_owned();
+            }
+        }
+    }
 
     pub(crate) fn editor_rows(&self) -> Vec<EditableFixture> {
-        self.rows.iter().zip(&self.instance_uids).map(|(row, uid)| {
-            let (mut center, grid_size) = moly_law::fixture::position::footprint_to_center_size(row.min, row.max)
-                .expect("validated offline layout footprint");
-            center.y = row.center_y;
-            EditableFixture { texture_id: row.texture_id, uid: uid.clone(), package: row.package.clone(), fixture_id: row.fixture_id,
-                center, grid_size, layout: row.layout, direction: row.direction }
-        }).collect()
+        self.rows
+            .iter()
+            .zip(&self.instance_uids)
+            .map(|(row, uid)| {
+                let (mut center, grid_size) =
+                    moly_law::fixture::position::footprint_to_center_size(row.min, row.max)
+                        .expect("validated offline layout footprint");
+                center.y = row.center_y;
+                EditableFixture {
+                    texture_id: row.texture_id,
+                    uid: uid.clone(),
+                    package: row.package.clone(),
+                    fixture_id: row.fixture_id,
+                    center,
+                    grid_size,
+                    layout: row.layout,
+                    direction: row.direction,
+                }
+            })
+            .collect()
     }
 
     /// Build a replacement without changing the currently published layout.
     /// The caller persists this complete draft before installing it.
-    pub(crate) fn with_editor_rows(&self, rows: &[EditableFixture], next_uid: u64) -> Result<Self, String> {
-        if self.site_id == 0 { return Err("active site layout is not installed".into()); }
+    pub(crate) fn with_editor_rows(
+        &self,
+        rows: &[EditableFixture],
+        next_uid: u64,
+    ) -> Result<Self, String> {
+        if self.site_id == 0 {
+            return Err("active site layout is not installed".into());
+        }
         let mut seen = std::collections::HashSet::new();
         let mut next = self.clone();
         next.rows.clear();
@@ -701,16 +1156,29 @@ impl FixturePlacements {
             if row.grid_size.x <= 0 || row.grid_size.y <= 0 || row.grid_size.z <= 0 {
                 return Err(format!("{} has invalid source grid dimensions", row.uid));
             }
-            let (min, max) = moly_law::fixture::position::footprint_front(row.center, row.grid_size);
-            let (center, dimensions) = moly_law::fixture::position::footprint_to_center_size(min, max)?;
+            let (min, max) =
+                moly_law::fixture::position::footprint_front(row.center, row.grid_size);
+            let (center, dimensions) =
+                moly_law::fixture::position::footprint_to_center_size(min, max)?;
             // Source positions use signed bytes; reject wrapping before a
             // malformed move can become a plausible but different rectangle.
             if dimensions != row.grid_size || center.x != row.center.x || center.z != row.center.z {
-                return Err(format!("{} footprint exceeds the signed grid domain", row.uid));
+                return Err(format!(
+                    "{} footprint exceeds the signed grid domain",
+                    row.uid
+                ));
             }
             row.pose()?;
-            next.rows.push(PlacementMock { texture_id: row.texture_id, package: row.package.clone(), fixture_id: row.fixture_id,
-                min, max, center_y: row.center.y, layout: row.layout, direction: row.direction });
+            next.rows.push(PlacementMock {
+                texture_id: row.texture_id,
+                package: row.package.clone(),
+                fixture_id: row.fixture_id,
+                min,
+                max,
+                center_y: row.center.y,
+                layout: row.layout,
+                direction: row.direction,
+            });
             next.instance_uids.push(row.uid.clone());
         }
         next.next_edit_uid = next_uid.max(1);
@@ -718,17 +1186,32 @@ impl FixturePlacements {
     }
 
     pub(crate) fn append_editor_fixture(
-        &mut self, uid: String, package: &'static str, fixture_id: i32,
-        center: GridPosition, grid_size: moly_law::fixture::Vector3Int, direction: Direction,
+        &mut self,
+        uid: String,
+        package: &'static str,
+        fixture_id: i32,
+        center: GridPosition,
+        grid_size: moly_law::fixture::Vector3Int,
+        direction: Direction,
     ) -> Result<(), String> {
-        if self.site_id == 0 { return Err("active site layout is not installed".into()); }
+        if self.site_id == 0 {
+            return Err("active site layout is not installed".into());
+        }
         if uid.is_empty() || self.instance_uids.contains(&uid) {
             return Err("editor supplied an empty or duplicate fixture UID".into());
         }
         let (min, max) = moly_law::fixture::position::footprint_front(center, grid_size);
         moly_law::fixture::position::footprint_to_center_size(min, max)?;
-        self.rows.push(PlacementMock { texture_id: 1, package: package.to_owned(), min, max, center_y: center.y,
-            layout: layout_type::FLOOR, direction, fixture_id });
+        self.rows.push(PlacementMock {
+            texture_id: 1,
+            package: package.to_owned(),
+            min,
+            max,
+            center_y: center.y,
+            layout: layout_type::FLOOR,
+            direction,
+            fixture_id,
+        });
         self.instance_uids.push(uid);
         Ok(())
     }
@@ -777,10 +1260,19 @@ impl FixturePlacements {
     }
 
     pub fn placed_instances(&self) -> Vec<PlacedFixture<'_>> {
-        self.rows.iter().zip(&self.instance_uids).map(|(row, uid)| {
-            let placed = row.placed();
-            PlacedFixture { uid, package: &row.package, position: placed.position, yaw: placed.yaw }
-        }).collect()
+        self.rows
+            .iter()
+            .zip(&self.instance_uids)
+            .map(|(row, uid)| {
+                let placed = row.placed();
+                PlacedFixture {
+                    uid,
+                    package: &row.package,
+                    position: placed.position,
+                    yaw: placed.yaw,
+                }
+            })
+            .collect()
     }
 
     /// 已摆放行的占用面（摆放编辑面对账用：重叠校验要把这些行的格占
@@ -792,8 +1284,9 @@ impl FixturePlacements {
             .enumerate()
             .map(|(index, row)| {
                 let placed = row.placed();
-                let (mut center, grid_size) = moly_law::fixture::position::footprint_to_center_size(row.min, row.max)
-                    .expect("validated offline layout footprint");
+                let (mut center, grid_size) =
+                    moly_law::fixture::position::footprint_to_center_size(row.min, row.max)
+                        .expect("validated offline layout footprint");
                 center.y = row.center_y;
                 OccupancyRow {
                     uid: self.instance_uids[index].clone(),
@@ -856,10 +1349,14 @@ struct FixtureInstanceSeed {
 /// Editor previews opt into the same material chain without FixtureRoot,
 /// FixturePlacement, occupancy, inventory or interaction identity.
 #[derive(Component)]
-pub(crate) struct FixtureVisualRoot { pub layout: u8 }
+pub(crate) struct FixtureVisualRoot {
+    pub layout: u8,
+}
 
 impl FixtureVisualRoot {
-    pub(crate) fn is_wall_layout(&self) -> bool { self.layout & WALL_LAYOUT_MASK != 0 }
+    pub(crate) fn is_wall_layout(&self) -> bool {
+        self.layout & WALL_LAYOUT_MASK != 0
+    }
 }
 
 #[derive(Component)]
@@ -871,11 +1368,22 @@ pub(crate) struct FixtureVisualReady;
 #[derive(Component)]
 struct FixtureIdentityResolved;
 
+/// One attempt at source-view binding has been made for this root. The search
+/// only succeeds on an unambiguous match, so without this marker a root that
+/// matches zero nodes — or several — stays in the binding query forever and
+/// repeats a full subtree walk, with a JSON parse per node, every frame for the
+/// life of the layout. The search runs behind `FixtureScenesReady`, i.e. after
+/// every fixture scene has finished expanding, so a root that cannot be
+/// resolved once will not become resolvable later. It is removed together with
+/// `FixtureViewInstance` when a view disappears, so a replacement scene is
+/// still allowed to bind.
+#[derive(Component)]
+pub(crate) struct FixtureViewResolved;
+
 /// The actual source FixtureView root inside this scene instance. Its local
 /// transform, not the logical placement's world position, selects variants.
 #[derive(Component)]
 pub(crate) struct FixtureViewInstance(pub Entity);
-
 
 impl FixturePlacement {
     /// 墙布局判定：LayoutType 命中 0xF0 任一位（位置律同一条掩码）。
@@ -896,10 +1404,35 @@ struct FixtureScenesReadyCount(usize);
 #[derive(Resource)]
 struct FixtureIndexAsset(Handle<moly_assets::json::JsonAsset>);
 
-/// 已请求装载的逐包 glb 句柄。
+/// Validated per-row GLB paths plus handles still needed by the loader.
+/// Paths stay aligned with placement row indices; handles are shared by path so
+/// repeated furniture does not create duplicate load requests. Spawned roots
+/// own their sources; this resource must not pin removed furniture afterwards.
 #[derive(Resource, Default)]
-struct FixtureGltfAssets(Vec<Handle<Gltf>>);
+pub(crate) struct FixtureGltfAssets {
+    paths: Vec<String>,
+    handles: HashMap<String, Handle<Gltf>>,
+}
 
+impl FixtureGltfAssets {
+    fn release_spawned(&mut self, spawned: usize) {
+        if self.handles.is_empty() { return; }
+        let pending: std::collections::HashSet<_> = self.paths[spawned.min(self.paths.len())..]
+            .iter().map(String::as_str).collect();
+        self.handles.retain(|path, _| pending.contains(path.as_str()));
+    }
+
+    pub(crate) fn residency(&self) -> serde_json::Value {
+        serde_json::json!({"plannedInstances": self.paths.len(), "loaderOwnedGltfs": self.handles.len()})
+    }
+}
+
+/// Keep browser asset decoding and scene expansion under explicit backpressure.
+/// A real Home site currently contains hundreds of instances; unbounded loading
+/// makes wasm spend multi-second stretches on one update.
+const FIXTURE_UNIQUE_LOADS_IN_FLIGHT: usize = 6;
+const FIXTURE_SCENE_SPAWN_BUDGET: usize = 3;
+const FIXTURE_SCENES_IN_FLIGHT: usize = 3;
 
 /// 已展开的摆放数（spawn 闩的计数）。
 #[derive(Resource, Default)]
@@ -907,13 +1440,26 @@ struct FixtureSpawnedCount(usize);
 
 /// Startup：请求装载包清单，摆放表落位。
 pub fn load(mut commands: Commands, server: Res<AssetServer>) {
-    let handle = server.load::<moly_assets::json::JsonAsset>(
-        bevy::asset::AssetPath::from("moly://fixture-models/index.json".to_owned()),
-    );
+    let handle = server.load::<moly_assets::json::JsonAsset>(bevy::asset::AssetPath::from(
+        "moly://fixture-models/index.json".to_owned(),
+    ));
     commands.insert_resource(FixtureIndexAsset(handle));
     // Keep the resource present for existing consumers, but no global preset
     // may be planned before the source site ID and selected level are known.
     commands.insert_resource(FixturePlacements::default());
+}
+
+/// Whether a restore of this site would read the home starter before the
+/// panel document has installed it, or before the snapshot's fixture master
+/// (which resolves the starter rows' pieces) is installed.
+pub(crate) fn waits_for_panel_layout(
+    site_type: &str,
+    content: crate::site::OfflineSceneContent,
+) -> bool {
+    site_type == "home_site"
+        && (!region::ready()
+            || (content == crate::site::OfflineSceneContent::Compact
+                && !layouts::home_starter_ready()))
 }
 
 fn restore_selected_layout(
@@ -924,21 +1470,86 @@ fn restore_selected_layout(
     mut placements: ResMut<FixturePlacements>,
     mut revision: ResMut<FixtureLayoutRevision>,
     mut last_error: Local<Option<String>>,
+    temporary: Option<Res<crate::site::TemporarySiteActive>>,
+    stage: Option<Res<crate::browser_stage::BrowserStage>>,
+    exploration: Option<Res<crate::player_data::TransientExploration>>,
+    source_region: Option<Res<crate::site::NavMeshSourceRegion>>,
+    homes: Option<Res<crate::entry::house::HomeFixtures>>,
+    gate_model: Option<Res<crate::gate_flow::HomeGateModel>>,
 ) {
-    let Some(sites) = sites else { return; };
-    let Some(site_id) = sites.site_id(selection.site_type()) else { return; };
-    let Ok(floor) = selection.fixture_floor_grid(&sites) else { return; };
-    if placements.site_id == site_id && placements.site_type == selection.site_type() { return; }
-    match saved.restore(site_id, selection.site_type(), floor.level, selection.content()).and_then(|layout| {
+    let Some(sites) = sites else {
+        return;
+    };
+    let Some(site_id) = sites.site_id(selection.site_type()) else {
+        return;
+    };
+    let Ok(floor) = selection.fixture_floor_grid(&sites) else {
+        return;
+    };
+    if placements.site_id == site_id && placements.site_type == selection.site_type() {
+        return;
+    }
+    // The home site's layout is completed with the player's house, which
+    // needs the fixture tables.
+    if selection.site_type() == "home_site" && homes.is_none() {
+        return;
+    }
+    // The home gate shows the model of the gate the server set at the home
+    // site (`MysekaiGateModel.AssetBundleName`).
+    if selection.site_type() == "home_site" && gate_model.is_none() {
+        return;
+    }
+    // An embedded stage starts with no preset or persisted layout. The same
+    // layout owner later installs/restores exact content-scoped fixtures.
+    // In particular, never instantiate a CN offline preset in a JP snapshot.
+    let restored = if crate::player_data::use_empty_stage_layout(
+        temporary.is_some(),
+        stage.is_some(),
+        exploration.is_some(),
+    ) {
+        // The temporary site is empty from its first frame. Never materialize
+        // a saved layout only to delete it, or let it block preview admission.
+        commands.insert_resource(TemporaryFixtureLayout);
+        Ok(FixturePlacements {
+            site_id,
+            site_type: selection.site_type().to_owned(),
+            level: floor.level,
+            floor: Some(floor),
+            ..Default::default()
+        })
+    } else {
+        // The home starter is the server panel's housing layout: hold, without
+        // an error, until the panel document has installed it.
+        if waits_for_panel_layout(selection.site_type(), selection.content()) {
+            return;
+        }
+        saved.restore(
+            site_id,
+            selection.site_type(),
+            floor.level,
+            selection.content(),
+            source_region.as_deref().copied(),
+            homes.as_deref(),
+        )
+    };
+    match restored.and_then(|layout| {
         layouts::validate_floor_layout(&layout, floor)?;
         Ok(layout)
     }) {
         Ok(mut layout) => {
             info!("[offline-layout] site {} ({}) level {}: restored {} fixtures; layouts are per-site",
                 site_id, selection.site_type(), floor.level, layout.total());
+            if selection.site_type() == "home_site" {
+                if let Some(model) = gate_model.as_deref() {
+                    layout.show_gate_model(model);
+                }
+            }
             layout.floor = Some(floor);
             *placements = layout;
-            revision.0 = revision.0.checked_add(1).expect("fixture layout revision exhausted");
+            revision.0 = revision
+                .0
+                .checked_add(1)
+                .expect("fixture layout revision exhausted");
             commands.remove_resource::<FixtureGltfAssets>();
             commands.remove_resource::<FixtureScenesReady>();
             commands.insert_resource(FixtureSpawnedCount::default());
@@ -956,9 +1567,15 @@ fn restore_selected_layout(
 /// Called after the caller releases player/NPC furniture ownership. Clear only
 /// live instances and derived state, never the per-site storage or source data.
 pub(crate) fn reload_current_layout(world: &mut World) {
-    let roots: Vec<_> = world.query_filtered::<Entity, With<FixtureRoot>>().iter(world).collect();
-    for root in roots { world.despawn(root); }
+    let roots: Vec<_> = world
+        .query_filtered::<Entity, Or<(With<FixtureRoot>, With<PendingInstanceModel>)>>()
+        .iter(world)
+        .collect();
+    for root in roots {
+        world.despawn(root);
+    }
     world.remove_resource::<FixtureGltfAssets>();
+    world.remove_resource::<FixtureLoadFailure>();
     world.remove_resource::<FixtureScenesReady>();
     world.remove_resource::<crate::fixture_material::FixtureMaterialsSwapped>();
     world.remove_resource::<crate::fixture_material::EmissionAccount>();
@@ -968,12 +1585,39 @@ pub(crate) fn reload_current_layout(world: &mut World) {
     world.insert_resource(FixtureSpawnedCount::default());
     world.insert_resource(FixtureScenesReadyCount::default());
     let mut revision = world.resource_mut::<FixtureLayoutRevision>();
-    revision.0 = revision.0.checked_add(1).expect("fixture layout revision exhausted");
+    revision.0 = revision
+        .0
+        .checked_add(1)
+        .expect("fixture layout revision exhausted");
+}
+
+pub(crate) fn install_temporary_layout(
+    world: &mut World,
+    rows: &[EditableFixture],
+) -> Result<(), String> {
+    let current = world
+        .get_resource::<FixturePlacements>()
+        .cloned()
+        .ok_or_else(|| "独立场景的家具布局尚未就绪".to_owned())?;
+    let replacement = current.with_editor_rows(rows, 1)?;
+    crate::player_fixture_action::cancel_for_site_change(world);
+    crate::npc_fixture_activity::cancel_for_site_change(world);
+    crate::fixture_gimmick::cancel_for_site_change(world);
+    crate::fixture_scene_inputs::invalidate_for_site_change(world);
+    reload_current_layout(world);
+    world.insert_resource(replacement);
+    world.insert_resource(TemporaryFixtureLayout);
+    Ok(())
 }
 
 pub(crate) fn clear_for_site_change(world: &mut World) {
-    if let Some(layout) = world.get_resource::<FixturePlacements>().cloned() {
-        world.resource_mut::<layouts::SiteFixtureLayouts>().remember(&layout);
+    let temporary = world.remove_resource::<TemporaryFixtureLayout>().is_some();
+    if !temporary {
+        if let Some(layout) = world.get_resource::<FixturePlacements>().cloned() {
+            world
+                .resource_mut::<layouts::SiteFixtureLayouts>()
+                .remember(&layout);
+        }
     }
     reload_current_layout(world);
     world.insert_resource(FixturePlacements::default());
@@ -999,7 +1643,9 @@ fn plan_when_ready(
     json: Res<Assets<moly_assets::json::JsonAsset>>,
     gltfs: Option<Res<FixtureGltfAssets>>,
 ) {
-    if placements.site_id == 0 { return; }
+    if placements.site_id == 0 {
+        return;
+    }
     if gltfs.is_some() {
         return;
     }
@@ -1020,11 +1666,13 @@ fn plan_when_ready(
         .get("packages")
         .and_then(|packages| packages.as_object())
         .unwrap_or_else(|| panic!("家具包清单缺 packages 对象"));
-    let mut handles = Vec::with_capacity(placements.total());
+    let mut paths = Vec::with_capacity(placements.total());
     for row in &placements.rows {
-        let entry = packages.get(&row.package).unwrap_or_else(|| {
-            panic!("摆放 mock 点名的包不在清单里：{}", row.package)
-        });
+        let entry = packages
+            .get(&row.package)
+            .unwrap_or_else(|| panic!("摆放 mock 点名的包不在清单里：{}", row.package));
+        moly_assets::coordinates::validate_document(entry)
+            .unwrap_or_else(|error| panic!("fixture {}: {error}", row.package));
         let status = entry.get("status").and_then(|v| v.as_str()).unwrap_or("");
         assert_eq!(
             status, "exported",
@@ -1040,21 +1688,24 @@ fn plan_when_ready(
             "摆放 mock 点名的包没有 fixture 视图变体：{}",
             row.package
         );
-        let glb = entry.get("glb").and_then(|v| v.as_str()).unwrap_or_else(|| {
-            panic!("清单条目缺 glb 文件名：{}", row.package)
-        });
-        handles.push(
-            server.load::<Gltf>(bevy::asset::AssetPath::from(format!(
-                "moly://fixture-models/{glb}"
-            ))),
-        );
+        let glb = entry
+            .get("glb")
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| panic!("清单条目缺 glb 文件名：{}", row.package));
+        paths.push(format!("moly://fixture-models/{glb}"));
     }
+    let unique = paths.iter().collect::<std::collections::HashSet<_>>().len();
     info!(
-        "家具装载计划：摆放 mock {} 条，逐包装载 {} 个 glb",
+        "家具装载计划：{} 个实例 / {} 个唯一 glb；浏览器加载窗口 {}，scene 展开窗口 {}",
         placements.total(),
-        handles.len()
+        unique,
+        FIXTURE_UNIQUE_LOADS_IN_FLIGHT,
+        FIXTURE_SCENES_IN_FLIGHT,
     );
-    commands.insert_resource(FixtureGltfAssets(handles));
+    commands.insert_resource(FixtureGltfAssets {
+        paths,
+        handles: HashMap::new(),
+    });
 }
 
 /// Update：逐包等到齐（glb 与全部依赖）后展开默认 scene 并按律落位。
@@ -1064,92 +1715,302 @@ fn spawn_when_ready(
     mut commands: Commands,
     server: Res<AssetServer>,
     gltfs: Res<Assets<Gltf>>,
-    assets: Option<Res<FixtureGltfAssets>>,
+    assets: Option<ResMut<FixtureGltfAssets>>,
     placements: Res<FixturePlacements>,
     mut spawned: ResMut<FixtureSpawnedCount>,
+    scenes_ready_count: Res<FixtureScenesReadyCount>,
     scenes_ready: Option<Res<FixtureScenesReady>>,
+    temporary: Option<Res<TemporaryFixtureLayout>>,
 ) {
-    let Some(assets) = assets else {
+    let Some(mut assets) = assets else {
         return;
     };
-    if assets.0.is_empty() && scenes_ready.is_none() {
+    assets.release_spawned(spawned.0);
+    if assets.paths.is_empty() && scenes_ready.is_none() {
         commands.insert_resource(FixtureScenesReady);
+        return;
     }
-    let occupancy = placements.occupancy_rows();
-    for (index, handle) in assets.0.iter().enumerate() {
-        if index < spawned.0 {
-            continue;
+
+    // Count only unresolved unique GLBs against the loading window. Once the
+    // last instance is spawned, ownership transfers to its FixtureSource.
+    let pending = assets
+        .handles
+        .values()
+        .filter(|handle| {
+            !server.is_loaded_with_dependencies(*handle)
+                && !matches!(server.load_state(*handle), LoadState::Failed(_))
+                && !matches!(
+                    server.recursive_dependency_load_state(*handle),
+                    RecursiveDependencyLoadState::Failed(_)
+                )
+        })
+        .count();
+    let mut slots = FIXTURE_UNIQUE_LOADS_IN_FLIGHT.saturating_sub(pending);
+    if slots > 0 {
+        for index in spawned.0..assets.paths.len() {
+            if slots == 0 {
+                break;
+            }
+            let path = assets.paths[index].clone();
+            if assets.handles.contains_key(&path) {
+                continue;
+            }
+            let handle = moly_assets::residency::load_gltf(
+                &server,
+                bevy::asset::AssetPath::from(path.clone()),
+                moly_assets::residency::GltfResidency::CpuTextures,
+            );
+            assets.handles.insert(path, handle);
+            slots -= 1;
         }
-        if let LoadState::Failed(err) = server.load_state(handle) {
-            panic!(
-                "家具 glb 装载失败（{}）：{err:?}",
+    }
+
+    let occupancy = placements.occupancy_rows();
+    let mut spawned_this_frame = 0usize;
+    while spawned.0 < assets.paths.len()
+        && spawned_this_frame < FIXTURE_SCENE_SPAWN_BUDGET
+        && spawned.0.saturating_sub(scenes_ready_count.0) < FIXTURE_SCENES_IN_FLIGHT
+    {
+        let index = spawned.0;
+        let path = assets.paths[index].clone();
+        let Some(handle) = assets.handles.get(&path).cloned() else {
+            // The current row is always the first candidate for a free load
+            // slot. No slot means existing requests must settle first.
+            return;
+        };
+        if let LoadState::Failed(err) = server.load_state(&handle) {
+            let reason = format!(
+                "家具模型装载失败（{}）：{err:?}",
                 placements.rows[index].package
             );
+            if temporary.is_some() {
+                commands.insert_resource(FixtureLoadFailure(reason));
+                return;
+            }
+            panic!("{reason}");
         }
         if let RecursiveDependencyLoadState::Failed(err) =
-            server.recursive_dependency_load_state(handle)
+            server.recursive_dependency_load_state(&handle)
         {
-            panic!(
-                "家具 glb 的依赖装载失败（{}）：{err:?}",
+            let reason = format!(
+                "家具模型依赖装载失败（{}）：{err:?}",
                 placements.rows[index].package
             );
+            if temporary.is_some() {
+                commands.insert_resource(FixtureLoadFailure(reason));
+                return;
+            }
+            panic!("{reason}");
         }
-        if !server.is_loaded_with_dependencies(handle) {
+        if !server.is_loaded_with_dependencies(&handle) {
             return;
         }
-        let Some(gltf) = gltfs.get(handle) else {
+        let Some(gltf) = gltfs.get(&handle) else {
             return;
         };
         let row = &placements.rows[index];
-        // 默认 scene = fixture 视图变体（提取侧约定，实测 999 包全对上）。
         let Some(scene) = gltf.default_scene.clone() else {
             panic!("家具 glb 没有默认 scene：{}", row.package);
         };
         let placed = row.placed();
-        commands.spawn((
+        spawn_instance(&mut commands, &placements, &occupancy, index, handle.clone(), scene);
+        // Per-instance browser logging is surprisingly expensive for real Home
+        // layouts. Keep detailed evidence for small fixtures, otherwise sample
+        // progress without serializing hundreds of near-identical messages.
+        if placements.total() <= 64 || index % 100 == 0 || index + 1 == placements.total() {
+            info!(
+                "家具摆放 {}/{}（{}）：方向 {:?} yaw {:.1}°，世界 ({:.3}, {:.3}, {:.3})",
+                index + 1,
+                placements.total(),
+                row.package,
+                row.direction,
+                placed.yaw.to_degrees(),
+                placed.position[0],
+                placed.position[1],
+                placed.position[2],
+            );
+        }
+        spawned.0 += 1;
+        spawned_this_frame += 1;
+    }
+    assets.release_spawned(spawned.0);
+}
+
+/// The root of placement row `index` over its loaded glb, hidden until its
+/// materials are swapped.
+fn spawn_instance(
+    commands: &mut Commands,
+    placements: &FixturePlacements,
+    occupancy: &[OccupancyRow],
+    index: usize,
+    handle: Handle<Gltf>,
+    scene: Handle<Scene>,
+) -> Entity {
+    let row = &placements.rows[index];
+    let placed = row.placed();
+    commands
+        .spawn((
             SceneRoot(scene),
             FixtureRoot,
             FixtureVisualRoot { layout: row.layout },
-            crate::fixture_colors::FixtureColorChoice { package: row.package.clone(), texture_id: row.texture_id },
+            crate::fixture_colors::FixtureColorChoice {
+                package: row.package.clone(),
+                texture_id: row.texture_id,
+            },
             fence::FixtureRow(index),
             FixturePlacement {
                 layout: row.layout,
                 fixture_id: row.fixture_id,
             },
-            FixtureSource(handle.clone()),
-            FixtureInstanceSeed { uid: placements.instance_uids[index].clone(), package: row.package.clone(), master: row.fixture_id },
+            FixtureSource(handle),
+            FixtureInstanceSeed {
+                uid: placements.instance_uids[index].clone(),
+                package: row.package.clone(),
+                master: row.fixture_id,
+            },
             crate::fixture_scene_inputs::FixtureScenePlacement(occupancy[index].clone()),
-            Transform::from_translation(Vec3::from(placed.position))
-                .with_rotation(Quat::from_rotation_y(placed.yaw)),
-            // Imported vertex colors encode shader masks, not albedo. Reveal
-            // the scene only after its source materials have been installed.
+            source_transform(placed.position, placed.yaw),
             Visibility::Hidden,
-        ));
+        ))
+        .id()
+}
+
+/// A placed instance waiting for the model [`replace_instance_model`] gave
+/// it.
+#[derive(Component)]
+struct PendingInstanceModel {
+    uid: String,
+    handle: Handle<Gltf>,
+}
+
+/// `SiteView.UpdateFixture` on one placed instance: its row shows `package`
+/// and its root is replaced by a root over the new model once that loads.
+/// The other instances, their activities and the layout's footprints stay;
+/// the per-package reads of the layout (the action points, the planned
+/// fixture timelines) are composed again. Returns the old package.
+pub(crate) fn replace_instance_model(
+    world: &mut World,
+    uid: &str,
+    package: &str,
+) -> Result<String, String> {
+    let index = world
+        .get_resource::<FixtureIndexAsset>()
+        .map(|asset| asset.0.clone())
+        .ok_or("the fixture index was not requested")?;
+    let text = world
+        .resource::<Assets<moly_assets::json::JsonAsset>>()
+        .get(&index)
+        .map(|json| json.0.clone())
+        .ok_or("the fixture index is not loaded")?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| format!("the fixture index is not JSON: {error}"))?;
+    let entry = value
+        .get("packages")
+        .and_then(|packages| packages.get(package))
+        .ok_or_else(|| format!("{package} is not in the fixture index"))?;
+    moly_assets::coordinates::validate_document(entry)
+        .map_err(|error| format!("fixture {package}: {error}"))?;
+    if entry.get("status").and_then(|v| v.as_str()) != Some("exported")
+        || entry.get("hasFixtureView").and_then(|v| v.as_bool()) != Some(true)
+    {
+        return Err(format!("{package} is not an exported fixture view"));
+    }
+    let glb = entry
+        .get("glb")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("{package} has no glb in the fixture index"))?;
+    let path = format!("moly://fixture-models/{glb}");
+    let (row, old) = {
+        let mut placements = world
+            .get_resource_mut::<FixturePlacements>()
+            .ok_or("the layout is not installed")?;
+        let row = placements
+            .instance_uids
+            .iter()
+            .position(|placed| placed == uid)
+            .ok_or_else(|| format!("the layout has no instance {uid}"))?;
+        let old = std::mem::replace(&mut placements.rows[row].package, package.to_owned());
+        (row, old)
+    };
+    if let Some(mut assets) = world.get_resource_mut::<FixtureGltfAssets>() {
+        if let Some(planned) = assets.paths.get_mut(row) {
+            *planned = path.clone();
+        }
+    }
+    let roots: Vec<Entity> = world
+        .query::<(Entity, &FixtureInstanceSeed)>()
+        .iter(world)
+        .filter(|(_, seed)| seed.uid == uid)
+        .map(|(root, _)| root)
+        .collect();
+    for root in roots {
+        world.despawn(root);
+    }
+    let server = world.resource::<AssetServer>().clone();
+    let handle = moly_assets::residency::load_gltf(
+        &server,
+        bevy::asset::AssetPath::from(path),
+        moly_assets::residency::GltfResidency::CpuTextures,
+    );
+    world.spawn(PendingInstanceModel {
+        uid: uid.to_owned(),
+        handle,
+    });
+    world.remove_resource::<crate::fixture_attach::AttachWorlds>();
+    world.remove_resource::<crate::fixture_talk::TimelinesPlanned>();
+    world.remove_resource::<crate::fixture_talk::TimelineAssets>();
+    Ok(old)
+}
+
+/// Update, after [`spawn_when_ready`]: a replaced instance's root, once its
+/// new model is loaded.
+fn spawn_replaced_models(
+    mut commands: Commands,
+    server: Res<AssetServer>,
+    gltfs: Res<Assets<Gltf>>,
+    placements: Res<FixturePlacements>,
+    pending: Query<(Entity, &PendingInstanceModel)>,
+) {
+    for (entity, model) in &pending {
+        let failed = match (
+            server.load_state(&model.handle),
+            server.recursive_dependency_load_state(&model.handle),
+        ) {
+            (LoadState::Failed(error), _) => Some(format!("{error:?}")),
+            (_, RecursiveDependencyLoadState::Failed(error)) => Some(format!("{error:?}")),
+            _ => None,
+        };
+        if let Some(error) = failed {
+            error!("[fixture] instance {}: its new model failed to load: {error}; it stays without a model", model.uid);
+            commands.entity(entity).despawn();
+            continue;
+        }
+        if !server.is_loaded_with_dependencies(&model.handle) {
+            continue;
+        }
+        let Some(gltf) = gltfs.get(&model.handle) else {
+            continue;
+        };
+        let Some(index) = placements.instance_uids.iter().position(|uid| *uid == model.uid) else {
+            error!("[fixture] instance {} left the layout before its new model loaded", model.uid);
+            commands.entity(entity).despawn();
+            continue;
+        };
+        let Some(scene) = gltf.default_scene.clone() else {
+            error!("[fixture] instance {}: its new model has no default scene", model.uid);
+            commands.entity(entity).despawn();
+            continue;
+        };
+        let occupancy = placements.occupancy_rows();
+        let root = spawn_instance(&mut commands, &placements, &occupancy, index, model.handle.clone(), scene);
         info!(
-            "家具摆放（{}）：存档格 min {:?} max {:?} center_y {} layout {:#04x} fixture_id {} \
-             朝向 {:?} yaw {:.1}° → 足迹 min {:?} max {:?}（{}x{} 格）→ 世界 \
-             ({:.3}, {:.3}, {:.3})",
-            row.package,
-            (row.min.x, row.min.y, row.min.z),
-            (row.max.x, row.max.y, row.max.z),
-            row.center_y,
-            row.layout,
-            row.fixture_id,
-            row.direction,
-            placed.yaw.to_degrees(),
-            (placed.min.x, placed.min.y, placed.min.z),
-            (placed.max.x, placed.max.y, placed.max.z),
-            placed.max.x as i32 - placed.min.x as i32 + 1,
-            placed.max.z as i32 - placed.min.z as i32 + 1,
-            placed.position[0],
-            placed.position[1],
-            placed.position[2],
+            "[fixture] SiteView.UpdateFixture: instance {} shows {} as root {root:?}",
+            model.uid, placements.rows[index].package
         );
-        spawned.0 += 1;
+        commands.entity(entity).despawn();
     }
 }
 
-/// 全局观察者：scene 实例展开完毕时计数；全部摆放展开后立换装的闩
 /// （`FixtureScenesReady`，换装系统只看它）。
 fn on_scene_ready(
     trigger: On<SceneInstanceReady>,
@@ -1157,24 +2018,67 @@ fn on_scene_ready(
     visuals: Query<(), With<FixtureVisualRoot>>,
     children: Query<&Children>,
     extras: Query<&bevy::gltf::GltfExtras>,
+    parents: Query<&ChildOf>,
+    source_nodes: Query<&moly_assets::source_navigation::SourceObjectIdentity>,
+    mut transforms: Query<&mut Transform>,
     placements: Res<FixturePlacements>,
     mut count: ResMut<FixtureScenesReadyCount>,
     mut commands: Commands,
 ) {
-    if visuals.contains(trigger.event().entity) {
-        commands.entity(trigger.event().entity).insert(FixtureVisualSceneReady);
+    if !visuals.contains(trigger.event().entity) {
+        return;
     }
-    if roots.get(trigger.event().entity).is_err() { return; }
+    // The source places FixtureView itself: replace its authored root T/R,
+    // preserve its scale and descendants. The outer wrapper owns placement.
+    let mut pending = vec![trigger.event().entity];
+    let mut views = Vec::new();
+    while let Some(entity) = pending.pop() {
+        if let Ok(children) = children.get(entity) {
+            pending.extend(children.iter());
+        }
+        let Ok(extra) = extras.get(entity) else { continue; };
+        let value: serde_json::Value = serde_json::from_str(&extra.value)
+            .expect("fixture node extras");
+        if value.get("fixtureViewRoot").and_then(serde_json::Value::as_bool) != Some(true) {
+            continue;
+        }
+        moly_assets::coordinates::validate_document(&value).expect("fixture view coordinates");
+        assert!(source_nodes.contains(entity), "FixtureView marker lacks exact source identity");
+        views.push(entity);
+    }
+    let [view] = views.as_slice() else {
+        panic!("fixture scene requires one source FixtureView root; re-export snapshot");
+    };
+    let mut ancestor = *view;
+    while let Ok(parent) = parents.get(ancestor) {
+        ancestor = parent.parent();
+        if ancestor == trigger.event().entity { break; }
+        assert!(!source_nodes.contains(ancestor),
+            "nested source FixtureView needs an explicit placement hierarchy contract");
+    }
+    normalize_placed_view(&mut transforms.get_mut(*view).expect("fixture view transform"));
+    commands.entity(trigger.event().entity).insert(moly_assets::coordinates::CanonicalCoordinates);
+    if visuals.contains(trigger.event().entity) {
+        commands
+            .entity(trigger.event().entity)
+            .insert(FixtureVisualSceneReady);
+    }
+    if roots.get(trigger.event().entity).is_err() {
+        return;
+    }
+    // Canonical geometry already has correct winding. No per-instance clone or
+    // persistent strong-handle cache is needed after scene destruction.
     fence::bind_scene(trigger.event().entity, &children, &extras, &mut commands);
     count.0 += 1;
     if count.0 == placements.total() {
-        info!(
-            "家具 scene 全部展开：{}/{}",
-            count.0,
-            placements.total()
-        );
+        info!("家具 scene 全部展开：{}/{}", count.0, placements.total());
         commands.insert_resource(FixtureScenesReady);
     }
+}
+
+fn normalize_placed_view(pose: &mut Transform) {
+    pose.translation = Vec3::ZERO;
+    pose.rotation = Quat::IDENTITY;
 }
 
 /// Update：落地件朝向的**读回**，scene 全部展开后报一次。
@@ -1196,7 +2100,10 @@ fn report_orientation(
     placements: Res<FixturePlacements>,
     roots: Query<&Transform, With<FixtureRoot>>,
 ) {
-    if *seen_revision != revision.0 { *done = false; *seen_revision = revision.0; }
+    if *seen_revision != revision.0 {
+        *done = false;
+        *seen_revision = revision.0;
+    }
     if *done || ready.is_none() {
         return;
     }
@@ -1251,20 +2158,42 @@ pub struct FixturePlugin;
 fn bind_activity_identities(
     mut commands: Commands,
     tables: Option<Res<crate::fixture_activity_data::FixtureActivityTables>>,
+    gate_models: Option<Res<crate::gate_flow::GateModelPackages>>,
     roots: Query<(Entity, &FixtureInstanceSeed), Without<FixtureIdentityResolved>>,
 ) {
-    let Some(tables) = tables else { return; };
+    let Some(tables) = tables else {
+        return;
+    };
     for (entity, seed) in &roots {
-        let Some(model) = seed.package.strip_prefix("mysekai__fixture__") else { continue; };
+        let Some(model) = seed.package.strip_prefix("mysekai__fixture__") else {
+            continue;
+        };
         let master = if seed.master != 0 {
-            tables.fixture_master(seed.master).filter(|row| row.model_name == model)
-        } else { tables.unique_fixture_master_for_model(model) };
-        if let Some(master) = master {
-            commands.entity(entity).insert(crate::fixture_activity_state::FixtureActivityIdentity {
-                uid: seed.uid.clone(), master_id: master.id, model_package: seed.package.clone(),
-            });
+            // A gate shows its gate's or its skin's model
+            // (`MysekaiGateModel.AssetBundleName`), not its master's.
+            tables.fixture_master(seed.master).filter(|row| {
+                row.model_name == model
+                    || (row.is_gate
+                        && gate_models
+                            .as_ref()
+                            .is_some_and(|models| models.0.contains(&seed.package)))
+            })
         } else {
-            warn!("[fixture-activity] offline layout needs an explicit matching master: {} ({})", seed.uid, seed.package);
+            tables.unique_fixture_master_for_model(model)
+        };
+        if let Some(master) = master {
+            commands.entity(entity).insert(
+                crate::fixture_activity_state::FixtureActivityIdentity {
+                    uid: seed.uid.clone(),
+                    master_id: master.id,
+                    model_package: seed.package.clone(),
+                },
+            );
+        } else {
+            warn!(
+                "[fixture-activity] offline layout needs an explicit matching master: {} ({})",
+                seed.uid, seed.package
+            );
         }
         commands.entity(entity).insert(FixtureIdentityResolved);
     }
@@ -1274,32 +2203,69 @@ fn bind_source_views(
     mut commands: Commands,
     ready: Option<Res<FixtureScenesReady>>,
     points: Option<Res<crate::fixture_attach::AttachPoints>>,
-    roots: Query<(Entity, &FixtureInstanceSeed), Without<FixtureViewInstance>>,
+    roots: Query<(Entity, &FixtureInstanceSeed), Without<FixtureViewResolved>>,
     children: Query<&Children>,
-    extras: Query<&bevy::gltf::GltfExtras>,
+    identities: Query<&moly_assets::source_navigation::SourceObjectIdentity>,
 ) {
-    let (Some(_), Some(points)) = (ready, points) else { return; };
+    let (Some(_), Some(points)) = (ready, points) else {
+        return;
+    };
+    let (mut bound, mut absent, mut unmatched, mut ambiguous) = (0usize, 0usize, 0usize, 0usize);
+    let mut deferred = 0usize;
     for (root, seed) in &roots {
-        let Some(source) = points.instance_view(&seed.package) else { continue; };
+        let Some(source) = points.instance_view(&seed.package) else {
+            absent += 1;
+            commands.entity(root).insert(FixtureViewResolved);
+            continue;
+        };
         let mut stack = vec![root];
         let mut matches = Vec::new();
+        let mut visited = 0usize;
         while let Some(entity) = stack.pop() {
-            if let Ok(kids) = children.get(entity) { stack.extend(kids.iter()); }
-            let Ok(extra) = extras.get(entity) else { continue; };
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(&extra.value) else { continue; };
-            if value.get("sourcePathId").and_then(|v| v.as_i64()) == Some(source.transform)
-                && value.get("gameObjectId").and_then(|v| v.as_i64()) == Some(source.game_object) {
+            visited += 1;
+            if let Ok(kids) = children.get(entity) {
+                stack.extend(kids.iter());
+            }
+            let Ok(identity) = identities.get(entity) else {
+                continue;
+            };
+            if identity.file == source.file
+                && identity.transform == source.transform
+                && identity.game_object == source.game_object
+            {
                 matches.push(entity);
             }
         }
-        if let [view] = matches.as_slice() {
-            commands.entity(root).insert(FixtureViewInstance(*view));
+        if visited <= 1 {
+            deferred += 1;
+            // 只看到根自己：这棵场景树还没展开，这一次搜索什么也没搜过。
+            // 退役它会把一个本来会在后一帧成功的绑定永久判死。闩已经保证
+            // 展开完毕，这里是第二道保险；真有长不出子节点的根，它的重扫
+            // 成本也只有一个实体。
+            continue;
         }
+        match matches.as_slice() {
+            [view] => {
+                bound += 1;
+                commands.entity(root).insert(FixtureViewInstance(*view));
+            }
+            [] => unmatched += 1,
+            _ => ambiguous += 1,
+        }
+        // Every outcome retires the root from the query, exactly as the sibling
+        // identity binding does. A root left in it would be re-walked forever.
+        commands.entity(root).insert(FixtureViewResolved);
+    }
+    if bound + absent + unmatched + ambiguous + deferred > 0 {
+        info!(
+            "[fixture-view] 源视图绑定：成功 {bound} · 该包无 instance_view {absent} · \
+             零匹配 {unmatched} · 多匹配 {ambiguous} · 场景未展开改日再试 {deferred}",
+        );
     }
 }
 
-/// Publish the live ViewObject's local transform, not the placement root's
-/// height. A removed view invalidates its binding so a replacement scene can
+/// Publish the source ViewObject pose reconstructed from wrapper and view.
+/// A removed view invalidates its binding so a replacement scene can
 /// supply a new identity; stale heights must not select a timeline variant.
 pub(crate) fn refresh_activity_view(
     mut commands: Commands,
@@ -1313,10 +2279,15 @@ pub(crate) fn refresh_activity_view(
     use crate::fixture_activity_provider::SourceFixtureViewLocalY;
     for (root, view, current) in &roots {
         let Ok(transform) = transforms.get(view.0) else {
-            commands.entity(root).remove::<(FixtureViewInstance, SourceFixtureViewLocalY)>();
+            // Clearing the resolved marker as well is what lets a replacement
+            // scene bind again; leaving it would retire this root permanently.
+            commands
+                .entity(root)
+                .remove::<(FixtureViewInstance, FixtureViewResolved, SourceFixtureViewLocalY)>();
             continue;
         };
-        let y = transform.translation.y;
+        let Ok(placement) = transforms.get(root) else { continue; };
+        let y = placement.transform_point(transform.translation).y;
         if !y.is_finite() {
             if current.is_some() {
                 commands.entity(root).remove::<SourceFixtureViewLocalY>();
@@ -1335,14 +2306,134 @@ impl Plugin for FixturePlugin {
             .init_resource::<FixtureSpawnedCount>()
             .init_resource::<FixtureScenesReadyCount>()
             .add_systems(Startup, load)
+            .add_systems(PostUpdate, crate::fixture_activity_provider::retire_lookup_caches)
             .add_observer(on_scene_ready)
             .add_systems(
                 Update,
-                (restore_selected_layout, plan_when_ready, spawn_when_ready, bind_activity_identities, bind_source_views, refresh_activity_view, report_orientation, fence::update_connections)
-                    .chain().in_set(FixtureLayoutSet)
+                (
+                    restore_selected_layout,
+                    plan_when_ready,
+                    spawn_when_ready,
+                    spawn_replaced_models,
+                    bind_activity_identities,
+                    bind_source_views,
+                    refresh_activity_view,
+                    report_orientation,
+                    fence::update_connections,
+                )
+                    .chain()
+                    .in_set(FixtureLayoutSet)
                     .after(crate::site::plan)
                     .after(crate::fixture_edit::FixtureEditSystems::Input)
                     .before(crate::walk_face::build),
             );
+    }
+}
+
+#[cfg(test)]
+mod coordinate_tests {
+    use super::*;
+    use moly_assets::coordinates::{source_position, source_rotation};
+
+    #[test]
+    fn placement_replaces_authored_view_offset_and_shares_locator_frame() {
+        // CN flyingcar1's authored FixtureView position is overwritten by
+        // SetPosition. Using a source-asymmetric point catches a second flip.
+        let authored = Vec3::new(-1.97, 0.0, -0.99);
+        let locator = Vec3::new(-0.35, 0.42, 0.91);
+        let source_scale = Vec3::new(0.7, 1.2, 1.1);
+        let source_yaw = Quat::from_rotation_y(0.31);
+        for direction in 0..4 {
+            let placed = Vec3::new(2.125, 0.5, -1.75);
+            let angle = direction as f32 * std::f32::consts::FRAC_PI_2;
+            let q = Quat::from_rotation_y(angle);
+            let wrapper = source_transform(source_position(placed).to_array(), -angle);
+            assert_eq!(wrapper.scale, Vec3::ONE);
+            let mut view = Transform::from_translation(source_position(authored))
+                .with_rotation(source_rotation(source_yaw)).with_scale(source_scale);
+            normalize_placed_view(&mut view);
+            assert_eq!(view.scale, source_scale);
+            assert_eq!(view.rotation, Quat::IDENTITY);
+            let rendered = wrapper.transform_point(view.transform_point(source_position(locator)));
+            let expected = source_position(placed + q * (source_scale * locator));
+            assert!(rendered.distance(expected) < 1e-5);
+            // Locator, collider vertex and render vertex are identical local
+            // points here: all must traverse the same placed hierarchy.
+            let collider = (GlobalTransform::from(wrapper).mul_transform(view))
+                .transform_point(source_position(locator));
+            assert!(rendered.distance(collider) < 1e-5);
+        }
+    }
+}
+
+#[cfg(test)]
+mod residency_tests {
+    use super::*;
+
+    #[test]
+    fn loader_releases_spawned_sources_but_keeps_later_duplicate_requests() {
+        let assets = Assets::<Gltf>::default();
+        let a = assets.reserve_handle();
+        let b = assets.reserve_handle();
+        let mut loads = FixtureGltfAssets {
+            paths: vec!["a".into(), "b".into(), "a".into()],
+            handles: HashMap::from([("a".into(), a.clone()), ("b".into(), b.clone())]),
+        };
+        loads.release_spawned(1);
+        assert_eq!(loads.handles.len(), 2);
+        loads.release_spawned(2);
+        assert!(loads.handles.contains_key("a"));
+        assert!(!loads.handles.contains_key("b"));
+        loads.release_spawned(3);
+        assert!(loads.handles.is_empty());
+        // These consumer-owned handles remain valid, independently of lookup retention.
+        assert_ne!(a.id(), b.id());
+    }
+
+    #[test]
+    fn removing_one_furniture_root_drops_its_last_source_not_other_consumers() {
+        let assets = Assets::<Gltf>::default();
+        let source = assets.reserve_handle();
+        let weak = match &source {
+            Handle::Strong(handle) => std::sync::Arc::downgrade(handle),
+            _ => panic!("reserved asset handle must be strong"),
+        };
+        let mut world = World::new();
+        let root = world.spawn((FixtureRoot, FixtureSource(source.clone()))).id();
+        let active = world.spawn(FixtureSource(source.clone())).id();
+        let mut loads = FixtureGltfAssets {
+            paths: vec!["furniture".into()],
+            handles: HashMap::from([("furniture".into(), source)]),
+        };
+        loads.release_spawned(1);
+        world.despawn(root);
+        assert!(weak.upgrade().is_some(), "another active owner must survive eviction");
+        world.despawn(active);
+        assert!(weak.upgrade().is_none(), "loader must not pin a removed fixture");
+    }
+
+    #[test]
+    fn layout_replacement_removes_roots_and_loader_ownership_only() {
+        let assets = Assets::<Gltf>::default();
+        let source = assets.reserve_handle();
+        let weak = match &source {
+            Handle::Strong(handle) => std::sync::Arc::downgrade(handle),
+            _ => panic!("reserved asset handle must be strong"),
+        };
+        let mut world = World::new();
+        world.init_resource::<FixtureLayoutRevision>();
+        let root = world.spawn((FixtureRoot, FixtureSource(source.clone()))).id();
+        let child = world.spawn(ChildOf(root)).id();
+        let unrelated = world.spawn_empty().id();
+        world.insert_resource(FixtureGltfAssets {
+            paths: vec!["furniture".into()],
+            handles: HashMap::from([("furniture".into(), source)]),
+        });
+        reload_current_layout(&mut world);
+        assert!(!world.entities().contains(root));
+        assert!(!world.entities().contains(child));
+        assert!(world.entities().contains(unrelated));
+        assert!(weak.upgrade().is_none());
+        assert!(!world.contains_resource::<FixtureGltfAssets>());
     }
 }

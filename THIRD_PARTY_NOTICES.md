@@ -6,13 +6,47 @@
 ## Resource Han Rounded（字体子集）
 
 `crates/moly-game/assets/font/ResourceHanRoundedSC-Medium.subset.ttf` 是
-Resource Han Rounded SC Medium 的一个字形子集，运行时用于烘焙文字图集。
-按 SIL Open Font License 1.1 授权，许可全文及版权声明见
+Resource Han Rounded SC Medium 0.990（作者 GitHub 发布的 TTF 版本）的一个
+字形子集，运行时用于烘焙文字图集。子集保留此前全部码点，并覆盖日服、国服
+产品可显示文本（界面文案、对话与推文语料、主表文本字段）以及产品自身写入的
+文字；[tools/subset_catalog_font.py](tools/subset_catalog_font.py) 可由原字体与
+同一组输入重建它。按 SIL Open Font License 1.1 授权，许可全文及版权声明见
 [OFL-1.1.txt](crates/moly-game/assets/font/OFL-1.1.txt)
-（© 2018–2022 Cyano Hao；部分 © 2014–2021 Adobe）。
+（© 2018–2019 Cyano Hao；部分 © 2014、2015、2018 Adobe）。
 
 子集化是 OFL 意义上的修改版本，文件名以 `.subset` 后缀标注。字体名不含
 Adobe 的保留字体名（Reserved Font Name "Source"）。
+
+## Arm Optimized Routines（单精度 powf 移植）
+
+`crates/moly-law/src/powf.rs` 是 Arm Optimized Routines 中单精度 `powf`
+（`math/powf.c`，及其数据表 `math/powf_log2_data.c`、`math/exp2f_data.c`）
+的 Rust 移植，逐位复现 Android 10 起系统 libm 所用的那份实现。上游按
+MIT 许可证授权，许可全文如下：
+
+```text
+MIT License
+
+Copyright (c) 1999-2018, Arm Limited.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
 
 ## Rust 直接依赖
 
@@ -28,6 +62,7 @@ Adobe 的保留字体名（Reserved Font Name "Source"）。
 | futures-lite | MIT OR Apache-2.0 | 异步任务与 I/O 辅助 |
 | gltf | MIT OR Apache-2.0 | glTF 模型数据解析 |
 | js-sys | MIT OR Apache-2.0 | JavaScript 内建对象绑定 |
+| parry3d | Apache-2.0 | 源凸碰撞网格的三维凸包构建 |
 | serde | MIT OR Apache-2.0 | 数据序列化与反序列化 |
 | serde_json | MIT OR Apache-2.0 | JSON 清单与资源数据解析 |
 | sha2 | MIT OR Apache-2.0 | 资源包 SHA-256 完整性校验 |
@@ -40,3 +75,54 @@ Adobe 的保留字体名（Reserved Font Name "Source"）。
 
 本文件是第三方内容索引，不替代各依赖的版权声明和许可全文；这些文件随对应
 crates.io 源码包提供。分发构建产物时，应一并保留适用的第三方声明和许可文件。
+
+## Arm Optimized Routines（logf、exp、cosf 移植）
+
+`crates/moly-law/src/particle/device_libm.rs` 中的 `logf`、`exp`、`cosf`
+是 Arm Optimized Routines（`math/logf.c`、`math/logf_data.c`、`math/exp.c`、
+`math/exp_data.c`、`math/cosf.c`、`math/sincosf.h`、`math/sincosf_data.c`）
+的 Rust 移植，逐位复现 Android 10 起系统 libm 所用的那份实现（加权曲线段的
+Bezier 时间解调用它们）。上游按 MIT 许可证授权，许可全文如下：
+
+```text
+MIT License
+
+Copyright (c) 1999-2019, Arm Limited.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+## FreeBSD msun（atan2f、atanf 移植）
+
+`crates/moly-law/src/particle/device_libm.rs` 中的 `atan2f` 与 `atanf` 是
+FreeBSD msun（`e_atan2f.c`、`s_atanf.c`，bionic libm 沿用）的 Rust 移植。
+上游声明如下：
+
+```text
+Conversion to float by Ian Lance Taylor, Cygnus Support, ian@cygnus.com.
+
+====================================================
+Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+
+Developed at SunPro, a Sun Microsystems, Inc. business.
+Permission to use, copy, modify, and distribute this
+software is freely granted, provided that this notice
+is preserved.
+====================================================
+```

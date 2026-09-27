@@ -21,6 +21,8 @@ pub(super) struct Cell {
     pub selected: String,
     pub placed: String,
     pub hide: Vec<String>,
+    /// The thumbnail's `frameMask`, which `SetupMysekaiFixture` disables.
+    pub frame_mask: Option<i64>,
 }
 
 #[derive(Clone)]
@@ -46,6 +48,7 @@ pub(super) struct Bindings {
     pub tabs: Vec<Tab>,
     pub hidden: Vec<String>,
     pub save: String,
+    pub info: String,
     pub hide_ui: String,
     pub show_ui: String,
     pub hud: String,
@@ -54,6 +57,12 @@ pub(super) struct Bindings {
     pub cancel: String,
     pub rotate: String,
     pub decide: String,
+    /// SiteEditView's camera rotate button (`LayoutAction` 13).
+    pub camera_rotate: String,
+    /// SiteEditView's change-look button (`LayoutAction` 14).
+    pub change_look: String,
+    /// SiteEditView's remove-all button (`OnRemoveFixtureAll`).
+    pub remove_all: String,
     pub unsupported_buttons: Vec<String>,
     pub panel: String,
     pub panel_y: f32,
@@ -114,6 +123,20 @@ fn optional_cloned(
         }
     }
     Ok(result)
+}
+
+/// Whether this layout's `SiteEditView` declares `_reportTipButton`, by the
+/// layout's region tag. Layouts without a tag are the shared root's CN
+/// extractions, whose class serializes it; the JP class of the region root
+/// serializes nine references and the report-tip button is not one of them,
+/// so on JP it is not built. A declared field the layout lacks is still an
+/// error.
+fn declares_report_tip_button(doc: &UiPrefab) -> Result<bool, String> {
+    match doc.source.region.as_deref() {
+        None => Ok(true),
+        Some("jp") => Ok(false),
+        Some(region) => Err(format!("SiteEditView: no declared field set for region {region}")),
+    }
 }
 
 fn f(fields: &Value, name: &str) -> Result<f32, String> {
@@ -215,6 +238,18 @@ pub(super) fn compose(
                 &thumb_fields,
                 &["disableCover", "labelImage", "_subThumbnailImage"],
             )?);
+            // UIPartsItemThumbnail.SetupMysekaiFixture hides thumbnailBase and
+            // ends with VisibleFrame = false: the frame image's GameObject off
+            // and frameMask disabled, so a fixture thumbnail is not masked.
+            hide.extend(optional_cloned(
+                instance,
+                &thumb_fields,
+                &["thumbnailBase", "frameImage"],
+            )?);
+            let frame_mask = match pointer(&thumb_fields["frameMask"])? {
+                0 => None,
+                id => Some(instance.identity(id)?),
+            };
             // Loading/failed-state graphics belong to the source texture loader;
             // the host hides them once the real catalog image is registered.
             let loader = component(
@@ -236,6 +271,7 @@ pub(super) fn compose(
                 selected: cloned_field(instance, &cell_fields, "selected")?,
                 placed: cloned_field(instance, &cell_fields, "_inPlacedLabel")?,
                 hide,
+                frame_mask,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -276,21 +312,30 @@ pub(super) fn compose(
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
+    // Elements without a presenter here. The screen reaches these through its
+    // serialized references; the two paths below have no serialized
+    // reference in the layout (no other component points at them).
     let mut hidden = [
-        "ContentRoot/PlanningConfirmHeadUpDisplay",
-        "ContentRoot/Rectangle",
-        "ContentRoot/LongTapGauge",
-        "ContentRoot/PlacedCountHeadUpDisplay",
-        "ContentRoot/SequentialFixtureStartMarker",
-        "ContentRoot/SequentialFixtureEndMarker",
-        "ContentRoot/SiteEditView/RightBottom",
-        "ContentRoot/ExpansionFixtureSelecter/BaseContent/Background/SiteEnvironment",
-        "ContentRoot/ExpansionFixtureSelecter/BaseContent/Background/Handle/FixtureThumbnail",
-        "ContentRoot/ExpansionFixtureSelecter/BaseContent/LayoutedCount",
+        "_rectangle",
+        "_longTouchGauge",
+        "_placedCountHeadUpDisplay",
+        "_sequentialFixtureStartMarker",
+        "_sequentialFixtureEndMarker",
+        "_rightBottomRoot",
+        "_siteEnvironmentSelectContent",
+        "_fixtureLayoutCountInfo",
     ]
     .into_iter()
-    .map(str::to_owned)
-    .collect::<Vec<_>>();
+    .map(|name| field(&screen, name))
+    .collect::<Result<Vec<_>, _>>()?;
+    hidden.extend(
+        [
+            "ContentRoot/PlanningConfirmHeadUpDisplay",
+            "ContentRoot/ExpansionFixtureSelecter/BaseContent/Background/Handle/FixtureThumbnail",
+        ]
+        .into_iter()
+        .map(str::to_owned),
+    );
     // Full source hierarchy is retained, while unavailable data families have
     // no fabricated rows. Source's inactive outer prototype stays inactive.
     hidden.extend(optional_cloned(
@@ -316,17 +361,16 @@ pub(super) fn compose(
         &fixture_fields,
         "_hashTagFilteredBalloon",
     )?);
-    let mut unsupported_buttons = [
-        "_removeAllButton",
-        "_presetSaveButton",
-        "_infoButton",
-        "_changeLookButton",
-        "_rotateButton",
-        "_reportTipButton",
-    ]
-    .into_iter()
-    .map(|name| field(&action, name))
-    .collect::<Result<Vec<_>, _>>()?;
+    let mut unsupported = vec!["_presetSaveButton"];
+    if declares_report_tip_button(&doc)? {
+        unsupported.push("_reportTipButton");
+    } else if action.get("_reportTipButton").is_some() {
+        return Err("this region's SiteEditView declares no _reportTipButton, but the layout carries one".into());
+    }
+    let mut unsupported_buttons = unsupported
+        .into_iter()
+        .map(|name| field(&action, name))
+        .collect::<Result<Vec<_>, _>>()?;
     let filter = component(
         list,
         &field(&fixture_fields, "_searchButton")?,
@@ -374,6 +418,7 @@ pub(super) fn compose(
         tabs,
         hidden,
         save: field(&action, "_saveButton")?,
+        info: field(&action, "_infoButton")?,
         hide_ui: field(&action, "_uiDisableButton")?,
         show_ui: field(&action, "_uiEnableButton")?,
         hud: field(&screen, "_fixtureEditHeadUpDisplay")?,
@@ -382,6 +427,9 @@ pub(super) fn compose(
         cancel: field(&hud, "cancelButton")?,
         rotate: field(&hud, "rotateButton")?,
         decide: field(&hud, "decideButton")?,
+        camera_rotate: field(&action, "_rotateButton")?,
+        change_look: field(&action, "_changeLookButton")?,
+        remove_all: field(&action, "_removeAllButton")?,
         unsupported_buttons,
         panel,
         panel_y: panel_rect.anchored_position[1],
@@ -443,14 +491,19 @@ pub(super) fn apply_static(
         enabled(view, doc, &tab.button, tab.primary);
     }
     for cell in &bindings.cells {
-        view.set_texture(&cell.image, &icons.by_fixture[&cell.choice.fixture_id]);
-        view.set_text(
-            &cell.quantity,
-            if cell.choice.unlimited() { "∞" } else { "1" }.to_owned(),
-        );
+        let icon = cell
+            .choice
+            .icon(icons)
+            .expect("the editor lists only fixtures with a registered thumbnail");
+        view.set_texture(&cell.image, icon);
+        // UIPartsThumbnail.SetQuantity: "×{0}".
+        view.set_text(&cell.quantity, format!("×{}", cell.choice.count));
         view.set_visible(&cell.placed, cell.choice.is_placed());
         for path in &cell.hide {
             view.set_visible(path, false);
+        }
+        if let Some(mask) = cell.frame_mask {
+            view.set_behaviour_enabled(mask, false);
         }
         enabled(view, doc, &cell.button, cell.choice.editable);
     }

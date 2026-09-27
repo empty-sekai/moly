@@ -2,9 +2,14 @@
 use bevy::asset::uuid::Uuid;
 use bevy::asset::LoadState;
 use bevy::camera::visibility::NoFrustumCulling;
+use bevy::ecs::system::lifetimeless::SRes;
+use bevy::ecs::system::SystemParamItem;
 use bevy::mesh::Mesh;
 use bevy::prelude::*;
-use bevy::render::render_resource::{AsBindGroup, ShaderType};
+use bevy::render::render_asset::RenderAssets;
+use bevy::render::render_resource::*;
+use bevy::render::renderer::RenderDevice;
+use bevy::render::texture::GpuImage;
 use bevy::shader::ShaderRef;
 use moly_assets::sidecar::{MolyJson, ParticleRenderer, ParticleSystem, SiteSidecar};
 use moly_law::material::MaterialSlot;
@@ -14,7 +19,8 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 
 use crate::billboard::{self, Alignment, SizeClamp};
-use crate::particle_runtime::{Runtime, Rng, Context, EffectKind, build_quads, simulate, PREWARM_STEP};
+use crate::env::SiteEnvGpuBuffer;
+use crate::particle_runtime::{Runtime, Rng, Context, EffectKind, simulate, PREWARM_STEP};
 use crate::site::{SiteActive, SiteRoot, SiteScenesReady};
 use crate::site_material::SiteSidecarAsset;
 
@@ -48,18 +54,50 @@ pub struct UberT1Params {
     pub base_st: Vec4,
     /// `_TintColor`（HDR 分量是常态，源程序不钳制）。
     pub tint_colour: Vec4,
-    /// x = `_TintBlendRate` · y = 全局 mip 偏置 · z, w 留空。
+    /// x = `_TintBlendRate` · y = 全局 mip 偏置 · z = `_TranceparencyByLuminanceEnabled`
+    /// · w = `_PhenomenaLightEnabled`。后两个在源程序里就是 uniform 分支的
+    /// 判别量（`lessThan(0.5, …)`），这里照那个形状喂进来，不做管线特化。
     pub scalars: Vec4,
+    /// 亮度键控透明的标量：x = `_LuminanceTransparencyProgress`
+    /// · y = `_LuminanceTransparencySharpness` · z = `_InverseLuminanceTransparency`
+    /// · w 留空。
+    ///
+    /// 源程序里 progress 与 sharpness 各自还叠一个逐粒子自定义流
+    /// （`coord = 分量号 × 10 + 来源号`，来源 0 取常量零向量），本站材质集上
+    /// 两个 coord 恰全为 0（2121/2121）⇒ 叠加项恒为 0，只剩这两个标量本身。
+    /// coord ≠ 0 的材质仍由门拦下，不会静默走到这里。
+    pub luminance: Vec4,
+    /// 逐粒子流选择器。x = `_TintBlendRateCoord`；其余分量留给同族的其它
+    /// coord，接线方式相同（门未放开的仍由门拦下）。
+    pub coords: Vec4,
+}
+
+impl UberT1Params {
+    /// 手写绑定组用的字节序；槽序与 `shaders/uber_particle.wgsl` 的
+    /// `UberT1Params` 是契约，也与 `fixture_emission` 的对象块前四槽一致。
+    fn bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(80);
+        for slot in [self.base_st, self.tint_colour, self.scalars, self.luminance, self.coords] {
+            for value in slot.to_array() {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        bytes
+    }
 }
 
 #[derive(Component, Clone, Copy)]
 pub(crate) struct ParticleEmission {
+    pub source_state: Option<moly_assets::material_passes::SourceRenderState>,
+    pub render_queue: i32,
     pub params: UberT1Params,
     pub colour: Vec4,
     pub intensity: f32,
     pub colour_type: f32,
     pub area: bool,
     pub tint_area: bool,
+    /// 原版粒子族：材质色平乘（见 wgsl 的 `UBER_PLAIN_COLOUR`）。
+    pub plain_colour: bool,
     pub cull: CullArm,
     pub blend: BlendArm,
 }
@@ -90,21 +128,109 @@ pub enum BlendArm {
 pub struct UberT1Key {
     /// 关键字集里有「染色作用于整片」或「染色作用于边缘」之一。
     pub tint_area: bool,
+    /// 材质族是原版粒子族 ⇒ 材质色平乘。与 `tint_area` 互斥：
+    /// 两族的属性面不相交（该族无 `_TINT_AREA_*`，染色族无 `_Color`）。
+    pub plain_colour: bool,
     pub cull: CullArm,
     pub blend: BlendArm,
 }
 
-#[derive(Asset, TypePath, Debug, Clone, AsBindGroup)]
-#[bind_group_data(UberT1Key)]
+#[derive(Asset, TypePath, Debug, Clone)]
 pub struct UberParticleMaterial {
-    #[uniform(0)]
     params: UberT1Params,
-    #[texture(1)]
-    #[sampler(2)]
     pub(crate) base_map: Handle<Image>,
     tint_area: bool,
+    plain_colour: bool,
     cull: CullArm,
     blend: BlendArm,
+}
+
+impl AsBindGroup for UberParticleMaterial {
+    type Data = UberT1Key;
+    type Param = (SRes<SiteEnvGpuBuffer>, SRes<RenderAssets<GpuImage>>);
+
+    fn label() -> &'static str {
+        "uber_particle_material"
+    }
+
+    fn unprepared_bind_group(
+        &self,
+        _layout: &BindGroupLayout,
+        _render_device: &RenderDevice,
+        (env_buffer, images): &mut SystemParamItem<'_, '_, Self::Param>,
+        _force_no_bindless: bool,
+    ) -> Result<UnpreparedBindGroup, AsBindGroupError> {
+        let base = images
+            .get(&self.base_map)
+            .ok_or(AsBindGroupError::RetryNextUpdate)?;
+        let bindings = BindingResources(vec![
+            (0, OwnedBindingResource::Data(OwnedData(self.params.bytes()))),
+            (
+                1,
+                OwnedBindingResource::TextureView(
+                    TextureViewDimension::D2,
+                    base.texture_view.clone(),
+                ),
+            ),
+            (
+                2,
+                OwnedBindingResource::Sampler(SamplerBindingType::Filtering, base.sampler.clone()),
+            ),
+            // binding 3：站点全局量，与家具/站点材质共用同一个 buffer。
+            // `_GlobalPhenomenaDirectionalLightColor` 是逐帧全局量，不能烘进
+            // 材质——烘进去天气一换材质就是陈旧值，而材质不会因此重建。
+            (3, OwnedBindingResource::Buffer(env_buffer.buffer.clone())),
+        ]);
+        Ok(UnpreparedBindGroup { bindings })
+    }
+
+    fn bind_group_data(&self) -> Self::Data {
+        UberT1Key::from(self)
+    }
+
+    fn bind_group_layout_entries(
+        _render_device: &RenderDevice,
+        _force_no_bindless: bool,
+    ) -> Vec<BindGroupLayoutEntry> {
+        vec![
+            BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 1,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Texture {
+                    sample_type: TextureSampleType::Float { filterable: true },
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 2,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 3,
+                visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ]
+    }
 }
 
 /// 天气链共用这一份材质与管线特化（同一条 T1 片元链，不另起第二份
@@ -114,6 +240,7 @@ impl UberParticleMaterial {
         params: UberT1Params,
         base_map: Handle<Image>,
         tint_area: bool,
+        plain_colour: bool,
         cull: CullArm,
         blend: BlendArm,
     ) -> Self {
@@ -121,6 +248,7 @@ impl UberParticleMaterial {
             params,
             base_map,
             tint_area,
+            plain_colour,
             cull,
             blend,
         }
@@ -131,6 +259,7 @@ impl From<&UberParticleMaterial> for UberT1Key {
     fn from(material: &UberParticleMaterial) -> Self {
         UberT1Key {
             tint_area: material.tint_area,
+            plain_colour: material.plain_colour,
             cull: material.cull,
             blend: material.blend,
         }
@@ -165,9 +294,23 @@ impl Material for UberParticleMaterial {
     fn specialize(
         _pipeline: &bevy::pbr::MaterialPipeline,
         descriptor: &mut bevy::render::render_resource::RenderPipelineDescriptor,
-        _layout: &bevy::mesh::MeshVertexBufferLayoutRef,
+        layout: &bevy::mesh::MeshVertexBufferLayoutRef,
         key: bevy::pbr::MaterialPipelineKey<Self>,
     ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
+        // This shader does not use Bevy's bindless light-probe array. Reuse that
+        // group slot for a PER-VIEW raw-depth alias; material instances remain
+        // view-independent. The matching draw command installs the same layout.
+        descriptor.layout[1] = crate::weather_depth::raw_depth_layout();
+        // 顶点布局显式装配：默认的网格布局不含自定义流那两条，而源程序的
+        // 逐粒子选择器要从它们取分量。槽位与 `shaders/uber_particle.wgsl`
+        // 的 `UberVertex` 是契约。
+        descriptor.vertex.buffers = vec![layout.0.get_layout(&[
+            Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
+            Mesh::ATTRIBUTE_UV_0.at_shader_location(2),
+            Mesh::ATTRIBUTE_COLOR.at_shader_location(5),
+            crate::billboard::ATTRIBUTE_CUSTOM1.at_shader_location(8),
+            crate::billboard::ATTRIBUTE_CUSTOM2.at_shader_location(9),
+        ])?];
         if key.bind_group_data.tint_area {
             descriptor
                 .vertex
@@ -175,6 +318,12 @@ impl Material for UberParticleMaterial {
                 .push("UBER_TINT_AREA_ALL".into());
             if let Some(ref mut fragment) = descriptor.fragment {
                 fragment.shader_defs.push("UBER_TINT_AREA_ALL".into());
+            }
+        }
+        if key.bind_group_data.plain_colour {
+            descriptor.vertex.shader_defs.push("UBER_PLAIN_COLOUR".into());
+            if let Some(ref mut fragment) = descriptor.fragment {
+                fragment.shader_defs.push("UBER_PLAIN_COLOUR".into());
             }
         }
         descriptor.primitive.cull_mode = match key.bind_group_data.cull {
@@ -208,6 +357,7 @@ impl Material for UberParticleMaterial {
 /// Material 管线注册：在 `app()` 里 DefaultPlugins 之后调用一次。
 pub(crate) fn install(app: &mut App) {
     app.add_plugins(MaterialPlugin::<UberParticleMaterial>::default());
+    crate::weather_depth::install_raw_depth(app);
 }
 
 /// Startup：内嵌着色程序。
@@ -229,7 +379,7 @@ struct Planned {
     emitter: EmitterParams,
     /// 发射节点实体：世界变换逐帧从它读（局部空间仿真要它）。
     anchor: Entity,
-    alignment: Alignment,
+    geometry: UberGeometry,
     cone_angle: Option<f32>,
     rol: Option<RotationOverLifetime>,
     limit: Option<LimitVelocity>,
@@ -240,7 +390,84 @@ struct Planned {
     clamp: SizeClamp,
     pivot: [f32; 3],
     texture: Handle<Image>,
-    effect: ParticleEmission,
+    effect: Option<ParticleEmission>,
+}
+
+/// How an admitted Billboard system builds its quads.
+///
+/// The engine's Billboard geometry for the View, World and Local render
+/// spaces is one body that branches on the renderer's render space: World
+/// lays the quad on the world axes, Local on the owner's rotation, View on
+/// the camera's. World and Local are drawn with the source construction
+/// (`source_billboard`), which also carries the source pivot, renderer scale
+/// and rotation order. View stays on the older quad writer: the source View
+/// arm reads the renderer's allow-roll flag, and this path's renderer record
+/// does not carry it, so building it here would take a default the source
+/// never gave.
+#[derive(Clone)]
+enum UberGeometry {
+    Legacy(Alignment),
+    Source(crate::source_billboard::Draw),
+}
+
+/// The Billboard render space of one renderer: World and Local get the source
+/// construction, View the older writer; Facing and Velocity have no user on
+/// this path and are refused by name, with any value outside the engine's
+/// enumeration.
+///
+/// The source Draw's `allow_roll` is read only by the View and Facing arms,
+/// neither of which is built here; World and Local never read it, so the
+/// value set below reaches no output.
+fn uber_billboard_geometry(
+    renderer: &ParticleRenderer,
+    system: &serde_json::Value,
+    node_scale: Option<Vec3>,
+) -> Result<UberGeometry, String> {
+    billboard_geometry(renderer.alignment, renderer.pivot, [renderer.min_particle_size, renderer.max_particle_size],
+        system, node_scale)
+}
+
+/// [`uber_billboard_geometry`] over the renderer fields it reads.
+fn billboard_geometry(
+    render_space: i64,
+    pivot: [f32; 3],
+    screen_size: [f32; 2],
+    system: &serde_json::Value,
+    node_scale: Option<Vec3>,
+) -> Result<UberGeometry, String> {
+    use crate::particle_geometry::{Alignment as Space, Scaling};
+    let name = || Alignment::render_space_name(render_space);
+    let space = Space::from_source(render_space).ok_or_else(|| name().to_owned())?;
+    let space = match space {
+        Space::View => return Ok(UberGeometry::Legacy(Alignment::View)),
+        Space::World | Space::Local => space,
+        Space::Facing | Space::Velocity => {
+            return Err(name().to_owned())
+        }
+    };
+    // MainModule scaling: Hierarchy reads the owner's lossy scale, Local the
+    // emitter node's own scale; Shape is not consumed here.
+    let scaling = match system.get("scalingMode").and_then(serde_json::Value::as_u64) {
+        Some(0) => Scaling::Hierarchy,
+        Some(1) => Scaling::Local {
+            scale: node_scale.ok_or_else(|| {
+                format!("{}: Local scaling without the emitter node transform", name())
+            })?,
+            // Gates only the native birth path, which this host does not install.
+            unit_chain: false,
+        },
+        other => {
+            return Err(format!("{}: scalingMode {other:?}", name()))
+        }
+    };
+    Ok(UberGeometry::Source(crate::source_billboard::Draw {
+        mode: crate::source_billboard::Mode::Billboard,
+        alignment: space,
+        pivot: Vec3::from_array(pivot),
+        screen_size: Vec2::from_array(screen_size),
+        allow_roll: true,
+        scaling,
+    }))
 }
 
 /// 判读结果：放行的计划 + 逐档拒绝盘点。
@@ -258,10 +485,14 @@ struct Tally {
     records: usize,
     /// 渲染器关着的。
     renderer_disabled: usize,
+    /// 连渲染器记录都没有的。与下面两项一样，判读在 `records` 自增之前就
+    /// 退出，所以它们不计入本族记录数——但必须计数，否则这条路径上的拒绝
+    /// 既不出现在 `records` 里也不出现在任何桶里，等于静默丢弃。
+    no_renderer: usize,
     /// 没有内联材质记录的。
     no_material: usize,
-    /// 材质族不是这一族的。
-    other_family: usize,
+    /// 材质族不是这一族的，按 shader 名计数。
+    other_family: Vec<String>,
     /// 发射节点路径在已展开的场景树里对不上（见模块注释：多数是运行时
     /// 实例化的 prefab，不是缺陷）。
     node_unresolved: usize,
@@ -277,7 +508,7 @@ struct Tally {
     no_emission: usize,
     /// 缺 `system` 块（装载层原样存的那块）。
     no_system_block: usize,
-    /// 粒子律对单条 `system` 块具名拒绝（带权曲线模式等），按消息计数。
+    /// 粒子律对单条 `system` 块具名拒绝（缺导出的曲线 wrap 模式等），按消息计数。
     law_reject: Vec<String>,
     /// 仿真空间不是局部/世界二档之一。
     sim_space: usize,
@@ -311,6 +542,7 @@ pub(crate) fn plan(
     names: Query<&Name>,
     children: Query<&Children>,
     stale: Query<Entity, With<UberParticleDraw>>,
+    transforms: Query<&Transform>,
 ) {
     if planned.is_some() || state.is_some() {
         return;
@@ -344,13 +576,22 @@ pub(crate) fn plan(
 
     let mut tally = Tally::default();
     let mut plans = Vec::new();
+    let mut not_play_on_awake = 0usize;
     for system in &doc.particles {
+        // A system that does not play on awake runs only when its owner plays
+        // it (a director's Control clip, a Signal reaction's Play), never from
+        // the scene's load.
+        if system.system.as_ref().and_then(|v| v.get("playOnAwake")).and_then(serde_json::Value::as_bool) == Some(false) {
+            not_play_on_awake += 1;
+            continue;
+        }
         match judge(
             system,
             doc,
             &active.scene,
             &format!("site/scenes/{}", active.scene),
             &by_path,
+            &|entity| transforms.get(entity).ok().map(|t| t.scale),
             &server,
             &mut tally,
         ) {
@@ -360,6 +601,22 @@ pub(crate) fn plan(
             }
             None => {}
         }
+    }
+    // An environment site effect can live inside the site scene itself (the festival
+    // garden's `effect_root/fx_env_site_<phenomenon>`: its phenomenon has no unique
+    // environment bundle, so the environment loader never instantiates one). Name those
+    // rows so their admission is visible next to the family totals.
+    let embedded: Vec<&str> = doc.particles.iter().map(|s| s.node.as_str())
+        .filter(|node| node.contains("fx_env_site_")).collect();
+    if !embedded.is_empty() {
+        let admitted: Vec<&str> = plans.iter().map(|p: &Planned| p.node.as_str())
+            .filter(|node| node.contains("fx_env_site_")).collect();
+        info!("[uber-particle] {} scene-embedded environment effect rows {:?}; admitted {:?}",
+            active.scene, embedded, admitted);
+    }
+    if not_play_on_awake > 0 {
+        info!("[uber-particle] {}: {not_play_on_awake} systems do not play on awake; their owners play them, so they are not run from load",
+            active.scene);
     }
     if tally.records == 0 {
         // 这个站点包里没有这一族的粒子系统：不留资源，也不每帧重扫。
@@ -374,7 +631,7 @@ pub(crate) fn plan(
          挡下——节点路径未解析 {}（多为运行时实例化的 prefab，见模块注释）· \
          绘制模式 {:?} · 对齐档 {:?} · 发射形状律缺 {:?} · 缺形状模块 {} · \
          缺 emission {} · 缺 system 块 {} · 律拒 {:?} · 仿真空间 {} · 缺基础贴图 {} · 状态档族外 {:?} · \
-         渲染器关 {} · 无材质 {} · 非本族 {}；\
+         渲染器关 {} · 无渲染器 {} · 无材质 {} · 非本族 {:?}；\
          放行但未实现（逐条具名，不静默）：{:?}",
         active.scene,
         tally.records,
@@ -391,8 +648,9 @@ pub(crate) fn plan(
         tally.no_base_map,
         count_names(&tally.state_arm),
         tally.renderer_disabled,
+        tally.no_renderer,
         tally.no_material,
-        tally.other_family,
+        count_names(&tally.other_family),
         count_names(&tally.shading_shortfall),
     );
     commands.insert_resource(UberParticlePlan {
@@ -422,14 +680,25 @@ fn judge(
     scene: &str,
     texture_dir: &str,
     by_path: &HashMap<String, Vec<Entity>>,
+    node_scale: &dyn Fn(Entity) -> Option<Vec3>,
     server: &AssetServer,
     tally: &mut Tally,
 ) -> Option<Planned> {
-    let renderer: &ParticleRenderer = system.renderer.as_ref()?;
+    let Some(renderer) = system.renderer.as_ref() else {
+        tally.no_renderer += 1;
+        return None;
+    };
+    let renderer: &ParticleRenderer = renderer;
     let material = match renderer.material.as_ref() {
         Some(material) if material.shader == SHADER_NAME => material,
-        Some(_) => return None,
-        None => return None,
+        Some(other) => {
+            tally.other_family.push(other.shader.clone());
+            return None;
+        }
+        None => {
+            tally.no_material += 1;
+            return None;
+        }
     };
     tally.records += 1;
     if !renderer.enabled {
@@ -444,26 +713,36 @@ fn judge(
         return None;
     };
     if renderer.render_mode != "Billboard" {
-        tally.render_mode.push(renderer.render_mode.clone());
+        // 记的是「哪个模式 + 它要哪份网格」，不只是模式名。Mesh 模式的
+        // 网格引用（包内 glb + 节点）提取产物里是有的，判读行要把它报出来
+        // ——否则「9 条被 Mesh 挡下」读不出接下来该去拿什么。
+        tally.render_mode.push(match renderer.meshes.as_slice() {
+            [] => renderer.render_mode.clone(),
+            [mesh] => format!("{}({}#{})", renderer.render_mode, mesh.file, mesh.node),
+            many => format!("{}({} 份网格)", renderer.render_mode, many.len()),
+        });
         return None;
     }
-    let Some(alignment) = Alignment::from_render_space(renderer.alignment) else {
-        tally
-            .alignment
-            .push(Alignment::render_space_name(renderer.alignment).to_owned());
-        return None;
-    };
 
     // ---- 仿真侧的门 ----
-    // `system` 块原样存在装载层（不在那里解析：律对带权曲线模式具名拒绝，
-    // 全量解析会让永远不被放行的记录拖垮整个包）。这里对单条放行候选
-    // 调律——能走到这一行的记录已经过了绘制模式与对齐档两道门，带权键
-    // 全在被那两道门挡掉的系统里，到不了律解析器。律的档案入口吃
+    // `system` 块原样存在装载层（不在那里解析：律对求值不了的曲线形状具名
+    // 拒绝，全量解析会让永远不被放行的记录拖垮整个包）。这里对单条放行候选
+    // 调律——能走到这一行的记录已经过了绘制模式与对齐档两道门；带权键的
+    // 曲线道照引擎的加权分支求值，不在拒绝之列。律的档案入口吃
     // `{"effects": {<名>: {"particles": [{node, system}]}}}` 且用律自己的
     // JSON 类型，因此把条目折回那个形状（node 挂回 system 旁边）。
     let Some(system_block) = system.system.as_ref() else {
         tally.no_system_block += 1;
         return None;
+    };
+    // The render-space gate reads the MainModule scaling mode, so it sits
+    // right after the system block's own gate.
+    let geometry = match uber_billboard_geometry(renderer, system_block, node_scale(anchor)) {
+        Ok(geometry) => geometry,
+        Err(name) => {
+            tally.alignment.push(name);
+            return None;
+        }
     };
     let archive = serde_json::json!({
         "effects": {
@@ -488,6 +767,20 @@ fn judge(
             return None;
         }
     };
+    if let Some(sheet) = &emitter.texture_sheet {
+        if let Err(error) = moly_law::particle::texture_sheet::TextureSheet::from_params(sheet) {
+            tally.law_reject.push(format!("{}: {error}", system.node)); return None;
+        }
+    }
+    if let Some(force) = &emitter.force {
+        if let Err(error) = moly_law::particle::force::ForceOverLifetime::from_params(force) {
+            tally.law_reject.push(format!("{}: {error}", system.node)); return None;
+        }
+    }
+    // Every other curve the runtime evaluates, through the engine's dispatch.
+    if let Err(error) = crate::particle_runtime::curve_admission(&emitter) {
+        tally.law_reject.push(format!("{}: {error}", system.node)); return None;
+    }
     if emitter.emission.is_none() {
         tally.no_emission += 1;
         return None;
@@ -553,21 +846,55 @@ fn judge(
     }
 
     // ---- 着色轴：uniform 分支必须全关，否则源程序里那一步在场而本链没有 ----
-    for (name, want) in [
-        ("_FakeLightEnabled", 0.0),
-        ("_TranceparencyByLuminanceEnabled", 0.0),
-        ("_PhenomenaLightEnabled", 0.0),
-        ("_BaseMapRotationEnabled", 0.0),
-    ] {
+    for (name, want) in [("_FakeLightEnabled", 0.0), ("_BaseMapRotationEnabled", 0.0)] {
         if get(name) != Some(want) {
             tally.state_arm.push(format!("{name}={:?}", get(name)));
             return None;
         }
     }
+    // 亮度键控透明与现象光这两条分支本链已实现（片元链尾段）。开关只认
+    // 0/1——源程序的判别是 `0.5 < x`，别的取值不会改变分支走向，但它说明
+    // 这份材质不是我们读过的那一档，仍旧拒。
+    let luminance_enabled = match get("_TranceparencyByLuminanceEnabled") {
+        Some(v) if v == 0.0 || v == 1.0 => v,
+        other => {
+            tally.state_arm.push(format!("_TranceparencyByLuminanceEnabled={other:?}"));
+            return None;
+        }
+    };
+    let phenomena_enabled = match get("_PhenomenaLightEnabled") {
+        Some(v) if v == 0.0 || v == 1.0 => v,
+        other => {
+            tally.state_arm.push(format!("_PhenomenaLightEnabled={other:?}"));
+            return None;
+        }
+    };
+    // 亮度臂的两个逐粒子流选择器：本链只实现来源 0（常量零向量）那一档。
+    // 分支关着时这两个值不进链，不必管。
+    if luminance_enabled == 1.0 {
+        for name in [
+            "_LuminanceTransparencyProgressCoord",
+            "_LuminanceTransparencySharpnessCoord",
+        ] {
+            if get(name) != Some(0.0) {
+                tally.state_arm.push(format!("{name}={:?}", get(name)));
+                return None;
+            }
+        }
+    }
+    let luminance = Vec4::new(
+        get("_LuminanceTransparencyProgress").unwrap_or(0.0),
+        get("_LuminanceTransparencySharpness").unwrap_or(0.0),
+        get("_InverseLuminanceTransparency").unwrap_or(0.0),
+        0.0,
+    );
     // 逐粒子自定义流选择器：`coord = 分量号 × 10 + 来源号`，0 = 取常量 0。
     // 本链只实现常量 0 那一档（本站材质集上恰好全 0）。
+    // `_TintBlendRateCoord` 已接逐粒子流（顶点属性 custom1/custom2 + 着色器
+    // 选择器），不再要求为 0；其余 coord 的选择器接口相同但消费面未接，
+    // 仍旧拒——放行了却不喂就是静默的错误值。
+    let tint_blend_rate_coord = get("_TintBlendRateCoord").unwrap_or(0.0);
     for name in [
-        "_TintBlendRateCoord",
         "_EmissionIntensityCoord",
         "_BaseMapOffsetXCoord",
         "_BaseMapOffsetYCoord",
@@ -585,9 +912,9 @@ fn judge(
         match keyword.as_str() {
             "_BASE_MAP_MODE_2D" | "_EMISSION_MAP_MODE_2D" | "_TINT_COLOR_ENABLED"
             | "_EMISSION_AREA_ALL" | "_TINT_AREA_ALL" => {}
-            "_SOFT_PARTICLES_ENABLED" => {
-                tally.shading_shortfall.push("软粒子（关键字在场）".to_owned());
-            }
+            // Soft particles are drawn: the fragment tail fades alpha by the
+            // eye-depth gap to the opaque depth snapshot (`soften_alpha`).
+            "_SOFT_PARTICLES_ENABLED" => {}
             other => {
                 tally.state_arm.push(format!("keyword {other}"));
                 return None;
@@ -631,18 +958,32 @@ fn judge(
         .unwrap_or([1.0, 1.0, 1.0, 1.0]);
     let tint_blend_rate = get("_TintBlendRate").unwrap_or(0.0);
 
+    let soft_enabled = material.keywords.iter().any(|k| k == "_SOFT_PARTICLES_ENABLED");
+    let soft_intensity = if soft_enabled {
+        match get("_SoftParticlesIntensity").filter(|v| v.is_finite()) {
+            Some(intensity) => intensity,
+            None => {
+                tally.state_arm.push("_SoftParticlesIntensity absent with the soft keyword".to_owned());
+                return None;
+            }
+        }
+    } else { 0.0 };
+    let shader_coords = Vec4::new(tint_blend_rate_coord, soft_intensity,
+        f32::from(soft_enabled), get("_EmissionIntensityCoord").unwrap_or(0.0));
     Some(Planned {
         node: system.node.clone(),
         emitter,
         anchor,
-        alignment,
+        geometry,
         cone_angle,
         rol,
         limit,
         params: UberT1Params {
             base_st: Vec4::from_array(base_st),
             tint_colour: Vec4::from_array(tint_colour),
-            scalars: Vec4::new(tint_blend_rate, GLOBAL_MIP_BIAS, 0.0, 0.0),
+            scalars: Vec4::new(tint_blend_rate, GLOBAL_MIP_BIAS, luminance_enabled, phenomena_enabled),
+            luminance,
+            coords: shader_coords,
         },
         tint_area,
         cull,
@@ -653,14 +994,18 @@ fn judge(
         },
         pivot: renderer.pivot,
         texture,
-        effect: ParticleEmission {
-            params: UberT1Params { base_st: Vec4::from_array(base_st), tint_colour: Vec4::from_array(tint_colour), scalars: Vec4::new(tint_blend_rate, GLOBAL_MIP_BIAS, 0.0, 0.0) },
+        effect: (renderer.effect_pass == moly_assets::material_passes::EffectPassEligibility::Eligible).then(|| ParticleEmission {
+            source_state: renderer.effect_render_state,
+            render_queue: renderer.render_queue.expect("eligible effect has a queue"),
+            params: UberT1Params { base_st: Vec4::from_array(base_st), tint_colour: Vec4::from_array(tint_colour), scalars: Vec4::new(tint_blend_rate, GLOBAL_MIP_BIAS, luminance_enabled, phenomena_enabled), luminance, coords: shader_coords },
             colour: Vec4::from_array(material.colors.get("_EmissionColor").copied().unwrap_or([1.0; 4])),
             intensity: get("_EmissionIntensity").unwrap_or(1.0),
             colour_type: get("_EmissionColorType").unwrap_or(0.0),
             area: material.keywords.iter().any(|k| k == "_EMISSION_AREA_ALL"),
-            tint_area, cull, blend,
-        },
+            // 站点链的材质门只认 UberUnlit（见本文件 `SHADER_NAME`），
+            // 原版粒子族不会走到这里 ⇒ 平乘臂恒关。
+            tint_area, plain_colour: false, cull, blend,
+        }),
     })
 }
 
@@ -725,20 +1070,22 @@ pub(crate) fn spawn_when_ready(
             params: planned.params,
             base_map: planned.texture.clone(),
             tint_area: planned.tint_area,
+            // 站点链的材质门只认 UberUnlit ⇒ 平乘臂恒关。
+            plain_colour: false,
             cull: planned.cull,
             blend: planned.blend,
         });
         // 实体变换恒等：四角已在 CPU 展开成世界坐标，属性即世界坐标。
         // 逐帧重建的属性池没有稳定包围盒，剔除交给 NoFrustumCulling 直通。
-        commands.spawn((
+        let mut draw = commands.spawn((
             Mesh3d(mesh.clone()),
             MeshMaterial3d(material),
             Transform::IDENTITY,
             NoFrustumCulling,
             UberParticleDraw,
-            planned.effect,
             crate::shadowmap::NoShadowCast,
         ));
+        if let Some(effect) = planned.effect { draw.insert(effect); }
         live.push(runtime_from_plan(planned, mesh, index));
     }
     info!(
@@ -768,6 +1115,7 @@ pub(crate) fn advance(
     cameras: Query<(&GlobalTransform, &Projection, &Camera), With<Camera3d>>,
     anchors: Query<&GlobalTransform>,
     inactive: Query<(), With<moly_assets::scene_state::SourceInactive>>,
+    taken: Query<(), With<crate::fixture_timeline_particles::DrivenByPrefabOwner>>,
 ) {
     let Some(mut state) = state else {
         return;
@@ -792,12 +1140,17 @@ pub(crate) fn advance(
         camera_transform.translation(),
         perspective.fov,
         viewport.x as f32 / viewport.y.max(1) as f32,
+        perspective.near,
     );
 
-    let dt = time.delta_secs();
+    // Time.deltaTime: the frame clamped at Time.maximumDeltaTime and floored at
+    // 1e-5 s, rounded once to float.
+    let dt = crate::particle_runtime::source_delta_time(time.delta());
     let state = &mut *state;
     for system in &mut state.live {
-        if system.anchor.is_some_and(|entity| inactive.get(entity).is_ok()) {
+        // A system a prefab's director owner took over is the owner's, drawn
+        // by the fixture host.
+        if system.anchor.is_some_and(|entity| inactive.get(entity).is_ok() || taken.get(entity).is_ok()) {
             if let Some(mesh) = meshes.get_mut(&system.mesh) {
                 if mesh.count_vertices() != 0 { *mesh = billboard::empty_mesh(); }
             }
@@ -812,8 +1165,12 @@ pub(crate) fn advance(
                 for _ in 0..steps { simulate(system, PREWARM_STEP, &ctx); }
             }
         }
-        let step = dt * system.emitter.simulation_speed;
-        if step > 0.0 { simulate(system, step, &ctx); }
+        // Update1b and Update1Incremental: the frame scaled by the simulation
+        // speed, cut by GetTimeStep with the Maximum Particle Timestep, the time
+        // left over carried to the next frame.
+        if let Err(reason) = crate::particle_runtime::advance_frame(system, dt, true, &ctx, |_| {}) {
+            error!(%reason, effect=%system.effect, node=%system.node, "native particle step refused");
+        }
         let to_world = match system.emitter.simulation_space {
             SimulationSpace::World => GlobalTransform::IDENTITY,
             _ => anchor,
@@ -821,15 +1178,7 @@ pub(crate) fn advance(
         let Some(mesh) = meshes.get_mut(&system.mesh) else {
             continue;
         };
-        let quads = build_quads(system, &to_world);
-        billboard::write_quads(
-            mesh,
-            &quads,
-            system.alignment,
-            basis,
-            system.clamp,
-            system.pivot,
-        );
+        crate::particle_runtime::write_geometry(mesh, system, &to_world, &ctx.site, camera_transform, basis);
     }
 }
 
@@ -870,6 +1219,7 @@ pub(crate) fn report(state: Option<Res<UberParticleState>>) {
 
 fn runtime_from_plan(planned: &Planned, mesh: Handle<Mesh>, index: usize) -> Runtime {
     Runtime {
+        emission_surface: None,
             node: planned.node.clone(),
             emitter: planned.emitter.clone(),
             anchor: Some(planned.anchor),
@@ -877,20 +1227,44 @@ fn runtime_from_plan(planned: &Planned, mesh: Handle<Mesh>, index: usize) -> Run
             kind: EffectKind::Site,
             camera_rotation: false,
             node_affine: GlobalTransform::IDENTITY,
-            alignment: planned.alignment,
+            geometry: match &planned.geometry {
+                UberGeometry::Legacy(alignment) => crate::particle_runtime::Geometry::Billboard {
+                    alignment: *alignment, clamp: planned.clamp, pivot: planned.pivot,
+                },
+                UberGeometry::Source(draw) => crate::particle_runtime::Geometry::SourceBillboard(draw.clone()),
+            },
             ring_cursor: 0,
             prewarmed: false,
+            pending: 0.0,
+            sub_emitter_max_lifetime: 0.0,
             cone_angle: planned.cone_angle,
             rol: planned.rol.clone(),
             limit: planned.limit.clone(),
+            velocity_law: planned.emitter.velocity_over_lifetime.as_ref()
+                .map(|p| moly_law::particle::velocity::VelocityOverLifetime::from_params(p).expect("curves validated during admission")),
+            force_law: planned.emitter.force.as_ref().map(|p|
+                moly_law::particle::force::ForceOverLifetime::from_params(p).expect("force validated during admission")),
+            gravity_law: moly_law::particle::gravity::Gravity::new(&planned.emitter.start.gravity_modifier).expect("curves validated during admission"),
+            size_law: planned.emitter.size_over_lifetime.as_ref()
+                .map(|p| moly_law::particle::size::SizeOverLifetime::from_params(p).expect("curves validated during admission")),
+            color_law: planned.emitter.color_over_lifetime.as_ref()
+                .map(moly_law::particle::color::ColorOverLifetime::from_params),
+            custom_law: planned.emitter.custom_data.as_ref()
+                .map(|p| moly_law::particle::custom_data::CustomData::from_params(p).expect("curves validated during admission")),
+            texture_sheet: planned.emitter.texture_sheet.as_ref().map(|p|
+                moly_law::particle::texture_sheet::TextureSheet::from_params(p).expect("sheet validated during admission")),
+            sort_mode: moly_law::particle::sort::ParticleSort::None,
             mesh,
-            clamp: planned.clamp,
-            pivot: planned.pivot,
             pool: Vec::new(),
             side: Vec::new(),
             emission: EmissionState::default(),
             playback_head: 0.0,
             previous_head: 0.0,
+            emission_started: false,
+            native_birth: None,
+            noise: None,
+            trail: None,
+            collision: None,
             // 逐系统换一条流：同一个种子在所有系统上会画出同一个图形。
             rng: Rng(RNG_SEED ^ (index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
             born_total: 0,
@@ -907,7 +1281,7 @@ pub(crate) struct FixtureParticleRequest {
     planned: Option<Vec<Planned>>,
 }
 #[derive(Component)]
-pub(crate) struct FixtureParticleLive(Runtime);
+pub(crate) struct FixtureParticleLive(pub(crate) Runtime);
 #[derive(Component)]
 pub(crate) struct FixtureParticlesResolved;
 
@@ -919,6 +1293,9 @@ pub(crate) fn request_fixture_particles(
     roots: Query<(Entity, &crate::fixture::FixtureSource), (With<crate::fixture::FixtureRoot>, Without<FixtureParticleRequest>, Without<FixtureParticlesResolved>)>,
 ) {
     let handle = index.get_or_insert_with(|| server.load("moly://fixture-particles-v2/index.json"));
+    // The index is only consulted for fixture roots that have not been
+    // requested or resolved yet; with none pending there is nothing to parse.
+    if roots.is_empty() { return; }
     let Some(json) = jsons.get(handle) else { return; };
     let archive: serde_json::Value = serde_json::from_str(&json.0).expect("fixture particle index");
     for (entity, source) in &roots {
@@ -938,7 +1315,7 @@ pub(crate) fn plan_fixture_particles(
     mut commands: Commands, server: Res<AssetServer>, jsons: Res<Assets<moly_assets::json::JsonAsset>>,
     mut roots: Query<(Entity, &mut FixtureParticleRequest)>,
     ready: Option<Res<crate::fixture::FixtureScenesReady>>,
-    names: Query<&Name>, children: Query<&Children>,
+    names: Query<&Name>, children: Query<&Children>, transforms: Query<&Transform>,
 ) {
     if ready.is_none() { return; }
     for (entity, mut request) in &mut roots {
@@ -951,26 +1328,78 @@ pub(crate) fn plan_fixture_particles(
             continue;
         };
         let raw: serde_json::Value = serde_json::from_str(&json.0).expect("fixture particle JSON");
-        let doc = match moly_assets::sidecar::parse_fixture_particles(json.0.as_bytes()) {
+        // Source snapshots and legacy material summaries are distinct schemas.
+        // Never feed a source-qualified failure back through the approximate path.
+        let mut legacy = raw.clone();
+        if let Some(emitters) = legacy["emitters"].as_array_mut() {
+            emitters.retain(|p| !crate::weather_fx::fixture::is_source_particle(p));
+        }
+        let doc = match moly_assets::sidecar::parse_fixture_particles(legacy.to_string().as_bytes()) {
             Ok(doc) => doc,
             Err(error) => { warn!("fixture particles {}: {error}", request.package); request.planned = Some(Vec::new()); continue; }
         };
         let mut by_path = HashMap::new();
         crate::inactive_nodes::collect(entity, &mut Vec::new(), &names, &children, &mut by_path);
         let by_path: HashMap<_, _> = by_path.into_iter().map(|(p, entities)| (format!("/{p}"), entities)).collect();
+        crate::weather_fx::fixture::plan(&mut commands, entity, &raw, &by_path, &server);
         let mut tally = Tally::default();
         let mut plans = Vec::new();
+        let mut not_play_on_awake = 0usize;
         for (index, particle) in doc.particles.iter().enumerate() {
-            let source = &raw["emitters"][index];
+            let source = &legacy["emitters"][index];
             // An inactive event template requires its actual activation binding.
             // Missing activation metadata cannot be treated as an active instance.
             if source.get("activeInHierarchy").and_then(serde_json::Value::as_bool) != Some(true) {
                 tally.law_reject.push(format!("{}: activeInHierarchy unresolved or inactive", particle.node)); continue;
             }
-            if particle.system.as_ref().and_then(|v| v.get("playOnAwake")).and_then(serde_json::Value::as_bool) != Some(true) { continue; }
-            if let Some(plan) = judge(particle, &doc, "", "fixture-particles-v2/textures", &by_path, &server, &mut tally) { plans.push(plan); }
+            if particle.system.as_ref().and_then(|v| v.get("playOnAwake")).and_then(serde_json::Value::as_bool) != Some(true) {
+                not_play_on_awake += 1;
+                continue;
+            }
+            if let Some(mut plan) = judge(particle, &doc, "", "fixture-particles-v2/textures", &by_path,
+                &|entity| transforms.get(entity).ok().map(|t| t.scale), &server, &mut tally) {
+                // The fixture setup forces `_PhenomenaLightEnabled` to 1 on every
+                // fixture material (SetPhenomenaLighting(true); see the source
+                // adapter in weather_fx/fixture.rs). Both regions' exports put
+                // every fixture UberUnlit record on the source path, so this
+                // legacy arm keeps the same law for any summary-only record.
+                plan.params.scalars.w = 1.0;
+                if let Some(effect) = plan.effect.as_mut() { effect.params.scalars.w = 1.0; }
+                plans.push(plan);
+            }
         }
-        info!("fixture particles {}: {} awake systems, unresolved {:?}", request.package, plans.len(), tally.law_reject);
+        // 家具这条路此前只报 `plans.len()` 与 `law_reject`，其余每一个桶都被
+        // 计进 `tally` 然后丢掉——实测 304 条拒绝里 292 条不出现在任何日志
+        // 里，读起来像「没有可做的事」。未实现必须可审计、可统计，所以这里
+        // 与站点那条路报同一份账。
+        info!(
+            "[uber-particle] 家具 {}：本族记录 {}；放行 {}；\
+             挡下——非 playOnAwake {} · 节点路径未解析 {} · 绘制模式 {:?} · 对齐档 {:?} · \
+             发射形状律缺 {:?} · 缺形状模块 {} · 缺 emission {} · 缺 system 块 {} · \
+             律拒 {:?} · 仿真空间 {} · 缺基础贴图 {} · 状态档族外 {:?} · \
+             渲染器关 {} · 无渲染器 {} · 无材质 {} · 非本族 {:?}；\
+             放行但未实现（逐条具名，不静默）：{:?}",
+            request.package,
+            tally.records,
+            tally.admitted,
+            not_play_on_awake,
+            tally.node_unresolved,
+            count_names(&tally.render_mode),
+            count_names(&tally.alignment),
+            count_names(&tally.shape),
+            tally.no_shape,
+            tally.no_emission,
+            tally.no_system_block,
+            count_names(&tally.law_reject),
+            tally.sim_space,
+            tally.no_base_map,
+            count_names(&tally.state_arm),
+            tally.renderer_disabled,
+            tally.no_renderer,
+            tally.no_material,
+            count_names(&tally.other_family),
+            count_names(&tally.shading_shortfall),
+        );
         request.planned = Some(plans);
     }
 }
@@ -985,44 +1414,214 @@ pub(crate) fn spawn_fixture_particles(
         if plans.iter().any(|p| !server.load_state(&p.texture).is_loaded()) { continue; }
         for (index, planned) in request.planned.take().unwrap().iter().enumerate() {
             let mesh = meshes.add(billboard::empty_mesh());
-            let material = materials.add(UberParticleMaterial::new(planned.params, planned.texture.clone(), planned.tint_area, planned.cull, planned.blend));
-            commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(material), Transform::IDENTITY,
-                NoFrustumCulling, planned.effect, crate::shadowmap::NoShadowCast,
+            let material = materials.add(UberParticleMaterial::new(planned.params, planned.texture.clone(), planned.tint_area, false, planned.cull, planned.blend));
+            let mut draw = commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(material), Transform::IDENTITY,
+                NoFrustumCulling, crate::shadowmap::NoShadowCast,
                 FixtureParticleLive(runtime_from_plan(planned, mesh, index))));
+            if let Some(effect) = planned.effect { draw.insert(effect); }
         }
         commands.entity(root).remove::<FixtureParticleRequest>().insert(FixtureParticlesResolved);
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn advance_fixture_particles(
-    mut commands: Commands, mut live: Query<(Entity, &mut FixtureParticleLive)>,
+    mut commands: Commands, mut live: Query<(Entity, &mut FixtureParticleLive,
+        Option<&mut crate::fixture_timeline_particles::DirectorClock>,
+        Option<&mut crate::fixture_timeline_particles::StoppedByDirector>,
+        Option<&mut crate::weather_fx::fixture::Played>, Option<&crate::weather_fx::fixture::FixtureTrailDraw>)>,
     anchors: Query<&GlobalTransform>, cameras: Query<(&GlobalTransform, &Projection, &Camera), With<Camera3d>>,
     inactive: Query<(), With<moly_assets::scene_state::SourceInactive>>,
-    time: Res<Time>, mut meshes: ResMut<Assets<Mesh>>,
+    time: Res<Time>, unscaled: Option<Res<crate::particle_runtime::UnscaledFrameClock>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut camera_speed: Local<billboard::CameraVelocity>,
+    families: Query<(Entity, &crate::weather_fx::fixture::SubEmitterTargets)>,
+    locals: Query<(&Transform, Option<&ChildOf>)>,
 ) {
-    let Some((camera_transform, Projection::Perspective(projection), camera)) = cameras.iter().next() else { return; };
-    let Some(viewport) = camera.physical_viewport_size() else { return; };
-    let basis = billboard::basis_from_matrix(camera_transform.affine().matrix3.into(), camera_transform.translation(), projection.fov, viewport.x as f32 / viewport.y.max(1) as f32);
-    for (entity, mut particle) in &mut live {
+    let Some((camera_transform, Projection::Perspective(projection), camera)) = cameras.iter().next() else {
+        commands.queue(crate::fixture_timeline_particles::collect_garbage); return;
+    };
+    let camera_velocity = camera_speed.update(camera_transform.translation(), crate::particle_runtime::source_delta_time(time.delta()));
+    let Some(viewport) = camera.physical_viewport_size() else {
+        commands.queue(crate::fixture_timeline_particles::collect_garbage); return;
+    };
+    let mut basis = billboard::basis_from_matrix(camera_transform.affine().matrix3.into(), camera_transform.translation(), projection.fov, viewport.x as f32 / viewport.y.max(1) as f32, projection.near);
+    basis.velocity = camera_velocity;
+    // Time.deltaTime (clamped at Time.maximumDeltaTime, floored at 1e-5 s,
+    // rounded once to float) and Time.unscaledDeltaTime, as the weather host
+    // reads them.
+    let clocks = crate::weather_fx::fixture::FrameClocks {
+        scaled: crate::particle_runtime::source_delta_time(time.delta()),
+        unscaled: unscaled.as_deref().map(|clock| clock.delta()),
+        now: time.elapsed_secs_f64(),
+    };
+    let mut targets = Vec::new();
+    for (entity, mut particle, mut clock, stopped, played, trail) in &mut live {
         let system = &mut particle.0;
-        if system.anchor.is_some_and(|entity| inactive.get(entity).is_ok()) {
+        let dormant = system.anchor.is_some_and(|entity| inactive.get(entity).is_ok());
+        if let Some(mut stopped) = stopped {
+            if stopped.reactivated(dormant, system.emitter.play_on_awake) {
+                // The source GameObject has genuinely reactivated; removing a
+                // Director clock alone must never manufacture this Play edge.
+                commands.entity(entity).remove::<(
+                    crate::fixture_timeline_particles::StoppedByDirector,
+                    crate::fixture_timeline_particles::DirectorClock,
+                )>().insert(crate::fixture_timeline_particles::RestoredAutonomous);
+                clock = None;
+                system.prewarmed = false;
+            } else {
+                if let Some(mesh) = meshes.get_mut(&system.mesh) {
+                    if mesh.count_vertices() != 0 { *mesh = billboard::empty_mesh(); }
+                }
+                clear_trail_mesh(&mut meshes, trail);
+                continue;
+            }
+        }
+        if dormant && clock.is_none() {
             if let Some(mesh) = meshes.get_mut(&system.mesh) {
                 if mesh.count_vertices() != 0 { *mesh = billboard::empty_mesh(); }
             }
+            clear_trail_mesh(&mut meshes, trail);
             continue;
         }
         let Some(anchor) = system.anchor.and_then(|e| anchors.get(e).ok()).copied() else { commands.entity(entity).despawn(); continue; };
         let ctx = Context { site: anchor, sky: GlobalTransform::IDENTITY, camera: *camera_transform };
-        if !system.prewarmed {
-            system.prewarmed = true;
-            if system.emitter.prewarm && system.emitter.looping {
-                for _ in 0..(system.emitter.duration / PREWARM_STEP).max(1.0) as usize { simulate(system, PREWARM_STEP, &ctx); }
+        if let Some(mut clock) = clock {
+            // The Director's ParticleControlPlayable: PrepareFrame and its
+            // Simulate calls. An inactive or retired system draws nothing.
+            if !crate::fixture_timeline_particles::advance(system, &mut clock, &ctx, dormant) {
+                if let Some(mesh) = meshes.get_mut(&system.mesh) {
+                    if mesh.count_vertices() != 0 { *mesh = billboard::empty_mesh(); }
+                }
+                clear_trail_mesh(&mut meshes, trail);
+                continue;
+            }
+        } else if let Some(mut played) = played {
+            // Played (play on awake or an explicit Play): the weather host's
+            // per-frame update with the birth owner installed at its Play.
+            if let Err(reason) = crate::weather_fx::fixture::step_played(system, &mut played, &clocks, &ctx) {
+                error!(%reason, effect=%system.effect, node=%system.node,
+                    "native particle step refused: the system is retired and draws nothing");
+                system.pool.clear();
+                system.side.clear();
+                if let Some(mesh) = meshes.get_mut(&system.mesh) { *mesh = billboard::empty_mesh(); }
+                clear_trail_mesh(&mut meshes, trail);
+                commands.entity(entity).remove::<(FixtureParticleLive, crate::weather_fx::fixture::Played)>();
+                continue;
+            }
+        } else {
+            if !system.prewarmed {
+                system.prewarmed = true;
+                if system.emitter.prewarm && system.emitter.looping {
+                    for _ in 0..(system.emitter.duration / PREWARM_STEP).max(1.0) as usize { simulate(system, PREWARM_STEP, &ctx); }
+                }
+            }
+            // Time.deltaTime sliced as Update1b and Update1Incremental slice it
+            // (the Director path above steps by its own playable time instead).
+            let dt = crate::particle_runtime::source_delta_time(time.delta());
+            if let Err(reason) = crate::particle_runtime::advance_frame(system, dt, true, &ctx, |_| {}) {
+                error!(%reason, effect=%system.effect, node=%system.node, "native particle step refused");
             }
         }
-        let dt = time.delta_secs() * system.emitter.simulation_speed;
-        if dt > 0.0 { simulate(system, dt, &ctx); }
+        // A played sub-emitter target draws after its parents' commands of
+        // this frame reached it.
+        if system.native_birth.as_ref().is_some_and(|native| native.target.is_some()) {
+            targets.push((entity, anchor));
+            continue;
+        }
         let transform = if system.emitter.simulation_space == SimulationSpace::World { GlobalTransform::IDENTITY } else { anchor };
-        if let Some(mesh) = meshes.get_mut(&system.mesh) { billboard::write_quads(mesh, &build_quads(system, &transform), system.alignment, basis, system.clamp, system.pivot); }
+        if let Some(mesh) = meshes.get_mut(&system.mesh) {
+            crate::particle_runtime::write_geometry(mesh, system, &transform, &anchor, camera_transform, basis);
+        }
+        // The renderer's second draw: the trail strip from this frame's
+        // recorded points.
+        if let Some(mesh) = trail.and_then(|trail| meshes.get_mut(&trail.0)) {
+            crate::particle_runtime::write_trail_mesh(mesh, system, &anchor, camera_transform);
+        }
+    }
+    deliver_played_commands(&mut live, &families, &locals, clocks.scaled);
+    for (entity, anchor) in targets {
+        let Ok((_, mut particle, _, _, _, trail)) = live.get_mut(entity) else { continue };
+        let system = &mut particle.0;
+        let transform = if system.emitter.simulation_space == SimulationSpace::World { GlobalTransform::IDENTITY } else { anchor };
+        if let Some(mesh) = meshes.get_mut(&system.mesh) {
+            crate::particle_runtime::write_geometry(mesh, system, &transform, &anchor, camera_transform, basis);
+        }
+        // The renderer's second draw: the trail strip from this frame's
+        // recorded points.
+        if let Some(mesh) = trail.and_then(|trail| meshes.get_mut(&trail.0)) {
+            crate::particle_runtime::write_trail_mesh(mesh, system, &anchor, camera_transform);
+        }
+    }
+    commands.queue(crate::fixture_timeline_particles::collect_garbage);
+}
+
+/// Empty a fixture-host system's trail draw with its particle draw.
+fn clear_trail_mesh(meshes: &mut Assets<Mesh>, trail: Option<&crate::weather_fx::fixture::FixtureTrailDraw>) {
+    if let Some(mesh) = trail.and_then(|trail| meshes.get_mut(&trail.0)) {
+        if mesh.count_vertices() != 0 { *mesh = billboard::empty_mesh(); }
+    }
+}
+
+/// Hands each played parent's commands of this frame, in the order recorded,
+/// to its installed targets, as the weather host hands its own: a target's
+/// owner words are composed from its instance first, a refused command
+/// changes nothing but the target's refusal count, and a command whose target
+/// is not installed is dropped, counted. A target that is a parent in turn
+/// records commands while it takes its parent's; those go in the next round,
+/// until none is left (one round per family at most).
+fn deliver_played_commands(live: &mut Query<(Entity, &mut FixtureParticleLive,
+        Option<&mut crate::fixture_timeline_particles::DirectorClock>,
+        Option<&mut crate::fixture_timeline_particles::StoppedByDirector>,
+        Option<&mut crate::weather_fx::fixture::Played>, Option<&crate::weather_fx::fixture::FixtureTrailDraw>)>, families: &Query<(Entity, &crate::weather_fx::fixture::SubEmitterTargets)>,
+    locals: &Query<(&Transform, Option<&ChildOf>)>, frame_dt: f32) {
+    let families: Vec<(Entity, Vec<(String, Entity)>)> = families.iter().map(|(parent, targets)| (parent, targets.0.clone())).collect();
+    for _round in 0..families.len() {
+        let mut delivered = false;
+        for (parent, targets) in &families {
+            let taken = match live.get_mut(*parent) {
+                Ok((_, mut particle, ..)) => particle.0.native_birth.as_mut().and_then(|native| native.events.as_mut())
+                    .map_or_else(Vec::new, |events| events.take_commands()),
+                Err(_) => continue,
+            };
+            if taken.is_empty() {
+                continue;
+            }
+            delivered = true;
+            let mut dropped = 0;
+            let mut refreshed = std::collections::HashSet::new();
+            for (target, command) in taken {
+                let Some(&(_, draw)) = targets.iter().find(|(node, _)| *node == target) else { dropped += 1; continue };
+                let Ok((_, mut child, ..)) = live.get_mut(draw) else { dropped += 1; continue };
+                let system = &mut child.0;
+                if refreshed.insert(draw) {
+                    let owner = system.anchor.ok_or_else(|| "target has no instance node".to_owned())
+                        .and_then(|anchor| crate::weather_fx::fixture::target_scaling(system).and_then(|scaling|
+                            crate::weather_fx::fixture::instance_owner(anchor, scaling,
+                                |entity| locals.get(entity).ok().map(|(transform, _)| *transform),
+                                |entity| locals.get(entity).ok().and_then(|(_, parent)| parent.map(ChildOf::parent)))));
+                    match (owner, system.native_birth.as_mut().and_then(|native| native.target.as_mut())) {
+                        (Ok(owner), Some(state)) => state.owner = owner,
+                        (Err(reason), _) => error!(%reason, node=%system.node,
+                            "sub-emitter target owner words not composed; its commands read the last ones"),
+                        _ => {}
+                    }
+                }
+                if let Err(reason) = crate::particle_runtime::deliver_command(system, &command, frame_dt) {
+                    if system.native_birth.as_ref().and_then(|native| native.target.as_ref()).is_some_and(|state| state.refused == 1) {
+                        error!(%reason, effect=%system.effect, node=%system.node, "sub-emitter command refused by its target");
+                    }
+                }
+            }
+            if dropped > 0 {
+                if let Ok((_, particle, _, _, Some(mut played), _)) = live.get_mut(*parent) {
+                    crate::weather_fx::fixture::count_dropped(&mut played, &particle.0, dropped);
+                }
+            }
+        }
+        if !delivered {
+            return;
+        }
     }
 }
 
@@ -1030,4 +1629,171 @@ pub(crate) fn advance_fixture_particles(
 pub(crate) fn teardown(commands: &mut Commands) {
     commands.remove_resource::<UberParticlePlan>();
     commands.remove_resource::<UberParticleState>();
+}
+
+#[cfg(test)]
+mod billboard_native {
+    use super::*;
+    use crate::particle_geometry::{Alignment as Space, Frame, Instance};
+    use crate::source_billboard::{vertices, Draw};
+    use bevy::math::Mat3;
+    use serde_json::Value;
+
+    /// Research instrument: the engine's Billboard geometry for the World and
+    /// Local render spaces (the body the View space shares, four
+    /// instantiations: with and without a pivot, 2D and 3D rotation) executed
+    /// in an ARMv8 emulator on the current engine library, its corners read at
+    /// the vertex writer's entry, over sampled cameras, World (identity) and
+    /// rigid Local owners, unit and non-unit renderer scale, pivots and roll on
+    /// and off. Local runs with both states of the temp-data flag that picks
+    /// the owner basis: set, the owner matrix columns with the owner's scale
+    /// in them and the renderer scale not applied (the source construction's
+    /// Local-simulation order, basis x scale x rotation); clear, the emitter
+    /// rotation quaternion with the renderer scale applied first (its
+    /// World-simulation order). The replay reads the flag as Local simulation,
+    /// the same pairing the independent engine cases in tests/data carry for
+    /// every alignment and simulation space; the two fields the renderer's
+    /// preparation derives the flag from are not yet named. Rows must lie in
+    /// the caller's dispatch domain: the pivot-less instantiations are taken
+    /// only for a zero pivot and a uniform (not 3D) size. Each row goes
+    /// through this path's own construction (`billboard_geometry`, then the
+    /// renderer scale through the Draw's scaling as the host applies it) and
+    /// every corner must match within the billboard receipts' 2.5e-5. The View
+    /// rows ride along as a control on the harness: the source View arm must
+    /// match them, and World must not. Point MOLY_UBER_BILLBOARD_NATIVE at the
+    /// rows; MOLY_UBER_BILLBOARD_MUTANT names a deliberate defect that must fail.
+    #[test]
+    #[ignore = "needs MOLY_UBER_BILLBOARD_NATIVE"]
+    fn world_and_local_billboards_match_native_rows() {
+        let path = std::env::var("MOLY_UBER_BILLBOARD_NATIVE").expect("MOLY_UBER_BILLBOARD_NATIVE");
+        let data: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(data["sourceSha256"], "937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9");
+        assert_eq!(data["staticInitializer"]["ran"], true, "the geometry job's static initializer must run first");
+        let mutant = std::env::var("MOLY_UBER_BILLBOARD_MUTANT").unwrap_or_default();
+        let word = |v: &Value| f32::from_bits(v.as_u64().unwrap() as u32);
+        let v3 = |v: &Value| Vec3::new(word(&v[0]), word(&v[1]), word(&v[2]));
+        let mut arms: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+        let (mut failures, mut maximum, mut world_as_view) = (Vec::new(), 0.0f32, 0usize);
+        for (index, row) in data["rows"].as_array().unwrap().iter().enumerate() {
+            let o: Vec<f32> = row["owner"].as_array().unwrap().iter().map(word).collect();
+            let owner = Mat3::from_cols(Vec3::new(o[0], o[1], o[2]), Vec3::new(o[4], o[5], o[6]), Vec3::new(o[8], o[9], o[10]));
+            let translation = Vec3::new(o[12], o[13], o[14]);
+            let c: Vec<f32> = row["cameraRotation"].as_array().unwrap().iter().map(word).collect();
+            let e: Vec<f32> = row["emitterRotation"].as_array().expect("rows from the domain-checked harness").iter().map(word).collect();
+            let bit28 = row["flagBit28"].as_i64().unwrap() == 1;
+            // With the flag set the owner columns carry the scale; clear, the
+            // renderer scale word does.
+            let scale = if bit28 {
+                Vec3::new(owner.x_axis.length(), owner.y_axis.length(), owner.z_axis.length())
+            } else {
+                v3(&row["rendererScale"])
+            };
+            let frame = Frame {
+                rotation: Mat3::from_cols_slice(&e),
+                scale: Vec3::ONE,
+                camera_rotation: Mat3::from_cols_slice(&c),
+                camera_position: v3(&row["cameraPosition"]),
+            };
+            let local = bit28;
+            let entry = row["entry"].as_str().unwrap();
+            if entry == "0xfa5300" || entry == "0xfa2860" {
+                let size = v3(&row["size"]);
+                assert!(
+                    row["size3D"] == 0 && v3(&row["pivot"]) == Vec3::ZERO && size.x == size.y && size.y == size.z,
+                    "row {index}: pivot-less instantiation {entry} called outside its dispatch domain"
+                );
+            }
+            let p = Instance {
+                position: owner * v3(&row["position"]) + translation,
+                velocity: Vec3::ZERO,
+                rotation: v3(&row["rotation"]),
+                size: v3(&row["size"]),
+                colour: Vec4::ONE,
+                custom1: Vec4::ZERO,
+                custom2: Vec4::ZERO,
+                seed: 0,
+                age_percent: 0.0,
+                axis: Vec3::Z,
+            };
+            let pivot = v3(&row["pivot"]);
+            let render_space = row["alignment"].as_i64().unwrap();
+            let arm = format!("{}/bit28={}", Alignment::render_space_name(render_space), row["flagBit28"]);
+            // Half the rows carry the renderer scale as Hierarchy scaling (the
+            // frame's own scale), half as Local scaling (the node scale the
+            // Draw substitutes), so both scaling arms of the host are read.
+            let by_node = index % 2 == 1;
+            let system = serde_json::json!({ "scalingMode": if by_node { 1 } else { 0 } });
+            let expected: Vec<Vec3> = (0..4).map(|k| v3(&row["corners"][k])).collect();
+            let compare = |corners: &[Vec3; 4]| -> f32 {
+                corners.iter().zip(&expected).map(|(a, b)| (*a - *b).abs().max_element()).fold(0.0, f32::max)
+            };
+            if render_space == 0 {
+                // Harness control: the source View arm matches, World does not.
+                let view = Draw {
+                    mode: crate::source_billboard::Mode::Billboard,
+                    alignment: Space::View,
+                    pivot,
+                    screen_size: Vec2::new(0.0, 10000.0),
+                    allow_roll: row["allowRoll"].as_bool().unwrap(),
+                    scaling: crate::particle_geometry::Scaling::Hierarchy,
+                };
+                let f = Frame { scale, ..frame };
+                let error = compare(&vertices(&p, &f, &view, local).0);
+                let entry = arms.entry("View (source arm, control)".into()).or_default();
+                entry.0 += 1;
+                if !(error <= 0.000025) {
+                    entry.1 += 1;
+                }
+                let world = Draw { alignment: Space::World, ..view };
+                if compare(&vertices(&p, &f, &world, local).0) <= 0.000025 {
+                    world_as_view += 1;
+                }
+                continue;
+            }
+            let geometry = billboard_geometry(render_space, pivot.to_array(), [0.0, 10000.0], &system, Some(scale))
+                .unwrap_or_else(|name| panic!("row {index}: refused {name}"));
+            let UberGeometry::Source(mut draw) = geometry else {
+                panic!("row {index}: {arm} took the older writer")
+            };
+            let mut f = if by_node { draw.scaling.apply(frame) } else { Frame { scale, ..frame } };
+            let mut local_arg = local;
+            // Mutants: the camera basis, the pivot sign, the renderer scale
+            // dropped, the older writer's world X axis, the Local order swapped.
+            match mutant.as_str() {
+                "view-basis" => draw.alignment = Space::View,
+                "pivot-sign" => draw.pivot = -draw.pivot,
+                "no-scale" => f.scale = Vec3::ONE,
+                "legacy-axes" if draw.alignment == Space::World => {
+                    draw.alignment = Space::Local;
+                    f.rotation = Mat3::from_diagonal(Vec3::new(-1.0, 1.0, 1.0));
+                    local_arg = true;
+                }
+                "local-order" if draw.alignment == Space::Local => local_arg = !local_arg,
+                _ => {}
+            }
+            let error = compare(&vertices(&p, &f, &draw, local_arg).0);
+            maximum = maximum.max(if error.is_finite() { error } else { f32::INFINITY });
+            let entry = arms.entry(arm.clone()).or_default();
+            entry.0 += 1;
+            if !(error <= 0.000025) {
+                entry.1 += 1;
+                failures.push(format!("row {index} ({} {arm} {}): max corner error {error}", row["entry"], row["simulation"]));
+            }
+        }
+        println!(
+            "uber billboard arms (particles, mismatched): {arms:?}; World construction matching View rows: {world_as_view}; max corner error {maximum}; mutant {mutant:?}"
+        );
+        assert!(arms.values().any(|(n, _)| *n > 0), "no rows");
+        let view = arms.get("View (source arm, control)").copied().unwrap_or_default();
+        assert!(
+            view.0 > 0 && view.1 == 0 && world_as_view == 0,
+            "harness control failed: View {view:?}, World matching View rows {world_as_view}"
+        );
+        assert!(
+            failures.is_empty(),
+            "{} mismatched particles:\n{}",
+            failures.len(),
+            failures.iter().take(12).cloned().collect::<Vec<_>>().join("\n")
+        );
+    }
 }

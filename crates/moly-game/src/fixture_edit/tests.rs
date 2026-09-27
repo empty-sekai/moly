@@ -1,6 +1,16 @@
 use super::*;
 use crate::site::FloorGridLayout;
-use bevy::ecs::system::RunSystemOnce;
+use std::collections::HashMap;
+use std::sync::Arc;
+
+/// Rules with no master rows, no bundle meta and no zones.
+fn rules() -> tile_rules::Rules {
+    tile_rules::Rules {
+        traits: Arc::new(HashMap::new()),
+        meta: Arc::new(HashMap::new()),
+        zones: Some(Arc::new(Vec::new())),
+    }
+}
 
 fn floor() -> FloorGridLayout {
     FloorGridLayout {
@@ -39,8 +49,8 @@ fn rotated_candidates_reject_grid_overflow_without_panicking() {
             assert!(candidate.footprint().is_ok());
         }
         assert!(matches!(
-            validation::put(&candidate, &[], Some(floor())),
-            PutStatus::OutOfBounds { .. }
+            validation::put(&candidate, &[], &[], Some(floor()), Ok(&rules())),
+            PutStatus::Refused(_)
         ));
     }
     for direction in [
@@ -53,7 +63,9 @@ fn rotated_candidates_reject_grid_overflow_without_panicking() {
             validation::put(
                 &rectangle(GridPosition::ZERO, direction),
                 &[],
-                Some(floor())
+                &[],
+                Some(floor()),
+                Ok(&rules())
             ),
             PutStatus::Ok
         );
@@ -63,8 +75,8 @@ fn rotated_candidates_reject_grid_overflow_without_panicking() {
                 candidate.grid_size.x = width;
                 candidate.grid_size.z = depth;
                 assert!(matches!(
-                    validation::put(&candidate, &[], Some(floor())),
-                    PutStatus::OutOfBounds { .. }
+                    validation::put(&candidate, &[], &[], Some(floor()), Ok(&rules())),
+                    PutStatus::Refused(_)
                 ));
             }
         }
@@ -77,17 +89,19 @@ fn malformed_draft_rows_return_layout_errors() {
     let mut invalid = rectangle(GridPosition::new(127, 0, 0), Direction::Left);
     invalid.uid = "invalid-neighbor".into();
     assert!(matches!(
-        validation::put(&valid, &[invalid.clone()], Some(floor())),
-        PutStatus::OutOfBounds { .. }
+        validation::put(&valid, &[], &[invalid.clone()], Some(floor()), Ok(&rules())),
+        PutStatus::Refused(_)
     ));
     let areas = FixtureAreas {
         loaded: true,
         ..Default::default()
     };
-    assert!(validation::save(&[invalid], Some(floor()), &areas)
-        .unwrap_err()
-        .starts_with("ErrorLayout(1)"));
-    assert!(validation::save(&[valid], Some(floor()), &areas).is_ok());
+    assert!(
+        validation::save(&[invalid], Some(floor()), &areas, Ok(&rules()))
+            .unwrap_err()
+            .starts_with("ErrorLayout(1)")
+    );
+    assert!(validation::save(&[valid], Some(floor()), &areas, Ok(&rules())).is_ok());
 }
 
 #[test]
@@ -135,7 +149,11 @@ fn invalid_candidate_save_preserves_storage() {
         ..Default::default()
     });
     world.init_resource::<EditView>();
+    put_effect::insert_test_tables(&mut world, &[]);
+    world.insert_resource(tile_rules::empty_zone_table());
 
+    // A drag is clamped into the grid (FloorEditState.ClampPosition), so it
+    // cannot leave an out-of-bounds candidate; select, drag, rotate, decide.
     apply_command(
         &mut world,
         &mut session,
@@ -143,48 +161,7 @@ fn invalid_candidate_save_preserves_storage() {
             uid: original.uid.clone(),
         },
     );
-    apply_command(
-        &mut world,
-        &mut session,
-        EditCommand::MoveTo {
-            center: GridPosition::new(126, 0, 0),
-        },
-    );
-    apply_command(&mut world, &mut session, EditCommand::Nudge { x: 1, z: 0 });
-    apply_command(&mut world, &mut session, EditCommand::Rotate);
-    world.insert_resource(session);
-    world.run_system_once(publish_view).unwrap();
-    assert!(matches!(
-        world
-            .resource::<EditView>()
-            .selected
-            .as_ref()
-            .unwrap()
-            .put_status,
-        PutStatus::OutOfBounds { .. }
-    ));
-    assert!(!world.resource::<EditView>().can_save);
-    let mut session = world.remove_resource::<EditSession>().unwrap();
-
-    apply_command(&mut world, &mut session, EditCommand::Decide);
-    apply_command(&mut world, &mut session, EditCommand::Save);
     assert!(session.selected.is_some());
-    assert_eq!(session.rows, vec![original.clone()]);
-    assert_eq!(
-        world.resource::<FixturePlacements>().editor_rows(),
-        vec![original.clone()]
-    );
-
-    apply_command(&mut world, &mut session, EditCommand::Cancel);
-    assert!(session.selected.is_none());
-    assert_eq!(session.rows, vec![original.clone()]);
-    apply_command(
-        &mut world,
-        &mut session,
-        EditCommand::SelectPlaced {
-            uid: original.uid.clone(),
-        },
-    );
     apply_command(
         &mut world,
         &mut session,
@@ -202,7 +179,9 @@ fn invalid_candidate_save_preserves_storage() {
     );
     apply_command(&mut world, &mut session, EditCommand::Decide);
     assert!(session.selected.is_none());
-    assert_eq!(session.rows[0].direction, Direction::Left);
+    // RotationSquareToRight turns Front to Left in the source frame, which
+    // is Right in the X-mirrored product frame.
+    assert_eq!(session.rows[0].direction, Direction::Right);
 
     session.rows[0].center = GridPosition::new(127, 0, 0);
     apply_command(&mut world, &mut session, EditCommand::Save);

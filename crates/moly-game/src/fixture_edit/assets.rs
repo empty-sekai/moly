@@ -2,41 +2,11 @@
 
 use bevy::{asset::LoadState, gltf::Gltf, prelude::*};
 use moly_assets::json::JsonAsset;
-use moly_law::fixture::Vector3Int;
 use std::collections::HashMap;
-
-pub(super) struct CatalogRow {
-    pub package: &'static str,
-    pub fixture_id: i32,
-    pub grid_size: Vector3Int,
-}
-
-/// Product-owned unlimited inventory mock; source master identities/dimensions.
-pub(super) const CANDIDATES: [CatalogRow; 4] = [
-    CatalogRow {
-        package: "mysekai__fixture__mdl_bir1103_fixture_chair1",
-        fixture_id: 853,
-        grid_size: Vector3Int { x: 2, y: 4, z: 2 },
-    },
-    CatalogRow {
-        package: "mysekai__fixture__mdl_bir1103_fixture_balloon1",
-        fixture_id: 850,
-        grid_size: Vector3Int { x: 2, y: 5, z: 2 },
-    },
-    CatalogRow {
-        package: "mysekai__fixture__mdl_bir1103_fixture_cake1",
-        fixture_id: 849,
-        grid_size: Vector3Int { x: 4, y: 3, z: 4 },
-    },
-    CatalogRow {
-        package: "mysekai__fixture__mdl_env0002_fixture_byoubu1",
-        fixture_id: 455,
-        grid_size: Vector3Int { x: 6, y: 5, z: 1 },
-    },
-];
+use std::sync::Arc;
 
 #[derive(Clone)]
-pub(super) struct MetaGrid {
+pub(crate) struct MetaGrid {
     pub rows: usize,
     pub cols: usize,
     pub cells: Vec<bool>,
@@ -77,6 +47,9 @@ pub(super) struct FixtureAreas {
     pub loaded: bool,
     pub motion: HashMap<String, MetaGrid>,
     pub cutscene: HashMap<String, MetaGrid>,
+    /// Each bundle meta's `stackEnables` and `AddUsingGrid` (the put rules'
+    /// inputs).
+    pub stack: Arc<HashMap<String, super::tile_rules::StackMeta>>,
 }
 
 #[derive(Resource)]
@@ -128,6 +101,7 @@ pub(super) fn parse_areas(
         .get("packages")
         .and_then(|packages| packages.as_object())
         .expect("areas.json must contain packages");
+    let mut stack = HashMap::with_capacity(packages.len());
     for (name, entry) in packages {
         if let Some(meta) = entry.get("motionArea").and_then(MetaGrid::from_json) {
             areas.motion.insert(name.clone(), meta);
@@ -135,7 +109,15 @@ pub(super) fn parse_areas(
         if let Some(meta) = entry.get("cutsceneArea").and_then(MetaGrid::from_json) {
             areas.cutscene.insert(name.clone(), meta);
         }
+        stack.insert(
+            name.clone(),
+            super::tile_rules::StackMeta {
+                stack_enables: entry.get("stackEnables").and_then(MetaGrid::from_json),
+                add_using: entry.get("AddUsingGrid").and_then(MetaGrid::from_json),
+            },
+        );
     }
+    areas.stack = Arc::new(stack);
     areas.loaded = true;
     commands.remove_resource::<AreasAsset>();
 }
@@ -160,33 +142,19 @@ pub(super) fn plan_candidates(
         .get("packages")
         .and_then(|packages| packages.as_object())
         .expect("fixture model index must contain packages");
-    // Parse paths, do not load the whole furniture catalog. An inventory item
-    // from another map requests its own package only when it needs a preview.
+    // Parse paths, do not load the whole furniture catalog. A listed or stored
+    // fixture requests its own package only when it needs a preview.
     for (name, entry) in packages {
         if entry.get("status").and_then(|v| v.as_str()) == Some("exported")
             && entry.get("hasFixtureView").and_then(|v| v.as_bool()) == Some(true)
         {
+            moly_assets::coordinates::validate_document(entry).expect("editor fixture coordinates");
             if let Some(path) = entry.get("glb").and_then(|v| v.as_str()) {
                 candidates
                     .paths
                     .insert(name.clone(), format!("moly://fixture-models/{path}"));
             }
         }
-    }
-    for row in &CANDIDATES {
-        let path = candidates
-            .paths
-            .get(row.package)
-            .unwrap_or_else(|| {
-                panic!(
-                    "offline editor package is not a source fixture: {}",
-                    row.package
-                )
-            })
-            .clone();
-        candidates
-            .glbs
-            .insert(row.package.into(), server.load(path));
     }
     candidates.index = None;
 }

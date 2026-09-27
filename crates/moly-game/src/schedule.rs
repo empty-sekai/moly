@@ -5,13 +5,13 @@
 //! 推导过程在私有研究仓，不在本仓。
 
 use crate::{
-    action_button, alone_action_runtime, audio, balloon, birthday,
-    camera, character, character_material, client_config, cloth_runtime, emoticon, fixture_attach,
-    fixture_edit,
-    fixture_talk, gesture, get_resource, harvest, inactive_nodes, info, joystick, light,
-    menu_dialog, menu_shell, npc, npc_objective, option_dialog, pick, player, player_avatar,
-    player_state, player_talk, site, site_sound, sitemap, sky, talk, talk_camera,
-    talk_window, ui_layers, uber_particle, walk_face, weather, weather_fx,
+    action_button, alone_action_runtime, audio, balloon, birthday, camera, character,
+    character_material, client_config, cloth_runtime, content_library, emoticon, fixture_attach,
+    fixture_edit, fixture_talk, gesture, get_resource, harvest, inactive_nodes, info, joystick,
+    learn_phenomena_dialog, light, menu_dialog, menu_shell, notice_banner, npc, npc_objective,
+    option_dialog, pick, player, player_avatar,
+    player_state, player_talk, site, site_sound, sitemap, sky, talk, talk_camera, talk_window,
+    uber_particle, ui_layers, walk_face, weather, weather_fx,
 };
 use bevy::app::{AnimationSystems, App, PostUpdate, PreUpdate, SpawnScene, Startup, Update};
 use bevy::prelude::{ApplyDeferred, IntoScheduleConfigs};
@@ -21,24 +21,91 @@ use bevy::transform::TransformSystems;
 use std::time::Duration;
 
 pub fn install(app: &mut App) {
+    content_library::install(app);
+    app.add_systems(Startup, content_library::load_capabilities);
+    app.add_systems(
+        PreUpdate,
+        content_library::bridge::gate_input
+            .after(bevy::input::InputSystems)
+            .before(crate::game_settings::input)
+            .before(content_library::input),
+    );
+    app.add_systems(
+        Update,
+        content_library::bridge::publish.after(content_library::refresh),
+    );
+    app.add_systems(
+        Update,
+        (
+            content_library::parse_assets,
+            content_library::parse_capabilities,
+            content_library::build_talk_catalog,
+            content_library::build_activity_catalog,
+            content_library::refresh_context,
+            content_library::prepare_pending,
+            content_library::dispatch.run_if(crate::audio_startup::can_play),
+        )
+            .chain()
+            .after(crate::player_fixture_action::refresh_availability)
+            .before(player_talk::consume_trigger)
+            .before(crate::player_fixture_action::receive_requests),
+    )
+    .add_systems(
+        Update,
+        content_library::refresh
+            .after(player_talk::advance_session)
+            .after(talk::advance_talk)
+            .after(crate::player_fixture_action::advance),
+    )
+    .add_systems(
+        Update,
+        content_library::qa_open
+            .run_if(crate::dev_tools::dev_tools)
+            .after(content_library::retire_scene)
+            .after(content_library::build_talk_catalog)
+            .before(content_library::refresh),
+    )
+    .add_systems(
+        Update,
+        content_library::observe_start
+            .after(crate::npc_fixture_activity::advance)
+            .after(crate::fixture_gimmick::advance)
+            .after(player_talk::advance_session)
+            .after(talk::advance_talk)
+            .after(crate::player_fixture_action::advance)
+            .before(content_library::refresh),
+    );
+    app.add_systems(
+        Update,
+        (
+            content_library::reap_preview_owners,
+            content_library::retire_scene,
+        )
+            .chain()
+            .after(content_library::observe_start)
+            .before(content_library::refresh),
+    );
     // UI consumes a pointer before the editor/world rays. Commands finish
     // before gameplay input; the early fixture loader intentionally depends
     // only on keyboard Input and observes committed reloads next frame.
-    app.configure_sets(Update, (
-        // Flush the previous loader generation's deferred material writes
-        // before Save can tear down its roots and readiness markers.
-        crate::fixture_material::FixtureMaterialSet
-            .before(fixture_edit::FixtureEditSystems::Commands),
-        fixture_edit::FixtureEditSystems::Pointer
-            .after(menu_shell::click)
-            .before(pick::pick),
-        fixture_edit::FixtureEditSystems::Commands
-            .after(menu_shell::click)
-            .before(npc_objective::decide)
-            .before(npc::advance)
-            .before(pick::pick),
-        fixture_edit::FixtureEditSystems::View.before(ui_layers::advance),
-    ));
+    app.configure_sets(
+        Update,
+        (
+            // Flush the previous loader generation's deferred material writes
+            // before Save can tear down its roots and readiness markers.
+            crate::fixture_material::FixtureMaterialSet
+                .before(fixture_edit::FixtureEditSystems::Commands),
+            fixture_edit::FixtureEditSystems::Pointer
+                .after(menu_shell::click)
+                .before(pick::pick),
+            fixture_edit::FixtureEditSystems::Commands
+                .after(menu_shell::click)
+                .before(npc_objective::decide)
+                .before(npc::advance)
+                .before(pick::pick),
+            fixture_edit::FixtureEditSystems::View.before(ui_layers::advance),
+        ),
+    );
     // DefaultPlugins and audio::install are already present on native and wasm.
     // Register the existing voice player's metered source, not a second bus.
     crate::voice_pcm::install(app);
@@ -49,6 +116,7 @@ pub fn install(app: &mut App) {
                 ApplyDeferred,
                 crate::voice_pcm::prepare,
                 ApplyDeferred,
+                crate::voice_pcm::report_start,
                 crate::voice_mouth::attach,
                 ApplyDeferred,
                 crate::voice_mouth::advance,
@@ -61,39 +129,117 @@ pub fn install(app: &mut App) {
                 .after(player_talk::advance_session)
                 .after(crate::fixture_activity_timeline::advance),
         );
+    // The presenter's per-frame calls in source order, after the AI loop:
+    // the state machine update (call 3), then the greeting gate (call 10).
+    app.configure_sets(
+        Update,
+        crate::npc_state::NpcPresenterSet.after(npc_objective::decide),
+    )
+    .add_systems(
+        Update,
+        (
+            crate::npc_state::on_update,
+            crate::npc_presenter::try_greeting,
+        )
+            .chain()
+            .in_set(crate::npc_state::NpcPresenterSet),
+    );
     app.init_resource::<crate::npc_fixture_activity::NpcFixtureActivities>()
         .init_resource::<crate::npc_fixture_activity::NpcFixtureAreas>()
-        .add_systems(Update, crate::npc_fixture_activity::advance
-            .after(npc::advance)
-            .after(crate::fixture_scene_inputs::advance)
-            .after(crate::fixture_activity_provider::advance)
-            .before(crate::fixture_activity_timeline::advance));
+        .add_systems(
+            Update,
+            crate::npc_fixture_activity::advance
+                .after(content_library::dispatch)
+                .after(npc::advance)
+                .after(crate::fixture_scene_inputs::advance)
+                .before(crate::fixture_activity_timeline::advance),
+        );
     app.init_resource::<crate::fixture_scene_inputs::FixtureFloorAreas>()
         .init_resource::<crate::fixture_scene_inputs::FixtureSceneSupply>()
-        .add_systems(Update, crate::fixture_scene_inputs::advance
-            .after(player::reseed)
-            .after(crate::fixture::refresh_activity_view)
-            .after(crate::fixture_edit::FixtureEditSystems::Commands)
-            .before(crate::player_fixture_action::refresh_availability));
+        .add_systems(
+            Update,
+            crate::fixture_scene_inputs::advance
+                .after(player::reseed)
+                .after(crate::fixture::refresh_activity_view)
+                .after(crate::fixture_edit::FixtureEditSystems::Commands)
+                .before(crate::player_fixture_action::refresh_availability),
+        );
+    app.add_systems(
+        Update,
+        crate::fixture_player_navigation::publish
+            .after(crate::fixture_scene_inputs::advance)
+            .after(npc_objective::build_face)
+            .after(walk_face::rebake_on_save)
+            .before(content_library::refresh_context)
+            .before(crate::player_fixture_action::refresh_availability)
+            .before(crate::player_fixture_action::receive_requests),
+    );
     app.init_resource::<crate::fixture_activity_state::FixtureActivityReservations>()
         .init_resource::<crate::fixture_activity_timeline::FixtureActivityTimelines>()
         .init_resource::<crate::player_fixture_action::PlayerFixtureRuntime>()
-        .init_resource::<crate::player_fixture_action::PlayerFixtureVisualProfiles>()
+        .init_resource::<crate::fixture_activity_provider::FixtureActivityProvider>()
         .init_resource::<crate::fixture_gimmick::Gimmicks>()
+        .init_resource::<crate::player_avatar::item_timeline::PlayerStepItem>()
         .add_systems(Startup, crate::fixture_activity_data::load)
         .add_systems(Startup, crate::fixture_gimmick::load)
-        .add_systems(Startup, player_avatar::switch_gesture::load)
-        .add_systems(Update, crate::fixture_gimmick::parse
-            .before(crate::player_fixture_action::advance))
+        .add_systems(
+            Update,
+            crate::fixture_gimmick::parse.before(crate::player_fixture_action::advance),
+        )
         .add_systems(Update, crate::fixture_activity_data::parse)
-        .add_systems(Update, crate::fixture_activity_provider::advance
-            .after(crate::fixture_activity_data::parse)
-            .after(crate::fixture::refresh_activity_view)
-            .after(character::wire_when_ready)
-            .before(crate::player_fixture_action::refresh_availability))
-        .add_systems(Update, crate::fixture_activity_provider::report
-            .after(crate::fixture_activity_provider::advance)
-            .run_if(common_conditions::on_timer(Duration::from_secs(2))));
+        .add_systems(Startup, crate::fixture_clock::load)
+        .add_systems(
+            Update,
+            (
+                crate::fixture_clock::supply,
+                crate::fixture_clock::bind,
+                crate::fixture_clock::advance,
+            )
+                .chain(),
+        )
+        .add_systems(
+            Update,
+            crate::fixture_gimmick::catalog_stream::advance
+                .after(crate::fixture_activity_data::parse)
+                .after(crate::fixture::refresh_activity_view)
+                .before(crate::player_fixture_action::refresh_availability),
+        );
+    // MySekai entry: the cover from the first frame, the join action and
+    // its gates. One exclusive step per frame, after the layout and the
+    // player's input and state writers, before the fixture controllers that
+    // consume its house trigger this frame, the player's movement and
+    // animation, and the SE drain.
+    app.add_systems(
+        Startup,
+        (
+            crate::entry::init,
+            crate::entry::cover::spawn,
+            crate::entry::indicator::request,
+            crate::entry::house::request,
+        ),
+    )
+    .add_systems(
+        Update,
+        crate::entry::house::build.before(crate::fixture::FixtureLayoutSet),
+    )
+    // ForceResetJoyStick: a press lets the stick go in the click's frame.
+    .add_systems(
+        Update,
+        joystick::force_reset
+            .after(action_button::click)
+            .before(player::advance),
+    )
+    .add_systems(
+        Update,
+        crate::entry::advance
+            .after(crate::fixture::FixtureLayoutSet)
+            .after(player_state::drive_from_input)
+            .after(action_button::click)
+            .before(crate::player_fixture_action::request_end_from_input)
+            .before(player::advance)
+            .before(player_avatar::drive)
+            .before(audio::advance_se),
+    );
     crate::game_settings::install(app);
     crate::player_data::install(app);
     crate::fixture_colors::install(app);
@@ -106,58 +252,116 @@ pub fn install(app: &mut App) {
             .after(info::init)
             .after(camera::spawn),
     )
+    .add_systems(Startup, content_library::setup.after(camera::spawn))
     .add_systems(
         PreUpdate,
-        crate::game_settings::input.after(bevy::ui::UiSystems::Focus),
+        crate::game_settings::release_input_guard
+            .after(bevy::input::InputSystems)
+            .before(crate::game_settings::input)
+            .before(content_library::input),
+    )
+    .add_systems(
+        PreUpdate,
+        crate::game_settings::input
+            .after(bevy::ui::UiSystems::Focus)
+            .run_if(crate::browser_stage::standalone)
+            .run_if(crate::dev_tools::dev_tools),
+    )
+    .add_systems(
+        PreUpdate,
+        content_library::input
+            .after(bevy::ui::UiSystems::Focus)
+            .after(crate::game_settings::input),
     )
     .add_systems(
         Update,
         (
             crate::game_settings::apply_graphics.after(info::click),
-            crate::game_settings::refresh_ui,
-        ).chain(),
+            crate::game_settings::refresh_ui.run_if(crate::dev_tools::dev_tools),
+        )
+            .chain(),
     )
-    .add_systems(
-        PostUpdate,
-        audio::apply_sink_volumes,
-    );
+    .add_systems(PostUpdate, audio::apply_sink_volumes);
     app.add_systems(Startup, crate::ui_layout::load)
         .add_systems(Update, crate::ui_layout::parse.before(menu_shell::parse))
-        .add_systems(Update, crate::ui_layout::render.after(menu_shell::place).after(menu_dialog::place).after(option_dialog::place).after(info::place).after(get_resource::place))
-        .add_systems(Update, (uber_particle::request_fixture_particles, uber_particle::plan_fixture_particles, uber_particle::spawn_fixture_particles).chain())
-        .add_systems(PostUpdate, uber_particle::advance_fixture_particles.after(TransformSystems::Propagate).after(camera::follow_avatar));
+        .add_systems(
+            Update,
+            crate::ui_layout::render
+                .after(menu_shell::place)
+                .after(menu_dialog::place)
+                .after(option_dialog::place)
+                .after(info::place)
+                .after(get_resource::place),
+        )
+        .add_systems(
+            Update,
+            (
+                uber_particle::request_fixture_particles,
+                uber_particle::plan_fixture_particles,
+                uber_particle::spawn_fixture_particles,
+                crate::weather_fx::fixture::spawn_when_ready,
+            )
+                .chain(),
+        )
+        .add_systems(
+            PostUpdate,
+            uber_particle::advance_fixture_particles
+                .after(TransformSystems::Propagate)
+                .after(camera::follow_avatar),
+        );
     app.add_systems(Startup, crate::fixture_edit_ui::load)
-        .add_systems(Update,
-            (crate::fixture_edit_ui::parse, crate::fixture_edit_ui::spawn_when_ready)
-                .chain().after(crate::ui_layout::parse))
-        .add_systems(Update,
+        .add_systems(
+            Update,
+            (
+                crate::fixture_edit_ui::parse,
+                crate::fixture_edit_ui::spawn_when_ready,
+            )
+                .chain()
+                .after(crate::ui_layout::parse),
+        )
+        .add_systems(
+            Update,
             crate::fixture_edit_ui::click
                 .run_if(crate::game_settings::scene_input_enabled)
                 .after(action_button::click)
                 .after(menu_shell::click)
                 .before(fixture_edit::FixtureEditSystems::Pointer)
-                .before(fixture_edit::FixtureEditSystems::Commands))
-        .add_systems(Update,
+                .before(fixture_edit::FixtureEditSystems::Commands),
+        )
+        .add_systems(
+            Update,
             crate::fixture_edit_ui::refresh
                 .after(crate::fixture_edit_ui::spawn_when_ready)
                 .after(fixture_edit::FixtureEditSystems::View)
                 .after(ui_layers::advance)
-                .before(crate::ui_layout::render));
+                .before(crate::ui_layout::render),
+        );
     app.add_message::<gesture::GestureEvent>()
+        .add_message::<gesture::UiPointerEvent>()
         .add_message::<player_talk::PlayerTalkRequest>()
         .add_message::<crate::player_fixture_action::PlayerFixtureRequest>()
+        .add_message::<joystick::ForceResetJoystick>()
         // 摆设编辑的保存回执沿（保存动作 → tweet 域 after-edit 反应）。
         .add_message::<fixture_edit::LayoutSaved>()
         .init_resource::<gesture::GestureLayerState>()
         // 摇杆层状态（手势层与玩家输入都读它；缺资源会在系统参数校验
         // 处 panic，与手势层同款兜底）。
         .init_resource::<joystick::JoystickState>()
-        .add_observer(site::on_scene_ready)
+        // SitePlugin owns the site SceneInstanceReady observer. Registering it
+        // again here would decrement SiteScenePending twice for one scene root.
         .add_observer(character::on_model_scene_ready)
+        .add_observer(player_avatar::body::on_scene_ready)
         // 气泡链的选取门要读当前现象 id；wasm 分支不装天气插件，资源在
         // 这里兜底建（默认值 = 真源默认现象 1，与档名资源在音频侧兜底建
         // 同款故事；native 上与天气插件的 init 幂等重合）。
         .init_resource::<weather::CurrentPhenomenonId>()
+        .init_resource::<weather_fx::WeatherFxRetirements>()
+        .init_resource::<weather_fx::EnvironmentRoot>()
+        .init_resource::<crate::particle_runtime::seed::SystemSeedManager>()
+        // The player's Time.unscaledDeltaTime holder: advanced once per frame
+        // from the real clock, right after the app's clocks update.
+        .init_resource::<crate::particle_runtime::UnscaledFrameClock>()
+        .add_systems(bevy::app::First, crate::particle_runtime::advance_unscaled_clock.after(bevy::time::TimeSystems))
         .init_resource::<alone_action_runtime::AloneExecutionGate>()
         // 家具时间轴可播集（常驻空表起步，装载期填充——步进系统按 Res
         // 读它，缺资源会在系统参数校验处 panic）。
@@ -200,6 +404,8 @@ pub fn install(app: &mut App) {
                     // 大表没到齐之前它们就该落定。
                     client_config::load,
                     birthday::load,
+                    // The master rank table the rank gauges read.
+                    crate::mysekai_rank::load,
                     uber_particle::load,
                     // 家具挂点档案（attach-points）的装载请求：动作点
                     // 世界位的数据面，与摆放表（fixture 域）在同一批
@@ -214,7 +420,8 @@ pub fn install(app: &mut App) {
                     // 玩家对话剧本表（talks）与站点主表（站点门对照）的
                     // 装载请求。
                     player_talk::load,
-                    // 对话窗体的纹源（面板页 + 尾标替身）与常驻状态机。
+                    content_library::load,
+                    // 对话窗体的常驻状态机（绘制输入等布局文档到了再读）。
                     talk_window::load,
                     // 摇杆两件（底盘 + 手柄）的纹源（UI atlas 整页，两件
                     // 共用一次装载）。
@@ -226,16 +433,14 @@ pub fn install(app: &mut App) {
                     audio::load,
                     balloon::overlay_camera,
                     // 小地图链的装载请求与覆盖相机（order 2 层，与气泡层平行）。
-                    sitemap::load,
-                    sitemap::overlay_camera,
+                    sitemap::load.run_if(crate::browser_stage::standalone),
+                    sitemap::overlay_camera.run_if(crate::browser_stage::standalone),
                 )
                     .chain(),
             )
                 .chain(),
         )
         .add_systems(Update, character_material::apply_fog)
-        // The player uses the shared SD body/rig/material installation. No
-        // audience model, audience recolouring or spectator wear is registered.
         .add_systems(
             Update,
             (
@@ -245,6 +450,7 @@ pub fn install(app: &mut App) {
                     // 域，单独成链放最前）。装载失败在这里响亮 panic。
                     client_config::parse,
                     birthday::parse,
+                    crate::mysekai_rank::parse,
                 ),
                 (
                     // 站点域：主表解析 → 换站入口（拆站重选）→ 装载计划
@@ -254,12 +460,14 @@ pub fn install(app: &mut App) {
                     // 约束面构建收尾站点域：玩家铺位与推进读它（面与地表
                     // 同批网格，地表顶点可查的当帧它也齐）。
                     site::parse_masters,
-                    site::read_switch.after(site::parse_masters).run_if(crate::game_settings::scene_input_enabled),
+                    site::read_switch.after(site::parse_masters),
                     site::plan.after(site::read_switch),
                     site::spawn_when_ready.after(site::plan),
                     inactive_nodes::parse,
                     site_sound::parse,
-                    site_sound::apply.after(site_sound::parse).after(inactive_nodes::parse),
+                    site_sound::apply
+                        .after(site_sound::parse)
+                        .after(inactive_nodes::parse),
                     site::report_anchor.after(site::spawn_when_ready),
                     walk_face::build.after(site::spawn_when_ready),
                     // 目标面构建（保留高度的三角网 + 格桶 + 可行走格）：
@@ -267,6 +475,7 @@ pub fn install(app: &mut App) {
                     npc_objective::build_face.after(walk_face::build),
                     // 摆放保存后整场重烘挖洞：保存回执落台账 → 重烘 → 对账行。
                     walk_face::rebake_on_save.after(walk_face::build),
+                    walk_face::probe.after(walk_face::rebake_on_save),
                 ),
                 (
                     // 手势与摇杆链（0 层输入，先于相机与对话的消费）：
@@ -288,7 +497,12 @@ pub fn install(app: &mut App) {
                     joystick::smoke_autojoystick,
                     // 动作按钮的走位冒烟口也注在摇杆层推进之前：它写入的
                     // 触摸要被同一帧的摇杆层读到。
-                    action_button::smoke_autowalk,
+                    (
+                        action_button::smoke_autowalk,
+                        action_button::smoke_door_walk,
+                        crate::player_fixture_action::walk::smoke_fixture_walk,
+                    )
+                        .chain(),
                     joystick::advance,
                     gesture::advance,
                     joystick::spawn_when_ready,
@@ -301,250 +515,310 @@ pub fn install(app: &mut App) {
                     action_button::spawn_when_ready,
                     action_button::advance,
                     action_button::place_ui,
-                action_button::click,
-                    pick::smoke_autotap,
+                    action_button::place_change_ui,
+                    action_button::click,
                     // NPC 臂冒烟口（MOLY_PICK_NPC_TAP_SECS）：名册成员的
                     // 世界位投影点按，走同一条拾取链过配对门。
                     pick::smoke_npc_autotap,
                     // 玩家对话冒烟口同拍注入（候选成员的世界位投影点按，
                     // 请求当帧被对话链消费）。
                     player_talk::smoke_autotap,
-                    pick::pick.before(harvest::on_damage),
+                    pick::pick,
                 )
                     .chain(),
                 (
-                (
-                    // npc 链写者先于读者：解析清单 → 铺名册 → 换站重播种 →
-                    // 逐帧推进（写移动相位）→ 周期状态行。排在站点域之后：
-                    // 名册的脚下高度取自站点地表网格。
-                    // 挂点档案解析（含与摆放表组合出的动作点世界位）放
-                    // 链首：装载失败在此响亮 panic；组合表晚解析一帧落地
-                    // （命令同步点），目标机的资源门挡那一帧的空窗。
-                    fixture_attach::parse,
-                    npc::parse,
-                    npc::spawn_when_ready.after(npc::parse).after(fixture_attach::parse),
-                    npc::reseed.after(npc::spawn_when_ready),
-                    // 目标机决策（停顿计时、决策梯、抽签、目的地解算、出发——
-                    // 写路径槽与相位）。决策先于推进：当帧决策当帧起步。
-                    npc_objective::decide.after(npc::reseed).before(npc::advance),
-                    npc::advance,
-                    npc::report.after(npc::advance).run_if(common_conditions::on_timer(Duration::from_secs(2))),
-                ),
-                (
-                    // 相机 JSON 解析：装载面（七曲线 + 静态机位）。资产
-                    // 独立于站点链，放在链前端尽早落定；frame_site 消费
-                    // 其 CameraSetting（解析未到时取景暂缓）。
-                    camera::parse,
-                    // 相机手势输入：吃手势层的 DRAG 逐帧 Moved（激活阈值
-                    // 在手势层）+ 滚轮捏合，跟随律在 PostUpdate 当帧消费
-                    // ——输入当帧生效。
-                    camera::apply_input.after(camera::parse).run_if(crate::game_settings::scene_input_enabled),
-                ),
-                (
-                    // 角色链：计划（发包装载）→ 挂载 → 装配（插播放器与驱动）→
-                    // toon 计划（解析骨架档案建材质）→ toon 换装（等贴图到齐
-                    // 摘 Standard 换 Character）。链内命令自动同步点逐级生效：
-                    // 前一级插的组件，后一级当帧读得到。
-                    player::parse,
-                    player::spawn_when_ready.after(player::parse),
-                    character::plan_when_ready.after(player::spawn_when_ready).after(npc::spawn_when_ready),
-                    character::attach_when_ready.after(character::plan_when_ready),
-                    character::wire_when_ready.after(character::attach_when_ready),
-                    character_material::plan_when_wired.after(character::wire_when_ready),
-                    character_material::swap_when_planned.after(character_material::plan_when_wired),
-                    // 骨布装配：解析 rig 的 cloth 节、绑骨、建链（等装配闩
-                    // MotionDriver——场景已展开、动画目标已插）。
-                    cloth_runtime::plan_when_wired.after(character::wire_when_ready),
-                    // 玩家逻辑仍在自己的根：换站重定位 → 输入 → 位移，
-                    // 只将SD外观与角色共用，不加入NPC决策/路径名册。
-                    player::reseed.after(player::spawn_when_ready),
-                    // 读输入 → 推进位移这一对必须显式链上：两者对 PlayerInput
-                    // 一写一读构成冲突，但冲突只保证串行、不保证次序——
-                    // executor 让推进先跑时读到的是上一帧的输入，起手/收场
-                    // 各晚一帧（真源 OnTouchJoyStick 在事件回调里烘好向量，
-                    // 同一帧的 UpdateState 就消费它；键盘路同帧同形）。
                     (
-                        player::read_input.after(player::reseed),
-                        player::advance,
+                        // npc 链写者先于读者：解析清单 → 铺名册 → 换站重播种 →
+                        // 逐帧推进（写移动相位）→ 周期状态行。排在站点域之后：
+                        // 名册的脚下高度取自站点地表网格。
+                        // 挂点档案解析（含与摆放表组合出的动作点世界位）放
+                        // 链首：装载失败在此响亮 panic；组合表晚解析一帧落地
+                        // （命令同步点），目标机的资源门挡那一帧的空窗。
+                        fixture_attach::parse,
+                        npc::parse,
+                        npc::spawn_when_ready
+                            .after(npc::parse)
+                            .after(fixture_attach::parse),
+                        npc::reseed.after(npc::spawn_when_ready),
+                        // Frame order of one NPC frame: the agent step, then the
+                        // AI loop (the objective machine: rest, ladder, draws,
+                        // destinations, departure, the objective bodies), then
+                        // the presenter's per-frame calls (NpcPresenterSet). A
+                        // destination chosen on a frame is first stepped on the
+                        // next one.
+                        npc::advance.after(npc::reseed),
+                        npc_objective::decide
+                            .after(npc::advance)
+                            .before(npc::sync_rest_lifecycle),
+                        // The gate's appearance after the AI loop: a cancel
+                        // it makes is seen by the objective on the next frame.
+                        crate::npc_gate::appear
+                            .after(npc_objective::decide)
+                            .before(npc::sync_rest_lifecycle),
+                        // The look-at tweens after the agent step writes the
+                        // standing rotation.
+                        crate::npc_look_at::step.after(npc::advance),
+                        npc::report
+                            .after(npc::advance)
+                            .run_if(common_conditions::on_timer(Duration::from_secs(2))),
+                    ),
+                    (
+                        // 相机 JSON 解析：装载面（七曲线 + 静态机位）。资产
+                        // 独立于站点链，放在链前端尽早落定；frame_site 消费
+                        // 其 CameraSetting（解析未到时取景暂缓）。
+                        camera::parse,
+                        // 相机手势输入：吃手势层的 DRAG 逐帧 Moved（激活阈值
+                        // 在手势层）+ 滚轮捏合，跟随律在 PostUpdate 当帧消费
+                        // ——输入当帧生效。
+                        camera::apply_input
+                            .after(camera::parse)
+                            .after(gesture::advance)
+                            .run_if(crate::game_settings::camera_input_enabled),
+                    ),
+                    (
+                        // 角色链：计划（发包装载）→ 挂载 → 装配（插播放器与驱动）→
+                        // toon 计划（解析骨架档案建材质）→ toon 换装（等贴图到齐
+                        // 摘 Standard 换 Character）。链内命令自动同步点逐级生效：
+                        // 前一级插的组件，后一级当帧读得到。
+                        player::spawn_when_ready,
+                        // The player's body: request -> attach -> wire (the
+                        // loader's animator gets the graph and the driver).
+                        player_avatar::body::request.after(player::spawn_when_ready),
+                        player_avatar::body::attach.after(player_avatar::body::request),
+                        player_avatar::body::wire.after(player_avatar::body::attach),
+                        character::plan_when_ready
+                            .after(player::spawn_when_ready)
+                            .after(npc::spawn_when_ready),
+                        character::attach_when_ready.after(character::plan_when_ready),
+                        character::wire_when_ready.after(character::attach_when_ready),
+                        character_material::plan_when_wired.after(character::wire_when_ready),
+                        character_material::swap_when_planned
+                            .after(character_material::plan_when_wired),
+                        // 骨布装配：解析 rig 的 cloth 节、绑骨、建链（等装配闩
+                        // MotionDriver——场景已展开、动画目标已插）。
+                        cloth_runtime::plan_when_wired.after(character::wire_when_ready),
+                        // 玩家逻辑仍在自己的根：换站重定位 → 输入 → 位移，
+                        // 只将SD外观与角色共用，不加入NPC决策/路径名册。
+                        player::reseed.after(player::spawn_when_ready),
+                        // 读输入 → 推进位移这一对必须显式链上：两者对 PlayerInput
+                        // 一写一读构成冲突，但冲突只保证串行、不保证次序——
+                        // executor 让推进先跑时读到的是上一帧的输入，起手/收场
+                        // 各晚一帧（真源 OnTouchJoyStick 在事件回调里烘好向量，
+                        // 同一帧的 UpdateState 就消费它；键盘路同帧同形）。
+                        (player::read_input.after(player::reseed), player::advance).chain(),
+                        // The player's body is installed by player_avatar::body
+                        // above; it installs the sole AvatarDriver.
+                    ),
+                    (
+                        // 待机动作链：两张表解析（装载失败在此响亮失败）→ 逐名挂
+                        // 运行时（挂上即核数据面：facial 键与动作段全在表/库里）
+                        // → 逐帧主循环（驻留帧选取、序列步进分发事件、播完回收
+                        // 重选、播放器独占权维护）。排在换装之后（运行时要 toon
+                        // 材质句柄）、位移驱动之前（先占后让：演出占住播放器时
+                        // 位移驱动整名让位）。
+                        alone_action_runtime::parse_alone_actions,
+                        alone_action_runtime::parse_facial_tables,
+                        alone_action_runtime::attach
+                            .after(alone_action_runtime::parse_alone_actions)
+                            .after(alone_action_runtime::parse_facial_tables)
+                            .after(character_material::swap_when_planned),
+                        alone_action_runtime::report.after(alone_action_runtime::attach),
+                    ),
+                    (
+                        // 驱动（读移动相位换段）与播放探针；玩家速率律排在换段
+                        // 之后：换段以缺省速率起新段，玩家域同帧把速率压回
+                        // 真源式。其后气泡链：烘图集（tweet 行归 NPC 侧解析）
+                        // → HUD 事件消费（NPC 状态机本帧发的事件，排在呈现
+                        // 调用集之后）→ 存活计时与淡坡。
+                        player_avatar::drive
+                            .after(player::advance)
+                            .after(player_avatar::body::wire),
+                        player::tune_animation_speed.after(player_avatar::drive),
+                        character::probe_playback.after(character::drive),
+                        player_avatar::probe_playback.after(player::tune_animation_speed),
+                        player::report
+                            .after(player::advance)
+                            .run_if(common_conditions::on_timer(Duration::from_secs(2))),
+                        balloon::bake_atlas
+                            .after(crate::npc_tweet::parse)
+                            .after(player_talk::parse),
+                        // HUD 事件消费 → 显式同步点 → after-edit 反应：同一根
+                        // objective 槽位的两条写入沿。链式定序 + 同步点让
+                        // 反应的让位门看得见 HUD 事件本帧铺的气泡——不定序
+                        // 时两系统并发（命令式写入不构成访问冲突），让位门
+                        // 对同帧的问候气泡是盲的，成员头上会叠两只气泡
+                        // （真源单状态字段，构造上不允许两只并存）。
+                        (
+                            balloon::hud_event
+                                .after(balloon::bake_atlas)
+                                .after(crate::npc_state::NpcPresenterSet),
+                            ApplyDeferred,
+                            // after-edit 反应链：保存回执 → 池选取
+                            // → 上屏 → 5.0s 驻留收场（驻留在上屏之后，真源
+                            // objective 的序）。同一份表与图集资源，呈现复用。
+                            balloon::after_edit_reaction,
+                        )
+                            .chain(),
+                        balloon::tick.after(balloon::after_edit_reaction),
+                        // 层序探针（MOLY_BALLOON_ORDER_SECS > 0 才活）：造一对
+                        // 同屏点重叠的探针气泡，到秒数自动退出（无头验收）。
+                        balloon::order_smoke.after(balloon::tick),
+                    ),
+                    (
+                        // The Rest driver owns script selection; this chain only prepares visuals.
+                        emoticon::parse,
+                        emoticon::spawn_when_ready.after(emoticon::parse),
+                    ),
+                    (
+                        // 对话链：剧本表解析 → 时间轴三件套装载计划（锚定
+                        // 摆放 ∩ 语料点名）与解析（可播集落位）→ 名册/库/
+                        // 表/档案全就绪后预筛候选（候选要点播的键装载期核
+                        // 验）→ 配对检出与选取（读 npc 推进写好的位置，排
+                        // 其后；开场即开下方对话窗，与玩家链共用窗体）→
+                        // 点跳输入（两链各自的闩，无输入驻留合成点击）→
+                        // 家具脸部件解析与动画执行面解析（换装闩后一次性，
+                        // 步进要读它们）→ 步进主循环（触发步分发：文本进
+                        // 对话窗体、眼/口写材质（角色与家具同表）、动作起
+                        // 播、表情件折请求、家具转体起转、时间轴起播；合
+                        // 成点击闩与 IsWaitClick 门在步进前定）→ 时间轴序
+                        // 列逐帧（段终态接下一段/进循环）→ 家具转体逐帧
+                        // （当帧可完成瞬时档）→ 转体逐帧推进（参演者持留
+                        // 期间位移侧让位）→ 表情件请求消费（同一条出件/
+                        // 收件通道）→ 窗体帧推进（打字机/淡变/字形揭示/α
+                        // 写回）→ 周期状态行。
+                        //
+                        // 玩家对话链同拍同形：剧本表解析（含指称名表与文本字
+                        // 符集——字符集并进气泡图集的烘焙门）→ 名册就绪后筛
+                        // 候选 → 消费拾取链的玩家对话请求（六门求值 → 池 →
+                        // 均匀抽/重播回退/Current覆写 → 会话开场）。只有一个
+                        // 业务request reader；随后同步命令，让Rest出沿先于
+                        // 两个既有脚本后端的正文/语音消费者。
+                        (
+                            talk::parse,
+                            fixture_talk::plan_timelines,
+                            fixture_talk::resolve_timelines,
+                            talk::prepare,
+                            player_talk::parse,
+                            player_talk::prepare,
+                            player_talk::consume_trigger,
+                            ApplyDeferred,
+                            // Dispose a departing Rest before a new conversation writes animation.
+                            npc::sync_rest_lifecycle.after(npc::advance),
+                            alone_action_runtime::advance,
+                            (talk::fixture_action::drive, character::drive).chain(),
+                            emoticon::serve_rest,
+                            // 合成对话注入口（冒烟；无环境变量自关）——与配对同链
+                            // 在步进前：注入的会话当帧即可步进。
+                            // Keep the outer dialogue tuple below Bevy's tuple-system
+                            // arity while preserving the probe -> prefetch order.
+                            (
+                                talk::voice_probe,
+                                talk::partvoice_probe,
+                                // Warm exact future authored voice assets without
+                                // creating a player or advancing the script cursor.
+                                audio::prefetch_voice,
+                            )
+                                .chain(),
+                            talk_window::read_click_input
+                                .run_if(crate::game_settings::talk_input_enabled),
+                            fixture_talk::discover_faces,
+                            (
+                                fixture_talk::discover_animation,
+                                fixture_talk::discover_late_animation,
+                            )
+                                .chain(),
+                            talk_window::smoke_tap,
+                            talk::advance_talk,
+                            player_talk::advance_session,
+                        )
+                            .chain(),
+                        (
+                            // Both conversation drivers publish voice lines before this flush.
+                            // Audio observes the same frame as the associated text steps.
+                            ApplyDeferred,
+                            // talk voice 起播（音频域消费行请求）：真源行内命令序
+                            // voice 先于 text——行推进同帧起播。
+                            audio::serve_voice,
+                            fixture_talk::progress_timelines,
+                            fixture_talk::progress_turns,
+                            talk::progress_turns,
+                            player_talk::progress_turns,
+                            emoticon::serve_talk,
+                            talk_window::tick_window,
+                            talk::report
+                                .run_if(common_conditions::on_timer(Duration::from_secs(5))),
+                            player_talk::report
+                                .run_if(common_conditions::on_timer(Duration::from_secs(5))),
+                        )
+                            .chain(),
                     )
                         .chain(),
-                    // SD body/model wiring is shared with character above;
-                    // its player branch installs the sole AvatarDriver.
-                ),
-                (
-                    // 待机动作链：两张表解析（装载失败在此响亮失败）→ 逐名挂
-                    // 运行时（挂上即核数据面：facial 键与动作段全在表/库里）
-                    // → 逐帧主循环（驻留帧选取、序列步进分发事件、播完回收
-                    // 重选、播放器独占权维护）。排在换装之后（运行时要 toon
-                    // 材质句柄）、位移驱动之前（先占后让：演出占住播放器时
-                    // 位移驱动整名让位）。
-                    alone_action_runtime::parse_alone_actions,
-                    alone_action_runtime::parse_facial_tables,
-                    alone_action_runtime::attach
-                        .after(alone_action_runtime::parse_alone_actions)
-                        .after(alone_action_runtime::parse_facial_tables)
-                        .after(character_material::swap_when_planned),
-                    alone_action_runtime::report.after(alone_action_runtime::attach),
-                ),
-                (
-                    // 驱动（读移动相位换段）与播放探针；玩家速率律排在换段
-                    // 之后：换段以缺省速率起新段，玩家域同帧把速率压回
-                    // 真源式。其后气泡链：解析主表
-                    // → 烘图集 → 驻留沿触发（读 npc 推进写好的相位）→ 存活
-                    // 计时与淡坡。读相位所以排推进之后。
-                    player_avatar::drive.after(player::advance).after(character::wire_when_ready),
-                    player::tune_animation_speed.after(player_avatar::drive),
-                    character::probe_playback.after(character::drive),
-                    player_avatar::probe_playback.after(player::tune_animation_speed),
-                    player::report.after(player::advance).run_if(common_conditions::on_timer(Duration::from_secs(2))),
-                    balloon::parse_master,
-                    balloon::bake_atlas.after(balloon::parse_master).after(player_talk::parse),
-                    // 问候触发 → 显式同步点 → after-edit 反应：同一根
-                    // objective 槽位的两条写入沿。链式定序 + 同步点让
-                    // 反应的让位门看得见问候触发本帧铺的气泡——不定序
-                    // 时两系统并发（命令式写入不构成访问冲突），让位门
-                    // 对同帧的问候气泡是盲的，成员头上会叠两只气泡
-                    // （真源单状态字段，构造上不允许两只并存）。
                     (
-                        balloon::trigger.after(balloon::bake_atlas).after(npc::advance),
-                        ApplyDeferred,
-                        // after-edit 反应链：保存回执 → 池选取
-                        // → 上屏 → 5.0s 驻留收场（驻留在上屏之后，真源
-                        // objective 的序）。同一份表与图集资源，呈现复用。
-                        balloon::after_edit_reaction,
-                    )
-                        .chain(),
-                    balloon::tick.after(balloon::after_edit_reaction),
-                    // 层序探针（MOLY_BALLOON_ORDER_SECS > 0 才活）：造一对
-                    // 同屏点重叠的探针气泡，到秒数自动退出（无头验收）。
-                    balloon::order_smoke.after(balloon::tick),
+                        // 小地图链：四份数据解析（fail-closed）→ 贴图到齐铺装
+                        // （底图 + 图标列 + 云簇 + 天气钮 + 字形图集）→ 两根
+                        // 缩放逐帧对窗 → 验证用的自动开云钩子 → 点击开云 →
+                        // 入场/浮动/开云三条推进 → M 键显隐 → 天气钮跟随
+                        // 现象 → 周期状态行。链内命令同步点逐级生效。
+                        sitemap::parse,
+                        sitemap::spawn_when_ready,
+                        sitemap::fit_root,
+                        sitemap::auto_unlock,
+                        sitemap::smoke_autoclick,
+                        sitemap::click.run_if(crate::game_settings::scene_input_enabled),
+                        sitemap::tick_entries,
+                        sitemap::tick_floats,
+                        sitemap::tick_unlock,
+                        sitemap::toggle
+                            .run_if(crate::game_settings::scene_input_enabled)
+                            .run_if(crate::entry::site_input_open),
+                        sitemap::refresh_weather,
+                        sitemap::report.run_if(common_conditions::on_timer(Duration::from_secs(2))),
+                    ),
                 ),
-                (
-                    // The Rest driver owns script selection; this chain only prepares visuals.
-                    emoticon::parse,
-                    emoticon::spawn_when_ready.after(emoticon::parse),
-                ),
-                (
-                    // 对话链：剧本表解析 → 时间轴三件套装载计划（锚定
-                    // 摆放 ∩ 语料点名）与解析（可播集落位）→ 名册/库/
-                    // 表/档案全就绪后预筛候选（候选要点播的键装载期核
-                    // 验）→ 配对检出与选取（读 npc 推进写好的位置，排
-                    // 其后；开场即开下方对话窗，与玩家链共用窗体）→
-                    // 点跳输入（两链各自的闩，无输入驻留合成点击）→
-                    // 家具脸部件解析与动画执行面解析（换装闩后一次性，
-                    // 步进要读它们）→ 步进主循环（触发步分发：文本进
-                    // 对话窗体、眼/口写材质（角色与家具同表）、动作起
-                    // 播、表情件折请求、家具转体起转、时间轴起播；合
-                    // 成点击闩与 IsWaitClick 门在步进前定）→ 时间轴序
-                    // 列逐帧（段终态接下一段/进循环）→ 家具转体逐帧
-                    // （当帧可完成瞬时档）→ 转体逐帧推进（参演者持留
-                    // 期间位移侧让位）→ 表情件请求消费（同一条出件/
-                    // 收件通道）→ 窗体帧推进（打字机/淡变/字形揭示/α
-                    // 写回）→ 周期状态行。
-                    //
-                    // 玩家对话链同拍同形：剧本表解析（含指称名表与文本字
-                    // 符集——字符集并进气泡图集的烘焙门）→ 名册就绪后筛
-                    // 候选 → 消费拾取链的玩家对话请求（六门求值 → 池 →
-                    // 均匀抽/重播回退/Current覆写 → 会话开场）。只有一个
-                    // 业务request reader；随后同步命令，让Rest出沿先于
-                    // 两个既有脚本后端的正文/语音消费者。
-                    (
-                        talk::parse,
-                        fixture_talk::plan_timelines,
-                        fixture_talk::resolve_timelines,
-                        talk::prepare,
-                        player_talk::parse,
-                        player_talk::prepare,
-                        player_talk::consume_trigger,
-                        ApplyDeferred,
-                        // Dispose a departing Rest before a new conversation writes animation.
-                        npc::sync_rest_lifecycle.after(npc::advance),
-                        alone_action_runtime::advance,
-                        character::drive,
-                        emoticon::serve_rest,
-                        // 合成对话注入口（冒烟；无环境变量自关）——与配对同链
-                        // 在步进前：注入的会话当帧即可步进。
-                        talk::voice_probe,
-                        talk::partvoice_probe,
-                        talk_window::read_click_input.run_if(crate::game_settings::scene_input_enabled),
-                        fixture_talk::discover_faces,
-                        fixture_talk::discover_animation,
-                        talk_window::smoke_tap,
-                        talk::advance_talk,
-                        player_talk::advance_session,
-                    )
-                        .chain(),
-                    (
-                        // Both conversation drivers publish voice lines before this flush.
-                        // Audio observes the same frame as the associated text steps.
-                        ApplyDeferred,
-                        // talk voice 起播（音频域消费行请求）：真源行内命令序
-                        // voice 先于 text——行推进同帧起播。
-                        audio::serve_voice,
-                        fixture_talk::progress_timelines,
-                        fixture_talk::progress_turns,
-                        talk::progress_turns,
-                        player_talk::progress_turns,
-                        emoticon::serve_talk,
-                        talk_window::tick_window,
-                        talk::report.run_if(common_conditions::on_timer(Duration::from_secs(5))),
-                        player_talk::report
-                            .run_if(common_conditions::on_timer(Duration::from_secs(5))),
-                    )
-                        .chain(),
-                )
-                    .chain(),
-                (
-                    // 小地图链：四份数据解析（fail-closed）→ 贴图到齐铺装
-                    // （底图 + 图标列 + 云簇 + 天气钮 + 字形图集）→ 两根
-                    // 缩放逐帧对窗 → 验证用的自动开云钩子 → 点击开云 →
-                    // 入场/浮动/开云三条推进 → M 键显隐 → 天气钮跟随
-                    // 现象 → 周期状态行。链内命令同步点逐级生效。
-                    sitemap::parse,
-                    sitemap::spawn_when_ready,
-                    sitemap::fit_root,
-                    sitemap::auto_unlock,
-                    sitemap::smoke_autoclick,
-                    sitemap::click.run_if(crate::game_settings::scene_input_enabled),
-                    sitemap::tick_entries,
-                    sitemap::tick_floats,
-                    sitemap::tick_unlock,
-                    sitemap::toggle.run_if(crate::game_settings::scene_input_enabled),
-                    sitemap::refresh_weather,
-                    sitemap::report.run_if(common_conditions::on_timer(Duration::from_secs(2))),
-                ),
-                )
             )
                 .chain(),
         )
-        // 玩家 avatar 状态机三写者（真源 UpdateController 每帧分派的等价
-        // + 两个域写者）：采集段 → 对话会话 → 输入。单列而不进上面的大
-        // tuple——那个 tuple 的名册/玩家组已经顶到 Bevy 调度元组的 20 元
-        // 上限，再塞会整块失去 IntoScheduleConfigs（错误只在 .chain() 处
-        // 冒「not an iterator」）。采集段排在整个采集链之后（段信号是被击
-        // 队列与在飞击打演出的事后读数）；输入写者排在 read_input 之后——
-        // 与那对同款，PlayerInput 一写一读的冲突只保证串行不保证次序。
-        // 采集段放链首：同帧收场时先开门，输入写者当帧就能接上。
+        // 玩家 avatar 状态机的对话与输入写者（真源 UpdateController 每帧
+        // 分派的等价 + 对话域写者）。单列而不进上面的大 tuple——那个 tuple
+        // 的名册/玩家组已经顶到 Bevy 调度元组的 20 元上限，再塞会整块失去
+        // IntoScheduleConfigs（错误只在 .chain() 处冒「not an iterator」）。
+        // The harvest action (its own writer of states 7 / 0 and of the gate)
+        // runs between the input read and these writers: a gate it opens this
+        // frame is seen by the input writer this frame, and the harvest
+        // instrument's synthetic input reaches both. 输入写者排在 read_input
+        // 之后——与那对同款，PlayerInput 一写一读的冲突只保证串行不保证次序。
+        .configure_sets(
+            Update,
+            harvest::HarvestActionSet
+                .after(player::read_input)
+                .before(player::advance),
+        )
         .add_systems(
             Update,
             (
-                player_state::drive_from_harvest,
                 player_state::drive_from_talk,
                 player_state::drive_from_input,
             )
                 .chain()
-                .after(harvest::advance_punch)
+                .after(harvest::HarvestActionSet)
                 .after(player::read_input),
         )
         .add_systems(
             Update,
             (
                 crate::player_fixture_action::request_end_from_input,
-                crate::player_fixture_action::receive_requests,
                 crate::player_fixture_action::refresh_availability,
+                crate::player_fixture_action::receive_requests,
                 crate::player_fixture_action::advance,
                 crate::fixture_gimmick::advance,
-                crate::fixture_activity_timeline::advance,
+                crate::player_avatar::item_timeline::advance,
+                // The director's script outputs evaluate after the NPC
+                // presenter's update in the source frame (the avatar store's
+                // Update, then the director update): its character mixers
+                // (eye preset, blink state, fade) write after the view's blink
+                // and dither of the same frame.
+                crate::fixture_activity_timeline::advance
+                    .after(crate::npc_state::NpcPresenterSet),
             )
                 .chain()
                 .after(action_button::click)
@@ -580,8 +854,7 @@ pub fn install(app: &mut App) {
             (
                 uber_particle::plan,
                 uber_particle::spawn_when_ready,
-                uber_particle::report
-                    .run_if(common_conditions::on_timer(Duration::from_secs(2))),
+                uber_particle::report.run_if(common_conditions::on_timer(Duration::from_secs(2))),
             )
                 .chain(),
         )
@@ -592,14 +865,17 @@ pub fn install(app: &mut App) {
         .add_systems(
             Update,
             (
+                weather_fx::notify_invisible,
+                weather_fx::expire_retirements,
+                weather_fx::sync_fixture_colliders,
                 weather_fx::watch,
                 weather_fx::parse,
                 weather_fx::plan,
                 weather_fx::spawn_when_ready,
-                weather_fx::report
-                    .run_if(common_conditions::on_timer(Duration::from_secs(2))),
+                weather_fx::refresh_effect_visible,
+                weather_fx::report.run_if(common_conditions::on_timer(Duration::from_secs(2))),
             )
-                .chain(),
+                .chain().after(crate::weather_transition::WeatherEnvironmentUpdate),
         )
         // 音频链：路由表解析（两份档案到齐一次性吃掉）→ BGM（淡出/淡入/
         // intro→loop 交接/换曲）→ 环境音（切档停放）→ A 套就近管理（站点
@@ -612,12 +888,13 @@ pub fn install(app: &mut App) {
             Update,
             (
                 audio::parse,
-                audio::advance_bgm,
-                audio::advance_ambient,
-                audio::advance_proximity,
+                audio::advance_bgm.run_if(crate::audio_startup::can_prepare),
+                audio::advance_ambient.after(weather::commit_environment).run_if(crate::audio_startup::can_prepare),
+                audio::advance_ambient_sequence.run_if(crate::audio_startup::can_prepare),
+                audio::advance_proximity.run_if(crate::audio_startup::can_prepare),
                 audio::advance_se
                     .in_set(audio::SeDrainSet::Drain)
-                    .after(harvest::on_damage)
+                    .after(harvest::HarvestActionSet)
                     .after(talk::advance_talk)
                     .after(talk_window::tick_window),
                 audio::report.run_if(common_conditions::on_timer(Duration::from_secs(2))),
@@ -638,9 +915,16 @@ pub fn install(app: &mut App) {
                     .run_if(common_conditions::on_timer(cloth_runtime::REPORT_PERIOD)),
             ),
         )
+        // The weather's physics scene: the site's readiness and the local
+        // player's avatar, after the transforms propagate and before the
+        // weather particles query it.
+        .add_systems(
+            PostUpdate,
+            crate::particle_runtime::collision_scene::observe_product.after(TransformSystems::Propagate),
+        )
         // TransformPropagate 之后：scene 实体当帧展开，取景要读已传播的全局变换。
         // 追角色再排在取景之后：角色就位当帧起，追角色每帧覆盖机位。
-        // 天空钉位收尾：读当帧机位的水平坐标，别把上一帧的机位画进天空。
+        // 天空钉位收尾：读玩家视变换当帧（传播之后）的世界位置。
         .add_systems(
             PostUpdate,
             (
@@ -655,7 +939,7 @@ pub fn install(app: &mut App) {
                 camera::report_follow
                     .after(camera::follow_avatar)
                     .run_if(common_conditions::on_timer(Duration::from_secs(2))),
-                sky::follow_camera.after(camera::follow_avatar),
+                sky::follow_player_view.after(camera::follow_avatar),
                 // 粒子帧推进与属性池重建：变换传播之后（发射节点的世界
                 // 变换是本帧的）、机位定好之后（四角朝的是本帧的相机）。
                 uber_particle::advance
@@ -665,7 +949,8 @@ pub fn install(app: &mut App) {
                 // 机位都要当帧值。
                 weather_fx::advance
                     .after(TransformSystems::Propagate)
-                    .after(camera::follow_avatar),
+                    .after(camera::follow_avatar)
+                    .after(crate::particle_runtime::collision_scene::observe_product),
                 // 角色侧相机态（屏幕/投影参数）与站点取景同拍；头参考点在
                 // TransformPropagate 之后回写——动画在 Propagate 之前推进，
                 // 读到的是当帧姿势。
@@ -701,7 +986,7 @@ pub fn install(app: &mut App) {
                     .before(camera::follow_avatar),
                 talk_camera::advance
                     .after(camera::follow_avatar)
-                    .before(sky::follow_camera)
+                    .before(sky::follow_player_view)
                     .before(character_material::write_frame_state)
                     .before(balloon::place)
                     .before(emoticon::advance),
@@ -710,6 +995,8 @@ pub fn install(app: &mut App) {
     // ---- 场地屏外壳 · 屏幕层栈（追加段：以下全部为新增，未动上面既有行） ----
     // 层栈命令与外壳对话框请求两条消息沿；层栈资源常驻（栈底场地屏起步，
     // 真源主场地屏常驻同形）。
+    // The screen manager's registry, hook events and back key.
+    ui_layers::install(app);
     app.add_message::<ui_layers::LayerCommand>()
         .add_message::<menu_shell::ShellDialogRequest>()
         .init_resource::<ui_layers::UiLayerStack>()
@@ -724,9 +1011,40 @@ pub fn install(app: &mut App) {
         // 壳上的那一下不该再打世界射线——与动作按钮同一条次序律）。
         .add_systems(
             Update,
-            menu_shell::click.run_if(crate::game_settings::scene_input_enabled)
+            menu_shell::click
+                .run_if(crate::game_settings::scene_input_enabled)
                 .after(action_button::click)
                 .before(pick::pick),
+        )
+        // Source press/click of the camera reset button: same input gate and
+        // order as the tap dispatch (after the action buttons' tap flag, before
+        // the world pick).
+        .init_resource::<menu_shell::SourceInputManager>()
+        .init_resource::<menu_shell::CameraResetPress>()
+        .add_systems(
+            Update,
+            menu_shell::camera_reset_input
+                .run_if(crate::game_settings::scene_input_enabled)
+                .after(action_button::click)
+                .after(menu_shell::click)
+                .before(pick::pick),
+        )
+        // The button's disable while pressed: every frame, input enabled or
+        // not, after the input and before the effect's update.
+        .add_systems(
+            Update,
+            menu_shell::camera_reset_disable
+                .after(menu_shell::camera_reset_input)
+                .before(menu_shell::camera_reset_tap_effect),
+        )
+        // The button's press effect: its fade takes the frame's step after
+        // the press, before the prefab views draw.
+        .init_resource::<menu_shell::CameraResetTapEffect>()
+        .add_systems(
+            Update,
+            menu_shell::camera_reset_tap_effect
+                .after(menu_shell::camera_reset_input)
+                .before(crate::ui_layout::render),
         )
         // 层栈推进：读小地图根可见性做直通口对账 + 消费层命令 + 回写槽
         // 位视图。小地图的四条可见性写者（点击 · 自动点 · 解锁推进 ·
@@ -749,13 +1067,10 @@ pub fn install(app: &mut App) {
                 .chain()
                 .after(ui_layers::advance)
                 .after(menu_shell::click),
-        )
-        // 相机复位补间推进：相机输入之后（补间期间输入被吞——真源
-        // _isResetAnimation 门，吞门在 apply_input 里读本资源在场与否）。
-        .add_systems(
-            Update,
-            menu_shell::advance_camera_reset.after(camera::apply_input),
         );
+    // The camera reset is a field-camera tween: camera::follow_avatar
+    // advances it, and camera::apply_input swallows drag/pinch while it runs
+    // (the Normal state's _isResetAnimation gate).
     // ---- 情报层视图（追加段：层栈 + 外壳之后的第一个带内容物的屏幕层） ----
     // 资源与启动施加（进场即按存量档全量施加；刷新率档当值取构造默认
     // high ⇒ 60fps 钳制）。
@@ -768,7 +1083,8 @@ pub fn install(app: &mut App) {
         // 当帧进栈。
         .add_systems(
             Update,
-            info::click.run_if(crate::game_settings::scene_input_enabled)
+            info::click
+                .run_if(crate::game_settings::scene_input_enabled)
                 .after(menu_shell::click)
                 .before(pick::pick)
                 .before(ui_layers::advance),
@@ -784,9 +1100,39 @@ pub fn install(app: &mut App) {
                 .after(menu_shell::place)
                 .after(info::click),
         );
+    // The inventory screen (screen 607): the masters at start-up (their names
+    // join the shell charset before the shared atlas bakes), the view once
+    // its layouts, the fixture thumbnails and the masters are in; taps in the
+    // same chain as the info screen; placement after the screen manager and
+    // before the prefab views draw.
+    app.add_systems(Startup, crate::inventory::load)
+        .add_systems(
+            Update,
+            (
+                crate::inventory::parse_glyphs.before(menu_shell::parse),
+                crate::inventory::spawn_when_ready,
+            ),
+        )
+        .add_systems(
+            Update,
+            crate::inventory::click
+                .run_if(crate::game_settings::scene_input_enabled)
+                .after(menu_shell::click)
+                .before(pick::pick)
+                .before(ui_layers::advance),
+        )
+        .add_systems(
+            Update,
+            crate::inventory::place
+                .after(ui_layers::advance)
+                .after(menu_shell::place)
+                .after(crate::inventory::click)
+                .before(crate::ui_layout::render),
+        );
     // ---- 菜单对话框（追加段：外壳菜单钮的目标，Dialog 槽） ----
-    // mock 面板资源（服务端态具名：体力/等级两格 + 四个使能输入，环境
-    // 变量覆写）。
+    // The menu's named mock enable inputs (visiting and two permissions,
+    // native instruments); stamina and rank are the server model's client
+    // copies, the photo permission is the active site's type.
     app.add_systems(Startup, menu_dialog::init)
         // 铺件：图集到齐一次铺成（外壳字符集已并菜单对话框固定文案，
         // 烘制门四员到齐条件不变——菜单对话框的字随外壳成员一起进图集）。
@@ -797,7 +1143,8 @@ pub fn install(app: &mut App) {
         // 重置者在前）、世界射线与层栈推进之前（框内层命令当帧进栈）。
         .add_systems(
             Update,
-            menu_dialog::click.run_if(crate::game_settings::scene_input_enabled)
+            menu_dialog::click
+                .run_if(crate::game_settings::scene_input_enabled)
                 .after(action_button::click)
                 .before(menu_shell::click)
                 .before(pick::pick)
@@ -812,8 +1159,9 @@ pub fn install(app: &mut App) {
                 .after(menu_shell::place),
         );
     // ---- 获得子窗（追加段：Dialog 槽的第三件，四开门者共用的获得窗） ----
-    // mock 面板资源（服务端态具名：开门者 + 资源队列，环境变量覆写）与
-    // 链播放态（关一格出队开下一格）。
+    // The native instrument's opener and resource queue (not a server value;
+    // game mode reads no instrument) and the chain player state (closing one
+    // window opens the next).
     app.add_systems(Startup, get_resource::init)
         // 铺件：图集到齐一次铺成（外壳字符集已并获得子窗固定文案，烘制
         // 门四员到齐条件不变——获得子窗的字随外壳成员一起进图集）。
@@ -824,7 +1172,8 @@ pub fn install(app: &mut App) {
         // （同一份点按消费标志，重置者在前）、世界射线与层栈推进之前。
         .add_systems(
             Update,
-            get_resource::click.run_if(crate::game_settings::scene_input_enabled)
+            get_resource::click
+                .run_if(crate::game_settings::scene_input_enabled)
                 .after(action_button::click)
                 .before(menu_shell::click)
                 .before(menu_dialog::click)
@@ -840,6 +1189,39 @@ pub fn install(app: &mut App) {
                 .after(get_resource::click)
                 .after(menu_shell::place),
         );
+    // ---- Learn-phenomenon dialog (the dialog slot) and the notice layer's
+    // weather banner (appended block).
+    app.add_message::<notice_banner::SiteEnvironmentInfo>()
+        .init_resource::<notice_banner::NoticeBanner>()
+        .add_systems(Startup, learn_phenomena_dialog::load_glyphs)
+        // The phenomenon names join the shell charset before the atlas bake.
+        .add_systems(Update, learn_phenomena_dialog::parse_glyphs.before(menu_shell::parse))
+        .add_systems(Update, (learn_phenomena_dialog::spawn_when_ready, notice_banner::spawn_when_ready))
+        // Open, taps, then the tweens: the request's SEs drain this frame; the
+        // taps keep the dialog slot's order (after the action buttons' tap
+        // flag, before the shell, the other dialogs, the world pick and the
+        // layer stack).
+        .add_systems(
+            Update,
+            (
+                learn_phenomena_dialog::open,
+                learn_phenomena_dialog::autotap,
+                learn_phenomena_dialog::click.run_if(crate::game_settings::scene_input_enabled),
+                learn_phenomena_dialog::back_key,
+                learn_phenomena_dialog::place,
+            )
+                .chain()
+                .after(ui_layers::back_key)
+                .after(action_button::click)
+                .before(menu_shell::click)
+                .before(menu_dialog::click)
+                .before(get_resource::click)
+                .before(pick::pick)
+                .before(ui_layers::advance)
+                .before(audio::SeDrainSet::Drain),
+        )
+        // The banner reads the entry's calls in the frame they are made.
+        .add_systems(Update, notice_banner::advance.after(crate::entry::advance));
     // ---- 选项对话框（追加段：设置钮的目标，Dialog 槽——音量页） ----
     // 本地档装载与进场施加（SceneMysekai.Start → SetupVolume 同律：读档
     // → 施加系统组 → 环境变量只作进场覆写）。排 Startup 链后（无跨系统
@@ -855,7 +1237,8 @@ pub fn install(app: &mut App) {
         // 全归本系统（外壳与菜单对话框的门读同一个 option_open 位）。
         .add_systems(
             Update,
-            option_dialog::click.run_if(crate::game_settings::scene_input_enabled)
+            option_dialog::click
+                .run_if(crate::game_settings::scene_input_enabled)
                 .after(action_button::click)
                 .before(menu_dialog::click)
                 .before(menu_shell::click)

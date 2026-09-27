@@ -1,0 +1,1019 @@
+import { verifyPublishedStore } from "./asset-pack-store.mjs";
+import { resolveResourceSource } from "./resource-sources.mjs";
+import {
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  renameSync,
+  symlinkSync,
+  realpathSync,
+  lstatSync,
+} from "node:fs";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+  gzipSync,
+  brotliCompressSync,
+  constants as zlibConstants,
+} from "node:zlib";
+import { contentKey, EMBED_VERSION } from "./embed-contract.mjs";
+import { workspaceFingerprint, sha256 } from "./build-source.mjs";
+import { isDeepStrictEqual } from "node:util";
+import { COORDINATE_CONTRACT, requireCoordinateContract, validateCoordinatePair } from "./coordinate-contract.mjs";
+import { validatePublicationCoordinates } from "./coordinate-publication.mjs";
+import { bundleCacheWorkerFiles } from "./cache-worker-bundle.mjs";
+import { GAME_ABI, GAME_EXPORTS } from "./game-controller.mjs";
+
+export const STAGE_FILES = [
+  "embed.mjs",
+  "embed-stage.mjs",
+  "embed-contract.mjs",
+  "embed.d.ts",
+  "stage.html",
+  "stage.mjs",
+  "base-resources.mjs",
+  "coordinate-contract.mjs",
+  "asset-pack-client.mjs",
+  "stage.css",
+  "stage-controller.mjs",
+  "stage-activation.mjs",
+  "stage-audio.mjs",
+  "stage-locale.mjs",
+  "weather-presentation.mjs",
+  "weather-artwork.mjs",
+  "weather-picker.mjs",
+  "weather-ui-locale.mjs",
+  "boot.mjs",
+  "engine-loader.mjs",
+];
+
+/** The game loader a product page imports, and every module it imports. */
+export const GAME_FILES = [
+  "game-boot.mjs",
+  "game-controller.mjs",
+  "engine-loader.mjs",
+  "boot.mjs",
+  "base-resources.mjs",
+  "coordinate-contract.mjs",
+  "asset-pack-client.mjs",
+  "embed-contract.mjs",
+  "stage-audio.mjs",
+];
+
+export const PROFILES = Object.freeze({
+  stage: Object.freeze({
+    files: STAGE_FILES,
+    abi: [
+      "start_stage",
+      "library_snapshot",
+      "library_command",
+      "library_catalog",
+      "library_diagnostics",
+    ],
+  }),
+  game: Object.freeze({ files: GAME_FILES, abi: GAME_EXPORTS }),
+});
+export const PUBLIC_PREFIX = "/moly/";
+const PREFIX = /^\/(?:[a-z0-9][a-z0-9._-]*\/)*$/;
+
+/**
+ * Convert the host-mounted `/moly/` manifest addresses to object-store
+ * logical keys.  The S3 uploader uses this immutable projection when it puts
+ * a release below an explicit resource_base; source publication and local
+ * same-origin serving keep the host form unchanged.
+ */
+export function toLogicalResourceManifest(manifest) {
+  if (!manifest || typeof manifest !== "object")
+    throw new TypeError("Invalid release manifest");
+  const logical = structuredClone(manifest);
+  const logicalPath = value => {
+    if (typeof value !== "string")
+      throw new Error("Manifest contains a non-canonical Moly resource path");
+    const result = value.startsWith("/moly/") ? value.slice("/moly/".length) : value;
+    if (!/^(?:releases|snapshots)\/[a-z0-9][a-z0-9._-]{0,95}\/|^asset-store\/$/.test(result))
+      throw new Error("Manifest contains a non-canonical Moly resource path");
+    return result;
+  };
+  if (logical.release) {
+    if (logical.release.module !== undefined)
+      logical.release.module = logicalPath(logical.release.module);
+    if (logical.release.stage !== undefined)
+      logical.release.stage = logicalPath(logical.release.stage);
+    if (logical.release.game?.module !== undefined)
+      logical.release.game.module = logicalPath(logical.release.game.module);
+  }
+  if (Array.isArray(logical.snapshots)) {
+    for (const snapshot of logical.snapshots) {
+      if (!snapshot || typeof snapshot !== "object")
+        throw new Error("Manifest contains an invalid snapshot");
+      if (snapshot.assets !== undefined) snapshot.assets = logicalPath(snapshot.assets);
+      if (snapshot.catalog !== undefined) snapshot.catalog = logicalPath(snapshot.catalog);
+    }
+  }
+  return logical;
+}
+const MAGIC = Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]);
+const PORTRAIT_MIGRATION_BASELINE = "f79162417628b26ec54155f698a4f197d27c6fcb";
+const COORDINATE_METADATA_ADDITIONS = [
+  "asset.extras.coordinateContract", "asset.extras.coordinateUnits",
+  "sceneRoots[].extras.coordinateContract", "sceneRoots[].extras.coordinateUnits",
+];
+
+function portraitGlb(bytes) {
+  if (bytes.length < 20 || bytes.toString("ascii", 0, 4) !== "glTF" ||
+      bytes.readUInt32LE(4) !== 2 || bytes.readUInt32LE(8) !== bytes.length ||
+      bytes.toString("ascii", 16, 20) !== "JSON")
+    throw new Error("Invalid portrait migration GLB");
+  const end = 20 + bytes.readUInt32LE(12);
+  if (end > bytes.length || end % 4) throw new Error("Truncated portrait migration GLB");
+  let offset = end;
+  while (offset < bytes.length) {
+    if (offset + 8 > bytes.length) throw new Error("Truncated portrait GLB chunk");
+    const length = bytes.readUInt32LE(offset);
+    if (length % 4 || offset + 8 + length > bytes.length ||
+        bytes.toString("ascii", offset + 4, offset + 8) === "JSON")
+      throw new Error("Invalid portrait GLB binary chunk");
+    offset += 8 + length;
+  }
+  return { document: JSON.parse(bytes.subarray(20, end)), tail: bytes.subarray(end) };
+}
+
+/** Only metadata-only migration of the exact captured character may reuse a portrait.
+ * The original bytes are required; receipt declarations alone are not evidence.
+ * No capture facts or image bytes are rewritten, and the original model hash stays.
+ */
+export function verifyPortraitCoordinateMigration({ photo, currentBytes, originalBytes, receiptBytes }) {
+  const fail = () => { throw new Error(`Unverified portrait coordinate migration: ${photo.model}`); };
+  if (!/^sd_\d+\.glb$/.test(photo.model)) fail();
+  const receipt = JSON.parse(receiptBytes);
+  const rows = receipt.files?.filter(row => row.path === photo.model);
+  const row = rows?.length === 1 ? rows[0] : null;
+  const originalHash = sha256(originalBytes), currentHash = sha256(currentBytes);
+  const captureHash = photo.originalModelSha256 ?? photo.modelSha256;
+  const digest = value => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+  if (receipt.coordinateContract !== COORDINATE_CONTRACT ||
+      receipt.baselineCommit !== PORTRAIT_MIGRATION_BASELINE ||
+      receipt.status !== "complete" || receipt.verifiedMetadataOnly !== true ||
+      !row || row.family !== "character" || row.generator !== "moly-root character extractor" ||
+      row.sourceSha256 !== originalHash || row.outputSha256 !== currentHash ||
+      captureHash !== originalHash ||
+      row.machineCheck?.originalJsonPreserved !== true ||
+      row.machineCheck?.binaryChunksPreserved !== true ||
+      !isDeepStrictEqual(row.machineCheck?.addedMetadata, COORDINATE_METADATA_ADDITIONS) ||
+      !digest(row.originalJsonSha256) ||
+      row.originalJsonSha256 !== row.outputJsonWithoutAddedMetadataSha256) fail();
+
+  const original = portraitGlb(originalBytes), current = portraitGlb(currentBytes);
+  if (original.document.asset?.generator !== row.generator ||
+      original.document.asset?.extras?.coordinates !== "unity x-axis reflected" ||
+      !original.tail.equals(current.tail) ||
+      row.binaryChunksSha256 !== sha256(original.tail) ||
+      row.outputBinaryChunksSha256 !== sha256(current.tail)) fail();
+  const restored = structuredClone(current.document);
+  const indices = new Set(original.document.scenes?.flatMap(scene => scene.nodes ?? []) ?? []);
+  const pairs = [[original.document.asset, restored.asset],
+    ...Array.from(indices, index => [original.document.nodes?.[index], restored.nodes?.[index]])];
+  for (const [before, after] of pairs) {
+    if (!before || !after || !after.extras ||
+        after.extras.coordinateContract !== COORDINATE_CONTRACT ||
+        after.extras.coordinateUnits !== "source-unity-unit") fail();
+    for (const key of ["coordinateContract", "coordinateUnits"])
+      if (!Object.hasOwn(before.extras ?? {}, key)) delete after.extras[key];
+    if (!Object.hasOwn(before, "extras") && Object.keys(after.extras).length === 0) delete after.extras;
+  }
+  // Exact original JSON (including arbitrary extras, animations and materials)
+  // and every non-JSON chunk must be preserved. Only the four named additions
+  // above are removed for comparison; no recursive metadata stripping occurs.
+  if (!isDeepStrictEqual(original.document, restored)) fail();
+  const proof = {
+    kind: "verified-coordinate-metadata-only-v1",
+    coordinateContract: COORDINATE_CONTRACT,
+    receiptSha256: sha256(receiptBytes),
+    baselineCommit: receipt.baselineCommit,
+    sourceSha256: originalHash,
+    outputSha256: currentHash,
+    binaryChunksSha256: sha256(current.tail),
+    originalJsonPreserved: true,
+    binaryChunksPreserved: true,
+    addedMetadata: COORDINATE_METADATA_ADDITIONS,
+  };
+  if (photo.originalModelSha256 !== undefined &&
+      (photo.modelSha256 !== currentHash || !isDeepStrictEqual(photo.modelMigration, proof))) fail();
+  if (photo.modelMigration !== undefined && photo.originalModelSha256 === undefined) fail();
+  return { ...photo, originalModelSha256: originalHash, modelSha256: currentHash, modelMigration: proof };
+}
+
+function leb(bytes, offset) {
+  let value = 0,
+    shift = 0;
+  for (let index = 0; index < 5; index++) {
+    if (offset >= bytes.length)
+      throw new Error("Truncated WASM section length");
+    const byte = bytes[offset++];
+    if (index === 4 && byte > 15)
+      throw new Error("WASM section length overflow");
+    value += (byte & 127) * 2 ** shift;
+    if (!(byte & 128)) return { value, offset };
+    shift += 7;
+  }
+  throw new Error("Invalid WASM section length");
+}
+
+/** Remove debug names only. Every standard section and runtime byte stays exact. */
+export function stripDebugNames(input) {
+  const bytes = Buffer.from(input);
+  if (!bytes.subarray(0, 8).equals(MAGIC))
+    throw new Error("Unsupported WASM header");
+  const chunks = [bytes.subarray(0, 8)];
+  let offset = 8;
+  while (offset < bytes.length) {
+    const start = offset,
+      id = bytes[offset++];
+    const size = leb(bytes, offset);
+    offset = size.offset;
+    const end = offset + size.value;
+    if (end > bytes.length) throw new Error("Truncated WASM section");
+    let discard = false;
+    if (id === 0) {
+      const name = leb(bytes, offset);
+      if (name.offset + name.value > end)
+        throw new Error("Invalid WASM custom section name");
+      const label = bytes
+        .subarray(name.offset, name.offset + name.value)
+        .toString("utf8");
+      discard = label === "name" || label.startsWith(".debug_");
+    }
+    if (!discard) chunks.push(bytes.subarray(start, end));
+    offset = end;
+  }
+  return Buffer.concat(chunks);
+}
+
+// Entry details live in a fixed number of content-addressed bundles shared by
+// every snapshot. An entry always falls in the same bundle (chosen from its
+// key), so a bundle keeps its address until one of its own entries changes.
+export const DETAIL_BUNDLES = 256;
+export const DETAIL_STORE = "/moly/catalog-store/";
+export function detailBundle(key) {
+  return parseInt(sha256(Buffer.from(key)).slice(0, 8), 16) % DETAIL_BUNDLES;
+}
+export function splitCatalog(raw, snapshotId, publishImage = (image) => image, detailStore = DETAIL_STORE) {
+  if (
+    raw.schemaVersion !== 1 ||
+    raw.ready !== true ||
+    raw.mode !== "independent" ||
+    !["cn", "jp", "tw", "en", "kr"].includes(raw.region) ||
+    !/^\d+\.\d+\.\d+$/.test(raw.version) ||
+    !Array.isArray(raw.entries) ||
+    !Array.isArray(raw.characters) ||
+    !/^[a-z0-9][a-z0-9._-]{0,95}$/.test(snapshotId)
+  )
+    throw new Error("Invalid Rust catalog export");
+  const keys = new Set(),
+    files = new Map(),
+    bundles = Array.from({ length: DETAIL_BUNDLES }, () => new Map()),
+    entries = [];
+  for (const original of raw.entries) {
+    const key = contentKey(original.key);
+    if (keys.has(key)) throw new Error(`Duplicate content identity: ${key}`);
+    keys.add(key);
+    if (
+      !original.presentation ||
+      typeof original.available !== "boolean" ||
+      !Array.isArray(original.fixtureIds) ||
+      !Array.isArray(original.unitIds) ||
+      !Array.isArray(original.characters)
+    )
+      throw new Error(`Invalid runtime projection: ${key}`);
+    // Card images are logical asset paths; the caller decides how each one
+    // is published.
+    const image = (value) =>
+      typeof value === "string" ? publishImage(value) : value;
+    const published = { ...original, image: image(original.image) };
+    if (Array.isArray(original.fixtures))
+      published.fixtures = original.fixtures.map((fixture) => ({
+        ...fixture,
+        image: image(fixture.image),
+      }));
+    const detail = detailBundle(key);
+    bundles[detail].set(key, published);
+    // This is a transport projection, not an eligibility or playback rule.
+    const {
+      lines: _lines,
+      description: _description,
+      fixtures: _fixtures,
+      related: _related,
+      ...card
+    } = published;
+    entries.push({ ...card, detail });
+  }
+  // Bundle bytes depend only on their entries: keys are sorted and no
+  // snapshot identity is written into them.
+  const details = new Map(),
+    names = bundles.map((bundle) => {
+      const bytes = Buffer.from(
+        JSON.stringify({
+          schemaVersion: 2,
+          entries: Object.fromEntries(
+            [...bundle].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+          ),
+        }),
+      );
+      const name = `${sha256(bytes)}.json`;
+      details.set(name, bytes);
+      return detailStore + name;
+    });
+  const index = {
+    schemaVersion: 2,
+    snapshotId,
+    region: raw.region,
+    version: raw.version,
+    characters: raw.characters,
+    details: names,
+    entries,
+  };
+  files.set("index.json", Buffer.from(JSON.stringify(index)));
+  return { files, details, index };
+}
+
+function inside(parent, child) {
+  const relative = path.relative(parent, child);
+  return (
+    relative !== ".." &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative)
+  );
+}
+function json(file) {
+  return JSON.parse(readFileSync(file, "utf8"));
+}
+function put(file, bytes) {
+  mkdirSync(path.dirname(file), { recursive: true });
+  if (existsSync(file)) {
+    if (!readFileSync(file).equals(bytes))
+      throw new Error(`Refusing to mutate an immutable artifact: ${file}`);
+  } else writeFileSync(file, bytes, { flag: "wx" });
+}
+function compressedPut(file, bytes) {
+  put(file, bytes);
+  const gzip = gzipSync(bytes, { level: 9 });
+  put(`${file}.gz`, gzip);
+  // Precompress only large executable payloads. Browsers select br or gzip;
+  // no runtime decompressor or WASM bytes are added to the JavaScript bundle.
+  if (file.endsWith(".wasm"))
+    put(
+      `${file}.br`,
+      brotliCompressSync(bytes, {
+        params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 9 },
+      }),
+    );
+  return { downloadBytes: gzip.length, decodedBytes: bytes.length };
+}
+
+/** Build artifacts only; proprietary source resources remain outside git/images. */
+export async function publish({
+  workspace,
+  output,
+  sources,
+  reuseSnapshots = false,
+  reuseEngine = false,
+  developmentLinks = false,
+  packageRoot,
+  profiles = ["stage"],
+  publicPrefix = PUBLIC_PREFIX,
+}) {
+  if (
+    !Array.isArray(profiles) ||
+    profiles.length < 1 ||
+    new Set(profiles).size !== profiles.length ||
+    profiles.some((profile) => !Object.hasOwn(PROFILES, profile))
+  )
+    throw new Error("Publish one or more of the profiles: stage, game");
+  if (typeof publicPrefix !== "string" || !PREFIX.test(publicPrefix))
+    throw new Error("The public prefix must be a canonical absolute directory");
+  // The stage page, its preflight and its worker are served below /moly/.
+  if (profiles.includes("stage") && publicPrefix !== PUBLIC_PREFIX)
+    throw new Error(`The stage profile is served only below ${PUBLIC_PREFIX}`);
+  const prefix = publicPrefix;
+  workspace = realpathSync(workspace);
+  output = path.resolve(output);
+  if (!reuseEngine)
+    packageRoot = realpathSync(packageRoot ?? path.join(workspace, "web/pkg"));
+  if (inside(workspace, output) || path.basename(output) === "moly-deploy")
+    throw new Error("Publish outside source repositories");
+  const manifestPath = path.join(output, "manifest.json");
+  const retained = existsSync(manifestPath) ? json(manifestPath) : null;
+  if (retained && retained.publisher !== "moly-release-artifact-v1")
+    throw new Error("Output contains an unrelated manifest");
+  if (reuseSnapshots) {
+    if (sources !== undefined || !retained || retained.schemaVersion !== EMBED_VERSION ||
+        !Array.isArray(retained.snapshots) || retained.snapshots.length < 1 || retained.snapshots.length > 2 ||
+        retained.snapshots.some((snapshot) =>
+          !/^[a-z0-9][a-z0-9._-]{0,95}$/.test(snapshot.id) ||
+          !["cn", "jp"].includes(snapshot.region) ||
+          !/^\d+\.\d+\.\d+$/.test(snapshot.version) ||
+          snapshot.catalog !== `${prefix}snapshots/${snapshot.id}/catalog/index.json` ||
+          snapshot.assets !== (snapshot.packs ? `${prefix}asset-store/` : `${prefix}snapshots/${snapshot.id}/assets/`)))
+      throw new Error("Cannot reuse an unverified source-qualified publication");
+    const regions = new Set();
+    for (const snapshot of retained.snapshots) {
+      validateCoordinatePair(retained.release, snapshot);
+      if (regions.has(snapshot.region)) throw new Error("Duplicate retained source region");
+      regions.add(snapshot.region);
+      const root = path.join(output, "snapshots", snapshot.id);
+      const descriptor = json(path.join(root, "snapshot.json"));
+      validateCoordinatePair(retained.release, descriptor);
+      if (!isDeepStrictEqual(descriptor, snapshot)) throw new Error("Retained coordinate descriptor differs from manifest");
+      const catalog = json(path.join(root, "catalog/index.json"));
+      if (![1, 2].includes(catalog.schemaVersion) || catalog.snapshotId !== snapshot.id ||
+          catalog.region !== snapshot.region || catalog.version !== snapshot.version)
+        throw new Error("Retained catalog source mismatch");
+      if (!snapshot.packs) {
+        const fixture = json(path.join(root, "assets/mysekai-fixtures.json"));
+        if (fixture.region !== snapshot.region || fixture.gameVersion !== snapshot.version)
+          throw new Error("Retained asset source mismatch");
+        const checked = validatePublicationCoordinates(path.join(root, "assets"), { region: snapshot.region, version: snapshot.version });
+        if (!isDeepStrictEqual(checked.coordinateDocuments, snapshot.provenance.coordinateDocuments) || !isDeepStrictEqual(checked.coordinateModels, snapshot.provenance.coordinateModels))
+          throw new Error("Retained coordinate evidence changed");
+      }
+    }
+  } else if (!Array.isArray(sources) || sources.length < 1 || sources.length > 5)
+    throw new Error("Publish one to five explicit region snapshots");
+  // A shell-only release reuses an engine that was already published and
+  // verified, rather than rebuilding one: the reused bytes are checked against
+  // the integrity record of the release they come from, and the fingerprint
+  // recorded here stays the one that actually produced that engine.
+  const reusedId =
+    reuseEngine === true ? (retained?.release?.id ?? null) : reuseEngine || null;
+  if (reuseEngine && !/^[a-z0-9][a-z0-9._-]{0,95}$/.test(reusedId ?? ""))
+    throw new Error("Cannot reuse an engine from an unnamed release");
+  const reusedRoot = reusedId ? path.join(output, "releases", reusedId) : null;
+  const reused = reusedRoot
+    ? json(path.join(reusedRoot, "integrity.json"))
+    : null;
+  if (reused) requireCoordinateContract(reused, "reused engine");
+  if (reused && reused.releaseId !== reusedId) throw new Error("Reused coordinate engine identity mismatch");
+  if (
+    reused &&
+    (reused.schemaVersion !== 1 || reused.contractVersion !== EMBED_VERSION)
+  )
+    throw new Error("Cannot reuse an engine from an unreadable release");
+  const sourceFingerprint = reused
+    ? reused.sourceFingerprint
+    : workspaceFingerprint(workspace);
+  const files = new Map(),
+    engines = {};
+  for (const profile of profiles)
+    for (const relative of PROFILES[profile].files)
+      if (!files.has(relative))
+        files.set(relative, readFileSync(path.join(workspace, "web", relative)));
+  for (const backend of ["webgpu", "webgl2"]) {
+    const directory = reused
+      ? path.join(reusedRoot, "pkg", backend)
+      : path.join(packageRoot, backend);
+    const build = json(path.join(directory, "build.json"));
+    if (
+      build.schemaVersion !== 1 ||
+      build.backend !== backend ||
+      build.sourceFingerprint !== sourceFingerprint
+    )
+      throw new Error(`Stale ${backend} build; run web/build-wasm.mjs`);
+    for (const name of ["moly-app.js", "moly-app_bg.wasm"]) {
+      const original = readFileSync(path.join(directory, name));
+      if (
+        reused
+          ? sha256(original) !== reused.hashes[`pkg/${backend}/${name}`]
+          : sha256(original) !== build.files[name]
+      )
+        throw new Error(`Changed ${backend} output: ${name}`);
+      // Published engine bytes already had their debug names stripped.
+      const bytes =
+        name.endsWith(".wasm") && !reused
+          ? stripDebugNames(original)
+          : original;
+      if (name.endsWith(".wasm")) {
+        const before = await WebAssembly.compile(original),
+          after = await WebAssembly.compile(bytes);
+        for (const method of ["imports", "exports"]) {
+          if (
+            JSON.stringify(WebAssembly.Module[method](before)) !==
+            JSON.stringify(WebAssembly.Module[method](after))
+          )
+            throw new Error(`WASM ${method} changed`);
+        }
+        const exports = WebAssembly.Module.exports(after).map(
+          (value) => value.name,
+        );
+        for (const profile of profiles)
+          for (const entry of PROFILES[profile].abi)
+            if (!exports.includes(entry))
+              throw new Error(`Missing ${profile} ABI: ${entry}`);
+        const gzipBytes = gzipSync(bytes, { level: 9 }).length;
+        const brotliBytes = brotliCompressSync(bytes, {
+          params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 9 },
+        }).length;
+        engines[backend] = {
+          downloadBytes: brotliBytes,
+          brotliBytes,
+          gzipBytes,
+          decodedBytes: bytes.length,
+        };
+      }
+      files.set(`pkg/${backend}/${name}`, bytes);
+    }
+    files.set(
+      `pkg/${backend}/build.json`,
+      reused
+        ? readFileSync(path.join(directory, "build.json"))
+        : Buffer.from(JSON.stringify(build)),
+    );
+  }
+  const hashes = Object.fromEntries(
+    [...files].map(([name, bytes]) => [name, sha256(bytes)]),
+  );
+  const releaseId = `stage-${sha256(JSON.stringify(hashes)).slice(0, 20)}`;
+  const releaseRoot = path.join(output, "releases", releaseId);
+  for (const [name, bytes] of files)
+    compressedPut(path.join(releaseRoot, name), bytes);
+  put(
+    path.join(releaseRoot, "integrity.json"),
+    Buffer.from(
+      JSON.stringify(
+        {
+          schemaVersion: 1,
+          releaseId,
+          contractVersion: EMBED_VERSION,
+          coordinateContract: COORDINATE_CONTRACT,
+          sourceFingerprint,
+          hashes,
+        },
+        null,
+        2,
+      ),
+    ),
+  );
+  const snapshots = reuseSnapshots ? retained.snapshots.map((snapshot) => ({ ...snapshot })) : [],
+    regions = new Set();
+  for (const specification of sources ?? []) {
+    const source = await resolveResourceSource(specification, {
+      cacheRoot: path.join(output, ".source-cache"),
+    });
+    if (
+      !["cn", "jp", "tw", "en", "kr"].includes(source.region) ||
+      regions.has(source.region)
+    )
+      throw new Error("Unsupported or duplicated source region");
+    regions.add(source.region);
+    const assets = realpathSync(source.assets),
+      catalogBytes = readFileSync(source.catalog),
+      catalog = JSON.parse(catalogBytes);
+    const fixtureBytes = readFileSync(
+        path.join(assets, "mysekai-fixtures.json"),
+      ),
+      fixture = JSON.parse(fixtureBytes);
+    if (
+      fixture.region !== source.region ||
+      catalog.region !== source.region ||
+      fixture.gameVersion !== catalog.version
+    )
+      throw new Error("Catalog and mounted assets have different provenance");
+    const provenance = existsSync(path.join(assets, "source.json"))
+      ? json(path.join(assets, "source.json"))
+      : {};
+    if (provenance.source?.region && provenance.source.region !== source.region)
+      throw new Error("Source manifest region mismatch");
+    const coordinateEvidence = validatePublicationCoordinates(assets, { region: source.region, version: catalog.version });
+    const controllerIndexBytes = readFileSync(
+      path.join(assets, "fixture-gimmick/browser-index.json"),
+    );
+    const controllerIndex = JSON.parse(controllerIndexBytes);
+    if (
+      controllerIndex.schemaVersion !== 1 ||
+      controllerIndex.generator !== "moly-gimmick-split-v1" ||
+      controllerIndex.region !== source.region ||
+      controllerIndex.gameVersion !== catalog.version
+    )
+      throw new Error(
+        "Regenerate source-qualified controller packages with web/split-gimmicks.mjs before publishing",
+      );
+    const basePath = path.join(assets, "browser-base.json");
+    const baseBytes = existsSync(basePath)
+      ? readFileSync(basePath)
+      : Buffer.alloc(0);
+    const base = baseBytes.length ? JSON.parse(baseBytes) : null;
+    if (
+      base &&
+      (base.schemaVersion !== 1 ||
+        base.generator !== "moly-browser-base-v1" ||
+        base.region !== source.region ||
+        base.gameVersion !== catalog.version ||
+        !Array.isArray(base.files))
+    )
+      throw new Error("Invalid measured base resource descriptor");
+    if (base) {
+      let decoded = 0,
+        download = 0;
+      for (const resource of base.files) {
+        if (
+          typeof resource.path !== "string" ||
+          resource.path.includes("\\") ||
+          resource.path.includes(":") ||
+          resource.path.split("/").some((part) => !part || part.startsWith("."))
+        )
+          throw new Error("Invalid base resource path");
+        const file = path.join(assets, resource.path);
+        if (!inside(assets, realpathSync(file)))
+          throw new Error("Base resource escaped source root");
+        const bytes = readFileSync(file);
+        if (
+          sha256(bytes) !== resource.sha256 ||
+          bytes.length !== resource.decodedBytes
+        )
+          throw new Error("Base resource changed after measurement");
+        const transfer =
+          resource.encoding === "gzip"
+            ? readFileSync(file + ".gz").length
+            : bytes.length;
+        if (transfer !== resource.downloadBytes)
+          throw new Error("Base resource transport changed after measurement");
+        decoded += bytes.length;
+        download += transfer;
+      }
+      if (decoded !== base.decodedBytes || download !== base.downloadBytes)
+        throw new Error("Base resource totals do not match");
+    }
+    // Photos are exact source entities and are part of immutable snapshot
+    // identity. Never publish a one-character sample as an all-character set.
+    let portraitBytes = Buffer.alloc(0);
+    const portraitFiles = [];
+    if (source.portraits) {
+      const photoRoot = realpathSync(source.portraits);
+      portraitBytes = readFileSync(path.join(photoRoot, "manifest.json"));
+      if (portraitBytes.length > 262144)
+        throw new Error("Portrait index is too large");
+      const photos = JSON.parse(portraitBytes);
+      let migratedPortraits = false;
+      let migrationReceipt;
+      let originalModels;
+      const entities = new Set(
+        json(path.join(assets, "manifest.json")).units.map(
+          (row) => Number(row.unit) - 100,
+        ),
+      );
+      if (
+        photos.schemaVersion !== 1 ||
+        photos.generator !== "moly-root-chara-head-v1" ||
+        photos.region !== source.region ||
+        photos.version !== catalog.version ||
+        photos.expected !== entities.size ||
+        !Array.isArray(photos.portraits) ||
+        photos.portraits.length !== entities.size
+      )
+        throw new Error("Incomplete source-rendered portrait set");
+      for (let photoIndex = 0; photoIndex < photos.portraits.length; photoIndex++) {
+        let photo = photos.portraits[photoIndex];
+        if (
+          !entities.delete(photo.unit) ||
+          photo.file !== `unit-${photo.unit}.png` ||
+          photo.model !== `sd_${photo.unit + 100}.glb` ||
+          photo.rig !== `sd_${photo.unit + 100}.rig.json` ||
+          photo.width !== 512 ||
+          photo.height !== 512 ||
+          photo.transparentPixels <= 0 ||
+          photo.opaquePixels <= 0
+        )
+          throw new Error("Invalid SD portrait identity or alpha coverage");
+        const name = path.join(photoRoot, photo.file);
+        if (!inside(photoRoot, realpathSync(name)))
+          throw new Error("Portrait escaped its source folder");
+        const bytes = readFileSync(name);
+        if (
+          bytes.length < 33 ||
+          bytes.length > 8 * 1048576 ||
+          bytes.subarray(0, 8).toString("hex") !== "89504e470d0a1a0a" ||
+          bytes.readUInt32BE(16) !== 512 ||
+          bytes.readUInt32BE(20) !== 512 ||
+          bytes[25] !== 6
+        )
+          throw new Error("Portrait must be a real 512 x 512 RGBA PNG");
+        if (photos.generator === "moly-root-chara-head-v1") {
+          const currentModel = readFileSync(path.join(assets, photo.model));
+          if (photo.modelSha256 !== sha256(currentModel) ||
+              photo.originalModelSha256 !== undefined || photo.modelMigration !== undefined) {
+            if (!source.portraitModelOriginals)
+              throw new Error("Portrait model changed; explicit portraitModelOriginals required for metadata-only proof");
+            originalModels ??= realpathSync(source.portraitModelOriginals);
+            const originalPath = realpathSync(path.join(originalModels, photo.model));
+            if (!inside(originalModels, originalPath)) throw new Error("Original portrait model escaped its source folder");
+            migrationReceipt ??= readFileSync(path.join(assets, "coordinate-migration-receipt.json"));
+            photo = verifyPortraitCoordinateMigration({ photo, currentBytes: currentModel,
+              originalBytes: readFileSync(originalPath), receiptBytes: migrationReceipt });
+            photos.portraits[photoIndex] = photo;
+            migratedPortraits = true;
+          }
+          if (
+            photos.preset?.bodyGeometry !== false ||
+            photo.capture?.mode !== "head-only" ||
+            photo.headBoundaryPixels !== 0 ||
+            photo.sha256 !== sha256(bytes) ||
+            photo.modelSha256 !== sha256(currentModel) ||
+            photo.rigSha256 !==
+              sha256(readFileSync(path.join(assets, photo.rig)))
+          )
+            throw new Error(
+              "Head portrait does not match its original source or head-only capture",
+            );
+        }
+        portraitFiles.push([photo.file, bytes]);
+      }
+      if (entities.size)
+        throw new Error("Source SD entities are missing portraits");
+      if (migratedPortraits) {
+        portraitBytes = Buffer.from(JSON.stringify(photos, null, 2) + "\n");
+        if (portraitBytes.length > 262144) throw new Error("Migrated portrait index is too large");
+      }
+    }
+    const packed =
+      source.assetCatalog !== undefined
+        ? await verifyPublishedStore(
+            path.join(output, "asset-store"),
+            source.assetCatalog,
+            { region: source.region, assets },
+          )
+        : null;
+    if (packed)
+      for (const required of [
+        "browser-base.json",
+        "mysekai-fixtures.json",
+        "manifest.json",
+        "fixture-gimmick/browser-index.json",
+        "source.json", "fixture-models/index.json", "fixture-attach/attach-points.json",
+      ])
+        if (!packed.entries.has(required))
+          throw new Error(
+            `Pinned pack omits required stage asset: ${required}`,
+          );
+    if (packed && base)
+      for (const resource of base.files)
+        if (!packed.entries.has(resource.path))
+          throw new Error(
+            `Pinned pack omits required base asset: ${resource.path}`,
+          );
+    const portraitDigest = portraitBytes.length
+      ? sha256(
+          Buffer.concat([
+            portraitBytes,
+            ...portraitFiles.map(([name, bytes]) =>
+              Buffer.from(`${name}:${sha256(bytes)}`),
+            ),
+          ]),
+        )
+      : "";
+    const id = `${source.region}-${catalog.version}-${sha256(Buffer.concat([catalogBytes, fixtureBytes, controllerIndexBytes, baseBytes, Buffer.from(JSON.stringify(provenance)), Buffer.from(JSON.stringify({ provider: source.provider, resourceIndexSha256: source.resourceIndexSha256, resourceOrigin: source.resourceOrigin, portraitDigest, coordinateEvidence, ...(packed ? { assetCatalog: packed.catalogId } : {}) }))])).slice(0, 20)}`;
+    const directory = path.join(output, "snapshots", id);
+    const { files: catalogFiles, details } = splitCatalog(
+      catalog,
+      id,
+      packed
+        ? (image) => {
+            // A store serves no logical URLs; name the image by content.
+            const entry = packed.entries.get(image);
+            if (entry?.codec !== "identity")
+              throw new Error(`Pinned pack cannot serve catalog image: ${image}`);
+            return `${prefix}asset-store/blobs/${entry.blob}`;
+          }
+        : undefined,
+      `${prefix}catalog-store/`,
+    );
+    for (const [name, bytes] of catalogFiles)
+      compressedPut(path.join(directory, "catalog", name), bytes);
+    for (const [name, bytes] of details)
+      compressedPut(path.join(output, "catalog-store", name), bytes);
+    if (portraitBytes.length) {
+      compressedPut(
+        path.join(directory, "catalog/portraits/manifest.json"),
+        portraitBytes,
+      );
+      for (const [name, bytes] of portraitFiles)
+        put(path.join(directory, "catalog/portraits", name), bytes);
+    }
+    const mount = path.join(directory, "assets");
+    if (packed) {
+      // The store was verified, not copied. No per-snapshot binary mount exists.
+    } else if (developmentLinks) {
+      // The Go server contains all path resolution within its configured root.
+      if (!inside(realpathSync(output), assets))
+        throw new Error(
+          "Development asset links must remain inside the serving root",
+        );
+      if (existsSync(mount)) {
+        if (
+          !lstatSync(mount).isSymbolicLink() ||
+          realpathSync(mount) !== assets
+        )
+          throw new Error("Asset mount already exists with another identity");
+      } else
+        symlinkSync(
+          assets,
+          mount,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+    } else mkdirSync(mount, { recursive: true });
+    const root = `${prefix}snapshots/${id}/`;
+    snapshots.push({
+      id,
+      coordinateContract: COORDINATE_CONTRACT,
+      // This publisher has verified source identity and closure. The CDN
+      // manifest is consumed directly by the host, without a Go annotation.
+      available: true,
+      region: source.region,
+      version: catalog.version,
+      assets: packed ? `${prefix}asset-store/` : `${root}assets/`,
+      ...(packed
+        ? {
+            packs: true,
+            assetCatalog: packed.catalogId,
+            assetReleaseVersion: packed.catalog.version,
+          }
+        : {}),
+      catalog: `${root}catalog/index.json`,
+      provenance: {
+        ...coordinateEvidence,
+        resourceProvider: source.provider,
+        ...(portraitDigest ? { portraitsSha256: portraitDigest } : {}),
+        ...(source.resourceIndexSha256
+          ? {
+              resourceIndexSha256: source.resourceIndexSha256,
+              resourceOrigin: source.resourceOrigin,
+            }
+          : {}),
+        catalogSha256: sha256(catalogBytes),
+        fixtureMasterSha256: sha256(fixtureBytes),
+        controllerIndexSha256: sha256(controllerIndexBytes),
+        ...(base ? { baseDescriptorSha256: sha256(baseBytes) } : {}),
+        assetPolicy: packed
+          ? "content-addressed-store"
+          : developmentLinks
+            ? "development-mount"
+            : "immutable-readonly-mount",
+        ...(packed
+          ? {
+              assetCatalogSha256: packed.catalogId,
+              verifiedLogicalFiles: packed.logicalFiles,
+            }
+          : {}),
+        ...(provenance.source?.assetVersion
+          ? { assetVersion: provenance.source.assetVersion }
+          : {}),
+        ...(provenance.master?.commit
+          ? { masterCommit: provenance.master.commit }
+          : {}),
+      },
+      base: {
+        downloadBytes:
+          packed && base
+            ? [
+                ...new Map(
+                  base.files.map((row) => {
+                    const entry = packed.entries.get(row.path);
+                    return [entry.blob, entry.blob_bytes];
+                  }),
+                ).values(),
+              ].reduce((a, b) => a + b, 0)
+            : (base?.downloadBytes ?? 0),
+        decodedBytes: base?.decodedBytes ?? 0,
+      },
+    });
+    // Keep the exact source-qualified descriptor independently addressable
+    // after discovery moves on to a newer region release. Never rewrite it.
+    put(
+      path.join(directory, "snapshot.json"),
+      Buffer.from(JSON.stringify(snapshots.at(-1), null, 2) + "\n"),
+    );
+    put(
+      path.join(directory, "provenance.json"),
+      Buffer.from(
+        JSON.stringify(
+          {
+            schemaVersion: 1,
+            snapshotId: id,
+            source: provenance,
+            policy: packed
+              ? "Every runtime artifact is verified against the pinned package catalog; all binary objects live in the shared immutable asset store. Channels/default selection are mutable and never cached as content."
+              : "This identity hashes the Rust catalogue, fixture master and provenance descriptor, not every binary. Production asset mounts MUST be immutable; replace the snapshot instead of editing the mount.",
+          },
+          null,
+          2,
+        ),
+      ),
+    );
+  }
+  const manifest = {
+    publisher: "moly-release-artifact-v1",
+    schemaVersion: EMBED_VERSION,
+    release: {
+      id: releaseId,
+      ...(profiles.includes("stage")
+        ? {
+            module: `${prefix}releases/${releaseId}/embed.mjs`,
+            stage: `${prefix}releases/${releaseId}/stage.html`,
+          }
+        : {}),
+      contractVersion: EMBED_VERSION,
+      coordinateContract: COORDINATE_CONTRACT,
+      engines,
+      ...(profiles.includes("game")
+        ? {
+            game: {
+              module: `${prefix}releases/${releaseId}/game-boot.mjs`,
+              abi: GAME_ABI,
+              engines,
+            },
+          }
+        : {}),
+    },
+    snapshots,
+  };
+  mkdirSync(output, { recursive: true });
+  // The retention worker belongs to the stage and its /moly/ scope.
+  if (profiles.includes("stage")) {
+    const workerPath = path.join(output, "cache-worker.mjs");
+    // One classic script: the worker URL is fixed and imports nothing.
+    const workerBytes = Buffer.from(
+      bundleCacheWorkerFiles(
+        "./cache-worker.mjs",
+        pathToFileURL(path.join(workspace, "web") + path.sep),
+      ),
+    );
+    if (
+      existsSync(workerPath) &&
+      !existsSync(manifestPath) &&
+      !readFileSync(workerPath).equals(workerBytes)
+    )
+      throw new Error("Output contains an unrelated cache worker");
+    const workerTemporary = `${workerPath}.${process.pid}.tmp`;
+    writeFileSync(workerTemporary, workerBytes, { flag: "wx" });
+    renameSync(workerTemporary, workerPath);
+  }
+  const temporary = path.join(output, `manifest.${process.pid}.tmp`);
+  writeFileSync(temporary, JSON.stringify(manifest, null, 2) + "\n", {
+    flag: "wx",
+  });
+  renameSync(temporary, manifestPath);
+  if (profiles.includes("game")) {
+    // The product site reads only this pointer; manifest.json stays the
+    // stage host's record.
+    const pointer = {
+      publisher: "moly-release-artifact-v1",
+      schemaVersion: 1,
+      prefix,
+      release: {
+        id: releaseId,
+        module: manifest.release.game.module,
+        abi: GAME_ABI,
+        coordinateContract: COORDINATE_CONTRACT,
+      },
+      snapshots: snapshots.map(({ id, region, version, assets, packs, assetCatalog }) => ({
+        id,
+        region,
+        version,
+        assets,
+        packs: packs === true,
+        assetCatalog: packs === true ? assetCatalog : null,
+      })),
+    };
+    const pointerPath = path.join(output, "game", "manifest.json");
+    mkdirSync(path.dirname(pointerPath), { recursive: true });
+    const pointerTemporary = `${pointerPath}.${process.pid}.tmp`;
+    writeFileSync(pointerTemporary, JSON.stringify(pointer, null, 2) + "\n", {
+      flag: "wx",
+    });
+    renameSync(pointerTemporary, pointerPath);
+  }
+  return manifest;
+}
+
+if (
+  process.argv[1] &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  try {
+    const args = process.argv.slice(2),
+      configIndex = args.indexOf("--config");
+    if (configIndex < 0 || !args[configIndex + 1])
+      throw new Error(
+        "Usage: node web/release-artifact.mjs --config /private/publication.json",
+      );
+    console.log(
+      JSON.stringify(
+        await publish(json(path.resolve(args[configIndex + 1]))),
+        null,
+        2,
+      ),
+    );
+  } catch (error) {
+    console.error(error.message);
+    process.exitCode = 1;
+  }
+}

@@ -7,9 +7,13 @@
 //! `dt` 显式入参，等待步驻留、点击按源语义提前放行、label 供跳转
 //! 锚解析。家具对话剧本（含两人/四人目）走同一套选取与推进。
 
+pub mod net_random;
 pub mod row;
 pub mod select;
 pub mod step;
+
+#[cfg(test)]
+mod source_cases;
 
 pub use row::{
     ConditionRow, FixtureStep, FixtureTalkRow, PairRow, TalkRow, TalkStep, TweetRef,
@@ -20,11 +24,13 @@ pub use row::{
 };
 pub use select::{
     condition_group_matches, condition_matches, get_enable_talk_counts,
-    lottery_member_count, lottery_talk_id, matches_lottery_conditions, member_count_of_unit_ids,
-    pick_talk_by_member_count, select_fixture_lane, select_objective, talk_conditions_verdict,
-    ConditionContext, GateFlags, Candidate, LotteryPercents, LotteryWeights, Objective,
-    PercentDraw, TalkLane, TypeOnlyVerdict, UniformDraw, WeightedDraw,
+    lottery_general_talk_id, lottery_member_count, lottery_talk_id, matches_lottery_conditions,
+    member_count_of_unit_ids, pick_talk_by_member_count, select_fixture_lane, select_objective,
+    talk_conditions_verdict, ConditionContext, GateFlags, GeneralPick, Candidate, LotteryFault,
+    LotteryPercents, LotteryTalkOutcome, LotteryWeights, Objective, PercentDraw, TalkLane,
+    TypeOnlyVerdict, UniformDraw, WeightedDraw,
 };
+pub use net_random::{EnumerablePick, NetRandom, NetThreadSeeder};
 pub use step::{
     advance, effective_animation_speed, is_finished, label_anchor, wait_milliseconds,
     wait_time_click_skippable, FaceSlot, Hold, Rejection, StepOp, StreamState, TIME_EPSILON,

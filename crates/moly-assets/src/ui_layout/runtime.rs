@@ -181,6 +181,7 @@ impl UiPrefab {
         let updated = UiPrefab::try_from(UiPrefabSource {
             version: self.version,
             prefab: self.prefab.clone(),
+            source: self.source.clone(),
             nodes: combined,
         })?;
         *self = updated;

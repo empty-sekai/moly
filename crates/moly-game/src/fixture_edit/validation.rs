@@ -1,7 +1,12 @@
 //! Grid-space checks. Rendering bounds are never used as layout dimensions.
+//!
+//! The put check is the source's `CanPutFloor` (`tile_rules`) on the draft:
+//! the committed rows are the tile data, the selected fixture and the
+//! fixtures stacked on it are checked at their draft places.
 
 use super::{
     assets::{FixtureAreas, MetaGrid},
+    tile_rules::{self, Board, Missing, Piece, Refusal, Rules},
     PutStatus,
 };
 use crate::{fixture::EditableFixture, site::FloorGridLayout};
@@ -9,97 +14,87 @@ use moly_law::fixture::areas::{motion_area_bounds, rotated_center_grid, GridArea
 use moly_law::fixture::position::layout_type;
 use std::collections::HashSet;
 
-/// This slice edits ground furniture and rugs. Roads, walls and nonzero-height
-/// stacks remain in the draft unchanged; source-specific controls come later.
+/// The floor editor's layouts (`FloorEditState` edits the floor and the rug
+/// grids; walls, fences and roads have their own edit states, and the
+/// fence/road handle types are refused where the master row is read).
 pub(super) fn is_ground(item: &EditableFixture) -> bool {
-    item.center.y == 0
-        && matches!(item.layout, layout_type::FLOOR | layout_type::RUG)
-        && item.fixture_id > 0
+    matches!(item.layout, layout_type::FLOOR | layout_type::RUG) && item.fixture_id > 0
 }
 
-pub(super) fn put_label(status: PutStatus) -> &'static str {
+pub(super) fn put_label(status: PutStatus) -> String {
     match status {
-        PutStatus::Ok => "可以放置",
-        PutStatus::OutOfBounds { .. } => "超出该地图当前等级的可摆范围",
-        PutStatus::Overlap { .. } => "与同一布局层的家具重叠",
-        PutStatus::Unsupported => "需要尚未接入的布局分支",
+        PutStatus::Ok => "可以放置".into(),
+        PutStatus::Refused(refusal) => tile_rules::refusal_label(refusal),
     }
 }
 
+/// `SiteLayoutUtility.CanPutFloor` for `item` at its draft place, with the
+/// fixtures stacked on it (`stacked`) at theirs, against the tile data of
+/// `rows`.
+pub(super) fn put(
+    item: &EditableFixture,
+    stacked: &[EditableFixture],
+    rows: &[EditableFixture],
+    floor: Option<FloorGridLayout>,
+    rules: Result<&Rules, Missing>,
+) -> PutStatus {
+    match check(item, stacked, rows, floor, rules) {
+        Ok(()) => PutStatus::Ok,
+        Err(refusal) => PutStatus::Refused(refusal),
+    }
+}
+
+fn check(
+    item: &EditableFixture,
+    stacked: &[EditableFixture],
+    rows: &[EditableFixture],
+    floor: Option<FloorGridLayout>,
+    rules: Result<&Rules, Missing>,
+) -> Result<(), Refusal> {
+    if !is_ground(item) {
+        return Err(Refusal::Unsupported);
+    }
+    let floor = floor.ok_or(Refusal::Missing(Missing::FloorGrid))?;
+    let rules = rules.map_err(Refusal::Missing)?;
+    let board = Board::new(rows, floor, rules).map_err(Refusal::Missing)?;
+    let piece = Piece::new(item, rules).map_err(Refusal::Missing)?;
+    if piece.traits.joint {
+        return Err(Refusal::Unsupported);
+    }
+    let stacked = stacked
+        .iter()
+        .map(|row| Piece::new(row, rules))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Refusal::Missing)?;
+    board.can_put_floor(&piece, &stacked)
+}
+
+/// A cell of the product frame inside the floor grid's width (the cutscene
+/// area check's bound).
 fn axis_inside(x: i8, width: i32) -> bool {
     let half = (width + 1) / 2;
     (-half..half).contains(&(x as i32))
 }
 
-pub(super) fn put(
-    item: &EditableFixture,
-    rows: &[EditableFixture],
-    floor: Option<FloorGridLayout>,
-) -> PutStatus {
-    if !is_ground(item) {
-        return PutStatus::Unsupported;
-    }
-    let Some(floor) = floor else {
-        return PutStatus::OutOfBounds { cells: 0 };
-    };
-    let Ok((min, max)) = item.footprint() else {
-        return PutStatus::OutOfBounds { cells: 0 };
-    };
-    let occupied: Result<Vec<_>, _> = rows
-        .iter()
-        .filter(|row| row.uid != item.uid && row.layout == item.layout)
-        .map(EditableFixture::footprint)
-        .collect();
-    let Ok(occupied) = occupied else {
-        return PutStatus::OutOfBounds { cells: 0 };
-    };
-    let mut outside = 0;
-    let mut overlap = 0;
-    let height = if item.layout == layout_type::FLOOR {
-        floor.height
-    } else {
-        1
-    };
-    // Check the full source volume, including height. Separate floor/rug tile
-    // tables may overlap in x/z without incorrectly rejecting a rug under a chair.
-    for x in min.x as i32..=max.x as i32 {
-        for y in min.y as i32..=max.y as i32 {
-            for z in min.z as i32..=max.z as i32 {
-                if !axis_inside(x as i8, floor.width)
-                    || !axis_inside(z as i8, floor.depth)
-                    || y < 0
-                    || y >= height
-                {
-                    outside += 1;
-                } else if occupied.iter().any(|(a, b)| {
-                    x >= a.x as i32
-                        && x <= b.x as i32
-                        && y >= a.y as i32
-                        && y <= b.y as i32
-                        && z >= a.z as i32
-                        && z <= b.z as i32
-                }) {
-                    overlap += 1;
-                }
-            }
-        }
-    }
-    if outside > 0 {
-        PutStatus::OutOfBounds { cells: outside }
-    } else if overlap > 0 {
-        PutStatus::Overlap { cells: overlap }
-    } else {
-        PutStatus::Ok
-    }
-}
-
-fn cutscene_cells(meta: &MetaGrid, owner: &EditableFixture) -> HashSet<(i8, i8)> {
+fn cutscene_cells(meta: &MetaGrid, owner: &EditableFixture) -> Result<HashSet<(i8, i8)>, String> {
     let mut area = GridAreaData::from_meta(meta.rows, meta.cols, |r, c| meta.cell(r, c));
-    area.rotate(owner.direction, true);
-    let center = rotated_center_grid(owner.center, owner.grid_size, owner.direction);
+    let (source_center, source_direction, _) = moly_assets::player_data::mirror_fixture_layout(
+        owner.center,
+        owner.grid_size,
+        owner.direction,
+        owner.layout,
+    )?;
+    area.rotate(source_direction, true);
+    let center = rotated_center_grid(source_center, owner.grid_size, source_direction);
     area.enable_tiles
         .iter()
-        .map(|tile| (center.x.wrapping_add(tile.x), center.z.wrapping_add(tile.z)))
+        .map(|tile| {
+            Ok((
+                i8::try_from(-i16::from(center.x.wrapping_add(tile.x)) - 1)
+                    .map_err(|_| "cutscene cell exceeds grid domain")?,
+                center.z.wrapping_add(tile.z),
+            ))
+        })
         .collect()
 }
 
@@ -111,6 +106,7 @@ pub(super) fn save(
     rows: &[EditableFixture],
     floor: Option<FloorGridLayout>,
     areas: &FixtureAreas,
+    rules: Result<&Rules, Missing>,
 ) -> Result<(), String> {
     if !areas.loaded {
         return Err("家具区域表仍在加载".into());
@@ -129,7 +125,7 @@ pub(super) fn save(
         .collect::<Result<_, _>>()?;
     for owner in rows {
         if let Some(meta) = areas.cutscene.get(&owner.package) {
-            let protected = cutscene_cells(meta, owner);
+            let protected = cutscene_cells(meta, owner)?;
             if protected
                 .iter()
                 .any(|(x, z)| !axis_inside(*x, floor.width) || !axis_inside(*z, floor.depth))
@@ -157,21 +153,28 @@ pub(super) fn save(
                     item.uid
                 ));
             };
+            let (source_center, source_direction, _) =
+                moly_assets::player_data::mirror_fixture_layout(
+                    item.center,
+                    item.grid_size,
+                    item.direction,
+                    item.layout,
+                )?;
             let bounds = motion_area_bounds(
                 meta.rows,
                 meta.cols,
                 |r, c| meta.cell(r, c),
-                item.center,
+                source_center,
                 item.grid_size,
-                item.direction,
+                source_direction,
             );
             if bounds.iter().any(|bound| {
                 rows.iter()
                     .zip(&footprints)
                     .filter(|(row, _)| row.uid != item.uid && row.layout == layout_type::FLOOR)
                     .any(|(_, (a, b))| {
-                        bound.min.x <= b.x
-                            && bound.max.x >= a.x
+                        -i16::from(bound.max.x) - 1 <= i16::from(b.x)
+                            && -i16::from(bound.min.x) - 1 >= i16::from(a.x)
                             && bound.min.z <= b.z
                             && bound.max.z >= a.z
                     })
@@ -188,11 +191,38 @@ pub(super) fn save(
         if item.uid.is_empty() || !unique.insert(item.uid.as_str()) {
             return Err("ErrorLayout(1)：家具UID为空或重复".into());
         }
-        if is_ground(item) {
-            let status = put(item, rows, Some(floor));
-            if status != PutStatus::Ok {
-                return Err(format!("ErrorLayout(1)：{}{}", item.uid, put_label(status)));
+    }
+    // `IsValidPutStatus` for every placed fixture that is not on a wall: a
+    // fence or road (`CanSaveJointObject`: the tile at its center holds it),
+    // otherwise `CanPutFloor` in its placed layout with its stacked fixtures.
+    // Wall fixtures (`CanPutWall`) belong to the wall edit branch.
+    let rules = rules.map_err(|missing| format!("ErrorLayout(1)：摆放检查缺少输入 {missing:?}"))?;
+    let board = Board::new(rows, floor, rules)
+        .map_err(|missing| format!("ErrorLayout(1)：摆放检查缺少输入 {missing:?}"))?;
+    for item in rows {
+        if item.layout & layout_type::FIELD == 0 {
+            continue;
+        }
+        let Some(piece) = board.piece(&item.uid) else {
+            continue;
+        };
+        if piece.traits.joint {
+            if !board.holds_own_center(piece) {
+                return Err(format!("ErrorLayout(1)：{}的中心格不是它自己", item.uid));
             }
+            continue;
+        }
+        let stacked: Vec<Piece> = board
+            .stacked_on(&item.uid)
+            .iter()
+            .filter_map(|uid| board.piece(uid).cloned())
+            .collect();
+        if let Err(refusal) = board.can_put_floor(piece, &stacked) {
+            return Err(format!(
+                "ErrorLayout(1)：{}{}",
+                item.uid,
+                tile_rules::refusal_label(refusal)
+            ));
         }
     }
     Ok(())

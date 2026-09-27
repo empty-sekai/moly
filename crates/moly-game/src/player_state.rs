@@ -35,16 +35,15 @@
 //!   写它（Idle 只累加计时；Harvest、UseTimelineFixture、Talk 是空体）
 //!   ——通道等第一个真用它的态进批再落。
 //!
-//! 写者：采集段（[`drive_from_harvest`]）· 对话会话
-//! （[`drive_from_talk`]）· 输入（[`drive_from_input`]），以及家具会话的
-//! 进出场。家具控制租约存在时，本模块三个域写者全部让位；截获门由
+//! 写者：采集动作（`harvest::action`：`PlayHarvestAction` 进 7 关门、
+//! 收场开门回 0）· 对话会话（[`drive_from_talk`]）· 输入
+//! （[`drive_from_input`]），以及家具会话的进出场。家具控制租约存在时，本模块三个域写者全部让位；截获门由
 //! 该会话在最终释放时恢复，不能被别的域的延迟收场提前打开。门读者：
 //! 相机近距进入守卫（`camera::can_switch_to_fps`，在 {Harvest,
 //! UseTimelineFixture} 拒入）。
 
 use bevy::prelude::*;
 
-use crate::harvest::{HarvestHits, HarvestPunch};
 use crate::player::{DashMode, PlayerControlled, PlayerInput};
 use crate::player_fixture_action::PlayerFixtureControlOwner;
 use crate::player_talk::PlayerTalkSession;
@@ -68,13 +67,63 @@ pub enum PlayerActionState {
     Talk,
     /// 7：采集（`HarvestPresenter` 命中臂进、收场臂出）。
     Harvest,
+    /// 8: the birthday-party delivery (`PlayerAvatarDeliveryState`), entered
+    /// by the delivery pre-action after the approach; the delivery closes
+    /// the intercept gate for it and opens it at its end action.
+    Delivery,
+    /// 9: the honor reward (`PlayerAvatarDeliveryHonorRewardState`); its
+    /// camera state and look-at are the delivery's.
+    DeliveryHonorReward,
     /// 10: the player's one-second fixture switch interval.
     SwitchGimmick,
+    /// 11: walking into the house (`PlayerAvatarEnterMoveHouseState`, the
+    /// home-to-room move). Initialize closes the gate; at 2.0 s UpdateState
+    /// opens it, hides the avatar and goes Idle.
+    EnterMoveHouse,
+    /// 13: leaving the house (`PlayerAvatarExitMoveHouseState`, the entry and
+    /// the room-to-home move). Initialize closes the intercept gate; its
+    /// UpdateState only counts time; the move's Finish opens the gate.
+    ExitMoveHouse,
+    /// 14: stepping into a room (`PlayerAvatarEnterMoveMyRoomState`).
+    /// Initialize closes the gate; at 1.0 s UpdateState opens it and goes Idle.
+    EnterMoveMyRoom,
+    /// 15: walking out of a room (`PlayerAvatarExitMoveMyRoomState`).
+    /// Initialize closes the gate; at 1.45 s UpdateState hides the avatar,
+    /// opens the gate and goes Idle.
+    ExitMoveMyRoom,
     /// 23：冲刺（`MoveTo` 的 dash 支；dash 位由替身键切换）。
     Dash,
+    /// 24: crafting at a workbench (`PlayerAvatarCraftMotionState`). The
+    /// home action enters it with the gate open and closes the gate; its
+    /// Initialize and Dispose run in `home_action` (the state's clip, facing
+    /// the target fixture, then the idle clip at fade 0 and ClearAvatarItem).
+    Craft,
+    /// 25: painting a canvas (`PlayerAvatarDrawMotionState`), as Craft.
+    Draw,
+    /// 26: sketching (`PlayerAvatarSketchMotionState`): its Initialize also
+    /// plays `se_sketch`; it does not turn the player.
+    Sketch,
+    /// 27: choosing a fixture to sketch (`PlayerAvatarSelectSketchItemState`):
+    /// Initialize only clears the next state; UpdateState and Dispose are
+    /// empty. The gate stays open: input moves the player out of it, and
+    /// without input it stays (the input writer's finish set is {Move,
+    /// AutoMove, Dash}).
+    SelectSketchItem,
     /// 28：演出家具（`ChangeStateUseTimelineFixture` 进）。家具会话
     /// 持有该态和截获门，离座或取消释放后才开门回 Idle。
     UseTimelineFixture,
+    /// 30: leaving a harvest site by cannon. `Initialize` closes the
+    /// intercept gate; `UpdateState` reopens it once 1.0 s has elapsed
+    /// (`ANIMATION_TIME`). The cannon's `OnMoveFinish` (0.817 s after entry
+    /// on a successful landing) is therefore dropped by the closed gate.
+    ExitHarvestSite,
+    /// 31: entering a harvest site by cannon. Its `Initialize` only shows the
+    /// warp effect for other players' avatars; `UpdateState` is empty.
+    EnterHarvestSite,
+    /// 32: leaving the delivery site; same body as 30.
+    ExitDeliverySite,
+    /// 33: entering the delivery site; same body as 31.
+    EnterDeliverySite,
     /// 34：无。真源 `PlayerAvatarStateBase.ClearNextState` 的哨兵值。
     None,
 }
@@ -90,6 +139,9 @@ pub struct PlayerAvatarStates {
     /// `ChangeStatus` 第③段）。默认开（真源由状态构造开成）。采集与
     /// 家具会话的独占流程分别在自己的进出场关闭、恢复这扇门。
     pub(crate) can_intercept: bool,
+    /// `PlayerAvatarStateBase.ElapsedTime` of the current state, for the
+    /// states whose `UpdateState` reads it (the site exit states).
+    pub(crate) state_elapsed: f32,
 }
 
 impl Default for PlayerAvatarStates {
@@ -97,6 +149,7 @@ impl Default for PlayerAvatarStates {
         Self {
             current: PlayerActionState::Idle,
             can_intercept: true,
+            state_elapsed: 0.0,
         }
     }
 }
@@ -121,46 +174,81 @@ impl PlayerAvatarStates {
             self.current, status
         );
         self.current = status;
+        // New state's Initialize.
+        self.state_elapsed = 0.0;
+        if matches!(
+            status,
+            PlayerActionState::ExitHarvestSite
+                | PlayerActionState::ExitDeliverySite
+                | PlayerActionState::EnterMoveHouse
+                | PlayerActionState::ExitMoveHouse
+                | PlayerActionState::EnterMoveMyRoom
+                | PlayerActionState::ExitMoveMyRoom
+        ) {
+            self.can_intercept = false;
+        }
     }
 }
 
-/// 采集段写者：被击队列有货或击打演出在飞 ⇒ 玩家处于 Harvest。
-///
-/// 真源进出（`HarvestPresenter` 命中臂/收场臂）：**进**——`ChangeState(7)`
-/// （门开着进）随后 `SetInterceptFlag(false)` 关门，整段采集演出独占，
-/// 期间摇杆的 `MoveTo` 被门丢掉；**出**——`SetInterceptFlag(true)` 开门
-/// 随后 `ChangeState(0)`。两处顺序照抄：进是「先换态后关门」，出是
-/// 「先开门后换态」。
-///
-/// ⚠ 分批口径的偏差（具名）：真源**逐次按键** 7→0 循环；本仓采集域是
-/// 邻近自动命中批处理形——段 = 「待处理击打非空 ∨ 击打演出在飞」，
-/// 连击期间停在 7，两下之间不回 0。玩家位移在段内不持留：真源锁步靠
-/// 屏幕态切换加 NavMeshAgent 停位（ChangeStatus 第④段），本仓两者都
-/// 没有对应物，且采集域是「走近即命中」形，段内持留会改掉该域现有
-/// 行为——位移持留挂到采集域自己的单子上，不在此造。
-pub(crate) fn drive_from_harvest(
-    hits: Res<HarvestHits>,
-    punches: Query<(), With<HarvestPunch>>,
-    fixture_owner: Option<Res<PlayerFixtureControlOwner>>,
+/// Update, after the site-move executor (a state the move enters this frame
+/// counts this frame's delta, as the state machine's Update runs after the
+/// move's continuation): `UpdateState` of the four house and room states.
+/// The avatar is hidden through the player's visibility; the move shows it
+/// again.
+pub(crate) fn update_house_states(
+    time: Res<Time>,
     mut states: ResMut<PlayerAvatarStates>,
-    mut span: Local<bool>,
+    mut players: Query<&mut Visibility, With<PlayerControlled>>,
 ) {
-    if fixture_owner.is_some() {
-        // A pending harvest end must not reopen another activity's gate.
-        // Keep this writer's span until it can observe the state after release.
+    use crate::site_move::door_law::{
+        state_timer, ENTER_MOVE_HOUSE_TIME, ENTER_MOVE_MY_ROOM_TIME, EXIT_MOVE_MY_ROOM_TIME,
+    };
+    let current = states.current;
+    let threshold = match current {
+        PlayerActionState::EnterMoveHouse => ENTER_MOVE_HOUSE_TIME,
+        PlayerActionState::EnterMoveMyRoom => ENTER_MOVE_MY_ROOM_TIME,
+        PlayerActionState::ExitMoveMyRoom => EXIT_MOVE_MY_ROOM_TIME,
+        // ExitMoveHouse only counts its time.
+        PlayerActionState::ExitMoveHouse => f32::INFINITY,
+        _ => return,
+    };
+    let (elapsed, act) = state_timer(states.state_elapsed, time.delta_secs(), threshold);
+    states.state_elapsed = elapsed;
+    if !act {
         return;
     }
-    let active = !hits.0.is_empty() || !punches.is_empty();
-    if active && !*span {
-        info!("[player-state] harvest span begin: lock the intercept gate");
-        states.change_status(PlayerActionState::Harvest);
-        states.can_intercept = false;
-        *span = true;
-    } else if !active && *span {
-        info!("[player-state] harvest span end: open the gate and go idle");
+    let hide = matches!(
+        current,
+        PlayerActionState::EnterMoveHouse | PlayerActionState::ExitMoveMyRoom
+    );
+    if hide {
+        for mut visibility in &mut players {
+            *visibility = Visibility::Hidden;
+        }
+    }
+    states.can_intercept = true;
+    info!(
+        "[player-state] {current:?}: {elapsed:.4}s >= {threshold}: gate open{}, next state Idle",
+        if hide { ", avatar hidden" } else { "" }
+    );
+    states.change_status(PlayerActionState::Idle);
+}
+
+/// Update: `UpdateState` of the two site exit states. `ElapsedTime` grows by
+/// `Time.deltaTime`; once it is no longer below 1.0 (compared in double) a
+/// closed gate reopens.
+pub(crate) fn update_site_exit_states(time: Res<Time>, mut states: ResMut<PlayerAvatarStates>) {
+    if !matches!(
+        states.current,
+        PlayerActionState::ExitHarvestSite | PlayerActionState::ExitDeliverySite
+    ) {
+        return;
+    }
+    let elapsed = states.state_elapsed + time.delta_secs();
+    states.state_elapsed = elapsed;
+    if !((elapsed as f64) < 1.0) && !states.can_intercept {
         states.can_intercept = true;
-        states.change_status(PlayerActionState::Idle);
-        *span = false;
+        info!("[player-state] {:?}: intercept gate reopened after {elapsed:.3}s", states.current);
     }
 }
 

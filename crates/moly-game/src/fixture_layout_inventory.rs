@@ -2,10 +2,10 @@
 //! It retains exact instance identity; it is not a claim about a server account.
 
 use super::{
-    Direction, FixturePlacements, SECTION, VERSION, byte, canonical_package, grid, grid_json,
+    byte, canonical_package, grid, grid_json, Direction, FixturePlacements, SECTION, VERSION,
 };
 use crate::fixture::EditableFixture;
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 
 pub(super) fn read(document: &Value) -> Result<Vec<EditableFixture>, String> {
@@ -56,7 +56,11 @@ pub(super) fn read(document: &Value) -> Result<Vec<EditableFixture>, String> {
             .and_then(|v| i32::try_from(v).ok())
             .ok_or("returned mysekaiFixtureId must be i32")?;
         let item = EditableFixture {
-            texture_id: record.get("textureId").map(|v| super::positive_u32(v, "textureId")).transpose()?.unwrap_or(1),
+            texture_id: record
+                .get("textureId")
+                .map(|v| super::positive_u32(v, "textureId"))
+                .transpose()?
+                .unwrap_or(1),
             uid: uid.into(),
             package,
             fixture_id,

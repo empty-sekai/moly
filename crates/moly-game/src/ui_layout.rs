@@ -1,25 +1,31 @@
 //! Shared prefab view: geometry, images and text use the same resolved nodes as hit testing.
 
 mod filled_image;
+mod tmp_font;
 mod tmp_layout;
 mod clip_render;
+mod stencil_mask;
+mod raycast;
+pub(crate) use raycast::Pointer;
+#[cfg(test)]
+mod ui_source_compare;
 
 pub(crate) fn install(app: &mut App) {
     clip_render::install(app);
 }
 
-use crate::balloon::{canvas_scale, BalloonArt, BAKE_PPEM};
+use crate::balloon::{BalloonArt, BAKE_PPEM};
 use bevy::asset::RenderAssetUsages;
 use bevy::asset::{AssetEvent, AssetId, AssetLoadFailedEvent, LoadState};
 use bevy::camera::visibility::RenderLayers;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
-use bevy::sprite::{BorderRect, SliceScaleMode, TextureSlicer};
 use moly_assets::{
     json::JsonAsset,
+    residency::load_image,
     ui_layout::{
         auto_layout::{compute_overrides, LayoutMetrics},
-        RectTransform, UiComponent, UiPrefab, UiRect,
+        RectTransform, UiComponent, UiPrefab, UiRect, UiRootManifest,
     },
 };
 use serde_json::Value;
@@ -27,6 +33,98 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 const ROOT: &str = "moly://ui-layout-v2/";
+
+/// The shared root's wording dictionary lives outside the shared UI root.
+const SHARED_WORDINGS: &str = "moly://wordings.json";
+
+/// Regions whose runtime reads every UI source file from its own
+/// region-tagged root (`moly://ui-<region>/`) instead of the shared root.
+/// That root's ui-manifest.json admits each file by a row of the file's own
+/// kind, region, client version and sha256 (a layout also by its node count
+/// and the serialized file it was read from). A file the product asks for
+/// that the root does not carry fails the load; it never falls back to the
+/// shared root.
+const REGION_ROOTS: &[&str] = &["jp"];
+
+/// The UI source files besides the layouts, each with the kind of its row
+/// in a region root's manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UiSourceFile {
+    /// The runtime wording dictionary (on a region root: the built-in
+    /// wording CSV with the master wordings applied over it).
+    Wordings,
+    /// Runtime texture aliases the hosts swap into Images.
+    RuntimeTextures,
+    /// Authored Sprite metrics of those runtime textures.
+    RuntimeSprites,
+    /// The TMP settings' line-breaking character sets.
+    TextSettings,
+    /// The host scene's root Canvas, its scaler, camera and layer Canvases.
+    HostCanvas,
+    /// The TMP font assets texts are laid out with (a region root only).
+    TmpFontAssets,
+    /// The colour palette palette-bound graphics read (a region root only).
+    Palette,
+    /// The tween defaults tweens without their own settings run with (a
+    /// region root only).
+    TweenSettings,
+}
+
+impl UiSourceFile {
+    const ALL: [Self; 8] = [
+        Self::Wordings, Self::RuntimeTextures, Self::RuntimeSprites, Self::TextSettings, Self::HostCanvas,
+        Self::TmpFontAssets, Self::Palette, Self::TweenSettings,
+    ];
+
+    /// Files only a region root carries.
+    fn region_only(self) -> bool {
+        matches!(self, Self::TmpFontAssets | Self::Palette | Self::TweenSettings)
+    }
+
+    fn file(self) -> &'static str {
+        match self {
+            Self::Wordings => "wordings.json",
+            Self::RuntimeTextures => "textures.json",
+            Self::RuntimeSprites => "runtime-sprites.json",
+            Self::TextSettings => "text-settings.json",
+            Self::HostCanvas => "host-canvas.json",
+            Self::TmpFontAssets => "fonts/tmp-font-assets.json",
+            Self::Palette => "palette.json",
+            Self::TweenSettings => "tween-settings.json",
+        }
+    }
+
+    fn kind(self) -> &'static str {
+        match self {
+            Self::Wordings => "wordings",
+            Self::RuntimeTextures => "runtime-textures",
+            Self::RuntimeSprites => "runtime-sprites",
+            Self::TextSettings => "tmp-settings",
+            Self::HostCanvas => "host-canvas",
+            Self::TmpFontAssets => "tmp-font-assets",
+            Self::Palette => "palette",
+            Self::TweenSettings => "tween-settings",
+        }
+    }
+}
+
+/// The asset path of an image named inside a UI document: names of the shared
+/// root are relative to it, names of a region root were rebased to full paths.
+pub(crate) fn image_asset_path(name: &str) -> String {
+    if name.contains("://") { name.to_owned() } else { format!("{ROOT}{name}") }
+}
+
+/// The runtime's source region, from the snapshot identity document.
+fn runtime_region(source: &str) -> Result<String, String> {
+    let value: Value = serde_json::from_str(source).map_err(|e| format!("source.json: {e}"))?;
+    if value["version"].as_u64() != Some(1) {
+        return Err("source.json has an unsupported or missing identity version".into());
+    }
+    value["source"]["region"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| "source.json has no source region".into())
+}
 
 /// Pointer-down ownership uses the same resolved geometry as the prefab view.
 /// It only identifies source controls; field-wide decorative graphics are not
@@ -39,18 +137,25 @@ pub(crate) struct PointerUi<'w, 's> {
     editor: Option<Res<'w, crate::fixture_edit::EditView>>,
     views: Query<'w, 's, (Entity, &'static UiPrefabView, &'static GlobalTransform)>,
     hierarchy: Query<'w, 's, (Option<&'static Visibility>, Option<&'static ChildOf>)>,
+    root: Option<Res<'w, crate::canvas::RootCanvas>>,
 }
 
 impl PointerUi<'_, '_> {
-    pub(crate) fn captures(&self, position: Vec2, window_size: Vec2) -> bool {
+    pub(crate) fn captures(&self, position: Vec2, window: &Window) -> bool {
         if self.dialogs.blocks_field_input() { return true; }
         let editor_layer = self.layers.current() == crate::ui_layers::LayerId::MysekaiSiteEdit;
         if !self.layers.on_field() && !editor_layer { return true; }
-        if editor_layer && self.editor.as_deref().is_some_and(|edit| edit.exit_dialog) {
+        if editor_layer
+            && self
+                .editor
+                .as_deref()
+                .is_some_and(|edit| edit.exit_dialog || edit.clean_up_dialog)
+        {
             return true;
         }
-        let Some(layouts) = self.layouts.as_deref() else { return false; };
-        let canvas = window_size / canvas_scale(window_size.x, window_size.y);
+        let (Some(layouts), Some(root)) = (self.layouts.as_deref(), self.root.as_deref()) else { return false; };
+        let canvas = root.size(window);
+        let window_size = Vec2::new(window.width(), window.height());
         let screen = Vec3::new(position.x - window_size.x * 0.5, window_size.y * 0.5 - position.y, 0.);
         self.views.iter().any(|(entity, view, transform)| {
             if root_hidden(entity, &self.hierarchy) { return false; }
@@ -59,6 +164,15 @@ impl PointerUi<'_, '_> {
             let local = transform.affine().inverse().transform_point3(screen).truncate();
             if crate::fixture_edit_ui::captures_background(view, layouts, local, canvas) {
                 return true;
+            }
+            // The field camera reset button: ownership by the source raycast
+            // (padded hit graphic, raycast filters, highest depth wins) of the
+            // pointer its press chain casts.
+            if let Some(button) = crate::menu_shell::camera_reset_button(doc) {
+                let pointer = crate::menu_shell::event_pointer(window, root, position);
+                if view.press_target(layouts, pointer, canvas).is_some_and(|(_, id)| id == button) {
+                    return true;
+                }
             }
             doc.nodes.iter().zip(rects.iter()).any(|(node, rect)| {
                 rect.active && rect.contains(local) && node.components.iter().any(|component| {
@@ -96,15 +210,24 @@ const DOCUMENTS: &[(&str, &str)] = &[
     ("EditorCell", "editor/FixtureSelectCell.json"),
     ("EditorCategory", "editor/UIPartsLeftTabListMysekaiContentCell.json"),
     ("EditorHeader", "editor/ScreenLayerHeader.json"),
+    ("LearnPhenomena", "menu/LearnPhenomenaSubWindowDialog.json"),
+    ("Notice", "hud/ScreenLayerMysekaiNotice.json"),
+    ("HarvestSummary", "hud/ScreenLayerMysekaiHarvestSummary.json"),
 ];
 
 #[derive(Resource, Default)]
 pub(crate) struct UiLayouts {
+    /// Active-theme colour of every colour palette entry, by `ColorEntry`
+    /// value (a region root only).
+    palette: Option<Vec<[f32; 4]>>,
+    /// The tween defaults, when the root carries them (a region root only).
+    tween_defaults: Option<TweenDefaults>,
     docs: HashMap<String, UiPrefab>,
     document_revisions: HashMap<String, u64>,
     images: HashMap<String, Handle<Image>>,
     pub(crate) wordings: HashMap<String, String>,
     runtime_textures: HashMap<String, String>,
+    runtime_sprites: Option<Value>,
     metadata_loaded: bool,
     sources_ready: bool,
     document_images: HashMap<String, Vec<String>>,
@@ -116,7 +239,20 @@ pub(crate) struct UiLayouts {
     text_rules: Option<tmp_layout::TextRules>,
     measurement_revision: u64,
     canvas_reference_pixels_per_unit: Option<f32>,
+    /// The host root Canvas' serialized pixel-perfect flag.
+    canvas_pixel_perfect: Option<bool>,
+    /// The host UI layer Canvas' sorting order (its override sorting is on).
+    ui_layer_sorting_order: Option<i32>,
     runtime_sprite_layouts: HashMap<String, SpriteLayoutMetrics>,
+    /// (document, component) pairs already reported as drawn by the plain
+    /// sprite path instead of the Image mesh rules.
+    image_fallbacks: Mutex<HashSet<(String, i64)>>,
+    /// (document, Mask component) pairs already reported as refused by the
+    /// stencil consumer.
+    stencil_refusals: Mutex<HashSet<(String, i64)>>,
+    /// Documents already reported as drawing sprites without an exported
+    /// downscale multiplier.
+    downscale_defaults: Mutex<HashSet<String>>,
 }
 
 struct ResolvedLayout {
@@ -138,73 +274,385 @@ pub(crate) struct SpriteLayoutMetrics {
 
 #[derive(Resource)]
 pub(crate) struct UiLayoutRequests {
-    docs: Vec<(&'static str, Handle<JsonAsset>)>,
-    wordings: Handle<JsonAsset>,
-    textures: Handle<JsonAsset>,
-    text_settings: Handle<JsonAsset>,
-    host_canvas: Handle<JsonAsset>,
+    stage_only: bool,
+    /// The runtime identity; the UI root is chosen once it is read.
+    source: Option<Handle<JsonAsset>>,
+    /// The requests of the chosen UI root.
+    sources: Option<UiSources>,
 }
 
-pub(crate) fn load(mut commands: Commands, server: Res<AssetServer>) {
-    commands.init_resource::<UiLayouts>();
-    commands.insert_resource(UiLayoutRequests {
-        docs: DOCUMENTS
+/// Every UI source file requested from one root: the runtime region's own
+/// root, admitted through its manifest, or the shared root.
+struct UiSources {
+    root: String,
+    /// None for the shared root.
+    region: Option<RegionRoot>,
+    files: Vec<(UiSourceFile, Handle<JsonAsset>)>,
+    docs: Vec<(&'static str, &'static str, Handle<JsonAsset>)>,
+}
+
+struct RegionRoot {
+    region: String,
+    manifest: Handle<JsonAsset>,
+    parsed: Option<UiRootManifest>,
+}
+
+impl UiSources {
+    /// The stage reads only the Talk layout and needs no editor sprites.
+    fn request(server: &AssetServer, region: Option<&str>, stage_only: bool) -> Self {
+        let root = region.map_or_else(|| ROOT.to_owned(), |region| format!("moly://ui-{region}/"));
+        let docs = DOCUMENTS
             .iter()
-            .map(|(name, path)| (*name, server.load(format!("{ROOT}{path}"))))
-            .collect(),
-        wordings: server.load("moly://wordings.json"),
-        textures: server.load(format!("{ROOT}textures.json")),
-        text_settings: server.load(format!("{ROOT}text-settings.json")),
-        host_canvas: server.load(format!("{ROOT}host-canvas.json")),
+            .filter(|(name, _)| !stage_only || *name == "Talk")
+            .map(|(name, path)| (*name, *path, server.load(format!("{root}{path}"))))
+            .collect();
+        let files = UiSourceFile::ALL
+            .into_iter()
+            .filter(|file| !(stage_only && *file == UiSourceFile::RuntimeSprites))
+            // The shared root carries no TMP font assets, palette or tween defaults.
+            .filter(|file| region.is_some() || !file.region_only())
+            .map(|file| {
+                let path = match (region, file) {
+                    (None, UiSourceFile::Wordings) => SHARED_WORDINGS.to_owned(),
+                    _ => format!("{root}{}", file.file()),
+                };
+                (file, server.load(path))
+            })
+            .collect();
+        let region = region.map(|region| RegionRoot {
+            region: region.to_owned(),
+            manifest: server.load(format!("{root}ui-manifest.json")),
+            parsed: None,
+        });
+        Self { root, region, files, docs }
+    }
+
+    fn file(&self, file: UiSourceFile) -> Option<&Handle<JsonAsset>> {
+        self.files.iter().find(|(candidate, _)| *candidate == file).map(|(_, handle)| handle)
+    }
+}
+
+pub(crate) fn load(mut commands: Commands, server: Res<AssetServer>, stage: Option<Res<crate::browser_stage::BrowserStage>>) {
+    commands.init_resource::<UiLayouts>();
+    // The stage draws only the Talk layout, from the same root the runtime's
+    // region selects.
+    commands.insert_resource(UiLayoutRequests {
+        stage_only: stage.is_some(),
+        source: Some(server.load("moly://source.json")),
+        sources: None,
     });
 }
 
 pub(crate) fn parse(
     mut commands: Commands,
-    request: Option<Res<UiLayoutRequests>>,
+    request: Option<ResMut<UiLayoutRequests>>,
     server: Res<AssetServer>,
     json: Res<Assets<JsonAsset>>,
     mut layouts: ResMut<UiLayouts>,
 ) {
-    let Some(request) = request else {
+    let Some(mut request) = request else {
         return;
     };
-    for handle in [
-        &request.wordings,
-        &request.textures,
-        &request.text_settings,
-        &request.host_canvas,
-    ] {
-        if let LoadState::Failed(e) = server.load_state(handle) {
-            panic!("UI source asset failed: {e:?}");
+    // The root is chosen by the runtime's region: its own root when it has
+    // one, else the shared root.
+    if request.sources.is_none() {
+        let handle = request.source.clone().expect("UI requests carry the runtime identity");
+        if let LoadState::Failed(e) = server.load_state(&handle) {
+            panic!("UI runtime source identity failed: {e:?}");
         }
-        if json.get(handle).is_none() {
+        let Some(asset) = json.get(&handle) else {
             return;
+        };
+        let region = runtime_region(&asset.0).unwrap_or_else(|e| panic!("UI: {e}"));
+        let own_root = REGION_ROOTS.contains(&region.as_str());
+        if !own_root {
+            info!("UI sources for region {region}: the shared UI root {ROOT}");
+        }
+        let stage_only = request.stage_only;
+        request.sources = Some(UiSources::request(&server, own_root.then_some(region.as_str()), stage_only));
+        request.source = None;
+    }
+    let stage_only = request.stage_only;
+    let sources = request.sources.as_mut().expect("UI root chosen");
+    if let Some(region) = sources.region.as_mut() {
+        if region.parsed.is_none() {
+            if let LoadState::Failed(e) = server.load_state(&region.manifest) {
+                panic!("UI {} root manifest failed: {e:?}", region.region);
+            }
+            let Some(asset) = json.get(&region.manifest) else {
+                return;
+            };
+            region.parsed = Some(
+                UiRootManifest::parse(&asset.0, &region.region)
+                    .unwrap_or_else(|e| panic!("UI {} root: {e}", region.region)),
+            );
         }
     }
     if !layouts.metadata_loaded {
-        let host_canvas: Value = serde_json::from_str(&json.get(&request.host_canvas).unwrap().0)
-            .expect("UI host canvas JSON");
-        assert_eq!(
-            host_canvas["version"].as_u64(),
-            Some(1),
-            "UI host canvas version"
+        for (file, handle) in &sources.files {
+            if let LoadState::Failed(e) = server.load_state(handle) {
+                panic!("UI source {} failed in {}: {e:?}", file.file(), sources.root);
+            }
+            if json.get(handle).is_none() {
+                return;
+            }
+        }
+        let text = |file: UiSourceFile| -> &str {
+            let handle = sources.file(file).unwrap_or_else(|| panic!("UI source {} not requested", file.file()));
+            &json.get(handle).expect("UI source loaded").0
+        };
+        if let Some(region) = sources.region.as_ref() {
+            let manifest = region.parsed.as_ref().expect("UI region manifest parsed");
+            for (file, _) in &sources.files {
+                let (_, identity) = manifest
+                    .admit(file.file(), file.kind(), text(*file))
+                    .unwrap_or_else(|e| panic!("UI {} root: {e}", region.region));
+                info!(
+                    "UI {} from the {} UI root {}{}; client {} unity {}; document sha256 {}; source sha256 {}",
+                    file.kind(), identity.region, sources.root, file.file(), identity.client_version,
+                    identity.unity_version, identity.document_sha256,
+                    identity.source_sha256.as_deref().unwrap_or("none"),
+                );
+            }
+        }
+        let parse_json = |file: UiSourceFile| -> Value {
+            serde_json::from_str(text(file)).unwrap_or_else(|e| panic!("UI source {}: {e}", file.file()))
+        };
+        let words = parse_json(UiSourceFile::Wordings);
+        if let Some(region) = sources.region.as_ref() {
+            let manifest = region.parsed.as_ref().expect("UI region manifest parsed");
+            assert!(
+                words["source"]["region"].as_str() == Some(manifest.region.as_str())
+                    && words["source"]["clientVersion"].as_str() == Some(manifest.client_version.as_str()),
+                "UI {} root: its wording dictionary is not {} {}",
+                region.region, manifest.region, manifest.client_version
+            );
+        }
+        let camera_fields = if sources.region.is_some() {
+            crate::canvas::RootCameraFields::Required
+        } else {
+            crate::canvas::RootCameraFields::SharedRootMayLack
+        };
+        let root_canvas = layouts.apply_host_sources(
+            &parse_json(UiSourceFile::HostCanvas),
+            &parse_json(UiSourceFile::TextSettings),
+            &words,
+            camera_fields,
         );
+        commands.insert_resource(root_canvas);
+        match sources.region.as_ref() {
+            Some(region) => {
+                let manifest = region.parsed.as_ref().expect("UI region manifest parsed");
+                let fonts = tmp_font::TmpFonts::parse(
+                    &parse_json(UiSourceFile::TmpFontAssets),
+                    &manifest.region,
+                    &manifest.client_version,
+                )
+                .unwrap_or_else(|e| panic!("UI {} root: {e}", region.region));
+                layouts.set_tmp_fonts(Some(fonts));
+            }
+            None => {
+                warn!(
+                    "UI sources of the shared root carry no TMP font assets: texts are laid out with the \
+                     open font's advances and pairs, not the source glyph tables"
+                );
+                layouts.set_tmp_fonts(None);
+            }
+        }
+        match sources.region.as_ref() {
+            Some(region) => {
+                layouts.palette = Some(
+                    parse_palette(&parse_json(UiSourceFile::Palette))
+                        .unwrap_or_else(|e| panic!("UI {} root palette: {e}", region.region)),
+                );
+                layouts.tween_defaults = Some(
+                    TweenDefaults::parse(&parse_json(UiSourceFile::TweenSettings))
+                        .unwrap_or_else(|e| panic!("UI {} root tween defaults: {e}", region.region)),
+                );
+            }
+            None => warn!(
+                "UI sources of the shared root carry no colour palette or tween defaults: palette-bound \
+                 button press effects are not drawn"
+            ),
+        }
+        let textures: HashMap<String, String> = serde_json::from_str(text(UiSourceFile::RuntimeTextures))
+            .expect("UI runtime texture inventory");
+        // A region root names its images relative to itself; keys become the
+        // full asset paths, like the images of its layouts.
+        layouts.runtime_textures = textures
+            .into_iter()
+            .map(|(alias, path)| {
+                let path = if sources.region.is_some() && !path.contains("://") {
+                    format!("{}{path}", sources.root)
+                } else {
+                    path
+                };
+                (alias, path)
+            })
+            .collect();
+        layouts.runtime_sprites = sources
+            .file(UiSourceFile::RuntimeSprites)
+            .map(|_| parse_json(UiSourceFile::RuntimeSprites));
+        // The stage has no editor/menu: do not fetch thousands of unrelated
+        // thumbnails and chrome textures. Talk document images are requested
+        // by install_document, using the original source geometry.
+        let paths: Vec<_> = if stage_only { Vec::new() } else { layouts.runtime_textures.values().cloned().collect() };
+        for path in paths {
+            layouts
+                .images
+                .entry(path.clone())
+                .or_insert_with(|| load_image(&server, image_asset_path(&path)));
+        }
+        layouts.metadata_loaded = true;
+    }
+    let mut pending = false;
+    for (name, path, handle) in &sources.docs {
+        if layouts.docs.contains_key(*name) {
+            continue;
+        }
+        if let LoadState::Failed(e) = server.load_state(handle) {
+            panic!("UI {name} source asset failed in {}: {e:?}", sources.root);
+        }
+        let Some(source) = json.get(handle) else {
+            pending = true;
+            continue;
+        };
+        let mut doc = UiPrefab::parse(&source.0).unwrap_or_else(|e| panic!("UI {name}: {e}"));
+        match sources.region.as_ref() {
+            Some(region) => {
+                let manifest = region.parsed.as_ref().expect("UI region manifest parsed");
+                let identity = manifest.admit_prefab(path, &source.0, &doc)
+                    .unwrap_or_else(|e| panic!("UI {name}: {e}"));
+                doc.rebase_images(&sources.root);
+                info!(
+                    "UI prefab {name}: {} source nodes from the {} UI root {path}; client {} unity {}; \
+                     document sha256 {}; serialized file sha256 {}",
+                    doc.nodes.len(), identity.region, identity.client_version, identity.unity_version,
+                    identity.document_sha256, identity.source_sha256.as_deref().unwrap_or("none"),
+                );
+            }
+            None => {
+                // A region-tagged document is admitted only through its region root.
+                if let Some(region) = doc.source.region.as_deref() {
+                    panic!("UI {name}: a {region} document in the shared UI root");
+                }
+                info!("UI prefab {name}: {} source nodes", doc.nodes.len());
+            }
+        }
+        layouts.install_document(name, doc, &server);
+    }
+    if !pending {
+        // Text glyphs are baked from all document wordings once. Publish the
+        // source set atomically, even though each JSON was parsed only once.
+        layouts.sources_ready = true;
+        commands.remove_resource::<UiLayoutRequests>();
+    }
+}
+
+/// `PaletteUtility.GetColor`'s table: the active theme's value of every
+/// colour palette entry, indexed by `ColorEntry` (the generated enum lists
+/// the entries in the palette's entry order).
+fn parse_palette(doc: &Value) -> Result<Vec<[f32; 4]>, String> {
+    if doc["version"].as_u64() != Some(1) {
+        return Err("unsupported palette document version".into());
+    }
+    let active = doc["activeThemeId"].as_str().ok_or("no active theme id")?;
+    let rows = doc["colorEntries"].as_array().ok_or("no colour entries")?;
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| {
+            if row["colorEntry"].as_u64() != Some(index as u64) {
+                return Err(format!("colour entry {index} is out of order"));
+            }
+            let value = row["values"][active].as_array().filter(|v| v.len() == 4)
+                .ok_or_else(|| format!("colour entry {index} has no active-theme colour"))?;
+            let mut color = [0.0; 4];
+            for (channel, number) in color.iter_mut().zip(value) {
+                *channel = number.as_f64().ok_or_else(|| format!("colour entry {index} channel is not a number"))? as f32;
+            }
+            Ok(color)
+        })
+        .collect()
+}
+
+/// DOTween's settings asset, as a tween created without its own ease,
+/// update type or auto-kill reads it. The tweens here implement the
+/// OutQuad ease on scaled frame time with timeScale 1, killed on
+/// completion; other defaults are refused, not approximated.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct TweenDefaults;
+
+impl TweenDefaults {
+    fn parse(doc: &Value) -> Result<Self, String> {
+        if doc["version"].as_u64() != Some(1) {
+            return Err("unsupported tween settings document version".into());
+        }
+        let settings = &doc["settings"];
+        let int = |name: &str| settings[name].as_i64().ok_or_else(|| format!("{name} is missing"));
+        let flag = |name: &str| settings[name].as_bool().ok_or_else(|| format!("{name} is missing"));
+        let float = |name: &str| settings[name].as_f64().ok_or_else(|| format!("{name} is missing"));
+        // DG.Tweening.Ease 6 = OutQuad; UpdateType 0 = Normal.
+        if int("defaultEaseType")? != 6 {
+            return Err("defaultEaseType is not OutQuad".into());
+        }
+        if int("defaultUpdateType")? != 0 || flag("defaultTimeScaleIndependent")? {
+            return Err("default updates are not scaled frame time".into());
+        }
+        if float("timeScale")? != 1.0 || flag("useSmoothDeltaTime")? {
+            return Err("tween time is scaled or smoothed".into());
+        }
+        if !flag("defaultAutoKill")? {
+            return Err("tweens are not killed on completion by default".into());
+        }
+        Ok(Self)
+    }
+}
+
+impl UiLayouts {
+    /// `PaletteUtility.GetColor(entry)`; None when the root carries no
+    /// palette or the palette has no such entry.
+    pub(crate) fn palette_color(&self, entry: usize) -> Option<[f32; 4]> {
+        self.palette.as_ref()?.get(entry).copied()
+    }
+
+    /// The tween defaults, when the root carries them.
+    pub(crate) fn tween_defaults(&self) -> Option<TweenDefaults> {
+        self.tween_defaults
+    }
+
+    /// The host canvas, TMP settings and wording dictionary as the UI reads
+    /// them: the root Canvas scaler and camera, the host reference pixels per
+    /// unit, the root pixel-perfect flag, the UI layer Canvas' sorting order,
+    /// the line-breaking rules and the wordings.
+    pub(crate) fn apply_host_sources(
+        &mut self,
+        host_canvas: &Value,
+        text_settings: &Value,
+        words: &Value,
+        camera_fields: crate::canvas::RootCameraFields,
+    ) -> crate::canvas::RootCanvas {
+        assert_eq!(host_canvas["version"].as_u64(), Some(1), "UI host canvas version");
+        let root_canvas = crate::canvas::RootCanvas::from_host_canvas(host_canvas, camera_fields);
         let reference_ppu = host_canvas["referencePixelsPerUnit"]
             .as_f64()
             .expect("UI host referencePixelsPerUnit") as f32;
         // This is an explicit Mysekai CanvasRoot contract, not a claimed native
         // inheritance rule for every nested Canvas. Per-component data wins.
-        layouts.set_canvas_reference_pixels_per_unit(reference_ppu);
-        let text_settings: Value =
-            serde_json::from_str(&json.get(&request.text_settings).unwrap().0)
-                .expect("UI text settings JSON");
-        assert_eq!(
-            text_settings["version"].as_u64(),
-            Some(1),
-            "UI text settings version"
+        self.set_canvas_reference_pixels_per_unit(reference_ppu);
+        self.canvas_pixel_perfect = Some(
+            host_canvas["rootCanvasFields"]["m_PixelPerfect"]
+                .as_bool()
+                .expect("UI host root Canvas m_PixelPerfect"),
         );
-        layouts.text_rules = Some(tmp_layout::TextRules {
+        self.ui_layer_sorting_order = Some(
+            host_canvas["layers"]
+                .as_array()
+                .and_then(|layers| layers.iter().find(|l| l["name"].as_str() == Some("Layer_UI")))
+                .and_then(|layer| layer["canvasFields"]["m_SortingOrder"].as_i64())
+                .expect("UI host Layer_UI Canvas sorting order") as i32,
+        );
+        assert_eq!(text_settings["version"].as_u64(), Some(1), "UI text settings version");
+        self.text_rules = Some(tmp_layout::TextRules {
             leading: text_settings["leadingCharacters"]
                 .as_str()
                 .expect("UI leading character rules")
@@ -218,52 +666,37 @@ pub(crate) fn parse(
             modern_hangul: text_settings["useModernHangulLineBreakingRules"]
                 .as_bool()
                 .expect("UI modern Hangul rule flag"),
+            fonts: None,
         });
-        layouts.measurement_revision = layouts.measurement_revision.wrapping_add(1);
-        let words: Value =
-            serde_json::from_str(&json.get(&request.wordings).unwrap().0).expect("wordings JSON");
-        layouts.wordings = words["entries"]
+        self.measurement_revision = self.measurement_revision.wrapping_add(1);
+        self.wordings = words["entries"]
             .as_object()
             .expect("wordings entries")
             .iter()
             .filter_map(|(k, v)| v["value"].as_str().map(|v| (k.clone(), v.to_owned())))
             .collect();
-        layouts.runtime_textures = serde_json::from_str(&json.get(&request.textures).unwrap().0)
-            .expect("UI runtime texture inventory");
-        let paths: Vec<_> = layouts.runtime_textures.values().cloned().collect();
-        for path in paths {
-            layouts
-                .images
-                .entry(path.clone())
-                .or_insert_with(|| server.load(format!("{ROOT}{path}")));
-        }
-        layouts.metadata_loaded = true;
+        root_canvas
     }
-    let mut pending = false;
-    for (name, handle) in &request.docs {
-        if layouts.docs.contains_key(*name) {
-            continue;
-        }
-        if let LoadState::Failed(e) = server.load_state(handle) {
-            panic!("UI {name} source asset failed: {e:?}");
-        }
-        let Some(source) = json.get(handle) else {
-            pending = true;
-            continue;
-        };
-        let doc = UiPrefab::parse(&source.0).unwrap_or_else(|e| panic!("UI {name}: {e}"));
-        info!("UI prefab {name}: {} source nodes", doc.nodes.len());
-        layouts.install_document(name, doc, &server);
-    }
-    if !pending {
-        // Text glyphs are baked from all document wordings once. Publish the
-        // source set atomically, even though each JSON was parsed only once.
-        layouts.sources_ready = true;
-        commands.remove_resource::<UiLayoutRequests>();
-    }
-}
 
-impl UiLayouts {
+    /// The TMP font assets the root's texts are laid out with (None: the
+    /// open font's advances). Set after the host sources.
+    fn set_tmp_fonts(&mut self, fonts: Option<tmp_font::TmpFonts>) {
+        let rules = self.text_rules.as_mut().expect("UI TMP line rules are loaded before the font assets");
+        rules.fonts = fonts.map(Arc::new);
+        self.measurement_revision = self.measurement_revision.wrapping_add(1);
+    }
+
+    /// The runtime Sprite metrics document of the UI root, once loaded
+    /// (none for the stage).
+    /// Whether the root's runtime texture inventory (or a host) carries `alias`.
+    pub(crate) fn has_runtime_texture(&self, alias: &str) -> bool {
+        self.runtime_textures.contains_key(alias)
+    }
+
+    pub(crate) fn runtime_sprites(&self) -> Option<&Value> {
+        self.runtime_sprites.as_ref()
+    }
+
     /// Register an actual external provider before the first view binds it.
     /// Keys remain complete asset paths in images/runtime_textures. In
     /// particular moly://fixture-thumbnails/... is not relative to ROOT.
@@ -277,7 +710,7 @@ impl UiLayouts {
             assert_eq!(previous, &full_path, "runtime UI texture alias was rebound: {alias}");
         }
         let image = self.images.entry(full_path.clone())
-            .or_insert_with(|| server.load(full_path.clone())).clone();
+            .or_insert_with(|| load_image(server, full_path.clone())).clone();
         self.runtime_textures.insert(alias.to_owned(), full_path);
         image
     }
@@ -324,7 +757,7 @@ impl UiLayouts {
         });
         for path in &paths {
             let id = self.images.entry(path.clone())
-                .or_insert_with(|| server.load(format!("{ROOT}{path}"))).id();
+                .or_insert_with(|| load_image(server, image_asset_path(path))).id();
             self.image_documents.entry(id).or_default().push(key.to_owned());
         }
         self.document_images.insert(key.to_owned(), paths);
@@ -335,8 +768,12 @@ impl UiLayouts {
         self.docs.insert(key.to_owned(), document);
     }
 
-    /// CustomSelectableDefine's cue binding, using the clicked source control.
-    pub(crate) fn button_sound(&self, key: &str, path: &str) -> Option<String> {
+    /// The clicked source control's serialized sound fields (`se` and
+    /// `otherSeName`), for `CustomSelectableDefine.PlaySE`. None when the
+    /// control has no sound fields or is not interactable.
+    pub(crate) fn button_se(
+        &self, key: &str, path: &str,
+    ) -> Option<(moly_law::ui::custom_button::SeType, String)> {
         let doc = self.document(key)?;
         let mut node = &doc.nodes[doc.find(path).expect("source button path")];
         if let Some(wrapper) = node.components.iter().find(|c| c.fields.get("_button").is_some()) {
@@ -346,18 +783,42 @@ impl UiLayouts {
             node = &doc.nodes[doc.find(&format!("@{id}")).expect("wrapped button")];
         }
         let control = node.components.iter().find(|c| c.enabled && c.fields.get("se").is_some())?;
-        if control.fields["m_Interactable"].as_bool() == Some(false) { return None; }
-        let cue = match control.fields["se"].as_i64().expect("button sound kind") {
-            0 => return None,
-            1 => "SE_DECIDE1",
-            2 => "SE_CANCEL",
-            3 => control.fields["otherSeName"].as_str().expect("custom button sound"),
-            4 => "se_mysekai_ui_decision",
-            5 => "se_mysekai_ui_select",
-            6 => "se_mysekai_ui_cancel",
-            other => panic!("unsupported button sound kind {other}"),
-        };
-        (!cue.is_empty()).then(|| cue.to_owned())
+        if !control.fields["m_Interactable"].as_bool().expect("button m_Interactable") { return None; }
+        let se = control.fields["se"].as_i64()
+            .and_then(moly_law::ui::custom_button::SeType::from_serialized)
+            .expect("button SeType");
+        let other = control.fields["otherSeName"].as_str().expect("button otherSeName").to_owned();
+        Some((se, other))
+    }
+
+    /// Reports, once per document and component, an Image drawn as a plain
+    /// stretched sprite instead of by the Image mesh rules.
+    fn note_image_fallback(&self, doc: &UiPrefab, component: &UiComponent, reason: &str) {
+        let first = self
+            .image_fallbacks
+            .lock()
+            .expect("UI image fallback log poisoned")
+            .insert((doc.prefab.clone(), component.path_id));
+        if first {
+            warn!(
+                "UI {}: Image @{} is drawn as a plain stretched sprite, not by the Image mesh rules: {reason}",
+                doc.prefab, component.path_id
+            );
+        }
+    }
+
+    fn note_stencil_refusal(&self, doc: &UiPrefab, mask: &UiComponent, reason: &str) {
+        let first = self
+            .stencil_refusals
+            .lock()
+            .expect("UI stencil refusal log poisoned")
+            .insert((doc.prefab.clone(), mask.path_id));
+        if first {
+            error!(
+                "UI {}: Mask @{} is not drawn as a stencil ({reason}); the Graphics under it are not clipped",
+                doc.prefab, mask.path_id
+            );
+        }
     }
 
     /// The real host Canvas supplies this when it is outside the source prefab.
@@ -394,7 +855,28 @@ impl UiLayouts {
         rect_overrides: &HashMap<usize, RectTransform>,
         changes: &HashMap<usize, &Override>,
     ) -> Arc<Vec<UiRect>> {
+        let automatic = self.layout_overrides(doc, canvas, visibility, rect_overrides, changes);
+        let mut rects = doc.resolve_with(canvas, visibility, &automatic);
+        moly_assets::ui_layout::clipping::apply(doc, &mut rects)
+            .unwrap_or_else(|error| panic!("UI clipping {}: {error}", doc.prefab));
+        Arc::new(rects)
+    }
+
+    /// The RectTransforms the layout controllers (layout groups and content
+    /// size fitters) drive, merged over the given overrides.
+    fn layout_overrides(
+        &self,
+        doc: &UiPrefab,
+        canvas: Vec2,
+        visibility: &HashMap<usize, bool>,
+        rect_overrides: &HashMap<usize, RectTransform>,
+        changes: &HashMap<usize, &Override>,
+    ) -> HashMap<usize, RectTransform> {
         let mut measurement_error = None;
+        // Each resolution lays the document out as a freshly enabled
+        // instance, so each text component's preferred-pass character array
+        // starts empty here and lives for this resolution.
+        let mut internal: HashMap<i64, Vec<char>> = HashMap::new();
         let automatic = compute_overrides(
             doc,
             canvas,
@@ -404,7 +886,7 @@ impl UiLayouts {
                 if measurement_error.is_some() {
                     return None;
                 }
-                match self.measure_node(doc, index, axis, size, changes.get(&index).copied()) {
+                match self.measure_node(doc, index, axis, size, changes.get(&index).copied(), &mut internal) {
                     Ok(metrics) => metrics,
                     Err(error) => {
                         measurement_error = Some(format!("{}: {error}", doc.nodes[index].path));
@@ -416,12 +898,32 @@ impl UiLayouts {
         if let Some(error) = measurement_error {
             panic!("UI content measurement failed: {error}");
         }
-        let automatic =
-            automatic.unwrap_or_else(|error| panic!("UI layout {}: {error}", doc.prefab));
-        let mut rects = doc.resolve_with(canvas, visibility, &automatic);
-        moly_assets::ui_layout::clipping::apply(doc, &mut rects)
-            .unwrap_or_else(|error| panic!("UI clipping {}: {error}", doc.prefab));
-        Arc::new(rects)
+        automatic.unwrap_or_else(|error| panic!("UI layout {}: {error}", doc.prefab))
+    }
+
+    /// The nodes of a document whose RectTransform its layout controllers
+    /// rewrite at this canvas size, with no host overrides.
+    #[cfg(test)]
+    fn layout_driven_nodes(&self, key: &str, canvas: Vec2) -> Option<Vec<usize>> {
+        let doc = self.document(key)?;
+        let mut driven: Vec<usize> = self
+            .layout_overrides(doc, canvas, &HashMap::new(), &HashMap::new(), &HashMap::new())
+            .into_keys()
+            .collect();
+        driven.sort_unstable();
+        Some(driven)
+    }
+
+    /// Installs one source layout with no image requests and publishes the
+    /// source set, so the research instrument drives the product's own
+    /// layout and hit paths on an extracted document.
+    #[cfg(test)]
+    fn install_for_measurement(&mut self, key: &str, document: UiPrefab) {
+        let revision = self.document_revisions.entry(key.to_owned()).or_default();
+        *revision = revision.wrapping_add(1);
+        self.docs.insert(key.to_owned(), document);
+        self.metadata_loaded = true;
+        self.sources_ready = true;
     }
 
     fn measure_node(
@@ -431,6 +933,7 @@ impl UiLayouts {
         axis: usize,
         size: Vec2,
         change: Option<&Override>,
+        internal: &mut HashMap<i64, Vec<char>>,
     ) -> Result<Option<LayoutMetrics>, String> {
         let mut preferred: Option<f32> = None;
         let preferred_field = if axis == 0 {
@@ -453,10 +956,10 @@ impl UiLayouts {
                     preferred = Some(-1.0);
                     continue;
                 }
-                let text = change
-                    .and_then(|v| v.text.as_deref())
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| self.text(&comp.fields));
+                let (text, input_box) = match change.and_then(|v| v.text.as_deref()) {
+                    Some(text) => (text.to_owned(), false),
+                    None => self.text_source(comp),
+                };
                 let rules = self
                     .text_rules
                     .as_ref()
@@ -467,6 +970,8 @@ impl UiLayouts {
                     axis,
                     size,
                     rules,
+                    input_box,
+                    internal.entry(comp.path_id).or_default(),
                 )?)
             } else if comp.fields.get("m_Type").is_some() {
                 Some(if preferred_overridden {
@@ -685,18 +1190,68 @@ impl UiLayouts {
         let index = doc.find(path).unwrap_or_else(|e| panic!("{e}"));
         Some(self.resolved(key, canvas)?[index].clone())
     }
-    pub(crate) fn text(&self, fields: &Value) -> String {
-        let key = fields["wordingKey"].as_str().unwrap_or("");
-        // CustomTextMesh leaves its serialized text intact when the key is empty.
-        // Numeric fields use this state until their presenter supplies a value.
-        if fields["useWordingKey"].as_bool() == Some(true) && !key.is_empty() {
-            self.wordings
+    /// The text a text component shows before any code sets it. Only
+    /// `CustomTextMesh` is drawn: its `Start` runs `UpdateWordingText`,
+    /// which assigns the wording of `wordingKey` when `useWordingKey` is on
+    /// and the key is not empty, and otherwise leaves the serialized TMP
+    /// `m_text` (numeric fields keep it until their presenter supplies a
+    /// value). All three fields are serialized by that class and its TMP
+    /// base; a layout without one is refused, as is any other text class.
+    /// The flag says whether the text is the component's serialized text:
+    /// TMP parses the backslash escapes of that one only (its text input
+    /// box source), not of a wording `Start` assigns through the text setter.
+    pub(crate) fn text_source(&self, component: &UiComponent) -> (String, bool) {
+        assert_eq!(
+            component.class, "Sekai.UI.CustomTextMesh",
+            "UI text component {}: no text rule for this class", component.path_id
+        );
+        let field = |name: &str| {
+            component.fields.get(name).unwrap_or_else(|| {
+                panic!("UI CustomTextMesh {}: serialized {name} is missing", component.path_id)
+            })
+        };
+        let use_key = field("useWordingKey").as_bool()
+            .unwrap_or_else(|| panic!("UI CustomTextMesh {}: useWordingKey is not a bool", component.path_id));
+        let key = field("wordingKey").as_str()
+            .unwrap_or_else(|| panic!("UI CustomTextMesh {}: wordingKey is not a string", component.path_id));
+        let serialized = field("m_text").as_str()
+            .unwrap_or_else(|| panic!("UI CustomTextMesh {}: m_text is not a string", component.path_id));
+        if use_key && !key.is_empty() {
+            let wording = self.wordings
                 .get(key)
                 .unwrap_or_else(|| panic!("UI wording missing: {key}"))
-                .clone()
+                .clone();
+            (wording, false)
         } else {
-            fields["m_text"].as_str().unwrap_or("").to_owned()
+            (serialized.to_owned(), true)
         }
+    }
+    /// `CustomTextMesh.SetWordingText` on the CustomTextMesh at `path` of
+    /// layout `doc_key`: it stores the key and the arguments (none for the
+    /// one-parameter overload), then `UpdateWordingText` assigns
+    /// `WordingManager.Get(key)`, passed through `String.Format` when there
+    /// are arguments, through the TMP text setter (so without `SetText`'s
+    /// no-break spaces), but only when the component's serialized
+    /// `useWordingKey` is on and the key is not empty. Otherwise the text
+    /// stays as it is (None). The source's lookup yields null for a key its
+    /// dictionary lacks, so a missing key is refused here.
+    pub(crate) fn set_wording_text(&self, doc_key: &str, path: &str, key: &str, args: Option<&[String]>) -> Option<String> {
+        let doc = self.document(doc_key).unwrap_or_else(|| panic!("UI layout {doc_key} is not loaded"));
+        let index = doc.find(path).unwrap_or_else(|error| panic!("{error}"));
+        let component = doc.nodes[index].components.iter()
+            .find(|c| c.class == "Sekai.UI.CustomTextMesh")
+            .unwrap_or_else(|| panic!("UI {}: {path} has no CustomTextMesh", doc.prefab));
+        let use_key = component.fields["useWordingKey"].as_bool()
+            .unwrap_or_else(|| panic!("UI {}: {path} CustomTextMesh lacks useWordingKey", doc.prefab));
+        if !use_key || key.is_empty() {
+            return None;
+        }
+        let wording = self.wordings.get(key).unwrap_or_else(|| panic!("UI wording missing: {key}"));
+        Some(match args {
+            Some(args) => moly_law::text::custom_text_mesh::format_wording(wording, args)
+                .unwrap_or_else(|error| panic!("UI wording {key}: {error}")),
+            None => wording.clone(),
+        })
     }
     pub(crate) fn text_chars(&self) -> Vec<char> {
         let mut chars = Vec::new();
@@ -704,7 +1259,12 @@ impl UiLayouts {
             for n in &doc.nodes {
                 for c in &n.components {
                     if c.fields.get("m_fontSize").is_some() {
-                        chars.extend(self.text(&c.fields).chars());
+                        let (text, input_box) = self.text_source(c);
+                        chars.extend(text.chars());
+                        // An escape can draw a character the text does not spell.
+                        if let Ok(processed) = tmp_layout::processing_characters(&text, c, input_box) {
+                            chars.extend(processed);
+                        }
                     }
                 }
             }
@@ -726,6 +1286,11 @@ struct Override {
     alpha: Option<f32>,
     anchored_position: Option<Vec2>,
     size_delta: Option<Vec2>,
+    /// `Graphic.color` set by code on the Graphic component with this id.
+    graphic_color: Option<(i64, [f32; 4])>,
+    /// `Behaviour.enabled` set by code on the component with this id (read by
+    /// the stencil Mask).
+    behaviour_enabled: Option<(i64, bool)>,
 }
 
 impl Override {
@@ -736,11 +1301,15 @@ impl Override {
                     && self.text_alignment == other.text_alignment
                     && self.fill == other.fill
                     && self.texture == other.texture
+                    && self.graphic_color == other.graphic_color
+                    && self.behaviour_enabled == other.behaviour_enabled
             }
             None => self.text.is_none()
                 && self.text_alignment.is_none()
                 && self.fill.is_none()
-                && self.texture.is_none(),
+                && self.texture.is_none()
+                && self.graphic_color.is_none()
+                && self.behaviour_enabled.is_none(),
         }
     }
 }
@@ -876,6 +1445,25 @@ impl UiPrefabView {
         }
         self.update(path, |v| v.anchored_position = Some(value));
     }
+    /// `Graphic.color = value` on the Image component `graphic` (its node is
+    /// the one `@graphic` names).
+    pub(crate) fn set_graphic_color(&mut self, graphic: i64, value: [f32; 4]) {
+        assert!(value.iter().all(|channel| channel.is_finite()), "non-finite UI graphic colour");
+        let path = format!("@{graphic}");
+        if self.overrides.get(&path).and_then(|v| v.graphic_color) == Some((graphic, value)) {
+            return;
+        }
+        self.update(&path, |v| v.graphic_color = Some((graphic, value)));
+    }
+    /// `Behaviour.enabled = value` on the component `component` (its node is
+    /// the one `@component` names).
+    pub(crate) fn set_behaviour_enabled(&mut self, component: i64, value: bool) {
+        let path = format!("@{component}");
+        if self.overrides.get(&path).and_then(|v| v.behaviour_enabled) == Some((component, value)) {
+            return;
+        }
+        self.update(&path, |v| v.behaviour_enabled = Some((component, value)));
+    }
     pub(crate) fn set_size_delta(&mut self, path: &str, value: Vec2) {
         assert!(value.is_finite(), "non-finite UI size delta");
         if self.overrides.get(path).and_then(|v| v.size_delta) == Some(value) {
@@ -899,6 +1487,29 @@ impl UiPrefabView {
         }) {
             return Some(entry.rects.clone());
         }
+        let (visibility, rect_overrides, changes) = self.host_state(doc);
+        let rects = if self.overrides.is_empty() {
+            layouts.resolved(self.key, canvas)?
+        } else {
+            layouts.resolve_layout(doc, canvas, &visibility, &rect_overrides, &changes)
+        };
+        *cache = Some(ViewLayout {
+            key: self.key,
+            document_revision: layouts.document_revision(self.key),
+            revision: self.geometry_revision,
+            canvas,
+            measurement_revision: layouts.measurement_revision,
+            font_metrics_revision: tmp_layout::FONT_METRICS_REVISION,
+            rects: rects.clone(),
+        });
+        Some(rects)
+    }
+    /// The host's overrides as the layout reads them: visibility and
+    /// RectTransform overrides by node, and each overridden node's change.
+    fn host_state<'a>(
+        &'a self,
+        doc: &UiPrefab,
+    ) -> (HashMap<usize, bool>, HashMap<usize, RectTransform>, HashMap<usize, &'a Override>) {
         let mut visibility = HashMap::new();
         let mut rect_overrides = HashMap::new();
         for (path, value) in &self.overrides {
@@ -963,27 +1574,124 @@ impl UiPrefabView {
             .iter()
             .map(|(path, value)| (doc.find(path).unwrap_or_else(|e| panic!("{e}")), value))
             .collect();
-        let rects = if self.overrides.is_empty() {
-            layouts.resolved(self.key, canvas)?
-        } else {
-            layouts.resolve_layout(doc, canvas, &visibility, &rect_overrides, &changes)
-        };
-        *cache = Some(ViewLayout {
-            key: self.key,
-            document_revision: layouts.document_revision(self.key),
-            revision: self.geometry_revision,
-            canvas,
-            measurement_revision: layouts.measurement_revision,
-            font_metrics_revision: tmp_layout::FONT_METRICS_REVISION,
-            rects: rects.clone(),
-        });
-        Some(rects)
+        (visibility, rect_overrides, changes)
     }
+
+    /// The nodes whose RectTransform the layout controllers set in this
+    /// view's drawn state: every node they drive that the host does not
+    /// override, and host-overridden nodes whose value they change.
+    #[cfg(test)]
+    fn layout_driven(&self, layouts: &UiLayouts, canvas: Vec2) -> Option<Vec<usize>> {
+        let doc = layouts.document(self.key)?;
+        let (visibility, rect_overrides, changes) = self.host_state(doc);
+        let automatic = layouts.layout_overrides(doc, canvas, &visibility, &rect_overrides, &changes);
+        let same = |a: &RectTransform, b: &RectTransform| {
+            a.anchors_min == b.anchors_min && a.anchors_max == b.anchors_max && a.pivot == b.pivot
+                && a.anchored_position == b.anchored_position && a.size_delta == b.size_delta
+                && a.local_scale == b.local_scale && a.local_rotation == b.local_rotation
+        };
+        let mut driven: Vec<usize> = automatic
+            .iter()
+            .filter(|(index, rect)| rect_overrides.get(index).is_none_or(|host| !same(host, rect)))
+            .map(|(index, _)| *index)
+            .collect();
+        driven.sort_unstable();
+        Some(driven)
+    }
+
     pub(crate) fn rect(&self, layouts: &UiLayouts, path: &str, canvas: Vec2) -> Option<UiRect> {
         let doc = layouts.document(self.key)?;
         let index = doc.find(path).unwrap_or_else(|e| panic!("{e}"));
         self.resolved(layouts, canvas).map(|r| r[index].clone())
     }
+
+    /// The drawn rects of this view (host overrides and layout controllers
+    /// applied), one per document node.
+    #[cfg(test)]
+    fn drawn_rects(&self, layouts: &UiLayouts, canvas: Vec2) -> Option<Arc<Vec<UiRect>>> {
+        self.resolved(layouts, canvas)
+    }
+
+    /// A check the solved view can fail: the nodes whose world corners are
+    /// not all finite, and the nodes with a negative width or height (which
+    /// the engine allows, so they are reported, not refused), by path.
+    pub(crate) fn solve_check(&self, layouts: &UiLayouts, canvas: Vec2) -> Option<SolveCheck> {
+        let doc = layouts.document(self.key)?;
+        let rects = self.resolved(layouts, canvas)?;
+        let mut check = SolveCheck { nodes: rects.len(), non_finite: Vec::new(), negative_size: Vec::new() };
+        for (node, rect) in doc.nodes.iter().zip(rects.iter()) {
+            let local = moly_law::ui::image::Rect::from_size_pivot(rect.size.to_array(), rect.pivot.to_array());
+            let corners = [
+                (local.x, local.y),
+                (local.x, local.y + local.height),
+                (local.x + local.width, local.y + local.height),
+                (local.x + local.width, local.y),
+            ];
+            let finite = corners.iter().all(|&(x, y)| rect.world.transform_point3(Vec3::new(x, y, 0.)).is_finite());
+            if !finite {
+                check.non_finite.push(node.path.clone());
+            }
+            if rect.size.x < 0. || rect.size.y < 0. {
+                check.negative_size.push(node.path.clone());
+            }
+        }
+        Some(check)
+    }
+
+    /// The node of the graphic the source raycast puts first for `pointer`
+    /// over this view: the pointer's enter target.
+    pub(crate) fn raycast_winner(&self, layouts: &UiLayouts, pointer: Pointer, canvas: Vec2) -> Option<usize> {
+        let doc = layouts.document(self.key)?;
+        let rects = self.resolved(layouts, canvas)?;
+        let order = layouts.ui_layer_sorting_order.expect("UI host layer sorting order is loaded");
+        raycast::winner(doc, &rects, pointer, order)
+    }
+
+    /// The selectable (node, component identity) a press of `pointer` goes
+    /// to by the source raycast over this view, if any.
+    pub(crate) fn press_target(&self, layouts: &UiLayouts, pointer: Pointer, canvas: Vec2) -> Option<(usize, i64)> {
+        let graphic = self.raycast_winner(layouts, pointer, canvas)?;
+        raycast::selectable_handler(layouts.document(self.key)?, graphic)
+    }
+
+    /// Whether `node` is the enter target of `pointer` or one of its
+    /// ancestors: the objects the event system's enter and exit reach.
+    pub(crate) fn hovers(&self, layouts: &UiLayouts, pointer: Pointer, canvas: Vec2, node: usize) -> bool {
+        let Some(doc) = layouts.document(self.key) else { return false; };
+        let mut cursor = self.raycast_winner(layouts, pointer, canvas);
+        while let Some(i) = cursor {
+            if i == node {
+                return true;
+            }
+            cursor = doc.parent(i);
+        }
+        false
+    }
+
+    /// `IsActive()` and `IsInteractable()` of the selectable component `id`
+    /// on `node`; None only when the canvas has no area (nothing resolves or
+    /// raycasts then). A missing layout, component or `m_Interactable` (a
+    /// Selectable field) is refused.
+    pub(crate) fn selectable_live(&self, layouts: &UiLayouts, canvas: Vec2, node: usize, id: i64) -> Option<(bool, bool)> {
+        let doc = layouts.document(self.key)
+            .unwrap_or_else(|| panic!("UI layout {} is not loaded", self.key));
+        let component = doc.nodes[node].components.iter().find(|c| c.path_id == id)
+            .unwrap_or_else(|| panic!("UI {}: node {node} has no component {id}", doc.prefab));
+        let serialized = component.fields["m_Interactable"].as_bool()
+            .unwrap_or_else(|| panic!("UI {}: selectable {id} has no m_Interactable", doc.prefab));
+        let rects = self.resolved(layouts, canvas)?;
+        let active = rects[node].active && component.enabled;
+        let interactable = moly_law::ui::raycast::is_interactable(serialized, raycast::groups_allow_interaction(doc, node));
+        Some((active, interactable))
+    }
+}
+
+/// The outcome of `UiPrefabView::solve_check`.
+#[derive(Debug, Clone)]
+pub(crate) struct SolveCheck {
+    pub(crate) nodes: usize,
+    pub(crate) non_finite: Vec<String>,
+    pub(crate) negative_size: Vec<String>,
 }
 
 #[derive(Component)]
@@ -1011,6 +1719,7 @@ pub(crate) struct ViewCache {
 struct NodeSnapshot {
     rect: UiRect,
     change: Override,
+    stencil: Option<clip_render::Stencil>,
 }
 
 #[derive(Default)]
@@ -1182,12 +1891,16 @@ fn rebuild_image_users(
                 }
             }
             if comp.fields.get("m_fontSize").is_some() {
-                let text = overrides
-                    .get(&index)
-                    .and_then(|v| v.text.clone())
-                    .unwrap_or_else(|| layouts.text(&comp.fields));
-                let pages: HashSet<_> = text
-                    .chars()
+                let (text, input_box) = match overrides.get(&index).and_then(|v| v.text.clone()) {
+                    Some(text) => (text, false),
+                    None => layouts.text_source(comp),
+                };
+                let mut drawn: Vec<char> = text.chars().collect();
+                if let Ok(processed) = tmp_layout::processing_characters(&text, comp, input_box) {
+                    drawn.extend(processed);
+                }
+                let pages: HashSet<_> = drawn
+                    .into_iter()
                     .filter(|ch| art.glyph_cell(*ch).is_some())
                     .map(|ch| art.glyph_image_for(ch).id())
                     .collect();
@@ -1215,6 +1928,7 @@ pub(crate) fn render(
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut clip_materials: ResMut<Assets<clip_render::UiClipMaterial>>,
     mut sprites: Query<&mut Sprite>,
+    root_canvas: Option<Res<crate::canvas::RootCanvas>>,
 ) {
     cache.retain(|entity, previous| {
         if views.get(*entity).is_ok() {
@@ -1273,11 +1987,10 @@ pub(crate) fn render(
             }
         }
     }
-    let (Some(art), Ok(window)) = (art, windows.single()) else {
+    let (Some(art), Some(root_canvas), Ok(window)) = (art, root_canvas, windows.single()) else {
         return;
     };
-    let canvas =
-        Vec2::new(window.width(), window.height()) / canvas_scale(window.width(), window.height());
+    let canvas = root_canvas.size(window);
     if !canvas.is_finite() || canvas.min_element() <= 0. { return; }
     // The current orthographic UI host maps this canvas to the full viewport.
     // Physical pixels (not CSS/logical pixels) provide the source half-pixel
@@ -1328,6 +2041,7 @@ pub(crate) fn render(
             .collect();
         let rects = view.resolved(&layouts, canvas).unwrap();
         let alphas = group_alphas(doc, &overrides);
+        let stencils = stencil_mask::resolve(&layouts, doc, &rects, &overrides, &alphas);
         let text_layout_changed = previous.measurement_revision != layouts.measurement_revision
             || previous.font_metrics_revision != Some(tmp_layout::FONT_METRICS_REVISION);
         previous.measurement_revision = layouts.measurement_revision;
@@ -1389,8 +2103,13 @@ pub(crate) fn render(
                 // applied when this node actually becomes visible again.
                 continue;
             }
+            let stencil = stencils.tested[index].as_ref();
+            // A stencil-tested Graphic samples its masking graphic's texture.
+            let stencil_ready = stencil.and_then(|s| s.texture.as_ref())
+                .is_none_or(|texture| images.get(texture).is_some());
             if rendered.snapshot.as_ref().is_some_and(|snapshot| {
                 snapshot.rect == *rect && snapshot.change.same_paint(change)
+                    && snapshot.stencil.as_ref() == stencil
             }) && !image_dirty
                 && !rendered.redraw
             {
@@ -1406,7 +2125,8 @@ pub(crate) fn render(
                         .all(|path| {
                             layouts.image_ready(path, &server)
                                 && images.get(&layouts.images[path]).is_some()
-                        });
+                        })
+                        && stencil_ready;
                     if ready {
                         if let Some(entity) = rendered.entity {
                             commands.entity(entity).insert(Visibility::Inherited);
@@ -1421,6 +2141,7 @@ pub(crate) fn render(
             let snapshot = NodeSnapshot {
                 rect: rect.clone(),
                 change: change.cloned().unwrap_or_default(),
+                stencil: stencil.cloned(),
             };
             let ready = node
                 .components
@@ -1433,7 +2154,8 @@ pub(crate) fn render(
                 .all(|path| {
                     layouts.image_ready(path, &server)
                         && images.get(&layouts.images[path]).is_some()
-                });
+                })
+                && stencil_ready;
             if !ready {
                 if !rendered.hidden {
                     if let Some(entity) = rendered.entity {
@@ -1477,93 +2199,63 @@ pub(crate) fn render(
                     continue;
                 }
                 let f = &comp.fields;
+                // A masking graphic that does not show writes no colour.
+                if stencils.unshown[index] == Some(comp.path_id) {
+                    continue;
+                }
                 if comp.class.ends_with("Image") && f.get("m_Color").is_some() {
-                    let clip = clip_render::for_component(comp, rect);
-                    let source = comp.sprite.as_ref().or(comp.texture.as_ref());
+                    let clip = clip_render::with_stencil(comp, rect, stencil);
                     let path = image_path(&layouts, comp, change);
                     let image = path.map(|p| layouts.images[p].clone()).unwrap_or_default();
-                    let mut sprite = Sprite {
+                    // A colour set by code reaches the vertices as Color32.
+                    let color = match change.and_then(|c| c.graphic_color).filter(|(id, _)| *id == comp.path_id) {
+                        Some((_, value)) => {
+                            let [r, g, b, a] = moly_law::ui::graphic_tap_effect::vertex_color(value);
+                            Color::srgba(r, g, b, a)
+                        }
+                        None => serialized_rgba(f, "m_Color"),
+                    };
+                    let sprite = Sprite {
                         image,
-                        color: rgba(&f["m_Color"], Color::WHITE),
+                        color,
                         custom_size: Some(rect.size),
                         ..default()
                     };
-                    if f["m_Type"].as_i64() == Some(1) {
-                        if let Some(border) = source
-                            .and_then(|v| v["border"].as_array())
-                            .filter(|v| v.len() == 4)
-                        {
-                            let borders = [
-                                num(&border[0]),
-                                num(&border[1]),
-                                num(&border[2]),
-                                num(&border[3]),
-                            ];
-                            if let Some(size) = source
-                                .and_then(|v| v["size"].as_array())
-                                .filter(|v| v.len() == 2)
-                            {
-                                let image_size = Vec2::new(num(&size[0]), num(&size[1]));
-                                // A zero-width UV centre is valid: it stretches one sampled line.
-                                // TextureSlicer rejects this case and stretches the whole image.
-                                if borders[0] + borders[2] >= image_size.x
-                                    || borders[1] + borders[3] >= image_size.y
-                                {
-                                    let mesh = sliced_mesh(
-                                        rect.size,
-                                        image_size,
-                                        borders,
-                                        f["m_FillCenter"].as_bool().unwrap_or(true),
-                                    );
-                                    if let Some(clip) = clip {
-                                        clip_render::Draw { commands: &mut commands, images: &images,
-                                            meshes: &mut meshes, materials: &mut clip_materials,
-                                            pixel_size: clip_pixel_size, layer: view.layer
-                                        }.mesh(node_contents, rendered, mesh, base_transform,
-                                            sprite.color, Some(sprite.image.clone()), clip, alphas[index]);
-                                        continue;
-                                    }
-                                    let material = materials.add(ColorMaterial {
-                                        color: sprite.color,
-                                        texture: Some(sprite.image.clone()),
-                                        ..default()
-                                    });
-                                    let mesh = meshes.add(mesh);
-                                    rendered.meshes.push(mesh.clone());
-                                    rendered.materials.push(material.clone());
-                                    rendered.material_colors.push(sprite.color);
-                                    if let Some(value) = materials.get_mut(&material) {
-                                        value.color = sprite
-                                            .color
-                                            .with_alpha(sprite.color.alpha() * alphas[index]);
-                                    }
-                                    let entity = commands
-                                        .spawn((
-                                            Mesh2d(mesh),
-                                            MeshMaterial2d(material),
-                                            base_transform,
-                                            RenderLayers::layer(view.layer),
-                                        ))
-                                        .id();
-                                    commands.entity(node_contents).add_child(entity);
-                                    continue;
-                                }
-                            }
-                            sprite.image_mode = SpriteImageMode::Sliced(TextureSlicer {
-                                border: BorderRect {
-                                    min_inset: Vec2::new(num(&border[0]), num(&border[3])),
-                                    max_inset: Vec2::new(num(&border[2]), num(&border[1])),
-                                },
-                                center_scale_mode: SliceScaleMode::Stretch,
-                                sides_scale_mode: SliceScaleMode::Stretch,
-                                max_corner_scale: 1.,
-                            });
+                    if let Some(mesh) = path.and_then(|_| {
+                        image_rule_mesh(&layouts, doc, index, comp, change, rect)
+                    }) {
+                        if let Some(clip) = clip {
+                            clip_render::Draw { commands: &mut commands, images: &images,
+                                meshes: &mut meshes, materials: &mut clip_materials,
+                                pixel_size: clip_pixel_size, layer: view.layer
+                            }.mesh(node_contents, rendered, mesh, base_transform,
+                                sprite.color, Some(sprite.image.clone()), clip, alphas[index]);
+                            continue;
                         }
+                        let material = materials.add(ColorMaterial {
+                            color: sprite.color.with_alpha(sprite.color.alpha() * alphas[index]),
+                            texture: Some(sprite.image.clone()),
+                            ..default()
+                        });
+                        let mesh = meshes.add(mesh);
+                        rendered.meshes.push(mesh.clone());
+                        rendered.materials.push(material.clone());
+                        rendered.material_colors.push(sprite.color);
+                        let entity = commands
+                            .spawn((
+                                Mesh2d(mesh),
+                                MeshMaterial2d(material),
+                                base_transform,
+                                RenderLayers::layer(view.layer),
+                            ))
+                            .id();
+                        commands.entity(node_contents).add_child(entity);
+                        continue;
                     }
                     if f["m_Type"].as_i64() == Some(3) {
                         let fill = change
                             .and_then(|c| c.fill)
-                            .unwrap_or_else(|| num(&f["m_FillAmount"]));
+                            .unwrap_or_else(|| serialized_number(f, "m_FillAmount"));
                         let method = filled_image::FillMethod::from_serialized(
                             f["m_FillMethod"].as_i64().expect("Image fill method"),
                         );
@@ -1619,14 +2311,16 @@ pub(crate) fn render(
                     commands.entity(node_contents).add_child(entity);
                 }
                 if f.get("m_fontSize").is_some() {
-                    let text = change
-                        .and_then(|v| v.text.clone())
-                        .unwrap_or_else(|| layouts.text(f));
+                    let (text, input_box) = match change.and_then(|v| v.text.clone()) {
+                        Some(text) => (text, false),
+                        None => layouts.text_source(comp),
+                    };
                     spawn_text(
                         &mut commands,
                         node_contents,
                         &art,
                         &text,
+                        input_box,
                         comp,
                         change.and_then(|v| v.text_alignment),
                         rect,
@@ -1638,7 +2332,7 @@ pub(crate) fn render(
                         view.layer,
                         alphas[index],
                         rendered,
-                        clip_render::for_component(comp, rect),
+                        clip_render::with_stencil(comp, rect, stencil),
                         &images,
                         &mut meshes,
                         &mut clip_materials,
@@ -1659,77 +2353,269 @@ pub(crate) fn render(
     }
 }
 
-fn sliced_mesh(size: Vec2, image_size: Vec2, border: [f32; 4], fill_center: bool) -> Mesh {
-    let mut adjusted = border;
-    for axis in 0..2 {
-        let combined = adjusted[axis] + adjusted[axis + 2];
-        if combined > size[axis] {
-            let ratio = size[axis] / combined;
-            adjusted[axis] *= ratio;
-            adjusted[axis + 2] *= ratio;
+/// The effective `Canvas.pixelPerfect` a Graphic at `index` reads: the
+/// nearest enclosing Canvas that overrides pixel-perfect decides, otherwise
+/// the host root Canvas does. (Nested canvases without the override inherit;
+/// that inheritance is the engine's native getter and was not read from its
+/// binary.)
+fn effective_pixel_perfect(layouts: &UiLayouts, doc: &UiPrefab, index: usize) -> bool {
+    let mut cursor = Some(index);
+    while let Some(i) = cursor {
+        if let Some(canvas) = doc.nodes[i].components.iter().find(|c| {
+            c.enabled && c.class == "UnityEngine.Canvas"
+                && c.fields["m_OverridePixelPerfect"].as_bool() == Some(true)
+        }) {
+            return canvas.fields["m_PixelPerfect"].as_bool().expect("Canvas m_PixelPerfect");
         }
+        cursor = doc.parent(i);
     }
-    let x = [0., adjusted[0], size.x - adjusted[2], size.x];
-    let y = [0., adjusted[1], size.y - adjusted[3], size.y];
-    let u = [
-        0.,
-        border[0] / image_size.x,
-        1. - border[2] / image_size.x,
-        1.,
-    ];
-    let v = [
-        1.,
-        1. - border[1] / image_size.y,
-        border[3] / image_size.y,
-        0.,
-    ];
-    let mut positions = Vec::with_capacity(16);
-    let mut uv = Vec::with_capacity(16);
-    let mut indices = Vec::with_capacity(54);
-    for row in 0..4 {
-        for col in 0..4 {
-            positions.push([x[col] - size.x * 0.5, y[row] - size.y * 0.5, 0.]);
-            uv.push([u[col], v[row]]);
-        }
-    }
-    for row in 0..3 {
-        for col in 0..3 {
-            if (!fill_center && col == 1 && row == 1)
-                || x[col + 1] <= x[col]
-                || y[row + 1] <= y[row]
-            {
-                continue;
-            }
-            let lower_left = (row * 4 + col) as u32;
-            indices.extend_from_slice(&[
-                lower_left,
-                lower_left + 1,
-                lower_left + 5,
-                lower_left,
-                lower_left + 5,
-                lower_left + 4,
-            ]);
-        }
-    }
-    Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::RENDER_WORLD,
-    )
-    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0., 0., 1.]; 16])
-    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uv)
-    .with_inserted_indices(Indices::U32(indices))
+    layouts.canvas_pixel_perfect.expect("UI host root Canvas pixel-perfect flag is loaded")
 }
 
-fn num(value: &Value) -> f32 {
-    value.as_f64().unwrap_or(0.) as f32
+/// `Image.OnPopulateMesh` for Simple and Sliced images as the renderer
+/// uploads it; None when the component is drawn by another path: a raw image
+/// (no Image type), a Filled image, or (reported once per document and
+/// component) an Image the rules cannot draw, which the caller then draws as
+/// a plain stretched sprite.
+fn image_rule_mesh(
+    layouts: &UiLayouts,
+    doc: &UiPrefab,
+    index: usize,
+    comp: &UiComponent,
+    change: Option<&Override>,
+    rect: &UiRect,
+) -> Option<Mesh> {
+    match image_rule_mesh_data(layouts, doc, index, comp, change, rect) {
+        Ok(data) => Some(data.into_mesh()),
+        Err(ImageDraw::OtherPath) => None,
+        Err(ImageDraw::Fallback(reason)) => {
+            layouts.note_image_fallback(doc, comp, reason);
+            None
+        }
+    }
 }
-fn rgba(value: &Value, default: Color) -> Color {
-    value
+
+#[derive(Clone, Copy, Debug)]
+enum ImageDraw {
+    /// Drawn by its own path (raw image, Filled).
+    OtherPath,
+    /// Not drawable by the Image rules; the plain sprite path draws it.
+    Fallback(&'static str),
+}
+
+/// The vertex data of an Image drawn by the Image rules, exactly as the
+/// renderer uploads it: positions relative to the node rect's centre (the
+/// mesh entity sits at that centre), UVs in the exported top-down image,
+/// and the triangle list. The rules are given `Graphic.color` white; the
+/// renderer tints through the material colour instead, so `rule_colors`
+/// (the rules' Color32 output) is not uploaded. `crop` (x, y, width, height
+/// in texture texels) and `texture_size` map the UVs back to texture space.
+#[derive(Debug, Clone)]
+struct ImageMeshData {
+    positions: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    indices: Vec<u32>,
+    // The rules' colours, the crop and the texture size are read by the
+    // research instrument only.
+    #[cfg_attr(not(test), allow(dead_code))]
+    rule_colors: Vec<[u8; 4]>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    crop: [f32; 4],
+    #[cfg_attr(not(test), allow(dead_code))]
+    texture_size: [f32; 2],
+}
+
+impl ImageMeshData {
+    fn into_mesh(self) -> Mesh {
+        let count = self.positions.len();
+        Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
+            .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.positions)
+            .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0., 0., 1.]; count])
+            .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs)
+            .with_inserted_indices(Indices::U32(self.indices))
+    }
+}
+
+/// The doc-to-mesh mapping of the Image rule path.
+///
+/// The exported image of an atlas sprite is its texture rect snapped to whole
+/// texels (min corner rounded, size as exported), so atlas UVs map into it by
+/// that crop. A runtime replacement with authored metrics is a whole-image
+/// sprite. A replacement without authored Sprite metrics has no rect size,
+/// border or pixels per unit to give the rules, so the rules do not draw it
+/// (the same case the preferred-size query refuses).
+#[allow(clippy::too_many_arguments)]
+fn image_rule_mesh_data(
+    layouts: &UiLayouts,
+    doc: &UiPrefab,
+    index: usize,
+    comp: &UiComponent,
+    change: Option<&Override>,
+    rect: &UiRect,
+) -> Result<ImageMeshData, ImageDraw> {
+    use moly_law::ui::image as rule;
+    let f = &comp.fields;
+    // A raw image serializes no Image type; its texture is its own path.
+    let Some(serialized_type) = f.get("m_Type") else { return Err(ImageDraw::OtherPath); };
+    let image_type = serialized_type.as_i64().and_then(rule::ImageType::from_serialized)
+        .unwrap_or_else(|| panic!("UI {}: Image @{} has an unknown m_Type {serialized_type}", doc.prefab, comp.path_id));
+    match image_type {
+        rule::ImageType::Simple | rule::ImageType::Sliced => {}
+        rule::ImageType::Filled => return Err(ImageDraw::OtherPath),
+        rule::ImageType::Tiled => return Err(ImageDraw::Fallback("Tiled images have no draw path")),
+    }
+    let (sprite, crop) = if let Some(name) = change.and_then(|v| v.texture.as_deref()) {
+        let metrics = layouts.runtime_sprite_layouts.get(name)
+            .ok_or(ImageDraw::Fallback("its runtime replacement has no authored Sprite metrics"))?;
+        let size = metrics.rect_size;
+        let sprite = rule::SpriteData {
+            rect_size: size.to_array(),
+            border: metrics.border,
+            pixels_per_unit: metrics.pixels_per_unit,
+            texture_rect: [0.0, 0.0, size.x, size.y],
+            texture_rect_offset: [0.0, 0.0],
+            downscale_multiplier: 1.0,
+            texture_size: Some(size.to_array()),
+        };
+        (sprite, [0.0, 0.0, size.x, size.y])
+    } else {
+        let source = comp
+            .sprite
+            .as_ref()
+            .filter(|v| v["state"].as_str() == Some("ok"))
+            .ok_or(ImageDraw::Fallback("its sprite was not exported"))?;
+        let array = |value: &Value, count: usize| -> Option<Vec<f32>> {
+            let items = value.as_array().filter(|a| a.len() == count)?;
+            items.iter().map(|v| v.as_f64().map(|n| n as f32)).collect()
+        };
+        let missing = ImageDraw::Fallback(
+            "its sprite lacks the texture rect, offset, rect size, border, exported size or texture size",
+        );
+        let texture_rect = array(&source["textureRect"], 4).ok_or(missing)?;
+        let offset = array(&source["textureRectOffset"], 2).ok_or(missing)?;
+        let rect_size = array(&source["rectSize"], 2).ok_or(missing)?;
+        let border = array(&source["border"], 4).ok_or(missing)?;
+        let exported = array(&source["size"], 2).ok_or(missing)?;
+        let texture_size = array(&source["texture"]["size"], 2).ok_or(missing)?;
+        let downscale_multiplier = sprite_downscale_multiplier(layouts, doc, comp, source)?;
+        let sprite = rule::SpriteData {
+            rect_size: [rect_size[0], rect_size[1]],
+            border: [border[0], border[1], border[2], border[3]],
+            pixels_per_unit: source["pixelsPerUnit"]
+                .as_f64()
+                .ok_or(ImageDraw::Fallback("its sprite lacks pixels per unit"))? as f32,
+            texture_rect: [texture_rect[0], texture_rect[1], texture_rect[2], texture_rect[3]],
+            texture_rect_offset: [offset[0], offset[1]],
+            downscale_multiplier,
+            texture_size: Some([texture_size[0], texture_size[1]]),
+        };
+        let crop = [texture_rect[0].round(), texture_rect[1].round(), exported[0], exported[1]];
+        (sprite, crop)
+    };
+    let local = rule::Rect::from_size_pivot(rect.size.to_array(), rect.pivot.to_array());
+    let Some(pixel_adjusted) = rule::pixel_adjusted_rect(local, effective_pixel_perfect(layouts, doc, index)) else {
+        error_once!("UI Image under a pixel-perfect Canvas: the native pixel-adjusted rect is not ported; drawn unsliced");
+        return Err(ImageDraw::Fallback("the pixel-adjusted rect of a pixel-perfect canvas is not ported"));
+    };
+    let field = |name: &str| -> &Value {
+        f.get(name).unwrap_or_else(|| panic!("UI {}: Image @{} lacks {name}", doc.prefab, comp.path_id))
+    };
+    let flag = |name: &str| -> bool {
+        field(name).as_bool().unwrap_or_else(|| panic!("UI {}: Image @{} {name} is not a bool", doc.prefab, comp.path_id))
+    };
+    let input = rule::ImageInput {
+        image_type,
+        sprite: Some(&sprite),
+        rect: local,
+        pixel_adjusted_rect: pixel_adjusted,
+        pivot: rect.pivot.to_array(),
+        color: [1.0; 4],
+        preserve_aspect: flag("m_PreserveAspect"),
+        fill_center: flag("m_FillCenter"),
+        use_sprite_mesh: flag("m_UseSpriteMesh"),
+        pixels_per_unit_multiplier: field("m_PixelsPerUnitMultiplier").as_f64().unwrap_or_else(|| {
+            panic!("UI {}: Image @{} m_PixelsPerUnitMultiplier is not a number", doc.prefab, comp.path_id)
+        }) as f32,
+        reference_pixels_per_unit: comp.canvas_reference_pixels_per_unit.or(layouts.canvas_reference_pixels_per_unit),
+    };
+    let rule::Populated::Mesh(stream) = rule::populate(&input) else {
+        return Err(ImageDraw::Fallback("the Image rules do not port this configuration (sprite mesh)"));
+    };
+    let texture_size = sprite.texture_size.expect("rule sprite carries its texture size");
+    // Positions relative to the rect centre; UVs from texture space into the
+    // exported (top-down) image.
+    let centre = (Vec2::splat(0.5) - rect.pivot) * rect.size;
+    let mut positions = Vec::with_capacity(stream.vertices.len());
+    let mut uvs = Vec::with_capacity(stream.vertices.len());
+    let mut rule_colors = Vec::with_capacity(stream.vertices.len());
+    for vertex in &stream.vertices {
+        positions.push([vertex.position[0] - centre.x, vertex.position[1] - centre.y, 0.0]);
+        let texel = [vertex.uv0[0] * texture_size[0], vertex.uv0[1] * texture_size[1]];
+        uvs.push([(texel[0] - crop[0]) / crop[2], 1.0 - (texel[1] - crop[1]) / crop[3]]);
+        rule_colors.push(vertex.color);
+    }
+    Ok(ImageMeshData { positions, uvs, indices: stream.indices, rule_colors, crop, texture_size })
+}
+
+/// The render data's downscale multiplier of an exported sprite. A layout
+/// of a region root carries it (the atlas entry's for a packed sprite, else
+/// the sprite's own render data); a shared-root layout was exported before
+/// the field was and is drawn with 1.0, reported once per document. The
+/// exported image is cropped from the texture at the texture rect, so the
+/// UV-to-crop mapping above holds for 1.0 only; any other value is not drawn
+/// by the rules.
+fn sprite_downscale_multiplier(
+    layouts: &UiLayouts,
+    doc: &UiPrefab,
+    comp: &UiComponent,
+    source: &Value,
+) -> Result<f32, ImageDraw> {
+    let Some(value) = source.get("downscaleMultiplier") else {
+        assert!(
+            doc.source.region.is_none(),
+            "UI {}: Image @{} sprite has no downscaleMultiplier in a region-tagged layout",
+            doc.prefab, comp.path_id
+        );
+        let first = layouts
+            .downscale_defaults
+            .lock()
+            .expect("UI downscale report poisoned")
+            .insert(doc.prefab.clone());
+        if first {
+            warn!(
+                "UI {}: its sprites carry no render-data downscale multiplier (exported before the field \
+                 was); drawn with 1.0",
+                doc.prefab
+            );
+        }
+        return Ok(1.0);
+    };
+    let multiplier = value.as_f64().filter(|n| n.is_finite() && *n > 0.0).unwrap_or_else(|| {
+        panic!("UI {}: Image @{} sprite downscaleMultiplier {value} is not a positive number", doc.prefab, comp.path_id)
+    }) as f32;
+    if multiplier != 1.0 {
+        return Err(ImageDraw::Fallback(
+            "its sprite's downscale multiplier is not 1, and the exported crop is mapped for 1 only",
+        ));
+    }
+    Ok(multiplier)
+}
+
+/// A serialized float field of a component; a layout without it is refused.
+fn serialized_number(fields: &Value, name: &str) -> f32 {
+    fields[name].as_f64().unwrap_or_else(|| panic!("UI component {name} is missing or not a number")) as f32
+}
+/// A serialized Color field of a component (four channels); a layout
+/// without it is refused.
+fn serialized_rgba(fields: &Value, name: &str) -> Color {
+    let channels = fields[name]
         .as_array()
         .filter(|v| v.len() == 4)
-        .map(|v| Color::srgba(num(&v[0]), num(&v[1]), num(&v[2]), num(&v[3])))
-        .unwrap_or(default)
+        .unwrap_or_else(|| panic!("UI component {name} is missing or not four channels"));
+    let channel = |i: usize| {
+        channels[i].as_f64().unwrap_or_else(|| panic!("UI component {name} channel {i} is not a number")) as f32
+    };
+    Color::srgba(channel(0), channel(1), channel(2), channel(3))
 }
 
 fn spawn_text(
@@ -1737,6 +2623,7 @@ fn spawn_text(
     parent: Entity,
     art: &BalloonArt,
     text: &str,
+    input_box: bool,
     component: &moly_assets::ui_layout::UiComponent,
     alignment: Option<i64>,
     rect: &UiRect,
@@ -1752,12 +2639,9 @@ fn spawn_text(
     clip_pixel_size: Vec2,
 ) {
     let fields = &component.fields;
-    let layout = tmp_layout::layout(text, component, rect.size, rules, alignment)
+    let layout = tmp_layout::layout(text, component, rect.size, rect.pivot, rules, alignment, input_box)
         .unwrap_or_else(|error| panic!("UI TMP layout failed: {error}"));
-    let base_color = rgba(
-        &fields["m_fontColor"],
-        Color::srgba(0.26666668, 0.26666668, 0.4, 1.),
-    );
+    let base_color = serialized_rgba(fields, "m_fontColor");
     let (cell, pen_x, base_top) = art.cell_geometry();
     let mut clipped_glyphs = Vec::new();
     for glyph in &layout.glyphs {
@@ -1773,9 +2657,8 @@ fn spawn_text(
                 (cell * 0.5 - pen_x) * factor * glyph.width_scale,
                 -(cell * 0.5 - base_top) * factor,
             );
-        let position = rect
-            .world
-            .transform_point3((offset + (Vec2::splat(0.5) - rect.pivot) * rect.size).extend(0.));
+        // The pen is already in the rect's local space (origin at the pivot).
+        let position = rect.world.transform_point3(offset.extend(0.));
         let (scale, rotation, _) = rect.world.to_scale_rotation_translation();
         let color = glyph
             .color

@@ -1,115 +1,117 @@
-//! 选项对话框（真源 `OptionDialog`，DialogType 82，Dialog 槽——全局设置的
-//! 对话框体，Common1ButtonDialog 一钮形）——本仓建它的**音量页**，其余
-//! 三页置灰未建。
+//! The option dialog (source `OptionDialog`, dialog type 82, a
+//! `Common1ButtonDialog`), all five of its source pages.
 //!
-//! ## 入口
+//! ## Entry and the first page
 //!
-//! The product settings panel opens this source dialog. It does not add a
-//! hand-positioned button to the field chrome.
+//! The product settings panel opens this dialog; MySekai itself has no caller
+//! of `OptionDialog.Setup`. The call this port follows is the out-game menu's
+//! (the menu transition): `Setup(0, canAssetSetting: true,
+//! canBlockListSetting: true, showCustomScoreTab: false,
+//! showCommunicationTab: true)`. `Setup` disables the custom-score tab, enables
+//! the communication tab and opens `(tabIndex | showCustomScoreTab) == 0 ? 1 :
+//! tabIndex`, which is the Live page.
 //!
-//! ## 页结构（四页，本仓建一页）
+//! ## Pages
 //!
-//! 页枚举：Live=0 · Volume=1 · System=2 · Communication=3（另一语言版本
-//! 多一页 CustomScore，音量页两版一致）。本仓只建音量页；开局页取音量页
-//! （真源开局页 Live=0 属演出域未建——本仓选值，具名）。
+//! `Page`: CustomScore 0, Live 1, Volume 2, System 3, Communication 4 (the
+//! tab group's toggle order). A tab change runs `DeactivateCurrentPage` (the
+//! page's `UpdateLocalData`, except Communication, then `SetActive(false)`)
+//! and `ActivateCurrentPage` (`SetActive(true)` and the page's `Setup` from the
+//! dialog's data objects), then `UpdateTabLines`. So a page shown again starts
+//! from the data objects: Live, Volume and System keep their edits through the
+//! deactivation write; Communication does not.
 //!
-//! ## 六滑杆（SetupObject 逐个，方法体直读）
+//! - **Live** (`OptionLiveSetting`, `OptionNoteSetting`): six numeric
+//!   selectors and twelve toggle groups over `LiveSettingData`, which
+//!   `LoadFromStorage` reads fresh at every open (no cache); the long-note and
+//!   guide alphas write the data object on every change.
+//! - **Volume** (`OptionVolumeSetting`): the six sliders, unchanged below.
+//! - **System** (`OptionSystemSetting`): five toggle groups and five buttons.
+//! - **Communication** (`OptionCommunicationSetting`): friend requests,
+//!   story favorites, the block list.
 //!
-//! | 滑杆 | 组 | 声型 | 预览 cue |
-//! |---|---|---|---|
-//! | Live BGM | Live | 型 0（BGM） | 无（cue 空 ⇒ 预览静默） |
-//! | Live SE | Live | 型 3（InGameSE） | `SE_VOLCHANGE_SE_INGAME` |
-//! | Live Voice | Live | 型 4（InGameVoice） | `SE_VOLCHANGE_VOX_INGAME` |
-//! | System BGM | System | 型 0 | 无 |
-//! | System SE | System | 型 1（SE） | `SE_VOLCHANGE_SE_UI` |
-//! | System Voice | System | 型 2（Voice） | `SE_VOLCHANGE_VOX_SCENARIO` |
+//! The pages bind through their classes' serialized references (the page
+//! components, the numeric selectors and the toggle groups). A layout whose
+//! page classes carry no decoded references shows that page's tab disabled,
+//! with one warning naming the missing decode.
 //!
-//! 控件是整数选择器（ViewData 的 SelectedNum/MinNum/MaxNum 全 int，
-//! 0..100 步 1）：±钮 = `ChangeItemSelectNum` ±1 界内钳后写值并回调；
-//! 置灰律 = 减量钮 Selected>Min 才亮、增量钮 Selected<Max 才亮
-//! （`UpdateButtonEnable` 方法体直读）。滑杆本体是 Unity Slider 子类
-//! （`CustomSlider`）：按下即落值到按点位、拖动续值；IsPlaySliderSe=
-//! false ⇒ 拖动不播逐档 SE（`OnValueChange` 的逐档 SE 支整体被该开关
-//! 关掉，方法体直读）。
+//! ## Save and close
 //!
-//! ## 变更链（b__0/b__1 两拍，方法体直读）
+//! The dialog shows through the screen manager (`DialogType.OptionDialog`,
+//! 82); its back key is `Common1ButtonDialog.OnHardwareBackKeyProcess`, which
+//! is `OnClickOK`, like `OnCloseExternal`.
 //!
-//! 滑杆变更回调 b__0：取消在途延时 → 重排 0.15s 延时预览 → **立即**
-//! `UpdateVolume`。UpdateVolume 只读**系统三滑杆** →
-//! `SetupVolume(1.0, Bgm, Se, Voice)` → 三播放器 UpdateAll（即刻生效）
-//! ——**游戏外预览律：这里没有 BGM×0.7**；mysekai 场内的 0.7 落在 BGM
-//! 消费侧（进场施加同源，见 `crate::audio` 的 BGM 通道）。Live 组滑杆
-//! 不进施加（档值在保存关闭时随 Live 组落盘）。
+//! OK, a tap outside and the back key run `Save`: every set-up page's `UpdateLocalData`,
+//! `UpdateServerData`, `LiveSettingData.SaveToStorage` and
+//! `ApplicationLocalSettings.SaveToStorage`. The close button closes without
+//! saving; the application settings object is the session's cached one, so a
+//! deactivation's write stays in the session.
 //!
-//! 延时预览 b__1（0.15s 到点）：cue 非空 ⇒ 先 `StopVoiceAll` 再按型播
-//! 预览声——型 1 PlaySEOneShot · 型 2 PlayVoice(1.0) · 型 3
-//! SamplePlaySE(值×0.01) · 型 4 PlayVoiceFixedVolume(值×0.01)。本仓
-//! 对应物：**型 1 走真 SE 请求队列**（cue 未提取 ⇒ 通道侧每 cue 一次的
-//! 缺流告警就是诚实行）；型 2/3/4 **无渠道对应物**（voice 通道词表只有
-//! 对话行；SE 请求无逐请求音量位）——具名不播，记行不静默。
+//! ## Server values
 //!
-//! ## 落盘与弃置律
+//! `UserConfig` (the online-status flag and the friend request status) is
+//! server state: `MOLY_OPTION_MOCK_USER_CONFIG=<true|false>,<all|id_search|reject>`.
+//! Without it the user config is null and the pages take the source's null
+//! branches (online status off, friend request and story favorite toggles
+//! left as `Awake` leaves them, all off) and `UpdateServerData` is not sent.
 //!
-//! - **OK / 合法框外点按**：`UpdateLoacalData`（六值 ×0.01 写档对象）→ 落盘读回校验
-//!   （`crate::audio::save_volume_settings`）→ 关框。
-//! - **关闭钮**：保留当前草稿弃置行为、
-//!   **已施加的音量不回滚**（施加即时、无回滚支，真源同形）、档对象与
-//!   盘上档都不动。
+//! ## Named gaps
 //!
-//! 持久化形态在 `crate::audio` 的本地档段（ApplicationLocalSettings 音量
-//! 半：native 用户数据目录文件 / wasm localStorage；键形照真源序列化键
-//! Bgm/Se/Voice 与字段名 LiveVolume/SystemVolume）。
-//!
-//! ## 附加件收口
-//!
-//! 静音/独奏/恢复默认：真源音量页**无**这三样（SoundManager 的
-//! SetMute/SetCategoryVolume 写者只在 streaming live 域——逐调用点文件
-//! 穷举；MysekaiPlayerInfo.SetMute(bool) 是同名异物：多人聊天的玩家
-//! userId 静音，不碰音频；恢复默认无对应方法）⇒ 具名不做。
-//!
-//! ## 我方选值（改这里之前先读）
-//!
-//! 预制体与资产字符串未提取 ⇒ 摆位、配色、文案全是**我方选值**（页签/
-//! 组头/滑杆标签为自写文案，提取到后整组替换）。参照画布 1920×1080，
-//! y 向上；对话框渲染走 order-2 覆盖相机（Dialog 槽，件 z ≥ 20，盖过
-//! 小地图内容 z ≤ 1）。
-//!
-//! ## 模态与已知偏差
-//!
-//! 开着时点按族 End 先过本模块（Dialog 槽 blockRaycasts 同形；外壳与
-//! 菜单对话框的点按门读同一个 option_open 位）。已知偏差与菜单对话框
-//! 同款（既有具名挂账家族「输入让位门在各自域」）：相机拖拽、摇杆、
-//! 对话 tap 族不读对话框态，框开着照样收输入——本模块不动各域判定面；
-//! 动作按钮的点按消费先于本模块（同菜单对话框）。
-//!
-//! ## 冒烟口
-//!
-//! `MOLY_OPTION_AUTOSMOKE_SECS` 给秒数后按 2 秒一拍七步：开框 → 系统
-//! SE 减一（施加 + 预览入队）→ 系统 BGM 减一（施加；BGM 账目行随周期
-//! 账目现新值）→ Live SE 减一（无总线效果 + 预览无渠道行）→ OK（落盘
-//! + 读回一致 + 关框）→ 再开框（草稿从档取——档内值现于开框行 = 当跑
-//! 读回）→ 框外点按（提交关框）。**两跑重启读回法**：`MOLY_SETTINGS_FILE`
-//! 指到隔离路径跑一遍（OK 落盘），同路径再跑一遍——第二跑的装载行现出
-//! 第一跑存的值，即重启读回判据。
-
-use std::collections::HashMap;
+//! - The OptionDialog class itself is not decoded, so its tab group is
+//!   reached by the prefab path `WindowRoot/Tabs`.
+//! - Tab text colours (`UIPartsDialogTab.On/Off` writes the palette colours
+//!   base_dbl / base_wh into the text): the view has no text colour override.
+//! - Scroll views move by drag and clamp; `ScrollRect` elasticity, inertia and
+//!   the scrollbar are not ported.
+//! - The 120 fps confirmation (`Common2ButtonMediumDialog`), the timing tap
+//!   dialog (`LiveNoteSettingDialog`), the note skin previews, the note SE
+//!   names and test sounds (the live note bundles), the block list screen,
+//!   the MV and music cache dialogs and the bulk downloads are other screens
+//!   or live-game assets this product does not carry; their buttons log.
+//! - `DisplayUtility.ActivateFixedScreenOrientation` has no host counterpart.
 
 use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
+use moly_assets::ui_layout::{UiComponent, UiPrefab};
+use serde_json::{json, Map, Value};
 
 use crate::action_button::ActionTapConsumed;
 use crate::audio::{
-    apply_system_volume, save_volume_settings, stop_voice_all, LocalVolumeSettings, SeClass,
-    SeRequest, SeRequests, VoiceChannel, VolumeBus, VolumeSettingData,
+    apply_system_volume, stop_voice_all, LocalVolumeSettings, PreviewSound, SeClass, SeRequest,
+    SeRequests,
+    VoiceChannel, VolumeBus, VolumeSettingData,
 };
-use crate::balloon::canvas_scale;
 use crate::gesture::{GestureEvent, GestureKind, GestureState};
+use crate::info::referenced_component;
 use crate::menu_shell::ShellDialogState;
 use crate::sitemap::SITEMAP_LAYER;
+use crate::ui_layers::{
+    DialogBackKey, DialogBackKeyEvent, DialogId, DialogType, DisplayLayerType, UiLayerStack,
+};
+
+/// `Show1ButtonDialog(DialogType.OptionDialog)`.
+const OPTION_DIALOG: DialogType = DialogType(82);
+
+/// The dialog's layout document.
+const KEY: &str = "Option";
+
+/// Glyphs of the texts this dialog writes besides the source texts and
+/// wordings: the numeric selectors' numbers.
+pub(crate) const FIXED_TEXTS: &[&str] = &["0123456789.-+%"];
+
+/// Wordings this dialog writes: the System buttons'
+/// `UIPartsCommonButton.SetWordingKey` and the numeric selectors' button
+/// texts (`SetupButton`). The atlas charset takes their glyphs from here.
+pub(crate) const WORDINGS: &[&str] = &[
+    "WORD_DOWNLOADED",
+    "WORD_BULK_DOWNLOAD",
+    "WORD_ADD_FORMAT",
+    "WORD_SUBTRACT_FORMAT",
+];
 
 // ---------------------------------------------------------------------------
-// 身份件：滑杆 · 页签 · 组（屏位与真源参数）
+// Volume page identities (OptionVolumeSetting.SetupObject, read per slider)
 // ---------------------------------------------------------------------------
 
 /// 六滑杆之一（SetupObject 逐个对应，见模块头表）。序即草稿下标序。
@@ -287,193 +289,1767 @@ fn draft_group(draft: &[u8; 6], group: Group) -> VolumeSettingData {
 /// 重排（b__0 先取消在途再重排）——停手 0.15s 后才响预览声。
 const PREVIEW_DELAY_SECONDS: f32 = 0.15;
 
-/// 页签（页枚举 Live=0 · Volume=1 · System=2 · Communication=3；序即
-/// 摆位序，本仓只建音量页）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum OptionTab {
+// ---------------------------------------------------------------------------
+// Pages and the Setup call
+// ---------------------------------------------------------------------------
+
+/// `OptionDialog.Page` (None is `Option::None`); the tab group's toggle order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Page {
+    CustomScore,
     Live,
     Volume,
     System,
     Communication,
 }
 
-/// 页签全集（摆位序）。
-const TABS: [OptionTab; 4] = [
-    OptionTab::Live,
-    OptionTab::Volume,
-    OptionTab::System,
-    OptionTab::Communication,
+const PAGES: [Page; 5] = [
+    Page::CustomScore,
+    Page::Live,
+    Page::Volume,
+    Page::System,
+    Page::Communication,
 ];
 
-impl OptionTab {
-    /// 页名（真源页枚举名，账目行用）。
-    fn source_name(self) -> &'static str {
-        match self {
-            OptionTab::Live => "Live",
-            OptionTab::Volume => "Volume",
-            OptionTab::System => "System",
-            OptionTab::Communication => "Communication",
-        }
-    }
-
-    /// 页签文案（自写：资产字符串未提取）。
-    fn label(self) -> &'static str {
-        match self {
-            OptionTab::Live => "演出",
-            OptionTab::Volume => "音量",
-            OptionTab::System => "系统",
-            OptionTab::Communication => "通信",
-        }
-    }
-
-    /// 该页在本仓建了没有（当前唯一已建：音量页）。
-    fn built(self) -> bool {
-        matches!(self, OptionTab::Volume)
+impl Page {
+    fn index(self) -> usize {
+        self as usize
     }
 }
 
-/// 字符集（图集的**第七个**消费者）。动态值只有 0..100 的整数，无自由
-/// 文本 ⇒ 装载期可枚举全量。
-pub(crate) const FIXED_TEXTS: &[&str] = &[
-    "设置",
-    "选项",
-    "演出",
-    "音量",
-    "系统",
-    "通信",
-    "Live",
-    "System",
-    "BGM",
-    "SE",
-    "Voice",
-    "-",
-    "+",
-    "OK",
-    "关闭",
-    "0123456789",
+/// `OptionDialog.Setup`'s arguments at the out-game menu's call site.
+struct SetupArgs {
+    tab_index: usize,
+    can_asset_setting: bool,
+    can_block_list_setting: bool,
+    show_custom_score_tab: bool,
+    show_communication_tab: bool,
+}
+
+const MENU_SETUP: SetupArgs = SetupArgs {
+    tab_index: 0,
+    can_asset_setting: true,
+    can_block_list_setting: true,
+    show_custom_score_tab: false,
+    show_communication_tab: true,
+};
+
+impl SetupArgs {
+    /// `((uint)tabIndex | showCustomScoreTab) == 0 ? 1 : tabIndex`.
+    fn opening(&self) -> usize {
+        if self.tab_index == 0 && !self.show_custom_score_tab {
+            1
+        } else {
+            self.tab_index
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// UIPartsNumericSelector
+// ---------------------------------------------------------------------------
+
+/// The selector's value in hundredths. The source keeps a `decimal`; every
+/// setup value here is a `(decimal)float` (seven significant digits) or an
+/// integer, and every step is a multiple of 0.01, so hundredths hold it except
+/// a stored value with a third decimal, which rounds.
+#[derive(Debug, Clone, PartialEq)]
+struct Selector {
+    value: i64,
+    min: i64,
+    max: i64,
+    /// The variation values the buttons were set up with.
+    steps: Steps,
+    /// `_format`, appended after the number.
+    suffix: &'static str,
+    /// `_stringFormat` "F2"; the empty format prints the decimal as it is.
+    two_decimals: bool,
+}
+
+/// `(decimal)value`: the float at seven significant digits, in hundredths.
+fn decimal_hundredths(value: f32) -> i64 {
+    let seven: f64 = format!("{:.6e}", value as f64).parse().expect("float text");
+    (seven * 100.0).round() as i64
+}
+
+/// `SetupButton` calls: `Setup(float[])` sets button i up with value i (a
+/// button past the array gets no listener); `Setup(float)` sets every button
+/// up with the one value. Hundredths.
+#[derive(Debug, Clone, PartialEq)]
+enum Steps {
+    PerButton(&'static [i64]),
+    Every(i64),
+}
+
+impl Selector {
+    fn new(
+        value: i64,
+        min: i64,
+        max: i64,
+        steps: Steps,
+        suffix: &'static str,
+        two_decimals: bool,
+    ) -> Self {
+        let mut selector = Selector {
+            value,
+            min: min * 100,
+            max: max * 100,
+            steps,
+            suffix,
+            two_decimals,
+        };
+        selector.update(value);
+        selector
+    }
+
+    /// `UpdateValue`: clamp into [min, max].
+    fn update(&mut self, value: i64) {
+        self.value = value.min(self.max).max(self.min);
+    }
+
+    /// `decimal.ToString(format, InvariantCulture) + _format`.
+    fn text(&self) -> String {
+        let sign = if self.value < 0 { "-" } else { "" };
+        let (whole, cents) = (self.value.abs() / 100, self.value.abs() % 100);
+        let number = if self.two_decimals {
+            format!("{sign}{whole}.{cents:02}")
+        } else if cents == 0 {
+            format!("{sign}{whole}")
+        } else {
+            format!(
+                "{sign}{whole}.{}",
+                format!("{cents:02}").trim_end_matches('0')
+            )
+        };
+        format!("{number}{}", self.suffix)
+    }
+
+    /// `UpdateButtonEnable`: increments while `max - value > 0.0001`,
+    /// decrements while `value - min > 0.0001`.
+    fn can_increment(&self) -> bool {
+        self.max - self.value > 0
+    }
+
+    fn can_decrement(&self) -> bool {
+        self.value - self.min > 0
+    }
+
+    /// The variation value button `index` (either direction) adds or
+    /// subtracts; None when that button has no listener.
+    fn step(&self, index: usize) -> Option<i64> {
+        match &self.steps {
+            Steps::PerButton(steps) => steps.get(index).copied(),
+            Steps::Every(step) => Some(*step),
+        }
+    }
+
+    /// `Value` (`(float)_value`).
+    fn value(&self) -> f32 {
+        self.value as f32 / 100.0
+    }
+}
+
+/// `LiveConfig.VariationValues[1]` = {1.0, 0.1}, in hundredths.
+const VARIATION_VALUES_1: [i64; 2] = [100, 10];
+
+/// `Mathf.Floor(value * 100)` of an alpha or brightness, as the integer the
+/// percent selectors start from.
+fn percent(value: f32) -> i64 {
+    ((value * 100.0).floor() as i64) * 100
+}
+
+// ---------------------------------------------------------------------------
+// Toggle groups
+// ---------------------------------------------------------------------------
+
+/// A `CustomIndexToggleGroup`'s selection: `None` while no toggle is on (the
+/// state `Awake`'s `CollectToggles(false)` leaves), which `SelectedIndex`
+/// reads as 0.
+fn selected(state: Option<usize>) -> usize {
+    state.unwrap_or(0)
+}
+
+/// `InitializeSelectIndex(!value ? 1 : 0)`.
+fn from_bool(value: bool) -> Option<usize> {
+    Some(if value { 0 } else { 1 })
+}
+
+/// The Live page's groups, in `OptionLiveSetting`'s field order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveToggle {
+    CutIn,
+    SkillAndPraise,
+    NoteEffect,
+    FeverEffect,
+    SimultaneousPushingLine,
+    Vibration,
+    AllPerfectEffect,
+    FastLateFlick,
+    Mirror,
+    Use120Fps,
+    Mode,
+    Quality,
+}
+
+const LIVE_TOGGLES: [(LiveToggle, &str); 12] = [
+    (LiveToggle::CutIn, "_cutin"),
+    (LiveToggle::SkillAndPraise, "_skillAndPraise"),
+    (LiveToggle::NoteEffect, "_noteEffect"),
+    (LiveToggle::FeverEffect, "_feverEffect"),
+    (
+        LiveToggle::SimultaneousPushingLine,
+        "_simultaneousPushingLine",
+    ),
+    (LiveToggle::Vibration, "_vibration"),
+    (LiveToggle::AllPerfectEffect, "_allPerfectEffect"),
+    (LiveToggle::FastLateFlick, "_fastLateFlick"),
+    (LiveToggle::Mirror, "_mirrorToggle"),
+    (LiveToggle::Use120Fps, "_use120FpsToggle"),
+    (LiveToggle::Mode, "_modeSetting"),
+    (LiveToggle::Quality, "_qualitySetting"),
+];
+
+/// The Live page's selectors: `OptionLiveSetting` holds the first four,
+/// `OptionNoteSetting` the two alphas.
+const LIVE_SELECTORS: [&str; 6] = [
+    "_noteSpeed",
+    "_timingAdjust",
+    "_brightness",
+    "_laneAlpha",
+    "_longNoteAlpha",
+    "_guideAlpha",
+];
+
+/// The System page's groups, in `OptionSystemSetting`'s field order.
+const SYSTEM_TOGGLES: [&str; 5] = [
+    "defaultMusic",
+    "screenFixed",
+    "showNoteSpeed",
+    "showLoginStatus",
+    "notifyLiveBonusMax",
+];
+const SCREEN_FIXED: usize = 1;
+const SHOW_LOGIN_STATUS: usize = 3;
+
+/// The System page's buttons.
+const SYSTEM_BUTTONS: [&str; 5] = [
+    "voiceBulkDownload",
+    "mvBulkDownload",
+    "musicBulkDownload",
+    "_mvSaveNumSettingButton",
+    "_musicSaveNumSettingButton",
 ];
 
 // ---------------------------------------------------------------------------
-// 实体与资源
+// Bindings: the source references, resolved once
 // ---------------------------------------------------------------------------
 
-/// 对话框总根（Dialog 槽：order-2 覆盖相机，件 z ≥ 20；开 = 外壳对话框
-/// 态的 option_open 位）。
+/// A `CustomButton` or `CustomToggle` and the graphics its `HideCover`
+/// (`OnEnable`) hides and its `ShowCover` (`OnDisable`, only when
+/// `disableActionType` is Grayout) shows: the cover and the optional covers.
+struct SelectableBinding {
+    control: String,
+    covers: Vec<String>,
+    grayout: bool,
+}
+
+struct ToggleBinding {
+    selectable: SelectableBinding,
+    /// `Toggle.graphic` (the check mark), when set.
+    graphic: Option<String>,
+}
+
+struct GroupBinding {
+    toggles: Vec<ToggleBinding>,
+}
+
+struct SelectorBinding {
+    text: String,
+    decrement: Vec<SelectableBinding>,
+    increment: Vec<SelectableBinding>,
+    /// `_decrementButtonTexts` / `_incrementButtonTexts` (may be empty).
+    decrement_texts: Vec<String>,
+    increment_texts: Vec<String>,
+}
+
+struct ScrollBinding {
+    content: String,
+    viewport: String,
+}
+
+struct TabBinding {
+    page: Page,
+    selectable: SelectableBinding,
+    background: String,
+    line: Option<String>,
+}
+
+/// `UIPartsCommonButton`: its `CustomButton` and text.
+struct CommonButtonBinding {
+    button: SelectableBinding,
+    text: String,
+}
+
+struct LiveBinding {
+    selectors: Vec<SelectorBinding>,
+    groups: Vec<GroupBinding>,
+    vibration_root: String,
+    timing_tap: SelectableBinding,
+    skin: [SelectableBinding; 2],
+    tap_se: [SelectableBinding; 2],
+    tests: [SelectableBinding; 4],
+}
+
+struct SystemBinding {
+    groups: Vec<GroupBinding>,
+    buttons: Vec<CommonButtonBinding>,
+}
+
+struct CommunicationBinding {
+    friend: GroupBinding,
+    favorite: GroupBinding,
+    block_list: SelectableBinding,
+}
+
+#[derive(Resource)]
+pub(crate) struct OptionBindings {
+    tabs: Vec<TabBinding>,
+    /// Page nodes by page index.
+    pages: Vec<Option<String>>,
+    /// The page scroll views (`<page>/ScorollView`) by page index.
+    scrolls: Vec<Option<ScrollBinding>>,
+    live: Result<LiveBinding, String>,
+    system: Result<SystemBinding, String>,
+    communication: Result<CommunicationBinding, String>,
+}
+
+/// `@id` of a GameObject, RectTransform or component reference; None for a
+/// null one.
+fn object_ref(doc: &UiPrefab, reference: &Value) -> Option<String> {
+    let reference = reference.as_array().expect("Option serialized reference");
+    assert_eq!(
+        reference[0].as_i64(),
+        Some(0),
+        "Option reference must be local"
+    );
+    let id = reference[1].as_i64().expect("Option reference identity");
+    if id == 0 {
+        return None;
+    }
+    let key = format!("@{id}");
+    doc.find(&key)
+        .unwrap_or_else(|e| panic!("Option reference: {e}"));
+    Some(key)
+}
+
+/// The document's single component of `class`, when its serialized fields
+/// were decoded (`probe` is one of them).
+fn page_component<'a>(
+    doc: &'a UiPrefab,
+    class: &str,
+    probe: &str,
+) -> Result<&'a UiComponent, String> {
+    let found: Vec<&UiComponent> = doc
+        .nodes
+        .iter()
+        .flat_map(|n| n.components.iter())
+        .filter(|c| c.class == class)
+        .collect();
+    let [component] = found[..] else {
+        return Err(format!(
+            "{}: {} {class} components, the dialog binds one",
+            doc.prefab,
+            found.len()
+        ));
+    };
+    if component.fields.get(probe).is_none() {
+        return Err(format!(
+            "{}: {class} carries no decoded references (the layout predates its decoder)",
+            doc.prefab
+        ));
+    }
+    Ok(component)
+}
+
+fn selectable(doc: &UiPrefab, control: String, component: &UiComponent) -> SelectableBinding {
+    let fields = &component.fields;
+    let mut covers: Vec<String> = object_ref(doc, &fields["coverImage"]).into_iter().collect();
+    if let Some(list) = fields["optionalCoverImages"].as_array() {
+        covers.extend(
+            list.iter()
+                .filter_map(|reference| object_ref(doc, reference)),
+        );
+    }
+    let grayout = fields["disableActionType"]
+        .as_i64()
+        .expect("Option selectable disableActionType")
+        == 1;
+    SelectableBinding {
+        control,
+        covers,
+        grayout,
+    }
+}
+
+fn toggle(doc: &UiPrefab, reference: &Value) -> ToggleBinding {
+    let (control, toggle) = referenced_component(doc, reference, "Sekai.UI.CustomToggle");
+    let graphic = object_ref(doc, &toggle.fields["graphic"]);
+    ToggleBinding {
+        selectable: selectable(doc, control, toggle),
+        graphic,
+    }
+}
+
+fn group(doc: &UiPrefab, reference: &Value) -> GroupBinding {
+    let (_, group) = referenced_component(doc, reference, "Sekai.UI.CustomIndexToggleGroup");
+    let toggles = group.fields["indexToggles"]
+        .as_array()
+        .expect("Option toggle references")
+        .iter()
+        .map(|reference| toggle(doc, reference))
+        .collect();
+    GroupBinding { toggles }
+}
+
+fn button(doc: &UiPrefab, reference: &Value) -> SelectableBinding {
+    let (control, button) = referenced_component(doc, reference, "Sekai.UI.CustomButton");
+    selectable(doc, control, button)
+}
+
+fn selector(doc: &UiPrefab, reference: &Value) -> SelectorBinding {
+    let (_, s) = referenced_component(doc, reference, "Sekai.UIPartsNumericSelector");
+    let buttons = |name: &str| -> Vec<SelectableBinding> {
+        s.fields[name]
+            .as_array()
+            .unwrap_or_else(|| panic!("Option selector {name}"))
+            .iter()
+            .map(|reference| button(doc, reference))
+            .collect()
+    };
+    let texts = |name: &str| -> Vec<String> {
+        s.fields
+            .get(name)
+            .and_then(Value::as_array)
+            .map_or_else(Vec::new, |list| {
+                list.iter()
+                    .map(|r| referenced_component(doc, r, "Sekai.UI.CustomTextMesh").0)
+                    .collect()
+            })
+    };
+    SelectorBinding {
+        text: referenced_component(doc, &s.fields["_numText"], "Sekai.UI.CustomTextMesh").0,
+        decrement: buttons("_decrementButtons"),
+        increment: buttons("_incrementButtons"),
+        decrement_texts: texts("_decrementButtonTexts"),
+        increment_texts: texts("_incrementButtonTexts"),
+    }
+}
+
+fn common_button(doc: &UiPrefab, reference: &Value) -> CommonButtonBinding {
+    let (_, common) = referenced_component(doc, reference, "Sekai.UI.UIPartsCommonButton");
+    CommonButtonBinding {
+        button: button(doc, &common.fields["customButton"]),
+        text: referenced_component(
+            doc,
+            &common.fields["customTextMesh"],
+            "Sekai.UI.CustomTextMesh",
+        )
+        .0,
+    }
+}
+
+/// The child of node `parent` named `name`.
+fn child<'a>(
+    doc: &'a UiPrefab,
+    parent: usize,
+    name: &str,
+) -> Option<&'a moly_assets::ui_layout::UiNode> {
+    let transform = doc.nodes[parent].transform_id;
+    doc.nodes
+        .iter()
+        .find(|n| n.parent_transform_id == transform && n.name == name)
+}
+
+/// The tab group's toggles with their `UIPartsDialogTab`. A layout whose
+/// `UIPartsDialogTab` is not decoded reaches the same two graphics through
+/// the tab prefab's own children (`background`, `Line`).
+fn tabs(doc: &UiPrefab) -> Vec<TabBinding> {
+    let tabs_node = &doc.nodes[doc
+        .find("WindowRoot/Tabs")
+        .unwrap_or_else(|e| panic!("Option tabs: {e}"))];
+    let tab_group = tabs_node
+        .components
+        .iter()
+        .find(|c| c.class == "Sekai.UI.CustomIndexToggleGroup")
+        .expect("Option tab group");
+    let references = tab_group.fields["indexToggles"]
+        .as_array()
+        .expect("Option tab toggles");
+    // The tab group holds one toggle per page; a client without the custom
+    // score page has the four from Live.
+    let pages: &[Page] = match references.len() {
+        5 => &PAGES,
+        4 => &PAGES[1..],
+        n => panic!("Option tab group holds {n} toggles; the dialog knows four or five pages"),
+    };
+    references
+        .iter()
+        .zip(pages)
+        .map(|(reference, page)| {
+            let ToggleBinding { selectable, .. } = toggle(doc, reference);
+            let node = doc.find(&selectable.control).expect("tab node");
+            let tab = doc.nodes[node]
+                .components
+                .iter()
+                .find(|c| c.class == "Sekai.UIPartsDialogTab")
+                .expect("UIPartsDialogTab beside the tab toggle");
+            let (background, line) = if tab.fields.get("backgroundImage").is_some() {
+                (
+                    referenced_component(
+                        doc,
+                        &tab.fields["backgroundImage"],
+                        "Sekai.UI.CustomImage",
+                    )
+                    .0,
+                    object_ref(doc, &tab.fields["lineObj"]),
+                )
+            } else {
+                let background = child(doc, node, "background").expect("tab background");
+                let image = background
+                    .components
+                    .iter()
+                    .find(|c| c.class == "Sekai.UI.CustomImage")
+                    .expect("tab background image");
+                (
+                    format!("@{}", image.path_id),
+                    child(doc, node, "Line").map(|n| format!("@{}", n.game_object_id)),
+                )
+            };
+            TabBinding {
+                page: *page,
+                selectable,
+                background,
+                line,
+            }
+        })
+        .collect()
+}
+
+impl OptionBindings {
+    fn from_prefab(doc: &UiPrefab) -> Self {
+        let tabs = tabs(doc);
+        let live = page_component(doc, "Sekai.OptionLiveSetting", "_noteSpeed").and_then(|live| {
+            let note = page_component(doc, "Sekai.OptionNoteSetting", "_longNoteAlpha")?;
+            let f = |name: &str| {
+                if live.fields.get(name).is_some() {
+                    &live.fields[name]
+                } else {
+                    &note.fields[name]
+                }
+            };
+            Ok(LiveBinding {
+                selectors: LIVE_SELECTORS
+                    .iter()
+                    .map(|name| selector(doc, f(*name)))
+                    .collect(),
+                groups: LIVE_TOGGLES
+                    .iter()
+                    .map(|(_, name)| group(doc, f(*name)))
+                    .collect(),
+                vibration_root: object_ref(doc, &live.fields["_vibrationRoot"])
+                    .expect("vibration root"),
+                timing_tap: button(doc, &live.fields["_timingAdjustTap"]),
+                skin: [
+                    button(doc, &note.fields["_skinChangeLeft"]),
+                    button(doc, &note.fields["_skinChangeRight"]),
+                ],
+                tap_se: [
+                    button(doc, &note.fields["_tapSeChangeLeft"]),
+                    button(doc, &note.fields["_tapSeChangeRight"]),
+                ],
+                tests: [
+                    "_testTapSeButton",
+                    "_testFlickSeButton",
+                    "_testLongSeButton",
+                    "_testTraceSeButton",
+                ]
+                .map(|name| button(doc, &note.fields[name])),
+            })
+        });
+        let system =
+            page_component(doc, "Sekai.OptionSystemSetting", "defaultMusic").map(|system| {
+                SystemBinding {
+                    groups: SYSTEM_TOGGLES
+                        .iter()
+                        .map(|name| group(doc, &system.fields[*name]))
+                        .collect(),
+                    buttons: SYSTEM_BUTTONS
+                        .iter()
+                        .map(|name| common_button(doc, &system.fields[*name]))
+                        .collect(),
+                }
+            });
+        let communication = page_component(
+            doc,
+            "Sekai.OptionCommunicationSetting",
+            "friendRequestToggle",
+        )
+        .map(|c| CommunicationBinding {
+            friend: group(doc, &c.fields["friendRequestToggle"]),
+            favorite: group(doc, &c.fields["displayStoryFavoriteToggle"]),
+            block_list: button(doc, &c.fields["blockListButton"]),
+        });
+        let page_classes = [
+            "Sekai.OptionCustomScoreSetting",
+            "Sekai.OptionLiveSetting",
+            "Sekai.OptionVolumeSetting",
+            "Sekai.OptionSystemSetting",
+            "Sekai.OptionCommunicationSetting",
+        ];
+        let page_nodes: Vec<Option<usize>> = page_classes
+            .iter()
+            .map(|class| {
+                doc.nodes
+                    .iter()
+                    .position(|n| n.components.iter().any(|c| c.class == *class))
+            })
+            .collect();
+        let pages = page_nodes
+            .iter()
+            .map(|node| node.map(|i| format!("@{}", doc.nodes[i].game_object_id)))
+            .collect();
+        let scrolls = page_nodes
+            .iter()
+            .map(|node| {
+                let view = child(doc, (*node)?, "ScorollView")?;
+                let rect = view
+                    .components
+                    .iter()
+                    .find(|c| c.class == "Sekai.UI.CustomScrollRect")?;
+                Some(ScrollBinding {
+                    content: object_ref(doc, &rect.fields["m_Content"]).expect("scroll content"),
+                    viewport: object_ref(doc, &rect.fields["m_Viewport"]).expect("scroll viewport"),
+                })
+            })
+            .collect();
+        for (name, missing) in [
+            ("Live", live.as_ref().err()),
+            ("System", system.as_ref().err()),
+            ("Communication", communication.as_ref().err()),
+        ] {
+            if let Some(reason) = missing {
+                warn!("[option] the {name} page is not built from this layout: {reason}; its tab shows disabled");
+            }
+        }
+        OptionBindings {
+            tabs,
+            pages,
+            scrolls,
+            live,
+            system,
+            communication,
+        }
+    }
+
+    /// Whether the page can be shown from this layout.
+    fn built(&self, page: Page) -> bool {
+        match page {
+            Page::CustomScore => false,
+            Page::Live => self.live.is_ok(),
+            Page::Volume => self.pages[Page::Volume.index()].is_some(),
+            Page::System => self.system.is_ok(),
+            Page::Communication => self.communication.is_ok(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Data objects
+// ---------------------------------------------------------------------------
+
+/// `LiveSettingData`'s MessagePack keys with the constructor's values (read
+/// natively: the reconstructed constructor drops the wide stores of the note
+/// speed, brightness, lane transparency, note alpha and vibration).
+fn live_setting_defaults() -> Map<String, Value> {
+    let Value::Object(map) = json!({
+        "NoteSpeed": 6.0, "TimingAdjustData": 0.0, "Brightness": 1.0, "LaneTransparent": 1.0,
+        "UseCutIn": true, "HiddenSkillAndPraise": false, "UseSimultaneousPushingLine": true,
+        "UseVibration": true, "UseAllPerfectEffect": true, "LiveMode": 1, "NoteAlpha": 1.0,
+        "GuideAlpha": 0.6f32, "NoteSkinIndex": 0, "NoteSeIndex": 0, "IsMirror": false,
+        "QualityType": 0, "IsFastLateFlick": false, "Use120FPS": false, "UsedVSync": null,
+        "NoteEffect": 0, "_noteShowRate": 0.0, "FeverEffectTypeIndex": 0,
+        "TotalPowerUpperLimit": null, "TotalPowerLowerLimit": null,
+        "CustomRoomTotalPowerUpperLimit": null, "CustomRoomTotalPowerLowerLimit": null,
+        "ShowsRoomId": true, "CustomRoomScoreSettingIndex": 0, "CustomRoomIsDisplayPlayerInfo": true,
+        "CustomRoomSelectedDifficulties": null, "CustomRoomSelectedMusicType": 0, "ScoreSelectType": 0,
+    }) else {
+        unreachable!()
+    };
+    map
+}
+
+/// The stored key of `LiveSettingData` (its own persistent object in the
+/// source, a section of the local settings document here).
+const LIVE_SECTION: &str = "LiveSettingData";
+
+/// `LiveSettingData`, as the stored object.
+#[derive(Debug, Clone, PartialEq)]
+struct LiveData(Map<String, Value>);
+
+impl LiveData {
+    /// `LoadFromStorage`: the stored object over the constructor's values; a
+    /// stored member of another type than the constructor's keeps the latter.
+    fn load(document: &Value) -> Self {
+        let mut data = live_setting_defaults();
+        match &document[LIVE_SECTION] {
+            Value::Null => {}
+            Value::Object(stored) => {
+                for (key, value) in stored {
+                    let same_kind = match data.get(key) {
+                        Some(Value::Bool(_)) => value.is_boolean(),
+                        Some(Value::Number(_)) => value.is_number(),
+                        Some(Value::Null) | None => true,
+                        Some(_) => false,
+                    };
+                    if same_kind {
+                        data.insert(key.clone(), value.clone());
+                    } else {
+                        warn!("[option] {LIVE_SECTION}.{key}={value} is not the member's type; the constructor value stays");
+                    }
+                }
+            }
+            other => warn!(
+                "[option] {LIVE_SECTION} is not an object ({other}); the constructor values stand"
+            ),
+        }
+        LiveData(data)
+    }
+
+    fn f32(&self, key: &str) -> f32 {
+        self.0[key]
+            .as_f64()
+            .unwrap_or_else(|| panic!("{LIVE_SECTION}.{key} is not a number")) as f32
+    }
+
+    fn int(&self, key: &str) -> i64 {
+        let value = &self.0[key];
+        value
+            .as_i64()
+            .or_else(|| value.as_f64().map(|v| v as i64))
+            .unwrap_or_else(|| panic!("{LIVE_SECTION}.{key} is not an integer"))
+    }
+
+    fn bool(&self, key: &str) -> bool {
+        self.0[key]
+            .as_bool()
+            .unwrap_or_else(|| panic!("{LIVE_SECTION}.{key} is not a bool"))
+    }
+
+    fn set(&mut self, key: &str, value: Value) {
+        self.0.insert(key.to_owned(), value);
+    }
+
+    /// `GetNoteAlpha`: 0 reads as 1.
+    fn note_alpha(&self) -> f32 {
+        let alpha = self.f32("NoteAlpha");
+        if alpha == 0.0 {
+            1.0
+        } else {
+            alpha
+        }
+    }
+
+    /// `GetGuideAlpha`: 0 reads as 0.6.
+    fn guide_alpha(&self) -> f32 {
+        let alpha = self.f32("GuideAlpha");
+        if alpha == 0.0 {
+            0.6
+        } else {
+            alpha
+        }
+    }
+}
+
+/// The `ApplicationLocalSettings` members the System and Communication pages
+/// read and write, with the constructor's values (read natively: the
+/// reconstructed constructor drops the stores of BatteryAlert,
+/// NotifyLiveBonusMax and ShowNoteSpeedDialog, all true). The source object
+/// is the session's cached one, so this resource is kept for the session.
+#[derive(Resource, Debug, Clone, PartialEq)]
+pub(crate) struct AppLocalOptions {
+    default_music_ver: i64,
+    screen_fixed: bool,
+    show_note_speed_dialog: bool,
+    notify_live_bonus_max: bool,
+    hide_story_favorite_comment: bool,
+    is_additional_voice: bool,
+}
+
+impl Default for AppLocalOptions {
+    fn default() -> Self {
+        AppLocalOptions {
+            default_music_ver: 0,
+            screen_fixed: false,
+            show_note_speed_dialog: true,
+            notify_live_bonus_max: true,
+            hide_story_favorite_comment: false,
+            is_additional_voice: false,
+        }
+    }
+}
+
+impl AppLocalOptions {
+    fn load(document: &Value) -> Self {
+        let mut options = AppLocalOptions::default();
+        let flag = |key: &str, slot: &mut bool| {
+            match &document[key] {
+            Value::Null => {}
+            Value::Bool(value) => *slot = *value,
+            other => warn!("[option] ApplicationLocalSettings.{key}={other} is not a bool; the constructor value stays"),
+        }
+        };
+        flag("ScreenFixed", &mut options.screen_fixed);
+        flag("ShowNoteSpeedDialog", &mut options.show_note_speed_dialog);
+        flag("NotifyLiveBonusMax", &mut options.notify_live_bonus_max);
+        flag(
+            "HideStoryFavoriteComment",
+            &mut options.hide_story_favorite_comment,
+        );
+        flag("IsAdditionalVoice", &mut options.is_additional_voice);
+        match &document["DefaultMusicVer"] {
+            Value::Null => {}
+            value => match value.as_i64() {
+                Some(v) => options.default_music_ver = v,
+                None => warn!("[option] ApplicationLocalSettings.DefaultMusicVer={value} is not an int; the constructor value stays"),
+            },
+        }
+        options
+    }
+
+    /// The members the dialog writes, as root keys of the local settings
+    /// document (beside `LiveVolume` and `SystemVolume`).
+    fn sections(&self) -> Vec<(&'static str, Value)> {
+        vec![
+            ("DefaultMusicVer", json!(self.default_music_ver)),
+            ("ScreenFixed", json!(self.screen_fixed)),
+            ("ShowNoteSpeedDialog", json!(self.show_note_speed_dialog)),
+            ("NotifyLiveBonusMax", json!(self.notify_live_bonus_max)),
+            (
+                "HideStoryFavoriteComment",
+                json!(self.hide_story_favorite_comment),
+            ),
+        ]
+    }
+}
+
+/// `UserDataManager.UserConfig`: server state. None is the null user config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UserConfig {
+    display_login_status: bool,
+    /// `FriendRequestStatus`: all 0, id_search 1, reject 2.
+    friend_request_status: usize,
+}
+
+fn user_config_mock() -> Option<UserConfig> {
+    const NAME: &str = "MOLY_OPTION_MOCK_USER_CONFIG";
+    let raw = std::env::var(NAME).ok()?;
+    let parsed = raw.split_once(',').and_then(|(login, friend)| {
+        let display_login_status = match login.trim() {
+            "true" => true,
+            "false" => false,
+            _ => return None,
+        };
+        let friend_request_status = ["all", "id_search", "reject"]
+            .iter()
+            .position(|name| *name == friend.trim())?;
+        Some(UserConfig {
+            display_login_status,
+            friend_request_status,
+        })
+    });
+    if parsed.is_none() {
+        warn!("[option] mock panel: {NAME}={raw:?} is not <true|false>,<all|id_search|reject>; the user config stays null");
+    }
+    parsed
+}
+
+// ---------------------------------------------------------------------------
+// Page state
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+struct LivePage {
+    selectors: Vec<Selector>,
+    toggles: [Option<usize>; 12],
+    note_skin_index: i64,
+    note_se_index: i64,
+}
+
+#[derive(Debug, Clone)]
+struct SystemPage {
+    toggles: [Option<usize>; 5],
+}
+
+#[derive(Debug, Clone)]
+struct CommunicationPage {
+    friend: Option<usize>,
+    favorite: Option<usize>,
+    friend_enabled: bool,
+    block_list_enabled: bool,
+}
+
+/// The option dialog's state for one open.
+#[derive(Resource, Default)]
+pub(crate) struct OptionDialogState {
+    /// The six volume sliders' integer draft (0..=100).
+    draft: [u8; 6],
+    /// The delayed preview in flight (b__0's reschedule): (due time, slider).
+    pending: Option<(f32, VolumeSlider)>,
+    /// The slider being dragged.
+    dragging: Option<VolumeSlider>,
+    /// `_currentPage`.
+    current: Option<Page>,
+    live_data: Option<LiveData>,
+    live: Option<LivePage>,
+    volume_set_up: bool,
+    system: Option<SystemPage>,
+    communication: Option<CommunicationPage>,
+    user_config: Option<UserConfig>,
+    /// Content offsets of the page scroll views, by page index.
+    scroll: [f32; 5],
+    /// A drag moving a page's content: (page, start y, start offset).
+    scrolling: Option<(Page, f32, f32)>,
+    /// The screen manager's handle of this dialog.
+    dialog_id: Option<DialogId>,
+}
+
+// ---------------------------------------------------------------------------
+// Page Setup / UpdateLocalData (OptionDialog.Activate/DeactivateCurrentPage)
+// ---------------------------------------------------------------------------
+
+/// `OptionLiveSetting.Setup` with `OptionNoteSetting.Setup`. The vibration
+/// root is hidden and its group never set up, so its state carries over.
+fn live_setup(data: &mut LiveData, previous: Option<&LivePage>) -> LivePage {
+    let mut toggles = [None; 12];
+    let set = |toggles: &mut [Option<usize>; 12], which: LiveToggle, value: Option<usize>| {
+        let index = LIVE_TOGGLES
+            .iter()
+            .position(|(t, _)| *t == which)
+            .expect("live toggle");
+        toggles[index] = value;
+    };
+    set(
+        &mut toggles,
+        LiveToggle::CutIn,
+        from_bool(data.bool("UseCutIn")),
+    );
+    set(
+        &mut toggles,
+        LiveToggle::NoteEffect,
+        from_bool(data.int("NoteEffect") == 0),
+    );
+    set(
+        &mut toggles,
+        LiveToggle::FeverEffect,
+        from_bool(data.int("FeverEffectTypeIndex") == 0),
+    );
+    set(
+        &mut toggles,
+        LiveToggle::SkillAndPraise,
+        from_bool(!data.bool("HiddenSkillAndPraise")),
+    );
+    set(
+        &mut toggles,
+        LiveToggle::SimultaneousPushingLine,
+        from_bool(data.bool("UseSimultaneousPushingLine")),
+    );
+    let vibration = previous.map_or(None, |p| p.toggles[LiveToggle::Vibration as usize]);
+    set(&mut toggles, LiveToggle::Vibration, vibration);
+    set(
+        &mut toggles,
+        LiveToggle::AllPerfectEffect,
+        from_bool(data.bool("UseAllPerfectEffect")),
+    );
+    set(
+        &mut toggles,
+        LiveToggle::FastLateFlick,
+        from_bool(data.bool("IsFastLateFlick")),
+    );
+    // The live mode switch (native jump table): High3D and Default3D 0,
+    // Mode2D 1, OriginalMV 2, Low 3; another value leaves the group.
+    let mode = match data.int("LiveMode") {
+        0 | 1 => Some(0),
+        2 => Some(1),
+        3 => Some(3),
+        4 => Some(2),
+        _ => None,
+    };
+    set(&mut toggles, LiveToggle::Mode, mode);
+    set(
+        &mut toggles,
+        LiveToggle::Quality,
+        Some(if data.int("QualityType") == 0 { 1 } else { 0 }),
+    );
+    set(
+        &mut toggles,
+        LiveToggle::Mirror,
+        from_bool(data.bool("IsMirror")),
+    );
+    set(
+        &mut toggles,
+        LiveToggle::Use120Fps,
+        from_bool(data.bool("Use120FPS")),
+    );
+    let selectors = vec![
+        Selector::new(
+            decimal_hundredths(data.f32("NoteSpeed")),
+            1,
+            12,
+            Steps::PerButton(&VARIATION_VALUES_1),
+            "",
+            true,
+        ),
+        Selector::new(
+            decimal_hundredths(data.f32("TimingAdjustData")),
+            -20,
+            20,
+            Steps::PerButton(&VARIATION_VALUES_1),
+            "",
+            true,
+        ),
+        Selector::new(
+            percent(data.f32("Brightness")),
+            50,
+            100,
+            Steps::Every(1000),
+            "%",
+            false,
+        ),
+        Selector::new(
+            percent(data.f32("LaneTransparent")),
+            0,
+            100,
+            Steps::Every(1000),
+            "%",
+            false,
+        ),
+        Selector::new(
+            percent(data.note_alpha()),
+            10,
+            100,
+            Steps::Every(500),
+            "%",
+            false,
+        ),
+        Selector::new(
+            percent(data.guide_alpha()),
+            10,
+            100,
+            Steps::Every(500),
+            "%",
+            false,
+        ),
+    ];
+    let page = LivePage {
+        selectors,
+        toggles,
+        note_skin_index: data.int("NoteSkinIndex"),
+        note_se_index: data.int("NoteSeIndex"),
+    };
+    // The alpha selectors' update action runs inside Setup's UpdateValue.
+    alpha_update(data, &page, 4);
+    alpha_update(data, &page, 5);
+    page
+}
+
+/// `UpdateSLongNoteAlphaSetting` / `UpdateGuideAlphaSetting`: the alpha
+/// selectors write the data object on every change.
+fn alpha_update(data: &mut LiveData, page: &LivePage, selector: usize) {
+    let key = if selector == 4 {
+        "NoteAlpha"
+    } else {
+        "GuideAlpha"
+    };
+    data.set(key, json!(page.selectors[selector].value() / 100.0));
+}
+
+/// `OptionLiveSetting.UpdateLocalData`.
+fn live_update_local(data: &mut LiveData, page: &LivePage) {
+    let s = &page.selectors;
+    let at = |which: LiveToggle| selected(page.toggles[which as usize]);
+    data.set("NoteSpeed", json!(s[0].value()));
+    data.set("TimingAdjustData", json!(s[1].value()));
+    data.set("Brightness", json!(s[2].value() / 100.0));
+    data.set("LaneTransparent", json!(s[3].value() / 100.0));
+    data.set("UseCutIn", json!(at(LiveToggle::CutIn) == 0));
+    data.set(
+        "NoteEffect",
+        json!(i64::from(at(LiveToggle::NoteEffect) != 0)),
+    );
+    data.set(
+        "FeverEffectTypeIndex",
+        json!(i64::from(at(LiveToggle::FeverEffect) != 0)),
+    );
+    data.set(
+        "HiddenSkillAndPraise",
+        json!(at(LiveToggle::SkillAndPraise) != 0),
+    );
+    data.set(
+        "UseSimultaneousPushingLine",
+        json!(at(LiveToggle::SimultaneousPushingLine) == 0),
+    );
+    data.set("UseVibration", json!(at(LiveToggle::Vibration) == 0));
+    data.set(
+        "UseAllPerfectEffect",
+        json!(at(LiveToggle::AllPerfectEffect) == 0),
+    );
+    data.set("IsFastLateFlick", json!(at(LiveToggle::FastLateFlick) == 0));
+    // MVQualityType High 1, Default 0.
+    let quality = if at(LiveToggle::Quality) == 0 { 1 } else { 0 };
+    data.set("QualityType", json!(quality));
+    // GetObjectLiveMode.
+    let mode = match at(LiveToggle::Mode) {
+        1 => 2,
+        2 => 4,
+        0 => {
+            if quality == 1 {
+                0
+            } else {
+                1
+            }
+        }
+        _ => 3,
+    };
+    data.set("LiveMode", json!(mode));
+    data.set("IsMirror", json!(at(LiveToggle::Mirror) == 0));
+    data.set("Use120FPS", json!(at(LiveToggle::Use120Fps) == 0));
+    data.set("NoteSkinIndex", json!(page.note_skin_index));
+    data.set("NoteSeIndex", json!(page.note_se_index));
+}
+
+/// `OptionSystemSetting.Setup`. `InitializeSelectIndex` of an index outside
+/// the group logs and changes nothing.
+fn system_setup(
+    app: &AppLocalOptions,
+    user: Option<UserConfig>,
+    previous: Option<&SystemPage>,
+    groups: usize,
+) -> SystemPage {
+    let mut toggles = previous.map_or([None; 5], |p| p.toggles);
+    match usize::try_from(app.default_music_ver)
+        .ok()
+        .filter(|v| *v < groups)
+    {
+        Some(index) => toggles[0] = Some(index),
+        None => error!(
+            "[option] DefaultMusicVer {}: unknown toggle index; the group is unchanged",
+            app.default_music_ver
+        ),
+    }
+    toggles[SCREEN_FIXED] = from_bool(app.screen_fixed);
+    // OnSelectedScreenFixed runs from InitializeSelectIndex.
+    info!(
+        "[option] System: DisplayUtility.ActivateFixedScreenOrientation({}) has no host counterpart",
+        app.screen_fixed
+    );
+    toggles[2] = from_bool(app.show_note_speed_dialog);
+    toggles[4] = from_bool(app.notify_live_bonus_max);
+    // A null user config reads as false.
+    toggles[SHOW_LOGIN_STATUS] = from_bool(user.is_some_and(|u| u.display_login_status));
+    SystemPage { toggles }
+}
+
+/// `OptionSystemSetting.UpdateLoacalData`.
+fn system_update_local(app: &mut AppLocalOptions, page: &SystemPage) {
+    app.default_music_ver = selected(page.toggles[0]) as i64;
+    app.screen_fixed = selected(page.toggles[SCREEN_FIXED]) == 0;
+    app.show_note_speed_dialog = selected(page.toggles[2]) == 0;
+    app.notify_live_bonus_max = selected(page.toggles[4]) == 0;
+}
+
+/// `OptionCommunicationSetting.Setup`: with a user config both groups take
+/// the stored values; without one both stay as `Awake` left them.
+fn communication_setup(
+    app: &AppLocalOptions,
+    user: Option<UserConfig>,
+    enabled_block_list: bool,
+) -> CommunicationPage {
+    let (friend, favorite) = match user {
+        Some(user) => (
+            Some(user.friend_request_status),
+            Some(usize::from(app.hide_story_favorite_comment)),
+        ),
+        None => (None, None),
+    };
+    CommunicationPage {
+        friend,
+        favorite,
+        friend_enabled: enabled_block_list,
+        block_list_enabled: enabled_block_list,
+    }
+}
+
+/// `OptionDialog.Save`'s report of the two server values, when the user config
+/// exists and one of them changed (`UserInformationUtility.UpdateUserConfig`).
+fn update_server_data(state: &OptionDialogState) {
+    let Some(user) = state.user_config else {
+        info!("[option] UpdateServerData: the user config is null (server state not in this product); nothing is sent");
+        return;
+    };
+    let login = state
+        .system
+        .as_ref()
+        .map_or(user.display_login_status, |p| {
+            selected(p.toggles[SHOW_LOGIN_STATUS]) == 0
+        });
+    let friend = state
+        .communication
+        .as_ref()
+        .map_or(user.friend_request_status, |p| selected(p.friend));
+    if login == user.display_login_status && friend == user.friend_request_status {
+        return;
+    }
+    info!("[option] UpdateServerData: UpdateUserConfig(isDisplayLoginStatus {login}, friendRequestStatus {friend}) goes to the server model");
+}
+
+impl OptionDialogState {
+    /// `DeactivateCurrentPage`.
+    fn deactivate(&mut self, settings: &mut LocalVolumeSettings, app: &mut AppLocalOptions) {
+        match self.current {
+            Some(Page::Live) => {
+                if let (Some(data), Some(page)) = (self.live_data.as_mut(), self.live.as_ref()) {
+                    live_update_local(data, page);
+                }
+            }
+            Some(Page::Volume) => volume_update_local(settings, &self.draft),
+            Some(Page::System) => {
+                if let Some(page) = &self.system {
+                    system_update_local(app, page);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `ActivateCurrentPage`: the page's Setup from the data objects; the
+    /// scroll content goes back to the top.
+    fn activate(
+        &mut self,
+        page: Page,
+        settings: &LocalVolumeSettings,
+        app: &AppLocalOptions,
+        bindings: &OptionBindings,
+    ) {
+        self.scroll[page.index()] = 0.0;
+        match page {
+            Page::Live => {
+                let data = self.live_data.as_mut().expect("live data loaded at open");
+                self.live = Some(live_setup(data, self.live.as_ref()));
+            }
+            Page::Volume => {
+                for which in SLIDERS {
+                    self.draft[which.index()] = which.initial(settings);
+                    info!(
+                        "[option]   Volume {} {}: {} ({}, preview cue {})",
+                        which.group().header(),
+                        which.kind_label(),
+                        self.draft[which.index()],
+                        which.preview_kind().label(),
+                        which.cue().unwrap_or("none"),
+                    );
+                }
+                self.volume_set_up = true;
+            }
+            Page::System => {
+                let groups = bindings
+                    .system
+                    .as_ref()
+                    .map_or(0, |b| b.groups[0].toggles.len());
+                self.system = Some(system_setup(
+                    app,
+                    self.user_config,
+                    self.system.as_ref(),
+                    groups,
+                ));
+            }
+            Page::Communication => {
+                self.communication = Some(communication_setup(
+                    app,
+                    self.user_config,
+                    MENU_SETUP.can_block_list_setting,
+                ));
+            }
+            Page::CustomScore => {}
+        }
+        info!("[option] ActivateCurrentPage: {page:?} Setup");
+    }
+
+    /// `OnSelectedTab`.
+    fn select_tab(
+        &mut self,
+        page: Page,
+        settings: &mut LocalVolumeSettings,
+        app: &mut AppLocalOptions,
+        bindings: &OptionBindings,
+    ) {
+        if self.current == Some(page) {
+            return;
+        }
+        self.deactivate(settings, app);
+        self.current = Some(page);
+        self.activate(page, settings, app, bindings);
+    }
+}
+
+/// `OptionVolumeSetting.UpdateLoacalData`: the draft into the session object.
+fn volume_update_local(settings: &mut LocalVolumeSettings, draft: &[u8; 6]) {
+    settings.live = draft_group(draft, Group::Live);
+    settings.system = draft_group(draft, Group::System);
+}
+
+/// `OptionDialog.Save`: every set-up page's UpdateLocalData (each page's
+/// method returns while its Setup has not run; read natively), UpdateServerData,
+/// then both storage objects: the volumes through the audio module's own
+/// write, the other members and `LiveSettingData` in one more write of the
+/// local settings document.
+fn save(
+    state: &mut OptionDialogState,
+    settings: &mut LocalVolumeSettings,
+    app: &mut AppLocalOptions,
+    cause: &str,
+) {
+    if let (Some(data), Some(page)) = (state.live_data.as_mut(), state.live.as_ref()) {
+        live_update_local(data, page);
+    }
+    if state.volume_set_up {
+        volume_update_local(settings, &state.draft);
+    }
+    if let Some(page) = &state.system {
+        system_update_local(app, page);
+    }
+    if let Some(page) = &state.communication {
+        app.hide_story_favorite_comment = selected(page.favorite) != 0;
+    }
+    update_server_data(state);
+    crate::audio::save_volume_settings(settings);
+    let mut sections: Vec<(&str, Value)> = app.sections();
+    if let Some(data) = &state.live_data {
+        sections.push((LIVE_SECTION, Value::Object(data.0.clone())));
+    }
+    match crate::settings_store::save_sections(&sections) {
+        Ok(()) => {
+            let readback = crate::settings_store::read_document()
+                .map(|document| sections.iter().all(|(key, value)| &document[*key] == value));
+            match readback {
+                Ok(true) => info!(
+                    "[option] {cause}: Save wrote {} sections (ApplicationLocalSettings members, {LIVE_SECTION}) to {}; read back equal",
+                    sections.len(),
+                    crate::settings_store::location()
+                ),
+                Ok(false) => warn!("[option] {cause}: Save read back different values"),
+                Err(error) => warn!("[option] {cause}: Save wrote, the read back failed: {error}"),
+            }
+        }
+        Err(error) => {
+            warn!("[option] {cause}: Save failed: {error}; the session keeps the new values")
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Painting
+// ---------------------------------------------------------------------------
+
+/// `CustomButton` / `CustomToggle` enabled state: `OnEnable` hides the covers,
+/// `OnDisable` shows them when the selectable greys out.
+fn paint_selectable(
+    view: &mut crate::ui_layout::UiPrefabView,
+    selectable: &SelectableBinding,
+    enabled: bool,
+) {
+    for cover in &selectable.covers {
+        view.set_visible(cover, selectable.grayout && !enabled);
+    }
+}
+
+/// A toggle group: the check mark of the one toggle on shows (`Toggle`'s
+/// graphic alpha 1 or 0; its 0.1 s `CrossFadeAlpha` is not ported).
+fn paint_group(
+    view: &mut crate::ui_layout::UiPrefabView,
+    group: &GroupBinding,
+    state: Option<usize>,
+    enabled: bool,
+) {
+    for (index, toggle) in group.toggles.iter().enumerate() {
+        if let Some(graphic) = &toggle.graphic {
+            view.set_alpha(graphic, if state == Some(index) { 1.0 } else { 0.0 });
+        }
+        paint_selectable(view, &toggle.selectable, enabled);
+    }
+}
+
+/// `float.ToString()` of a variation value (hundredths): 1, 0.1, 10, 5.
+fn variation_text(hundredths: i64) -> String {
+    let (whole, cents) = (hundredths / 100, hundredths % 100);
+    if cents == 0 {
+        whole.to_string()
+    } else {
+        format!("{whole}.{}", format!("{cents:02}").trim_end_matches('0'))
+    }
+}
+
+fn paint_live(
+    view: &mut crate::ui_layout::UiPrefabView,
+    layouts: &crate::ui_layout::UiLayouts,
+    binding: &LiveBinding,
+    page: &LivePage,
+) {
+    for (selector, bound) in page.selectors.iter().zip(&binding.selectors) {
+        view.set_text(&bound.text, selector.text());
+        for button in &bound.decrement {
+            paint_selectable(view, button, selector.can_decrement());
+        }
+        for button in &bound.increment {
+            paint_selectable(view, button, selector.can_increment());
+        }
+        // SetupButton: WORD_ADD_FORMAT / WORD_SUBTRACT_FORMAT with the step.
+        for (texts, key) in [
+            (&bound.increment_texts, "WORD_ADD_FORMAT"),
+            (&bound.decrement_texts, "WORD_SUBTRACT_FORMAT"),
+        ] {
+            for (index, text) in texts.iter().enumerate() {
+                let Some(step) = selector.step(index) else {
+                    continue;
+                };
+                let args = [variation_text(step)];
+                if let Some(value) = layouts.set_wording_text(KEY, text, key, Some(&args[..])) {
+                    view.set_text(text, value);
+                }
+            }
+        }
+    }
+    for (group, state) in binding.groups.iter().zip(page.toggles) {
+        paint_group(view, group, state, true);
+    }
+    // SetupVibration hides the vibration root.
+    view.set_visible(&binding.vibration_root, false);
+}
+
+/// `OptionSystemSetting.Setup`'s five buttons: (enabled, wording key written).
+/// Live rank matching is session state of the live game, off here; this
+/// product carries no MV or music bundles, so both pending download counts
+/// are 0.
+fn system_buttons(app: &AppLocalOptions) -> [(bool, Option<&'static str>); 5] {
+    let can_asset = MENU_SETUP.can_asset_setting;
+    let rank_matching = false;
+    let voice = if app.is_additional_voice {
+        "WORD_DOWNLOADED"
+    } else {
+        "WORD_BULK_DOWNLOAD"
+    };
+    let pending_downloads = 0;
+    let bulk = if pending_downloads == 0 {
+        (false, Some("WORD_DOWNLOADED"))
+    } else {
+        (true, None)
+    };
+    [
+        (
+            can_asset && !rank_matching && !app.is_additional_voice,
+            Some(voice),
+        ),
+        bulk,
+        bulk,
+        (can_asset, None),
+        (can_asset, None),
+    ]
+}
+
+fn paint_system(
+    view: &mut crate::ui_layout::UiPrefabView,
+    layouts: &crate::ui_layout::UiLayouts,
+    binding: &SystemBinding,
+    page: &SystemPage,
+    app: &AppLocalOptions,
+) {
+    for (group, state) in binding.groups.iter().zip(page.toggles) {
+        paint_group(view, group, state, true);
+    }
+    for (button, (enabled, wording)) in binding.buttons.iter().zip(system_buttons(app)) {
+        paint_selectable(view, &button.button, enabled);
+        if let Some(key) = wording {
+            // UIPartsCommonButton.SetWordingKey turns the key on first.
+            let text = layouts
+                .wordings
+                .get(key)
+                .unwrap_or_else(|| panic!("UI wording missing: {key}"));
+            view.set_text(&button.text, text.clone());
+        }
+    }
+}
+
+fn paint_communication(
+    view: &mut crate::ui_layout::UiPrefabView,
+    binding: &CommunicationBinding,
+    page: &CommunicationPage,
+) {
+    paint_group(view, &binding.friend, page.friend, page.friend_enabled);
+    paint_group(view, &binding.favorite, page.favorite, true);
+    paint_selectable(view, &binding.block_list, page.block_list_enabled);
+}
+
+/// `UpdateTabLines` (read natively): over the tabs whose GameObject is
+/// active, the line hides on the selected one (its `UIPartsDialogTab.isOn`),
+/// on the one before it and on the last; the others show it.
+fn tab_lines(active: &[usize], selected: Option<usize>) -> Vec<(usize, bool)> {
+    let selected = selected
+        .and_then(|tab| active.iter().position(|a| *a == tab))
+        .map_or(-1, |k| k as i64);
+    active
+        .iter()
+        .enumerate()
+        .map(|(k, tab)| {
+            let k = k as i64;
+            let hidden = k == selected || k == selected - 1 || k == active.len() as i64 - 1;
+            (*tab, !hidden)
+        })
+        .collect()
+}
+
+/// `Setup`'s `DisableToggle(0)` / `EnableToggle(4)`: whether a tab's
+/// GameObject is active.
+fn tab_shown(page: Page) -> bool {
+    match page {
+        Page::CustomScore => MENU_SETUP.show_custom_score_tab,
+        Page::Communication => MENU_SETUP.show_communication_tab,
+        _ => true,
+    }
+}
+
+fn paint(
+    view: &mut crate::ui_layout::UiPrefabView,
+    layouts: &crate::ui_layout::UiLayouts,
+    doc: &UiPrefab,
+    bindings: &OptionBindings,
+    state: &OptionDialogState,
+    app: &AppLocalOptions,
+) {
+    let active: Vec<usize> = (0..bindings.tabs.len())
+        .filter(|i| tab_shown(bindings.tabs[*i].page))
+        .collect();
+    let selected = bindings
+        .tabs
+        .iter()
+        .position(|tab| Some(tab.page) == state.current);
+    for (index, tab) in bindings.tabs.iter().enumerate() {
+        view.set_visible(&tab.selectable.control, tab_shown(tab.page));
+        // UIPartsDialogTab.On / Off: backgroundImage.enabled (the image is
+        // its node's only graphic).
+        view.set_visible(&tab.background, selected == Some(index));
+        // A page this layout cannot build shows its tab as a disabled toggle.
+        paint_selectable(view, &tab.selectable, bindings.built(tab.page));
+    }
+    for (tab, shown) in tab_lines(&active, selected) {
+        if let Some(line) = &bindings.tabs[tab].line {
+            view.set_visible(line, shown);
+        }
+    }
+    for page in PAGES {
+        if let Some(node) = &bindings.pages[page.index()] {
+            view.set_visible(node, state.current == Some(page));
+        }
+        if let Some(scroll) = &bindings.scrolls[page.index()] {
+            let base = doc.nodes[doc.find(&scroll.content).expect("scroll content node")]
+                .rect
+                .anchored_position;
+            view.set_anchored_position(
+                &scroll.content,
+                Vec2::new(base[0], base[1] + state.scroll[page.index()]),
+            );
+        }
+    }
+    match state.current {
+        Some(Page::Live) => {
+            if let (Ok(binding), Some(page)) = (&bindings.live, &state.live) {
+                paint_live(view, layouts, binding, page);
+            }
+        }
+        Some(Page::Volume) => {
+            for which in SLIDERS {
+                let path = slider_root(which);
+                let value = state.draft[which.index()];
+                view.set_text(&format!("{path}/NumText"), value.to_string());
+                view.set_slider(&format!("{path}/UIPartsSlider"), value as f32 / 100.0);
+                view.set_visible(&format!("{path}/UIPartsDecrementButton/Cover"), value == 0);
+                view.set_visible(
+                    &format!("{path}/UIPartsIncrementButton/Cover"),
+                    value == 100,
+                );
+            }
+        }
+        Some(Page::System) => {
+            if let (Ok(binding), Some(page)) = (&bindings.system, &state.system) {
+                paint_system(view, layouts, binding, page, app);
+            }
+        }
+        Some(Page::Communication) => {
+            if let (Ok(binding), Some(page)) = (&bindings.communication, &state.communication) {
+                paint_communication(view, binding, page);
+            }
+        }
+        Some(Page::CustomScore) | None => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entities and systems
+// ---------------------------------------------------------------------------
+
+/// The dialog root (Dialog slot; open = the shell dialog state's option bit).
 #[derive(Component)]
 pub(crate) struct OptionDialogRoot;
 
-/// 选项对话框运行态。
-#[derive(Resource, Default)]
-pub(crate) struct OptionDialogState {
-    /// 六滑杆的整数草稿（0..=100；开框沿从档值 ×100 取整初始化）。
-    draft: [u8; 6],
-    /// 在途的延时预览（b__0 的重排结果）：(到点 elapsed 秒, 滑杆)。
-    pending: Option<(f32, VolumeSlider)>,
-    /// 正在拖动的滑杆（Drag Began 在轨道上 → Some；End → None）。
-    dragging: Option<VolumeSlider>,
-}
-
-/// 铺装闩（视图一次铺成后置）。
-#[derive(Resource, Default)]
-pub(crate) struct OptionDialogSpawned;
-
-// ---------------------------------------------------------------------------
-// Startup
-// ---------------------------------------------------------------------------
-
 pub(crate) fn init(mut commands: Commands) {
     commands.init_resource::<OptionDialogState>();
+    let app = match crate::settings_store::read_document() {
+        Ok(document) => AppLocalOptions::load(&document),
+        Err(error) => {
+            warn!("[option] the local settings document is unreadable ({error}); ApplicationLocalSettings starts from its constructor");
+            AppLocalOptions::default()
+        }
+    };
+    info!("[option] ApplicationLocalSettings members of the dialog: {app:?}");
+    commands.insert_resource(app);
 }
 
-// ---------------------------------------------------------------------------
-// Update：铺件（图集到齐一次）
-// ---------------------------------------------------------------------------
-
-/// Build the source dialog once; the product settings panel owns its entry.
+/// Resolve the bindings and build the source dialog once; the product
+/// settings panel owns its entry.
 pub(crate) fn spawn_when_ready(
     mut commands: Commands,
     layouts: Res<crate::ui_layout::UiLayouts>,
     server: Res<AssetServer>,
-    spawned: Option<Res<OptionDialogSpawned>>,
+    bindings: Option<Res<OptionBindings>>,
 ) {
-    if spawned.is_some() || !layouts.ready("Option", &server) {
+    if bindings.is_some() || !layouts.ready(KEY, &server) {
         return;
     }
-    commands.spawn((OptionDialogRoot, Visibility::Hidden, Transform::default(),
-        RenderLayers::layer(SITEMAP_LAYER), crate::ui_layout::UiPrefabView::new("Option", SITEMAP_LAYER)));
-    commands.insert_resource(OptionDialogSpawned);
-}
-
-// ---------------------------------------------------------------------------
-// Update：摆位与开关沿
-// ---------------------------------------------------------------------------
-
-/// 开框沿（Setup 的同形日志）：开局页 · 页签装值 · 六滑杆逐杆装值（档值
-/// ×100 取整 + 声型与预览 cue）。
-fn on_open(settings: &LocalVolumeSettings, draft: &[u8; 6]) {
-    info!(
-        "[option] 开框：选项对话框（Dialog 槽，Common1ButtonDialog 一钮形，allowCloseExternal=true）\
-         → Setup(tabIndex=1 音量页)——开局页取音量页是本仓选值（真源开局页 Live=0，演出域未建）"
-    );
-    info!(
-        "[option] 页签装值：演出(Live=0) 置灰未建 · 音量(Volume=1) 当前页 · 系统(System=2) 置灰未建 · \
-         通信(Communication=3) 置灰未建（本仓只建音量页，其余三页具名挂账）"
-    );
-    for which in SLIDERS {
-        let stored = match which.kind() {
-            SliderKind::Bgm => which.group().data(settings).bgm,
-            SliderKind::Se => which.group().data(settings).se,
-            SliderKind::Voice => which.group().data(settings).voice,
-        };
-        info!(
-            "[option]   滑杆 {}·{}：装值 {}（档 {} 组 {:.2} ×100 取整 · {} · 预览 cue {}）",
-            which.group().header(),
-            which.kind_label(),
-            draft[which.index()],
-            which.group().header(),
-            stored,
-            which.preview_kind().label(),
-            which.cue().unwrap_or("空（型 0 静默）"),
-        );
+    let doc = layouts.document(KEY).expect("ready layout");
+    // The wordings the pages write resolve here or the write refuses later.
+    let missing: Vec<&str> = WORDINGS
+        .iter()
+        .copied()
+        .filter(|key| !layouts.wordings.contains_key(*key))
+        .collect();
+    if !missing.is_empty() {
+        warn!("[option] wordings missing from this root: {missing:?}; a page writing one of them refuses");
     }
+    commands.insert_resource(OptionBindings::from_prefab(doc));
+    commands.spawn((
+        OptionDialogRoot,
+        Visibility::Hidden,
+        Transform::default(),
+        RenderLayers::layer(SITEMAP_LAYER),
+        crate::ui_layout::UiPrefabView::new(KEY, SITEMAP_LAYER),
+    ));
 }
 
-/// Update：摆位与逐帧状态。每帧——
-/// 1. 开关沿（开框沿：草稿从档取整 + Setup 行组；关框沿：清拖动）；
-/// 2. 在途延时预览到点即放（b__1 的 0.15s；不问开关态——真源 DelayCall
-///    不随框撤，此处开框沿清拍为简化，具名）；
-/// 3. 对话框根可见性 = option_open 位；
-/// 4. 逐件：填充/柄位按草稿摆，±钮按界置灰，页签按已建置灰，文案变更
-///    整组重建。
-#[allow(clippy::type_complexity)]
-pub(crate) fn place(
-    mut commands: Commands, windows: Query<&Window, With<PrimaryWindow>>, time: Res<Time>,
-    dialog: Res<ShellDialogState>, settings: Res<LocalVolumeSettings>,
-    mut state: ResMut<OptionDialogState>, mut voice: ResMut<VoiceChannel>, mut se_requests: ResMut<SeRequests>,
-    mut roots: Query<(&mut Visibility, &mut Transform, &mut crate::ui_layout::UiPrefabView), With<OptionDialogRoot>>,
-    mut was_open: Local<bool>,
+/// The open edge: `LiveSettingData.LoadFromStorage`, the user config, then
+/// `Setup(MENU_SETUP)` and `InitializeSelectIndex(opening)`.
+fn open(
+    state: &mut OptionDialogState,
+    settings: &LocalVolumeSettings,
+    app: &AppLocalOptions,
+    bindings: &OptionBindings,
 ) {
-    let open = dialog.option_open;
-    match (*was_open, open) {
+    let document = crate::settings_store::read_document().unwrap_or_else(|error| {
+        warn!("[option] the local settings document is unreadable ({error}); {LIVE_SECTION} starts from its constructor");
+        Value::Null
+    });
+    *state = OptionDialogState {
+        live_data: Some(LiveData::load(&document)),
+        user_config: user_config_mock(),
+        ..OptionDialogState::default()
+    };
+    let opening = PAGES[MENU_SETUP.opening()];
+    let first = if bindings.built(opening) {
+        opening
+    } else {
+        let built = bindings
+            .tabs
+            .iter()
+            .map(|tab| tab.page)
+            .find(|page| tab_shown(*page) && bindings.built(*page))
+            .expect("the Volume page is built");
+        warn!("[option] Setup opens the {opening:?} page, which this layout cannot build; the dialog opens {built:?}");
+        built
+    };
+    info!(
+        "[option] open: Setup(tabIndex {}, canAssetSetting {}, canBlockListSetting {}, showCustomScoreTab {}, showCommunicationTab {}) -> {first:?}",
+        MENU_SETUP.tab_index, MENU_SETUP.can_asset_setting, MENU_SETUP.can_block_list_setting,
+        MENU_SETUP.show_custom_score_tab, MENU_SETUP.show_communication_tab,
+    );
+    // InitializeSelectIndex fires OnSelectedTab; no page was current.
+    state.current = Some(first);
+    state.activate(first, settings, app, bindings);
+}
+
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+pub(crate) fn place(
+    mut commands: Commands,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    time: Res<Time>,
+    dialog: Res<ShellDialogState>,
+    settings: Res<LocalVolumeSettings>,
+    app: Res<AppLocalOptions>,
+    mut state: ResMut<OptionDialogState>,
+    mut voice: ResMut<VoiceChannel>,
+    mut se_requests: ResMut<SeRequests>,
+    mut roots: Query<
+        (
+            &mut Visibility,
+            &mut Transform,
+            &mut crate::ui_layout::UiPrefabView,
+        ),
+        With<OptionDialogRoot>,
+    >,
+    mut was_open: Local<bool>,
+    root_canvas: Option<Res<crate::canvas::RootCanvas>>,
+    layouts: Res<crate::ui_layout::UiLayouts>,
+    bindings: Option<Res<OptionBindings>>,
+    mut stack: ResMut<UiLayerStack>,
+) {
+    let Some(bindings) = bindings else {
+        return;
+    };
+    let open_now = dialog.option_open;
+    match (*was_open, open_now) {
         (false, true) => {
-            // 开框沿：草稿从档取整（真源 Setup：滑杆装档值 ×100）。
-            for which in SLIDERS {
-                state.draft[which.index()] = which.initial(&settings);
+            open(&mut state, &settings, &app, &bindings);
+            // Shown without an open animation here. The dialog's back key is
+            // Common1ButtonDialog's OnClickOK (Save, then close).
+            match stack.show_dialog(OPTION_DIALOG, DisplayLayerType::LayerDialog, DialogBackKey::Close, "settings panel (OptionDialog.Setup)") {
+                Ok(id) => {
+                    stack.open_dialog(id);
+                    stack.dialog_open_finished(id);
+                    state.dialog_id = Some(id);
+                }
+                Err(error) => warn!("[option] {error}; the dialog shows outside the screen manager and the back key does not reach it"),
             }
-            // 弃置在途预览与拖动：重开框的新 Setup 不受旧拍尾巴干扰
-            //（真源 DelayCall 挂管理器不随框撤，此处简化，具名）。
-            state.pending = None;
-            state.dragging = None;
-            on_open(&settings, &state.draft);
         }
         (true, false) => {
             state.dragging = None;
+            state.scrolling = None;
+            state.current = None;
+            if let Some(id) = state.dialog_id.take() {
+                stack.close_dialog(id);
+                stack.dialog_destroyed(id);
+            }
         }
         _ => {}
     }
-    *was_open = open;
+    *was_open = open_now;
 
-    // 在途延时预览到点（b__1 的 0.15s）。
+    // The delayed preview (b__1 after 0.15 s).
     if let Some((at, which)) = state.pending {
         if time.elapsed_secs() >= at {
             state.pending = None;
@@ -487,26 +2063,28 @@ pub(crate) fn place(
         }
     }
 
-    let Ok(window) = windows.single() else { return; };
-    let scale = canvas_scale(window.width(),window.height());
-    for (mut visible,mut transform,mut view) in &mut roots {
-        *visible = if open {Visibility::Inherited}else{Visibility::Hidden}; transform.scale=Vec3::splat(scale);
-        for tab in TABS {view.set_visible(&format!("ContentRoot/Content/{}",tab.source_name()),tab==OptionTab::Volume);}
-        for (line,on) in [("@135036",true),("@68777",false),("@62301",true),("@44320",true)] {view.set_visible(line,on);}
-        for (cover,on) in [("@128425",true),("@57742",false),("@72401",true),("@50041",true)] {view.set_visible(cover,on);}
-        for which in SLIDERS {
-            let path=slider_root(which); let value=state.draft[which.index()];
-            view.set_text(&format!("{path}/NumText"),value.to_string());
-            view.set_slider(&format!("{path}/UIPartsSlider"),value as f32/100.0);
-            view.set_visible(&format!("{path}/UIPartsDecrementButton/Cover"),value==0);
-            view.set_visible(&format!("{path}/UIPartsIncrementButton/Cover"),value==100);
+    let (Ok(window), Some(root_canvas)) = (windows.single(), root_canvas.as_deref()) else {
+        return;
+    };
+    let Some(doc) = layouts.document(KEY) else {
+        return;
+    };
+    let scale = root_canvas.scale(window);
+    for (mut visible, mut transform, mut view) in &mut roots {
+        *visible = if open_now {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        transform.scale = Vec3::splat(scale);
+        if open_now {
+            paint(&mut view, &layouts, doc, &bindings, &state, &app);
         }
     }
 }
-
-/// 延时预览到点的一拍（b__1）：cue 空（BGM 两杆）静默返回；cue 非空先
-/// `StopVoiceAll` 再按型播——型 1 走真 SE 队列，型 2/3/4 无渠道对应物
-/// 具名不播（见模块头）。
+/// The delayed preview's call (b__1): an empty cue (the two BGM sliders)
+/// returns; otherwise `StopVoiceAll`, then the slider's sound type through
+/// `SoundManager`. The four cues are in the common menu bank.
 fn fire_preview(
     commands: &mut Commands,
     which: VolumeSlider,
@@ -515,47 +2093,35 @@ fn fire_preview(
     se_requests: &mut SeRequests,
 ) {
     let Some(cue) = which.cue() else {
-        return; // 型 0（BGM 两杆）：cue 空 ⇒ 预览静默返回（真源同支）
+        return;
     };
-    // StopVoiceAll 先于预览声（真源序：cue 非空即先停语音，型别在后）。
     stop_voice_all(voice, commands);
-    let who = format!("{}·{}", which.group().header(), which.kind_label());
+    let who = format!("{} {}", which.group().header(), which.kind_label());
+    let volume = value as f32 * 0.01;
     match which.preview_kind() {
         PreviewKind::Se => {
-            // 型 1（PlaySEOneShot）⇒ 真 SE 请求队列。cue 未提取 ⇒ 通道侧
-            // 每 cue 一次的缺流告警就是它的诚实行（ExistsCueName
-            // fail-closed 同款）。
+            // Type 1, PlaySEOneShot: the UI SE player.
             se_requests.0.push(SeRequest {
+                owner: None,
                 cue: cue.into(),
                 class: SeClass::Ui,
                 source: "option_preview",
             });
-            info!(
-                "[option] 延时预览（0.15s 到点，b__1）：{who} → 型 1 PlaySEOneShot({cue}) 入 SE 队列\
-                 （值 {value}；cue 未提取 ⇒ 通道侧具名跳过）"
-            );
+            info!("[option] preview (0.15 s, b__1): {who} -> type 1 PlaySEOneShot({cue})");
         }
         PreviewKind::Voice => {
-            info!(
-                "[option] 延时预览（0.15s 到点，b__1）：{who} → 型 2 PlayVoice({cue}, 1.0)——voice 通道\
-                 词表只有对话行（talk voice/partvoice），无对应渠道，具名不播（值 {value}）"
-            );
+            se_requests.preview(PreviewSound::Voice(cue.into()));
+            info!("[option] preview (0.15 s, b__1): {who} -> type 2 PlayVoice({cue}, 1)");
         }
         PreviewKind::IngameSe => {
-            info!(
-                "[option] 延时预览（0.15s 到点，b__1）：{who} → 型 3 SamplePlaySE({cue}, {:.2})——SE 请求\
-                 无逐请求音量位，无对应渠道，具名不播",
-                value as f32 * 0.01
-            );
+            se_requests.preview(PreviewSound::SampleSe(cue.into(), volume));
+            info!("[option] preview (0.15 s, b__1): {who} -> type 3 SamplePlaySE({cue}, {volume:.2})");
         }
         PreviewKind::IngameVoice => {
-            info!(
-                "[option] 延时预览（0.15s 到点，b__1）：{who} → 型 4 PlayVoiceFixedVolume({cue}, {:.2})——\
-                 同型 3，无对应渠道，具名不播",
-                value as f32 * 0.01
-            );
+            se_requests.preview(PreviewSound::VoiceFixed(cue.into(), volume));
+            info!("[option] preview (0.15 s, b__1): {who} -> type 4 PlayVoiceFixedVolume({cue}, {volume:.2})");
         }
-        PreviewKind::Bgm => unreachable!("cue 非空的滑杆不会落在型 0"),
+        PreviewKind::Bgm => unreachable!("a slider with a cue is not type 0"),
     }
 }
 
@@ -569,20 +2135,60 @@ fn to_canvas(position: Vec2, width: f32, height: f32, scale: f32) -> Vec2 {
 }
 
 fn slider_root(which: VolumeSlider) -> String {
-    let group=if which.index()<3 {"LiveVolume"}else{"SystemVolume"};
-    let suffix=match which.index()%3 {0=>"",1=>" (1)",_=>" (2)"};
+    let group = if which.index() < 3 {
+        "LiveVolume"
+    } else {
+        "SystemVolume"
+    };
+    let suffix = match which.index() % 3 {
+        0 => "",
+        1 => " (1)",
+        _ => " (2)",
+    };
     format!("Volume/ScorollView/Viewport/Content/{group}/UIPartsSliderLabelContent{suffix}/UIPartsSelectCost")
 }
-fn source_hit(canvas:Vec2,path:&str,layouts:&crate::ui_layout::UiLayouts,view:&crate::ui_layout::UiPrefabView,size:Vec2)->bool {
-    view.rect(layouts,path,size).is_some_and(|r|r.active&&r.contains(canvas))
+fn source_hit(
+    canvas: Vec2,
+    path: &str,
+    layouts: &crate::ui_layout::UiLayouts,
+    view: &crate::ui_layout::UiPrefabView,
+    size: Vec2,
+) -> bool {
+    view.rect(layouts, path, size)
+        .is_some_and(|r| r.active && r.contains(canvas))
 }
-fn track_slider_at(canvas: Vec2, layouts:&crate::ui_layout::UiLayouts,view:&crate::ui_layout::UiPrefabView,size:Vec2) -> Option<VolumeSlider> {
-    SLIDERS.iter().copied().find(|which|source_hit(canvas,&format!("{}/UIPartsSlider",slider_root(*which)),layouts,view,size))
+fn track_slider_at(
+    canvas: Vec2,
+    layouts: &crate::ui_layout::UiLayouts,
+    view: &crate::ui_layout::UiPrefabView,
+    size: Vec2,
+) -> Option<VolumeSlider> {
+    SLIDERS.iter().copied().find(|which| {
+        source_hit(
+            canvas,
+            &format!("{}/UIPartsSlider", slider_root(*which)),
+            layouts,
+            view,
+            size,
+        )
+    })
 }
-fn value_from_x(which: VolumeSlider, x: f32, layouts:&crate::ui_layout::UiLayouts,view:&crate::ui_layout::UiPrefabView,size:Vec2) -> u8 {
-    let Some(rect)=view.rect(layouts,&format!("{}/UIPartsSlider/HandleSlideArea",slider_root(which)),size) else {return 0;};
-    let t=(x-(rect.center().x-rect.size.x*0.5))/rect.size.x;
-    (t*100.0).round().clamp(0.0,100.0) as u8
+fn value_from_x(
+    which: VolumeSlider,
+    x: f32,
+    layouts: &crate::ui_layout::UiLayouts,
+    view: &crate::ui_layout::UiPrefabView,
+    size: Vec2,
+) -> u8 {
+    let Some(rect) = view.rect(
+        layouts,
+        &format!("{}/UIPartsSlider/HandleSlideArea", slider_root(which)),
+        size,
+    ) else {
+        return 0;
+    };
+    let t = (x - (rect.center().x - rect.size.x * 0.5)) / rect.size.x;
+    (t * 100.0).round().clamp(0.0, 100.0) as u8
 }
 
 /// 滑杆变更的整链（b__0）：写草稿 → 重排 0.15s 延时预览 → UpdateVolume
@@ -623,195 +2229,515 @@ fn set_slider(
     }
 }
 
-/// 保存关闭入口共用六值提交，不改变音量施加与存储失败策略。
-fn commit_draft(settings: &mut LocalVolumeSettings, draft: &[u8; 6], cause: &str) {
-    let next = LocalVolumeSettings {
-        live: draft_group(draft, Group::Live),
-        system: draft_group(draft, Group::System),
-    };
-    info!(
-        "[option] {cause} → UpdateLoacalData：六值 ×0.01 写档对象（Live{{bgm {:.2}, se {:.2}, voice {:.2}}} · \
-         System{{bgm {:.2}, se {:.2}, voice {:.2}}}）→ 落盘 → 关框",
-        next.live.bgm,
-        next.live.se,
-        next.live.voice,
-        next.system.bgm,
-        next.system.se,
-        next.system.voice,
-    );
-    *settings = next;
-    save_volume_settings(&next);
+// ---------------------------------------------------------------------------
+// Taps and drags (modal)
+// ---------------------------------------------------------------------------
+
+/// What a tap on the dialog asks the host to do.
+enum TapOutcome {
+    /// Handled (or eaten) inside the dialog.
+    Stay,
+    /// Close without `Save` (the close button).
+    Close(&'static str),
+    /// `Save`, then close.
+    SaveAndClose(&'static str),
 }
 
-/// 框内点按分派（模态消费在外层记）。命中优先序：关闭 → OK → 页签 →
-/// 六杆的 ±钮 → 轨道/柄（点按落值）→ 面板空白（吃掉不动作）→ 框外
-/// （提交收框）。
-fn dispatch_tap(
-    layouts: &crate::ui_layout::UiLayouts, view:&crate::ui_layout::UiPrefabView, size:Vec2,
+/// The toggle of `group` under the tap, when it is shown and enabled.
+fn tapped_toggle(hit: &dyn Fn(&str) -> bool, group: &GroupBinding) -> Option<usize> {
+    group
+        .toggles
+        .iter()
+        .position(|toggle| hit(&toggle.selectable.control))
+}
+
+/// A group's toggle turned on by a tap (`CustomIndexToggleGroup` with switch
+/// off disallowed: tapping the toggle already on changes nothing). Returns
+/// whether the selection changed.
+fn select_toggle(slot: &mut Option<usize>, index: usize) -> bool {
+    if *slot == Some(index) {
+        return false;
+    }
+    *slot = Some(index);
+    true
+}
+
+struct TapContext<'a> {
+    hit: &'a dyn Fn(&str) -> bool,
+    layouts: &'a crate::ui_layout::UiLayouts,
+    sounds: &'a mut SeRequests,
+    configs: Option<&'a crate::client_config::ClientConfigs>,
+}
+
+impl TapContext<'_> {
+    fn sound(&mut self, control: &str) {
+        self.sounds.source_button(self.layouts, KEY, control);
+    }
+}
+
+fn tap_live(cx: &mut TapContext, binding: &LiveBinding, state: &mut OptionDialogState) -> bool {
+    let (Some(page), Some(data)) = (state.live.as_mut(), state.live_data.as_mut()) else {
+        return false;
+    };
+    for (index, (bound, selector)) in binding
+        .selectors
+        .iter()
+        .zip(page.selectors.iter_mut())
+        .enumerate()
+    {
+        for (direction, buttons) in [(-1, &bound.decrement), (1, &bound.increment)] {
+            let Some(button) = buttons.iter().position(|b| (cx.hit)(&b.control)) else {
+                continue;
+            };
+            let enabled = if direction < 0 {
+                selector.can_decrement()
+            } else {
+                selector.can_increment()
+            };
+            if enabled {
+                cx.sound(&buttons[button].control);
+                let Some(step) = selector.step(button) else {
+                    return true;
+                };
+                let before = selector.text();
+                selector.update(selector.value + direction * step);
+                info!(
+                    "[option] Live {}: {before} -> {}",
+                    LIVE_SELECTORS[index],
+                    selector.text()
+                );
+                // The alpha selectors' update action.
+                if index >= 4 {
+                    let key = if index == 4 {
+                        "NoteAlpha"
+                    } else {
+                        "GuideAlpha"
+                    };
+                    data.set(key, json!(selector.value() / 100.0));
+                }
+            }
+            return true;
+        }
+    }
+    for (index, group) in binding.groups.iter().enumerate() {
+        let Some(toggle) = tapped_toggle(cx.hit, group) else {
+            continue;
+        };
+        cx.sound(&group.toggles[toggle].selectable.control);
+        let (which, name) = LIVE_TOGGLES[index];
+        if which == LiveToggle::Use120Fps && toggle == 0 && page.toggles[index] != Some(0) {
+            // OnSelectedUse120Fps: index 0 asks Common2ButtonMediumDialog
+            // (MSG_USE_120FPS_DIALOG); cancel sets index 1 without notify.
+            info!("[option] Live {name}: the 120 fps confirmation dialog is not in this product; the toggle stays as the cancel leaves it");
+            page.toggles[index] = Some(1);
+            return true;
+        }
+        if select_toggle(&mut page.toggles[index], toggle) {
+            info!("[option] Live {name}: index {toggle}");
+        }
+        return true;
+    }
+    let counts = |key: i32| cx.configs.map(|configs| i64::from(configs.int(key)));
+    for (pair, slot, key, name) in [
+        (&binding.skin, 0, 79, "NoteSkinIndex"),
+        (&binding.tap_se, 1, 80, "NoteSeIndex"),
+    ] {
+        for (direction, button) in [(-1i64, &pair[0]), (1, &pair[1])] {
+            if !(cx.hit)(&button.control) {
+                continue;
+            }
+            let Some(count) = counts(key) else {
+                warn!("[option] Live {name}: ClientConfig.Live is not loaded; the index stays");
+                return true;
+            };
+            cx.sound(&button.control);
+            let value = if slot == 0 {
+                &mut page.note_skin_index
+            } else {
+                &mut page.note_se_index
+            };
+            let next = *value + direction;
+            *value = if next < 0 {
+                count - 1
+            } else if next >= count {
+                0
+            } else {
+                next
+            };
+            info!("[option] Live {name}: {} of {count} (the note previews and names come from the live note bundles, not in this product)", *value);
+            return true;
+        }
+    }
+    if (cx.hit)(&binding.timing_tap.control) {
+        cx.sound(&binding.timing_tap.control);
+        info!("[option] Live timing tap: LiveNoteSettingDialog is not in this product");
+        return true;
+    }
+    for (button, cue) in binding.tests.iter().zip([
+        "SE_LIVE_PERFECT",
+        "SE_LIVE_FLICK",
+        "SE_LIVE_LONG",
+        "SE_LIVE_TRACE",
+    ]) {
+        if (cx.hit)(&button.control) {
+            cx.sound(&button.control);
+            info!("[option] Live test sound {cue}: the live note SE banks are not in this product");
+            return true;
+        }
+    }
+    false
+}
+
+fn tap_system(
+    cx: &mut TapContext,
+    binding: &SystemBinding,
+    state: &mut OptionDialogState,
+    app: &AppLocalOptions,
+) -> bool {
+    let Some(page) = state.system.as_mut() else {
+        return false;
+    };
+    for (index, group) in binding.groups.iter().enumerate() {
+        let Some(toggle) = tapped_toggle(cx.hit, group) else {
+            continue;
+        };
+        cx.sound(&group.toggles[toggle].selectable.control);
+        if select_toggle(&mut page.toggles[index], toggle) {
+            info!("[option] System {}: index {toggle}", SYSTEM_TOGGLES[index]);
+            if index == SCREEN_FIXED {
+                info!("[option] System: DisplayUtility.ActivateFixedScreenOrientation({}) has no host counterpart", toggle == 0);
+            }
+        }
+        return true;
+    }
+    for ((button, (enabled, _)), name) in binding
+        .buttons
+        .iter()
+        .zip(system_buttons(app))
+        .zip(SYSTEM_BUTTONS)
+    {
+        if (cx.hit)(&button.button.control) {
+            if enabled {
+                cx.sound(&button.button.control);
+                info!(
+                    "[option] System {name}: its download or cache dialog is not in this product"
+                );
+            }
+            return true;
+        }
+    }
+    false
+}
+
+/// Returns the outcome when a control of the page took the tap.
+fn tap_communication(
+    cx: &mut TapContext,
+    binding: &CommunicationBinding,
+    state: &mut OptionDialogState,
+) -> Option<TapOutcome> {
+    let page = state.communication.as_mut()?;
+    if let Some(toggle) = tapped_toggle(cx.hit, &binding.friend) {
+        if page.friend_enabled {
+            cx.sound(&binding.friend.toggles[toggle].selectable.control);
+            select_toggle(&mut page.friend, toggle);
+        }
+        return Some(TapOutcome::Stay);
+    }
+    if let Some(toggle) = tapped_toggle(cx.hit, &binding.favorite) {
+        cx.sound(&binding.favorite.toggles[toggle].selectable.control);
+        select_toggle(&mut page.favorite, toggle);
+        return Some(TapOutcome::Stay);
+    }
+    if (cx.hit)(&binding.block_list.control) {
+        if !page.block_list_enabled {
+            return Some(TapOutcome::Stay);
+        }
+        cx.sound(&binding.block_list.control);
+        // PushUIScreen(BlockList) and OnPushedListManagementButton (Save,
+        // OnApplyOption, Close).
+        info!("[option] Communication block list: the BlockList screen is not in this product");
+        return Some(TapOutcome::SaveAndClose("block list"));
+    }
+    None
+}
+
+fn tap_volume(
     canvas: Vec2,
     now: f32,
-    settings: &mut LocalVolumeSettings,
+    layouts: &crate::ui_layout::UiLayouts,
+    view: &crate::ui_layout::UiPrefabView,
+    size: Vec2,
     state: &mut OptionDialogState,
     bus: &mut VolumeBus,
-    close: &mut Option<&'static str>,
-) {
-    if source_hit(canvas,"WindowRoot/UIPartsCloseButton",layouts,view,size) {
-        info!(
-            "[option] 关闭钮按下 → 关框——草稿弃置、已施加的音量不回滚（施加即时无回滚支，真源同形）、档不动"
-        );
-        *close = Some("关闭钮");
-        return;
-    }
-    if source_hit(canvas,"FooterButtons/UIPartsCommonButton",layouts,view,size) {
-        commit_draft(settings, &state.draft, "OK 按下");
-        *close = Some("OK");
-        return;
-    }
-    for tab in TABS {
-        if source_hit(canvas,match tab {OptionTab::Live=>"@15056",OptionTab::Volume=>"@79073",OptionTab::System=>"@85519",OptionTab::Communication=>"@105193"},layouts,view,size) {
-            if tab.built() {
-                info!("[option] 页签「{}」按下：当前页（音量页已建）", tab.label());
-            } else {
-                info!(
-                    "[option] 页签「{}」按下：置灰不响应（{} 页未建，具名挂账——本仓只建音量页）",
-                    tab.label(),
-                    tab.source_name()
-                );
-            }
-            return;
-        }
-    }
+) -> bool {
     for which in SLIDERS {
         let value = state.draft[which.index()];
-        if source_hit(canvas,&format!("{}/UIPartsDecrementButton",slider_root(which)),layouts,view,size) {
+        if source_hit(
+            canvas,
+            &format!("{}/UIPartsDecrementButton", slider_root(which)),
+            layouts,
+            view,
+            size,
+        ) {
             if value > 0 {
-                set_slider(state, bus, now, which, value - 1, "减量钮 ChangeItemSelectNum(-1) 界内钳");
-            } else {
-                info!(
-                    "[option] {}·{} 减量钮置灰不响应（UpdateButtonEnable：Selected>Min 才亮，已在 0）",
-                    which.group().header(),
-                    which.kind_label()
-                );
+                set_slider(state, bus, now, which, value - 1, "decrement");
             }
-            return;
+            return true;
         }
-        if source_hit(canvas,&format!("{}/UIPartsIncrementButton",slider_root(which)),layouts,view,size) {
+        if source_hit(
+            canvas,
+            &format!("{}/UIPartsIncrementButton", slider_root(which)),
+            layouts,
+            view,
+            size,
+        ) {
             if value < 100 {
-                set_slider(state, bus, now, which, value + 1, "增量钮 ChangeItemSelectNum(+1) 界内钳");
-            } else {
-                info!(
-                    "[option] {}·{} 增量钮置灰不响应（UpdateButtonEnable：Selected<Max 才亮，已在 100）",
-                    which.group().header(),
-                    which.kind_label()
-                );
+                set_slider(state, bus, now, which, value + 1, "increment");
             }
-            return;
+            return true;
         }
     }
-    // 轨道/柄点按：落值到按点位（Unity Slider 按下落值同形；柄内按下
-    // 不跳变的细枝不设，具名）。
-    if let Some(which) = track_slider_at(canvas,layouts,view,size) {
-        set_slider(state, bus, now, which, value_from_x(which, canvas.x,layouts,view,size), "轨道点按落值");
-        return;
+    if let Some(which) = track_slider_at(canvas, layouts, view, size) {
+        set_slider(
+            state,
+            bus,
+            now,
+            which,
+            value_from_x(which, canvas.x, layouts, view, size),
+            "track tap",
+        );
+        return true;
     }
-    if source_hit(canvas,"WindowRoot",layouts,view,size) {
-        return; // 面板空白：吃掉不动作（模态消费已在外层记）
-    }
-    commit_draft(
-        settings,
-        &state.draft,
-        "框外点按收框（模态；allowCloseExternal=true）",
-    );
-    *close = Some("框外点按");
+    false
 }
 
-/// 点按与拖动分派。对话框开着 ⇒ 模态（点按族 End 全被本模块吃掉，真源
-/// Dialog 槽 blockRaycasts 同形；外壳与菜单对话框的门都读同一个
-/// option_open 位）；拖动在轨道上起拖落值、拖动中续值。
+#[allow(clippy::too_many_arguments)]
+fn dispatch_tap(
+    layouts: &crate::ui_layout::UiLayouts,
+    view: &crate::ui_layout::UiPrefabView,
+    size: Vec2,
+    canvas: Vec2,
+    now: f32,
+    bindings: &OptionBindings,
+    state: &mut OptionDialogState,
+    settings: &mut LocalVolumeSettings,
+    app: &mut AppLocalOptions,
+    bus: &mut VolumeBus,
+    sounds: &mut SeRequests,
+    configs: Option<&crate::client_config::ClientConfigs>,
+) -> TapOutcome {
+    let hit = |path: &str| source_hit(canvas, path, layouts, view, size);
+    const CLOSE: &str = "WindowRoot/UIPartsCloseButton";
+    const OK: &str = "FooterButtons/UIPartsCommonButton";
+    if hit(CLOSE) {
+        sounds.source_button(layouts, KEY, CLOSE);
+        return TapOutcome::Close("close button");
+    }
+    if hit(OK) {
+        sounds.source_button(layouts, KEY, OK);
+        return TapOutcome::SaveAndClose("OK");
+    }
+    if let Some(tab) = bindings
+        .tabs
+        .iter()
+        .find(|tab| tab_shown(tab.page) && hit(&tab.selectable.control))
+    {
+        if bindings.built(tab.page) {
+            sounds.source_button(layouts, KEY, &tab.selectable.control);
+            state.select_tab(tab.page, settings, app, bindings);
+            // UpdateTabLines runs with the paint.
+        } else {
+            info!(
+                "[option] tab {:?}: this layout cannot build the page",
+                tab.page
+            );
+        }
+        return TapOutcome::Stay;
+    }
+    let mut cx = TapContext {
+        hit: &hit,
+        layouts,
+        sounds,
+        configs,
+    };
+    let taken = match state.current {
+        Some(Page::Live) => bindings
+            .live
+            .as_ref()
+            .is_ok_and(|binding| tap_live(&mut cx, binding, state)),
+        Some(Page::Volume) => tap_volume(canvas, now, layouts, view, size, state, bus),
+        Some(Page::System) => bindings
+            .system
+            .as_ref()
+            .is_ok_and(|binding| tap_system(&mut cx, binding, state, app)),
+        Some(Page::Communication) => match bindings
+            .communication
+            .as_ref()
+            .ok()
+            .and_then(|binding| tap_communication(&mut cx, binding, state))
+        {
+            Some(outcome) => return outcome,
+            None => false,
+        },
+        Some(Page::CustomScore) | None => false,
+    };
+    if taken || hit("WindowRoot") {
+        return TapOutcome::Stay;
+    }
+    // allowCloseExternal: a tap outside the window closes through Save.
+    TapOutcome::SaveAndClose("tap outside")
+}
+
+/// The scroll offset range of the current page: 0 up to the content height
+/// past the viewport.
+fn scroll_limit(
+    layouts: &crate::ui_layout::UiLayouts,
+    view: &crate::ui_layout::UiPrefabView,
+    size: Vec2,
+    scroll: &ScrollBinding,
+) -> f32 {
+    let height = |path: &str| {
+        view.rect(layouts, path, size)
+            .map_or(0.0, |rect| rect.size.y)
+    };
+    (height(&scroll.content) - height(&scroll.viewport)).max(0.0)
+}
+
+/// Taps and drags while the dialog is open (modal: every tap-family end is
+/// consumed). A drag starting on a volume slider track moves the slider; any
+/// other drag starting in the current page's viewport scrolls its content.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn click(
     layouts: Res<crate::ui_layout::UiLayouts>,
-    views: Query<&crate::ui_layout::UiPrefabView,With<OptionDialogRoot>>,
+    views: Query<&crate::ui_layout::UiPrefabView, With<OptionDialogRoot>>,
     mut gestures: MessageReader<GestureEvent>,
     windows: Query<&Window, With<PrimaryWindow>>,
     time: Res<Time>,
     mut dialog: ResMut<ShellDialogState>,
     mut settings: ResMut<LocalVolumeSettings>,
+    mut app: ResMut<AppLocalOptions>,
     mut bus: ResMut<VolumeBus>,
     mut state: ResMut<OptionDialogState>,
     mut consumed: ResMut<ActionTapConsumed>,
+    mut sounds: ResMut<SeRequests>,
+    bindings: Option<Res<OptionBindings>>,
+    configs: Option<Res<crate::client_config::ClientConfigs>>,
+    root_canvas: Option<Res<crate::canvas::RootCanvas>>,
+    mut back_keys: MessageReader<DialogBackKeyEvent>,
 ) {
-    let events: Vec<GestureEvent> = gestures.read().cloned().collect();
-    if events.is_empty() {
+    // Common1ButtonDialog.OnHardwareBackKeyProcess: OnClickOK.
+    let back = back_keys
+        .read()
+        .any(|event| state.dialog_id == Some(event.id));
+    if back && dialog.option_open {
+        save(&mut state, &mut settings, &mut app, "back key");
+        dialog.option_open = false;
         return;
     }
-    let Ok(window) = windows.single() else {
+    let events: Vec<GestureEvent> = gestures.read().cloned().collect();
+    if events.is_empty() || !dialog.option_open {
+        return;
+    }
+    let (Ok(window), Some(root_canvas), Some(bindings), Ok(view)) = (
+        windows.single(),
+        root_canvas.as_deref(),
+        bindings,
+        views.single(),
+    ) else {
+        return;
+    };
+    let Some(current) = state.current else {
         return;
     };
     let (width, height) = (window.width(), window.height());
-    let scale = canvas_scale(width, height);
+    let scale = root_canvas.scale(window);
+    let size = root_canvas.size(window);
     let now = time.elapsed_secs();
-
-    if !dialog.option_open { return; }
-    let Ok(view)=views.single() else {return;};
-    let size=Vec2::new(width,height)/scale;
-    // ---- 开态：模态 ----
-    let mut close = None::<&'static str>;
+    let mut outcome = TapOutcome::Stay;
     for event in &events {
         let canvas = to_canvas(event.position, width, height, scale);
         match event.kind {
-            // 拖动：轨道上起拖落值，拖动中续值，抬手收拖（CustomSlider =
-            // Unity Slider 子类：按下落值到按点位、拖动续值）。
             GestureKind::Drag => match event.state {
                 GestureState::Began => {
-                    if let Some(which) = track_slider_at(canvas,&layouts,view,size) {
-                        state.dragging = Some(which);
-                        set_slider(
-                            &mut state,
-                            &mut bus,
-                            now,
-                            which,
-                            value_from_x(which, canvas.x,&layouts,view,size),
-                            "轨道按下落值",
-                        );
+                    if current == Page::Volume {
+                        if let Some(which) = track_slider_at(canvas, &layouts, view, size) {
+                            state.dragging = Some(which);
+                            set_slider(
+                                &mut state,
+                                &mut bus,
+                                now,
+                                which,
+                                value_from_x(which, canvas.x, &layouts, view, size),
+                                "track press",
+                            );
+                            continue;
+                        }
+                    }
+                    if let Some(scroll) = &bindings.scrolls[current.index()] {
+                        if source_hit(canvas, &scroll.viewport, &layouts, view, size) {
+                            state.scrolling =
+                                Some((current, canvas.y, state.scroll[current.index()]));
+                        }
                     }
                 }
-                GestureState::Moved => {
+                GestureState::Moved | GestureState::End => {
                     if let Some(which) = state.dragging {
                         set_slider(
                             &mut state,
                             &mut bus,
                             now,
                             which,
-                            value_from_x(which, canvas.x,&layouts,view,size),
-                            "拖动续值",
+                            value_from_x(which, canvas.x, &layouts, view, size),
+                            "drag",
                         );
                     }
-                }
-                GestureState::End => {
-                    if let Some(which) = state.dragging.take() {
-                        set_slider(
-                            &mut state,
-                            &mut bus,
-                            now,
-                            which,
-                            value_from_x(which, canvas.x,&layouts,view,size),
-                            "拖动收尾",
-                        );
+                    if let Some((page, start, offset)) = state.scrolling {
+                        if let Some(scroll) = &bindings.scrolls[page.index()] {
+                            let limit = scroll_limit(&layouts, view, size, scroll);
+                            state.scroll[page.index()] =
+                                (offset + canvas.y - start).clamp(0.0, limit);
+                        }
+                    }
+                    if event.state == GestureState::End {
+                        state.dragging = None;
+                        state.scrolling = None;
                     }
                 }
             },
-            // 点按族 End：模态吃掉 + 分派（每拍物理交互恰一事件，双击的
-            // 第二拍以 DoubleTap 型到达，不与 Tap 重复）。
             GestureKind::Tap | GestureKind::DoubleTap | GestureKind::LongTouch
                 if event.state == GestureState::End =>
             {
                 consumed.0 = true;
-                dispatch_tap(&layouts,view,size,canvas, now, &mut settings, &mut state, &mut bus, &mut close);
+                if !matches!(outcome, TapOutcome::Stay) {
+                    continue;
+                }
+                outcome = dispatch_tap(
+                    &layouts,
+                    view,
+                    size,
+                    canvas,
+                    now,
+                    &bindings,
+                    &mut state,
+                    &mut settings,
+                    &mut app,
+                    &mut bus,
+                    &mut sounds,
+                    configs.as_deref(),
+                );
             }
             _ => {}
         }
     }
-    if close.is_some() {
-        dialog.option_open = false;
+    match outcome {
+        TapOutcome::Stay => {}
+        TapOutcome::Close(cause) => {
+            info!("[option] {cause}: close without Save (set-up pages' edits stay in the session objects)");
+            dialog.option_open = false;
+        }
+        TapOutcome::SaveAndClose(cause) => {
+            save(&mut state, &mut settings, &mut app, cause);
+            dialog.option_open = false;
+        }
     }
 }

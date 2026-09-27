@@ -10,7 +10,10 @@ use std::{
     sync::Arc,
 };
 
-use bevy::prelude::*;
+use bevy::{
+    ecs::{change_detection::Tick, query::QueryState},
+    prelude::*,
+};
 use moly_law::fixture::{
     areas::{rotated_center_grid, GridAreaData},
     position::{direction_yaw_degrees, field_position, layout_type, WALL_LAYOUT_MASK},
@@ -104,6 +107,12 @@ pub(crate) struct FixtureSceneSupply {
     next_revision: u64,
     pending: Option<String>,
     last_report: Vec<String>,
+    /// `discover`'s inputs as the previous update left them.
+    watch: Option<DiscoverWatch>,
+    queries: Option<WatchQueries>,
+    /// Whether the previous report found the installed navigation on the
+    /// current input stamp.
+    report_navigation: Option<bool>,
 }
 
 impl FixtureSceneSupply {
@@ -133,6 +142,16 @@ struct Signature {
     rows: Vec<ObservedRow>,
 }
 
+/// The extractor's mark for a fixture bundle that holds no FixtureBundleMeta
+/// at all (as opposed to one it could not read).
+const NO_META: &str = "no fixture_metadata asset in this bundle";
+
+/// A bundle with no FixtureBundleMeta. FixtureFactory then creates a fresh
+/// meta whose stack, motion, cutscene and using-grid arrays are all 0 x 0.
+pub(crate) fn bundle_has_no_meta(row: &Value) -> bool {
+    row["hasMeta"].as_bool() == Some(false) && row["readError"].as_str() == Some(NO_META)
+}
+
 /// Populated by the existing fixture-areas parser. It neither reloads the
 /// document nor substitutes motion/cutscene arrays for AddUsingGrid.
 #[derive(Resource, Default)]
@@ -149,6 +168,9 @@ impl FixtureFloorAreas {
         let mut entries = HashMap::new();
         for (name, row) in packages {
             let parsed = (|| {
+                if bundle_has_no_meta(row) {
+                    return Ok(GridAreaData::from_meta(0, 0, |_, _| false));
+                }
                 if row["hasMeta"].as_bool() != Some(true) {
                     return Err("fixture metadata has not been supplied".to_owned());
                 }
@@ -222,10 +244,184 @@ fn live_matrix(world: &World, entity: Entity) -> Option<Mat4> {
     Some(global.to_matrix())
 }
 
+/// The values `discover` reads, as one update leaves them. Small values are
+/// kept here; whole resources and the components of fixture rows and of the
+/// entities `live_matrix` walks are compared by change tick instead.
+#[derive(PartialEq)]
+struct DiscoverWatch {
+    editing: Option<bool>,
+    fixture_scenes_ready: bool,
+    site_scenes_ready: bool,
+    site_ready: bool,
+    epoch: Option<u64>,
+    site_active: bool,
+    site_selection: bool,
+    sites: bool,
+    edit_session: bool,
+    areas_revision: Option<u64>,
+    origins: Vec<(Entity, Ancestry)>,
+    players: Vec<(Entity, Option<PlayerFixtureAgentParameters>)>,
+    rows: Vec<RowWatch>,
+}
+
+/// One entity's ancestry as `live_matrix` walks it: the entity the walk ends
+/// on (`None` on a cycle) and whether every entity on the way has a Transform.
+#[derive(Clone, Copy, PartialEq)]
+struct Ancestry {
+    top: Option<Entity>,
+    transforms: bool,
+}
+
+#[derive(PartialEq)]
+struct RowWatch {
+    entity: Entity,
+    placement: bool,
+    identity: bool,
+    ancestry: Ancestry,
+}
+
+struct WatchQueries {
+    origins: QueryState<Entity, With<SiteCoordinateOrigin>>,
+    players: QueryState<
+        (Entity, Option<&'static PlayerFixtureAgentParameters>),
+        With<PlayerControlled>,
+    >,
+    rows: QueryState<
+        (
+            Entity,
+            Option<Ref<'static, FixtureScenePlacement>>,
+            Option<Ref<'static, FixtureActivityIdentity>>,
+        ),
+        With<FixtureRoot>,
+    >,
+}
+
+impl WatchQueries {
+    fn new(world: &mut World) -> Self {
+        Self {
+            origins: world.query_filtered(),
+            players: world.query_filtered(),
+            rows: world.query_filtered(),
+        }
+    }
+}
+
+impl DiscoverWatch {
+    /// Read the watched values, and report whether a watched resource, a row
+    /// component, or a Transform or ChildOf on a walked ancestry changed after
+    /// the world's last change tick (this system's previous run).
+    fn read(world: &World, queries: &mut WatchQueries) -> (Self, bool) {
+        let (last, now) = (world.last_change_tick(), world.read_change_tick());
+        let mut changed = world.is_resource_changed::<SiteActive>()
+            || world.is_resource_changed::<SiteSelection>()
+            || world.is_resource_changed::<Sites>()
+            || world.is_resource_changed::<crate::fixture_edit::EditSession>();
+        let mut memo: Vec<(Entity, Ancestry, bool)> = Vec::new();
+        let mut origins = Vec::new();
+        for entity in queries.origins.iter(world) {
+            let (ancestry, moved) = ancestry(world, entity, last, now, &mut memo);
+            changed |= moved;
+            origins.push((entity, ancestry));
+        }
+        let players = queries
+            .players
+            .iter(world)
+            .map(|(entity, agent)| (entity, agent.copied()))
+            .collect();
+        let mut rows = Vec::new();
+        for (entity, placement, identity) in queries.rows.iter(world) {
+            changed |= placement.as_ref().is_some_and(|row| row.is_changed())
+                || identity.as_ref().is_some_and(|identity| identity.is_changed());
+            let (ancestry, moved) = ancestry(world, entity, last, now, &mut memo);
+            changed |= moved;
+            rows.push(RowWatch {
+                entity,
+                placement: placement.is_some(),
+                identity: identity.is_some(),
+                ancestry,
+            });
+        }
+        let watch = Self {
+            editing: world
+                .get_resource::<crate::fixture_edit::EditSessionActive>()
+                .map(crate::fixture_edit::EditSessionActive::is_active),
+            fixture_scenes_ready: world.contains_resource::<FixtureScenesReady>(),
+            site_scenes_ready: world.contains_resource::<SiteScenesReady>(),
+            site_ready: world.contains_resource::<SiteReady>(),
+            epoch: world.get_resource::<GroundEpoch>().map(|epoch| epoch.0),
+            site_active: world.contains_resource::<SiteActive>(),
+            site_selection: world.contains_resource::<SiteSelection>(),
+            sites: world.contains_resource::<Sites>(),
+            edit_session: world.contains_resource::<crate::fixture_edit::EditSession>(),
+            areas_revision: world
+                .get_resource::<FixtureFloorAreas>()
+                .map(|areas| areas.revision),
+            origins,
+            players,
+            rows,
+        };
+        (watch, changed)
+    }
+}
+
+/// Walk `entity`'s ancestry as `live_matrix` does, and report whether a
+/// Transform or ChildOf on it changed after `last`. Ancestors shared by
+/// several walks are walked once per update.
+fn ancestry(
+    world: &World,
+    entity: Entity,
+    last: Tick,
+    now: Tick,
+    memo: &mut Vec<(Entity, Ancestry, bool)>,
+) -> (Ancestry, bool) {
+    // (entity, has a Transform, its Transform or ChildOf changed)
+    let mut chain: Vec<(Entity, bool, bool)> = Vec::new();
+    let mut current = entity;
+    let (top, mut transforms, mut changed) = loop {
+        if !chain.is_empty() {
+            if let Some((_, known, moved)) = memo.iter().find(|(start, ..)| *start == current) {
+                break (known.top, known.transforms, *moved);
+            }
+        }
+        if chain.iter().any(|(seen, ..)| *seen == current) {
+            break (None, true, false);
+        }
+        let Ok(node) = world.get_entity(current) else {
+            chain.push((current, false, false));
+            break (Some(current), true, false);
+        };
+        let newer = |ticks: Option<bevy::ecs::change_detection::ComponentTicks>| {
+            ticks.is_some_and(|ticks| ticks.changed.is_newer_than(last, now))
+        };
+        let transform = node.get_change_ticks::<Transform>();
+        chain.push((
+            current,
+            transform.is_some(),
+            newer(transform) || newer(node.get_change_ticks::<ChildOf>()),
+        ));
+        match node.get::<ChildOf>() {
+            Some(parent) => current = parent.parent(),
+            None => break (Some(current), true, false),
+        }
+    };
+    for (index, &(link, has_transform, moved)) in chain.iter().enumerate().rev() {
+        transforms &= has_transform;
+        changed |= moved;
+        if index > 0 && top.is_some() {
+            memo.push((link, Ancestry { top, transforms }, changed));
+        }
+    }
+    (Ancestry { top, transforms }, changed)
+}
+
 fn discover(world: &mut World) -> Result<Signature, String> {
-    if world.get_resource::<crate::fixture_edit::EditSessionActive>()
-        .is_some_and(|editor| editor.is_active()) {
-        return Err("layout editing owns scene poses; draft geometry is not a playable snapshot".into());
+    if world
+        .get_resource::<crate::fixture_edit::EditSessionActive>()
+        .is_some_and(|editor| editor.is_active())
+    {
+        return Err(
+            "layout editing owns scene poses; draft geometry is not a playable snapshot".into(),
+        );
     }
     if !world.contains_resource::<FixtureScenesReady>() {
         return Err("placed fixture scenes are still loading".into());
@@ -403,11 +599,11 @@ fn build_floor(
                 ));
             }
             let position = field_position(row.min, row.max, row.center_y, row.layout)?;
-            let expected = Transform::from_translation(signature.origin + Vec3::from(position))
-                .with_rotation(Quat::from_rotation_y(
-                    direction_yaw_degrees(row.direction).to_radians(),
-                ))
-                .to_matrix();
+            let expected = crate::fixture::source_transform(
+                (signature.origin + Vec3::from(position)).to_array(),
+                direction_yaw_degrees(row.direction).to_radians(),
+            )
+            .to_matrix();
             let actual = observed
                 .world_matrix
                 .ok_or("layout row has no live fixture pose")?;
@@ -442,10 +638,23 @@ fn build_floor(
                 .get(&row.package)
                 .ok_or("AddUsingGrid package record is missing")?
                 .clone()?;
-            add_using.rotate(row.direction, true);
-            let center = rotated_center_grid(row.layout_center, master.grid_size, row.direction);
+            let (source_center, source_direction, _) =
+                moly_assets::player_data::mirror_fixture_layout(
+                    row.layout_center,
+                    master.grid_size,
+                    row.direction,
+                    row.layout,
+                )?;
+            add_using.rotate(source_direction, true);
+            let center = rotated_center_grid(source_center, master.grid_size, source_direction);
             for cell in add_using.enable_tiles {
-                let position = center + cell;
+                let source = center + cell;
+                let position = GridPosition::new(
+                    i8::try_from(-i16::from(source.x) - 1)
+                        .map_err(|_| "AddUsing X exceeds grid domain")?,
+                    source.y,
+                    source.z,
+                );
                 result.push(TileOccupancyEntry {
                     position,
                     identity: TileOccupancyIdentity::Uid(row.uid.clone()),
@@ -491,11 +700,48 @@ fn build_floor(
 
 /// Install after instance records, editor input and player reseeding, before
 /// fixture admission. This never constructs a navigation-query implementation.
+///
+/// Once a signature is installed, `discover` runs again only when one of its
+/// inputs changed since the previous update: it reads nothing else, so with
+/// unchanged inputs it would return the installed signature and nothing would
+/// be rebuilt.
 pub(crate) fn advance(world: &mut World) {
     world.init_resource::<FixtureSceneSupply>();
     let mut supply = world
         .remove_resource::<FixtureSceneSupply>()
         .expect("initialized scene supply");
+    let mut queries = supply
+        .queries
+        .take()
+        .unwrap_or_else(|| WatchQueries::new(world));
+    let (watch, changed) = DiscoverWatch::read(world, &mut queries);
+    let unchanged =
+        supply.signature.is_some() && !changed && supply.watch.as_ref() == Some(&watch);
+    if unchanged {
+        supply.watch = Some(watch);
+    } else {
+        rediscover(world, &mut supply);
+        // discover may have supplied the player's parameters; keep the state
+        // it leaves.
+        supply.watch = Some(DiscoverWatch::read(world, &mut queries).0);
+    }
+    supply.queries = Some(queries);
+    let navigation_current = supply.current.as_ref().map(|current| {
+        world
+            .get_resource::<PlayerFixtureNavigation>()
+            .is_some_and(|nav| nav.scene_stamp == current.stamp)
+    });
+    if unchanged && supply.report_navigation == navigation_current {
+        // The report would be built from the same values as the previous one.
+        world.insert_resource(supply);
+        return;
+    }
+    supply.report_navigation = navigation_current;
+    report(world, &mut supply);
+    world.insert_resource(supply);
+}
+
+fn rediscover(world: &mut World, supply: &mut FixtureSceneSupply) {
     match discover(world) {
         Err(reason) => {
             supply.current = None;
@@ -533,6 +779,9 @@ pub(crate) fn advance(world: &mut World) {
             }
         }
     }
+}
+
+fn report(world: &World, supply: &mut FixtureSceneSupply) {
     let mut report = Vec::new();
     if let Some(current) = &supply.current {
         report.push(format!(
@@ -558,7 +807,6 @@ pub(crate) fn advance(world: &mut World) {
         }
         supply.last_report = report;
     }
-    world.insert_resource(supply);
 }
 
 /// Called after the action owner's site-change cancellation and before scene
@@ -590,8 +838,9 @@ pub(crate) fn validate_admission(
     Ok(())
 }
 
-/// Real geometry/agent implementation only. The supplier deliberately has no
-/// WalkField adapter, synthetic-success result, or fallback endpoint radius.
+/// A supplied geometry implementation must preserve failed samples and paths.
+/// Moly installs its real carved WalkField adapter separately; this input owner
+/// never manufactures success or changes a requested endpoint radius.
 pub(crate) trait FixtureNavigationGeometry: Send + Sync {
     fn sample_position(&self, position: Vec3, max_distance: f32) -> Option<Vec3>;
     fn path(

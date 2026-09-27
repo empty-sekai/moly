@@ -44,6 +44,29 @@ pub fn accumulate_rate(state: &mut EmissionState, rate: f32, dt: f32) -> u32 {
     whole as u32
 }
 
+/// 触发轮数。序列化的 `cycleCount` 用 **0 表示无限重复**，非 0 表示固定轮
+/// 数——引擎 Editor 的轮数下拉第 0 项就叫 Infinite 且写入字面量 0，托管
+/// setter 也只拒 `< 0`。做成闭集而不是裸 `u32`，是因为「0 = 无限」这条语义
+/// 曾被读反成「0 非法、用户口径 ≥ 1」，把所有常驻发射器整条拒掉；裸整数留
+/// 不住这个区别，类型能。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BurstCycles {
+    /// 序列化 `cycleCount == 0`：按 `repeat_interval` 无限重复。
+    Infinite,
+    /// 序列化 `cycleCount == n > 0`：恰触发 n 轮。
+    Finite(std::num::NonZeroU32),
+}
+
+impl BurstCycles {
+    /// 用序列化口径构造：0 即无限。
+    pub fn from_serialized(cycle_count: u32) -> Self {
+        match std::num::NonZeroU32::new(cycle_count) {
+            Some(n) => Self::Finite(n),
+            None => Self::Infinite,
+        }
+    }
+}
+
 /// 一个 burst。序列化口径直接存用户面（`cycleCount`、`probability`）；
 /// 引擎内部另有两处编码差，`C# 可读`：
 ///
@@ -57,8 +80,8 @@ pub struct Burst {
     pub time: f32,
     /// burst 数量。求值在触发时发生，`lerp_factor` 用显式 rand。
     pub count: MinMaxCurve,
-    /// 总触发次数（用户口径，≥1）。
-    pub cycles: u32,
+    /// 总触发次数。`cycleCount == 0` 是无限重复，不是非法值。
+    pub cycles: BurstCycles,
     /// 重复间隔。`> 0` 才有第 2 次及以后的触发（`C# 可读`：
     /// 间隔的 setter 拒绝非正值）。
     pub repeat_interval: f32,
@@ -105,18 +128,32 @@ pub fn burst_check(
         // 也会到 NotDue，但显式拦下是因为 NaN 进时间轴是状态损坏。
         return BurstOutcome::NotDue;
     }
-    let hits = (0..burst.cycles.max(1)).any(|k| {
-        let t_k = if k == 0 {
-            burst.time
+    let due_at = |t_k: f32| prev_time < t_k && t_k <= now_time;
+    let at_cycle = |k: u32| -> Option<f32> {
+        if k == 0 {
+            Some(burst.time)
         } else if burst.repeat_interval > 0.0 {
-            burst.time + k as f32 * burst.repeat_interval
+            Some(burst.time + k as f32 * burst.repeat_interval)
         } else {
             // 间隔非正：只保第 0 次触发（真源 setter 拒绝 interval<=0，
             // 序列化数据不会带着它进来，此处是双保险）。
-            return false;
-        };
-        prev_time < t_k && t_k <= now_time
-    });
+            None
+        }
+    };
+    let hits = match burst.cycles {
+        BurstCycles::Finite(n) => (0..n.get()).any(|k| at_cycle(k).is_some_and(&due_at)),
+        BurstCycles::Infinite => {
+            // 无限轮不能迭代——直接解出落在 (prev, now] 里的那个 k。
+            // 需要 prev < time + k*interval <= now，取最小的 k ≥ 1；
+            // k = 0 单独看（它不依赖 interval）。
+            due_at(burst.time)
+                || (burst.repeat_interval > 0.0 && {
+                    let k = (((prev_time - burst.time) / burst.repeat_interval).floor() + 1.0)
+                        .max(1.0);
+                    k.is_finite() && due_at(burst.time + k * burst.repeat_interval)
+                })
+        }
+    };
     if !hits {
         return BurstOutcome::NotDue;
     }
@@ -142,10 +179,41 @@ mod tests {
         Burst {
             time,
             count: MinMaxCurve::Constant(3.0),
-            cycles: 1,
+            cycles: BurstCycles::from_serialized(1),
             repeat_interval: 0.0,
             probability: 1.0,
         }
+    }
+
+    #[test]
+    fn serialized_cycle_count_zero_repeats_without_end() {
+        // 锚点：引擎 Editor 的轮数下拉第 0 项是 "Infinite"，选中时把**字面量
+        // 0** 写进序列化的 `cycleCount`；托管 setter 只拒 `< 0`，全树穷举没有
+        // 任何一处要求 `>= 1`。所以 0 是「无限重复」。
+        // 判别式：把真源那一项改成「0 表示发一次」，下面第三条断言会红。
+        let b = Burst {
+            time: 0.5,
+            count: MinMaxCurve::Constant(1.0),
+            cycles: BurstCycles::from_serialized(0),
+            repeat_interval: 1.0,
+            probability: 1.0,
+        };
+        // 第 0 轮照常到点。
+        assert_eq!(burst_check(&b, 0.4, 0.6, 0.0, 0.0), BurstOutcome::Fired(1));
+        // 第 1 轮。
+        assert_eq!(burst_check(&b, 1.4, 1.6, 0.0, 0.0), BurstOutcome::Fired(1));
+        // 远期一轮：固定轮数会在这里停，无限不会。这一条是「无限」与
+        // 「恰 N 轮」唯一分得开的地方。
+        assert_eq!(burst_check(&b, 100.4, 100.6, 0.0, 0.0), BurstOutcome::Fired(1));
+        // 轮次之间仍然不发。
+        assert_eq!(burst_check(&b, 100.6, 101.4, 0.0, 0.0), BurstOutcome::NotDue);
+        // 成对：同样的远期窗口，固定 3 轮必须不发。
+        let finite = Burst { cycles: BurstCycles::from_serialized(3), ..b.clone() };
+        assert_eq!(burst_check(&finite, 100.4, 100.6, 0.0, 0.0), BurstOutcome::NotDue);
+        // 无限 + 非正间隔：仍然只有第 0 轮（间隔不推进）。
+        let no_interval = Burst { repeat_interval: 0.0, ..b };
+        assert_eq!(burst_check(&no_interval, 0.4, 0.6, 0.0, 0.0), BurstOutcome::Fired(1));
+        assert_eq!(burst_check(&no_interval, 100.4, 100.6, 0.0, 0.0), BurstOutcome::NotDue);
     }
 
     #[test]
@@ -217,7 +285,7 @@ mod tests {
         let b = Burst {
             time: 0.0,
             count: MinMaxCurve::Constant(1.0),
-            cycles: 3,
+            cycles: BurstCycles::from_serialized(3),
             repeat_interval: 2.0,
             probability: 1.0,
         };
@@ -229,7 +297,7 @@ mod tests {
         // cycles 之外的重复（t=6）不再触发。
         assert_eq!(burst_check(&b, 5.5, 6.5, 0.0, 0.0), BurstOutcome::NotDue);
 
-        let zero_interval = Burst { repeat_interval: 0.0, cycles: 5, ..b };
+        let zero_interval = Burst { repeat_interval: 0.0, cycles: BurstCycles::from_serialized(5), ..b };
         // 间隔 0：无论 cycles 多大，只保第 0 次。
         assert_eq!(burst_check(&zero_interval, -0.5, 0.5, 0.0, 0.0), BurstOutcome::Fired(1));
         assert_eq!(burst_check(&zero_interval, 0.5, 5.5, 0.0, 0.0), BurstOutcome::NotDue);
