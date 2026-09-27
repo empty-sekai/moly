@@ -112,6 +112,7 @@ pub(crate) fn advance(
     mut model: Option<ResMut<HarvestPlayerModel>>,
     catalog: Option<Res<HarvestCatalog>>,
     mut objects: Query<&mut HarvestObject>,
+    mut possession: ResMut<super::possession::PossessionMock>,
 ) {
     let (Some(configs), Some(server), Some(user), Some(model), Some(catalog)) = (
         configs,
@@ -195,11 +196,14 @@ pub(crate) fn advance(
             drops,
         };
         let reply = server.gather(&request);
+        possession.on_gather(&request.drops, &catalog);
         queue.gather_requests += 1;
         info!(
-            "[harvest-api] PostUserMysekaiGatherApi (mock) site {site}: {} drops -> materials {:?}",
+            "[harvest-api] PostUserMysekaiGatherApi (mock) site {site}: {} drops -> materials {:?}; PossessionMock material quantity {}, fixtures {}",
             request.drops.len(),
             reply.materials,
+            possession.material_quantity,
+            possession.fixtures.values().sum::<i64>(),
         );
         apply_reply(&reply, site, user, model, &catalog, &mut objects);
     }

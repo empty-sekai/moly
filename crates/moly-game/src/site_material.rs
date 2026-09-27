@@ -1666,7 +1666,7 @@ pub(crate) fn resolve_object(
 
 /// DropItem 解析。值域门：_UVSelection 只在 {0, 1}；clip 是常量阈 0.5
 /// （`_AlphaClip` 标量不被消费）；alpha = tex.a（无 _BaseOpacity）。
-fn resolve_dropitem(
+pub(crate) fn resolve_dropitem(
     sidecar: &SiteSidecar,
     slot: &MaterialSlot,
     load_texture: impl Fn(&str) -> Handle<Image>,
