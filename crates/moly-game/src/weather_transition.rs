@@ -17,7 +17,7 @@ pub(crate) const HOME_ENVIRONMENT_FADE_SECONDS: f32 = 0.25;
 
 /// `MoveSiteUseCannonActionState.ChangeEnvironment` passes
 /// `MysekaiGraphicsConfig.SiteTransition.CrossFadeDuration`. The shipped graphics config
-/// (player-data resource `graphics/data/mysekaigraphicsconfig`, JP 6.8.1) serialises
+/// (player-data resource `graphics/data/mysekaigraphicsconfig`, JP client) serialises
 /// `_siteTransitionData._crossFadeDuration` as 0.5; the field initialiser's 0.25 is not
 /// the shipped value. The runtime root carries no graphics-config file, so the value is
 /// carried here like the other graphics-config constants.

@@ -16,7 +16,7 @@
 //! null value is a texture bound in a dependency package that the extractor
 //! did not export; that stays a named refusal.
 //!
-//! JP 6.8.1 crystal variant (`_ENABLE_CRYSTAL_FIXTURE`, with the JP
+//! JP client crystal variant (`_ENABLE_CRYSTAL_FIXTURE`, with the JP
 //! normal-map block): see `FIXTURE_CRYSTAL` / `FIXTURE_NORMAL_MAP` in the
 //! WGSL. Its second colour target (the colour-picker emission, the
 //! normal-driven emission and the centre damp) is drawn by the emission pass

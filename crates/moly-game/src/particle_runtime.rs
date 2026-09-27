@@ -83,7 +83,7 @@ const GRAVITY: [f32; 3] = [0.0, -9.81, 0.0];
 
 pub(crate) const PREWARM_STEP: f32 = 1.0 / 60.0;
 
-/// The player's TimeManager. The JP 6.8.1 and CN 6.0.0 players serialize the
+/// The player's TimeManager. The JP and CN client players serialize the
 /// same one (Fixed Timestep 0.02, Maximum Allowed Timestep 1/3, time scale 1,
 /// Maximum Particle Timestep 0.03, the engine's reset defaults), so one
 /// constant serves both regions. The game assembly calls only Time getters, so
@@ -1084,7 +1084,7 @@ pub(crate) fn compose_to_world(system: &Runtime, ctx: &Context) -> GlobalTransfo
 
 /// Apply the world-space owner to a direction after Shape/EmitterStoreData.
 ///
-/// The current JP 6.8.1 native path normalizes inside `EmitterStoreData`
+/// The current JP client's native path normalizes inside `EmitterStoreData`
 /// before multiplying the outer owner 3x3.  It does **not** normalize again
 /// after that final owner multiplication.  Keeping this as a small helper
 /// makes the boundary explicit and prevents a renderer-facing `normalize`
@@ -2289,7 +2289,7 @@ fn spawn_one(system: &mut Runtime, ctx: &Context) {
         let to_world = anchor * node_affine;
         let position = to_world.transform_point(Vec3::from_array(position)).to_array();
         // Native EmitterStoreData has already normalized the direction in
-        // emitter space.  The final owner 3x3 is a plain multiply: JP 6.8.1
+        // emitter space.  The final owner 3x3 is a plain multiply: the JP client
         // does not normalize after it, so non-uniform owner scale remains in
         // the velocity magnitude.  Do not replace this with normalize_or_zero.
         let dir = if system.emitter.shape.is_some() {

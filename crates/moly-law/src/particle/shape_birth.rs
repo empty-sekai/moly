@@ -1,5 +1,5 @@
-//! Current JP 6.8.1 four-lane ShapeModule::Start -> EmitterStoreData boundary.
-//! Transcribed from the current JP 6.8.1 libunity.
+//! Current JP client four-lane ShapeModule::Start -> EmitterStoreData boundary.
+//! Transcribed from the current JP client's engine library.
 //! Hemisphere: the Random arc mode of StartHemiSphere over the envelope the
 //! native receipts execute: any finite radius, shape rotation, scale and
 //! position, arc of zero or more degrees, arc spread of zero or more, position

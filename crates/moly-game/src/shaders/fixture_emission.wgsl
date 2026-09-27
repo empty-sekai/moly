@@ -20,7 +20,7 @@
 // Basic material defaults follow the phenomenon. Animation events also write
 // override mode 1 (force on) and 2 (force off), carried in emission.w.
 //
-// # JP 6.8.1 additions (Basic only; the Rug programs are unchanged)
+// # JP client additions (Basic only; the Rug programs are unchanged)
 //
 // - `_UseEmissionColorPicker`, a runtime int in every JP Basic program: on,
 //   the emission colour is `_EmissionColor.xyz * _EmissionIntensity` instead

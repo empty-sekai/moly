@@ -1,7 +1,7 @@
 //! Qualified single-octave 3D/high particle Noise, one strength or separate axes, in any strength mode.
 //!
 //! Pure law: the consumer supplies owner seed, scroll and source simulation inputs.
-//! Transcribed from the current JP 6.8.1 libunity, along the call chain
+//! Transcribed from the current JP client's engine library, along the call chain
 //! NoiseModule::Update -> CalculateNoise -> NoiseModule::CalculateNoiseJob -> Perlin3D.
 //! Perlin3D follows the native straight-line dataflow operation by operation;
 //! the curl pairing and scales follow the job body.

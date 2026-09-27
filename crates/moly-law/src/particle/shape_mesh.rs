@@ -1,6 +1,6 @@
 //! Mesh shape in its Triangle placement: ShapeModule's mesh cache and the
 //! triangle sample of one four-lane birth group.
-//! Transcribed from the current JP 6.8.1 libunity.
+//! Transcribed from the current JP client's engine library.
 //!
 //! The cache is what the module rebuilds whenever its mesh data changes.
 //! Each included submesh (every submesh, or only the one the material index

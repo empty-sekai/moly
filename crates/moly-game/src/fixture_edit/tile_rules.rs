@@ -40,7 +40,7 @@
 //! contains it in x and z (`GridBound.IntersectsXZ`, both ends inclusive).
 //! The zones come from the layout row of the site, the layout type and the
 //! rank (`GetUnavailableZone`). The master's zone rows name floor and wall
-//! layouts only (CN and JP 6.8.1: 10 rows each, identical), so the rug and
+//! layouts only (CN and JP clients: 10 rows each, identical), so the rug and
 //! road grids have none; a floor check without the zone table is refused.
 //!
 //! `CanPutOnBaseFixture(cell)`: the fixture is a put target and the tile below

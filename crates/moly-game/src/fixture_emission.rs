@@ -8,7 +8,7 @@
 //! 为预滤波源。着色程序在 `shaders/fixture_emission.wgsl`（片元式与绑定
 //! 契约的注释在那里）。
 //!
-//! JP 6.8.1 additions carried by [`FixtureEmission`]: the colour picker
+//! JP client additions carried by [`FixtureEmission`]: the colour picker
 //! (every JP Basic program) and the crystal programs' normal-driven step and
 //! centre damp, which need the world normal (and uv1 plus `_NormalMap` for the
 //! normal-map block) in this pass.

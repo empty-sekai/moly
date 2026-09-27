@@ -66,7 +66,7 @@
 //!   order, each after `Delay(k × 0.04 s)` (k = 1, 2, …) following the
 //!   previous one; then `se_open_map`. `SiteIconIn` shows the current-location
 //!   badge on the icon of the current site only.
-//! - `OpenSiteAsync` (JP 6.8.1): floating stops, the cloud goes, the button and
+//! - `OpenSiteAsync` (JP client): floating stops, the cloud goes, the button and
 //!   line show, the button group fades 0→1 in 3.0 s (ease 3 = OutSine), the
 //!   animator's `isOpen` trigger starts `clip_open_cloud` (32 curves, 2.2 s;
 //!   its 0.7 s event `OnPlaySE("se_unlock_site")` reaches
@@ -168,7 +168,7 @@ const IN_DELAY_STEP: f32 = 0.04;
 const FLOAT_AMPLITUDE_PX: f32 = 30.0;
 const FLOAT_SECONDS: f32 = 3.0;
 
-/// `OpenSiteAsync` (JP 6.8.1): the button group fades 0→1 in 3.0 s (ease 3 =
+/// `OpenSiteAsync` (JP client): the button group fades 0→1 in 3.0 s (ease 3 =
 /// OutSine), then `Delay(3.0 s)`; after it the name fades 0→1 in 1.5 s
 /// (OutSine), `open_cloud` is deactivated and floating restarts.
 const OPEN_FADE_SECONDS: f32 = 3.0;

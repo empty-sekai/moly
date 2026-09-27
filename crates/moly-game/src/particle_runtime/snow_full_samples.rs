@@ -376,7 +376,7 @@ fn compare_effective_size(actual: &[u32], expected: &Value, stage: &str) -> Valu
 }
 
 #[test]
-#[ignore = "MOLY_SNOW_FULL_NATIVE must identify current JP 6.8.1 source/native receipt"]
+#[ignore = "MOLY_SNOW_FULL_NATIVE must identify the current JP client's source/native receipt"]
 fn source_snow_full_prewarm_matches_current_native() {
     let path = std::path::PathBuf::from(std::env::var_os("MOLY_SNOW_FULL_NATIVE").unwrap());
     let native: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();

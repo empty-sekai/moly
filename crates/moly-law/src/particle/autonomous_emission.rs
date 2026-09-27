@@ -1,6 +1,6 @@
 //! Guarded ordinary Update1 / EmitOverTime / StartParticles scheduling.
 //!
-//! Current JP 6.8.1 libunity. Evidence: a native boundary replay
+//! The current JP client's engine library. Evidence: a native boundary replay
 //! (405 scalar emission, 108 clock, 15 newborn cases), a native EmitOverTime
 //! receipt over every two-constant emission configuration of the corpus,
 //! native EmitOverTime batteries over the burst schedule, and native rows of

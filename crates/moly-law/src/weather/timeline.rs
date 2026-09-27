@@ -1,4 +1,4 @@
-//! Authored environment mixers recovered from current JP 6.8.1.
+//! Authored environment mixers recovered from the current JP client.
 //!
 //! Clip selection is first-in-source-order with inclusive endpoints. Mixer
 //! time is director.time, not accumulated particle time. Weighted curves reuse

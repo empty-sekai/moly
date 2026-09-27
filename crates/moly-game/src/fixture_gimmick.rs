@@ -426,7 +426,7 @@ fn euler_trigger_order(controller: &Value, machine: &Value) -> Result<[Trigger; 
 }
 
 // This is deliberately not an "empty array => no-op" rule for all fixtures.
-// CN 6.0.0's refrigerator receiver was traced through constructor, Initialize,
+// The CN client's refrigerator receiver was traced through constructor, Initialize,
 // Setup/SetupForHome and AttachComponents. Its package has no ParticleSystem;
 // the only static field writer is SetFixtureActivateEffect, with no direct
 // caller in any executable section of the game's native binary. Hot IFix overrides are excluded.

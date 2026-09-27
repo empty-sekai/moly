@@ -95,7 +95,7 @@ mod tests {
 
     #[test]
     fn source_snow_size_keeps_native_age_percent_for_draw() {
-        // Current JP 6.8.1 snow, first normal frame after 12s prewarm,
+        // Current JP client snow, first normal frame after 12s prewarm,
         // particle 66. Native's effective-size array holds 0x3b3840b0; the
         // old age round trip produced 0x3b38418a. Keep the authored Size curve.
         let keys = [(0.0, 1.0, 0.3333333432674408),

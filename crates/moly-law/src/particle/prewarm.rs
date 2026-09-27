@@ -1,5 +1,5 @@
-//! Bounded JP 6.8.1 ParticleSystem prewarm plan. Source lifecycle admission remains separate.
-//! Transcribed from the current JP 6.8.1 libunity: ParticleSystem::GetTimeStep
+//! Bounded JP client ParticleSystem prewarm plan. Source lifecycle admission remains separate.
+//! Transcribed from the current JP client's engine library: ParticleSystem::GetTimeStep
 //! and ParticleSystem::Update1Incremental; the native prewarm observations are
 //! replayed by opt-in tests that read them from outside the repository. First
 //! Play runs ParticleSystem::ComputePrewarmStartParameters, then

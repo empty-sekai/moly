@@ -1,6 +1,6 @@
 //! Source mouth continuations and channel-zero PCM level arithmetic.
 //!
-//! CN 6.0.0 NPCAvatarView.LipSync gates at cycle entry, not during each
+//! The CN client's NPCAvatarView.LipSync gates at cycle entry, not during each
 //! awaited delay. An engine adapter owns actual voice identity, PCM callback
 //! blocks and Update-phase delays. This module neither plays sound nor guesses
 //! a speaker from a unit id. See the voice-mouth lane's source report.

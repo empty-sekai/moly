@@ -11,7 +11,7 @@ use moly_law::particle::{
 
 // Two transform rows (the first and the fourth) and the Shape exit of the
 // current native shape birth observation: EmitterStoreData executed from the
-// current JP 6.8.1 libunity.
+// current JP client's engine library.
 // Local data is captured after both source normalization operations. World
 // data is independently captured after the outer owner multiply. All eight
 // storage lanes are retained, including the three padded lanes of the 5 birth

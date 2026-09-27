@@ -1,4 +1,4 @@
-//! FenceConnectData + FenceController (JP 6.7.0 source, CN prefab enums).
+//! FenceConnectData + FenceController (JP client source, CN prefab enums).
 //! Neighbors are in source ConnectType order: UR, UL, RU, RD, DR, DL, LU, LD.
 //! Grid lookup preserves the first joint's type/direction, while UID overlap
 //! considers every joint in the two tiles, as IsSameMysekaiUid does.

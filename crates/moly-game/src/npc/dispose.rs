@@ -1,4 +1,4 @@
-//! `AvatarDataStore.DisposeNPC` / `DisposeNPCAll` (JP 6.8.1): the avatar
+//! `AvatarDataStore.DisposeNPC` / `DisposeNPCAll` (JP client): the avatar
 //! store removes the presenter from its list and disposes it.
 //!
 //! The presenter's dispose, in order: the model is marked disposed; the
