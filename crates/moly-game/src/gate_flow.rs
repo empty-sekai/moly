@@ -2079,6 +2079,9 @@ pub(crate) fn cut_scene_started(world: &mut World, cast: &Cast) {
         CastCaller::Invite => {
             info!("[gate] PlayInviteCutSceneAsync: no start callback");
         }
+        // Empty: cutscene.rs dispatches Birthday casts to its own callbacks
+        // and never calls gate_flow for them.
+        CastCaller::Birthday => {}
     }
     info!(
         "[gate] joystick enabled before the cut-scene state: {:?}",
@@ -2107,6 +2110,9 @@ pub(crate) fn cut_scene_end_callback(world: &mut World, cast: &Cast) {
             }
             dispose_npc_all(world, "OnEndGoHomeCutScene");
         }
+        // Empty: cutscene.rs dispatches Birthday casts to its own callbacks
+        // and never calls gate_flow for them.
+        CastCaller::Birthday => {}
     }
 }
 

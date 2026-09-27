@@ -20,10 +20,11 @@
 //!
 //! `birthday` (8) is above the table's range: the source returns without a
 //! sensor type, so a birthday fixture offers no action through this table.
-//! Its cut-scene button reaches the button stack on its own path, gated by
-//! `MysekaiFixtureUtility.CanShowBirthdayCutSceneButton` (not visiting, no
-//! birthday context, `IsWithinBirthdayTimeByFixtureId`), which is not ported
-//! here; see [`birthday_cut_scene_button_condition`].
+//! Its cut-scene button reaches the button stack on its own path
+//! (`GetPlayerActionButtonType`'s `IsWithinBirthdayTimeByFixtureId` arm),
+//! gated by `MysekaiFixtureUtility.CanShowBirthdayCutSceneButton` (not
+//! visiting, no birthday context, `IsWithinBirthdayTimeByFixtureId`): the
+//! party fixture's [`crate::cutscene::birthday::BirthdayButton`].
 //!
 //! The sensor type maps to the button type through
 //! [`ButtonType::from_action_type`]. Which of the classified buttons the
@@ -116,15 +117,6 @@ pub(crate) fn system_fixture_button(action: PlayerActionType) -> ButtonType {
 ///
 /// The others are withheld: their availability rules are not ported here.
 pub(crate) const STACKED_ACTIONS: &[PlayerActionType] = &[PlayerActionType::MusicPlay];
-
-/// The hook for `CanShowBirthdayCutSceneButton` (not visiting, no
-/// `BirthdayContext`, `IsWithinBirthdayTimeByFixtureId`). Not ported: it
-/// answers `None` ("not decided"), and a birthday fixture shows no button
-/// through this module.
-#[allow(dead_code)] // The birthday cut-scene button builds on it.
-pub(crate) fn birthday_cut_scene_button_condition(_master_fixture_id: i32) -> Option<bool> {
-    None
-}
 
 /// The system fixture master the classification reads.
 const SYSTEM_FIXTURES: MasterTable<HashMap<i32, SystemFixtureType>> = MasterTable {

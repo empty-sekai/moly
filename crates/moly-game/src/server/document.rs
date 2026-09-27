@@ -162,6 +162,9 @@ pub(crate) struct ServerDocument {
     pub(crate) music_play_reply: super::music_play::MusicPlayReplyPolicy,
     /// `userMysekaiMusicRecords` ([`super::music_play`]).
     pub(crate) music_records: Vec<super::client::music_play::OwnedMusicRecord>,
+    /// `userMysekaiSystemFixtureActions` and its policies
+    /// ([`super::system_fixture_action`]).
+    pub(crate) system_fixture_actions: super::system_fixture_action::SystemFixtureActionDoc,
 }
 
 /// Which migration a schemaVersion 1 slice takes.
@@ -546,6 +549,7 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
         .chain([super::music::SECTION, super::avatar::SECTION].iter())
         .chain(super::inventory::DOCUMENT_KEYS.iter())
         .chain(std::iter::once(&super::music_play::RECORDS_SECTION))
+        .chain(super::system_fixture_action::DOCUMENT_KEYS.iter())
         .copied()
         .collect();
     only(doc, &allowed, "the server document")?;
@@ -564,6 +568,7 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
         .chain(std::iter::once(super::home_action::POLICY_KEY))
         .chain(super::inventory::POLICY_KEYS.iter().copied())
         .chain(std::iter::once(super::music_play::POLICY_KEY))
+        .chain(super::system_fixture_action::POLICY_KEYS.iter().copied())
         .collect();
     only(policies, &allowed, "policies")?;
     let delivery = super::delivery::DeliveryDoc::parse(doc, policies)?;
@@ -573,6 +578,8 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
     let inventory = super::inventory::InventoryDoc::parse(doc, policies)?;
     let music_play_reply = super::music_play::parse_reply_policy(policies)?;
     let music_records = super::music_play::parse(doc)?;
+    let system_fixture_actions =
+        super::system_fixture_action::SystemFixtureActionDoc::parse(doc, policies)?;
     let (gate, gate_characters, talk_histories) = parse_visit(
         field(doc, "userMysekaiGateCharacterVisit", "the server document")?,
         true,
@@ -639,6 +646,7 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
         inventory,
         music_play_reply,
         music_records,
+        system_fixture_actions,
     };
     document.check_structure()?;
     Ok((document, pending))
@@ -760,6 +768,7 @@ pub(crate) fn migrate_v1(text: &str, migration: Migration) -> Result<ServerDocum
         inventory: Default::default(),
         music_play_reply: Default::default(),
         music_records: Vec::new(),
+        system_fixture_actions: Default::default(),
     };
     document.check_structure()?;
     Ok(document)
@@ -927,6 +936,7 @@ impl ServerDocument {
                 super::music_play::RECORDS_SECTION.into(),
                 super::client::music_play::owned_rows_value(&self.music_records),
             );
+            self.system_fixture_actions.write(top, &mut policies);
             top.insert("policies".into(), Value::Object(policies));
         }
         value
@@ -951,6 +961,8 @@ impl ServerDocument {
         if let Some(policy) = &self.talk_list_policy {
             value["talkListPolicy"] = policy.clone();
         }
+        self.system_fixture_actions
+            .serve_party_fixtures(&mut value["userMysekaiSiteHousingLayouts"]);
         value
     }
 }

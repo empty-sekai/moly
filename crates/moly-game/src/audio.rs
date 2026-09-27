@@ -87,6 +87,7 @@
 
 mod cue;
 mod cue_law;
+pub(crate) mod cutscene;
 mod record;
 
 pub use self::record::RecordChoice;
@@ -2134,6 +2135,7 @@ pub(crate) fn advance_bgm(
     bgm_hold: Option<Res<crate::site_move::BgmHold>>,
     mut manager_fade: ResMut<MysekaiBgmFade>,
     mut record: record::RecordParams,
+    mut cut_scene: ResMut<cutscene::CutSceneAudio>,
 ) {
     manager_fade.advance(time.elapsed_secs(), bus.player.bgm);
     let bgm_player = manager_fade.player_volume(bus.player.bgm);
@@ -2225,6 +2227,20 @@ pub(crate) fn advance_bgm(
         }
     }
 
+    // A cut-scene's BGM call stands over the channel's own choice until the
+    // cut-scene ends ([`cutscene`]).
+    if cutscene::stands(
+        &mut cut_scene,
+        &mut commands,
+        &server,
+        &routing,
+        &mut channel,
+        &bus,
+        bgm_player,
+        &gate,
+    ) {
+        return;
+    }
     // 选曲：站点或客户端配置未就绪时不动（现声照响，换站途中亦然）。
     let (Some(site), Some(configs)) = (site.as_deref(), configs.as_deref()) else {
         return;
@@ -3782,6 +3798,7 @@ pub(crate) fn install(app: &mut App) {
         .init_resource::<BgmChannel>()
         .init_resource::<record::RecordLibrary>()
         .init_resource::<RecordChoice>()
+        .init_resource::<cutscene::CutSceneAudio>()
         .init_resource::<MysekaiBgmFade>()
         .init_resource::<AmbientChannel>()
         .init_resource::<SequenceWorkAreas>()
