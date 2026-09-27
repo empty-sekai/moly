@@ -93,6 +93,7 @@ pub(crate) mod inventory;
 pub(crate) mod local;
 pub(crate) mod music;
 pub(crate) mod music_play;
+pub(crate) mod system_fixture_action;
 pub(crate) mod talk_read;
 
 use std::collections::VecDeque;
@@ -274,6 +275,7 @@ pub(crate) enum ResponseKind {
     CharacterTalkRead,
     MusicPlaySet,
     MusicPlayEject,
+    SystemFixtureAction,
 }
 
 impl ResponseKind {
@@ -298,6 +300,7 @@ impl ResponseKind {
             }
             Self::MusicPlaySet => "PutUserMysekaiMusicPlaySetApi",
             Self::MusicPlayEject => "PutUserMysekaiMusicPlayEjectApi",
+            Self::SystemFixtureAction => "PostUserMysekaiSystemFixtureActionApi",
         }
     }
 }
@@ -325,6 +328,9 @@ pub(crate) struct ServerResponse {
     pub(crate) inventory: client::inventory::SuiteUserSections,
     /// `userMysekaiMusicRecords` when it carries them.
     pub(crate) music_records: Option<Vec<client::music_play::OwnedMusicRecord>>,
+    /// `userMysekaiSystemFixtureActions` when it carries them.
+    pub(crate) system_fixture_actions:
+        Option<Vec<client::system_fixture_action::UserMysekaiSystemFixtureAction>>,
 }
 
 /// A reply's talk list (`mysekaiCharacterTalkWithReadHistories`): the rows
@@ -737,6 +743,8 @@ impl ServerModel {
             avatar: has(avatar::SECTION).then_some(self.doc.avatar),
             inventory: self.inventory_update(&sections),
             music_records: has(music_play::RECORDS_SECTION).then(|| self.doc.music_records.clone()),
+            system_fixture_actions: has(system_fixture_action::SECTION)
+                .then(|| self.doc.system_fixture_actions.rows.clone()),
         };
         info!(
             "[server] response {}: sections {sections:?}, isRefreshed {is_refreshed}, server date {now}",
@@ -777,6 +785,7 @@ impl ServerModel {
         carries.extend([music::SECTION, avatar::SECTION]);
         carries.extend(inventory::SECTIONS);
         carries.push(music_play::RECORDS_SECTION);
+        carries.push(system_fixture_action::SECTION);
         self.respond(ResponseKind::Join, refreshed, &carries);
     }
 
@@ -1694,6 +1703,7 @@ fn deliver(
     mut avatar_copy: ResMut<client::avatar::ClientUserAvatar>,
     mut inventory_copy: ResMut<client::inventory::ClientMysekaiInventory>,
     mut records_copy: ResMut<client::music_play::ClientMusicRecords>,
+    mut actions_copy: ResMut<client::system_fixture_action::ClientSystemFixtureActions>,
 ) {
     let taken = with_model(|model| {
         (
@@ -1720,6 +1730,9 @@ fn deliver(
         inventory_copy.apply(std::mem::take(&mut response.inventory));
         if let Some(rows) = response.music_records.take() {
             records_copy.apply(rows);
+        }
+        if let Some(rows) = response.system_fixture_actions.take() {
+            actions_copy.apply(rows);
         }
         let previous_rank = copy.as_ref().and_then(|copy| copy.gamedata.mysekai_rank);
         let next = match copy.take() {
@@ -1916,6 +1929,7 @@ impl Plugin for ServerPlugin {
         craft::install(app);
         let endpoint = app.world_mut().register_system(music_play::handle);
         app.insert_resource(client::music_play::MusicPlayEndpoint(endpoint));
+        system_fixture_action::install(app);
     }
 }
 

@@ -40,15 +40,28 @@
 //!
 //! Masking: a maskable UIParticle below a `Mask` is refused here (the
 //! stencil material is not ported); none of the packaged UIParticles is
-//! below one. The UI-Uber program has no clip-rect term, so a `RectMask2D`
-//! clips nothing of it.
+//! below one. The UI-Uber and UI/Additive programs have no clip-rect term,
+//! so a `RectMask2D` clips nothing of them. UI-Default multiplies its alpha
+//! by the `_ClipRect` test, and the canvas batch writes `_ClipRect` as
+//! (-inf, -inf, +inf, +inf) unless the batch is rect-clipped
+//! (`UI::PrepareBatches`), so the test passes everywhere and is left out of
+//! the program here; a UI-Default system below a `RectMask2D` is refused.
 //!
-//! The draw: the UI camera draws the pass tagged `SRPDefaultUnlit` (the
-//! UI-Uber pass without a LightMode) once per batch; see [`admission`]. The
-//! fragment is the UI-Uber program's: the texture times the vertex colour, the
-//! rgb times alpha for `_BlendMode` 2, with the pass blend
-//! `[_SrcBlend] [_DstBlend]`, `ColorMask RGB`, `Cull Off`, `ZTest LEqual`,
-//! `ZWrite Off` (`shaders/ui_particle.wgsl`).
+//! The draw: the UI camera draws the pass tagged `SRPDefaultUnlit` (the pass
+//! without a LightMode) once per batch; see [`admission`]. Three programs,
+//! selected by the material's shader name (`shaders/ui_particle.wgsl`):
+//! - `Mysekai/Effect/UI-Uber`: the texture times the vertex colour, the rgb
+//!   times alpha for `_BlendMode` 2; pass blend `[_SrcBlend] [_DstBlend]`,
+//!   `ColorMask RGB`, `Cull Off`, `ZTest LEqual`, `ZWrite Off`.
+//! - `Sekai/Particles/UI-Default`: the vertex colour times `_Color`, then the
+//!   texture times that; pass blend `SrcAlpha OneMinusSrcAlpha`,
+//!   `ColorMask [_ColorMask]`, `Cull Off`, `ZTest [unity_GUIZTestMode]` (8,
+//!   Always, for a host on a screen-space overlay canvas, marked
+//!   [`UiParticleOverlayCanvas`]; 4, LessEqual, for a canvas a camera draws),
+//!   `ZWrite Off`.
+//! - `Sekai/Particles/UI/Additive`: the texture times the vertex colour; pass
+//!   0 blend `SrcAlpha One`, `ColorMask RGB`, `Cull Off`, `ZTest Always`,
+//!   `ZWrite Off`.
 //!
 //! Host API ([`UiParticleHost`]): a screen that owns a UIParticle node spawns
 //! an entity with this component where the node is, as a descendant of the
@@ -134,6 +147,12 @@ pub(crate) struct UiParticleHost {
     pub(crate) alpha: f32,
 }
 
+/// The host's UIParticle is on a screen-space overlay canvas (the engine
+/// sets `unity_GUIZTestMode` to Always for it); without this marker the host
+/// is on a canvas a camera draws (LessEqual).
+#[derive(Component, Clone, Copy, Debug)]
+pub(crate) struct UiParticleOverlayCanvas;
+
 /// `ParticleSystem.Pause(withChildren: true)` on a host's systems.
 #[derive(Component, Clone, Copy, Debug)]
 pub(crate) struct UiParticlePaused;
@@ -198,6 +217,9 @@ struct Installed {
     drawn_before: bool,
     /// Whether the host's [`UiParticleHeadStart`] has been stepped.
     head_started: bool,
+    /// Live-particle count lines written: 1 after the first bake, 2 after
+    /// the first bake without [`UiParticlePaused`].
+    counts_logged: u8,
 }
 
 /// One installed system of a UIParticle.
@@ -222,36 +244,39 @@ struct UiParticleSystem {
 }
 
 #[derive(Debug, Clone, Copy, ShaderType)]
-struct UiUberUniform {
+struct UiParticleUniform {
+    /// `_MainTex_ST` (all three programs; four channels).
     main_tex_st: Vec4,
-    /// x: `_BlendMode`.
+    /// UI-Default's `_Color` (four channels); unread by the other programs.
+    color: Vec4,
+    /// x: UI-Uber's `_BlendMode`; y: the program ([`admission::UiProgram`]).
     blend_mode: UVec4,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct UiUberKey {
+pub(crate) struct UiParticleKey {
     state: SourceRenderState,
 }
 
-/// `Mysekai/Effect/UI-Uber` on a canvas.
+/// A UI particle program on a canvas.
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
-#[bind_group_data(UiUberKey)]
-pub(crate) struct UiUberMaterial {
+#[bind_group_data(UiParticleKey)]
+pub(crate) struct UiParticleMaterial {
     #[uniform(0)]
-    value: UiUberUniform,
+    value: UiParticleUniform,
     #[texture(1)]
     #[sampler(2)]
     texture: Handle<Image>,
-    key: UiUberKey,
+    key: UiParticleKey,
 }
 
-impl From<&UiUberMaterial> for UiUberKey {
-    fn from(material: &UiUberMaterial) -> Self {
+impl From<&UiParticleMaterial> for UiParticleKey {
+    fn from(material: &UiParticleMaterial) -> Self {
         material.key
     }
 }
 
-impl Material2d for UiUberMaterial {
+impl Material2d for UiParticleMaterial {
     fn vertex_shader() -> ShaderRef {
         ShaderRef::Handle(SHADER.clone())
     }
@@ -280,7 +305,7 @@ pub(crate) struct UiParticlePlugin;
 
 impl Plugin for UiParticlePlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(Material2dPlugin::<UiUberMaterial>::default());
+        app.add_plugins(Material2dPlugin::<UiParticleMaterial>::default());
         app.world_mut()
             .resource_mut::<Assets<Shader>>()
             .insert(
@@ -618,6 +643,7 @@ fn install(
         &UiParticleHost,
         &InheritedVisibility,
         Option<&mut HostState>,
+        Has<UiParticleOverlayCanvas>,
     )>,
     live: Query<(), With<UiParticleHost>>,
     systems: Query<(Entity, &UiParticleSystem)>,
@@ -625,7 +651,7 @@ fn install(
     (gltfs, gltf_nodes): (Res<Assets<Gltf>>, Res<Assets<GltfNode>>),
     server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<UiUberMaterial>>,
+    mut materials: ResMut<Assets<UiParticleMaterial>>,
     mut seeds: ResMut<crate::particle_runtime::seed::SystemSeedManager>,
     mut state: Local<(u64, HashMap<AssetId<JsonAsset>, Arc<Value>>)>,
 ) {
@@ -635,7 +661,12 @@ fn install(
             commands.entity(entity).try_despawn();
         }
     }
-    for (entity, host, visible, host_state) in &mut hosts {
+    for (entity, host, visible, host_state, overlay) in &mut hosts {
+        let gui_ztest = if overlay {
+            admission::GUI_ZTEST_OVERLAY
+        } else {
+            admission::GUI_ZTEST_CAMERA
+        };
         // The glTF scene of an awaiting host, once its nodes are there.
         let mut plain = HashMap::new();
         match (visible.get(), host_state) {
@@ -685,6 +716,7 @@ fn install(
                     host,
                     &doc,
                     &plain,
+                    gui_ztest,
                     &server,
                     &mut meshes,
                     &mut materials,
@@ -728,6 +760,7 @@ fn install(
                     host,
                     &doc,
                     &plain,
+                    gui_ztest,
                     &server,
                     &mut meshes,
                     &mut materials,
@@ -799,9 +832,10 @@ fn install_host(
     host: &UiParticleHost,
     doc: &Value,
     plain_trs: &HashMap<String, Trs>,
+    gui_ztest: u8,
     server: &AssetServer,
     meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<UiUberMaterial>,
+    materials: &mut Assets<UiParticleMaterial>,
     seeds: &mut crate::particle_runtime::seed::SystemSeedManager,
     ordinal: &mut u64,
 ) -> Result<Installed, NotInstalled> {
@@ -896,6 +930,19 @@ fn install_host(
     if under_mask && f["m_Maskable"].as_i64() != Some(0) {
         return Err("a Mask above the UIParticle: the stencil material is not ported".into());
     }
+    // A RectMask2D on the UIParticle node or above it, placed as the Mask
+    // is. It rect-clips the batch, which only UI-Default's program reads.
+    let under_rect_mask = doc["components"]["RectMask2D"]["instances"]
+        .as_array()
+        .is_some_and(|masks| {
+            masks.iter().any(|inst| {
+                let mask = inst["node"].as_str().unwrap_or("");
+                rects.contains_key(mask)
+                    && (mask.is_empty()
+                        || host.node == mask
+                        || host.node.starts_with(&format!("{mask}/")))
+            })
+        });
     let fields = Fields {
         ignore_canvas_scaler: f["m_IgnoreCanvasScaler"]
             .as_i64()
@@ -912,6 +959,13 @@ fn install_host(
     };
     let has_rigidbody = doc["inventory"]["types"].get("Rigidbody").is_some();
     let references = f["m_Particles"].as_array().ok_or("m_Particles")?;
+    if references.is_empty() {
+        // OnEnable fills an empty list from the node's children and sorts it
+        // (SortForRendering: render queue, sorting layer, sorting order, ...).
+        return Err(
+            "an empty m_Particles is filled and sorted at OnEnable, which is not ported".into(),
+        );
+    }
     let mut draws = Vec::new();
     let mut report = Vec::new();
     for (order, reference) in references.iter().enumerate() {
@@ -950,11 +1004,18 @@ fn install_host(
             row,
             local_scale,
             has_rigidbody,
+            gui_ztest,
             mesh.clone(),
             entity,
             *ordinal,
         )
         .map_err(|reason| format!("m_Particles[{order}] {node}: {reason}"))?;
+        if under_rect_mask && draw.program == admission::UiProgram::Default {
+            return Err(format!(
+                "m_Particles[{order}] {node}: a RectMask2D above a UI-Default system rect-clips it, which is not ported"
+            )
+            .into());
+        }
         *ordinal += 1;
         let played = crate::weather_fx::fixture::install_played(&mut runtime, &route, seeds)
             .map_err(|reason| format!("m_Particles[{order}] {node}: {reason}"))?;
@@ -966,15 +1027,19 @@ fn install_host(
             server,
             format!("moly://{}/{}", host.directory, draw.texture),
         );
-        let material = materials.add(UiUberMaterial {
-            value: UiUberUniform {
+        let material = materials.add(UiParticleMaterial {
+            value: UiParticleUniform {
                 main_tex_st: Vec4::from_array(draw.main_tex_st),
-                blend_mode: UVec4::new(draw.blend_mode, 0, 0, 0),
+                color: Vec4::from_array(draw.color.unwrap_or([0.0; 4])),
+                blend_mode: UVec4::new(draw.blend_mode, draw.program as u32, 0, 0),
             },
             texture,
-            key: UiUberKey { state: draw.state },
+            key: UiParticleKey { state: draw.state },
         });
-        report.push(format!("{order}:{node} ({})", draw.texture));
+        report.push(format!(
+            "{order}:{node} ({:?}, {}, state {:?})",
+            draw.program, draw.texture, draw.state
+        ));
         let entity_draw = commands
             .spawn((
                 Mesh2d(mesh),
@@ -1015,6 +1080,7 @@ fn install_host(
         cached_position: Vec3::ZERO,
         drawn_before: false,
         head_started: false,
+        counts_logged: 0,
     })
 }
 
@@ -1175,6 +1241,7 @@ fn bake_frame(
         );
         installed.cached_position = position;
         let bake_alpha = !bake::approximately(host.alpha, 0.0);
+        let mut counts: Vec<(String, usize)> = Vec::new();
         let mut groups: Vec<String> = Vec::new();
         for &draw in &installed.draws {
             let Ok((mut system, mut transform, mesh)) = draws.get_mut(draw) else {
@@ -1228,6 +1295,7 @@ fn bake_frame(
                     *retired = true;
                 }
             }
+            counts.push((system.runtime.node.clone(), system.runtime.pool.len()));
             if system.space == Space::World && displacement != Vec3::ZERO {
                 let shift = bake::reflect(displacement).to_array();
                 for particle in &mut system.runtime.pool {
@@ -1317,5 +1385,18 @@ fn bake_frame(
         }
         installed.drawn_before = !groups.is_empty();
         installed.head_started = true;
+        let when = match (installed.counts_logged, paused) {
+            (0, _) => Some(format!("first bake ({head_steps} head-start steps)")),
+            (1, false) => Some("first bake after the pause".to_owned()),
+            _ => None,
+        };
+        if let Some(when) = when {
+            installed.counts_logged = if paused { 1 } else { 2 };
+            info!(
+                root = %host.root,
+                node = %host.node,
+                "[ui-particle] live particles at the {when}: {counts:?}"
+            );
+        }
     }
 }
