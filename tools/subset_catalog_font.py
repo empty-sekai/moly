@@ -7,7 +7,8 @@ Requires fonttools. Three steps, each reproducible from its recorded inputs:
   census   collect the code points of every text a product root and its
            region's master tables can put on screen into a census file
   build    subset the original OFL font to the existing subset's code points,
-           the census files and the product's own literal texts
+           the census files and the product's own literal texts, and
+           optionally standard character sets in full (--standard)
 
 Control characters (Unicode category C) never enter a census: the product's
 atlas asks for no glyph for them. Fetched tables and census files hold game
@@ -60,6 +61,8 @@ MASTER_FIELDS: dict[str, tuple[str, ...]] = {
     ),
     "musicArtists": ("name",),
     "musicVocals": ("caption",),
+    # The BGM select screen prints a soundtrack record's title and creator.
+    "musicSoundTracks": ("title", "creator"),
     "honors": ("name", "levels[].description"),
     "honorGroups": ("name",),
     "bondsHonors": ("name", "description", "levels[].description"),
@@ -106,6 +109,32 @@ TEXT_COMPONENT = "Sekai.UI.CustomTextMesh"
 
 # Text the product writes itself beyond the constants read from its sources.
 UI_TEXT = "对话与互动 独立体验 内容 对话 家具 演出 搜索 筛选 角色 全部 当前 场景 空场景 所需 可体验 播放 停止 返回 关闭 上一页 下一页 暂不可用 正在准备 已结束 名称 台词 清空 详情 实例 继续 查看 全文 仅看 收藏 最近 使用 中 缺少 资源 重试 缩略图 没有找到 确定 取消 下一句 · … ← → ↑ ↓ × − + / # 0123456789"
+
+
+def euc_grid(codec: str) -> str:
+    """Every character of a 94x94 double-byte set, decoded through its EUC codec."""
+    chars = []
+    for row in range(1, 95):
+        for cell in range(1, 95):
+            try:
+                chars.append(bytes((0xA0 + row, 0xA0 + cell)).decode(codec))
+            except UnicodeDecodeError:
+                continue
+    return "".join(chars)
+
+
+# Standard character sets a build can add on top of the census, so that text a
+# later master brings is likely drawable before a new census is taken. Each is
+# checked against the size its standard defines; a codec that maps otherwise
+# is refused.
+STANDARD_SETS = {
+    "latin-1-supplement": (lambda: "".join(map(chr, range(0xA0, 0x100))), 96),
+    "latin-extended-a": (lambda: "".join(map(chr, range(0x100, 0x180))), 128),
+    # Non-kanji rows 1-8, level 1 rows 16-47, level 2 rows 48-84.
+    "jis-x-0208": (lambda: euc_grid("euc_jp"), 6879),
+    # Non-hanzi rows 1-9, level 1 rows 16-55, level 2 rows 56-87.
+    "gb-2312": (lambda: euc_grid("gb2312"), 7445),
+}
 
 
 def printable(ch: str) -> bool:
@@ -324,6 +353,8 @@ def rust_unescape(literal: str) -> str:
 def product_literals() -> tuple[list[str], list[dict]]:
     """The texts the product's own sources hand to the atlas: every
     `FIXED_TEXTS` constant and the sitemap's phenomenon rows."""
+    if not GAME_SRC.is_dir():
+        raise SystemExit(f"{GAME_SRC} is absent: run the tool from inside the repository.")
     texts: list[str] = [UI_TEXT]
     sources = []
     block = re.compile(r"const FIXED_TEXTS: &\[&str\] = &\[(.*?)\];", re.S)
@@ -380,8 +411,13 @@ def build(args: argparse.Namespace) -> None:
     texts, literal_sources = product_literals()
     for text in texts:
         literals.add(text)
+    ui_sources = []
     for path in args.ui_source:
-        literals.add(path.read_text(encoding="utf8"))
+        part = Census()
+        part.add(path.read_text(encoding="utf8"))
+        literals.points |= part.points
+        ui_sources.append({"path": path.name, "sha256": sha256(path),
+                           "codepoints": len(part.points)})
     requested = old_points | literals.points
     censuses = []
     for path in args.census:
@@ -393,6 +429,18 @@ def build(args: argparse.Namespace) -> None:
             "dataVersion": document["masters"]["dataVersion"], "codepoints": len(points),
             "newCodepoints": len(points - old_points), "absent": document["absent"],
         })
+    standards = []
+    for name in args.standard:
+        spell, size = STANDARD_SETS[name]
+        text = spell()
+        if len(text) != size or len(set(text)) != size:
+            raise SystemExit(f"{name}: {len(set(text))} distinct characters, the standard has {size}.")
+        part = Census()
+        part.add(text)
+        standards.append({"name": name, "codepoints": len(part.points),
+                          "newCodepoints": len(part.points - requested),
+                          "unsupported": len(part.points - source_points)})
+        requested |= part.points
     missing = sorted(requested - source_points)
     supported = requested & source_points
 
@@ -428,7 +476,9 @@ def build(args: argparse.Namespace) -> None:
         "glyphs": glyph_count,
         "unsupportedCodepoints": [f"U+{point:04X}" for point in missing],
         "censuses": censuses,
+        "standardSets": standards,
         "productLiterals": literal_sources,
+        "uiSources": ui_sources,
         "existingBytes": args.existing.stat().st_size,
         "outputBytes": args.output.stat().st_size,
         "outputSha256": sha256(args.output),
@@ -456,6 +506,8 @@ def main() -> None:
     make.add_argument("--census", required=True, action="append", type=Path)
     make.add_argument("--output", required=True, type=Path)
     make.add_argument("--ui-source", action="append", default=[], type=Path)
+    make.add_argument("--standard", action="append", default=[], choices=sorted(STANDARD_SETS),
+                      help="also cover a standard character set in full")
     args = parser.parse_args()
     {"masters": fetch_masters, "census": census, "build": build}[args.step](args)
 
