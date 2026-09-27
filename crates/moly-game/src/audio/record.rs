@@ -30,7 +30,7 @@
 //! - Only when the model has a resource does `TryPlayUserSettingBGM` answer
 //!   true; it then plays the record through the same player call the default
 //!   choice uses (`OutGameBGMController.LoadAndPlayAsync`, no fade loop,
-//!   priority 1 -> `SoundManager.PlayBGM` with the controller's 0.25 s fade
+//!   priority 1 -> `SoundManager.PlayBGM` with the controller's fade time
 //!   and the start time). `SoundManager.PlayBGM` skips a cue whose name the
 //!   BGM channel already holds, and `CriCorePlayer.PlayCoreFade` sets the
 //!   start time as whole milliseconds, `(long)(startTime * 1000f)`, and
@@ -51,6 +51,29 @@
 //! own download layer has no such outcome): unreachable masters, a failed or
 //! mismatching download and an undecodable file are refused by name once per
 //! site entry and the default choice plays.
+//!
+//! The BGM select screen reaches the BGM through [`RecordChoice`] only, with
+//! the two calls its presenter makes on the BGM manager:
+//! - [`RecordChoice::play_record`]: the screen plays a record model for its
+//!   site (`BGMSelectPresenter.PlayBgm` -> `MysekaiBGMManager.PlayBGMAsync`
+//!   with the model), both for the highlighted record (`PlaySelectBgm`) and
+//!   for the screen's chosen one (`PlaySettingBgm`). The screen returns
+//!   without a call when the model has no resource, so here a record without
+//!   a resource (or without a record row) changes no BGM; otherwise the
+//!   record plays as a set record does, with the same refusals.
+//! - [`RecordChoice::play_default`]: the screen plays the site's default
+//!   (`BGMSelectPresenter.PlayDefaultBGM` ->
+//!   `MysekaiBGMManager.PlayDefaultBGMAsync`), which skips the site's setting.
+//! - [`RecordChoice::set_fade_time`]: the screen's `MysekaiBGMManager.SetFadeTime`
+//!   (0.3 when it resumes, 1.0 when it is disposed), the crossfade time of
+//!   every later BGM change.
+//!
+//! In the source each call simply replaces what plays until the next call on
+//! the manager. This port chooses the BGM every frame from the site, the
+//! phenomenon and the setting, so a choice stands over the setting until the
+//! active site or the phenomenon changes (where the port asks for the site's
+//! own choice again). The screen's requests to the server (set or eject on
+//! exit) are separate and change the setting, not the choice.
 
 use super::cue::gain_from_block;
 use super::*;
@@ -373,6 +396,7 @@ pub(crate) struct RecordParams<'w> {
     sources: Res<'w, Assets<AudioSource>>,
     region: Option<Res<'w, NavMeshSourceRegion>>,
     admission: Option<Res<'w, remote::RemoteAdmission>>,
+    choice: ResMut<'w, RecordChoice>,
 }
 
 /// What the BGM channel does after the record path ran.
@@ -384,6 +408,217 @@ pub(super) enum Step {
     Keep,
     /// The default choice plays.
     Default,
+}
+
+/// What asked for the record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Origin {
+    /// The site's setting (`TryPlayUserSettingBGM`).
+    Setting,
+    /// The BGM select screen ([`RecordChoice::play_record`]).
+    Screen,
+}
+
+/// A choice of the BGM select screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Choice {
+    Record {
+        record_id: i64,
+        vocal_id: i64,
+    },
+    /// The site's default, skipping its setting.
+    Default,
+}
+
+#[derive(Clone, Debug)]
+struct Chosen {
+    site_id: u32,
+    choice: Choice,
+    /// The phenomenon the choice was first read under.
+    phenomenon: Option<String>,
+}
+
+/// The BGM select screen's way into the BGM (see the module notes).
+#[derive(Resource, Default)]
+pub struct RecordChoice {
+    chosen: Option<Chosen>,
+    fade_seconds: Option<f32>,
+}
+
+impl RecordChoice {
+    /// Plays the record `record_id` with the vocal `vocal_id` as the BGM of
+    /// `site_id` (a soundtrack record ignores the vocal). The next frame's
+    /// BGM choice reads it.
+    pub fn play_record(&mut self, site_id: u32, record_id: i32, vocal_id: i32) {
+        self.chosen = Some(Chosen {
+            site_id,
+            choice: Choice::Record {
+                record_id: i64::from(record_id),
+                vocal_id: i64::from(vocal_id),
+            },
+            phenomenon: None,
+        });
+    }
+
+    /// Plays the default BGM of `site_id`, whatever the site's setting names
+    /// (the screen's choice was cleared).
+    pub fn play_default(&mut self, site_id: u32) {
+        self.chosen = Some(Chosen {
+            site_id,
+            choice: Choice::Default,
+            phenomenon: None,
+        });
+    }
+
+    /// Sets the BGM crossfade time, in seconds, for every later BGM change
+    /// (`MysekaiBGMManager.SetFadeTime`: the controller's fade time, which
+    /// the screen sets to 0.3 when it resumes and to 1.0 when it is disposed;
+    /// the value holds until the manager is rebuilt, and nothing else writes
+    /// it after the controller's construction default of 0.25). A fade
+    /// already running keeps the time it started with. A negative or
+    /// non-finite time stops loudly.
+    pub fn set_fade_time(&mut self, seconds: f32) {
+        assert!(
+            seconds.is_finite() && seconds >= 0.0,
+            "BGM crossfade time {seconds} is not a non-negative number of seconds"
+        );
+        self.fade_seconds = Some(seconds);
+    }
+
+    /// The crossfade time of the next BGM change.
+    fn fade_seconds(&self) -> f32 {
+        self.fade_seconds.unwrap_or(CROSS_FADE_SECONDS)
+    }
+}
+
+impl RecordParams<'_> {
+    /// The crossfade time of the next BGM change.
+    pub(super) fn fade_seconds(&self) -> f32 {
+        self.choice.fade_seconds()
+    }
+}
+
+/// The native instrument of the select screen's two entries.
+#[cfg(not(target_arch = "wasm32"))]
+const CHOICE_AUTOPLAY: &str = "MOLY_RECORD_CHOICE_AUTOPLAY";
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug)]
+pub(super) enum AutoplayStep {
+    Play { site: u32, record: i32, vocal: i32 },
+    Default { site: u32 },
+    Fade { seconds: f32 },
+}
+
+/// `MOLY_RECORD_CHOICE_AUTOPLAY`: comma-separated steps
+/// `<seconds>=play:<site>:<record>:<vocal>`, `<seconds>=default:<site>` or
+/// `<seconds>=fade:<crossfade seconds>`, in time order; a malformed step
+/// stops loudly.
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_autoplay(raw: &str) -> std::collections::VecDeque<(f32, AutoplayStep)> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            parse_autoplay_step(entry).unwrap_or_else(|| {
+                panic!("{CHOICE_AUTOPLAY} step {entry:?} is not <seconds>=play:<site>:<record>:<vocal>, <seconds>=default:<site> or <seconds>=fade:<crossfade seconds>")
+            })
+        })
+        .collect()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_autoplay_step(entry: &str) -> Option<(f32, AutoplayStep)> {
+    let (at, step) = entry.split_once('=')?;
+    let at = at.trim().parse::<f32>().ok()?;
+    let parts: Vec<&str> = step.split(':').map(str::trim).collect();
+    let step = match parts.as_slice() {
+        ["play", site, record, vocal] => AutoplayStep::Play {
+            site: site.parse().ok()?,
+            record: record.parse().ok()?,
+            vocal: vocal.parse().ok()?,
+        },
+        ["default", site] => AutoplayStep::Default {
+            site: site.parse().ok()?,
+        },
+        ["fade", seconds] => AutoplayStep::Fade {
+            seconds: seconds.parse().ok()?,
+        },
+        _ => return None,
+    };
+    Some((at, step))
+}
+
+/// Calls the select screen's entries at the instrument's times (seconds of
+/// real time since the app started).
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn autoplay_record_choice(
+    time: Res<Time<bevy::time::Real>>,
+    mut choice: ResMut<RecordChoice>,
+    mut steps: Local<Option<std::collections::VecDeque<(f32, AutoplayStep)>>>,
+) {
+    let steps = steps.get_or_insert_with(|| {
+        let steps = std::env::var(CHOICE_AUTOPLAY)
+            .map(|raw| parse_autoplay(&raw))
+            .unwrap_or_default();
+        if !steps.is_empty() {
+            warn!("[audio] {CHOICE_AUTOPLAY} instrument on: {steps:?}");
+        }
+        steps
+    });
+    while steps
+        .front()
+        .is_some_and(|(at, _)| time.elapsed_secs() >= *at)
+    {
+        let (at, step) = steps.pop_front().expect("checked above");
+        info!("[audio] {CHOICE_AUTOPLAY}: {step:?} at {at:.1}s");
+        match step {
+            AutoplayStep::Play {
+                site,
+                record,
+                vocal,
+            } => choice.play_record(site, record, vocal),
+            AutoplayStep::Default { site } => choice.play_default(site),
+            AutoplayStep::Fade { seconds } => choice.set_fade_time(seconds),
+        }
+    }
+}
+
+/// The screen's choice standing for the active site and phenomenon, if any.
+/// A new choice binds to the phenomenon it is first read under and clears
+/// the refusal guard (each choice names its own refusal); a choice for
+/// another site, or read under another phenomenon, is dropped.
+pub(super) fn standing_choice(
+    params: &mut RecordParams,
+    channel: &mut BgmChannel,
+    site_id: u32,
+    phenomenon: &str,
+) -> Option<Choice> {
+    let chosen = params.choice.chosen.as_mut()?;
+    if chosen.site_id != site_id {
+        warn!(
+            "[audio] record BGM: the select screen's choice for site {} is dropped: the active site is {site_id}",
+            chosen.site_id
+        );
+        params.choice.chosen = None;
+        return None;
+    }
+    match chosen.phenomenon.as_deref() {
+        None => {
+            chosen.phenomenon = Some(phenomenon.to_owned());
+            channel.music_refused_for = None;
+            info!(
+                "[audio] record BGM: the select screen chose {:?} for site {site_id}",
+                chosen.choice
+            );
+        }
+        Some(bound) if bound != phenomenon => {
+            params.choice.chosen = None;
+            return None;
+        }
+        Some(_) => {}
+    }
+    Some(chosen.choice)
 }
 
 /// Logs once per site entry (the channel's record-refusal guard).
@@ -398,8 +633,8 @@ fn once(channel: &mut BgmChannel, site_id: u32, line: impl FnOnce() -> String, e
     }
 }
 
-/// The record path for a housing site whose setting names `record_id` /
-/// `vocal_id`.
+/// The record path for a site whose setting (or the select screen) names
+/// `record_id` / `vocal_id`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn advance(
     params: &mut RecordParams,
@@ -412,6 +647,7 @@ pub(super) fn advance(
     site_id: u32,
     record_id: i64,
     vocal_id: i64,
+    origin: Origin,
 ) -> Step {
     let Some(region) = params.region.as_deref() else {
         return Step::Hold;
@@ -528,6 +764,19 @@ pub(super) fn advance(
     };
     let track = match masters.resolve(record_id, vocal_id) {
         Resolution::Track(track) => track,
+        Resolution::NoResource(reason) if origin == Origin::Screen => {
+            once(
+                channel,
+                site_id,
+                || {
+                    format!(
+                "[audio] record BGM: site {site_id} record {record_id} (vocal {vocal_id}) has no resource ({reason}); the select screen plays nothing for it, so no BGM changes"
+            )
+                },
+                false,
+            );
+            return Step::Keep;
+        }
         Resolution::NoResource(reason) => {
             once(
                 channel,
@@ -547,7 +796,12 @@ pub(super) fn advance(
                 site_id,
                 || {
                     format!(
-                "[audio] record BGM refused: site {site_id} record {record_id} (vocal {vocal_id}): {reason}; the source's record model throws here, so no BGM changes"
+                "[audio] record BGM refused: site {site_id} record {record_id} (vocal {vocal_id}): {reason}; {}, so no BGM changes",
+                if origin == Origin::Screen {
+                    "the select screen holds no model for it"
+                } else {
+                    "the source's record model throws here"
+                }
             )
                 },
                 true,
@@ -671,12 +925,25 @@ pub(super) fn advance(
         }
         AudioState::Loading(_) => return Step::Hold,
     };
+    let fade_seconds = params.choice.fade_seconds();
     start_voice(
-        commands, channel, handle, facts, &track, bus, bgm_player, gate,
+        commands,
+        channel,
+        handle,
+        facts,
+        &track,
+        bus,
+        bgm_player,
+        gate,
+        fade_seconds,
     );
     info!(
-        "[audio] record BGM start: site {site_id} record {record_id} ({}) -> package {} cue {} from {:.3}s ({})",
+        "[audio] record BGM start: site {site_id} record {record_id} ({}, {}) -> package {} cue {} from {:.3}s ({}; crossfade {:.2}s)",
         track.kind,
+        match origin {
+            Origin::Setting => "the site's setting",
+            Origin::Screen => "the select screen",
+        },
         track.package,
         track.cue,
         track.start_ms as f64 / 1000.0,
@@ -684,7 +951,8 @@ pub(super) fn advance(
             format!("loop region [{:.3}, {:.3}]", facts.loop_start, facts.loop_end)
         } else {
             format!("no loop chunk: the whole {:.3}s waveform loops", facts.duration)
-        }
+        },
+        fade_seconds
     );
     Step::Keep
 }
@@ -702,6 +970,7 @@ fn start_voice(
     bus: &VolumeBus,
     bgm_player: f32,
     gate: &AudioGate,
+    fade_seconds: f32,
 ) {
     if let Some(voice) = channel.voice.take() {
         let entities = voice
@@ -714,6 +983,7 @@ fn start_voice(
             entities,
             from_volume: voice.applied_volume,
             elapsed: 0.0,
+            seconds: fade_seconds,
         });
     }
     let cold = channel.fading.is_empty();
@@ -771,6 +1041,7 @@ fn start_voice(
         handoff_at,
         handoff_done,
         fade_in: if cold { None } else { Some(0.0) },
+        fade_seconds,
         applied_volume: if cold { target } else { 0.0 },
         volume,
     });
