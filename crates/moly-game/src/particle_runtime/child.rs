@@ -1057,6 +1057,13 @@ pub(crate) fn child_target_eligible(emitter: &EmitterParams, evidence: Option<Sh
     -> Result<(), String> {
     birth::qualify_emitter(&own_clock_emitter(emitter)).map_err(|refused| format!("{refused:?}"))?;
     native_shape_state_eligible(emitter, evidence)?;
+    // A Shape-scaled system's owner and shape scale are composed by the
+    // fixture host's per-frame loop for a system it steps itself; a target's
+    // owner words and draw context are composed elsewhere and do not take
+    // that rule, so such a target is refused by name.
+    if matches!(evidence.map(|evidence| evidence.scaling), Some(crate::particle_geometry::Scaling::Shape { .. })) {
+        return Err("Shape-scaled sub-emitter target: its owner is not composed by the Shape rule on the target path".into());
+    }
     qualify_target(emitter).map_err(|refused| format!("{refused:?}"))?;
     if let Some(params) = &emitter.shape {
         let law = ShapeBirthLaw::from_params(params).map_err(|refused| format!("target Shape {refused:?}"))?;
@@ -1148,6 +1155,29 @@ pub(crate) fn install_child_target(system: &mut Runtime, seeds: &mut seed::Syste
     Ok(())
 }
 
+/// `ParticleSystem.Simulate(0, restart)` reaching an installed sub-emitter
+/// target first, as its parent's Simulate steps its sub-emitters (the
+/// restart's time is zero for them): ResetSeeds from the target's seed,
+/// which the playable's Initialize made manual, so the shared manager is not
+/// read; Clear; `Play(false)`, which writes the start delay word; the warm a
+/// target never takes (a prewarm target is refused at admission); a time
+/// update of zero, which skips. The parent's restart then caches it stopped
+/// again, so it keeps taking only its parent's commands. The owner words
+/// its commands read are `owner`, composed from its instance now.
+pub(crate) fn restart_child_target(system: &mut Runtime, owner: ChildOwner) -> Result<(), String> {
+    if system.emitter.auto_random_seed != Some(false) {
+        return Err("sub-emitter target restart needs the manual owner the playable's Initialize sets".into());
+    }
+    super::clear_particles(system);
+    system.born_total = 0;
+    system.died_total = 0;
+    system.full_total = 0;
+    super::reset_for_first_play(system);
+    install_child_target(system, &mut seed::SystemSeedManager::default(), owner)?;
+    system.prewarmed = true;
+    Ok(())
+}
+
 /// One parent command delivered to its installed target in the frame it was
 /// issued: the per-frame update passes no catch-up flag, the world plays and
 /// the world gravity is the physics default. The Shape stream is committed
@@ -1155,10 +1185,20 @@ pub(crate) fn install_child_target(system: &mut Runtime, seeds: &mut seed::Syste
 /// target's refusal count.
 pub(crate) fn deliver_command(system: &mut Runtime,
     command: &moly_law::particle::sub_emission::SubEmitterCommand, frame_dt: f32) -> Result<usize, String> {
+    deliver_command_with(system, command, frame_dt, 0)
+}
+
+/// [`deliver_command`] for a command its parent recorded in an update
+/// entered with UpdateData `flags`: the child Emit reads the parent update's
+/// flags (a script `Simulate` time update passes 4, which enables the
+/// catch-up and skips its widening).
+pub(crate) fn deliver_command_with(system: &mut Runtime,
+    command: &moly_law::particle::sub_emission::SubEmitterCommand, frame_dt: f32, flags: u32)
+    -> Result<usize, String> {
     let Some(mut native) = system.native_birth.take() else {
         return Err("target has no child owner".into());
     };
-    let result = deliver_staged(system, &mut native, command, frame_dt);
+    let result = deliver_staged(system, &mut native, command, frame_dt, flags);
     if let Some(target) = native.target.as_mut() {
         target.commands += 1;
         match &result {
@@ -1174,9 +1214,9 @@ pub(crate) fn deliver_command(system: &mut Runtime,
 }
 
 fn deliver_staged(system: &mut Runtime, native: &mut birth::NativeBirthState,
-    command: &moly_law::particle::sub_emission::SubEmitterCommand, frame_dt: f32) -> Result<usize, String> {
+    command: &moly_law::particle::sub_emission::SubEmitterCommand, frame_dt: f32, flags: u32) -> Result<usize, String> {
     let owner = native.target.as_ref().ok_or("system is not a sub-emitter target")?.owner;
-    let update = ChildUpdate { flags: 0, frame_dt, world_playing: true, gravity: SOURCE_GRAVITY };
+    let update = ChildUpdate { flags, frame_dt, world_playing: true, gravity: SOURCE_GRAVITY };
     let mut shape = match &system.emitter.shape {
         None => None,
         Some(params) => Some(SourceShape {

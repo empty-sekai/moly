@@ -40,6 +40,7 @@ pub mod rotation;
 pub mod rotation_by_speed;
 pub mod mesh_selection;
 pub mod limit_velocity;
+pub mod main_duration;
 pub mod velocity;
 pub mod random;
 pub mod curve;

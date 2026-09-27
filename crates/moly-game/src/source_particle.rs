@@ -178,8 +178,21 @@ impl SourceParticle {
                     .as_ref()
                     .is_some_and(|name| self.material.disabled_passes.contains(name))
         };
-        // DrawObjectsPass queries these tags. Serialized UsePass/GrabPass entries
-        // are not executable passes. An omitted LightMode is SRPDefaultUnlit.
+        // URP's DrawObjectsPass queries the first three tags. Serialized
+        // UsePass/GrabPass entries are not executable passes. An omitted
+        // LightMode is SRPDefaultUnlit. The field renderer also carries two
+        // active MysekaiRenderObjectsFeature instances whose passes draw the
+        // tag MysekaiObject for every layer (the feature's constructor fixes
+        // that tag for a non-preview camera): "Render Mysekai Opaque Object"
+        // over the opaque queue range and "Render Mysekai Transparent Object"
+        // over the transparent range, so a MysekaiObject pass is drawn at any
+        // queue. URP's error pass for legacy tags is compiled into
+        // development builds only, so no other tag is drawn in the player.
+        // Named difference: the source's transparent MysekaiObject feature
+        // runs as its own DrawRenderers call before URP's transparent pass
+        // (both at the before-transparents event; feature passes are enqueued
+        // first and the sort is stable), so every such system draws before
+        // every forward one; this host sorts both into one transparent phase.
         let forwards = catalogue
             .passes
             .iter()
@@ -187,7 +200,7 @@ impl SourceParticle {
             .filter(|p| {
                 matches!(
                     p.light_mode.as_deref().unwrap_or("SRPDefaultUnlit"),
-                    "SRPDefaultUnlit" | "UniversalForward" | "UniversalForwardOnly"
+                    "SRPDefaultUnlit" | "UniversalForward" | "UniversalForwardOnly" | "MysekaiObject"
                 )
             })
             .collect::<Vec<_>>();

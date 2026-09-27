@@ -197,8 +197,15 @@ pub struct FrameStep {
 
 impl FrameStep {
     pub fn new(frame_dt: f32, simulation_speed: f32, time: TimeManagerSnapshot) -> Self {
+        Self::new_entry(frame_dt, simulation_speed, time, IncrementalEntry::PerFrame)
+    }
+
+    /// [`FrameStep::new`] for an update entered as `entry`: a fixed-time-step
+    /// script `Simulate` takes GetTimeStep's fixed step (see
+    /// [`super::frame_time::entry_step`]).
+    pub fn new_entry(frame_dt: f32, simulation_speed: f32, time: TimeManagerSnapshot, entry: IncrementalEntry) -> Self {
         let scaled_dt = frame_dt * super::frame_time::fmax_zero(simulation_speed);
-        Self { scaled_dt, step: super::frame_time::time_step(scaled_dt, time.maximum_particle_timestep) }
+        Self { scaled_dt, step: super::frame_time::entry_step(scaled_dt, time, entry) }
     }
 
     /// A skipped frame adds nothing to the pending time and runs no slice.

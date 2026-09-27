@@ -46,12 +46,21 @@ impl AxisBody {
 /// `unit_chain` records whether the emitter node and every ancestor carry
 /// scale exactly one: native Local scaling builds the world owner matrix from
 /// hierarchy rotation and translation only, so the composed affine owner is
-/// that matrix only over such a chain.
+/// that matrix only over such a chain. Shape (mode 2) scales no particle: the
+/// owner update stores a particle scale of one and a matrix of the chain's
+/// rotation and translation only, and the Shape module places births with
+/// the chain's lossy global scale, `shape_scale`, which the host recomputes
+/// from the instance every frame (see
+/// [`crate::weather_fx::fixture::shape_owner`]).
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum Scaling { Hierarchy, Local { scale: Vec3, unit_chain: bool } }
+pub(crate) enum Scaling { Hierarchy, Local { scale: Vec3, unit_chain: bool }, Shape { shape_scale: Vec3 } }
 impl Scaling {
     pub(crate) fn apply(self, mut frame: Frame) -> Frame {
-        if let Self::Local { scale, .. } = self { frame.scale = scale; }
+        match self {
+            Self::Local { scale, .. } => frame.scale = scale,
+            Self::Shape { .. } => frame.scale = Vec3::ONE,
+            Self::Hierarchy => {}
+        }
         frame
     }
 }
