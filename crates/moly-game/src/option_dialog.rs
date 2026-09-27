@@ -1779,11 +1779,7 @@ fn paint_system(
         paint_selectable(view, &button.button, enabled);
         if let Some(key) = wording {
             // UIPartsCommonButton.SetWordingKey turns the key on first.
-            let text = layouts
-                .wordings
-                .get(key)
-                .unwrap_or_else(|| panic!("UI wording missing: {key}"));
-            view.set_text(&button.text, text.clone());
+            view.set_text(&button.text, layouts.wording(key));
         }
     }
 }
