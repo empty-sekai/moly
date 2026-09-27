@@ -773,12 +773,12 @@ mod tests {
     #[test]
     fn a_craft_spends_cost_times_quantity_and_the_first_one_earns_the_master_bonus() {
         let mut model = model();
-        materials(&mut model, &[(1, 100), (21, 10), (10, 10)]);
+        materials(&mut model, &[(1, 130), (21, 13), (10, 13)]);
         let reply = model.craft_reply(&request(4, 3)).reply;
         assert!(reply.success, "{reply:?}");
         // MaterialCostList: cost.quantity x craftCount per row (30, 3, 3).
         let left = &model.doc.delivery.mysekai_materials;
-        assert_eq!((left[&1], left[&21], left[&10]), (10, 1, 1));
+        assert_eq!((left[&1], left[&21], left[&10]), (40, 4, 4));
         assert_eq!(
             model.doc.inventory.fixtures,
             vec![UserMysekaiFixture {
@@ -797,6 +797,8 @@ mod tests {
         assert!(model.craft_reply(&request(4, 1)).reply.success);
         assert_eq!(model.doc.gamedata.total_exp, 1000);
         assert_eq!(model.doc.inventory.fixtures[0].quantity, 4);
+        let left = &model.doc.delivery.mysekai_materials;
+        assert_eq!((left[&1], left[&21], left[&10]), (10, 1, 1));
     }
 
     #[test]
