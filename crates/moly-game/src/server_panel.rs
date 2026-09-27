@@ -302,11 +302,6 @@ pub(crate) struct TodayPhenomena {
 }
 
 impl TodayPhenomena {
-    /// The phenomenon the schedule write selected, if any.
-    pub(crate) fn phenomena_id(&self) -> Option<i32> {
-        self.phenomena_id
-    }
-
     /// Whether the first schedule write has run.
     pub(crate) fn written(&self) -> bool {
         self.written
