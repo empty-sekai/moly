@@ -444,6 +444,70 @@ pub(crate) fn shake_points(
     (points, durations)
 }
 
+/// DOTween `Shake` with a vector strength (`vectorBased`), the Full
+/// randomness mode: the magnitude is the strength's length; the first angle
+/// is one draw in [0, 360), each later point turns by 180 minus a draw in
+/// [-randomness, randomness); each point is then turned about up by
+/// `Quaternion.AngleAxis(draw in [-randomness, randomness), up)`, each axis
+/// clamped by `Vector3.ClampMagnitude(to, strength.axis)`, and set to the
+/// magnitude along its direction (`normalized`, zero below 1e-5); with
+/// `fade_out` the magnitude decays by `|strength| / n` per point and the
+/// strength is clamped to it. The last point is zero.
+pub(crate) fn vector_shake_points(
+    duration: f32,
+    strength: Vec3,
+    vibrato: i32,
+    randomness: f32,
+    fade_out: bool,
+    mut draw: impl FnMut(f32, f32) -> f32,
+) -> (Vec<Vec3>, Vec<f32>) {
+    let mut strength = strength;
+    let mut magnitude = strength.length();
+    let mut count = (vibrato as f32 * duration) as i32;
+    if count < 2 {
+        count = 2;
+    }
+    let n = count as usize;
+    let decay = magnitude / count as f32;
+    let (durations, _) = iteration_durations(n, duration, fade_out);
+    let mut angle = draw(0.0, 360.0);
+    let mut points = Vec::with_capacity(n);
+    for i in 0..n {
+        if i + 1 < n {
+            if i > 0 {
+                angle = angle - 180.0 + draw(-randomness, randomness);
+            }
+            let turn = draw(-randomness, randomness) * 0.017_453_292;
+            let radians = angle * 0.017_453_292;
+            let flat = Vec3::new(magnitude * radians.cos(), magnitude * radians.sin(), 0.0);
+            // A turn about Unity's up axis (left-handed: +z towards +x).
+            let turned = Vec3::new(
+                flat.x * turn.cos() + flat.z * turn.sin(),
+                flat.y,
+                flat.z * turn.cos() - flat.x * turn.sin(),
+            );
+            let clamped = Vec3::new(
+                clamp_magnitude(turned, strength.x).x,
+                clamp_magnitude(turned, strength.y).y,
+                clamp_magnitude(turned, strength.z).z,
+            );
+            let length = clamped.length();
+            points.push(if length > 1e-5 {
+                clamped / length * magnitude
+            } else {
+                Vec3::ZERO
+            });
+            if fade_out {
+                magnitude -= decay;
+            }
+            strength = clamp_magnitude(strength, magnitude);
+        } else {
+            points.push(Vec3::ZERO);
+        }
+    }
+    (points, durations)
+}
+
 fn iteration_durations(n: usize, duration: f32, grow: bool) -> (Vec<f32>, f32) {
     let mut durations = Vec::with_capacity(n);
     let mut sum = 0.0f32;
