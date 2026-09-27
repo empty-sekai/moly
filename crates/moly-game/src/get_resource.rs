@@ -68,7 +68,8 @@
 //! - any other: thumbnail; the caller's key.
 //!
 //! The name balloon (a tap on the thumbnail) shows `GetResourceName`. Every
-//! text comes from the root's wordings and masters.
+//! text comes from the root's wordings and the region's master tables (the
+//! master layer, [`moly_assets::json::master`]).
 //!
 //! ## The views and their closes
 //!
@@ -139,6 +140,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use moly_assets::json::JsonAsset;
+use moly_assets::json::master::{self, MasterData, MasterTable};
 use serde_json::Value;
 
 use crate::action_button::ActionTapConsumed;
@@ -208,14 +210,39 @@ const WORDINGS: &[&str] = &[
     WORD_FORMAT_RECORD_NAME,
 ];
 
-/// The masters the openers read.
-const MASTERS: [&str; 6] = [
-    "mysekai-materials.json",
-    "mysekai-blueprints.json",
-    "mysekai-fixtures.json",
-    "mysekai-tools.json",
-    "mysekai-items.json",
-    "mysekai-music-records.json",
+/// The master tables the openers and the craft screen read, from the
+/// region's master hosts (plain row arrays, master order).
+const MASTERS: [MasterTable<Vec<Value>>; 6] = [
+    MasterTable {
+        table: "mysekaiMaterials",
+        name: "mysekaiMaterials (the acquisition dialogs and the craft screen)",
+        parse: master::rows,
+    },
+    MasterTable {
+        table: "mysekaiBlueprints",
+        name: "mysekaiBlueprints (the acquisition dialogs and the craft screen)",
+        parse: master::rows,
+    },
+    MasterTable {
+        table: "mysekaiFixtures",
+        name: "mysekaiFixtures (the acquisition dialogs and the craft screen)",
+        parse: master::rows,
+    },
+    MasterTable {
+        table: "mysekaiTools",
+        name: "mysekaiTools (the acquisition dialogs and the craft screen)",
+        parse: master::rows,
+    },
+    MasterTable {
+        table: "mysekaiItems",
+        name: "mysekaiItems (the acquisition dialogs)",
+        parse: master::rows,
+    },
+    MasterTable {
+        table: "mysekaiMusicRecords",
+        name: "mysekaiMusicRecords (the acquisition dialogs)",
+        parse: master::rows,
+    },
 ];
 
 const SE_GET_MATERIAL: &str = "se_get_material";
@@ -284,6 +311,15 @@ struct FixtureRow {
     bundle: String,
     /// `MysekaiFixtureType` raw value.
     kind: i32,
+    /// Texture 1 and the other colours' textures
+    /// (`mysekaiFixtureAnotherColors`), ascending: the craft preview's colour
+    /// cells stand in on these; `None` for a row without the column (only the
+    /// craft screen reads it).
+    colors: Option<Vec<i32>>,
+    /// `mysekaiSettableLayoutType` and the grid size (width, depth, height),
+    /// for the craft preview's size text; `None` for a row without the
+    /// columns.
+    layout: Option<(String, [i32; 3])>,
 }
 
 struct ItemRow {
@@ -303,12 +339,8 @@ struct Masters {
 }
 
 impl Masters {
-    fn parse(docs: &[Value]) -> Result<Masters, String> {
-        let entries = |index: usize| -> Result<&serde_json::Map<String, Value>, String> {
-            docs[index]["entries"]
-                .as_object()
-                .ok_or_else(|| format!("{}: no entries", MASTERS[index]))
-        };
+    fn parse(tables: &[Vec<Value>]) -> Result<Masters, String> {
+        let entries = |index: usize| -> Result<&Vec<Value>, String> { Ok(&tables[index]) };
         let int = |row: &Value, key: &str, file: &str| -> Result<i32, String> {
             row[key]
                 .as_i64()
@@ -322,8 +354,8 @@ impl Masters {
                 .ok_or_else(|| format!("{file}: a row without {key}"))
         };
         let mut materials = HashMap::new();
-        for row in entries(0)?.values() {
-            let file = MASTERS[0];
+        for row in entries(0)? {
+            let file = MASTERS[0].table;
             let kind = match row["mysekaiMaterialType"].as_str() {
                 Some("wood") => 0,
                 Some("mineral") => 1,
@@ -353,8 +385,8 @@ impl Masters {
             );
         }
         let mut blueprints = HashMap::new();
-        for row in entries(1)?.values() {
-            let file = MASTERS[1];
+        for row in entries(1)? {
+            let file = MASTERS[1].table;
             let craft_type = match row["mysekaiCraftType"].as_str() {
                 Some("mysekai_fixture") => CraftType::Fixture,
                 Some("mysekai_tool") => CraftType::Tool,
@@ -371,12 +403,9 @@ impl Masters {
             );
         }
         let mut fixtures = HashMap::new();
-        let fixture_rows = docs[2]["fixtures"]
-            .as_array()
-            .ok_or_else(|| format!("{}: no fixtures", MASTERS[2]))?;
-        for row in fixture_rows {
-            let file = MASTERS[2];
-            let kind = match row["fixtureType"].as_str() {
+        for row in entries(2)? {
+            let file = MASTERS[2].table;
+            let kind = match row["mysekaiFixtureType"].as_str() {
                 Some("system") => 0,
                 Some("custom") => 1,
                 Some("plant") => FIXTURE_TYPE_PLANT,
@@ -393,16 +422,45 @@ impl Masters {
                     name: text(row, "name", file)?,
                     bundle: text(row, "assetbundleName", file)?,
                     kind,
+                    layout: row["mysekaiSettableLayoutType"]
+                        .as_str()
+                        .and_then(|layout| {
+                            let grid = |key: &str| row["gridSize"][key].as_i64().map(|v| v as i32);
+                            Some((
+                                layout.to_owned(),
+                                [grid("width")?, grid("depth")?, grid("height")?],
+                            ))
+                        }),
+                    colors: match row["mysekaiFixtureAnotherColors"].as_array() {
+                        None => None,
+                        Some(values) => {
+                            let mut colors = values
+                                .iter()
+                                .map(|value| {
+                                    value["textureId"].as_i64().map(|v| v as i32).ok_or_else(|| {
+                                        format!("{file}: an other colour without an integer textureId")
+                                    })
+                                })
+                                .collect::<Result<Vec<i32>, String>>()?;
+                            colors.push(1);
+                            colors.sort_unstable();
+                            colors.dedup();
+                            Some(colors)
+                        }
+                    },
                 },
             );
         }
         let mut tools = HashMap::new();
-        for row in entries(3)?.values() {
-            tools.insert(int(row, "id", MASTERS[3])?, text(row, "name", MASTERS[3])?);
+        for row in entries(3)? {
+            tools.insert(
+                int(row, "id", MASTERS[3].table)?,
+                text(row, "name", MASTERS[3].table)?,
+            );
         }
         let mut items = HashMap::new();
-        for row in entries(4)?.values() {
-            let file = MASTERS[4];
+        for row in entries(4)? {
+            let file = MASTERS[4].table;
             let kind = match row["mysekaiItemType"].as_str() {
                 Some("white_blueprint") => 0,
                 Some("surplus_blueprint") => ITEM_TYPE_SURPLUS_BLUEPRINT,
@@ -421,8 +479,8 @@ impl Masters {
             );
         }
         let mut records = HashSet::new();
-        for row in entries(5)?.values() {
-            records.insert(int(row, "id", MASTERS[5])?);
+        for row in entries(5)? {
+            records.insert(int(row, "id", MASTERS[5].table)?);
         }
         Ok(Masters {
             materials,
@@ -647,7 +705,8 @@ pub(crate) const FIXED_TEXTS: &[&str] = &["×0123456789"];
 /// The requested masters and what was read from them.
 #[derive(Resource, Default)]
 pub(crate) struct GetResourceInputs {
-    handles: Vec<Handle<JsonAsset>>,
+    /// The tables taken so far, in [`MASTERS`] order.
+    tables: Vec<Option<Vec<Value>>>,
     masters: Option<Masters>,
     absent: bool,
     /// The root's honor image index (`honor/index.json`), by honor id.
@@ -655,6 +714,65 @@ pub(crate) struct GetResourceInputs {
     /// and image by name.
     honors_handle: Option<Handle<JsonAsset>>,
     honors: Option<HashMap<i32, HonorImage>>,
+}
+
+impl GetResourceInputs {
+    /// The craft target's name and colour cells (`MasterMysekaiFixture` or
+    /// `MasterMysekaiTool`; a tool has no cells), for the craft screen.
+    pub(crate) fn craft_target(&self, tool: bool, id: i32) -> Result<(String, Vec<i32>), String> {
+        let masters = self.masters.as_ref().ok_or(if self.absent {
+            "the fixture and tool masters are not served"
+        } else {
+            "the fixture and tool masters are not read yet"
+        })?;
+        if tool {
+            masters
+                .tools
+                .get(&id)
+                .map(|name| (name.clone(), Vec::new()))
+                .ok_or_else(|| format!("tool {id} is not in the tool master"))
+        } else {
+            let row = masters
+                .fixtures
+                .get(&id)
+                .ok_or_else(|| format!("fixture {id} is not in the fixture master"))?;
+            let colors = row
+                .colors
+                .clone()
+                .ok_or("the fixture master has no colorIds column (the colour cells)")?;
+            Ok((row.name.clone(), colors))
+        }
+    }
+
+    /// A fixture's settable layout type and grid size (width, depth,
+    /// height).
+    pub(crate) fn fixture_layout(&self, id: i32) -> Result<(&str, [i32; 3]), String> {
+        let masters = self
+            .masters
+            .as_ref()
+            .ok_or("the fixture master is not read")?;
+        let row = masters
+            .fixtures
+            .get(&id)
+            .ok_or_else(|| format!("fixture {id} is not in the fixture master"))?;
+        row.layout
+            .as_ref()
+            .map(|(layout, grid)| (layout.as_str(), *grid))
+            .ok_or_else(|| "the fixture master has no layoutType or grid size columns".to_owned())
+    }
+
+    /// A material's `iconAssetbundleName`.
+    pub(crate) fn material_icon(&self, id: i32) -> Result<&str, String> {
+        let masters = self
+            .masters
+            .as_ref()
+            .ok_or("the material master is not read")?;
+        masters
+            .materials
+            .get(&id)
+            .map(|row| row.icon.as_str())
+            .ok_or_else(|| format!("material {id} is not in the material master"))
+    }
 }
 
 /// One honor of the root's honor image index.
@@ -745,15 +863,19 @@ pub(crate) struct GetResourceSpawned {
 // Startup
 // ---------------------------------------------------------------------------
 
-pub(crate) fn init(mut commands: Commands, server: Res<AssetServer>) {
+pub(crate) fn init(
+    mut commands: Commands,
+    server: Res<AssetServer>,
+    mut master_data: ResMut<MasterData>,
+) {
     commands.init_resource::<GetResourceOpeners>();
     commands.init_resource::<GetResourcePlayer>();
     commands.init_resource::<GetResourceSpawned>();
+    for table in &MASTERS {
+        master_data.request(table);
+    }
     commands.insert_resource(GetResourceInputs {
-        handles: MASTERS
-            .iter()
-            .map(|path| server.load(bevy::asset::AssetPath::from(format!("moly://{path}"))))
-            .collect(),
+        tables: vec![None; MASTERS.len()],
         masters: None,
         absent: false,
         honors_handle: Some(server.load(bevy::asset::AssetPath::from(HONOR_INDEX.to_owned()))),
@@ -902,8 +1024,13 @@ fn compose_honor(
 // Resolving the calls
 // ---------------------------------------------------------------------------
 
-/// Read the masters once they are loaded.
-fn read_inputs(inputs: &mut GetResourceInputs, server: &AssetServer, json: &Assets<JsonAsset>) {
+/// Read the masters once they are served.
+fn read_inputs(
+    inputs: &mut GetResourceInputs,
+    server: &AssetServer,
+    json: &Assets<JsonAsset>,
+    master_data: &mut MasterData,
+) {
     if let Some(handle) = inputs.honors_handle.clone() {
         if let LoadState::Failed(error) = server.load_state(&handle) {
             error!(
@@ -933,24 +1060,30 @@ fn read_inputs(inputs: &mut GetResourceInputs, server: &AssetServer, json: &Asse
     if inputs.masters.is_some() || inputs.absent {
         return;
     }
-    let mut docs = Vec::new();
-    for (path, handle) in MASTERS.iter().zip(&inputs.handles) {
-        if let LoadState::Failed(error) = server.load_state(handle) {
-            error!(
-                "[get_resource] input absent: {path} ({error}); NoticeCollectItem and the sketch result stay off"
-            );
-            inputs.absent = true;
-            return;
+    for (table, slot) in MASTERS.iter().zip(inputs.tables.iter_mut()) {
+        if slot.is_some() {
+            continue;
         }
-        let Some(asset) = json.get(handle) else {
-            return;
-        };
-        docs.push(
-            serde_json::from_str::<Value>(&asset.0)
-                .unwrap_or_else(|error| panic!("[get_resource] {path}: not JSON: {error}")),
-        );
+        match master_data.take(table) {
+            None => {}
+            Some(Ok(rows)) => *slot = Some(rows),
+            Some(Err(error)) => {
+                error!(
+                    "[get_resource] input absent: {error}; NoticeCollectItem, the sketch result and the craft screen's names stay off"
+                );
+                inputs.absent = true;
+                return;
+            }
+        }
     }
-    match Masters::parse(&docs) {
+    if inputs.tables.len() != MASTERS.len() || inputs.tables.iter().any(Option::is_none) {
+        return;
+    }
+    let tables: Vec<Vec<Value>> = std::mem::take(&mut inputs.tables)
+        .into_iter()
+        .flatten()
+        .collect();
+    match Masters::parse(&tables) {
         Ok(masters) => {
             info!(
                 "[get_resource] masters read: {} materials, {} blueprints, {} fixtures, {} tools, {} items, {} records",
@@ -963,14 +1096,19 @@ fn read_inputs(inputs: &mut GetResourceInputs, server: &AssetServer, json: &Asse
             );
             inputs.masters = Some(masters);
         }
-        Err(error) => panic!("[get_resource] {error}"),
+        Err(error) => {
+            error!(
+                "[get_resource] the master tables are malformed ({error}); NoticeCollectItem, the sketch result and the craft screen's names stay off"
+            );
+            inputs.absent = true;
+        }
     }
 }
 
 /// The charset of every text these dialogs draw.
 fn charset(masters: Option<&Masters>, wordings: &HashMap<String, String>) -> Vec<char> {
     let mut chars: Vec<char> = Vec::new();
-    for key in WORDINGS {
+    for key in WORDINGS.iter().chain(crate::home_action::craft::WORDINGS) {
         match wordings.get(*key) {
             Some(text) => chars.extend(text.chars()),
             None => error!(
@@ -979,8 +1117,22 @@ fn charset(masters: Option<&Masters>, wordings: &HashMap<String, String>) -> Vec
         }
     }
     if let Some(masters) = masters {
-        for id in masters.blueprints.keys() {
+        for (id, row) in &masters.blueprints {
             chars.extend(masters.blueprint_name(*id, wordings).chars());
+            // The craft screen writes the target's own name.
+            match row.craft_type {
+                CraftType::Tool => {
+                    if let Some(name) = masters.tools.get(&row.target) {
+                        chars.extend(name.chars());
+                    }
+                }
+                CraftType::Fixture | CraftType::Canvas => {
+                    if let Some(fixture) = masters.fixtures.get(&row.target) {
+                        chars.extend(fixture.name.chars());
+                    }
+                }
+                CraftType::Material => {}
+            }
         }
         for row in masters.items.values() {
             chars.extend(row.name.chars());
@@ -1316,7 +1468,7 @@ fn notice(
         }
         RT_MATERIAL => {
             error!(
-                "[get_resource] {caller}: NoticeCollectItem({resource_type}, {resource_id}): the material master is not on the roots; the notice is refused"
+                "[get_resource] {caller}: NoticeCollectItem({resource_type}, {resource_id}): the material master is not served; the notice is refused"
             );
         }
         _ => hud(
@@ -1361,6 +1513,7 @@ fn enqueue_chain(player: &mut GetResourcePlayer, entry: ResourceEntry, caller: &
 pub(crate) struct PlaceInputs<'w, 's> {
     server: Res<'w, AssetServer>,
     json: Res<'w, Assets<JsonAsset>>,
+    master_data: ResMut<'w, MasterData>,
     layouts: ResMut<'w, crate::ui_layout::UiLayouts>,
     art: Option<Res<'w, BalloonArt>>,
     time: Res<'w, Time>,
@@ -1508,6 +1661,7 @@ pub(crate) fn place(
     let PlaceInputs {
         server,
         json,
+        mut master_data,
         mut layouts,
         art,
         time,
@@ -1517,7 +1671,7 @@ pub(crate) fn place(
         records,
         mut harvest_notices,
     } = inputs_param;
-    read_inputs(&mut inputs, &server, &json);
+    read_inputs(&mut inputs, &server, &json, &mut master_data);
     let sources_ready = layouts.document(KEY_GET_RESOURCE).is_some();
     let inputs_settled = inputs.masters.is_some() || inputs.absent;
     if charset_present.is_none() && sources_ready && inputs_settled {
@@ -1632,7 +1786,7 @@ pub(crate) fn place(
                     caller,
                     ..
                 } => error!(
-                    "[get_resource] {caller}: NoticeCollectItem({resource_type}, {resource_id}) refused: the masters are not on the root"
+                    "[get_resource] {caller}: NoticeCollectItem({resource_type}, {resource_id}) refused: the masters are not served"
                 ),
             }
         }

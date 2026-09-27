@@ -1792,10 +1792,16 @@ fn system_fixture_button(
 /// IsActionButtonTypeAvailable of a stacked system fixture button (after
 /// CheckTargetSite, which holds by construction); `None` for every other
 /// button type. `OpenMysekaiBgmSelect`: `CanShowBGMSelectButton` is
-/// `!IsVisiting`, and the product is never visiting.
+/// `!IsVisiting`, and the product is never visiting. `OpenCraftTool`:
+/// `CanShowCraftToolButton` is `CanShowTutorialCraftToolButton` (true
+/// outside the tutorial, which the product does not run) and `!IsVisiting`.
 fn system_button_available(button: ButtonType) -> Option<bool> {
     match button {
         ButtonType::OpenMysekaiBgmSelect => Some(true),
+        // The dispatch arm is taken from earlier builds; this build's table is
+        // an indirect jump that is not decoded, so the arm is not confirmed
+        // here.
+        ButtonType::OpenCraftTool => Some(true),
         _ => None,
     }
 }
@@ -2237,6 +2243,17 @@ fn dispatch(
             info!("[action_button] 门邀请按钮按下 → PushUIScreen(传送门邀请 645，源带启动参数) → 层栈压层");
         }
         (ButtonType::OpenCraftTool, _) => {
+            // The pressed workbench is the craft's target (the source's
+            // action data): the craft screen crafts at it.
+            match fixture_target {
+                Some(target) => {
+                    commands.insert_resource(crate::home_action::CraftWorkbench(target.clone()))
+                }
+                None => {
+                    commands.remove_resource::<crate::home_action::CraftWorkbench>();
+                    warn!("[action_button] OpenCraftTool: the candidate's instance identity is not ready; the craft screen has no workbench");
+                }
+            }
             layer_commands.write(LayerCommand::Push(LayerId::MysekaiCraft));
             info!("[action_button] 工作台按钮按下 → PushUIScreen(工坊 615) → 层栈压层");
         }

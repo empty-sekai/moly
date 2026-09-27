@@ -43,15 +43,27 @@
 //! player's target (the source's action data) is the fixture the request
 //! names. The SE volume class is the in-game one.
 //!
+//! The craft screen ([`craft`]) sends its own request
+//! (`PostUserMysekaiCraftApi`) before its craft sequence starts, and draws
+//! the dialogs after the hold: its sequence waits for them before the after
+//! part.
+//!
 //! Triggers: [`HomeActionRequest`] (what the screens send; each is first
 //! posted to the server model through
 //! [`crate::server::client::home_action::post`], and a refused reply starts
-//! nothing), [`HomeActionSkip`] (the
+//! nothing; a craft the craft screen already posted is not posted again),
+//! [`HomeActionSkip`] (the
 //! skip button), [`SketchModeRequest`] (the menu's sketch button enters game
 //! state 9 and player state 27; the sketch screen's exit leaves game state 9).
 //! Stand-in keys: J craft and K canvas at the nearest craft tool, L enters
 //! sketch mode and then sketches, U skips, I leaves sketch mode. Instrument:
-//! `MOLY_HOME_ACTION_AUTOPLAY=craft|canvas|sketch` (off by default).
+//! `MOLY_HOME_ACTION_AUTOPLAY=craft|canvas|sketch|screen` (off by default;
+//! `screen` presses the nearest craft tool's button: the craft screen opens
+//! with that workbench handed over).
+
+pub(crate) mod craft;
+
+pub(crate) use craft::CraftWorkbench;
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -76,6 +88,7 @@ use crate::player_avatar::{
 };
 use crate::player_state::{PlayerActionState, PlayerAvatarStates};
 use crate::server::client::home_action::{post, HomeActionApi};
+use crate::ui_layers::{LayerCommand, LayerId};
 
 /// `EffectType.Craft`.
 const CRAFT_EFFECT_TYPE: u16 = 15;
@@ -172,8 +185,9 @@ impl HomeAction {
 /// the world sequence.
 #[derive(Message, Debug, Clone)]
 pub(crate) enum HomeActionRequest {
-    /// A craft at the workbench the player pressed.
-    Craft { fixture: FixtureTarget },
+    /// A craft at the workbench the player pressed. `posted`: the craft
+    /// screen already sent its request (its success starts the sequence).
+    Craft { fixture: FixtureTarget, posted: bool },
     /// A canvas painting, started from the same workbench's craft screen.
     Draw { fixture: FixtureTarget },
     /// A sketch from the sketch screen (game state 9) of the target
@@ -251,11 +265,15 @@ enum Phase {
     Hold(Delay),
     /// The sketch sequence's wait before its last `ClearAvatarItem`.
     ClearDelay(Delay),
+    /// A posted craft's dialogs after the hold (the craft screen's).
+    Dialogs,
 }
 
 struct Sequence {
     action: HomeAction,
     target: Option<FixtureTarget>,
+    /// The craft screen posted the request and draws the dialogs.
+    posted: bool,
     phase: Phase,
     /// The sequence started in this frame's call, before the phase check:
     /// its wait does not count this frame's delta. (A later phase is made
@@ -687,8 +705,15 @@ fn start(world: &mut World, actions: &mut HomeActions, request: HomeActionReques
         return;
     }
     let mut sketch_blueprint = None;
+    let mut posted = false;
     let (action, target) = match request {
-        HomeActionRequest::Craft { fixture } => (HomeAction::Craft, Some(fixture)),
+        HomeActionRequest::Craft {
+            fixture,
+            posted: sent,
+        } => {
+            posted = sent;
+            (HomeAction::Craft, Some(fixture))
+        }
         HomeActionRequest::Draw { fixture } => (HomeAction::Draw, Some(fixture)),
         HomeActionRequest::Sketch { blueprint } => {
             sketch_blueprint = blueprint;
@@ -704,15 +729,20 @@ fn start(world: &mut World, actions: &mut HomeActions, request: HomeActionReques
             return;
         }
     }
-    let reply = post(world, action.api(), target.as_ref().map(|target| target.uid.as_str()));
-    if !reply.success {
-        return;
+    if posted {
+        info!("[home-action] {action:?}: the craft screen already posted PostUserMysekaiCraftApi; no second request");
+    } else {
+        let reply = post(world, action.api(), target.as_ref().map(|target| target.uid.as_str()));
+        if !reply.success {
+            return;
+        }
     }
     let now = world.resource::<Time>().elapsed_secs();
     let epoch = world.get_resource::<crate::site::GroundEpoch>().map_or(0, |epoch| epoch.0);
     let sequence = Sequence {
         action,
         target,
+        posted,
         phase: Phase::Wait(Delay::new(action.wait())),
         fresh: true,
         started: now,
@@ -817,14 +847,13 @@ fn end(world: &mut World, actions: &mut HomeActions, sequence: &mut Sequence) ->
                 }
                 info!("[home-action] t={t:.3} StopSE({SE_CRAFT} handle {scope:?})");
             }
-            info!("[home-action] t={t:.3} OpenCreateResponseDialogAsync, the fixture bonus dialog and the rank dialog: the screens' owner draws them; no time passes here");
-            set_gate(world, true);
-            change_state(world, sequence, PlayerActionState::Idle);
-            items(world, AvatarItemRequest::Clear);
-            info!("[home-action] t={t:.3} SetInterceptFlag(true), ChangeState(Idle), ClearAvatarItem");
-            show_screens(world, sequence);
-            camera_back(world, sequence);
-            info!("[home-action] t={t:.3} HeaderUtility.ShowBackUIScreen: the screens' owner");
+            if sequence.posted {
+                craft::sequence_end(world);
+                sequence.phase = Phase::Dialogs;
+                return false;
+            }
+            info!("[home-action] t={t:.3} OpenCreateResponseDialogAsync, the fixture bonus dialog and the rank dialog: no craft screen sent this craft; no time passes here");
+            craft_after(world, sequence);
             true
         }
         HomeAction::Draw => {
@@ -863,6 +892,19 @@ fn end(world: &mut World, actions: &mut HomeActions, sequence: &mut Sequence) ->
     }
 }
 
+/// The craft sequence's part after its dialogs: gate open, Idle,
+/// `ClearAvatarItem`, the screens fade back, the camera returns.
+fn craft_after(world: &mut World, sequence: &mut Sequence) {
+    let t = elapsed(world, sequence);
+    set_gate(world, true);
+    change_state(world, sequence, PlayerActionState::Idle);
+    items(world, AvatarItemRequest::Clear);
+    info!("[home-action] t={t:.3} SetInterceptFlag(true), ChangeState(Idle), ClearAvatarItem");
+    show_screens(world, sequence);
+    camera_back(world, sequence);
+    info!("[home-action] t={t:.3} HeaderUtility.ShowBackUIScreen: the screens' owner");
+}
+
 /// Leave the sequence when the site changes under it.
 fn cancel(world: &mut World, actions: &mut HomeActions, mut sequence: Sequence, reason: &str) {
     warn!("[home-action] {:?} cancelled: {reason}", sequence.action);
@@ -879,6 +921,9 @@ fn cancel(world: &mut World, actions: &mut HomeActions, mut sequence: Sequence, 
     set_gate(world, true);
     change_state(world, &mut sequence, PlayerActionState::Idle);
     items(world, AvatarItemRequest::Clear);
+    if sequence.posted {
+        craft::sequence_closed(world, true);
+    }
     actions.finished += 1;
 }
 
@@ -929,6 +974,7 @@ pub(crate) fn advance(world: &mut World) {
             Phase::Wait(delay) | Phase::Hold(delay) | Phase::ClearDelay(delay) => {
                 !fresh && delay.advance(dt)
             }
+            Phase::Dialogs => false,
         };
         let mut done = false;
         match sequence.phase {
@@ -959,6 +1005,13 @@ pub(crate) fn advance(world: &mut World) {
                     items(world, AvatarItemRequest::Clear);
                     let t = elapsed(world, &sequence);
                     info!("[home-action] t={t:.3} ClearAvatarItem after {SKETCH_CLEAR_DELAY}s");
+                    done = true;
+                }
+            }
+            Phase::Dialogs => {
+                if craft::dialogs_done(world) {
+                    craft_after(world, &mut sequence);
+                    craft::sequence_closed(world, false);
                     done = true;
                 }
             }
@@ -1030,7 +1083,10 @@ pub(crate) fn stand_in(
         return;
     };
     let request = if craft {
-        HomeActionRequest::Craft { fixture }
+        HomeActionRequest::Craft {
+            fixture,
+            posted: false,
+        }
     } else {
         HomeActionRequest::Draw { fixture }
     };
@@ -1071,12 +1127,14 @@ pub(crate) struct Autoplay {
     progress: Option<(f32, f32)>,
 }
 
-/// Instrument (`MOLY_HOME_ACTION_AUTOPLAY=craft|canvas|sketch`, off by
-/// default; `MOLY_HOME_ACTION_AUTOPLAY_AFTER` seconds after the joystick
+/// Instrument (`MOLY_HOME_ACTION_AUTOPLAY=craft|canvas|sketch|screen`, off
+/// by default; `MOLY_HOME_ACTION_AUTOPLAY_AFTER` seconds after the joystick
 /// opens, default 2; `MOLY_HOME_ACTION_AUTOPLAY_SKIP` seconds into the
 /// sequence presses skip): walk to the nearest craft tool through the
 /// joystick's touch stream and run one craft or canvas there, or enter sketch
-/// mode and sketch. It stands in for the screens' request.
+/// mode and sketch; `screen` presses the craft tool's button instead (the
+/// craft screen opens with the workbench handed over, and the craft screen's
+/// instruments go on from there). It stands in for the screens' request.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn autoplay(
     time: Res<Time>,
@@ -1093,6 +1151,7 @@ pub(crate) fn autoplay(
     mut skips: MessageWriter<HomeActionSkip>,
     mut sketch: MessageWriter<SketchModeRequest>,
     mut run: Local<Autoplay>,
+    (mut screen_commands, mut layer_commands): (Commands, MessageWriter<LayerCommand>),
 ) {
     let Ok(mode) = std::env::var("MOLY_HOME_ACTION_AUTOPLAY") else {
         return;
@@ -1102,7 +1161,7 @@ pub(crate) fn autoplay(
         run.warned = true;
         warn!("[home-action] instrument MOLY_HOME_ACTION_AUTOPLAY={mode} is on: the player walks and the screens' request is sent by the instrument");
     }
-    if !matches!(mode.as_str(), "craft" | "canvas" | "sketch") {
+    if !matches!(mode.as_str(), "craft" | "canvas" | "sketch" | "screen") {
         return;
     }
     let now = time.elapsed_secs();
@@ -1192,8 +1251,20 @@ pub(crate) fn autoplay(
         if now - arrived >= 0.5 {
             run.sent = true;
             run.sent_at = Some(now);
+            if mode == "screen" {
+                info!(
+                    "[home-action] instrument: craft tool {}'s button at distance {distance:.2} m: PushUIScreen(MysekaiCraft 615), the workbench handed over",
+                    target.uid
+                );
+                screen_commands.insert_resource(CraftWorkbench(target));
+                layer_commands.write(LayerCommand::Push(LayerId::MysekaiCraft));
+                return;
+            }
             let request = if mode == "craft" {
-                HomeActionRequest::Craft { fixture: target }
+                HomeActionRequest::Craft {
+                    fixture: target,
+                    posted: false,
+                }
             } else {
                 HomeActionRequest::Draw { fixture: target }
             };
@@ -1259,12 +1330,14 @@ pub(crate) fn install(app: &mut App) {
     use crate::player_avatar::avatar_item;
     app.init_resource::<HomeActions>()
         .init_resource::<HomeActionPresentation>()
+        .init_resource::<craft::CraftScreen>()
+        .init_resource::<craft::view::CraftViewState>()
         .init_resource::<AvatarItemView>()
         .add_message::<HomeActionRequest>()
         .add_message::<HomeActionSkip>()
         .add_message::<SketchModeRequest>()
         .add_message::<AvatarItemRequest>()
-        .add_systems(Startup, (load, avatar_item::load))
+        .add_systems(Startup, (load, avatar_item::load, craft::request_masters))
         .add_systems(
             Update,
             (
@@ -1290,6 +1363,38 @@ pub(crate) fn install(app: &mut App) {
                 .after(crate::harvest::HarvestActionSet)
                 .before(crate::player::advance)
                 .before(crate::player_avatar::drive)
+                .before(crate::audio::advance_se),
+        )
+        // The craft screen: its view and its common dialogs' views; the taps
+        // and the back key on the dialogs, then on the screen (after the
+        // action buttons' tap flag and the back key, before the shell, the
+        // world pick and the layer stack); then the screen's step and the
+        // drawing. Its SE drains this frame.
+        .add_systems(
+            Update,
+            (
+                craft::spawn_when_ready,
+                craft::view::spawn_when_ready,
+                craft::result::spawn_when_ready,
+            ),
+        )
+        .add_systems(
+            Update,
+            (
+                craft::click.run_if(crate::game_settings::scene_input_enabled),
+                craft::result::click.run_if(crate::game_settings::scene_input_enabled),
+                craft::view::click.run_if(crate::game_settings::scene_input_enabled),
+                craft::advance,
+                craft::place,
+                craft::result::place,
+                craft::view::place,
+            )
+                .chain()
+                .after(crate::action_button::click)
+                .after(crate::ui_layers::back_key)
+                .before(crate::menu_shell::click)
+                .before(crate::pick::pick)
+                .before(crate::ui_layers::advance)
                 .before(crate::audio::advance_se),
         );
 }

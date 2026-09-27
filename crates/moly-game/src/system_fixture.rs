@@ -114,9 +114,14 @@ pub(crate) fn system_fixture_button(action: PlayerActionType) -> ButtonType {
 /// - `MusicPlay` -> `OpenMysekaiBGMSelect`: `CanShowBGMSelectButton` is
 ///   `!IsVisiting`, which holds in this product; the click opens the BGM
 ///   select screen ([`crate::bgm_select`]).
+/// - `CraftTool` -> `OpenCraftTool`: `CanShowCraftToolButton` is
+///   `CanShowTutorialCraftToolButton` (true outside the tutorial, which this
+///   product does not run) and `!IsVisiting`; the click opens the craft
+///   screen ([`crate::home_action::craft`]) at the pressed workbench.
 ///
 /// The others are withheld: their availability rules are not ported here.
-pub(crate) const STACKED_ACTIONS: &[PlayerActionType] = &[PlayerActionType::MusicPlay];
+pub(crate) const STACKED_ACTIONS: &[PlayerActionType] =
+    &[PlayerActionType::MusicPlay, PlayerActionType::CraftTool];
 
 /// The system fixture master the classification reads.
 const SYSTEM_FIXTURES: MasterTable<HashMap<i32, SystemFixtureType>> = MasterTable {
