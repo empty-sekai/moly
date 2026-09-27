@@ -1052,9 +1052,16 @@ pub(crate) fn spawn_when_ready(
     } else {
         Err("this region's rank page has no put-cost texts".to_owned())
     };
-    let missing: Vec<&str> = WORDINGS.iter().copied().filter(|key| !layouts.wordings.contains_key(*key)).collect();
+    // The room cost text is written only where the region's page declares it.
+    let writes_costs = info_field_set(doc).put_limit_costs;
+    let missing: Vec<&str> = WORDINGS
+        .iter()
+        .copied()
+        .filter(|key| writes_costs || *key != MYROOM_COST_WORDING)
+        .filter(|key| !layouts.wordings.contains_key(*key))
+        .collect();
     if !missing.is_empty() {
-        warn!("[info] wordings missing from this root: {missing:?}; a text writing one of them refuses");
+        warn!("[info] wordings missing from this root: {missing:?}; their texts follow the region's wording lookup");
     }
     commands.insert_resource(InfoPresentation { bindings: InfoBindings::from_prefab(doc), elapsed: 0., put_limit });
     commands.spawn((InfoRoot,Visibility::Hidden,Transform::default(),RenderLayers::layer(SITEMAP_LAYER),crate::ui_layout::UiPrefabView::new("Info",SITEMAP_LAYER)));
