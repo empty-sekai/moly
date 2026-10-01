@@ -1,5 +1,7 @@
 import { PackClient, packDigest } from "./asset-pack-client.mjs";
 
+export const BASE_RESOURCE_CONCURRENCY = 8;
+
 // The first entry downloads the measured necessary pack without waiting for
 // audio permission. Playback still begins from the trusted in-frame gesture.
 export function validateBasePack(pack, { region, version, assets }) {
@@ -89,8 +91,21 @@ async function consume(url, maximum, signal, fetchImpl, keep = false) {
 }
 export async function warmBaseResources(
   options,
-  { fetchImpl = fetch, signal, onProgress = () => {} } = {},
+  {
+    fetchImpl = fetch,
+    signal,
+    onProgress = () => {},
+    concurrency = BASE_RESOURCE_CONCURRENCY,
+  } = {},
 ) {
+  if (
+    !Number.isInteger(concurrency) ||
+    concurrency < 1 ||
+    concurrency > BASE_RESOURCE_CONCURRENCY
+  )
+    throw new RangeError(
+      "Required resource concurrency must be an integer from 1 to 8",
+    );
   const descriptor = new URL("browser-base.json", options.assets);
   const client =
     options.packs || options.assetCatalog
@@ -140,7 +155,7 @@ export async function warmBaseResources(
     }
   };
   await Promise.all(
-    Array.from({ length: Math.min(client ? 2 : 3, rows.length) }, worker),
+    Array.from({ length: Math.min(concurrency, rows.length) }, worker),
   );
   // Cache writes are serialized and may complete just after their response.
   // Flush their queue, without making storage denial a playback blocker.
