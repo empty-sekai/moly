@@ -55,3 +55,63 @@ test("truncated necessary resource cannot be reported as ready", async () => {
     /length mismatch/,
   );
 });
+
+for (const concurrency of [undefined, 3]) {
+  test(`base transfers admit ${concurrency ?? 8} concurrent streams and complete queued resources`, async () => {
+    const files = Array.from({ length: 19 }, (_, index) => ({
+      path: `resource-${index}.bin`,
+      sha256: "a".repeat(64),
+      decodedBytes: 3,
+    }));
+    let active = 0,
+      peak = 0;
+    const updates = [];
+    const result = await warmBaseResources(options, {
+      ...(concurrency === undefined ? {} : { concurrency }),
+      fetchImpl: async (url) => {
+        if (String(url).endsWith("browser-base.json"))
+          return new Response(
+            JSON.stringify({ ...pack, files, decodedBytes: files.length * 3 }),
+          );
+        active++;
+        peak = Math.max(peak, active);
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              setTimeout(() => {
+                active--;
+                controller.enqueue(new TextEncoder().encode("abc"));
+                controller.close();
+              }, 10);
+            },
+          }),
+        );
+      },
+      onProgress: (update) => updates.push(update),
+    });
+    assert.equal(peak, concurrency ?? 8);
+    assert.equal(active, 0);
+    assert.deepEqual(result, {
+      completed: files.length,
+      decodedBytes: files.length * 3,
+    });
+    assert.deepEqual(
+      updates.map((row) => row.completed),
+      files.map((_, index) => index + 1),
+    );
+  });
+}
+
+test("invalid prewarm concurrency fails before issuing a request", async () => {
+  for (const concurrency of [0, -1, 1.5, 9, NaN, "8", null]) {
+    await assert.rejects(
+      warmBaseResources(options, {
+        concurrency,
+        fetchImpl: () => {
+          throw new Error("Unexpected network request");
+        },
+      }),
+      /concurrency must be an integer from 1 to 8/,
+    );
+  }
+});
