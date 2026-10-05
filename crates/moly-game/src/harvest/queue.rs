@@ -228,8 +228,10 @@ fn apply_reply(
     }
     model.stamina = reply.stamina;
     user.stamina = reply.stamina;
-    model.refresh_tools(&reply.tools);
-    user.tools = reply.tools.clone();
+    if let Some(tools) = &reply.tools {
+        model.refresh_tools(tools);
+        user.tools = tools.clone();
+    }
     user.materials = reply.materials.clone();
     // Event 31: the harvest map; the pending drop rows of the site's objects
     // are rebuilt from it (`SynchronizedTargetBeforeDropItems`).

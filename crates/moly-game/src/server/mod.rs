@@ -19,7 +19,8 @@
 //!   entry's refresh performance reads that topic.
 //! - **Harvest and gather replies** (`PostUserMysekaiHarvestApi`,
 //!   `PostUserMysekaiGatherApi`): the stamina, through the harvest owner's
-//!   calls into [`harvest_api_stamina`] and [`gather_api_stamina`].
+//!   calls into [`harvest_api_stamina`] and [`gather_api_stamina`], and the
+//!   harvest reply's tool rows through [`tools::harvest_tool_use`].
 //! - **Gate replies** (reserve and change): the panel's gate actions stand
 //!   in for the requests the gate screens make (those screens are not built);
 //!   the reply is queued in [`ServerGateReplies`] for the gate presenter.
@@ -95,6 +96,7 @@ pub(crate) mod music;
 pub(crate) mod music_play;
 pub(crate) mod system_fixture_action;
 pub(crate) mod talk_read;
+pub(crate) mod tools;
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -177,6 +179,8 @@ pub(crate) struct Masters {
     pub(crate) possession: client::inventory::PossessionMasters,
     /// The cards master (deferred): card id -> its character and rarity.
     pub(crate) cards: Deferred<std::collections::BTreeMap<i32, craft::CardRow>>,
+    /// The tool master (`mysekaiTools`).
+    pub(crate) tools: Option<Vec<tools::ToolMaster>>,
     pub(crate) missing: Vec<String>,
 }
 
@@ -331,6 +335,8 @@ pub(crate) struct ServerResponse {
     /// `userMysekaiSystemFixtureActions` when it carries them.
     pub(crate) system_fixture_actions:
         Option<Vec<client::system_fixture_action::UserMysekaiSystemFixtureAction>>,
+    /// `userMysekaiTools` when it carries them.
+    pub(crate) tools: Option<Vec<tools::UserMysekaiTool>>,
 }
 
 /// A reply's talk list (`mysekaiCharacterTalkWithReadHistories`): the rows
@@ -745,6 +751,7 @@ impl ServerModel {
             music_records: has(music_play::RECORDS_SECTION).then(|| self.doc.music_records.clone()),
             system_fixture_actions: has(system_fixture_action::SECTION)
                 .then(|| self.doc.system_fixture_actions.rows.clone()),
+            tools: has(tools::SECTION).then(|| self.doc.tools.clone().unwrap_or_default()),
         };
         info!(
             "[server] response {}: sections {sections:?}, isRefreshed {is_refreshed}, server date {now}",
@@ -761,6 +768,9 @@ impl ServerModel {
         self.joined = true;
         let now = self.now_ms();
         self.seat();
+        if self.seat_tools() {
+            self.commit();
+        }
         let refreshed = self.refresh_due(now);
         if refreshed {
             self.refresh(now);
@@ -786,6 +796,7 @@ impl ServerModel {
         carries.extend(inventory::SECTIONS);
         carries.push(music_play::RECORDS_SECTION);
         carries.push(system_fixture_action::SECTION);
+        carries.push(tools::SECTION);
         self.respond(ResponseKind::Join, refreshed, &carries);
     }
 
@@ -934,6 +945,7 @@ fn native_overlay(doc: &mut ServerDocument) -> avatar::AvatarInstrument {
     }
     inventory::native_overlay(doc);
     music_play::native_overlay(doc);
+    tools::native_overlay(doc);
     let text = |name: &str| {
         instrument_env(name)
             .map(|raw| raw.trim().to_owned())
@@ -1232,6 +1244,12 @@ static SERVER_TABLES: &[ServerTable] = &[
         "mysekaiItems (the server's white blueprint item)",
         inventory::parse_items_master,
         craft.white_blueprint_item
+    ),
+    server_table!(
+        "mysekaiTools",
+        "mysekaiTools (the server's tools: initial tools, durability resets, tool craft)",
+        tools::parse_master,
+        tools
     ),
     server_table!(
         "birthdayPartyDeliveryRewards",
@@ -1710,6 +1728,7 @@ fn deliver(
     mut inventory_copy: ResMut<client::inventory::ClientMysekaiInventory>,
     mut records_copy: ResMut<client::music_play::ClientMusicRecords>,
     mut actions_copy: ResMut<client::system_fixture_action::ClientSystemFixtureActions>,
+    mut tools_copy: ResMut<tools::ClientMysekaiTools>,
 ) {
     let taken = with_model(|model| {
         (
@@ -1739,6 +1758,9 @@ fn deliver(
         }
         if let Some(rows) = response.system_fixture_actions.take() {
             actions_copy.apply(rows);
+        }
+        if let Some(rows) = response.tools.take() {
+            tools_copy.apply(rows);
         }
         let previous_rank = copy.as_ref().and_then(|copy| copy.gamedata.mysekai_rank);
         let next = match copy.take() {
@@ -1836,6 +1858,7 @@ fn deliver(
         "userAvatar": client::avatar::value(&avatar_copy.avatar),
         "mysekaiInventory": inventory_copy.view(),
         "userMysekaiMusicRecords": records_copy.view(),
+        "userMysekaiTools": tools_copy.view(),
     });
     with_model(|model| model.client = view);
     match client.as_deref_mut() {
@@ -1913,6 +1936,7 @@ impl Plugin for ServerPlugin {
             .init_resource::<client::music::ClientMusicPlaySettings>()
             .init_resource::<client::avatar::ClientUserAvatar>()
             .init_resource::<client::music_play::ClientMusicRecords>()
+            .init_resource::<tools::ClientMysekaiTools>()
             .add_systems(PreStartup, seat_local)
             .add_systems(Startup, load)
             .add_systems(

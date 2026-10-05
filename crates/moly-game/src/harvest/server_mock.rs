@@ -11,13 +11,16 @@
 //! - `HarvestMapMock`: the user harvest map of each harvest site (fixture rows
 //!   and their drop rows), generated once per session by the mock's placement
 //!   rule below.
-//! - The tools and stamina mock: the user tool rows and the stamina triple
-//!   (`StaminaMock`: the normal pool at its master maximum, enhance 0, and
-//!   the boost pool of one boost recovery, the recovery master's
-//!   `recoveryBoostStamina`; boost is spent first, so the first swings of a
-//!   session run boosted, at the boost speed and with the boost effects).
+//! - The stamina mock: the stamina triple (`StaminaMock`: the normal pool at
+//!   its master maximum, enhance 0, and the boost pool of one boost
+//!   recovery, the recovery master's `recoveryBoostStamina`; boost is spent
+//!   first, so the first swings of a session run boosted, at the boost speed
+//!   and with the boost effects).
 //! - `HarvestApiMock` and `GatherApiMock`: echo replies to the harvest and
-//!   gather requests.
+//!   gather requests. The user tool rows are not this panel's: they are the
+//!   server document's `userMysekaiTools`, which the craft replies also
+//!   change; the harvest reply's tools come from the server model's tool use
+//!   policy (`crate::server::tools`).
 //! - `TreasureBoxListMock`: the user treasure box rows. The mock's choice:
 //!   one `once_a_day` box (seq 1, the first harvest site), status
 //!   before_spawned, `transportSeconds` = [`TRANSPORT_SECONDS`] (the server
@@ -52,7 +55,7 @@ use std::collections::BTreeMap;
 
 use bevy::prelude::*;
 
-use super::law::{Stamina, ToolType};
+use super::law::Stamina;
 
 /// `UserMysekaiSiteHarvestFixtureStatus`.
 pub(crate) const FIXTURE_SPAWNED: i32 = 1;
@@ -113,12 +116,23 @@ pub(crate) struct UserHarvestMap {
     pub(crate) drops: Vec<UserDrop>,
 }
 
-/// One `UserMysekaiTool` row.
+/// One `UserMysekaiTool` row as the harvest reads it.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct UserTool {
     pub(crate) tool_id: i64,
     pub(crate) quantity: i32,
     pub(crate) durability: i32,
+}
+
+/// The server's `userMysekaiTools` rows as the harvest reads them.
+pub(crate) fn user_tools(rows: &[crate::server::tools::UserMysekaiTool]) -> Vec<UserTool> {
+    rows.iter()
+        .map(|row| UserTool {
+            tool_id: i64::from(row.mysekai_tool_id),
+            quantity: row.quantity,
+            durability: row.durability,
+        })
+        .collect()
 }
 
 /// The master rows the mock draws from (joined by the harvest catalog).
@@ -161,20 +175,11 @@ impl MockSpot {
     }
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct MockToolRow {
-    pub(crate) id: i64,
-    pub(crate) tool_type: ToolType,
-    pub(crate) level: i32,
-    pub(crate) max_durability: i32,
-}
-
 /// What the panel is built from.
 pub(crate) struct MockInputs {
     pub(crate) fixtures: Vec<MockFixtureRow>,
     pub(crate) materials: Vec<MockMaterialRow>,
     pub(crate) spots: Vec<MockSpot>,
-    pub(crate) tools: Vec<MockToolRow>,
     /// Master `maxStamina` of the normal pool.
     pub(crate) max_normal_stamina: i32,
     /// `recoveryBoostStamina` of one boost recovery.
@@ -224,8 +229,6 @@ pub(crate) struct HarvestServerMock {
     transport_fixture: Option<i32>,
     /// Type-3 material rows (the transported box's drop row).
     box_materials: Vec<MockMaterialRow>,
-    tools: Vec<UserTool>,
-    tool_rows: Vec<MockToolRow>,
     stamina: Stamina,
     materials: BTreeMap<i64, i64>,
     others: BTreeMap<(i32, i64), i64>,
@@ -242,6 +245,7 @@ pub(crate) struct HarvestRequest {
     pub(crate) fixture_id: i32,
     pub(crate) hp: i32,
     pub(crate) is_last_attack: bool,
+    /// (tool id, use count, the durability the client holds after them).
     pub(crate) tool: Option<(i64, i32, i32)>,
     /// `[{type, rest}]` in the order normal, enhance, boost.
     pub(crate) stamina_rests: [i32; 3],
@@ -258,7 +262,9 @@ pub(crate) struct GatherRequest {
 #[derive(Clone, Debug)]
 pub(crate) struct SuiteUserReply {
     pub(crate) stamina: Stamina,
-    pub(crate) tools: Vec<UserTool>,
+    /// `userMysekaiTools` when the reply carries it (the harvest reply of a
+    /// request that used a tool).
+    pub(crate) tools: Option<Vec<UserTool>>,
     pub(crate) map: Option<UserHarvestMap>,
     pub(crate) materials: BTreeMap<i64, i64>,
 }
@@ -280,29 +286,13 @@ impl MockRng {
 }
 
 impl HarvestServerMock {
-    /// Build the panel: every harvest site's map by the mock's rule, the tool
-    /// rows (one pickaxe and one axe of level 1 at full durability) and the
+    /// Build the panel: every harvest site's map by the mock's rule and the
     /// normal stamina at its master maximum.
     pub(crate) fn new(inputs: &MockInputs) -> Self {
         let mut maps = BTreeMap::new();
         for &site_id in &inputs.harvest_sites {
             maps.insert(site_id, generate_map(site_id, inputs));
         }
-        let tools = [ToolType::Pickaxe, ToolType::Axe]
-            .into_iter()
-            .filter_map(|tool_type| {
-                inputs
-                    .tools
-                    .iter()
-                    .filter(|row| row.tool_type == tool_type && row.level == 1)
-                    .min_by_key(|row| row.id)
-            })
-            .map(|row| UserTool {
-                tool_id: row.id,
-                quantity: 1,
-                durability: row.max_durability,
-            })
-            .collect::<Vec<_>>();
         // TreasureBoxListMock (the mock's choice).
         let boxes = inputs
             .harvest_sites
@@ -333,8 +323,6 @@ impl HarvestServerMock {
                 .filter(|row| row.material_type == 3)
                 .cloned()
                 .collect(),
-            tools,
-            tool_rows: inputs.tools.clone(),
             // StaminaMock (the mock's choice: the user has used one boost
             // recovery; the user's pools are server data).
             stamina: Stamina {
@@ -348,9 +336,10 @@ impl HarvestServerMock {
         }
     }
 
-    /// The login fetch: the user lists as the client first receives them.
-    pub(crate) fn login(&self) -> (BTreeMap<u32, UserHarvestMap>, Vec<UserTool>, Stamina) {
-        (self.maps.clone(), self.tools.clone(), self.stamina)
+    /// The login fetch: the user lists as the client first receives them
+    /// (the tools come from the server document).
+    pub(crate) fn login(&self) -> (BTreeMap<u32, UserHarvestMap>, Stamina) {
+        (self.maps.clone(), self.stamina)
     }
 
     /// The user phenomena rows at login.
@@ -432,45 +421,30 @@ impl HarvestServerMock {
     }
 
     /// `HarvestApiMock`: echo. Stamina := each type's sent rest; the tool's
-    /// durability follows its use count (a durability that reaches zero
-    /// consumes one of the quantity and resets); the target's hp := the sent
-    /// hp, harvested on the last attack; drop rows above the sent hp (all on
-    /// the last attack) become dropped.
+    /// rows are the server document's after its tool use policy (a
+    /// durability that reaches zero consumes one of the quantity and resets);
+    /// the target's hp := the sent hp, harvested on the last attack; drop
+    /// rows above the sent hp (all on the last attack) become dropped.
     pub(crate) fn harvest(&mut self, request: &HarvestRequest) -> SuiteUserReply {
         self.stamina = Stamina {
             normal: request.stamina_rests[0],
             enhance: request.stamina_rests[1],
             boost: request.stamina_rests[2],
         };
-        if let Some((tool_id, use_count, sent_durability)) = request.tool {
-            let max = self
-                .tool_rows
-                .iter()
-                .find(|row| row.id == tool_id)
-                .map(|row| row.max_durability);
-            if let (Some(index), Some(max)) = (
-                self.tools.iter().position(|tool| tool.tool_id == tool_id),
-                max,
-            ) {
-                let tool = &mut self.tools[index];
-                tool.durability -= use_count;
-                while tool.durability <= 0 && tool.quantity > 0 {
-                    tool.quantity -= 1;
-                    tool.durability += max;
+        let tools = request
+            .tool
+            .and_then(|(tool_id, use_count, sent_durability)| {
+                let Ok(tool_id) = i32::try_from(tool_id) else {
+                    warn!("[harvest-mock] HarvestApiMock: tool {tool_id} is not a 32-bit tool id");
+                    return None;
+                };
+                let rows = crate::server::tools::harvest_tool_use(tool_id, use_count, sent_durability);
+                if rows.is_none() {
+                    warn!("[harvest-mock] HarvestApiMock: no server model holds userMysekaiTools; the reply carries no tools");
                 }
-                if tool.durability != sent_durability && tool.quantity > 0 {
-                    warn!(
-                        "[harvest-mock] HarvestApiMock tool {tool_id}: server durability {} differs from the sent {sent_durability}",
-                        tool.durability
-                    );
-                }
-                if tool.quantity < 1 {
-                    self.tools.remove(index);
-                }
-            } else {
-                warn!("[harvest-mock] HarvestApiMock: tool {tool_id} is not in the user tool list");
-            }
-        }
+                rows
+            })
+            .map(|rows| user_tools(&rows));
         let map = self.maps.get_mut(&request.site_id);
         let map = match map {
             Some(map) => {
@@ -502,7 +476,7 @@ impl HarvestServerMock {
             }
             None => None,
         };
-        self.reply(map)
+        self.reply(map, tools)
     }
 
     /// `GatherApiMock`: echo. Materials grow by the gathered quantities (the
@@ -531,13 +505,13 @@ impl HarvestServerMock {
             });
             map.clone()
         });
-        self.reply(map)
+        self.reply(map, None)
     }
 
-    fn reply(&self, map: Option<UserHarvestMap>) -> SuiteUserReply {
+    fn reply(&self, map: Option<UserHarvestMap>, tools: Option<Vec<UserTool>>) -> SuiteUserReply {
         SuiteUserReply {
             stamina: self.stamina,
-            tools: self.tools.clone(),
+            tools,
             map,
             materials: self.materials.clone(),
         }
@@ -759,26 +733,6 @@ mod value_checks {
                     height: 46,
                 },
             ],
-            tools: vec![
-                MockToolRow {
-                    id: 1,
-                    tool_type: ToolType::Pickaxe,
-                    level: 1,
-                    max_durability: 30,
-                },
-                MockToolRow {
-                    id: 6,
-                    tool_type: ToolType::Axe,
-                    level: 1,
-                    max_durability: 30,
-                },
-                MockToolRow {
-                    id: 9,
-                    tool_type: ToolType::Axe,
-                    level: 4,
-                    max_durability: 150,
-                },
-            ],
             max_normal_stamina: 1000,
             boost_grant: 100,
             harvest_sites: vec![5],
@@ -833,13 +787,9 @@ mod value_checks {
     #[test]
     fn harvest_and_gather_echo() {
         let mut mock = HarvestServerMock::new(&inputs());
-        let (maps, tools, stamina) = mock.login();
+        let (maps, stamina) = mock.login();
         assert_eq!(stamina.normal, 1000);
         assert_eq!(stamina.boost, 100);
-        assert_eq!(
-            tools.iter().map(|t| t.tool_id).collect::<Vec<_>>(),
-            vec![1, 6]
-        );
         let tree = maps[&5]
             .fixtures
             .iter()
@@ -857,15 +807,6 @@ mod value_checks {
             stamina_rests: [960, 0, 0],
         });
         assert_eq!(reply.stamina.normal, 960);
-        assert_eq!(
-            reply
-                .tools
-                .iter()
-                .find(|t| t.tool_id == 6)
-                .unwrap()
-                .durability,
-            28
-        );
         let map = reply.map.unwrap();
         let at = |d: &&UserDrop| d.position_x == tree.position_x && d.position_z == tree.position_z;
         let status: Vec<(i32, i32)> = map

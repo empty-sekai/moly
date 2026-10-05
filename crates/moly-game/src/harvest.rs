@@ -779,6 +779,7 @@ impl Plugin for HarvestPlugin {
                 Update,
                 (
                     catalog::build,
+                    catalog::follow_server_tools,
                     possession::build,
                     clips::parse,
                     tool_model::parse,

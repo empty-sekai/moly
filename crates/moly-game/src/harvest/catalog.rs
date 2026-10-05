@@ -18,8 +18,8 @@ use moly_assets::json::JsonAsset;
 
 use super::law::{Stamina, ToolType};
 use super::server_mock::{
-    HarvestServerMock, MockFixtureRow, MockInputs, MockMaterialRow, MockSpot, MockToolRow,
-    UserHarvestMap, UserTool, MOCK_EXCLUDED,
+    HarvestServerMock, MockFixtureRow, MockInputs, MockMaterialRow, MockSpot, UserHarvestMap,
+    UserTool, MOCK_EXCLUDED,
 };
 use super::ActionInterface;
 
@@ -415,6 +415,7 @@ pub(crate) fn build(
     inputs: Option<ResMut<HarvestInputs>>,
     mut masters: ResMut<MasterData>,
     sites: Option<Res<crate::site::Sites>>,
+    server_tools: Option<Res<crate::server::tools::ClientMysekaiTools>>,
 ) {
     let Some(mut inputs) = inputs else {
         return;
@@ -445,6 +446,11 @@ pub(crate) fn build(
         return;
     }
     let Some(sites) = sites else {
+        return;
+    };
+    // The login's tools are the server document's: wait for the join that
+    // carries them.
+    let Some(server_tools) = server_tools.filter(|tools| tools.revision > 0) else {
         return;
     };
     let Some(asset) = json.get(&inputs.index) else {
@@ -607,22 +613,14 @@ pub(crate) fn build(
         fixtures: mock_fixtures,
         materials: mock_materials,
         spots: mock_spots,
-        tools: tool_defs
-            .iter()
-            .map(|tool| MockToolRow {
-                id: tool.id,
-                tool_type: tool.tool_type,
-                level: tool.level,
-                max_durability: tool.max_durability,
-            })
-            .collect(),
         max_normal_stamina,
         boost_grant,
         harvest_sites: harvest_sites.clone(),
         toolbox_blueprint: blueprint_ids.iter().copied().min(),
     };
     let mock = HarvestServerMock::new(&mock_inputs);
-    let (maps, user_tools, stamina) = mock.login();
+    let (maps, stamina) = mock.login();
+    let user_tools = super::server_mock::user_tools(server_tools.rows());
     info!(
         "[harvest] catalog: {} master fixtures on {} packages, {} drop materials, {} tools; HarvestServerMock (the mock's own placement rule, not the source's) for harvest sites {:?}; left out of the mock map: {}",
         defs.len(),
@@ -651,7 +649,7 @@ pub(crate) fn build(
         );
     }
     info!(
-        "[harvest-mock] tools mock: {:?}; stamina mock: normal {} enhance {} boost {}",
+        "[harvest-mock] tools (the server document's userMysekaiTools): {:?}; stamina mock: normal {} enhance {} boost {}",
         user_tools
             .iter()
             .map(|tool| format!(
@@ -687,4 +685,40 @@ pub(crate) fn build(
         tools: tool_defs,
     });
     commands.remove_resource::<HarvestInputs>();
+}
+
+/// Update: the harvest's tool lists follow the client's `userMysekaiTools`
+/// copy when a response other than the harvest's own changes it (a craft
+/// reply, a panel edit). A copy equal to the list the last harvest reply set
+/// leaves the player model alone, so hits the client has counted but not yet
+/// sent are not undone.
+pub(crate) fn follow_server_tools(
+    server_tools: Option<Res<crate::server::tools::ClientMysekaiTools>>,
+    user: Option<ResMut<HarvestUserData>>,
+    model: Option<ResMut<super::action::HarvestPlayerModel>>,
+    mut seen: Local<u64>,
+) {
+    let (Some(server_tools), Some(mut user), Some(mut model)) = (server_tools, user, model) else {
+        return;
+    };
+    if server_tools.revision == *seen {
+        return;
+    }
+    *seen = server_tools.revision;
+    let rows = super::server_mock::user_tools(server_tools.rows());
+    if rows == user.tools {
+        return;
+    }
+    info!(
+        "[harvest] userMysekaiTools changed by the server: {:?} -> {:?}",
+        user.tools
+            .iter()
+            .map(|tool| (tool.tool_id, tool.quantity, tool.durability))
+            .collect::<Vec<_>>(),
+        rows.iter()
+            .map(|tool| (tool.tool_id, tool.quantity, tool.durability))
+            .collect::<Vec<_>>()
+    );
+    model.refresh_tools(&rows);
+    user.tools = rows;
 }

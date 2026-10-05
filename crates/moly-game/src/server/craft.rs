@@ -51,11 +51,19 @@
 //! shows the row's quantity alone), and a craft that is not a first craft
 //! grants no experience (the master holds no other row).
 //!
-//! *Refused by name*: a tool blueprint (the tool rows belong to the harvest
-//! mock), a canvas blueprint (its character material needs the card's
-//! character and rarity from the cards master, which loads after the join;
-//! with it in, the character material rule is still not modelled), and the
-//! material type (no master blueprint has it).
+//! *Tool craft*: a `mysekai_tool` blueprint passes the same checks (the
+//! possession limit check is false for a tool: `IsReachedPossessionLimitToCraft`
+//! reads fixtures and canvases only) and, in place of the fixture grant, adds
+//! the quantity to the `userMysekaiTools` row of its craft target by the tool
+//! craft policy ([`super::tools`]); the reply carries that section, and the
+//! client's tool copy takes it at once. No texture is read (the craft screen
+//! sends none for a tool, `GetSelectedMysekaiColorId`), and no experience is
+//! granted (`IsFirstCraft` is false for a tool).
+//!
+//! *Refused by name*: a canvas blueprint (its character material needs the
+//! card's character and rarity from the cards master, which loads after the
+//! join; with it in, the character material rule is still not modelled), and
+//! the material type (no master blueprint has it).
 //!
 //! *Sketch* (the client offers it only in another user's MySekai,
 //! `SketchUtility.IsSketchAvailable`, and visiting is not in the product, so
@@ -85,6 +93,7 @@ use super::client::craft::{
 use super::client::inventory::{ClientMysekaiInventory, UserMysekaiBlueprint, UserMysekaiFixture};
 use super::delivery::{ClientBirthdayPartyData, SECTION_MYSEKAI_MATERIALS};
 use super::inventory::{SECTION_BLUEPRINTS, SECTION_FIXTURES, SECTION_ITEMS};
+use super::tools::ClientMysekaiTools;
 use super::{Masters, ResponseKind, ServerModel, SECTION_GAMEDATA};
 
 /// The texture a request without one takes (the client's base colour).
@@ -240,7 +249,8 @@ pub(crate) fn is_within_time(check_at: i64, start_at: i64, end_at: i64) -> bool 
 /// What a craft request did, for its log line.
 struct Crafted {
     blueprint: MasterBlueprint,
-    texture_id: i32,
+    /// The fixture texture (`None` for a tool).
+    texture_id: Option<i32>,
     spent: Vec<(i32, i32)>,
     first: bool,
     exp: i32,
@@ -262,8 +272,9 @@ impl ServerModel {
                 request.blueprint_id
             )
         })?;
+        let tool = blueprint.craft_type == MysekaiCraftType::MysekaiTool;
         match blueprint.craft_type {
-            MysekaiCraftType::MysekaiFixture => {}
+            MysekaiCraftType::MysekaiFixture | MysekaiCraftType::MysekaiTool => {}
             MysekaiCraftType::MysekaiCanvas => {
                 let reason = match self.masters.cards.get(
                     "its character material needs the card's character and rarity",
@@ -275,12 +286,6 @@ impl ServerModel {
                     "blueprint {} is a canvas (cardId {:?}): {reason}",
                     blueprint.id, request.card_id
                 ));
-            }
-            MysekaiCraftType::MysekaiTool => {
-                return Err(format!(
-                    "blueprint {} is a tool: the tool rows belong to the harvest mock; the tool craft is not modelled",
-                    blueprint.id
-                ))
             }
             MysekaiCraftType::Material => {
                 return Err(format!(
@@ -317,6 +322,7 @@ impl ServerModel {
             ));
         }
         let texture_id = match request.texture_id {
+            _ if tool => BASE_TEXTURE_ID,
             None => BASE_TEXTURE_ID,
             Some(id) if id >= 1 => id,
             Some(id) => {
@@ -324,6 +330,11 @@ impl ServerModel {
                     "textureId {id} is not a colour id (the client sends 1 in its place)"
                 ))
             }
+        };
+        let tool_max = if tool {
+            Some(self.crafted_tool_max(blueprint.craft_target_id)?)
+        } else {
+            None
         };
         let costs: Vec<MaterialCost> = masters
             .blueprint_costs(blueprint.id)
@@ -424,22 +435,28 @@ impl ServerModel {
             *quantity -= need;
             spent.push((cost.mysekai_material_id, need));
         }
-        let fixtures = &mut self.doc.inventory.fixtures;
-        match fixtures.iter_mut().find(|row| {
-            row.mysekai_fixture_id == blueprint.craft_target_id && row.texture_id == texture_id
-        }) {
-            Some(row) => {
-                row.quantity += request.quantity;
-                row.last_obtained_at = now;
+        let mut changed = vec![SECTION_MYSEKAI_MATERIALS];
+        if let Some(max) = tool_max {
+            self.grant_crafted_tool(blueprint.craft_target_id, request.quantity, max, now);
+            changed.push(super::tools::SECTION);
+        } else {
+            let fixtures = &mut self.doc.inventory.fixtures;
+            match fixtures.iter_mut().find(|row| {
+                row.mysekai_fixture_id == blueprint.craft_target_id && row.texture_id == texture_id
+            }) {
+                Some(row) => {
+                    row.quantity += request.quantity;
+                    row.last_obtained_at = now;
+                }
+                None => fixtures.push(UserMysekaiFixture {
+                    mysekai_fixture_id: blueprint.craft_target_id,
+                    texture_id,
+                    quantity: request.quantity,
+                    last_obtained_at: now,
+                }),
             }
-            None => fixtures.push(UserMysekaiFixture {
-                mysekai_fixture_id: blueprint.craft_target_id,
-                texture_id,
-                quantity: request.quantity,
-                last_obtained_at: now,
-            }),
+            changed.push(SECTION_FIXTURES);
         }
-        let mut changed = vec![SECTION_MYSEKAI_MATERIALS, SECTION_FIXTURES];
         if let Some(rank) = rank {
             self.doc.gamedata.total_exp = total_exp;
             self.doc.gamedata.mysekai_rank = Some(rank);
@@ -449,7 +466,7 @@ impl ServerModel {
         Ok((
             Crafted {
                 blueprint,
-                texture_id,
+                texture_id: (!tool).then_some(texture_id),
                 spent,
                 first,
                 exp,
@@ -531,24 +548,35 @@ impl ServerModel {
         };
         match self.craft(request) {
             Ok((crafted, changed)) => {
-                let row = self.doc.inventory.fixtures.iter().find(|row| {
-                    row.mysekai_fixture_id == crafted.blueprint.craft_target_id
-                        && row.texture_id == crafted.texture_id
-                });
+                let target = crafted.blueprint.craft_target_id;
+                let row = match crafted.texture_id {
+                    Some(texture_id) => format!(
+                        "fixture {target} texture {texture_id}; fixture row now {:?}",
+                        self.doc.inventory.fixtures.iter().find(|row| {
+                            row.mysekai_fixture_id == target && row.texture_id == texture_id
+                        })
+                    ),
+                    None => format!(
+                        "tool {target}; tool row now {:?} ({} tool rows)",
+                        self.doc
+                            .tools
+                            .iter()
+                            .flatten()
+                            .find(|row| row.mysekai_tool_id == target),
+                        self.doc.tools.as_ref().map_or(0, Vec::len)
+                    ),
+                };
                 info!(
-                    "[server] {}: {} x blueprint {} -> fixture {} texture {}; spent {:?}; first craft {} -> totalExp +{} (now {}, rank {:?}); userMysekaiMaterials now {:?}; fixture row now {:?}",
+                    "[server] {}: {} x blueprint {} -> {row}; spent {:?}; first craft {} -> totalExp +{} (now {}, rank {:?}); userMysekaiMaterials now {:?}",
                     kind.name(),
                     request.quantity,
                     crafted.blueprint.id,
-                    crafted.blueprint.craft_target_id,
-                    crafted.texture_id,
                     crafted.spent,
                     crafted.first,
                     crafted.exp,
                     self.doc.gamedata.total_exp,
                     self.doc.gamedata.mysekai_rank,
                     self.doc.delivery.mysekai_materials,
-                    row,
                 );
                 self.answer(kind, &changed)
             }
@@ -574,6 +602,7 @@ impl ServerModel {
                 updated: response.inventory.clone(),
             },
             delivery: Some(response.delivery.clone()),
+            tools: response.tools.clone(),
         }
     }
 
@@ -582,6 +611,7 @@ impl ServerModel {
         Answer {
             reply: SuiteUserReply::refused(format!("{}: {reason}", kind.name())),
             delivery: None,
+            tools: None,
         }
     }
 
@@ -597,12 +627,15 @@ impl ServerModel {
 pub(super) struct Answer {
     pub(super) reply: SuiteUserReply,
     pub(super) delivery: Option<super::delivery::DeliveryUpdate>,
+    /// `userMysekaiTools` when the reply carries it.
+    pub(super) tools: Option<Vec<super::tools::UserMysekaiTool>>,
 }
 
 fn run(
     api: &str,
     inventory: &mut ClientMysekaiInventory,
     birthday: &mut ClientBirthdayPartyData,
+    tools: &mut ClientMysekaiTools,
     answer: impl FnOnce(&mut ServerModel) -> Answer,
 ) -> SuiteUserReply {
     let answer = super::with_model(|model| {
@@ -612,6 +645,7 @@ fn run(
                     "{api}: the server has not joined the client yet"
                 )),
                 delivery: None,
+                tools: None,
             };
         }
         answer(model)
@@ -619,9 +653,13 @@ fn run(
     .unwrap_or_else(|| Answer {
         reply: SuiteUserReply::refused(format!("{api}: the server model is not installed")),
         delivery: None,
+        tools: None,
     });
     if let Some(delivery) = answer.delivery {
         birthday.apply(delivery);
+    }
+    if let Some(rows) = answer.tools {
+        tools.apply(rows);
     }
     inventory.apply(answer.reply.updated.clone());
     answer.reply
@@ -632,11 +670,13 @@ pub(super) fn handle_craft(
     In(request): In<UserMysekaiCraftRequest>,
     mut inventory: ResMut<ClientMysekaiInventory>,
     mut birthday: ResMut<ClientBirthdayPartyData>,
+    mut tools: ResMut<ClientMysekaiTools>,
 ) -> SuiteUserReply {
     run(
         "PostUserMysekaiCraftApi",
         &mut inventory,
         &mut birthday,
+        &mut tools,
         |model| model.craft_reply(&request),
     )
 }
@@ -646,11 +686,13 @@ pub(super) fn handle_sketch(
     In(request): In<UserMysekaiHousingSketchRequest>,
     mut inventory: ResMut<ClientMysekaiInventory>,
     mut birthday: ResMut<ClientBirthdayPartyData>,
+    mut tools: ResMut<ClientMysekaiTools>,
 ) -> SuiteUserReply {
     run(
         "PostUserMysekaiHousingSketchApi",
         &mut inventory,
         &mut birthday,
+        &mut tools,
         |model| model.sketch_reply(&request),
     )
 }
@@ -711,11 +753,12 @@ pub(crate) fn schema_sections() -> Value {
 /// The panel's named craft policies.
 pub(crate) fn schema_policies() -> Value {
     json!([
-        {"name": "craft refusals", "rule": "refuse unless: a master fixture blueprint with cost rows; owned or available without possession (UserResourceFactory); inside its blueprint term when it has one (TimeUtility.IsWithinCurrentTime, MSG_CRAFT_TERM_LIMIT); quantity in 1..999 and at most the craftable count (CraftPreview count selector, GetCanCraftCount capped at the remaining fixture capacity); IsReachedPossessionLimitToCraft false (create count limit, fixture possession limit of the level); IsEnoughMaterialToCraft"},
+        {"name": "craft refusals", "rule": "refuse unless: a master fixture or tool blueprint with cost rows; owned or available without possession (UserResourceFactory); inside its blueprint term when it has one (TimeUtility.IsWithinCurrentTime, MSG_CRAFT_TERM_LIMIT); quantity in 1..999 and at most the craftable count (CraftPreview count selector, GetCanCraftCount capped at the remaining fixture capacity); IsReachedPossessionLimitToCraft false (create count limit, fixture possession limit of the level); IsEnoughMaterialToCraft"},
         {"name": "craft spend", "rule": "each cost row's material loses cost.quantity x quantity (MaterialCostList need quantity)"},
         {"name": "craft grant", "rule": "the userMysekaiFixtures row of (craft target, texture) gains quantity, lastObtainedAt = server clock (CraftPreview.SetFixtureQuantityText reads that row); no texture -> 1 (an inference: the base colour)"},
         {"name": "first-craft experience", "rule": "IsFirstCraft before the grant -> totalExp + mysekaiRankObtainedExps craft_mysekai_fixture_first_bonus (CraftResultSubWindowDialog.SetupFirstCraftBonus); the rank follows totalExp. Inferences: once per request, and no experience for a craft that is not a first craft"},
-        {"name": "craft types refused by name", "rule": "tool (the harvest mock's tool rows), canvas (its character material needs the cards master, which loads after the join, and a rule that is not modelled), material"},
+        {"name": "tool craft", "rule": "a mysekai_tool blueprint adds the quantity to the craft target's userMysekaiTools row (the tool craft policy); no texture, no experience"},
+        {"name": "craft types refused by name", "rule": "canvas (its character material needs the cards master, which loads after the join, and a rule that is not modelled), material"},
         {"name": "sketch", "rule": "refuse unless a master blueprint with isEnableSketch (IsFixtureCanSketch), not owned (HasTargetBluePrint) and a white_blueprint item above 0 (IsSketchAvailable); spend 1 white blueprint (an inference) and add the userMysekaiBlueprints row at the server clock; the owner and site are taken as stated (visiting is not in the product)"},
     ])
 }

@@ -10,7 +10,8 @@
 //! settings' `userMysekaiMusicPlayFixtureSettings`, the avatar's
 //! `userAvatar`, and the owned data's `userMysekaiFixtures`,
 //! `userMysekaiCanvases`, `userMysekaiBlueprints`, `userMysekaiItems` and
-//! the two possession levels in `userMysekaiGamedata`). A `masterConfigs` key of an earlier document is read and
+//! the two possession levels in `userMysekaiGamedata`, and the harvest
+//! tools' `userMysekaiTools`). A `masterConfigs` key of an earlier document is read and
 //! ignored: those values are master data. The rest are the mock's own keys and
 //! name themselves as such: `clock` (the one server clock), `policies` (the
 //! server rules this mock stands in for), `phenomenaSchedulePolicy`,
@@ -165,6 +166,9 @@ pub(crate) struct ServerDocument {
     /// `userMysekaiSystemFixtureActions` and its policies
     /// ([`super::system_fixture_action`]).
     pub(crate) system_fixture_actions: super::system_fixture_action::SystemFixtureActionDoc,
+    /// `userMysekaiTools` ([`super::tools`]); `None` until the server seats
+    /// a new user's tools.
+    pub(crate) tools: Option<Vec<super::tools::UserMysekaiTool>>,
 }
 
 /// Which migration a schemaVersion 1 slice takes.
@@ -550,6 +554,7 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
         .chain(super::inventory::DOCUMENT_KEYS.iter())
         .chain(std::iter::once(&super::music_play::RECORDS_SECTION))
         .chain(super::system_fixture_action::DOCUMENT_KEYS.iter())
+        .chain(std::iter::once(&super::tools::SECTION))
         .copied()
         .collect();
     only(doc, &allowed, "the server document")?;
@@ -580,6 +585,7 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
     let music_records = super::music_play::parse(doc)?;
     let system_fixture_actions =
         super::system_fixture_action::SystemFixtureActionDoc::parse(doc, policies)?;
+    let tools = super::tools::parse(doc)?;
     let (gate, gate_characters, talk_histories) = parse_visit(
         field(doc, "userMysekaiGateCharacterVisit", "the server document")?,
         true,
@@ -647,6 +653,7 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
         music_play_reply,
         music_records,
         system_fixture_actions,
+        tools,
     };
     document.check_structure()?;
     Ok((document, pending))
@@ -769,6 +776,7 @@ pub(crate) fn migrate_v1(text: &str, migration: Migration) -> Result<ServerDocum
         music_play_reply: Default::default(),
         music_records: Vec::new(),
         system_fixture_actions: Default::default(),
+        tools: None,
     };
     document.check_structure()?;
     Ok(document)
@@ -847,7 +855,8 @@ impl ServerDocument {
             }
         }
         self.delivery.check_structure()?;
-        self.inventory.check_structure()
+        self.inventory.check_structure()?;
+        super::tools::check_structure(&self.tools)
     }
 
     fn gamedata_value(&self) -> Value {
@@ -937,6 +946,10 @@ impl ServerDocument {
                 super::client::music_play::owned_rows_value(&self.music_records),
             );
             self.system_fixture_actions.write(top, &mut policies);
+            top.insert(
+                super::tools::SECTION.into(),
+                super::tools::value(&self.tools),
+            );
             top.insert("policies".into(), Value::Object(policies));
         }
         value
