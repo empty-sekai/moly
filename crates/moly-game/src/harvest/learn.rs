@@ -97,8 +97,8 @@ const THUMBNAIL_PREFIX: &str = "mysekai/thumbnail/phenomena/";
 /// open plays `se_get_blueprint`.
 #[derive(Message, Clone, Debug)]
 pub(crate) struct LearnPhenomenaDialogRequest {
-    /// The phenomenon master row id (`sitemap_phenomena::PHENOMENA_ROWS`:
-    /// its `jp` column is the master `name`).
+    /// The phenomenon master row id (`mysekaiPhenomenas`,
+    /// [`crate::sitemap_phenomena::PhenomenaMaster`]).
     pub(crate) phenomena_id: i32,
     /// `mysekai/thumbnail/phenomena/` + `iconAssetbundleName`.
     pub(crate) thumbnail: String,
@@ -307,6 +307,7 @@ pub(crate) fn advance(
         MessageWriter<LearnPhenomenaDialogRequest>,
         MessageReader<LearnPhenomenaDialogClosed>,
     ),
+    master: Option<Res<crate::sitemap_phenomena::PhenomenaMaster>>,
 ) {
     let frame = u64::from(frames.0);
     let closed_now = dialog_closed.read().count() > 0;
@@ -358,10 +359,7 @@ pub(crate) fn advance(
             );
             user.phenomena = rows;
             // GetMysekaiPhenomena(today), then PlayLearnEnvironment -> Play.
-            match crate::sitemap_phenomena::PHENOMENA_ROWS
-                .iter()
-                .find(|row| row.id == today)
-            {
+            match master.as_deref().and_then(|master| master.phenomena(today)) {
                 Some(row) => info!(
                     "[harvest-learn] PlayLearnEnvironment: phenomenon master row {} ({}, {})",
                     row.id, row.asset, row.en
@@ -387,9 +385,9 @@ pub(crate) fn advance(
     match &mut run.stage {
         Stage::Delay(delay) => {
             if delay.tick(frame, dt) {
-                match crate::sitemap_phenomena::PHENOMENA_ROWS
-                    .iter()
-                    .find(|row| row.id == run.phenomena_id)
+                match master
+                    .as_deref()
+                    .and_then(|master| master.phenomena(run.phenomena_id))
                 {
                     Some(row) => {
                         info!(

@@ -771,7 +771,7 @@ pub fn install(app: &mut App) {
                         sitemap::toggle
                             .run_if(crate::game_settings::scene_input_enabled)
                             .run_if(crate::entry::site_input_open),
-                        sitemap::refresh_weather,
+                        sitemap::setup_phenomena.before(sitemap::tick_entries),
                         sitemap::report.run_if(common_conditions::on_timer(Duration::from_secs(2))),
                     ),
                 ),
@@ -1193,6 +1193,9 @@ pub fn install(app: &mut App) {
     // weather banner (appended block).
     app.add_message::<notice_banner::SiteEnvironmentInfo>()
         .init_resource::<notice_banner::NoticeBanner>()
+        // The phenomenon master (site map, forecast, learn flow).
+        .add_systems(Startup, crate::sitemap_phenomena::load)
+        .add_systems(Update, crate::sitemap_phenomena::resolve)
         .add_systems(Startup, learn_phenomena_dialog::load_glyphs)
         // The phenomenon names join the shell charset before the atlas bake.
         .add_systems(Update, learn_phenomena_dialog::parse_glyphs.before(menu_shell::parse))

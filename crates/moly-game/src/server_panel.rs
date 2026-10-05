@@ -306,6 +306,12 @@ impl TodayPhenomena {
     pub(crate) fn written(&self) -> bool {
         self.written
     }
+
+    /// `UserDataManager.TodayMysekaiPhenomenaId` as the client computed it
+    /// from the schedule: `None` until a schedule write selected a row.
+    pub(crate) fn phenomena_id(&self) -> Option<i32> {
+        self.phenomena_id
+    }
 }
 
 /// A control edit of the schedule row that is current.

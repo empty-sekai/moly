@@ -1,129 +1,225 @@
-//! 小地图天气钮的现象主表：服务端下发数据的服务端 mock（范围通则的
-//! 具名形态——一行常量表，不是散落的字面量）。
+//! The phenomenon master as the site map, the forecast dialog and the learn
+//! flow read it: `MasterDataManager.GetMysekaiPhenomena(id)` over the
+//! upstream table `mysekaiPhenomenas`, and
+//! `GetMysekaiPhenomenaBackgroundColor(id)` over
+//! `mysekaiPhenomenaBackgroundColors`. Both tables are read from the region's
+//! master hosts ([`moly_assets::json::master`]); the client has no copy of its
+//! own.
 //!
-//! 行内容与主表的 MessagePack 键一一对应：id · assetbundleName ·
-//! iconAssetbundleName · englishName · name。日文名只作显示数据进图集，
-//! 永不进日志（日志只打 id/英文名/长度）。
-//!
-//! 覆盖面：14 行 = 小地图图标族 icon_env_* 的全部 14 名（提取产物贴图
-//! 清单与主表行一一对应）。现象清单里不在本表的档（庆典园地）在真源
-//! 侧就查不到主表行——天气钮不换图标，同形。
+//! A table its consumer cannot get is named once and leaves its lookups
+//! empty: each lookup that misses logs as the source's `LogError` does and
+//! takes the source's branch for a missing row.
 
-/// 真源常量：默认现象 id（主表类声明的 DEFAULT_PHENOMENA_ID）。
-pub(crate) const DEFAULT_PHENOMENA_ID: i32 = 1;
+use bevy::prelude::*;
+use moly_assets::json::master::{self, MasterData, MasterTable};
 
-/// 一行现象主表。
+/// One `MasterMysekaiPhenomena` row, the fields the readers use.
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PhenomenaRow {
     pub(crate) id: i32,
-    /// assetbundleName：现象档名（001_sunny 形），与天气系统当前档名同键。
-    pub(crate) asset: &'static str,
-    /// iconAssetbundleName：Sprite 装载名前缀（env_sunny 形），装载名 =
-    /// "icon_" + 本字段（真源 UpdatePhenomena 的装载式）。
-    pub(crate) icon: &'static str,
-    /// englishName：天气钮的第二行文本。
-    pub(crate) en: &'static str,
-    /// name：天气钮的第一行文本（日文）。
-    pub(crate) jp: &'static str,
+    /// `assetbundleName` (`001_sunny`), the weather chain's phenomenon key.
+    pub(crate) asset: String,
+    /// `iconAssetbundleName` (`env_sunny`): the site-map sprite is
+    /// `"icon_" + icon`, the forecast thumbnail bundle
+    /// `mysekai/thumbnail/phenomena/` + icon.
+    pub(crate) icon: String,
+    /// `englishName`: the site-map panel's second line.
+    pub(crate) en: String,
+    /// `name`: the panel's first line and the forecast cell's label.
+    pub(crate) name: String,
+    /// `mysekaiPhenomenaBackgroundColorId`.
+    pub(crate) background_color_id: i32,
 }
 
-/// 全部 14 行，按 id 升序。
-pub(crate) const PHENOMENA_ROWS: &[PhenomenaRow] = &[
-    PhenomenaRow {
-        id: 1,
-        asset: "001_sunny",
-        icon: "env_sunny",
-        en: "SUNNY",
-        jp: "晴天",
-    },
-    PhenomenaRow {
-        id: 2,
-        asset: "002_evening",
-        icon: "env_evening",
-        en: "EVENING",
-        jp: "傍晚",
-    },
-    PhenomenaRow {
-        id: 3,
-        asset: "003_night",
-        icon: "env_night",
-        en: "NIGHT",
-        jp: "夜晚",
-    },
-    PhenomenaRow {
-        id: 4,
-        asset: "004_fine",
-        icon: "env_fine",
-        en: "FINE",
-        jp: "夏天",
-    },
-    PhenomenaRow {
-        id: 5,
-        asset: "005_fullmoon",
-        icon: "env_fullmoon",
-        en: "FULLMOON",
-        jp: "满月",
-    },
-    PhenomenaRow {
-        id: 6,
-        asset: "006_rain",
-        icon: "env_rain",
-        en: "RAIN",
-        jp: "雨天",
-    },
-    PhenomenaRow {
-        id: 7,
-        asset: "007_rainnight",
-        icon: "env_rainnight",
-        en: "RAINNIGHT",
-        jp: "雨夜",
-    },
-    PhenomenaRow {
-        id: 8,
-        asset: "008_thunder",
-        icon: "env_thunder",
-        en: "THUNDER",
-        jp: "雷电",
-    },
-    PhenomenaRow {
-        id: 9,
-        asset: "009_meteorshower",
-        icon: "env_meteorshower",
-        en: "METEOR SHOWER",
-        jp: "流星雨",
-    },
-    PhenomenaRow {
-        id: 10,
-        asset: "010_snow",
-        icon: "env_snow",
-        en: "SNOW",
-        jp: "雪天",
-    },
-    PhenomenaRow {
-        id: 11,
-        asset: "011_snownight",
-        icon: "env_snownight",
-        en: "SNOWNIGHT",
-        jp: "雪夜",
-    },
-    PhenomenaRow {
-        id: 14,
-        asset: "014_sekai",
-        icon: "env_sekai",
-        en: "SEKAI",
-        jp: "「世界」",
-    },
-    PhenomenaRow {
-        id: 15,
-        asset: "015_cloud",
-        icon: "env_cloud",
-        en: "CLOUD",
-        jp: "多云",
-    },
-    PhenomenaRow {
-        id: 17,
-        asset: "017_rainbow",
-        icon: "env_rainbow",
-        en: "RAINBOW",
-        jp: "彩虹",
-    },
-];
+/// One `MasterMysekaiPhenomenaBackgroundColor` row, each colour code already
+/// through `ColorUtility.ColorCodeToColor`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct BackgroundColorRow {
+    pub(crate) id: i32,
+    pub(crate) base: [f32; 4],
+    pub(crate) ground: [f32; 4],
+    pub(crate) gradation: [f32; 4],
+    pub(crate) corner: [f32; 4],
+    pub(crate) ground_highlight: [f32; 4],
+}
+
+const PHENOMENAS: MasterTable<Vec<PhenomenaRow>> = MasterTable {
+    table: "mysekaiPhenomenas",
+    name: "mysekaiPhenomenas (the site-map weather panel and the forecast)",
+    parse: parse_phenomenas,
+};
+
+const BACKGROUND_COLORS: MasterTable<Vec<BackgroundColorRow>> = MasterTable {
+    table: "mysekaiPhenomenaBackgroundColors",
+    name: "mysekaiPhenomenaBackgroundColors (the site-map background)",
+    parse: parse_background_colors,
+};
+
+/// The two tables once both have resolved; `Err` carries the master layer's
+/// reason for a table that did not arrive.
+#[derive(Resource, Debug)]
+pub(crate) struct PhenomenaMaster {
+    pub(crate) rows: Result<Vec<PhenomenaRow>, String>,
+    pub(crate) colors: Result<Vec<BackgroundColorRow>, String>,
+}
+
+impl PhenomenaMaster {
+    /// `GetMysekaiPhenomena(id)`: the row, or `None` (the source returns
+    /// null).
+    pub(crate) fn phenomena(&self, id: i32) -> Option<&PhenomenaRow> {
+        self.rows.as_ref().ok()?.iter().find(|row| row.id == id)
+    }
+
+    /// `GetMysekaiPhenomenaBackgroundColor(id)`.
+    pub(crate) fn background_color(&self, id: i32) -> Option<&BackgroundColorRow> {
+        self.colors.as_ref().ok()?.iter().find(|row| row.id == id)
+    }
+
+    /// The rows in master order (empty when the table did not arrive).
+    pub(crate) fn rows(&self) -> &[PhenomenaRow] {
+        self.rows.as_deref().unwrap_or(&[])
+    }
+}
+
+/// Startup: request both tables.
+pub(crate) fn load(mut masters: ResMut<MasterData>) {
+    masters.request(&PHENOMENAS);
+    masters.request(&BACKGROUND_COLORS);
+}
+
+type Part<T> = Option<Result<Vec<T>, String>>;
+
+/// Update: take both tables once they have resolved.
+pub(crate) fn resolve(
+    mut commands: Commands,
+    mut masters: ResMut<MasterData>,
+    mut parts: Local<(Part<PhenomenaRow>, Part<BackgroundColorRow>)>,
+    installed: Option<Res<PhenomenaMaster>>,
+) {
+    if installed.is_some() {
+        return;
+    }
+    if parts.0.is_none() {
+        parts.0 = masters
+            .take(&PHENOMENAS)
+            .map(|result| result.map_err(|error| error.to_string()));
+    }
+    if parts.1.is_none() {
+        parts.1 = masters
+            .take(&BACKGROUND_COLORS)
+            .map(|result| result.map_err(|error| error.to_string()));
+    }
+    if parts.0.is_none() || parts.1.is_none() {
+        return;
+    }
+    let (Some(rows), Some(colors)) = (parts.0.take(), parts.1.take()) else {
+        return;
+    };
+    match &rows {
+        Ok(rows) => info!(
+            "[phenomena-master] mysekaiPhenomenas: {} rows, ids {:?}",
+            rows.len(),
+            rows.iter().map(|row| row.id).collect::<Vec<_>>()
+        ),
+        Err(reason) => error!(
+            "[phenomena-master] mysekaiPhenomenas did not arrive ({reason}): every phenomenon lookup misses"
+        ),
+    }
+    match &colors {
+        Ok(colors) => info!(
+            "[phenomena-master] mysekaiPhenomenaBackgroundColors: {} rows, ids {:?}",
+            colors.len(),
+            colors.iter().map(|row| row.id).collect::<Vec<_>>()
+        ),
+        Err(reason) => error!(
+            "[phenomena-master] mysekaiPhenomenaBackgroundColors did not arrive ({reason}): every background colour lookup misses"
+        ),
+    }
+    commands.insert_resource(PhenomenaMaster { rows, colors });
+}
+
+fn parse_phenomenas(text: &str) -> Result<Vec<PhenomenaRow>, String> {
+    master::rows(text)?
+        .iter()
+        .map(|row| {
+            Ok(PhenomenaRow {
+                id: master::int32(row, "id")?,
+                asset: master::text(row, "assetbundleName")?.to_owned(),
+                icon: master::text(row, "iconAssetbundleName")?.to_owned(),
+                en: master::text(row, "englishName")?.to_owned(),
+                name: master::text(row, "name")?.to_owned(),
+                background_color_id: master::int32(row, "mysekaiPhenomenaBackgroundColorId")?,
+            })
+        })
+        .collect()
+}
+
+fn parse_background_colors(text: &str) -> Result<Vec<BackgroundColorRow>, String> {
+    master::rows(text)?
+        .iter()
+        .map(|row| {
+            let color = |field: &str| -> Result<[f32; 4], String> {
+                let code = master::text(row, field)?;
+                color_code_to_color(code).ok_or_else(|| {
+                    format!("{field} {code:?} is not a #RGB, #RGBA, #RRGGBB or #RRGGBBAA code")
+                })
+            };
+            Ok(BackgroundColorRow {
+                id: master::int32(row, "id")?,
+                base: color("baseColor")?,
+                ground: color("groundColor")?,
+                gradation: color("gradationColor")?,
+                corner: color("cornerColor")?,
+                ground_highlight: color("groundHighlightColor")?,
+            })
+        })
+        .collect()
+}
+
+/// `ColorUtility.ColorCodeToColor` on a hex code: `TryParseHtmlString`
+/// reads `#RGB`, `#RGBA`, `#RRGGBB` or `#RRGGBBAA` into a `Color32` (a short
+/// form doubles each digit; alpha 255 when absent), and the `Color` is each
+/// byte over 255. `None` for any other text: the source falls back to white
+/// there, and the master parser refuses such a table by name instead.
+pub(crate) fn color_code_to_color(code: &str) -> Option<[f32; 4]> {
+    let digits = code.strip_prefix('#')?;
+    if !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut out = [255u8; 4];
+    match digits.len() {
+        3 | 4 => {
+            for (k, slot) in out.iter_mut().enumerate().take(digits.len()) {
+                *slot = u8::from_str_radix(&digits[k..=k], 16).ok()? * 17;
+            }
+        }
+        6 | 8 => {
+            for (k, slot) in out.iter_mut().enumerate().take(digits.len() / 2) {
+                *slot = u8::from_str_radix(&digits[k * 2..k * 2 + 2], 16).ok()?;
+            }
+        }
+        _ => return None,
+    }
+    Some(out.map(|b| f32::from(b) / 255.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn color_codes_read_as_html_hex() {
+        assert_eq!(
+            color_code_to_color("#a0eeff"),
+            Some([160.0 / 255.0, 238.0 / 255.0, 1.0, 1.0])
+        );
+        assert_eq!(color_code_to_color("#fff"), Some([1.0, 1.0, 1.0, 1.0]));
+        assert_eq!(
+            color_code_to_color("#00000080"),
+            Some([0.0, 0.0, 0.0, 128.0 / 255.0])
+        );
+        assert_eq!(color_code_to_color("a0eeff"), None);
+        assert_eq!(color_code_to_color("#a0eef"), None);
+        assert_eq!(color_code_to_color("#gg0000"), None);
+    }
+}

@@ -81,10 +81,12 @@
 //!   curves are serialized on the icon behaviours, which no root carries:
 //!   the slide takes OutQuad and the floating linear, named.
 //! - Weather panel (`SiteMapPhenomenaView`): pinned top-centre (anchor
-//!   (0.5,1), pivot the same, @ (0,8), 512×128); a phenomenon without a master
-//!   row leaves it as it is, as in the source. The rows are
-//!   [`crate::sitemap_phenomena::PHENOMENA_ROWS`]. The weather button
-//!   (`_weatherButton`, the forecast dialog) is not drawn.
+//!   (0.5,1), pivot the same, @ (0,8), 512×128). `SetupAsync` reads the
+//!   master row of `TodayMysekaiPhenomenaId` (the server panel's phenomenon
+//!   of the day) from [`crate::sitemap_phenomena::PhenomenaMaster`] at each
+//!   open; without a row it logs and returns before the in-animation, as in
+//!   the source. `ChangeSiteMapColor` tints the background images with the
+//!   row's `mysekaiPhenomenaBackgroundColors` entry.
 //!
 //! Blur: none, as in the source. `ScreenManager.EnableBlur` returns unless the
 //! current scene is in its `EnableBlurSceneList`, which its static
@@ -101,10 +103,11 @@
 //!   base image of the background are serialized in the screen layer prefab:
 //!   no root carries that layout yet, so the badge is decided and logged, the
 //!   balloon draws its text only, and the background is not drawn;
-//! - the background colours (`ChangeSiteMapColor`, the phenomenon's row of
-//!   `mysekaiPhenomenaBackgroundColors`: base, gradient, ground highlight
-//!   (`img_map_shadow` at 1760×1040 @ (0,668)), two corners, sphere) are in no
-//!   root yet;
+//! - of the background images `ChangeSiteMapColor` tints, only the sphere
+//!   (`bg_map_ground`, ground colour) is drawn: the base, the gradient, the
+//!   ground highlight (`LoadSprite`: `img_map_shadow`) and the two corners
+//!   (`bg_corner`) need their sibling order, rotation and serialized sprites,
+//!   which the screen layer document does not carry yet;
 //! - the no-party dialog (`ShowCommon1ButtonDialog("MSG_NOTHING_BIRTHDAY_DIALOG_BODY")`)
 //!   has no Common1 body view: the tap logs it and stays;
 //! - `open_cloud`'s animator enters `clip_open_cloud` through a transition
@@ -129,10 +132,9 @@ use std::collections::HashMap;
 
 use crate::audio::{SeClass, SeRequest, SeRequests};
 use crate::canvas::{CANVAS_REF_H, CANVAS_REF_W};
-use crate::sitemap_phenomena::{DEFAULT_PHENOMENA_ID, PHENOMENA_ROWS};
+use crate::sitemap_phenomena::{PhenomenaMaster, PhenomenaRow};
 use crate::source_curve::Curve;
 use crate::ui_layers::{LayerCommand, MenuScreenType, ScreenHook, ScreenLayerEvent};
-use crate::weather::CurrentPhenomenon;
 
 // ---------------------------------------------------------------------------
 // 常量（真源锚在注释里）
@@ -239,6 +241,7 @@ fn json_path(rel: &str) -> AssetPath<'static> {
 
 /// Startup：发装载请求。
 pub(crate) fn load(mut commands: Commands, server: Res<AssetServer>) {
+    commands.init_resource::<SiteMapSetup>();
     commands.insert_resource(SitemapRequest {
         prefab: server.load::<JsonAsset>(json_path("site/sitemap/prefab/prefab.json")),
         animation: server.load::<JsonAsset>(json_path("site/sitemap/animation/animation.json")),
@@ -991,9 +994,19 @@ pub(crate) fn parse(
             wanted.push(format!("img_map_site_{}", site.id));
         }
     }
-    for row in PHENOMENA_ROWS {
-        wanted.push(format!("icon_{}", row.icon));
-    }
+    // `SiteMapPhenomenaView.UpdatePhenomena` loads "icon_" +
+    // iconAssetbundleName from this bundle: every `icon_` sprite of it.
+    let mut icons: Vec<String> = srgb_names
+        .keys()
+        .filter(|name| name.starts_with("icon_"))
+        .cloned()
+        .collect();
+    icons.sort();
+    info!(
+        "sitemap: {} phenomenon icon sprites in the site-map texture bundle",
+        icons.len()
+    );
+    wanted.extend(icons);
     let missing: Vec<&String> = wanted
         .iter()
         .filter(|n| !srgb_names.contains_key(*n))
@@ -1106,6 +1119,7 @@ pub(crate) struct SitemapText {
 fn bake_text_atlas(
     images: &mut Assets<Image>,
     site_names: &[String],
+    phenomena: &[PhenomenaRow],
     release_format: Option<String>,
 ) -> SitemapText {
     let mut chars: Vec<char> = (0x20u8..=0x7e).map(|b| b as char).collect();
@@ -1116,9 +1130,9 @@ fn bake_text_atlas(
             }
         }
     };
-    for row in PHENOMENA_ROWS {
-        push(row.jp, &mut chars);
-        push(row.en, &mut chars);
+    for row in phenomena {
+        push(&row.name, &mut chars);
+        push(&row.en, &mut chars);
     }
     for name in site_names {
         push(name, &mut chars);
@@ -1507,13 +1521,26 @@ pub(crate) struct UnlockRun {
 /// 天气面板（SiteMapPhenomenaView）。
 #[derive(Component)]
 pub(crate) struct WeatherPanel {
-    icon: Entity,
+    /// The icon sprite (`_siteMapPhenomenaIcon`), once a phenomenon is set.
+    icon: Option<Entity>,
     /// 两行文本的行父实体（字形是其子实体，撤行父即整行撤——刷新期
-    /// 只撤一次，见 refresh_weather）。
+    /// 只撤一次，见 setup_phenomena）。
     rows: Vec<Entity>,
-    row: usize,
-    /// 上次见到的现象档名（变更检测；档名不在主表时也记，避免每帧重报）。
-    last_asset: String,
+    /// The master row id the panel shows, once `UpdatePhenomena` ran.
+    id: Option<i32>,
+}
+
+/// The world-panorama image (`_siteMapSphereImage`), tinted by
+/// `ChangeSiteMapColor`.
+#[derive(Component)]
+pub(crate) struct SphereImage;
+
+/// What `SetupAsync` decided at the latest open: `aborted` when the
+/// phenomenon of the day has no master row (the source logs and returns
+/// before `SiteMapInAnimation`).
+#[derive(Resource, Default)]
+pub(crate) struct SiteMapSetup {
+    aborted: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1652,15 +1679,19 @@ pub(crate) fn spawn_when_ready(
     roots: Query<(), With<SitemapRoot>>,
     mut images: ResMut<Assets<Image>>,
     server: Res<AssetServer>,
-    (layouts, root_canvas): (
+    (layouts, root_canvas, phenomena): (
         Option<Res<crate::ui_layout::UiLayouts>>,
         Option<Res<crate::canvas::RootCanvas>>,
+        Option<Res<PhenomenaMaster>>,
     ),
 ) {
     if !roots.is_empty() {
         return;
     }
     let Some(mut data) = data else { return };
+    // The phenomenon names are baked with the site names: the atlas waits for
+    // the phenomenon master (an absent table bakes none and is named there).
+    let Some(phenomena) = phenomena else { return };
     // The wordings arrive with the host sources (the root canvas is set in
     // the same step): the balloon's wording is baked with the names.
     let (Some(layouts), Some(_)) = (layouts, root_canvas) else {
@@ -1688,7 +1719,7 @@ pub(crate) fn spawn_when_ready(
     if release_format.is_none() {
         warn!("sitemap: the root's wordings carry no {WORD_SITE_RELEASE}: the release balloon has no text");
     }
-    let text = bake_text_atlas(&mut images, &site_names, release_format);
+    let text = bake_text_atlas(&mut images, &site_names, phenomena.rows(), release_format);
 
     // Hidden until the screen manager makes the site map the current screen
     // (the menu's site map button or the M key push it).
@@ -1717,6 +1748,7 @@ pub(crate) fn spawn_when_ready(
         0.0,
         Color::WHITE,
     );
+    commands.entity(ground).insert(SphereImage);
     commands.entity(map_root).add_child(ground);
     info!("sitemap: overlay spawned hidden; the screen manager shows it while MysekaiSiteMap is the current screen");
     info!(
@@ -1746,7 +1778,7 @@ pub(crate) fn spawn_when_ready(
         "sitemap：第 0 号图标必须是 HOME（真源 HOME_SITE_ICON_INDEX=0）"
     );
 
-    spawn_weather_panel(&mut commands, &data, &text, ui_root);
+    spawn_weather_panel(&mut commands, &data, ui_root);
 
     commands.insert_resource(text);
     info!(
@@ -2084,13 +2116,17 @@ fn spawn_cloud_cluster(
 
 /// 现象行的三件位（面板系）：图标中心、JP 文本左起点、EN 行中心。
 /// JP 行 =「图标 + 文本」横排、组在行心居中（真源布局组件的组居中律；
-/// 间距取具名近似值）。铺装与刷新共用，两路的组宽口径一致。
-fn phenomena_slots(data: &SitemapData, text: &SitemapText, row: usize) -> (Vec2, Vec2, Vec2) {
+/// 间距取具名近似值）。
+fn phenomena_slots(
+    data: &SitemapData,
+    text: &SitemapText,
+    row: &PhenomenaRow,
+) -> (Vec2, Vec2, Vec2) {
     let layout = &data.screen.phenomena;
     let panel_at = layout.background.center;
     let jp_row_at = layout.jp_row - panel_at;
     let en_row_at = layout.en_row - panel_at;
-    let jp_text_width = text_width(text, &PHENOMENA_ROWS[row].jp, PHENOMENA_JP_SIZE);
+    let jp_text_width = text_width(text, &row.name, PHENOMENA_JP_SIZE);
     let group_width = layout.icon_size.x + PHENOMENA_ICON_GAP_PX + jp_text_width;
     let icon_at =
         jp_row_at - Vec2::new(group_width / 2.0, 0.0) + Vec2::new(layout.icon_size.x / 2.0, 0.0);
@@ -2099,16 +2135,11 @@ fn phenomena_slots(data: &SitemapData, text: &SitemapText, row: usize) -> (Vec2,
     (icon_at, jp_text_at, en_row_at)
 }
 
-/// 铺天气面板（SiteMapPhenomenaView：bg_site_info + icon + 两行文本，
-/// 初始默认现象）。位置与内件排布都是屏幕层真值：面板钉在画布顶中
-/// （锚 (0.5,1) @ (0,8)，512×128），现象图标在 JP 行内、EN 行在下。
-/// 独立的天气按钮件（开现象选择屏）不在本单范围，不上屏（挂账）。
-fn spawn_weather_panel(
-    commands: &mut Commands,
-    data: &SitemapData,
-    text: &SitemapText,
-    ui_root: Entity,
-) {
+/// 铺天气面板（SiteMapPhenomenaView：`Setup` loads `bg_site_info` into the
+/// background）。位置与内件排布都是屏幕层真值：面板钉在画布顶中
+/// （锚 (0.5,1) @ (0,8)，512×128）。The icon and the two lines are set by
+/// `UpdatePhenomena` when the map opens ([`setup_phenomena`]).
+fn spawn_weather_panel(commands: &mut Commands, data: &SitemapData, ui_root: Entity) {
     let layout = &data.screen.phenomena;
     let at = layout.background.center;
     let panel = commands
@@ -2130,38 +2161,31 @@ fn spawn_weather_panel(
         Color::WHITE,
     );
     commands.entity(panel).add_child(bg);
-
-    let row = PHENOMENA_ROWS
-        .iter()
-        .position(|r| r.id == DEFAULT_PHENOMENA_ID)
-        .unwrap_or_else(|| panic!("sitemap：现象表缺默认行 {DEFAULT_PHENOMENA_ID}"));
-    // JP 行 =「图标 + 文本」横排、组在行心居中；图标与文本的 x 都从
-    // 组宽现算（与刷新路径共用 [`phenomena_slots`]）。
-    let (icon_at, jp_text_at, en_row_at) = phenomena_slots(data, &text, row);
-    let icon = spawn_phenomena_icon(commands, data, panel, row, icon_at);
-    let rows = spawn_phenomena_text(commands, text, panel, row, jp_text_at, en_row_at);
     commands.entity(panel).insert(WeatherPanel {
-        icon,
-        rows,
-        row,
-        last_asset: PHENOMENA_ROWS[row].asset.to_owned(),
+        icon: None,
+        rows: Vec::new(),
+        id: None,
     });
-    let p = &PHENOMENA_ROWS[row];
     info!(
-        "sitemap: phenomena panel at ({:.1},{:.1}) bg {:.0}x{:.0}（屏幕层真值 顶中）; row id={} en={} jp_len={} icon=icon_{}",
-        at.x, at.y, layout.background.size.x, layout.background.size.y,
-        p.id, p.en, p.jp.chars().count(), p.icon
+        "sitemap: phenomena panel at ({:.1},{:.1}) bg {:.0}x{:.0}（屏幕层真值 顶中）; the phenomenon is set when the map opens",
+        at.x, at.y, layout.background.size.x, layout.background.size.y
     );
 }
 
+/// `_siteMapPhenomenaIcon.sprite = LoadAsset("icon_" + iconAssetbundleName)`;
+/// a sprite the bundle lacks is the source's `LogError` and draws nothing.
 fn spawn_phenomena_icon(
     commands: &mut Commands,
     data: &SitemapData,
     panel: Entity,
-    row: usize,
+    row: &PhenomenaRow,
     at: Vec2,
-) -> Entity {
-    let name = format!("icon_{}", PHENOMENA_ROWS[row].icon);
+) -> Option<Entity> {
+    let name = format!("icon_{}", row.icon);
+    if !data.textures.contains_key(&name) {
+        error!("sitemap: UpdatePhenomena: the site-map texture bundle has no {name} (phenomenon {}): no icon is drawn", row.id);
+        return None;
+    }
     // 图标槽 44×44（屏幕层真值）；行内 x 由调用方按组宽给定。
     let icon = spawn_image(
         commands,
@@ -2173,25 +2197,23 @@ fn spawn_phenomena_icon(
         Color::WHITE,
     );
     commands.entity(panel).add_child(icon);
-    icon
+    Some(icon)
 }
 
 /// 两行文本（JP 行在图标右侧、EN 行在下面板中部；行中心是屏幕层真值）。
-/// 返回**行父实体**——字形是行的子实体，随行父撤（撤两遍就是那批
-/// despawn WARN：天气切换 × 面板重建的组合，见 refresh_weather）。
+/// 返回**行父实体**——字形是行的子实体，随行父撤。
 fn spawn_phenomena_text(
     commands: &mut Commands,
     text: &SitemapText,
     panel: Entity,
-    row: usize,
+    row: &PhenomenaRow,
     jp_text_at: Vec2,
     en_row_at: Vec2,
 ) -> Vec<Entity> {
-    let row_data = &PHENOMENA_ROWS[row];
     let mut rows = Vec::new();
     for ((content, size), origin_left, at) in [
-        ((&row_data.jp[..], PHENOMENA_JP_SIZE), true, jp_text_at),
-        ((&row_data.en[..], PHENOMENA_EN_SIZE), false, en_row_at),
+        ((&row.name[..], PHENOMENA_JP_SIZE), true, jp_text_at),
+        ((&row.en[..], PHENOMENA_EN_SIZE), false, en_row_at),
     ] {
         let parent = commands
             .spawn((
@@ -2878,6 +2900,7 @@ pub(crate) fn tick_entries(
     mut cloud_particles: Query<(&mut crate::ui_particle::UiParticleHost, &CloudParticle)>,
     // Some(warned) while an open waits for the rank.
     mut pending: Local<Option<bool>>,
+    setup: Option<Res<SiteMapSetup>>,
 ) {
     // Read every hook of the frame (a short-circuit would leave the rest for
     // the next frame).
@@ -2885,6 +2908,9 @@ pub(crate) fn tick_entries(
         opened
             || (e.screen == MenuScreenType::MysekaiSiteMap && e.hook == ScreenHook::OnInitComponent)
     });
+    // `SetupAsync` returned before `SiteMapInAnimation` (no master row for
+    // the phenomenon of the day; [`setup_phenomena`] ran first and said so).
+    let opened = opened && !setup.as_deref().is_some_and(|setup| setup.aborted);
     if opened {
         *pending = Some(false);
         match se.as_deref_mut() {
@@ -3270,72 +3296,116 @@ pub(crate) fn toggle(
     }
 }
 
-/// Update：天气钮跟随当前现象（天气域的只读出口；天气插件缺席时保持
-/// 默认行——资源由 audio::install 兜底，Option 读法照旧）。档名不在主表
-/// （如庆典园地档）时不更新——真源同形。
-pub(crate) fn refresh_weather(
+/// Update: `SetupAsync`'s phenomenon part, on the site map's
+/// `OnInitComponent`. `GetMysekaiPhenomena(TodayMysekaiPhenomenaId)`: with no
+/// master row the source logs (`LogError`) and returns before
+/// `SiteMapInAnimation`, so no icon comes in ([`SiteMapSetup`]); otherwise
+/// `UpdatePhenomena` (the icon `"icon_" + iconAssetbundleName`, the `name`
+/// and `englishName` lines), the weather button enabled (the tutorial
+/// branch is out of scope) and `ChangeSiteMapColor`. The panel keeps what it
+/// shows until the next open, as in the source.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn setup_phenomena(
     mut commands: Commands,
-    data: Option<Res<SitemapData>>,
-    text: Option<Res<SitemapText>>,
-    weather: Option<Res<CurrentPhenomenon>>,
+    mut hooks: MessageReader<ScreenLayerEvent>,
+    (data, text, master, today): (
+        Option<Res<SitemapData>>,
+        Option<Res<SitemapText>>,
+        Option<Res<PhenomenaMaster>>,
+        Option<Res<crate::server_panel::TodayPhenomena>>,
+    ),
+    setup: Option<ResMut<SiteMapSetup>>,
     mut panels: Query<(Entity, &mut WeatherPanel)>,
+    mut spheres: Query<&mut Sprite, With<SphereImage>>,
 ) {
-    let (Some(data), Some(text)) = (data, text) else {
+    let opened = hooks.read().fold(false, |opened, e| {
+        opened
+            || (e.screen == MenuScreenType::MysekaiSiteMap && e.hook == ScreenHook::OnInitComponent)
+    });
+    if !opened {
         return;
-    };
-    let Some(asset) = weather.map(|w| w.0.clone()) else {
+    }
+    let (Some(data), Some(text), Some(mut setup)) = (data, text, setup) else {
         return;
     };
     let Ok((panel_entity, mut panel)) = panels.single_mut() else {
         return;
     };
-    if panel.last_asset == asset {
-        return;
-    }
-    let row = PHENOMENA_ROWS.iter().position(|r| r.asset == asset);
-    match row {
-        Some(row) if row != panel.row => {
-            // 撤的是 icon 与两个行父：字形是行父的子实体，跟着一次撤。
-            // 旧版把行父与字形混在一列各撤一遍，字形已被父级连带撤掉，
-            // 第二次 despawn 落在死实体上——天气切换 × 面板重建每次固定
-            // 刷出一批「despawn 落空」WARN（实测 native 130/wasm
-            // 123，与本处字符数逐次吻合），即此处。
-            commands.entity(panel.icon).despawn();
-            for row_entity in &panel.rows {
-                commands.entity(*row_entity).despawn();
+    let today = today.as_deref().and_then(|today| today.phenomena_id());
+    let row = master
+        .as_deref()
+        .zip(today)
+        .and_then(|(master, id)| master.phenomena(id));
+    let Some(row) = row else {
+        setup.aborted = true;
+        error!(
+            "sitemap: SetupAsync: the phenomenon of the day {today:?} has no master row (mysekaiPhenomenas {}): the panel is not updated and SiteMapInAnimation does not run",
+            match master.as_deref().map(|m| &m.rows) {
+                Some(Ok(rows)) => format!("{} rows", rows.len()),
+                Some(Err(reason)) => format!("absent: {reason}"),
+                None => "not resolved".to_owned(),
             }
-            let (icon_at, jp_text_at, en_row_at) = phenomena_slots(&data, &text, row);
-            let icon = spawn_phenomena_icon(&mut commands, &data, panel_entity, row, icon_at);
-            let rows = spawn_phenomena_text(
-                &mut commands,
-                &text,
-                panel_entity,
-                row,
-                jp_text_at,
-                en_row_at,
-            );
-            *panel = WeatherPanel {
-                icon,
-                rows,
-                row,
-                last_asset: asset.clone(),
+        );
+        return;
+    };
+    setup.aborted = false;
+    if let Some(icon) = panel.icon.take() {
+        commands.entity(icon).despawn();
+    }
+    for row_entity in panel.rows.drain(..) {
+        commands.entity(row_entity).despawn();
+    }
+    let (icon_at, jp_text_at, en_row_at) = phenomena_slots(&data, &text, row);
+    panel.icon = spawn_phenomena_icon(&mut commands, &data, panel_entity, row, icon_at);
+    panel.rows = spawn_phenomena_text(
+        &mut commands,
+        &text,
+        panel_entity,
+        row,
+        jp_text_at,
+        en_row_at,
+    );
+    panel.id = Some(row.id);
+    info!(
+        "sitemap: UpdatePhenomena: phenomenon of the day {} ({}) en={} name_len={} icon=icon_{} (mysekaiPhenomenas {} rows); weather button enabled",
+        row.id,
+        row.asset,
+        row.en,
+        row.name.chars().count(),
+        row.icon,
+        master.as_deref().map_or(0, |m| m.rows().len())
+    );
+    // ChangeSiteMapColor.
+    let master = master.as_deref().expect("a row came from the master");
+    match master.background_color(row.background_color_id) {
+        Some(colors) => {
+            let ground = colors.ground;
+            for mut sprite in &mut spheres {
+                sprite.color = Color::srgba(ground[0], ground[1], ground[2], ground[3]);
+            }
+            let hex = |c: [f32; 4]| {
+                format!(
+                    "#{:02x}{:02x}{:02x}{:02x}",
+                    (c[0] * 255.0).round() as u8,
+                    (c[1] * 255.0).round() as u8,
+                    (c[2] * 255.0).round() as u8,
+                    (c[3] * 255.0).round() as u8
+                )
             };
-            let p = &PHENOMENA_ROWS[row];
             info!(
-                "sitemap: phenomena id={} en={} jp_len={} icon=icon_{}",
-                p.id,
-                p.en,
-                p.jp.chars().count(),
-                p.icon
+                "sitemap: ChangeSiteMapColor: background colour row {}: base {} gradation {} groundHighlight {} corner {} ground {}; the sphere image takes ground",
+                colors.id,
+                hex(colors.base),
+                hex(colors.gradation),
+                hex(colors.ground_highlight),
+                hex(colors.corner),
+                hex(colors.ground)
             );
         }
-        Some(_) => {
-            panel.last_asset = asset;
-        }
-        None => {
-            info!("sitemap: phenomena asset={asset} no master row — panel unchanged");
-            panel.last_asset = asset;
-        }
+        None => error!(
+            "sitemap: ChangeSiteMapColor: phenomenon {} names background colour {}, which mysekaiPhenomenaBackgroundColors does not hold: the background keeps its colours",
+            row.id, row.background_color_id
+        ),
     }
 }
 
@@ -3352,10 +3422,7 @@ pub(crate) fn report(
     let active = icons.iter().filter(|i| i.active).count();
     let released = icons.iter().filter(|i| i.released).count();
     let here: Vec<usize> = icons.iter().filter(|i| i.here).map(|i| i.site).collect();
-    let phenomena = panels
-        .single()
-        .map(|p| PHENOMENA_ROWS[p.row].id)
-        .unwrap_or(-1);
+    let phenomena = panels.single().ok().and_then(|p| p.id).unwrap_or(-1);
     info!(
         "sitemap: icons={total} shown={active} released={released} locked={} here={here:?} entries={} floats={} unlock_runs={} balloons_shown={} phenomena_id={phenomena}",
         total - released,
