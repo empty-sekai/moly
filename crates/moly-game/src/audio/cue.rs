@@ -511,40 +511,44 @@ fn seeded_sequence_rng(slot: RngSlot) -> SequenceRng {
 /// volume in hundredths; command 89 is a volume in hundredths with a random
 /// spread (second 16-bit value, hundredths) drawn per start from the player's
 /// generator. The spread is not ported: its base value is used, and the cues
-/// that carry it are counted at parse.
-pub(crate) fn gain_from_block(block: &serde_json::Value, cue_label: &str) -> CueGain {
-    let records = |value: &serde_json::Value| -> Vec<(u64, Vec<u8>)> {
-        value
-            .as_array()
-            .map(|list| {
-                list.iter()
-                    .map(|record| {
-                        let code = record["code"]
-                            .as_u64()
-                            .unwrap_or_else(|| panic!("cue {cue_label} 的命令码不是整数"));
-                        let hex = record["bytes"]
-                            .as_str()
-                            .unwrap_or_else(|| panic!("cue {cue_label} 的命令字节不是字符串"));
-                        (code, decode_hex(hex, cue_label))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    let volume_of = |list: &[(u64, Vec<u8>)]| -> f32 {
+/// that carry it are counted at parse. `Err` names the command list that
+/// does not have the exported shape.
+pub(crate) fn gain_from_block(block: &serde_json::Value) -> Result<CueGain, String> {
+    let records = |value: &serde_json::Value| -> Result<Vec<(u64, Vec<u8>)>, String> {
+        let Some(list) = value.as_array() else {
+            return Ok(Vec::new());
+        };
         list.iter()
-            .filter_map(|(code, bytes)| match (*code, bytes.as_slice()) {
+            .map(|record| {
+                let code = record["code"]
+                    .as_u64()
+                    .ok_or("a command code is not an integer")?;
+                let hex = record["bytes"]
+                    .as_str()
+                    .ok_or_else(|| format!("the bytes of command {code} are not a string"))?;
+                Ok((code, decode_hex(hex)?))
+            })
+            .collect()
+    };
+    let volume_of = |list: &[(u64, Vec<u8>)]| -> Result<f32, String> {
+        let mut volume = 1.0f32;
+        for (code, bytes) in list {
+            match (*code, bytes.as_slice()) {
                 (COMMAND_VOLUME, [hi, lo]) | (COMMAND_RANDOM_VOLUME, [hi, lo, _, _]) => {
-                    Some(f32::from(u16::from_be_bytes([*hi, *lo])) / 100.0)
+                    volume *= f32::from(u16::from_be_bytes([*hi, *lo])) / 100.0;
                 }
                 (COMMAND_VOLUME | COMMAND_RANDOM_VOLUME, other) => {
-                    panic!("cue {cue_label} 的音量命令 {code} 长 {} 字节", other.len())
+                    return Err(format!(
+                        "volume command {code} is {} bytes long",
+                        other.len()
+                    ));
                 }
-                _ => None,
-            })
-            .product()
+                _ => {}
+            }
+        }
+        Ok(volume)
     };
-    let sequence = records(&block["commands"]);
+    let sequence = records(&block["commands"])?;
     let mut random_spread = sequence
         .iter()
         .any(|(code, _)| *code == COMMAND_RANDOM_VOLUME);
@@ -552,7 +556,10 @@ pub(crate) fn gain_from_block(block: &serde_json::Value, cue_label: &str) -> Cue
     for (code, bytes) in &sequence {
         if *code == COMMAND_CATEGORY {
             if bytes.len() % 4 != 0 {
-                panic!("cue {cue_label} 的类别命令长 {} 不是 4 的倍数", bytes.len());
+                return Err(format!(
+                    "category command is {} bytes long, not a multiple of 4",
+                    bytes.len()
+                ));
             }
             categories.extend(
                 bytes
@@ -561,32 +568,24 @@ pub(crate) fn gain_from_block(block: &serde_json::Value, cue_label: &str) -> Cue
             );
         }
     }
-    let tracks = block["tracks"]
-        .as_array()
-        .map(|tracks| {
-            tracks
-                .iter()
-                .map(|track| {
-                    let mut synth = 1.0f32;
-                    for note in track["noteOns"].as_array().into_iter().flatten() {
-                        let list = records(&note["synth"]["commands"]);
-                        random_spread |=
-                            list.iter().any(|(code, _)| *code == COMMAND_RANDOM_VOLUME);
-                        synth *= volume_of(&list);
-                    }
-                    let list = records(&track["commands"]);
-                    random_spread |= list.iter().any(|(code, _)| *code == COMMAND_RANDOM_VOLUME);
-                    volume_of(&list) * synth
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    CueGain {
+    let mut tracks = Vec::new();
+    for track in block["tracks"].as_array().into_iter().flatten() {
+        let mut synth = 1.0f32;
+        for note in track["noteOns"].as_array().into_iter().flatten() {
+            let list = records(&note["synth"]["commands"])?;
+            random_spread |= list.iter().any(|(code, _)| *code == COMMAND_RANDOM_VOLUME);
+            synth *= volume_of(&list)?;
+        }
+        let list = records(&track["commands"])?;
+        random_spread |= list.iter().any(|(code, _)| *code == COMMAND_RANDOM_VOLUME);
+        tracks.push(volume_of(&list)? * synth);
+    }
+    Ok(CueGain {
         categories,
-        sequence: volume_of(&sequence),
+        sequence: volume_of(&sequence)?,
         tracks,
         random_spread,
-    }
+    })
 }
 
 /// Sequence command: the categories the cue belongs to.
@@ -596,15 +595,15 @@ const COMMAND_VOLUME: u64 = 87;
 /// Volume in hundredths with a random spread.
 pub(crate) const COMMAND_RANDOM_VOLUME: u64 = 89;
 
-fn decode_hex(hex: &str, cue_label: &str) -> Vec<u8> {
-    if hex.len() % 2 != 0 {
-        panic!("cue {cue_label} 的命令字节 {hex:?} 不是整字节");
+fn decode_hex(hex: &str) -> Result<Vec<u8>, String> {
+    if hex.len() % 2 != 0 || !hex.is_ascii() {
+        return Err(format!("command bytes {hex:?} are not whole bytes"));
     }
     (0..hex.len())
         .step_by(2)
         .map(|i| {
             u8::from_str_radix(&hex[i..i + 2], 16)
-                .unwrap_or_else(|_| panic!("cue {cue_label} 的命令字节 {hex:?} 不是十六进制"))
+                .map_err(|_| format!("command bytes {hex:?} are not hexadecimal"))
         })
         .collect()
 }

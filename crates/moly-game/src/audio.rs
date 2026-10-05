@@ -1063,6 +1063,12 @@ pub(crate) fn parse(
             .count(),
         routing.sequences.subsongs.len(),
     );
+    if !routing.sequences.refused.is_empty() {
+        info!(
+            "sequence exports refused: {} package(s), each named in an ERROR line",
+            routing.sequences.refused.len()
+        );
+    }
     info!(
         "talk voice 语料账本就绪：上游无包 {} 条具名（缺 cue 日志的分类依据）",
         voice_corpus.uncovered.len(),
@@ -1400,118 +1406,187 @@ struct SequenceIndex {
     /// Gain facts per (cue, package): every structured cue, and with export
     /// version 2 every listed cue.
     gains: HashMap<(String, String), CueGain>,
+    /// Packages whose export this reader refused, with the reason: every cue
+    /// of such a package is refused by name when started.
+    refused: HashMap<String, String>,
 }
 
-/// JSON 值取整数；缺或不是整数是结构损伤。
-fn value_i64(value: &serde_json::Value, what: &str) -> i64 {
+/// An integer of the sequence export; `Err` names the field that is missing
+/// or not an integer.
+fn value_i64(value: &serde_json::Value, what: &str) -> Result<i64, String> {
     value
         .as_i64()
-        .unwrap_or_else(|| panic!("序列导出里 {what} 不是整数"))
+        .ok_or_else(|| format!("{what} is not an integer"))
 }
 
+/// An integer of the sequence export in a narrower type; `Err` names the
+/// field and its value.
+fn value_in<T: TryFrom<i64>>(value: &serde_json::Value, what: &str) -> Result<T, String> {
+    let wide = value_i64(value, what)?;
+    T::try_from(wide).map_err(|_| format!("{what} {wide} is out of range"))
+}
+
+/// One cue's sequence block; `Err` names the field of the block that does
+/// not have the exported shape.
 fn parse_sequence_block(
     block: &serde_json::Value,
     archive: &str,
-    cue_label: &str,
     acb_version: Option<u32>,
-) -> SequenceBlock {
-    let kind = value_i64(&block["type"], "type");
-    let kind = u8::try_from(kind)
-        .unwrap_or_else(|_| panic!("cue {cue_label} 的序列类型 {kind} 超出一字节"));
+) -> Result<SequenceBlock, String> {
+    let kind = value_in::<u8>(&block["type"], "type")?;
     let repeat = match &block["repeat"] {
         serde_json::Value::Null => None,
-        value => Some(
-            u8::try_from(value_i64(value, "repeat"))
-                .unwrap_or_else(|_| panic!("cue {cue_label} 的重放标志超出一字节")),
-        ),
+        value => Some(value_in::<u8>(value, "repeat")?),
     };
-    let sequence_index = u16::try_from(value_i64(&block["sequenceIndex"], "sequenceIndex"))
-        .unwrap_or_else(|_| panic!("cue {cue_label} 的序列行号超出 16 位"));
-    let tracks = block["tracks"]
+    let sequence_index = value_in::<u16>(&block["sequenceIndex"], "sequenceIndex")?;
+    let mut tracks = Vec::new();
+    for track in block["tracks"]
         .as_array()
-        .unwrap_or_else(|| panic!("cue {cue_label} 的序列没有 tracks 数组"))
-        .iter()
-        .map(|track| {
-            let track_index = u16::try_from(value_i64(&track["trackIndex"], "trackIndex"))
-                .unwrap_or_else(|_| panic!("cue {cue_label} 的轨号超出 16 位"));
-            let note_ons = track["noteOns"]
-                .as_array()
-                .unwrap_or_else(|| panic!("cue {cue_label} 轨 {track_index} 没有 noteOns 数组"))
-                .iter()
-                .map(|note| {
-                    let note_kind = value_i64(&note["kind"], "noteOn kind");
-                    let references = note["synth"]["references"].as_array();
-                    match references {
-                        Some(items)
-                            if note_kind == 2
-                                && items.len() == 1
-                                && value_i64(&items[0]["kind"], "reference kind") == 1 =>
-                        {
-                            NoteOn::Waveform {
-                                subsong: items[0]["waveform"]["subsong"].as_i64(),
-                            }
-                        }
-                        Some(items) if note_kind == 2 => {
-                            NoteOn::Other(format!("synth 引用 {} 条（要恰一条波形）", items.len()))
-                        }
-                        _ => NoteOn::Other(format!("noteOn 指向种类 {note_kind}（要 synth）")),
+        .ok_or("tracks is not an array")?
+    {
+        let track_index = value_in::<u16>(&track["trackIndex"], "trackIndex")?;
+        let mut note_ons = Vec::new();
+        for note in track["noteOns"]
+            .as_array()
+            .ok_or_else(|| format!("noteOns of track {track_index} is not an array"))?
+        {
+            let note_kind = value_i64(&note["kind"], "noteOn kind")?;
+            let references = note["synth"]["references"].as_array();
+            note_ons.push(match references {
+                Some(items)
+                    if note_kind == 2
+                        && items.len() == 1
+                        && value_i64(&items[0]["kind"], "reference kind")? == 1 =>
+                {
+                    NoteOn::Waveform {
+                        subsong: items[0]["waveform"]["subsong"].as_i64(),
                     }
-                })
-                .collect();
-            SequenceTrack {
-                track_index,
-                start_delay_us: value_i64(
-                    &track["startDelayMicroseconds"],
-                    "startDelayMicroseconds",
-                ),
-                events_not_decoded: track["eventCodesNotDecoded"]
-                    .as_array()
-                    .unwrap_or_else(|| {
-                        panic!("cue {cue_label} 轨 {track_index} 没有 eventCodesNotDecoded")
-                    })
-                    .iter()
-                    .map(|code| value_i64(code, "event code"))
-                    .collect(),
-                note_ons,
-            }
-        })
-        .collect();
+                }
+                Some(items) if note_kind == 2 => {
+                    NoteOn::Other(format!("synth 引用 {} 条（要恰一条波形）", items.len()))
+                }
+                _ => NoteOn::Other(format!("noteOn 指向种类 {note_kind}（要 synth）")),
+            });
+        }
+        let mut events_not_decoded = Vec::new();
+        for code in track["eventCodesNotDecoded"].as_array().ok_or_else(|| {
+            format!("eventCodesNotDecoded of track {track_index} is not an array")
+        })? {
+            events_not_decoded.push(value_i64(code, "event code")?);
+        }
+        tracks.push(SequenceTrack {
+            track_index,
+            start_delay_us: value_i64(
+                &track["startDelayMicroseconds"],
+                "startDelayMicroseconds",
+            )?,
+            events_not_decoded,
+            note_ons,
+        });
+    }
     let not_consumed = format!(
         "总线送量 {} · 参数69 {} · 未解码命令码 {}",
         block["busSends"], block["parameter69"], block["commandCodesNotDecoded"]
     );
     let hex = block["trackValues"].as_str().unwrap_or("");
-    if hex.len() % 4 != 0 {
-        panic!("cue {cue_label} 的 trackValues {hex:?} 不是整 16 位");
+    if hex.len() % 4 != 0 || !hex.is_ascii() {
+        return Err(format!("trackValues {hex:?} is not whole 16-bit values"));
     }
     let track_values = (0..hex.len())
         .step_by(4)
         .map(|i| {
             u16::from_str_radix(&hex[i..i + 4], 16)
-                .unwrap_or_else(|_| panic!("cue {cue_label} 的 trackValues {hex:?} 不是十六进制"))
+                .map_err(|_| format!("trackValues {hex:?} is not hexadecimal"))
         })
-        .collect();
-    SequenceBlock {
+        .collect::<Result<_, _>>()?;
+    Ok(SequenceBlock {
         archive: archive.to_string(),
         sequence_index,
         kind,
         type_name: block["typeName"].as_str().unwrap_or("未命名").to_string(),
         repeat,
-        playback_ratio: value_i64(&block["playbackRatio"], "playbackRatio"),
-        action_tracks: value_i64(&block["actionTracks"]["count"], "actionTracks.count"),
+        playback_ratio: value_i64(&block["playbackRatio"], "playbackRatio")?,
+        action_tracks: value_i64(&block["actionTracks"]["count"], "actionTracks.count")?,
         plugin_tracks: value_i64(
             &block["instrumentPluginTracks"]["count"],
             "instrumentPluginTracks.count",
-        ),
+        )?,
         tracks,
         not_consumed,
         track_values,
         acb_version,
-    }
+    })
 }
 
-/// 解 loop.json 的序列导出（见 [`SequenceIndex`]）。导出版本不认得、有计数
-/// 却没有块表、同一 (cue, 包) 两个块：都是提取产物的结构损伤，响亮拒绝。
+/// What one package entry's sequence export adds to the index.
+#[derive(Default)]
+struct PackageExport {
+    blocks: Vec<(String, SequenceBlock)>,
+    read: Vec<String>,
+    /// Gain facts of the `cueCommands` rows (export version 2).
+    commands: Vec<(String, CueGain)>,
+    /// Gain facts of the blocks of cues without a `cueCommands` row.
+    block_gains: Vec<(String, CueGain)>,
+}
+
+/// One package entry's sequence export; `Err` names the first part of it
+/// this reader does not take (an export version it does not know, a field
+/// that does not have the exported shape, a table the version requires that
+/// is absent).
+fn parse_package_export(
+    package: &serde_json::Value,
+    export: &serde_json::Value,
+    streams: &[serde_json::Value],
+) -> Result<PackageExport, String> {
+    let version = value_i64(&export["version"], "sequenceExport.version")?;
+    if version != SEQUENCE_EXPORT_VERSION && version != SEQUENCE_EXPORT_VERSION_GAINS {
+        return Err(format!(
+            "export version {version} is not one this reader takes ({SEQUENCE_EXPORT_VERSION} or {SEQUENCE_EXPORT_VERSION_GAINS})"
+        ));
+    }
+    let mut parsed = PackageExport::default();
+    let no_rows = serde_json::Map::new();
+    let (acb_version, rows) = if version >= SEQUENCE_EXPORT_VERSION_GAINS {
+        let acb_version = value_in::<u32>(&export["acbVersion"], "sequenceExport.acbVersion")?;
+        let rows = package["cueCommands"]
+            .as_object()
+            .ok_or_else(|| format!("export version {version} has no cueCommands table"))?;
+        (Some(acb_version), rows)
+    } else {
+        (None, &no_rows)
+    };
+    for (cue, row) in rows {
+        let gain = cue::gain_from_block(row)
+            .map_err(|reason| format!("cueCommands of cue {}: {reason}", label(cue)))?;
+        parsed.commands.push((cue.clone(), gain));
+    }
+    let archive = package["archive"]
+        .as_str()
+        .ok_or("archive is not a string")?;
+    parsed.read = streams
+        .iter()
+        .filter_map(|stream| stream["cue"].as_str().map(str::to_string))
+        .collect();
+    let blocks = package["sequences"]
+        .as_object()
+        .ok_or("the entry has a sequence export but no sequences table")?;
+    for (cue, block) in blocks {
+        let named = |reason: String| format!("sequence block of cue {}: {reason}", label(cue));
+        let parsed_block = parse_sequence_block(block, archive, acb_version).map_err(named)?;
+        if !rows.contains_key(cue) {
+            let gain = cue::gain_from_block(block).map_err(named)?;
+            parsed.block_gains.push((cue.clone(), gain));
+        }
+        parsed.blocks.push((cue.clone(), parsed_block));
+    }
+    Ok(parsed)
+}
+
+/// 解 loop.json 的序列导出（见 [`SequenceIndex`]）。A package entry whose
+/// export this reader does not take is refused by name: one ERROR line with
+/// the package and the reason, and every cue of that package is refused when
+/// it is started ([`Routing::cue_plan`]); the other packages are read as
+/// usual.
 fn parse_sequences(loops: &serde_json::Value, base: &str) -> SequenceIndex {
     let mut index = SequenceIndex::default();
     for package in loops["packages"]
@@ -1557,55 +1632,49 @@ fn parse_sequences(loops: &serde_json::Value, base: &str) -> SequenceIndex {
         let Some(export) = package.get("sequenceExport") else {
             continue; // 从没读过这个归档的 cue 表
         };
-        let version = value_i64(&export["version"], "sequenceExport.version");
-        if version != SEQUENCE_EXPORT_VERSION && version != SEQUENCE_EXPORT_VERSION_GAINS {
-            panic!(
-                "包 {} 的序列导出版本 {version} 不认得（本仓读 {SEQUENCE_EXPORT_VERSION} 与 {SEQUENCE_EXPORT_VERSION_GAINS}）",
-                label(&package_name)
-            );
+        if index.refused.contains_key(&package_name) {
+            continue; // another entry of this package was refused and named
         }
-        let acb_version = (version >= SEQUENCE_EXPORT_VERSION_GAINS).then(|| {
-            u32::try_from(value_i64(
-                &export["acbVersion"],
-                "sequenceExport.acbVersion",
-            ))
-            .unwrap_or_else(|_| panic!("包 {} 的 acbVersion 超出 32 位", label(&package_name)))
+        let parsed = parse_package_export(package, export, streams).and_then(|parsed| {
+            // A package's archives are separate entries; two blocks for one
+            // cue of the package cannot both be the cue's structure.
+            match parsed.blocks.iter().find(|(cue, _)| {
+                index
+                    .blocks
+                    .contains_key(&(cue.clone(), package_name.clone()))
+            }) {
+                Some((cue, _)) => Err(format!(
+                    "cue {} has a sequence block in two entries of the package",
+                    label(cue)
+                )),
+                None => Ok(parsed),
+            }
         });
-        if version >= SEQUENCE_EXPORT_VERSION_GAINS {
-            let rows = package["cueCommands"].as_object().unwrap_or_else(|| {
-                panic!(
-                    "包 {} 的序列导出版本 2 却没有 cueCommands 表",
+        match parsed {
+            Ok(parsed) => {
+                for cue in parsed.read {
+                    index.read.insert((cue, package_name.clone()));
+                }
+                for (cue, gain) in parsed.commands {
+                    index.gains.insert((cue, package_name.clone()), gain);
+                }
+                for (cue, gain) in parsed.block_gains {
+                    // A block's facts do not replace a cueCommands row.
+                    index
+                        .gains
+                        .entry((cue, package_name.clone()))
+                        .or_insert(gain);
+                }
+                for (cue, block) in parsed.blocks {
+                    index.blocks.insert((cue, package_name.clone()), block);
+                }
+            }
+            Err(reason) => {
+                error!(
+                    "[audio] sequence export of package {} refused: {reason}; every cue of the package is refused when started, and its cue gain facts are absent",
                     label(&package_name)
-                )
-            });
-            for (cue, row) in rows {
-                index.gains.insert(
-                    (cue.clone(), package_name.clone()),
-                    cue::gain_from_block(row, &label(cue)),
                 );
-            }
-        }
-        let archive = field_str(package, "archive").to_string();
-        for stream in streams {
-            if let Some(cue) = stream["cue"].as_str() {
-                index.read.insert((cue.to_string(), package_name.clone()));
-            }
-        }
-        let blocks = package["sequences"].as_object().unwrap_or_else(|| {
-            panic!(
-                "包 {} 有序列导出计数却没有 sequences 表",
-                label(&package_name)
-            )
-        });
-        for (cue, block) in blocks {
-            let key = (cue.clone(), package_name.clone());
-            let parsed = parse_sequence_block(block, &archive, &label(cue), acb_version);
-            index
-                .gains
-                .entry(key.clone())
-                .or_insert_with(|| cue::gain_from_block(block, &label(cue)));
-            if index.blocks.insert(key, parsed).is_some() {
-                panic!("cue {} @ {} 有两个序列块", label(cue), label(&package_name));
+                index.refused.insert(package_name, reason);
             }
         }
     }
@@ -1753,6 +1822,9 @@ impl Routing {
     /// the sequence export never read (an extraction gap: the export reads
     /// the archive's cue table), or a key with no decoded stream.
     pub(crate) fn cue_plan(&self, cue: &str, package: &str) -> Result<CuePlan, String> {
+        if let Some(reason) = self.sequences.refused.get(package) {
+            return Err(format!("the sequence export of the package was refused: {reason}"));
+        }
         let key = (cue.to_string(), package.to_string());
         if let Some(block) = self.sequences.blocks.get(&key) {
             return structured_plan(&self.sequences, cue, package, block)
@@ -3860,5 +3932,105 @@ mod stream_manifest_tests {
     #[should_panic(expected = "nonempty string")]
     fn malformed_diagnostic_is_not_silently_ignored() {
         parse_streams(&manifest(json!([{"cue":"bad","error":false}])), "");
+    }
+}
+
+#[cfg(test)]
+mod sequence_export_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn entry(package: &str, export: serde_json::Value) -> serde_json::Value {
+        json!({
+            "package": package,
+            "archive": format!("{package}.acb"),
+            "streams": [{"cue": "c", "subsong": 1, "loop": false,
+                "ogg": format!("audio/{package}.ogg"), "durationSeconds": 1.0}],
+            "sequenceExport": export,
+            "cueCommands": {"c": {"commands": [{"code": 87, "bytes": "0032"}]}},
+            "sequences": {}
+        })
+    }
+
+    fn routing(loops: &serde_json::Value) -> Routing {
+        Routing {
+            site_bgms: HashMap::new(),
+            site_sound_fallbacks: HashMap::new(),
+            sites_with_sounds: HashSet::new(),
+            phenomena: HashMap::new(),
+            streams: parse_streams(loops, ""),
+            sequences: parse_sequences(loops, ""),
+        }
+    }
+
+    #[test]
+    fn a_package_export_the_reader_does_not_take_is_refused_by_name_and_the_rest_is_read() {
+        let mut no_commands = entry("no-commands", json!({"version": 2, "acbVersion": 1}));
+        no_commands.as_object_mut().unwrap().remove("cueCommands");
+        let loops = json!({"packages": [
+            entry("good", json!({"version": 2, "acbVersion": 0x0130_0000})),
+            no_commands,
+            entry("wide", json!({"version": 2, "acbVersion": 4_294_967_296_i64})),
+            entry("future", json!({"version": 3})),
+            entry("unversioned", json!({})),
+        ]});
+        let routing = routing(&loops);
+        let refused = &routing.sequences.refused;
+        let mut names: Vec<&str> = refused.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["future", "no-commands", "unversioned", "wide"]);
+        assert!(refused["no-commands"].contains("no cueCommands table"));
+        assert!(refused["wide"].contains("acbVersion 4294967296 is out of range"));
+        assert!(refused["future"].contains("export version 3"));
+        assert!(refused["unversioned"].contains("sequenceExport.version is not an integer"));
+        for package in names {
+            let error = routing.cue_plan("c", package).unwrap_err();
+            assert!(error.contains("sequence export of the package was refused"), "{error}");
+            assert!(routing.cue_gain("c", package).is_none());
+        }
+        let plan = routing.cue_plan("c", "good").expect("the readable package plays");
+        assert_eq!(plan.voices.len(), 1);
+        assert_eq!(routing.cue_gain("c", "good").unwrap().sequence, 0.5);
+    }
+
+    #[test]
+    fn a_malformed_block_or_command_list_refuses_only_its_package() {
+        let mut wide_type = entry("wide-type", json!({"version": 1}));
+        wide_type["sequences"] = json!({"c": {"type": 300, "sequenceIndex": 0, "tracks": []}});
+        let mut odd_bytes = entry("odd-bytes", json!({"version": 2, "acbVersion": 1}));
+        odd_bytes["cueCommands"]["c"]["commands"][0]["bytes"] = json!("003");
+        let mut short_volume = entry("short-volume", json!({"version": 2, "acbVersion": 1}));
+        short_volume["cueCommands"]["c"]["commands"][0]["bytes"] = json!("32");
+        let loops = json!({"packages": [
+            wide_type,
+            odd_bytes,
+            short_volume,
+            entry("good", json!({"version": 1})),
+        ]});
+        let routing = routing(&loops);
+        let refused = &routing.sequences.refused;
+        assert_eq!(refused.len(), 3);
+        assert!(refused["wide-type"].contains("type 300 is out of range"));
+        assert!(refused["odd-bytes"].contains("not whole bytes"));
+        assert!(refused["short-volume"].contains("volume command 87 is 1 bytes long"));
+        assert!(routing.cue_plan("c", "good").is_ok());
+    }
+
+    #[test]
+    fn a_cue_command_row_keeps_precedence_over_its_block() {
+        let mut both = entry("both", json!({"version": 2, "acbVersion": 1}));
+        both["sequences"] = json!({"c": {
+            "type": 0, "sequenceIndex": 0, "playbackRatio": 100,
+            "actionTracks": {"count": 0}, "instrumentPluginTracks": {"count": 0},
+            "commands": [{"code": 87, "bytes": "0019"}],
+            "tracks": [{"trackIndex": 0, "startDelayMicroseconds": 0,
+                "eventCodesNotDecoded": [],
+                "noteOns": [{"kind": 2, "synth": {"references": [
+                    {"kind": 1, "waveform": {"subsong": 1}}]}}]}]
+        }});
+        let routing = routing(&json!({"packages": [both]}));
+        assert!(routing.sequences.refused.is_empty());
+        assert_eq!(routing.cue_gain("c", "both").unwrap().sequence, 0.5);
+        assert!(routing.cue_plan("c", "both").is_ok());
     }
 }

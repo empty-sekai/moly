@@ -305,7 +305,9 @@ fn parse_record_sidecar(doc: &serde_json::Value) -> Result<HashMap<String, Packa
                 sha256: sha256.to_owned(),
                 gain: row["cueCommands"]
                     .get(cue)
-                    .map(|block| gain_from_block(block, &label(cue))),
+                    .map(gain_from_block)
+                    .transpose()
+                    .map_err(|reason| format!("{name}: cueCommands of cue {cue}: {reason}"))?,
             },
         );
     }
