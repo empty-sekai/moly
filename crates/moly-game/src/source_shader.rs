@@ -420,20 +420,7 @@ impl SourceGpuBinding {
         textures: &BTreeMap<String, SourceSampledResource<'_>>,
     ) -> Result<Self> {
         let abi = &program.abi;
-        let unfilterable = textures
-            .iter()
-            .filter_map(|(name, resource)| {
-                matches!(
-                    resource,
-                    SourceSampledResource::View {
-                        filterable: false,
-                        ..
-                    }
-                )
-                .then(|| name.clone())
-            })
-            .collect();
-        let layout = resource_binding_layout(abi, &unfilterable)?;
+        let layout = Self::layout(abi, textures)?;
         require(
             values.len() == abi.uniforms.len()
                 && values
@@ -447,6 +434,59 @@ impl SourceGpuBinding {
                 .cloned()
                 .ok_or_else(|| SourceShaderError(format!("unowned source uniform {}", field.name)))
         })?;
+        Self::create_with_layout(device, cache, program, layout, &bytes, textures)
+    }
+
+    /// [`Self::create_resources`] from an already packed uniform block, such
+    /// as one written through [`ProgramAbi::uniform_layout`]. A packing error
+    /// is passed in and reported where packing would report it: after the
+    /// binding layout checks and before the texture checks.
+    pub fn create_packed(
+        device: &RenderDevice,
+        cache: &PipelineCache,
+        program: &ProgramReceipt,
+        uniform: Result<&[u8]>,
+        textures: &BTreeMap<String, SourceSampledResource<'_>>,
+    ) -> Result<Self> {
+        let abi = &program.abi;
+        let layout = Self::layout(abi, textures)?;
+        let bytes = uniform?;
+        require(
+            bytes.len() == abi.uniform_bytes as usize,
+            "packed source uniform block differs from the compiled block size",
+        )?;
+        Self::create_with_layout(device, cache, program, layout, bytes, textures)
+    }
+
+    fn layout(
+        abi: &ProgramAbi,
+        textures: &BTreeMap<String, SourceSampledResource<'_>>,
+    ) -> Result<BindGroupLayoutDescriptor> {
+        let unfilterable = textures
+            .iter()
+            .filter_map(|(name, resource)| {
+                matches!(
+                    resource,
+                    SourceSampledResource::View {
+                        filterable: false,
+                        ..
+                    }
+                )
+                .then(|| name.clone())
+            })
+            .collect();
+        resource_binding_layout(abi, &unfilterable)
+    }
+
+    fn create_with_layout(
+        device: &RenderDevice,
+        cache: &PipelineCache,
+        program: &ProgramReceipt,
+        layout: BindGroupLayoutDescriptor,
+        bytes: &[u8],
+        textures: &BTreeMap<String, SourceSampledResource<'_>>,
+    ) -> Result<Self> {
+        let abi = &program.abi;
         require(
             textures.len() == abi.textures.len()
                 && textures
@@ -460,18 +500,18 @@ impl SourceGpuBinding {
                 SourceTextureDimension::D2 => TextureViewDimension::D2,
                 SourceTextureDimension::D2Array => TextureViewDimension::D2Array,
             };
-            require(
-                match texture {
-                    SourceSampledResource::Asset(texture) => texture.image.dimension == dimension,
-                    SourceSampledResource::View {
-                        dimension: actual, ..
-                    } => *actual == dimension,
-                },
-                format!(
+            let matches = match texture {
+                SourceSampledResource::Asset(texture) => texture.image.dimension == dimension,
+                SourceSampledResource::View {
+                    dimension: actual, ..
+                } => *actual == dimension,
+            };
+            if !matches {
+                return Err(SourceShaderError(format!(
                     "source texture {} dimensionality disagrees with its compiled program",
                     declaration.name
-                ),
-            )?;
+                )));
+            }
         }
         let samplers = abi
             .textures
@@ -498,7 +538,7 @@ impl SourceGpuBinding {
             .collect::<Result<BTreeMap<_, _>>>()?;
         let uniform = device.create_buffer_with_data(&BufferInitDescriptor {
             label: Some("source program uniform bytes"),
-            contents: &bytes,
+            contents: bytes,
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
         });
         let mut entries = vec![BindGroupEntry {
@@ -532,25 +572,11 @@ impl SourceGpuBinding {
     }
 
     /// Keep layouts, samplers and bind groups stable while camera/global writers
-    /// update their values. Resource replacement is a separate preparation step.
-    pub fn write_uniforms(
-        &self,
-        queue: &RenderQueue,
-        abi: &ProgramAbi,
-        values: &BTreeMap<String, UniformValue>,
-    ) -> Result<()> {
-        require(
-            values.len() == abi.uniforms.len(),
-            "source uniform writer count changed",
-        )?;
-        let bytes = abi.pack_uniforms(|field| {
-            values
-                .get(&field.name)
-                .cloned()
-                .ok_or_else(|| SourceShaderError(format!("unowned source uniform {}", field.name)))
-        })?;
-        queue.write_buffer(&self.uniform, 0, &bytes);
-        Ok(())
+    /// update their values: write a complete uniform block packed through the
+    /// program's [`ProgramAbi::uniform_layout`]. Resource replacement is a
+    /// separate preparation step.
+    pub fn write_packed(&self, queue: &RenderQueue, bytes: &[u8]) {
+        queue.write_buffer(&self.uniform, 0, bytes);
     }
 }
 

@@ -17,7 +17,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
-pub use abi::{ProgramAbi, UniformValue};
+pub use abi::{ProgramAbi, UniformFault, UniformLayout, UniformSlot, UniformValue};
 pub use loader::{register, SourceProgramAsset, SourceTextureAsset};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +39,14 @@ pub(crate) fn require(condition: bool, message: impl Into<String>) -> Result<()>
         Ok(())
     } else {
         Err(SourceShaderError(message.into()))
+    }
+}
+/// [`require`] with a message that is built only when the condition fails.
+pub(crate) fn require_with(condition: bool, message: impl FnOnce() -> String) -> Result<()> {
+    if condition {
+        Ok(())
+    } else {
+        Err(SourceShaderError(message()))
     }
 }
 pub fn sha256(bytes: &[u8]) -> String {
@@ -79,27 +87,25 @@ impl ContentReference {
         )?;
         // References are extraction-root-relative, never URLs, asset labels,
         // filesystem paths or a request to climb outside the source namespace.
-        require(
+        require_with(
             !self.file.is_empty()
                 && !self.file.contains(['\\', ':', '#', '?', '%'])
                 && self
                     .file
                     .split('/')
                     .all(|s| !s.is_empty() && s != "." && s != ".."),
-            format!("invalid source content path {}", self.file),
+            || format!("invalid source content path {}", self.file),
         )?;
         require(self.bytes > 0, "empty source content reference")
     }
     pub fn verify(&self, bytes: &[u8]) -> Result<()> {
         self.validate()?;
-        require(
-            bytes.len() as u64 == self.bytes,
-            format!("{}: source byte count mismatch", self.file),
-        )?;
-        require(
-            sha256(bytes) == self.sha256,
-            format!("{}: source SHA-256 mismatch", self.file),
-        )
+        require_with(bytes.len() as u64 == self.bytes, || {
+            format!("{}: source byte count mismatch", self.file)
+        })?;
+        require_with(sha256(bytes) == self.sha256, || {
+            format!("{}: source SHA-256 mismatch", self.file)
+        })
     }
 }
 
@@ -272,21 +278,19 @@ impl SourceShaderCatalogue {
                     && v.effective_keywords() == requested
             })
             .collect();
-        require(
-            candidates.len() == 1,
+        require_with(candidates.len() == 1, || {
             format!(
                 "{} source variants match the exact pass/keyword state",
                 candidates.len()
-            ),
-        )?;
+            )
+        })?;
         let selected = candidates[0];
-        require(
-            selected.status == "converted",
+        require_with(selected.status == "converted", || {
             selected
                 .error
                 .clone()
-                .unwrap_or_else(|| "source variant is not converted".into()),
-        )?;
+                .unwrap_or_else(|| "source variant is not converted".into())
+        })?;
         Ok((pass, selected))
     }
 }
