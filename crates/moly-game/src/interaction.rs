@@ -2,7 +2,8 @@
 
 use bevy::{ecs::system::SystemParam, prelude::*};
 use moly_law::action_button::{
-    character_box, update_player_box, CollisionBox2D, PLAYER_ADDITIONAL_HALF_EXTEND,
+    character_box, fixture_box, house_box, update_player_box, CollisionBox2D,
+    HOUSE_BOX_DOOR_OFFSET, PLAYER_ADDITIONAL_HALF_EXTEND,
 };
 
 use crate::{
@@ -15,15 +16,81 @@ use crate::{
     ui_layers::UiLayerStack,
 };
 
+// The collision boxes are built and tested in the source frame. The runtime
+// frame reflects the source's x axis, and the box test is not
+// mirror-symmetric (each box projects three of its four corners), so testing
+// reflected boxes answers differently near the edges, on the opposite side.
+
+/// A runtime position in the source frame: x reflected back.
+pub(crate) fn source_point(runtime: Vec3) -> [f32; 3] {
+    [-runtime.x, runtime.y, runtime.z]
+}
+
+/// A placed fixture's box rotation, from its runtime rotation: the source
+/// direction's quarter turns times 90 degrees, the angle
+/// `FixtureView.ForceSetRotation` writes into the box. The runtime yaw is the
+/// reflected source yaw, so the turns run the other way (Left and Right
+/// swap).
+pub(crate) fn source_box_rotation(rotation: Quat) -> f32 {
+    let forward = rotation * Vec3::Z;
+    let quarters = (forward.x.atan2(forward.z) / std::f32::consts::FRAC_PI_2).round() as i32;
+    quarters.wrapping_neg().rem_euclid(4) as f32 * 90.0
+}
+
+/// The player's additional box (`ObjectCollisionManager
+/// .UpdateAdditionalCollisionBox`), in the source frame: centre half a metre
+/// ahead along the source forward, rotation minus the source yaw.
 pub(crate) fn player_box(player: &Transform) -> CollisionBox2D {
     let mut bounds = CollisionBox2D::new([0.0, 0.0], PLAYER_ADDITIONAL_HALF_EXTEND, 0.0);
+    let forward = player.rotation * Vec3::Z;
     update_player_box(
         &mut bounds,
-        player.translation.to_array(),
-        (player.rotation * Vec3::Z).to_array(),
-        player.rotation.to_euler(EulerRot::YXZ).0.to_degrees(),
+        source_point(player.translation),
+        [-forward.x, forward.y, forward.z],
+        crate::site_move::camera::source_yaw(player.rotation),
     );
     bounds
+}
+
+/// An NPC's collision box, from its pose, in the source frame.
+pub(crate) fn character_target_box(target: &Transform) -> CollisionBox2D {
+    character_box(source_point(target.translation))
+}
+
+/// A placed fixture's collision box, from its root pose and its master grid,
+/// in the source frame.
+pub(crate) fn fixture_target_box(
+    root: &Transform,
+    grid_width: i32,
+    grid_depth: i32,
+    has_collider: bool,
+) -> CollisionBox2D {
+    fixture_box(
+        source_point(root.translation),
+        grid_width,
+        grid_depth,
+        source_box_rotation(root.rotation),
+        has_collider,
+    )
+}
+
+/// The house's runtime box centre (`HouseView.GetBoxCollider2DCenter`): the
+/// outside door point plus the house's rotation times (0, 0, 1.2); the origin
+/// when the house has no outside door point.
+pub(crate) fn house_box_centre(root: &Transform, outside_door: Option<Vec3>) -> Vec3 {
+    outside_door
+        .map(|door| door + root.rotation * Vec3::new(0.0, 0.0, HOUSE_BOX_DOOR_OFFSET))
+        .unwrap_or(Vec3::ZERO)
+}
+
+/// The house's collision box in the source frame: `HouseView`'s fixed box at
+/// [`house_box_centre`], turned by the house's direction.
+pub(crate) fn house_target_box(root: &Transform, outside_door: Option<Vec3>, has_collider: bool) -> CollisionBox2D {
+    house_box(
+        source_point(house_box_centre(root, outside_door)),
+        source_box_rotation(root.rotation),
+        has_collider,
+    )
 }
 
 #[derive(SystemParam)]
@@ -200,7 +267,7 @@ impl InteractionEligibility<'_, '_> {
                 .is_some_and(|site| site.site_type == actions.site_type)
             || visibility.is_some_and(|v| *v == Visibility::Hidden)
             || inherited.is_some_and(|visible| !visible.get())
-            || !player_box(player).collides(&character_box(target.translation.to_array()))
+            || !player_box(player).collides(&character_target_box(target))
         {
             return false;
         }
@@ -295,5 +362,166 @@ impl InteractionEligibility<'_, '_> {
             return Err("NPC is occupied by another player");
         }
         Ok(position)
+    }
+}
+
+/// Box-test outcomes over a synthetic pose grid, for a value-by-value
+/// comparison with an independent transcription of the source's test.
+///
+/// Every case is given in the source frame: a target box and the player at
+/// each of 121 x 121 positions (-3.00 m to 3.00 m in 0.05 m steps, computed
+/// in f32 as `(i - 60) as f32 * 0.05`) and 24 facings (Unity yaw 0 to 345
+/// degrees in 15 degree steps). The poses are carried into the runtime frame
+/// the way placements and the player are: x reflected, a fixture's Left and
+/// Right directions swapped, and the player's rotation the reflected yaw.
+/// Each case writes one `0`/`1` per pose to `<case>.txt`, facing outermost,
+/// then x, then z.
+#[cfg(test)]
+mod pose_sample {
+    use super::*;
+    use moly_law::fixture::position::direction_yaw_degrees;
+    use moly_law::fixture::Direction;
+
+    const STEPS: i32 = 121;
+    const TURNS: i32 = 24;
+
+    fn runtime(source: [f32; 3]) -> Vec3 {
+        Vec3::new(-source[0], source[1], source[2])
+    }
+
+    fn reflected(direction: Direction) -> Direction {
+        match direction {
+            Direction::Left => Direction::Right,
+            Direction::Right => Direction::Left,
+            other => other,
+        }
+    }
+
+    fn fixture_root(centre: [f32; 3], direction: Direction) -> Transform {
+        crate::fixture::source_transform(
+            runtime(centre).to_array(),
+            direction_yaw_degrees(reflected(direction)).to_radians(),
+        )
+    }
+
+    fn outcomes(target: &CollisionBox2D) -> String {
+        let mut out = String::with_capacity((STEPS * STEPS * TURNS) as usize);
+        for k in 0..TURNS {
+            let yaw = (k * 15) as f32;
+            for i in 0..STEPS {
+                for j in 0..STEPS {
+                    let x = (i - 60) as f32 * 0.05;
+                    let z = (j - 60) as f32 * 0.05;
+                    let player = Transform::from_translation(runtime([x, 0.0, z]))
+                        .with_rotation(Quat::from_rotation_y(-yaw.to_radians()));
+                    out.push(if player_box(&player).collides(target) {
+                        '1'
+                    } else {
+                        '0'
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    #[ignore = "writes the outcomes to the directory named by MOLY_ACTION_BOX_SAMPLE_DIR"]
+    fn write_box_sample() {
+        let dir = std::path::PathBuf::from(
+            std::env::var("MOLY_ACTION_BOX_SAMPLE_DIR")
+                .expect("MOLY_ACTION_BOX_SAMPLE_DIR names the output directory"),
+        );
+        std::fs::create_dir_all(&dir).unwrap();
+        // Record Transform query results, not nominal trigonometric angles:
+        // a quaternion's f32 forward/euler round trip is part of the input
+        // supplied by the host, before the source box equations run.
+        let facings: Vec<_> = (0..TURNS).map(|k| {
+            let yaw = (k * 15) as f32;
+            let rotation = Quat::from_rotation_y(-yaw.to_radians());
+            let forward = rotation * Vec3::Z;
+            serde_json::json!({"nominalYaw":yaw,
+                "forward":[-forward.x,forward.y,forward.z],
+                "yaw":crate::site_move::camera::source_yaw(rotation)})
+        }).collect();
+        let mut house_offsets = serde_json::Map::new();
+        for (name, direction) in [
+            ("house_front", Direction::Front), ("house_right", Direction::Right),
+            ("house_back", Direction::Back), ("house_null", Direction::Left),
+            ("house_no_door", Direction::Left),
+        ] {
+            let root = fixture_root([2.0,0.0,2.0], direction);
+            let offset = root.rotation * Vec3::new(0.0,0.0,1.2);
+            house_offsets.insert(name.into(), serde_json::json!([-offset.x,offset.y,offset.z]));
+        }
+        std::fs::write(dir.join("transform-inputs.json"), serde_json::to_vec_pretty(
+            &serde_json::json!({"schemaVersion":1,"facings":facings,"houseOffsets":house_offsets})
+        ).unwrap()).unwrap();
+        let fixtures = [
+            (
+                "fixture_4x4_front",
+                [0.0, 0.0, 0.0],
+                (4, 4),
+                Direction::Front,
+            ),
+            (
+                "fixture_4x6_right",
+                [0.0, 0.0, 0.0],
+                (4, 6),
+                Direction::Right,
+            ),
+            (
+                "fixture_4x6_front",
+                [0.125, 0.0, -0.375],
+                (4, 6),
+                Direction::Front,
+            ),
+            (
+                "fixture_4x6_left",
+                [0.125, 0.0, -0.375],
+                (4, 6),
+                Direction::Left,
+            ),
+            (
+                "fixture_4x6_back",
+                [0.125, 0.0, -0.375],
+                (4, 6),
+                Direction::Back,
+            ),
+            (
+                "fixture_3x5_right",
+                [0.125, 0.0, -0.375],
+                (3, 5),
+                Direction::Right,
+            ),
+        ];
+        for (name, centre, (width, depth), direction) in fixtures {
+            let root = fixture_root(centre, direction);
+            let target = fixture_target_box(&root, width, depth, true);
+            std::fs::write(dir.join(format!("{name}.txt")), outcomes(&target)).unwrap();
+        }
+        let houses = [
+            ("house_front", [0.4, 0.0, -1.1], Direction::Front),
+            ("house_right", [0.4, 0.0, -1.1], Direction::Right),
+            ("house_back", [-0.6, 0.0, 0.9], Direction::Back),
+        ];
+        for (name, door, direction) in houses {
+            let root = fixture_root([2.0, 0.0, 2.0], direction);
+            let target = house_target_box(&root, Some(runtime(door)), true);
+            std::fs::write(dir.join(format!("{name}.txt")), outcomes(&target)).unwrap();
+        }
+        let root = fixture_root([0.125, 0.0, -0.375], Direction::Left);
+        let target = fixture_target_box(&root, 3, 5, false);
+        std::fs::write(dir.join("fixture_null.txt"), outcomes(&target)).unwrap();
+        let target = house_target_box(&root, Some(runtime([0.4, 0.0, -1.1])), false);
+        std::fs::write(dir.join("house_null.txt"), outcomes(&target)).unwrap();
+        let target = house_target_box(&root, None, true);
+        std::fs::write(dir.join("house_no_door.txt"), outcomes(&target)).unwrap();
+        let npc = Transform::from_translation(runtime([0.3, 0.0, -0.2]));
+        std::fs::write(
+            dir.join("character.txt"),
+            outcomes(&character_target_box(&npc)),
+        )
+        .unwrap();
     }
 }

@@ -44,9 +44,8 @@ use bevy::window::PrimaryWindow;
 use moly_assets::json::JsonAsset;
 
 use moly_law::action_button::{
-    character_box, fixture_box, inside_circle, ButtonStack, ButtonType, CollisionBox2D,
-    FixtureType, PlayerActionType, TargetId, ACTION_BUTTON_INPUT_INTERVAL,
-    PLAYER_ADDITIONAL_HALF_EXTEND,
+    inside_circle, ButtonStack, ButtonType, CollisionBox2D, FixtureType, PlayerActionType,
+    TargetId, ACTION_BUTTON_INPUT_INTERVAL, PLAYER_ADDITIONAL_HALF_EXTEND,
 };
 
 use admission::{
@@ -597,6 +596,8 @@ struct Candidate<'a> {
     entity: Entity,
     button: ButtonType,
     touching: bool,
+    /// The box tested this frame, in the source frame.
+    bounds: CollisionBox2D,
     identity: Option<&'a FixtureActivityIdentity>,
     world: &'a GlobalTransform,
     /// The house's inside-door point, for a HouseEntry candidate.
@@ -1100,18 +1101,35 @@ pub(crate) fn advance(
         let Some(button) = facts_of.button.or_else(party).or_else(home) else {
             continue;
         };
+        let package = facts.package_for_glb(&facts_of.glb)
+            .expect("action button fixture has no package identity");
+        let Some(has_collider) = inputs.fixture_has_collider(package) else {
+            continue;
+        };
         if survey {
             with_button.push((button, transform.translation.to_array(), facts_of.glb.clone()));
         }
-        let target_box = fixture_box(
-            transform.translation.to_array(),
-            row.grid_width,
-            row.grid_depth,
-        );
+        // The placed house tests HouseView's fixed box in front of its
+        // outside door point, not its grid; every other fixture its grid
+        // box turned by its direction.
+        let target_box = match house {
+            Some(point) => crate::interaction::house_target_box(
+                transform,
+                point
+                    .1
+                    .and_then(|door| parents.get(door).ok())
+                    .map(GlobalTransform::translation),
+                has_collider,
+            ),
+            None => {
+                crate::interaction::fixture_target_box(transform, row.grid_width, row.grid_depth, has_collider)
+            }
+        };
         frame.push(Candidate {
             entity,
             button,
             touching: player_box.collides(&target_box),
+            bounds: target_box,
             identity,
             world,
             house_entry,
@@ -1126,8 +1144,17 @@ pub(crate) fn advance(
         if state.house_touching != Some(house.touching) {
             state.house_touching = Some(house.touching);
             info!(
-                "[action_button] HouseEntry candidate {:?}: player box overlaps the house footprint = {}",
-                house.entity, house.touching
+                "[action_button] HouseEntry candidate {:?}: player box overlaps the house box = {} (house box centre ({:.2},{:.2}) half ({:.2},{:.2}) angle {:.1}; player box centre ({:.2},{:.2}) angle {:.1}; source frame)",
+                house.entity,
+                house.touching,
+                house.bounds.center[0],
+                house.bounds.center[1],
+                house.bounds.half_extend[0],
+                house.bounds.half_extend[1],
+                house.bounds.rotation,
+                player_box.center[0],
+                player_box.center[1],
+                player_box.rotation,
             );
         }
     }
@@ -1153,7 +1180,7 @@ pub(crate) fn advance(
         .map(|(entity, transform, unit)| NpcCandidate {
             entity,
             unit: unit.0,
-            touching: player_box.collides(&character_box(transform.translation.to_array())),
+            touching: player_box.collides(&crate::interaction::character_target_box(transform)),
         })
         .collect();
 
@@ -2612,9 +2639,9 @@ pub(crate) struct DoorWalk {
 }
 
 /// Instrument (`MOLY_DOOR_WALK_SECS`, off by default; from
-/// `MOLY_DOOR_WALK_AFTER` seconds): on the home site walk the player past
-/// the house's inside-door point towards the house, in a room to the door
-/// sensor, through the
+/// `MOLY_DOOR_WALK_AFTER` seconds): on the home site walk the player to the
+/// centre of the house's collision box (in front of its outside door
+/// point), in a room to the door sensor, through the
 /// joystick's touch stream; once the stack head is that door's button (the
 /// house entry, the go-home button) tap it on its screen position, through
 /// the gesture and click path. The press moves the site, and the walk
@@ -2711,19 +2738,16 @@ pub(crate) fn smoke_door_walk(
         Some((sensor, _)) => points
             .get(sensor)
             .ok()
-            .map(|at| (at.translation(), ButtonType::GoHomeSite, None)),
-        // The house: half a metre past the inside-door point towards the
-        // house, so the player arrives facing it (the player box is ahead).
-        // That point is past the walls, so near it the finger pushes
-        // straight at the house, as a player would, instead of steering at
-        // the point while the walk slides along the wall.
-        None => houses.iter().next().and_then(|(point, house)| {
-            let at = points.get(point.0).ok()?.translation();
-            let inward = (house.translation() - at).with_y(0.0).normalize_or_zero();
-            Some((at + inward * 0.5, ButtonType::HouseEntry, Some(inward)))
+            .map(|at| (at.translation(), ButtonType::GoHomeSite)),
+        // The house: the centre of its collision box. The player box reaches
+        // a metre ahead, so the button comes up on the way there.
+        None => houses.iter().next().map(|(point, house)| {
+            let root = house.compute_transform();
+            let door = point.1.and_then(|door| points.get(door).ok()).map(GlobalTransform::translation);
+            (crate::interaction::house_box_centre(&root, door), ButtonType::HouseEntry)
         }),
     };
-    let Some((target, expected, push)) = target else {
+    let Some((target, expected)) = target else {
         return;
     };
     let offset = std::env::var("MOLY_DOOR_WALK_OFFSET")
@@ -2826,10 +2850,7 @@ pub(crate) fn smoke_door_walk(
         return;
     }
     // The joystick's inverse, as the action button walk writes it.
-    let dir_world = match push {
-        Some(inward) if distance < 1.0 => Vec2::new(inward.x, inward.z).normalize_or(Vec2::X),
-        _ => Vec2::new(delta.x, delta.z).normalize_or(Vec2::X),
-    };
+    let dir_world = Vec2::new(delta.x, delta.z).normalize_or(Vec2::X);
     let forward = camera.forward();
     let forward_flat = Vec2::new(forward.x, forward.z).normalize_or_zero();
     let right = camera.right();

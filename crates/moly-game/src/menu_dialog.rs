@@ -142,8 +142,8 @@
 //!   无自由文本 ⇒ 装载期可枚举全量。缺字形在铺字点 fail-closed。
 //! - **模态**：开着时全部点按先过它（真源 Dialog 槽 blockRaycasts 同
 //!   形）；外壳点按与小地图点按的门都读同一个 menu_open 位（与离开
-//!   确认框同族门）。已知偏差与外壳确认框同款：动作按钮的点按消费
-//!   不过这道门（它不读对话框态，既有具名挂账），本模块不动它的判定面。
+//!   确认框同族门）。动作按钮通过共用交互资格读取 menu_open 与
+//!   menu_closing，关闭动画结束前不接受场上点按。
 //! - When the menu finishes opening, one line lists each button's centre in
 //!   window pixels (the tap map for driving the menu with real taps).
 //!
@@ -1293,9 +1293,8 @@ fn log_tap_map(view: &UiPrefabView, layouts: &UiLayouts, canvas: Vec2, scale: f3
 
 /// 点按分派：对话框开着 ⇒ 模态（全部点按先过它，真源 Dialog 槽
 /// blockRaycasts 同形；外壳与小地图的点按门都读同一个 menu_open 位）。
-/// 框外点按收框（allowCloseExternal=true）。已知偏差与外壳确认框同款：
-/// 动作按钮的点按消费先于本模块（它不读对话框态，既有具名挂账），本
-/// 模块不动它的判定面。
+/// 框外点按收框（allowCloseExternal=true）。动作按钮虽先消费事件，
+/// 但其共用交互资格会先读取菜单与对话框态，因而不会穿透本窗口。
 pub(crate) fn click(
     mut gestures: MessageReader<GestureEvent>,
     windows: Query<&Window, With<PrimaryWindow>>,

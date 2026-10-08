@@ -15,6 +15,11 @@
 //! 2. 投影轴不做归一化。同一根轴上两段区间的比较不需要它，源也没做。
 //! 3. 球形判定用的是三维距离（含高度），而盒判定在 XZ 平面上做，
 //!    高度整个丢掉。两种判定的维度不同，不是笔误。
+//!
+//! The boxes and the test are in the source's own frame. The three-corner
+//! projection is not mirror-symmetric, so a caller whose world reflects the
+//! source's x axis converts its poses before building boxes; testing the
+//! reflected boxes answers differently near the edges.
 
 use crate::fixture::Direction;
 
@@ -38,8 +43,9 @@ pub const CHARACTER_SIZE_XZ: [f32; 2] = [1.0, 1.0];
 /// 连续两次动作按钮输入之间的最小间隔，秒。源里是一个常量字段。
 pub const ACTION_BUTTON_INPUT_INTERVAL: f32 = 0.3;
 
-/// 源在旋转二维向量时用的度转弧度系数，取它写下的那个字面量。
-pub const DEG_TO_RAD: f32 = 0.017453;
+/// The degree-to-radian factor the source multiplies a box's rotation by:
+/// the f32 word `0x3C8EFA35` (Mathf.Deg2Rad, 0.017453292).
+pub const DEG_TO_RAD: f32 = f32::from_bits(0x3C8E_FA35);
 
 /// 二维线段。分离轴既当轴、又当被投影的一段区间。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -130,19 +136,17 @@ fn project_segment(segment: Segment2D, axis: [f32; 2]) -> (f32, f32) {
     }
 }
 
-fn is_overlapping(a: (f32, f32), r: (f32, f32)) -> bool {
-    a.1 >= r.0 && r.1 >= a.0
-}
-
 /// 轴由一条边给出，方向取 `p1 - p2`；被投影的盒子只取 Front 与 Back
-/// 两条边的四个端点（去重后三个角），并集成一段区间。
+/// 两条边的四个端点（去重后三个角），并集成一段区间。The axis separates
+/// when one range ends strictly before the other begins: touching ranges
+/// overlap.
 fn is_separating_axis(axis: Segment2D, box2d: &CollisionBox2D) -> bool {
     let a = [axis.p1[0] - axis.p2[0], axis.p1[1] - axis.p2[1]];
     let axis_range = project_segment(axis, a);
     let front = project_segment(box2d.edge(Direction::Front), a);
     let back = project_segment(box2d.edge(Direction::Back), a);
     let r = (front.0.min(back.0), front.1.max(back.1));
-    !is_overlapping(axis_range, r)
+    axis_range.1 < r.0 || r.1 < axis_range.0
 }
 
 /// 球形判定。三维距离，含高度；比较的是**目标自己的半径**，玩家半径
@@ -174,17 +178,46 @@ pub fn character_box(position: [f32; 3]) -> CollisionBox2D {
     )
 }
 
-/// 家具的碰撞盒：半长是它占的格数乘格边长再折半，不带旋转。
+/// 家具的碰撞盒：半长是它占的格数乘格边长再折半。
 /// 源用的格边长与摆放公式那一族同一个常量。
-pub fn fixture_box(position: [f32; 3], grid_x: i32, grid_z: i32) -> CollisionBox2D {
+///
+/// The grid is the master row's width and depth as they are, not swapped
+/// for the direction: the layout keeps the unrotated size, and setting the
+/// direction writes the same angle into the box instead (`rotation`, the
+/// direction times 90 degrees, as `FixtureView.ForceSetRotation` sets it).
+/// The centre is the fixture's position.
+/// A null FixtureView collider produces a zero-size box. Its centre and
+/// direction still follow the later placement updates.
+pub fn fixture_box(position: [f32; 3], grid_x: i32, grid_z: i32, rotation: f32, has_collider: bool) -> CollisionBox2D {
     let tile = crate::fixture::position::TILE_SIZE;
     CollisionBox2D::new(
         [position[0], position[2]],
-        [
+        if has_collider { [
             tile * grid_x as f32 * 0.5,
             tile * grid_z as f32 * 0.5,
-        ],
-        0.0,
+        ] } else { [0.0, 0.0] },
+        rotation,
+    )
+}
+
+/// The house's collision box size (`HouseView.BOXCOLLIDER_SIZE`): a home
+/// system fixture uses this fixed box, not its grid.
+pub const HOUSE_BOX_SIZE: [f32; 2] = [0.4, 0.4];
+
+/// How far the house box sits from the outside door point along the
+/// house's rotation (`HouseView.GetBoxCollider2DCenter`: the point plus the
+/// rotation times (0, 0, 1.2)).
+pub const HOUSE_BOX_DOOR_OFFSET: f32 = 1.2;
+
+/// The house's collision box: [`HOUSE_BOX_SIZE`] halved, centred on
+/// `centre` (the outside door point plus the rotated offset, or the world
+/// origin when the house has no outside door point), turned by the house's
+/// direction like any fixture box.
+pub fn house_box(centre: [f32; 3], rotation: f32, has_collider: bool) -> CollisionBox2D {
+    CollisionBox2D::new(
+        [centre[0], centre[2]],
+        if has_collider { [HOUSE_BOX_SIZE[0] * 0.5, HOUSE_BOX_SIZE[1] * 0.5] } else { [0.0, 0.0] },
+        rotation,
     )
 }
 

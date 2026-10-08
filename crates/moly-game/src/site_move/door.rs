@@ -1568,9 +1568,10 @@ pub(crate) fn after_states(world: &mut World) {
 }
 
 /// `HouseView.InsideDoorActionPoint` of the placed house, on its fixture
-/// root: the house-entry button's availability reads it.
+/// root: the house-entry button's availability reads it. The second field is
+/// `OutsideDoorActionPoint`, which places the house's collision box.
 #[derive(Component, Clone, Copy, Debug)]
-pub(crate) struct HouseEntryPoint(pub(crate) Entity);
+pub(crate) struct HouseEntryPoint(pub(crate) Entity, pub(crate) Option<Entity>);
 
 /// The site generation the house-entry point was looked up for.
 #[derive(Resource)]
@@ -1602,7 +1603,9 @@ pub(crate) fn tag_house_entry(world: &mut World) {
             world.insert_resource(HouseEntryTagged(epoch));
             match house.inside_door {
                 Some(point) => {
-                    world.entity_mut(house.root).insert(HouseEntryPoint(point));
+                    world
+                        .entity_mut(house.root)
+                        .insert(HouseEntryPoint(point, house.outside_door));
                     // CanMoveDoorActionPoint measured from the outside door,
                     // the entry's standing point in front of the house.
                     let at = |e: Option<Entity>| {

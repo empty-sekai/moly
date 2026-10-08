@@ -146,6 +146,13 @@ pub(crate) struct AdmissionInputs<'w> {
 }
 
 impl AdmissionInputs<'_> {
+    pub(crate) fn fixture_has_collider(&self, package: &str) -> Option<bool> {
+        let points = self.points.as_deref()?;
+        Some(points.instance_view(package)
+            .unwrap_or_else(|| panic!("action bounds require one source FixtureView for {package}"))
+            .has_collider.unwrap_or_else(|error| panic!("action bounds for {package}: {error}")))
+    }
+
     pub(crate) fn site_epoch(&self) -> Option<u64> {
         self.epoch.as_deref().map(|epoch| epoch.0)
     }

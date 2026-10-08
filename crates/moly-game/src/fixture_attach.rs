@@ -78,6 +78,10 @@ pub(crate) struct AttachViewIdentity {
     pub game_object: i64,
     pub transform: i64,
     pub scale: Vec3,
+    /// Whether this view's exact serialized MeshCollider reference is non-null.
+    /// Older attachment documents can still supply poses, but cannot answer
+    /// collision queries until their view reference has been extracted.
+    pub has_collider: Result<bool, &'static str>,
 }
 
 impl AttachPoints {
@@ -129,6 +133,7 @@ impl AttachPoints {
                         game_object: id(game_object),
                         transform: id(transform),
                         scale,
+                        has_collider: view_collider_present(view),
                     });
                 }
                 views.insert(name.clone(), parsed);
@@ -346,6 +351,28 @@ impl AttachPoints {
     }
 }
 
+fn view_collider_present(view: &serde_json::Value) -> Result<bool, &'static str> {
+    let collider = view.get("collider").ok_or("missing collider reference; re-export attachments")?;
+    let pointer = collider.get("pointer").ok_or("missing collider pointer")?;
+    pointer.get("fileId").and_then(serde_json::Value::as_i64).ok_or("invalid collider fileId")?;
+    let path_id = pointer.get("pathId").and_then(serde_json::Value::as_str)
+        .and_then(|value| value.parse::<i64>().ok()).ok_or("invalid collider pathId")?;
+    match collider.get("status").and_then(serde_json::Value::as_str) {
+        Some("null") if path_id == 0 && collider.get("source").is_some_and(serde_json::Value::is_null) => Ok(false),
+        Some("resolved") if path_id != 0 => {
+            let source = &collider["source"];
+            if source["kind"].as_str() != Some("MeshCollider")
+                || source["file"].as_str().is_none_or(str::is_empty)
+                || source["pathId"].as_str().and_then(|value| value.parse::<i64>().ok()) != Some(path_id)
+            {
+                return Err("invalid resolved MeshCollider identity");
+            }
+            Ok(true)
+        }
+        _ => Err("collider reference is unresolved or inconsistent"),
+    }
+}
+
 /// Translate the source utility's Replace / Split / Int32.TryParse sequence.
 /// Do not repair an authored StartLoc pointing at loc_end (ice3): the source
 /// rejects that name even though the archival pair still carries an idValue.
@@ -529,7 +556,8 @@ mod coordinate_tests {
                 "coordinateContract":moly_assets::coordinates::CONTRACT,
                 "placementRoot":true,"localScale":[0.7,1.2,1.1],
                 "gameObject":{"file":"fixture","pathId":"1"},
-                "transform":{"file":"fixture","pathId":"2"}
+                "transform":{"file":"fixture","pathId":"2"},
+                "collider":{"pointer":{"fileId":0,"pathId":"0"},"status":"null","source":null}
             }],"entries": [{
                 "idValue":13,"source":{"entryIndex":0},
                 "start":{"name":"loc_start013","transform":{
