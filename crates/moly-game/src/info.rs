@@ -980,7 +980,7 @@ struct PutLimitTables {
 }
 
 // Both put-limit tables refuse as a whole on a row they cannot read (the
-// put-cost texts then keep the prefab's text) rather than dropping the row:
+// put-cost texts are then hidden) rather than dropping the row:
 // a dropped release or level row would change the limit computed from the
 // rows that remain.
 
@@ -1051,7 +1051,7 @@ pub(crate) fn spawn_when_ready(
         let Some(put_limit) = resolve_put_limit(&mut masters) else { return; };
         match &put_limit {
             Ok(tables) => info!("[info] put-limit tables: {} put-limit releases, {} level rows", tables.releases.len(), tables.levels.len()),
-            Err(_) => info!("[info] no put-limit tables: the rank page's put-cost texts keep the prefab's text"),
+            Err(_) => info!("[info] no put-limit tables: the rank page's put-cost texts are hidden"),
         }
         put_limit
     } else {
@@ -1089,7 +1089,7 @@ fn page_label(page: usize) -> &'static str {
 
 /// 进层钩子串（层栈的挂载梯日志之外，层侧内容在这里；无动画 ⇒ 等待点
 /// 当帧通过）。`rank` is `None` when the rank model was refused (named at
-/// the open edge): the rank page's model texts keep the prefab's text.
+/// the open edge): the rank page's model texts are hidden.
 fn on_open(settings: &mut InfoSettings, mock: &InfoMock, page_state: &InfoPageState,
     rank: Option<&moly_law::ui::mysekai_rank::MysekaiRankModel>) {
     // OnBoot：bootData = 排名页模型（服务端用户态 ⇒ 面板下发）；访问许可

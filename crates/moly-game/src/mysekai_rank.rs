@@ -103,12 +103,6 @@ impl MysekaiRanks {
         MysekaiRankModel::new(rows, total_exp).map_err(|err| format!("rank model: {err}"))
     }
 
-    /// [`Self::try_model`] for a caller that has no refusal path: panics
-    /// with the reason.
-    pub(crate) fn model(&self, total_exp: i32) -> MysekaiRankModel {
-        self.try_model(total_exp)
-            .unwrap_or_else(|reason| panic!("{reason}"))
-    }
 }
 
 #[cfg(test)]
