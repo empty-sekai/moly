@@ -14,7 +14,11 @@ export const RESOURCE_FAMILY_PREFIX = "moly-resource-";
 export const CONTROL_CACHE = "moly-control-v1";
 export const LIMIT = 512 * 1024 * 1024;
 export const MAX_ENTRY = 128 * 1024 * 1024;
+// Copies being checked and written at once.
 const MAX_PENDING = 8;
+// Declared bytes of responses handed to their page while their copy waits to
+// be checked and written. Within this bound a page never waits for storage.
+export const MAX_BUFFERED = 256 * 1024 * 1024;
 // Storage reads issued together while taking an inventory of stored entries.
 const INVENTORY_BATCH = 64;
 // Age after which the budget's accounting is taken again from storage.
@@ -51,8 +55,9 @@ export function isActiveRequiredResource(url, required, active) {
 }
 
 /** A bounded admission queue, never a reason to silently skip retention.
- * Waiting responses have not been cloned or consumed, so stream backpressure
- * bounds their buffers. Only admitted response bodies enter CacheStorage. */
+ * Responses waiting for it have not been cloned or consumed, so stream
+ * backpressure bounds their buffers. Only admitted response bodies enter
+ * CacheStorage. */
 export class CacheAdmission {
   constructor(maxCount, maxBytes) {
     this.maxCount = maxCount;
@@ -113,14 +118,20 @@ export function declaredDecodedBytes(headers) {
     headers.get("x-amz-meta-moly-decoded-bytes") || 0);
 }
 
+// Most immutable URLs one "require" message may name.
+export const REQUIRE_BATCH = 5000;
 export function isCacheMessage(value) {
   return (
     value &&
     typeof value === "object" &&
     value.source === "moly-cache-host" &&
     value.schemaVersion === CACHE_PROTOCOL &&
-    ["query", "retain", "clear"].includes(value.type) &&
-    (value.type !== "retain" || typeof value.enabled === "boolean")
+    ["query", "retain", "clear", "require", "flush"].includes(value.type) &&
+    (value.type !== "retain" || typeof value.enabled === "boolean") &&
+    (value.type !== "require" ||
+      (Array.isArray(value.urls) &&
+        value.urls.length <= REQUIRE_BATCH &&
+        value.urls.every((url) => typeof url === "string")))
   );
 }
 
@@ -331,7 +342,13 @@ export function createCacheCore({
     let enabled = initiallyEnabled,
       epoch = 0,
       queue = Promise.resolve();
+    // A response is handed to its page as soon as its declared bytes fit the
+    // buffered budget; its copy then waits for one of the storage slots.
+    const buffered = new CacheAdmission(Number.MAX_SAFE_INTEGER, MAX_BUFFERED);
     const admission = new CacheAdmission(MAX_PENDING, MAX_ENTRY);
+    // Responses can reach the page before hashing or storage admission. A
+    // flush snapshots these tasks, including copies not yet in the write queue.
+    const pendingRetention = new Set();
     const controlUrl = new URL(`${root}__retention`, scope.location.origin).href;
     const pinsUrl = new URL(`${root}__required`, scope.location.origin).href;
     const required = new Set();
@@ -352,6 +369,13 @@ export function createCacheCore({
     })().catch(() => {
       enabled = false;
     });
+    const writePins = async () =>
+      (await caches.open(CONTROL_CACHE)).put(
+        pinsUrl,
+        new Response(JSON.stringify([...required]), {
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
     const serial = (action) => {
       const result = queue.then(action);
       queue = result.catch(() => {});
@@ -451,7 +475,49 @@ export function createCacheCore({
         new URL(event.source.url).origin !== scope.location.origin
       )
         return false;
-      event.waitUntil(
+      if (message.type === "require") {
+        // The page names the shared store objects behind its base resources.
+        // Each must be an identity of the sending client's own configured
+        // store; pins only protect objects from eviction while it is open.
+        const clientUrl = event.source.url,
+          origin = scope.location.origin;
+        const configuredOrigin = clientResourceOrigin(clientUrl, origin),
+          configuredBase = clientResourceBase(clientUrl, origin);
+        const urls = message.urls
+          .map((url) => resourceIdentity(url, origin, configuredOrigin, configuredBase))
+          .filter((identity) => identity?.shared)
+          .map((identity) => identity.url);
+        event.waitUntil(
+          serial(async () => {
+            await initialized;
+            let changed = false;
+            if (enabled)
+              for (const url of urls) {
+                if (required.size >= 20000) break;
+                if (!required.has(url)) {
+                  required.add(url);
+                  changed = true;
+                }
+              }
+            if (changed) await writePins();
+            port.postMessage({
+              source: "moly-cache",
+              schemaVersion: CACHE_PROTOCOL,
+              ok: true,
+              enabled,
+              required: required.size,
+            });
+          }).catch(() =>
+            port.postMessage({
+              source: "moly-cache",
+              schemaVersion: CACHE_PROTOCOL,
+              ok: false,
+            }),
+          ),
+        );
+        return true;
+      }
+      const respond = () =>
         serial(async () => {
           await initialized;
           if (message.type === "retain") {
@@ -487,7 +553,14 @@ export function createCacheCore({
             entries: entries.length,
             limitBytes: LIMIT,
           });
-        }).catch(() =>
+        });
+      // Never hold the write queue while waiting: the pending copies must
+      // enter that queue themselves. Later reads do not extend this barrier.
+      const response = message.type === "flush"
+        ? Promise.allSettled([...pendingRetention]).then(respond)
+        : respond();
+      event.waitUntil(
+        response.catch(() =>
           port.postMessage({
             source: "moly-cache",
             schemaVersion: CACHE_PROTOCOL,
@@ -534,6 +607,8 @@ export function createCacheCore({
               .catch(() => null);
             if (retained) {
               lastUsed.set(identity.url, Date.now());
+              // Pages of earlier releases name required objects by this
+              // request header instead of a "require" message.
               if (
                 identity.shared &&
                 request.headers.get("X-Moly-Required") === "1"
@@ -542,14 +617,7 @@ export function createCacheCore({
                   serial(async () => {
                     if (!enabled || requestEpoch !== epoch || required.size >= 20000) return;
                     required.add(identity.url);
-                    await (
-                      await caches.open(CONTROL_CACHE)
-                    ).put(
-                      pinsUrl,
-                      new Response(JSON.stringify([...required]), {
-                        headers: { "Content-Type": "application/json" },
-                      }),
-                    );
+                    await writePins();
                   }).catch(() => {}),
                 );
               }
@@ -609,15 +677,22 @@ export function createCacheCore({
             bytes > 0 &&
             bytes <= (identity.maximum ?? MAX_ENTRY)
           ) {
-            const generation = epoch;
-            const release = await admission.acquire(
+            const generation = epoch,
+              current = () => enabled && generation === epoch;
+            const reserved = await buffered.acquire(
               bytes,
-              () => enabled && generation === epoch && !request.signal?.aborted,
+              () => current() && !request.signal?.aborted,
             );
-            if (!release) return response;
-            let copy = response.clone();
-            event.waitUntil(
+            if (!reserved) return response;
+            let copy = response.clone(),
+              release = null;
+            const pending =
               (async () => {
+                release = await admission.acquire(bytes, current);
+                if (!release) {
+                  await copy.body?.cancel();
+                  return;
+                }
                 // The hash check touches no shared state: admitted copies are
                 // checked concurrently, within the admission bounds, while
                 // earlier ones are written. Only storage changes are queued.
@@ -646,15 +721,7 @@ export function createCacheCore({
                     required.add(identity.url);
                     pinsChanged = true;
                   }
-                  if (pinsChanged)
-                    await (
-                      await caches.open(CONTROL_CACHE)
-                    ).put(
-                      pinsUrl,
-                      new Response(JSON.stringify([...required]), {
-                        headers: { "Content-Type": "application/json" },
-                      }),
-                    );
+                  if (pinsChanged) await writePins();
                   await makeSpace(bytes, identity.url);
                   const headers = new Headers(copy.headers);
                   headers.delete("Content-Encoding");
@@ -675,9 +742,12 @@ export function createCacheCore({
                   /* Retention is best-effort; never fail successful online playback. */
                 })
                 .finally(() => {
-                  release();
-                }),
-            );
+                  release?.();
+                  reserved();
+                  pendingRetention.delete(pending);
+                });
+            pendingRetention.add(pending);
+            event.waitUntil(pending);
           }
           return response;
         })(),

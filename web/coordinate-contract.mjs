@@ -41,7 +41,8 @@ export function validateCoordinatePair(release, snapshot, { region, version, sna
     throw new Error("Coordinate snapshot has no verified model evidence");
 }
 async function bytesFrom(url, maximum, fetchImpl, signal) {
-  const response = await fetchImpl(url, { signal, credentials: "omit", redirect: "error", cache: "no-store" });
+  // Release and snapshot paths are immutable: the HTTP cache may keep them.
+  const response = await fetchImpl(url, { signal, credentials: "omit", redirect: "error" });
   if (!response.ok || !response.body) throw new Error("Coordinate metadata unavailable");
   const reader = response.body.getReader(), chunks = [];
   let length = 0;
@@ -63,7 +64,7 @@ async function bytesFrom(url, maximum, fetchImpl, signal) {
 const parse = bytes => JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
 
 const IDENTITY = /^[a-z0-9][a-z0-9._-]{0,95}$/;
-/** Validate the source before requesting/initializing WASM. Old immutable
+/** Validate the source before initializing WASM. Old immutable
  * releases keep their own old module; this module belongs only to the v1 engine.
  * `releaseId` names the immutable release the page belongs to and
  * `resourcePrefix` is the path its publication is mounted at on the page
@@ -115,14 +116,14 @@ export async function preflightCoordinates(options, { fetchImpl = fetch, signal 
       throw new Error("Coordinate snapshot asset routing mismatch");
   } else if (packs) throw new Error("Packed coordinate preflight requires an explicit snapshot identity");
   const client = packs ? new PackClient(assets, assetCatalog, { fetchImpl, signal, required: true, resourceBase }) : null;
-  const documents = {};
-  for (const name of COORDINATE_DOCUMENTS) {
+  // The documents are independent reads: request them together.
+  const documents = Object.fromEntries(await Promise.all(COORDINATE_DOCUMENTS.map(async (name) => {
     const bytes = client ? await client.read(name) : await bytesFrom(new URL(name, base), 32 * 1048576, fetchImpl, signal);
     if (bytes.byteLength > 32 * 1048576) throw new Error("Coordinate metadata exceeds its bounded size");
     if (snapshot && await packDigest(bytes) !== snapshot.provenance.coordinateDocuments[name])
       throw new Error(`Coordinate source evidence changed: ${name}`);
-    documents[name] = parse(bytes);
-  }
+    return [name, parse(bytes)];
+  })));
   validateCoordinateSources(documents, { region, version });
   return { coordinateContract: COORDINATE_CONTRACT, snapshotId: snapshotId ?? null };
 }

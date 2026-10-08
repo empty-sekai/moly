@@ -285,27 +285,29 @@ async function loadStageEngine() {
   const releaseId = /^\/moly\/releases\/([a-z0-9][a-z0-9._-]{0,95})\/stage\.html$/.exec(location.pathname)?.[1];
   let configuredBase, publicOrigin;
   try {
+    // The engine path depends on these, and the engine download starts
+    // alongside the source preflight: settle them first.
+    if (!["cn", "jp", "tw", "en", "kr"].includes(region))
+      throw new Error("An explicit supported resource region is required");
+    configuredBase = params.get("resource_base")
+      ? resourceBase(params.get("resource_base"))
+      : undefined;
+    publicOrigin = resourceOrigin(params.get("resource_origin") ??
+      (configuredBase ? new URL(configuredBase).origin : undefined));
+    if (configuredBase && publicOrigin !== new URL(configuredBase).origin)
+      throw new Error("resource_origin must match resource_base");
+    resourceDirectory(
+      params.get("assets") || "",
+      location.href,
+      configuredBase ?? publicOrigin,
+    );
+    configuredResourceBase = configuredBase;
     const loaded = await loadEngine({
       requested,
       environment: { navigator, document },
       mark,
       report,
       async prepare({ signal, progress }) {
-        if (!["cn", "jp", "tw", "en", "kr"].includes(region))
-          throw new Error("An explicit supported resource region is required");
-        configuredBase = params.get("resource_base")
-          ? resourceBase(params.get("resource_base"))
-          : undefined;
-        publicOrigin = resourceOrigin(params.get("resource_origin") ??
-          (configuredBase ? new URL(configuredBase).origin : undefined));
-        if (configuredBase && publicOrigin !== new URL(configuredBase).origin)
-          throw new Error("resource_origin must match resource_base");
-        resourceDirectory(
-          params.get("assets") || "",
-          location.href,
-          configuredBase ?? publicOrigin,
-        );
-        configuredResourceBase = configuredBase;
         try {
           await preflightCoordinates({
             assets: new URL(params.get("assets"), location.href).href, region, version,

@@ -476,9 +476,9 @@ pub struct BirthEventRecord {
 }
 
 /// The count law of one cached birth edge, read from the child's start delay,
-/// duration, loop flag and Emission module: a constant start delay, a
-/// constant rate over time, a rate over distance in any mode (see
-/// [`DistanceRate`]), and the child's bursts (up to the eight
+/// duration, loop flag and Emission module: a constant start delay, a rate
+/// over time in any mode (see [`TimeRate`]), a rate over distance in any mode
+/// (see [`DistanceRate`]), and the child's bursts (up to the eight
 /// slots, a constant or two-constant count; every time, cycle count, repeat
 /// interval and probability). The event's time emission is the child's
 /// EmitOverTime over the window [previous, current) of the particle's life in
@@ -491,9 +491,56 @@ pub struct BirthEdgeLaw {
     delay: f32,
     /// The child duration, or f32::MAX for a looping child.
     duration: f32,
-    time_rate: f32,
+    time: TimeRate,
     distance: DistanceRate,
     bursts: crate::particle::autonomous_emission::BurstSchedule,
+}
+
+/// The child's rate over time as an event's EmitOverTime reads it, after the
+/// Emission module's load normalization (each scalar at least +0 and at most
+/// 1e7). EmitOverTime draws one word from the event's state first; the
+/// stored word (the constant, the maximum of two constants, or the
+/// multiplier of a curve mode) gates the evaluation: at or below zero, or
+/// NaN, the time amount is +0. Otherwise the rate is evaluated at the
+/// window's current end in child seconds divided by the child duration
+/// (f32::MAX for a looping child) with that word's random factor, floored at
+/// +0, the same evaluation as an autonomous slice without a wrap.
+#[derive(Debug, Clone)]
+struct TimeRate {
+    curve: MinMaxCurve,
+    rate: crate::particle::autonomous_emission::EmissionRate,
+}
+
+impl PartialEq for TimeRate {
+    fn eq(&self, other: &Self) -> bool {
+        self.curve == other.curve
+    }
+}
+
+impl TimeRate {
+    fn from_curve(curve: &MinMaxCurve) -> Result<Self, Refused> {
+        let curve = crate::particle::autonomous_emission::load_rate(curve);
+        let rate = crate::particle::autonomous_emission::rate(&curve).map_err(|_| Refused::UnsupportedConfiguration)?;
+        Ok(Self { curve, rate })
+    }
+
+    /// The stored word the gate and the carry of a slot without one read.
+    fn gate(&self) -> f32 {
+        self.rate.gate()
+    }
+
+    /// The time amount of the window [previous, current) with the entry
+    /// draw's word.
+    fn amount(&self, previous: f32, current: f32, duration: f32, word: u32) -> f32 {
+        if !(self.gate() > 0.0) {
+            return 0.0;
+        }
+        let random = (word & 0x007f_ffff) as f32 * crate::particle::autonomous_emission::UNIT_SCALE;
+        let rate = self.rate.value(random, current / duration);
+        #[cfg(test)]
+        let rate = time_arm(rate, self, previous, current, duration, random);
+        0.0 + (current - previous) * rate
+    }
 }
 
 /// The child's rate over distance as an event reads it. The distance
@@ -574,7 +621,7 @@ impl BirthEdgeLaw {
         Ok(Self {
             delay: constant(delay)?,
             duration: if looping { f32::MAX } else { duration },
-            time_rate: constant(&emission.rate_over_time)?,
+            time: TimeRate::from_curve(&emission.rate_over_time)?,
             distance: DistanceRate::from_curve(&emission.rate_over_distance)?,
             bursts,
         })
@@ -599,7 +646,7 @@ impl BirthEdgeLaw {
         else {
             return Ok(None);
         };
-        let mut carry = unkept_carry(interval.current, particle.velocity, self.time_rate, self.distance.gate);
+        let mut carry = unkept_carry(interval.current, particle.velocity, self.time.gate(), self.distance.gate);
         self.record_window(particle, &mut carry, interval, owner).map(Some)
     }
 
@@ -669,18 +716,15 @@ impl BirthEdgeLaw {
             spread(&mut state.distribution, amount)?
         };
         let distance_emission = state.distribution;
-        // Time: one unconditional draw first; a constant rate does not read it.
-        state.random.next_u32();
+        // Time: one unconditional draw first; the rate takes its random
+        // factor from it (a constant rate does not read it).
+        let word = state.random.next_u32();
         let previous = non_negative(interval.previous);
         let current = non_negative(interval.current);
         if current < previous {
             return Err(Refused::InvalidInput);
         }
-        let amount = if self.time_rate > 0.0 {
-            0.0 + (current - previous) * self.time_rate
-        } else {
-            0.0
-        };
+        let amount = self.time.amount(previous, current, self.duration, word);
         // AccumulateBursts over [previous, current), repeats allowed: a time
         // inside is left-closed and right-open, a repeat hits once however
         // many repeats the window spans; each hit draws its probability and
@@ -799,6 +843,26 @@ thread_local! { static DISTANCE_ARM: std::cell::Cell<u8> = const { std::cell::Ce
 pub(crate) fn set_distance_arm(arm: u8) {
     DISTANCE_ARM.with(|cell| cell.set(arm));
 }
+// Replay arms for the rate over time: 1 evaluates it at the window's
+// previous end, 2 at child seconds not divided by the duration, 3 takes the
+// stored gate word as the rate, 4 evaluates it with a zero random factor.
+#[cfg(test)]
+thread_local! { static TIME_ARM: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }
+#[cfg(test)]
+pub(crate) fn set_time_arm(arm: u8) {
+    TIME_ARM.with(|cell| cell.set(arm));
+}
+#[cfg(test)]
+fn time_arm(rate: f32, time: &TimeRate, previous: f32, current: f32, duration: f32, random: f32) -> f32 {
+    match TIME_ARM.with(|cell| cell.get()) {
+        1 => time.rate.value(random, previous / duration),
+        2 => time.rate.value(random, current),
+        3 => time.gate(),
+        4 => time.rate.value(0.0, current / duration),
+        _ => rate,
+    }
+}
+
 #[cfg(test)]
 fn distance_arm(rate: f32, distance: &DistanceRate, interval: BirthInterval, duration: f32, word: u32) -> f32 {
     match DISTANCE_ARM.with(|cell| cell.get()) {
@@ -1183,6 +1247,35 @@ mod tests {
         });
     }
 
+    /// The same per-call replay against native calls of parents whose birth
+    /// edges name children with a rate over time in a curve mode: the 008
+    /// sky cloud parent (three birth edges; one child with a two-curve rate
+    /// whose multiplier is 0.2, one with a 10 s start delay) in the authored
+    /// order and in two permutations so that the curve-rate child sits in a
+    /// slot with a carry and in one without, each in Local space under a
+    /// translation and in World space under a rotation with unequal slices;
+    /// and the 007 raindrop noise parent whose one birth edge names a light
+    /// child with a curve rate, in World and Local space. Arms: the rate
+    /// evaluated at the window's previous end, at child seconds not divided
+    /// by the duration, replaced by its stored word, or evaluated with a zero
+    /// random factor; the carry of a slot without one computed from the
+    /// evaluated rate instead of the stored word.
+    #[test]
+    #[ignore = "MOLY_SUBEMITTER_RATE_RECEIPT must identify the native curve-rate birth-edge receipt"]
+    fn replays_native_curve_rate_birth_edges() {
+        parent_birth_events("MOLY_SUBEMITTER_RATE_RECEIPT", |run| {
+            let (calls, newborn, records, commands, mismatched) = run(None);
+            println!("curve-rate birth edges: {calls} calls ({newborn} newborn), {records} records, {commands} commands, {mismatched} mismatched");
+            assert_eq!(mismatched, 0);
+            assert!(calls > 0 && newborn > 0 && records > 0 && commands > 0);
+            for arm in ["ratePreviousEnd", "rateUnnormalized", "rateWord", "rateIgnoresDraw", "evaluatedCarryWord"] {
+                let wrong = run(Some(arm)).4;
+                println!("arm {arm}: {wrong} records differ");
+                assert!(wrong > 0, "{arm} arm matched every native record");
+            }
+        });
+    }
+
     /// Every native SubModule call of a parent-event receipt through the law:
     /// `verdict` gets the replay, which takes one arm and returns (calls,
     /// newborn calls, records, commands, mismatched).
@@ -1242,7 +1335,8 @@ mod tests {
         let newborn_call = receipt.get("callSites").and_then(|sites| sites.get("newbornCall")).and_then(Value::as_str)
             .expect("the receipt names no callSites.newbornCall: it cannot classify its calls");
         // arm: None = the law; "catchUpZero", "sliceDt", "burstLow", "burstHigh", "noRepeats",
-        // "previousEnd", "unnormalized", "multiplierRate", "zeroCarry", "previousCarry" one rule each.
+        // "previousEnd", "unnormalized", "multiplierRate", "zeroCarry", "previousCarry", "ratePreviousEnd",
+        // "rateUnnormalized", "rateWord", "rateIgnoresDraw", "evaluatedCarryWord" one rule each.
         // Slots 0 and 1 carry from the call's carry arrays; later slots own no carry.
         let run = |arm: Option<&str>| -> (usize, usize, usize, usize, usize) {
             let (mut calls, mut records, mut commands, mut mismatched, mut newborn) = (0, 0, 0, 0, 0);
@@ -1251,6 +1345,13 @@ mod tests {
                 Some("previousEnd") => 1,
                 Some("unnormalized") => 2,
                 Some("multiplierRate") => 3,
+                _ => 0,
+            });
+            super::set_time_arm(match arm {
+                Some("ratePreviousEnd") => 1,
+                Some("rateUnnormalized") => 2,
+                Some("rateWord") => 3,
+                Some("rateIgnoresDraw") => 4,
                 _ => 0,
             });
             for parent in array(at(&receipt, "parentEvents")) {
@@ -1353,7 +1454,17 @@ mod tests {
                                         None => Ok(None),
                                         Some(interval) => {
                                             let mut carry = super::unkept_carry(interval.previous, particle.velocity,
-                                                law.time_rate, law.distance.gate);
+                                                law.time.gate(), law.distance.gate);
+                                            law.record_window(&particle, &mut carry, interval, &owner).map(Some)
+                                        }
+                                    }),
+                                    Some("evaluatedCarryWord") => super::birth_interval(law.delay, law.duration,
+                                        particle.age_percent, particle.inverse_lifetime, dt).and_then(|window| match window {
+                                        None => Ok(None),
+                                        Some(interval) => {
+                                            let word = law.time.rate.value(0.0, interval.current / law.duration);
+                                            let mut carry = super::unkept_carry(interval.current, particle.velocity,
+                                                word, law.distance.gate);
                                             law.record_window(&particle, &mut carry, interval, &owner).map(Some)
                                         }
                                     }),
@@ -1418,6 +1529,7 @@ mod tests {
             }
             super::set_no_repeats_arm(false);
             super::set_distance_arm(0);
+            super::set_time_arm(0);
             (calls, newborn, records, commands, mismatched)
         };
         verdict(&run);

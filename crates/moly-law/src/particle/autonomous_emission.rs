@@ -47,11 +47,11 @@ pub enum Refused {
 
 /// EmitOverTime scales the low 23 bits of its entry draw by 2^-23 * (1 + 2^-23),
 /// so a draw whose low 23 bits are all ones gives exactly 1.0.
-const UNIT_SCALE: f32 = f32::from_bits(0x3400_0001);
+pub(crate) const UNIT_SCALE: f32 = f32::from_bits(0x3400_0001);
 
 /// Rate over time in the MinMaxCurve::Evaluate modes EmitOverTime reads.
 #[derive(Clone, Debug)]
-enum EmissionRate {
+pub(crate) enum EmissionRate {
     /// Constant mode reads only the max scalar; the min scalar is never read.
     Constant(f32),
     /// TwoConstants: min + r * (max - min) as three separately rounded
@@ -73,7 +73,7 @@ impl EmissionRate {
     /// alone (the constant itself in Constant mode, the multiplier in the
     /// curve modes): at or below zero, or NaN, the amount is +0 and Evaluate
     /// is not called. The min is not read here.
-    fn gate(&self) -> f32 {
+    pub(crate) fn gate(&self) -> f32 {
         match *self {
             Self::Constant(value) => value,
             Self::TwoConstants { max, .. } => max,
@@ -85,7 +85,7 @@ impl EmissionRate {
     /// EmitOverTime's maximum with +0, which sends a negative value, -0 and
     /// NaN to +0. Written as a comparison because f32::max leaves the sign of
     /// a zero result unspecified. The constant modes do not read `t`.
-    fn value(&self, r: f32, t: f32) -> f32 {
+    pub(crate) fn value(&self, r: f32, t: f32) -> f32 {
         let value = match self {
             Self::Constant(value) => *value,
             Self::TwoConstants { min, max } => min + r * (max - min),
@@ -788,7 +788,7 @@ impl ConstantDistanceEmission {
 /// finite multiplier where the curve evaluator admits its lanes on the
 /// normalized clock EmitOverTime feeds (a segment end over the duration, in
 /// [0, 1]).
-fn rate(curve: &MinMaxCurve) -> Result<EmissionRate, Refused> {
+pub(crate) fn rate(curve: &MinMaxCurve) -> Result<EmissionRate, Refused> {
     match *curve {
         MinMaxCurve::Constant(value) if value.is_finite() => Ok(EmissionRate::Constant(value)),
         MinMaxCurve::TwoConstants { min, max } if min.is_finite() && max.is_finite() => {
@@ -829,7 +829,7 @@ fn burst_count(curve: &MinMaxCurve) -> Result<BurstCount, Refused> {
 /// stays NaN). In the curve modes the scalar is the multiplier, clamped the
 /// same way before the reader builds the optimized polynomial from it; the
 /// keys are not touched.
-fn load_rate(curve: &MinMaxCurve) -> MinMaxCurve {
+pub(crate) fn load_rate(curve: &MinMaxCurve) -> MinMaxCurve {
     match curve {
         MinMaxCurve::Constant(value) => MinMaxCurve::Constant(load_rate_scalar(*value)),
         MinMaxCurve::TwoConstants { min, max } => MinMaxCurve::TwoConstants {

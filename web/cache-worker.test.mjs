@@ -124,9 +124,14 @@ test("site, credentials, mutable manifests, query variants and other origins are
 test("cache protocol exposes bounded intentions, never arbitrary purge/fetch commands", () => {
   const base = { source: "moly-cache-host", schemaVersion: 1 };
   assert.ok(isCacheMessage({ ...base, type: "query" }));
+  assert.ok(isCacheMessage({ ...base, type: "flush" }));
   assert.ok(isCacheMessage({ ...base, type: "clear" }));
   assert.ok(isCacheMessage({ ...base, type: "retain", enabled: false }));
+  assert.ok(isCacheMessage({ ...base, type: "require", urls: ["https://a.test/x"] }));
   for (const payload of [
+    { ...base, type: "require" },
+    { ...base, type: "require", urls: [1] },
+    { ...base, type: "require", urls: Array(5001).fill("u") },
     { ...base, type: "retain", enabled: "true" },
     { ...base, type: "fetch", url: "/api" },
     { ...base, type: "query", schemaVersion: 2 },

@@ -42,6 +42,45 @@ test("necessary files download automatically and report actual byte completion",
   assert.deepEqual(result, { completed: 1, decodedBytes: 3 });
   assert.equal(updates[0].total, 1);
 });
+
+test("prewarm waits for the worker's retention barrier after the bodies finish", { timeout: 2000 }, async () => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  let received, port;
+  const message = new Promise((resolve) => { received = resolve; });
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {
+      serviceWorker: {
+        controller: {
+          postMessage(value, ports) {
+            port = ports[0];
+            received(value);
+          },
+        },
+      },
+    },
+  });
+  try {
+    let finished = false;
+    const warming = warmBaseResources(options, {
+      fetchImpl: async (url) => new Response(
+        String(url).endsWith("browser-base.json") ? JSON.stringify(pack) : "abc",
+      ),
+    }).then((result) => {
+      finished = true;
+      return result;
+    });
+    const request = await message;
+    assert.equal(request.type, "flush");
+    assert.equal(finished, false);
+    port.postMessage({ source: "moly-cache", schemaVersion: 1, ok: true });
+    assert.deepEqual(await warming, { completed: 1, decodedBytes: 3 });
+  } finally {
+    port?.close();
+    if (original) Object.defineProperty(globalThis, "navigator", original);
+    else delete globalThis.navigator;
+  }
+});
 test("truncated necessary resource cannot be reported as ready", async () => {
   await assert.rejects(
     warmBaseResources(options, {
@@ -58,7 +97,7 @@ test("truncated necessary resource cannot be reported as ready", async () => {
 
 for (const concurrency of [undefined, 3]) {
   test(`base transfers admit ${concurrency ?? 8} concurrent streams and complete queued resources`, async () => {
-    const files = Array.from({ length: 19 }, (_, index) => ({
+    const files = Array.from({ length: 37 }, (_, index) => ({
       path: `resource-${index}.bin`,
       sha256: "a".repeat(64),
       decodedBytes: 3,
@@ -114,4 +153,30 @@ test("invalid prewarm concurrency fails before issuing a request", async () => {
       /concurrency must be an integer from 1 to 8/,
     );
   }
+});
+
+test("loose base transfers start with the largest file", async () => {
+  const files = [3, 30, 7, 30, 1].map((size, index) => ({
+    path: `resource-${index}.bin`,
+    sha256: "a".repeat(64),
+    decodedBytes: size,
+  }));
+  const order = [];
+  await warmBaseResources(options, {
+    concurrency: 1,
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("browser-base.json"))
+        return new Response(
+          JSON.stringify({
+            ...pack,
+            files,
+            decodedBytes: files.reduce((sum, row) => sum + row.decodedBytes, 0),
+          }),
+        );
+      const index = Number(/resource-(\d+)/.exec(String(url))[1]);
+      order.push(index);
+      return new Response(new Uint8Array(files[index].decodedBytes));
+    },
+  });
+  assert.deepEqual(order, [1, 3, 2, 0, 4]);
 });

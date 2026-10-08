@@ -1,5 +1,7 @@
 import { PackClient } from "./asset-pack-client.mjs";
 
+// Most base files are small, so their transfer time is mostly round trips:
+// enough parallel streams keep the connection busy.
 export const BASE_RESOURCE_CONCURRENCY = 8;
 
 // The first entry downloads the measured necessary pack without waiting for
@@ -55,7 +57,6 @@ async function consume(url, maximum, signal, fetchImpl, keep = false) {
       signal: signal ? AbortSignal.any([signal, abort.signal]) : abort.signal,
       credentials: "omit",
       redirect: "error",
-      cache: "no-store",
     });
     if (!response.ok || !response.body)
       throw new Error("Required resource unavailable");
@@ -96,6 +97,7 @@ export async function warmBaseResources(
     signal,
     onProgress = () => {},
     concurrency = BASE_RESOURCE_CONCURRENCY,
+    announce,
   } = {},
 ) {
   if (
@@ -104,7 +106,7 @@ export async function warmBaseResources(
     concurrency > BASE_RESOURCE_CONCURRENCY
   )
     throw new RangeError(
-      "Required resource concurrency must be an integer from 1 to 8",
+      `Required resource concurrency must be an integer from 1 to ${BASE_RESOURCE_CONCURRENCY}`,
     );
   const descriptor = new URL("browser-base.json", options.assets);
   const client =
@@ -114,6 +116,7 @@ export async function warmBaseResources(
           signal,
           required: true,
           resourceBase: options.resourceBase,
+          ...(announce ? { announce } : {}),
         })
       : null;
   const bytes = client
@@ -123,17 +126,40 @@ export async function warmBaseResources(
     new TextDecoder("utf-8", { fatal: true }).decode(bytes),
   );
   const rows = validateBasePack(pack, options);
+  // Largest first: the few large files carry most of the bytes, and one that
+  // starts last becomes the tail of the whole transfer.
+  const queue = rows
+    .map((row, index) => ({ row, index }))
+    .sort((a, b) => b.row.decodedBytes - a.row.decodedBytes || a.index - b.index)
+    .map(({ row }) => row);
+  if (client) {
+    // Request every package manifest the base needs at once instead of one
+    // by one as the transfers reach them. Failures surface where a transfer
+    // resolves its path.
+    const { owners } = await client.selection();
+    for (const owner of new Set(rows.map((row) => owners.get(row.path))))
+      if (owner) void client.package(owner).catch(() => {});
+  }
   let next = 0,
     completed = 0,
     decodedBytes = 0;
+  const finish = (bytes) => {
+    decodedBytes += bytes;
+    completed++;
+    onProgress({ completed, total: rows.length, decodedBytes });
+  };
+  // Rows whose packed blob is already being transferred wait for that
+  // transfer instead of fetching the same immutable object again.
+  const transfers = new Map(),
+    shared = [];
   const worker = async () => {
-    while (next < rows.length) {
-      const row = rows[next++];
+    while (next < queue.length) {
+      const row = queue[next++];
       if (client) {
         // Like the loose prewarm, this only transfers the bytes. Every
         // reader that uses them checks them against this entry, so the
         // entry must be the measured row.
-        const entry = await client.warm(row.path);
+        const entry = await client.resolve(row.path);
         if (
           entry.bytes !== row.decodedBytes ||
           entry.content_sha256 !== row.sha256
@@ -141,27 +167,36 @@ export async function warmBaseResources(
           throw new Error(
             "Packed base resource differs from its measured descriptor",
           );
-        decodedBytes += entry.bytes;
+        const known = transfers.get(entry.url);
+        if (known) {
+          const done = known.then(() => finish(entry.bytes));
+          // Rejections are reported once, by the transfer's own worker.
+          done.catch(() => {});
+          shared.push(done);
+          continue;
+        }
+        const transfer = client.warmEntry(entry);
+        transfers.set(entry.url, transfer);
+        await transfer;
+        finish(entry.bytes);
       } else {
-        // Add after the await: `decodedBytes += await ...` reads the total
-        // first and drops what the other workers added meanwhile.
         const received = await consume(
           row.url,
           row.decodedBytes,
           signal,
           fetchImpl,
         );
-        decodedBytes += received;
+        finish(received);
       }
-      completed++;
-      onProgress({ completed, total: rows.length, decodedBytes });
     }
   };
   await Promise.all(
-    Array.from({ length: Math.min(concurrency, rows.length) }, worker),
+    Array.from({ length: Math.min(concurrency, queue.length) }, worker),
   );
-  // Cache writes are serialized and may complete just after their response.
-  // Flush their queue, without making storage denial a playback blocker.
+  await Promise.all(shared);
+  // A response can finish before its retained copy passes hashing and
+  // storage admission. Flush those tasks too, with a bounded best-effort wait
+  // so unavailable storage or an older worker cannot block online playback.
   const serviceWorker = globalThis.navigator?.serviceWorker?.controller;
   if (serviceWorker && typeof MessageChannel !== "undefined")
     await new Promise((resolve) => {
@@ -174,7 +209,7 @@ export async function warmBaseResources(
       const timeout = setTimeout(finish, 10000);
       channel.port1.onmessage = finish;
       serviceWorker.postMessage(
-        { source: "moly-cache-host", schemaVersion: 1, type: "query" },
+        { source: "moly-cache-host", schemaVersion: 1, type: "flush" },
         [channel.port2],
       );
     });

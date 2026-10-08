@@ -44,11 +44,13 @@ export function releaseEnginePath({
 /**
  * Choose a renderer, import its engine module and stream-compile its WASM.
  *
- * `prepare({ signal, progress })` runs first, inside the stall watchdog; it
- * may resolve to `{ ready }`, a promise (base resources) that is awaited only
- * after the engine is initialized. A download that delivers no chunk for `stallMs` is aborted, a
- * body over `maxBytes` is refused, and only an `application/wasm` response
- * is compiled. Every failure aborts the shared signal and rejects.
+ * `prepare({ signal, progress })` (the source preflight) runs alongside the
+ * engine download and compilation; the engine is instantiated only after it
+ * resolved. It may resolve to `{ ready }`, a promise (base resources) that is
+ * awaited only after the engine is initialized. A download that delivers no
+ * chunk, while the preflight makes no progress either, for `stallMs` is
+ * aborted, a body over `maxBytes` is refused, and only an `application/wasm`
+ * response is compiled. Every failure aborts the shared signal and rejects.
  */
 export async function loadEngine({
   requested = "auto",
@@ -64,6 +66,7 @@ export async function loadEngine({
   waitTick,
   fetchImpl = (...args) => fetch(...args),
   importModule = (href) => import(href),
+  compileModule = (response) => WebAssembly.compileStreaming(response),
   chooseRenderer = selectRenderer,
   stallMs = ENGINE_STALL_MS,
   maxBytes = ENGINE_MAX_BYTES,
@@ -73,72 +76,93 @@ export async function loadEngine({
   const abort = new AbortController();
   let lastChunk = performance.now(),
     engineBytes = 0;
+  const touch = () => {
+    lastChunk = performance.now();
+  };
   const watchdog = setInterval(() => {
     if (performance.now() - lastChunk > stallMs)
       abort.abort(new Error("Engine download made no progress for 30 seconds"));
   }, 2000);
+  // The first of the two tasks to fail stops the other.
+  const settle = (promise) =>
+    promise.catch((error) => {
+      abort.abort(error);
+      throw error;
+    });
   try {
-    const { ready } =
-      (await prepare({
-        signal: abort.signal,
-        progress() {
-          lastChunk = performance.now();
-        },
-      })) ?? {};
-    const renderer = await chooseRenderer(requested, environment);
-    const backend = renderer.backend;
-    onBackend(backend, renderer);
-    mark("backendSelected");
-    const path = resolve(backend);
-    const module = await importModule(path.href);
-    if (exports.some((name) => typeof module[name] !== "function"))
-      throw new Error(`Runtime does not implement the ${contract} contract`);
-    const response = await fetchImpl(new URL("./moly-app_bg.wasm", path), {
-      signal: abort.signal,
-      credentials: "omit",
-      redirect: "error",
-    });
-    if (
-      !response.ok ||
-      !response.headers.get("content-type")?.startsWith("application/wasm")
-    )
-      throw new Error(`Invalid WASM response ${response.status}`);
-    if (!response.body) throw new Error("Streaming response is unavailable");
-    mark("engineDownloadStart");
-    const reader = response.body.getReader();
-    const stream = new ReadableStream({
-      async pull(sink) {
-        try {
-          const { done, value } = await reader.read();
-          lastChunk = performance.now();
-          if (done) {
-            clearInterval(watchdog);
-            mark("engineDownloadEnd");
-            report("initializing");
-            sink.close();
-            return;
-          }
-          engineBytes += value.byteLength;
-          onBytes(engineBytes);
-          if (engineBytes > maxBytes) {
-            abort.abort();
-            throw new Error("Engine exceeds the bounded release payload");
-          }
-          sink.enqueue(value);
-        } catch (error) {
-          sink.error(error);
-        }
-      },
-      cancel(reason) {
-        return reader.cancel(reason);
-      },
-    });
-    await module.default({
-      module_or_path: new Response(stream, {
-        status: response.status,
-        headers: response.headers,
-      }),
-    });
+    const prepared = settle(
+      (async () => {
+        const value = await prepare({ signal: abort.signal, progress: touch });
+        mark("preflightReady");
+        return value;
+      })(),
+    );
+    const download = settle(
+      (async () => {
+        const renderer = await chooseRenderer(requested, environment);
+        const backend = renderer.backend;
+        onBackend(backend, renderer);
+        mark("backendSelected");
+        const path = resolve(backend);
+        const [module, response] = await Promise.all([
+          importModule(path.href),
+          fetchImpl(new URL("./moly-app_bg.wasm", path), {
+            signal: abort.signal,
+            credentials: "omit",
+            redirect: "error",
+          }),
+        ]);
+        if (exports.some((name) => typeof module[name] !== "function"))
+          throw new Error(`Runtime does not implement the ${contract} contract`);
+        if (
+          !response.ok ||
+          !response.headers.get("content-type")?.startsWith("application/wasm")
+        )
+          throw new Error(`Invalid WASM response ${response.status}`);
+        if (!response.body) throw new Error("Streaming response is unavailable");
+        mark("engineDownloadStart");
+        const reader = response.body.getReader();
+        const stream = new ReadableStream({
+          async pull(sink) {
+            try {
+              const { done, value } = await reader.read();
+              touch();
+              if (done) {
+                mark("engineDownloadEnd");
+                sink.close();
+                return;
+              }
+              engineBytes += value.byteLength;
+              onBytes(engineBytes);
+              if (engineBytes > maxBytes) {
+                abort.abort();
+                throw new Error("Engine exceeds the bounded release payload");
+              }
+              sink.enqueue(value);
+            } catch (error) {
+              sink.error(error);
+            }
+          },
+          cancel(reason) {
+            return reader.cancel(reason);
+          },
+        });
+        const compiled = await compileModule(
+          new Response(stream, {
+            status: response.status,
+            headers: response.headers,
+          }),
+        );
+        return { module, backend, compiled };
+      })(),
+    );
+    const [{ ready } = {}, { module, backend, compiled }] = await Promise.all([
+      prepared,
+      download,
+    ]);
+    clearInterval(watchdog);
+    report("initializing");
+    await module.default({ module_or_path: compiled });
     mark("wasmReady");
     report("base");
     const progressTimer = waitTick ? setInterval(waitTick, 2000) : null;

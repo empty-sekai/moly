@@ -260,7 +260,8 @@ test("v2 schema rejects absent required release totals and unknown fields", asyn
 
 test("bounded base prewarming uses the same shared immutable URLs", async () => {
   const cn = client("cn"),
-    progress = [];
+    progress = [],
+    announced = [];
   const result = await warmBaseResources(
     {
       assets: "https://pack.test/store/",
@@ -269,7 +270,11 @@ test("bounded base prewarming uses the same shared immutable URLs", async () => 
       packs: true,
       assetCatalog: cn.id,
     },
-    { fetchImpl: cn.fetchImpl, onProgress: (event) => progress.push(event) },
+    {
+      fetchImpl: cn.fetchImpl,
+      onProgress: (event) => progress.push(event),
+      announce: (url) => announced.push(url),
+    },
   );
   assert.ok(result);
   assert.ok(cn.requests.length > 3);
@@ -278,11 +283,17 @@ test("bounded base prewarming uses the same shared immutable URLs", async () => 
       /^store\/(catalogs|packages|blobs)\//.test(key),
     ),
   );
-  assert.ok(
-    cn.requests.every(
-      ({ options }) => options.headers?.["X-Moly-Required"] === "1",
-    ),
+  // No request carries a header that would need a CORS preflight; every
+  // object is named to the service worker instead.
+  assert.ok(cn.requests.every(({ options }) => options.headers === undefined));
+  assert.ok(cn.requests.every(({ options }) => options.cache === undefined));
+  assert.deepEqual(
+    new Set(announced),
+    new Set(cn.requests.map(({ key }) => `https://pack.test/${key}`)),
   );
+  // Each immutable object is transferred once.
+  const keys = cn.requests.map(({ key }) => key);
+  assert.equal(new Set(keys).size, keys.length);
 });
 
 test("mutable selectors are excluded while different releases share one immutable cache", () => {

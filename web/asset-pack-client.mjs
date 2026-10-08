@@ -97,6 +97,60 @@ class ReadBudget {
   }
 }
 const budget = new ReadBudget();
+// The page names the immutable objects behind its base resources to the
+// service worker that controls it, by message. A request header would be a
+// non-safelisted header: every cross-origin read would first need a CORS
+// preflight of its own, since immutable store URLs are all distinct.
+const REQUIRED_BATCH = 512;
+const requiredUrls = new Set();
+let requiredQueue = [],
+  requiredFlush = null,
+  requiredWatch = false;
+function postRequired(urls) {
+  const container = globalThis.navigator?.serviceWorker,
+    controller = container?.controller;
+  if (!controller || typeof MessageChannel === "undefined") return;
+  for (let start = 0; start < urls.length; start += REQUIRED_BATCH) {
+    const channel = new MessageChannel(),
+      close = () => channel.port1.close();
+    // A worker that does not know the message never answers it.
+    const timer = setTimeout(close, 10000);
+    channel.port1.onmessage = () => {
+      clearTimeout(timer);
+      close();
+    };
+    controller.postMessage(
+      {
+        source: "moly-cache-host",
+        schemaVersion: 1,
+        type: "require",
+        urls: urls.slice(start, start + REQUIRED_BATCH),
+      },
+      [channel.port2],
+    );
+  }
+}
+/** Queue one required immutable URL for the controlling service worker.
+ * Batches are sent once per task; a worker that takes control later receives
+ * every URL named so far. */
+export function announceRequired(url) {
+  if (requiredUrls.has(url)) return;
+  requiredUrls.add(url);
+  requiredQueue.push(url);
+  const container = globalThis.navigator?.serviceWorker;
+  if (!requiredWatch && container?.addEventListener) {
+    requiredWatch = true;
+    container.addEventListener("controllerchange", () =>
+      postRequired([...requiredUrls]),
+    );
+  }
+  requiredFlush ??= setTimeout(() => {
+    const urls = requiredQueue;
+    requiredQueue = [];
+    requiredFlush = null;
+    postRequired(urls);
+  }, 0);
+}
 // Work on immutable, content-addressed documents is verified once per page and
 // shared by every client of the same store and transport. It never carries
 // one caller's abort signal; a caller that aborts only stops waiting. A
@@ -172,7 +226,13 @@ export class PackClient {
   constructor(
     root,
     catalogId = null,
-    { fetchImpl = fetch, signal, required = false, resourceBase } = {},
+    {
+      fetchImpl = fetch,
+      signal,
+      required = false,
+      resourceBase,
+      announce = announceRequired,
+    } = {},
   ) {
     this.root = new URL(root, globalThis.location?.href);
     if (
@@ -193,6 +253,7 @@ export class PackClient {
     this.fetchImpl = (...args) => fetchImpl(...args);
     this.signal = signal;
     this.required = required;
+    this.announce = announce;
     this.catalogPromise = null;
   }
   url(path) {
@@ -201,14 +262,17 @@ export class PackClient {
       this.root,
     ).href;
   }
+  // Store objects are immutable and content-addressed: the default cache
+  // mode lets a read that no service worker answers be kept by the HTTP
+  // cache, where the engine's own reads of the same URL find it.
   async request(path, { signal = this.signal, required = this.required } = {}) {
-    const timeout = AbortSignal.timeout(60000);
-    return this.fetchImpl(this.url(path), {
+    const timeout = AbortSignal.timeout(60000),
+      url = this.url(path);
+    if (required) this.announce(url);
+    return this.fetchImpl(url, {
       credentials: "omit",
       redirect: "error",
-      cache: "no-store",
       signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
-      ...(required ? { headers: { "X-Moly-Required": "1" } } : {}),
     });
   }
   async document(path, expected = null, options) {
@@ -490,7 +554,10 @@ export class PackClient {
    * pack reader, checks them itself. Resolves to the entry, as read from
    * the verified package manifest. */
   async warm(path) {
-    const entry = await this.resolve(path);
+    return this.warmEntry(await this.resolve(path));
+  }
+  /** `warm` for an entry already returned by `resolve`. */
+  async warmEntry(entry) {
     const response = await this.request(`blobs/${entry.blob}`);
     if (response.status !== 200 || !response.body)
       throw new Error(`Packed response unavailable (${response.status})`);

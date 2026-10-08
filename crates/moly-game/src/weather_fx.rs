@@ -2083,9 +2083,7 @@ fn judge_in_host(
             return None;
         }
     };
-    let rate_time = raw_const(emission.get("rateOverTime"));
     let rate_distance = raw_const(emission.get("rateOverDistance"));
-    let time_zero = rate_time.map_or(true, |v| v == 0.0);
     let distance_zero = rate_distance == Some(0.0);
     // A sub-emitter target never emits on its own: its parent's edge law
     // reads its rate over distance (from the parent particle's motion). A
@@ -2095,11 +2093,7 @@ fn judge_in_host(
         tally.rate_distance_only += 1;
         return None;
     }
-    let bursts_present = emission
-        .get("bursts")
-        .and_then(Value::as_array)
-        .is_some_and(|bursts| !bursts.is_empty());
-    if time_zero && distance_zero && !bursts_present {
+    if raw_emission_is_zero(emission) {
         tally.dead_emission += 1;
         return None;
     }
@@ -2765,6 +2759,16 @@ fn raw_const(value: Option<&Value>) -> Option<f64> {
         }
         _ => None,
     }
+}
+
+/// Only known constant-zero rates without bursts prove this emission block
+/// inactive. A curve or unequal pair of constants is not a constant zero;
+/// the runtime law checks whether it can evaluate that rate.
+fn raw_emission_is_zero(emission: &Value) -> bool {
+    raw_const(emission.get("rateOverTime")) == Some(0.0)
+        && raw_const(emission.get("rateOverDistance")) == Some(0.0)
+        && !emission.get("bursts").and_then(Value::as_array)
+            .is_some_and(|bursts| !bursts.is_empty())
 }
 
 /// 律侧 `MinMaxCurve` 的恒定量（同上口径）。
