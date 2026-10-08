@@ -133,7 +133,7 @@ pub(super) fn parent_runtime_with(doc: &Value, source: &Value, edit: impl FnOnce
     let mut emitter = decoded.emitters.remove(0);
     adjust(&mut emitter);
     let graph = crate::weather_fx::source_sub_emitter_owners(particles);
-    let edges = crate::weather_fx::sub_emitter_edges(&emitter, &graph).expect("admission resolves the edges");
+    let edges = crate::weather_fx::sub_emitter_edges(&emitter, &graph, &by_path).expect("admission resolves the edges");
     let route = source_route(&record["system"]);
     assert_eq!(route, SourceRoute::Ordinary);
     native_birth_eligible(&emitter, &route)?;

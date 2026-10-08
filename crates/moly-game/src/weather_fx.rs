@@ -1421,18 +1421,31 @@ pub(crate) fn source_sub_emitter_owners(particles: &[Value]) -> SubEmitterGraph<
 /// reads the child's first burst into its event law. Every edge is a birth
 /// or death edge here (the source admission refused the rest); all of them
 /// are cached, the birth edges and the death edges each in authored order.
-pub(crate) fn sub_emitter_edges(emitter: &EmitterParams, graph: &SubEmitterGraph<'_>)
+pub(crate) fn sub_emitter_edges(emitter: &EmitterParams, graph: &SubEmitterGraph<'_>,
+    by_path: &HashMap<String, &Value>)
     -> Result<crate::particle_runtime::EventEdges, String> {
     use moly_law::particle::schema::SubEmitterTrigger;
     let cached = emitter.sub_emitters.iter().filter(|edge| edge.trigger == SubEmitterTrigger::Birth).count();
-    // The engine sorts its birth table by the children's instance ids at run
-    // time and only the first two slots keep a per-particle carry; with more
-    // than two birth edges that order decides which children's emission
-    // carries over between calls, and the export holds neither the clones'
-    // hierarchy order nor their ids.
-    if cached > 2 {
-        return Err(format!("{cached} birth edges: which two keep a per-particle carry follows the birth table's run-time instance-id order, which the export does not carry"));
-    }
+    // Clone production follows transform preorder; newly produced instance
+    // ids decrease. Sorting their ids ascending therefore reverses that
+    // preorder. More than two birth edges need this order to choose the two
+    // slots that retain a per-particle carry.
+    let birth_order = if cached > 2 {
+        let mut ordered = Vec::new();
+        for edge in &emitter.sub_emitters {
+            if edge.trigger != SubEmitterTrigger::Birth { continue; }
+            let target = edge.emitter.as_deref().ok_or("birth edge without a child")?;
+            if graph.records.get(target).map_or(0, Vec::len) != 1 {
+                return Err(format!("{target}: clone order requires one particle system on the target node"));
+            }
+            ordered.push((clone_preorder_key(by_path, target)?, target));
+        }
+        ordered.sort_by(|a, b| b.0.cmp(&a.0));
+        if ordered.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err("birth targets have the same clone hierarchy order".into());
+        }
+        ordered.into_iter().map(|(_, target)| target.to_owned()).collect::<Vec<_>>()
+    } else { Vec::new() };
     let mut edges = crate::particle_runtime::EventEdges::default();
     for edge in &emitter.sub_emitters {
         let target = edge.emitter.as_deref().filter(|name| !name.is_empty())
@@ -1483,7 +1496,37 @@ pub(crate) fn sub_emitter_edges(emitter: &EmitterParams, graph: &SubEmitterGraph
             trigger => return Err(format!("{target}: {trigger:?} edge events are not transcribed")),
         }
     }
+    if !birth_order.is_empty() {
+        edges.births.sort_by_key(|edge| birth_order.iter().position(|target| target == &edge.target));
+    }
     Ok(edges)
+}
+
+/// A node's transform preorder, independent of export record order or names.
+/// Missing hierarchy metadata is not interchangeable with a zero index.
+fn clone_preorder_key(by_path: &HashMap<String, &Value>, target: &str) -> Result<Vec<u64>, String> {
+    let mut key = Vec::new();
+    let mut current = target;
+    let mut visited = std::collections::HashSet::new();
+    loop {
+        if !visited.insert(current) { return Err(format!("{target}: cyclic clone hierarchy")); }
+        let node = by_path.get(current).ok_or_else(|| format!("{target}: clone node {current} is absent"))?;
+        match node.get("parent") {
+            Some(Value::Null) => break,
+            Some(Value::String(parent)) => {
+                let index = node.get("siblingIndex").and_then(Value::as_u64)
+                    .ok_or_else(|| format!("{current}: clone hierarchy has no siblingIndex"))?;
+                let duplicates = by_path.values().filter(|other| other.get("parent") == node.get("parent")
+                    && other.get("siblingIndex").and_then(Value::as_u64) == Some(index)).count();
+                if duplicates != 1 { return Err(format!("{current}: clone siblingIndex is not unique")); }
+                key.push(index);
+                current = parent;
+            }
+            _ => return Err(format!("{current}: clone hierarchy has no parent")),
+        }
+    }
+    key.reverse();
+    Ok(key)
 }
 
 /// Whether the effect's extracted component census rules out a Rigidbody or
@@ -2265,7 +2308,7 @@ fn judge_in_host(
     // child, which applies it when it is an installed target of the same
     // effect instance and otherwise refuses it, counting.
     let event_edges = if crate::particle_runtime::has_real_sub_emitter_edges(&emitter) {
-        match sub_emitter_edges(&emitter, sub_emitter_owners) {
+        match sub_emitter_edges(&emitter, sub_emitter_owners, by_path) {
             Ok(edges) => Some(edges),
             Err(reason) => { tally.law_reject.push(format!("{node}: SubModule {reason}")); return None; }
         }
