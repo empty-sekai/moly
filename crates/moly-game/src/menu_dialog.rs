@@ -792,6 +792,7 @@ pub(crate) struct MenuDialogRoot {
     dialog: Option<DialogId>,
     /// The last `Setup`'s button writes, in [`ALL_BUTTONS`] order.
     setup: Option<[ButtonSetup; 12]>,
+    rank_refused: Option<String>,
 }
 
 impl MenuDialogRoot {
@@ -909,7 +910,7 @@ pub(crate) fn spawn_when_ready(
     let binding = MenuSlideBinding::from_document(layouts.document("Menu").expect("menu layout missing"));
     commands.spawn((MenuDialogRoot {
             binding, phase: MenuSlidePhase::Hidden, requested_open: false,
-            elapsed: 0., slide_width: 0., canvas: None, dialog: None, setup: None,
+            elapsed: 0., slide_width: 0., canvas: None, dialog: None, setup: None, rank_refused: None,
         }, Visibility::Hidden, Transform::default(),
         RenderLayers::layer(SITEMAP_LAYER), crate::ui_layout::UiPrefabView::new("Menu", SITEMAP_LAYER)));
     commands.insert_resource(MenuDialogSpawned);
@@ -926,7 +927,7 @@ fn on_open(
     mock: &MenuMock,
     setup: &[ButtonSetup; 12],
     user: Option<&crate::server::ClientUserData>,
-    rank: &moly_law::ui::mysekai_rank::MysekaiRankModel,
+    rank: Option<&moly_law::ui::mysekai_rank::MysekaiRankModel>,
 ) {
     info!(
         "[menu_dialog] 开框：DialogUtility.ShowMysekaiMenu → TryGetActiveDialog(菜单对话框) 未开 \
@@ -953,6 +954,10 @@ fn on_open(
             which.handler()
         );
     }
+    let Some(rank) = rank else {
+        info!("[menu_dialog] rank data unavailable; the menu remains usable without its rank gauge");
+        return;
+    };
     let stamina = user.and_then(|user| user.stamina);
     info!(
         "[menu_dialog] Setup: the stamina cell reads the client copy of UserMysekaiStamina {:?} (sum {:?}, gauge maximum = master normal maxStamina {:?}); \
@@ -1158,11 +1163,22 @@ pub(crate) fn place(
         // references, then the stamina cell.
         if changed && open {
             let doc = layouts.document(view.key).expect("menu dialog layout is loaded");
-            let model = ranks.as_deref()
-                .unwrap_or_else(|| panic!("rank model: the master rank table has not resolved when the menu opens"))
-                .model(total_exp.0);
-            on_open(&mock, root.setup.as_ref().expect("Setup ran at the open edge"), user.as_deref(), &model);
-            apply_rank_gauge(&mut view, &layouts, &rank_gauge_targets(doc), &model);
+            let model = match ranks.as_deref() {
+                Some(ranks) => ranks.try_model(total_exp.0),
+                None => Err("rank model: the master rank table has not resolved when the menu opens".to_owned()),
+            };
+            if let Err(reason) = &model {
+                if root.rank_refused.as_deref() != Some(reason.as_str()) {
+                    error!("[menu_dialog] {reason}; rank gauge hidden");
+                    root.rank_refused = Some(reason.clone());
+                }
+            }
+            let targets = rank_gauge_targets(doc);
+            for target in [&targets.rank_text, &targets.rest_text, &targets.fill_image] {
+                view.set_visible(target, model.is_ok());
+            }
+            on_open(&mock, root.setup.as_ref().expect("Setup ran at the open edge"), user.as_deref(), model.as_ref().ok());
+            if let Ok(model) = &model { apply_rank_gauge(&mut view, &layouts, &targets, model); }
             update_stamina_gate_view(&mut view, &layouts, doc, user.as_deref());
         }
     }

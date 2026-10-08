@@ -1239,7 +1239,7 @@ pub(crate) fn place(
             Ok(model) => Some(model),
             Err(reason) => {
                 if rank_refused.as_deref() != Some(reason.as_str()) {
-                    error!("[info] {reason}; the rank page keeps the prefab's rank texts and gauge");
+                    error!("[info] {reason}; rank values and gauge hidden");
                     *rank_refused = Some(reason);
                 }
                 None
@@ -1272,10 +1272,19 @@ pub(crate) fn place(
             view.set_visible(&tab.off_image, page != index);
         }
         view.set_visible(&bindings.arrow_prev,page>0);view.set_visible(&bindings.arrow_next,page+1<PAGE_COUNT);
+        view.set_visible(&bindings.rank_page.rank_text, rank.is_some());
+        let doc = layouts.document(view.key).expect("info layout is loaded");
+        let targets = info_rank_gauge_targets(doc);
+        for target in [&targets.rank_text, &targets.rest_text, &targets.fill_image] {
+            view.set_visible(target, rank.is_some());
+        }
+        if let Some([home, room]) = &bindings.rank_page.put_limit_costs {
+            view.set_visible(home, rank.is_some() && put_limit.is_ok());
+            view.set_visible(room, rank.is_some() && put_limit.is_ok());
+        }
         if let Some(rank) = rank.as_ref() {
             view.set_text(&bindings.rank_page.rank_text, rank.mysekai_rank.to_string());
-            let doc = layouts.document(view.key).expect("info layout is loaded");
-            crate::menu_dialog::apply_rank_gauge(&mut view, &layouts, &info_rank_gauge_targets(doc), rank);
+            crate::menu_dialog::apply_rank_gauge(&mut view, &layouts, &targets, rank);
             // FixtureHomePutLimitPutCost.ToString() and
             // GetFormat(MSG_MYSEKAI_FIXTURE_MYROOM_LAYOUT_COST, room cost).
             if let (Some([home, room]), Ok(tables)) = (&bindings.rank_page.put_limit_costs, &put_limit) {
@@ -1321,9 +1330,15 @@ pub(crate) fn place(
         *visible=if open&&dialog.open==Some(root.which){Visibility::Inherited}else{Visibility::Hidden};transform.scale=Vec3::splat(scale);
         view.set_visible("WindowRoot/Tabs",false);
         match root.which {
-            InfoDialog::RankList=>{view.set_text("Content/MessageBody",format!("{}
-{}
-{}",InfoItem::RankLevelText.current_label(&mock, rank.as_ref().map_or(0, |r| r.mysekai_rank)).unwrap(),InfoItem::FixturePutText.current_label(&mock, 0).unwrap(),InfoItem::FixtureJointText.current_label(&mock, 0).unwrap()));}
+            InfoDialog::RankList=>{
+                let mut lines = Vec::new();
+                if let Some(rank) = rank.as_ref() {
+                    lines.push(InfoItem::RankLevelText.current_label(&mock, rank.mysekai_rank).unwrap());
+                }
+                lines.push(InfoItem::FixturePutText.current_label(&mock, 0).unwrap());
+                lines.push(InfoItem::FixtureJointText.current_label(&mock, 0).unwrap());
+                view.set_text("Content/MessageBody", lines.join("\n"));
+            }
         }
     }
 }
