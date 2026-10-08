@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { stripDebugNames, splitCatalog, detailBundle, DETAIL_BUNDLES, STAGE_FILES, GAME_FILES, verifyPortraitCoordinateMigration, toLogicalResourceManifest } from "./release-artifact.mjs";
+import { stripDebugNames, splitCatalog, detailBundle, DETAIL_BUNDLES, STAGE_FILES, GAME_FILES, verifyPortraitCoordinateMigration, toLogicalResourceManifest, publicSourceProvenance } from "./release-artifact.mjs";
 import { sha256 } from "./build-source.mjs";
 import { COORDINATE_CONTRACT } from "./coordinate-contract.mjs";
 
@@ -45,6 +45,27 @@ test("S3 publication projection removes host-only /moly prefixes from descriptor
 });
 
 const header = Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]);
+
+test("source provenance keeps portable identities and relative receipts, never local journals", () => {
+  const value = {
+    source: { region: "jp", appVersion: "1.2.3", assetHash: "synthetic", localDebug: "C:/fixture-cache/source" },
+    master: { commit: "a".repeat(40), repository: "example/master-data", checkout: "/private-cache/master" },
+    extraction: "C:/fixture-cache/extracted", workspace: "local-job-name",
+    sharedUi: { files: [{ path: "ui/action-icon/Talk.png", sha256: "b".repeat(64), localCopy: "/private-cache/texture" }] },
+    descriptorSha256: "c".repeat(64), coordinateContract: COORDINATE_CONTRACT,
+  };
+  const original = structuredClone(value);
+  const publicValue = publicSourceProvenance(value);
+  assert.deepEqual(publicValue.source, { region: "jp", appVersion: "1.2.3", assetHash: "synthetic" });
+  assert.deepEqual(publicValue.master, { commit: "a".repeat(40), repository: "example/master-data" });
+  assert.deepEqual(publicValue.sharedUi.files, [{ path: "ui/action-icon/Talk.png", sha256: "b".repeat(64) }]);
+  assert.equal(publicValue.descriptorSha256, "c".repeat(64));
+  assert.equal(publicValue.coordinateContract, COORDINATE_CONTRACT);
+  assert.doesNotMatch(JSON.stringify(publicValue), /fixture-cache|private-cache|local-job-name/);
+  assert.deepEqual(value, original);
+  for (const location of ["/private-cache/master", "C:/fixture-cache/master", "C:\\fixture-cache\\master", "\\\\fixture-host\\share", "file:///private-cache/master"])
+    assert.throws(() => publicSourceProvenance({ master: { repository: location } }), /machine-specific/);
+});
 const custom = (name, value = []) =>
   Buffer.from([
     0,
