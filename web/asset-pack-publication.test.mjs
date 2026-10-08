@@ -11,6 +11,7 @@ import { publish } from "./release-artifact.mjs";
 import { workspaceFingerprint } from "./build-source.mjs";
 import { canonicalPackBytes } from "./asset-pack-client.mjs";
 import { COORDINATE_CONTRACT } from "./coordinate-contract.mjs";
+import { GAME_EXPORTS } from "./game-controller.mjs";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const golden = JSON.parse(
   fs.readFileSync(new URL("./fixtures/asset-pack-v2.json", import.meta.url)),
@@ -258,7 +259,7 @@ function mockStageWasm(extraExports = []) {
     ...section(10, [1, 2, 0, 0x0b]),
   ]);
 }
-function workspace(root, font = null) {
+function workspace(root, font = null, extraExports = []) {
   const work = path.join(root, "workspace");
   fs.mkdirSync(path.join(work, "crates"), { recursive: true });
   fs.mkdirSync(path.join(work, "web"), { recursive: true });
@@ -281,7 +282,10 @@ function workspace(root, font = null) {
     fs.mkdirSync(dir, { recursive: true });
     const files = {
       "moly-app.js": Buffer.from("export const fixtureOnly = true;\n"),
-      "moly-app_bg.wasm": mockStageWasm(font ? ["install_ui_font"] : []),
+      "moly-app_bg.wasm": mockStageWasm([
+        ...extraExports,
+        ...(font ? ["install_ui_font"] : []),
+      ]),
     };
     for (const [name, bytes] of Object.entries(files))
       fs.writeFileSync(path.join(dir, name), bytes);
@@ -315,6 +319,91 @@ function workspace(root, font = null) {
   }
   return work;
 }
+
+test("game-only publication and reuse need no stage catalog but still verify the runtime root", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "moly-game-publication-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  extract(root);
+  canonicalTestStore(root, "cn", addCoordinateFixture(root, "cn"));
+  const work = workspace(root, null, GAME_EXPORTS),
+    output = path.join(root, "publication"),
+    assets = path.join(output, ".runtime/cn");
+  fs.mkdirSync(path.dirname(assets), { recursive: true });
+  fs.cpSync(path.join(root, "source-cn"), assets, { recursive: true });
+  fs.unlinkSync(path.join(root, "catalog-cn.json"));
+  const sources = [{ region: "cn", assets }];
+  const options = {
+    workspace: work,
+    output,
+    sources,
+    developmentLinks: true,
+    profiles: ["game"],
+  };
+  const manifest = await publish(options),
+    snapshot = manifest.snapshots[0];
+  assert.equal(snapshot.version, "1.0.0");
+  assert.equal(Object.hasOwn(snapshot, "catalog"), false);
+  assert.equal(Object.hasOwn(snapshot.provenance, "catalogSha256"), false);
+  assert.equal(fs.existsSync(path.join(output, "catalog-store")), false);
+  assert.equal(
+    fs.existsSync(path.join(output, "snapshots", snapshot.id, "catalog")),
+    false,
+  );
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(path.join(output, "game/manifest.json")))
+      .snapshots[0],
+    {
+      id: snapshot.id,
+      region: "cn",
+      version: "1.0.0",
+      assets: snapshot.assets,
+      packs: false,
+      assetCatalog: null,
+    },
+  );
+  assert.deepEqual(
+    await publish({
+      workspace: work,
+      output,
+      profiles: ["game"],
+      reuseEngine: true,
+      reuseSnapshots: true,
+    }),
+    manifest,
+  );
+  for (const profiles of [["stage"], ["game", "stage"]]) {
+    await assert.rejects(
+      publish({ ...options, profiles }),
+      /Stage publication requires a Rust catalog export/,
+    );
+    await assert.rejects(
+      publish({
+        workspace: work,
+        output,
+        profiles,
+        reuseEngine: true,
+        reuseSnapshots: true,
+      }),
+      /unverified source-qualified publication/,
+    );
+  }
+  const sourceFile = path.join(assets, "source.json"),
+    original = fs.readFileSync(sourceFile);
+  fs.writeFileSync(
+    sourceFile,
+    JSON.stringify({
+      ...JSON.parse(original),
+      extraction: "/private-fixture/source",
+    }),
+  );
+  await assert.rejects(publish(options), /sanitize-source/);
+  fs.writeFileSync(sourceFile, original);
+  const coordinates = path.join(assets, "fixture-attach/attach-points.json"),
+    bad = JSON.parse(fs.readFileSync(coordinates));
+  delete bad.coordinateContract;
+  fs.writeFileSync(coordinates, JSON.stringify(bad));
+  await assert.rejects(publish(options), /coordinate contract/);
+});
 
 test("publication refuses unclean source metadata without rewriting the input or active selector", async (t) => {
   const root = fs.mkdtempSync(

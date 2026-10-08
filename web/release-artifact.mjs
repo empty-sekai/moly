@@ -596,10 +596,11 @@ export async function publish({
     profiles.some((profile) => !Object.hasOwn(PROFILES, profile))
   )
     throw new Error("Publish one or more of the profiles: stage, game");
+  const stage = profiles.includes("stage");
   if (typeof publicPrefix !== "string" || !PREFIX.test(publicPrefix))
     throw new Error("The public prefix must be a canonical absolute directory");
   // The stage page, its preflight and its worker are served below /moly/.
-  if (profiles.includes("stage") && publicPrefix !== PUBLIC_PREFIX)
+  if (stage && publicPrefix !== PUBLIC_PREFIX)
     throw new Error(`The stage profile is served only below ${PUBLIC_PREFIX}`);
   const prefix = publicPrefix;
   workspace = realpathSync(workspace);
@@ -625,8 +626,9 @@ export async function publish({
           !/^[a-z0-9][a-z0-9._-]{0,95}$/.test(snapshot.id) ||
           !["cn", "jp"].includes(snapshot.region) ||
           !/^\d+\.\d+\.\d+$/.test(snapshot.version) ||
-          snapshot.catalog !==
-            `${prefix}snapshots/${snapshot.id}/catalog/index.json` ||
+          (stage &&
+            snapshot.catalog !==
+              `${prefix}snapshots/${snapshot.id}/catalog/index.json`) ||
           snapshot.assets !==
             (snapshot.packs
               ? `${prefix}asset-store/`
@@ -647,14 +649,16 @@ export async function publish({
       validateCoordinatePair(retained.release, descriptor);
       if (!isDeepStrictEqual(descriptor, snapshot))
         throw new Error("Retained coordinate descriptor differs from manifest");
-      const catalog = json(path.join(root, "catalog/index.json"));
-      if (
-        ![1, 2].includes(catalog.schemaVersion) ||
-        catalog.snapshotId !== snapshot.id ||
-        catalog.region !== snapshot.region ||
-        catalog.version !== snapshot.version
-      )
-        throw new Error("Retained catalog source mismatch");
+      if (stage) {
+        const catalog = json(path.join(root, "catalog/index.json"));
+        if (
+          ![1, 2].includes(catalog.schemaVersion) ||
+          catalog.snapshotId !== snapshot.id ||
+          catalog.region !== snapshot.region ||
+          catalog.version !== snapshot.version
+        )
+          throw new Error("Retained catalog source mismatch");
+      }
       if (!snapshot.packs) {
         const fixture = json(path.join(root, "assets/mysekai-fixtures.json"));
         if (
@@ -856,19 +860,24 @@ export async function publish({
     )
       throw new Error("Unsupported or duplicated source region");
     regions.add(source.region);
+    if (stage && typeof source.catalog !== "string")
+      throw new Error("Stage publication requires a Rust catalog export");
     const assets = realpathSync(source.assets),
-      catalogBytes = readFileSync(source.catalog),
-      catalog = JSON.parse(catalogBytes);
+      catalogBytes = stage ? readFileSync(source.catalog) : Buffer.alloc(0),
+      catalog = stage ? JSON.parse(catalogBytes) : null;
     const fixtureBytes = readFileSync(
         path.join(assets, "mysekai-fixtures.json"),
       ),
       fixture = JSON.parse(fixtureBytes);
     if (
       fixture.region !== source.region ||
-      catalog.region !== source.region ||
-      fixture.gameVersion !== catalog.version
+      !/^\d+\.\d+\.\d+$/.test(fixture.gameVersion) ||
+      (stage &&
+        (catalog.region !== source.region ||
+          fixture.gameVersion !== catalog.version))
     )
       throw new Error("Catalog and mounted assets have different provenance");
+    const version = fixture.gameVersion;
     const sourceDocument = existsSync(path.join(assets, "source.json"))
       ? json(path.join(assets, "source.json"))
       : {};
@@ -881,7 +890,7 @@ export async function publish({
       throw new Error("Source manifest region mismatch");
     const coordinateEvidence = validatePublicationCoordinates(assets, {
       region: source.region,
-      version: catalog.version,
+      version,
     });
     const controllerIndexBytes = readFileSync(
       path.join(assets, "fixture-gimmick/browser-index.json"),
@@ -891,7 +900,7 @@ export async function publish({
       controllerIndex.schemaVersion !== 1 ||
       controllerIndex.generator !== "moly-gimmick-split-v1" ||
       controllerIndex.region !== source.region ||
-      controllerIndex.gameVersion !== catalog.version
+      controllerIndex.gameVersion !== version
     )
       throw new Error(
         "Regenerate source-qualified controller packages with web/split-gimmicks.mjs before publishing",
@@ -906,7 +915,7 @@ export async function publish({
       (base.schemaVersion !== 1 ||
         base.generator !== "moly-browser-base-v1" ||
         base.region !== source.region ||
-        base.gameVersion !== catalog.version ||
+        base.gameVersion !== version ||
         !Array.isArray(base.files))
     )
       throw new Error("Invalid measured base resource descriptor");
@@ -946,7 +955,7 @@ export async function publish({
     // identity. Never publish a one-character sample as an all-character set.
     let portraitBytes = Buffer.alloc(0);
     const portraitFiles = [];
-    if (source.portraits) {
+    if (stage && source.portraits) {
       const photoRoot = realpathSync(source.portraits);
       portraitBytes = readFileSync(path.join(photoRoot, "manifest.json"));
       if (portraitBytes.length > 262144)
@@ -964,7 +973,7 @@ export async function publish({
         photos.schemaVersion !== 1 ||
         photos.generator !== "moly-root-chara-head-v1" ||
         photos.region !== source.region ||
-        photos.version !== catalog.version ||
+        photos.version !== version ||
         photos.expected !== entities.size ||
         !Array.isArray(photos.portraits) ||
         photos.portraits.length !== entities.size
@@ -1092,28 +1101,31 @@ export async function publish({
           ]),
         )
       : "";
-    const id = `${source.region}-${catalog.version}-${sha256(Buffer.concat([catalogBytes, fixtureBytes, controllerIndexBytes, baseBytes, Buffer.from(JSON.stringify(provenance)), Buffer.from(JSON.stringify({ provider: source.provider, resourceIndexSha256: source.resourceIndexSha256, resourceOrigin: source.resourceOrigin, portraitDigest, coordinateEvidence, ...(packed ? { assetCatalog: packed.catalogId } : {}) }))])).slice(0, 20)}`;
+    const id = `${source.region}-${version}-${sha256(Buffer.concat([catalogBytes, fixtureBytes, controllerIndexBytes, baseBytes, Buffer.from(JSON.stringify(provenance)), Buffer.from(JSON.stringify({ provider: source.provider, resourceIndexSha256: source.resourceIndexSha256, resourceOrigin: source.resourceOrigin, portraitDigest, coordinateEvidence, ...(packed ? { assetCatalog: packed.catalogId } : {}) }))])).slice(0, 20)}`;
     const directory = path.join(output, "snapshots", id);
-    const { files: catalogFiles, details } = splitCatalog(
-      catalog,
-      id,
-      packed
-        ? (image) => {
-            // A store serves no logical URLs; name the image by content.
-            const entry = packed.entries.get(image);
-            if (entry?.codec !== "identity")
-              throw new Error(
-                `Pinned pack cannot serve catalog image: ${image}`,
-              );
-            return `${prefix}asset-store/blobs/${entry.blob}`;
-          }
-        : undefined,
-      `${prefix}catalog-store/`,
-    );
-    for (const [name, bytes] of catalogFiles)
-      compressedPut(path.join(directory, "catalog", name), bytes);
-    for (const [name, bytes] of details)
-      compressedPut(path.join(output, "catalog-store", name), bytes);
+    mkdirSync(directory, { recursive: true });
+    if (stage) {
+      const { files: catalogFiles, details } = splitCatalog(
+        catalog,
+        id,
+        packed
+          ? (image) => {
+              // A store serves no logical URLs; name the image by content.
+              const entry = packed.entries.get(image);
+              if (entry?.codec !== "identity")
+                throw new Error(
+                  `Pinned pack cannot serve catalog image: ${image}`,
+                );
+              return `${prefix}asset-store/blobs/${entry.blob}`;
+            }
+          : undefined,
+        `${prefix}catalog-store/`,
+      );
+      for (const [name, bytes] of catalogFiles)
+        compressedPut(path.join(directory, "catalog", name), bytes);
+      for (const [name, bytes] of details)
+        compressedPut(path.join(output, "catalog-store", name), bytes);
+    }
     if (portraitBytes.length) {
       compressedPut(
         path.join(directory, "catalog/portraits/manifest.json"),
@@ -1152,7 +1164,7 @@ export async function publish({
       // manifest is consumed directly by the host, without a Go annotation.
       available: true,
       region: source.region,
-      version: catalog.version,
+      version,
       assets: packed ? `${prefix}asset-store/` : `${root}assets/`,
       ...(packed
         ? {
@@ -1161,7 +1173,7 @@ export async function publish({
             assetReleaseVersion: packed.catalog.version,
           }
         : {}),
-      catalog: `${root}catalog/index.json`,
+      ...(stage ? { catalog: `${root}catalog/index.json` } : {}),
       provenance: {
         ...coordinateEvidence,
         resourceProvider: source.provider,
@@ -1172,7 +1184,7 @@ export async function publish({
               resourceOrigin: source.resourceOrigin,
             }
           : {}),
-        catalogSha256: sha256(catalogBytes),
+        ...(stage ? { catalogSha256: sha256(catalogBytes) } : {}),
         fixtureMasterSha256: sha256(fixtureBytes),
         controllerIndexSha256: sha256(controllerIndexBytes),
         ...(base ? { baseDescriptorSha256: sha256(baseBytes) } : {}),
