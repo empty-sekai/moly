@@ -129,6 +129,39 @@ console.log(
   `wasm-bindgen version check: Cargo.lock and CLI both ${cliMatch[1]}`,
 );
 
+// The UI font travels next to the engines instead of inside them. Browser
+// builds check the bytes a page installs against the digest and length that
+// crates/moly-game/src/ui_font.rs declares, so both must name this file.
+const uiFontBytes = readFileSync(
+  path.join(
+    workspaceRoot,
+    "crates/moly-game/assets/font/ResourceHanRoundedSC-Medium.subset.ttf",
+  ),
+);
+const uiFont = {
+  path: `fonts/${sha256(uiFontBytes)}.ttf`,
+  sha256: sha256(uiFontBytes),
+  bytes: uiFontBytes.length,
+};
+{
+  const declaration = readFileSync(
+    path.join(workspaceRoot, "crates/moly-game/src/ui_font.rs"),
+    "utf8",
+  );
+  const digest = /UI_FONT_SHA256:\s*&str\s*=\s*"([a-f0-9]{64})"\s*;/.exec(
+    declaration,
+  )?.[1];
+  const length = Number(
+    /UI_FONT_BYTES:\s*usize\s*=\s*([0-9_]+)\s*;/
+      .exec(declaration)?.[1]
+      .replaceAll("_", ""),
+  );
+  if (digest !== uiFont.sha256 || length !== uiFont.bytes)
+    throw new Error(
+      `ui_font.rs declares a different UI font; set UI_FONT_SHA256 = "${uiFont.sha256}" and UI_FONT_BYTES = ${uiFont.bytes}`,
+    );
+}
+
 // release：这份产物就是浏览器要下载的东西；dev 档的 bevy wasm 体积大到不可用。
 // Engine buffer layouts depend on these features at compile time. Each module
 // has the layout for its backend; the bootstrap downloads only the chosen one.
@@ -180,6 +213,7 @@ for (const [backend, features] of [
         profile: profileName,
         sourceFingerprint,
         bindgenVersion: cliMatch[1],
+        uiFont,
         files: Object.fromEntries(
           ["moly-app.js", "moly-app_bg.wasm"].map((name) => [
             name,
@@ -192,4 +226,8 @@ for (const [backend, features] of [
     ) + "\n",
   );
 }
+const uiFontFile = path.join(outDir, uiFont.path);
+mkdirSync(path.dirname(uiFontFile), { recursive: true });
+writeFileSync(uiFontFile, uiFontBytes);
+console.log(`${uiFont.path}: ${uiFont.bytes} bytes`);
 console.log(`output: ${outDir}`);

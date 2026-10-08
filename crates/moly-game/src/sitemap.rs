@@ -1143,7 +1143,7 @@ fn bake_text_atlas(
     chars.sort_unstable();
     chars.dedup();
 
-    let font = swash::FontRef::from_index(FONT_BYTES, 0)
+    let font = swash::FontRef::from_index(&FONT_BYTES, 0)
         .unwrap_or_else(|| panic!("sitemap：仓内字体不是可读的 OpenType 字体"));
     let mut context = swash::scale::ScaleContext::new();
     let mut scaler = context.builder(font).size(BAKE_PPEM).build();

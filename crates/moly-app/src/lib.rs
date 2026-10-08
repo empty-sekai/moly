@@ -150,6 +150,14 @@ fn attach_canvas(app: &mut App) {
     window.fit_canvas_to_parent = true;
 }
 
+/// Installs the release's verified UI font before a browser entry starts.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn install_ui_font(bytes: Vec<u8>) -> Result<(), wasm_bindgen::JsValue> {
+    moly_game::ui_font::install(bytes)
+        .map_err(|error| wasm_bindgen::JsValue::from_str(&error))
+}
+
 /// Starts one browser application synchronously inside the trusted click.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
@@ -170,6 +178,7 @@ pub fn start_stage(backend: &str) -> Result<(), wasm_bindgen::JsValue> {
 #[wasm_bindgen]
 pub fn start_game(backend: &str, seed: &str) -> Result<(), wasm_bindgen::JsValue> {
     let refuse = |error: String| wasm_bindgen::JsValue::from_str(&error);
+    moly_game::ui_font::require().map_err(refuse)?;
     let mut seed = moly_game::parse_game_seed(seed).map_err(refuse)?;
     let source = asset_source::resolve_seed(&seed).map_err(refuse)?;
     let remote = asset_source::resolve_remote_seed(&seed).map_err(refuse)?;
@@ -204,6 +213,7 @@ fn install_panic_hook() {
 
 #[cfg(target_arch = "wasm32")]
 fn start_browser(backend: &str, writable: bool, mode: StartMode) -> Result<(), wasm_bindgen::JsValue> {
+    moly_game::ui_font::require().map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
     install_panic_hook();
     let settings = render_backend::settings(backend)
         .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;

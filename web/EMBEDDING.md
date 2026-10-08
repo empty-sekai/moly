@@ -4,10 +4,17 @@ The browser bundle is a standalone same-origin application. Its HTML, CSS and
 ES modules have no frontend framework dependency. Rust owns the catalogue,
 content eligibility and every playback / cancellation / restoration operation.
 
-Mount `web/` (including both generated `pkg/` backends) at a feature directory,
+Mount `web/` (including both generated `pkg/` backends and `pkg/fonts/`) at a feature directory,
 for example `/moly/`. Mount one complete resource snapshot at an explicit
 same-origin directory. The host chooses the snapshot; never merge CN and JP
 records by numeric ID. The default asset path is `./assets/` beside the page.
+
+Each backend's `build.json` names the shared UI font by SHA-256 and decoded
+length. The shipped loaders fetch it alongside the engine, verify the bytes,
+and call `install_ui_font` after WASM initialization and before any start
+entry. Copy the build records and font with the engines. Direct WASM consumers
+must perform the same installation; a missing or mismatched font refuses
+startup. Native builds continue to carry the font inside the application.
 
 ```js
 import { mountMoly } from "/moly/embed.mjs";

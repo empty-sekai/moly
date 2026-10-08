@@ -1,7 +1,8 @@
 // The loader a product page imports from an immutable release:
 // `<publication>releases/<id>/game-boot.mjs`. It checks the selected source
-// against the release before any engine byte is requested, warms the measured
-// base resources, chooses a renderer and stream-compiles its engine. The page
+// and warms the measured base resources alongside the engine and font download.
+// The engine is initialized only after that source check, with its verified font
+// installed before a start entry is exposed. The page
 // then calls `start(seed)` synchronously inside the user's tap.
 import { warmBaseResources } from "./base-resources.mjs";
 import { preflightCoordinates } from "./coordinate-contract.mjs";
@@ -41,9 +42,19 @@ const SEED_IDENTITY = [
  * URL: mounted on the page origin at `resourcePrefix`, or below an explicit
  * HTTPS resource base on another origin.
  */
-export function gameLocation({ moduleUrl, pageUrl, releaseId, resourcePrefix, snapshot }) {
-  if (!IDENTITY.test(releaseId ?? "")) throw new Error("Invalid game release identity");
-  if (typeof resourcePrefix !== "string" || !/^\/(?:[a-z0-9][a-z0-9._-]*\/)*$/.test(resourcePrefix))
+export function gameLocation({
+  moduleUrl,
+  pageUrl,
+  releaseId,
+  resourcePrefix,
+  snapshot,
+}) {
+  if (!IDENTITY.test(releaseId ?? ""))
+    throw new Error("Invalid game release identity");
+  if (
+    typeof resourcePrefix !== "string" ||
+    !/^\/(?:[a-z0-9][a-z0-9._-]*\/)*$/.test(resourcePrefix)
+  )
     throw new Error("Invalid game resource prefix");
   if (
     !snapshot ||
@@ -53,21 +64,35 @@ export function gameLocation({ moduleUrl, pageUrl, releaseId, resourcePrefix, sn
     (snapshot.packs && !CATALOG.test(snapshot.assetCatalog ?? ""))
   )
     throw new Error("Invalid game snapshot selection");
-  const tail = snapshot.packs ? "asset-store/" : `snapshots/${snapshot.id}/assets/`;
+  const tail = snapshot.packs
+    ? "asset-store/"
+    : `snapshots/${snapshot.id}/assets/`;
   if (snapshot.assets !== resourcePrefix + tail)
     throw new Error("Game snapshot asset routing mismatch");
   const module = new URL(moduleUrl),
     page = new URL(pageUrl);
   const own = `releases/${releaseId}/game-boot.mjs`;
   if (module.origin === page.origin) {
-    if (module.pathname !== resourcePrefix + own || module.search || module.hash)
+    if (
+      module.pathname !== resourcePrefix + own ||
+      module.search ||
+      module.hash
+    )
       throw new Error("Game boot is not the selected immutable release");
-    return { assets: resourcePrefix + tail, resourceBase: null, resourceOrigin: null };
+    return {
+      assets: resourcePrefix + tail,
+      resourceBase: null,
+      resourceOrigin: null,
+    };
   }
   const base = canonicalBase(new URL("../../", module).href);
   if (module.href !== base + own)
     throw new Error("Game boot is not the selected immutable release");
-  return { assets: base + tail, resourceBase: base, resourceOrigin: new URL(base).origin };
+  return {
+    assets: base + tail,
+    resourceBase: base,
+    resourceOrigin: new URL(base).origin,
+  };
 }
 
 /**
@@ -92,7 +117,11 @@ export async function bootGame({
     resourcePrefix,
     snapshot,
   });
-  resourceDirectory(place.assets, pageUrl, place.resourceBase ?? place.resourceOrigin ?? undefined);
+  resourceDirectory(
+    place.assets,
+    pageUrl,
+    place.resourceBase ?? place.resourceOrigin ?? undefined,
+  );
   const identity = Object.freeze({
     schemaVersion: GAME_SCHEMA,
     abi: GAME_ABI,
@@ -109,7 +138,13 @@ export async function bootGame({
   // Installed before the engine module loads, so its output context is tracked.
   const resumeAudio = audioActivation(scope);
   const timings = {};
-  const progress = { phase: "idle", backend: null, engineBytes: 0, baseCompleted: 0, baseTotal: 0 };
+  const progress = {
+    phase: "idle",
+    backend: null,
+    engineBytes: 0,
+    baseCompleted: 0,
+    baseTotal: 0,
+  };
   const report = (phase = progress.phase) => {
     progress.phase = phase;
     onProgress({ ...progress });
@@ -207,7 +242,8 @@ export async function bootGame({
     seed({ writable, documents = {} }) {
       const seeded = {};
       for (const name of GAME_DOCUMENTS)
-        seeded[name] = typeof documents[name] === "string" ? documents[name] : null;
+        seeded[name] =
+          typeof documents[name] === "string" ? documents[name] : null;
       return { ...identity, writable: writable === true, documents: seeded };
     },
     /** Synchronous: call it inside the trusted tap, after the page's own
@@ -222,14 +258,20 @@ export async function bootGame({
         !seed.documents ||
         Object.keys(seed.documents).length !== GAME_DOCUMENTS.length ||
         GAME_DOCUMENTS.some(
-          (name) => seed.documents[name] !== null && typeof seed.documents[name] !== "string",
+          (name) =>
+            seed.documents[name] !== null &&
+            typeof seed.documents[name] !== "string",
         )
       )
         throw new Error("Seed does not match the booted release and snapshot");
       started = true;
       mark("gameStart");
       module.start_game(backend, JSON.stringify(seed));
-      return createGameController({ wasm: module, post, writable: seed.writable });
+      return createGameController({
+        wasm: module,
+        post,
+        writable: seed.writable,
+      });
     },
   };
 }

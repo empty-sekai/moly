@@ -433,7 +433,7 @@ pub(crate) fn bake_atlas(
     else {
         return;
     };
-    let font = swash::FontRef::from_index(FONT_BYTES, 0)
+    let font = swash::FontRef::from_index(&FONT_BYTES, 0)
         .unwrap_or_else(|| panic!("仓内字体不是可读的 OpenType 字体"));
     let mut chars: Vec<char> = tables
         .tweets()
@@ -2375,7 +2375,7 @@ mod embedded_font_coverage_tests {
     use super::FONT_BYTES;
     #[test]
     fn embedded_subset_contains_japanese_voicing_and_common_kanji() {
-        let font=swash::FontRef::from_index(FONT_BYTES,0).expect("valid embedded OFL font");
+        let font=swash::FontRef::from_index(&FONT_BYTES,0).expect("valid embedded OFL font");
         // Previously absent from the CN-only subset, creating silent holes in
         // Japanese dialogue despite Playing/scene-ready being true.
         for codepoint in [0x304C_u32,0x3054,0x3069,0x3060,0x3053,0x9055,0x6575] {

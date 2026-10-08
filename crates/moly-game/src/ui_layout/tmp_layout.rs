@@ -741,7 +741,7 @@ fn prepare(input: &str, array: &[(char, usize)], settings: &Settings) -> Result<
 
 fn font() -> swash::FontRef<'static> {
     static VALUE: OnceLock<swash::FontRef<'static>> = OnceLock::new();
-    *VALUE.get_or_init(|| swash::FontRef::from_index(FONT, 0).expect("embedded UI font"))
+    *VALUE.get_or_init(|| swash::FontRef::from_index(&FONT, 0).expect("embedded UI font"))
 }
 
 #[derive(Clone, Copy, Default)]

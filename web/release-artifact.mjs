@@ -20,7 +20,11 @@ import {
 import { contentKey, EMBED_VERSION } from "./embed-contract.mjs";
 import { workspaceFingerprint, sha256 } from "./build-source.mjs";
 import { isDeepStrictEqual } from "node:util";
-import { COORDINATE_CONTRACT, requireCoordinateContract, validateCoordinatePair } from "./coordinate-contract.mjs";
+import {
+  COORDINATE_CONTRACT,
+  requireCoordinateContract,
+  validateCoordinatePair,
+} from "./coordinate-contract.mjs";
 import { validatePublicationCoordinates } from "./coordinate-publication.mjs";
 import { bundleCacheWorkerFiles } from "./cache-worker-bundle.mjs";
 import { GAME_ABI, GAME_EXPORTS } from "./game-controller.mjs";
@@ -87,11 +91,17 @@ export function toLogicalResourceManifest(manifest) {
   if (!manifest || typeof manifest !== "object")
     throw new TypeError("Invalid release manifest");
   const logical = structuredClone(manifest);
-  const logicalPath = value => {
+  const logicalPath = (value) => {
     if (typeof value !== "string")
       throw new Error("Manifest contains a non-canonical Moly resource path");
-    const result = value.startsWith("/moly/") ? value.slice("/moly/".length) : value;
-    if (!/^(?:releases|snapshots)\/[a-z0-9][a-z0-9._-]{0,95}\/|^asset-store\/$/.test(result))
+    const result = value.startsWith("/moly/")
+      ? value.slice("/moly/".length)
+      : value;
+    if (
+      !/^(?:releases|snapshots)\/[a-z0-9][a-z0-9._-]{0,95}\/|^asset-store\/$/.test(
+        result,
+      )
+    )
       throw new Error("Manifest contains a non-canonical Moly resource path");
     return result;
   };
@@ -107,8 +117,10 @@ export function toLogicalResourceManifest(manifest) {
     for (const snapshot of logical.snapshots) {
       if (!snapshot || typeof snapshot !== "object")
         throw new Error("Manifest contains an invalid snapshot");
-      if (snapshot.assets !== undefined) snapshot.assets = logicalPath(snapshot.assets);
-      if (snapshot.catalog !== undefined) snapshot.catalog = logicalPath(snapshot.catalog);
+      if (snapshot.assets !== undefined)
+        snapshot.assets = logicalPath(snapshot.assets);
+      if (snapshot.catalog !== undefined)
+        snapshot.catalog = logicalPath(snapshot.catalog);
     }
   }
   return logical;
@@ -116,71 +128,124 @@ export function toLogicalResourceManifest(manifest) {
 const MAGIC = Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]);
 const PORTRAIT_MIGRATION_BASELINE = "f79162417628b26ec54155f698a4f197d27c6fcb";
 const COORDINATE_METADATA_ADDITIONS = [
-  "asset.extras.coordinateContract", "asset.extras.coordinateUnits",
-  "sceneRoots[].extras.coordinateContract", "sceneRoots[].extras.coordinateUnits",
+  "asset.extras.coordinateContract",
+  "asset.extras.coordinateUnits",
+  "sceneRoots[].extras.coordinateContract",
+  "sceneRoots[].extras.coordinateUnits",
 ];
 
 function portraitGlb(bytes) {
-  if (bytes.length < 20 || bytes.toString("ascii", 0, 4) !== "glTF" ||
-      bytes.readUInt32LE(4) !== 2 || bytes.readUInt32LE(8) !== bytes.length ||
-      bytes.toString("ascii", 16, 20) !== "JSON")
+  if (
+    bytes.length < 20 ||
+    bytes.toString("ascii", 0, 4) !== "glTF" ||
+    bytes.readUInt32LE(4) !== 2 ||
+    bytes.readUInt32LE(8) !== bytes.length ||
+    bytes.toString("ascii", 16, 20) !== "JSON"
+  )
     throw new Error("Invalid portrait migration GLB");
   const end = 20 + bytes.readUInt32LE(12);
-  if (end > bytes.length || end % 4) throw new Error("Truncated portrait migration GLB");
+  if (end > bytes.length || end % 4)
+    throw new Error("Truncated portrait migration GLB");
   let offset = end;
   while (offset < bytes.length) {
-    if (offset + 8 > bytes.length) throw new Error("Truncated portrait GLB chunk");
+    if (offset + 8 > bytes.length)
+      throw new Error("Truncated portrait GLB chunk");
     const length = bytes.readUInt32LE(offset);
-    if (length % 4 || offset + 8 + length > bytes.length ||
-        bytes.toString("ascii", offset + 4, offset + 8) === "JSON")
+    if (
+      length % 4 ||
+      offset + 8 + length > bytes.length ||
+      bytes.toString("ascii", offset + 4, offset + 8) === "JSON"
+    )
       throw new Error("Invalid portrait GLB binary chunk");
     offset += 8 + length;
   }
-  return { document: JSON.parse(bytes.subarray(20, end)), tail: bytes.subarray(end) };
+  return {
+    document: JSON.parse(bytes.subarray(20, end)),
+    tail: bytes.subarray(end),
+  };
 }
 
 /** Only metadata-only migration of the exact captured character may reuse a portrait.
  * The original bytes are required; receipt declarations alone are not evidence.
  * No capture facts or image bytes are rewritten, and the original model hash stays.
  */
-export function verifyPortraitCoordinateMigration({ photo, currentBytes, originalBytes, receiptBytes }) {
-  const fail = () => { throw new Error(`Unverified portrait coordinate migration: ${photo.model}`); };
+export function verifyPortraitCoordinateMigration({
+  photo,
+  currentBytes,
+  originalBytes,
+  receiptBytes,
+}) {
+  const fail = () => {
+    throw new Error(`Unverified portrait coordinate migration: ${photo.model}`);
+  };
   if (!/^sd_\d+\.glb$/.test(photo.model)) fail();
   const receipt = JSON.parse(receiptBytes);
-  const rows = receipt.files?.filter(row => row.path === photo.model);
+  const rows = receipt.files?.filter((row) => row.path === photo.model);
   const row = rows?.length === 1 ? rows[0] : null;
-  const originalHash = sha256(originalBytes), currentHash = sha256(currentBytes);
+  const originalHash = sha256(originalBytes),
+    currentHash = sha256(currentBytes);
   const captureHash = photo.originalModelSha256 ?? photo.modelSha256;
-  const digest = value => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
-  if (receipt.coordinateContract !== COORDINATE_CONTRACT ||
-      receipt.baselineCommit !== PORTRAIT_MIGRATION_BASELINE ||
-      receipt.status !== "complete" || receipt.verifiedMetadataOnly !== true ||
-      !row || row.family !== "character" || row.generator !== "moly-root character extractor" ||
-      row.sourceSha256 !== originalHash || row.outputSha256 !== currentHash ||
-      captureHash !== originalHash ||
-      row.machineCheck?.originalJsonPreserved !== true ||
-      row.machineCheck?.binaryChunksPreserved !== true ||
-      !isDeepStrictEqual(row.machineCheck?.addedMetadata, COORDINATE_METADATA_ADDITIONS) ||
-      !digest(row.originalJsonSha256) ||
-      row.originalJsonSha256 !== row.outputJsonWithoutAddedMetadataSha256) fail();
+  const digest = (value) =>
+    typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+  if (
+    receipt.coordinateContract !== COORDINATE_CONTRACT ||
+    receipt.baselineCommit !== PORTRAIT_MIGRATION_BASELINE ||
+    receipt.status !== "complete" ||
+    receipt.verifiedMetadataOnly !== true ||
+    !row ||
+    row.family !== "character" ||
+    row.generator !== "moly-root character extractor" ||
+    row.sourceSha256 !== originalHash ||
+    row.outputSha256 !== currentHash ||
+    captureHash !== originalHash ||
+    row.machineCheck?.originalJsonPreserved !== true ||
+    row.machineCheck?.binaryChunksPreserved !== true ||
+    !isDeepStrictEqual(
+      row.machineCheck?.addedMetadata,
+      COORDINATE_METADATA_ADDITIONS,
+    ) ||
+    !digest(row.originalJsonSha256) ||
+    row.originalJsonSha256 !== row.outputJsonWithoutAddedMetadataSha256
+  )
+    fail();
 
-  const original = portraitGlb(originalBytes), current = portraitGlb(currentBytes);
-  if (original.document.asset?.generator !== row.generator ||
-      original.document.asset?.extras?.coordinates !== "unity x-axis reflected" ||
-      !original.tail.equals(current.tail) ||
-      row.binaryChunksSha256 !== sha256(original.tail) ||
-      row.outputBinaryChunksSha256 !== sha256(current.tail)) fail();
+  const original = portraitGlb(originalBytes),
+    current = portraitGlb(currentBytes);
+  if (
+    original.document.asset?.generator !== row.generator ||
+    original.document.asset?.extras?.coordinates !== "unity x-axis reflected" ||
+    !original.tail.equals(current.tail) ||
+    row.binaryChunksSha256 !== sha256(original.tail) ||
+    row.outputBinaryChunksSha256 !== sha256(current.tail)
+  )
+    fail();
   const restored = structuredClone(current.document);
-  const indices = new Set(original.document.scenes?.flatMap(scene => scene.nodes ?? []) ?? []);
-  const pairs = [[original.document.asset, restored.asset],
-    ...Array.from(indices, index => [original.document.nodes?.[index], restored.nodes?.[index]])];
+  const indices = new Set(
+    original.document.scenes?.flatMap((scene) => scene.nodes ?? []) ?? [],
+  );
+  const pairs = [
+    [original.document.asset, restored.asset],
+    ...Array.from(indices, (index) => [
+      original.document.nodes?.[index],
+      restored.nodes?.[index],
+    ]),
+  ];
   for (const [before, after] of pairs) {
-    if (!before || !after || !after.extras ||
-        after.extras.coordinateContract !== COORDINATE_CONTRACT ||
-        after.extras.coordinateUnits !== "source-unity-unit") fail();
+    if (
+      !before ||
+      !after ||
+      !after.extras ||
+      after.extras.coordinateContract !== COORDINATE_CONTRACT ||
+      after.extras.coordinateUnits !== "source-unity-unit"
+    )
+      fail();
     for (const key of ["coordinateContract", "coordinateUnits"])
       if (!Object.hasOwn(before.extras ?? {}, key)) delete after.extras[key];
-    if (!Object.hasOwn(before, "extras") && Object.keys(after.extras).length === 0) delete after.extras;
+    if (
+      !Object.hasOwn(before, "extras") &&
+      Object.keys(after.extras).length === 0
+    )
+      delete after.extras;
   }
   // Exact original JSON (including arbitrary extras, animations and materials)
   // and every non-JSON chunk must be preserved. Only the four named additions
@@ -198,10 +263,23 @@ export function verifyPortraitCoordinateMigration({ photo, currentBytes, origina
     binaryChunksPreserved: true,
     addedMetadata: COORDINATE_METADATA_ADDITIONS,
   };
-  if (photo.originalModelSha256 !== undefined &&
-      (photo.modelSha256 !== currentHash || !isDeepStrictEqual(photo.modelMigration, proof))) fail();
-  if (photo.modelMigration !== undefined && photo.originalModelSha256 === undefined) fail();
-  return { ...photo, originalModelSha256: originalHash, modelSha256: currentHash, modelMigration: proof };
+  if (
+    photo.originalModelSha256 !== undefined &&
+    (photo.modelSha256 !== currentHash ||
+      !isDeepStrictEqual(photo.modelMigration, proof))
+  )
+    fail();
+  if (
+    photo.modelMigration !== undefined &&
+    photo.originalModelSha256 === undefined
+  )
+    fail();
+  return {
+    ...photo,
+    originalModelSha256: originalHash,
+    modelSha256: currentHash,
+    modelMigration: proof,
+  };
 }
 
 function leb(bytes, offset) {
@@ -258,7 +336,12 @@ export const DETAIL_STORE = "/moly/catalog-store/";
 export function detailBundle(key) {
   return parseInt(sha256(Buffer.from(key)).slice(0, 8), 16) % DETAIL_BUNDLES;
 }
-export function splitCatalog(raw, snapshotId, publishImage = (image) => image, detailStore = DETAIL_STORE) {
+export function splitCatalog(
+  raw,
+  snapshotId,
+  publishImage = (image) => image,
+  detailStore = DETAIL_STORE,
+) {
   if (
     raw.schemaVersion !== 1 ||
     raw.ready !== true ||
@@ -355,21 +438,34 @@ function put(file, bytes) {
       throw new Error(`Refusing to mutate an immutable artifact: ${file}`);
   } else writeFileSync(file, bytes, { flag: "wx" });
 }
+// The engines and the UI font are large, immutable and downloaded by every
+// client: they are compressed once, at Brotli's highest quality and a 16 MiB
+// window. Browsers select br or gzip; no runtime decompressor is added.
+const brotliOutputs = new Map();
+export function engineBrotli(bytes) {
+  const key = sha256(bytes);
+  if (!brotliOutputs.has(key))
+    brotliOutputs.set(
+      key,
+      brotliCompressSync(bytes, {
+        params: {
+          [zlibConstants.BROTLI_PARAM_QUALITY]: 11,
+          [zlibConstants.BROTLI_PARAM_LGWIN]: 24,
+          [zlibConstants.BROTLI_PARAM_SIZE_HINT]: bytes.length,
+        },
+      }),
+    );
+  return brotliOutputs.get(key);
+}
 function compressedPut(file, bytes) {
   put(file, bytes);
   const gzip = gzipSync(bytes, { level: 9 });
   put(`${file}.gz`, gzip);
-  // Precompress only large executable payloads. Browsers select br or gzip;
-  // no runtime decompressor or WASM bytes are added to the JavaScript bundle.
-  if (file.endsWith(".wasm"))
-    put(
-      `${file}.br`,
-      brotliCompressSync(bytes, {
-        params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 9 },
-      }),
-    );
+  if (file.endsWith(".wasm") || file.endsWith(".ttf"))
+    put(`${file}.br`, engineBrotli(bytes));
   return { downloadBytes: gzip.length, decodedBytes: bytes.length };
 }
+const UI_FONT_PATH = /^fonts\/([a-f0-9]{64})\.ttf$/;
 
 /** Build artifacts only; proprietary source resources remain outside git/images. */
 export async function publish({
@@ -407,45 +503,86 @@ export async function publish({
   if (retained && retained.publisher !== "moly-release-artifact-v1")
     throw new Error("Output contains an unrelated manifest");
   if (reuseSnapshots) {
-    if (sources !== undefined || !retained || retained.schemaVersion !== EMBED_VERSION ||
-        !Array.isArray(retained.snapshots) || retained.snapshots.length < 1 || retained.snapshots.length > 2 ||
-        retained.snapshots.some((snapshot) =>
+    if (
+      sources !== undefined ||
+      !retained ||
+      retained.schemaVersion !== EMBED_VERSION ||
+      !Array.isArray(retained.snapshots) ||
+      retained.snapshots.length < 1 ||
+      retained.snapshots.length > 2 ||
+      retained.snapshots.some(
+        (snapshot) =>
           !/^[a-z0-9][a-z0-9._-]{0,95}$/.test(snapshot.id) ||
           !["cn", "jp"].includes(snapshot.region) ||
           !/^\d+\.\d+\.\d+$/.test(snapshot.version) ||
-          snapshot.catalog !== `${prefix}snapshots/${snapshot.id}/catalog/index.json` ||
-          snapshot.assets !== (snapshot.packs ? `${prefix}asset-store/` : `${prefix}snapshots/${snapshot.id}/assets/`)))
-      throw new Error("Cannot reuse an unverified source-qualified publication");
+          snapshot.catalog !==
+            `${prefix}snapshots/${snapshot.id}/catalog/index.json` ||
+          snapshot.assets !==
+            (snapshot.packs
+              ? `${prefix}asset-store/`
+              : `${prefix}snapshots/${snapshot.id}/assets/`),
+      )
+    )
+      throw new Error(
+        "Cannot reuse an unverified source-qualified publication",
+      );
     const regions = new Set();
     for (const snapshot of retained.snapshots) {
       validateCoordinatePair(retained.release, snapshot);
-      if (regions.has(snapshot.region)) throw new Error("Duplicate retained source region");
+      if (regions.has(snapshot.region))
+        throw new Error("Duplicate retained source region");
       regions.add(snapshot.region);
       const root = path.join(output, "snapshots", snapshot.id);
       const descriptor = json(path.join(root, "snapshot.json"));
       validateCoordinatePair(retained.release, descriptor);
-      if (!isDeepStrictEqual(descriptor, snapshot)) throw new Error("Retained coordinate descriptor differs from manifest");
+      if (!isDeepStrictEqual(descriptor, snapshot))
+        throw new Error("Retained coordinate descriptor differs from manifest");
       const catalog = json(path.join(root, "catalog/index.json"));
-      if (![1, 2].includes(catalog.schemaVersion) || catalog.snapshotId !== snapshot.id ||
-          catalog.region !== snapshot.region || catalog.version !== snapshot.version)
+      if (
+        ![1, 2].includes(catalog.schemaVersion) ||
+        catalog.snapshotId !== snapshot.id ||
+        catalog.region !== snapshot.region ||
+        catalog.version !== snapshot.version
+      )
         throw new Error("Retained catalog source mismatch");
       if (!snapshot.packs) {
         const fixture = json(path.join(root, "assets/mysekai-fixtures.json"));
-        if (fixture.region !== snapshot.region || fixture.gameVersion !== snapshot.version)
+        if (
+          fixture.region !== snapshot.region ||
+          fixture.gameVersion !== snapshot.version
+        )
           throw new Error("Retained asset source mismatch");
-        const checked = validatePublicationCoordinates(path.join(root, "assets"), { region: snapshot.region, version: snapshot.version });
-        if (!isDeepStrictEqual(checked.coordinateDocuments, snapshot.provenance.coordinateDocuments) || !isDeepStrictEqual(checked.coordinateModels, snapshot.provenance.coordinateModels))
+        const checked = validatePublicationCoordinates(
+          path.join(root, "assets"),
+          { region: snapshot.region, version: snapshot.version },
+        );
+        if (
+          !isDeepStrictEqual(
+            checked.coordinateDocuments,
+            snapshot.provenance.coordinateDocuments,
+          ) ||
+          !isDeepStrictEqual(
+            checked.coordinateModels,
+            snapshot.provenance.coordinateModels,
+          )
+        )
           throw new Error("Retained coordinate evidence changed");
       }
     }
-  } else if (!Array.isArray(sources) || sources.length < 1 || sources.length > 5)
+  } else if (
+    !Array.isArray(sources) ||
+    sources.length < 1 ||
+    sources.length > 5
+  )
     throw new Error("Publish one to five explicit region snapshots");
   // A shell-only release reuses an engine that was already published and
   // verified, rather than rebuilding one: the reused bytes are checked against
   // the integrity record of the release they come from, and the fingerprint
   // recorded here stays the one that actually produced that engine.
   const reusedId =
-    reuseEngine === true ? (retained?.release?.id ?? null) : reuseEngine || null;
+    reuseEngine === true
+      ? (retained?.release?.id ?? null)
+      : reuseEngine || null;
   if (reuseEngine && !/^[a-z0-9][a-z0-9._-]{0,95}$/.test(reusedId ?? ""))
     throw new Error("Cannot reuse an engine from an unnamed release");
   const reusedRoot = reusedId ? path.join(output, "releases", reusedId) : null;
@@ -453,7 +590,8 @@ export async function publish({
     ? json(path.join(reusedRoot, "integrity.json"))
     : null;
   if (reused) requireCoordinateContract(reused, "reused engine");
-  if (reused && reused.releaseId !== reusedId) throw new Error("Reused coordinate engine identity mismatch");
+  if (reused && reused.releaseId !== reusedId)
+    throw new Error("Reused coordinate engine identity mismatch");
   if (
     reused &&
     (reused.schemaVersion !== 1 || reused.contractVersion !== EMBED_VERSION)
@@ -463,22 +601,33 @@ export async function publish({
     ? reused.sourceFingerprint
     : workspaceFingerprint(workspace);
   const files = new Map(),
-    engines = {};
+    engines = {},
+    uiFonts = {};
   for (const profile of profiles)
     for (const relative of PROFILES[profile].files)
       if (!files.has(relative))
-        files.set(relative, readFileSync(path.join(workspace, "web", relative)));
+        files.set(
+          relative,
+          readFileSync(path.join(workspace, "web", relative)),
+        );
   for (const backend of ["webgpu", "webgl2"]) {
     const directory = reused
       ? path.join(reusedRoot, "pkg", backend)
       : path.join(packageRoot, backend);
-    const build = json(path.join(directory, "build.json"));
+    const buildBytes = readFileSync(path.join(directory, "build.json"));
+    if (
+      reused &&
+      sha256(buildBytes) !== reused.hashes[`pkg/${backend}/build.json`]
+    )
+      throw new Error(`Changed ${backend} build record`);
+    const build = JSON.parse(buildBytes);
     if (
       build.schemaVersion !== 1 ||
       build.backend !== backend ||
       build.sourceFingerprint !== sourceFingerprint
     )
       throw new Error(`Stale ${backend} build; run web/build-wasm.mjs`);
+    if (build.uiFont !== undefined) uiFonts[backend] = build.uiFont;
     for (const name of ["moly-app.js", "moly-app_bg.wasm"]) {
       const original = readFileSync(path.join(directory, name));
       if (
@@ -509,10 +658,12 @@ export async function publish({
           for (const entry of PROFILES[profile].abi)
             if (!exports.includes(entry))
               throw new Error(`Missing ${profile} ABI: ${entry}`);
+        if (build.uiFont !== undefined && !exports.includes("install_ui_font"))
+          throw new Error(
+            `The ${backend} engine names a UI font but cannot install one`,
+          );
         const gzipBytes = gzipSync(bytes, { level: 9 }).length;
-        const brotliBytes = brotliCompressSync(bytes, {
-          params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 9 },
-        }).length;
+        const brotliBytes = engineBrotli(bytes).length;
         engines[backend] = {
           downloadBytes: brotliBytes,
           brotliBytes,
@@ -524,10 +675,38 @@ export async function publish({
     }
     files.set(
       `pkg/${backend}/build.json`,
-      reused
-        ? readFileSync(path.join(directory, "build.json"))
-        : Buffer.from(JSON.stringify(build)),
+      reused ? buildBytes : Buffer.from(JSON.stringify(build)),
     );
+  }
+  // Engines built with an installable UI font name it in their build record;
+  // both backends must name the same file, published once below pkg/.
+  const fontRecords = Object.values(uiFonts);
+  if (fontRecords.length) {
+    const [font] = fontRecords;
+    if (
+      fontRecords.length !== 2 ||
+      fontRecords.some((record) => !isDeepStrictEqual(record, font)) ||
+      !font ||
+      typeof font !== "object" ||
+      Array.isArray(font) ||
+      UI_FONT_PATH.exec(font.path ?? "")?.[1] !== font.sha256 ||
+      !Number.isSafeInteger(font.bytes) ||
+      font.bytes <= 0 ||
+      font.bytes > 64 * 1024 * 1024
+    )
+      throw new Error("Both engines must name the same valid UI font");
+    const bytes = readFileSync(
+      reused
+        ? path.join(reusedRoot, "pkg", font.path)
+        : path.join(packageRoot, font.path),
+    );
+    if (
+      bytes.length !== font.bytes ||
+      sha256(bytes) !== font.sha256 ||
+      (reused && reused.hashes[`pkg/${font.path}`] !== font.sha256)
+    )
+      throw new Error(`Changed UI font: ${font.path}`);
+    files.set(`pkg/${font.path}`, bytes);
   }
   const hashes = Object.fromEntries(
     [...files].map(([name, bytes]) => [name, sha256(bytes)]),
@@ -553,7 +732,9 @@ export async function publish({
       ),
     ),
   );
-  const snapshots = reuseSnapshots ? retained.snapshots.map((snapshot) => ({ ...snapshot })) : [],
+  const snapshots = reuseSnapshots
+      ? retained.snapshots.map((snapshot) => ({ ...snapshot }))
+      : [],
     regions = new Set();
   for (const specification of sources ?? []) {
     const source = await resolveResourceSource(specification, {
@@ -583,7 +764,10 @@ export async function publish({
       : {};
     if (provenance.source?.region && provenance.source.region !== source.region)
       throw new Error("Source manifest region mismatch");
-    const coordinateEvidence = validatePublicationCoordinates(assets, { region: source.region, version: catalog.version });
+    const coordinateEvidence = validatePublicationCoordinates(assets, {
+      region: source.region,
+      version: catalog.version,
+    });
     const controllerIndexBytes = readFileSync(
       path.join(assets, "fixture-gimmick/browser-index.json"),
     );
@@ -671,7 +855,11 @@ export async function publish({
         photos.portraits.length !== entities.size
       )
         throw new Error("Incomplete source-rendered portrait set");
-      for (let photoIndex = 0; photoIndex < photos.portraits.length; photoIndex++) {
+      for (
+        let photoIndex = 0;
+        photoIndex < photos.portraits.length;
+        photoIndex++
+      ) {
         let photo = photos.portraits[photoIndex];
         if (
           !entities.delete(photo.unit) ||
@@ -699,16 +887,32 @@ export async function publish({
           throw new Error("Portrait must be a real 512 x 512 RGBA PNG");
         if (photos.generator === "moly-root-chara-head-v1") {
           const currentModel = readFileSync(path.join(assets, photo.model));
-          if (photo.modelSha256 !== sha256(currentModel) ||
-              photo.originalModelSha256 !== undefined || photo.modelMigration !== undefined) {
+          if (
+            photo.modelSha256 !== sha256(currentModel) ||
+            photo.originalModelSha256 !== undefined ||
+            photo.modelMigration !== undefined
+          ) {
             if (!source.portraitModelOriginals)
-              throw new Error("Portrait model changed; explicit portraitModelOriginals required for metadata-only proof");
+              throw new Error(
+                "Portrait model changed; explicit portraitModelOriginals required for metadata-only proof",
+              );
             originalModels ??= realpathSync(source.portraitModelOriginals);
-            const originalPath = realpathSync(path.join(originalModels, photo.model));
-            if (!inside(originalModels, originalPath)) throw new Error("Original portrait model escaped its source folder");
-            migrationReceipt ??= readFileSync(path.join(assets, "coordinate-migration-receipt.json"));
-            photo = verifyPortraitCoordinateMigration({ photo, currentBytes: currentModel,
-              originalBytes: readFileSync(originalPath), receiptBytes: migrationReceipt });
+            const originalPath = realpathSync(
+              path.join(originalModels, photo.model),
+            );
+            if (!inside(originalModels, originalPath))
+              throw new Error(
+                "Original portrait model escaped its source folder",
+              );
+            migrationReceipt ??= readFileSync(
+              path.join(assets, "coordinate-migration-receipt.json"),
+            );
+            photo = verifyPortraitCoordinateMigration({
+              photo,
+              currentBytes: currentModel,
+              originalBytes: readFileSync(originalPath),
+              receiptBytes: migrationReceipt,
+            });
             photos.portraits[photoIndex] = photo;
             migratedPortraits = true;
           }
@@ -731,7 +935,8 @@ export async function publish({
         throw new Error("Source SD entities are missing portraits");
       if (migratedPortraits) {
         portraitBytes = Buffer.from(JSON.stringify(photos, null, 2) + "\n");
-        if (portraitBytes.length > 262144) throw new Error("Migrated portrait index is too large");
+        if (portraitBytes.length > 262144)
+          throw new Error("Migrated portrait index is too large");
       }
     }
     const packed =
@@ -748,7 +953,9 @@ export async function publish({
         "mysekai-fixtures.json",
         "manifest.json",
         "fixture-gimmick/browser-index.json",
-        "source.json", "fixture-models/index.json", "fixture-attach/attach-points.json",
+        "source.json",
+        "fixture-models/index.json",
+        "fixture-attach/attach-points.json",
       ])
         if (!packed.entries.has(required))
           throw new Error(
@@ -780,7 +987,9 @@ export async function publish({
             // A store serves no logical URLs; name the image by content.
             const entry = packed.entries.get(image);
             if (entry?.codec !== "identity")
-              throw new Error(`Pinned pack cannot serve catalog image: ${image}`);
+              throw new Error(
+                `Pinned pack cannot serve catalog image: ${image}`,
+              );
             return `${prefix}asset-store/blobs/${entry.blob}`;
           }
         : undefined,
@@ -974,14 +1183,16 @@ export async function publish({
         abi: GAME_ABI,
         coordinateContract: COORDINATE_CONTRACT,
       },
-      snapshots: snapshots.map(({ id, region, version, assets, packs, assetCatalog }) => ({
-        id,
-        region,
-        version,
-        assets,
-        packs: packs === true,
-        assetCatalog: packs === true ? assetCatalog : null,
-      })),
+      snapshots: snapshots.map(
+        ({ id, region, version, assets, packs, assetCatalog }) => ({
+          id,
+          region,
+          version,
+          assets,
+          packs: packs === true,
+          assetCatalog: packs === true ? assetCatalog : null,
+        }),
+      ),
     };
     const pointerPath = path.join(output, "game", "manifest.json");
     mkdirSync(path.dirname(pointerPath), { recursive: true });
