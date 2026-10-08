@@ -42,33 +42,3 @@ export async function selectRenderer(
     throw new Error(`${requested === "auto" ? gpuFailure + "; " : ""}${error}`);
   }
 }
-
-// One writable document per origin; other tabs can explore without saving.
-// A localStorage flag is not a lock and must not replace this lease.
-export async function holdSettingsWriter(locks) {
-  if (!locks?.request) return { writable: false, release() {} };
-  return new Promise((resolve) => {
-    try {
-      locks
-        .request(
-          "moly-settings-write",
-          { mode: "exclusive", ifAvailable: true },
-          async (lock) => {
-            if (!lock) {
-              resolve({ writable: false, release() {} });
-              return;
-            }
-            let release;
-            const lifetime = new Promise((done) => {
-              release = done;
-            });
-            resolve({ writable: true, release });
-            await lifetime;
-          },
-        )
-        .catch(() => resolve({ writable: false, release() {} }));
-    } catch {
-      resolve({ writable: false, release() {} });
-    }
-  });
-}

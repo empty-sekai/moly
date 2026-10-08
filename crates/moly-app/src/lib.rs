@@ -13,10 +13,11 @@ use bevy::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::wasm_bindgen;
 
-/// What one start installs. The native window and the legacy browser pages
+/// What one start installs. The native window and embedded stage
 /// read their inputs from env or the page URL and carry developer tools; the
 /// browser game reads only its seed and carries none.
 enum StartMode {
+    #[cfg(not(target_arch = "wasm32"))]
     Library,
     #[cfg(target_arch = "wasm32")]
     Stage,
@@ -129,7 +130,7 @@ fn fail_loud(message: &str) -> ! {
     panic!("moly-app: {message}");
 }
 
-/// 认领 `index.html` 里的 `#app-canvas`。主窗实体由 DefaultPlugins 在
+/// 认领宿主页面里的 `#app-canvas`。主窗实体由 DefaultPlugins 在
 /// build 时生成，但裸窗到 runner 的 `resumed()` 才创建、届时才读 `canvas`
 /// 选择器（找不到元素会 panic）——所以在 `run()` 之前改主窗仍然生效，
 /// 不必为 canvas 给 moly-game 开配置口。
@@ -158,18 +159,17 @@ pub fn install_ui_font(bytes: Vec<u8>) -> Result<(), wasm_bindgen::JsValue> {
         .map_err(|error| wasm_bindgen::JsValue::from_str(&error))
 }
 
-/// Starts one browser application synchronously inside the trusted click.
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen]
-pub fn start(backend: &str, writable: bool) -> Result<(), wasm_bindgen::JsValue> {
-    start_browser(backend, writable, StartMode::Library)
-}
-
 /// Read-only stage entry; no second player/runtime is installed.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn start_stage(backend: &str) -> Result<(), wasm_bindgen::JsValue> {
-    start_browser(backend, false, StartMode::Stage)
+    moly_game::ui_font::require().map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
+    install_panic_hook();
+    let settings = render_backend::settings(backend)
+        .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
+    moly_game::set_browser_storage_writable(false);
+    run_app(settings, StartMode::Stage);
+    Ok(())
 }
 
 /// Starts the browser game from its seed, synchronously inside the trusted
@@ -211,24 +211,7 @@ fn install_panic_hook() {
     }));
 }
 
-#[cfg(target_arch = "wasm32")]
-fn start_browser(backend: &str, writable: bool, mode: StartMode) -> Result<(), wasm_bindgen::JsValue> {
-    moly_game::ui_font::require().map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
-    install_panic_hook();
-    let settings = render_backend::settings(backend)
-        .map_err(|error| wasm_bindgen::JsValue::from_str(&error))?;
-    set_storage_writable(writable);
-    run_app(settings, mode);
-    Ok(())
-}
-
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen]
-pub fn set_storage_writable(writable: bool) {
-    moly_game::set_browser_storage_writable(writable);
-}
-
-/// Library and player-data intents belong to the legacy pages.
+/// Library and player-data intents belong to the embedded stage.
 #[cfg(target_arch = "wasm32")]
 fn refuse_in_game() -> Result<(), wasm_bindgen::JsValue> {
     if moly_game::game_mode_active() {

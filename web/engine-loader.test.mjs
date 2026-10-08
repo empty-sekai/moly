@@ -2,6 +2,25 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { loadEngine, fetchUiFont, installUiFont } from "./engine-loader.mjs";
+import { selectRenderer } from "./boot.mjs";
+
+test("automatic renderer fallback releases its probe context", async () => {
+  let lost = false;
+  const result = await selectRenderer("auto", {
+    navigator: { gpu: { requestAdapter: async () => null } },
+    document: {
+      createElement: () => ({
+        getContext: () => ({
+          getExtension: () => ({
+            loseContext() { lost = true; },
+          }),
+        }),
+      }),
+    },
+  });
+  assert.equal(result.backend, "webgl2");
+  assert.equal(lost, true);
+});
 
 // A loader run with fake renderer, module and transport. `prepare` is the
 // source preflight; `gate` holds it until the test releases it.

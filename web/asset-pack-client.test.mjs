@@ -10,7 +10,6 @@ import {
 } from "./asset-pack-client.mjs";
 import { resourceIdentity } from "./cache-worker.mjs";
 import { warmBaseResources } from "./base-resources.mjs";
-import { snapshotUrl } from "./snapshots.mjs";
 
 // Golden bytes were produced by the Python packer, not this JavaScript reader.
 const golden = JSON.parse(
@@ -324,22 +323,9 @@ test("mutable selectors are excluded while different releases share one immutabl
     );
 });
 
-test("snapshot switching keeps the same store but changes the pinned catalog, and clears stale selection", () => {
-  const cn = golden.index.catalogs.cn.id,
-    jp = golden.index.catalogs.jp.id;
-  const initial = `https://pack.test/moly/?assets=/moly/asset-store/&packs=1&asset_catalog=${cn}&fixture=99`;
-  const switched = new URL(
-    snapshotUrl(initial, "/moly/asset-store/", {
-      packs: true,
-      assetCatalog: jp,
-    }),
-  );
-  assert.equal(switched.searchParams.get("asset_catalog"), jp);
-  assert.equal(switched.searchParams.get("packs"), "1");
-  assert.equal(switched.searchParams.has("fixture"), false);
-  const loose = new URL(snapshotUrl(switched.href, "/old-assets/"));
-  assert.equal(loose.searchParams.has("asset_catalog"), false);
-  assert.equal(loose.searchParams.has("packs"), false);
+test("pack selection rejects invalid or contradictory catalog settings", () => {
+  const cn = golden.index.catalogs.cn.id;
+  const initial = `https://pack.test/moly/?assets=/moly/asset-store/&packs=1&asset_catalog=${cn}`;
   assert.throws(() =>
     applyPackSelection(new URL(initial), { assetCatalog: "../bad" }),
   );

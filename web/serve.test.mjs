@@ -230,14 +230,6 @@ test(
           assert.equal(result.status, 200);
           assert.equal(result.headers["cache-control"], "no-store");
         }
-        const discovery = await (await fetch(`${base}snapshots.json`)).json();
-        for (const region of ["cn", "jp", "tw"])
-          assert.equal(
-            discovery.snapshots.find(
-              (row) => row.region === region && row.packs,
-            )?.assetCatalog,
-            golden.index.catalogs[region].id,
-          );
       },
     );
 
@@ -278,7 +270,7 @@ test(
           assert.equal(result.headers["content-type"], type, file);
           assert.ok(result.bytes > 0, file);
         }
-        const shell = await readResponse(`${base}shell.css`, "HEAD");
+        const shell = await readResponse(`${base}stage.css`, "HEAD");
         assert.equal(shell.status, 200);
         assert.equal(shell.headers["content-type"], "text/css; charset=utf-8");
       },

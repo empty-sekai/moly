@@ -168,7 +168,7 @@ export interface MolyError {
 }
 export interface MountOptions {
   onPlayerData?(value: MolyPlayerDataState): void;
-  view?: "shell" | "stage";
+  view: "stage";
   src: string;
   assets?: string;
   /** Explicit HTTPS object-store prefix, e.g. https://assets.pjsk.moe/sekai-extra-assets/. */
@@ -233,10 +233,6 @@ export function mountMoly(
     version: string;
   },
 ): MolyMount;
-export function mountMoly(
-  container: HTMLElement,
-  options: MountOptions,
-): Pick<MolyMount, "frame" | "setTheme" | "stop" | "dispose">;
 
 export interface MolyPlayerDataCommand {
   operation: "preview" | "explore" | "restore" | "cancel";

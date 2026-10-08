@@ -19,7 +19,6 @@ import {
 import { pipeline } from "node:stream/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { storeChannels } from "./asset-pack-store.mjs";
 import { playerDataResponse, DEFAULT_PLAYER_API } from "./player-api.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url)); // .../web
@@ -42,20 +41,6 @@ const jpRoot = (process.env.MOLY_JP_ASSET_ROOT ?? "").trim();
 if (jpRoot && !statSync(jpRoot, { throwIfNoEntry: false })?.isDirectory()) {
   throw new Error("MOLY_JP_ASSET_ROOT must name an existing resource snapshot");
 }
-function snapshotInfo(root, assetBase) {
-  try {
-    const data = JSON.parse(
-      readFileSync(path.join(root, "mysekai-fixtures.json"), "utf8"),
-    );
-    return { region: data.region, version: data.gameVersion, assetBase };
-  } catch {
-    return { region: "unknown", version: "", assetBase };
-  }
-}
-const snapshots = [
-  snapshotInfo(assetRoot, "/assets/"),
-  ...(jpRoot ? [snapshotInfo(jpRoot, "/assets-jp/")] : []),
-];
 const packRoot = (process.env.MOLY_ASSET_PACK_ROOT ?? "").trim();
 if (packRoot && !statSync(packRoot, { throwIfNoEntry: false })?.isDirectory()) {
   throw new Error(
@@ -67,13 +52,6 @@ if (packRoot && !statSync(packRoot, { throwIfNoEntry: false })?.isDirectory()) {
 // resolve：越界检查比对的是 resolve 后的绝对路径，根若保留正斜杠
 // （Windows 上「盘符:/…」形的 MOLY_ASSET_ROOT），startsWith 对每个
 // 文件都对不上，全部 404。
-if (packRoot)
-  snapshots.push(
-    ...storeChannels(packRoot).map((row) => ({
-      ...row,
-      assetBase: "/moly/asset-store/",
-    })),
-  );
 const mounts = [
   ...(jpRoot ? [["/assets-jp/", realpathSync(jpRoot)]] : []),
   ...(packRoot
@@ -164,17 +142,6 @@ const server = createServer(async (request, response) => {
     }
     if (/[\\\\\u0000-\u001f\u007f]/.test(urlPath))
       throw httpError(400, "Invalid request path");
-    if (
-      urlPath === "/snapshots.json" &&
-      (request.method === "GET" || request.method === "HEAD")
-    ) {
-      send(
-        200,
-        { "Content-Type": "application/json" },
-        JSON.stringify({ version: 1, snapshots }),
-      );
-      return;
-    }
     if (urlPath.startsWith("/player-api/")) {
       if (request.method !== "GET") {
         send(
@@ -317,10 +284,10 @@ reportFreshness();
 server.listen(port, "127.0.0.1", () => {
   const listeningPort = server.address().port;
   console.log(`serving on http://127.0.0.1:${listeningPort}/`);
-  console.log(`  page   : /  (index.html)`);
+  console.log(`  stage  : /stage.html`);
   console.log(`  assets : /assets/ -> ${assetRoot}`);
   if (packRoot) console.log(`  packs  : /packs/ -> ${packRoot}`);
   console.log(
-    `open: http://127.0.0.1:${listeningPort}/index.html?assets=/assets/`,
+    `open: http://127.0.0.1:${listeningPort}/stage.html?assets=/assets/`,
   );
 });

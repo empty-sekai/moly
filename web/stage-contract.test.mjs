@@ -454,30 +454,17 @@ test("document reload keeps current filters and retries only an unacknowledged P
   }
 });
 
-test("legacy shell and stage share one renderer lease in either mount order", async () => {
+test("the public adapter mounts only the stage and shares its renderer lease", async () => {
   const { mountMoly } = await import("./embed.mjs");
   const env = dom();
-  let shell, stage;
+  let stage;
   try {
-    shell = mountMoly(env.target, { src: "/index.html" });
-    assert.throws(
-      () => mountMoly(env.target, { ...options, view: "stage" }),
-      /already mounted/,
-    );
-    assert.throws(
-      () => mountMoly(env.target, { src: "/index.html" }),
-      /already mounted/,
-    );
-    shell.dispose();
+    assert.throws(() => mountMoly(env.target, {}), /view must be/);
     stage = mountMoly(env.target, { ...options, view: "stage" });
-    assert.throws(
-      () => mountMoly(env.target, { src: "/index.html" }),
-      /already mounted/,
-    );
+    assert.throws(() => mountStage(env.target, options), /already mounted/);
     stage.dispose();
     assert.equal(env.target.children.length, 0);
   } finally {
-    shell?.dispose();
     stage?.dispose();
     env.cleanup();
   }
