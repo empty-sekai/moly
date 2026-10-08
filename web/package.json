@@ -1,5 +1,5 @@
 {
-  "name": "moly-browser-shell-tests",
+  "name": "moly-browser-tests",
   "private": true,
   "type": "module",
   "scripts": {

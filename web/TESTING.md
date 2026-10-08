@@ -88,7 +88,7 @@ lists. Full diagnostics are produced at the native QA sampling cadence.
 
 `stage-contract.test.mjs` checks exact origin/window/version validation, source
 mismatch, allowed intentions, queue limits, concurrent close acknowledgment,
-retry handshakes, and the shared legacy/stage singleton. It explicitly checks
+retry handshakes, and the stage singleton. It explicitly checks
 that theme/locale/browse do not create another iframe or cancel playback.
 
 `cache-worker-runtime.test.mjs` executes the shipped worker under controlled
