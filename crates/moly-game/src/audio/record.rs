@@ -77,6 +77,7 @@
 
 use super::cue::gain_from_block;
 use super::*;
+use moly_assets::json::master;
 use crate::site::NavMeshSourceRegion;
 use bevy::ecs::system::SystemParam;
 use moly_assets::remote::{self, Remote, RemoteRegion};
@@ -120,68 +121,70 @@ pub(crate) struct RecordMasters {
 }
 
 /// Parses the four upstream master tables (arrays of rows) the record model
-/// reads. The only reader of these tables.
-fn parse_record_masters(tables: &[serde_json::Value; 4]) -> Result<RecordMasters, String> {
+/// reads. The only reader of these tables. A row it cannot read is dropped
+/// and named once per table and reason (the second value); a record whose
+/// music, vocal or soundtrack row is absent resolves to a named refusal.
+fn parse_record_masters(
+    tables: &[serde_json::Value; 4],
+) -> Result<(RecordMasters, Vec<master::RefusedRows>), String> {
     let rows = |index: usize| -> Result<&Vec<serde_json::Value>, String> {
         tables[index]
             .as_array()
             .ok_or_else(|| format!("{} is not an array of rows", TABLES[index]))
     };
-    let int = |row: &serde_json::Value, table: &str, field: &str| -> Result<i64, String> {
-        row[field]
-            .as_i64()
-            .ok_or_else(|| format!("{table} row {}: {field} is not an integer", row["id"]))
+    let mut refused = Vec::new();
+    let mut name = |index: usize, rows: Vec<master::RowRefusal>| {
+        refused.extend(master::group_refusals(TABLES[index], TABLES[index], rows));
     };
-    let text = |row: &serde_json::Value, table: &str, field: &str| -> Result<String, String> {
-        row[field]
-            .as_str()
-            .map(str::to_owned)
-            .ok_or_else(|| format!("{table} row {}: {field} is not a string", row["id"]))
-    };
-    let mut records = HashMap::new();
-    for row in rows(0)? {
-        let kind = text(row, TABLES[0], "mysekaiMusicTrackType")?;
-        records.insert(
-            int(row, TABLES[0], "id")?,
+    let (records, dropped) = master::read_parsed_rows(rows(0)?, |row| {
+        let kind = master::text(row, "mysekaiMusicTrackType")?;
+        Ok(Some((
+            master::int(row, "id")?,
             RecordRow {
                 soundtrack: kind == TRACK_SOUNDTRACK,
-                external_id: int(row, TABLES[0], "externalId")?,
+                external_id: master::int(row, "externalId")?,
             },
-        );
-    }
-    let mut fillers = HashMap::new();
-    for row in rows(1)? {
-        let filler = row["fillerSec"]
-            .as_f64()
-            .ok_or_else(|| format!("musics row {}: fillerSec is not a number", row["id"]))?;
-        fillers.insert(int(row, TABLES[1], "id")?, filler as f32);
-    }
-    let mut vocals: HashMap<i64, Vec<(i64, String)>> = HashMap::new();
-    for row in rows(2)? {
-        vocals
-            .entry(int(row, TABLES[2], "musicId")?)
-            .or_default()
-            .push((
-                int(row, TABLES[2], "id")?,
-                text(row, TABLES[2], "assetbundleName")?,
-            ));
-    }
-    let mut soundtracks = HashMap::new();
-    for row in rows(3)? {
-        soundtracks.insert(
-            int(row, TABLES[3], "id")?,
+        )))
+    });
+    name(0, dropped);
+    let (fillers, dropped) = master::read_parsed_rows(rows(1)?, |row| {
+        let filler = master::number(row, "fillerSec")?;
+        Ok(Some((master::int(row, "id")?, filler as f32)))
+    });
+    name(1, dropped);
+    let (vocal_rows, dropped) = master::read_parsed_rows(rows(2)?, |row| {
+        Ok(Some((
+            master::int(row, "musicId")?,
             (
-                text(row, TABLES[3], "assetbundleName")?,
-                text(row, TABLES[3], "assetbundleFileName")?,
+                master::int(row, "id")?,
+                master::text(row, "assetbundleName")?.to_owned(),
             ),
-        );
+        )))
+    });
+    name(2, dropped);
+    let mut vocals: HashMap<i64, Vec<(i64, String)>> = HashMap::new();
+    for (music, vocal) in vocal_rows {
+        vocals.entry(music).or_default().push(vocal);
     }
-    Ok(RecordMasters {
-        records,
-        fillers,
-        vocals,
-        soundtracks,
-    })
+    let (soundtracks, dropped) = master::read_parsed_rows(rows(3)?, |row| {
+        Ok(Some((
+            master::int(row, "id")?,
+            (
+                master::text(row, "assetbundleName")?.to_owned(),
+                master::text(row, "assetbundleFileName")?.to_owned(),
+            ),
+        )))
+    });
+    name(3, dropped);
+    Ok((
+        RecordMasters {
+            records: records.into_iter().collect(),
+            fillers: fillers.into_iter().collect(),
+            vocals,
+            soundtracks: soundtracks.into_iter().collect(),
+        },
+        refused,
+    ))
 }
 
 /// What the record model resolves to.
@@ -709,7 +712,11 @@ pub(super) fn advance(
             library.masters = Some(parsed.and_then(|tables| {
                 let tables: [serde_json::Value; 4] =
                     tables.try_into().map_err(|_| "table count".to_string())?;
-                parse_record_masters(&tables)
+                let (masters, refused) = parse_record_masters(&tables)?;
+                for group in refused {
+                    warn!("[audio] record BGM masters: {group}");
+                }
+                Ok(masters)
             }));
             if let Some(Ok(masters)) = &library.masters {
                 info!(
@@ -1047,4 +1054,42 @@ fn start_voice(
         applied_volume: if cold { target } else { 0.0 },
         volume,
     });
+}
+
+#[cfg(test)]
+mod row_refusal_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn record_master_rows_the_reader_cannot_read_are_dropped_and_named_per_reason() {
+        let tables = [
+            json!([
+                {"id": 1, "mysekaiMusicTrackType": "music", "externalId": 10},
+                {"id": 2, "mysekaiMusicTrackType": "music", "externalId": "11"}
+            ]),
+            json!([
+                {"id": 10, "fillerSec": 1.5},
+                {"id": 11, "fillerSec": null},
+                {"id": 12}
+            ]),
+            json!([{"id": 100, "musicId": 10, "assetbundleName": "song_a"}]),
+            json!([]),
+        ];
+        let (masters, refused) = parse_record_masters(&tables).expect("arrays of rows");
+        let named: Vec<(&str, &str, usize, &str)> = refused
+            .iter()
+            .map(|group| (group.table, group.reason.as_str(), group.count, group.first.as_str()))
+            .collect();
+        assert_eq!(
+            named,
+            [
+                ("mysekaiMusicRecords", "externalId is not an integer", 1, "row 2"),
+                ("musics", "fillerSec is not a number", 2, "row 11"),
+            ]
+        );
+        assert!(matches!(masters.resolve(1, 100), Resolution::Track(_)));
+        assert!(matches!(masters.resolve(2, 100), Resolution::Throws(_)));
+        assert!(parse_record_masters(&[json!({}), json!([]), json!([]), json!([])]).is_err());
+    }
 }

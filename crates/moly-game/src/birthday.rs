@@ -16,7 +16,10 @@
 //! A table that is absent or malformed is named once by the master layer;
 //! then no party is in session, the gate shows its no-party dialog, the
 //! delivery and gather replies refuse by naming the table, and the rest of
-//! the game runs as usual.
+//! the game runs as usual. A row without an integer `id`, `startAt` or
+//! `closedAt` is dropped and named by the master layer; a row without the
+//! two delivery material columns is named once when the table is seated,
+//! stays in the gate's session check and is left out of the delivery's.
 
 use bevy::prelude::*;
 
@@ -77,37 +80,47 @@ pub(crate) fn parse(mut commands: Commands, mut masters: ResMut<MasterData>) {
             format!("：{}", in_session.join("，"))
         }
     );
+    let incomplete: Vec<String> = parties
+        .iter()
+        .filter(|row| row.delivery_columns().is_none())
+        .map(PartyRow::label)
+        .collect();
+    if !incomplete.is_empty() {
+        warn!(
+            "[birthday] {} party row(s) without deliveryItemMaterialId or deliveryRewardMysekaiMaterialId ({}): the delivery does not take them in session",
+            incomplete.len(),
+            incomplete.join(", ")
+        );
+    }
     commands.insert_resource(BirthdayParties {
         rows: parties,
         missing: None,
     });
 }
 
-/// `birthdayParties`：行在主表序；缺整型档期字段的行具名拒绝整表。
+/// `birthdayParties`：行在主表序；a row without an integer id or session
+/// field is dropped and named by the master layer.
 fn parse_parties(text: &str) -> Result<Vec<PartyRow>, String> {
-    master::rows(text)?
-        .iter()
-        .map(|row| {
-            Ok(PartyRow {
-                id: master::int(row, "id")?,
-                start_at: master::int(row, "startAt")?,
-                closed_at: master::int(row, "closedAt")?,
-                // 门只读档期；包名是日志里的行标签，缺了用行 id 标。
-                assetbundle_name: row
-                    .get("assetbundleName")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned),
-                // The delivery site reads these two columns of the parties in
-                // session; the gate does not.
-                delivery_item_material_id: row
-                    .get("deliveryItemMaterialId")
-                    .and_then(|v| v.as_i64()),
-                delivery_reward_material_id: row
-                    .get("deliveryRewardMysekaiMaterialId")
-                    .and_then(|v| v.as_i64()),
-            })
-        })
-        .collect()
+    master::read_rows(text, |row| {
+        Ok(Some(PartyRow {
+            id: master::int(row, "id")?,
+            start_at: master::int(row, "startAt")?,
+            closed_at: master::int(row, "closedAt")?,
+            // 门只读档期；包名是日志里的行标签，缺了用行 id 标。
+            assetbundle_name: row
+                .get("assetbundleName")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+            // The delivery site reads these two columns of the parties in
+            // session; the gate does not.
+            delivery_item_material_id: row
+                .get("deliveryItemMaterialId")
+                .and_then(|v| v.as_i64()),
+            delivery_reward_material_id: row
+                .get("deliveryRewardMysekaiMaterialId")
+                .and_then(|v| v.as_i64()),
+        }))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -143,6 +156,14 @@ impl PartyRow {
             .clone()
             .unwrap_or_else(|| format!("#{}", self.id))
     }
+
+    /// The two material columns the delivery reads, when the row has both.
+    fn delivery_columns(&self) -> Option<(i64, i64)> {
+        Some((
+            self.delivery_item_material_id?,
+            self.delivery_reward_material_id?,
+        ))
+    }
 }
 
 /// 生日派对主表。
@@ -177,21 +198,20 @@ impl BirthdayParties {
 
     /// GetMasterBirthdayPartiesInSession for the delivery site: the rows in
     /// session, in master order, with the two material columns. A row in
-    /// session without them is refused by name: the delivery cannot spend
-    /// or drop without them.
+    /// session without them is left out (named once when the table was
+    /// seated): the delivery cannot spend or drop without them.
     pub(crate) fn in_session(&self, now_ms: i64) -> Vec<InSessionParty> {
         self.rows
             .iter()
             .filter(|row| is_within_time(now_ms, row.start_at, row.closed_at))
-            .map(|row| InSessionParty {
-                id: row.id,
-                label: row.label(),
-                delivery_item_material_id: row.delivery_item_material_id.unwrap_or_else(|| {
-                    panic!("生日派对主表行 {} 缺 deliveryItemMaterialId", row.label())
-                }),
-                delivery_reward_material_id: row.delivery_reward_material_id.unwrap_or_else(|| {
-                    panic!("生日派对主表行 {} 缺 deliveryRewardMysekaiMaterialId", row.label())
-                }),
+            .filter_map(|row| {
+                let (item, reward) = row.delivery_columns()?;
+                Some(InSessionParty {
+                    id: row.id,
+                    label: row.label(),
+                    delivery_item_material_id: item,
+                    delivery_reward_material_id: reward,
+                })
             })
             .collect()
     }
@@ -213,4 +233,44 @@ pub(crate) fn is_within_time(check_at: i64, start_at: i64, end_at: i64) -> bool 
 /// server model is installed.
 pub(crate) fn now_ms() -> i64 {
     crate::server::server_now_ms().unwrap_or_else(crate::server::clock::device_now_ms)
+}
+
+#[cfg(test)]
+mod row_refusal_tests {
+    use super::*;
+
+    #[test]
+    fn party_rows_without_a_session_field_are_dropped_and_rows_without_delivery_columns_stay_out_of_the_delivery()
+    {
+        master::take_refused_rows();
+        let rows = parse_parties(
+            r#"[
+                {"id": 1, "startAt": 100, "closedAt": 0, "assetbundleName": "complete",
+                 "deliveryItemMaterialId": 5, "deliveryRewardMysekaiMaterialId": 6},
+                {"id": 2, "startAt": 100, "assetbundleName": "no_close"},
+                {"id": 3, "startAt": 100, "closedAt": 0, "assetbundleName": "no_columns"}
+            ]"#,
+        )
+        .expect("a table of rows");
+        let refused = master::take_refused_rows();
+        assert_eq!(refused.len(), 1);
+        assert_eq!(refused[0].reason, "closedAt is not an integer");
+        let parties = BirthdayParties {
+            rows,
+            missing: None,
+        };
+        assert_eq!(parties.labels_in_session(200), ["complete", "no_columns"]);
+        let delivery: Vec<(i64, i64, i64)> = parties
+            .in_session(200)
+            .iter()
+            .map(|party| {
+                (
+                    party.id,
+                    party.delivery_item_material_id,
+                    party.delivery_reward_material_id,
+                )
+            })
+            .collect();
+        assert_eq!(delivery, [(1, 5, 6)]);
+    }
 }

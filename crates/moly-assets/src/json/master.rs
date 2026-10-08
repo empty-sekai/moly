@@ -15,9 +15,13 @@
 //! A table that no base serves, or whose text its consumer's parser refuses,
 //! is named once in the log and in the root's missing list
 //! ([`MasterData::missing`]); its consumer takes the named error and applies
-//! its own fallback. Nothing here panics on data.
+//! its own fallback. A parser that reads its rows with [`read_rows`] drops a
+//! row it cannot read instead of refusing the table: each distinct reason is
+//! named once per consumer, with the number of rows it dropped
+//! ([`MasterData::refused_rows`]). Nothing here panics on data.
 
 use std::any::{Any, TypeId};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -212,6 +216,30 @@ pub struct MasterData {
     /// Bases whose read timed out, in the order they did: tried last for
     /// the rest of the session.
     demoted: Vec<usize>,
+    /// Rows consumers dropped, one entry per consumer and reason.
+    refused_rows: Vec<RefusedRows>,
+}
+
+/// Rows of one table one consumer dropped for one reason.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RefusedRows {
+    pub table: &'static str,
+    pub name: &'static str,
+    pub reason: String,
+    /// How many rows the reason dropped.
+    pub count: usize,
+    /// The first of them (`row 12`, by its id).
+    pub first: String,
+}
+
+impl fmt::Display for RefusedRows {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}: {} row(s) dropped, {} (first: {})",
+            self.name, self.count, self.reason, self.first
+        )
+    }
 }
 
 impl MasterData {
@@ -284,6 +312,26 @@ impl MasterData {
     /// The bases demoted for the session because a read of theirs timed out.
     pub fn demoted(&self) -> &[usize] {
         &self.demoted
+    }
+
+    /// The rows consumers dropped, one entry per consumer and reason.
+    pub fn refused_rows(&self) -> &[RefusedRows] {
+        &self.refused_rows
+    }
+
+    /// Names the rows a consumer's parser dropped: once per consumer and
+    /// reason, with the count and the first row.
+    fn name_refused_rows(&mut self, table: &'static str, name: &'static str, rows: Vec<RowRefusal>) {
+        for group in group_refusals(table, name, rows) {
+            let named = self
+                .refused_rows
+                .iter()
+                .any(|known| known.name == group.name && known.reason == group.reason);
+            if !named {
+                warn!("[masters] {group}");
+                self.refused_rows.push(group);
+            }
+        }
     }
 
     /// Demotes a base whose read timed out; named once per base.
@@ -446,7 +494,11 @@ impl Pending {
             return None;
         }
         let text = &jsons.get(&handle)?.0;
-        match (self.parse)(text) {
+        // Refusals filed outside a parse of this layer are not this table's.
+        take_refused_rows();
+        let parsed = (self.parse)(text);
+        data.name_refused_rows(self.table, self.name, take_refused_rows());
+        match parsed {
             Ok(value) => {
                 info!("[masters] {}: read from {}", self.name, base.name);
                 Some(Ok(value))
@@ -539,9 +591,192 @@ pub fn int32(row: &Value, field: &str) -> Result<i32, String> {
         .map_err(|_| format!("{field} of {} is out of the 32-bit range", row_label(row)))
 }
 
+/// A number field of a row (integer or float).
+pub fn number(row: &Value, field: &str) -> Result<f64, String> {
+    row.get(field)
+        .and_then(Value::as_f64)
+        .ok_or_else(|| format!("{field} of {} is not a number", row_label(row)))
+}
+
 /// A string field of a row.
 pub fn text<'a>(row: &'a Value, field: &str) -> Result<&'a str, String> {
     row.get(field)
         .and_then(Value::as_str)
         .ok_or_else(|| format!("{field} of {} is not a string", row_label(row)))
+}
+
+/// A string field of a row that names one of a closed set of values (an
+/// enum the consumer reads); `Err` names a field that is not a string or a
+/// value outside the set.
+pub fn one_of<T: Copy>(row: &Value, field: &str, values: &[(&str, T)]) -> Result<T, String> {
+    let value = text(row, field)?;
+    values
+        .iter()
+        .find(|(name, _)| *name == value)
+        .map(|(_, known)| *known)
+        .ok_or_else(|| format!("{field} of {} is {value:?}, not a value this reader knows", row_label(row)))
+}
+
+// ---------------------------------------------------------------------------
+// Row-level refusal
+// ---------------------------------------------------------------------------
+
+/// One row a consumer's parser does not take, and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RowRefusal {
+    /// The row's label (`row 12`, by its id).
+    pub row: String,
+    /// What of the row the consumer cannot read, without the row's label.
+    pub reason: String,
+}
+
+thread_local! {
+    /// Rows refused by [`read_rows`] since the layer last took them. A
+    /// parser runs synchronously inside [`resolve`], so the layer takes the
+    /// rows of each parse right after it.
+    static REFUSED_ROWS: RefCell<Vec<RowRefusal>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The rows refused by [`read_rows`] on this thread since the last call. The
+/// layer calls it around every parse; a parser's own tests call it to see
+/// what the parse refused.
+pub fn take_refused_rows() -> Vec<RowRefusal> {
+    REFUSED_ROWS.with(|rows| std::mem::take(&mut *rows.borrow_mut()))
+}
+
+/// A plain upstream table read row by row. `read` gives a row's value,
+/// `Ok(None)` for a row the consumer does not take by its own rule (not a
+/// refusal), or `Err` naming what of the row it cannot read: a field absent
+/// or of another type, a value outside the set it knows. A refused row is
+/// dropped, and the layer names each distinct reason once per consumer with
+/// the number of rows it dropped. `Err` only when the text is not a table
+/// of rows.
+///
+/// For tables whose rows are independent entries. A table whose rows only
+/// mean something together (thresholds, a sequence) refuses as a whole
+/// with [`rows`] and `?`.
+pub fn read_rows<T>(
+    text: &str,
+    read: impl FnMut(&Value) -> Result<Option<T>, String>,
+) -> Result<Vec<T>, String> {
+    let (kept, refused) = read_parsed_rows(&rows(text)?, read);
+    REFUSED_ROWS.with(|rows| rows.borrow_mut().extend(refused));
+    Ok(kept)
+}
+
+/// [`read_rows`] over rows already parsed, for a reader that reads its
+/// tables outside this layer: the refused rows are returned to it, to be
+/// named once per reason ([`group_refusals`]).
+pub fn read_parsed_rows<T>(
+    rows: &[Value],
+    mut read: impl FnMut(&Value) -> Result<Option<T>, String>,
+) -> (Vec<T>, Vec<RowRefusal>) {
+    let mut kept = Vec::new();
+    let mut refused = Vec::new();
+    for row in rows {
+        match read(row) {
+            Ok(Some(value)) => kept.push(value),
+            Ok(None) => {}
+            Err(reason) => {
+                let label = row_label(row);
+                // The row readers name the row inside their reason; it is
+                // taken out so rows refused for one reason are named together.
+                let reason = reason.replace(&format!(" of {label}"), "");
+                refused.push(RowRefusal { row: label, reason });
+            }
+        }
+    }
+    (kept, refused)
+}
+
+/// Refusals grouped by reason, in the order each reason first appears.
+pub fn group_refusals(table: &'static str, name: &'static str, rows: Vec<RowRefusal>) -> Vec<RefusedRows> {
+    let mut groups: Vec<RefusedRows> = Vec::new();
+    for row in rows {
+        match groups.iter_mut().find(|group| group.reason == row.reason) {
+            Some(group) => group.count += 1,
+            None => groups.push(RefusedRows {
+                table,
+                name,
+                reason: row.reason,
+                count: 1,
+                first: row.row,
+            }),
+        }
+    }
+    groups
+}
+
+#[cfg(test)]
+mod row_refusal_tests {
+    use super::*;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Kind {
+        A,
+        B,
+    }
+
+    fn read(row: &Value) -> Result<Option<(i64, Kind)>, String> {
+        if text(row, "skip").is_ok() {
+            return Ok(None);
+        }
+        Ok(Some((int(row, "id")?, one_of(row, "kind", &[("a", Kind::A), ("b", Kind::B)])?)))
+    }
+
+    #[test]
+    fn rows_a_reader_cannot_read_are_dropped_and_named_by_reason() {
+        take_refused_rows();
+        let text = r#"[
+            {"id": 1, "kind": "a"},
+            {"id": 2, "kind": "c"},
+            {"id": "3", "kind": "b"},
+            {"id": 4},
+            {"id": 5, "kind": "b"},
+            {"id": 6, "kind": "c"},
+            {"id": 7, "skip": "yes"}
+        ]"#;
+        let kept = read_rows(text, read).expect("a table of rows");
+        assert_eq!(kept, [(1, Kind::A), (5, Kind::B)]);
+        let groups = group_refusals("t", "t (test)", take_refused_rows());
+        let named: Vec<(String, usize, String)> = groups
+            .iter()
+            .map(|group| (group.reason.clone(), group.count, group.first.clone()))
+            .collect();
+        assert_eq!(
+            named,
+            [
+                ("kind is \"c\", not a value this reader knows".to_owned(), 2, "row 2".to_owned()),
+                ("id is not an integer".to_owned(), 1, "row \"3\"".to_owned()),
+                ("kind is not a string".to_owned(), 1, "row 4".to_owned()),
+            ]
+        );
+        assert!(take_refused_rows().is_empty());
+    }
+
+    #[test]
+    fn a_text_that_is_not_a_table_still_refuses_the_table() {
+        take_refused_rows();
+        assert!(read_rows("{\"id\": 1}", read).is_err());
+        assert!(read_rows("[1, 2]", read).is_err());
+        assert!(take_refused_rows().is_empty());
+    }
+
+    #[test]
+    fn the_layer_names_each_reason_once_per_consumer() {
+        let mut data = MasterData::default();
+        let refusal = |row: &str, reason: &str| RowRefusal {
+            row: row.into(),
+            reason: reason.into(),
+        };
+        data.name_refused_rows("t", "t (one)", vec![refusal("row 1", "x"), refusal("row 2", "x")]);
+        data.name_refused_rows("t", "t (one)", vec![refusal("row 3", "x")]);
+        data.name_refused_rows("t", "t (two)", vec![refusal("row 1", "x")]);
+        let named: Vec<(&str, usize)> = data
+            .refused_rows()
+            .iter()
+            .map(|group| (group.name, group.count))
+            .collect();
+        assert_eq!(named, [("t (one)", 2), ("t (two)", 1)]);
+    }
 }

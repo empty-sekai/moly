@@ -5,8 +5,10 @@
 //! (`mysekaiRanks`). The user's total experience is server-side user state
 //! from the server document, one value both screens read ([`UserTotalExp`]).
 //! A root whose table is absent or malformed does not stop the start: the
-//! table is named once, and the first rank model asked of it panics with that
-//! name, as the source throws when its table is absent.
+//! table is named once, and a rank model asked of it is refused with that
+//! name ([`MysekaiRanks::try_model`]), as the source throws when its table is
+//! absent. The table refuses as a whole on a row it cannot read: its rows
+//! are rank thresholds, and a dropped row would move every rank above it.
 
 use bevy::prelude::*;
 
@@ -94,10 +96,40 @@ pub(crate) fn parse_ranks(text: &str) -> Result<Vec<MasterMysekaiRank>, String> 
 }
 
 impl MysekaiRanks {
-    /// `new MysekaiRankModel()` with the given total experience. Panics where
-    /// the source throws, and on a root without the table.
+    /// `new MysekaiRankModel()` with the given total experience. `Err` names
+    /// where the source throws, and a root without the table.
+    pub(crate) fn try_model(&self, total_exp: i32) -> Result<MysekaiRankModel, String> {
+        let rows = self.0.as_ref().map_err(|reason| format!("rank model: {reason}"))?;
+        MysekaiRankModel::new(rows, total_exp).map_err(|err| format!("rank model: {err}"))
+    }
+
+    /// [`Self::try_model`] for a caller that has no refusal path: panics
+    /// with the reason.
     pub(crate) fn model(&self, total_exp: i32) -> MysekaiRankModel {
-        let rows = self.0.as_ref().unwrap_or_else(|reason| panic!("rank model: {reason}"));
-        MysekaiRankModel::new(rows, total_exp).unwrap_or_else(|err| panic!("rank model: {err}"))
+        self.try_model(total_exp)
+            .unwrap_or_else(|reason| panic!("{reason}"))
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+
+    #[test]
+    fn a_root_without_the_table_refuses_the_model_by_name() {
+        let ranks = MysekaiRanks(Err("mysekaiRanks (the rank gauges): malformed".into()));
+        let error = ranks.try_model(0).unwrap_err();
+        assert!(error.contains("mysekaiRanks (the rank gauges): malformed"), "{error}");
+    }
+
+    #[test]
+    fn a_rank_row_the_reader_cannot_read_refuses_the_whole_table() {
+        assert!(parse_ranks(r#"[{"id": 1, "mysekaiRank": 1, "totalExp": 0},
+            {"id": 2, "mysekaiRank": "2", "totalExp": 10}]"#)
+        .is_err());
+        let rows = parse_ranks(r#"[{"id": 1, "mysekaiRank": 1, "totalExp": 0},
+            {"id": 2, "mysekaiRank": 2, "totalExp": 10}]"#)
+        .expect("well-formed rows");
+        assert_eq!(MysekaiRanks(Ok(rows)).try_model(10).unwrap().mysekai_rank, 2);
     }
 }

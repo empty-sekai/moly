@@ -300,6 +300,11 @@ pub(crate) fn parse_talk_extras(mut commands: Commands, mut masters: ResMut<Mast
     commands.remove_resource::<TalkExtraRequests>();
 }
 
+// These four tables refuse as a whole on a row they cannot read (named once
+// by the master layer; the path that reads the table names it when reached)
+// rather than dropping the row: their rows are lottery candidates, and a
+// dropped row would change the draw over the rows that remain.
+
 fn parse_fixture_commons(text: &str) -> Result<Vec<FixtureCommonRow>, String> {
     master::rows(text)?
         .iter()

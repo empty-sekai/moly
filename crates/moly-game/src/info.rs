@@ -979,6 +979,11 @@ struct PutLimitTables {
     levels: Vec<PutLimitLevel>,
 }
 
+// Both put-limit tables refuse as a whole on a row they cannot read (the
+// put-cost texts then keep the prefab's text) rather than dropping the row:
+// a dropped release or level row would change the limit computed from the
+// rows that remain.
+
 fn parse_put_limit_releases(text: &str) -> Result<Vec<(i64, i64)>, String> {
     let mut releases = Vec::new();
     for row in master::rows(text)? {
@@ -1083,24 +1088,27 @@ fn page_label(page: usize) -> &'static str {
 }
 
 /// 进层钩子串（层栈的挂载梯日志之外，层侧内容在这里；无动画 ⇒ 等待点
-/// 当帧通过）。
+/// 当帧通过）。`rank` is `None` when the rank model was refused (named at
+/// the open edge): the rank page's model texts keep the prefab's text.
 fn on_open(settings: &mut InfoSettings, mock: &InfoMock, page_state: &InfoPageState,
-    rank: &moly_law::ui::mysekai_rank::MysekaiRankModel) {
+    rank: Option<&moly_law::ui::mysekai_rank::MysekaiRankModel>) {
     // OnBoot：bootData = 排名页模型（服务端用户态 ⇒ 面板下发）；访问许可
     // 现值重读（真源 OnBoot 读 UserDataManager）。
     settings.access = mock.access_permission;
-    info!(
-        "[info] OnBoot：bootData=排名页模型（总经验 {}（mock）查 master 等级表：rank {} / max {} · \
-         本级累计 {} · 下级累计 {}；面板下发：家具摆放上限 {} · 连接家具上限 {}）；访问许可现值={}（面板下发）",
-        rank.total_exp,
-        rank.mysekai_rank,
-        rank.max_mysekai_rank,
-        rank.total_exp_to_current_rank,
-        rank.total_exp_to_next_rank,
-        mock.fixture_put_limit,
-        mock.fixture_joint_put_limit,
-        settings.access.true_name()
-    );
+    if let Some(rank) = rank {
+        info!(
+            "[info] OnBoot：bootData=排名页模型（总经验 {}（mock）查 master 等级表：rank {} / max {} · \
+             本级累计 {} · 下级累计 {}；面板下发：家具摆放上限 {} · 连接家具上限 {}）；访问许可现值={}（面板下发）",
+            rank.total_exp,
+            rank.mysekai_rank,
+            rank.max_mysekai_rank,
+            rank.total_exp_to_current_rank,
+            rank.total_exp_to_next_rank,
+            mock.fixture_put_limit,
+            mock.fixture_joint_put_limit,
+            settings.access.true_name()
+        );
+    }
     info!(
         "[info] OnInitComponent：三档读入（画质 {} · 刷新率 {} · 变换通知 {}）；七 Setup——\
          SetupTab · SetupRankInfoButton · SetupArrowButton · SetupPage 已接；视图读源预制体；\
@@ -1183,11 +1191,13 @@ fn info_rank_gauge_targets(doc: &moly_assets::ui_layout::UiPrefab) -> crate::men
 }
 
 /// The place system's own memory across frames: the open edge, the rank
-/// model built per open, and the one-time scene start.
+/// model built per open, the reason a rank model was last refused (named
+/// once per reason), and the one-time scene start.
 #[derive(Default)]
 pub(crate) struct PlaceMemory {
     was_open: bool,
     rank: Option<moly_law::ui::mysekai_rank::MysekaiRankModel>,
+    rank_refused: Option<String>,
     scene_started: bool,
 }
 
@@ -1210,7 +1220,7 @@ pub(crate) fn place(
     layouts: Res<crate::ui_layout::UiLayouts>,
     mut graphics: ResMut<crate::game_settings::GameSettings>,
 ) {
-    let PlaceMemory { was_open, rank, scene_started } = &mut *memory;
+    let PlaceMemory { was_open, rank, rank_refused, scene_started } = &mut *memory;
     if !*scene_started {
         *scene_started = true;
         apply_on_scene_start(&mut graphics, &settings);
@@ -1218,12 +1228,25 @@ pub(crate) fn place(
     let open=stack.current()==LayerId::MysekaiInfo;
     let opening = open && !*was_open;
     if opening {
-        // TryMoveScreenLayerMysekaiInfo: a new rank model per open.
-        *rank = Some(ranks.as_deref()
-            .unwrap_or_else(|| panic!("rank model: the master rank table has not resolved when the info screen opens"))
-            .model(total_exp.0));
+        // TryMoveScreenLayerMysekaiInfo: a new rank model per open. Where the
+        // source throws (or the table has not resolved) the rank page's model
+        // texts are refused by name and the rest of the screen opens.
+        let built = match ranks.as_deref() {
+            Some(ranks) => ranks.try_model(total_exp.0),
+            None => Err("rank model: the master rank table has not resolved when the info screen opens".to_owned()),
+        };
+        *rank = match built {
+            Ok(model) => Some(model),
+            Err(reason) => {
+                if rank_refused.as_deref() != Some(reason.as_str()) {
+                    error!("[info] {reason}; the rank page keeps the prefab's rank texts and gauge");
+                    *rank_refused = Some(reason);
+                }
+                None
+            }
+        };
     }
-    match (*was_open,open) {(false,true)=>on_open(&mut settings,&mock,&page_state,rank.as_ref().expect("rank model built on open")),(true,false)=>on_close(&settings,&page_state),_=>{}}
+    match (*was_open,open) {(false,true)=>on_open(&mut settings,&mock,&page_state,rank.as_ref()),(true,false)=>on_close(&settings,&page_state),_=>{}}
     *was_open=open;
     let Some(presentation) = presentation.as_deref_mut() else { return; };
     if !open || opening { presentation.elapsed = 0.; }

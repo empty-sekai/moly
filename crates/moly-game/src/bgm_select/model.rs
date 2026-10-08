@@ -58,40 +58,40 @@ fn text_or_empty(row: &Value, field: &str) -> String {
         .to_owned()
 }
 
+// Every table here is read row by row: a row the reader cannot read is
+// dropped and named once by the master layer. The rows are independent
+// entries, and a record whose music, soundtrack or vocal row is absent is
+// refused by name when the record list is built (as the source logs the
+// missing master row and leaves the model without a resource).
+
 fn parse_records(text: &str) -> Result<Vec<RecordRow>, String> {
-    master::rows(text)?
-        .iter()
-        .map(|row| {
-            Ok(RecordRow {
-                id: master::int32(row, "id")?,
-                soundtrack: master::text(row, "mysekaiMusicTrackType")? == "music_sound_track",
-                external_id: master::int32(row, "externalId")?,
-            })
-        })
-        .collect()
+    master::read_rows(text, |row| {
+        Ok(Some(RecordRow {
+            id: master::int32(row, "id")?,
+            soundtrack: master::text(row, "mysekaiMusicTrackType")? == "music_sound_track",
+            external_id: master::int32(row, "externalId")?,
+        }))
+    })
 }
 
 fn parse_musics(text: &str) -> Result<HashMap<i32, MusicRow>, String> {
-    master::rows(text)?
-        .iter()
-        .map(|row| {
-            Ok((
-                master::int32(row, "id")?,
-                MusicRow {
-                    seq: master::int32(row, "seq")?,
-                    title: text_or_empty(row, "title"),
-                    creator_artist_id: master::int32(row, "creatorArtistId").unwrap_or(0),
-                    published_at: master::int(row, "publishedAt")?,
-                },
-            ))
-        })
-        .collect()
+    let rows = master::read_rows(text, |row| {
+        Ok(Some((
+            master::int32(row, "id")?,
+            MusicRow {
+                seq: master::int32(row, "seq")?,
+                title: text_or_empty(row, "title"),
+                creator_artist_id: master::int32(row, "creatorArtistId").unwrap_or(0),
+                published_at: master::int(row, "publishedAt")?,
+            },
+        )))
+    })?;
+    Ok(rows.into_iter().collect())
 }
 
 /// `musicVocals` by music id, in master order.
 fn parse_vocals(text: &str) -> Result<HashMap<i32, Vec<VocalRow>>, String> {
-    let mut by_music: HashMap<i32, Vec<VocalRow>> = HashMap::new();
-    for row in master::rows(text)? {
+    let rows = master::read_rows(text, |row| {
         let mut characters = Vec::new();
         for character in row["characters"].as_array().into_iter().flatten() {
             characters.push((
@@ -100,70 +100,73 @@ fn parse_vocals(text: &str) -> Result<HashMap<i32, Vec<VocalRow>>, String> {
                 master::int32(character, "seq")?,
             ));
         }
-        by_music
-            .entry(master::int32(&row, "musicId")?)
-            .or_default()
-            .push(VocalRow {
-                id: master::int32(&row, "id")?,
-                vocal_type: master::text(&row, "musicVocalType")?.to_owned(),
+        Ok(Some((
+            master::int32(row, "musicId")?,
+            VocalRow {
+                id: master::int32(row, "id")?,
+                vocal_type: master::text(row, "musicVocalType")?.to_owned(),
                 characters,
-            });
+            },
+        )))
+    })?;
+    let mut by_music: HashMap<i32, Vec<VocalRow>> = HashMap::new();
+    for (music, vocal) in rows {
+        by_music.entry(music).or_default().push(vocal);
     }
     Ok(by_music)
 }
 
 fn parse_sound_tracks(text: &str) -> Result<HashMap<i32, SoundTrackRow>, String> {
-    master::rows(text)?
-        .iter()
-        .map(|row| {
-            Ok((
-                master::int32(row, "id")?,
-                SoundTrackRow {
-                    seq: master::int32(row, "seq")?,
-                    title: text_or_empty(row, "title"),
-                    creator: text_or_empty(row, "creator"),
-                },
-            ))
-        })
-        .collect()
+    let rows = master::read_rows(text, |row| {
+        Ok(Some((
+            master::int32(row, "id")?,
+            SoundTrackRow {
+                seq: master::int32(row, "seq")?,
+                title: text_or_empty(row, "title"),
+                creator: text_or_empty(row, "creator"),
+            },
+        )))
+    })?;
+    Ok(rows.into_iter().collect())
 }
 
 /// `musicTags`: the music ids of each tag.
 fn parse_tags(text: &str) -> Result<HashMap<String, HashSet<i32>>, String> {
+    let rows = master::read_rows(text, |row| {
+        Ok(Some((
+            master::text(row, "musicTag")?.to_owned(),
+            master::int32(row, "musicId")?,
+        )))
+    })?;
     let mut by_tag: HashMap<String, HashSet<i32>> = HashMap::new();
-    for row in master::rows(text)? {
-        by_tag
-            .entry(master::text(&row, "musicTag")?.to_owned())
-            .or_default()
-            .insert(master::int32(&row, "musicId")?);
+    for (tag, music) in rows {
+        by_tag.entry(tag).or_default().insert(music);
     }
     Ok(by_tag)
 }
 
 /// `id` -> `name` (`musicArtists`, `outsideCharacters`).
 fn parse_names(text: &str) -> Result<HashMap<i32, String>, String> {
-    master::rows(text)?
-        .iter()
-        .map(|row| Ok((master::int32(row, "id")?, text_or_empty(row, "name"))))
-        .collect()
+    let rows = master::read_rows(text, |row| {
+        Ok(Some((master::int32(row, "id")?, text_or_empty(row, "name"))))
+    })?;
+    Ok(rows.into_iter().collect())
 }
 
 /// `gameCharacters`: `MasterGameCharacter.FullName` = `"{0}{1}"` of
 /// `firstName` and `givenName`.
 fn parse_game_characters(text: &str) -> Result<HashMap<i32, String>, String> {
-    master::rows(text)?
-        .iter()
-        .map(|row| {
-            Ok((
-                master::int32(row, "id")?,
-                format!(
-                    "{}{}",
-                    text_or_empty(row, "firstName"),
-                    text_or_empty(row, "givenName")
-                ),
-            ))
-        })
-        .collect()
+    let rows = master::read_rows(text, |row| {
+        Ok(Some((
+            master::int32(row, "id")?,
+            format!(
+                "{}{}",
+                text_or_empty(row, "firstName"),
+                text_or_empty(row, "givenName")
+            ),
+        )))
+    })?;
+    Ok(rows.into_iter().collect())
 }
 
 pub(crate) const RECORDS: MasterTable<Vec<RecordRow>> = MasterTable {
@@ -267,39 +270,60 @@ impl Pending {
         take(&mut self.artists, data, &ARTISTS);
         take(&mut self.game_characters, data, &GAME_CHARACTERS);
         take(&mut self.outside_characters, data, &OUTSIDE_CHARACTERS);
-        let done = self.records.is_some()
-            && self.musics.is_some()
-            && self.vocals.is_some()
-            && self.sound_tracks.is_some()
-            && self.tags.is_some()
-            && self.artists.is_some()
-            && self.game_characters.is_some()
-            && self.outside_characters.is_some();
-        if !done {
-            return None;
-        }
-        let pending = std::mem::take(self);
+        let (
+            records,
+            musics,
+            vocals,
+            sound_tracks,
+            tags,
+            artists,
+            game_characters,
+            outside_characters,
+        ) = match std::mem::take(self) {
+            Pending {
+                records: Some(records),
+                musics: Some(musics),
+                vocals: Some(vocals),
+                sound_tracks: Some(sound_tracks),
+                tags: Some(tags),
+                artists: Some(artists),
+                game_characters: Some(game_characters),
+                outside_characters: Some(outside_characters),
+            } => (
+                records,
+                musics,
+                vocals,
+                sound_tracks,
+                tags,
+                artists,
+                game_characters,
+                outside_characters,
+            ),
+            // Not every table has resolved: keep what has.
+            incomplete => {
+                *self = incomplete;
+                return None;
+            }
+        };
         let required = |error: MasterError| error.to_string();
         let mut degraded = Vec::new();
-        let mut optional = |slot: Option<Result<HashMap<i32, String>, MasterError>>| match slot
-            .expect("resolved")
-        {
+        let mut optional = |slot: Result<HashMap<i32, String>, MasterError>| match slot {
             Ok(table) => table,
             Err(error) => {
                 degraded.push(error.to_string());
                 HashMap::new()
             }
         };
-        let artists = optional(pending.artists);
-        let game_characters = optional(pending.game_characters);
-        let outside_characters = optional(pending.outside_characters);
+        let artists = optional(artists);
+        let game_characters = optional(game_characters);
+        let outside_characters = optional(outside_characters);
         Some((|| -> Result<BgmMasters, String> {
             Ok(BgmMasters {
-                records: pending.records.expect("resolved").map_err(required)?,
-                musics: pending.musics.expect("resolved").map_err(required)?,
-                vocals: pending.vocals.expect("resolved").map_err(required)?,
-                sound_tracks: pending.sound_tracks.expect("resolved").map_err(required)?,
-                tags: pending.tags.expect("resolved").map_err(required)?,
+                records: records.map_err(required)?,
+                musics: musics.map_err(required)?,
+                vocals: vocals.map_err(required)?,
+                sound_tracks: sound_tracks.map_err(required)?,
+                tags: tags.map_err(required)?,
                 artists,
                 game_characters,
                 outside_characters,
@@ -662,5 +686,56 @@ impl Presenter {
                 })
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod row_refusal_tests {
+    use super::*;
+
+    #[test]
+    fn a_record_row_the_reader_cannot_read_is_dropped_and_named() {
+        master::take_refused_rows();
+        let records = parse_records(
+            r#"[
+                {"id": 1, "mysekaiMusicTrackType": "music", "externalId": 10},
+                {"id": 2, "mysekaiMusicTrackType": "music"},
+                {"id": 3, "mysekaiMusicTrackType": "music_sound_track", "externalId": 30}
+            ]"#,
+        )
+        .expect("a table of rows");
+        let kept: Vec<(i32, bool, i32)> = records
+            .iter()
+            .map(|row| (row.id, row.soundtrack, row.external_id))
+            .collect();
+        assert_eq!(kept, [(1, false, 10), (3, true, 30)]);
+        let refused = master::take_refused_rows();
+        assert_eq!(refused.len(), 1);
+        assert_eq!(refused[0].row, "row 2");
+        assert_eq!(refused[0].reason, "externalId is not an integer");
+    }
+
+    #[test]
+    fn a_vocal_with_a_malformed_character_is_dropped_and_its_music_keeps_the_others() {
+        master::take_refused_rows();
+        let vocals = parse_vocals(
+            r#"[
+                {"id": 1, "musicId": 7, "musicVocalType": "sekai", "characters": [
+                    {"characterType": "game_character", "characterId": 1, "seq": 1}]},
+                {"id": 2, "musicId": 7, "musicVocalType": "sekai", "characters": [
+                    {"characterType": "game_character", "characterId": "x", "seq": 1}]},
+                {"id": 3, "musicId": 7, "musicVocalType": "instrumental", "characters": []}
+            ]"#,
+        )
+        .expect("a table of rows");
+        let ids: Vec<i32> = vocals[&7].iter().map(|vocal| vocal.id).collect();
+        assert_eq!(ids, [1, 3]);
+        assert_eq!(master::take_refused_rows().len(), 1);
+    }
+
+    #[test]
+    fn a_text_that_is_not_a_table_refuses_the_table() {
+        assert!(parse_tags("{}").is_err());
+        assert!(parse_names("not json").is_err());
     }
 }
