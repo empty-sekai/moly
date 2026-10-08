@@ -75,7 +75,8 @@ test("observed decoded shader pixels remain in the browser resource boundary", (
   evidence.events[1].data.push({ name: `https://site.test/game/${texture}` });
   assert.ok(evidencePaths(evidence).includes(texture));
   for (const extension of ["glsl", "wgsl", "spv"]) {
-    const shader = "phenomena/shaders/compiled/" + "b".repeat(64) + "." + extension;
+    const shader =
+      "phenomena/shaders/compiled/" + "b".repeat(64) + "." + extension;
     evidence.events[1].data.push({ name: `https://site.test/game/${shader}` });
     assert.ok(evidencePaths(evidence).includes(shader));
   }

@@ -97,7 +97,11 @@ export function createWeatherArtwork(
   const packed = Boolean(packs || assetCatalog);
   const root = new URL(assets, baseUrl).href;
   const client = packed
-    ? createClient(root, assetCatalog, { required: true, signal: abort.signal, resourceBase })
+    ? createClient(root, assetCatalog, {
+        required: true,
+        signal: abort.signal,
+        resourceBase,
+      })
     : null;
   const pending = new Map();
   const urls = new Set();

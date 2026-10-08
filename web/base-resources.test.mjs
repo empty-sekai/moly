@@ -43,44 +43,53 @@ test("necessary files download automatically and report actual byte completion",
   assert.equal(updates[0].total, 1);
 });
 
-test("prewarm waits for the worker's retention barrier after the bodies finish", { timeout: 2000 }, async () => {
-  const original = Object.getOwnPropertyDescriptor(globalThis, "navigator");
-  let received, port;
-  const message = new Promise((resolve) => { received = resolve; });
-  Object.defineProperty(globalThis, "navigator", {
-    configurable: true,
-    value: {
-      serviceWorker: {
-        controller: {
-          postMessage(value, ports) {
-            port = ports[0];
-            received(value);
+test(
+  "prewarm waits for the worker's retention barrier after the bodies finish",
+  { timeout: 2000 },
+  async () => {
+    const original = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+    let received, port;
+    const message = new Promise((resolve) => {
+      received = resolve;
+    });
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        serviceWorker: {
+          controller: {
+            postMessage(value, ports) {
+              port = ports[0];
+              received(value);
+            },
           },
         },
       },
-    },
-  });
-  try {
-    let finished = false;
-    const warming = warmBaseResources(options, {
-      fetchImpl: async (url) => new Response(
-        String(url).endsWith("browser-base.json") ? JSON.stringify(pack) : "abc",
-      ),
-    }).then((result) => {
-      finished = true;
-      return result;
     });
-    const request = await message;
-    assert.equal(request.type, "flush");
-    assert.equal(finished, false);
-    port.postMessage({ source: "moly-cache", schemaVersion: 1, ok: true });
-    assert.deepEqual(await warming, { completed: 1, decodedBytes: 3 });
-  } finally {
-    port?.close();
-    if (original) Object.defineProperty(globalThis, "navigator", original);
-    else delete globalThis.navigator;
-  }
-});
+    try {
+      let finished = false;
+      const warming = warmBaseResources(options, {
+        fetchImpl: async (url) =>
+          new Response(
+            String(url).endsWith("browser-base.json")
+              ? JSON.stringify(pack)
+              : "abc",
+          ),
+      }).then((result) => {
+        finished = true;
+        return result;
+      });
+      const request = await message;
+      assert.equal(request.type, "flush");
+      assert.equal(finished, false);
+      port.postMessage({ source: "moly-cache", schemaVersion: 1, ok: true });
+      assert.deepEqual(await warming, { completed: 1, decodedBytes: 3 });
+    } finally {
+      port?.close();
+      if (original) Object.defineProperty(globalThis, "navigator", original);
+      else delete globalThis.navigator;
+    }
+  },
+);
 test("truncated necessary resource cannot be reported as ready", async () => {
   await assert.rejects(
     warmBaseResources(options, {

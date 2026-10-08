@@ -317,34 +317,76 @@ function workspace(root, font = null) {
 }
 
 test("publication refuses unclean source metadata without rewriting the input or active selector", async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "moly-source-provenance-"));
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "moly-source-provenance-"),
+  );
   t.after(() => {
     assert.equal(path.dirname(root), path.resolve(os.tmpdir()));
     assert.match(path.basename(root), /^moly-source-provenance-/);
     fs.rmSync(root, { recursive: true, force: true });
   });
   extract(root);
-  const catalogId = canonicalTestStore(root, "cn", addCoordinateFixture(root, "cn")),
-    work = workspace(root), output = path.join(root, "publication");
+  const catalogId = canonicalTestStore(
+      root,
+      "cn",
+      addCoordinateFixture(root, "cn"),
+    ),
+    work = workspace(root),
+    output = path.join(root, "publication");
   fs.mkdirSync(output);
-  fs.cpSync(path.join(root, "store"), path.join(output, "asset-store"), { recursive: true });
-  const sources = [{ region: "cn", assets: path.join(root, "source-cn"),
-    catalog: path.join(root, "catalog-cn.json"), assetCatalog: catalogId }];
+  fs.cpSync(path.join(root, "store"), path.join(output, "asset-store"), {
+    recursive: true,
+  });
+  const sources = [
+    {
+      region: "cn",
+      assets: path.join(root, "source-cn"),
+      catalog: path.join(root, "catalog-cn.json"),
+      assetCatalog: catalogId,
+    },
+  ];
   await publish({ workspace: work, output, sources });
   const selector = fs.readFileSync(path.join(output, "manifest.json")),
     sourceFile = path.join(root, "source-cn/source.json"),
     original = JSON.parse(fs.readFileSync(sourceFile));
-  for (const fields of [{ extraction: "C:/fixture-cache/extracted" },
+  for (const fields of [
+    { extraction: "C:/fixture-cache/extracted" },
     { workspace: "local-job-name", command: "extract /private-cache/source" },
-    { source: { ...original.source, debug: { path: "\\\\fixture-host\\share" } } }]) {
-    const privateBytes = Buffer.from(JSON.stringify({ ...original, ...fields }));
+    {
+      source: {
+        ...original.source,
+        debug: { path: "\\\\fixture-host\\share" },
+      },
+    },
+  ]) {
+    const privateBytes = Buffer.from(
+      JSON.stringify({ ...original, ...fields }),
+    );
     fs.writeFileSync(sourceFile, privateBytes);
-    await assert.rejects(publish({ workspace: work, output, sources }), /sanitize-source/);
+    await assert.rejects(
+      publish({ workspace: work, output, sources }),
+      /sanitize-source/,
+    );
     assert.deepEqual(fs.readFileSync(sourceFile), privateBytes);
-    assert.deepEqual(fs.readFileSync(path.join(output, "manifest.json")), selector);
+    assert.deepEqual(
+      fs.readFileSync(path.join(output, "manifest.json")),
+      selector,
+    );
   }
-  const publicProvenance = JSON.parse(fs.readFileSync(path.join(output, "snapshots", JSON.parse(selector).snapshots[0].id, "provenance.json")));
-  assert.doesNotMatch(JSON.stringify(publicProvenance), /fixture-cache|private-cache|fixture-host|local-job-name/);
+  const publicProvenance = JSON.parse(
+    fs.readFileSync(
+      path.join(
+        output,
+        "snapshots",
+        JSON.parse(selector).snapshots[0].id,
+        "provenance.json",
+      ),
+    ),
+  );
+  assert.doesNotMatch(
+    JSON.stringify(publicProvenance),
+    /fixture-cache|private-cache|fixture-host|local-job-name/,
+  );
 });
 
 test("external fonts stay complete and verified across publication and engine reuse", async (t) => {

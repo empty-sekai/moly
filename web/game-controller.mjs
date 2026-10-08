@@ -36,12 +36,22 @@ export function gameCommand(type, value) {
 
 /** `{path, value}` or `{action, ...fields}`; the engine validates the rest. */
 function isServerEdit(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value) || "type" in value) return false;
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    "type" in value
+  )
+    return false;
   if (JSON.stringify(value).length > MAX_SERVER_EDIT) return false;
   if (typeof value.action === "string")
     return SERVER_ACTIONS.includes(value.action) && !("path" in value);
-  return typeof value.path === "string" && value.path !== "" && "value" in value &&
-    Object.keys(value).length === 2;
+  return (
+    typeof value.path === "string" &&
+    value.path !== "" &&
+    "value" in value &&
+    Object.keys(value).length === 2
+  );
 }
 
 export function isGameSnapshot(value) {
@@ -64,7 +74,8 @@ export function isGameSnapshot(value) {
     // null until the server model is installed.
     (value.server?.revision === null || revisionOf(value.server?.revision)) &&
     // null: the engine has not measured its memory (yet).
-    (value.memory?.wasmBytes === null || Number.isSafeInteger(value.memory?.wasmBytes)) &&
+    (value.memory?.wasmBytes === null ||
+      Number.isSafeInteger(value.memory?.wasmBytes)) &&
     Array.isArray(value.errors) &&
     value.errors.every((error) => typeof error === "string")
   );
@@ -84,7 +95,9 @@ export function parsePersist(text, after) {
     typeof value.documents !== "object" ||
     Object.keys(value.documents).length !== GAME_DOCUMENTS.length ||
     GAME_DOCUMENTS.some(
-      (name) => value.documents[name] !== null && typeof value.documents[name] !== "string",
+      (name) =>
+        value.documents[name] !== null &&
+        typeof value.documents[name] !== "string",
     )
   )
     throw new Error("Invalid persisted documents");
@@ -110,7 +123,11 @@ export function createGameController({ wasm, post = () => {}, writable }) {
       wasm.game_command(JSON.stringify(item));
       return true;
     } catch (error) {
-      post("error", { code: "command_refused", type: item.type, reason: String(error) });
+      post("error", {
+        code: "command_refused",
+        type: item.type,
+        reason: String(error),
+      });
       return false;
     }
   };
@@ -140,12 +157,17 @@ export function createGameController({ wasm, post = () => {}, writable }) {
         state = null;
       }
       if (!isGameSnapshot(state)) {
-        close("abi_mismatch", { expected: { schemaVersion: GAME_SCHEMA, abi: GAME_ABI } });
+        close("abi_mismatch", {
+          expected: { schemaVersion: GAME_SCHEMA, abi: GAME_ABI },
+        });
         return null;
       }
       if (!verified) {
         if (state.writable !== writable) {
-          close("writable_mismatch", { expected: writable, actual: state.writable });
+          close("writable_mismatch", {
+            expected: writable,
+            actual: state.writable,
+          });
           return null;
         }
         verified = true;
@@ -178,7 +200,8 @@ export function createGameController({ wasm, post = () => {}, writable }) {
      * `{ ok: false, reason }` with the engine's named refusal.
      */
     serverEdit(edit) {
-      if (closed || !verified) return { ok: false, reason: "The game is not running" };
+      if (closed || !verified)
+        return { ok: false, reason: "The game is not running" };
       const item = gameCommand("server.edit", edit);
       try {
         wasm.game_command(JSON.stringify(item));

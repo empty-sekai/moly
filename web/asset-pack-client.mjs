@@ -242,7 +242,8 @@ export class PackClient {
       this.root.username ||
       this.root.password ||
       !["http:", "https:"].includes(this.root.protocol) ||
-      (globalThis.location && !resourceDirectory(this.root.href, location.href, resourceBase))
+      (globalThis.location &&
+        !resourceDirectory(this.root.href, location.href, resourceBase))
     )
       throw new Error("Pack store must be a same-origin directory");
     if (catalogId !== null && !validCatalogId(catalogId))
@@ -278,7 +279,10 @@ export class PackClient {
   async document(path, expected = null, options) {
     const release = await budget.acquire(DOCUMENT * 3);
     try {
-      const bytes = await boundedBody(await this.request(path, options), DOCUMENT);
+      const bytes = await boundedBody(
+        await this.request(path, options),
+        DOCUMENT,
+      );
       if (expected && (await packDigest(bytes)) !== expected)
         throw new Error(`Packed document content address mismatch: ${path}`);
       return { value: JSON.parse(decoder.decode(bytes)), bytes };
@@ -297,8 +301,11 @@ export class PackClient {
         );
       this.catalogPromise = (
         this.catalogId
-          ? shared(this.transport, `${this.root.href}catalogs/${this.catalogId}.json`, required, () =>
-              load({ signal: null, required }),
+          ? shared(
+              this.transport,
+              `${this.root.href}catalogs/${this.catalogId}.json`,
+              required,
+              () => load({ signal: null, required }),
             )
           : load()
       ).catch((error) => {
@@ -312,7 +319,11 @@ export class PackClient {
     const path = this.catalogId
       ? `catalogs/${this.catalogId}.json`
       : "asset-packs.json";
-    const { value: catalog } = await this.document(path, this.catalogId, options);
+    const { value: catalog } = await this.document(
+      path,
+      this.catalogId,
+      options,
+    );
     if (catalog?.schema === "moly-asset-packs/1")
       throw new Error(
         "Legacy v1 packs require explicit offline migration to v2",
@@ -388,14 +399,11 @@ export class PackClient {
       if (new Set(row.dependencies).size !== row.dependencies.length)
         throw new Error("Duplicate dependency");
       for (const dependency of row.dependencies) {
-        if (!ids.has(dependency))
-          throw new Error("Missing package dependency");
+        if (!ids.has(dependency)) throw new Error("Missing package dependency");
         outgoing.get(dependency).push(row.id);
       }
     }
-    const ready = [...incoming]
-      .filter(([, n]) => n === 0)
-      .map(([id]) => id);
+    const ready = [...incoming].filter(([, n]) => n === 0).map(([id]) => id);
     let visited = 0;
     while (ready.length) {
       const id = ready.pop();
@@ -531,8 +539,7 @@ export class PackClient {
       ),
     };
     if (
-      (await packDigest(canonicalPackBytes(projection))) !==
-      manifest.content_id
+      (await packDigest(canonicalPackBytes(projection))) !== manifest.content_id
     )
       throw new Error("Semantic content identity mismatch");
     return { manifest, entries };

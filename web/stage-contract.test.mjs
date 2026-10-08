@@ -103,36 +103,76 @@ test("public resources support changing the configured HTTPS origin without rebu
   assert.equal(resourceOrigin(undefined), null);
   for (const origin of [cdn, "https://cdn-two.example:8443"]) {
     assert.equal(resourceOrigin(origin), origin);
-    assert.equal(resourceDirectory(origin + "/moly/snapshots/cn-test/assets/", base, origin).origin, origin);
-    assert.equal(resourceDirectory(origin + "/moly/asset-store/", base, origin).origin, origin);
-    assert.throws(() => resourceDirectory(origin + "/moly/asset-store/", base, null));
-    assert.throws(() => resourceDirectory(origin + "/moly/asset-store/", base, "https://unselected.example"));
+    assert.equal(
+      resourceDirectory(
+        origin + "/moly/snapshots/cn-test/assets/",
+        base,
+        origin,
+      ).origin,
+      origin,
+    );
+    assert.equal(
+      resourceDirectory(origin + "/moly/asset-store/", base, origin).origin,
+      origin,
+    );
+    assert.throws(() =>
+      resourceDirectory(origin + "/moly/asset-store/", base, null),
+    );
+    assert.throws(() =>
+      resourceDirectory(
+        origin + "/moly/asset-store/",
+        base,
+        "https://unselected.example",
+      ),
+    );
   }
   for (const value of [
     "http://assets-one.example/moly/asset-store/",
     cdn + ".evil.test/moly/asset-store/",
     "https://user@" + cdn.slice(8) + "/moly/asset-store/",
-    cdn + "/api/player/", cdn + "/moly/sources/cn/assets/",
+    cdn + "/api/player/",
+    cdn + "/moly/sources/cn/assets/",
     cdn + "/moly/snapshots/cn-test/assets/?token=private",
     cdn + "/moly/snapshots/old/../cn-test/assets/",
-  ]) assert.throws(() => resourceDirectory(value, base, cdn), value);
-  for (const value of ["http://other.test", "https://other.test/api/", "https://user@other.test", "https://other.test?key=private", "https://other.test/#fragment"])
+  ])
+    assert.throws(() => resourceDirectory(value, base, cdn), value);
+  for (const value of [
+    "http://other.test",
+    "https://other.test/api/",
+    "https://user@other.test",
+    "https://other.test?key=private",
+    "https://other.test/#fragment",
+  ])
     assert.throws(() => resourceOrigin(value));
 });
 test("production object-store roots are explicit and use logical keys without /moly", () => {
   const root = "https://assets.pjsk.moe/sekai-extra-assets/";
   assert.equal(resourceBase(root), root);
   assert.equal(
-    resourceDirectory(root + "snapshots/cn-test/assets/", "https://host.test/", root).href,
+    resourceDirectory(
+      root + "snapshots/cn-test/assets/",
+      "https://host.test/",
+      root,
+    ).href,
     root + "snapshots/cn-test/assets/",
   );
   assert.equal(
     resourceDirectory(root + "asset-store/", "https://host.test/", root).href,
     root + "asset-store/",
   );
-  assert.throws(() => resourceDirectory(root + "snapshots/cn-test/assets/", "https://host.test/"));
-  assert.throws(() => resourceDirectory(root + "snapshots/cn-test/assets/", "https://host.test/", "https://assets.pjsk.moe/other/"));
-  assert.throws(() => resourceBase("https://assets.pjsk.moe/sekai-extra-assets"));
+  assert.throws(() =>
+    resourceDirectory(root + "snapshots/cn-test/assets/", "https://host.test/"),
+  );
+  assert.throws(() =>
+    resourceDirectory(
+      root + "snapshots/cn-test/assets/",
+      "https://host.test/",
+      "https://assets.pjsk.moe/other/",
+    ),
+  );
+  assert.throws(() =>
+    resourceBase("https://assets.pjsk.moe/sekai-extra-assets"),
+  );
 });
 test("wrong source snapshot rejects pending Play without admitting any action", () => {
   const d = driver({ region: "jp", version: "6.8.1" });
@@ -288,17 +328,27 @@ test("CDN resources preserve same-origin iframe and the synchronous activation f
   let handle;
   try {
     const cdn = "https://cdn-two.example:8443";
-    handle = mountStage(env.target, { ...options, assets: cdn + options.assets, resourceOrigin: cdn });
+    handle = mountStage(env.target, {
+      ...options,
+      assets: cdn + options.assets,
+      resourceOrigin: cdn,
+    });
     const source = new URL(handle.frame.src);
     assert.equal(source.origin, env.window.location.origin);
     assert.equal(source.searchParams.get("assets"), cdn + options.assets);
     assert.equal(source.searchParams.get("resource_origin"), cdn);
     let activated = 0;
-    handle.frame.contentWindow.addEventListener("moly-activate", () => { activated++; });
+    handle.frame.contentWindow.addEventListener("moly-activate", () => {
+      activated++;
+    });
     handle.play("talk:fixture:6177");
     assert.equal(activated, 1, "play forwards the host click before returning");
     handle.preview("talk:fixture:6177");
-    assert.equal(activated, 2, "preview forwards the host click before returning");
+    assert.equal(
+      activated,
+      2,
+      "preview forwards the host click before returning",
+    );
   } finally {
     handle?.dispose();
     env.cleanup();
@@ -317,9 +367,15 @@ test("production S3 resource_base keeps the iframe same-origin and emits the ful
     });
     const source = new URL(handle.frame.src);
     assert.equal(source.origin, env.window.location.origin);
-    assert.equal(source.searchParams.get("assets"), root + "snapshots/cn-test/assets/");
+    assert.equal(
+      source.searchParams.get("assets"),
+      root + "snapshots/cn-test/assets/",
+    );
     assert.equal(source.searchParams.get("resource_base"), root);
-    assert.equal(source.searchParams.get("resource_origin"), "https://assets.pjsk.moe");
+    assert.equal(
+      source.searchParams.get("resource_origin"),
+      "https://assets.pjsk.moe",
+    );
   } finally {
     handle?.dispose();
     env.cleanup();
@@ -471,10 +527,16 @@ test("the public adapter mounts only the stage and shares its renderer lease", a
 });
 
 test("sites are chosen by runtime ID and survive a document reload before Play", () => {
-  assert.deepEqual(intent("site", "first_floor"), { type: "site", value: "first_floor" });
+  assert.deepEqual(intent("site", "first_floor"), {
+    type: "site",
+    value: "first_floor",
+  });
   for (const bad of ["Shore", "shore/..", "", 3, null])
     assert.throws(() => intent("site", bad));
-  const options_ = [{ id: "home_site", name: "home" }, { id: "shore", name: "shore" }];
+  const options_ = [
+    { id: "home_site", name: "home" },
+    { id: "shore", name: "shore" },
+  ];
   assert.ok(isSnapshot(state({ site: { id: "shore", options: options_ } })));
   assert.ok(!isSnapshot(state({ site: { id: "moon", options: options_ } })));
   assert.ok(!isSnapshot(state({ site: { id: "shore", options: [] } })));

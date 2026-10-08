@@ -30,10 +30,19 @@ function publicOrigin(value) {
   if (typeof value !== "string") return null;
   try {
     const url = new URL(value);
-    return url.protocol === "https:" && url.hostname && !url.username && !url.password &&
-      !url.search && !url.hash && url.pathname === "/" && value === url.origin
-      ? url.origin : null;
-  } catch { return null; }
+    return url.protocol === "https:" &&
+      url.hostname &&
+      !url.username &&
+      !url.password &&
+      !url.search &&
+      !url.hash &&
+      url.pathname === "/" &&
+      value === url.origin
+      ? url.origin
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 /** The stage's selection: the parameters of its own page URL. */
@@ -47,11 +56,13 @@ export function queryClientSettings(client) {
 }
 
 export function isActiveRequiredResource(url, required, active) {
-  if ([...active.releases].some(root => url.startsWith(root))) return true;
+  if ([...active.releases].some((root) => url.startsWith(root))) return true;
   if (!required.has(url)) return false;
   // Shared objects do not carry a snapshot in their URL. Conservatively keep
   // required objects of a store only while a packed stage uses that store.
-  return [...active.snapshots, ...active.shared].some(root => url.startsWith(root));
+  return [...active.snapshots, ...active.shared].some((root) =>
+    url.startsWith(root),
+  );
 }
 
 /** A bounded admission queue, never a reason to silently skip retention.
@@ -105,17 +116,26 @@ export class CacheAdmission {
 
 /** URL properties no client configuration changes: a URL failing them never has an identity. */
 export function plainResourceUrl(url) {
-  return !url.search && !url.hash && !url.username && !url.password &&
-    ["http:", "https:"].includes(url.protocol) && !/%2f|%5c|%00/i.test(url.pathname);
+  return (
+    !url.search &&
+    !url.hash &&
+    !url.username &&
+    !url.password &&
+    ["http:", "https:"].includes(url.protocol) &&
+    !/%2f|%5c|%00/i.test(url.pathname)
+  );
 }
 
 /** Decoded size published with the object: the local server's header or the
  * object store's user metadata (OSS and S3 spellings). A store that does not
  * expose it through CORS reads as 0, which disables retention, not playback. */
 export function declaredDecodedBytes(headers) {
-  return Number(headers.get("X-Moly-Decoded-Bytes") ||
-    headers.get("x-oss-meta-moly-decoded-bytes") ||
-    headers.get("x-amz-meta-moly-decoded-bytes") || 0);
+  return Number(
+    headers.get("X-Moly-Decoded-Bytes") ||
+      headers.get("x-oss-meta-moly-decoded-bytes") ||
+      headers.get("x-amz-meta-moly-decoded-bytes") ||
+      0,
+  );
 }
 
 // Most immutable URLs one "require" message may name.
@@ -189,10 +209,15 @@ export function createCacheCore({
   /** The matched page and its selection, or null for any other client. */
   function clientSelection(clientUrl, origin) {
     const client = new URL(clientUrl);
-    if (client.origin !== origin || client.username || client.password) return null;
+    if (client.origin !== origin || client.username || client.password)
+      return null;
     const match = clientPath.exec(client.pathname);
     if (!match) return null;
-    return { url: client, release: match[1], settings: clientSettings(client) ?? {} };
+    return {
+      url: client,
+      release: match[1],
+      settings: clientSettings(client) ?? {},
+    };
   }
 
   /** Trust the configured origin of the requesting same-origin stage client,
@@ -202,7 +227,9 @@ export function createCacheCore({
       const selection = clientSelection(clientUrl, origin);
       if (!selection) return null;
       return publicOrigin(selection.settings.resourceOrigin);
-    } catch { return null; }
+    } catch {
+      return null;
+    }
   }
 
   /** The complete object-store prefix selected by a stage, when present. */
@@ -213,62 +240,121 @@ export function createCacheCore({
       const value = selection.settings.resourceBase;
       if (!value) return null;
       const base = new URL(value);
-      return base.protocol === "https:" && base.origin && !base.username && !base.password &&
-        !base.search && !base.hash && base.pathname.endsWith("/") && value === base.href
-        ? base.href : null;
-    } catch { return null; }
+      return base.protocol === "https:" &&
+        base.origin &&
+        !base.username &&
+        !base.password &&
+        !base.search &&
+        !base.hash &&
+        base.pathname.endsWith("/") &&
+        value === base.href
+        ? base.href
+        : null;
+    } catch {
+      return null;
+    }
   }
 
   /** Only currently open stages protect an engine or a source's base resources.
    * The persisted required list describes base membership, not a permanent pin. */
   function activeResourceRoots(clients, origin) {
-    const releases = new Set(), snapshots = new Set(), shared = new Set();
+    const releases = new Set(),
+      snapshots = new Set(),
+      shared = new Set();
     for (const client of clients) {
       try {
         const selection = clientSelection(client.url, origin);
         const release = selection?.release ?? selection?.settings.release;
-        if (!selection || typeof release !== "string" || !IDENTITY.test(release)) continue;
+        if (
+          !selection ||
+          typeof release !== "string" ||
+          !IDENTITY.test(release)
+        )
+          continue;
         const remote = clientResourceOrigin(client.url, origin);
         const remoteBase = clientResourceBase(client.url, origin);
         const releasePath = `${root}releases/${release}/`;
         releases.add(origin + releasePath);
         if (remote) releases.add(remote + releasePath);
-        if (remoteBase) releases.add(new URL(`releases/${release}/`, remoteBase).href);
+        if (remoteBase)
+          releases.add(new URL(`releases/${release}/`, remoteBase).href);
         const value = selection.settings.assets;
         if (!value) continue;
         const assets = new URL(value, selection.url);
-        if ((assets.origin !== origin && assets.origin !== remote) || assets.username || assets.password ||
-            assets.search || assets.hash || /[%\\]/.test(assets.pathname)) continue;
+        if (
+          (assets.origin !== origin && assets.origin !== remote) ||
+          assets.username ||
+          assets.password ||
+          assets.search ||
+          assets.hash ||
+          /[%\\]/.test(assets.pathname)
+        )
+          continue;
         const basePath = remoteBase ? new URL(remoteBase).pathname : root;
-        if (assets.origin === (remoteBase ? new URL(remoteBase).origin : remote) &&
-            assets.pathname.startsWith(basePath) &&
-            /^snapshots\/[a-z0-9][a-z0-9._-]{0,95}\/assets\/$/.test(assets.pathname.slice(basePath.length))) snapshots.add(assets.href);
-        else if (selection.settings.packs === true && assets.origin === (remoteBase ? new URL(remoteBase).origin : remote) &&
-            assets.pathname === basePath + "asset-store/") shared.add(assets.href);
-      } catch { /* An unrelated or invalid client cannot pin resources. */ }
+        if (
+          assets.origin ===
+            (remoteBase ? new URL(remoteBase).origin : remote) &&
+          assets.pathname.startsWith(basePath) &&
+          /^snapshots\/[a-z0-9][a-z0-9._-]{0,95}\/assets\/$/.test(
+            assets.pathname.slice(basePath.length),
+          )
+        )
+          snapshots.add(assets.href);
+        else if (
+          selection.settings.packs === true &&
+          assets.origin ===
+            (remoteBase ? new URL(remoteBase).origin : remote) &&
+          assets.pathname === basePath + "asset-store/"
+        )
+          shared.add(assets.href);
+      } catch {
+        /* An unrelated or invalid client cannot pin resources. */
+      }
     }
     return { releases, snapshots, shared };
   }
 
-  function resourceIdentity(value, origin, configuredOrigin = null, configuredBase = null) {
+  function resourceIdentity(
+    value,
+    origin,
+    configuredOrigin = null,
+    configuredBase = null,
+  ) {
     let url;
-    try { url = new URL(value, origin); } catch { return null; }
-    if ((url.origin !== origin && url.origin !== publicOrigin(configuredOrigin)) || !plainResourceUrl(url))
+    try {
+      url = new URL(value, origin);
+    } catch {
       return null;
-    const basePath = configuredBase ? (() => {
-      try {
-        const base = new URL(configuredBase);
-        return base.origin === url.origin && base.pathname.endsWith("/") ? base.pathname : null;
-      } catch { return null; }
-    })() : null;
-    const logicalPath = basePath && url.pathname.startsWith(basePath)
-      ? url.pathname.slice(basePath.length)
-      : url.pathname.startsWith(root)
-        ? url.pathname.slice(root.length)
-        : null;
-    const shared = logicalPath && logicalPath.match(
-      /^asset-store\/(?:(blobs)\/([a-f0-9]{2})\/([a-f0-9]{64})\.(bin|gzz|brz|br)|(packages|catalogs)\/([a-f0-9]{64})\.json)$/,
-    );
+    }
+    if (
+      (url.origin !== origin &&
+        url.origin !== publicOrigin(configuredOrigin)) ||
+      !plainResourceUrl(url)
+    )
+      return null;
+    const basePath = configuredBase
+      ? (() => {
+          try {
+            const base = new URL(configuredBase);
+            return base.origin === url.origin && base.pathname.endsWith("/")
+              ? base.pathname
+              : null;
+          } catch {
+            return null;
+          }
+        })()
+      : null;
+    const logicalPath =
+      basePath && url.pathname.startsWith(basePath)
+        ? url.pathname.slice(basePath.length)
+        : url.pathname.startsWith(root)
+          ? url.pathname.slice(root.length)
+          : null;
+    const shared =
+      logicalPath &&
+      logicalPath.match(
+        /^asset-store\/(?:(blobs)\/([a-f0-9]{2})\/([a-f0-9]{64})\.(bin|gzz|brz|br)|(packages|catalogs)\/([a-f0-9]{64})\.json)$/,
+      );
     if (shared) {
       const sha256 = shared[3] || shared[6];
       if (shared[2] && shared[2] !== sha256.slice(0, 2)) return null;
@@ -280,7 +366,11 @@ export function createCacheCore({
         maximum: shared[1] ? MAX_ENTRY : 16 * 1024 * 1024,
       };
     }
-    const match = logicalPath && /^(releases|snapshots)\/([a-z0-9][a-z0-9._-]{0,95})\/(.+)$/.exec(logicalPath);
+    const match =
+      logicalPath &&
+      /^(releases|snapshots)\/([a-z0-9][a-z0-9._-]{0,95})\/(.+)$/.exec(
+        logicalPath,
+      );
     if (
       !match ||
       match[3]
@@ -289,14 +379,26 @@ export function createCacheCore({
     )
       return null;
     return {
-      cache: RESOURCE_PREFIX + (match[1] === "releases" ? "r-" : "s-") + match[2],
+      cache:
+        RESOURCE_PREFIX + (match[1] === "releases" ? "r-" : "s-") + match[2],
       url: url.href,
     };
   }
 
   /** Only a trusted, source-qualified measured pack can protect assets. */
-  function requiredResourceURLs(pack, descriptor, origin, configuredOrigin = null, configuredBase = null) {
-    const identity = resourceIdentity(descriptor, origin, configuredOrigin, configuredBase);
+  function requiredResourceURLs(
+    pack,
+    descriptor,
+    origin,
+    configuredOrigin = null,
+    configuredBase = null,
+  ) {
+    const identity = resourceIdentity(
+      descriptor,
+      origin,
+      configuredOrigin,
+      configuredBase,
+    );
     if (
       !identity ||
       pack?.schemaVersion !== 1 ||
@@ -309,9 +411,12 @@ export function createCacheCore({
       return [];
     const url = new URL(descriptor);
     const prefix = configuredBase ? new URL(configuredBase).pathname : root;
-    if (!url.pathname.startsWith(
+    if (
+      !url.pathname.startsWith(
         `${prefix}snapshots/${pack.region}-${pack.gameVersion}-`,
-      ) || !url.pathname.endsWith("/assets/browser-base.json"))
+      ) ||
+      !url.pathname.endsWith("/assets/browser-base.json")
+    )
       return [];
     const base = new URL("./", url);
     const urls = [url.href];
@@ -324,7 +429,12 @@ export function createCacheCore({
         return [];
       const child = new URL(file.path, base);
       if (
-        !resourceIdentity(child.href, origin, configuredOrigin, configuredBase) ||
+        !resourceIdentity(
+          child.href,
+          origin,
+          configuredOrigin,
+          configuredBase,
+        ) ||
         !child.pathname.startsWith(base.pathname)
       )
         return [];
@@ -349,7 +459,8 @@ export function createCacheCore({
     // Responses can reach the page before hashing or storage admission. A
     // flush snapshots these tasks, including copies not yet in the write queue.
     const pendingRetention = new Set();
-    const controlUrl = new URL(`${root}__retention`, scope.location.origin).href;
+    const controlUrl = new URL(`${root}__retention`, scope.location.origin)
+      .href;
     const pinsUrl = new URL(`${root}__required`, scope.location.origin).href;
     const required = new Set();
     const lastUsed = new Map();
@@ -364,7 +475,11 @@ export function createCacheCore({
           for (const url of values)
             // Restoring cache bookkeeping does not authorize any network reads.
             // Each future request must match its own stage client's origin below.
-            if (typeof url === "string" && resourceIdentity(url, scope.location.origin, new URL(url).origin)) required.add(url);
+            if (
+              typeof url === "string" &&
+              resourceIdentity(url, scope.location.origin, new URL(url).origin)
+            )
+              required.add(url);
       }
     })().catch(() => {
       enabled = false;
@@ -393,7 +508,9 @@ export function createCacheCore({
         const requests = await cache.keys();
         for (let start = 0; start < requests.length; start += INVENTORY_BATCH) {
           const batch = requests.slice(start, start + INVENTORY_BATCH);
-          const responses = await Promise.all(batch.map((request) => cache.match(request)));
+          const responses = await Promise.all(
+            batch.map((request) => cache.match(request)),
+          );
           batch.forEach((request, index) => {
             const response = responses[index];
             entries.push({
@@ -418,7 +535,9 @@ export function createCacheCore({
       ledgerBytes = 0;
     const ledgerKey = (name, url) => `${name}\n${url}`;
     function takeLedger(entries) {
-      ledger = new Map(entries.map((entry) => [ledgerKey(entry.name, entry.url), entry]));
+      ledger = new Map(
+        entries.map((entry) => [ledgerKey(entry.name, entry.url), entry]),
+      );
       ledgerBytes = entries.reduce((sum, entry) => sum + entry.bytes, 0);
       ledgerAt = Date.now();
       return entries;
@@ -437,14 +556,20 @@ export function createCacheCore({
       ledgerBytes += entry.bytes;
     }
     async function makeSpace(extra, incoming) {
-      if (!ledger || Date.now() - ledgerAt > LEDGER_MS) takeLedger(await inventory());
+      if (!ledger || Date.now() - ledgerAt > LEDGER_MS)
+        takeLedger(await inventory());
       // The total includes any stored copy of the incoming URL, so a total
       // within the budget needs no closer look.
       if (ledgerBytes + extra <= LIMIT) return;
-      const entries = [...ledger.values()].filter((entry) => entry.url !== incoming);
+      const entries = [...ledger.values()].filter(
+        (entry) => entry.url !== incoming,
+      );
       let bytes = entries.reduce((sum, entry) => sum + entry.bytes, 0);
       if (bytes + extra <= LIMIT) return;
-      const active = activeResourceRoots(await scope.clients.matchAll({ type: "window" }), scope.location.origin);
+      const active = activeResourceRoots(
+        await scope.clients.matchAll({ type: "window" }),
+        scope.location.origin,
+      );
       const time = (entry) => lastUsed.get(entry.url) ?? entry.stored;
       for (const entry of entries.sort((a, b) => time(a) - time(b))) {
         if (bytes + extra <= LIMIT) break;
@@ -484,7 +609,9 @@ export function createCacheCore({
         const configuredOrigin = clientResourceOrigin(clientUrl, origin),
           configuredBase = clientResourceBase(clientUrl, origin);
         const urls = message.urls
-          .map((url) => resourceIdentity(url, origin, configuredOrigin, configuredBase))
+          .map((url) =>
+            resourceIdentity(url, origin, configuredOrigin, configuredBase),
+          )
           .filter((identity) => identity?.shared)
           .map((identity) => identity.url);
         event.waitUntil(
@@ -556,9 +683,10 @@ export function createCacheCore({
         });
       // Never hold the write queue while waiting: the pending copies must
       // enter that queue themselves. Later reads do not extend this barrier.
-      const response = message.type === "flush"
-        ? Promise.allSettled([...pendingRetention]).then(respond)
-        : respond();
+      const response =
+        message.type === "flush"
+          ? Promise.allSettled([...pendingRetention]).then(respond)
+          : respond();
       event.waitUntil(
         response.catch(() =>
           port.postMessage({
@@ -582,20 +710,44 @@ export function createCacheCore({
       // immutable logical suffixes, while the asynchronous identity check below
       // still requires the requesting client's exact resource_base.
       const logicalCandidate =
-        /(?:^|\/)(?:releases|snapshots)\/[a-z0-9][a-z0-9._-]{0,95}\/.+/.test(candidateUrl.pathname) ||
-        /(?:^|\/)asset-store\/(?:blobs\/[a-f0-9]{2}\/[a-f0-9]{64}\.(?:bin|gzz|brz|br)|(?:packages|catalogs)\/[a-f0-9]{64}\.json)$/.test(candidateUrl.pathname);
+        /(?:^|\/)(?:releases|snapshots)\/[a-z0-9][a-z0-9._-]{0,95}\/.+/.test(
+          candidateUrl.pathname,
+        ) ||
+        /(?:^|\/)asset-store\/(?:blobs\/[a-f0-9]{2}\/[a-f0-9]{64}\.(?:bin|gzz|brz|br)|(?:packages|catalogs)\/[a-f0-9]{64}\.json)$/.test(
+          candidateUrl.pathname,
+        );
       // A URL no configuration can admit (a query, a fragment, credentials, an encoded
       // separator) is left to the browser, so its request and any failure stay its own.
-      const candidate = request.method === "GET" && !request.headers.has("Range") && plainResourceUrl(candidateUrl) &&
-        (resourceIdentity(request.url, scope.location.origin, candidateUrl.origin) ||
-         logicalCandidate);
+      const candidate =
+        request.method === "GET" &&
+        !request.headers.has("Range") &&
+        plainResourceUrl(candidateUrl) &&
+        (resourceIdentity(
+          request.url,
+          scope.location.origin,
+          candidateUrl.origin,
+        ) ||
+          logicalCandidate);
       if (!candidate) return false;
       event.respondWith(
         (async () => {
-          const client = event.clientId ? await scope.clients.get(event.clientId).catch(() => null) : null;
-          const configuredOrigin = clientResourceOrigin(client?.url, scope.location.origin);
-          const configuredBase = clientResourceBase(client?.url, scope.location.origin);
-          const identity = resourceIdentity(request.url, scope.location.origin, configuredOrigin, configuredBase);
+          const client = event.clientId
+            ? await scope.clients.get(event.clientId).catch(() => null)
+            : null;
+          const configuredOrigin = clientResourceOrigin(
+            client?.url,
+            scope.location.origin,
+          );
+          const configuredBase = clientResourceBase(
+            client?.url,
+            scope.location.origin,
+          );
+          const identity = resourceIdentity(
+            request.url,
+            scope.location.origin,
+            configuredOrigin,
+            configuredBase,
+          );
           if (!identity) return fetch(request);
           await initialized;
           const requestEpoch = epoch;
@@ -615,7 +767,12 @@ export function createCacheCore({
               ) {
                 event.waitUntil(
                   serial(async () => {
-                    if (!enabled || requestEpoch !== epoch || required.size >= 20000) return;
+                    if (
+                      !enabled ||
+                      requestEpoch !== epoch ||
+                      required.size >= 20000
+                    )
+                      return;
                     required.add(identity.url);
                     await writePins();
                   }).catch(() => {}),
@@ -632,7 +789,11 @@ export function createCacheCore({
           }
           // Controlled large runtime requests bypass the browser's opaque HTTP
           // cache. Optional retained copies are therefore measurable and removable.
-          const response = await fetch(request, { cache: "no-store", credentials: "omit", redirect: "error" });
+          const response = await fetch(request, {
+            cache: "no-store",
+            credentials: "omit",
+            redirect: "error",
+          });
           const bytes = declaredDecodedBytes(response.headers);
           let pinsChanged = false;
           if (
@@ -686,66 +847,70 @@ export function createCacheCore({
             if (!reserved) return response;
             let copy = response.clone(),
               release = null;
-            const pending =
-              (async () => {
-                release = await admission.acquire(bytes, current);
-                if (!release) {
+            const pending = (async () => {
+              release = await admission.acquire(bytes, current);
+              if (!release) {
+                await copy.body?.cancel();
+                return;
+              }
+              // The hash check touches no shared state: admitted copies are
+              // checked concurrently, within the admission bounds, while
+              // earlier ones are written. Only storage changes are queued.
+              if (identity.sha256) {
+                const data = await verifiedSharedBody(
+                  copy,
+                  bytes,
+                  identity.sha256,
+                );
+                copy = new Response(data, {
+                  status: response.status,
+                  statusText: response.statusText,
+                  headers: response.headers,
+                });
+              }
+              await serial(async () => {
+                if (!enabled || generation !== epoch) {
                   await copy.body?.cancel();
                   return;
                 }
-                // The hash check touches no shared state: admitted copies are
-                // checked concurrently, within the admission bounds, while
-                // earlier ones are written. Only storage changes are queued.
-                if (identity.sha256) {
-                  const data = await verifiedSharedBody(
-                    copy,
-                    bytes,
-                    identity.sha256,
-                  );
-                  copy = new Response(data, {
-                    status: response.status,
-                    statusText: response.statusText,
-                    headers: response.headers,
-                  });
+                if (
+                  identity.shared &&
+                  request.headers.get("X-Moly-Required") === "1" &&
+                  required.size < 20000
+                ) {
+                  required.add(identity.url);
+                  pinsChanged = true;
                 }
-                await serial(async () => {
-                  if (!enabled || generation !== epoch) {
-                    await copy.body?.cancel();
-                    return;
-                  }
-                  if (
-                    identity.shared &&
-                    request.headers.get("X-Moly-Required") === "1" &&
-                    required.size < 20000
-                  ) {
-                    required.add(identity.url);
-                    pinsChanged = true;
-                  }
-                  if (pinsChanged) await writePins();
-                  await makeSpace(bytes, identity.url);
-                  const headers = new Headers(copy.headers);
-                  headers.delete("Content-Encoding");
-                  headers.delete("Content-Length");
-                  const stored = Date.now();
-                  headers.set("X-Moly-Stored-Bytes", String(bytes));
-                  headers.set("X-Moly-Stored-At", String(stored));
-                  const cache = await caches.open(identity.cache);
-                  await cache.put(
-                    identity.url,
-                    new Response(copy.body, { status: 200, headers }),
-                  );
-                  remember({ name: identity.cache, url: identity.url, bytes, stored });
-                  lastUsed.set(identity.url, Date.now());
+                if (pinsChanged) await writePins();
+                await makeSpace(bytes, identity.url);
+                const headers = new Headers(copy.headers);
+                headers.delete("Content-Encoding");
+                headers.delete("Content-Length");
+                const stored = Date.now();
+                headers.set("X-Moly-Stored-Bytes", String(bytes));
+                headers.set("X-Moly-Stored-At", String(stored));
+                const cache = await caches.open(identity.cache);
+                await cache.put(
+                  identity.url,
+                  new Response(copy.body, { status: 200, headers }),
+                );
+                remember({
+                  name: identity.cache,
+                  url: identity.url,
+                  bytes,
+                  stored,
                 });
-              })()
-                .catch(() => {
-                  /* Retention is best-effort; never fail successful online playback. */
-                })
-                .finally(() => {
-                  release?.();
-                  reserved();
-                  pendingRetention.delete(pending);
-                });
+                lastUsed.set(identity.url, Date.now());
+              });
+            })()
+              .catch(() => {
+                /* Retention is best-effort; never fail successful online playback. */
+              })
+              .finally(() => {
+                release?.();
+                reserved();
+                pendingRetention.delete(pending);
+              });
             pendingRetention.add(pending);
             event.waitUntil(pending);
           }
@@ -763,10 +928,14 @@ export function createCacheCore({
     scope.addEventListener("install", (event) =>
       event.waitUntil(scope.skipWaiting()),
     );
-    scope.addEventListener("activate", (event) => event.waitUntil((async () => {
-      await scope.clients.claim();
-      await store.activate();
-    })()));
+    scope.addEventListener("activate", (event) =>
+      event.waitUntil(
+        (async () => {
+          await scope.clients.claim();
+          await store.activate();
+        })(),
+      ),
+    );
     scope.addEventListener("message", (event) => {
       store.handleMessage(event);
     });

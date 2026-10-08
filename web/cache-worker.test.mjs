@@ -19,61 +19,182 @@ test("only open stage versions protect engines and the selected base resources",
   const cdn = "https://cdn.example";
   const base = cdn + "/moly/snapshots/cn-1.2.3-current/assets/";
   const oldBase = cdn + "/moly/snapshots/cn-1.2.3-old/assets/";
-  const clients = [{ url: origin + "/moly/releases/current/stage.html?resource_origin=" + encodeURIComponent(cdn) + "&assets=" + encodeURIComponent(base) }];
+  const clients = [
+    {
+      url:
+        origin +
+        "/moly/releases/current/stage.html?resource_origin=" +
+        encodeURIComponent(cdn) +
+        "&assets=" +
+        encodeURIComponent(base),
+    },
+  ];
   const required = new Set([base + "base.json", oldBase + "base.json"]);
   const active = activeResourceRoots(clients, origin);
-  assert.ok(isActiveRequiredResource(cdn + "/moly/releases/current/pkg/webgpu/moly-app_bg.wasm", required, active));
+  assert.ok(
+    isActiveRequiredResource(
+      cdn + "/moly/releases/current/pkg/webgpu/moly-app_bg.wasm",
+      required,
+      active,
+    ),
+  );
   assert.ok(isActiveRequiredResource(base + "base.json", required, active));
-  assert.equal(isActiveRequiredResource(base + "optional.ogg", required, active), false);
-  assert.equal(isActiveRequiredResource(cdn + "/moly/releases/old/pkg/webgpu/moly-app_bg.wasm", required, active), false);
-  assert.equal(isActiveRequiredResource(oldBase + "base.json", required, active), false);
-  assert.equal(isActiveRequiredResource(base + "base.json", required, activeResourceRoots([], origin)), false);
+  assert.equal(
+    isActiveRequiredResource(base + "optional.ogg", required, active),
+    false,
+  );
+  assert.equal(
+    isActiveRequiredResource(
+      cdn + "/moly/releases/old/pkg/webgpu/moly-app_bg.wasm",
+      required,
+      active,
+    ),
+    false,
+  );
+  assert.equal(
+    isActiveRequiredResource(oldBase + "base.json", required, active),
+    false,
+  );
+  assert.equal(
+    isActiveRequiredResource(
+      base + "base.json",
+      required,
+      activeResourceRoots([], origin),
+    ),
+    false,
+  );
   const sharedRoot = cdn + "/moly/asset-store/";
   const blob = sharedRoot + "blobs/aa/" + "a".repeat(64) + ".bin";
-  const packed = activeResourceRoots([{ url: origin + "/moly/releases/current/stage.html?packs=1&resource_origin=" + encodeURIComponent(cdn) + "&assets=" + encodeURIComponent(sharedRoot) }], origin);
+  const packed = activeResourceRoots(
+    [
+      {
+        url:
+          origin +
+          "/moly/releases/current/stage.html?packs=1&resource_origin=" +
+          encodeURIComponent(cdn) +
+          "&assets=" +
+          encodeURIComponent(sharedRoot),
+      },
+    ],
+    origin,
+  );
   assert.ok(isActiveRequiredResource(blob, new Set([blob]), packed));
   assert.equal(isActiveRequiredResource(blob, new Set([blob]), active), false);
 });
 
 test("CDN retention preserves immutable identities and excludes private routes", () => {
-  for (const cdn of ["https://assets-one.example", "https://cdn-two.example:8443"]) {
-  const descriptor = cdn + "/moly/snapshots/cn-1.2.3-test/assets/browser-base.json";
-  const client = origin + "/moly/releases/stage-a/stage.html?resource_origin=" + encodeURIComponent(cdn);
-  assert.equal(clientResourceOrigin(client, origin), cdn);
-  assert.ok(resourceIdentity(descriptor, origin, clientResourceOrigin(client, origin)));
-  assert.equal(resourceIdentity(descriptor, origin), null);
-  assert.equal(resourceIdentity(descriptor, origin, "https://unselected.example"), null);
-  assert.deepEqual(requiredResourceURLs({
-    schemaVersion: 1, generator: "moly-browser-base-v1", region: "cn", gameVersion: "1.2.3",
-    files: [{ path: "audio/loop.json" }],
-  }, descriptor, origin, cdn), [descriptor, cdn + "/moly/snapshots/cn-1.2.3-test/assets/audio/loop.json"]);
-  for (const url of [cdn + "/api/player", cdn + "/moly/manifest.json", cdn + ".evil.test/moly/asset-store/"])
-    assert.equal(resourceIdentity(url, origin, cdn), null);
+  for (const cdn of [
+    "https://assets-one.example",
+    "https://cdn-two.example:8443",
+  ]) {
+    const descriptor =
+      cdn + "/moly/snapshots/cn-1.2.3-test/assets/browser-base.json";
+    const client =
+      origin +
+      "/moly/releases/stage-a/stage.html?resource_origin=" +
+      encodeURIComponent(cdn);
+    assert.equal(clientResourceOrigin(client, origin), cdn);
+    assert.ok(
+      resourceIdentity(
+        descriptor,
+        origin,
+        clientResourceOrigin(client, origin),
+      ),
+    );
+    assert.equal(resourceIdentity(descriptor, origin), null);
+    assert.equal(
+      resourceIdentity(descriptor, origin, "https://unselected.example"),
+      null,
+    );
+    assert.deepEqual(
+      requiredResourceURLs(
+        {
+          schemaVersion: 1,
+          generator: "moly-browser-base-v1",
+          region: "cn",
+          gameVersion: "1.2.3",
+          files: [{ path: "audio/loop.json" }],
+        },
+        descriptor,
+        origin,
+        cdn,
+      ),
+      [
+        descriptor,
+        cdn + "/moly/snapshots/cn-1.2.3-test/assets/audio/loop.json",
+      ],
+    );
+    for (const url of [
+      cdn + "/api/player",
+      cdn + "/moly/manifest.json",
+      cdn + ".evil.test/moly/asset-store/",
+    ])
+      assert.equal(resourceIdentity(url, origin, cdn), null);
   }
 });
 test("production S3 prefix admits only its configured logical resources", () => {
   const cdn = "https://assets.pjsk.moe";
   const root = cdn + "/sekai-extra-assets/";
   const descriptor = root + "snapshots/cn-1.2.3-test/assets/browser-base.json";
-  const client = origin + "/moly/releases/stage-a/stage.html?resource_base=" + encodeURIComponent(root) +
-    "&resource_origin=" + encodeURIComponent(cdn);
+  const client =
+    origin +
+    "/moly/releases/stage-a/stage.html?resource_base=" +
+    encodeURIComponent(root) +
+    "&resource_origin=" +
+    encodeURIComponent(cdn);
   assert.equal(clientResourceBase(client, origin), root);
   assert.ok(resourceIdentity(descriptor, origin, cdn, root));
   assert.equal(resourceIdentity(descriptor, origin, cdn), null);
-  assert.equal(resourceIdentity(root + "manifest.json", origin, cdn, root), null);
+  assert.equal(
+    resourceIdentity(root + "manifest.json", origin, cdn, root),
+    null,
+  );
   assert.equal(resourceIdentity(root + "api/player", origin, cdn, root), null);
-  assert.equal(resourceIdentity(cdn + "/other/snapshots/cn-test/assets/a.glb", origin, cdn, root), null);
+  assert.equal(
+    resourceIdentity(
+      cdn + "/other/snapshots/cn-test/assets/a.glb",
+      origin,
+      cdn,
+      root,
+    ),
+    null,
+  );
 });
 test("production S3 prefix pins release and snapshot roots by the stage selection", () => {
   const cdn = "https://assets.pjsk.moe";
   const root = cdn + "/sekai-extra-assets/";
   const assets = root + "snapshots/cn-1.2.3-test/assets/";
-  const client = origin + "/moly/releases/stage-a/stage.html?resource_base=" + encodeURIComponent(root) +
-    "&resource_origin=" + encodeURIComponent(cdn) + "&assets=" + encodeURIComponent(assets);
+  const client =
+    origin +
+    "/moly/releases/stage-a/stage.html?resource_base=" +
+    encodeURIComponent(root) +
+    "&resource_origin=" +
+    encodeURIComponent(cdn) +
+    "&assets=" +
+    encodeURIComponent(assets);
   const active = activeResourceRoots([{ url: client }], origin);
-  assert.ok(isActiveRequiredResource(root + "releases/stage-a/pkg/webgpu/moly-app_bg.wasm", new Set(), active));
-  assert.equal(isActiveRequiredResource(root + "snapshots/old/assets/model.glb", new Set([root + "snapshots/old/assets/model.glb"]), active), false);
-  assert.ok(isActiveRequiredResource(assets + "model.glb", new Set([assets + "model.glb"]), active));
+  assert.ok(
+    isActiveRequiredResource(
+      root + "releases/stage-a/pkg/webgpu/moly-app_bg.wasm",
+      new Set(),
+      active,
+    ),
+  );
+  assert.equal(
+    isActiveRequiredResource(
+      root + "snapshots/old/assets/model.glb",
+      new Set([root + "snapshots/old/assets/model.glb"]),
+      active,
+    ),
+    false,
+  );
+  assert.ok(
+    isActiveRequiredResource(
+      assets + "model.glb",
+      new Set([assets + "model.glb"]),
+      active,
+    ),
+  );
 });
 
 test("only a same-origin stage can select a cache resource origin", () => {
@@ -81,10 +202,13 @@ test("only a same-origin stage can select a cache resource origin", () => {
     "https://other.test/moly/releases/a/stage.html?resource_origin=https://cdn.example",
     origin + "/api/player?resource_origin=https://cdn.example",
     origin + "/moly/releases/a/stage.html?resource_origin=http://cdn.example",
-    origin + "/moly/releases/a/stage.html?resource_origin=https://user@cdn.example",
-    origin + "/moly/releases/a/stage.html?resource_origin=https://cdn.example/private/",
+    origin +
+      "/moly/releases/a/stage.html?resource_origin=https://user@cdn.example",
+    origin +
+      "/moly/releases/a/stage.html?resource_origin=https://cdn.example/private/",
     origin + "/moly/releases/a/stage.html",
-  ]) assert.equal(clientResourceOrigin(client, origin), null);
+  ])
+    assert.equal(clientResourceOrigin(client, origin), null);
 });
 
 test("resource retention keys preserve both release and snapshot identities", () => {
@@ -127,7 +251,9 @@ test("cache protocol exposes bounded intentions, never arbitrary purge/fetch com
   assert.ok(isCacheMessage({ ...base, type: "flush" }));
   assert.ok(isCacheMessage({ ...base, type: "clear" }));
   assert.ok(isCacheMessage({ ...base, type: "retain", enabled: false }));
-  assert.ok(isCacheMessage({ ...base, type: "require", urls: ["https://a.test/x"] }));
+  assert.ok(
+    isCacheMessage({ ...base, type: "require", urls: ["https://a.test/x"] }),
+  );
   for (const payload of [
     { ...base, type: "require" },
     { ...base, type: "require", urls: [1] },
@@ -184,8 +310,21 @@ test("shared cache stream validation enforces size while reading and verifies SH
 });
 
 test("decoded size is read from the server header and both object-store metadata spellings", () => {
-  assert.equal(declaredDecodedBytes(new Headers({ "X-Moly-Decoded-Bytes": "7" })), 7);
-  assert.equal(declaredDecodedBytes(new Headers({ "x-oss-meta-moly-decoded-bytes": "8" })), 8);
-  assert.equal(declaredDecodedBytes(new Headers({ "x-amz-meta-moly-decoded-bytes": "9" })), 9);
-  assert.equal(declaredDecodedBytes(new Headers({ "Content-Length": "10" })), 0, "an encoded length is never a decoded size");
+  assert.equal(
+    declaredDecodedBytes(new Headers({ "X-Moly-Decoded-Bytes": "7" })),
+    7,
+  );
+  assert.equal(
+    declaredDecodedBytes(new Headers({ "x-oss-meta-moly-decoded-bytes": "8" })),
+    8,
+  );
+  assert.equal(
+    declaredDecodedBytes(new Headers({ "x-amz-meta-moly-decoded-bytes": "9" })),
+    9,
+  );
+  assert.equal(
+    declaredDecodedBytes(new Headers({ "Content-Length": "10" })),
+    0,
+    "an encoded length is never a decoded size",
+  );
 });

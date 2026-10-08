@@ -142,12 +142,22 @@ function worker(stores = new Map()) {
     networkHold: (value) => {
       networkHold = value;
     },
-    responseStatus: (value) => { responseStatus = value; },
-    responseCacheControl: (value) => { responseCacheControl = value; },
+    responseStatus: (value) => {
+      responseStatus = value;
+    },
+    responseCacheControl: (value) => {
+      responseCacheControl = value;
+    },
     async message(type, enabled, extra = {}) {
       let result, waiting;
       handlers.get("message")({
-        data: { source: "moly-cache-host", schemaVersion: 1, type, enabled, ...extra },
+        data: {
+          source: "moly-cache-host",
+          schemaVersion: 1,
+          type,
+          enabled,
+          ...extra,
+        },
         source: { url: "https://qa.test/en-us/mysekai/interactions/" },
         ports: [
           {
@@ -253,78 +263,97 @@ test("responses reach the page while their copies wait, within a bounded byte bu
   assert.equal(w.network(), 4);
 });
 
-test("flush waits for returned responses still queued for storage admission", { timeout: 2000 }, async (t) => {
-  const w = worker();
-  await w.message("retain", true);
-  let release;
-  w.hold(new Promise((resolve) => { release = resolve; }));
-  t.after(() => release());
-  const paths = ["large-a.glb", "large-b.glb", "large-c.glb"];
-  const responses = [];
-  for (const path of paths) {
+test(
+  "flush waits for returned responses still queued for storage admission",
+  { timeout: 2000 },
+  async (t) => {
+    const w = worker();
+    await w.message("retain", true);
+    let release;
+    w.hold(
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    );
+    t.after(() => release());
+    const paths = ["large-a.glb", "large-b.glb", "large-c.glb"];
+    const responses = [];
+    for (const path of paths) {
+      const value = await w.request(path);
+      assert.equal(await value.response.text(), "resource");
+      responses.push(value);
+    }
+    // All network bodies have completed, but only the first copy fits the
+    // storage admission budget. The others have not entered the write queue.
+    let finished = false;
+    const flushed = w.message("flush").then((state) => {
+      finished = true;
+      return state;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(finished, false);
+    release();
+    const state = await flushed;
+    assert.equal(state.entries, paths.length);
+    assert.equal(state.bytes, paths.length * 80 * 1024 * 1024);
+    // Exercise the user's next read offline, without awaiting the test-only
+    // settle handles before the flush acknowledgment.
+    w.networkFailure(true);
+    for (const path of paths) {
+      const value = await w.request(path);
+      assert.equal(value.response.headers.get("X-Moly-Cache"), "retained");
+      assert.equal(await value.response.text(), "resource");
+    }
+    assert.equal(w.network(), paths.length);
+    await Promise.all(responses.map((value) => value.settle()));
+  },
+);
+
+test(
+  "flush waits for verification outside the write queue and tolerates storage failure",
+  { timeout: 2000 },
+  async (t) => {
+    const w = worker();
+    await w.message("retain", true);
+    let release;
+    w.hashHold(
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    );
+    t.after(() => release());
+    const hash = createHash("sha256").update("resource").digest("hex");
+    const path = `/moly/asset-store/blobs/${hash.slice(0, 2)}/${hash}.bin`;
     const value = await w.request(path);
     assert.equal(await value.response.text(), "resource");
-    responses.push(value);
-  }
-  // All network bodies have completed, but only the first copy fits the
-  // storage admission budget. The others have not entered the write queue.
-  let finished = false;
-  const flushed = w.message("flush").then((state) => {
-    finished = true;
-    return state;
-  });
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(finished, false);
-  release();
-  const state = await flushed;
-  assert.equal(state.entries, paths.length);
-  assert.equal(state.bytes, paths.length * 80 * 1024 * 1024);
-  // Exercise the user's next read offline, without awaiting the test-only
-  // settle handles before the flush acknowledgment.
-  w.networkFailure(true);
-  for (const path of paths) {
-    const value = await w.request(path);
-    assert.equal(value.response.headers.get("X-Moly-Cache"), "retained");
-    assert.equal(await value.response.text(), "resource");
-  }
-  assert.equal(w.network(), paths.length);
-  await Promise.all(responses.map((value) => value.settle()));
-});
+    let finished = false;
+    const flushed = w.message("flush").then((state) => {
+      finished = true;
+      return state;
+    });
+    // The barrier must not occupy the serial queue: ordinary controls remain
+    // available while verification is paused outside it.
+    assert.equal((await w.message("query")).entries, 0);
+    assert.equal(finished, false);
+    release();
+    assert.equal((await flushed).entries, 1);
+    w.networkFailure(true);
+    assert.equal(
+      (await w.request(path)).response.headers.get("X-Moly-Cache"),
+      "retained",
+    );
+    await value.settle();
 
-test("flush waits for verification outside the write queue and tolerates storage failure", { timeout: 2000 }, async (t) => {
-  const w = worker();
-  await w.message("retain", true);
-  let release;
-  w.hashHold(new Promise((resolve) => { release = resolve; }));
-  t.after(() => release());
-  const hash = createHash("sha256").update("resource").digest("hex");
-  const path = `/moly/asset-store/blobs/${hash.slice(0, 2)}/${hash}.bin`;
-  const value = await w.request(path);
-  assert.equal(await value.response.text(), "resource");
-  let finished = false;
-  const flushed = w.message("flush").then((state) => {
-    finished = true;
-    return state;
-  });
-  // The barrier must not occupy the serial queue: ordinary controls remain
-  // available while verification is paused outside it.
-  assert.equal((await w.message("query")).entries, 0);
-  assert.equal(finished, false);
-  release();
-  assert.equal((await flushed).entries, 1);
-  w.networkFailure(true);
-  assert.equal((await w.request(path)).response.headers.get("X-Moly-Cache"), "retained");
-  await value.settle();
-
-  w.networkFailure(false);
-  w.writeFailure(true);
-  const denied = await w.request("optional.ogg");
-  assert.equal(await denied.response.text(), "resource");
-  const state = await w.message("flush");
-  assert.equal(state.ok, true);
-  assert.equal(state.entries, 1);
-  await denied.settle();
-});
+    w.networkFailure(false);
+    w.writeFailure(true);
+    const denied = await w.request("optional.ogg");
+    assert.equal(await denied.response.text(), "resource");
+    const state = await w.message("flush");
+    assert.equal(state.ok, true);
+    assert.equal(state.entries, 1);
+    await denied.settle();
+  },
+);
 test("disable after scoped clear makes subsequent loads online without recreating resource caches", async () => {
   const w = worker();
   await w.message("retain", true);
@@ -407,9 +436,17 @@ test("explicit clear removes every resource-cache version, not preferences or ot
     "moly-resource-v1-shared-pack-store",
     "moly-resource-v2-new-source",
   ]) {
-    w.stores.set(name, new Map([["https://qa.test/moly/test.bin", new Response("old", {
-      headers: { "X-Moly-Stored-Bytes": "3", "X-Moly-Stored-At": "1" },
-    })]]));
+    w.stores.set(
+      name,
+      new Map([
+        [
+          "https://qa.test/moly/test.bin",
+          new Response("old", {
+            headers: { "X-Moly-Stored-Bytes": "3", "X-Moly-Stored-At": "1" },
+          }),
+        ],
+      ]),
+    );
   }
   w.stores.set("other-app-resources", new Map());
   w.stores.set("moly-layout-preferences", new Map());
@@ -418,7 +455,9 @@ test("explicit clear removes every resource-cache version, not preferences or ot
   assert.equal(state.entries, 0);
   assert.equal(state.bytes, 0);
   assert.equal(state.enabled, true);
-  assert.ok([...w.stores.keys()].every(name => !name.startsWith("moly-resource-")));
+  assert.ok(
+    [...w.stores.keys()].every((name) => !name.startsWith("moly-resource-")),
+  );
   assert.ok(w.stores.has("moly-control-v1"));
   assert.ok(w.stores.has("moly-layout-preferences"));
   assert.ok(w.stores.has("other-app-resources"));
@@ -428,9 +467,16 @@ test("optional request in flight remains readable after clear but cannot refill 
   const w = worker();
   await w.message("retain", true);
   let release;
-  w.networkHold(new Promise(resolve => { release = resolve; }));
-  const pending = w.request("/moly/snapshots/cn-source/assets/audio/dialogue.ogg");
-  while (w.network() === 0) await new Promise(resolve => setTimeout(resolve, 0));
+  w.networkHold(
+    new Promise((resolve) => {
+      release = resolve;
+    }),
+  );
+  const pending = w.request(
+    "/moly/snapshots/cn-source/assets/audio/dialogue.ogg",
+  );
+  while (w.network() === 0)
+    await new Promise((resolve) => setTimeout(resolve, 0));
   await w.message("clear");
   release();
   const response = await pending;
@@ -438,7 +484,9 @@ test("optional request in flight remains readable after clear but cannot refill 
   await response.settle();
   assert.equal((await w.message("query")).entries, 0);
   w.networkHold(null);
-  const later = await w.request("/moly/snapshots/cn-source/assets/audio/dialogue.ogg");
+  const later = await w.request(
+    "/moly/snapshots/cn-source/assets/audio/dialogue.ogg",
+  );
   await later.settle();
   assert.equal((await w.message("query")).entries, 1);
 });
@@ -447,11 +495,20 @@ test("clear waits for an active disk write then removes it without cancelling th
   const w = worker();
   await w.message("retain", true);
   let release;
-  w.hold(new Promise(resolve => { release = resolve; }));
-  const pending = await w.request("/moly/snapshots/cn-source/assets/fixture-models/horse.glb");
+  w.hold(
+    new Promise((resolve) => {
+      release = resolve;
+    }),
+  );
+  const pending = await w.request(
+    "/moly/snapshots/cn-source/assets/fixture-models/horse.glb",
+  );
   let cleared = false;
-  const clear = w.message("clear").then(value => { cleared = true; return value; });
-  await new Promise(resolve => setTimeout(resolve, 0));
+  const clear = w.message("clear").then((value) => {
+    cleared = true;
+    return value;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(cleared, false);
   assert.equal(await pending.response.text(), "resource");
   release();

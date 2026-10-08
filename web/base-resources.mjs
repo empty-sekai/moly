@@ -130,7 +130,9 @@ export async function warmBaseResources(
   // starts last becomes the tail of the whole transfer.
   const queue = rows
     .map((row, index) => ({ row, index }))
-    .sort((a, b) => b.row.decodedBytes - a.row.decodedBytes || a.index - b.index)
+    .sort(
+      (a, b) => b.row.decodedBytes - a.row.decodedBytes || a.index - b.index,
+    )
     .map(({ row }) => row);
   if (client) {
     // Request every package manifest the base needs at once instead of one

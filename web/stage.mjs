@@ -57,7 +57,11 @@ let site = null,
 const siteSelect = $("site-select");
 siteSelect.addEventListener("change", () => {
   const id = siteSelect.value;
-  if (!siteLocked && id !== site?.id && site?.options.some((option) => option.id === id))
+  if (
+    !siteLocked &&
+    id !== site?.id &&
+    site?.options.some((option) => option.id === id)
+  )
     controller?.dispatch("site", id);
   else if (site) siteSelect.value = site.id;
 });
@@ -149,8 +153,9 @@ function report(next = phase) {
 }
 function render() {
   const t = stageMessages(ui.locale);
-  const stalled = (phase === "base" || phase === "resources")
-    && performance.now() - lastProgress > 30000;
+  const stalled =
+    (phase === "base" || phase === "resources") &&
+    performance.now() - lastProgress > 30000;
   document.documentElement.lang = ui.locale;
   document.documentElement.dataset.theme = ui.theme.mode;
   if (ui.theme.accent)
@@ -177,11 +182,13 @@ function render() {
   $("boot-recovery").hidden = !failed && !stalled;
   $("boot-note").textContent = stalled ? t.stalled : "";
   const amount = engineBytes || decodedBytes;
-  $("boot-progress").textContent = failed ? "" : phase === "base" && baseTotal
-    ? `${t.baseProgress} ${baseCompleted}/${baseTotal}`
-    : amount
-      ? `${t.progress} ${new Intl.NumberFormat(ui.locale, { maximumFractionDigits: 1 }).format(amount / 1e6)} MB`
-      : "";
+  $("boot-progress").textContent = failed
+    ? ""
+    : phase === "base" && baseTotal
+      ? `${t.baseProgress} ${baseCompleted}/${baseTotal}`
+      : amount
+        ? `${t.progress} ${new Intl.NumberFormat(ui.locale, { maximumFractionDigits: 1 }).format(amount / 1e6)} MB`
+        : "";
   $("stage-hint").textContent = t.controls;
   renderWeather();
   renderSite();
@@ -192,7 +199,9 @@ function renderSite() {
     field.hidden = true;
     return;
   }
-  const names = JSON.stringify(site.options.map((option) => [option.id, option.name]));
+  const names = JSON.stringify(
+    site.options.map((option) => [option.id, option.name]),
+  );
   if (siteSelect.dataset.options !== names) {
     siteSelect.dataset.options = names;
     siteSelect.replaceChildren(
@@ -282,7 +291,10 @@ observer.observe({ type: "resource", buffered: true });
 async function loadStageEngine() {
   if (loading || wasm || started || failed) return;
   loading = true;
-  const releaseId = /^\/moly\/releases\/([a-z0-9][a-z0-9._-]{0,95})\/stage\.html$/.exec(location.pathname)?.[1];
+  const releaseId =
+    /^\/moly\/releases\/([a-z0-9][a-z0-9._-]{0,95})\/stage\.html$/.exec(
+      location.pathname,
+    )?.[1];
   let configuredBase, publicOrigin;
   try {
     // The engine path depends on these, and the engine download starts
@@ -292,8 +304,10 @@ async function loadStageEngine() {
     configuredBase = params.get("resource_base")
       ? resourceBase(params.get("resource_base"))
       : undefined;
-    publicOrigin = resourceOrigin(params.get("resource_origin") ??
-      (configuredBase ? new URL(configuredBase).origin : undefined));
+    publicOrigin = resourceOrigin(
+      params.get("resource_origin") ??
+        (configuredBase ? new URL(configuredBase).origin : undefined),
+    );
     if (configuredBase && publicOrigin !== new URL(configuredBase).origin)
       throw new Error("resource_origin must match resource_base");
     resourceDirectory(
@@ -309,15 +323,27 @@ async function loadStageEngine() {
       report,
       async prepare({ signal, progress }) {
         try {
-          await preflightCoordinates({
-            assets: new URL(params.get("assets"), location.href).href, region, version,
-            packs: params.get("packs") === "1", assetCatalog: params.get("asset_catalog") ?? undefined,
-            snapshotId: params.get("snapshot") ?? undefined, pageUrl: location.href,
-            releaseId, resourcePrefix: "/moly/",
-            resourceOrigin: publicOrigin, resourceBase: configuredBase,
-          }, { signal });
+          await preflightCoordinates(
+            {
+              assets: new URL(params.get("assets"), location.href).href,
+              region,
+              version,
+              packs: params.get("packs") === "1",
+              assetCatalog: params.get("asset_catalog") ?? undefined,
+              snapshotId: params.get("snapshot") ?? undefined,
+              pageUrl: location.href,
+              releaseId,
+              resourcePrefix: "/moly/",
+              resourceOrigin: publicOrigin,
+              resourceBase: configuredBase,
+            },
+            { signal },
+          );
           progress();
-        } catch (error) { fail("source_mismatch", error); throw error; }
+        } catch (error) {
+          fail("source_mismatch", error);
+          throw error;
+        }
         weatherArtwork = createWeatherArtwork({
           assets: params.get("assets"),
           baseUrl: location.href,

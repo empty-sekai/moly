@@ -67,11 +67,14 @@ export function mountStage(container, options = {}) {
   url.searchParams.set("embed", "1");
   url.searchParams.set("theme", ui.theme.mode);
   url.searchParams.set("locale", ui.locale);
-  const configuredBase = options.resourceBase === undefined
-    ? undefined
-    : resourceBase(options.resourceBase);
-  const publicOrigin = resourceOrigin(options.resourceOrigin ??
-    (configuredBase ? new URL(configuredBase).origin : undefined));
+  const configuredBase =
+    options.resourceBase === undefined
+      ? undefined
+      : resourceBase(options.resourceBase);
+  const publicOrigin = resourceOrigin(
+    options.resourceOrigin ??
+      (configuredBase ? new URL(configuredBase).origin : undefined),
+  );
   if (configuredBase && publicOrigin !== new URL(configuredBase).origin)
     throw new TypeError("resourceOrigin must match resourceBase");
   const assetRoot = resourceDirectory(
@@ -79,7 +82,10 @@ export function mountStage(container, options = {}) {
     location.href,
     configuredBase ?? publicOrigin,
   );
-  url.searchParams.set("assets", assetRoot.origin === location.origin ? assetRoot.pathname : assetRoot.href);
+  url.searchParams.set(
+    "assets",
+    assetRoot.origin === location.origin ? assetRoot.pathname : assetRoot.href,
+  );
   if (publicOrigin) url.searchParams.set("resource_origin", publicOrigin);
   if (configuredBase) url.searchParams.set("resource_base", configuredBase);
   applyPackSelection(url, options);
@@ -183,7 +189,12 @@ export function mountStage(container, options = {}) {
       // Retry after a download/initialization failure restores only the last
       // unacknowledged user Play intention. A previously playing scene is not
       // silently resumed after a crash, and current browsing is never rewound.
-      if (reloaded && requestedPlay && !queued.has("play") && !queued.has("preview"))
+      if (
+        reloaded &&
+        requestedPlay &&
+        !queued.has("play") &&
+        !queued.has("preview")
+      )
         post("intent", requestedPlay);
     } else if (
       type === "player-data" &&

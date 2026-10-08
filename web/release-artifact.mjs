@@ -469,49 +469,104 @@ const UI_FONT_PATH = /^fonts\/([a-f0-9]{64})\.ttf$/;
 
 // Published source identity follows the producer's portable source contract.
 // Extraction journals and arbitrary extension fields are not release metadata.
-const identityFields = Object.fromEntries([
-  "region", "appVersion", "appHash", "assetVersion", "assetHash", "platform",
-  "profile", "assetbundleHostHash", "manifestVersion", "versionSource",
-].map((name) => [name, "atom"]));
+const identityFields = Object.fromEntries(
+  [
+    "region",
+    "appVersion",
+    "appHash",
+    "assetVersion",
+    "assetHash",
+    "platform",
+    "profile",
+    "assetbundleHostHash",
+    "manifestVersion",
+    "versionSource",
+  ].map((name) => [name, "atom"]),
+);
 identityFields.upstreamReference = { project: "atom", commit: "atom" };
-const masterFields = Object.fromEntries([
-  "region", "commit", "assetVersion", "assetHash", "dataVersion", "repository", "provider",
-].map((name) => [name, "atom"]));
+const masterFields = Object.fromEntries(
+  [
+    "region",
+    "commit",
+    "assetVersion",
+    "assetHash",
+    "dataVersion",
+    "repository",
+    "provider",
+  ].map((name) => [name, "atom"]),
+);
 const fileIdentity = { path: "path", sha256: "sha256" };
 const sourceFields = {
-  ...Object.fromEntries(["version", "kind", "runtimeStatus", "validationStatus",
-    "coordinateContract", "coordinateUnits"].map((name) => [name, "atom"])),
-  descriptorSha256: "sha256", source: identityFields, master: masterFields,
+  ...Object.fromEntries(
+    [
+      "version",
+      "kind",
+      "runtimeStatus",
+      "validationStatus",
+      "coordinateContract",
+      "coordinateUnits",
+    ].map((name) => [name, "atom"]),
+  ),
+  descriptorSha256: "sha256",
+  source: identityFields,
+  master: masterFields,
   sharedUi: {
-    purpose: "atom", donorRegion: "atom", donorVersion: "atom", files: [fileIdentity],
+    purpose: "atom",
+    donorRegion: "atom",
+    donorVersion: "atom",
+    files: [fileIdentity],
     regionUi: {
-      directory: "path", region: "atom", clientVersion: "atom", unityVersion: "atom",
+      directory: "path",
+      region: "atom",
+      clientVersion: "atom",
+      unityVersion: "atom",
       files: [fileIdentity],
-      replacesDonor: [{ document: "path", donorCopy: "path", removedDonorFiles: [fileIdentity] }],
+      replacesDonor: [
+        {
+          document: "path",
+          donorCopy: "path",
+          removedDonorFiles: [fileIdentity],
+        },
+      ],
     },
   },
 };
 const machineReference = /(?:^|[\s"'])(?:[A-Za-z]:|[/\\]|~[/\\]|file:)/i;
 function projectSource(value, schema, label) {
   if (Array.isArray(schema)) {
-    if (!Array.isArray(value)) throw new Error(`${label} must be a provenance array`);
+    if (!Array.isArray(value))
+      throw new Error(`${label} must be a provenance array`);
     return value.map((row) => projectSource(row, schema[0], `${label}[]`));
   }
   if (typeof schema === "object") {
     if (!value || typeof value !== "object" || Array.isArray(value))
       throw new Error(`${label} must be a provenance object`);
-    return Object.fromEntries(Object.entries(schema)
-      .filter(([key]) => Object.hasOwn(value, key))
-      .map(([key, child]) => [key, projectSource(value[key], child, `${label}.${key}`)]));
+    return Object.fromEntries(
+      Object.entries(schema)
+        .filter(([key]) => Object.hasOwn(value, key))
+        .map(([key, child]) => [
+          key,
+          projectSource(value[key], child, `${label}.${key}`),
+        ]),
+    );
   }
   if (schema === "sha256") {
     if (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value))
       throw new Error(`${label} must be a SHA-256 identity`);
   } else if (schema === "path") {
-    if (typeof value !== "string" || !value || /[\\:]/.test(value) ||
-        value.split("/").some((part) => !part || part === "." || part === ".."))
+    if (
+      typeof value !== "string" ||
+      !value ||
+      /[\\:]/.test(value) ||
+      value.split("/").some((part) => !part || part === "." || part === "..")
+    )
       throw new Error(`${label} must be a relative resource path`);
-  } else if (value !== null && typeof value !== "string" && typeof value !== "boolean" && !Number.isSafeInteger(value)) {
+  } else if (
+    value !== null &&
+    typeof value !== "string" &&
+    typeof value !== "boolean" &&
+    !Number.isSafeInteger(value)
+  ) {
     throw new Error(`${label} must be a scalar source identity`);
   }
   if (typeof value === "string" && machineReference.test(value))
@@ -819,7 +874,9 @@ export async function publish({
       : {};
     const provenance = publicSourceProvenance(sourceDocument);
     if (!isDeepStrictEqual(provenance, sourceDocument))
-      throw new Error("source.json contains private or unsupported provenance; create a separate runtime root with python -m pack.groups --sanitize-source ORIGINAL/source.json --source-copy CLEAN/source.json before publishing");
+      throw new Error(
+        "source.json contains private or unsupported provenance; create a separate runtime root with python -m pack.groups --sanitize-source ORIGINAL/source.json --source-copy CLEAN/source.json before publishing",
+      );
     if (provenance.source?.region && provenance.source.region !== source.region)
       throw new Error("Source manifest region mismatch");
     const coordinateEvidence = validatePublicationCoordinates(assets, {

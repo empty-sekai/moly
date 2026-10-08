@@ -239,9 +239,16 @@ export function resourceOrigin(value) {
   if (typeof value !== "string" || /[\\\x00-\x20\x7f]/.test(value))
     throw new TypeError("Expected a canonical HTTPS resource origin");
   const url = new URL(value);
-  if (url.protocol !== "https:" || !url.hostname || url.username || url.password ||
-      url.pathname !== "/" || url.search || url.hash ||
-      (value !== url.origin && value !== url.origin + "/"))
+  if (
+    url.protocol !== "https:" ||
+    !url.hostname ||
+    url.username ||
+    url.password ||
+    url.pathname !== "/" ||
+    url.search ||
+    url.hash ||
+    (value !== url.origin && value !== url.origin + "/")
+  )
     throw new TypeError("Expected a canonical HTTPS resource origin");
   return url.origin;
 }
@@ -255,8 +262,13 @@ export function resourceBase(value) {
     throw new TypeError("Expected a canonical HTTPS resource base");
   const url = new URL(value);
   if (
-    url.protocol !== "https:" || !url.hostname || url.username || url.password ||
-    !url.pathname.endsWith("/") || url.search || url.hash ||
+    url.protocol !== "https:" ||
+    !url.hostname ||
+    url.username ||
+    url.password ||
+    !url.pathname.endsWith("/") ||
+    url.search ||
+    url.hash ||
     /%2f|%5c|%00/i.test(url.pathname) ||
     value !== url.href
   )
@@ -265,12 +277,19 @@ export function resourceBase(value) {
 }
 
 function remoteDirectoryPath(path, configured) {
-  const configuredUrl = configured === undefined || configured === null
-    ? null
-    : new URL(configured);
-  if (!configuredUrl || configuredUrl.protocol !== "https:" ||
-      configuredUrl.username || configuredUrl.password || configuredUrl.search ||
-      configuredUrl.hash || !configuredUrl.pathname.endsWith("/"))
+  const configuredUrl =
+    configured === undefined || configured === null
+      ? null
+      : new URL(configured);
+  if (
+    !configuredUrl ||
+    configuredUrl.protocol !== "https:" ||
+    configuredUrl.username ||
+    configuredUrl.password ||
+    configuredUrl.search ||
+    configuredUrl.hash ||
+    !configuredUrl.pathname.endsWith("/")
+  )
     return null;
   // `resourceOrigin` is retained only for the old `/moly/` deployment.  New
   // deployments must pass the complete resource_base, including its prefix.
@@ -284,17 +303,27 @@ function remoteDirectoryPath(path, configured) {
 }
 
 function isRemoteAssetDirectory(path) {
-  return /^(?:snapshots\/[a-z0-9][a-z0-9._-]{0,95}\/assets\/|asset-store\/)$/.test(path);
+  return /^(?:snapshots\/[a-z0-9][a-z0-9._-]{0,95}\/assets\/|asset-store\/)$/.test(
+    path,
+  );
 }
 
 export function resourceDirectory(value, base, configuredBase = undefined) {
   const url = new URL(value, base);
-  if (url.origin === new URL(base).origin) return sameOriginDirectory(value, base);
-  if (!configuredBase || resourceOrigin(url.origin) !== url.origin ||
-      resourceOrigin(new URL(configuredBase).origin) !== url.origin ||
-      url.username || url.password || url.search || url.hash ||
-      /[%\\\x00-\x20\x7f]/.test(url.pathname) || value !== url.href ||
-      !isRemoteAssetDirectory(remoteDirectoryPath(url.pathname, configuredBase)))
+  if (url.origin === new URL(base).origin)
+    return sameOriginDirectory(value, base);
+  if (
+    !configuredBase ||
+    resourceOrigin(url.origin) !== url.origin ||
+    resourceOrigin(new URL(configuredBase).origin) !== url.origin ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash ||
+    /[%\\\x00-\x20\x7f]/.test(url.pathname) ||
+    value !== url.href ||
+    !isRemoteAssetDirectory(remoteDirectoryPath(url.pathname, configuredBase))
+  )
     throw new TypeError("Expected a configured public Moly resource directory");
   return url;
 }

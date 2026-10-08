@@ -12,7 +12,9 @@ test("automatic renderer fallback releases its probe context", async () => {
       createElement: () => ({
         getContext: () => ({
           getExtension: () => ({
-            loseContext() { lost = true; },
+            loseContext() {
+              lost = true;
+            },
           }),
         }),
       }),
