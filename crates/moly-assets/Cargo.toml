@@ -18,6 +18,12 @@ futures-lite = "2"
 sha2 = "0.10"
 tokio = { version = "1", default-features = false, features = ["sync"] }
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Native remote reads (`remote`): the whole transfer runs on the blocking
+# thread pool with bounded waits, through the client Bevy's web reader uses.
+blocking = "1.6"
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
 wasm-bindgen = "0.2"

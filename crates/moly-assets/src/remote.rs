@@ -5,10 +5,16 @@
 //! host is an asset source of its own with one admitted HTTPS base: a path
 //! below the source is joined to that base, and nothing outside the base is
 //! reachable through it. Which host a consumer tries first, and whether it
-//! falls back to the other, is the consumer's rule. The transfer is Bevy's
-//! web asset reader (`ureq` on native, the page's `fetch` on wasm), except a
-//! master read on wasm: its own `fetch`, which fails as `TimedOut` when the
-//! response headers do not arrive within [`MASTER_FIRST_BYTE_MS`].
+//! falls back to the other, is the consumer's rule.
+//!
+//! On native the whole transfer, request and body, runs on the blocking
+//! thread pool through `ureq`, so a slow or stalled host never holds a thread
+//! of the asset task pool. It fails as `TimedOut` when it has not completed
+//! within [`NATIVE_READ_MS`], and a master read also when its response
+//! headers do not arrive within [`MASTER_FIRST_BYTE_MS`]. On wasm a storage
+//! read is Bevy's web asset reader (the page's `fetch`) and a master read is
+//! its own `fetch`, which fails as `TimedOut` when the response headers do not
+//! arrive within [`MASTER_FIRST_BYTE_MS`].
 //!
 //! The bases are admitted by the entry crate, the one refusal point for asset
 //! locations, once the app is built and before it runs. A read before
@@ -17,18 +23,24 @@
 //! "not found" without a request.
 
 use bevy::app::App;
+#[cfg(target_arch = "wasm32")]
+use bevy::asset::io::web::WebAssetReader;
 use bevy::asset::io::{
-    web::WebAssetReader, AssetReader, AssetReaderError, AssetSourceBuilder, PathStream, Reader,
-    VecReader,
+    AssetReader, AssetReaderError, AssetSourceBuilder, PathStream, Reader, VecReader,
 };
 use bevy::asset::{AssetApp, AssetPath};
 use bevy::prelude::Resource;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-/// How long a master host has to send its response headers on the browser
-/// before the read fails as `TimedOut` (the body is not bounded).
+/// How long a master host has to send its response headers before the read
+/// fails as `TimedOut` (on the browser the body is not bounded).
 pub const MASTER_FIRST_BYTE_MS: i32 = 10_000;
+
+/// How long a native remote read may take, from the request to the last body
+/// byte, before it fails as `TimedOut`: the bound the browser puts on the
+/// product's own asset requests.
+pub const NATIVE_READ_MS: u64 = 60_000;
 
 /// The admitted bases, each a canonical HTTPS directory ending in `/`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -236,21 +248,24 @@ fn plain_relative(path: &Path) -> Option<String> {
 impl AssetReader for RemoteReader {
     async fn read<'a>(&'a self, path: &'a Path) -> Result<impl Reader + 'a, AssetReaderError> {
         let target = self.target(path)?;
+        let url = format!("https://{}", target.display());
         // A master host that does not answer within the bound fails the read
-        // as `TimedOut`, and the master layer tries its next host. Bevy's
-        // fetch has no bound: a connect the network drops waits for the
-        // system's own connect limit (about two minutes). Native reads keep
-        // Bevy's reader.
+        // as `TimedOut`, and the master layer tries its next host.
+        let master = matches!(self.remote, Remote::Master | Remote::MasterMirror);
+        #[cfg(not(target_arch = "wasm32"))]
+        let bytes = native::read(url, master).await?;
+        // Bevy's fetch has no bound: a connect the network drops waits for the
+        // system's own connect limit (about two minutes).
         #[cfg(target_arch = "wasm32")]
-        if matches!(self.remote, Remote::Master | Remote::MasterMirror) {
-            let url = format!("https://{}", target.display());
-            let bytes = crate::http::read_first_byte_bounded(&url, MASTER_FIRST_BYTE_MS).await?;
-            return Ok(VecReader::new(bytes));
-        }
-        let web = WebAssetReader::Https;
-        let mut reader = AssetReader::read(&web, &target).await?;
-        let mut bytes = Vec::new();
-        reader.read_to_end(&mut bytes).await?;
+        let bytes = if master {
+            crate::http::read_first_byte_bounded(&url, MASTER_FIRST_BYTE_MS).await?
+        } else {
+            let web = WebAssetReader::Https;
+            let mut reader = AssetReader::read(&web, &target).await?;
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes).await?;
+            bytes
+        };
         Ok(VecReader::new(bytes))
     }
 
@@ -267,5 +282,70 @@ impl AssetReader for RemoteReader {
 
     async fn is_directory<'a>(&'a self, _path: &'a Path) -> Result<bool, AssetReaderError> {
         Ok(false)
+    }
+}
+
+/// Native transfers: one `ureq` agent per bound, so connections are reused
+/// across the reads of a host kind.
+#[cfg(not(target_arch = "wasm32"))]
+mod native {
+    use super::{AssetReaderError, MASTER_FIRST_BYTE_MS, NATIVE_READ_MS};
+    use std::io::{self, BufReader, Read};
+    use std::path::PathBuf;
+    use std::sync::{Arc, LazyLock};
+    use std::time::Duration;
+    use ureq::tls::{RootCerts, TlsConfig};
+    use ureq::Agent;
+
+    fn agent(first_byte: Option<Duration>) -> Agent {
+        Agent::config_builder()
+            .tls_config(
+                TlsConfig::builder()
+                    .root_certs(RootCerts::PlatformVerifier)
+                    .build(),
+            )
+            .timeout_global(Some(Duration::from_millis(NATIVE_READ_MS)))
+            .timeout_recv_response(first_byte)
+            .build()
+            .new_agent()
+    }
+
+    static MASTER: LazyLock<Agent> = LazyLock::new(|| {
+        agent(Some(Duration::from_millis(MASTER_FIRST_BYTE_MS as u64)))
+    });
+    static STORAGE: LazyLock<Agent> = LazyLock::new(|| agent(None));
+
+    /// The body of `url`, read on the blocking thread pool. A 404 is "not
+    /// found" and another error status an HTTP error, as Bevy's web reader
+    /// answers them; a timeout is `TimedOut`.
+    pub(super) async fn read(url: String, master: bool) -> Result<Vec<u8>, AssetReaderError> {
+        blocking::unblock(move || {
+            let failure = |error: ureq::Error| {
+                let kind = if matches!(error, ureq::Error::Timeout(_)) {
+                    io::ErrorKind::TimedOut
+                } else {
+                    io::ErrorKind::Other
+                };
+                AssetReaderError::Io(Arc::new(io::Error::new(
+                    kind,
+                    format!("remote read of {url}: {error}"),
+                )))
+            };
+            let agent = if master { &*MASTER } else { &*STORAGE };
+            let mut response = match agent.get(&url).call() {
+                Ok(response) => response,
+                Err(ureq::Error::StatusCode(404)) => {
+                    return Err(AssetReaderError::NotFound(PathBuf::from(&url)));
+                }
+                Err(ureq::Error::StatusCode(code)) => return Err(AssetReaderError::HttpError(code)),
+                Err(error) => return Err(failure(error)),
+            };
+            let mut bytes = Vec::new();
+            BufReader::new(response.body_mut().with_config().reader())
+                .read_to_end(&mut bytes)
+                .map_err(|error| failure(ureq::Error::from(error)))?;
+            Ok(bytes)
+        })
+        .await
     }
 }

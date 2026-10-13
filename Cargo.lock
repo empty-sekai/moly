@@ -3812,6 +3812,7 @@ version = "0.0.1"
 dependencies = [
  "async-lock",
  "bevy",
+ "blocking",
  "flate2",
  "futures-lite",
  "gltf",
@@ -3821,6 +3822,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
+ "ureq",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
