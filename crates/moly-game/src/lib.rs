@@ -102,6 +102,7 @@ mod npc_view;
 pub mod option_dialog;
 mod particle_runtime;
 mod particle_geometry;
+mod pipeline_report;
 mod source_billboard;
 mod system_fixture;
 mod particle_mesh_emission;
@@ -228,6 +229,7 @@ pub fn app(
     app.add_plugins(game_settings::perf_plugin());
     app.add_plugins(mesh_buffer_release::MeshBufferReleasePlugin);
     gpu_image_release::install(&mut app);
+    pipeline_report::install(&mut app);
     #[cfg(not(target_arch = "wasm32"))]
     app.add_plugins(native_graphics_diagnostics::NativeGraphicsDiagnosticsPlugin);
 
