@@ -2,8 +2,8 @@
 //! selected-tool view and the tool selector's controller.
 //!
 //! - `SelectedToolView.UpdateContent(tool)`: the icon through its
-//!   `UITextureLoader` (bundle `mysekai/thumbnail/tool`, file
-//!   `<spriteName>_t`) and the count text
+//!   `UITextureLoader` (bundle `mysekai/thumbnail/tool/<assetbundleName>_t`,
+//!   file `<spriteName>_t`) and the count text
 //!   `GetFormat("FORMAT_MYSEKAI_HARVEST_TOOL_QUANTITY", quantity)` written
 //!   through the text setter; `Show` / `Hide` are its GameObject's active
 //!   flag; `ShowArrowImage` / `HideArrowImage` set both arrows together.
@@ -31,8 +31,9 @@
 //! Named gaps: the selector is not drawn (its cell prefab,
 //! `ToolScrollView._cellPrefab`, and the scroll view's serialized fields are
 //! not extracted; release roadmap), so `Show` is refused by name and the
-//! selected-tool view stays; the tool thumbnails are not on the roots yet
-//! (named once per sprite; the icon and its loading circle stay hidden);
+//! selected-tool view stays; a root whose icon index does not list the
+//! tool's thumbnail names it once per load path, and the icon and its
+//! loading circle stay hidden;
 //! `ChangeTool`'s `ToolUseHistory` write to the local cache is not ported;
 //! `SetInteractable` (`EnableMysekaiHarvestButton`) is not wired.
 //! `SelectedToolView`'s serialized references are not decoded on the roots,
@@ -48,6 +49,7 @@ use super::action::HarvestPlayerModel;
 use super::catalog::HarvestCatalog;
 use super::law::is_tool_required_for_harvest;
 use super::ui::HarvestButton;
+use crate::item_icon::ItemIcons;
 use crate::ui_layout::{UiLayouts, UiPrefabView};
 use moly_assets::ui_layout::UiPrefab;
 
@@ -66,6 +68,7 @@ pub(crate) const SUBTREES: [&str; 3] = [SELECTED, TOOL_NAME, SELECTOR];
 pub(crate) struct SelectedContent {
     pub(crate) tool_id: i64,
     pub(crate) quantity: i32,
+    pub(crate) assetbundle: String,
     pub(crate) sprite_name: String,
 }
 
@@ -82,7 +85,7 @@ pub(crate) struct ToolViewState {
     pub(crate) tool_name: Option<i64>,
     /// Selected-tool button clicks raised this frame.
     pub(crate) open_presses: u32,
-    /// Thumbnails already named missing.
+    /// Thumbnail load paths already named missing.
     missing_named: HashSet<String>,
 }
 
@@ -105,6 +108,7 @@ pub(crate) fn content_of(
     Some(SelectedContent {
         tool_id,
         quantity: user.quantity,
+        assetbundle: def.assetbundle.clone(),
         sprite_name: def.sprite_name.clone(),
     })
 }
@@ -209,7 +213,9 @@ pub(crate) fn apply(
     state: &mut ToolViewState,
     marks: &ToolViewMarks,
     view: &mut UiPrefabView,
-    layouts: &UiLayouts,
+    layouts: &mut UiLayouts,
+    server: &AssetServer,
+    icons: Option<&ItemIcons>,
 ) {
     view.set_visible(&marks.selected, state.selected_active);
     // The selector is refused (see the module comment); the name view is at
@@ -227,13 +233,36 @@ pub(crate) fn apply(
         moly_law::text::custom_text_mesh::format_wording(&format, &[content.quantity.to_string()])
             .unwrap_or_else(|error| panic!("UI wording {COUNT_FORMAT}: {error}"));
     view.set_text(&marks.count_text, text);
-    view.set_visible(&marks.icon, false);
     view.set_visible(&marks.loading, false);
-    if state.missing_named.insert(content.sprite_name.clone()) {
-        warn!(
-            "[harvest-ui] SelectedToolView.UpdateContent: tool {} icon {THUMBNAIL_BUNDLE}/{}_t is not on this root (the tool thumbnails are not exported yet); the icon and its loading circle stay hidden",
-            content.tool_id, content.sprite_name
-        );
+    let Some(icons) = icons else {
+        view.set_visible(&marks.icon, false);
+        return;
+    };
+    // GetMysekaiToolTransparentThumbnail(assetbundleName) and
+    // GetMysekaiToolTransparentThumbnailFileName(spriteName).
+    let load_path = format!("{THUMBNAIL_BUNDLE}/{}_t", content.assetbundle);
+    let resource = format!("{}_t", content.sprite_name);
+    match icons.texture(&load_path, &resource) {
+        Ok(asset) => {
+            if !layouts.has_runtime_texture(&load_path) {
+                layouts.register_runtime_texture(&load_path, &asset, server);
+                info!(
+                    "[harvest-ui] SelectedToolView.UpdateContent: tool {} icon {load_path} / {resource}: {asset}",
+                    content.tool_id
+                );
+            }
+            view.set_texture(&marks.icon, &load_path);
+            view.set_visible(&marks.icon, true);
+        }
+        Err(reason) => {
+            view.set_visible(&marks.icon, false);
+            if state.missing_named.insert(load_path.clone()) {
+                warn!(
+                    "[harvest-ui] SelectedToolView.UpdateContent: tool {} icon {load_path} / {resource} refused ({reason}); the icon and its loading circle stay hidden",
+                    content.tool_id
+                );
+            }
+        }
     }
 }
 

@@ -449,7 +449,8 @@ pub(crate) fn place(
     root_canvas: Option<Res<RootCanvas>>,
     time: Res<Time>,
     server: Res<AssetServer>,
-    layouts: Res<UiLayouts>,
+    mut layouts: ResMut<UiLayouts>,
+    icons: Option<Res<crate::item_icon::ItemIcons>>,
     mut button: ResMut<HarvestButton>,
     (stack, entry, site): (
         Res<crate::ui_layers::UiLayerStack>,
@@ -537,6 +538,13 @@ pub(crate) fn place(
             view.set_text(&marks.balloon_text, layouts.wording(BALLOON_WORDING));
         }
         view.set_alpha(&marks.balloon, balloon_alpha);
-        super::tool_view::apply(&mut button.tools, &marks.tools, &mut view, &layouts);
+        super::tool_view::apply(
+            &mut button.tools,
+            &marks.tools,
+            &mut view,
+            &mut layouts,
+            &server,
+            icons.as_deref(),
+        );
     }
 }
