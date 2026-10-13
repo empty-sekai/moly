@@ -359,7 +359,7 @@ fn prepare(
                     return Ok(false);
                 }
                 if plan.draw.is_none() {
-                    let mesh = world.resource_mut::<Assets<Mesh>>().add(billboard::empty_mesh());
+                    let mesh = world.resource_mut::<Assets<Mesh>>().add(crate::source_particle::draw_mesh());
                     let draw = world.spawn((Mesh3d(mesh.clone()), plan.source.clone(), Transform::IDENTITY,
                         NoFrustumCulling, crate::shadowmap::NoShadowCast, ChildOf(root))).id();
                     plan.draw = Some((draw, mesh));
@@ -377,7 +377,7 @@ fn prepare(
                         return Ok(false);
                     }
                     if trail.draw.is_none() {
-                        let mesh = world.resource_mut::<Assets<Mesh>>().add(billboard::empty_mesh());
+                        let mesh = world.resource_mut::<Assets<Mesh>>().add(crate::source_particle::draw_mesh());
                         let draw = world.spawn((Mesh3d(mesh.clone()), trail.source.clone(), Transform::IDENTITY,
                             NoFrustumCulling, crate::shadowmap::NoShadowCast, ChildOf(leader))).id();
                         trail.draw = Some((draw, mesh));
@@ -1487,7 +1487,7 @@ pub(crate) fn spawn_when_ready(
                 Ok(true) => {}
             }
             if planned.draw.is_none() {
-                let mesh = meshes.add(billboard::empty_mesh());
+                let mesh = meshes.add(crate::source_particle::draw_mesh());
                 let draw = commands.spawn((Mesh3d(mesh.clone()), planned.source.clone(), Transform::IDENTITY,
                     NoFrustumCulling, crate::shadowmap::NoShadowCast, ChildOf(root))).id();
                 planned.draw = Some((draw, mesh));
@@ -1514,7 +1514,7 @@ pub(crate) fn spawn_when_ready(
                     }
                 }
                 if trail.draw.is_none() {
-                    let mesh = meshes.add(billboard::empty_mesh());
+                    let mesh = meshes.add(crate::source_particle::draw_mesh());
                     let draw = commands.spawn((Mesh3d(mesh.clone()), trail.source.clone(), Transform::IDENTITY,
                         NoFrustumCulling, crate::shadowmap::NoShadowCast, ChildOf(leader))).id();
                     trail.draw = Some((draw, mesh));

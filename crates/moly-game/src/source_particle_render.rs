@@ -39,7 +39,8 @@ use moly_assets::source_shader::{
     SourceShaderError, UniformFault, UniformLayout, UniformValue,
 };
 use std::collections::BTreeMap;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use bevy::platform::collections::{HashMap, HashSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 struct ExtractedParticle {
@@ -826,7 +827,7 @@ fn prepare(
     gpu.packs.retain(|key, _| drawn.contains(key));
     let active_programs: HashSet<_> = drawn.iter().map(|(_, program)| *program).collect();
     gpu.pipelines.retain(|key, _| active_programs.contains(&key.program));
-    let mut live = std::collections::HashSet::new();
+    let mut live = HashSet::new();
     for (view_entity, view, target, attachment, depth, _) in &views {
         let Some(camera) = frame.cameras.get(&view_entity) else {
             continue;
@@ -853,6 +854,17 @@ fn prepare(
                 if !attached {
                     gpu.packets.remove(&key);
                     fail_particle(gpu, &item.source, attachment_mismatch());
+                    continue;
+                }
+                // A disabled draw is not drawn, and once it has a packet for
+                // this pipeline nothing of it is brought up to date until it
+                // is enabled again: the enabled path compares the uniform
+                // block, the geometry and the sampled resources and rewrites
+                // what differs. The packet stays, so the draw stays ready.
+                if !item.source.enabled
+                    && gpu.packets.get(&key).is_some_and(|packet| packet.pipeline == pipeline)
+                {
+                    live.insert(key);
                     continue;
                 }
                 let Some(program) = programs.get(pass.program.id()) else {
@@ -1236,9 +1248,9 @@ impl ViewNode for EffectNode {
 pub struct SourceParticlePlugin;
 impl Plugin for SourceParticlePlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(bevy::render::extract_component::ExtractComponentPlugin::<
-            SourceParticle,
-        >::default())
+        // `extract` reads the main-world component itself and keeps its copy
+        // across frames; the render world only needs the draw's entity.
+        app.add_plugins(bevy::render::sync_component::SyncComponentPlugin::<SourceParticle>::default())
             .add_systems(
                 Update,
                 (

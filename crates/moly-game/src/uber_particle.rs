@@ -1152,7 +1152,7 @@ pub(crate) fn advance(
         // by the fixture host.
         if system.anchor.is_some_and(|entity| inactive.get(entity).is_ok() || taken.get(entity).is_ok()) {
             if let Some(mesh) = meshes.get_mut(&system.mesh) {
-                if mesh.count_vertices() != 0 { *mesh = billboard::empty_mesh(); }
+                if mesh.count_vertices() != 0 { billboard::clear(mesh); }
             }
             continue;
         }
@@ -1473,7 +1473,7 @@ pub(crate) fn advance_fixture_particles(
                 system.prewarmed = false;
             } else {
                 if let Some(mesh) = meshes.get_mut(&system.mesh) {
-                    if mesh.count_vertices() != 0 { *mesh = billboard::empty_mesh(); }
+                    if mesh.count_vertices() != 0 { billboard::clear(mesh); }
                 }
                 clear_trail_mesh(&mut meshes, trail);
                 continue;
@@ -1481,7 +1481,7 @@ pub(crate) fn advance_fixture_particles(
         }
         if dormant && clock.is_none() {
             if let Some(mesh) = meshes.get_mut(&system.mesh) {
-                if mesh.count_vertices() != 0 { *mesh = billboard::empty_mesh(); }
+                if mesh.count_vertices() != 0 { billboard::clear(mesh); }
             }
             clear_trail_mesh(&mut meshes, trail);
             continue;
@@ -1502,7 +1502,7 @@ pub(crate) fn advance_fixture_particles(
                 Err(reason) => {
                     error!(%reason, effect=%system.effect, node=%system.node, "Shape scaling owner refused: the system draws nothing");
                     if let Some(mesh) = meshes.get_mut(&system.mesh) {
-                        if mesh.count_vertices() != 0 { *mesh = billboard::empty_mesh(); }
+                        if mesh.count_vertices() != 0 { billboard::clear(mesh); }
                     }
                     continue;
                 }
@@ -1524,7 +1524,7 @@ pub(crate) fn advance_fixture_particles(
             // Simulate calls. An inactive or retired system draws nothing.
             if !crate::fixture_timeline_particles::advance(system, &mut clock, &ctx, dormant) {
                 if let Some(mesh) = meshes.get_mut(&system.mesh) {
-                    if mesh.count_vertices() != 0 { *mesh = billboard::empty_mesh(); }
+                    if mesh.count_vertices() != 0 { billboard::clear(mesh); }
                 }
                 clear_trail_mesh(&mut meshes, trail);
                 continue;
@@ -1537,7 +1537,7 @@ pub(crate) fn advance_fixture_particles(
                     "native particle step refused: the system is retired and draws nothing");
                 system.pool.clear();
                 system.side.clear();
-                if let Some(mesh) = meshes.get_mut(&system.mesh) { *mesh = billboard::empty_mesh(); }
+                if let Some(mesh) = meshes.get_mut(&system.mesh) { billboard::clear(mesh); }
                 clear_trail_mesh(&mut meshes, trail);
                 commands.entity(entity).remove::<(FixtureParticleLive, crate::weather_fx::fixture::Played)>();
                 continue;
@@ -1578,7 +1578,7 @@ pub(crate) fn advance_fixture_particles(
             Some(anchor) => targets.push((entity, anchor)),
             None => if let Ok((_, particle, _, _, _, trail)) = live.get(entity) {
                 if let Some(mesh) = meshes.get_mut(&particle.0.mesh) {
-                    if mesh.count_vertices() != 0 { *mesh = billboard::empty_mesh(); }
+                    if mesh.count_vertices() != 0 { billboard::clear(mesh); }
                 }
                 clear_trail_mesh(&mut meshes, trail);
             },
@@ -1671,7 +1671,7 @@ fn advance_director_families(live: &mut FixtureLive<'_, '_>, families: &[(Entity
 /// Empty a fixture-host system's trail draw with its particle draw.
 fn clear_trail_mesh(meshes: &mut Assets<Mesh>, trail: Option<&crate::weather_fx::fixture::FixtureTrailDraw>) {
     if let Some(mesh) = trail.and_then(|trail| meshes.get_mut(&trail.0)) {
-        if mesh.count_vertices() != 0 { *mesh = billboard::empty_mesh(); }
+        if mesh.count_vertices() != 0 { billboard::clear(mesh); }
     }
 }
 

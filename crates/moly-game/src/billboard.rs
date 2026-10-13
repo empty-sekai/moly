@@ -177,6 +177,13 @@ pub fn empty_mesh() -> Mesh {
         .with_inserted_indices(Indices::U32(Vec::new()))
 }
 
+/// Empty `mesh` again as [`empty_mesh`] makes it, keeping its asset usage.
+pub fn clear(mesh: &mut Mesh) {
+    let usage = mesh.asset_usage;
+    *mesh = empty_mesh();
+    mesh.asset_usage = usage;
+}
+
 /// 把一批四边形写进网格的属性池（整池替换，不增量）。
 ///
 /// `pivot` 是轴心偏移，单位是**粒子尺寸的倍数**（渲染器记录的 `pivot`

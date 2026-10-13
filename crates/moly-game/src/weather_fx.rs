@@ -3092,7 +3092,7 @@ pub(crate) fn spawn_when_ready(
         }
         if planned.source.passes.is_empty() { return; }
         if planned.draw.is_none() {
-            let mesh = meshes.add(billboard::empty_mesh());
+            let mesh = meshes.add(crate::source_particle::draw_mesh());
             let draw = commands.spawn((Mesh3d(mesh.clone()), planned.source.clone(), Transform::IDENTITY,
                 NoFrustumCulling, WeatherFxPreflight(request_serial), crate::shadowmap::NoShadowCast)).id();
             planned.draw = Some((draw, mesh));
@@ -3105,7 +3105,7 @@ pub(crate) fn spawn_when_ready(
             }
             if trail.source.passes.is_empty() { return; }
             if trail.draw.is_none() {
-                let mesh = meshes.add(billboard::empty_mesh());
+                let mesh = meshes.add(crate::source_particle::draw_mesh());
                 let draw = commands.spawn((Mesh3d(mesh.clone()), trail.source.clone(), Transform::IDENTITY,
                     NoFrustumCulling, WeatherFxPreflight(request_serial), crate::shadowmap::NoShadowCast)).id();
                 trail.draw = Some((draw, mesh));

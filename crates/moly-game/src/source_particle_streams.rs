@@ -93,7 +93,8 @@ impl ParticleStreams {
         vertices: &mut Vec<u8>,
         indices: &mut Vec<u8>,
     ) -> Result<u32> {
-        let layout = self.layout(abi)?;
+        // The layout's refusals (an input with no writer) come first.
+        self.layout(abi)?;
         let count = geometry.vertex_count;
         // Resolve each input's attribute column once; the per-vertex loop
         // below reads the same values the attribute lookups would.
@@ -124,38 +125,61 @@ impl ParticleStreams {
                 }
             })
             .collect();
+        // The first refusal in vertex order, then input order: an input's
+        // first vertex without values, or a UV fill over a stream that is
+        // not two-wide, refused at the first vertex that has values.
+        let refusal = columns
+            .iter()
+            .filter_map(|column| match column {
+                Column::Zero => None,
+                Column::Values { name, data, width, fill_zw, .. } => {
+                    let present = if *width == 0 { 0 } else { data.len() / width };
+                    if count > 0 && present > 0 && *fill_zw && *width != 2 {
+                        Some((0, SourceShaderError(format!(
+                            "particle geometry {name} has {width} components, not the UV stream's two"
+                        ))))
+                    } else {
+                        (present < count).then(|| (present, SourceShaderError(format!(
+                            "particle geometry lacks {name} at vertex {present}"
+                        ))))
+                    }
+                }
+            })
+            .min_by_key(|(vertex, _)| *vertex);
+        if let Some((_, error)) = refusal {
+            return Err(error);
+        }
+        // Each vertex is its inputs in order: a zero stream is 16 zero bytes,
+        // an attribute its components (x negated when reflected), and a UV
+        // fill z = 0 and w = 1 after the two components.
+        let stride: usize = columns
+            .iter()
+            .map(|column| match column {
+                Column::Zero => 16,
+                Column::Values { width, fill_zw, .. } => 4 * width + if *fill_zw { 8 } else { 0 },
+            })
+            .sum();
         let bytes = vertices;
         bytes.clear();
-        bytes.reserve(count * layout.array_stride as usize);
-        for vertex in 0..count {
-            for column in &columns {
-                let (name, data, width, reflect, fill_zw) = match column {
-                    Column::Zero => {
-                        bytes.extend_from_slice(&[0; 16]);
+        bytes.resize(count * stride, 0);
+        if stride > 0 {
+            for (vertex, out) in bytes.chunks_exact_mut(stride).enumerate() {
+                let mut at = 0;
+                for column in &columns {
+                    let Column::Values { data, width, reflect, fill_zw, .. } = column else {
+                        at += 16;
                         continue;
+                    };
+                    let values = &data[vertex * width..(vertex + 1) * width];
+                    for (component, value) in values.iter().enumerate() {
+                        let value = if component == 0 && *reflect { -*value } else { *value };
+                        out[at..at + 4].copy_from_slice(&value.to_le_bytes());
+                        at += 4;
                     }
-                    Column::Values { name, data, width, reflect, fill_zw } => (name, data, *width, *reflect, *fill_zw),
-                };
-                let values = (width > 0)
-                    .then(|| data.get(vertex * width..(vertex + 1) * width))
-                    .flatten()
-                    .ok_or_else(|| {
-                        SourceShaderError(format!(
-                            "particle geometry lacks {name} at vertex {vertex}"
-                        ))
-                    })?;
-                for (component, value) in values.iter().enumerate() {
-                    let value = if component == 0 && reflect { -*value } else { *value };
-                    bytes.extend_from_slice(&value.to_le_bytes());
-                }
-                if fill_zw {
-                    if width != 2 {
-                        return Err(SourceShaderError(format!(
-                            "particle geometry {name} has {width} components, not the UV stream's two"
-                        )));
+                    if *fill_zw {
+                        out[at + 4..at + 8].copy_from_slice(&1.0f32.to_le_bytes());
+                        at += 8;
                     }
-                    bytes.extend_from_slice(&0.0f32.to_le_bytes());
-                    bytes.extend_from_slice(&1.0f32.to_le_bytes());
                 }
             }
         }
@@ -365,9 +389,9 @@ fn index_bytes(
         "particle index exceeds vertex count",
     )?;
     bytes.clear();
-    bytes.reserve(indices.len() * 4);
-    for index in indices {
-        bytes.extend_from_slice(&index.to_le_bytes());
+    bytes.resize(indices.len() * 4, 0);
+    for (out, index) in bytes.chunks_exact_mut(4).zip(indices) {
+        out.copy_from_slice(&index.to_le_bytes());
     }
     Ok(())
 }

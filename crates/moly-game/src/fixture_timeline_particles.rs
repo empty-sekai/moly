@@ -1447,7 +1447,7 @@ pub(crate) fn release(world: &mut World, binding: &ParticleControlBinding) {
         };
         if let Some(handle) = mesh {
             if let Some(mesh) = world.resource_mut::<Assets<Mesh>>().get_mut(&handle) {
-                *mesh = crate::billboard::empty_mesh();
+                crate::billboard::clear(mesh);
             }
         }
         if let Some(mut clock) = world.get_mut::<DirectorClock>(draw) {

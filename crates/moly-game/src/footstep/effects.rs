@@ -626,7 +626,7 @@ pub(crate) fn step(
                     );
                     system.pool.clear();
                     if let Some(mesh) = meshes.get_mut(&system.mesh) {
-                        *mesh = crate::billboard::empty_mesh();
+                        crate::billboard::clear(mesh);
                     }
                     commands.entity(*draw).remove::<FootParticle>();
                     continue;

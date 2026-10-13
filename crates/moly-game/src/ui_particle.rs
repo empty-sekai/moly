@@ -1320,7 +1320,7 @@ fn bake_frame(
             // approximately zero.
             if system.runtime.pool.is_empty() || !bake_alpha {
                 if mesh.count_vertices() != 0 {
-                    *mesh = crate::billboard::empty_mesh();
+                    crate::billboard::clear(mesh);
                 }
                 continue;
             }
@@ -1341,7 +1341,7 @@ fn bake_frame(
             if near_limit {
                 warn_once!(node = %system.runtime.node, "[ui-particle] a particle near the baking camera's size limit, whose clamp is not wired: not drawn");
                 if mesh.count_vertices() != 0 {
-                    *mesh = crate::billboard::empty_mesh();
+                    crate::billboard::clear(mesh);
                 }
                 continue;
             }
@@ -1362,7 +1362,7 @@ fn bake_frame(
             if groups.len() > MAX_MATERIALS {
                 // Past the eighth material the CanvasRenderer has no material
                 // for the submesh.
-                *mesh = crate::billboard::empty_mesh();
+                crate::billboard::clear(mesh);
                 continue;
             }
             let system_node = (!system.chain.is_empty()).then_some(&node);

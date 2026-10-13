@@ -15,7 +15,6 @@ fn require(value: bool, message: impl Into<String>) -> Result<()> {
     }
 }
 use crate::source_particle_streams::ParticleStreams;
-use bevy::render::extract_component::ExtractComponent;
 use moly_assets::source_shader::{SourceShaderCatalogue, material::MaterialSnapshot};
 
 #[derive(Clone)]
@@ -25,7 +24,7 @@ pub struct ParticlePass {
     pub effect: bool,
 }
 
-#[derive(Component, Clone, ExtractComponent)]
+#[derive(Component, Clone)]
 #[require(crate::source_color::EncodedColorOutput)]
 pub struct SourceParticle {
     /// Material references are relative to their exporting archive, not weather.
@@ -54,7 +53,22 @@ pub struct SourceParticle {
     /// A second draw of the same renderer (the trail material): it takes the
     /// sort key of the draw entity named here and is drawn right after it.
     pub follows: Option<Entity>,
+    /// Every bound program and every texture was loaded when
+    /// [`resolve_particles`] last looked. Nothing reloads an asset, the draw
+    /// holds its handles, and its passes and textures stay as bound, so none
+    /// of them can fail afterwards.
+    dependencies_loaded: bool,
 }
+/// The mesh a source particle draw is spawned with: [`crate::billboard::empty_mesh`]
+/// kept in the main world only. The source renderer reads the geometry from
+/// the main-world asset when it extracts the draw and uploads its own packed
+/// buffers, so the render world needs no copy of the mesh.
+pub(crate) fn draw_mesh() -> Mesh {
+    let mut mesh = crate::billboard::empty_mesh();
+    mesh.asset_usage = bevy::asset::RenderAssetUsages::MAIN_WORLD;
+    mesh
+}
+
 #[derive(Clone, Debug, Default)]
 pub enum ParticleReadiness {
     #[default]
@@ -125,6 +139,7 @@ impl SourceParticle {
             phenomena_lighting_forced: false,
             phenomena_lighting_written: None,
             follows: None,
+            dependencies_loaded: false,
         })
     }
 
@@ -281,7 +296,7 @@ pub fn resolve_particles(
     mut particles: Query<&mut SourceParticle>,
 ) {
     for mut particle in &mut particles {
-        if particle.error.is_some() {
+        if particle.error.is_some() || particle.dependencies_loaded {
             continue;
         }
         let failed = particle
@@ -309,10 +324,14 @@ pub fn resolve_particles(
             particle.error = Some(error);
             continue;
         }
-        // Already resolved: resolve() would return without writing. Checking
-        // through the shared reference keeps the component unchanged, so the
-        // render world's change detection stays meaningful.
+        // Already resolved: resolve() would return without writing.
         if !particle.passes.is_empty() {
+            let loaded = |state: bevy::asset::LoadState| matches!(state, bevy::asset::LoadState::Loaded);
+            if particle.passes.iter().all(|pass| loaded(server.load_state(&pass.program)))
+                && particle.textures.values().all(|texture| loaded(server.load_state(texture)))
+            {
+                particle.dependencies_loaded = true;
+            }
             continue;
         }
         if let Err(error) = particle.resolve(&server, &catalogues) {
