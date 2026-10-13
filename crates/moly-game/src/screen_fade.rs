@@ -329,6 +329,7 @@ pub(crate) fn spawn(mut commands: Commands) {
             Tonemapping::None,
             DebandDither::Disabled,
             RenderLayers::layer(layer),
+            crate::overlay_camera::IdleWhenEmpty,
         ));
         let sprite = (
             Sprite {

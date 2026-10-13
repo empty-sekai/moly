@@ -109,6 +109,7 @@ mod particle_mesh_emission;
 pub mod pick;
 pub mod player;
 pub mod player_avatar;
+mod overlay_camera;
 pub mod player_data;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod portraits;
@@ -254,6 +255,7 @@ pub fn app(
     app.add_plugins(npc_state::NpcStatePlugin);
     site_move::install(&mut app);
     screen_fade::install(&mut app);
+    overlay_camera::install(&mut app);
     game_state::install(&mut app);
     site_expansion::install(&mut app);
     cutscene_camera::install(&mut app);

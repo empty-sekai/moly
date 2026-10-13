@@ -1649,6 +1649,7 @@ pub(crate) fn overlay_camera(mut commands: Commands) {
             ..default()
         },
         RenderLayers::layer(SITEMAP_LAYER),
+        crate::overlay_camera::IdleWhenEmpty,
     ));
 }
 

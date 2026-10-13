@@ -2315,6 +2315,7 @@ pub(crate) fn overlay_camera(mut commands: Commands) {
             ..default()
         },
         RenderLayers::layer(BALLOON_LAYER),
+        crate::overlay_camera::IdleWhenEmpty,
     ));
 }
 
