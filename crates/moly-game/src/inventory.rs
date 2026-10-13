@@ -28,13 +28,16 @@
 //!   every `UserMysekaiFixture` row with quantity at least 1 and a master
 //!   row, as a `FixtureSelectCell` whose thumbnail count is `×{quantity}`
 //!   (`UIPartsThumbnail.SetQuantity`, format `×{0}`).
-//! - **Material and item lists** (`UserResourceContentList`): the owned rows
-//!   with quantity above 0, as `UIPartsItemThumbnailListViewItem` cells with
-//!   the same count format. `UIPartsItemThumbnail.Setup` loads the cell image
-//!   from `AssetBundleNames.GetMysekaiMaterialThumbnail` /
-//!   `GetMysekaiItemThumbnail` (`mysekai/thumbnail/material/` or
-//!   `mysekai/thumbnail/item/` followed by the master's
-//!   `iconAssetbundleName`).
+//! - **Material, item and tool lists** (`UserResourceContentList`): the
+//!   owned rows with quantity above 0, as `UIPartsItemThumbnailListViewItem`
+//!   cells with the same count format. The tool rows are
+//!   `UserMysekaiTools` (`ToUserResources`: the resource id is
+//!   `mysekaiToolId`). `UIPartsItemThumbnail.Setup` loads the cell image from
+//!   `AssetBundleNames.GetMysekaiMaterialThumbnail` /
+//!   `GetMysekaiItemThumbnail` / `GetMysekaiToolThumbnail`
+//!   (`mysekai/thumbnail/material/`, `mysekai/thumbnail/item/` or
+//!   `mysekai/thumbnail/tool/` followed by the master's
+//!   `iconAssetbundleName`, or the tool master's `assetbundleName`).
 //! - **Chest limit** (`UpdateLimitText`): the root is active for Fixture and
 //!   Material only. Fixture: `WORD_CHEST_FURNITURE_NUM`, have =
 //!   `GetFixtureTotalCount` (the sum of every fixture row's quantity), limit
@@ -49,12 +52,15 @@
 //!   `SetItem`) the item object with the image of
 //!   `GetMysekaiMaterialPreview` / `GetMysekaiItemPreview`
 //!   (`mysekai/item_preview/material/` or `mysekai/item_preview/item/`
-//!   followed by `iconAssetbundleName`); for a fixture the fixture object.
+//!   followed by `iconAssetbundleName`); for a fixture the fixture object;
+//!   for a tool (`SetTool`) neither: the item object and the fixture object
+//!   off.
 //!   `ShowEmpty` when the list has no rows: the preview object, the recycle
 //!   button and the cannot-recycle info off.
 //!
 //! The owned rows and the possession levels are the client's copy of the
-//! server data (`crate::server::client::inventory`); the possession limits
+//! server data (`crate::server::client::inventory`, and
+//! `crate::server::tools` for the tools); the possession limits
 //! are master data the server model installs. The thumbnail and preview
 //! images are resolved by their client load path and resource through the
 //! shared item icon index ([`crate::item_icon`]); a path the index does not
@@ -62,7 +68,7 @@
 //! off.
 //!
 //! The screen's own prefab, its four list prefabs, its tab cell and its item
-//! cell are documents a root may lack (the CN roots carry none of them). A
+//! cell are documents a root may lack. A
 //! root without one of them names the absent documents once; the screen then
 //! refuses by name in the frame it is pushed and asks the screen manager to
 //! pop it.
@@ -76,8 +82,7 @@
 //!   cannot-recycle info is hidden.
 //! - The 3D preview, the system fixture icon, the description pages and the
 //!   grid size text (`MysekaiFixtureUtility.GetGridSizeText`) are hidden.
-//! - Canvas rows (`UserMysekaiCanvas`) are not listed; the client copy has
-//!   no tool rows, so the tool list shows its nothing text.
+//! - Canvas rows (`UserMysekaiCanvas`) are not listed.
 //! - The tab cell's icon is hidden (the selector's cell settings carry no
 //!   sprite for these four types) and its label keeps the serialized colour.
 //! - The header shows its back button only.
@@ -95,6 +100,7 @@ use crate::action_button::ActionTapConsumed;
 use crate::gesture::{GestureEvent, GestureKind, GestureState};
 use crate::item_icon::ItemIcons;
 use crate::server::client::inventory::{ClientMysekaiInventory, PossessionMasters};
+use crate::server::tools::ClientMysekaiTools;
 use crate::sitemap::SITEMAP_LAYER;
 use crate::ui_layers::{LayerCommand, LayerId, UiLayerStack};
 use crate::ui_layout::{UiLayouts, UiPrefabView};
@@ -166,7 +172,19 @@ impl ContentListType {
         match self {
             Self::Material => Some("material"),
             Self::Item => Some("item"),
-            Self::Fixture | Self::Tool => None,
+            Self::Tool => Some("tool"),
+            Self::Fixture => None,
+        }
+    }
+
+    /// The icon families a row of the type loads: the cell's thumbnail, and
+    /// the preview's item image for the types whose preview shows the item
+    /// object (`SetMaterial` / `SetItem`; `SetTool` turns it off).
+    fn icon_families(self) -> &'static [&'static str] {
+        match self {
+            Self::Material | Self::Item => &["thumbnail", "item_preview"],
+            Self::Tool => &["thumbnail"],
+            Self::Fixture => &[],
         }
     }
 }
@@ -193,18 +211,20 @@ impl Row {
     }
 }
 
-/// A master row's name and icon (`iconAssetbundleName`; none for fixtures).
+/// A master row's name and icon (`iconAssetbundleName`, a tool's
+/// `assetbundleName`; none for fixtures).
 struct MasterRow {
     name: String,
     icon: Option<String>,
 }
 
-/// The master rows the screen reads (fixtures, materials, items).
+/// The master rows the screen reads (fixtures, materials, items, tools).
 #[derive(Default)]
 struct Masters {
     fixtures: HashMap<i32, MasterRow>,
     materials: HashMap<i32, MasterRow>,
     items: HashMap<i32, MasterRow>,
+    tools: HashMap<i32, MasterRow>,
 }
 
 impl Masters {
@@ -213,14 +233,16 @@ impl Masters {
             (ContentListType::Fixture, Row::Fixture { id, .. }) => self.fixtures.get(&id),
             (ContentListType::Material, Row::Resource { id, .. }) => self.materials.get(&id),
             (ContentListType::Item, Row::Resource { id, .. }) => self.items.get(&id),
+            (ContentListType::Tool, Row::Resource { id, .. }) => self.tools.get(&id),
             _ => None,
         }
     }
 
     /// The client load of a row's cell image (`GetMysekaiMaterialThumbnail`
-    /// / `GetMysekaiItemThumbnail`) or preview image (`GetMysekaiMaterialPreview`
-    /// / `GetMysekaiItemPreview`): the load path (the folder then the master's
-    /// icon name) and the resource, the icon name itself.
+    /// / `GetMysekaiItemThumbnail` / `GetMysekaiToolThumbnail`) or preview
+    /// image (`GetMysekaiMaterialPreview` / `GetMysekaiItemPreview`): the load
+    /// path (the folder then the master's icon name) and the resource, the
+    /// icon name itself.
     fn icon_path(&self, kind: ContentListType, row: Row, family: &str) -> Option<IconLoad> {
         let folder = kind.icon_folder()?;
         let icon = self.row(kind, row)?.icon.as_deref()?;
@@ -234,12 +256,13 @@ impl Masters {
 const FIXTURE_MASTER: &str = "moly://mysekai-fixtures.json";
 const MATERIAL_MASTER: &str = "moly://mysekai-materials.json";
 const ITEM_MASTER: &str = "moly://mysekai-items.json";
+const TOOL_MASTER: &str = "moly://mysekai-tools.json";
 
 /// The master tables, requested at start-up; their names reach the shared
 /// text atlas through `texts`.
 #[derive(Resource)]
 pub(crate) struct InventoryGlyphs {
-    handles: Option<[Handle<JsonAsset>; 3]>,
+    handles: Option<[Handle<JsonAsset>; 4]>,
     masters: Option<Masters>,
     pub(crate) texts: Option<Vec<String>>,
 }
@@ -262,7 +285,7 @@ fn register_icons(
     rows: &[Row],
 ) {
     for row in rows {
-        for family in ["thumbnail", "item_preview"] {
+        for family in kind.icon_families() {
             let Some(load) = masters.icon_path(kind, *row, family) else {
                 continue;
             };
@@ -285,7 +308,10 @@ pub(crate) fn load(
     // A stage draws no screens: nothing to request, nothing to add.
     let handles = stage
         .is_none()
-        .then(|| [FIXTURE_MASTER, MATERIAL_MASTER, ITEM_MASTER].map(|path| server.load(path)));
+        .then(|| {
+            [FIXTURE_MASTER, MATERIAL_MASTER, ITEM_MASTER, TOOL_MASTER]
+                .map(|path| server.load(path))
+        });
     let texts = handles.is_none().then(Vec::new);
     commands.insert_resource(InventoryGlyphs {
         handles,
@@ -323,9 +349,9 @@ fn fixture_rows(value: &Value) -> Result<HashMap<i32, MasterRow>, String> {
         .collect()
 }
 
-/// A keyed master table (`entries` by id), each row with its name and
-/// `iconAssetbundleName`.
-fn keyed_rows(value: &Value, table: &str) -> Result<HashMap<i32, MasterRow>, String> {
+/// A keyed master table (`entries` by id), each row with its name and its
+/// icon name (the column `icon`).
+fn keyed_rows(value: &Value, table: &str, icon: &str) -> Result<HashMap<i32, MasterRow>, String> {
     if value["semantics"]["table"].as_str() != Some(table) {
         return Err(format!("the document is not the {table} master"));
     }
@@ -346,7 +372,7 @@ fn keyed_rows(value: &Value, table: &str) -> Result<HashMap<i32, MasterRow>, Str
                 id,
                 MasterRow {
                     name: text("name")?,
-                    icon: Some(text("iconAssetbundleName")?),
+                    icon: Some(text(icon)?),
                 },
             ))
         })
@@ -364,7 +390,7 @@ pub(crate) fn parse_glyphs(
     let Some(handles) = glyphs.handles.clone() else {
         return;
     };
-    let paths = [FIXTURE_MASTER, MATERIAL_MASTER, ITEM_MASTER];
+    let paths = [FIXTURE_MASTER, MATERIAL_MASTER, ITEM_MASTER, TOOL_MASTER];
     let mut values = Vec::with_capacity(handles.len());
     for (handle, path) in handles.iter().zip(paths) {
         if let bevy::asset::LoadState::Failed(error) = server.load_state(handle) {
@@ -386,24 +412,28 @@ pub(crate) fn parse_glyphs(
     let masters = Masters {
         fixtures: fixture_rows(&values[0])
             .unwrap_or_else(|e| panic!("[inventory] {FIXTURE_MASTER}: {e}")),
-        materials: keyed_rows(&values[1], "mysekaiMaterials")
+        materials: keyed_rows(&values[1], "mysekaiMaterials", "iconAssetbundleName")
             .unwrap_or_else(|e| panic!("[inventory] {MATERIAL_MASTER}: {e}")),
-        items: keyed_rows(&values[2], "mysekaiItems")
+        items: keyed_rows(&values[2], "mysekaiItems", "iconAssetbundleName")
             .unwrap_or_else(|e| panic!("[inventory] {ITEM_MASTER}: {e}")),
+        tools: keyed_rows(&values[3], "mysekaiTools", "assetbundleName")
+            .unwrap_or_else(|e| panic!("[inventory] {TOOL_MASTER}: {e}")),
     };
     let mut texts: Vec<String> = masters
         .fixtures
         .values()
         .chain(masters.materials.values())
         .chain(masters.items.values())
+        .chain(masters.tools.values())
         .map(|row| row.name.clone())
         .collect();
     texts.extend(FIXED_TEXTS.iter().map(|text| (*text).to_owned()));
     info!(
-        "[inventory] masters: {} fixtures, {} materials, {} items",
+        "[inventory] masters: {} fixtures, {} materials, {} items, {} tools",
         masters.fixtures.len(),
         masters.materials.len(),
-        masters.items.len()
+        masters.items.len(),
+        masters.tools.len()
     );
     glyphs.masters = Some(masters);
     glyphs.texts = Some(texts);
@@ -844,15 +874,17 @@ pub(crate) struct InventorySpawned;
 
 /// The listed rows of a type: fixtures with quantity at least 1 and a master
 /// row (`UserFixtureArrayToFixtureThumbnailData`, view type Default); owned
-/// materials and items with quantity above 0.
+/// materials, items and tools with quantity above 0.
 fn rows(
     kind: ContentListType,
     owned: Option<&ClientMysekaiInventory>,
+    tools: Option<&ClientMysekaiTools>,
     masters: &Masters,
 ) -> Vec<Row> {
-    let Some(owned) = owned else {
-        return Vec::new();
-    };
+    let empty = ClientMysekaiInventory::default();
+    let owned = owned.unwrap_or(&empty);
+    let no_tools = ClientMysekaiTools::default();
+    let tools = tools.unwrap_or(&no_tools);
     match kind {
         ContentListType::Fixture => owned
             .fixtures()
@@ -884,7 +916,15 @@ fn rows(
                 quantity: row.quantity,
             })
             .collect(),
-        ContentListType::Tool => Vec::new(),
+        ContentListType::Tool => tools
+            .rows()
+            .iter()
+            .filter(|row| row.quantity > 0)
+            .map(|row| Row::Resource {
+                id: row.mysekai_tool_id,
+                quantity: row.quantity,
+            })
+            .collect(),
     }
 }
 
@@ -1037,6 +1077,7 @@ pub(crate) fn spawn_when_ready(
     glyphs: Res<InventoryGlyphs>,
     icons: Res<crate::fixture_edit_ui::EditorIcons>,
     owned: Option<Res<ClientMysekaiInventory>>,
+    tools: Option<Res<ClientMysekaiTools>>,
     mut state: ResMut<InventoryState>,
     icon_index: Option<Res<ItemIcons>>,
     spawned: Option<Res<InventorySpawned>>,
@@ -1082,7 +1123,7 @@ pub(crate) fn spawn_when_ready(
         );
     }
     let kind = CONTENT_LIST_TYPES[0];
-    let listed = rows(kind, owned.as_deref(), masters);
+    let listed = rows(kind, owned.as_deref(), tools.as_deref(), masters);
     register_icons(&mut layouts, &server, &icon_index, masters, kind, &listed);
     let (document, bindings) = compose(&layouts, kind, listed)
         .unwrap_or_else(|error| panic!("inventory screen composition: {error}"));
@@ -1201,6 +1242,7 @@ pub(crate) fn place(
     glyphs: Res<InventoryGlyphs>,
     icons: Res<crate::fixture_edit_ui::EditorIcons>,
     owned: Option<Res<ClientMysekaiInventory>>,
+    tools: Option<Res<ClientMysekaiTools>>,
     possession: Option<Res<PossessionMasters>>,
     icon_index: Option<Res<ItemIcons>>,
     mut roots: Query<
@@ -1235,12 +1277,13 @@ pub(crate) fn place(
         info!(
             "[inventory] OnBoot: no boot argument; OnInitComponent: ContentListTypes Fixture, Material, Item, Tool; \
              UpdateLimitText(Fixture); the first item of each list. Client copy: {} fixture rows ({} in total), \
-             {} material rows (possession {}), {} item rows{}{}",
+             {} material rows (possession {}), {} item rows, {} tool rows{}{}",
             copy.map_or(0, |o| o.fixtures().len()),
             copy.map_or(0, |o| o.fixture_total_count()),
             copy.map_or(0, |o| o.materials().len()),
             copy.map_or(0, |o| o.total_material_possession()),
             copy.map_or(0, |o| o.items().len()),
+            tools.as_deref().map_or(0, |t| t.rows().len()),
             match copy {
                 None => "; the server model keeps no inventory copy in this build",
                 Some(o) if o.revision == 0 =>
@@ -1287,7 +1330,7 @@ pub(crate) fn place(
         return;
     };
     let kind = CONTENT_LIST_TYPES[state.tab];
-    let next_rows = rows(kind, owned.as_deref(), masters);
+    let next_rows = rows(kind, owned.as_deref(), tools.as_deref(), masters);
     if root.bindings.kind != kind || root.bindings.rows != next_rows {
         register_icons(&mut layouts, &server, icon_index, masters, kind, &next_rows);
         let (document, bindings) = compose(&layouts, kind, next_rows)
@@ -1356,9 +1399,12 @@ pub(crate) fn place(
                     .row(kind, *row)
                     .map_or_else(String::new, |m| m.name.clone()),
             );
+            // SetFixture: the fixture object; SetMaterial / SetItem: the item
+            // object; SetTool: neither.
+            let item = matches!(kind, ContentListType::Material | ContentListType::Item);
             view.set_visible(&bindings.fixture_object, kind == ContentListType::Fixture);
-            view.set_visible(&bindings.item_object, kind != ContentListType::Fixture);
-            if kind != ContentListType::Fixture {
+            view.set_visible(&bindings.item_object, item);
+            if item {
                 let path = masters.icon_path(kind, *row, "item_preview");
                 set_icon(
                     &mut view,
