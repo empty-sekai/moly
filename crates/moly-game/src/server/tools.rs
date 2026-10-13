@@ -432,7 +432,6 @@ impl ClientMysekaiTools {
     }
 
     /// The quantity of a tool (0 without a row), as the craft screen shows it.
-    #[allow(dead_code)] // Read by the craft screen's tool rows.
     pub(crate) fn quantity(&self, tool_id: i32) -> i32 {
         self.rows
             .iter()

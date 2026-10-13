@@ -52,19 +52,27 @@
 //! - Common1's back key and outside tap answer OK; Common2's answer cancel
 //!   (their `OnHardwareBackKeyProcess` and `OnCloseExternal`).
 //!
-//! - The Craft list (`CraftContentList`, content type Craft): the master
-//!   blueprints `UserResourceFactory.GetUserBluePrints(Craft)` keeps
-//!   (`CheckEnableBluePrint`: a fixture or canvas blueprint without a term
-//!   row, available without possession or owned; none while the user has no
-//!   blueprint rows), and `SelectFirstItem` selects its first row when the
-//!   screen opens. A tap on a cell (`OnClickCell`) selects its row and sets
-//!   the preview up for it. The view is [`view`].
+//! - The content lists (`CraftContentListSelector.Setup(ContentListTypes)`,
+//!   the screen's static array Craft (20), Tool (9), LimitedCraft (21)): one
+//!   `CraftContentList` per type, each holding the master blueprints
+//!   `UserResourceFactory.GetUserBluePrints(type)` keeps
+//!   (`CheckEnableBluePrint`: the list's target type, a tool for Tool and a
+//!   fixture otherwise, or a canvas blueprint in any list but Tool; a term
+//!   row only in LimitedCraft, whose term holds the current time; available
+//!   without possession or owned; none while the user has no blueprint
+//!   rows). The LimitedCraft tab cell is active only while some blueprint
+//!   term holds the current time (`GetMysekaiBlueprintsTermInSession`). The
+//!   screen opens on the Craft list (`selectedContent`) and `SelectFirstItem`
+//!   selects its first row. A tab tap plays `se_mysekai_ui_select`
+//!   (`SetTabClickSe`); a different tab sets `selectedContent` and selects
+//!   that list's first row. A tap on a cell (`OnClickCell`) selects its row
+//!   and sets the preview up for it. The view is [`view`].
 //!
 //! Named gaps (each logged where it is met):
-//! - The tab cells (their prefab is not exported): only the Craft list is
-//!   listed; the Tool and LimitedCraft lists are not reachable. The sort
-//!   dropdown, the genre tabs, the search button and the hashtag balloon are
-//!   not built: the rows keep master order.
+//! - The LimitedCraft tab's badge and its seen state (`SaveSelectedTopTab`)
+//!   are not kept; the badge stays off. The sort dropdown, the genre tabs,
+//!   the search button and the hashtag balloon are not built: the rows keep
+//!   master order.
 //! - The count selector is not built: the count is 1 unless the instrument
 //!   names one.
 //! - The colour cells are the 3D preview's colours (`GetColors`), and the 3D
@@ -139,6 +147,8 @@ const FIXTURE_BONUS_DIALOG: DialogType = DialogType(405);
 /// `DialogType.MysekaiRankUpDialog`.
 const RANK_UP_DIALOG: DialogType = DialogType(335);
 const SE_ENTER_CRAFT_TOOL: &str = "se_enter_crafttool";
+/// `SetupContentList`'s `SetTabClickSe`.
+const SE_TAB_CLICK: &str = "se_mysekai_ui_select";
 const COMMON1: &str = "Common1";
 const COMMON2: &str = "Common2";
 const FOOTER_BUTTON: &str = "WindowRoot/FooterButtons/UIPartsCommonButton";
@@ -154,6 +164,10 @@ pub(crate) const WORDINGS: &[&str] = &[
     "WORD_OK",
     "WORD_CANCEL",
     "MSG_CRAFT_TERM_LIMIT_DIALOG_BODY",
+    // The tab cells.
+    "WORD_FIXTURE",
+    "WORD_TOOL",
+    "WORD_LIMITED_FIXTURE",
     // The screen's apply button, its balloon and the preview's texts.
     "WORD_PRODUCTION",
     "WORD_GOTO_SELECT_MEMBER",
@@ -170,6 +184,40 @@ pub(crate) const WORDINGS: &[&str] = &[
     "WORD_MULTIPLY_FORMAT",
     "WORD_FIRST_CRAFT_BONUS",
 ];
+
+/// The craft screen's `ContentListType`s.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CraftListType {
+    Craft = 20,
+    Tool = 9,
+    LimitedCraft = 21,
+}
+
+/// `ScreenLayerMysekaiCraft.ContentListTypes`, the tab order.
+pub(crate) const CRAFT_LIST_TYPES: [CraftListType; 3] = [
+    CraftListType::Craft,
+    CraftListType::Tool,
+    CraftListType::LimitedCraft,
+];
+
+impl CraftListType {
+    /// `UserResourceFactory.GetCraftTargetType`.
+    fn target(self) -> MysekaiCraftType {
+        match self {
+            Self::Tool => MysekaiCraftType::MysekaiTool,
+            Self::Craft | Self::LimitedCraft => MysekaiCraftType::MysekaiFixture,
+        }
+    }
+
+    /// `MysekaiUtility.GetContentListTabWordingKey`.
+    pub(crate) fn tab_wording(self) -> &'static str {
+        match self {
+            Self::Craft => "WORD_FIXTURE",
+            Self::Tool => "WORD_TOOL",
+            Self::LimitedCraft => "WORD_LIMITED_FIXTURE",
+        }
+    }
+}
 
 /// The workbench whose button opened the craft screen (the source's action
 /// data); the action button sets it when it pushes 615.
@@ -262,6 +310,8 @@ struct ApplyButton {
 enum ViewRequest {
     /// `OnClickCell(index)`.
     Select(usize),
+    /// A tab cell's `OnClickCell(index)` (`OnSelectContentType`).
+    Tab(usize),
     /// `OnClickApplyButton` (the button is enabled).
     Apply,
 }
@@ -271,7 +321,14 @@ enum ViewRequest {
 pub(crate) struct CraftScreen {
     open: bool,
     opened_at: f32,
-    /// The Craft list's rows, master order.
+    /// Each list's rows (`InitListView`, when the screen opens), in
+    /// [`CRAFT_LIST_TYPES`] order, master order.
+    lists: [Vec<MasterBlueprint>; 3],
+    /// `selectedContent`, an index into [`CRAFT_LIST_TYPES`].
+    list: usize,
+    /// `isActiveLimitedTabCell`.
+    limited_tab: bool,
+    /// The selected list's rows.
     rows: Vec<MasterBlueprint>,
     /// Bumped whenever the rows are read again (the view recomposes).
     rows_revision: u64,
@@ -500,13 +557,13 @@ fn setup_apply_button(world: &World, selection: &Selection) -> ApplyButton {
     }
 }
 
-/// `UserResourceFactory.GetUserBluePrints(Craft)`: the master blueprints
-/// `CheckEnableBluePrint(master, Craft)` keeps, master order: a fixture
-/// blueprint (the list's target type) or a canvas blueprint (any list but
-/// Tool), without a term row (a term row belongs to the LimitedCraft list),
-/// available without possession or owned. None while the user has no
-/// blueprint rows (the source returns null).
-fn craft_rows(world: &World) -> Result<Vec<MasterBlueprint>, String> {
+/// `UserResourceFactory.GetUserBluePrints(kind)`: the master blueprints
+/// `CheckEnableBluePrint(master, kind)` keeps, master order: the list's
+/// target type or a canvas blueprint (any list but Tool); a term row only in
+/// LimitedCraft, whose term must hold the current time
+/// (`CheckEnableLimitedBluePrint`); available without possession or owned.
+/// None while the user has no blueprint rows (the source returns null).
+fn craft_rows(world: &World, kind: CraftListType) -> Result<Vec<MasterBlueprint>, String> {
     let masters = world
         .get_resource::<CraftMasters>()
         .ok_or("the craft masters are not installed")?;
@@ -524,20 +581,81 @@ fn craft_rows(world: &World) -> Result<Vec<MasterBlueprint>, String> {
         .terms
         .as_ref()
         .ok_or("the blueprint term master (mysekai-blueprint-terms.json) is absent")?;
+    let now = match kind {
+        CraftListType::LimitedCraft => Some(current_timestamp(world)?),
+        CraftListType::Craft | CraftListType::Tool => None,
+    };
     Ok(blueprints
         .values()
         .filter(|blueprint| {
-            matches!(
-                blueprint.craft_type,
-                MysekaiCraftType::MysekaiFixture | MysekaiCraftType::MysekaiCanvas
-            ) && !terms
+            let target = blueprint.craft_type == kind.target()
+                || (blueprint.craft_type == MysekaiCraftType::MysekaiCanvas
+                    && kind != CraftListType::Tool);
+            let term = terms
                 .iter()
-                .any(|term| term.mysekai_blueprint_id == blueprint.id)
+                .find(|term| term.mysekai_blueprint_id == blueprint.id);
+            let in_term = match (term, now) {
+                (None, None) => true,
+                (Some(term), Some(now)) => {
+                    crate::server::craft::is_within_time(now, term.start_at, term.end_at)
+                }
+                (None, Some(_)) | (Some(_), None) => false,
+            };
+            target
+                && in_term
                 && (blueprint.is_available_without_possession
                     || inventory.has_blueprint(blueprint.id))
         })
         .copied()
         .collect())
+}
+
+/// The client's current timestamp (`ClientUserData`'s server date plus the
+/// time since it was read).
+fn current_timestamp(world: &World) -> Result<i64, String> {
+    let user = world
+        .get_resource::<crate::server::ClientUserData>()
+        .ok_or("the server has not answered yet (no current timestamp)")?;
+    Ok(user.current_timestamp(world.resource::<Time<Real>>().elapsed_secs()))
+}
+
+/// `GetMysekaiBlueprintsTermInSession().Count`: the term rows holding the
+/// current time.
+fn terms_in_session(world: &World) -> Result<usize, String> {
+    let terms = world
+        .get_resource::<CraftMasters>()
+        .ok_or("the craft masters are not installed")?
+        .terms
+        .as_ref()
+        .ok_or("the blueprint term master (mysekai-blueprint-terms.json) is absent")?;
+    let now = current_timestamp(world)?;
+    Ok(terms
+        .iter()
+        .filter(|term| crate::server::craft::is_within_time(now, term.start_at, term.end_at))
+        .count())
+}
+
+/// Shows list `index`: its rows, no selection yet.
+fn show_list(screen: &mut CraftScreen, index: usize) {
+    screen.list = index;
+    screen.rows = screen.lists[index].clone();
+    screen.rows_revision += 1;
+    screen.selected = None;
+    screen.selection = None;
+    screen.button = None;
+}
+
+/// `CraftContentListSelector.SelectFirstItem`: the shown list's first row,
+/// or the empty preview.
+fn select_first_item(world: &World, screen: &mut CraftScreen) {
+    if screen.rows.is_empty() {
+        info!(
+            "[craft] SetupCraftPreview(null): SetupEmpty (the {:?} list has no rows)",
+            CRAFT_LIST_TYPES[screen.list]
+        );
+    } else {
+        select_row(world, screen, 0, 1);
+    }
 }
 
 /// `SelectContent` for a row: the selection, the preview and its button.
@@ -1087,7 +1205,7 @@ pub(crate) fn advance(world: &mut World) {
             .get_resource::<CraftWorkbench>()
             .map(|workbench| workbench.0.uid.clone());
         info!(
-            "[craft] ScreenLayerMysekaiCraft.OnInitComponent (workbench {}): SetupContentList (the Craft list), SelectFirstItem, SetupCraftPreview; PlaySEOneShot({SE_ENTER_CRAFT_TOOL})",
+            "[craft] ScreenLayerMysekaiCraft.OnInitComponent (workbench {}): SetupContentList (Craft, Tool, LimitedCraft), SelectFirstItem, SetupCraftPreview; PlaySEOneShot({SE_ENTER_CRAFT_TOOL})",
             workbench.as_deref().unwrap_or("not handed over")
         );
         world.resource_mut::<SeRequests>().0.push(SeRequest {
@@ -1096,26 +1214,65 @@ pub(crate) fn advance(world: &mut World) {
             class: SeClass::Ui,
             source: "craft-screen",
         });
-        screen.rows = match craft_rows(world) {
-            Ok(rows) => rows,
+        for (index, kind) in CRAFT_LIST_TYPES.into_iter().enumerate() {
+            screen.lists[index] = match craft_rows(world, kind) {
+                Ok(rows) => rows,
+                Err(reason) => {
+                    error!("[craft] SetupContentList: {reason}; the {kind:?} list is empty");
+                    Vec::new()
+                }
+            };
+        }
+        screen.limited_tab = match terms_in_session(world) {
+            Ok(count) => {
+                info!(
+                    "[craft] CraftContentListSelector.Setup: {count} blueprint terms in session; the LimitedCraft tab cell is {}",
+                    if count > 0 { "active" } else { "inactive" }
+                );
+                count > 0
+            }
             Err(reason) => {
-                error!("[craft] SetupContentList: {reason}; the Craft list is empty");
-                Vec::new()
+                error!(
+                    "[craft] GetMysekaiBlueprintsTermInSession: {reason}; the LimitedCraft tab cell is inactive"
+                );
+                false
             }
         };
-        screen.rows_revision += 1;
-        screen.selected = None;
-        screen.selection = None;
-        screen.button = None;
+        show_list(&mut screen, 0);
         screen.requests.clear();
-        info!("[craft] the Craft list: {} rows", screen.rows.len());
+        info!(
+            "[craft] the lists: Craft {} rows, Tool {} rows, LimitedCraft {} rows",
+            screen.lists[0].len(),
+            screen.lists[1].len(),
+            screen.lists[2].len()
+        );
         match select_instrument() {
             Some((blueprint, count)) => {
-                match screen.rows.iter().position(|row| row.id == blueprint) {
-                    Some(index) => select_row(world, &mut screen, index, count),
+                let found = (0..CRAFT_LIST_TYPES.len())
+                    .filter(|index| {
+                        CRAFT_LIST_TYPES[*index] != CraftListType::LimitedCraft
+                            || screen.limited_tab
+                    })
+                    .find_map(|index| {
+                        screen.lists[index]
+                            .iter()
+                            .position(|row| row.id == blueprint)
+                            .map(|row| (index, row))
+                    });
+                match found {
+                    Some((index, row)) => {
+                        if index != screen.list {
+                            info!(
+                                "[craft] instrument: blueprint {blueprint} is a {:?} list row; that tab is selected",
+                                CRAFT_LIST_TYPES[index]
+                            );
+                            show_list(&mut screen, index);
+                        }
+                        select_row(world, &mut screen, row, count)
+                    }
                     None => {
                         warn!(
-                            "[craft] instrument: blueprint {blueprint} is not a Craft list row; it is selected outside the list"
+                            "[craft] instrument: blueprint {blueprint} is not a row of a shown list; it is selected outside the lists"
                         );
                         match select(world, blueprint, count) {
                             Ok(selection) => {
@@ -1129,10 +1286,7 @@ pub(crate) fn advance(world: &mut World) {
                     }
                 }
             }
-            None if screen.rows.is_empty() => {
-                info!("[craft] SetupCraftPreview(null): SetupEmpty (the Craft list has no rows)")
-            }
-            None => select_row(world, &mut screen, 0, 1),
+            None => select_first_item(world, &mut screen),
         }
     } else if !open && screen.open {
         screen.open = false;
@@ -1152,6 +1306,22 @@ pub(crate) fn advance(world: &mut World) {
             ViewRequest::Select(index) => {
                 info!("[craft] OnClickCell({index})");
                 select_row(world, &mut screen, index, 1);
+            }
+            // `<SetupContentList>b__10_0`: the same type does nothing.
+            ViewRequest::Tab(index) if index == screen.list => {
+                info!(
+                    "[craft] OnSelectContentType({index}): {:?} is already selectedContent",
+                    CRAFT_LIST_TYPES[index]
+                );
+            }
+            ViewRequest::Tab(index) => {
+                info!(
+                    "[craft] OnSelectContentType({index}): selectedContent {:?}, SelectFirstItem ({} rows)",
+                    CRAFT_LIST_TYPES[index],
+                    screen.lists[index].len()
+                );
+                show_list(&mut screen, index);
+                select_first_item(world, &mut screen);
             }
             ViewRequest::Apply => click_apply(world, &mut screen),
         }

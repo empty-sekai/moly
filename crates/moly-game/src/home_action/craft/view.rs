@@ -1,27 +1,38 @@
 //! The craft screen's view: `ScreenLayerMysekaiCraft` (screen 615) drawn from
-//! its own prefab, with the Craft list prefab (`CraftFixtureContentList`)
-//! its content-list selector instantiates under `_contentListBaseRoot` and
-//! the list's cells (`CraftThumbnailViewItem`), and the shared header.
+//! its own prefab, with its content-list selector's tab cells
+//! (`ContentListSelectorCell` under `_tabCellRoot`, one per
+//! `ContentListTypes` entry, labelled by `GetContentListTabWordingKey`), the
+//! selected type's list prefab (`_listSettingDataList`:
+//! `CraftFixtureContentList`, `CraftToolContentList` or
+//! `LimitedCraftFixtureContentList`) under `_contentListBaseRoot`, the list's
+//! cells (`CraftThumbnailViewItem`), and the shared header. Switching the tab
+//! composes the screen again with that type's list prefab.
 //!
 //! What it shows (the source's order):
+//! - **Tab cells**: the selected type's `selectedObj` on; the LimitedCraft
+//!   cell active only while the screen's `isActiveLimitedTabCell` holds.
 //! - **Cells** (`CraftContentList.OnCreateCell`): per row a
 //!   `CraftThumbnailViewItem.Setup(UserResource(target, count), onClick,
 //!   isSetDisableCover = !IsCanCraftAnyColor(blueprint), isMission)`. The
 //!   count is `GetCraftViewData`: the summed quantity of the target's fixture
-//!   rows (a canvas blueprint: its canvas rows). `IsCanCraftAnyColor`:
+//!   rows (a canvas blueprint: its canvas rows; a tool blueprint: the first
+//!   `UserMysekaiTools` row of the tool, else 0). `IsCanCraftAnyColor`:
 //!   `IsCanCraft(texture 1)`, or any other colour's `IsCanCraft`, where
 //!   `IsCanCraft` is not at the create count limit, not at the possession
 //!   limit, and `IsEnoughMaterialToCraft(blueprint, 1, dummy material)`. The
 //!   thumbnail (`UIPartsItemThumbnail`) hides its base and frame (the fixture
-//!   path's `VisibleFrame = false`) and shows the count. `SetSelected` marks
-//!   the selected row.
-//! - **Preview** (`CraftPreview`): the target's name, the owned quantity of
-//!   the selected colour (`SetFixtureQuantityText`; a canvas: its canvas rows
-//!   summed) with `_quantityObject` on, the grid size
+//!   path's `VisibleFrame = false`) and shows the count; a tool's image is
+//!   `GetMysekaiToolThumbnail(assetbundleName)`. `SetSelected` marks the
+//!   selected row.
+//! - **Preview** (`CraftPreview`): the target's name, the owned quantity
+//!   (`SetQuantityText`: the selected colour's fixture row, a canvas's
+//!   canvas rows summed, a tool's first tool row) with `_quantityObject` on,
+//!   the grid size of a fixture or canvas
 //!   (`MysekaiFixtureUtility.GetGridSizeText`: floor, rug and road layouts
 //!   `FORMAT_MYSEKAI_SITE_LAYOUT_SIZE(width, depth)`, the wall layout
 //!   `(width, height)`, any other none, and `_sizeObject` on only for a
-//!   text), the material cost cells (`MaterialCostList.SetupMaterialCostList`:
+//!   text; a tool has none), the material cost cells
+//!   (`MaterialCostList.SetupMaterialCostList`:
 //!   up to five cells, each with the material's thumbnail, the need quantity
 //!   `quantity * count` and the owned quantity; the cells beyond the costs
 //!   off; the canvas's stand-in character row as `WORD_THREE_HYPHEN`), the
@@ -35,17 +46,18 @@
 //!
 //! Taps (the full-screen layer takes every tap; a shown dialog takes them
 //! first): the header's back button pops the screen (`OnClickBackUIScreen`);
-//! a cell selects its row; the apply button, while enabled, is
-//! `OnClickApplyButton`. A drag in the list's viewport or the mouse wheel
-//! scrolls it.
+//! an active tab cell plays the tab SE and selects its type; a cell selects
+//! its row; the apply button, while enabled, is `OnClickApplyButton`. A drag
+//! in the list's viewport or the mouse wheel scrolls it.
 //!
 //! The list is the source ListView's recycling form: a pool of cells covers
 //! the visible rows and takes the rows under the scroll position, so a list
 //! of a thousand blueprints lays out a few dozen cells.
 //!
 //! Instrument (off by default; game mode reads none):
-//! `MOLY_CRAFT_TAP_CELL=<slot>` taps that recycled cell at its drawn centre
-//! two seconds after the screen opens, and `MOLY_CRAFT_TAP_APPLY=1` taps the
+//! `MOLY_CRAFT_TAP_TAB=<index>` taps that tab cell at its drawn centre one
+//! second after the screen opens, `MOLY_CRAFT_TAP_CELL=<slot>` taps that
+//! recycled cell two seconds after, and `MOLY_CRAFT_TAP_APPLY=1` taps the
 //! apply button one second later: the view's own tap path.
 //!
 //! Named gaps: the 3D preview, the colour selector (its cell prefab is not
@@ -53,7 +65,10 @@
 //! fixture icon and the layout cost (the fixture master carries no put
 //! costs) are hidden; the count selector keeps its prefab text; the owned
 //! quantity's short-of-material colour is not decoded (the text keeps its
-//! serialized colour); the mission labels are hidden.
+//! serialized colour); the mission labels are hidden; the term text
+//! (`SetupCraftTermText`, `MSG_DATE_LIMIT` of the term's end) stays off; the
+//! tab cells' separator lines, badges, banners and selected text colour are
+//! not built.
 
 use bevy::camera::visibility::RenderLayers;
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
@@ -64,8 +79,9 @@ use moly_law::ui::dotween::Ease;
 use serde_json::Value;
 use std::collections::BTreeSet;
 
-use super::{CraftScreen, Stage, ViewRequest};
+use super::{CRAFT_LIST_TYPES, CraftListType, CraftScreen, SE_TAB_CLICK, Stage, ViewRequest};
 use crate::action_button::ActionTapConsumed;
+use crate::audio::{SeClass, SeRequest};
 use crate::fixture_edit_ui::EditorIcons;
 use crate::gesture::{GestureEvent, GestureKind, GestureState};
 use crate::home_action::HomeActionPresentation;
@@ -75,16 +91,20 @@ use crate::server::client::craft::{
     is_create_count_limit, is_enough_material_to_craft, is_reached_possession_limit_to_craft,
 };
 use crate::server::client::inventory::{ClientMysekaiInventory, PossessionMasters};
+use crate::server::tools::ClientMysekaiTools;
 use crate::sitemap::SITEMAP_LAYER;
 use crate::ui_layers::{LayerCommand, LayerId, UiLayerStack};
 use crate::ui_layout::{UiLayouts, UiPrefabView};
 
 /// The composed screen document.
 const RUNTIME: &str = "CraftRuntime";
-/// The screen's prefab, the Craft list's prefab and its cell (optional
-/// documents).
+/// The screen's prefab, the three list prefabs, the tab cell and the list
+/// cell (optional documents).
 pub(crate) const SCREEN: &str = "CraftScreen";
 pub(crate) const FIXTURE_LIST: &str = "CraftFixtureList";
+pub(crate) const TOOL_LIST: &str = "CraftToolList";
+pub(crate) const LIMITED_LIST: &str = "CraftLimitedList";
+pub(crate) const TAB_CELL: &str = "CraftTabCell";
 pub(crate) const CELL: &str = "CraftCell";
 /// The shared header (`ScreenLayerHeader`).
 const HEADER: &str = "EditorHeader";
@@ -176,6 +196,22 @@ fn template<'a>(layouts: &'a UiLayouts, key: &str) -> Result<&'a UiPrefab, Strin
 // Composition
 // ---------------------------------------------------------------------------
 
+/// The list prefab of a type (`_listSettingDataList`).
+fn list_document(kind: CraftListType) -> &'static str {
+    match kind {
+        CraftListType::Craft => FIXTURE_LIST,
+        CraftListType::Tool => TOOL_LIST,
+        CraftListType::LimitedCraft => LIMITED_LIST,
+    }
+}
+
+struct TabBinding {
+    root: String,
+    button: String,
+    label: String,
+    selected: String,
+}
+
 struct CellBinding {
     root: String,
     button: String,
@@ -193,6 +229,10 @@ struct CostBinding {
 }
 
 struct Bindings {
+    /// The list type this composition holds.
+    kind: CraftListType,
+    /// The tab cells, in [`CRAFT_LIST_TYPES`] order.
+    tabs: Vec<TabBinding>,
     cells: Vec<CellBinding>,
     hidden: Vec<String>,
     frame_masks: Vec<i64>,
@@ -221,7 +261,7 @@ struct Bindings {
     screen_group: String,
 }
 
-fn compose(layouts: &UiLayouts) -> Result<(UiPrefab, Bindings), String> {
+fn compose(layouts: &UiLayouts, kind: CraftListType) -> Result<(UiPrefab, Bindings), String> {
     let mut doc = template(layouts, SCREEN)?.clone();
     let screen = component(&doc, &doc.prefab, ".ScreenLayerMysekaiCraft")?
         .fields
@@ -238,8 +278,45 @@ fn compose(layouts: &UiLayouts) -> Result<(UiPrefab, Bindings), String> {
         .clone();
     let mut hidden = Vec::new();
 
-    // The Craft list prefab under _contentListBaseRoot.
-    let list = template(layouts, FIXTURE_LIST)?;
+    // The tab cells, one per content type, in ContentListTypes order.
+    let tab_source = template(layouts, TAB_CELL)?;
+    let tab_fields = component(tab_source, &tab_source.prefab, ".ContentListSelectorCell")?
+        .fields
+        .clone();
+    let tab_names: Vec<String> = CRAFT_LIST_TYPES
+        .iter()
+        .map(|kind| format!("Tab{}", *kind as i32))
+        .collect();
+    let tab_instances = doc.instantiate_children(
+        &field(&selector, "_tabCellRoot")?,
+        tab_source,
+        &tab_source.prefab,
+        tab_names.iter().map(String::as_str),
+    )?;
+    let mut tabs = Vec::new();
+    for instance in &tab_instances {
+        hidden.extend(optional_cloned(
+            instance,
+            &tab_fields,
+            &[
+                "badgeObj",
+                "_missionIcon",
+                "selectBannerObj",
+                "selectBannerCover",
+                "lineObj",
+                "_iconImage",
+            ],
+        )?);
+        tabs.push(TabBinding {
+            root: instance.root_selector(),
+            button: cloned(instance, &tab_fields, "button")?,
+            label: cloned(instance, &tab_fields, "numberText")?,
+            selected: cloned(instance, &tab_fields, "selectedObj")?,
+        });
+    }
+
+    // The selected type's list prefab under _contentListBaseRoot.
+    let list = template(layouts, list_document(kind))?;
     let list_fields = component(list, &list.prefab, ".CraftContentList")?
         .fields
         .clone();
@@ -410,6 +487,8 @@ fn compose(layouts: &UiLayouts) -> Result<(UiPrefab, Bindings), String> {
     let balloon = field(&preview, "_cantCraftBalloon")?;
     let balloon_fields = component(&doc, &balloon, ".UIPartsBalloon")?.fields.clone();
     let bindings = Bindings {
+        kind,
+        tabs,
         cells,
         hidden,
         frame_masks,
@@ -515,8 +594,8 @@ pub(crate) struct CraftViewState {
     scroll: f32,
     dragging_list: bool,
     was_open: bool,
-    /// The rows and inventory the cell data was computed from.
-    cells_for: Option<(u64, u64)>,
+    /// The rows, inventory and tools the cell data was computed from.
+    cells_for: Option<(u64, u64, u64)>,
     cell_data: Vec<CellData>,
     /// The first row the pool shows.
     first_row: usize,
@@ -528,6 +607,7 @@ pub(crate) struct CraftViewState {
     absent: Option<String>,
     /// The instrument's taps of this opening.
     opened_at: f32,
+    tab_tapped: bool,
     tapped: u8,
 }
 
@@ -550,6 +630,7 @@ impl Default for CraftViewState {
             named: BTreeSet::new(),
             absent: None,
             opened_at: 0.0,
+            tab_tapped: false,
             tapped: 0,
         }
     }
@@ -608,21 +689,22 @@ fn cell_data(
     colors: Option<&[i32]>,
     masters: &CraftMasters,
     owned: &CraftOwned,
+    tools: &ClientMysekaiTools,
 ) -> CellData {
-    let count = if blueprint.craft_type == MysekaiCraftType::MysekaiCanvas {
-        owned
+    let count = match blueprint.craft_type {
+        MysekaiCraftType::MysekaiCanvas => owned
             .canvases
             .iter()
             .filter(|row| row.mysekai_fixture_id == blueprint.craft_target_id)
             .map(|row| row.quantity)
-            .sum()
-    } else {
-        owned
+            .sum(),
+        MysekaiCraftType::MysekaiTool => tools.quantity(blueprint.craft_target_id),
+        _ => owned
             .fixtures
             .iter()
             .filter(|row| row.mysekai_fixture_id == blueprint.craft_target_id)
             .map(|row| row.quantity)
-            .sum()
+            .sum(),
     };
     let can_craft = is_can_craft(blueprint, 1, masters, owned)
         || colors.is_some_and(|colors| {
@@ -661,17 +743,45 @@ fn grid_size_text(
 // Spawn
 // ---------------------------------------------------------------------------
 
+/// The documents the view draws.
+const DOCUMENTS: [&str; 6] = [SCREEN, FIXTURE_LIST, TOOL_LIST, LIMITED_LIST, TAB_CELL, CELL];
+
 /// The documents the view draws that this root lacks, once the root's
 /// documents have settled (the shared header, a required document, has
 /// loaded); `None` while they are still loading.
 fn absent_documents(layouts: &UiLayouts) -> Option<Vec<&'static str>> {
     layouts.document(HEADER)?;
     Some(
-        [SCREEN, FIXTURE_LIST, CELL]
+        DOCUMENTS
             .into_iter()
             .filter(|key| layouts.document(key).is_none())
             .collect(),
     )
+}
+
+/// What a composition sets once: the hidden parts, the disabled frame
+/// masks and the tab labels (`SetWordingKey(GetContentListTabWordingKey)`);
+/// the label wordings this root lacks are returned (their texts keep the
+/// prefab's).
+fn apply_static(
+    view: &mut UiPrefabView,
+    layouts: &UiLayouts,
+    bindings: &Bindings,
+) -> Vec<&'static str> {
+    for path in &bindings.hidden {
+        view.set_visible(path, false);
+    }
+    for mask in &bindings.frame_masks {
+        view.set_behaviour_enabled(*mask, false);
+    }
+    let mut missing = Vec::new();
+    for (tab, kind) in bindings.tabs.iter().zip(CRAFT_LIST_TYPES) {
+        match layouts.wordings.get(kind.tab_wording()) {
+            Some(text) => view.set_text(&tab.label, text.clone()),
+            None => missing.push(kind.tab_wording()),
+        }
+    }
+    missing
 }
 
 pub(crate) fn spawn_when_ready(
@@ -696,14 +806,24 @@ pub(crate) fn spawn_when_ready(
         }
         Some(_) => {}
     }
-    if [SCREEN, FIXTURE_LIST, CELL, HEADER]
+    if DOCUMENTS
         .into_iter()
+        .chain([HEADER])
         .any(|key| !layouts.ready(key, &server))
     {
         return;
     }
     *spawned = true;
-    let (document, bindings) = match compose(&layouts) {
+    // Every type's list composes (a tab switch composes the screen again).
+    for kind in &CRAFT_LIST_TYPES[1..] {
+        if let Err(reason) = compose(&layouts, *kind) {
+            let reason = format!("the {kind:?} list: {reason}");
+            error!("[craft] the craft screen could not be composed ({reason}); it has no view");
+            state.absent = Some(reason);
+            return;
+        }
+    }
+    let (document, bindings) = match compose(&layouts, CRAFT_LIST_TYPES[0]) {
         Ok(composed) => composed,
         Err(reason) => {
             error!("[craft] the craft screen could not be composed ({reason}); it has no view");
@@ -717,14 +837,15 @@ pub(crate) fn spawn_when_ready(
         return;
     }
     let mut view = UiPrefabView::new(RUNTIME, SITEMAP_LAYER);
-    for path in &bindings.hidden {
-        view.set_visible(path, false);
-    }
-    for mask in &bindings.frame_masks {
-        view.set_behaviour_enabled(*mask, false);
+    let missing = apply_static(&mut view, &layouts, &bindings);
+    if !missing.is_empty() {
+        warn!(
+            "[craft] this root lacks the tab wordings {missing:?}; those labels keep the prefab's text"
+        );
     }
     info!(
-        "[craft] the craft screen composed: {} recycled cells ({} columns), {} material cost cells",
+        "[craft] the craft screen composed: {} tab cells, {} recycled cells ({} columns), {} material cost cells",
+        bindings.tabs.len(),
         bindings.cells.len(),
         bindings.columns,
         bindings.costs.len()
@@ -780,6 +901,29 @@ fn material_thumbnail(
     Ok(path)
 }
 
+/// Registers a tool's thumbnail (`GetMysekaiToolThumbnail(assetbundleName)`,
+/// resource `assetbundleName`) by its load path; `Err` names why it has none.
+fn tool_thumbnail(
+    layouts: &mut UiLayouts,
+    server: &AssetServer,
+    icons: Option<&ItemIcons>,
+    inputs: Option<&crate::get_resource::GetResourceInputs>,
+    tool: i32,
+) -> Result<String, String> {
+    let bundle = inputs
+        .ok_or("the acquisition module's masters are not installed")?
+        .tool_bundle(tool)?;
+    let path = format!("mysekai/thumbnail/tool/{bundle}");
+    if layouts.has_runtime_texture(&path) {
+        return Ok(path);
+    }
+    let image = icons
+        .ok_or("the item icon index is not installed")?
+        .texture(&path, bundle)?;
+    layouts.register_runtime_texture(&path, &image, server);
+    Ok(path)
+}
+
 /// Draws the screen while 615 is the current screen.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) fn place(
@@ -794,15 +938,16 @@ pub(crate) fn place(
         Option<Res<ItemIcons>>,
         Option<Res<crate::get_resource::GetResourceInputs>>,
     ),
-    (masters, inventory, possession): (
+    (masters, inventory, possession, tools): (
         Option<Res<CraftMasters>>,
         Option<Res<ClientMysekaiInventory>>,
         Option<Res<PossessionMasters>>,
+        Option<Res<ClientMysekaiTools>>,
     ),
     (presentation, time): (Res<HomeActionPresentation>, Res<Time>),
     mut roots: Query<
         (
-            &CraftViewRoot,
+            &mut CraftViewRoot,
             &mut UiPrefabView,
             &mut Visibility,
             &mut Transform,
@@ -825,6 +970,7 @@ pub(crate) fn place(
     if open && !state.was_open {
         state.scroll = 0.0;
         state.opened_at = time.elapsed_secs();
+        state.tab_tapped = false;
         state.tapped = 0;
         state.map_pending = true;
         state.fade = Fade {
@@ -871,7 +1017,7 @@ pub(crate) fn place(
             header_view.set_alpha(&root, alpha);
         }
     }
-    let Ok((root, mut view, mut visibility, mut transform)) = roots.single_mut() else {
+    let Ok((mut root, mut view, mut visibility, mut transform)) = roots.single_mut() else {
         return;
     };
     *visibility = if open {
@@ -883,15 +1029,52 @@ pub(crate) fn place(
     if !open {
         return;
     }
+    // The selected type's list (`OnSelectorCell`: that list shown).
+    let kind = CRAFT_LIST_TYPES[screen.list];
+    if root.bindings.kind != kind {
+        let composed = compose(&layouts, kind).and_then(|(document, bindings)| {
+            layouts.replace_runtime_document(RUNTIME, document, &server)?;
+            Ok(bindings)
+        });
+        match composed {
+            Ok(bindings) => {
+                view.clear_overrides();
+                root.bindings = bindings;
+                apply_static(&mut view, &layouts, &root.bindings);
+                state.scroll = 0.0;
+                state.cells_for = None;
+                state.map_pending = true;
+                info!("[craft] the {kind:?} list shown");
+            }
+            Err(reason) => {
+                if state.name_once(format!("compose {kind:?}")) {
+                    error!(
+                        "[craft] the {kind:?} list could not be composed ({reason}); the {:?} list stays shown",
+                        root.bindings.kind
+                    );
+                }
+            }
+        }
+    }
     let bindings = &root.bindings;
     view.set_alpha(&bindings.screen_group, alpha);
+    for (index, (tab, kind)) in bindings.tabs.iter().zip(CRAFT_LIST_TYPES).enumerate() {
+        view.set_visible(
+            &tab.root,
+            kind != CraftListType::LimitedCraft || screen.limited_tab,
+        );
+        view.set_visible(&tab.selected, index == screen.list);
+    }
 
-    // The rows' cell data, again when the rows or the client copy change.
+    // The rows' cell data, again when the rows or the client copies change.
     let revision = inventory
         .as_deref()
         .map_or(0, |inventory| inventory.revision);
-    if state.cells_for != Some((screen.rows_revision, revision)) {
-        state.cells_for = Some((screen.rows_revision, revision));
+    let tools_revision = tools.as_deref().map_or(0, |tools| tools.revision);
+    if state.cells_for != Some((screen.rows_revision, revision, tools_revision)) {
+        state.cells_for = Some((screen.rows_revision, revision, tools_revision));
+        let empty_tools = ClientMysekaiTools::default();
+        let tool_rows = tools.as_deref().unwrap_or(&empty_tools);
         state.cell_data = match (masters.as_deref(), inventory.as_deref()) {
             (Some(masters), Some(inventory)) => {
                 let owned = owned(inventory, possession.as_deref());
@@ -899,13 +1082,15 @@ pub(crate) fn place(
                     .rows
                     .iter()
                     .map(|blueprint| {
+                        // `IsCanCraftAnyColor` reads the fixture master by the
+                        // target id whatever the blueprint's type.
                         let colors = inputs
                             .as_deref()
                             .and_then(|inputs| {
                                 inputs.craft_target(false, blueprint.craft_target_id).ok()
                             })
                             .map(|(_, colors)| colors);
-                        cell_data(blueprint, colors.as_deref(), masters, &owned)
+                        cell_data(blueprint, colors.as_deref(), masters, &owned, tool_rows)
                     })
                     .collect()
             }
@@ -968,6 +1153,30 @@ pub(crate) fn place(
         view.set_text(&cell.count, data.count.to_string());
         view.set_visible(&cell.disabled, !data.can_craft);
         view.set_visible(&cell.selected, screen.selected == Some(index));
+        if blueprint.craft_type == MysekaiCraftType::MysekaiTool {
+            match tool_thumbnail(
+                &mut layouts,
+                &server,
+                item_icons.as_deref(),
+                inputs.as_deref(),
+                blueprint.craft_target_id,
+            ) {
+                Ok(path) => {
+                    view.set_visible(&cell.image, true);
+                    view.set_texture(&cell.image, &path);
+                }
+                Err(reason) => {
+                    view.set_visible(&cell.image, false);
+                    if state.name_once(format!("tool {}", blueprint.craft_target_id)) {
+                        warn!(
+                            "[craft] tool {} thumbnail refused: {reason}; the cell shows no image",
+                            blueprint.craft_target_id
+                        );
+                    }
+                }
+            }
+            continue;
+        }
         match editor_icons.variant(blueprint.craft_target_id, 1) {
             Some(alias) => {
                 view.set_visible(&cell.image, true);
@@ -997,24 +1206,43 @@ pub(crate) fn place(
             view.set_visible(&bindings.preview_content, true);
             view.set_text(&bindings.name_text, selection.name.clone());
             let blueprint = &selection.blueprint;
-            let quantity: i32 = match inventory.as_deref() {
-                None => 0,
-                Some(inventory) if blueprint.craft_type == MysekaiCraftType::MysekaiCanvas => {
+            // SetupCraftTermText: on for a blueprint with a term row.
+            if masters
+                .as_deref()
+                .is_some_and(|masters| masters.term(blueprint.id).is_some())
+                && state.name_once("term text".into())
+            {
+                warn!(
+                    "[craft] SetupCraftTermText: the term's end date (MSG_DATE_LIMIT) is not built; the term text stays off"
+                );
+            }
+            // SetQuantityText.
+            let quantity: i32 = match (blueprint.craft_type, inventory.as_deref()) {
+                (MysekaiCraftType::MysekaiTool, _) => tools
+                    .as_deref()
+                    .map_or(0, |tools| tools.quantity(blueprint.craft_target_id)),
+                (_, None) => 0,
+                (MysekaiCraftType::MysekaiCanvas, Some(inventory)) => {
                     inventory.canvas_quantity(blueprint.craft_target_id)
                 }
-                Some(inventory) => inventory
+                (_, Some(inventory)) => inventory
                     .fixture_of_texture(blueprint.craft_target_id, selection.texture().unwrap_or(1))
                     .map_or(0, |row| row.quantity),
             };
             view.set_text(&bindings.quantity_text, quantity.to_string());
             view.set_visible(&bindings.quantity_object, true);
-            let size = inputs
-                .as_deref()
-                .ok_or_else(|| "the acquisition module's masters are not installed".to_owned())
-                .and_then(|inputs| {
-                    let (layout, grid) = inputs.fixture_layout(blueprint.craft_target_id)?;
-                    grid_size_text(&layouts, layout, grid)
-                });
+            // SetSizeText: a fixture or canvas blueprint's.
+            let size = if blueprint.craft_type == MysekaiCraftType::MysekaiTool {
+                Ok(None)
+            } else {
+                inputs
+                    .as_deref()
+                    .ok_or_else(|| "the acquisition module's masters are not installed".to_owned())
+                    .and_then(|inputs| {
+                        let (layout, grid) = inputs.fixture_layout(blueprint.craft_target_id)?;
+                        grid_size_text(&layouts, layout, grid)
+                    })
+            };
             match size {
                 Ok(Some(text)) => {
                     view.set_text(&bindings.size_text, text);
@@ -1120,18 +1348,27 @@ pub(crate) fn place(
 
     // The instrument's taps (the view's own tap path).
     let since = time.elapsed_secs() - state.opened_at;
-    let target = match state.tapped {
-        0 if since >= 2.0 => crate::server::client::instrument_env("MOLY_CRAFT_TAP_CELL")
+    let target = if !state.tab_tapped && since >= 1.0 {
+        state.tab_tapped = true;
+        crate::server::client::instrument_env("MOLY_CRAFT_TAP_TAB")
             .and_then(|raw| raw.trim().parse::<usize>().ok())
-            .and_then(|slot| bindings.cells.get(slot))
-            .map(|cell| ("cell", cell.button.clone())),
-        1 if since >= 3.0 => crate::server::client::instrument_env("MOLY_CRAFT_TAP_APPLY")
-            .map(|_| ("apply button", bindings.apply_button.clone())),
-        _ => None,
+            .and_then(|index| bindings.tabs.get(index))
+            .map(|tab| ("tab cell", tab.button.clone()))
+    } else {
+        let target = match state.tapped {
+            0 if since >= 2.0 => crate::server::client::instrument_env("MOLY_CRAFT_TAP_CELL")
+                .and_then(|raw| raw.trim().parse::<usize>().ok())
+                .and_then(|slot| bindings.cells.get(slot))
+                .map(|cell| ("cell", cell.button.clone())),
+            1 if since >= 3.0 => crate::server::client::instrument_env("MOLY_CRAFT_TAP_APPLY")
+                .map(|_| ("apply button", bindings.apply_button.clone())),
+            _ => None,
+        };
+        if state.tapped < 2 && since >= 2.0 + state.tapped as f32 {
+            state.tapped += 1;
+        }
+        target
     };
-    if state.tapped < 2 && since >= 2.0 + state.tapped as f32 {
-        state.tapped += 1;
-    }
     if let Some((what, path)) = target {
         if let Some(rect) = view.rect(&layouts, &path, canvas) {
             let centre = rect.center();
@@ -1168,6 +1405,11 @@ pub(crate) fn place(
             .single()
             .ok()
             .and_then(|(header, header_view, _, _)| pixel(header_view, &header.back));
+        let tabs: Vec<_> = bindings
+            .tabs
+            .iter()
+            .map(|tab| pixel(&*view, &tab.button))
+            .collect();
         let cells: Vec<_> = bindings
             .cells
             .iter()
@@ -1176,8 +1418,8 @@ pub(crate) fn place(
             .collect();
         let apply = pixel(&*view, &bindings.apply_button);
         info!(
-            "[craft] tap map (window px, window {}x{}): back {back:?}, first cells {cells:?}, apply {apply:?}; {} rows",
-            size.x, size.y, rows
+            "[craft] tap map (window px, window {}x{}): back {back:?}, tabs Craft/Tool/LimitedCraft {tabs:?}, first cells {cells:?}, apply {apply:?}; {:?} list, {} rows",
+            size.x, size.y, bindings.kind, rows
         );
     }
 }
@@ -1283,6 +1525,24 @@ pub(crate) fn click(
                 sounds.source_button(&layouts, header_view.key, &header.back);
                 info!("[craft] header back button: BackUIScreen");
                 layer_commands.write(LayerCommand::Pop);
+                continue;
+            }
+        }
+        // The tab group's cells (`ChangeOtherSE`: each plays the tab SE);
+        // an inactive cell is not drawn and takes no tap.
+        if let Some(index) = bindings
+            .tabs
+            .iter()
+            .position(|tab| hit(view, &layouts, &tab.button, point, canvas))
+        {
+            if CRAFT_LIST_TYPES[index] != CraftListType::LimitedCraft || screen.limited_tab {
+                sounds.0.push(SeRequest {
+                    owner: None,
+                    cue: SE_TAB_CLICK.to_owned(),
+                    class: SeClass::Ui,
+                    source: "craft-tab",
+                });
+                screen.requests.push(ViewRequest::Tab(index));
                 continue;
             }
         }

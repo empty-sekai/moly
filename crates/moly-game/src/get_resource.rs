@@ -329,11 +329,17 @@ struct ItemRow {
     kind: i32,
 }
 
+struct ToolRow {
+    name: String,
+    /// `assetbundleName`; `None` for a row without it.
+    bundle: Option<String>,
+}
+
 struct Masters {
     materials: HashMap<i32, MaterialRow>,
     blueprints: HashMap<i32, BlueprintRow>,
     fixtures: HashMap<i32, FixtureRow>,
-    tools: HashMap<i32, String>,
+    tools: HashMap<i32, ToolRow>,
     items: HashMap<i32, ItemRow>,
     records: HashSet<i32>,
 }
@@ -455,7 +461,10 @@ impl Masters {
         for row in entries(3)? {
             tools.insert(
                 int(row, "id", MASTERS[3].table)?,
-                text(row, "name", MASTERS[3].table)?,
+                ToolRow {
+                    name: text(row, "name", MASTERS[3].table)?,
+                    bundle: row["assetbundleName"].as_str().map(str::to_owned),
+                },
             );
         }
         let mut items = HashMap::new();
@@ -509,7 +518,7 @@ impl Masters {
             return String::new();
         };
         let name = match row.craft_type {
-            CraftType::Tool => self.tools.get(&row.target).cloned(),
+            CraftType::Tool => self.tools.get(&row.target).map(|tool| tool.name.clone()),
             CraftType::Fixture | CraftType::Canvas => {
                 self.fixtures.get(&row.target).map(|f| f.name.clone())
             }
@@ -729,7 +738,7 @@ impl GetResourceInputs {
             masters
                 .tools
                 .get(&id)
-                .map(|name| (name.clone(), Vec::new()))
+                .map(|tool| (tool.name.clone(), Vec::new()))
                 .ok_or_else(|| format!("tool {id} is not in the tool master"))
         } else {
             let row = masters
@@ -772,6 +781,18 @@ impl GetResourceInputs {
             .get(&id)
             .map(|row| row.icon.as_str())
             .ok_or_else(|| format!("material {id} is not in the material master"))
+    }
+
+    /// A tool's `assetbundleName`.
+    pub(crate) fn tool_bundle(&self, id: i32) -> Result<&str, String> {
+        let masters = self.masters.as_ref().ok_or("the tool master is not read")?;
+        masters
+            .tools
+            .get(&id)
+            .ok_or_else(|| format!("tool {id} is not in the tool master"))?
+            .bundle
+            .as_deref()
+            .ok_or_else(|| format!("tool {id} has no assetbundleName"))
     }
 }
 
@@ -1122,8 +1143,8 @@ fn charset(masters: Option<&Masters>, wordings: &HashMap<String, String>) -> Vec
             // The craft screen writes the target's own name.
             match row.craft_type {
                 CraftType::Tool => {
-                    if let Some(name) = masters.tools.get(&row.target) {
-                        chars.extend(name.chars());
+                    if let Some(tool) = masters.tools.get(&row.target) {
+                        chars.extend(tool.name.chars());
                     }
                 }
                 CraftType::Fixture | CraftType::Canvas => {
