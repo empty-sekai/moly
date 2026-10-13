@@ -706,6 +706,40 @@ pub struct SiteAssets {
     home_obstacle_site_level: u32,
 }
 
+/// Where the site expansion stands, for a report while the entry waits on
+/// it: each glTF handle's load, dependency and recursive dependency states,
+/// and the scene roots still expanding.
+pub(crate) fn expansion_detail(world: &World) -> String {
+    let Some(assets) = world.get_resource::<SiteAssets>() else {
+        return "the site assets are not requested".to_owned();
+    };
+    let server = world.resource::<AssetServer>();
+    let mut parts: Vec<String> = [
+        ("main", Some(&assets.gltf)),
+        ("module", assets.module.as_ref()),
+        ("walkable", assets.walkable.as_ref()),
+        ("navmesh", assets.navmesh.as_ref()),
+    ]
+    .into_iter()
+    .filter_map(|(name, handle)| {
+        let handle = handle?;
+        Some(format!(
+            "{name} {:?}: load {:?}, dependencies {:?}, recursive {:?}",
+            server.get_path(handle).map(|path| path.to_string()),
+            server.load_state(handle),
+            server.dependency_load_state(handle),
+            server.recursive_dependency_load_state(handle)
+        ))
+    })
+    .collect();
+    parts.push(match world.get_resource::<SiteScenePending>() {
+        Some(pending) => format!("{} scene roots expanding", pending.0),
+        None if world.contains_resource::<GroundMeshes>() => "scene roots expanded".to_owned(),
+        None => "scene roots not spawned".to_owned(),
+    });
+    parts.join("; ")
+}
+
 /// One authored obstacle ring root of the home site (`rank<level>`).
 #[derive(Component, Clone, Copy, Debug)]
 pub(crate) struct HomeObstacleRing {

@@ -243,6 +243,7 @@ fn player_entity(world: &mut World) -> Option<Entity> {
 }
 
 const FIXTURE_BINDING_BLOCKER: &str = "fixture layout is binding";
+const SCENES_EXPANDING: &str = "scenes are expanding";
 
 /// What is not ready yet, or `None` when the join may begin.
 fn join_blocker(world: &mut World) -> Option<String> {
@@ -253,7 +254,7 @@ fn join_blocker(world: &mut World) -> Option<String> {
         return Some("site not active".into());
     };
     if !world.contains_resource::<crate::site::SiteScenesReady>() {
-        return Some(format!("{site} scenes are expanding"));
+        return Some(format!("{site} {SCENES_EXPANDING}"));
     }
     if !world.contains_resource::<crate::site_material::SiteMaterialsSwapped>() {
         return Some(format!("{site} materials are swapping"));
@@ -774,6 +775,8 @@ pub(crate) fn advance(world: &mut World) {
                     if due {
                         let detail = if blocker == FIXTURE_BINDING_BLOCKER {
                             format!(" ({})", crate::fixture::binding_detail(world))
+                        } else if blocker.ends_with(SCENES_EXPANDING) {
+                            format!(" ({})", crate::site::expansion_detail(world))
                         } else {
                             String::new()
                         };
