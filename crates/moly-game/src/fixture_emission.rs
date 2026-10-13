@@ -846,81 +846,87 @@ impl<const EARLY: bool> ViewNode for EmissionPassNode<EARLY> {
         // copied camera depth. The alias changes binding type, not its bytes.
         // Even a refused camera clears its target: no stale contribution reaches
         // post-processing. Such a clear has no mismatched depth attachment.
-        let mut pass = render_context
-            .command_encoder()
-            .begin_render_pass(&RenderPassDescriptor {
-                label: Some(if EARLY { "mysekai_effect_after_opaques" } else { "transparent_fixture_emission" }),
-                color_attachments: &[Some(RenderPassColorAttachment {
-                    view: &target.resolved,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: Operations {
-                        load: if EARLY { LoadOp::Clear(LinearRgba::NONE.into()) } else { LoadOp::Load },
-                        store: StoreOp::Store,
-                    },
-                })],
-                // The camera depth is still required by forward transparents and
-                // later consumers. A read-only draw does NOT authorize Discard.
-                depth_stencil_attachment: attachment_compatible.then(|| depth.get_attachment(StoreOp::Store)),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
+        // The late pass only adds blended draws onto the loaded target; with
+        // none it would leave the target unchanged and is not begun.
+        let begin = EARLY
+            || (attachment_compatible
+                && draws.draws.iter().any(|item| item.particle.is_none() && item.blend));
+        if begin {
+            let mut pass = render_context
+                .command_encoder()
+                .begin_render_pass(&RenderPassDescriptor {
+                    label: Some(if EARLY { "mysekai_effect_after_opaques" } else { "transparent_fixture_emission" }),
+                    color_attachments: &[Some(RenderPassColorAttachment {
+                        view: &target.resolved,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: Operations {
+                            load: if EARLY { LoadOp::Clear(LinearRgba::NONE.into()) } else { LoadOp::Load },
+                            store: StoreOp::Store,
+                        },
+                    })],
+                    // The camera depth is still required by forward transparents and
+                    // later consumers. A read-only draw does NOT authorize Discard.
+                    depth_stencil_attachment: attachment_compatible.then(|| depth.get_attachment(StoreOp::Store)),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
 
-        for (index, item) in draws.draws.iter().enumerate().filter(|_| attachment_compatible) {
-            let belongs_early = item.particle.is_some() || !item.blend;
-            if EARLY != belongs_early { continue; }
-            if item.particle.is_some() && depth_binding.is_none() { continue; }
-            let (Some(pipeline), Some(render_mesh)) =
-                (resolve(item.pipeline), meshes.get(item.mesh))
-            else {
-                continue;
-            };
-            let Some(vertex_slice) = allocator.mesh_vertex_slice(&item.mesh) else {
-                continue;
-            };
-            let texture_key = (item.mask, item.main, item.normal_map);
-            if !texture_groups.contains_key(&texture_key) {
-                // 缺件的对在 pass 前建组时已被跳过——这里同样跳过 draw。
-                continue;
-            }
-            let texture_bind_group = &texture_groups[&texture_key];
-            pass.set_pipeline(pipeline);
-            let object_offsets = [
-                (index as u32) * gpu.object_stride,
-                view_offset.offset,
-                item.skin_byte_offset.unwrap_or(0),
-            ];
-            pass.set_bind_group(0, &object_bind_group, if gpu.skin_uniforms {
-                &object_offsets[..]
-            } else {
-                &object_offsets[..2]
-            });
-            pass.set_bind_group(1, texture_bind_group, &[]);
-            if item.particle.is_some() {
-                pass.set_bind_group(2, &depth_binding.unwrap().group, &[]);
-            }
-            pass.set_vertex_buffer(0, *vertex_slice.buffer.slice(..));
-            match &render_mesh.buffer_info {
-                RenderMeshBufferInfo::Indexed {
-                    index_format,
-                    count,
-                } => {
-                    let Some(index_slice) = allocator.mesh_index_slice(&item.mesh) else {
-                        continue;
-                    };
-                    pass.set_index_buffer(*index_slice.buffer.slice(..), *index_format);
-                    pass.draw_indexed(
-                        index_slice.range.start..(index_slice.range.start + *count),
-                        vertex_slice.range.start as i32,
-                        0..1,
-                    );
+            for (index, item) in draws.draws.iter().enumerate().filter(|_| attachment_compatible) {
+                let belongs_early = item.particle.is_some() || !item.blend;
+                if EARLY != belongs_early { continue; }
+                if item.particle.is_some() && depth_binding.is_none() { continue; }
+                let (Some(pipeline), Some(render_mesh)) =
+                    (resolve(item.pipeline), meshes.get(item.mesh))
+                else {
+                    continue;
+                };
+                let Some(vertex_slice) = allocator.mesh_vertex_slice(&item.mesh) else {
+                    continue;
+                };
+                let texture_key = (item.mask, item.main, item.normal_map);
+                if !texture_groups.contains_key(&texture_key) {
+                    // 缺件的对在 pass 前建组时已被跳过——这里同样跳过 draw。
+                    continue;
                 }
-                RenderMeshBufferInfo::NonIndexed => {
-                    pass.draw(vertex_slice.range, 0..1);
+                let texture_bind_group = &texture_groups[&texture_key];
+                pass.set_pipeline(pipeline);
+                let object_offsets = [
+                    (index as u32) * gpu.object_stride,
+                    view_offset.offset,
+                    item.skin_byte_offset.unwrap_or(0),
+                ];
+                pass.set_bind_group(0, &object_bind_group, if gpu.skin_uniforms {
+                    &object_offsets[..]
+                } else {
+                    &object_offsets[..2]
+                });
+                pass.set_bind_group(1, texture_bind_group, &[]);
+                if item.particle.is_some() {
+                    pass.set_bind_group(2, &depth_binding.unwrap().group, &[]);
+                }
+                pass.set_vertex_buffer(0, *vertex_slice.buffer.slice(..));
+                match &render_mesh.buffer_info {
+                    RenderMeshBufferInfo::Indexed {
+                        index_format,
+                        count,
+                    } => {
+                        let Some(index_slice) = allocator.mesh_index_slice(&item.mesh) else {
+                            continue;
+                        };
+                        pass.set_index_buffer(*index_slice.buffer.slice(..), *index_format);
+                        pass.draw_indexed(
+                            index_slice.range.start..(index_slice.range.start + *count),
+                            vertex_slice.range.start as i32,
+                            0..1,
+                        );
+                    }
+                    RenderMeshBufferInfo::NonIndexed => {
+                        pass.draw(vertex_slice.range, 0..1);
+                    }
                 }
             }
         }
-        drop(pass);
         let probe = world.get_resource::<WeatherEffectProbes>().and_then(|probes| {
             if EARLY { probes.after_opaques.as_ref() } else { probes.after_transparents.as_ref() }
         }).and_then(|handle| images.get(handle));

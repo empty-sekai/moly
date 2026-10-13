@@ -2225,7 +2225,7 @@ fn reveal_material_ready_roots(
 ) {
     if ready.is_none() { return; }
     for (entity, mut visibility) in &mut roots {
-        *visibility = Visibility::Inherited;
+        visibility.set_if_neq(Visibility::Inherited);
         commands.entity(entity).remove::<SiteVisualPending>();
     }
 }

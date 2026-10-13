@@ -705,12 +705,12 @@ pub(crate) fn refresh(
     let Ok((mut root, mut view, mut visibility, mut transform)) = roots.single_mut() else {
         return;
     };
-    *visibility = if active {
+    visibility.set_if_neq(if active {
         Visibility::Inherited
     } else {
         Visibility::Hidden
-    };
-    transform.scale = Vec3::splat(scale);
+    });
+    crate::canvas::set_scale(&mut transform, scale);
     if active {
         if root.seen_revision != edit.revision || root.seen_owned_revision != edit.owned_revision {
             let next_choices = choices(&edit, &icons);
@@ -845,11 +845,11 @@ pub(crate) fn refresh(
             }
             EditorAuxiliary::CleanUp(_) => active && edit.clean_up_dialog,
         };
-        *visibility = if visible {
+        visibility.set_if_neq(if visible {
             Visibility::Inherited
         } else {
             Visibility::Hidden
-        };
-        transform.scale = Vec3::splat(scale);
+        });
+        crate::canvas::set_scale(&mut transform, scale);
     }
 }

@@ -282,7 +282,8 @@ fn parse_cut_scenes(text: &str) -> Result<Vec<(i64, i64, String)>, String> {
         .collect()
 }
 
-type Tables = (Vec<Party>, Vec<SystemFixture>, Vec<(i64, i64, String)>);
+/// Shared, so that the readers of every frame take the tables without a copy.
+type Tables = std::sync::Arc<(Vec<Party>, Vec<SystemFixture>, Vec<(i64, i64, String)>)>;
 
 /// The party rows, the system fixture rows and the birthday cut-scene rows,
 /// once the master layer has resolved all three.
@@ -304,9 +305,10 @@ fn tables(world: &mut World) -> Result<Option<Tables>, String> {
     ) else {
         return Err("a birthday master table was taken by another reader".into());
     };
-    let taken = (|| Ok((parties?, system?, cut_scenes?)))()
+    let taken = (|| Ok(std::sync::Arc::new((parties?, system?, cut_scenes?))))()
         .map_err(|error: master::MasterError| error.to_string());
-    if let Ok((parties, system, cut_scenes)) = &taken {
+    if let Ok(tables) = &taken {
+        let (parties, system, cut_scenes) = &**tables;
         info!(
             "[birthday] master tables: {} parties, {} system fixtures ({} of type {PARTY_FIXTURE_TYPE}), {} birthday cut-scenes",
             parties.len(),
@@ -335,9 +337,10 @@ pub(super) fn advance(world: &mut World) {
 
 /// Keeps [`BirthdayButton`] on each placed party fixture.
 fn update_buttons(world: &mut World) {
-    let Ok(Some((parties, system, _))) = tables(world) else {
+    let Ok(Some(tables)) = tables(world) else {
         return;
     };
+    let (parties, system, _) = &*tables;
     let now = crate::birthday::now_ms();
     let context = world.contains_resource::<BirthdayContext>();
     let placed: Vec<(Entity, i64, Option<BirthdayButton>)> = world
@@ -424,7 +427,7 @@ fn instrument_press(world: &mut World) {
 /// The instrument's first step: the player beside a party fixture whose
 /// button shows.
 fn instrument_place(world: &mut World, wanted: Option<i32>, now: f64) {
-    let (parties, system, _) = match tables(world) {
+    let tables = match tables(world) {
         Ok(Some(tables)) => tables,
         Ok(None) => return,
         Err(reason) => {
@@ -432,6 +435,7 @@ fn instrument_place(world: &mut World, wanted: Option<i32>, now: f64) {
             return set_stage(world, InstrumentStage::Done);
         }
     };
+    let (parties, system, _) = &*tables;
     let party_fixtures: Vec<i64> = system
         .iter()
         .filter(|row| row.kind == PARTY_FIXTURE_TYPE)
@@ -582,7 +586,7 @@ fn on_click(world: &mut World, fixture: Entity) {
             return;
         }
     };
-    let (parties, system, cut_scenes) = tables;
+    let (parties, system, cut_scenes) = &*tables;
     // IsExecutable.
     let Some(master) = world
         .get::<FixtureActivityIdentity>(fixture)

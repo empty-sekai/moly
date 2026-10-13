@@ -877,7 +877,7 @@ impl UiLayouts {
         Ok(())
     }
 
-    fn document_revision(&self, key: &str) -> u64 {
+    pub(crate) fn document_revision(&self, key: &str) -> u64 {
         self.document_revisions.get(key).copied().unwrap_or(0)
     }
 

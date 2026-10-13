@@ -1366,11 +1366,11 @@ fn camera_fov(world: &mut World) -> f32 {
 fn set_player_visible(world: &mut World, visible: bool) {
     let mut players = world.query_filtered::<&mut Visibility, With<PlayerControlled>>();
     for mut visibility in players.iter_mut(world) {
-        *visibility = if visible {
+        visibility.set_if_neq(if visible {
             Visibility::Inherited
         } else {
             Visibility::Hidden
-        };
+        });
     }
 }
 

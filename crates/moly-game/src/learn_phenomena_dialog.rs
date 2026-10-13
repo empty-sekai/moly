@@ -814,14 +814,14 @@ pub(crate) fn place(
         return;
     };
     if let (Ok(window), Some(root_canvas)) = (windows.single(), root_canvas.as_deref()) {
-        transform.scale = Vec3::splat(root_canvas.scale(window));
+        crate::canvas::set_scale(&mut transform, root_canvas.scale(window));
     }
     let dialog = &mut *dialog;
     let (Some(run), Some(bindings)) = (dialog.run.as_mut(), dialog.bindings.as_ref()) else {
-        *visibility = Visibility::Hidden;
+        visibility.set_if_neq(Visibility::Hidden);
         return;
     };
-    *visibility = Visibility::Inherited;
+    visibility.set_if_neq(Visibility::Inherited);
     let dt = time.delta_secs();
     let now = time.elapsed_secs_f64();
     if let Some(alpha) = run.fade.update(run.alpha, dt) {
@@ -861,7 +861,7 @@ pub(crate) fn place(
                 screens.dialog_destroyed(run.id);
                 dialog.run = None;
                 shell.learn_phenomena_open = false;
-                *visibility = Visibility::Hidden;
+                visibility.set_if_neq(Visibility::Hidden);
             }
             Stage::Open => {}
         }

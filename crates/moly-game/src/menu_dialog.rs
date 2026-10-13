@@ -1094,7 +1094,7 @@ pub(crate) fn place(
             };
         }
         if root.phase == MenuSlidePhase::Hidden {
-            *visibility = Visibility::Hidden;
+            visibility.set_if_neq(Visibility::Hidden);
             dialog.menu_closing = false;
             continue;
         }

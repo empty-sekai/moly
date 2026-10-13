@@ -1855,7 +1855,7 @@ pub(crate) fn place_ui(
         // TimelineFixtureProcess hides the action buttons view until the
         // timeline's finish shows it again. They are part of the home
         // screen, which is not shown while another screen is current.
-        *visibility = if head.is_some()
+        visibility.set_if_neq(if head.is_some()
             && rects.is_some()
             && state.timeline.is_none()
             && state.home_mounted
@@ -1863,9 +1863,9 @@ pub(crate) fn place_ui(
             Visibility::Visible
         } else {
             Visibility::Hidden
-        };
+        });
         if let Some(scale) = scale {
-            transform.scale = Vec3::new(scale, scale, 1.0);
+            set_if_neq!(transform.scale, Vec3::new(scale, scale, 1.0));
         }
     }
     let go_home_shown = head.is_some_and(|(button, _)| button == ButtonType::GoHomeSite)
@@ -1922,11 +1922,11 @@ pub(crate) fn place_ui(
             &background_rect
         };
         let (local_scale, rotation, _) = rect.world.to_scale_rotation_translation();
-        *transform = Transform {
+        set_if_neq!(*transform, Transform {
             translation: rect.center().extend(if icon.is_some() { 0.5 } else { 0.0 }),
             rotation,
             scale: local_scale,
-        };
+        });
         sprite.custom_size = Some(rect.size);
         let image = if icon.is_some() {
             skin.icon.as_ref().or_else(|| {
@@ -1974,17 +1974,17 @@ pub(crate) fn place_change_ui(
     let (Some((_, icon)), Some(scale), true, true) =
         (rects, screen.scale(window), view_shown, state.change_shown())
     else {
-        *visibility = Visibility::Hidden;
+        visibility.set_if_neq(Visibility::Hidden);
         return;
     };
     let (local_scale, rotation, _) = icon.world.to_scale_rotation_translation();
-    *transform = Transform {
+    set_if_neq!(*transform, Transform {
         translation: (icon.center() * scale).extend(0.6),
         rotation,
         scale: local_scale * Vec3::new(scale, scale, 1.0),
-    };
+    });
     sprite.custom_size = Some(icon.size);
-    *visibility = Visibility::Visible;
+    visibility.set_if_neq(Visibility::Visible);
 }
 
 /// The click wrapper's IsResetJoyStick, then ForceResetJoyStick. The

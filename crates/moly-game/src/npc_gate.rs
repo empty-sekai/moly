@@ -232,7 +232,7 @@ fn hide_entry_site_starts(world: &mut World, frame: u32) {
     let mut query = world.query::<(&CharacterUnitId, &ObjectiveMind, &mut Visibility)>();
     for (unit, mind, mut visibility) in query.iter_mut(world) {
         if mind.body == Some(BodyWait::EntrySite { since: frame }) {
-            *visibility = Visibility::Hidden;
+            visibility.set_if_neq(Visibility::Hidden);
             info!(
                 "[npc unit={}] frame={frame} entry-site objective: Hide",
                 unit.0
@@ -552,7 +552,7 @@ fn place(
         warn!("[npc-gate] frame={frame} unit={unit}: the warp to {position:?} maps onto no navigation cell; the agent stays");
     }
     if let Some(mut visibility) = world.get_mut::<Visibility>(entity) {
-        *visibility = Visibility::Inherited;
+        visibility.set_if_neq(Visibility::Inherited);
     }
     // TryCancelCurrentObjective with the cancelled objective's own OnCancel
     // (the entry-site objective's does nothing; a drafted member's

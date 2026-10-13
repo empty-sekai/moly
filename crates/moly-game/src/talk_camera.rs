@@ -514,7 +514,7 @@ pub(crate) fn advance(
             // FPS.OnExit must run when Talk replaces it too: the avatar must
             // not remain hidden after the camera ceases to be first-person.
             if let Ok((_, mut visibility)) = scene.player_avatar.single_mut() {
-                *visibility = Visibility::Visible;
+                visibility.set_if_neq(Visibility::Visible);
             }
             if let Some(memory) = scene.normal_memory.as_deref() {
                 snapshot.point.look_at = memory.look_at;

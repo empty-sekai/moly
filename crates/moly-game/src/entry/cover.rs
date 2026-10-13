@@ -180,9 +180,7 @@ pub(crate) fn fit_start_particle(world: &mut World) {
     };
     let mut canvases = world.query_filtered::<&mut Transform, With<EntryStartParticleCanvas>>();
     for mut transform in canvases.iter_mut(world) {
-        if transform.scale != Vec3::splat(scale) {
-            transform.scale = Vec3::splat(scale);
-        }
+        crate::canvas::set_scale(&mut transform, scale);
     }
 }
 
@@ -210,9 +208,7 @@ pub(crate) fn write(world: &mut World, value: [f32; 4]) {
         } else {
             Visibility::Hidden
         };
-        if *visibility != wanted {
-            *visibility = wanted;
-        }
+        visibility.set_if_neq(wanted);
     }
 }
 

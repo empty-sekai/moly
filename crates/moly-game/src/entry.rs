@@ -177,6 +177,14 @@ impl EntrySequence {
             (_, Phase::Ended) => "ended",
         }
     }
+
+    /// The entry has ended, the cover is destroyed and the banner hide has
+    /// been called: no later frame changes anything.
+    fn settled(&self) -> bool {
+        matches!(self.phase, Phase::Ended)
+            && matches!(self.cover, Cover::Gone)
+            && self.banner_hide.is_none()
+    }
 }
 
 /// `MysekaiUtility.EnableJoyStick` / `EnableGestureLayer`: false until the
@@ -687,12 +695,17 @@ fn finish_enter(world: &mut World, seq: &mut EntrySequence, source_t: Option<f32
 
 /// Update (exclusive): one step of the entry per frame.
 pub(crate) fn advance(world: &mut World) {
+    if world.get_resource::<EntrySequence>().is_none_or(EntrySequence::settled) {
+        return;
+    }
     let Some(mut seq) = world.remove_resource::<EntrySequence>() else {
         return;
     };
     let dt = world.resource::<Time>().delta_secs();
     let real = world.resource::<Time<Real>>().elapsed_secs_f64();
-    cover::fit_start_particle(world);
+    if !matches!(seq.cover, Cover::Gone) {
+        cover::fit_start_particle(world);
+    }
     seq.frame += 1;
     if seq.frame == 1 {
         seq.started_real = real;

@@ -710,8 +710,8 @@ pub(crate) fn place(
         let visible = crate::entry::hud_open(entry.as_deref())
             && (stack.on_field() || stack.is_active(screen))
             && is_host;
-        *visibility = if visible { Visibility::Inherited } else { Visibility::Hidden };
-        transform.scale = Vec3::splat(scale);
+        visibility.set_if_neq(if visible { Visibility::Inherited } else { Visibility::Hidden });
+        crate::canvas::set_scale(&mut transform, scale);
         let doc = layouts.document(root.host.key()).expect("spawned field prefab");
         // The screen animations write the root's CanvasGroup alpha.
         if let Some(alpha) = stack.screen_visual(screen).alpha {
@@ -749,8 +749,8 @@ pub(crate) fn place(
     }
     for (mut visibility, mut transform, mut view) in &mut dialogs {
         let context = dialog.leave_context.as_ref().filter(|_| dialog.leave_confirm);
-        *visibility = if context.is_some() { Visibility::Inherited } else { Visibility::Hidden };
-        transform.scale = Vec3::splat(scale);
+        visibility.set_if_neq(if context.is_some() { Visibility::Inherited } else { Visibility::Hidden });
+        crate::canvas::set_scale(&mut transform, scale);
         if let Some(context) = context {
             view.set_text("Content/MessageBody", layouts.wording("MSG_CONFIRM_LEAVE_MYSEKAI")
                 .replace("{0}", &context.owner_name));
@@ -1387,6 +1387,9 @@ struct TapEffectView {
 #[derive(Resource, Default)]
 pub(crate) struct CameraResetTapEffect {
     views: std::collections::HashMap<(&'static str, i64), TapEffectView>,
+    /// Each host view's tap effects with their palette colours, and the
+    /// document revision they were read from.
+    parsed: std::collections::HashMap<&'static str, (u64, Vec<(GraphicTapEffect, tap_rule::TapEffectColors)>)>,
     unported_root_reported: bool,
 }
 
@@ -1412,16 +1415,27 @@ pub(crate) fn camera_reset_tap_effect(
         }
         return;
     }
+    let CameraResetTapEffect { views, parsed, .. } = &mut *effects;
     for (root, mut view) in &mut roots {
         let Some(doc) = layouts.document(view.key) else { continue; };
-        let Some(button) = camera_reset_button(doc) else { continue; };
-        for GraphicTapEffect { id, graphics, config } in tap_effect(doc, button) {
-        let colors = config.colors(|entry| layouts.palette_color(entry))
-            .unwrap_or_else(|error| panic!("{}: camera reset tap effect: {error}", doc.prefab));
-        let entry = effects.views.entry((view.key, id)).or_default();
+        // The button and its effects are read once per document revision
+        // (the palette is fixed once the root is loaded).
+        let revision = layouts.document_revision(view.key);
+        if parsed.get(view.key).is_none_or(|(read, _)| *read != revision) {
+            let read = camera_reset_button(doc).map_or_else(Vec::new, |button| {
+                tap_effect(doc, button).into_iter().map(|effect| {
+                    let colors = effect.config.colors(|entry| layouts.palette_color(entry))
+                        .unwrap_or_else(|error| panic!("{}: camera reset tap effect: {error}", doc.prefab));
+                    (effect, colors)
+                }).collect()
+            });
+            parsed.insert(view.key, (revision, read));
+        }
+        for (GraphicTapEffect { id, graphics, config }, colors) in &parsed[view.key].1 {
+        let entry = views.entry((view.key, *id)).or_default();
         if !entry.awake {
             entry.awake = true;
-            for &graphic in &graphics {
+            for &graphic in graphics {
                 let node = doc.find(&format!("@{graphic}")).unwrap_or_else(|error| panic!("{error}"));
                 let image = doc.nodes[node].components.iter().find(|c| c.path_id == graphic)
                     .unwrap_or_else(|| panic!("{}: effect graphic {graphic} missing", doc.prefab));
@@ -1433,8 +1447,8 @@ pub(crate) fn camera_reset_tap_effect(
                 }
                 entry.colors.insert(graphic, color);
             }
-            if let Some(color) = entry.state.awake(&config, &colors) {
-                for &graphic in &graphics {
+            if let Some(color) = entry.state.awake(config, colors) {
+                for &graphic in graphics {
                     entry.colors.insert(graphic, color);
                     view.set_graphic_color(graphic, color);
                 }
@@ -1445,8 +1459,8 @@ pub(crate) fn camera_reset_tap_effect(
                 continue;
             }
             match interaction {
-                ViewInteraction::Pressed => entry.state.on_pressed(&colors),
-                ViewInteraction::Released => entry.state.on_released(&colors),
+                ViewInteraction::Pressed => entry.state.on_pressed(colors),
+                ViewInteraction::Released => entry.state.on_released(colors),
             }
         }
         // The effect graphic's tween and the icon graphic's tween are the
@@ -1454,7 +1468,7 @@ pub(crate) fn camera_reset_tap_effect(
         let Some(&first) = graphics.first() else { continue; };
         let current = entry.colors[&first];
         if let Some(color) = entry.state.update(current, time.delta_secs()) {
-            for &graphic in &graphics {
+            for &graphic in graphics {
                 entry.colors.insert(graphic, color);
                 view.set_graphic_color(graphic, color);
             }

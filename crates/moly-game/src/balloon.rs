@@ -1853,7 +1853,7 @@ pub(crate) fn tick(
             elapsed.t = (elapsed.t + dt).min(SCALE_SECONDS);
             for kid in kids.iter() {
                 if let Ok(mut transform) = anims.get_mut(kid) {
-                    transform.scale = Vec3::splat((elapsed.t / SCALE_SECONDS).clamp(0.,1.));
+                    crate::canvas::set_scale(&mut transform, (elapsed.t / SCALE_SECONDS).clamp(0.,1.));
                 }
             }
             continue;
@@ -1889,7 +1889,7 @@ pub(crate) fn tick(
             hud.scale = scale;
             for kid in kids.iter() {
                 if let Ok(mut transform) = anims.get_mut(kid) {
-                    transform.scale = Vec3::splat(scale);
+                    crate::canvas::set_scale(&mut transform, scale);
                 }
             }
             continue;
@@ -1926,7 +1926,7 @@ pub(crate) fn tick(
         };
         for kid in kids.iter() {
             if let Ok(mut transform) = anims.get_mut(kid) {
-                transform.scale = Vec3::splat(scale);
+                crate::canvas::set_scale(&mut transform, scale);
             }
         }
     }
@@ -2083,7 +2083,7 @@ pub(crate) fn place(
         // 锚点屏幕位不参与——真源的 localPosition 已除过 canvas 缩放，
         // 乘回去净值为屏幕像素）。
         // Same authored canvas/HUD scale in browser and native rendering.
-        transform.scale = Vec3::splat(top_scale * canvas);
+        crate::canvas::set_scale(&mut transform, top_scale * canvas);
         if placed.is_none() {
             commands.entity(entity).insert(Placed);
             // 矩阵 near：clip_from_view[3][2]。与组件 near 并排打——两者会
@@ -2303,10 +2303,15 @@ pub(crate) fn order_smoke(
     );
 }
 
+/// The balloon overlay camera, which also hosts the content library's UI.
+#[derive(Component)]
+pub(crate) struct HudCamera;
+
 /// Startup：气泡覆盖相机。只画 [`BALLOON_LAYER`]，不清屏——叠在 3D
 /// 画面上；渲染次序在主相机（order 0）之后。
 pub(crate) fn overlay_camera(mut commands: Commands) {
     commands.spawn((
+        HudCamera,
         Camera2d,
         crate::camera::MYSEKAI_CAMERA_MSAA,
         Camera {

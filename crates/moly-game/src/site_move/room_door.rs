@@ -247,12 +247,12 @@ fn cull_wall_fixtures(
             };
             if visible {
                 if culled {
-                    *visibility = Visibility::Inherited;
+                    visibility.set_if_neq(Visibility::Inherited);
                     commands.entity(entity).remove::<WallCulled>();
                     on += 1;
                 }
             } else if !culled && *visibility != Visibility::Hidden {
-                *visibility = Visibility::Hidden;
+                visibility.set_if_neq(Visibility::Hidden);
                 commands.entity(entity).insert(WallCulled);
                 off += 1;
             }
@@ -796,7 +796,7 @@ impl RoomDoor {
         // OpenDoorAsync's ShowDoor; both states start from their first frame.
         if clip == Clip::Open {
             if let Some(mut visibility) = world.get_mut::<Visibility>(instance.root) {
-                *visibility = Visibility::Inherited;
+                visibility.set_if_neq(Visibility::Inherited);
             }
         }
         if let Some((animator, open, close)) = instance.animator {

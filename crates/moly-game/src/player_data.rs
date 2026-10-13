@@ -81,6 +81,8 @@ pub struct PlayerDataImport {
     catalog: Option<PlayerDataCatalog>,
     exploration: Option<(SiteFixtureLayouts, SiteSelection)>,
     last_error: bool,
+    /// The state last written to the browser snapshot cell.
+    published: Option<serde_json::Value>,
 }
 
 impl Default for PlayerDataImport {
@@ -92,7 +94,8 @@ impl Default for PlayerDataImport {
         Self { uid: String::new(), region: "cn".into(),
             status: "Enter a player UID or choose a Mysekai JSON file. Import keeps a recoverable layout backup.".into(),
             busy: false, action: None, api: api.into(), inbox: Default::default(), read_task: None,
-            generation: 0, pending: None, preview: None, requests: None, catalog: None, exploration: None, last_error: false }
+            generation: 0, pending: None, preview: None, requests: None, catalog: None, exploration: None, last_error: false,
+            published: None }
     }
 }
 
@@ -632,12 +635,16 @@ pub(crate) fn update(world: &mut World) {
         .as_ref()
         .map(|preview| preview.data.notices.clone())
         .unwrap_or_default();
-    *browser_snapshot_cell().lock().unwrap() = json!({
+    let snapshot = json!({
         "schemaVersion":1,"region":state.region,"busy":state.busy,"error":state.last_error,
         "status":state.status,"canExplore":summary.is_some(),"exploring":state.exploration.is_some(),
         "summary":summary.map(|(rank,sites,fixtures)|json!({"rank":rank,"sites":sites,"fixtures":fixtures})),
         "notices":notices,
-    }).to_string();
+    });
+    if state.published.as_ref() != Some(&snapshot) {
+        *browser_snapshot_cell().lock().unwrap() = snapshot.to_string();
+        state.published = Some(snapshot);
+    }
     world.insert_resource(state);
 }
 

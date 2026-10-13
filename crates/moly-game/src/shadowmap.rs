@@ -592,9 +592,9 @@ fn extract_shadow_casters(
             && !dropped.contains(&id);
         let corners = if reused {
             let draw = before.expect("reused draw exists");
-            draw.pipeline = CachedRenderPipelineId::INVALID;
             if draw.two_sided != two_sided {
                 draw.two_sided = two_sided;
+                draw.pipeline = CachedRenderPipelineId::INVALID;
                 changed = true;
                 static_dirty |= draw.baked;
                 draw.baked = false;
@@ -1053,6 +1053,7 @@ fn prepare_shadow_draws(
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
     meshes: Res<RenderAssets<RenderMesh>>,
+    extracted: Option<Res<ExtractedAssets<RenderMesh>>>,
     env: Option<Res<SiteEnv>>,
     gpu: Res<ShadowMapGpu>,
     mut palette: ResMut<ShadowPaletteGpu>,
@@ -1079,8 +1080,21 @@ fn prepare_shadow_draws(
             object_bytes.resize(next_slot, 0);
         }
     }
+    // A rigid draw keeps its pipeline across frames while its mesh is not
+    // prepared again (a mesh prepared again may have another vertex layout);
+    // extraction clears it when the draw's mesh or sidedness changes.
+    let touched = extracted
+        .as_deref()
+        .filter(|extracted| !extracted.added.is_empty() || !extracted.modified.is_empty());
     for item in draws.draws.iter_mut() {
+        let prepared_again = touched.is_some_and(|extracted| {
+            extracted.added.contains(&item.mesh) || extracted.modified.contains(&item.mesh)
+        });
+        if item.pipeline != CachedRenderPipelineId::INVALID && !prepared_again {
+            continue;
+        }
         let Some(render_mesh) = meshes.get(item.mesh) else {
+            item.pipeline = CachedRenderPipelineId::INVALID;
             continue;
         };
         let key = depth_pipeline_key(render_mesh, item.two_sided, false);

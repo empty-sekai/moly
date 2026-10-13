@@ -2067,12 +2067,12 @@ pub(crate) fn place(
     };
     let scale = root_canvas.scale(window);
     for (mut visible, mut transform, mut view) in &mut roots {
-        *visible = if open_now {
+        visible.set_if_neq(if open_now {
             Visibility::Inherited
         } else {
             Visibility::Hidden
-        };
-        transform.scale = Vec3::splat(scale);
+        });
+        crate::canvas::set_scale(&mut transform, scale);
         if open_now {
             paint(&mut view, &layouts, doc, &bindings, &state, &app);
         }

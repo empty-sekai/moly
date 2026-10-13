@@ -549,11 +549,9 @@ pub(crate) fn advance(
     } else {
         Visibility::Hidden
     };
-    if *visibility != shown {
-        *visibility = shown;
-    }
+    visibility.set_if_neq(shown);
     if let (Ok(window), Some(root_canvas)) = (windows.single(), root_canvas.as_deref()) {
-        transform.scale = Vec3::splat(root_canvas.scale(window));
+        crate::canvas::set_scale(&mut transform, root_canvas.scale(window));
     }
     if let (Some(bindings), Some(values)) = (summary.bindings.as_ref(), values) {
         view.set_anchored_position(

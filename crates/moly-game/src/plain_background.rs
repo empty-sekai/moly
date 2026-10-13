@@ -309,9 +309,7 @@ fn show(site: Option<Res<SiteActive>>, mut quads: Query<&mut Visibility, With<Pl
         Visibility::Hidden
     };
     for mut visibility in &mut quads {
-        if *visibility != target {
-            *visibility = target;
-        }
+        visibility.set_if_neq(target);
     }
 }
 

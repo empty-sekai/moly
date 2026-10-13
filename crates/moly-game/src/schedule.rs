@@ -252,7 +252,12 @@ pub fn install(app: &mut App) {
             .after(info::init)
             .after(camera::spawn),
     )
-    .add_systems(Startup, content_library::setup.after(camera::spawn))
+    .add_systems(
+        Startup,
+        content_library::setup
+            .after(camera::spawn)
+            .after(balloon::overlay_camera),
+    )
     .add_systems(
         PreUpdate,
         crate::game_settings::release_input_guard

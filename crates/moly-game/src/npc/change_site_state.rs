@@ -399,7 +399,7 @@ fn step(world: &mut World, actor: Entity, frame: u32) {
                 end_clip(world, actor, unit);
             }
             if let Some(mut visibility) = world.get_mut::<Visibility>(actor) {
-                *visibility = Visibility::Inherited;
+                visibility.set_if_neq(Visibility::Inherited);
             }
             info!("[npc-change-site] unit={unit} frame={frame} the change-site objective was cancelled by another owner: its state steps stop");
             world.resource_mut::<ChangeSiteRuns>().runs.remove(&actor);
@@ -594,7 +594,7 @@ fn step(world: &mut World, actor: Entity, frame: u32) {
             if !shown {
                 // ShowAfterOneFrame.
                 if let Some(mut visibility) = world.get_mut::<Visibility>(actor) {
-                    *visibility = Visibility::Inherited;
+                    visibility.set_if_neq(Visibility::Inherited);
                 }
                 if let Some(run) = world.resource_mut::<ChangeSiteRuns>().runs.get_mut(&actor) {
                     run.stage = Stage::EntryClip { node, shown: true };
@@ -776,7 +776,7 @@ fn floor_door(world: &mut World, actor: Entity, unit: u32, frame: u32, on_site: 
 fn floor_enter_after_door(world: &mut World, actor: Entity, unit: u32, frame: u32) {
     // The brightness fade is not played; SetTransparencyEnabled(true).
     if let Some(mut visibility) = world.get_mut::<Visibility>(actor) {
-        *visibility = Visibility::Inherited;
+        visibility.set_if_neq(Visibility::Inherited);
     }
     start_clip(world, actor, unit, FLOOR_ENTER_CLIP, frame, true);
 }
@@ -830,7 +830,7 @@ fn place_on_target(world: &mut World, actor: Entity, target: i32, position: Vec3
     world.entity_mut(actor).remove::<Away>();
     crate::npc::force_set_position(world, actor, position.to_array());
     if let Some(mut visibility) = world.get_mut::<Visibility>(actor) {
-        *visibility = Visibility::Hidden;
+        visibility.set_if_neq(Visibility::Hidden);
     }
     if let Some(mut actions) = world.get_mut::<NpcActions>(actor) {
         actions.site_type = residency::SITE_TYPES[target as usize].to_owned();
@@ -900,7 +900,7 @@ fn start_clip(world: &mut World, actor: Entity, unit: u32, clip: &str, frame: u3
         None => {
             warn!("[npc-change-site] unit={unit} frame={frame} PlayAnimation({clip}): the motion library or the NPC's player is not ready; the clip is skipped");
             if let Some(mut visibility) = world.get_mut::<Visibility>(actor) {
-                *visibility = Visibility::Inherited;
+                visibility.set_if_neq(Visibility::Inherited);
             }
             set_stage(world, actor, Stage::SetupDone, frame);
         }

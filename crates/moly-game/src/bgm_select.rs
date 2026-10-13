@@ -1076,14 +1076,14 @@ pub(crate) fn place(
         }
     };
     for (_, _, mut visibility, mut transform) in &mut headers {
-        *visibility = visibility_of(open);
-        transform.scale = Vec3::splat(scale);
+        visibility.set_if_neq(visibility_of(open));
+        crate::canvas::set_scale(&mut transform, scale);
     }
     let Ok((root, mut view, mut visibility, mut transform)) = roots.single_mut() else {
         return;
     };
-    *visibility = visibility_of(open);
-    transform.scale = Vec3::splat(scale);
+    visibility.set_if_neq(visibility_of(open));
+    crate::canvas::set_scale(&mut transform, scale);
     if !open {
         return;
     }

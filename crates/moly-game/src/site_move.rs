@@ -27,11 +27,10 @@
 //! (`CanRemoveSite`: a harvest or delivery site) or leaves it listed and
 //! hidden (home), [`crate::site::end_departure`].
 //!
-//! Named differences:
-//! - The environment follow (`environmentRoot.position = Step.position`
-//!   during the flight, then its y restored at landing) has no product
-//!   counterpart: the sky dome and the weather sky anchor already follow the
-//!   player every frame. The two steps are logged, not applied.
+//! The environment follow (`environmentRoot.position = Step.position` during
+//! the flight, then its y restored at landing) is published as
+//! [`CannonEnvironmentWrite`]; the weather host that keeps the environment
+//! root applies it.
 //!
 //! Timing conventions are in [`timeline`]: waits are the source's
 //! millisecond-rounded delays that skip their creation frame; tweens and
@@ -1457,13 +1456,13 @@ fn hold_reveal(
             continue;
         }
         commands.entity(entity).insert(RevealHeld(*visibility));
-        *visibility = Visibility::Hidden;
+        visibility.set_if_neq(Visibility::Hidden);
     }
     // A writer changed a held entity again (a material reveal, a harvest
     // state): keep its latest wish for the release.
     for (mut visibility, mut wish) in &mut held {
         wish.0 = *visibility;
-        *visibility = Visibility::Hidden;
+        visibility.set_if_neq(Visibility::Hidden);
     }
 }
 

@@ -517,12 +517,12 @@ pub(crate) fn place(
                 _ => {}
             }
         }
-        *visibility = if visible {
+        visibility.set_if_neq(if visible {
             Visibility::Inherited
         } else {
             Visibility::Hidden
-        };
-        transform.scale = Vec3::splat(scale);
+        });
+        crate::canvas::set_scale(&mut transform, scale);
         view.set_alpha(&marks.button, if button.shown { 1.0 } else { 0.0 });
         view.set_visible(&marks.active_cover, button.is_press);
         view.set_visible(&marks.cover, button.cover);

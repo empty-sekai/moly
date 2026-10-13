@@ -471,11 +471,7 @@ pub(crate) fn place_ui(
     };
     let captured = state.captured.is_some();
     for mut root in &mut roots {
-        *root = if captured {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        };
+        set_if_neq!(*root, if captured { Visibility::Visible } else { Visibility::Hidden });
     }
     if !captured {
         return;
@@ -484,12 +480,12 @@ pub(crate) fn place_ui(
     let scale = root_canvas.scale(window);
     let base_world = Vec2::new(state.base.x - width / 2.0, height / 2.0 - state.base.y);
     if let Ok((mut transform, mut sprite)) = bases.single_mut() {
-        transform.translation = base_world.extend(0.2);
+        set_if_neq!(transform.translation, base_world.extend(0.2));
         sprite.custom_size = Some(Vec2::splat(BASE_SIZE * scale));
     }
     if let Ok((mut transform, mut sprite)) = handles.single_mut() {
         let handle_world = base_world + state.direction * HANDLE_SIZE * scale;
-        transform.translation = handle_world.extend(0.3);
+        set_if_neq!(transform.translation, handle_world.extend(0.3));
         sprite.custom_size = Some(Vec2::splat(HANDLE_SIZE * scale));
     }
 }

@@ -1826,7 +1826,7 @@ pub(crate) fn fps_on_enter(world: &mut World, prev: CameraStateType) {
             world.query_filtered::<(&GlobalTransform, &mut Visibility), With<AvatarRoot>>();
         match players.single_mut(world) {
             Ok((global, mut visibility)) => {
-                *visibility = Visibility::Hidden;
+                visibility.set_if_neq(Visibility::Hidden);
                 Some(global.translation())
             }
             Err(_) => None,
@@ -1902,7 +1902,7 @@ pub(crate) fn fps_on_enter(world: &mut World, prev: CameraStateType) {
 pub(crate) fn fps_on_exit(world: &mut World) {
     let mut players = world.query_filtered::<&mut Visibility, With<AvatarRoot>>();
     if let Ok(mut visibility) = players.single_mut(world) {
-        *visibility = Visibility::Visible;
+        visibility.set_if_neq(Visibility::Visible);
     }
     info!("[camera-fps] FPS.OnExit: player shown");
 }

@@ -247,18 +247,26 @@ impl Channel {
 /// count. It is kept across frames and updated in place, so an unchanged mesh
 /// costs one comparison and no allocation. [`Self::generation`] changes
 /// exactly when the copied content changes, compared bit for bit (a -0.0
-/// written over 0.0 is a change, and so is any NaN payload).
+/// written over 0.0 is a change, and so is any NaN payload);
+/// [`Self::index_generation`] only when the indices or the vertex count do.
 #[derive(Default)]
 pub struct ParticleGeometry {
     columns: [GeometryColumn; 6],
     indices: GeometryIndices,
     vertex_count: usize,
     generation: u64,
+    index_generation: u64,
 }
 impl ParticleGeometry {
     /// Nonzero once copied. Equal generations from one counter mean equal content.
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Nonzero once copied. Equal index generations from one counter mean
+    /// equal indices and vertex count, the only inputs of the packed indices.
+    pub fn index_generation(&self) -> u64 {
+        self.index_generation
     }
 
     /// Copy `mesh`. When anything differs from the held copy, `next` is
@@ -276,13 +284,16 @@ impl ParticleGeometry {
             };
             changed |= column.copy(data, width);
         }
-        changed |= self.indices.copy(mesh.indices());
         let count = mesh.count_vertices();
-        changed |= self.vertex_count != count;
+        let indexed = self.indices.copy(mesh.indices()) | (self.vertex_count != count);
+        changed |= indexed;
         self.vertex_count = count;
         if changed {
             *next += 1;
             self.generation = *next;
+            if indexed || self.index_generation == 0 {
+                self.index_generation = *next;
+            }
         }
         changed
     }

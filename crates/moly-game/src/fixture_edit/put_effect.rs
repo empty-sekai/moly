@@ -547,7 +547,7 @@ impl FixturePutEffect {
                 }
                 let nodes = crate::site_move::effects::set_source_nodes_active(world, root, false);
                 if let Some(mut visibility) = world.get_mut::<Visibility>(root) {
-                    *visibility = Visibility::Inherited;
+                    visibility.set_if_neq(Visibility::Inherited);
                 }
                 *held = nodes > 0;
                 let paths = crate::site_move::node_paths(world, root);

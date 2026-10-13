@@ -17,7 +17,8 @@
 //! local pose taken through the canvas.
 
 use bevy::math::Vec2;
-use bevy::prelude::{warn, Resource};
+use bevy::math::Vec3;
+use bevy::prelude::{warn, Mut, Resource, Transform};
 use bevy::window::Window;
 use moly_law::ui::{canvas, screen_ray};
 use serde_json::Value;
@@ -264,5 +265,15 @@ impl RootCanvas {
     /// The root canvas rect size in canvas units.
     pub(crate) fn size(&self, window: &Window) -> Vec2 {
         Vec2::from_array(self.for_window(window).size)
+    }
+}
+
+/// Gives a view root the uniform `scale`, writing the transform only when the
+/// scale differs: every write marks the root's transform changed, and
+/// transform propagation then recomputes the root's whole subtree.
+pub(crate) fn set_scale(transform: &mut Mut<Transform>, scale: f32) {
+    let scale = Vec3::splat(scale);
+    if transform.scale != scale {
+        transform.scale = scale;
     }
 }

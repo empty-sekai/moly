@@ -1838,11 +1838,11 @@ pub(crate) fn advance(
     // The site map view draws while its layer is active, its exit animation
     // included.
     if let Ok(mut visible) = sitemap_roots.single_mut() {
-        *visible = if stack.is_active(MenuScreenType::MysekaiSiteMap) {
+        visible.set_if_neq(if stack.is_active(MenuScreenType::MysekaiSiteMap) {
             Visibility::Inherited
         } else {
             Visibility::Hidden
-        };
+        });
     }
 }
 

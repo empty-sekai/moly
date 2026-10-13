@@ -1897,9 +1897,7 @@ pub(crate) fn apply_obstacle_level(
         } else {
             Visibility::Hidden
         };
-        if *visibility != wanted {
-            *visibility = wanted;
-        }
+        visibility.set_if_neq(wanted);
     }
 }
 

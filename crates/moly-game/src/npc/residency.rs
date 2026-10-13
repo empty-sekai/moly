@@ -108,7 +108,7 @@ pub(crate) fn mark_away(
             continue;
         }
         commands.entity(entity).insert(Away);
-        *visibility = Visibility::Hidden;
+        visibility.set_if_neq(Visibility::Hidden);
         rest.leave_for_residency();
         info!(
             "[npc-residency] unit={} stays on {} (site type {:?}) while {} (site type {:?}) is loaded: suspended, not placed here; per-frame NPC update on this site: {}",

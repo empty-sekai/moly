@@ -276,11 +276,7 @@ pub(crate) fn refresh(
     mut buttons: Query<(&ImportAction, &Interaction, &mut BackgroundColor)>,
 ) {
     for mut root in &mut roots {
-        root.display = if panel.player_data {
-            Display::Flex
-        } else {
-            Display::None
-        };
+        set_if_neq!(root.display, if panel.player_data { Display::Flex } else { Display::None });
     }
     if !panel.open || !panel.player_data {
         return;
@@ -297,12 +293,12 @@ pub(crate) fn refresh(
         }
     }
     for (action, interaction, mut color) in &mut buttons {
-        color.0 = if !enabled(*action, &state) {
+        set_if_neq!(color.0, if !enabled(*action, &state) {
             Color::srgb(0.10, 0.13, 0.18)
         } else if *interaction == Interaction::Hovered {
             Color::srgb(0.26, 0.39, 0.53)
         } else {
             Color::srgb(0.18, 0.26, 0.38)
-        };
+        });
     }
 }

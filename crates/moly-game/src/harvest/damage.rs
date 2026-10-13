@@ -350,13 +350,13 @@ fn change_after_object(
             // FallDownAnimation: before off, after on, under on.
             hide(object_node, root_visibility, node_visibility);
             if let Ok(mut visibility) = node_visibility.get_mut(after) {
-                *visibility = Visibility::Inherited;
+                visibility.set_if_neq(Visibility::Inherited);
             }
             if let Some(mut visibility) = nodes
                 .under
                 .and_then(|under| node_visibility.get_mut(under).ok())
             {
-                *visibility = Visibility::Inherited;
+                visibility.set_if_neq(Visibility::Inherited);
             }
             commands.entity(root).insert(HarvestAfterForm::TreeFall {
                 elapsed: 0.0,
@@ -558,7 +558,7 @@ pub(crate) fn advance_after_forms(
                     FadeStep::Finish => {
                         tops.set_dither(materials, 0.0);
                         if let Ok((_, mut visibility, _)) = nodes.get_mut(after) {
-                            *visibility = Visibility::Hidden;
+                            visibility.set_if_neq(Visibility::Hidden);
                         }
                         info!(
                             "[harvest] {}#{} fall done at {:.3} s (fade time {before:.4}): SetDitherAlpha(0), top off, the under part stays until the next load",

@@ -640,7 +640,7 @@ impl EffectPools {
             *transform = pose;
         }
         if let Some(mut visibility) = world.get_mut::<Visibility>(root) {
-            *visibility = Visibility::Inherited;
+            visibility.set_if_neq(Visibility::Inherited);
         }
         if std::mem::take(&mut copy.held) {
             set_source_nodes_active(world, root, true);
@@ -721,7 +721,7 @@ impl EffectPools {
                     );
                 }
                 if let Some(mut visibility) = world.get_mut::<Visibility>(root) {
-                    *visibility = Visibility::Inherited;
+                    visibility.set_if_neq(Visibility::Inherited);
                 }
                 self.copies[index].held = true;
             }

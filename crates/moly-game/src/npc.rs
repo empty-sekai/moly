@@ -1394,7 +1394,7 @@ pub(crate) fn reseed(
             // Away from the loaded site: suspended where it stands.
             if !away {
                 commands.entity(entity).insert(residency::Away);
-                *visibility = Visibility::Hidden;
+                visibility.set_if_neq(Visibility::Hidden);
                 *slot = PathSlot(NpcPathWalkSlot::from_corners(Vec::new()));
                 *route = RouteStops::default();
                 *stuck = StuckBaseline::default();
@@ -1433,7 +1433,7 @@ pub(crate) fn reseed(
         if away {
             // Back on its own site: it resumes where it stood.
             commands.entity(entity).remove::<residency::Away>();
-            *visibility = Visibility::Inherited;
+            visibility.set_if_neq(Visibility::Inherited);
             let kept = face.sample(
                 transform.translation.to_array(),
                 moly_law::objective::TILE_SCALE,

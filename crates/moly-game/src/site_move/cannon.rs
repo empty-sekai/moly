@@ -269,7 +269,7 @@ impl Cannon {
             let scale = 1.0 - in_back(e);
             if let Some(mesh) = self.mesh {
                 if let Some(mut transform) = world.get_mut::<Transform>(mesh) {
-                    transform.scale = Vec3::splat(scale);
+                    crate::canvas::set_scale(&mut transform, scale);
                 }
             }
         }

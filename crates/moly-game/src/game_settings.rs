@@ -798,21 +798,13 @@ pub(crate) fn refresh_ui(
     mut residency_sample: Local<Option<(f64, u64, u64, u64)>>,
 ) {
     for mut node in &mut roots {
-        node.display = if panel.open {
-            Display::Flex
-        } else {
-            Display::None
-        };
+        set_if_neq!(node.display, if panel.open { Display::Flex } else { Display::None });
     }
     if !panel.open {
         return;
     }
     for mut body in &mut bodies {
-        body.display = if panel.player_data {
-            Display::None
-        } else {
-            Display::Flex
-        };
+        set_if_neq!(body.display, if panel.player_data { Display::None } else { Display::Flex });
     }
     let refresh_performance = time.elapsed_secs_f64() - *last_performance >= 0.5;
     if refresh_performance {

@@ -627,13 +627,13 @@ pub(crate) fn advance(
     let visible =
         crate::entry::hud_open(entry.as_deref()) && stack.on_field() && harvest_site.is_some();
     for (marks, mut visibility, mut transform, mut view) in &mut views {
-        *visibility = if visible {
+        visibility.set_if_neq(if visible {
             Visibility::Inherited
         } else {
             Visibility::Hidden
-        };
-        transform.scale = Vec3::splat(scale);
-        transform.translation.z = view_z(doc.nodes.len(), scale);
+        });
+        crate::canvas::set_scale(&mut transform, scale);
+        set_if_neq!(transform.translation.z, view_z(doc.nodes.len(), scale));
         view.set_visible(&marks.root, hud.active);
         view.set_visible(&marks.group, hud.view_active);
         view.set_alpha(&marks.group, hud.alpha);

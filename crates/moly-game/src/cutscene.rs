@@ -751,7 +751,7 @@ fn hide_fixture_all(world: &mut World) {
     for (entity, hide) in rows {
         if hide {
             if let Some(mut visibility) = world.get_mut::<Visibility>(entity) {
-                *visibility = Visibility::Hidden;
+                visibility.set_if_neq(Visibility::Hidden);
                 hidden += 1;
             }
         } else {
@@ -766,7 +766,7 @@ fn show_all_fixtures(world: &mut World) {
     let mut query = world.query_filtered::<&mut Visibility, With<FixtureActivityIdentity>>();
     let mut shown = 0;
     for mut visibility in query.iter_mut(world) {
-        *visibility = Visibility::Inherited;
+        visibility.set_if_neq(Visibility::Inherited);
         shown += 1;
     }
     info!("[cutscene] ShowAllFixtures: {shown} fixtures shown");
@@ -2275,7 +2275,7 @@ fn set_effect_instances(world: &mut World, plan: &Plan, t: f64) {
             seed_pass(world, instance)
         };
         if let Some(mut visibility) = world.get_mut::<Visibility>(instance.root) {
-            *visibility = Visibility::Inherited;
+            visibility.set_if_neq(Visibility::Inherited);
         }
         let played = play_subtrees(world, instance);
         info!(

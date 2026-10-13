@@ -1592,12 +1592,8 @@ fn can_place(world: &World) -> bool {
 
 /// Rewrite the fill and the colours when the session or the profile changed.
 fn refresh(world: &mut World, grid: &mut EditGrid) {
-    let Some(Ok(doc)) = grid.doc.clone() else {
-        return;
-    };
     let generation = grid.profile_generation;
-    let profile = profile_of(grid, &doc);
-    let Some(shown) = grid.shown.as_mut() else {
+    let Some(shown) = grid.shown.as_ref() else {
         return;
     };
     let Some(session) = world.get_resource::<EditSession>() else {
@@ -1607,6 +1603,13 @@ fn refresh(world: &mut World, grid: &mut EditGrid) {
     if shown.written == Some((revision, generation)) {
         return;
     }
+    let Some(Ok(doc)) = grid.doc.clone() else {
+        return;
+    };
+    let profile = profile_of(grid, &doc);
+    let Some(shown) = grid.shown.as_mut() else {
+        return;
+    };
     if world
         .get_resource::<FixturePlacements>()
         .and_then(FixturePlacements::floor_grid)

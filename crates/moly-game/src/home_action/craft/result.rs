@@ -226,12 +226,12 @@ pub(crate) fn place(
     let scale = root_canvas.scale(window);
     let size = root_canvas.size(window);
     for (result, mut visible, mut transform, mut view) in &mut views {
-        transform.scale = Vec3::splat(scale);
+        crate::canvas::set_scale(&mut transform, scale);
         let Some(shown) = screen.result.as_mut() else {
-            *visible = Visibility::Hidden;
+            visible.set_if_neq(Visibility::Hidden);
             continue;
         };
-        *visible = Visibility::Inherited;
+        visible.set_if_neq(Visibility::Inherited);
         let b = &result.bindings;
         match layouts.wordings.get(shown.body) {
             Some(text) => view.set_text(&b.body, text.clone()),

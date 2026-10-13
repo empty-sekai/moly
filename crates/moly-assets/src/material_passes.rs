@@ -9,6 +9,8 @@ use bevy::prelude::*;
 #[reflect(Component)]
 pub struct SourceMaterialPasses {
     light_modes: Vec<String>,
+    /// Whether a tag of `light_modes` is ShadowCaster (ASCII case-insensitive).
+    shadow_caster: bool,
     color_state: Option<SourceRenderState>,
     effect_state: Option<SourceRenderState>,
 }
@@ -82,6 +84,15 @@ impl SourceRenderState {
 }
 
 impl SourceMaterialPasses {
+    fn new(
+        light_modes: Vec<String>,
+        color_state: Option<SourceRenderState>,
+        effect_state: Option<SourceRenderState>,
+    ) -> Self {
+        let shadow_caster = light_modes.iter().any(|mode| mode.eq_ignore_ascii_case("ShadowCaster"));
+        Self { light_modes, shadow_caster, color_state, effect_state }
+    }
+
     /// Missing metadata is distinct from a known list without a shadow pass.
     /// Untagged passes are valid, but cannot satisfy a ShadowCaster request.
     pub fn from_extras(extras: &serde_json::Value) -> Option<Self> {
@@ -121,11 +132,11 @@ impl SourceMaterialPasses {
                 _ => return None,
             }
         }
-        Some(Self {
+        Some(Self::new(
             light_modes,
             color_state,
-            effect_state: if effect_unresolved { None } else { effect_state },
-        })
+            if effect_unresolved { None } else { effect_state },
+        ))
     }
 
     /// Compact particle exports retain each declared LightMode, including
@@ -139,7 +150,7 @@ impl SourceMaterialPasses {
                 _ => return None,
             }
         }
-        Some(Self { light_modes, color_state: None, effect_state: None })
+        Some(Self::new(light_modes, None, None))
     }
 
     /// Pass tags are identities. Shader-family names are never a substitute.
@@ -148,9 +159,7 @@ impl SourceMaterialPasses {
     }
 
     pub fn has_shadow_caster(&self) -> bool {
-        self.light_modes
-            .iter()
-            .any(|mode| mode.eq_ignore_ascii_case("ShadowCaster"))
+        self.shadow_caster
     }
 
     /// Only a source-resolved effect state is usable. Differing SubShader

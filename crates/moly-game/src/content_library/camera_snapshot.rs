@@ -58,7 +58,7 @@ impl CameraSnapshot {
             .query_filtered::<&mut Visibility, With<crate::character::AvatarRoot>>()
             .iter_mut(world)
         {
-            *visibility = Visibility::Visible;
+            visibility.set_if_neq(Visibility::Visible);
         }
     }
     pub(super) fn restore(&self, world: &mut World) {

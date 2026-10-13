@@ -1,10 +1,12 @@
 //! Overlay cameras with nothing to draw are switched off.
 //!
 //! An overlay camera marked [`IdleWhenEmpty`] clears nothing and draws only
-//! the entities on its render layers. While none of them is visible in the
-//! hierarchy, its passes add nothing to the image and its output copy
-//! repeats the one written below it, so the camera is made inactive; it is
-//! active again on the first frame an entity on its layers is visible.
+//! the entities on its render layers and the UI roots that name it with
+//! `UiTargetCamera`. While none of them is visible in the hierarchy (a UI root
+//! also counts as hidden while its display is `None`), its passes add nothing
+//! to the image and its output copy repeats the one written below it, so the
+//! camera is made inactive; it is active again on the first frame one of them
+//! is visible.
 //!
 //! The engine's default UI camera is the window camera with the highest
 //! order, active or not, so a marked camera can be that camera (the screen
@@ -19,11 +21,12 @@ use bevy::prelude::*;
 pub(crate) struct IdleWhenEmpty;
 
 /// PostUpdate, between visibility propagation and the per-camera visibility
-/// check: a marked camera is active exactly when an entity on its layers is
-/// visible in the hierarchy.
+/// check: a marked camera is active exactly when an entity on its layers or a
+/// UI root that targets it is visible in the hierarchy.
 fn switch_idle_overlays(
-    mut cameras: Query<(&mut Camera, &RenderLayers), With<IdleWhenEmpty>>,
+    mut cameras: Query<(Entity, &mut Camera, &RenderLayers), With<IdleWhenEmpty>>,
     content: Query<(&RenderLayers, &InheritedVisibility), Without<Camera>>,
+    ui_roots: Query<(&UiTargetCamera, &Node, &InheritedVisibility)>,
 ) {
     if cameras.is_empty() {
         return;
@@ -42,12 +45,15 @@ fn switch_idle_overlays(
             *word |= bits;
         }
     }
-    for (mut camera, layers) in &mut cameras {
+    for (entity, mut camera, layers) in &mut cameras {
         let drawn = layers
             .bits()
             .iter()
             .zip(&visible)
-            .any(|(camera_bits, visible_bits)| camera_bits & visible_bits != 0);
+            .any(|(camera_bits, visible_bits)| camera_bits & visible_bits != 0)
+            || ui_roots.iter().any(|(target, node, visibility)| {
+                target.entity() == entity && node.display != Display::None && visibility.get()
+            });
         if camera.is_active != drawn {
             camera.is_active = drawn;
         }

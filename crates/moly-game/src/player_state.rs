@@ -223,7 +223,7 @@ pub(crate) fn update_house_states(
     );
     if hide {
         for mut visibility in &mut players {
-            *visibility = Visibility::Hidden;
+            visibility.set_if_neq(Visibility::Hidden);
         }
     }
     states.can_intercept = true;

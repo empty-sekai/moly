@@ -262,7 +262,7 @@ pub(crate) fn advance_animations(
         anim.elapsed += time.delta_secs();
         let t = anim.elapsed;
         if anim.scale_in {
-            transform.scale = Vec3::splat((t / DROP_DURATION).min(1.0));
+            crate::canvas::set_scale(&mut transform, (t / DROP_DURATION).min(1.0));
         }
         if t >= DROP_DURATION {
             transform.translation = anim.landing;

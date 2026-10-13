@@ -333,9 +333,7 @@ pub(crate) fn advance(world: &mut World) {
         Visibility::Hidden
     };
     if let Some(mut visibility) = world.get_mut::<Visibility>(quad) {
-        if *visibility != wanted {
-            *visibility = wanted;
-        }
+        visibility.set_if_neq(wanted);
     }
     if let Some(mut camera) = world.get_mut::<Camera>(camera) {
         if camera.is_active != visible {

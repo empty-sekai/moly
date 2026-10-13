@@ -1307,22 +1307,22 @@ pub(crate) fn place(
     let scale = root_canvas.scale(window);
     let canvas = root_canvas.size(window);
     for (_, _, mut visibility, mut transform) in &mut headers {
-        *visibility = if open {
+        visibility.set_if_neq(if open {
             Visibility::Inherited
         } else {
             Visibility::Hidden
-        };
-        transform.scale = Vec3::splat(scale);
+        });
+        crate::canvas::set_scale(&mut transform, scale);
     }
     let Ok((mut root, mut view, mut visibility, mut transform)) = roots.single_mut() else {
         return;
     };
-    *visibility = if open {
+    visibility.set_if_neq(if open {
         Visibility::Inherited
     } else {
         Visibility::Hidden
-    };
-    transform.scale = Vec3::splat(scale);
+    });
+    crate::canvas::set_scale(&mut transform, scale);
     if !open {
         return;
     }

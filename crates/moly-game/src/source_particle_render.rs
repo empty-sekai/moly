@@ -246,8 +246,10 @@ struct Packet {
     resources: Vec<TextureViewId>,
     /// The uniform block the binding's buffer holds.
     uniform: Vec<u8>,
-    /// The [`GeometryPack::id`] whose bytes the vertex and index buffers hold.
+    /// The [`GeometryPack::id`] whose bytes the vertex buffer holds.
     geometry: u64,
+    /// The [`GeometryPack::index_id`] whose bytes the index buffer holds.
+    indices: u64,
 }
 #[derive(Resource, Default)]
 struct ParticleGpu {
@@ -269,7 +271,13 @@ struct ParticleGpu {
 struct GeometryPack {
     /// Unique per packing: equal ids mean equal bytes.
     id: u64,
+    /// Changes with a packing whose index bytes may differ from the last:
+    /// equal ids mean equal index bytes.
+    index_id: u64,
     geometry: u64,
+    /// The geometry's index generation the index bytes were packed from;
+    /// 0 after a failed packing.
+    index_geometry: u64,
     receipt: Option<Arc<ProgramReceipt>>,
     streams: Option<ParticleStreams>,
     vertices: Vec<u8>,
@@ -281,7 +289,9 @@ impl Default for GeometryPack {
     fn default() -> Self {
         Self {
             id: 0,
+            index_id: 0,
             geometry: 0,
+            index_geometry: 0,
             receipt: None,
             streams: None,
             vertices: Vec::new(),
@@ -309,6 +319,12 @@ impl GeometryPack {
         *next_id += 1;
         self.id = *next_id;
         self.geometry = geometry.generation();
+        // The index bytes are a function of the indices and the vertex count
+        // alone; after a failed packing they hold nothing meaningful.
+        if self.count.is_err() || self.index_geometry != geometry.index_generation() {
+            self.index_id = *next_id;
+            self.index_geometry = if self.count.is_ok() { geometry.index_generation() } else { 0 };
+        }
         self.receipt = Some(receipt.clone());
         self.streams = Some(streams.clone());
     }
@@ -971,6 +987,9 @@ fn prepare(
                                 } else if !vertices.is_empty() {
                                     queue.write_buffer(&packet.vertex, 0, vertices);
                                 }
+                                packet.geometry = pack.id;
+                            }
+                            if packet.indices != pack.index_id {
                                 if packet.index.size() < indices.len() as u64 {
                                     packet.index = buffer(
                                         "source particle indices",
@@ -980,7 +999,7 @@ fn prepare(
                                 } else if !indices.is_empty() {
                                     queue.write_buffer(&packet.index, 0, indices);
                                 }
-                                packet.geometry = pack.id;
+                                packet.indices = pack.index_id;
                             }
                         }
                         packet.count = count;
@@ -1037,6 +1056,7 @@ fn prepare(
                         rank: item.rank,
                         uniform: block.clone(),
                         geometry: pack.id,
+                        indices: pack.index_id,
                     }))
                 })();
                 match result {

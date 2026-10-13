@@ -969,7 +969,7 @@ fn hide_near_fixtures(world: &mut World, cast: &mut Cast, distance: i64) {
             continue;
         }
         if let Some(mut visibility) = world.get_mut::<Visibility>(entity) {
-            *visibility = Visibility::Hidden;
+            visibility.set_if_neq(Visibility::Hidden);
             cast.hidden_fixtures.push(entity);
             hidden.push(format!("{package} at {d:.2}"));
         }

@@ -306,9 +306,7 @@ fn write_cover<C: Component>(world: &mut World, colour: [f32; 4]) {
         } else {
             Visibility::Hidden
         };
-        if *visibility != wanted {
-            *visibility = wanted;
-        }
+        visibility.set_if_neq(wanted);
     }
 }
 

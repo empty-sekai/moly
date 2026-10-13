@@ -1262,7 +1262,7 @@ pub(crate) fn place(
     let put_limit = &presentation.put_limit;
     let reviewing = settings.access == AccessPermission::Review;
     for (mut visible,mut transform,mut view) in &mut roots {
-        *visible=if open {Visibility::Inherited}else{Visibility::Hidden};transform.scale=Vec3::splat(scale);
+        set_if_neq!(*visible,if open {Visibility::Inherited}else{Visibility::Hidden});crate::canvas::set_scale(&mut transform,scale);
         for (index, source_page) in bindings.pages.iter().enumerate() {
             view.set_visible(&source_page.node, index == page);
             for group in &source_page.groups { view.set_alpha(group, if open && index == page { alpha } else { 0. }); }
@@ -1327,7 +1327,7 @@ pub(crate) fn place(
         }
     }
     for (root,mut visible,mut transform,mut view) in &mut dialogs {
-        *visible=if open&&dialog.open==Some(root.which){Visibility::Inherited}else{Visibility::Hidden};transform.scale=Vec3::splat(scale);
+        set_if_neq!(*visible,if open&&dialog.open==Some(root.which){Visibility::Inherited}else{Visibility::Hidden});crate::canvas::set_scale(&mut transform,scale);
         view.set_visible("WindowRoot/Tabs",false);
         match root.which {
             InfoDialog::RankList=>{

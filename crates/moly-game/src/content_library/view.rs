@@ -130,28 +130,26 @@ fn surface(c: &mut Commands, parent: Entity, node: Node, region: Region) -> Enti
         .insert((region, BackgroundColor(PANEL), BorderColor::all(EDGE)));
     id
 }
-pub(crate) fn setup(mut c: Commands, mut fonts: ResMut<Assets<Font>>, state: Res<ContentLibrary>) {
+pub(crate) fn setup(
+    mut c: Commands,
+    mut fonts: ResMut<Assets<Font>>,
+    state: Res<ContentLibrary>,
+    hud: Query<Entity, With<crate::balloon::HudCamera>>,
+) {
     if state.external_ui {
         // refresh retains the same SystemParam contract, but the web shell
-        // needs neither a second UI camera nor the native catalogue tree.
+        // needs neither a UI camera nor the native catalogue tree.
         c.insert_resource(LibraryFont(Handle::default()));
         return;
     }
     let font = fonts.add(Font::try_from_bytes(FONT.to_vec()).expect("bundled library font"));
     c.insert_resource(LibraryFont(font.clone()));
-    let camera = c
-        .spawn((
-            Camera2d,
-            crate::camera::MYSEKAI_CAMERA_MSAA,
-            Camera {
-                order: 104,
-                clear_color: ClearColorConfig::None,
-                ..default()
-            },
-            RenderLayers::none(),
-            LibraryUiCamera,
-        ))
-        .id();
+    // The library UI is drawn by the HUD overlay camera's UI pass, after the
+    // HUD itself; a camera of its own would add its passes and a full-window
+    // copy every frame.
+    let camera = hud
+        .single()
+        .expect("content library: the HUD overlay camera is spawned before the library UI");
     let launcher = c
         .spawn((
             Node {
@@ -1452,7 +1450,7 @@ pub(crate) fn refresh(
                 region,
                 Region::Overlay | Region::Transport | Region::Launcher | Region::FixtureDialog
             ) {
-                node.display = Display::None;
+                set_if_neq!(node.display, Display::None);
             }
         }
         return;
@@ -1498,47 +1496,43 @@ pub(crate) fn refresh(
             Region::InstanceControls => selected_instances.len() > 1,
             _ => true,
         };
-        node.display = if visible {
-            Display::Flex
-        } else {
-            Display::None
-        };
+        set_if_neq!(node.display, if visible { Display::Flex } else { Display::None });
         match region {
-            Region::Overlay => node.padding = UiRect::all(px(if narrow || short { 8 } else { 18 })),
+            Region::Overlay => set_if_neq!(node.padding, UiRect::all(px(if narrow || short { 8 } else { 18 }))),
             Region::Shell => {
-                node.padding = UiRect::all(px(if short {
+                set_if_neq!(node.padding, UiRect::all(px(if short {
                     10
                 } else if narrow {
                     14
                 } else {
                     22
-                }));
-                node.row_gap = px(if short { 5 } else { 12 });
+                })));
+                set_if_neq!(node.row_gap, px(if short { 5 } else { 12 }));
             }
             Region::HeaderTitle => {
                 if let Some(mut font) = text_font {
-                    font.font_size = if short { 21. } else { 27. };
+                    set_if_neq!(font.font_size, if short { 21. } else { 27. });
                 }
             }
             Region::ModeDescription => {
                 if let Some(mut text_font) = text_font {
-                    text_font.font_size = if narrow { 11. } else { 12. };
+                    set_if_neq!(text_font.font_size, if narrow { 11. } else { 12. });
                 }
             }
             Region::SearchBox => {
-                node.height = px(if short { 34 } else { 42 });
-                node.min_height = node.height;
+                set_if_neq!(node.height, px(if short { 34 } else { 42 }));
+                set_if_neq!(node.min_height, node.height);
             }
-            Region::Browser => node.width = percent(if narrow { 100. } else { 44. }),
+            Region::Browser => set_if_neq!(node.width, percent(if narrow { 100. } else { 44. })),
             Region::Detail => {
-                node.width = percent(if narrow { 100. } else { 56. });
-                node.padding = UiRect::all(px(if short { 10 } else { 18 }));
+                set_if_neq!(node.width, percent(if narrow { 100. } else { 56. }));
+                set_if_neq!(node.padding, UiRect::all(px(if short { 10 } else { 18 })));
             }
             Region::ListViewport if state.open && (!narrow || !state.narrow_detail) => {
                 if let Some(computed) = computed {
                     let height = computed.size().y * computed.inverse_scale_factor();
                     if height > 40. {
-                        state.page_size = ((height + 8.) / ROW_HEIGHT).floor().max(1.) as usize;
+                        set_if_neq!(state.page_size, ((height + 8.) / ROW_HEIGHT).floor().max(1.) as usize);
                     }
                 }
             }
@@ -1566,9 +1560,12 @@ pub(crate) fn refresh(
             _ => {}
         }
     }
-    state.offset = state
-        .offset
-        .min(state.filtered.len().saturating_sub(state.page_size));
+    set_if_neq!(
+        state.offset,
+        state
+            .offset
+            .min(state.filtered.len().saturating_sub(state.page_size))
+    );
     let list_stamp = (
         state.revision,
         catalog.revision,
@@ -1825,7 +1822,7 @@ pub(crate) fn refresh(
             LibraryAction::NextPage => state.offset + state.page_size >= state.filtered.len(),
             _ => false,
         };
-        background.0 = if disabled {
+        background.set_if_neq(BackgroundColor(if disabled {
             Color::srgb(0.10, 0.13, 0.18)
         } else if *interaction == Interaction::Pressed {
             Color::srgb(0.14, 0.36, 0.42)
@@ -1841,13 +1838,13 @@ pub(crate) fn refresh(
             Color::srgb(0.14, 0.21, 0.29)
         } else {
             PANEL
-        };
-        *border = BorderColor::all(if selected {
+        }));
+        border.set_if_neq(BorderColor::all(if selected {
             ACCENT
         } else if !disabled && matches!(kind, ButtonKind::Danger) {
             Color::srgb(0.40, 0.25, 0.29)
         } else {
             EDGE
-        });
+        }));
     }
 }

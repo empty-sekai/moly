@@ -269,11 +269,11 @@ fn set_visible(world: &mut World, visible: bool) {
         return;
     };
     if let Some(mut visibility) = world.get_mut::<Visibility>(quad) {
-        *visibility = if visible {
+        visibility.set_if_neq(if visible {
             Visibility::Inherited
         } else {
             Visibility::Hidden
-        };
+        });
     }
 }
 

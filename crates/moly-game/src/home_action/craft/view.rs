@@ -1003,12 +1003,12 @@ pub(crate) fn place(
     let scale = root_canvas.scale(window);
     let canvas = root_canvas.size(window);
     for (_, mut header_view, mut visibility, mut transform) in &mut headers {
-        *visibility = if open {
+        visibility.set_if_neq(if open {
             Visibility::Inherited
         } else {
             Visibility::Hidden
-        };
-        transform.scale = Vec3::splat(scale);
+        });
+        crate::canvas::set_scale(&mut transform, scale);
         if let Some(root) = layouts
             .document(HEADER)
             .and_then(|doc| doc.nodes.first())
@@ -1020,12 +1020,12 @@ pub(crate) fn place(
     let Ok((mut root, mut view, mut visibility, mut transform)) = roots.single_mut() else {
         return;
     };
-    *visibility = if open {
+    visibility.set_if_neq(if open {
         Visibility::Inherited
     } else {
         Visibility::Hidden
-    };
-    transform.scale = Vec3::splat(scale);
+    });
+    crate::canvas::set_scale(&mut transform, scale);
     if !open {
         return;
     }

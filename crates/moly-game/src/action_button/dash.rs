@@ -619,12 +619,12 @@ pub(crate) fn place(
     let shown_host = host.filter(|key| *key != "ShellHome" || state.timeline.is_none());
     for (marks, mut visibility, mut transform, mut view, children) in &mut views {
         let shown = shown_host == Some(marks.key) && dash.host == Some(marks.key);
-        *visibility = if shown {
+        visibility.set_if_neq(if shown {
             Visibility::Inherited
         } else {
             Visibility::Hidden
-        };
-        transform.scale = Vec3::splat(scale);
+        });
+        crate::canvas::set_scale(&mut transform, scale);
         if !shown {
             continue;
         }
@@ -654,11 +654,11 @@ pub(crate) fn place(
             else {
                 continue;
             };
-            *ring_visibility = if dash.root_active {
+            set_if_neq!(*ring_visibility, if dash.root_active {
                 Visibility::Inherited
             } else {
                 Visibility::Hidden
-            };
+            });
             // The root's pivot, and its runtime rotation and scale about it.
             let pivot = root_rect.world.transform_point3(Vec3::ZERO);
             let spin = Quat::from_rotation_z(dash.rotation_degrees().to_radians());
@@ -673,11 +673,11 @@ pub(crate) fn place(
                     .document(marks.key)
                     .map_or(0, |doc| doc.find(&marks.circle).unwrap_or(0)) as f32
                     * 0.02;
-            *ring_transform = Transform {
+            set_if_neq!(*ring_transform, Transform {
                 translation: placed.truncate().extend(depth),
                 rotation: spin * circle_rotation,
                 scale: circle_scale * dash.root_scale,
-            };
+            });
             sprite.custom_size = Some(ring.quad_size);
             let alpha = ring.color[3] * dash.ring_alpha * dash.canvas_alpha * marks.parent_alpha;
             sprite.color = Color::srgba(ring.color[0], ring.color[1], ring.color[2], alpha);

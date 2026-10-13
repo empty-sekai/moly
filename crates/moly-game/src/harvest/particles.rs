@@ -655,11 +655,11 @@ fn run(world: &mut World, entry: &Call) -> Step {
     };
     if let Some(active) = entry.active {
         if let Some(mut visibility) = world.get_mut::<Visibility>(node) {
-            *visibility = if active {
+            visibility.set_if_neq(if active {
                 Visibility::Inherited
             } else {
                 Visibility::Hidden
-            };
+            });
         }
     }
     let bound = world

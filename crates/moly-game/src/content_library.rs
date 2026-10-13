@@ -17,7 +17,6 @@ use crate::{
 };
 use bevy::{
     asset::{AssetPath, LoadState},
-    camera::visibility::RenderLayers,
     input::{
         keyboard::KeyboardInput,
         mouse::{MouseScrollUnit, MouseWheel},
@@ -660,8 +659,6 @@ pub(crate) enum ButtonKind {
     Row,
     Danger,
 }
-#[derive(Component)]
-struct LibraryUiCamera;
 #[derive(Component)]
 struct DetailArtwork;
 

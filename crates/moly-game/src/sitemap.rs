@@ -1666,10 +1666,10 @@ pub(crate) fn fit_root(
     };
     let canvas = root_canvas.scale(window);
     for mut transform in &mut map_roots {
-        transform.scale = Vec3::splat(canvas);
+        crate::canvas::set_scale(&mut transform, canvas);
     }
     for mut transform in &mut ui_roots {
-        transform.scale = Vec3::splat(canvas);
+        crate::canvas::set_scale(&mut transform, canvas);
     }
 }
 
@@ -3197,11 +3197,11 @@ pub(crate) fn tick_unlock(
             }
         }
         if let Ok(mut visible) = visibilities.get_mut(run.flare_front.0) {
-            *visible = if data.curves[run.flare_active].curve.sample(ct) >= 0.5 {
+            visible.set_if_neq(if data.curves[run.flare_active].curve.sample(ct) >= 0.5 {
                 Visibility::Inherited
             } else {
                 Visibility::Hidden
-            };
+            });
         }
 
         // The button's CanvasGroup: 0→1 in 3.0 s, ease 3 (OutSine).

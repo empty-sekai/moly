@@ -135,7 +135,7 @@ pub(crate) fn apply(
             ToolModelRequest::Hide => {
                 for entity in models.instances.values() {
                     if let Ok(mut visibility) = visibility.get_mut(*entity) {
-                        *visibility = Visibility::Hidden;
+                        visibility.set_if_neq(Visibility::Hidden);
                     }
                 }
                 models.wanted = None;
@@ -147,7 +147,7 @@ pub(crate) fn apply(
             } => {
                 for entity in models.instances.values() {
                     if let Ok(mut visibility) = visibility.get_mut(*entity) {
-                        *visibility = Visibility::Hidden;
+                        visibility.set_if_neq(Visibility::Hidden);
                     }
                 }
                 models.wanted = Some((tool_id, assetbundle));
@@ -163,7 +163,7 @@ pub(crate) fn apply(
     };
     if let Some(entity) = models.instances.get(&tool_id).copied() {
         if let Ok(mut visibility) = visibility.get_mut(entity) {
-            *visibility = Visibility::Inherited;
+            visibility.set_if_neq(Visibility::Inherited);
         }
         models.pending_show = false;
         return;

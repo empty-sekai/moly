@@ -1870,10 +1870,10 @@ pub(crate) fn place(
     };
     let scale = root_canvas.scale(window);
     for (mut visible, mut transform, mut view) in &mut roots {
-        transform.scale = Vec3::splat(scale);
+        crate::canvas::set_scale(&mut transform, scale);
         match player.shown.as_ref() {
             Some(shown) => {
-                *visible = Visibility::Inherited;
+                visible.set_if_neq(Visibility::Inherited);
                 let blueprint = shown.entry.kind == ResourceKind::Blueprint;
                 view.set_text("Content/BodyText", shown.entry.body.clone());
                 view.set_visible("Content/Object3DPreview", blueprint);
@@ -1885,12 +1885,14 @@ pub(crate) fn place(
                     shown.entry.name.clone().unwrap_or_default(),
                 );
             }
-            None => *visible = Visibility::Hidden,
+            None => {
+                visible.set_if_neq(Visibility::Hidden);
+            }
         }
     }
     let mut reward_shown = false;
     for (mut root, mut visible, mut transform, mut view) in &mut rewards {
-        transform.scale = Vec3::splat(scale);
+        crate::canvas::set_scale(&mut transform, scale);
         let top = screens
             .dialogs()
             .filter(|(_, dialog, state)| *dialog == root.dialog && *state == DialogState::Show)
@@ -1937,12 +1939,12 @@ pub(crate) fn place(
             }
             root.showing = top;
         }
-        *visible = if top.is_some() {
+        visible.set_if_neq(if top.is_some() {
             reward_shown = true;
             Visibility::Inherited
         } else {
             Visibility::Hidden
-        };
+        });
     }
     dialog.get_resource_open = player.shown.is_some() || reward_shown;
 

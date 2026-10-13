@@ -2,6 +2,19 @@
 //!
 //! 帧次序：0 层输入/决策 → 1 层聚合 → 2 层快照（依据记在 `schedule.rs`）。
 
+/// Assigns `$value` to `$place` only when they differ. A write through `Mut`
+/// marks the component changed even when the value is equal, and the
+/// change-driven systems (UI layout and text measurement, transform and
+/// visibility propagation) then redo their work for it on that frame.
+macro_rules! set_if_neq {
+    ($place:expr, $value:expr) => {{
+        let value = $value;
+        if $place != value {
+            $place = value;
+        }
+    }};
+}
+
 pub mod action_button;
 pub mod alone_action_runtime;
 pub mod audio;

@@ -1899,10 +1899,8 @@ pub(crate) fn advance(
     } else {
         Visibility::Hidden
     };
-    if *visibility != wanted {
-        *visibility = wanted;
-    }
-    transform.scale = Vec3::splat(scale);
+    visibility.set_if_neq(wanted);
+    crate::canvas::set_scale(&mut transform, scale);
     // CustomButton.OnDisable of a pressed button.
     let lives = button_lives(screen, &bindings, &view, &layouts, canvas);
     let mut actions = Vec::new();
