@@ -3,7 +3,7 @@
 //! 每一步都是引擎原生烘焙链在 2D（单高度面）上的转录，锚点在
 //! [`super`] 的模块注释里。本文件只有形状与常数，不出现任何 bevy。
 
-use super::{ColliderPolygon, Obstacle, AGENT_CLIMB, AGENT_HEIGHT};
+use super::{BuildVolume, ColliderPolygon, Obstacle, AGENT_CLIMB, AGENT_HEIGHT};
 
 /// 烘焙格面：世界 xz 平面上的等距格，`walkable` 是侵蚀与小区过滤都
 /// 过完之后的净可行走表。格原点是面三角网包围盒的最小角——引擎侧
@@ -47,7 +47,12 @@ impl Grid {
 
 /// 三角网栅格化：每格按**格中心**的含点判入面（与引擎侧凸多边形标记
 /// 的中心采样同形）。逐三角只扫自己的包围盒格，代价按三角面积摊。
-pub(crate) fn rasterize(tris: &[[[f32; 2]; 3]], voxel: f32) -> Grid {
+///
+/// With a build `volume` the grid covers only the part of the faces'
+/// bounds inside it: nothing outside the volume is rasterized, and the
+/// volume's sides are the grid's outer edge, which the erosion treats as
+/// unwalkable like any other edge.
+pub(crate) fn rasterize(tris: &[[[f32; 2]; 3]], voxel: f32, volume: Option<BuildVolume>) -> Grid {
     let mut lo = [f32::MAX; 2];
     let mut hi = [-f32::MAX; 2];
     for tri in tris {
@@ -61,6 +66,16 @@ pub(crate) fn rasterize(tris: &[[[f32; 2]; 3]], voxel: f32) -> Grid {
     }
     assert!(!tris.is_empty(), "可行走面为空，烘焙拒绝");
     assert!(voxel.is_finite() && voxel > 0.0, "voxel 必须为正有限值");
+    if let Some(volume) = volume {
+        for axis in 0..2 {
+            lo[axis] = lo[axis].max(volume.min[axis]);
+            hi[axis] = hi[axis].min(volume.max[axis]);
+        }
+        assert!(
+            lo[0] < hi[0] && lo[1] < hi[1],
+            "烘焙体积 {volume:?} 与可行走面不相交，烘焙拒绝"
+        );
+    }
     let cols = (((hi[0] - lo[0]) / voxel).ceil() as usize).max(1);
     let rows = (((hi[1] - lo[1]) / voxel).ceil() as usize).max(1);
     let mut grid = Grid {

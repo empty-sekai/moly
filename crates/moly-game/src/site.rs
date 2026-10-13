@@ -644,6 +644,60 @@ impl Sites {
                 format!("site {site_type} has no authored floor layout for level {requested_level}")
             })
     }
+
+    /// The horizontal part of the volume the site's `NavMeshField` builds
+    /// over (`CollectObjects.Volume` from the colliders on the
+    /// `MysekaiNavMeshBuildTarget` layer). The field is a child of the site
+    /// controller at local position zero and its centre (`_siteCenter`) is
+    /// zero, so the volume is centred on the site origin. Its size is set by
+    /// the controller:
+    /// - home (`SetUpAsync`): the floor layout of the current site level,
+    ///   `TILE_SIZE` times its grid counts;
+    /// - a room (`SetUpMyRoomField`, run on every entry): the same plus the
+    ///   field's `EntranceSize` (5, 0, 5);
+    /// - a harvest or delivery site (`SetupNavMeshField`): the floor layout of
+    ///   the site's first level row, its width and depth taken as metres.
+    ///
+    /// The volume's height (`NAVMESH_DATA_AREA_HEIGHT`, or the layout height
+    /// outdoors) is not applied: the walk field is a single surface.
+    pub(crate) fn nav_mesh_volume(
+        &self,
+        active: &SiteActive,
+    ) -> Result<moly_law::carve::BuildVolume, String> {
+        use moly_law::fixture::position::TILE_SIZE;
+        const ENTRANCE_SIZE: [f32; 2] = [5.0, 5.0];
+        let site_type = active.site_type.as_str();
+        let row = self
+            .row_opt(site_type)
+            .ok_or_else(|| format!("site type {site_type} is not in the loaded site table"))?;
+        let size = match row.category.as_str() {
+            "housing_home" => {
+                let floor = self.floor_grid(site_type, active.level)?;
+                [TILE_SIZE * floor.width as f32, TILE_SIZE * floor.depth as f32]
+            }
+            "housing_room" => {
+                let floor = self.floor_grid(site_type, active.level)?;
+                [
+                    TILE_SIZE * floor.width as f32 + ENTRANCE_SIZE[0],
+                    TILE_SIZE * floor.depth as f32 + ENTRANCE_SIZE[1],
+                ]
+            }
+            "harvest" | "delivery" => {
+                let first = row
+                    .levels
+                    .first()
+                    .ok_or_else(|| format!("site {site_type} has no level rows"))?;
+                let floor = self.floor_grid(site_type, *first)?;
+                [floor.width as f32, floor.depth as f32]
+            }
+            other => {
+                return Err(format!(
+                    "site {site_type} has category {other}, which no site controller builds a navigation volume for"
+                ))
+            }
+        };
+        Ok(moly_law::carve::BuildVolume::centred([0.0, 0.0], size))
+    }
 }
 
 /// 当前站点的账目面：锚行与日志的名字、位点、房间拼装来源都读它。

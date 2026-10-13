@@ -340,6 +340,47 @@ pub struct ColliderPolygon {
     pub carve: bool,
 }
 
+/// The horizontal extent of a `NavMeshSurface` build volume
+/// (`CollectObjects.Volume`): the bake reads only the sources inside it and
+/// builds only inside it, so its sides are edges of the baked field.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BuildVolume {
+    pub min: [f32; 2],
+    pub max: [f32; 2],
+}
+
+impl BuildVolume {
+    /// A volume of horizontal `size` centred on `centre`.
+    pub fn centred(centre: [f32; 2], size: [f32; 2]) -> Self {
+        assert!(
+            size.iter().all(|value| value.is_finite() && *value > 0.0),
+            "烘焙体积尺寸 {size:?} 不是正有限值"
+        );
+        let half = [size[0].abs() * 0.5, size[1].abs() * 0.5];
+        Self {
+            min: [centre[0] - half[0], centre[1] - half[1]],
+            max: [centre[0] + half[0], centre[1] + half[1]],
+        }
+    }
+
+    pub fn centre(&self) -> [f32; 2] {
+        [
+            (self.min[0] + self.max[0]) * 0.5,
+            (self.min[1] + self.max[1]) * 0.5,
+        ]
+    }
+
+    /// The horizontal half extents `NavMeshField` keeps as its `Bounds`
+    /// after a build: the baked data's source bounds (this volume) less the
+    /// agent radius on each side, `(2·extent − 2·radius)·0.5`.
+    pub fn field_half_extents(&self) -> [f32; 2] {
+        [
+            ((self.max[0] - self.min[0]) - 2.0 * AGENT_RADIUS) * 0.5,
+            ((self.max[1] - self.min[1]) - 2.0 * AGENT_RADIUS) * 0.5,
+        ]
+    }
+}
+
 /// 摆放行是否参与挖洞，参与则给它的世界足迹矩形。
 ///
 /// 参与门（旧布局足迹兼容接口）：地板类布局（布局含地板位）且
@@ -431,7 +472,7 @@ impl WalkField {
     /// 烘焙：栅格化 → 足迹标 null → 侵蚀 → 小区过滤 → 单调分区 → 轮廓，
     /// 账目逐段记。
     pub fn bake(input: &BakeInput) -> WalkField {
-        let mut grid = grid::rasterize(&input.tris, input.voxel);
+        let mut grid = grid::rasterize(&input.tris, input.voxel, None);
         let face = grid.walkable.iter().filter(|w| **w).count();
         let obstacle_nulled = grid::mark_obstacles(&mut grid, &input.obstacles);
         Self::finish_bake(grid, face, obstacle_nulled, input.voxel, Vec::new())
@@ -444,11 +485,22 @@ impl WalkField {
         colliders: &[ColliderPolygon],
         voxel: f32,
     ) -> WalkField {
+        Self::bake_colliders_in(surface, colliders, voxel, None)
+    }
+
+    /// [`Self::bake_colliders`] limited to a build volume (see
+    /// [`BuildVolume`]); `None` bakes over the faces' whole bounds.
+    pub fn bake_colliders_in(
+        surface: &[[[f32; 3]; 3]],
+        colliders: &[ColliderPolygon],
+        voxel: f32,
+        volume: Option<BuildVolume>,
+    ) -> WalkField {
         let tris: Vec<_> = surface
             .iter()
             .map(|tri| tri.map(|p| [p[0], p[2]]))
             .collect();
-        let mut grid = grid::rasterize(&tris, voxel);
+        let mut grid = grid::rasterize(&tris, voxel, volume);
         let face = grid.walkable.iter().filter(|w| **w).count();
         let heights = grid::surface_heights(&grid, surface);
         let (obstacle_nulled, height_offsets) =
@@ -1388,6 +1440,43 @@ mod tests {
         for value in [0u32, 1, 2, 3, 9, u32::MAX] {
             assert_eq!(voxel_size(NavMeshRegion::Jp, value), 0.01, "value {value}");
         }
+    }
+
+    /// A build volume bounds the field: no walkable cell lies outside it, its
+    /// sides are eroded by the agent radius like any edge, and the faces
+    /// inside it bake as they do without it.
+    #[test]
+    fn build_volume_bounds_the_field() {
+        let ground: Vec<[[f32; 3]; 3]> = quad([-10.0, -10.0], [10.0, 10.0])
+            .into_iter()
+            .map(|t| t.map(|p| [p[0], 0.0, p[1]]))
+            .collect();
+        let voxel = 0.05;
+        let volume = BuildVolume::centred([1.0, -2.0], [8.0, 6.0]);
+        assert_eq!(volume.min, [-3.0, -5.0]);
+        assert_eq!(volume.max, [5.0, 1.0]);
+        let field = WalkField::bake_colliders_in(&ground, &[], voxel, Some(volume));
+        let whole = WalkField::bake_colliders(&ground, &[], voxel);
+        // Inside, clear of the eroded band: walkable with and without it.
+        for p in [[1.0, -2.0], [-2.5, -4.5], [4.5, 0.5]] {
+            assert!(field.walkable_at(p), "{p:?} inside the volume");
+            assert!(whole.walkable_at(p));
+        }
+        // Outside the volume, on the faces: walkable only without it.
+        for p in [[6.0, -2.0], [1.0, 2.0], [-4.0, -2.0], [1.0, -6.0], [8.0, 8.0]] {
+            assert!(!field.walkable_at(p), "{p:?} outside the volume");
+            assert!(whole.walkable_at(p));
+        }
+        // The volume's sides are edges: the agent radius next to them is eroded.
+        let band = AGENT_RADIUS * 0.5;
+        assert!(!field.walkable_at([5.0 - band, -2.0]));
+        assert!(!field.walkable_at([1.0, -5.0 + band]));
+        assert!(field.walkable_at([5.0 - AGENT_RADIUS - 2.0 * voxel, -2.0]));
+        assert!(field.counts().cells < whole.counts().cells);
+        // The field's half extents: the volume's less the agent radius.
+        let half = volume.field_half_extents();
+        assert!((half[0] - (4.0 - AGENT_RADIUS)).abs() < 1e-6);
+        assert!((half[1] - (3.0 - AGENT_RADIUS)).abs() < 1e-6);
     }
 
     #[test]

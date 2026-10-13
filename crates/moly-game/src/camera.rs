@@ -720,10 +720,10 @@ fn parse_camera_params(value: &serde_json::Value) -> CameraParamAsset {
 /// 本步同时做两件源里站点装载时做的事：
 /// - 初始化 [`FieldCameraModel`]（源 `SetupModel` → `FieldCameraModel..ctor`）；
 /// - 布置取景活动界（源站点控制器 `SetupLockAtCameraBounds`：界中心 =
-///   navMesh 场变换位置，界半径 = navMesh 界缩不可见格数×格值——我们的
-///   navMesh 等价物是地面网格包围盒，格值 0.25 与源常量同值，不可见格数
-///   取具名 mock）。
-pub fn frame_site(
+///   navMesh 场变换位置（站点原点），界半径 = navMesh 场 `Bounds` 缩不可见
+///   格数×格值；`Bounds` 是烘焙体积减 agent 半径，见
+///   [`crate::site::Sites::nav_mesh_volume`]，格值 0.25 与源常量同值）。
+pub(crate) fn frame_site(
     mut commands: Commands,
     meshes: Res<Assets<Mesh>>,
     ground: Option<Res<GroundMeshes>>,
@@ -731,6 +731,7 @@ pub fn frame_site(
     active: Option<Res<SiteActive>>,
     setting: Option<Res<CameraSetting>>,
     config: Option<Res<crate::client_config::ClientConfigs>>,
+    sites: Option<Res<crate::site::Sites>>,
     parts: Query<(&Mesh3d, &GlobalTransform), Without<moly_assets::scene_state::SourceInactive>>,
     entities: Query<Entity>,
     mut cameras: Query<&mut Transform, With<Camera3d>>,
@@ -741,8 +742,8 @@ pub fn frame_site(
         Option<ResMut<FieldCameraModel>>,
     ),
 ) {
-    let (Some(ground), Some(_), Some(active), Some(setting), Some(config)) =
-        (ground, settled, active, setting, config)
+    let (Some(ground), Some(_), Some(active), Some(setting), Some(config), Some(sites)) =
+        (ground, settled, active, setting, config, sites)
     else {
         return;
     };
@@ -802,22 +803,27 @@ pub fn frame_site(
             nearest.y
         });
     // 模型初始化 + 取景活动界（源 SetupLockAtCameraBounds 的式子，界
-    // 半径 = fmax(全径 − 格值×不可见格数, 0)·0.5；全径即包围盒 x/z 跨度）。
-    // 不可见格数是面板键（InvisibleGridCount，IntConfigs 键 69）。
+    // 半径 = fmax(全径 − 格值×不可见格数, 0)·0.5；全径 = 2 × navMesh 场
+    // `Bounds` 半径，远界半径即 `Bounds` 半径）。不可见格数是面板键
+    // （InvisibleGridCount，IntConfigs 键 69）。
     let mut model = FieldCameraModel::from_setting(&setting);
     let invisible_grid_count = config.int(crate::client_config::KEY_INVISIBLE_GRID_COUNT) as f32;
-    let full_extents = Vec2::new(max.x - min.x, max.z - min.z);
+    let volume = sites
+        .nav_mesh_volume(&active)
+        .unwrap_or_else(|reason| panic!("[camera] 取景界无法确定（{site}）：{reason}"));
+    let bounds_center = Vec2::from(volume.centre());
+    let full_extents = Vec2::from(volume.field_half_extents()) * 2.0;
     let shrink = moly_law::fixture::position::TILE_SIZE * invisible_grid_count;
     let near_extents = Vec2::new(
         (full_extents.x - shrink).max(0.0) * 0.5,
         (full_extents.y - shrink).max(0.0) * 0.5,
     );
     model.look_at_bounds = BoundsXz {
-        center,
+        center: bounds_center,
         extents: near_extents,
     };
     model.max_look_at_bounds = BoundsXz {
-        center,
+        center: bounds_center,
         extents: full_extents * 0.5,
     };
     if site_move.is_some() {
@@ -829,7 +835,7 @@ pub fn frame_site(
             existing.max_look_at_bounds = model.max_look_at_bounds;
             info!(
                 "[camera] {site} tracking bounds set during a cannon move: centre ({:.2},{:.2}) near {:?} far {:?}",
-                center.x, center.y, near_extents, full_extents * 0.5
+                bounds_center.x, bounds_center.y, near_extents, full_extents * 0.5
             );
             commands.remove_resource::<SiteSettled>();
             return;
@@ -853,8 +859,8 @@ pub fn frame_site(
     );
     info!(
         "[camera] 取景界：中心 ({:.2},{:.2}) 近界 {:#?} 远界 {:#?}（不可见格数 {invisible_grid_count}，面板 IntConfigs {}）",
-        center.x,
-        center.y,
+        bounds_center.x,
+        bounds_center.y,
         near_extents,
         full_extents * 0.5,
         crate::client_config::KEY_INVISIBLE_GRID_COUNT

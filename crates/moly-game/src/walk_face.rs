@@ -5,7 +5,7 @@
 use crate::fixture::FixturePlacements;
 use crate::fixture_collision::{CollisionBakeStatus, CollisionInputs};
 use crate::fixture_edit::LayoutSaved;
-use crate::site::{NavMeshSourceRegion, SiteActive, WalkFaceMeshes};
+use crate::site::{NavMeshSourceRegion, SiteActive, Sites, WalkFaceMeshes};
 use bevy::ecs::message::MessageReader;
 use bevy::prelude::*;
 use moly_law::carve::{self, BakeCounts, WalkField};
@@ -109,6 +109,7 @@ pub(crate) fn build(
     face: Option<Res<WalkFace>>,
     site: Option<Res<SiteActive>>,
     source: Option<Res<NavMeshSourceRegion>>,
+    sites: Option<Res<Sites>>,
     placements: Option<Res<FixturePlacements>>,
     collision: CollisionInputs,
     mut failure: Local<String>,
@@ -120,7 +121,7 @@ pub(crate) fn build(
     let Some(handles) = handles else {
         return;
     };
-    let (Some(site), Some(source)) = (site, source) else {
+    let (Some(site), Some(source), Some(sites)) = (site, source, sites) else {
         return;
     };
     let Some(placements) = placements else {
@@ -148,7 +149,8 @@ pub(crate) fn build(
         polygons: sources.polygons.len(),
     });
     let n_obstacles = sources.colliders;
-    let field = WalkField::bake_colliders(&tris, &sources.polygons, voxel);
+    let volume = site_volume(&sites, &site);
+    let field = WalkField::bake_colliders_in(&tris, &sources.polygons, voxel, Some(volume));
     let (min, max) =
         tris.iter()
             .flatten()
@@ -160,12 +162,16 @@ pub(crate) fn build(
                 (min, max)
             });
     info!(
-        "[walk-face] 约束面就绪：三角 {}，x [{:.1},{:.1}] z [{:.1},{:.1}]",
+        "[walk-face] 约束面就绪：三角 {}，x [{:.1},{:.1}] z [{:.1},{:.1}]；烘焙体积 x [{:.2},{:.2}] z [{:.2},{:.2}]",
         tris.len(),
         min[0],
         max[0],
         min[1],
-        max[1]
+        max[1],
+        volume.min[0],
+        volume.max[0],
+        volume.min[1],
+        volume.max[1]
     );
     log_bake("烘好", &field, n_obstacles);
     commands.insert_resource(WalkFace {
@@ -189,6 +195,7 @@ pub(crate) fn rebake_on_save(
     face: Option<Res<WalkFace>>,
     site: Option<Res<SiteActive>>,
     source: Option<Res<NavMeshSourceRegion>>,
+    sites: Option<Res<Sites>>,
     placements: Option<Res<FixturePlacements>>,
     collision: CollisionInputs,
     mut failure: Local<String>,
@@ -208,6 +215,7 @@ pub(crate) fn rebake_on_save(
         face.as_deref(),
         site.as_deref(),
         source.as_deref(),
+        sites.as_deref(),
         placements.as_deref(),
         &collision,
         &mut failure,
@@ -230,6 +238,7 @@ fn rebake(
     face: Option<&WalkFace>,
     site: Option<&SiteActive>,
     source: Option<&NavMeshSourceRegion>,
+    sites: Option<&Sites>,
     placements: Option<&FixturePlacements>,
     collision: &CollisionInputs,
     failure: &mut String,
@@ -240,8 +249,8 @@ fn rebake(
     if !*pending {
         return false;
     }
-    let (Some(site), Some(source), Some(placements), Some(handles), Some(face)) =
-        (site, source, placements, handles, face)
+    let (Some(site), Some(source), Some(sites), Some(placements), Some(handles), Some(face)) =
+        (site, source, sites, placements, handles, face)
     else {
         return false; // 面不在（未烘好或换站清扫中）：台账已落，build 会带上
     };
@@ -265,7 +274,8 @@ fn rebake(
     });
     let n_obstacles = sources.colliders;
     let prior = *face.carve_counts();
-    let field = WalkField::bake_colliders(&tris, &sources.polygons, voxel);
+    let volume = site_volume(sites, site);
+    let field = WalkField::bake_colliders_in(&tris, &sources.polygons, voxel, Some(volume));
     log_bake("重烘（摆放变化）", &field, n_obstacles);
     let fresh = *field.counts();
     info!(
@@ -501,6 +511,13 @@ fn site_voxel(site: &SiteActive, source: &NavMeshSourceRegion) -> f32 {
         )
     });
     carve::voxel_size(source.0, value)
+}
+
+/// The site's navigation build volume ([`Sites::nav_mesh_volume`]).
+fn site_volume(sites: &Sites, site: &SiteActive) -> carve::BuildVolume {
+    sites
+        .nav_mesh_volume(site)
+        .unwrap_or_else(|reason| panic!("[walk-face] 烘焙体积无法确定：{reason}"))
 }
 
 fn record_failure(commands: &mut Commands, prior: &mut String, reason: String) {
