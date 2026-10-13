@@ -71,6 +71,18 @@
 //! 解出光源正交框、写三块 uniform、按顶点布局特化管线 → 节点在
 //! EndPrepasses 与 StartMainPass 之间跑深度 pass（管线没编好或 caster
 //! 为空的帧整段跳过）。
+//!
+//! # Static map
+//!
+//! A rigid caster whose mesh, world matrix and winding stayed the same for
+//! [`STATIC_AFTER_FRAMES`] extractions is baked: drawn once into a second
+//! depth map of the same size and state, which every frame's pass copies
+//! texel for texel before it draws the other rigid casters and the skinned
+//! ones. The map is drawn again whenever its content would differ: a baked
+//! caster changed, left the list or had its mesh modified, the light frame
+//! block changed, or another caster became stable. The depth test keeps the
+//! nearest depth per texel either way, so the frame's map holds the same
+//! values as one pass over every caster.
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -84,7 +96,7 @@ use bevy::mesh::{Mesh, MeshVertexBufferLayoutRef};
 use bevy::prelude::*;
 use bevy::render::mesh::allocator::MeshAllocator;
 use bevy::render::mesh::{RenderMesh, RenderMeshBufferInfo};
-use bevy::render::render_asset::RenderAssets;
+use bevy::render::render_asset::{ExtractedAssets, RenderAssets};
 use bevy::render::render_graph::{Node, NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel};
 use bevy::render::render_resource::binding_types::{uniform_buffer, uniform_buffer_sized};
 use bevy::render::render_resource::*;
@@ -107,6 +119,16 @@ const SHADOW_DEPTH_SHADER: Handle<Shader> = Handle::Uuid(
     Uuid::from_u128(0x6271_62d3_a2e2_4f19_b6c6_9f3e_51c8_0d44),
     PhantomData,
 );
+
+/// The program that copies the static map into the frame's map.
+const SHADOW_COPY_SHADER: Handle<Shader> = Handle::Uuid(
+    Uuid::from_u128(0x6271_62d3_a2e2_4f19_b6c6_9f3e_51c8_0d45),
+    PhantomData,
+);
+
+/// Extractions a rigid caster must stay unchanged before it is baked into
+/// the static map (module comment, "Static map").
+const STATIC_AFTER_FRAMES: u32 = 30;
 
 /// 深度图边长：站点管线资产的主光影图档 1024²（单级联单图，模块注释
 /// 「数值口径」）。
@@ -287,6 +309,14 @@ pub struct ShadowMapGpu {
     /// The skinned entry point's group 1 layout: one palette window, bound at
     /// a dynamic offset.
     skin_layout: BindGroupLayoutDescriptor,
+    /// The static map (module comment, "Static map"): same size and format
+    /// as the frame's map, drawn as an attachment and read by the copy.
+    static_view: TextureView,
+    /// The copy's layout (the static map as a depth texture and a nearest,
+    /// non-comparison sampler), its sampler and its pipeline.
+    copy_layout: BindGroupLayoutDescriptor,
+    copy_sampler: Sampler,
+    copy_pipeline: CachedRenderPipelineId,
     /// 动态 offset 槽距：按设备对齐取，≥ 64 字节。
     object_stride: u32,
     /// 单个矩阵的绑定尺寸（动态 offset 校验用）。
@@ -299,6 +329,10 @@ struct ShadowDraw {
     world: Mat4,
     pipeline: CachedRenderPipelineId,
     two_sided: bool,
+    /// Consecutive extractions this draw stayed the same.
+    stable: u32,
+    /// The draw is in the static map, not drawn per frame.
+    baked: bool,
 }
 
 /// One skinned depth draw: a character renderer and the byte offset of its
@@ -344,6 +378,30 @@ struct ShadowDrawList {
     /// Their joint palettes, each at a [`PALETTE_ALIGN`]-aligned offset.
     palette_bytes: Vec<u8>,
     skinned_tally: SkinnedTally,
+    /// The static map no longer holds exactly the baked draws as they are
+    /// now; set by every change, turned into a bake request by
+    /// [`plan_static_bake`].
+    static_dirty: bool,
+    /// The bake this frame's node run must draw, by generation; it stays set
+    /// until a node run answers it.
+    static_request: Option<u64>,
+    static_generation: u64,
+    /// Baked draws in the list.
+    baked_count: usize,
+}
+
+/// What the node's last bake of the static map drew: the generation it
+/// answered, the draws it recorded and the baked draws it could not record
+/// (mesh or buffer slices missing), which [`plan_static_bake`] turns back
+/// into per-frame draws.
+#[derive(Resource, Default)]
+struct StaticBake(Mutex<BakeInner>);
+
+#[derive(Default)]
+struct BakeInner {
+    answered: Option<u64>,
+    recorded: usize,
+    skipped: Vec<usize>,
 }
 
 /// The world-space bounds corners of each draw in [`ShadowDrawList`], at the
@@ -371,6 +429,11 @@ struct AccountInner {
     casters_invalid: usize,
     /// 最近一帧节点实际录进 pass 的 draw 数。
     draws_recorded: usize,
+    /// Of those, the draws in the static map (as of its last bake) and the
+    /// rigid draws recorded in the frame's own pass; bakes of the static map.
+    static_recorded: usize,
+    per_frame_rigid: usize,
+    static_bakes: u64,
     /// The latest prepare's skinned casters, those whose layout has no
     /// position/normal/joint streams, and the skinned draws last recorded.
     skinned_casters: usize,
@@ -487,6 +550,9 @@ fn extract_shadow_casters(
         keep
     });
     let mut changed = false;
+    // A baked draw that changes or leaves the list makes the static map
+    // stale.
+    let mut static_dirty = false;
     let mut count = 0usize;
     let mut bounds: Option<(Vec3, Vec3)> = None;
     for (mesh, transform, visibility, passes, renderer, parent) in &casters {
@@ -530,6 +596,11 @@ fn extract_shadow_casters(
             if draw.two_sided != two_sided {
                 draw.two_sided = two_sided;
                 changed = true;
+                static_dirty |= draw.baked;
+                draw.baked = false;
+                draw.stable = 0;
+            } else {
+                draw.stable = draw.stable.saturating_add(1);
             }
             stored[slot]
         } else {
@@ -555,15 +626,21 @@ fn extract_shadow_casters(
                     world,
                     pipeline: CachedRenderPipelineId::INVALID,
                     two_sided,
+                    stable: 0,
+                    baked: false,
                 };
                 match before {
                     Some(old) => {
                         changed |= !same_world || old.mesh != id || old.two_sided != two_sided;
+                        static_dirty |= old.baked;
                         *old = draw;
                         stored[slot] = corners;
                     }
                     None => {
                         changed = true;
+                        static_dirty |= list.draws[slot.min(list.draws.len())..]
+                            .iter()
+                            .any(|draw| draw.baked);
                         list.draws.truncate(slot);
                         stored.truncate(slot);
                         list.draws.push(draw);
@@ -589,10 +666,14 @@ fn extract_shadow_casters(
     }
     let kept = count.min(OBJECT_CAPACITY);
     changed |= kept != previous;
+    static_dirty |= list.draws[kept.min(list.draws.len())..]
+        .iter()
+        .any(|draw| draw.baked);
     list.draws.truncate(kept);
     stored.truncate(kept);
     list.bounds = bounds;
     list.changed = changed;
+    list.static_dirty |= static_dirty;
 }
 
 /// Extract, after [`extract_shadow_casters`]: the skinned character casters
@@ -1149,10 +1230,11 @@ fn prepare_shadow_draws(
     }
     debug_assert_eq!(frame_bytes.len(), FRAME_BYTES);
     // Both blocks keep their last contents; a write of the same bytes is
-    // skipped.
+    // skipped. The static map was drawn with the previous frame block.
     if uploaded.frame.as_deref() != Some(frame_bytes.as_slice()) {
         render_queue.write_buffer(&gpu.frame_buffer, 0, &frame_bytes);
         uploaded.frame = Some(frame_bytes);
+        draws.static_dirty = true;
     }
     let consumer_bytes = consumer.bytes();
     if uploaded.consumer.as_deref() != Some(consumer_bytes.as_slice()) {
@@ -1196,6 +1278,140 @@ fn prepare_shadow_draws(
             );
         }
     }
+}
+
+/// PrepareResources, after [`prepare_shadow_draws`]: which rigid draws the
+/// static map holds and whether this frame's node run draws it again
+/// (module comment, "Static map").
+///
+/// The last bake's answer comes first: an answered request is cleared, and
+/// the baked draws that bake could not record are drawn per frame from now
+/// on (the map lacks them). Then a draw whose mesh was added or modified this
+/// frame, or whose mesh is no longer on the GPU, starts over as a per-frame
+/// draw; and every draw stable for [`STATIC_AFTER_FRAMES`] extractions whose
+/// mesh and buffer slices are present is baked. Any of these, a change seen
+/// by the extraction or a new light frame block requests a bake; an
+/// unanswered request is requested again.
+fn plan_static_bake(
+    mut list: ResMut<ShadowDrawList>,
+    meshes: Res<RenderAssets<RenderMesh>>,
+    allocator: Res<MeshAllocator>,
+    extracted: Option<Res<ExtractedAssets<RenderMesh>>>,
+    bake: Res<StaticBake>,
+) {
+    let list = &mut *list;
+    {
+        let mut answer = bake.0.lock().unwrap();
+        if list.static_request.is_some() && answer.answered == list.static_request {
+            list.static_request = None;
+            for index in answer.skipped.drain(..) {
+                if let Some(draw) = list.draws.get_mut(index) {
+                    draw.baked = false;
+                    draw.stable = 0;
+                }
+            }
+        }
+    }
+    let touched = extracted
+        .as_deref()
+        .filter(|extracted| !extracted.added.is_empty() || !extracted.modified.is_empty());
+    for draw in &mut list.draws {
+        let mesh_changed = touched.is_some_and(|extracted| {
+            extracted.added.contains(&draw.mesh) || extracted.modified.contains(&draw.mesh)
+        });
+        if mesh_changed || (draw.baked && meshes.get(draw.mesh).is_none()) {
+            list.static_dirty |= draw.baked;
+            draw.baked = false;
+            draw.stable = 0;
+        }
+    }
+    for draw in &mut list.draws {
+        if draw.baked
+            || draw.stable < STATIC_AFTER_FRAMES
+            || draw.pipeline == CachedRenderPipelineId::INVALID
+        {
+            continue;
+        }
+        let Some(render_mesh) = meshes.get(draw.mesh) else {
+            continue;
+        };
+        let slices = allocator.mesh_vertex_slice(&draw.mesh).is_some()
+            && match render_mesh.buffer_info {
+                RenderMeshBufferInfo::Indexed { .. } => {
+                    allocator.mesh_index_slice(&draw.mesh).is_some()
+                }
+                RenderMeshBufferInfo::NonIndexed => true,
+            };
+        if slices {
+            draw.baked = true;
+            list.static_dirty = true;
+        }
+    }
+    list.baked_count = list.draws.iter().filter(|draw| draw.baked).count();
+    if list.static_dirty || list.static_request.is_some() {
+        list.static_generation += 1;
+        list.static_request = Some(list.static_generation);
+        list.static_dirty = false;
+    }
+}
+
+/// Records one rigid draw at its object slot into a depth pass, skipping
+/// sets that would bind the bound pipeline or buffers again; evaluates to
+/// false when the draw's pipeline, mesh or buffer slices are not available.
+macro_rules! record_rigid {
+    ($pass:expr, $bound:expr, $resolve:expr, $item:expr, $index:expr,
+     $bind_group:expr, $stride:expr, $meshes:expr, $allocator:expr) => {{
+        let item: &ShadowDraw = $item;
+        let bound: &mut BoundState = $bound;
+        match ($resolve(item.pipeline), $meshes.get(item.mesh), $allocator.mesh_vertex_slice(&item.mesh)) {
+            (Some(pipeline), Some(render_mesh), Some(vertex_slice)) => {
+                let index_slice = match &render_mesh.buffer_info {
+                    RenderMeshBufferInfo::Indexed { index_format, count } => {
+                        $allocator.mesh_index_slice(&item.mesh).map(|slice| Some((slice, *index_format, *count)))
+                    }
+                    RenderMeshBufferInfo::NonIndexed => Some(None),
+                };
+                match index_slice {
+                    Some(index_slice) => {
+                        if bound.pipeline != Some(item.pipeline) {
+                            $pass.set_pipeline(pipeline);
+                            bound.pipeline = Some(item.pipeline);
+                        }
+                        $pass.set_bind_group(0, $bind_group, &[($index as u32) * $stride]);
+                        if bound.vertex != Some(vertex_slice.buffer.id()) {
+                            $pass.set_vertex_buffer(0, *vertex_slice.buffer.slice(..));
+                            bound.vertex = Some(vertex_slice.buffer.id());
+                        }
+                        match index_slice {
+                            Some((index_slice, index_format, count)) => {
+                                if bound.index != Some((index_slice.buffer.id(), index_format)) {
+                                    $pass.set_index_buffer(*index_slice.buffer.slice(..), index_format);
+                                    bound.index = Some((index_slice.buffer.id(), index_format));
+                                }
+                                $pass.draw_indexed(
+                                    index_slice.range.start..(index_slice.range.start + count),
+                                    vertex_slice.range.start as i32,
+                                    0..1,
+                                );
+                            }
+                            None => $pass.draw(vertex_slice.range.clone(), 0..1),
+                        }
+                        true
+                    }
+                    None => false,
+                }
+            }
+            _ => false,
+        }
+    }};
+}
+
+/// What a depth pass has bound (see [`record_rigid`]).
+#[derive(Default)]
+struct BoundState {
+    pipeline: Option<CachedRenderPipelineId>,
+    vertex: Option<BufferId>,
+    index: Option<(BufferId, IndexFormat)>,
 }
 
 /// 深度 pass 节点：一次成图，跨视图共享（站点场景只有一台 3D 相机；
@@ -1299,6 +1515,70 @@ impl Node for ShadowDepthNode {
             )
         });
 
+        // The static map (module comment, "Static map"): drawn again when a
+        // bake is requested that no run has answered yet, and copied into the
+        // frame's map when it holds draws. Until the copy pipeline exists,
+        // every rigid draw goes to the frame's map.
+        let copy_pipeline = pipeline_cache.get_render_pipeline(gpu.copy_pipeline);
+        let mut answer = world.resource::<StaticBake>().0.lock().unwrap();
+        let bake_now = copy_pipeline.is_some()
+            && draws.static_request.is_some()
+            && answer.answered != draws.static_request;
+        let use_static = copy_pipeline.is_some() && draws.baked_count > 0;
+        if bake_now {
+            let mut pass = render_context
+                .command_encoder()
+                .begin_render_pass(&RenderPassDescriptor {
+                    label: Some("site_shadow_static_pass"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                        view: &gpu.static_view,
+                        depth_ops: Some(Operations {
+                            load: LoadOp::Clear(1.0),
+                            store: StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+            let mut bound = BoundState::default();
+            let mut recorded = 0;
+            let mut skipped = Vec::new();
+            for (index, item) in draws.draws.iter().enumerate() {
+                if !item.baked {
+                    continue;
+                }
+                if record_rigid!(pass, &mut bound, resolve, item, index, &bind_group,
+                    gpu.object_stride, meshes, allocator)
+                {
+                    recorded += 1;
+                } else {
+                    skipped.push(index);
+                }
+            }
+            drop(pass);
+            answer.answered = draws.static_request;
+            answer.recorded = recorded;
+            answer.skipped = skipped;
+            world.resource::<ShadowAccount>().0.lock().unwrap().static_bakes += 1;
+        }
+        let static_recorded = if use_static { answer.recorded } else { 0 };
+        drop(answer);
+        let copy_group = use_static.then(|| {
+            let frame = world.resource::<bevy::diagnostic::FrameCount>().0;
+            self.bind_groups.lock().get(
+                render_context.render_device(),
+                "site_shadow_static_copy_bind_group",
+                &pipeline_cache.get_bind_group_layout(&gpu.copy_layout),
+                &[
+                    (0, Bound::View(&gpu.static_view)),
+                    (1, Bound::Sampler(&gpu.copy_sampler)),
+                ],
+                frame,
+            )
+        });
+
         let mut pass = render_context
             .command_encoder()
             .begin_render_pass(&RenderPassDescriptor {
@@ -1319,52 +1599,25 @@ impl Node for ShadowDepthNode {
         // Pipeline, vertex buffer and index buffer stay bound across draws of
         // one pass; a set that would bind the same object again is skipped, so
         // every draw still runs with exactly the state it set before.
-        let mut bound_pipeline: Option<CachedRenderPipelineId> = None;
-        let mut bound_vertex: Option<BufferId> = None;
-        let mut bound_index: Option<(BufferId, IndexFormat)> = None;
-        let mut drawn: usize = 0;
-        for (index, item) in draws.draws.iter().enumerate() {
-            let (Some(pipeline), Some(render_mesh)) =
-                (resolve(item.pipeline), meshes.get(item.mesh))
-            else {
-                continue;
-            };
-            let Some(vertex_slice) = allocator.mesh_vertex_slice(&item.mesh) else {
-                continue;
-            };
-            if bound_pipeline != Some(item.pipeline) {
-                pass.set_pipeline(pipeline);
-                bound_pipeline = Some(item.pipeline);
-            }
-            pass.set_bind_group(0, &bind_group, &[(index as u32) * gpu.object_stride]);
-            if bound_vertex != Some(vertex_slice.buffer.id()) {
-                pass.set_vertex_buffer(0, *vertex_slice.buffer.slice(..));
-                bound_vertex = Some(vertex_slice.buffer.id());
-            }
-            match &render_mesh.buffer_info {
-                RenderMeshBufferInfo::Indexed {
-                    index_format,
-                    count,
-                } => {
-                    let Some(index_slice) = allocator.mesh_index_slice(&item.mesh) else {
-                        continue;
-                    };
-                    if bound_index != Some((index_slice.buffer.id(), *index_format)) {
-                        pass.set_index_buffer(*index_slice.buffer.slice(..), *index_format);
-                        bound_index = Some((index_slice.buffer.id(), *index_format));
-                    }
-                    pass.draw_indexed(
-                        index_slice.range.start..(index_slice.range.start + *count),
-                        vertex_slice.range.start as i32,
-                        0..1,
-                    );
-                }
-                RenderMeshBufferInfo::NonIndexed => {
-                    pass.draw(vertex_slice.range, 0..1);
-                }
-            }
-            drawn += 1;
+        let mut bound = BoundState::default();
+        if let (Some(copy_pipeline), Some(copy_group)) = (copy_pipeline, &copy_group) {
+            pass.set_pipeline(copy_pipeline);
+            bound.pipeline = Some(gpu.copy_pipeline);
+            pass.set_bind_group(0, copy_group, &[]);
+            pass.draw(0..3, 0..1);
         }
+        let mut per_frame: usize = 0;
+        for (index, item) in draws.draws.iter().enumerate() {
+            if use_static && item.baked {
+                continue;
+            }
+            if record_rigid!(pass, &mut bound, resolve, item, index, &bind_group,
+                gpu.object_stride, meshes, allocator)
+            {
+                per_frame += 1;
+            }
+        }
+        let drawn = static_recorded + per_frame;
 
         // The skinned character casters, after the rigid ones (the depth test
         // makes the order irrelevant). A skinned pipeline still compiling
@@ -1384,26 +1637,26 @@ impl Node for ShadowDepthNode {
                 let Some(vertex_slice) = allocator.mesh_vertex_slice(&item.mesh) else {
                     continue;
                 };
-                if bound_pipeline != Some(item.pipeline) {
+                if bound.pipeline != Some(item.pipeline) {
                     pass.set_pipeline(pipeline);
-                    bound_pipeline = Some(item.pipeline);
+                    bound.pipeline = Some(item.pipeline);
                 }
                 // The rigid object window is not read by the skinned entry
                 // point; offset 0 is a valid window of the pool.
                 pass.set_bind_group(0, &bind_group, &[0]);
                 pass.set_bind_group(1, skin_group, &[item.palette_offset]);
-                if bound_vertex != Some(vertex_slice.buffer.id()) {
+                if bound.vertex != Some(vertex_slice.buffer.id()) {
                     pass.set_vertex_buffer(0, *vertex_slice.buffer.slice(..));
-                    bound_vertex = Some(vertex_slice.buffer.id());
+                    bound.vertex = Some(vertex_slice.buffer.id());
                 }
                 match &render_mesh.buffer_info {
                     RenderMeshBufferInfo::Indexed { index_format, count } => {
                         let Some(index_slice) = allocator.mesh_index_slice(&item.mesh) else {
                             continue;
                         };
-                        if bound_index != Some((index_slice.buffer.id(), *index_format)) {
+                        if bound.index != Some((index_slice.buffer.id(), *index_format)) {
                             pass.set_index_buffer(*index_slice.buffer.slice(..), *index_format);
-                            bound_index = Some((index_slice.buffer.id(), *index_format));
+                            bound.index = Some((index_slice.buffer.id(), *index_format));
                         }
                         pass.draw_indexed(
                             index_slice.range.start..(index_slice.range.start + *count),
@@ -1426,6 +1679,8 @@ impl Node for ShadowDepthNode {
             let mut inner = world.resource::<ShadowAccount>().0.lock().unwrap();
             inner.frames_drawn += 1;
             inner.draws_recorded = drawn;
+            inner.static_recorded = static_recorded;
+            inner.per_frame_rigid = per_frame;
             inner.skinned_recorded = skinned_drawn;
             if drawn == 0 {
                 inner.frames_empty_pass += 1;
@@ -1675,7 +1930,7 @@ fn finish_pending_probe(world: &World, render_context: &RenderContext) {
         .map(|(low, high)| ((low + high) * 0.5, high - low))
         .unwrap_or((Vec3::ZERO, Vec3::ZERO));
     info!(
-        "shadow account, skinned casters: {} drawn {} (player {}, NPC {}; NPC Off at dither alpha 0: {}; other skinned meshes not casting: {}; layout without normal/joint streams {}); palettes {}, joints {} (joint world transform x inverse bind pose, this frame); rigid casters {}, total casters {}; player window {:?}: nonclear {} texels, min depth {:.4}, changed since last read-back {:?} (rest of map {:?}); player bounds centre ({:.3}, {:.3}, {:.3}) size ({:.3}, {:.3}, {:.3}); caster bias (all casters) from pipeline 1.0/1.0 x texel x 2.5: texel {:.6} m, depth {:.6} m, normal {:.6} m; raster bias 1 / 2.5; rigid casters without normals {}",
+        "shadow account, skinned casters: {} drawn {} (player {}, NPC {}; NPC Off at dither alpha 0: {}; other skinned meshes not casting: {}; layout without normal/joint streams {}); palettes {}, joints {} (joint world transform x inverse bind pose, this frame); rigid casters {}, total casters {}; player window {:?}: nonclear {} texels, min depth {:.4}, changed since last read-back {:?} (rest of map {:?}); player bounds centre ({:.3}, {:.3}, {:.3}) size ({:.3}, {:.3}, {:.3}); caster bias (all casters) from pipeline 1.0/1.0 x texel x 2.5: texel {:.6} m, depth {:.6} m, normal {:.6} m; raster bias 1 / 2.5; rigid casters without normals {}; static map: {} rigid draws as of its last bake, {} rigid draws per frame, {} bakes",
         inner.skinned_casters,
         inner.skinned_recorded,
         tally.player,
@@ -1702,6 +1957,9 @@ fn finish_pending_probe(world: &World, render_context: &RenderContext) {
         caster_bias.1,
         caster_bias.2,
         inner.rigid_without_normals,
+        inner.static_recorded,
+        inner.per_frame_rigid,
+        inner.static_bakes,
     );
     info!(
         "主光阴影账目：帧 prepared {} / drawn {}（静默跳过 {}、空过 {}）；caster {}（布局取不出 {}，实录 draw {}）；光框 {box_w:.1}×{box_h:.1} m 深 {box_d:.1} m（texel {:.2} cm）；深度图非清 {} texel（{:.2}%）、最小深度 {min_depth:.4}；caster 原点：投影 {origins}、出框 {out_of_range}、邻域有图 {near_nonclear}；单 texel 比较 lit {lit} vs 影 {shadowed}、最大深度差 {max_gap:.4}",
@@ -1724,7 +1982,7 @@ fn finish_pending_probe(world: &World, render_context: &RenderContext) {
 fn log_counter_line(world: &World) {
     let inner = world.resource::<ShadowAccount>().0.lock().unwrap();
     info!(
-        "主光阴影账目（wasm 计数行）：帧 prepared {} / drawn {}（静默跳过 {}、空过 {}）；caster {}（布局取不出 {}，实录 draw {}）；skinned casters {} drawn {} (player {}, NPC {}, NPC Off at dither 0 {}, other skinned {}, layout invalid {}; palettes {}, joints {})",
+        "主光阴影账目（wasm 计数行）：帧 prepared {} / drawn {}（静默跳过 {}、空过 {}）；caster {}（布局取不出 {}，实录 draw {}）；skinned casters {} drawn {} (player {}, NPC {}, NPC Off at dither 0 {}, other skinned {}, layout invalid {}; palettes {}, joints {}); static map: {} rigid draws as of its last bake, {} rigid draws per frame, {} bakes",
         inner.frames_prepared,
         inner.frames_drawn,
         inner.frames_skipped_not_ready,
@@ -1741,11 +1999,18 @@ fn log_counter_line(world: &World) {
         inner.skinned_invalid,
         inner.skinned_tally.palettes,
         inner.skinned_tally.joints,
+        inner.static_recorded,
+        inner.per_frame_rigid,
+        inner.static_bakes,
     );
 }
 
 /// 渲染启动：深度图、比较采样器、三块 buffer、group 0 布局。
-fn init_shadow_resources(mut commands: Commands, render_device: Res<RenderDevice>) {
+fn init_shadow_resources(
+    mut commands: Commands,
+    render_device: Res<RenderDevice>,
+    pipeline_cache: Res<PipelineCache>,
+) {
     let texture = render_device.create_texture(&TextureDescriptor {
         label: Some("site_shadow_depth_texture"),
         size: Extent3d {
@@ -1764,6 +2029,79 @@ fn init_shadow_resources(mut commands: Commands, render_device: Res<RenderDevice
     });
     let depth_view = texture.create_view(&TextureViewDescriptor {
         dimension: Some(TextureViewDimension::D2),
+        ..Default::default()
+    });
+    let static_view = render_device
+        .create_texture(&TextureDescriptor {
+            label: Some("site_shadow_static_depth_texture"),
+            size: Extent3d {
+                width: SHADOWMAP_SIZE,
+                height: SHADOWMAP_SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Depth32Float,
+            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        })
+        .create_view(&TextureViewDescriptor {
+            dimension: Some(TextureViewDimension::D2),
+            ..Default::default()
+        });
+    // The copy reads the static map as an unfilterable float texture through a
+    // nearest, non-comparison sampler (shaders/shadow_depth_copy.wgsl).
+    let copy_layout = BindGroupLayoutDescriptor::new(
+        "site_shadow_static_copy_layout",
+        &[
+            BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Texture {
+                    sample_type: TextureSampleType::Float { filterable: false },
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 1,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Sampler(SamplerBindingType::NonFiltering),
+                count: None,
+            },
+        ],
+    );
+    let copy_sampler = crate::weather_depth::raw_depth_sampler(&render_device);
+    // Every texel is written with the stored depth (compare Always, no
+    // raster bias: the depth comes from the program, not the rasteriser).
+    let copy_pipeline = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
+        label: Some("site_shadow_static_copy_pipeline".into()),
+        layout: vec![copy_layout.clone()],
+        vertex: VertexState {
+            shader: SHADOW_COPY_SHADER.clone(),
+            entry_point: Some("vertex".into()),
+            ..Default::default()
+        },
+        fragment: Some(FragmentState {
+            shader: SHADOW_COPY_SHADER.clone(),
+            entry_point: Some("fragment".into()),
+            targets: vec![],
+            ..Default::default()
+        }),
+        primitive: PrimitiveState {
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(DepthStencilState {
+            format: TextureFormat::Depth32Float,
+            depth_write_enabled: true,
+            depth_compare: CompareFunction::Always,
+            stencil: StencilState::default(),
+            bias: DepthBiasState::default(),
+        }),
+        multisample: MultisampleState::default(),
         ..Default::default()
     });
     let cmp_sampler = render_device.create_sampler(&SamplerDescriptor {
@@ -1832,6 +2170,10 @@ fn init_shadow_resources(mut commands: Commands, render_device: Res<RenderDevice
         object_binding_size: std::mem::size_of::<[Vec4; 4]>() as u64,
         depth_layout,
         skin_layout,
+        static_view,
+        copy_layout,
+        copy_sampler,
+        copy_pipeline,
     });
 }
 
@@ -1842,6 +2184,13 @@ fn load(mut shaders: ResMut<Assets<Shader>>) {
         Shader::from_wgsl(
             include_str!("shaders/shadow_depth.wgsl"),
             "moly_game/src/shaders/shadow_depth.wgsl".to_owned(),
+        ),
+    );
+    let _ = shaders.insert(
+        SHADOW_COPY_SHADER.id(),
+        Shader::from_wgsl(
+            include_str!("shaders/shadow_depth_copy.wgsl"),
+            "moly_game/src/shaders/shadow_depth_copy.wgsl".to_owned(),
         ),
     );
 }
@@ -1861,6 +2210,7 @@ impl Plugin for ShadowmapPlugin {
             .init_resource::<ShadowDrawList>()
             .init_resource::<DepthPipelines>()
             .init_resource::<ShadowAccount>()
+            .init_resource::<StaticBake>()
             .add_systems(RenderStartup, init_shadow_resources)
             .add_systems(
                 ExtractSchedule,
@@ -1868,7 +2218,9 @@ impl Plugin for ShadowmapPlugin {
             )
             .add_systems(
                 Render,
-                prepare_shadow_draws.in_set(RenderSystems::PrepareResources),
+                (prepare_shadow_draws, plan_static_bake)
+                    .chain()
+                    .in_set(RenderSystems::PrepareResources),
             )
             .add_render_graph_node::<ShadowDepthNode>(Core3d, ShadowDepthLabel)
             .add_render_graph_edges(
