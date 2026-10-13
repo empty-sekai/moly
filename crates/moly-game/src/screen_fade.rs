@@ -27,6 +27,8 @@ use bevy::{
 use crate::entry::law::{ColorFade, FadeStage};
 
 const LAYER: usize = 27;
+/// The cutscene cover's layer: each overlay camera draws only its own cover.
+const CUTSCENE_LAYER: usize = 26;
 /// Above the wipe (150) and every HUD camera, below the entry cover (200).
 const SCREEN_ORDER: isize = 160;
 /// The cutscene screen sits below the screen manager's own fade panel.
@@ -312,7 +314,10 @@ fn write_cover<C: Component>(world: &mut World, colour: [f32; 4]) {
 
 /// Startup: both covers, transparent.
 pub(crate) fn spawn(mut commands: Commands) {
-    for (order, cutscene) in [(SCREEN_ORDER, false), (CUTSCENE_ORDER, true)] {
+    for (order, layer, cutscene) in [
+        (SCREEN_ORDER, LAYER, false),
+        (CUTSCENE_ORDER, CUTSCENE_LAYER, true),
+    ] {
         commands.spawn((
             Camera2d,
             crate::camera::MYSEKAI_CAMERA_MSAA,
@@ -323,7 +328,7 @@ pub(crate) fn spawn(mut commands: Commands) {
             },
             Tonemapping::None,
             DebandDither::Disabled,
-            RenderLayers::layer(LAYER),
+            RenderLayers::layer(layer),
         ));
         let sprite = (
             Sprite {
@@ -331,9 +336,9 @@ pub(crate) fn spawn(mut commands: Commands) {
                 custom_size: Some(Vec2::splat(EXTENT)),
                 ..default()
             },
-            // Both quads share one layer; the cutscene image sits behind.
+            // The cutscene camera draws first, so its image sits behind.
             Transform::from_xyz(0.0, 0.0, if cutscene { 0.0 } else { 1.0 }),
-            RenderLayers::layer(LAYER),
+            RenderLayers::layer(layer),
             Visibility::Hidden,
         );
         if cutscene {
