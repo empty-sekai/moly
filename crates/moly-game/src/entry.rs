@@ -129,7 +129,9 @@ pub(crate) struct EntrySequence {
     end_source_t: Option<f32>,
     normal_private: Option<NormalPrivate>,
     hidden_visibility: Option<Visibility>,
-    waiting_reported: bool,
+    /// The last blocker named while waiting under the cover, with the wait
+    /// (real seconds) at which it was named.
+    waiting_reported: Option<(String, f64)>,
 }
 
 impl EntrySequence {
@@ -149,7 +151,7 @@ impl EntrySequence {
             end_source_t: None,
             normal_private: None,
             hidden_visibility: None,
-            waiting_reported: false,
+            waiting_reported: None,
         }
     }
 
@@ -240,6 +242,8 @@ fn player_entity(world: &mut World) -> Option<Entity> {
     }
 }
 
+const FIXTURE_BINDING_BLOCKER: &str = "fixture layout is binding";
+
 /// What is not ready yet, or `None` when the join may begin.
 fn join_blocker(world: &mut World) -> Option<String> {
     let site = world
@@ -264,7 +268,7 @@ fn join_blocker(world: &mut World) -> Option<String> {
     if !world.contains_resource::<crate::fixture::FixtureScenesReady>()
         || !crate::fixture::placements_resolved(world)
     {
-        return Some("fixture layout is binding".into());
+        return Some(FIXTURE_BINDING_BLOCKER.into());
     }
     // A failed catalogue load is not waited on: the lookup names it.
     if !world.contains_resource::<house_door::HouseCatalog>()
@@ -760,9 +764,21 @@ pub(crate) fn advance(world: &mut World) {
                     }
                 }
                 Some(blocker) => {
-                    if !seq.waiting_reported && real - seq.started_real > 30.0 {
-                        seq.waiting_reported = true;
-                        warn!("[entry] still under the cover after 30 s: {blocker}");
+                    // After 30 s under the cover, the blocker is named when
+                    // it changes and again every 30 s while it stays.
+                    let waited = real - seq.started_real;
+                    let due = match &seq.waiting_reported {
+                        None => waited > 30.0,
+                        Some((last, at)) => *last != blocker || waited - at > 30.0,
+                    };
+                    if due {
+                        let detail = if blocker == FIXTURE_BINDING_BLOCKER {
+                            format!(" ({})", crate::fixture::binding_detail(world))
+                        } else {
+                            String::new()
+                        };
+                        warn!("[entry] still under the cover after {waited:.0} s: {blocker}{detail}");
+                        seq.waiting_reported = Some((blocker, waited));
                     }
                     seq.phase = Phase::Loading;
                 }

@@ -865,6 +865,51 @@ pub(crate) fn placements_resolved(world: &mut World) -> bool {
     roots.iter(world).all(|(identity, view)| identity && view)
 }
 
+/// Where the layout binding stands, for a report while the entry waits on it:
+/// the rows spawned and the scenes expanded out of the planned rows, the next
+/// row's load states when it is not spawned yet, and the roots whose identity
+/// or view is not resolved.
+pub(crate) fn binding_detail(world: &mut World) -> String {
+    let spawned = world.get_resource::<FixtureSpawnedCount>().map_or(0, |count| count.0);
+    let ready = world.get_resource::<FixtureScenesReadyCount>().map_or(0, |count| count.0);
+    let mut detail = match world.get_resource::<FixtureGltfAssets>() {
+        None => "the furniture plan is not built".to_owned(),
+        Some(assets) => {
+            let total = assets.paths.len();
+            let mut text = format!("{spawned}/{total} rows spawned, {ready} scenes expanded");
+            if let Some(path) = assets.paths.get(spawned) {
+                let next = match assets.handles.get(path) {
+                    None => "not requested".to_owned(),
+                    Some(handle) => {
+                        let server = world.resource::<AssetServer>();
+                        format!(
+                            "load {:?}, dependencies {:?}, recursive {:?}",
+                            server.load_state(handle),
+                            server.dependency_load_state(handle),
+                            server.recursive_dependency_load_state(handle)
+                        )
+                    }
+                };
+                text.push_str(&format!("; next row {} {path}: {next}", spawned + 1));
+            }
+            text
+        }
+    };
+    let mut roots = world.query_filtered::<
+        (Has<FixtureIdentityResolved>, Has<FixtureViewResolved>),
+        (With<FixtureInstanceSeed>, With<FixtureRoot>),
+    >();
+    let (mut identity, mut view) = (0usize, 0usize);
+    for (has_identity, has_view) in roots.iter(world) {
+        identity += usize::from(!has_identity);
+        view += usize::from(!has_view);
+    }
+    detail.push_str(&format!(
+        "; roots without identity {identity}, without view {view}"
+    ));
+    detail
+}
+
 /// 一条摆放（服务端域 mock 的行形状，与存档列一一对应）。
 #[derive(Clone, Copy, PartialEq)]
 struct PlacementMock<P = &'static str> {
