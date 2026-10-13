@@ -2218,7 +2218,7 @@ fn switch_materials(
 /// Only presentation is delayed. The deferred material replacements must be
 /// applied before this system can reveal the roots; `.chain()` supplies that
 /// barrier. Source-inactive descendants and navigation roots remain hidden.
-fn reveal_material_ready_roots(
+pub(crate) fn reveal_material_ready_roots(
     mut commands: Commands,
     ready: Option<Res<SiteMaterialsSwapped>>,
     mut roots: Query<(Entity, &mut Visibility), With<SiteVisualPending>>,

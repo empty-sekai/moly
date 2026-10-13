@@ -146,6 +146,7 @@ pub mod site_material;
 pub mod site_sound;
 mod site_expansion;
 pub(crate) mod site_move;
+mod site_object_dither;
 pub mod sitemap;
 pub mod sitemap_phenomena;
 pub mod sky;
@@ -276,6 +277,7 @@ pub fn app(
     gate_flow::install(&mut app);
     footstep::install(&mut app);
     app.add_plugins(site_material::SiteMaterialPlugin);
+    site_object_dither::install(&mut app);
     room_appearance::install(&mut app);
     plain_background::install(&mut app);
     app.add_plugins(material_order::MaterialOrderPlugin);
