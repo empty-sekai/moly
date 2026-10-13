@@ -305,13 +305,26 @@ pub(crate) fn advance(world: &mut World) {
             *camera,
         )
     };
-    if let Some(asset) = world
-        .resource_mut::<Assets<WipeCircleMaterial>>()
-        .get_mut(&material)
-    {
-        asset.value.params = Vec4::new(scale, offset.x, offset.y, 0.0);
-        if let Some(half) = half {
-            asset.value.half_extent = Vec4::new(half.x, half.y, 0.0, 0.0);
+    // A write marks the material changed and prepares it again, so it is
+    // written only when a value differs.
+    let params = Vec4::new(scale, offset.x, offset.y, 0.0);
+    let half_extent = half.map(|half| Vec4::new(half.x, half.y, 0.0, 0.0));
+    let stale = world
+        .resource::<Assets<WipeCircleMaterial>>()
+        .get(&material)
+        .is_some_and(|asset| {
+            asset.value.params != params
+                || half_extent.is_some_and(|half_extent| asset.value.half_extent != half_extent)
+        });
+    if stale {
+        if let Some(asset) = world
+            .resource_mut::<Assets<WipeCircleMaterial>>()
+            .get_mut(&material)
+        {
+            asset.value.params = params;
+            if let Some(half_extent) = half_extent {
+                asset.value.half_extent = half_extent;
+            }
         }
     }
     let wanted = if visible {
