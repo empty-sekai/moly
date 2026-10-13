@@ -11,15 +11,14 @@ fn compile_glsl(source:&str)->Result<String,String> {
     Ok(output)
 }
 #[test]
-fn actual_raw_depth_helper_compiles_to_non_comparison_glsl_texel_fetch() {
+fn actual_raw_depth_helper_compiles_to_non_comparison_glsl_lookup() {
     let shader=include_str!("shaders/uber_particle.wgsl");
     let helper=shader.split("// BEGIN RAW DEPTH LOAD CONTRACT").nth(1).unwrap()
         .split("// END RAW DEPTH LOAD CONTRACT").next().unwrap();
-    let source=format!("{helper}\n@group(0) @binding(0) var depth:texture_2d<f32>;\n@fragment fn fragment(@builtin(position) p:vec4<f32>)->@location(0) vec4<f32>{{ return vec4<f32>(load_depth_at_pixel(depth,p.xy)); }}");
+    let source=format!("{helper}\n@group(0) @binding(0) var depth:texture_2d<f32>;\n@group(0) @binding(1) var nearest:sampler;\n@fragment fn fragment(@builtin(position) p:vec4<f32>)->@location(0) vec4<f32>{{ return vec4<f32>(load_depth_at_pixel(depth,nearest,p.xy)); }}");
     let glsl=compile_glsl(&source).expect("The actual depth helper must compile through the WebGL2 backend");
-    assert!(glsl.contains("texelFetch"),"{glsl}");
+    assert!(glsl.contains("textureLod("),"{glsl}");
     assert!(!glsl.contains("Shadow"),"Raw depth must not become a comparison: {glsl}");
-    assert!(!glsl.contains("textureLod("),"Raw depth must not be filtered: {glsl}");
 }
 #[test]
 fn regression_unaliased_depth_load_is_rejected_by_the_same_glsl_compiler() {
@@ -40,10 +39,9 @@ fn raw_depth_layout_is_unfilterable_and_missing_depth_discards() {
 fn actual_snapshot_shader_writes_raw_depth_without_colour_or_comparison() {
     let source = include_str!("shaders/weather_depth_copy.wgsl");
     let glsl = compile_glsl(source).expect("Actual snapshot shader must compile for GLSL ES 300");
-    assert!(glsl.contains("texelFetch"), "{glsl}");
+    assert!(glsl.contains("textureLod("), "{glsl}");
     assert!(glsl.contains("gl_FragDepth"), "{glsl}");
     assert!(!glsl.contains("Shadow"), "Snapshot must not compare: {glsl}");
-    assert!(!glsl.contains("textureLod("), "Snapshot must not filter: {glsl}");
 }
 
 #[test]
@@ -67,7 +65,7 @@ fn source_depth_and_colour_adapters_compile_for_webgl2() {
             let mut output = String::new();
             glsl::Writer::new(&mut output, &module, &info, &options, &pipeline,
                 naga::proc::BoundsCheckPolicies::default()).unwrap().write().unwrap();
-            assert!(output.contains("texelFetch"), "{entry}: {output}");
+            assert!(output.contains("texelFetch") || output.contains("textureLod("), "{entry}: {output}");
             assert!(!output.contains("Shadow"), "{entry}: {output}");
         }
     }

@@ -937,6 +937,7 @@ struct SilhouetteGpu {
     rigid_layout: BindGroupLayoutDescriptor,
     skin_layout: BindGroupLayoutDescriptor,
     composite_layout: BindGroupLayoutDescriptor,
+    depth_sampler: Sampler,
     views: GrowBuffer,
     transforms: GrowBuffer,
     palettes: GrowBuffer,
@@ -957,8 +958,9 @@ fn init_gpu(mut commands: Commands, device: Res<RenderDevice>) {
         "character_silhouette_skin_layout",
         &BindGroupLayoutEntries::with_indices(ShaderStages::VERTEX, ((0, window(PALETTE_WINDOW)),)),
     );
-    // The scene colour and the camera depth, both read raw with textureLoad:
-    // a depth texture bound as unfilterable float reads on every backend.
+    // The scene colour and the camera depth, both read raw: the colour with
+    // textureLoad, the depth (bound as unfilterable float) through the nearest
+    // raw-depth sampler, which the GL backend needs to read a depth texture.
     let raw = |binding: u32| BindGroupLayoutEntry {
         binding,
         visibility: ShaderStages::FRAGMENT,
@@ -984,8 +986,15 @@ fn init_gpu(mut commands: Commands, device: Res<RenderDevice>) {
                 },
                 count: None,
             },
+            BindGroupLayoutEntry {
+                binding: 3,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Sampler(SamplerBindingType::NonFiltering),
+                count: None,
+            },
         ],
     );
+    let depth_sampler = crate::weather_depth::raw_depth_sampler(&device);
     let colour = device.create_buffer(&BufferDescriptor {
         label: Some("character_silhouette_colour"),
         size: 16,
@@ -997,6 +1006,7 @@ fn init_gpu(mut commands: Commands, device: Res<RenderDevice>) {
         rigid_layout,
         skin_layout,
         composite_layout,
+        depth_sampler,
         views: GrowBuffer::new(&device, "character_silhouette_views", SLOT as u64),
         transforms: GrowBuffer::new(&device, "character_silhouette_transforms", SLOT as u64),
         palettes: GrowBuffer::new(&device, "character_silhouette_palettes", PALETTE_WINDOW),
@@ -1495,6 +1505,7 @@ impl ViewNode for CharacterSilhouetteNode {
                     (0, Bound::View(&target.scratch.default_view)),
                     (1, Bound::View(depth.view())),
                     (2, Bound::whole(&gpu.colour)),
+                    (3, Bound::Sampler(&gpu.depth_sampler)),
                 ],
                 frame,
             );

@@ -46,10 +46,12 @@ fn vertex(in: Vertex) -> @builtin(position) vec4<f32> {
 }
 
 @group(2) @binding(0) var scene_colour: texture_2d<f32>;
-// The camera depth read raw, one texel per pixel (a depth texture bound as
-// unfilterable float, readable on every backend).
+// The camera depth read raw, one texel per pixel: a depth texture bound as
+// unfilterable float, read through a nearest, non-comparison sampler at the
+// texel centre (a GL depth texture read without a sampler returns 0).
 @group(2) @binding(1) var scene_depth: texture_2d<f32>;
 @group(2) @binding(2) var<uniform> silhouette_colour: vec4<f32>;
+@group(2) @binding(3) var scene_depth_sampler: sampler;
 
 // The sRGB transfer both ways, on [0, 1]: the scene target stores linear
 // values and encodes them on write, the source's frame buffer holds the
@@ -78,7 +80,8 @@ fn decode(c: vec3<f32>) -> vec3<f32> {
 @fragment
 fn silhouette_fragment(@builtin(position) pixel: vec4<f32>) -> @location(0) vec4<f32> {
     let p = vec2<i32>(pixel.xy);
-    if !(pixel.z < textureLoad(scene_depth, p, 0).x) {
+    let depth_uv = pixel.xy / vec2<f32>(textureDimensions(scene_depth));
+    if !(pixel.z < textureSampleLevel(scene_depth, scene_depth_sampler, depth_uv, 0.0).x) {
         discard;
     }
     let under = textureLoad(scene_colour, p, 0);

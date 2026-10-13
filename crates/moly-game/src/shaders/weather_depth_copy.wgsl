@@ -1,8 +1,16 @@
 // Copy the actual camera attachment after opaques, one raw texel per pixel.
 // Source and destination are separate, single-sample Depth32Float textures of
 // equal extent. No geometry replay, filtering, projection conversion, resolve,
-// comparison sampler or colour target participates in this operation.
+// comparison sampler or colour target participates in this operation. The
+// attachment is read through a nearest, non-comparison sampler at the texel
+// centre (see `raw_depth_layout`).
 @group(0) @binding(0) var camera_depth: texture_2d<f32>;
+@group(0) @binding(1) var depth_sampler: sampler;
+
+fn depth_at(pixel: vec2<f32>) -> f32 {
+    let size = vec2<f32>(textureDimensions(camera_depth));
+    return textureSampleLevel(camera_depth, depth_sampler, pixel / size, 0.0).x;
+}
 
 @vertex
 fn vertex(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
@@ -13,7 +21,7 @@ fn vertex(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
 
 @fragment
 fn fragment(@builtin(position) pixel: vec4<f32>) -> @builtin(frag_depth) f32 {
-    return textureLoad(camera_depth, vec2<i32>(pixel.xy), 0).x;
+    return depth_at(pixel.xy);
 }
 
 // The original GLES program's ComputeScreenPos is bottom-left-origin and
@@ -22,7 +30,6 @@ fn fragment(@builtin(position) pixel: vec4<f32>) -> @builtin(frag_depth) f32 {
 // continues against the unchanged reversed camera attachment.
 @fragment
 fn source_fragment(@builtin(position) pixel: vec4<f32>) -> @builtin(frag_depth) f32 {
-    let size = vec2<i32>(textureDimensions(camera_depth));
-    let p = vec2<i32>(i32(pixel.x), size.y - 1 - i32(pixel.y));
-    return 1.0 - textureLoad(camera_depth, p, 0).x;
+    let height = f32(textureDimensions(camera_depth).y);
+    return 1.0 - depth_at(vec2<f32>(pixel.x, height - pixel.y));
 }

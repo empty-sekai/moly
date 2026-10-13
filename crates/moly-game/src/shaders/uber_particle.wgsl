@@ -25,6 +25,7 @@ struct UberT1Params {
 @group(0) @binding(1) var<uniform> view: View;
 @group(2) @binding(0) var opaque_depth: texture_2d<f32>;
 @group(2) @binding(1) var<uniform> depth_available: vec4<u32>;
+@group(2) @binding(2) var opaque_depth_sampler: sampler;
 struct EmissionObject {
     clip_from_local: mat4x4<f32>,
     params: UberT1Params,
@@ -56,6 +57,7 @@ struct ParticleEnv {
 @group(3) @binding(3) var<uniform> env: ParticleEnv;
 @group(1) @binding(0) var opaque_depth: texture_2d<f32>;
 @group(1) @binding(1) var<uniform> depth_available: vec4<u32>;
+@group(1) @binding(2) var opaque_depth_sampler: sampler;
 #endif
 struct UberVertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -204,9 +206,12 @@ fn shade_tail(colour: vec4<f32>, p: UberT1Params, light: vec4<f32>) -> vec4<f32>
 // BEGIN RAW DEPTH LOAD CONTRACT
 // The host aliases the existing depth-format view as unfilterable float. This
 // is not a colour conversion or a second depth render: raw texels are unchanged.
-// GLSL ES can texelFetch this sampler2D without shadow-comparison semantics.
-fn load_depth_at_pixel(depth: texture_2d<f32>, pixel: vec2<f32>) -> f32 {
-    return textureLoad(depth, vec2<i32>(pixel), 0).x;
+// GLSL ES reads this sampler2D without shadow-comparison semantics, through a
+// nearest sampler at the texel centre (a GL depth texture read without a
+// sampler keeps its own linear filter and returns 0).
+fn load_depth_at_pixel(depth: texture_2d<f32>, nearest: sampler, pixel: vec2<f32>) -> f32 {
+    let size = vec2<f32>(textureDimensions(depth));
+    return textureSampleLevel(depth, nearest, pixel / size, 0.0).x;
 }
 // END RAW DEPTH LOAD CONTRACT
 
@@ -227,7 +232,7 @@ fn emission_fragment(in: UberVertexOutput) -> @location(0) vec4<f32> {
         if depth_available.x == 0u { discard; }
         // Same single-sample snapshot as the forward path. Incompatible MSAA
         // attachments are rejected by the host; no sample-zero resolve is used.
-        let scene_z = load_depth_at_pixel(opaque_depth, in.position.xy);
+        let scene_z = load_depth_at_pixel(opaque_depth, opaque_depth_sampler, in.position.xy);
         colour = soften_alpha(colour, scene_z, in.position.z, object.params.coords.y);
     }
     return colour;
@@ -240,7 +245,7 @@ fn fragment(in: UberVertexOutput) -> @location(0) vec4<f32> {
         // Discard, rather than merely setting alpha=0: authored blend factors
         // may be One/One, so alpha alone does not guarantee zero contribution.
         if depth_available.x == 0u { discard; }
-        let scene_z = load_depth_at_pixel(opaque_depth, in.position.xy);
+        let scene_z = load_depth_at_pixel(opaque_depth, opaque_depth_sampler, in.position.xy);
         colour = soften_alpha(colour, scene_z, in.position.z, params.coords.y);
     }
     return vec4<f32>(srgb_format_decode(colour.rgb), colour.a);

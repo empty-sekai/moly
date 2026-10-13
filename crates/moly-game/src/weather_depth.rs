@@ -147,8 +147,11 @@ mod contract_tests {
 mod shader_tests;
 
 
-/// wgpu permits a depth-format view with an unfilterable-float binding. Naga's
-/// GLSL backend can therefore use raw texelFetch, without comparison samplers.
+/// wgpu permits a depth-format view with an unfilterable-float binding, so
+/// Naga's GLSL backend reads it as a plain sampler2D rather than a comparison
+/// sampler. The read goes through a nearest, non-comparison sampler: on the GL
+/// backend a depth texture keeps its own linear filter, which a 32-bit float
+/// depth format cannot use, and a read without a sampler returns 0.
 /// The texture itself is the unchanged camera-depth snapshot, per view.
 pub(crate) fn raw_depth_layout() -> BindGroupLayoutDescriptor {
     BindGroupLayoutDescriptor::new("weather_raw_camera_depth", &[
@@ -158,7 +161,22 @@ pub(crate) fn raw_depth_layout() -> BindGroupLayoutDescriptor {
         BindGroupLayoutEntry {binding:1,visibility:ShaderStages::FRAGMENT,
             ty:BindingType::Buffer {ty:BufferBindingType::Uniform,has_dynamic_offset:false,
                 min_binding_size:std::num::NonZeroU64::new(16)},count:None},
+        BindGroupLayoutEntry {binding:2,visibility:ShaderStages::FRAGMENT,
+            ty:BindingType::Sampler(SamplerBindingType::NonFiltering),count:None},
     ])
+}
+
+/// The nearest, non-comparison sampler every raw depth read uses.
+pub(crate) fn raw_depth_sampler(device: &bevy::render::renderer::RenderDevice) -> Sampler {
+    device.create_sampler(&SamplerDescriptor {
+        label: Some("raw_depth_nearest"),
+        address_mode_u: AddressMode::ClampToEdge,
+        address_mode_v: AddressMode::ClampToEdge,
+        mag_filter: FilterMode::Nearest,
+        min_filter: FilterMode::Nearest,
+        mipmap_filter: FilterMode::Nearest,
+        ..default()
+    })
 }
 
 #[derive(Component)]
@@ -169,6 +187,7 @@ pub(crate) struct RawDepthGpu {
     invalid_view: TextureView,
     valid: Buffer,
     invalid: Buffer,
+    sampler: Sampler,
     copy_pipeline: CachedRenderPipelineId,
     source_copy_pipeline: CachedRenderPipelineId,
 }
@@ -186,7 +205,9 @@ fn load_depth_copy(mut shaders: ResMut<Assets<Shader>>) {
 }
 
 fn depth_copy_layout() -> BindGroupLayoutDescriptor {
-    BindGroupLayoutDescriptor::new("weather_copy_raw_depth", &[raw_depth_layout().entries[0]])
+    let raw = raw_depth_layout();
+    BindGroupLayoutDescriptor::new("weather_copy_raw_depth",
+        &[raw.entries[0], BindGroupLayoutEntry { binding: 1, ..raw.entries[2] }])
 }
 
 fn init_raw_depth(mut commands:Commands, device:Res<bevy::render::renderer::RenderDevice>,
@@ -225,7 +246,8 @@ fn init_raw_depth(mut commands:Commands, device:Res<bevy::render::renderer::Rend
     };
     let copy_pipeline = cache.queue_render_pipeline(copy_descriptor("fragment"));
     let source_copy_pipeline = cache.queue_render_pipeline(copy_descriptor("source_fragment"));
-    commands.insert_resource(RawDepthGpu {invalid_view,valid,invalid,copy_pipeline,source_copy_pipeline});
+    let sampler = raw_depth_sampler(&device);
+    commands.insert_resource(RawDepthGpu {invalid_view,valid,invalid,sampler,copy_pipeline,source_copy_pipeline});
 }
 
 /// Both bind groups are cached by layout and bound resource ids, so a view
@@ -264,7 +286,7 @@ pub(crate) fn prepare_raw_depth(
             // the same descriptor a per-frame create_view would use.
             let source = groups.get(&device, "weather_actual_depth_source",
                 &cache.get_bind_group_layout(&depth_copy_layout()),
-                &[(0, Bound::View(main.view()))], frame);
+                &[(0, Bound::View(main.view())), (1, Bound::Sampler(&gpu.sampler))], frame);
             let source_texture = textures.get(&device, TextureDescriptor {
                 label: Some("source_GLES_actual_opaque_depth"),
                 size: main.texture.size(), mip_level_count: 1, sample_count: 1,
@@ -283,7 +305,8 @@ pub(crate) fn prepare_raw_depth(
         // explicitly invalid binding, never a valid flag over last-frame depth.
         let group = groups.get(&device, "weather_raw_depth_for_view",
             &cache.get_bind_group_layout(&raw_depth_layout()),
-            &[(0, Bound::View(view)), (1, Bound::whole(valid))], frame);
+            &[(0, Bound::View(view)), (1, Bound::whole(valid)), (2, Bound::Sampler(&gpu.sampler))],
+            frame);
         let mut entity = commands.entity(entity);
         entity.insert(RawDepthBinding { group });
         if let Some(snapshot) = snapshot { entity.insert(snapshot); }
