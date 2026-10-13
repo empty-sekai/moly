@@ -6,4 +6,6 @@ $:
         build: .ide/Dockerfile
         image: cnbcool/default-dev-env:latest
       services:
-        - vscode
+        - name: vscode
+          options:
+            keepAliveTimeout: 18h
