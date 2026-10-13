@@ -396,6 +396,17 @@ impl ContentLibrary {
         self.active.is_some() || self.pending.is_some() || self.stopping || self.scene_owned
     }
 
+    /// Whether the library reads the furniture availability cache now: it is
+    /// open (in game or in the web shell), shows a fixture dialog or a
+    /// performance, or still owns a choice it staged or started.
+    pub(crate) fn reads_availability(&self) -> bool {
+        self.open
+            || self.external_open
+            || self.watching
+            || self.fixture_dialog.is_some()
+            || self.browser_busy()
+    }
+
     pub(crate) fn owns_talk_preview(&self, ticket: u64) -> bool {
         !self.stopping
             && self

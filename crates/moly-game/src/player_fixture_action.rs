@@ -503,10 +503,21 @@ struct AvailabilitySweep {
 /// no loaded or published timeline; resources load only for a request. The
 /// refresh runs within a per-frame budget instead of re-planning every seat
 /// of every fixture each frame; at least one fixture is re-derived per frame.
+/// While the library does not read the cache, nothing is derived and the
+/// cache is emptied, so it refills (missing entries first) when read again.
 pub(crate) fn refresh_availability(world: &mut World) {
     let Some(mut runtime) = world.remove_resource::<PlayerFixtureRuntime>() else {
         return;
     };
+    if !world
+        .get_resource::<crate::content_library::ContentLibrary>()
+        .is_some_and(|library| library.reads_availability())
+    {
+        runtime.availability.clear();
+        runtime.availability_sweep = AvailabilitySweep::default();
+        world.insert_resource(runtime);
+        return;
+    }
     let targets: Vec<FixtureTarget> = world
         .query::<(Entity, &FixtureActivityIdentity)>()
         .iter(world)
