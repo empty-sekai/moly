@@ -11,7 +11,7 @@ mod effects;
 mod source;
 
 pub(crate) use source::{
-    AnimationPlayableSettings, BlendCurve, ClipTarget, ControlSettings, CutScenePayload,
+    AnimationPlayableSettings, ClipTarget, ControlSettings, CutScenePayload,
     ExpansionEffect, ExposedSource, InfiniteClip, SourceAssetId, TimelineClip, TimelineClipKey,
     TimelineDefinition, TimelinePackage, TimelinePayload, TimelineTrack,
 };

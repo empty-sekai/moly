@@ -81,12 +81,6 @@ pub(crate) struct TalkCandidates {
     roster: Vec<u32>,
 }
 
-impl TalkCandidates {
-    pub(crate) fn contains_talk(&self, master_id: i32) -> bool {
-        self.rows.iter().any(|row| row.talk_id == master_id)
-    }
-}
-
 /// 候选段文本字符集：`balloon::bake_atlas` 并进 tweet 主表字符集一起
 /// 烘。字段对气泡模块开放。
 #[derive(Resource)]

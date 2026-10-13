@@ -4,7 +4,10 @@
 //! rewrite the cast. Unit-group positions select action-point fields exactly;
 //! one timeline-row draw is retained across all asynchronous asset preparation.
 
+use moly_law::talk::select::UniformDraw;
+
 use super::*;
+use crate::fixture_attach::AttachPoints;
 
 #[derive(Debug, Clone)]
 pub(crate) struct CastLocate {

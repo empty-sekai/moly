@@ -83,8 +83,8 @@ impl FixtureActivityProvider {
         self.assets.cache_counts()
     }
 
-    /// Exact package/prefab resolution, also usable by the NPC owner after its
-    /// source factory has selected a height-qualified PreparedTimeline.
+    /// Exact package/prefab resolution, also usable by the NPC owner once a
+    /// timeline is selected.
     pub(crate) fn definition(
         &mut self,
         world: &World,

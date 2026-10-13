@@ -1,7 +1,10 @@
 //! Source-qualified, single-character actions for browsing and exact playback.
 //! NoTalk actions and a story's pre-action are different source identities.
 //! Both can borrow the normal NPC fixture owner without starting a dialogue.
+use moly_law::talk::TweetRef;
+
 use super::*;
+use crate::talk::TalkStore;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ActivityOrigin {
