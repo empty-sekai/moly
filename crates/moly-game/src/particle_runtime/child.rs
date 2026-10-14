@@ -15,7 +15,9 @@
 //! two-constant linear axes of one mode, not in world space, the constant
 //! speed modifier one; orbital, offset and radial constants or two constants,
 //! their orbital section only in a Local target), Noise (the qualified Noise
-//! law, with the target's installed owner seed and scroll), ClampVelocity (one
+//! law, with the target's installed owner seed and scroll), ForceOverLifetime
+//! (constant or two-constant axes of one mode, not randomized per frame, in or
+//! out of world space), ClampVelocity (one
 //! axis group, a constant limit, zero drag), InheritVelocity (Initial with a
 //! constant or two-constant curve; Current outside World space, which does
 //! nothing here), SizeOverLifetime,
@@ -32,7 +34,7 @@
 //! velocity. In Current mode the start adds nothing and the per-update module
 //! acts only in World space. The newborn and catch-up pre-simulation modules run in the
 //! engine's order: gravity and the animated velocity cleared,
-//! RotationOverLifetime, Velocity (linear, then orbital), Noise,
+//! RotationOverLifetime, Velocity (linear, then orbital), Noise, Force,
 //! ClampVelocity, CustomData. The newborn call does not advance the Noise
 //! scroll; each catch-up step's call does, once, before the modules read it.
 //! The inherited block must be the neutral one
@@ -263,6 +265,8 @@ struct ChildLaws {
     /// The orbital section contributes (some orbital, offset or radial block
     /// is not zero); the target is Local.
     orbital: bool,
+    /// ForceOverLifetime (constant or two-constant axes of one mode).
+    force: Option<moly_law::particle::force::ForceOverLifetime>,
     /// ClampVelocity (one axis group, a constant limit, zero drag).
     limit: Option<moly_law::particle::LimitVelocity>,
     /// InheritVelocity in Initial mode: the curve the start velocity adds
@@ -293,10 +297,7 @@ fn child_laws(emitter: &EmitterParams) -> Result<ChildLaws, Refused> {
     // particle's sheet cell from the particle's own seed (and age, for a
     // curve), which the child Emit writes as any birth does. A target's
     // sheet is drawn as any system's.
-    if emitter.force.is_some()
-        || emitter.collision.is_some()
-        || emitter.trails.is_some()
-    {
+    if emitter.collision.is_some() || emitter.trails.is_some() {
         return unsupported("target module outside the child composition");
     }
     // A target's own edges: birth edges only, recorded by the newborn call
@@ -379,6 +380,10 @@ fn child_laws(emitter: &EmitterParams) -> Result<ChildLaws, Refused> {
         None => None,
         Some(params) => Some(child_velocity(params)?),
     };
+    let force = match &emitter.force {
+        None => None,
+        Some(params) => Some(child_force(params)?),
+    };
     let limit = match &emitter.limit_velocity {
         None => None,
         Some(params) => Some(child_limit(params)?),
@@ -413,6 +418,7 @@ fn child_laws(emitter: &EmitterParams) -> Result<ChildLaws, Refused> {
         size_3d: moly_law::particle::death_event::size_3d(emitter),
         velocity,
         orbital,
+        force,
         limit,
         inherit,
     })
@@ -459,6 +465,50 @@ fn child_velocity(params: &moly_law::particle::schema::VelocityOverLifetimeParam
         return unsupported("target Velocity orbital, offset or radial curve mode");
     }
     moly_law::particle::velocity::VelocityOverLifetime::from_params(params).map_err(Refused::Unsupported)
+}
+
+/// A target's ForceOverLifetime on the child path. ForceModule::Update runs
+/// in every pre-simulation call of the child Emit, between Noise and
+/// ClampVelocity, and adds `dt * M * force` to the persistent velocity (see
+/// [`add_force`]). The module dispatches all three axes on the x axis's curve
+/// mode: constants read each axis's scalar, two constants take
+/// `min + u * (max - min)` with the three successive draws of the particle
+/// seed's force stream (the root path's law), so the axes must share one mode.
+/// Per-frame randomization draws from the module's own stream instead, and the
+/// curve modes go through evaluation helpers; neither is transcribed here.
+fn child_force(params: &moly_law::particle::schema::ForceParams)
+    -> Result<moly_law::particle::force::ForceOverLifetime, Refused> {
+    let unsupported = |reason| Err(Refused::Unsupported(reason));
+    if params.randomize_per_frame {
+        return unsupported("target Force randomized per frame");
+    }
+    let constants = params.axes.iter().all(|c| matches!(c, MinMaxCurve::Constant(_)));
+    let two_constants = params.axes.iter().all(|c| matches!(c, MinMaxCurve::TwoConstants { .. }));
+    if !(constants || two_constants) {
+        return unsupported("target Force axes other than constants or two constants of one mode");
+    }
+    moly_law::particle::force::ForceOverLifetime::from_params(params)
+        .map_err(|_| Refused::Unsupported("target Force outside the force law"))
+}
+
+/// The columns ForceModule takes the force through, as the engine's
+/// GetTransformationMatrix builds them from the target's owner words: a World
+/// target with the force not in world space takes the first three columns of
+/// its local-to-world; a target that is not World-space with the force in
+/// world space takes the first three columns of its world-to-local, each
+/// times its axis of the emitter scale; a World target with the force in world
+/// space takes the unit columns times the emitter scale; any other target the
+/// unit columns.
+fn force_columns(world_space: bool, in_world_space: bool, owner: &ChildOwner) -> [[f32; 3]; 3] {
+    const UNIT: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let column = |m: &[f32; 16], c: usize| [m[4 * c], m[4 * c + 1], m[4 * c + 2]];
+    let scale = owner.emitter_scale;
+    match (world_space, in_world_space) {
+        (true, false) => std::array::from_fn(|c| column(&owner.local_to_world, c)),
+        (false, true) => std::array::from_fn(|c| column(&owner.world_to_local, c).map(|v| v * scale[c])),
+        (true, true) => std::array::from_fn(|c| UNIT[c].map(|v| v * scale[c])),
+        (false, false) => UNIT,
+    }
 }
 
 /// A target's ClampVelocity on the child path: one axis group, a constant
@@ -719,6 +769,7 @@ fn apply_with_laws(
     let back_scale = command.dt / system.emitter.simulation_speed;
     let gravity_space = (!world_space && !arms::on("gravityWorld")).then_some(&owner.world_to_local);
     let velocity_space = world_space.then_some(&owner.local_to_world);
+    let force_space = laws.force.as_ref().map(|force| force_columns(world_space, force.in_world_space, owner));
     let batch_seeds: Vec<u32> = (0..lanes.len()).map(|index| lanes[index & !3].seed).collect();
     for (index, lane) in lanes.iter_mut().enumerate() {
         let clamp_dt = if arms::on("clampCommandDt") { command.dt } else { lane.birth_dt };
@@ -729,7 +780,7 @@ fn apply_with_laws(
             scroll
         };
         let space = ModuleSpace { velocity: velocity_space, batch_seed: batch_seeds[index], clamp_dt,
-            noise_scroll: newborn_scroll };
+            noise_scroll: newborn_scroll, force: force_space.as_ref() };
         pre_modules(system, &laws, lane, lane.birth_dt, update.gravity, gravity_space, space);
     }
     for lane in &mut lanes {
@@ -808,7 +859,7 @@ fn apply_with_laws(
             }
             for (index, lane) in lanes[..covered].iter_mut().enumerate() {
                 let space = ModuleSpace { velocity: velocity_space, batch_seed: batch_seeds[index], clamp_dt: dt,
-                    noise_scroll: scroll };
+                    noise_scroll: scroll, force: force_space.as_ref() };
                 pre_modules(system, &laws, lane, dt, update.gravity, gravity_space, space);
             }
             for lane in &mut lanes[..covered] {
@@ -932,16 +983,18 @@ fn start_size(inherit: &ChildInherit, own: [Option<f32>; 3], size_3d: bool) -> [
     if size_3d { size } else { [size[0]; 3] }
 }
 
-/// What the Velocity, Noise and ClampVelocity updates of one lane read
+/// What the Velocity, Noise, Force and ClampVelocity updates of one lane read
 /// besides the lane: the matrix of the linear velocity (None for the
-/// identity), the seed of the lane's four-lane group, the lane's dt and the
-/// target's Noise scroll at this call.
+/// identity), the seed of the lane's four-lane group, the lane's dt, the
+/// target's Noise scroll at this call and the force columns (None without
+/// ForceOverLifetime).
 #[derive(Clone, Copy)]
 struct ModuleSpace<'a> {
     velocity: Option<&'a [f32; 16]>,
     batch_seed: u32,
     clamp_dt: f32,
     noise_scroll: f32,
+    force: Option<&'a [[f32; 3]; 3]>,
 }
 
 /// The target's Noise scroll after one scroll update over `dt` (the scroll
@@ -969,11 +1022,25 @@ fn add_noise(system: &Runtime, lane: &mut Lane, scroll: f32) {
     }
 }
 
+/// ForceOverLifetime on one lane: the force drawn from the lane's seed, taken
+/// through the force columns per axis as `x * c0 + (y * c1 + z * c2)`, times
+/// the call's dt (the lane's birth dt in the newborn call, the step in a
+/// catch-up call) and added to the persistent velocity. The age is not read
+/// by the constant and two-constant modes.
+fn add_force(laws: &ChildLaws, lane: &mut Lane, dt: f32, columns: Option<&[[f32; 3]; 3]>) {
+    if let (Some(force), Some(c)) = (&laws.force, columns) {
+        let [x, y, z] = force.sample(lane.seed, lane.age);
+        let f: [f32; 3] = std::array::from_fn(|a| x * c[0][a] + (y * c[1][a] + z * c[2][a]));
+        lane.velocity = std::array::from_fn(|a| lane.velocity[a] + dt * f[a]);
+    }
+}
+
 /// The pre-simulation modules of one lane over dt, in the engine's order:
 /// gravity into the persistent velocity, animated velocity cleared, angular
 /// speed cleared and rebuilt by RotationOverLifetime, VelocityOverLifetime's
 /// linear velocity and then its orbital velocity added to the animated
-/// velocity, Noise added to the animated velocity, ClampVelocity on the
+/// velocity, Noise added to the animated velocity, Force added to the
+/// persistent velocity, ClampVelocity on the
 /// persistent velocity against persistent plus animated (its k from the
 /// lane's own dt), CustomData at the current age.
 fn pre_modules(system: &mut Runtime, laws: &ChildLaws, lane: &mut Lane, dt: f32, gravity: [f32; 3],
@@ -1011,6 +1078,7 @@ fn pre_modules(system: &mut Runtime, laws: &ChildLaws, lane: &mut Lane, dt: f32,
     if !arms::on("noNoise") {
         add_noise(system, lane, space.noise_scroll);
     }
+    add_force(laws, lane, dt, space.force);
     if !arms::on("clampBeforeVelocity") && !arms::on("noClamp") {
         clamp_velocity(laws, lane, space.clamp_dt);
     }
