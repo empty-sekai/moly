@@ -53,6 +53,12 @@
 //!   off (`_Show` 0): both are hidden. The door parts carry their source
 //!   shader attribute ([`SourceStencilAttribute`]), and the character
 //!   silhouette's stencil replay draws the stencil mesh from it.
+//! - The `Mysekai/Fixture/Basic` door parts draw without their vertex
+//!   colours. The glb carries a `COLOR_0` on them (pure red, green and
+//!   yellow channel masks), and the Basic programs have no COLOR0 consumer
+//!   (the fixture material path's ruling); the imported material would
+//!   multiply it into the base colour, so the attribute is dropped from
+//!   those meshes when the prefab is bound.
 //! - The clip's binding path is `Loc_door/root/joint_door1` (the animation
 //!   file's hierarchy); under the prefab's Animator the joint is
 //!   `root/joint_door1`. The release glb binds the channel to the prefab's
@@ -71,6 +77,8 @@ use crate::character_silhouette::{door_part_attribute, SourceStencilAttribute};
 use crate::site_expansion::law::{Masters, FLOOR_BUTTON_TABLES};
 use moly_assets::json::master::MasterData;
 
+/// The door parts' base program; it reads no vertex colour.
+const BASIC_SHADER: &str = "Mysekai/Fixture/Basic";
 /// `SetUpDoor`'s search: a Transform named exactly this under the wall.
 const DOOR_ANCHOR: &str = "Loc_door";
 /// `SetupEntrance`'s door action point.
@@ -169,6 +177,9 @@ struct DoorPrefab {
     hidden: Vec<String>,
     /// Material names with the source shader attribute of their program.
     attributes: Vec<(String, u8)>,
+    /// Material names of the `Mysekai/Fixture/Basic` program, whose meshes
+    /// draw without their vertex colours.
+    basic: Vec<String>,
     /// The skin bundle's textures (the sidecar's `textures` list).
     textures: Vec<String>,
 }
@@ -571,6 +582,16 @@ impl RoomDoor {
                     .collect()
             })
             .unwrap_or_default();
+        let basic = doc["materials"]
+            .as_array()
+            .map(|materials| {
+                materials
+                    .iter()
+                    .filter(|m| m["shader"]["name"].as_str() == Some(BASIC_SHADER))
+                    .filter_map(|m| m["name"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
         let textures = doc["textures"]
             .as_array()
             .map(|rows| {
@@ -587,6 +608,7 @@ impl RoomDoor {
             close_length,
             hidden,
             attributes,
+            basic,
             textures,
         })
     }
@@ -629,6 +651,23 @@ impl RoomDoor {
                 marked += 1;
             }
         }
+        // The Basic programs read no vertex colour.
+        let mut uncoloured = 0;
+        for entity in &entities {
+            let basic = world
+                .get::<GltfMaterialName>(*entity)
+                .is_some_and(|name| prefab.basic.contains(&name.0));
+            let mesh = world.get::<Mesh3d>(*entity).map(|mesh| mesh.0.clone());
+            let Some(mesh) = mesh.filter(|_| basic) else {
+                continue;
+            };
+            let mut meshes = world.resource_mut::<Assets<Mesh>>();
+            if let Some(mesh) = meshes.get_mut(&mesh) {
+                if mesh.remove_attribute(Mesh::ATTRIBUTE_COLOR).is_some() {
+                    uncoloured += 1;
+                }
+            }
+        }
         self.set_door_texture(world, root, &prefab);
         let animator = entities
             .iter()
@@ -654,7 +693,7 @@ impl RoomDoor {
             }
         };
         info!(
-            "[room-door] {}: door prefab bound {} (scene {}, clips {} {:.4}s / {} {:.4}s, {hidden} stencil/shadow meshes hidden, {marked} parts with a source shader attribute)",
+            "[room-door] {}: door prefab bound {} (scene {}, clips {} {:.4}s / {} {:.4}s, {hidden} stencil/shadow meshes hidden, {marked} parts with a source shader attribute, {uncoloured} Basic meshes without vertex colours)",
             self.skin,
             if bound.is_some() { "with its animator" } else { "without an animator" },
             prefab.scene,
