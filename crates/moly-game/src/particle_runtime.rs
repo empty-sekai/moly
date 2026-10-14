@@ -1179,6 +1179,12 @@ fn simulate_with_emission(system: &mut Runtime, dt: f32, ctx: &Context, emitting
         system.refused_total += 1;
         return Err("start delay: the legacy step does not count the start delay word down".into());
     }
+    // The native slices refuse every Custom simulation space before their
+    // update; the legacy step refuses the module columns it cannot build.
+    if motion::custom_world_module(system) {
+        system.refused_total += 1;
+        return Err(motion::CUSTOM_WORLD_MODULE.into());
+    }
     // Current Update1 calls ParticleSystemState::Tick before the stopped gate
     // and before pre-simulation modules. Only zero delay is admitted here:
     // nonzero authored delay cannot substitute for the native remaining wait
@@ -1333,7 +1339,12 @@ fn simulate_range(system: &mut Runtime, start: usize, end: usize, dt: f32,
         }
     }
     let owner = compose_to_world(system, ctx);
-    let velocity_over_lifetime = system.velocity_law.as_ref();
+    // Velocity and Force each build their columns once per call, before the
+    // lanes; a Custom system with such a module never reaches the update.
+    let module_space = |in_world_space| motion::transformation_columns(system, in_world_space, &owner)
+        .expect("the step refuses a module in world space in a Custom simulation space");
+    let velocity_over_lifetime = system.velocity_law.as_ref().map(|law| (law, module_space(law.in_world_space)));
+    let force_over_lifetime = system.force_law.as_ref().map(|law| (law, module_space(law.in_world_space)));
     // RotationBySpeed is built from the emitter block (admission refused a
     // block its law does not take). Both rotation modules add into one
     // angular-velocity lane per axis that Initial clears for the range, and
@@ -1389,8 +1400,8 @@ fn simulate_range(system: &mut Runtime, start: usize, end: usize, dt: f32,
         let module_age = if child::arms::on("moduleAgeFromNormalized") { age_pre * 100.0 }
             else { system.pool[index].age_percent };
         let (velocity_anim, modifier) = match velocity_over_lifetime {
-            Some(value) => motion::velocity_at_age(value, &system.pool[index], &side, batch_seed,
-                system.emitter.simulation_space, &owner, module_age, dt, birth_dts.is_some()),
+            Some((value, columns)) => motion::velocity_at_age(value, &system.pool[index], &side, batch_seed,
+                system.emitter.simulation_space, &owner, &columns, module_age, dt, birth_dts.is_some()),
             None => ([0.0; 3], 1.0),
         };
         // Noise contributes transient animated velocity after authored
@@ -1411,9 +1422,8 @@ fn simulate_range(system: &mut Runtime, start: usize, end: usize, dt: f32,
         system.side[index].animated = anim;
         // Force modifies persistent velocity before velocity limiting. Animated
         // velocity is still transient and shares the final integration modifier.
-        if let Some(force) = &system.force_law {
-            let acceleration = motion::module_vector(force.sample(side.seed, module_age),
-                force.in_world_space, system.emitter.simulation_space, &owner);
+        if let Some((force, columns)) = force_over_lifetime {
+            let acceleration = motion::module_vector(force.sample(side.seed, module_age), &columns);
             for axis in 0..3 {
                 system.pool[index].velocity[axis] += acceleration[axis] * dt;
             }

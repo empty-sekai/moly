@@ -27,22 +27,89 @@ pub(super) fn current_size(system: &super::Runtime, index: usize, age_percent: f
     }
 }
 
-/// Force and linear velocity share the source space transform, including the
-/// emitter scale for world-space modules. Directions are never normalized.
-pub(super) fn module_vector(
-    value: [f32; 3], in_world_space: bool, simulation: SimulationSpace,
-    owner: &GlobalTransform,
-) -> Vec3 {
-    let value = crate::particle_geometry::reflect(Vec3::from_array(value));
-    let affine = owner.affine();
-    match (simulation == SimulationSpace::World, in_world_space) {
-        (false, false) => value,
-        (true, false) => affine.transform_vector3(value),
-        (true, true) => value * owner.to_scale_rotation_translation().0,
-        (false, true) => affine.inverse().transform_vector3(value * owner.to_scale_rotation_translation().0),
+/// Why a Velocity or Force module in world space in a Custom simulation space
+/// is not run: GetTransformationMatrix tests only whether the space is World,
+/// so it reads the world-to-local the owner update composes from the custom
+/// transform, which the root update does not have.
+pub(super) const CUSTOM_WORLD_MODULE: &str =
+    "Velocity or Force in world space in a Custom simulation space: the custom transform's world-to-local is not composed here";
+
+/// Whether the system has a Velocity or Force module in world space in a
+/// Custom simulation space ([`CUSTOM_WORLD_MODULE`]).
+pub(super) fn custom_world_module(system: &super::Runtime) -> bool {
+    system.emitter.simulation_space == SimulationSpace::Custom
+        && (system.velocity_law.as_ref().is_some_and(|law| law.in_world_space)
+            || system.force_law.as_ref().is_some_and(|law| law.in_world_space))
+}
+
+const UNIT_COLUMNS: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+/// The columns ForceModule and VelocityModule take their linear vector
+/// through, in source axes, as GetTransformationMatrix builds them once per
+/// module call from the owner words. It tests only whether the simulation
+/// space is World. A World system with the module not in world space takes
+/// the first three columns of the local-to-world; a system in another space
+/// with the module in world space takes the first three columns of the
+/// world-to-local, each times its axis of the emitter scale; a World system
+/// with the module in world space takes the unit columns times the emitter
+/// scale; any other system takes the unit columns. The local-to-world is the
+/// owner the root update reads, and the world-to-local is the engine's general
+/// 3D inverse of those words (all zero below its determinant threshold, which
+/// the engine keeps using).
+pub(super) fn transformation_columns(system: &super::Runtime, in_world_space: bool, owner: &GlobalTransform)
+    -> Result<[[f32; 3]; 3], &'static str> {
+    let world = system.emitter.simulation_space == SimulationSpace::World;
+    if !world && in_world_space && system.emitter.simulation_space != SimulationSpace::Local {
+        return Err(CUSTOM_WORLD_MODULE);
+    }
+    let local_to_world = super::birth::source_owner_matrix(owner);
+    Ok(columns(world, in_world_space, &local_to_world, emitter_scale(system, owner)))
+}
+
+/// [`transformation_columns`] from source-axis owner words.
+fn columns(world: bool, in_world_space: bool, local_to_world: &[f32; 16], emitter_scale: [f32; 3])
+    -> [[f32; 3]; 3] {
+    let column = |m: &[f32; 16], c: usize| [m[4 * c], m[4 * c + 1], m[4 * c + 2]];
+    match (world, in_world_space) {
+        (true, false) => std::array::from_fn(|c| column(local_to_world, c)),
+        (false, true) => {
+            let (world_to_local, _) = moly_law::particle::owner::invert_general_3d(local_to_world);
+            std::array::from_fn(|c| column(&world_to_local, c).map(|v| v * emitter_scale[c]))
+        }
+        (true, true) => std::array::from_fn(|c| UNIT_COLUMNS[c].map(|v| v * emitter_scale[c])),
+        (false, false) => UNIT_COLUMNS,
     }
 }
 
+/// The emitter scale the owner update stores for GetTransformationMatrix: the
+/// node's own local scale in Local scaling and one in Shape scaling. In
+/// Hierarchy scaling it is the lossy global scale of the node's chain, which
+/// the root update does not compose; it reads its owner's decomposed scale,
+/// the scale the renderer applies in that mode, as it does for the legacy
+/// billboard, which carries no scaling mode.
+fn emitter_scale(system: &super::Runtime, owner: &GlobalTransform) -> [f32; 3] {
+    use crate::particle_geometry::Scaling;
+    match system.geometry.shape_evidence().map(|evidence| evidence.scaling) {
+        Some(Scaling::Local { scale, .. }) => scale.to_array(),
+        Some(Scaling::Shape { .. }) => [1.0; 3],
+        Some(Scaling::Hierarchy) | None => owner.to_scale_rotation_translation().0.to_array(),
+    }
+}
+
+/// `M * v` as both modules add it, axis `a`:
+/// `v.x * c0[a] + (v.y * c1[a] + v.z * c2[a])` over source-axis columns of
+/// [`transformation_columns`], reflected once into runtime axes. Module values
+/// are source vectors; directions are never normalized.
+pub(super) fn module_vector(value: [f32; 3], columns: &[[f32; 3]; 3]) -> Vec3 {
+    let [x, y, z] = value;
+    let c = columns;
+    crate::particle_geometry::reflect(Vec3::from_array(
+        std::array::from_fn(|a| x * c[0][a] + (y * c[1][a] + z * c[2][a]))))
+}
+
+/// VelocityOverLifetime's animated velocity of one particle and its speed
+/// modifier: the linear vector through `linear_columns` (the module's
+/// [`transformation_columns`]) plus the orbital velocity.
 pub(super) fn velocity_at_age(
     params: &VelocityOverLifetime,
     particle: &Particle,
@@ -50,6 +117,7 @@ pub(super) fn velocity_at_age(
     batch_seed: u32,
     simulation: SimulationSpace,
     owner: &GlobalTransform,
+    linear_columns: &[[f32; 3]; 3],
     age_percent: f32,
     dt: f32,
     newborn: bool,
@@ -58,7 +126,7 @@ pub(super) fn velocity_at_age(
     let affine = owner.affine();
     let world = simulation == SimulationSpace::World;
     let sampled = params.sample(side.seed, batch_seed, age_percent);
-    let linear = module_vector(sampled.linear, params.in_world_space, simulation, owner);
+    let linear = module_vector(sampled.linear, linear_columns);
     let modifier = sampled.speed_modifier;
     let position = Vec3::from_array(particle.position);
     let local = if world { affine.inverse().transform_point3(position) } else { position };
@@ -134,11 +202,13 @@ mod tests {
         });
         let particle = Particle::born([-2.0, 1.0, 3.0], [0.0; 3], 10.0);
         let mut params = params();
+        let local_to_world = super::super::birth::source_owner_matrix(&owner);
         for simulation in [SimulationSpace::Local, SimulationSpace::World] {
+            let space = |in_world_space| columns(simulation == SimulationSpace::World, in_world_space, &local_to_world, [1.0; 3]);
             params.in_world_space = false;
-            let local = velocity_at_age(&VelocityOverLifetime::from_params(&params).unwrap(), &particle, &side(), 17, simulation, &owner, 0.0, 0.01, false);
+            let local = velocity_at_age(&VelocityOverLifetime::from_params(&params).unwrap(), &particle, &side(), 17, simulation, &owner, &space(false), 0.0, 0.01, false);
             params.in_world_space = true;
-            let world = velocity_at_age(&VelocityOverLifetime::from_params(&params).unwrap(), &particle, &side(), 17, simulation, &owner, 0.0, 0.01, false);
+            let world = velocity_at_age(&VelocityOverLifetime::from_params(&params).unwrap(), &particle, &side(), 17, simulation, &owner, &space(true), 0.0, 0.01, false);
             assert_eq!(local, world);
             let expected = if simulation == SimulationSpace::World {
                 [1.9949831, 0.0, 1.0099609]
@@ -156,7 +226,7 @@ mod tests {
         params.z = MinMaxCurve::Constant(3.0);
         let particle = Particle::born([0.0; 3], [0.0; 3], 10.0);
         let (linear, modifier) = velocity_at_age(&VelocityOverLifetime::from_params(&params).unwrap(), &particle, &side(), 17, SimulationSpace::Local,
-            &GlobalTransform::IDENTITY, 0.0, 0.01, false);
+            &GlobalTransform::IDENTITY, &UNIT_COLUMNS, 0.0, 0.01, false);
         assert_eq!(linear, [-1.0, 2.0, 3.0]);
         assert_eq!(modifier, 1.0);
     }
