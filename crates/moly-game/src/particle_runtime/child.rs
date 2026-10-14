@@ -11,8 +11,8 @@
 //! lifetime, size (one axis or three), speed and rotation, a constant start colour source the
 //! Initial law takes, a constant gravity modifier, Shape through the target's
 //! own Shape law (or no Shape with zero speed), RotationOverLifetime with
-//! constant, two-constant or single-curve axes, VelocityOverLifetime (constant or
-//! two-constant linear axes of one mode, not in world space, the constant
+//! constant, two-constant or single-curve axes, VelocityOverLifetime (linear
+//! axes of one mode, in or out of world space, the constant
 //! speed modifier one; orbital, offset and radial constants or two constants,
 //! their orbital section only in a Local target), Noise (the qualified Noise
 //! law, with the target's installed owner seed and scroll), ForceOverLifetime
@@ -380,6 +380,15 @@ fn child_laws(emitter: &EmitterParams) -> Result<ChildLaws, Refused> {
         None => None,
         Some(params) => Some(child_velocity(params)?),
     };
+    // In world space a target that is not World-space takes its
+    // world-to-local columns; the owner words carry the engine's matrices for
+    // a Local target, while a Custom simulation space takes owner branches
+    // that are not transcribed.
+    if velocity.as_ref().is_some_and(|velocity| velocity.in_world_space)
+        && emitter.simulation_space == SimulationSpace::Custom
+    {
+        return unsupported("target Velocity in world space in a Custom simulation space");
+    }
     let force = match &emitter.force {
         None => None,
         Some(params) => Some(child_force(params)?),
@@ -434,29 +443,34 @@ fn zero_orbital(params: &moly_law::particle::schema::VelocityOverLifetimeParams)
 }
 
 /// A target's VelocityOverLifetime on the child path. VelocityModule::Update
-/// adds `M * linear` to the animated velocity, `M` the identity for a Local
-/// or Custom target and the owner's first three columns for a World one (the
-/// linear axes not in world space); a two-constant axis draws from the
-/// particle seed. Its orbital section then adds the orbital velocity: the
+/// adds `x * c0 + (y * c1 + z * c2)` per axis to the animated velocity,
+/// through the columns GetTransformationMatrix builds for the module's
+/// world-space switch (see [`transformation_columns`]); no dt and no speed
+/// modifier enter it. The linear axes must share one mode: with mixed modes
+/// the module skips its whole linear section (and logs an error), which is not
+/// composed. A constant axis reads its scalar and a two-constant one draws
+/// from the particle seed; a curve or two-curve axis is evaluated at the
+/// lane's normalized age before the call (zero in the newborn call, where
+/// InitialModule::Start has just cleared it), through the optimized
+/// polynomial when all three axes carry it and through the curve evaluation
+/// otherwise, a two-curve axis drawing its factor from the same seed stream
+/// (the root path's law).
+/// Its orbital section then adds the orbital velocity: the
 /// lane's position minus the offset, turned by angular speed times dt (Z, X,
 /// Y), moved along itself by radial speed times dt, less the unturned vector,
-/// over dt (the orbital law of the root path). An all-zero orbital block adds
-/// a signed zero, which is not composed. The speed modifier storage exists
-/// only for a modifier other than the constant one.
+/// over dt (the orbital law of the root path). The orbital section builds its
+/// own matrices and never reads the world-space switch. An all-zero orbital
+/// block adds a signed zero, which is not composed. The speed modifier storage
+/// exists only for a modifier other than the constant one.
 fn child_velocity(params: &moly_law::particle::schema::VelocityOverLifetimeParams)
     -> Result<moly_law::particle::velocity::VelocityOverLifetime, Refused> {
     let unsupported = |reason| Err(Refused::Unsupported(reason));
-    if params.in_world_space {
-        return unsupported("target Velocity in world space");
-    }
     if !matches!(params.speed_modifier, MinMaxCurve::Constant(v) if v == 1.0) {
         return unsupported("target Velocity speed modifier other than the constant one");
     }
-    let linear = [&params.x, &params.y, &params.z];
-    let constants = linear.iter().all(|c| matches!(c, MinMaxCurve::Constant(_)));
-    let two_constants = linear.iter().all(|c| matches!(c, MinMaxCurve::TwoConstants { .. }));
-    if !(constants || two_constants) {
-        return unsupported("target Velocity linear axes other than constants or two constants of one mode");
+    let mode = std::mem::discriminant::<MinMaxCurve>;
+    if mode(&params.y) != mode(&params.x) || mode(&params.z) != mode(&params.x) {
+        return unsupported("target Velocity linear axes of mixed modes");
     }
     // The orbital section's curve-mode templates were not read; constants
     // and two constants take the per-particle seed streams of the law.
@@ -491,15 +505,16 @@ fn child_force(params: &moly_law::particle::schema::ForceParams)
         .map_err(|_| Refused::Unsupported("target Force outside the force law"))
 }
 
-/// The columns ForceModule takes the force through, as the engine's
-/// GetTransformationMatrix builds them from the target's owner words: a World
-/// target with the force not in world space takes the first three columns of
-/// its local-to-world; a target that is not World-space with the force in
+/// The columns ForceModule takes the force through and VelocityModule the
+/// linear velocity, as the engine's GetTransformationMatrix builds them from
+/// the target's owner words and the module's world-space switch: a World
+/// target with the module not in world space takes the first three columns of
+/// its local-to-world; a target that is not World-space with the module in
 /// world space takes the first three columns of its world-to-local, each
-/// times its axis of the emitter scale; a World target with the force in world
-/// space takes the unit columns times the emitter scale; any other target the
-/// unit columns.
-fn force_columns(world_space: bool, in_world_space: bool, owner: &ChildOwner) -> [[f32; 3]; 3] {
+/// times its axis of the emitter scale; a World target with the module in
+/// world space takes the unit columns times the emitter scale; any other
+/// target the unit columns.
+fn transformation_columns(world_space: bool, in_world_space: bool, owner: &ChildOwner) -> [[f32; 3]; 3] {
     const UNIT: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
     let column = |m: &[f32; 16], c: usize| [m[4 * c], m[4 * c + 1], m[4 * c + 2]];
     let scale = owner.emitter_scale;
@@ -768,8 +783,10 @@ fn apply_with_laws(
     // along the command velocity in the target's space.
     let back_scale = command.dt / system.emitter.simulation_speed;
     let gravity_space = (!world_space && !arms::on("gravityWorld")).then_some(&owner.world_to_local);
-    let velocity_space = world_space.then_some(&owner.local_to_world);
-    let force_space = laws.force.as_ref().map(|force| force_columns(world_space, force.in_world_space, owner));
+    let velocity_space = transformation_columns(world_space,
+        laws.velocity.as_ref().is_some_and(|velocity| velocity.in_world_space), owner);
+    let force_space = laws.force.as_ref()
+        .map(|force| transformation_columns(world_space, force.in_world_space, owner));
     let batch_seeds: Vec<u32> = (0..lanes.len()).map(|index| lanes[index & !3].seed).collect();
     for (index, lane) in lanes.iter_mut().enumerate() {
         let clamp_dt = if arms::on("clampCommandDt") { command.dt } else { lane.birth_dt };
@@ -779,7 +796,7 @@ fn apply_with_laws(
         } else {
             scroll
         };
-        let space = ModuleSpace { velocity: velocity_space, batch_seed: batch_seeds[index], clamp_dt,
+        let space = ModuleSpace { velocity: &velocity_space, batch_seed: batch_seeds[index], clamp_dt,
             noise_scroll: newborn_scroll, force: force_space.as_ref() };
         pre_modules(system, &laws, lane, lane.birth_dt, update.gravity, gravity_space, space);
     }
@@ -858,7 +875,7 @@ fn apply_with_laws(
                 scroll = advanced_scroll(system, scroll, dt);
             }
             for (index, lane) in lanes[..covered].iter_mut().enumerate() {
-                let space = ModuleSpace { velocity: velocity_space, batch_seed: batch_seeds[index], clamp_dt: dt,
+                let space = ModuleSpace { velocity: &velocity_space, batch_seed: batch_seeds[index], clamp_dt: dt,
                     noise_scroll: scroll, force: force_space.as_ref() };
                 pre_modules(system, &laws, lane, dt, update.gravity, gravity_space, space);
             }
@@ -984,13 +1001,12 @@ fn start_size(inherit: &ChildInherit, own: [Option<f32>; 3], size_3d: bool) -> [
 }
 
 /// What the Velocity, Noise, Force and ClampVelocity updates of one lane read
-/// besides the lane: the matrix of the linear velocity (None for the
-/// identity), the seed of the lane's four-lane group, the lane's dt, the
-/// target's Noise scroll at this call and the force columns (None without
-/// ForceOverLifetime).
+/// besides the lane: the columns of the linear velocity, the seed of the
+/// lane's four-lane group, the lane's dt, the target's Noise scroll at this
+/// call and the force columns (None without ForceOverLifetime).
 #[derive(Clone, Copy)]
 struct ModuleSpace<'a> {
-    velocity: Option<&'a [f32; 16]>,
+    velocity: &'a [[f32; 3]; 3],
     batch_seed: u32,
     clamp_dt: f32,
     noise_scroll: f32,
@@ -1088,16 +1104,14 @@ fn pre_modules(system: &mut Runtime, laws: &ChildLaws, lane: &mut Lane, dt: f32,
 }
 
 /// `M * v` as VelocityOverLifetime adds it, axis a:
-/// `v.x * c0[a] + (v.y * c1[a] + v.z * c2[a])` with the columns of the
-/// owner's local-to-world matrix, or of the identity.
-fn linear_in_space(v: [f32; 3], matrix: Option<&[f32; 16]>) -> [f32; 3] {
-    const IDENTITY: [f32; 16] = moly_law::particle::shape_birth::IDENTITY;
-    let m = matrix.unwrap_or(&IDENTITY);
+/// `v.x * c0[a] + (v.y * c1[a] + v.z * c2[a])` with the module's
+/// transformation columns ([`transformation_columns`]).
+fn linear_in_space(v: [f32; 3], c: &[[f32; 3]; 3]) -> [f32; 3] {
     std::array::from_fn(|a| {
         if arms::on("velocityGroupedAssociation") {
-            (v[0] * m[a] + v[1] * m[4 + a]) + v[2] * m[8 + a]
+            (v[0] * c[0][a] + v[1] * c[1][a]) + v[2] * c[2][a]
         } else {
-            v[0] * m[a] + (v[1] * m[4 + a] + v[2] * m[8 + a])
+            v[0] * c[0][a] + (v[1] * c[1][a] + v[2] * c[2][a])
         }
     })
 }
