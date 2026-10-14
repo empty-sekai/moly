@@ -212,7 +212,7 @@ impl Cast {
     }
 
     /// Every member's character by unit, taken-over NPCs included (the
-    /// tracks bound to the unit's view).
+    /// tracks bound to the unit's view, and the birthday party's character).
     pub(super) fn members(&self) -> Vec<(u32, Entity)> {
         self.members
             .iter()
@@ -569,17 +569,31 @@ pub(super) fn prepare(
         let registry: Value =
             serde_json::from_str(&text).map_err(|error| format!("character registry: {error}"))?;
         for &unit in &cast.play.units.clone() {
-            let present = present_npc(world, unit);
             // The birthday caller's start callback destroys every NPC and
-            // creates a new character of the unit before the presenter's
-            // FindNPC, so its member is a new avatar even when the unit is
-            // present now (see `super::birthday`).
-            let takes_over =
-                cast.play.use_already_exist_character && cast.play.caller != CastCaller::Birthday;
+            // creates a new NPC of the unit (`CreateBirthdayCharacter`); the
+            // presenter's Setup, without useAlreadyExistCharacter, creates it
+            // and does not take it over, so its AI starts as any NPC's does.
+            // The host creates it here, while the package loads, beside the
+            // roster the callback then disposes (see `super::birthday`).
+            if cast.play.caller == CastCaller::Birthday {
+                let npc = crate::npc::create_npc_avatar_for_multi(world, unit)
+                    .map_err(|reason| format!("CreateBirthdayCharacter(unit {unit}): {reason}"))?;
+                info!("[cutscene-cast] Setup: unit {unit}: CreateBirthdayCharacter: AvatarUtility.CreateAndSetupNPCAvatarView + AvatarFactory.CreateNPCAvatarForMulti(unit, view, 1): new NPC {npc:?} (hidden until the director's first frame), not taken over");
+                cast.members.push(Member {
+                    unit,
+                    entity: npc,
+                    taken_over: true,
+                    // NPCAvatarPresenter.Show runs before the director.
+                    prior_visibility: Visibility::Inherited,
+                });
+                continue;
+            }
+            let present = present_npc(world, unit);
+            let takes_over = cast.play.use_already_exist_character;
             let (entity, taken_over) = match (takes_over, present) {
                 (true, Some(npc)) => {
                     let cancelled = crate::npc::gate_entries::take_over_for_cut_scene(world, npc);
-                    info!("[cutscene-cast] Setup: unit {unit}: FindNPC found it; useAlreadyExistCharacter: taken over (TryCancelCurrentObjective {cancelled}, ForceUpdateCutSceneObjective, SetImmediatelyExecuteNextObjective(true))");
+                    info!("[cutscene-cast] Setup: unit {unit}: FindNPC found it; useAlreadyExistCharacter: TryCancelCurrentObjective {cancelled}{}", if cancelled { ", ForceUpdateCutSceneObjective, SetImmediatelyExecuteNextObjective(true)" } else { ": not cancelled, its talk data kept" });
                     (npc, true)
                 }
                 (_, present) => {

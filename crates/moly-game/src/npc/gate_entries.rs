@@ -24,7 +24,8 @@
 //!   nearest-movable-position search) is not modelled.
 //! - SetImmediatelyExecuteNextObjective(enable) writes the flag that skips
 //!   the next rest; the model's reset clears it. SetCanInterruptTalkData is
-//!   not here: its only caller is the gate visitor's forced timeline, whose
+//!   written by the birthday wait (ForceUpdateBirthdayWaitTalk, marker 20);
+//!   its other caller is the gate visitor's forced timeline, whose
 //!   interrupt (the immediately-played timeline objective, 12) has no
 //!   decision route in this host yet.
 //! - ForceUpdateCutSceneObjective makes no cancel: the model resets twice and
@@ -251,6 +252,65 @@ pub(crate) fn force_update_cut_scene_objective(world: &mut World, entity: Entity
     info!("[npc-entry] unit={unit} frame={} ForceUpdateCutSceneObjective: reset x2, cut-scene talk data (17)", frame(world));
 }
 
+/// `AIModel.UpdateObjectiveBirthdayParty` (the presenter's
+/// `ForceUpdateBirthdayWaitTalk`): one reset, the birthday talk data
+/// (`CreateBirthdayTalkData`: type 18 with the character as its main), and
+/// `SetCanInterruptTalkData(true, BirthdayPartyWait)`, so the next decision
+/// builds the birthday wait objective (20). The data's
+/// `IsImmediatelyPlayTimeline` has no reader in this host.
+pub(crate) fn force_update_birthday_wait_talk(world: &mut World, entity: Entity) {
+    model_reset(world, entity);
+    let unit = unit_of(world, entity).unwrap_or(0);
+    if let Some(mut slot) = world.get_mut::<TalkSlot>(entity) {
+        slot.set_current(AiTalkData {
+            kind: TalkType::BirthdayParty,
+            content: None,
+            target_fixture: None,
+            target_position: [0.0; 3],
+            main_character: unit,
+            characters: Vec::new(),
+            pre_action: None,
+            locate: None,
+            pending_factory: None,
+        });
+        slot.interrupt = Some(moly_law::objective::InterruptMarker {
+            marker_type: moly_law::objective::ObjectiveType::BirthdayPartyWait as i32,
+            can_interrupt: true,
+        });
+    }
+    info!("[npc-entry] unit={unit} frame={} ForceUpdateBirthdayWaitTalk: reset, birthday talk data (18), interrupt marker (true, 20)", frame(world));
+}
+
+/// The `ForceUpdateObjective` calls a cancel owes, for a caller that writes
+/// new talk data at once: the source makes them inside the cancel, so the
+/// caller's data replaces what they built. Here they would run on the
+/// character's next decision pass, after that data, and replace it; they are
+/// dropped instead and the AI loop yields as after any cancel. Their row-1
+/// cascade (its factory's draws) is not made.
+pub(crate) fn drop_owed_force_updates(world: &mut World, entity: Entity) {
+    let frame = frame(world);
+    let unit = unit_of(world, entity).unwrap_or(0);
+    let Some(mut mind) = world.get_mut::<ObjectiveMind>(entity) else {
+        return;
+    };
+    if mind.force_updates == 0 {
+        return;
+    }
+    let owed = mind.force_updates;
+    mind.force_updates = 0;
+    mind.yield_since = Some(frame);
+    info!("[npc-entry] unit={unit} frame={frame} the {owed} owed ForceUpdateObjective call(s) are replaced by the talk data written next");
+}
+
+/// Presenter.SetTalkEnabled.
+pub(crate) fn set_talk_enabled(world: &mut World, entity: Entity, enabled: bool) {
+    if let Some(mut actions) = world.get_mut::<NpcActions>(entity) {
+        actions.enable_talk = enabled;
+    }
+    let unit = unit_of(world, entity).unwrap_or(0);
+    info!("[npc-entry] unit={unit} frame={} SetTalkEnabled({enabled})", frame(world));
+}
+
 /// Presenter.ChangeState.
 pub(crate) fn change_state(world: &mut World, entity: Entity, state: NpcAction) {
     let mut query = world.query::<(&mut NpcActions, &mut RestLifecycle)>();
@@ -266,12 +326,16 @@ pub(crate) fn change_state(world: &mut World, entity: Entity, state: NpcAction) 
 }
 
 /// CutScenePresenter.Setup with useAlreadyExistCharacter, for a present NPC:
-/// TryCancelCurrentObjective, ForceUpdateCutSceneObjective,
-/// SetImmediatelyExecuteNextObjective(true). Returns the cancel's value.
+/// TryCancelCurrentObjective, and only when it cancelled,
+/// ForceUpdateCutSceneObjective and SetImmediatelyExecuteNextObjective(true).
+/// An objective that is not cancelled keeps its talk data. Returns the
+/// cancel's value.
 pub(crate) fn take_over_for_cut_scene(world: &mut World, entity: Entity) -> bool {
     let cancelled = try_cancel_current_objective(world, entity);
-    force_update_cut_scene_objective(world, entity);
-    set_immediately_execute_next_objective(world, entity, true);
+    if cancelled {
+        force_update_cut_scene_objective(world, entity);
+        set_immediately_execute_next_objective(world, entity, true);
+    }
     cancelled
 }
 

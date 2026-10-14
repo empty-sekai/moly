@@ -1128,6 +1128,8 @@ pub(crate) enum BodyWait {
     NotTalking { since: u32, step: TweetStep },
     /// The greeting objective: until the first talk is complete.
     FirstTalk { since: u32 },
+    /// The birthday wait objective: Idle until its cancel.
+    BirthdayPartyWait { since: u32 },
     /// A Stacked move: the scaled 1.0 s delay before the move fails.
     Stacked {
         since: u32,
@@ -1527,6 +1529,9 @@ enum DecisionRoute {
     /// The entry-site objective (the entry-site interrupt the AI's set-up
     /// raises): hidden, waiting for its cancel.
     EntrySite,
+    /// The birthday wait objective (the interrupt the birthday party's
+    /// `ForceUpdateBirthdayWaitTalk` raises): Idle, waiting for its cancel.
+    BirthdayPartyWait,
 }
 
 impl DecisionRoute {
@@ -1539,6 +1544,7 @@ impl DecisionRoute {
             DecisionRoute::Greeting => "greeting",
             DecisionRoute::ChangeSite => "change_site",
             DecisionRoute::EntrySite => "entry_site",
+            DecisionRoute::BirthdayPartyWait => "birthday_party_wait",
         }
     }
 }
@@ -2080,6 +2086,8 @@ pub(crate) fn decide(
                 // The entry-site objective waits for its cancel, which ends
                 // the objective (see `owe_force_updates`).
                 BodyWait::EntrySite { .. } => {}
+                // The birthday wait objective's `WaitUntil(_isCanceled)`.
+                BodyWait::BirthdayPartyWait { .. } => {}
                 BodyWait::Stacked { since, mut delay } => {
                     if frame != since {
                         if delay.advance(dt) {
@@ -2356,6 +2364,14 @@ pub(crate) fn decide(
                     }
                     DecisionRoute::EntrySite
                 }
+                objective::Decision::Interrupt {
+                    dispatch: objective::InterruptDispatch::Direct(ObjectiveType::BirthdayPartyWait),
+                } => {
+                    if let Some(marker) = slot.interrupt.as_mut() {
+                        marker.can_interrupt = false;
+                    }
+                    DecisionRoute::BirthdayPartyWait
+                }
                 // The current objective is still the wait-communication sub
                 // objective (a cancelled one stays current until the next Rest
                 // or decision replaces it). The row does not continue it: it
@@ -2376,9 +2392,9 @@ pub(crate) fn decide(
                 //   kinds, change-site, common fixture, while-doing wait,
                 //   no-talk, greeting, entry-site and cut-scene).
                 // - Interrupt to the main or sub communication, the immediate
-                //   fixture timeline, the random walk, the birthday wait, or
-                //   the invalid fallback: the markers written here are 4, 5,
-                //   6, 9 and 14, all routed above.
+                //   fixture timeline, the random walk, or the invalid
+                //   fallback: the markers written here are 4, 5, 6, 9, 14 and
+                //   20, all routed above.
                 // - CutScene: a current objective of the cut-scene type is
                 //   constructed only by this row itself (the source's one other
                 //   constructor is in the tutorial, which is finished here),
@@ -2390,7 +2406,7 @@ pub(crate) fn decide(
                 other => unreachable!(
                     "the decision ladder reached a row with no route here ({other:?}): \
                      no photo mode, no high-priority or after-edit talk data, markers \
-                     only 4, 5, 6, 9 and 14, no current cut-scene or type-6 objective"
+                     only 4, 5, 6, 9, 14 and 20, no current cut-scene or type-6 objective"
                 ),
             };
             let objective_type = match decision_route {
@@ -2398,6 +2414,7 @@ pub(crate) fn decide(
                 DecisionRoute::Greeting => ObjectiveType::Greeting,
                 DecisionRoute::ChangeSite => ObjectiveType::ChangeSite,
                 DecisionRoute::EntrySite => ObjectiveType::EntrySite,
+                DecisionRoute::BirthdayPartyWait => ObjectiveType::BirthdayPartyWait,
                 DecisionRoute::SubObjective(kind) => kind,
                 _ => ObjectiveType::Talk,
             };
@@ -2408,6 +2425,7 @@ pub(crate) fn decide(
                     ObjectiveType::Greeting => "greeting",
                     ObjectiveType::ChangeSite => "change_site",
                     ObjectiveType::EntrySite => "entry_site",
+                    ObjectiveType::BirthdayPartyWait => "birthday_party_wait",
                     ObjectiveType::SomeCharacterFixtureActionCommunicationWhileDoingWaitSub => {
                         "sub_while_doing_wait"
                     }
@@ -2446,6 +2464,23 @@ pub(crate) fn decide(
                 mind.executing = true;
                 mind.body = Some(BodyWait::EntrySite { since: frame });
                 info!("[npc unit={}] frame={frame} entry-site objective: hidden until cancelled", unit.0);
+                continue 'npc;
+            }
+            if let DecisionRoute::BirthdayPartyWait = decision_route {
+                // NPCAvatarBirthdayPartyWaitObjective.ExecuteAsync:
+                // FindNPC(unit)?.ChangeState(Idle), then WaitUntil(_isCanceled).
+                // It draws nothing; its OnCancel and OnDispose are empty.
+                let calls = trial.calls() - calls_before;
+                *rng = trial;
+                *seeder.seeder() = trial_seeder;
+                record.set("path", "birthday_party_wait_objective");
+                record.emit("birthday_party_wait", calls);
+                fixture_activities.clear_pending(entity);
+                mind.begin_objective(ObjectiveType::BirthdayPartyWait);
+                mind.executing = true;
+                actions.change(crate::npc::NpcAction::Idle, &mut rest);
+                mind.body = Some(BodyWait::BirthdayPartyWait { since: frame });
+                info!("[npc unit={}] frame={frame} birthday wait objective: ChangeState(Idle), waiting until cancelled", unit.0);
                 continue 'npc;
             }
             if let DecisionRoute::Greeting = decision_route {
@@ -2874,6 +2909,9 @@ pub(crate) fn decide(
                 DecisionRoute::Greeting => unreachable!("the greeting objective returned above"),
                 DecisionRoute::ChangeSite => unreachable!("the change-site objective returned above"),
                 DecisionRoute::EntrySite => unreachable!("the entry-site objective returned above"),
+                DecisionRoute::BirthdayPartyWait => {
+                    unreachable!("the birthday wait objective returned above")
+                }
             }
             match halt {
                 Some(npc_talk_lottery::Halt::Fault(reason)) => {
@@ -3015,6 +3053,9 @@ pub(crate) fn decide(
                     DecisionRoute::Greeting => unreachable!("the greeting objective returned above"),
                     DecisionRoute::ChangeSite => unreachable!("the change-site objective returned above"),
                     DecisionRoute::EntrySite => unreachable!("the entry-site objective returned above"),
+                    DecisionRoute::BirthdayPartyWait => {
+                        unreachable!("the birthday wait objective returned above")
+                    }
                     DecisionRoute::NoneTalk
                         if matches!(decision, objective::Decision::NoneTalk)
                             && forced_none_talk(&mut fixture_activities, entity, &slot) =>

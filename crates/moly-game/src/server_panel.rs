@@ -50,7 +50,10 @@
 //!   Rows of one talk combine as "any row passes". Phenomenon rows are left
 //!   to the client. Every kept talk starts unread unless the server recorded
 //!   its read. The list keeps the talk table's order. The talk-term start
-//!   is not checked: the asset source carries no talk-term table.
+//!   is not checked: the asset source carries no talk-term table. A
+//!   character that is not a visitor has no talk in the list, so an NPC of
+//!   that character (the birthday party's, see
+//!   [`crate::cutscene::birthday_party`]) finds no general talk.
 //! - The **read report** handler records the talk as read on the server side
 //!   and answers with no obtained resources.
 //! - **Device time zone.** The client converts server timestamps to device

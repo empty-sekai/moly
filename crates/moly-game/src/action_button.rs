@@ -2394,7 +2394,8 @@ enum WalkTarget {
     Anchor(i32, Vec3),
 }
 
-/// 配对门运行的冒烟口（`MOLY_ACTION_BUTTON_AUTOWALK_SECS`）：把玩家
+/// 配对门运行的冒烟口（`MOLY_ACTION_BUTTON_AUTOWALK_SECS`，`<until>` 或
+/// `<from>:<until>` 秒）：把玩家
 /// 依次开到每个角色与每个锚定家具跟前。触摸注入进 `TouchInput` 消息流
 /// ——与引擎触摸同一条流，走真实的摇杆链（捕获 → 方向 → 移动向量），
 /// 不绕任何一行。两臂：
@@ -2427,11 +2428,15 @@ pub(crate) fn smoke_autowalk(
     mut target_since: Local<Option<f32>>,
     mut linger_until: Local<f32>,
 ) {
-    let armed = env_secs("MOLY_ACTION_BUTTON_AUTOWALK_SECS");
-    if armed <= 0.0 {
+    let Some((from, armed)) =
+        crate::dev_tools::instrument_window("MOLY_ACTION_BUTTON_AUTOWALK_SECS")
+    else {
+        return;
+    };
+    let now = time.elapsed_secs();
+    if armed <= 0.0 || now < from {
         return;
     }
-    let now = time.elapsed_secs();
     let Ok((window_entity, window)) = screen.windows.single() else {
         return;
     };

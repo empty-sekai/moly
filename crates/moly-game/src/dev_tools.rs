@@ -40,3 +40,25 @@ pub(crate) fn dev_tools(tools: Option<Res<DevTools>>) -> bool {
 pub(crate) fn installed() -> bool {
     INSTALLED.load(Ordering::Relaxed)
 }
+
+/// A native instrument's time window from its variable: `<until>` (from the
+/// start) or `<from>:<until>`, in seconds of app time. `None` when unset or
+/// not numbers.
+pub(crate) fn instrument_window(name: &str) -> Option<(f32, f32)> {
+    let raw = std::env::var(name).ok()?;
+    let secs = |text: &str| {
+        text.trim()
+            .parse::<f64>()
+            .ok()
+            .map(|value| value.max(0.0) as f32)
+    };
+    match raw.split_once(':') {
+        Some((from, until)) => Some((secs(from)?, secs(until)?)),
+        None => Some((0.0, secs(&raw)?)),
+    }
+}
+
+/// Whether `now` lies inside the instrument window of `name`.
+pub(crate) fn instrument_open(name: &str, now: f32) -> bool {
+    instrument_window(name).is_some_and(|(from, until)| from <= now && now < until)
+}

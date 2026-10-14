@@ -909,10 +909,32 @@ fn confirmed(world: &mut World, confirm: BirthdayConfirm, cut_scenes: &[(i64, i6
 /// `OnStartFadeInCallBack`, at the start of `SetupInternal`.
 pub(super) fn start_fade_in_callback(world: &mut World, cast: &Cast) {
     info!("[birthday] OnStartFadeInCallBack: DownloadVoiceAsync (bundle mysekai/talk/birthday/voice/{}: the voice track plays it from the root's stream table)", cast.play.timeline);
-    let disposed =
-        crate::npc::dispose::dispose_npc_all(world, "BirthdayPartyPresenter.DestroyCharacters");
-    let avatars = cast.avatars();
-    info!("[birthday] DestroyCharacters: every NPC warps away and is destroyed: units {disposed:?}; CreateBirthdayCharacter(unit {:?}): the cast's new avatar {:?} stands for it (FindNPC takes it over)", cast.play.units, avatars);
+    // DestroyCharacters runs before CreateBirthdayCharacter, so it disposes
+    // every NPC present then. The host created the party's character while
+    // the package loaded (see `super::cast`), so that one is kept.
+    let members = cast.members();
+    let caller = "BirthdayPartyPresenter.DestroyCharacters";
+    let mut disposed = Vec::new();
+    for (unit, entity) in crate::npc::dispose::npc_list(world) {
+        if members.iter().any(|(_, member)| *member == entity) {
+            continue;
+        }
+        match crate::npc::dispose::dispose_npc(world, entity, caller) {
+            Ok(unit) => disposed.push(unit),
+            Err(reason) => warn!("[birthday] {caller}: unit {unit}: {reason}"),
+        }
+    }
+    // DisposeNPC takes a unit off the roster; the party's character keeps
+    // its own registration.
+    if let Some(mut registry) = world.get_resource_mut::<crate::npc::Registry>() {
+        for (unit, _) in &members {
+            if !registry.character_unit_ids.contains(unit) {
+                registry.character_unit_ids.push(*unit);
+            }
+        }
+        registry.character_unit_ids.sort_unstable();
+    }
+    info!("[birthday] DestroyCharacters: every NPC warps away and is destroyed: units {disposed:?}; CreateBirthdayCharacter(unit {:?}): the new NPC {members:?}, whose AI runs as any NPC's", cast.play.units);
 }
 
 /// `OnEndFadeOutCallback`, after the view is disposed.
@@ -932,7 +954,7 @@ pub(super) fn end_fade_out_callback(world: &mut World, cast: &Cast) {
         return;
     };
     let (fixture, unit) = (presenter.fixture, presenter.party.unit);
-    let Some((_, character)) = cast.avatars().into_iter().find(|(u, _)| *u == unit) else {
+    let Some((_, character)) = cast.members().into_iter().find(|(u, _)| *u == unit) else {
         error!("[birthday] OnEndFadeOutCallback: FindNPC({unit}) found no character");
         return;
     };
@@ -945,7 +967,7 @@ pub(super) fn end_fade_out_callback(world: &mut World, cast: &Cast) {
     };
     let place =
         |yaw_deg: f32, length: f32, facing_deg: f32| beside(&pose, yaw_deg, length, facing_deg);
-    world.entity_mut(character).insert(Visibility::Inherited);
+    crate::npc::gate_entries::show(world, character);
     // PutCharacterBesideFixture.
     let (offset, length) = if unit == NIGO_MIKU_UNIT {
         (NIGO_MIKU_ANGLE, NIGO_MIKU_LENGTH)
@@ -953,6 +975,10 @@ pub(super) fn end_fade_out_callback(world: &mut World, cast: &Cast) {
         (CHARACTER_ANGLE, CHARACTER_LENGTH)
     };
     let (at, rotation) = place(90.0 + offset, length, 180.0);
+    crate::npc::force_set_position(world, character, at.to_array());
+    if let Some(mut walk) = world.get_mut::<crate::npc::WalkState>(character) {
+        walk.0.forward = (rotation * Vec3::Z).to_array();
+    }
     if let Some(mut transform) = world.get_mut::<Transform>(character) {
         transform.translation = at;
         transform.rotation = rotation;
@@ -991,18 +1017,18 @@ pub(super) fn cut_scene_returned(world: &mut World, cast: &Cast) {
     );
     match (outcome, presenter) {
         (Ok(()), Some(presenter)) => {
-            let avatar = cast
-                .avatars()
+            let character = cast
+                .members()
                 .into_iter()
                 .find(|(unit, _)| *unit == presenter.party.unit)
                 .map(|(_, entity)| entity);
+            info!("[birthday] the party's character: {character:?}");
             super::birthday_party::start(
                 world,
                 super::birthday_party::Party {
                     id: presenter.party.id,
                     unit: presenter.party.unit,
                     fixture: presenter.fixture,
-                    avatar,
                 },
                 presenter.rewards,
             );

@@ -1274,27 +1274,7 @@ pub(crate) fn spawn_temporary_units(
     let mut spawned = Vec::with_capacity(blueprints.len());
     for (unit_id, speed, pause, idle, walk, seed) in blueprints {
         let entity = world
-            .spawn((
-                CharacterUnitId(unit_id),
-                Transform::from_translation(Vec3::from(seed)),
-                Visibility::default(),
-                PathSlot(NpcPathWalkSlot::from_corners(Vec::new())),
-                WalkSpeed(speed),
-                (
-                    PauseSeconds(pause),
-                    RestLifecycle::default(),
-                    NpcActions::default(),
-                ),
-                WalkState(LawWalkState::new(seed, FORWARD_FALLBACK)),
-                MoveTarget(seed),
-                RouteStops::default(),
-                StuckBaseline::default(),
-                MotionClips { idle, walk },
-                crate::npc_objective::TalkSlot::default(),
-                crate::npc_objective::ObjectiveMind::at_spawn(),
-                crate::npc_objective::MemberRng::from_platform(),
-                MotionPhase::Dwelling { remaining: None },
-            ))
+            .spawn(ordinary_npc(unit_id, speed, pause, MotionClips { idle, walk }, seed))
             .id();
         spawned.push(entity);
     }
@@ -1304,6 +1284,68 @@ pub(crate) fn spawn_temporary_units(
         registry.character_unit_ids.dedup();
     }
     Ok(spawned)
+}
+
+/// An ordinary NPC entity: the components every character the AI runs
+/// carries, with an empty model and empty talk data.
+fn ordinary_npc(
+    unit_id: u32,
+    speed: f32,
+    pause: f32,
+    clips: MotionClips,
+    seed: [f32; 3],
+) -> impl Bundle {
+    (
+        CharacterUnitId(unit_id),
+        Transform::from_translation(Vec3::from(seed)),
+        Visibility::default(),
+        PathSlot(NpcPathWalkSlot::from_corners(Vec::new())),
+        WalkSpeed(speed),
+        (
+            PauseSeconds(pause),
+            RestLifecycle::default(),
+            NpcActions::default(),
+        ),
+        WalkState(LawWalkState::new(seed, FORWARD_FALLBACK)),
+        MoveTarget(seed),
+        RouteStops::default(),
+        StuckBaseline::default(),
+        clips,
+        crate::npc_objective::TalkSlot::default(),
+        crate::npc_objective::ObjectiveMind::at_spawn(),
+        crate::npc_objective::MemberRng::from_platform(),
+        MotionPhase::Dwelling { remaining: None },
+    )
+}
+
+/// `AvatarFactory.CreateNPCAvatarForMulti(unit, view, 1)`: a new NPC of the
+/// unit at [`CREATION_POSITION`] on the home site, hidden until its caller
+/// shows it. It is created whatever character of the unit is present (the
+/// birthday party's character is created beside the roster it replaces), and
+/// its AI model is the default one: no talk data, the start flag raised.
+pub(crate) fn create_npc_avatar_for_multi(world: &mut World, unit: u32) -> Result<Entity, String> {
+    let (_, speed, pause, idle, walk) = world
+        .get_resource::<Catalog>()
+        .ok_or_else(|| "the character list is not loaded".to_owned())?
+        .0
+        .iter()
+        .find(|(id, ..)| *id == unit)
+        .cloned()
+        .ok_or_else(|| format!("unit {unit} is not in the character list"))?;
+    let entity = world
+        .spawn(ordinary_npc(unit, speed, pause, MotionClips { idle, walk }, CREATION_POSITION))
+        .insert(Visibility::Hidden)
+        .id();
+    if let Some(mut actions) = world.get_mut::<NpcActions>(entity) {
+        actions.site_type = residency::SITE_TYPES[0].to_owned();
+    }
+    if let Some(mut registry) = world.get_resource_mut::<Registry>() {
+        if !registry.character_unit_ids.contains(&unit) {
+            registry.character_unit_ids.push(unit);
+            registry.character_unit_ids.sort_unstable();
+        }
+    }
+    Ok(entity)
 }
 
 pub(crate) fn remove_temporary_units(world: &mut World, entities: &[Entity]) {
