@@ -235,7 +235,9 @@ impl ParticlePipeline {
 struct Packet {
     pipeline: CachedRenderPipelineId,
     binding: SourceGpuBinding,
-    vertex: Buffer,
+    /// The bytes of this frame's [`ParticleGpu::arena`] that hold the draw's
+    /// vertices; empty while the draw is disabled.
+    vertices: std::ops::Range<u64>,
     index: Buffer,
     count: u32,
     distance: f32,
@@ -246,8 +248,6 @@ struct Packet {
     resources: Vec<TextureViewId>,
     /// The uniform block the binding's buffer holds.
     uniform: Vec<u8>,
-    /// The [`GeometryPack::id`] whose bytes the vertex buffer holds.
-    geometry: u64,
     /// The [`GeometryPack::index_id`] whose bytes the index buffer holds.
     indices: u64,
 }
@@ -261,6 +261,13 @@ struct ParticleGpu {
     packs: HashMap<(Entity, AssetId<SourceProgramAsset>), GeometryPack>,
     /// The last [`GeometryPack::id`] given out.
     pack_id: u64,
+    /// The vertices of every enabled draw of this frame, uploaded in one
+    /// write at the end of `prepare`.
+    arena: Option<Buffer>,
+    arena_bytes: Vec<u8>,
+    /// The range of `arena_bytes` given to each packing this frame: the
+    /// draws of one geometry in several views share one copy.
+    arena_ranges: HashMap<u64, std::ops::Range<u64>>,
     errors: BTreeSet<String>,
     depth_sampler: Option<Sampler>,
 }
@@ -301,6 +308,25 @@ impl Default for GeometryPack {
     }
 }
 impl GeometryPack {
+    /// The range of this frame's vertex arena that holds the pack's
+    /// vertices, copied in on the frame's first request.
+    fn arena_range(
+        &self,
+        bytes: &mut Vec<u8>,
+        ranges: &mut HashMap<u64, std::ops::Range<u64>>,
+    ) -> std::ops::Range<u64> {
+        ranges
+            .entry(self.id)
+            .or_insert_with(|| {
+                let start = bytes.len() as u64;
+                bytes.extend_from_slice(&self.vertices);
+                // Vertex buffer offsets and write sizes are multiples of 4.
+                bytes.resize(bytes.len().next_multiple_of(4), 0);
+                start..start + self.vertices.len() as u64
+            })
+            .clone()
+    }
+
     fn update(
         &mut self,
         next_id: &mut u64,
@@ -845,6 +871,8 @@ fn prepare(
     // `RecentParticleAssets`): a draw that takes it again reuses them.
     let active_programs: HashSet<_> = drawn.iter().map(|(_, program)| *program).collect();
     gpu.pipelines.retain(|key, _| active_programs.contains(&key.program) || programs.get(key.program).is_some());
+    gpu.arena_bytes.clear();
+    gpu.arena_ranges.clear();
     let mut live = HashSet::new();
     for (view_entity, view, target, attachment, depth, _) in &views {
         let Some(camera) = frame.cameras.get(&view_entity) else {
@@ -877,13 +905,17 @@ fn prepare(
                 // A disabled draw is not drawn, and once it has a packet for
                 // this pipeline nothing of it is brought up to date until it
                 // is enabled again: the enabled path compares the uniform
-                // block, the geometry and the sampled resources and rewrites
-                // what differs. The packet stays, so the draw stays ready.
-                if !item.source.enabled
-                    && gpu.packets.get(&key).is_some_and(|packet| packet.pipeline == pipeline)
-                {
-                    live.insert(key);
-                    continue;
+                // block, the indices and the sampled resources, rewrites what
+                // differs and gives the draw that frame's vertices. The packet
+                // stays, so the draw stays ready.
+                if !item.source.enabled {
+                    if let Some(packet) =
+                        gpu.packets.get_mut(&key).filter(|packet| packet.pipeline == pipeline)
+                    {
+                        packet.vertices = 0..0;
+                        live.insert(key);
+                        continue;
+                    }
                 }
                 let Some(program) = programs.get(pass.program.id()) else {
                     continue;
@@ -952,7 +984,14 @@ fn prepare(
                         &item.geometry,
                     );
                     let count = *pack.count.as_ref().map_err(Clone::clone)?;
-                    let (vertices, indices) = (&pack.vertices, &pack.indices);
+                    let indices = &pack.indices;
+                    // A disabled draw is not drawn, so its vertices are not
+                    // uploaded.
+                    let vertices = if item.source.enabled {
+                        pack.arena_range(&mut gpu.arena_bytes, &mut gpu.arena_ranges)
+                    } else {
+                        0..0
+                    };
                     let buffer = |label, bytes: &[u8], usage| {
                         let buffer = device.create_buffer(&BufferDescriptor {
                             label: Some(label),
@@ -979,18 +1018,6 @@ fn prepare(
                                 packet.binding.write_packed(&queue, block);
                                 packet.uniform.clone_from(block);
                             }
-                            if packet.geometry != pack.id {
-                                if packet.vertex.size() < vertices.len() as u64 {
-                                    packet.vertex = buffer(
-                                        "source particle vertices",
-                                        vertices,
-                                        BufferUsages::VERTEX,
-                                    );
-                                } else if !vertices.is_empty() {
-                                    queue.write_buffer(&packet.vertex, 0, vertices);
-                                }
-                                packet.geometry = pack.id;
-                            }
                             if packet.indices != pack.index_id {
                                 if packet.index.size() < indices.len() as u64 {
                                     packet.index = buffer(
@@ -1004,6 +1031,7 @@ fn prepare(
                                 packet.indices = pack.index_id;
                             }
                         }
+                        packet.vertices = vertices;
                         packet.count = count;
                         packet.distance =
                             view.rangefinder3d().distance(&item.center) - item.source.sorting_fudge;
@@ -1047,7 +1075,7 @@ fn prepare(
                     Ok(Some(Packet {
                         pipeline,
                         binding,
-                        vertex: buffer("source particle vertices", vertices, BufferUsages::VERTEX),
+                        vertices,
                         index: buffer("source particle indices", indices, BufferUsages::INDEX),
                         count,
                         resources,
@@ -1057,7 +1085,6 @@ fn prepare(
                         render_queue: item.source.render_queue,
                         rank: item.rank,
                         uniform: block.clone(),
-                        geometry: pack.id,
                         indices: pack.index_id,
                     }))
                 })();
@@ -1084,6 +1111,18 @@ fn prepare(
         }
     }
     gpu.packets.retain(|key, _| live.contains(key));
+    if !gpu.arena_bytes.is_empty() {
+        let size = gpu.arena_bytes.len() as u64;
+        if gpu.arena.as_ref().is_none_or(|arena| arena.size() < size) {
+            gpu.arena = Some(device.create_buffer(&BufferDescriptor {
+                label: Some("source particle vertices"),
+                size: size.next_power_of_two(),
+                usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+        queue.write_buffer(gpu.arena.as_ref().expect("set above"), 0, &gpu.arena_bytes);
+    }
     // This frame's verdict per readiness cell (a cell shared by several
     // draws is ready when any of them is), published below in one write.
     let cell = |source: &SourceParticle| Arc::as_ptr(&source.readiness) as usize;
@@ -1158,16 +1197,19 @@ impl RenderCommand<Transparent3d> for DrawPacket {
         gpu: SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
+        let gpu = gpu.into_inner();
         let Some(packet) = gpu
-            .into_inner()
             .packets
             .get(&(view, item.entity(), false))
-            .filter(|p| p.pipeline == item.pipeline && p.count > 0)
+            .filter(|p| p.pipeline == item.pipeline && p.count > 0 && !p.vertices.is_empty())
         else {
             return RenderCommandResult::Skip;
         };
+        let Some(arena) = &gpu.arena else {
+            return RenderCommandResult::Skip;
+        };
         pass.set_bind_group(0, &packet.binding.group, &[]);
-        pass.set_vertex_buffer(0, packet.vertex.slice(..));
+        pass.set_vertex_buffer(0, arena.slice(packet.vertices.clone()));
         pass.set_index_buffer(packet.index.slice(..), IndexFormat::Uint32);
         pass.draw_indexed(0..packet.count, 0, 0..1);
         RenderCommandResult::Success
@@ -1200,6 +1242,9 @@ impl ViewNode for EffectNode {
             return Ok(());
         }
         let gpu = world.resource::<ParticleGpu>();
+        let Some(arena) = &gpu.arena else {
+            return Ok(());
+        };
         let cache = world.resource::<PipelineCache>();
         let frame = world.resource::<ParticleFrame>();
         // Only packets that draw: an empty pass loads and stores the targets
@@ -1210,7 +1255,7 @@ impl ViewNode for EffectNode {
             .filter(|((view, draw, effect), _)| {
                 *view == entity && *effect && frame.enabled.contains(draw)
             })
-            .filter(|(_, p)| p.count > 0)
+            .filter(|(_, p)| p.count > 0 && !p.vertices.is_empty())
             .filter_map(|(_, p)| Some((p, cache.get_render_pipeline(p.pipeline)?)))
             .collect::<Vec<_>>();
         if packets.is_empty() {
@@ -1259,7 +1304,7 @@ impl ViewNode for EffectNode {
         for (packet, pipeline) in packets {
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &packet.binding.group, &[]);
-            pass.set_vertex_buffer(0, *packet.vertex.slice(..));
+            pass.set_vertex_buffer(0, *arena.slice(packet.vertices.clone()));
             pass.set_index_buffer(*packet.index.slice(..), IndexFormat::Uint32);
             pass.draw_indexed(0..packet.count, 0, 0..1);
         }
