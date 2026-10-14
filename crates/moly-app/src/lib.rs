@@ -294,6 +294,21 @@ pub fn game_take_persist(after_revision: u32) -> String {
     moly_game::game_take_persist(after_revision)
 }
 
+/// Validates a director command (a script to run, stop, pause or resume)
+/// and queues it for the next frame; available on every page mode.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn director_command(json: &str) -> Result<(), wasm_bindgen::JsValue> {
+    moly_game::director_command(json).map_err(|error| wasm_bindgen::JsValue::from_str(&error))
+}
+
+/// The director's state: status, the steps running now and the run's log.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn director_snapshot() -> String {
+    moly_game::director_snapshot()
+}
+
 /// The editable fields of the server document, for the page's panel.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]

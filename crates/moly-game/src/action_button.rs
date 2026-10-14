@@ -278,7 +278,7 @@ impl ActionButtonScreen<'_, '_> {
         ))
     }
 
-    fn change_position(&self, window: &Window, shown: ButtonType) -> Option<Vec2> {
+    pub(crate) fn change_position(&self, window: &Window, shown: ButtonType) -> Option<Vec2> {
         let (button, _) = self.change_rects(window, shown)?;
         let center = button.center() * self.scale(window)?;
         Some(Vec2::new(window.width() * 0.5 + center.x, window.height() * 0.5 - center.y))
@@ -554,8 +554,18 @@ impl ActionButtonState {
     }
 
     /// An entry of this button type is stacked, head or not.
-    fn stacked(&self, button: ButtonType) -> bool {
+    pub(crate) fn stacked(&self, button: ButtonType) -> bool {
         self.stack.buttons().any(|stacked| stacked == button)
+    }
+
+    /// This entry is stacked, head or not.
+    pub(crate) fn contains(&self, button: ButtonType, target: TargetId) -> bool {
+        self.stack.contains(button, target)
+    }
+
+    /// The stack handle of the admitted placement with this UID.
+    pub(crate) fn fixture_key(&self, uid: &str) -> Option<i32> {
+        self.fixture_targets.iter().find(|(_, target)| target.uid == uid).map(|(key, _)| *key)
     }
 
     fn fixture_target(&self, key: i32) -> Option<FixtureTarget> {

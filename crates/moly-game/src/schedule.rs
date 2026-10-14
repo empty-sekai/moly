@@ -241,6 +241,7 @@ pub fn install(app: &mut App) {
             .before(audio::advance_se),
     );
     crate::game_settings::install(app);
+    crate::director::install(app);
     crate::player_data::install(app);
     crate::fixture_colors::install(app);
     app.add_message::<crate::frame_capture::CaptureFrame>()

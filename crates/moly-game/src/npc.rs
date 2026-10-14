@@ -748,6 +748,20 @@ impl RouteStops {
         })
     }
 
+    /// Drops the Rest stops after the current one, so the route walks its
+    /// navigation corners without pausing. Returns how many were dropped.
+    pub(crate) fn drop_rests(&mut self) -> usize {
+        let keep = (self.next + 1).min(self.stops.len());
+        let before = self.stops.len();
+        let mut index = 0;
+        self.stops.retain(|point| {
+            let kept = index < keep || point.kind == WaypointKind::CheckPoint;
+            index += 1;
+            kept
+        });
+        before - self.stops.len()
+    }
+
     fn stop(&mut self) {
         let generation = self.generation;
         self.cancel();

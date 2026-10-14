@@ -46,6 +46,7 @@ mod delayed_faces;
 pub mod delivery;
 mod delivery_camera;
 mod dev_tools;
+mod director;
 pub mod emoticon;
 mod entry;
 pub mod env;
@@ -194,6 +195,7 @@ pub use browser_game::{
 pub use content_library::bridge::{configure_browser_library, library_catalog, library_command, library_snapshot};
 pub use content_library::library_diagnostics;
 pub use dev_tools::{insert_dev_tools, DevTools};
+pub use director::{director_command, director_snapshot};
 
 /// Product version shared by the settings panel and application entry points.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

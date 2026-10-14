@@ -210,6 +210,30 @@ export function createGameController({ wasm, post = () => {}, writable }) {
         return { ok: false, reason: String(error) };
       }
     },
+    /**
+     * One director command (a script, `{ run }`, `{ stop }`, `{ pause }` or
+     * `{ resume }`), validated before it is queued. Resolves to `{ ok: true }`
+     * or `{ ok: false, reason }` with the director's named refusal.
+     */
+    director(command) {
+      if (closed || !verified)
+        return { ok: false, reason: "The game is not running" };
+      if (typeof wasm.director_command !== "function")
+        return { ok: false, reason: "This engine has no director" };
+      try {
+        wasm.director_command(
+          typeof command === "string" ? command : JSON.stringify(command),
+        );
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, reason: String(error) };
+      }
+    },
+    /** The director's state and log, or null when the engine has none. */
+    directorSnapshot() {
+      if (typeof wasm.director_snapshot !== "function") return null;
+      return JSON.parse(wasm.director_snapshot());
+    },
     /** Frames the engine has measured, or null when it publishes no counter. */
     presentedFrames() {
       if (typeof wasm.perf_snapshot !== "function") return null;
