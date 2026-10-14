@@ -841,8 +841,10 @@ fn prepare(
     gpu.resolutions
         .retain(|key, _| drawn.contains(key));
     gpu.packs.retain(|key, _| drawn.contains(key));
+    // A program no draw uses keeps its pipelines while it stays loaded (see
+    // `RecentParticleAssets`): a draw that takes it again reuses them.
     let active_programs: HashSet<_> = drawn.iter().map(|(_, program)| *program).collect();
-    gpu.pipelines.retain(|key, _| active_programs.contains(&key.program));
+    gpu.pipelines.retain(|key, _| active_programs.contains(&key.program) || programs.get(key.program).is_some());
     let mut live = HashSet::new();
     for (view_entity, view, target, attachment, depth, _) in &views {
         let Some(camera) = frame.cameras.get(&view_entity) else {
@@ -1271,6 +1273,8 @@ impl Plugin for SourceParticlePlugin {
         // `extract` reads the main-world component itself and keeps its copy
         // across frames; the render world only needs the draw's entity.
         app.add_plugins(bevy::render::sync_component::SyncComponentPlugin::<SourceParticle>::default())
+            .init_resource::<crate::source_particle::RecentParticleAssets>()
+            .add_observer(crate::source_particle::keep_released)
             .add_systems(
                 Update,
                 (

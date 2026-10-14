@@ -290,6 +290,57 @@ impl SourceParticle {
     }
 }
 
+/// Source particle assets of removed draws, kept for a while: a draw made
+/// again soon after (a weather changed back, a fixture shown again) finds its
+/// catalogue, programs and textures loaded instead of fetching, verifying,
+/// decoding and compiling them again. The least recently released go first
+/// once the kept textures' pixels pass [`RECENT_TEXTURE_BYTES`] or the kept
+/// assets pass [`RECENT_ASSETS`].
+#[derive(Resource, Default)]
+pub(crate) struct RecentParticleAssets {
+    held: std::collections::VecDeque<(UntypedHandle, usize)>,
+    bytes: usize,
+}
+
+const RECENT_TEXTURE_BYTES: usize = 32 << 20;
+const RECENT_ASSETS: usize = 512;
+
+impl RecentParticleAssets {
+    fn keep(&mut self, handle: UntypedHandle, bytes: usize) {
+        if let Some(at) = self.held.iter().position(|(held, _)| held.id() == handle.id()) {
+            let entry = self.held.remove(at).expect("position found above");
+            self.held.push_back(entry);
+            return;
+        }
+        self.bytes += bytes;
+        self.held.push_back((handle, bytes));
+        while self.bytes > RECENT_TEXTURE_BYTES || self.held.len() > RECENT_ASSETS {
+            let Some((_, bytes)) = self.held.pop_front() else { break };
+            self.bytes -= bytes;
+        }
+    }
+}
+
+/// A draw's assets join [`RecentParticleAssets`] as the draw is removed.
+pub(crate) fn keep_released(
+    remove: On<Remove, SourceParticle>,
+    particles: Query<&SourceParticle>,
+    textures: Res<Assets<SourceTextureAsset>>,
+    mut recent: ResMut<RecentParticleAssets>,
+) {
+    let Ok(particle) = particles.get(remove.event().entity) else {
+        return;
+    };
+    recent.keep(particle.catalogue.clone().untyped(), 0);
+    for pass in &particle.passes {
+        recent.keep(pass.program.clone().untyped(), 0);
+    }
+    for texture in particle.textures.values() {
+        let bytes = textures.get(texture).map_or(0, |texture| texture.pixels.len());
+        recent.keep(texture.clone().untyped(), bytes);
+    }
+}
+
 pub fn resolve_particles(
     server: Res<AssetServer>,
     catalogues: Res<Assets<SourceShaderCatalogue>>,
