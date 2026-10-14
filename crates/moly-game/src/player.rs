@@ -302,15 +302,19 @@ pub(crate) fn read_input(
     entry: Option<Res<crate::entry::EntrySequence>>,
     learn: Option<Res<crate::harvest::LearnSiteEnvironmentActive>>,
     held: Option<Res<crate::game_state::HeldGameState>>,
+    screens: Option<Res<crate::ui_layers::ScreenManager>>,
 ) {
     // 摆放编辑面持有输入期间（真源编辑模式下手势层/摇杆归编辑面，
     // ScreenLayerMysekaiCommon 的 _joyStickCanvasGroup），玩家移动让位。
     // GameState SiteMove disables the gesture layer and taps as well.
     // The keyboard adaptation follows the joystick: off until the entry's Finish.
+    // A dialog over the field takes the field's input, as it takes the stick's
+    // new presses (ExistsDialog(Layer_Dialog)), so the adaptation is off too.
     if edits.is_active()
         || settings_panel.blocks_world_input()
         || library.blocks_exploration_input()
         || site_move.is_some()
+        || screens.as_deref().is_some_and(crate::ui_layers::ScreenManager::exists_dialog)
         // GameState LearnSiteEnvironment hides the stick.
         || learn.is_some()
         // GameState CutScene / LevelUpMyRoomSite disable the stick.

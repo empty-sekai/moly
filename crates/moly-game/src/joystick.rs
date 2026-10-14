@@ -264,7 +264,18 @@ pub(crate) fn advance(
     for touch in touches.read() {
         match touch.phase {
             TouchPhase::Started => {
-                if state.captured.is_none() && !dialog && in_zone(touch.position, width, height) {
+                if state.captured.is_none() && dialog && in_zone(touch.position, width, height) {
+                    // A press under a dialog belongs to the dialog layer, as
+                    // the field buttons' taps do (ExistsDialog(Layer_Dialog)).
+                    // The gesture layer skips the same press while the stick
+                    // is enabled, so no layer takes it.
+                    info!(
+                        "[joystick] press {} @({:.0},{:.0}) refused: a dialog is shown on Layer_Dialog",
+                        touch.id, touch.position.x, touch.position.y
+                    );
+                    continue;
+                }
+                if state.captured.is_none() && in_zone(touch.position, width, height) {
                     // 首指捕获：底盘生于触点（浮动式）。已捕获时区内第二指
                     // 吞掉（真源早退 + 射线归摇杆件）；区外指不归本层。
                     state.captured = Some(touch.id);
