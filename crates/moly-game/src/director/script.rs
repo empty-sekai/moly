@@ -70,6 +70,11 @@ pub(crate) enum Node {
     NpcUse { unit: u32, fixture: FixtureRef, activity: Option<i32>, variant: Option<u32>, rests: bool },
     /// Shows a tweet of the master over a taken character for `secs`.
     NpcTweet { unit: u32, tweet: i32, secs: f32 },
+    /// A one-finger drag of `by` logical pixels (x right, y down) over
+    /// `secs`, starting at `from` (fractions of the window).
+    CameraDrag { by: [f32; 2], secs: f32, from: [f32; 2] },
+    /// A wheel turn of `by` pixels (positive zooms in) spread over `secs`.
+    CameraZoom { by: f32, secs: f32 },
     Weather { phenomenon: i32 },
     SiteSwitch { site: String },
 }
@@ -129,6 +134,9 @@ pub(crate) enum Cond {
     DialogShown,
     /// A player or NPC conversation is playing.
     TalkActive,
+    /// The camera has left its entry shot and no transition tween is in
+    /// flight, so a drag or a wheel turn moves it.
+    CameraSettled,
     ButtonHead(ButtonType),
     ButtonStacked(ButtonType),
     PlayerNear { to: Target, within: f32 },
@@ -142,7 +150,7 @@ const ACTIONS: &[&str] = &[
     "wait", "wait_until", "assert", "log", "where", "capture", "parallel", "repeat",
     "player.walk_to", "player.interact", "player.stick", "player.release", "player.talk_to", "tap",
     "npc.take", "npc.walk_to", "npc.face", "npc.emote", "npc.use", "npc.tweet", "npc.release",
-    "weather.set", "site.switch", "site.enter_room", "site.go_home",
+    "camera.drag", "camera.zoom", "weather.set", "site.switch", "site.enter_room", "site.go_home",
 ];
 
 /// Parses a script document.
@@ -304,6 +312,27 @@ fn step(value: &Value, at: &str) -> Result<Vec<Step>, String> {
             let secs = fields.opt_f32("secs")?.unwrap_or(3.0);
             vec![one(Node::NpcTweet { unit, tweet, secs }, None)]
         }
+        "camera.drag" => {
+            let by = pair(fields.req("by")?, &format!("{at}.by"))?;
+            let secs = fields.opt_f32("secs")?.unwrap_or(0.5);
+            let from = match fields.opt("from") {
+                Some(from) => pair(from, &format!("{at}.from"))?,
+                None => [0.5, 0.35],
+            };
+            if from.iter().any(|f| !(0.0..=1.0).contains(f)) {
+                return Err(format!("{at}: from is a fraction of the window, got {from:?}"));
+            }
+            vec![one(Node::CameraDrag { by, secs, from }, None)]
+        }
+        "camera.zoom" => {
+            let by = fields
+                .req("by")?
+                .as_f64()
+                .filter(|by| by.is_finite())
+                .ok_or_else(|| format!("{at}: by must be a number of pixels"))? as f32;
+            let secs = fields.opt_f32("secs")?.unwrap_or(0.5);
+            vec![one(Node::CameraZoom { by, secs }, None)]
+        }
         "weather.set" => vec![one(Node::Weather { phenomenon: fields.req_i32("phenomenon")? }, None)],
         "site.switch" => vec![one(Node::SiteSwitch { site: fields.req_str("site")?.to_owned() }, Some(60.0))],
         // Through the house's door: walk to its entry box, press the entry
@@ -344,6 +373,7 @@ fn cond(value: &Value, at: &str) -> Result<Cond, String> {
             "entry_done" => Cond::EntryDone,
             "dialog_shown" => Cond::DialogShown,
             "talk_active" => Cond::TalkActive,
+            "camera_settled" => Cond::CameraSettled,
             other => return Err(format!("{at}: unknown condition {other}")),
         });
     }
@@ -665,5 +695,22 @@ mod tests {
         assert!(matches!(&script.steps[2].node, Node::NpcTweet { tweet: 301, secs, .. } if *secs == 3.0));
         let error = parse(&json!({ "steps": [{ "do": "npc.use", "unit": 2, "fixture": 1, "variant": 0 }] })).unwrap_err();
         assert!(error.contains("variant counts from 1"), "{error}");
+    }
+
+    #[test]
+    fn camera_steps_take_pixels_and_window_fractions() {
+        let script = parse(&json!({ "steps": [
+            { "do": "camera.drag", "by": [-200, 0] },
+            { "do": "camera.zoom", "by": -120, "secs": 1 },
+            { "do": "wait_until", "until": "camera_settled" }
+        ] }))
+        .unwrap();
+        assert!(matches!(script.steps[2].node, Node::WaitUntil { until: Cond::CameraSettled }));
+        assert!(matches!(&script.steps[0].node,
+            Node::CameraDrag { by: [x, y], secs, from: [fx, fy] }
+                if *x == -200.0 && *y == 0.0 && *secs == 0.5 && *fx == 0.5 && *fy == 0.35));
+        assert!(matches!(&script.steps[1].node, Node::CameraZoom { by, secs } if *by == -120.0 && *secs == 1.0));
+        let error = parse(&json!({ "steps": [{ "do": "camera.drag", "by": [1, 1], "from": [1.5, 0] }] })).unwrap_err();
+        assert!(error.contains("fraction of the window"), "{error}");
     }
 }

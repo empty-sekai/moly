@@ -1,8 +1,9 @@
-//! The director's hand: a joystick finger and a tap finger. It writes the
-//! same input streams a person's fingers make, so every gate the product
-//! puts on input (the entry's control lock, a dialog over the field, a site
-//! move) holds for a script as it does for a player.
+//! The director's hand: a joystick finger, a tap finger, a drag finger and
+//! a mouse wheel. It writes the same input streams a person makes, so every
+//! gate the product puts on input (the entry's control lock, a dialog over
+//! the field, a site move) holds for a script as it does for a player.
 
+use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::input::touch::{TouchInput, TouchPhase};
 use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, WindowEvent};
@@ -15,6 +16,9 @@ const STICK_FINGER: u64 = 99_101;
 /// The tap finger. Its touches go to the window's event stream the gesture
 /// layer reads, which the joystick does not.
 const TAP_FINGER: u64 = 99_102;
+/// The drag finger, on the window's event stream like the tap finger: the
+/// gesture layer turns its moves into the camera's drag.
+const DRAG_FINGER: u64 = 99_103;
 
 /// Where the joystick finger goes down: inside the stick's zone.
 fn stick_base(window: &Window) -> Vec2 {
@@ -100,6 +104,26 @@ pub(crate) fn tap(world: &mut World, position: Vec2) -> Result<(), &'static str>
             id: TAP_FINGER,
         }));
     }
+    Ok(())
+}
+
+/// The drag finger at `position` in `phase`.
+pub(crate) fn drag_touch(world: &mut World, phase: TouchPhase, position: Vec2) -> Result<(), &'static str> {
+    let (entity, _) = window(world).ok_or("no primary window")?;
+    world.write_message(WindowEvent::TouchInput(TouchInput {
+        phase,
+        position,
+        window: entity,
+        force: None,
+        id: DRAG_FINGER,
+    }));
+    Ok(())
+}
+
+/// A wheel turn of `pixels` (up positive), as a touchpad scrolls.
+pub(crate) fn wheel(world: &mut World, pixels: f32) -> Result<(), &'static str> {
+    let (entity, _) = window(world).ok_or("no primary window")?;
+    world.write_message(MouseWheel { unit: MouseScrollUnit::Pixel, x: 0.0, y: pixels, window: entity });
     Ok(())
 }
 

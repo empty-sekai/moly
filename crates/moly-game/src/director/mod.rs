@@ -36,6 +36,12 @@
 //! `npc.release {unit}` gives it back to its AI. A script's taken characters
 //! are released when it ends.
 //!
+//! Camera: `camera.drag {by: [dx, dy], secs, from: [fx, fy]}` drags one
+//! finger by logical pixels from a point given as fractions of the window
+//! (the field above the player by default); `camera.zoom {by, secs}` turns
+//! the wheel by pixels (positive zooms in). Both go through the gesture
+//! layer and the camera's own input law.
+//!
 //! World: `weather.set {phenomenon}`, `site.switch {site}` (a site type such
 //! as `first_floor`), and the door sequences `site.enter_room` and
 //! `site.go_home` (walk to the door, press its button, wait for the move to
@@ -46,7 +52,8 @@
 //! with an optional `offset: [dx, dz]`.
 //!
 //! Conditions: `"site_moving"`, `"entry_done"`, `"dialog_shown"`,
-//! `"talk_active"`, or `{site_is}`, `{site_kind: home|room|harvest|delivery}`,
+//! `"talk_active"`, `"camera_settled"` (the entry shot has handed over and
+//! no camera transition is in flight), or `{site_is}`, `{site_kind: home|room|harvest|delivery}`,
 //! `{button_head}`, `{button_stacked}`, `{phenomenon_is}`, `{player_near: {to,
 //! within}}`, `{npc_near: {unit, to, within}}`, `{npc_action: {unit, is}}`
 //! (an action state such as `Walk` or `Talk`), `{all: [..]}`, `{any: [..]}`,
@@ -54,7 +61,8 @@
 //!
 //! Commands: `{"run": script}` (or a bare script), `{"stop": true}`,
 //! `{"pause": true}`, `{"resume": true}`. A native run reads a script file
-//! named by `MOLY_DIRECTOR_SCRIPT` at start; the browser engine takes
+//! named by `MOLY_DIRECTOR_SCRIPT` at start, and a script with `exit` ends
+//! the app once its captures are on disk; the browser engine takes
 //! commands through [`director_command`] and reports through
 //! [`director_snapshot`] (status `idle`, `queued`, `running`, `paused`,
 //! `done`, `failed` or `stopped`).
@@ -67,8 +75,14 @@ mod script;
 
 use std::sync::Mutex;
 
+use bevy::diagnostic::FrameCount;
 use bevy::prelude::*;
+use bevy::render::view::screenshot::Screenshot;
 use serde_json::{json, Value};
+
+/// How long a finished script with `exit` waits for its captures to save.
+#[cfg(not(target_arch = "wasm32"))]
+const EXIT_CAPTURE_WAIT: f32 = 5.0;
 
 /// Commands waiting for the next frame.
 static COMMANDS: Mutex<Vec<Command>> = Mutex::new(Vec::new());
@@ -116,6 +130,9 @@ struct Director {
     error: Option<String>,
     /// The revision last published, and when.
     published: Option<(u64, f32)>,
+    /// A finished script's exit, held while its captures save: the exit,
+    /// the frame it finished on and the time it gives up waiting.
+    exit: Option<(AppExit, u32, f32)>,
 }
 
 impl Default for Director {
@@ -128,6 +145,7 @@ impl Default for Director {
             started: 0.0,
             error: None,
             published: None,
+            exit: None,
         }
     }
 }
@@ -212,6 +230,7 @@ fn tick(world: &mut World) {
         for command in commands {
             apply(world, director, command);
         }
+        release_exit(world, director);
         if director.status == Status::Running {
             let track = director.track.as_mut().expect("a running director has a track");
             match track.tick(world, &mut director.shared) {
@@ -283,11 +302,33 @@ fn finish(world: &mut World, director: &mut Director, status: Status, error: Opt
     director.error = error;
     #[cfg(not(target_arch = "wasm32"))]
     if director.script.as_ref().is_some_and(|script| script.exit) {
-        world.write_message(match status {
+        let exit = match status {
             Status::Done => AppExit::Success,
             _ => AppExit::from_code(1),
-        });
+        };
+        director.exit = Some((exit, world.resource::<FrameCount>().0, director.shared.now + EXIT_CAPTURE_WAIT));
     }
+}
+
+/// Sends a held exit once no screenshot is pending. A capture requested on
+/// the script's last frame spawns its screenshot a frame later, so the
+/// check starts two frames after the finish.
+fn release_exit(world: &mut World, director: &mut Director) {
+    let Some((exit, frame, give_up)) = director.exit.clone() else {
+        return;
+    };
+    if world.resource::<FrameCount>().0.wrapping_sub(frame) < 2 {
+        return;
+    }
+    let pending = world.query_filtered::<(), With<Screenshot>>().iter(world).count();
+    if pending > 0 && director.shared.now < give_up {
+        return;
+    }
+    if pending > 0 {
+        warn!("[director] exiting with {pending} capture(s) still unsaved");
+    }
+    director.exit = None;
+    world.write_message(exit);
 }
 
 fn publish(director: &mut Director) {

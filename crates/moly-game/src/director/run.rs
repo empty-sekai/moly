@@ -6,6 +6,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
+use bevy::input::touch::TouchPhase;
 use bevy::prelude::*;
 use moly_law::action_button::{ButtonType, TargetId, ACTION_BUTTON_INPUT_INTERVAL};
 
@@ -116,6 +117,9 @@ enum Kind {
     Emote { lease: crate::emoticon::timeline::EmoteLease, until: f32 },
     NpcUse { ticket: u64 },
     Tweet { entity: Entity, until: f32 },
+    /// `down` is false until the finger has touched down at `from`.
+    CameraDrag { from: Vec2, by: Vec2, start: f32, secs: f32, down: bool },
+    CameraZoom { left: f32, per_sec: f32, until: f32 },
     Parallel { tracks: Vec<Track>, join: Join },
     SiteSwitch { site: String },
 }
@@ -129,6 +133,9 @@ impl Kind {
             Kind::Emote { lease, .. } => crate::emoticon::timeline::hide(world, *lease, true),
             Kind::NpcUse { ticket } => super::npc::end_activity(world, *ticket, true),
             Kind::Tweet { entity, .. } => super::npc::hide_tweet(world, *entity),
+            Kind::CameraDrag { from, by, down: true, .. } => {
+                let _ = hand::drag_touch(world, TouchPhase::Ended, *from + *by);
+            }
             _ => {}
         }
     }
@@ -414,6 +421,23 @@ fn start(world: &mut World, shared: &mut Shared, step: Step, path: String) -> St
             }
             Kind::Tweet { entity, until: shared.now + secs }
         }
+        Node::CameraDrag { by, secs, from } => {
+            let Some(size) = hand::window_size(world) else {
+                return ended(path, Err("no primary window".into()), optional);
+            };
+            Kind::CameraDrag {
+                from: Vec2::from(*from) * size,
+                by: Vec2::from(*by),
+                start: shared.now,
+                secs: *secs,
+                down: false,
+            }
+        }
+        Node::CameraZoom { by, secs } => Kind::CameraZoom {
+            left: *by,
+            per_sec: if *secs > 0.0 { by / secs } else { f32::INFINITY },
+            until: shared.now + secs,
+        },
         Node::Parallel { tracks, join } => Kind::Parallel {
             tracks: tracks
                 .iter()
@@ -530,6 +554,49 @@ fn poll(world: &mut World, shared: &mut Shared, active: &mut Active) -> Poll {
                 Poll::Done(String::new())
             } else {
                 Poll::Running(format!("{:.1} s left", *until - shared.now))
+            }
+        }
+        Kind::CameraDrag { from, by, start, secs, down } => {
+            if !*down {
+                if let Err(error) = hand::drag_touch(world, TouchPhase::Started, *from) {
+                    return Poll::Failed(error.into());
+                }
+                *down = true;
+                *start = shared.now;
+                return Poll::Running("finger down".into());
+            }
+            let done = (shared.now - *start) / secs.max(f32::EPSILON);
+            let at = *from + *by * done.min(1.0);
+            if let Err(error) = hand::drag_touch(world, TouchPhase::Moved, at) {
+                return Poll::Failed(error.into());
+            }
+            if done < 1.0 {
+                return Poll::Running(format!("{:.0} %", done * 100.0));
+            }
+            // The last move lands on the end point before the finger lifts.
+            *down = false;
+            match hand::drag_touch(world, TouchPhase::Ended, at) {
+                Ok(()) => Poll::Done(format!("dragged ({:.0}, {:.0}) px", by.x, by.y)),
+                Err(error) => Poll::Failed(error.into()),
+            }
+        }
+        Kind::CameraZoom { left, per_sec, until } => {
+            let step = if shared.now >= *until {
+                *left
+            } else {
+                let delta = world.resource::<Time>().delta_secs();
+                (*per_sec * delta).clamp(-left.abs(), left.abs())
+            };
+            if step != 0.0 {
+                if let Err(error) = hand::wheel(world, step) {
+                    return Poll::Failed(error.into());
+                }
+                *left -= step;
+            }
+            if shared.now >= *until || *left == 0.0 {
+                Poll::Done(String::new())
+            } else {
+                Poll::Running(format!("{left:.0} px left"))
             }
         }
         Kind::Parallel { tracks, join } => {

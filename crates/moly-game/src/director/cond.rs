@@ -163,6 +163,12 @@ pub(crate) fn eval(world: &mut World, cond: &Cond) -> (bool, String) {
                 .is_some_and(crate::ui_layers::ScreenManager::exists_dialog);
             (shown, format!("dialog shown {shown}"))
         }
+        Cond::CameraSettled => {
+            let state = world.get_resource::<crate::camera::FieldCameraState>().map(|state| state.0);
+            let tween = world.contains_resource::<crate::camera::CameraTween>();
+            let settled = state.is_some_and(|state| state != crate::camera::CameraStateType::HouseEntry) && !tween;
+            (settled, format!("camera state {state:?}, tween in flight {tween}"))
+        }
         Cond::TalkActive => {
             let talk = world.contains_resource::<crate::talk::ActiveTalk>()
                 || world.contains_resource::<crate::player_talk::PlayerTalkSession>();
