@@ -110,7 +110,7 @@ pub(super) struct ChildUpdate {
     pub gravity: [f32; 3],
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum Refused {
     InvalidCommand(&'static str),
     Unsupported(&'static str),
@@ -526,6 +526,7 @@ pub(super) mod arms {
 /// target's owner words of the frame the command was issued in; `initial`
 /// is the target's Initial stream; `shape` is the Shape step (None when the
 /// target has no Shape module). A refusal changes nothing.
+#[cfg(test)]
 pub(super) fn apply_command(
     system: &mut Runtime,
     owner: &ChildOwner,
@@ -540,8 +541,27 @@ pub(super) fn apply_command(
 /// [`apply_command`] for a target with its own birth edges: `events` records
 /// the newborns' birth events, and its queue and carries change only when
 /// the command succeeds.
+#[cfg(test)]
 pub(super) fn apply_command_with_events(
     system: &mut Runtime,
+    owner: &ChildOwner,
+    initial: &mut ModuleRandom,
+    shape: Option<&mut dyn ChildShape>,
+    command: &ChildCommand,
+    update: ChildUpdate,
+    events: Option<TargetEvents<'_>>,
+) -> Result<Applied, Refused> {
+    let laws = child_laws(&system.emitter);
+    apply_with_laws(system, &laws, owner, initial, shape, command, update, events)
+}
+
+/// One command applied with the target's laws already read from its
+/// modules (see [`TargetLaws`]); `events` as for a target with its own birth
+/// edges.
+#[allow(clippy::too_many_arguments)]
+fn apply_with_laws(
+    system: &mut Runtime,
+    laws: &Result<ChildLaws, Refused>,
     owner: &ChildOwner,
     initial: &mut ModuleRandom,
     shape: Option<&mut dyn ChildShape>,
@@ -563,7 +583,7 @@ pub(super) fn apply_command_with_events(
     }
     command.validate()?;
     let inherit = inherited_size(&command.inherited_words)?;
-    let laws = child_laws(&system.emitter)?;
+    let laws = laws.as_ref().map_err(|refused| *refused)?;
     // Replay arm: a sheet word drawn at birth from the Initial stream.
     if system.emitter.texture_sheet.is_some() && arms::on("uvDrawsInitialWord") {
         let _ = initial.next4_u32();
@@ -1195,10 +1215,37 @@ pub(crate) fn deliver_command(system: &mut Runtime,
 pub(crate) fn deliver_command_with(system: &mut Runtime,
     command: &moly_law::particle::sub_emission::SubEmitterCommand, frame_dt: f32, flags: u32)
     -> Result<usize, String> {
+    let laws = TargetLaws::of(system);
+    deliver_with_laws(system, &laws, command, frame_dt, flags)
+}
+
+/// A target's laws, read from its modules: the same for every command of one
+/// delivery round, which changes none of the target's modules.
+pub(crate) struct TargetLaws {
+    child: Result<ChildLaws, Refused>,
+    shape: Option<Result<ShapeBirthLaw, String>>,
+}
+
+impl TargetLaws {
+    pub(crate) fn of(system: &Runtime) -> Self {
+        Self {
+            child: child_laws(&system.emitter),
+            shape: system.emitter.shape.as_ref().map(|params| {
+                ShapeBirthLaw::from_params(params).map_err(|refused| format!("target Shape {refused:?}"))
+            }),
+        }
+    }
+}
+
+/// [`deliver_command_with`] with the target's laws read before (see
+/// [`TargetLaws`]).
+pub(crate) fn deliver_with_laws(system: &mut Runtime, laws: &TargetLaws,
+    command: &moly_law::particle::sub_emission::SubEmitterCommand, frame_dt: f32, flags: u32)
+    -> Result<usize, String> {
     let Some(mut native) = system.native_birth.take() else {
         return Err("target has no child owner".into());
     };
-    let result = deliver_staged(system, &mut native, command, frame_dt, flags);
+    let result = deliver_staged(system, laws, &mut native, command, frame_dt, flags);
     if let Some(target) = native.target.as_mut() {
         target.commands += 1;
         match &result {
@@ -1213,14 +1260,14 @@ pub(crate) fn deliver_command_with(system: &mut Runtime,
     result
 }
 
-fn deliver_staged(system: &mut Runtime, native: &mut birth::NativeBirthState,
+fn deliver_staged(system: &mut Runtime, laws: &TargetLaws, native: &mut birth::NativeBirthState,
     command: &moly_law::particle::sub_emission::SubEmitterCommand, frame_dt: f32, flags: u32) -> Result<usize, String> {
     let owner = native.target.as_ref().ok_or("system is not a sub-emitter target")?.owner;
     let update = ChildUpdate { flags, frame_dt, world_playing: true, gravity: SOURCE_GRAVITY };
-    let mut shape = match &system.emitter.shape {
+    let mut shape = match &laws.shape {
         None => None,
-        Some(params) => Some(SourceShape {
-            law: ShapeBirthLaw::from_params(params).map_err(|refused| format!("target Shape {refused:?}"))?,
+        Some(law) => Some(SourceShape {
+            law: law.clone()?,
             stream: native.shape,
             shape_scale: owner.shape_scale,
             uses_axis_of_rotation: system.geometry.shape_evidence().is_some_and(|e| e.mesh_renderer),
@@ -1231,7 +1278,7 @@ fn deliver_staged(system: &mut Runtime, native: &mut birth::NativeBirthState,
         accumulated: system.pending,
         emission_word: native.emission.random.words[0],
     });
-    let applied = apply_command_with_events(system, &owner, &mut native.initial,
+    let applied = apply_with_laws(system, &laws.child, &owner, &mut native.initial,
         shape.as_mut().map(|s| s as &mut dyn ChildShape), &ChildCommand::from_event(command), update, events)
         .map_err(|refused| format!("{refused:?}"))?;
     if let Some(shape) = shape {

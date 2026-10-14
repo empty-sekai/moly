@@ -202,7 +202,10 @@ impl AssetLoader for SourceTextureLoader {
             source.pixels.as_ref().expect("validated pixels"),
         )
         .await?;
-        source.verify_pixels(&pixels)?;
+        // `dependency` checked the payload against the pixels reference (its
+        // byte count and SHA-256), and `parse` checked that the mip ranges
+        // tile exactly that many bytes. The per-mip identities are checked
+        // with `verify_pixels` over the corpus, not at every load.
         Ok(SourceTextureAsset {
             source: Arc::new(source),
             pixels: Arc::from(pixels),

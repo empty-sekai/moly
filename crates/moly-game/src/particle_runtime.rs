@@ -14,7 +14,8 @@ pub(crate) use trails::{
     write_mesh as write_trail_mesh, TrailOwner, TrailState,
 };
 pub(crate) use sub_events::{BirthEdge, BirthEvents, CollisionEdge, DeathEdge, EventEdges};
-pub(crate) use child::{child_target_eligible, deliver_command, deliver_command_with, install_child_target, restart_child_target};
+pub(crate) use child::{child_target_eligible, deliver_command, deliver_command_with, deliver_with_laws, install_child_target,
+    restart_child_target, TargetLaws};
 pub(crate) mod seed;
 #[cfg(test)]
 pub(crate) mod test_support;

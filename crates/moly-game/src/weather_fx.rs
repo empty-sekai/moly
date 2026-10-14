@@ -869,6 +869,9 @@ pub(crate) fn plan(
     planned: Option<Res<WeatherFxPlan>>,
     site: Option<Res<SiteActive>>,
     placements: Option<Res<crate::fixture::FixturePlacements>>,
+    // The collider export is the same for every phenomenon: its parse and
+    // the scenes built from it stay for the next plan.
+    mut collision: Local<Option<(Option<AssetId<JsonAsset>>, crate::particle_runtime::collision_scene::SceneBuilder)>>,
  ) {
     if planned.is_some() {
         return;
@@ -880,36 +883,43 @@ pub(crate) fn plan(
     if let LoadState::Failed(err) = server.load_state(&doc.handle) {
         panic!("现象 {} 的特效档案装载失败（天气粒子链）：{err:?}", doc.tier);
     }
-    let Some(asset) = json.get(&doc.handle) else {
+    if let Some(handle) = &doc.animations {
+        if let LoadState::Failed(err) = server.load_state(handle) {
+            panic!("现象 {} 的动画源档案装载失败：{err:?}", doc.tier);
+        }
+    }
+    // Every document first, so a frame that waits parses none.
+    let collision_failed = doc.collision.as_ref().and_then(|handle| match server.load_state(handle) {
+        LoadState::Failed(err) => Some(format!("the collider export failed to load: {err:?}")),
+        _ => None,
+    });
+    let waiting = |handle: &Handle<JsonAsset>| json.get(handle).is_none();
+    if waiting(&doc.handle) || doc.animations.as_ref().is_some_and(waiting)
+        || (collision_failed.is_none() && doc.collision.as_ref().is_some_and(waiting)) {
         return;
-    };
-    let value: Value = serde_json::from_str(&asset.0).unwrap_or_else(|err| {
+    }
+    let value: Value = serde_json::from_str(&json.get(&doc.handle).expect("loaded").0).unwrap_or_else(|err| {
         panic!("现象 {} 的特效档案不是合法 JSON（天气粒子链）：{err}", doc.tier)
     });
     let Some(effects) = value.get("effects").and_then(Value::as_object) else {
         panic!("现象 {} 的特效档案缺 effects 对象", doc.tier);
     };
-    let animation_document = if let Some(handle) = &doc.animations {
-        if let LoadState::Failed(err) = server.load_state(handle) {
-            panic!("现象 {} 的动画源档案装载失败：{err:?}", doc.tier);
-        }
-        let Some(asset) = json.get(handle) else { return; };
-        Some(serde_json::from_str::<Value>(&asset.0).unwrap_or_else(|err| panic!("weather animation source JSON: {err}")))
-    } else { None };
-    // The collider export: read once per plan, one ground scene per effect.
-    let collision_document = match &doc.collision {
-        None => Err("this asset root carries no collider export".to_owned()),
-        Some(handle) => {
-            if let LoadState::Failed(err) = server.load_state(handle) {
-                Err(format!("the collider export failed to load: {err:?}"))
-            } else if let Some(asset) = json.get(handle) {
-                serde_json::from_str::<Value>(&asset.0).map_err(|err| format!("the collider export is not JSON: {err}"))
-            } else {
-                return;
-            }
-        }
-    };
-    let mut scenes = crate::particle_runtime::collision_scene::SceneBuilder::new(collision_document);
+    let animation_document = doc.animations.as_ref().map(|handle| {
+        serde_json::from_str::<Value>(&json.get(handle).expect("loaded").0)
+            .unwrap_or_else(|err| panic!("weather animation source JSON: {err}"))
+    });
+    // The collider export: one ground scene per effect and per site.
+    let collision_key = doc.collision.as_ref().map(Handle::id);
+    if collision.as_ref().map(|(key, _)| *key) != Some(collision_key) {
+        let document = match (&doc.collision, collision_failed) {
+            (None, _) => Err("this asset root carries no collider export".to_owned()),
+            (Some(_), Some(failed)) => Err(failed),
+            (Some(handle), None) => serde_json::from_str::<Value>(&json.get(handle).expect("loaded").0)
+                .map_err(|err| format!("the collider export is not JSON: {err}")),
+        };
+        *collision = Some((collision_key, crate::particle_runtime::collision_scene::SceneBuilder::new(document)));
+    }
+    let scenes = &mut collision.as_mut().expect("set above").1;
 
     // ---- 选 effect：只取源环境装载器按名字构造的三份预制件（见 source_environment_selection）----
     let selected = source_environment_selection(effects, &doc.tier, &doc.env_site);
@@ -3642,12 +3652,23 @@ fn deliver_round(systems: &mut [(&mut LiveWeatherEmitter, bool)], frame_dt: f32)
         }
         delivered = true;
         let clock = systems[parent].0.effect_clock.clone();
+        // Each target found and its laws read once for the round's commands.
+        let mut targets: Vec<(String, Option<(usize, crate::particle_runtime::TargetLaws)>)> = Vec::new();
         for (target, command) in commands {
-            let found = systems.iter_mut().find(|(live, _)| Arc::ptr_eq(&live.effect_clock, &clock)
-                && live.node == target
-                && live.native_birth.as_ref().is_some_and(|birth| birth.target.is_some()));
-            let Some((live, _)) = found else { continue };
-            if let Err(reason) = crate::particle_runtime::deliver_command(&mut live.runtime, &command, frame_dt) {
+            let at = match targets.iter().position(|(name, _)| *name == target) {
+                Some(at) => at,
+                None => {
+                    let found = systems.iter().position(|(live, _)| Arc::ptr_eq(&live.effect_clock, &clock)
+                        && live.node == target
+                        && live.native_birth.as_ref().is_some_and(|birth| birth.target.is_some()));
+                    let found = found.map(|index| (index, crate::particle_runtime::TargetLaws::of(&systems[index].0.runtime)));
+                    targets.push((target, found));
+                    targets.len() - 1
+                }
+            };
+            let Some((index, laws)) = &targets[at].1 else { continue };
+            let live = &mut *systems[*index].0;
+            if let Err(reason) = crate::particle_runtime::deliver_with_laws(&mut live.runtime, laws, &command, frame_dt, 0) {
                 let first = live.native_birth.as_ref().and_then(|birth| birth.target.as_ref())
                     .is_some_and(|state| state.refused == 1);
                 if first {

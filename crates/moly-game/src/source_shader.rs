@@ -74,7 +74,8 @@ impl GpuSourceTexture {
         asset: &SourceTextureAsset,
         view_formats: bool,
     ) -> Result<Self> {
-        asset.source.verify_pixels(&asset.pixels)?;
+        // The texture loader, the asset's only constructor, verified the
+        // pixels; the asset holds them immutably.
         let source = &asset.source;
         let limits = device.limits();
         require(
