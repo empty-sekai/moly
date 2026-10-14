@@ -13,9 +13,11 @@
 //! whole four-lane groups from the four-aligned end of the live particles;
 //! the newborn death pass kills the same way inside that span; packing then
 //! copies the last surviving newborns into the alignment gap before them.
-//! Clear only resets the count. [`SlotTail`] carries these slots for a
-//! runtime whose live particles follow the engine's slot order, in the order
-//! the runtime applies those operations.
+//! A sub-emitter target's child Emit writes and packs its block the same
+//! way, and its catch-up steps kill inside the block between the two
+//! ([`SlotTail::pack`]). Clear only resets the count. [`SlotTail`] carries
+//! these slots for a runtime whose live particles follow the engine's slot
+//! order, in the order the runtime applies those operations.
 use std::collections::VecDeque;
 
 use crate::particle::buffer::RingBufferMode;
@@ -157,22 +159,6 @@ impl SlotTail {
     /// runtime's newborns after packing.
     pub fn birth(&mut self, old: usize, lanes: &[Particle], live: usize, after: &[Particle])
         -> Result<(), TailRefused> {
-        if old != self.live {
-            return Err(TailRefused::Order);
-        }
-        // A birth past the reservation grows it; the growth keeps every
-        // slot the tail holds ([`RESERVED_SLOTS`]).
-        let end = old.next_multiple_of(4) + lanes.len();
-        if end > self.capacity {
-            self.capacity = end.next_multiple_of(32);
-        }
-        let gap = old.next_multiple_of(4) - old;
-        if self.slots.len() < gap {
-            return Err(TailRefused::Unwritten);
-        }
-        let gap_slots: Vec<Particle> = self.slots.drain(..gap).collect();
-        let overwritten = lanes.len().min(self.slots.len());
-        self.slots.drain(..overwritten);
         let mut survivors = lanes.to_vec();
         let mut popped = Vec::new();
         let mut index = 0;
@@ -184,24 +170,54 @@ impl SlotTail {
                 index += 1;
             }
         }
-        if live > survivors.len() {
+        let count = survivors.len();
+        survivors.extend(popped.iter().rev());
+        self.pack(old, &survivors, count, live, after)
+    }
+
+    /// The pack of one birth after `old` live particles whose block of
+    /// `block.len()` lanes (whole four-lane groups from the slot `old` rounded
+    /// up to four) is as the birth's passes leave it: its first `count` lanes
+    /// still in the count, then, in slot order, the slots past it, which hold
+    /// what each kill's copy of the last lane left there. The first `live` of
+    /// the block stay live, and packing copies the last `min(gap, live)` of
+    /// them into the gap below the block. `after` is the runtime's newborns
+    /// after packing.
+    pub fn pack(&mut self, old: usize, block: &[Particle], count: usize, live: usize, after: &[Particle])
+        -> Result<(), TailRefused> {
+        if old != self.live {
+            return Err(TailRefused::Order);
+        }
+        // A birth past the reservation grows it; the growth keeps every
+        // slot the tail holds ([`RESERVED_SLOTS`]).
+        let end = old.next_multiple_of(4) + block.len();
+        if end > self.capacity {
+            self.capacity = end.next_multiple_of(32);
+        }
+        let gap = old.next_multiple_of(4) - old;
+        if self.slots.len() < gap {
+            return Err(TailRefused::Unwritten);
+        }
+        let gap_slots: Vec<Particle> = self.slots.drain(..gap).collect();
+        let overwritten = block.len().min(self.slots.len());
+        self.slots.drain(..overwritten);
+        if live > count || count > block.len() {
             return Err(TailRefused::Order);
         }
         let copied = gap.min(live);
-        let mut packed = survivors[..live].to_vec();
+        let mut packed = block[..live].to_vec();
         packed.rotate_right(copied);
         if !same_all(&packed, after) {
             return Err(TailRefused::Order);
         }
         let mut tail: VecDeque<Particle> = VecDeque::new();
         if live >= gap {
-            tail.extend(&survivors[live - gap..live]);
+            tail.extend(&block[live - gap..live]);
         } else {
             tail.extend(&gap_slots[live..]);
-            tail.extend(&survivors[..live]);
+            tail.extend(&block[..live]);
         }
-        tail.extend(&survivors[live..]);
-        tail.extend(popped.iter().rev());
+        tail.extend(&block[live..]);
         tail.extend(self.slots.drain(..));
         self.slots = tail;
         self.live = old + live;

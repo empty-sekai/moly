@@ -46,9 +46,19 @@
 //! block ends with is not a child random word.
 //!
 //! The catch-up runs only when the parent's update flags enable it (bit 0 or
-//! bit 2); the per-frame update passes no such flag. Size is not stored: the
-//! renderer evaluates the size law at the final age, which is what the
-//! engine's size write after the catch-up holds.
+//! bit 2); the per-frame update passes no such flag. The engine's size write
+//! after the catch-up is its SizeModule call over the accepted lanes. A size
+//! law that evaluates where a consumer asks leaves it to the renderer, which
+//! evaluates that law at the final age; a size law that follows the engine's
+//! calls runs it ([`moly_law::particle::size::SizeCalls::emit`]).
+//!
+//! The block keeps its slots as the engine's storage does: a death copies
+//! the last lane in the count into the dead one and lowers the count, so the
+//! slots past the count keep what they held, and each catch-up call still
+//! covers the whole four-lane groups up to its end, those slots included.
+//! A CustomData or size law that follows the engine's storage is told the
+//! block as the passes leave it, then the pack
+//! ([`moly_law::particle::slot_tail::SlotTail::pack`]).
 //!
 //! In the product a target is installed with its own seed owner and the
 //! owner words of its authored chain; its own frame is the stopped update
@@ -649,6 +659,11 @@ fn apply_with_laws(
     command.validate()?;
     let inherit = inherited_size(&command.inherited_words)?;
     let laws = laws.as_ref().map_err(|refused| *refused)?;
+    // A law that follows the engine's storage and has stopped following it
+    // ends the target at its next frame; the command writes nothing.
+    if let Some(reason) = storage_refusal(system) {
+        return Err(Refused::Unsupported(reason));
+    }
     // Replay arm: a sheet word drawn at birth from the Initial stream.
     if system.emitter.texture_sheet.is_some() && arms::on("uvDrawsInitialWord") {
         let _ = initial.next4_u32();
@@ -709,6 +724,13 @@ fn apply_with_laws(
     let capacity_accepted = accepted;
     let groups = accepted.div_ceil(4);
     let aligned_lanes = groups * 4;
+    // A step not above the minimum skips the catch-up and the Emit's
+    // SizeModule call both: the newborns' sizes are then what their slots
+    // held, which a size law that follows the engine's calls does not know.
+    if groups > 0 && !catch_up.sizes_newborns()
+        && system.size_law.as_ref().is_some_and(|size| size.calls().is_some()) {
+        return Err(Refused::Unsupported("target command whose step skips the Emit's size call, with a size law that follows the engine's calls"));
+    }
 
     // Staged: nothing below writes the system until the command succeeded.
     let mut next_initial = *initial;
@@ -842,13 +864,17 @@ fn apply_with_laws(
         }
         recorded = Some(copy);
     }
-    // Newborn deaths over the padded block: the last lane moves into the
-    // dead one, and every death takes one off the accepted count.
+    // Newborn deaths over the padded block: the last lane in the count is
+    // copied into the dead one, which is retested, the count drops by one
+    // (the last slot keeps what it held) and every death takes one off the
+    // accepted count.
     let mut deaths = 0_u64;
+    let mut block_count = lanes.len();
     let mut index = 0;
-    while index < lanes.len() {
+    while index < block_count {
         if lanes[index].age > 100.0 {
-            lanes.swap_remove(index);
+            lanes[index] = lanes[block_count - 1];
+            block_count -= 1;
             accepted = accepted.saturating_sub(1);
             deaths += 1;
         } else {
@@ -861,7 +887,7 @@ fn apply_with_laws(
     if catch_up.runs {
         let dt = catch_up.frame_dt;
         loop {
-            if lanes.is_empty() || accepted == 0 {
+            if block_count == 0 || accepted == 0 {
                 break;
             }
             let mut end = accepted;
@@ -888,12 +914,13 @@ fn apply_with_laws(
                 }
             }
             // Four-wide from the block start while the group starts before
-            // the end: dead lanes 3..0 take the last lane, the group is
-            // retested; lanes of the last group past the end are tested too.
+            // the end and the count: dead lanes 3..0 in the count take the
+            // last lane in the count, the group is retested; lanes of the
+            // last group past the end are tested too.
             let mut group = 0;
-            while group < end && group < lanes.len() {
+            while group < end && group < block_count {
                 let dead: [bool; 4] =
-                    std::array::from_fn(|l| group + l < lanes.len() && lanes[group + l].age > 100.0);
+                    std::array::from_fn(|l| group + l < block_count && lanes[group + l].age > 100.0);
                 if !dead.iter().any(|&d| d) {
                     group += 4;
                     continue;
@@ -901,7 +928,8 @@ fn apply_with_laws(
                 for l in (0..4).rev() {
                     if dead[l] {
                         let padding = group + l >= accepted;
-                        lanes.swap_remove(group + l);
+                        lanes[group + l] = lanes[block_count - 1];
+                        block_count -= 1;
                         deaths += 1;
                         if accepted > 0 && !(arms::on("paddingKillKeepsAccepted") && padding) {
                             accepted -= 1;
@@ -909,7 +937,7 @@ fn apply_with_laws(
                     }
                 }
             }
-            end = end.min(lanes.len());
+            end = end.min(block_count);
             let covered = (4 * end.div_ceil(4)).min(lanes.len());
             for lane in &mut lanes[..covered] {
                 integrate_rotation(&laws, lane, dt);
@@ -919,19 +947,20 @@ fn apply_with_laws(
             }
         }
     }
-    lanes.truncate(accepted);
-    let born: Vec<(Particle, Side)> = lanes
+    let reflect = |v: [f32; 3]| crate::particle_geometry::reflect(Vec3::from_array(v)).to_array();
+    let lane_particle = |lane: &Lane| Particle {
+        position: reflect(lane.position),
+        velocity: reflect(lane.velocity),
+        start_lifetime: lane.lifetime,
+        inverse_lifetime: lane.inverse,
+        age_percent: lane.age,
+    };
+    // The accepted lanes still in the count stay live.
+    let born: Vec<(Particle, Side)> = lanes[..accepted.min(block_count)]
         .iter()
         .map(|lane| {
-            let reflect = |v: [f32; 3]| crate::particle_geometry::reflect(Vec3::from_array(v)).to_array();
             (
-                Particle {
-                    position: reflect(lane.position),
-                    velocity: reflect(lane.velocity),
-                    start_lifetime: lane.lifetime,
-                    inverse_lifetime: lane.inverse,
-                    age_percent: lane.age,
-                },
+                lane_particle(lane),
                 Side {
                     rand: 0.0,
                     seed: lane.seed,
@@ -972,6 +1001,22 @@ fn apply_with_laws(
     if let (Some(target), Some(recorded)) = (events, recorded) {
         *target.events = recorded;
     }
+    // The laws that follow the engine's storage: the Emit's SizeModule call
+    // over the accepted lanes (no module of a target reads the size during
+    // the passes, so it comes after them), then the pack of the block as the
+    // passes left it. A command that wrote no block changes no slot.
+    if groups > 0 {
+        let block: Vec<Particle> = lanes.iter().map(lane_particle).collect();
+        if let Some(calls) = system.size_law.as_mut().and_then(|size| size.calls_mut()) {
+            let sizes: Vec<moly_law::particle::size::SizeLane> = lanes.iter()
+                .map(|lane| moly_law::particle::size::SizeLane { age_percent: lane.age, seed: lane.seed, start: lane.size })
+                .collect();
+            calls.emit(old, &block, &sizes, block_count, accepted, &system.pool[old..]);
+        }
+        if let Some(custom) = system.custom_law.as_mut().filter(|custom| custom.tracks_storage()) {
+            custom.pack(old, &block, block_count, accepted, &system.pool[old..]);
+        }
+    }
     system.born_total += capacity_accepted as u64;
     system.died_total += deaths;
     system.full_total += (count - capacity_accepted) as u64;
@@ -981,6 +1026,13 @@ fn apply_with_laws(
         catch_up_remainder: remaining,
         start: Some(frame),
     })
+}
+
+/// Why a law of the target that follows the engine's storage (a CustomData
+/// or size law) no longer follows it, if one does not.
+fn storage_refusal(system: &Runtime) -> Option<&'static str> {
+    system.custom_law.as_ref().and_then(|custom| custom.refused())
+        .or_else(|| system.size_law.as_ref().and_then(|size| size.calls()).and_then(|calls| calls.refused()))
 }
 
 /// The stored start size: InitialModule's inherited axis times its own start
@@ -1328,6 +1380,16 @@ pub(crate) fn deliver_with_laws(system: &mut Runtime, laws: &TargetLaws,
         return Err("target has no child owner".into());
     };
     let result = deliver_staged(system, laws, &mut native, command, frame_dt, flags);
+    // A refused command is an Emit the engine runs: a law that follows the
+    // engine's storage stops following it.
+    if result.is_err() {
+        if let Some(custom) = system.custom_law.as_mut() {
+            custom.skipped_call();
+        }
+        if let Some(calls) = system.size_law.as_mut().and_then(|size| size.calls_mut()) {
+            calls.skipped_call();
+        }
+    }
     if let Some(target) = native.target.as_mut() {
         target.commands += 1;
         match &result {

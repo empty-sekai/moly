@@ -2036,28 +2036,8 @@ fn size_3d(emitter: &EmitterParams) -> bool {
 pub(crate) fn size_storage_eligible(emitter: &EmitterParams, route: &SourceRoute) -> Result<(), String> {
     use moly_law::particle::MinMaxCurve;
     native_birth_eligible(emitter, route).map_err(|reason| format!("the native birth path is refused: {reason}"))?;
-    if emitter.ring_buffer_mode != RingBufferMode::Disabled {
-        return Err("a ring buffer mode packs newborns in an order the slot model does not follow".into());
-    }
-    if emitter.collision.is_some() {
-        return Err("the CollisionModule reads the size during the slices, where the module then runs".into());
-    }
-    if emitter.limit_velocity.as_ref().is_some_and(|limit| limit.multiply_drag_by_size != Some(false)
-        && limit.drag.as_ref().is_some_and(|drag| *drag != MinMaxCurve::Constant(0.0))) {
-        return Err("drag by size reads the size during the slices, where the module then runs".into());
-    }
-    if emitter.trails.is_some() {
-        return Err("a trail's size flag moves the module into the slices; which trail field it is was not read".into());
-    }
-    if emitter.noise.as_ref().is_some_and(|noise| noise.size_amount != MinMaxCurve::Constant(0.0)) {
-        return Err("the Noise size update after the module is not ported".into());
-    }
-    let lifetime = match emitter.start.lifetime {
-        MinMaxCurve::Constant(value) => Some(value),
-        MinMaxCurve::TwoConstants { min, max } if min > 0.0 && max > 0.0 => Some(min.max(max)),
-        _ => None,
-    }.filter(|value| value.is_finite() && *value > 0.0)
-        .ok_or("a start lifetime that is not one or two positive constants")?;
+    size_calls_modules(emitter)?;
+    let lifetime = positive_start_lifetime(emitter)?;
     let emission = emitter.emission.as_ref().ok_or("no emission block: the storage reservation is not known")?;
     let upper = |curve: &MinMaxCurve| match curve {
         MinMaxCurve::Constant(value) => Some(*value),
@@ -2078,6 +2058,56 @@ pub(crate) fn size_storage_eligible(emitter: &EmitterParams, route: &SourceRoute
     Ok(())
 }
 
+/// The module conditions of [`size_storage_eligible`]: no module that reads
+/// the size during the slices or the Emit's passes, no ring mode and no Noise
+/// size amount.
+fn size_calls_modules(emitter: &EmitterParams) -> Result<(), String> {
+    use moly_law::particle::MinMaxCurve;
+    if emitter.ring_buffer_mode != RingBufferMode::Disabled {
+        return Err("a ring buffer mode packs newborns in an order the slot model does not follow".into());
+    }
+    if emitter.collision.is_some() {
+        return Err("the CollisionModule reads the size during the slices, where the module then runs".into());
+    }
+    if emitter.limit_velocity.as_ref().is_some_and(|limit| limit.multiply_drag_by_size != Some(false)
+        && limit.drag.as_ref().is_some_and(|drag| *drag != MinMaxCurve::Constant(0.0))) {
+        return Err("drag by size reads the size during the slices, where the module then runs".into());
+    }
+    if emitter.trails.is_some() {
+        return Err("a trail's size flag moves the module into the slices; which trail field it is was not read".into());
+    }
+    if emitter.noise.as_ref().is_some_and(|noise| noise.size_amount != MinMaxCurve::Constant(0.0)) {
+        return Err("the Noise size update after the module is not ported".into());
+    }
+    Ok(())
+}
+
+/// The largest start lifetime, when every lane is simulated: one or two
+/// positive finite constants.
+fn positive_start_lifetime(emitter: &EmitterParams) -> Result<f32, String> {
+    use moly_law::particle::MinMaxCurve;
+    match emitter.start.lifetime {
+        MinMaxCurve::Constant(value) => Some(value),
+        MinMaxCurve::TwoConstants { min, max } if min > 0.0 && max > 0.0 => Some(min.max(max)),
+        _ => None,
+    }.filter(|value| value.is_finite() && *value > 0.0)
+        .ok_or_else(|| "a start lifetime that is not one or two positive constants".to_owned())
+}
+
+/// [`size_storage_eligible`] for a sub-emitter target. Its births are its
+/// parents' child Emits, which call the module once over the newborn block
+/// after their passes when no module reads the size during them (the same
+/// modules as in the slices), and its own frame is the stopped update, with
+/// the call after the slices; the child path and the root path run both. So
+/// it needs the module conditions and every lane simulated. Its birth path
+/// and emission are its parents', and the Emit reserves the storage its
+/// block reaches before writing it, which keeps every slot the model follows
+/// ([`moly_law::particle::slot_tail::RESERVED_SLOTS`]).
+pub(crate) fn target_size_storage_eligible(emitter: &EmitterParams) -> Result<(), String> {
+    size_calls_modules(emitter)?;
+    positive_start_lifetime(emitter).map(|_| ())
+}
+
 /// Whether a system's CustomData law can follow the engine's storage past the
 /// live count. It needs the native birth path (the engine's slot order and its
 /// newborn spans), the storage without a ring mode (whose packing is not
@@ -2089,18 +2119,8 @@ pub(crate) fn size_storage_eligible(emitter: &EmitterParams, route: &SourceRoute
 pub(crate) fn custom_data_storage_eligible(emitter: &EmitterParams, route: &SourceRoute) -> Result<(), String> {
     use moly_law::particle::MinMaxCurve;
     native_birth_eligible(emitter, route).map_err(|reason| format!("the native birth path is refused: {reason}"))?;
-    if emitter.ring_buffer_mode != RingBufferMode::Disabled {
-        return Err("a ring buffer mode packs newborns in an order the slot model does not follow".into());
-    }
-    if emitter.collision.is_some() {
-        return Err("the CollisionModule's calls also run over the lanes past the live count, which the slot model does not follow".into());
-    }
-    let lifetime = match emitter.start.lifetime {
-        MinMaxCurve::Constant(value) => Some(value),
-        MinMaxCurve::TwoConstants { min, max } if min > 0.0 && max > 0.0 => Some(min.max(max)),
-        _ => None,
-    }.filter(|value| value.is_finite() && *value > 0.0)
-        .ok_or("a start lifetime that is not one or two positive constants")?;
+    custom_data_storage_modules(emitter)?;
+    let lifetime = positive_start_lifetime(emitter)?;
     let rate = match emitter.emission.as_ref().map(|emission| &emission.rate_over_time) {
         Some(MinMaxCurve::Constant(value)) if value.is_finite() && *value > 0.0 => *value,
         _ => return Err("an emission rate that is not a positive constant: the storage reservation is not known".into()),
@@ -2109,6 +2129,30 @@ pub(crate) fn custom_data_storage_eligible(emitter: &EmitterParams, route: &Sour
         return Err("no positive storage reservation".into());
     }
     Ok(())
+}
+
+/// The module conditions of [`custom_data_storage_eligible`]: no ring mode
+/// and no CollisionModule.
+fn custom_data_storage_modules(emitter: &EmitterParams) -> Result<(), String> {
+    if emitter.ring_buffer_mode != RingBufferMode::Disabled {
+        return Err("a ring buffer mode packs newborns in an order the slot model does not follow".into());
+    }
+    if emitter.collision.is_some() {
+        return Err("the CollisionModule's calls also run over the lanes past the live count, which the slot model does not follow".into());
+    }
+    Ok(())
+}
+
+/// [`custom_data_storage_eligible`] for a sub-emitter target. Its births are
+/// its parents' child Emits, which the child path runs over the newborn
+/// block with the slots its kills leave and reports as a pack, and its own
+/// frame is the stopped update, which the root path runs. So it needs the
+/// module conditions and every lane simulated; its birth path and emission
+/// are its parents', and the Emit reserves the storage its block reaches
+/// before writing it ([`moly_law::particle::slot_tail::RESERVED_SLOTS`]).
+pub(crate) fn target_custom_data_storage_eligible(emitter: &EmitterParams) -> Result<(), String> {
+    custom_data_storage_modules(emitter)?;
+    positive_start_lifetime(emitter).map(|_| ())
 }
 
 fn normalized_time(system: &Runtime, head: f32) -> f32 {

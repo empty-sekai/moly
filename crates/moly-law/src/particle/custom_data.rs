@@ -69,7 +69,8 @@ impl CustomData {
     /// lanes in the engine's slot order, one engine call at a time, and reports
     /// the calls' ends and its storage operations through
     /// [`CustomData::end_existing_call`], [`CustomData::kill`],
-    /// [`CustomData::birth`] and [`CustomData::clear`]: the lanes past each
+    /// [`CustomData::birth`] (or [`CustomData::pack`] for a sub-emitter
+    /// target's child Emit) and [`CustomData::clear`]: the lanes past each
     /// call's end are evaluated from the slots they read, so every curve
     /// object's cache follows the engine's and no repeat lane needs the
     /// history-independence certificate. `capacity` is the slots known to lie
@@ -232,6 +233,21 @@ impl CustomData {
     /// See [`SlotTail::birth`].
     pub fn birth(&mut self, old: usize, lanes: &[Particle], live: usize, after: &[Particle]) {
         self.follow(|storage| storage.birth(old, lanes, live, after));
+    }
+
+    /// See [`SlotTail::pack`]. The child Emit itself calls
+    /// [`CustomData::update`] on every slot its calls cover, those its kills
+    /// left past the count included.
+    pub fn pack(&mut self, old: usize, block: &[Particle], count: usize, live: usize, after: &[Particle]) {
+        self.follow(|storage| storage.pack(old, block, count, live, after));
+    }
+
+    /// An engine call the runtime did not run (a sub-emitter command it
+    /// refused): a law with storage stops following the engine's.
+    pub fn skipped_call(&mut self) {
+        if self.storage.is_some() && self.refused.is_none() {
+            self.refused = Some("customData curve cache: the runtime skipped a call the engine makes");
+        }
     }
 
     /// See [`SlotTail::regenerate`].

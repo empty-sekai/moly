@@ -2371,25 +2371,26 @@ fn judge_in_host(
     // Every other curve the runtime evaluates, through the engine's dispatch.
     // A CustomData lane whose value follows its curve objects' caches runs
     // with the law that follows the engine's storage past the live count: it
-    // needs this host's native birth owner, and a sub-emitter target's births
-    // (its parents' commands) are not what that law follows.
+    // needs this host's native birth owner; a sub-emitter target's births are
+    // its parents' commands, whose child Emits report their block to it.
     let storage = || -> Result<(), String> {
         if !native_owner {
             return Err("the Director's Simulate path does not install the native birth owner".into());
         }
         if child_parent.is_some() {
-            return Err("a sub-emitter target's storage follows its parents' commands, which the slot model does not".into());
+            return crate::particle_runtime::target_custom_data_storage_eligible(&emitter);
         }
         crate::particle_runtime::custom_data_storage_eligible(&emitter, &route)
     };
     // A size lane whose value follows its curve objects' caches runs with the
-    // law that follows the engine's SizeModule calls, on the same conditions.
+    // law that follows the engine's SizeModule calls, on the same conditions;
+    // a target's child Emits run their own call.
     let size_storage = || -> Result<(), String> {
         if !native_owner {
             return Err("the Director's Simulate path does not install the native birth owner".into());
         }
         if child_parent.is_some() {
-            return Err("a sub-emitter target's module calls include its parents' Emit calls, which are not ported".into());
+            return crate::particle_runtime::target_size_storage_eligible(&emitter);
         }
         crate::particle_runtime::size_storage_eligible(&emitter, &route)
     };

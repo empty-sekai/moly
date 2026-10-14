@@ -179,6 +179,15 @@ pub struct CatchUpPlan {
     pub runs: bool,
 }
 
+impl CatchUpPlan {
+    /// Whether the child Emit goes on to its SizeModule call: a step not
+    /// above the minimum skips the catch-up and that call both, straight to
+    /// the pack.
+    pub fn sizes_newborns(&self) -> bool {
+        self.step > MIN_CATCH_UP_STEP
+    }
+}
+
 /// The frame dt is the frame's own when the world plays, 0.02 otherwise.
 /// Unless flag bit 2 is set, a catch-up above 5 s (10 s) raises the step to
 /// the smaller of the system duration and 0.2 (1) when the frame dt is not

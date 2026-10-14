@@ -5,7 +5,8 @@
 //! curve lane only where the cache history cannot change a result (the
 //! history-independence certificate). [`SizeOverLifetime::with_storage`] is
 //! `SizeModule::Update` in the engine's own calls: the host runs
-//! [`SizeOverLifetime::pass`] exactly where the engine calls the module,
+//! [`SizeCalls::pass`] (in a sub-emitter target's child Emit,
+//! [`SizeCalls::emit`]) exactly where the engine calls the module,
 //! reports its storage operations, and reads the stored current size, as the
 //! renderer does; every curve object then carries its cache as the engine's
 //! does and no lane needs the certificate.
@@ -270,6 +271,43 @@ impl SizeCalls {
                 let x = self.stored[slot][0];
                 self.stored[slot] = [x; 3];
             }
+        }
+    }
+
+    /// A sub-emitter target's child Emit after `old` live particles: with no
+    /// module reading the size during its passes, `ParticleSystem::Emit` calls
+    /// the module once over the new block's accepted lanes, after its newborn
+    /// and catch-up passes and before the pack ([`SlotTail::pack`]). `block`
+    /// holds every slot of the block's four-lane groups as those passes leave
+    /// them (the first `count` still in the count, then those the kills left
+    /// past it) and `lanes` the same slots' ages, seeds and start sizes; the
+    /// first `live` are the accepted newborns, so the call evaluates the block
+    /// from its start while a group starts before `live`. `after` is the
+    /// runtime's newborns after the pack; their stored sizes move with it.
+    /// A refused law does nothing: the host must not apply a command to a
+    /// system whose law no longer follows the engine's.
+    pub fn emit(&mut self, old: usize, block: &[Particle], lanes: &[SizeLane], count: usize, live: usize,
+        after: &[Particle]) {
+        if self.refused.is_some() {
+            return;
+        }
+        let end = live.next_multiple_of(4);
+        assert!(lanes.len() == block.len() && end <= block.len(), "a child Emit block of whole four-lane groups");
+        let padding: Vec<f32> = lanes[live..end].iter().map(|lane| lane.age_percent).collect();
+        let stored = std::mem::take(&mut self.stored);
+        self.call(&lanes[..live], &padding, 0, live);
+        let mut newborn = std::mem::replace(&mut self.stored, stored);
+        newborn.rotate_right((old.next_multiple_of(4) - old).min(live));
+        self.stored.truncate(old);
+        self.stored.extend(newborn);
+        self.follow(|storage| storage.pack(old, block, count, live, after));
+    }
+
+    /// An engine call the runtime did not run (a sub-emitter command it
+    /// refused): the law stops following the engine's.
+    pub fn skipped_call(&mut self) {
+        if self.refused.is_none() {
+            self.refused = Some("sizeOverLifetime curve cache: the runtime skipped a call the engine makes");
         }
     }
 
