@@ -161,3 +161,144 @@ pub(crate) fn facing(world: &World, entity: Entity) -> bool {
 pub(crate) fn walk_outcome(world: &World, entity: Entity) -> Option<bool> {
     world.get::<RouteStops>(entity)?.outcome.map(|outcome| outcome == RouteOutcome::Arrived)
 }
+
+/// Starts one of a taken character's authored no-talk activities at a placed
+/// fixture through the furniture owner its AI uses (the walk there, the
+/// timeline, the exit). Without `rests` the approach drops the walk law's
+/// rest stops, as [`walk`] does. The phases are read with [`activity_phase`]
+/// under `ticket`.
+pub(crate) fn begin_activity(
+    world: &mut World,
+    entity: Entity,
+    fixture: &super::script::FixtureRef,
+    activity: Option<i32>,
+    variant: Option<u32>,
+    rests: bool,
+    ticket: u64,
+) -> Result<String, String> {
+    use crate::fixture_activity_data::{ActivityOrigin, FixtureActivityTables};
+    use crate::fixture_activity_state::{FixtureActivityIdentity, FixtureTarget};
+    use super::script::FixtureRef;
+
+    if world.get::<DirectorOwned>(entity).is_none() {
+        return Err("take the character before it uses a fixture (npc.take)".into());
+    }
+    let unit = world.get::<CharacterUnitId>(entity).map_or(0, |unit| unit.0);
+    let from = world.get::<GlobalTransform>(entity).map_or(Vec3::ZERO, GlobalTransform::translation);
+    let mut placed: Vec<(Entity, String, i32, f32)> = world
+        .query::<(Entity, &FixtureActivityIdentity, Option<&GlobalTransform>)>()
+        .iter(world)
+        .filter(|(_, identity, _)| match fixture {
+            FixtureRef::Uid(uid) => identity.uid == *uid,
+            FixtureRef::Id(id) => identity.master_id == *id,
+        })
+        .map(|(instance, identity, at)| {
+            let distance = at.map_or(f32::INFINITY, |at| super::cond::flat(at.translation(), from));
+            (instance, identity.uid.clone(), identity.master_id, distance)
+        })
+        .collect();
+    placed.sort_by(|a, b| a.3.total_cmp(&b.3).then_with(|| a.1.cmp(&b.1)));
+    let Some((fixture_entity, uid, master, _)) = placed.into_iter().next() else {
+        return Err(format!("no placed fixture {fixture:?} on this site"));
+    };
+    let tables = world.get_resource::<FixtureActivityTables>().ok_or("the furniture activity tables are not loaded")?;
+    let store = world.get_resource::<crate::talk::TalkStore>().ok_or("the talk store is not loaded")?;
+    let mine: Vec<_> = tables
+        .catalogue_activities(store)
+        .into_iter()
+        .filter(|spec| spec.unit == unit && matches!(spec.key.origin, ActivityOrigin::NoTalk(_)))
+        .collect();
+    let spec = mine
+        .iter()
+        .filter(|spec| spec.fixture_id == master)
+        .filter(|spec| activity.is_none_or(|id| spec.key.source_id() == id))
+        .find(|spec| variant.is_none_or(|variant| spec.variant == variant as usize))
+        .cloned();
+    let Some(spec) = spec else {
+        let mut offered: Vec<String> = mine
+            .iter()
+            .map(|spec| format!("{} at {} ({} variants)", spec.key.source_id(), spec.fixture_id, spec.variants))
+            .collect();
+        offered.dedup();
+        offered.truncate(24);
+        return Err(format!(
+            "character {unit} has no activity {} variant {} at fixture {master}; its activities: [{}]",
+            activity.map_or("(any)".into(), |id| id.to_string()),
+            variant.map_or("(first)".into(), |variant| variant.to_string()),
+            offered.join(", ")
+        ));
+    };
+    let target = FixtureTarget { entity: fixture_entity, uid: uid.clone() };
+    crate::npc_fixture_activity::preview::start(world, spec.key, target, ticket);
+    if let Some((crate::npc_fixture_activity::preview::PreviewPhase::Failed, error)) = activity_phase(world, ticket) {
+        end_activity(world, ticket, false);
+        return Err(error.unwrap_or_else(|| "the activity was refused".into()));
+    }
+    let dropped = match world.get_mut::<RouteStops>(entity) {
+        Some(mut route) if !rests => route.drop_rests(),
+        _ => 0,
+    };
+    Ok(format!(
+        "activity {} variant {}/{} at fixture {master} ({uid}); {dropped} rest stops dropped",
+        spec.key.source_id(),
+        spec.variant,
+        spec.variants
+    ))
+}
+
+/// The phase of the activity started under `ticket`, with its last note.
+pub(crate) fn activity_phase(
+    world: &World,
+    ticket: u64,
+) -> Option<(crate::npc_fixture_activity::preview::PreviewPhase, Option<String>)> {
+    world
+        .get_resource::<crate::npc_fixture_activity::preview::DirectorPreviews>()?
+        .0
+        .get(&ticket)
+        .cloned()
+}
+
+/// Forgets the activity of `ticket`; `cancel` also ends its session if it
+/// still runs.
+pub(crate) fn end_activity(world: &mut World, ticket: u64, cancel: bool) {
+    if cancel {
+        crate::npc_fixture_activity::preview::cancel(world, ticket);
+    }
+    if let Some(mut ledger) = world.get_resource_mut::<crate::npc_fixture_activity::preview::DirectorPreviews>() {
+        ledger.0.remove(&ticket);
+    }
+}
+
+/// Shows the master's tweet `tweet` over a taken character, as its tweet
+/// state shows one.
+pub(crate) fn show_tweet(world: &mut World, entity: Entity, tweet: i32) -> Result<String, String> {
+    if world.get::<DirectorOwned>(entity).is_none() {
+        return Err("take the character before it tweets (npc.take)".into());
+    }
+    let unit = world.get::<CharacterUnitId>(entity).map_or(0, |unit| unit.0);
+    let text = world
+        .get_resource::<crate::npc_tweet::TweetTables>()
+        .ok_or("the tweet master is not loaded")?
+        .tweet(tweet)
+        .map(|row| row.text.clone())
+        .ok_or_else(|| format!("the tweet master has no row {tweet}"))?;
+    let site_type = site_type(world, entity);
+    world.write_message(crate::npc_state::TweetHudEvent::Show { npc: entity, unit, tweet_id: tweet, text, site_type });
+    Ok(format!("tweet {tweet} shown over character {unit}"))
+}
+
+/// Hides the tweet balloon of a character.
+pub(crate) fn hide_tweet(world: &mut World, entity: Entity) {
+    if world.get_entity(entity).is_err() {
+        return;
+    }
+    let unit = world.get::<CharacterUnitId>(entity).map_or(0, |unit| unit.0);
+    let site_type = site_type(world, entity);
+    world.write_message(crate::npc_state::TweetHudEvent::Hide { npc: entity, unit, site_type });
+}
+
+fn site_type(world: &World, entity: Entity) -> Option<i32> {
+    world
+        .get::<NpcActions>(entity)
+        .and_then(|actions| crate::npc::residency::site_type_value(&actions.site_type))
+}

@@ -27,9 +27,14 @@
 //! with its own navigation (`rests: true` keeps the walk law's rest stops);
 //! `npc.face {unit, to, secs}` turns a taken, standing character toward a
 //! target; `npc.emote {unit, name, secs, use_root}` shows an emoticon (such
-//! as `fx_emote_001`) over a character; `npc.release {unit}` gives it back
-//! to its AI. A script's
-//! taken characters are released when it ends.
+//! as `fx_emote_001`) over a character; `npc.use {unit, fixture, activity,
+//! variant, rests}` plays one of a taken character's authored no-talk
+//! activities at a placed fixture (`fixture` a placement UID or a master id,
+//! the nearest instance; the first activity and timeline by default) through
+//! the furniture owner its AI uses, and ends when the activity has; `npc.tweet
+//! {unit, tweet, secs}` shows a tweet of the master over a taken character;
+//! `npc.release {unit}` gives it back to its AI. A script's taken characters
+//! are released when it ends.
 //!
 //! World: `weather.set {phenomenon}`, `site.switch {site}` (a site type such
 //! as `first_floor`), and the door sequences `site.enter_room` and
@@ -51,7 +56,8 @@
 //! `{"pause": true}`, `{"resume": true}`. A native run reads a script file
 //! named by `MOLY_DIRECTOR_SCRIPT` at start; the browser engine takes
 //! commands through [`director_command`] and reports through
-//! [`director_snapshot`].
+//! [`director_snapshot`] (status `idle`, `queued`, `running`, `paused`,
+//! `done`, `failed` or `stopped`).
 
 mod cond;
 mod hand;
@@ -155,14 +161,18 @@ pub fn director_command(input: &str) -> Result<(), String> {
 }
 
 /// The run's state: status, script, the steps running now, the log and the
-/// error that ended it.
+/// error that ended it. While commands wait for the next frame the status
+/// is `queued`, so a caller that polls right after sending a script does
+/// not read the state from before it.
 pub fn director_snapshot() -> String {
+    let pending = COMMANDS.lock().map(|queue| queue.len()).unwrap_or(0);
     let published = PUBLISHED.lock().map(|text| text.clone()).unwrap_or_default();
-    if published.is_empty() {
-        json!({ "status": Status::Idle.word() }).to_string()
-    } else {
-        published
+    let mut snapshot: Value = serde_json::from_str(&published).unwrap_or_else(|_| json!({ "status": Status::Idle.word() }));
+    if pending > 0 {
+        snapshot["status"] = json!("queued");
+        snapshot["pending"] = json!(pending);
     }
+    snapshot.to_string()
 }
 
 pub(crate) fn install(app: &mut App) {
@@ -320,5 +330,17 @@ mod tests {
         assert!(matches!(parse_command(r#"{ "stop": true }"#), Ok(Command::Stop)));
         assert!(parse_command(r#"{ "stop": false }"#).is_err());
         assert!(parse_command(r#"{ "jump": true }"#).is_err());
+    }
+
+    #[test]
+    fn a_sent_script_reads_as_queued_until_a_frame_takes_it() {
+        let before: Value = serde_json::from_str(&director_snapshot()).unwrap();
+        director_command(r#"{ "steps": [{ "do": "wait", "secs": 1 }] }"#).unwrap();
+        let queued: Value = serde_json::from_str(&director_snapshot()).unwrap();
+        assert_eq!(queued["status"], "queued");
+        assert_eq!(queued["pending"], 1);
+        COMMANDS.lock().unwrap().clear();
+        let after: Value = serde_json::from_str(&director_snapshot()).unwrap();
+        assert_eq!(after["status"], before["status"]);
     }
 }

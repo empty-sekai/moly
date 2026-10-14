@@ -14,6 +14,16 @@ pub(crate) enum PreviewPhase {
     Cancelled,
     Failed,
 }
+/// Tickets with this bit set belong to the director. Their phases are kept in
+/// [`DirectorPreviews`], so several can run at once, and the content
+/// library's cleanup ([`reap`]) leaves their sessions alone.
+pub(crate) const DIRECTOR_TICKET: u64 = 1 << 63;
+
+/// The phases of the director's previews, by ticket. The director removes
+/// an entry when its step ends.
+#[derive(Resource, Default, Debug)]
+pub(crate) struct DirectorPreviews(pub(crate) HashMap<u64, (PreviewPhase, Option<String>)>);
+
 #[derive(Resource, Debug, Clone)]
 pub(crate) struct PreviewRecord {
     pub ticket: u64,
@@ -82,6 +92,13 @@ pub(crate) fn start(world: &mut World, key: ActivityKey, target: FixtureTarget, 
             (None, PreviewPhase::Failed, Some(error))
         }
     };
+    if ticket & DIRECTOR_TICKET != 0 {
+        world
+            .get_resource_or_insert_with(DirectorPreviews::default)
+            .0
+            .insert(ticket, (phase, error));
+        return;
+    }
     world.insert_resource(PreviewRecord {
         ticket,
         key,
@@ -89,6 +106,29 @@ pub(crate) fn start(world: &mut World, key: ActivityKey, target: FixtureTarget, 
         phase,
         error,
     });
+}
+
+/// Changes the phase of the preview `ticket` in the ledger that holds it.
+fn update(
+    world: &mut World,
+    ticket: u64,
+    change: impl FnOnce(&mut PreviewPhase, &mut Option<String>),
+) {
+    if ticket & DIRECTOR_TICKET != 0 {
+        if let Some(entry) = world
+            .get_resource_mut::<DirectorPreviews>()
+            .map(Mut::into_inner)
+            .and_then(|ledger| ledger.0.get_mut(&ticket))
+        {
+            change(&mut entry.0, &mut entry.1);
+        }
+    } else if let Some(record) = world
+        .get_resource_mut::<PreviewRecord>()
+        .map(Mut::into_inner)
+        .filter(|record| record.ticket == ticket)
+    {
+        change(&mut record.phase, &mut record.error);
+    }
 }
 
 fn admit(
@@ -223,12 +263,10 @@ pub(super) fn record_progress(world: &mut World, session: &mut Session) {
         Phase::Playing | Phase::TalkHeld => PreviewPhase::Playing,
         Phase::Exiting(_) => PreviewPhase::Exiting,
     };
-    if let Some(mut record) = world.get_resource_mut::<PreviewRecord>() {
-        if record.ticket == ticket {
-            record.phase = phase;
-            record.error = session.last_pending.clone();
-        }
-    }
+    update(world, ticket, |current, error| {
+        *current = phase;
+        *error = session.last_pending.clone();
+    });
     if !session.tweet_issued && matches!(session.phase, Phase::Playing) {
         let playing = session.token.is_some_and(|token| {
             matches!(
@@ -256,31 +294,46 @@ pub(super) fn record_failure(world: &mut World, session: &Session, reason: Strin
     let Some(ticket) = session.preview_ticket else {
         return;
     };
-    if let Some(mut record) = world.get_resource_mut::<PreviewRecord>() {
-        if record.ticket == ticket {
-            record.phase = PreviewPhase::Failed;
-            record.error = Some(reason);
-        }
-    }
+    update(world, ticket, |phase, error| {
+        *phase = PreviewPhase::Failed;
+        *error = Some(reason);
+    });
 }
 pub(super) fn record_disposed(world: &mut World, session: &Session, completed: bool) {
     let Some(ticket) = session.preview_ticket else {
         return;
     };
-    if let Some(mut record) = world.get_resource_mut::<PreviewRecord>() {
-        if record.ticket == ticket && record.phase != PreviewPhase::Failed {
-            record.phase = if completed {
+    update(world, ticket, |phase, error| {
+        if *phase != PreviewPhase::Failed {
+            *phase = if completed {
                 PreviewPhase::Completed
             } else {
                 PreviewPhase::Cancelled
             };
-            record.error = None;
+            *error = None;
         }
+    });
+}
+
+/// Ends the preview `ticket` now, if its session is still running.
+pub(crate) fn cancel(world: &mut World, ticket: u64) {
+    let Some(mut runtime) = world.remove_resource::<NpcFixtureActivities>() else {
+        return;
+    };
+    let actor = runtime
+        .sessions
+        .iter()
+        .find(|(_, session)| session.preview_ticket == Some(ticket))
+        .map(|(actor, _)| *actor);
+    if let Some(session) = actor.and_then(|actor| runtime.sessions.remove(&actor)) {
+        dispose(world, session, false, false);
     }
+    world.insert_resource(runtime);
 }
 
 /// Generation-scoped cancellation. Never interrupts a natural activity merely
 /// because it shares an actor, furniture master ID, or a recycled catalog row.
+/// The director's previews are left running.
 pub(crate) fn reap(world: &mut World, retained_ticket: Option<u64>) {
     let Some(mut runtime) = world.remove_resource::<NpcFixtureActivities>() else {
         return;
@@ -291,7 +344,9 @@ pub(crate) fn reap(world: &mut World, retained_ticket: Option<u64>) {
         .filter_map(|(actor, session)| {
             session
                 .preview_ticket
-                .filter(|ticket| Some(*ticket) != retained_ticket)
+                .filter(|ticket| {
+                    *ticket & DIRECTOR_TICKET == 0 && Some(*ticket) != retained_ticket
+                })
                 .map(|_| *actor)
         })
         .collect();

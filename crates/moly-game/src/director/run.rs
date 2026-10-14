@@ -54,6 +54,8 @@ pub(crate) struct Shared {
     pub(crate) now: f32,
     /// Bumped on every record, so the snapshot is republished only on change.
     pub(crate) revision: u64,
+    /// Fixture activities started by this run.
+    activities: u64,
 }
 
 impl Shared {
@@ -112,8 +114,24 @@ enum Kind {
     NpcWalk { entity: Entity, unit: u32, goal: Vec3, within: f32 },
     NpcFace { entity: Entity, unit: u32, towards: Vec3, secs: f32, started: bool },
     Emote { lease: crate::emoticon::timeline::EmoteLease, until: f32 },
+    NpcUse { ticket: u64 },
+    Tweet { entity: Entity, until: f32 },
     Parallel { tracks: Vec<Track>, join: Join },
     SiteSwitch { site: String },
+}
+
+impl Kind {
+    /// Undoes what a step leaves running when it ends early (stopped, failed
+    /// or timed out).
+    fn stop(&self, world: &mut World) {
+        match self {
+            Kind::NpcWalk { entity, .. } => crate::npc::stop_for_external_activity(world, *entity),
+            Kind::Emote { lease, .. } => crate::emoticon::timeline::hide(world, *lease, true),
+            Kind::NpcUse { ticket } => super::npc::end_activity(world, *ticket, true),
+            Kind::Tweet { entity, .. } => super::npc::hide_tweet(world, *entity),
+            _ => {}
+        }
+    }
 }
 
 /// A sequence of steps.
@@ -156,11 +174,7 @@ impl Track {
                     track.abort(world, shared);
                 }
             }
-            match active.kind {
-                Kind::NpcWalk { entity, .. } => crate::npc::stop_for_external_activity(world, entity),
-                Kind::Emote { lease, .. } => crate::emoticon::timeline::hide(world, lease, true),
-                _ => {}
-            }
+            active.kind.stop(world);
             shared.release_hand_of(world, &active.path);
             shared.record(&active.path, "stopped", String::new());
         }
@@ -219,11 +233,7 @@ impl Track {
                             track.abort(world, shared);
                         }
                     }
-                    match active.kind {
-                        Kind::NpcWalk { entity, .. } => crate::npc::stop_for_external_activity(world, entity),
-                        Kind::Emote { lease, .. } => crate::emoticon::timeline::hide(world, lease, true),
-                        _ => {}
-                    }
+                    active.kind.stop(world);
                     shared.release_hand_of(world, &active.path);
                     shared.record(&active.path, "failed", note.clone());
                     if !active.step.optional {
@@ -382,6 +392,28 @@ fn start(world: &mut World, shared: &mut Shared, step: Step, path: String) -> St
                 Err(error) => return ended(path, Err(error), optional),
             }
         }
+        Node::NpcUse { unit, fixture, activity, variant, rests } => {
+            let Some(&(_, entity)) = shared.owned.iter().find(|(owned, _)| owned == unit) else {
+                return ended(path, Err(format!("character {unit} is not taken by this script (npc.take first)")), optional);
+            };
+            shared.activities += 1;
+            let ticket = crate::npc_fixture_activity::preview::DIRECTOR_TICKET | shared.activities;
+            match super::npc::begin_activity(world, entity, fixture, *activity, *variant, *rests, ticket) {
+                Ok(note) => shared.record(&path, "begun", note),
+                Err(error) => return ended(path, Err(error), optional),
+            }
+            Kind::NpcUse { ticket }
+        }
+        Node::NpcTweet { unit, tweet, secs } => {
+            let Some(&(_, entity)) = shared.owned.iter().find(|(owned, _)| owned == unit) else {
+                return ended(path, Err(format!("character {unit} is not taken by this script (npc.take first)")), optional);
+            };
+            match super::npc::show_tweet(world, entity, *tweet) {
+                Ok(note) => shared.record(&path, "shown", note),
+                Err(error) => return ended(path, Err(error), optional),
+            }
+            Kind::Tweet { entity, until: shared.now + secs }
+        }
         Node::Parallel { tracks, join } => Kind::Parallel {
             tracks: tracks
                 .iter()
@@ -467,6 +499,34 @@ fn poll(world: &mut World, shared: &mut Shared, active: &mut Active) -> Poll {
         Kind::Emote { lease, until } => {
             if shared.now >= *until {
                 crate::emoticon::timeline::hide(world, *lease, false);
+                Poll::Done(String::new())
+            } else {
+                Poll::Running(format!("{:.1} s left", *until - shared.now))
+            }
+        }
+        Kind::NpcUse { ticket } => {
+            use crate::npc_fixture_activity::preview::PreviewPhase;
+            let ticket = *ticket;
+            let poll = match super::npc::activity_phase(world, ticket) {
+                None => Poll::Failed("the activity's record is gone".into()),
+                Some((PreviewPhase::Completed, _)) => Poll::Done("the activity completed".into()),
+                Some((PreviewPhase::Cancelled, _)) => Poll::Failed("the activity was cancelled".into()),
+                Some((PreviewPhase::Failed, error)) => {
+                    Poll::Failed(error.unwrap_or_else(|| "the activity failed".into()))
+                }
+                Some((phase, note)) => {
+                    return Poll::Running(match note {
+                        Some(note) => format!("{phase:?}: {note}"),
+                        None => format!("{phase:?}"),
+                    });
+                }
+            };
+            super::npc::end_activity(world, ticket, false);
+            poll
+        }
+        Kind::Tweet { entity, until } => {
+            if shared.now >= *until {
+                super::npc::hide_tweet(world, *entity);
                 Poll::Done(String::new())
             } else {
                 Poll::Running(format!("{:.1} s left", *until - shared.now))

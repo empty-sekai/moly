@@ -63,8 +63,23 @@ pub(crate) enum Node {
     NpcFace { unit: u32, to: Target, secs: f32 },
     /// Shows an emoticon over a character for `secs`.
     NpcEmote { unit: u32, name: String, secs: f32, use_root: bool },
+    /// Plays one of the character's authored no-talk activities at a placed
+    /// fixture: `activity` picks the action by id and `variant` (1-based)
+    /// its timeline, the first of each by default; `rests` keeps the walk
+    /// law's rest stops on the way there.
+    NpcUse { unit: u32, fixture: FixtureRef, activity: Option<i32>, variant: Option<u32>, rests: bool },
+    /// Shows a tweet of the master over a taken character for `secs`.
+    NpcTweet { unit: u32, tweet: i32, secs: f32 },
     Weather { phenomenon: i32 },
     SiteSwitch { site: String },
+}
+
+/// A placed fixture: by placement UID, or the instance of a master id
+/// nearest the one who goes to it.
+#[derive(Clone, Debug)]
+pub(crate) enum FixtureRef {
+    Uid(String),
+    Id(i32),
 }
 
 /// A place in the world, resolved every frame.
@@ -126,7 +141,7 @@ pub(crate) enum Cond {
 const ACTIONS: &[&str] = &[
     "wait", "wait_until", "assert", "log", "where", "capture", "parallel", "repeat",
     "player.walk_to", "player.interact", "player.stick", "player.release", "player.talk_to", "tap",
-    "npc.take", "npc.walk_to", "npc.face", "npc.emote", "npc.release",
+    "npc.take", "npc.walk_to", "npc.face", "npc.emote", "npc.use", "npc.tweet", "npc.release",
     "weather.set", "site.switch", "site.enter_room", "site.go_home",
 ];
 
@@ -272,6 +287,23 @@ fn step(value: &Value, at: &str) -> Result<Vec<Step>, String> {
             let use_root = fields.opt_bool("use_root")?.unwrap_or(false);
             vec![one(Node::NpcEmote { unit, name, secs, use_root }, None)]
         }
+        "npc.use" => {
+            let unit = fields.req_u32("unit")?;
+            let fixture = fixture_ref(fields.req("fixture")?, &at)?;
+            let activity = fields.opt_i32("activity")?;
+            let variant = fields.opt_u32("variant")?;
+            if variant == Some(0) {
+                return Err(format!("{at}: variant counts from 1"));
+            }
+            let rests = fields.opt_bool("rests")?.unwrap_or(false);
+            vec![one(Node::NpcUse { unit, fixture, activity, variant, rests }, Some(300.0))]
+        }
+        "npc.tweet" => {
+            let unit = fields.req_u32("unit")?;
+            let tweet = fields.req_i32("tweet")?;
+            let secs = fields.opt_f32("secs")?.unwrap_or(3.0);
+            vec![one(Node::NpcTweet { unit, tweet, secs }, None)]
+        }
         "weather.set" => vec![one(Node::Weather { phenomenon: fields.req_i32("phenomenon")? }, None)],
         "site.switch" => vec![one(Node::SiteSwitch { site: fields.req_str("site")?.to_owned() }, Some(60.0))],
         // Through the house's door: walk to its entry box, press the entry
@@ -395,16 +427,23 @@ fn target(value: &Value, at: &str) -> Result<Target, String> {
     };
     let what = match (fields.opt("npc"), fields.opt("fixture"), fields.opt("point")) {
         (Some(_), None, None) => TargetKind::Npc(fields.req_u32("npc")?),
-        (None, Some(fixture), None) => match (fixture.as_str(), fixture.as_i64()) {
-            (Some(uid), _) => TargetKind::FixtureUid(uid.to_owned()),
-            (_, Some(id)) => TargetKind::FixtureId(i32::try_from(id).map_err(|_| format!("{at}: fixture id out of range"))?),
-            _ => return Err(format!("{at}: fixture is a placement UID string or a master id")),
+        (None, Some(fixture), None) => match fixture_ref(fixture, &at)? {
+            FixtureRef::Uid(uid) => TargetKind::FixtureUid(uid),
+            FixtureRef::Id(id) => TargetKind::FixtureId(id),
         },
         (None, None, Some(point)) => TargetKind::Point(pair(point, &format!("{at}.point"))?),
         _ => return Err(format!("{at}: give exactly one of npc, fixture or point")),
     };
     fields.finish()?;
     Ok(Target { what, offset })
+}
+
+fn fixture_ref(value: &Value, at: &str) -> Result<FixtureRef, String> {
+    match (value.as_str(), value.as_i64()) {
+        (Some(uid), _) => Ok(FixtureRef::Uid(uid.to_owned())),
+        (_, Some(id)) => Ok(FixtureRef::Id(i32::try_from(id).map_err(|_| format!("{at}: fixture id out of range"))?)),
+        _ => Err(format!("{at}: fixture is a placement UID string or a master id")),
+    }
 }
 
 fn pair(value: &Value, at: &str) -> Result<[f32; 2], String> {
@@ -528,10 +567,31 @@ impl<'a> Fields<'a> {
 
     fn req_i32(&mut self, key: &'a str) -> Result<i32, String> {
         let at = self.at.clone();
-        self.req(key)?
-            .as_i64()
-            .and_then(|value| i32::try_from(value).ok())
-            .ok_or_else(|| format!("{at}: {key} must be a whole number"))
+        self.opt_i32(key)?.ok_or_else(|| format!("{at}: missing field {key}"))
+    }
+
+    fn opt_i32(&mut self, key: &'a str) -> Result<Option<i32>, String> {
+        let at = self.at.clone();
+        self.opt(key)
+            .map(|value| {
+                value
+                    .as_i64()
+                    .and_then(|value| i32::try_from(value).ok())
+                    .ok_or_else(|| format!("{at}: {key} must be a whole number"))
+            })
+            .transpose()
+    }
+
+    fn opt_u32(&mut self, key: &'a str) -> Result<Option<u32>, String> {
+        let at = self.at.clone();
+        self.opt(key)
+            .map(|value| {
+                value
+                    .as_u64()
+                    .and_then(|value| u32::try_from(value).ok())
+                    .ok_or_else(|| format!("{at}: {key} must be a whole number of at least 0"))
+            })
+            .transpose()
     }
 
     fn finish(self) -> Result<(), String> {
@@ -586,5 +646,24 @@ mod tests {
         let Node::NpcWalkTo { to, .. } = &tracks[1][0].node else { panic!() };
         assert!(matches!(to.what, TargetKind::Npc(4)));
         assert_eq!(to.offset, [0.5, 0.0]);
+    }
+
+    #[test]
+    fn fixture_activities_take_a_uid_or_a_master_id() {
+        let script = parse(&json!({ "steps": [
+            { "do": "npc.use", "unit": 2, "fixture": 1053, "activity": 7, "variant": 2 },
+            { "do": "npc.use", "unit": 2, "fixture": "p-12" },
+            { "do": "npc.tweet", "unit": 2, "tweet": 301 }
+        ] }))
+        .unwrap();
+        let Node::NpcUse { fixture: FixtureRef::Id(1053), activity: Some(7), variant: Some(2), .. } = &script.steps[0].node
+        else {
+            panic!("{:?}", script.steps[0].node)
+        };
+        assert!(matches!(&script.steps[1].node, Node::NpcUse { fixture: FixtureRef::Uid(uid), activity: None, .. } if uid == "p-12"));
+        assert_eq!(script.steps[1].timeout, Some(300.0));
+        assert!(matches!(&script.steps[2].node, Node::NpcTweet { tweet: 301, secs, .. } if *secs == 3.0));
+        let error = parse(&json!({ "steps": [{ "do": "npc.use", "unit": 2, "fixture": 1, "variant": 0 }] })).unwrap_err();
+        assert!(error.contains("variant counts from 1"), "{error}");
     }
 }
