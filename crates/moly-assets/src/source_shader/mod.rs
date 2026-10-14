@@ -188,6 +188,45 @@ pub struct SourcePass {
     pub variants: Vec<SourceVariant>,
 }
 
+/// The built-in default textures a 2D texture property can declare.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TextureDefault {
+    /// `white`, RGBA (1, 1, 1, 1).
+    White,
+    /// `black`, RGBA (0, 0, 0, 1).
+    Black,
+    /// `gray`, RGBA (0.5, 0.5, 0.5, 1).
+    Gray,
+    /// `bump`, RGBA (0.5, 0.5, 1, 1).
+    Bump,
+    /// `red`, RGBA (1, 0, 0, 1).
+    Red,
+}
+
+impl TextureDefault {
+    /// The built-in's name in a shader declaration.
+    pub fn name(self) -> &'static str {
+        match self {
+            TextureDefault::White => "white",
+            TextureDefault::Black => "black",
+            TextureDefault::Gray => "gray",
+            TextureDefault::Bump => "bump",
+            TextureDefault::Red => "red",
+        }
+    }
+
+    /// The texel as 8-bit RGBA; 0.5 is stored as 128.
+    pub fn rgba8(self) -> [u8; 4] {
+        match self {
+            TextureDefault::White => [255, 255, 255, 255],
+            TextureDefault::Black => [0, 0, 0, 255],
+            TextureDefault::Gray => [128, 128, 128, 255],
+            TextureDefault::Bump => [128, 128, 255, 255],
+            TextureDefault::Red => [255, 0, 0, 255],
+        }
+    }
+}
+
 #[derive(Asset, TypePath, Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceShaderCatalogue {
@@ -247,6 +286,39 @@ impl SourceShaderCatalogue {
             }
         }
         Ok(result)
+    }
+
+    /// The declared default of a 2D texture property, bound when a material
+    /// leaves that slot unassigned. The five built-in defaults of a 2D
+    /// property are modelled; any other default is a named refusal.
+    pub fn texture_default(&self, property: &str) -> Result<TextureDefault> {
+        let declaration = self
+            .properties
+            .iter()
+            .find(|p| p["m_Name"].as_str() == Some(property) && p["m_Type"].as_i64() == Some(4))
+            .ok_or_else(|| {
+                SourceShaderError(format!("shader declares no texture property {property}"))
+            })?;
+        let default = &declaration["m_DefTexture"];
+        let dimension = default["m_TexDim"].as_i64();
+        require_with(dimension == Some(2), || {
+            format!("texture property {property} default dimension {dimension:?} is not modelled")
+        })?;
+        let name = default["m_DefaultName"].as_str();
+        [
+            TextureDefault::White,
+            TextureDefault::Black,
+            TextureDefault::Gray,
+            TextureDefault::Bump,
+            TextureDefault::Red,
+        ]
+        .into_iter()
+        .find(|builtin| Some(builtin.name()) == name)
+        .ok_or_else(|| {
+            SourceShaderError(format!(
+                "texture property {property} default {name:?} is not modelled"
+            ))
+        })
     }
 
     /// Select one exact address and effective keyword set. The renderer supplies

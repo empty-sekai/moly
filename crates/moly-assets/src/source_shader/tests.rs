@@ -132,6 +132,28 @@ fn program_selection_uses_source_address_and_exact_keywords_not_names_or_code() 
     assert!(c.select(0, 2, 9, 4, &keywords).is_err());
 }
 
+#[test]
+fn texture_defaults_are_the_declared_built_ins_and_others_are_refused() {
+    let mut c = catalogue();
+    let texture = |name: &str, dimension: i64, default: &str| {
+        json!({"m_Name":name,"m_Type":4,"m_DefTexture":{"m_DefaultName":default,"m_TexDim":dimension}})
+    };
+    c.properties = vec![
+        texture("_MainTex", 2, "white"),
+        texture("_EmissionMap", 2, "black"),
+        texture("_BumpMap", 2, "bump"),
+        texture("_Cube", 4, "grey"),
+        texture("_Mask", 2, "lightmap"),
+        json!({"m_Name":"_Color","m_Type":0}),
+    ];
+    assert_eq!(c.texture_default("_MainTex").unwrap(), TextureDefault::White);
+    assert_eq!(c.texture_default("_EmissionMap").unwrap().rgba8(), [0, 0, 0, 255]);
+    assert_eq!(c.texture_default("_BumpMap").unwrap().rgba8(), [128, 128, 255, 255]);
+    for property in ["_Cube", "_Mask", "_Color", "_Missing"] {
+        assert!(c.texture_default(property).is_err(), "{property}");
+    }
+}
+
 /// Replay a caller-supplied formal extraction without distributing game data.
 /// Every converted receipt/texture is checked; unavailable variants retain their
 /// source reason. This is an asset-contract gate, not a renderer equivalence gate.

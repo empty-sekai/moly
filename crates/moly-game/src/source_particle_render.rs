@@ -33,7 +33,9 @@ use bevy::render::{
 };
 use crate::source_particle_streams::{ParticleGeometry, ParticleStreams};
 use moly_assets::source_shader::Result;
-use moly_assets::source_shader::{material::MaterialSnapshot, ProgramReceipt, SourceShaderCatalogue};
+use moly_assets::source_shader::{
+    material::MaterialSnapshot, ProgramReceipt, SourceShaderCatalogue, TextureDefault,
+};
 use moly_assets::source_shader::{
     abi::UniformField, loader::SourceProgramAsset, state::SourcePassState, ProgramAbi,
     SourceShaderError, UniformFault, UniformLayout, UniformValue,
@@ -270,6 +272,9 @@ struct ParticleGpu {
     arena_ranges: HashMap<u64, std::ops::Range<u64>>,
     errors: BTreeSet<String>,
     depth_sampler: Option<Sampler>,
+    /// The built-in default textures bound to unassigned slots, each created
+    /// on first use.
+    defaults: HashMap<TextureDefault, Arc<FallbackTexture>>,
 }
 
 /// One draw's geometry packed for one program. Packing is a function of the
@@ -538,6 +543,62 @@ impl PassResolution {
 enum Sampled<'a> {
     Depth(&'a TextureView),
     Asset(&'a GpuSourceTexture),
+    Fallback(Arc<FallbackTexture>),
+}
+
+/// A 1x1 texture of a built-in default, for a sampled slot that the material
+/// leaves unassigned.
+struct FallbackTexture {
+    _texture: Texture,
+    view: TextureView,
+    sampler: Sampler,
+}
+impl FallbackTexture {
+    fn new(device: &RenderDevice, queue: &RenderQueue, builtin: TextureDefault) -> Self {
+        let texture = device.create_texture(&TextureDescriptor {
+            label: Some("built-in default texture"),
+            size: Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: Origin3d { x: 0, y: 0, z: 0 },
+                aspect: TextureAspect::All,
+            },
+            &builtin.rgba8(),
+            TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4),
+                rows_per_image: Some(1),
+            },
+            Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        let view = texture.create_view(&TextureViewDescriptor::default());
+        let sampler = device.create_sampler(&SamplerDescriptor {
+            label: Some("built-in default sampler"),
+            ..default()
+        });
+        Self {
+            _texture: texture,
+            view,
+            sampler,
+        }
+    }
 }
 fn attachment_mismatch() -> SourceShaderError {
     SourceShaderError(
@@ -951,19 +1012,36 @@ fn prepare(
                                 return Ok(None);
                             };
                             sampled.push(Sampled::Depth(depth.source_view()));
-                        } else {
-                            let handle =
-                                item.source.textures.get(&declaration.name).ok_or_else(|| {
-                                    SourceShaderError(format!(
-                                        "unowned texture {}",
-                                        declaration.name
-                                    ))
-                                })?;
+                        } else if let Some(handle) = item.source.textures.get(&declaration.name) {
                             let Some(texture) = textures.get(handle.id()) else {
                                 return Ok(None);
                             };
                             let texture = texture.result.as_ref().map_err(Clone::clone)?;
                             sampled.push(Sampled::Asset(texture));
+                        } else {
+                            // Only an unassigned slot binds the shader's declared default.
+                            // Any other missing payload stays a named error.
+                            let unassigned = item
+                                .source
+                                .material
+                                .textures
+                                .get(&declaration.name)
+                                .is_some_and(|binding| {
+                                    binding.status == "unassigned" && binding.texture.is_none()
+                                });
+                            if !unassigned {
+                                return Err(SourceShaderError(format!(
+                                    "unowned texture {}",
+                                    declaration.name
+                                )));
+                            }
+                            let builtin = catalogue.texture_default(&declaration.name)?;
+                            let fallback = gpu
+                                .defaults
+                                .entry(builtin)
+                                .or_insert_with(|| Arc::new(FallbackTexture::new(&device, &queue, builtin)))
+                                .clone();
+                            sampled.push(Sampled::Fallback(fallback));
                         }
                     }
                     let resources: Vec<TextureViewId> = sampled
@@ -971,6 +1049,7 @@ fn prepare(
                         .map(|resource| match resource {
                             Sampled::Depth(depth_view) => depth_view.id(),
                             Sampled::Asset(texture) => texture.raw.id(),
+                            Sampled::Fallback(fallback) => fallback.view.id(),
                         })
                         .collect();
                     let pack = gpu
@@ -1054,6 +1133,12 @@ fn prepare(
                                         sampler: &depth_sampler,
                                         dimension: TextureViewDimension::D2,
                                         filterable: false,
+                                    },
+                                    Sampled::Fallback(fallback) => SourceSampledResource::View {
+                                        view: &fallback.view,
+                                        sampler: &fallback.sampler,
+                                        dimension: TextureViewDimension::D2,
+                                        filterable: true,
                                     },
                                     Sampled::Asset(texture) => {
                                         SourceSampledResource::Asset(SourceSampledTexture {
