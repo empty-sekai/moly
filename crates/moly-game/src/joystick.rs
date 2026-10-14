@@ -196,6 +196,7 @@ pub(crate) fn advance(
     root_canvas: Option<Res<RootCanvas>>,
     learn: Option<Res<crate::harvest::LearnSiteEnvironmentActive>>,
     held: Option<Res<crate::game_state::HeldGameState>>,
+    screens: Option<Res<crate::ui_layers::ScreenManager>>,
 ) {
     let Some(window) = windows.single().ok() else {
         return;
@@ -255,10 +256,15 @@ pub(crate) fn advance(
     let radius = HANDLE_SIZE * root_canvas.scale(window);
     // Touch positions are logical pixels; the threshold is in device pixels.
     let drag_threshold = DRAG_THRESHOLD_DEVICE_PIXELS / window.scale_factor();
+    // A dialog over the field (ExistsDialog(Layer_Dialog)) takes a new press;
+    // a finger already on the stick keeps dragging it.
+    let dialog = screens
+        .as_deref()
+        .is_some_and(crate::ui_layers::ScreenManager::exists_dialog);
     for touch in touches.read() {
         match touch.phase {
             TouchPhase::Started => {
-                if state.captured.is_none() && in_zone(touch.position, width, height) {
+                if state.captured.is_none() && !dialog && in_zone(touch.position, width, height) {
                     // 首指捕获：底盘生于触点（浮动式）。已捕获时区内第二指
                     // 吞掉（真源早退 + 射线归摇杆件）；区外指不归本层。
                     state.captured = Some(touch.id);
