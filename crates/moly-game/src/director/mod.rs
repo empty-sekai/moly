@@ -25,7 +25,10 @@
 //! Characters: `npc.take {unit}` cancels the character's objective and holds
 //! its AI; `npc.walk_to {unit, to, within, rests}` walks a taken character
 //! with its own navigation (`rests: true` keeps the walk law's rest stops);
-//! `npc.release {unit}` gives it back to its AI. A script's
+//! `npc.face {unit, to, secs}` turns a taken, standing character toward a
+//! target; `npc.emote {unit, name, secs, use_root}` shows an emoticon (such
+//! as `fx_emote_001`) over a character; `npc.release {unit}` gives it back
+//! to its AI. A script's
 //! taken characters are released when it ends.
 //!
 //! World: `weather.set {phenomenon}`, `site.switch {site}` (a site type such
@@ -40,7 +43,8 @@
 //! Conditions: `"site_moving"`, `"entry_done"`, `"dialog_shown"`,
 //! `"talk_active"`, or `{site_is}`, `{site_kind: home|room|harvest|delivery}`,
 //! `{button_head}`, `{button_stacked}`, `{phenomenon_is}`, `{player_near: {to,
-//! within}}`, `{npc_near: {unit, to, within}}`, `{all: [..]}`, `{any: [..]}`,
+//! within}}`, `{npc_near: {unit, to, within}}`, `{npc_action: {unit, is}}`
+//! (an action state such as `Walk` or `Talk`), `{all: [..]}`, `{any: [..]}`,
 //! `{not: ..}`.
 //!
 //! Commands: `{"run": script}` (or a bare script), `{"stop": true}`,

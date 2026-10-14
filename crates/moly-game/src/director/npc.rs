@@ -122,6 +122,41 @@ pub(crate) fn walk(world: &mut World, entity: Entity, goal: Vec2, rests: bool) -
     Ok(())
 }
 
+/// Turns a taken character toward `towards` over `secs` with the greeting's
+/// look-at tween. The tween runs only while the character stands, so a
+/// walking character is refused (the `npc.face` step waits for it to stand).
+pub(crate) fn face(world: &mut World, entity: Entity, towards: Vec3, secs: f32) -> Result<(), String> {
+    if world.get::<DirectorOwned>(entity).is_none() {
+        return Err("take the character before turning it (npc.take)".into());
+    }
+    if !standing(world, entity) {
+        return Err("the character is moving; turn it once it stands".into());
+    }
+    let forward = world
+        .get::<WalkState>(entity)
+        .map(|walk| walk.0.forward)
+        .ok_or("the character has no walk state")?;
+    let frame = world.resource::<bevy::diagnostic::FrameCount>().0;
+    world.entity_mut(entity).insert(crate::npc_look_at::NpcLookAt::new(
+        towards,
+        forward,
+        secs,
+        moly_law::ui::dotween::Ease::Linear,
+        frame,
+    ));
+    Ok(())
+}
+
+/// Whether the character stands (its motion is a dwell).
+pub(crate) fn standing(world: &World, entity: Entity) -> bool {
+    matches!(world.get::<MotionPhase>(entity), Some(MotionPhase::Dwelling { .. }))
+}
+
+/// Whether a turn started by [`face`] is still running.
+pub(crate) fn facing(world: &World, entity: Entity) -> bool {
+    world.get::<crate::npc_look_at::NpcLookAt>(entity).is_some()
+}
+
 /// The walk's end: `Some(true)` arrived, `Some(false)` stopped short.
 pub(crate) fn walk_outcome(world: &World, entity: Entity) -> Option<bool> {
     world.get::<RouteStops>(entity)?.outcome.map(|outcome| outcome == RouteOutcome::Arrived)

@@ -59,6 +59,10 @@ pub(crate) enum Node {
     /// `rests` keeps the walk law's rest stops on the route.
     NpcWalkTo { unit: u32, to: Target, within: f32, rests: bool },
     NpcRelease { unit: u32 },
+    /// Turns a taken, standing character toward a target over `secs`.
+    NpcFace { unit: u32, to: Target, secs: f32 },
+    /// Shows an emoticon over a character for `secs`.
+    NpcEmote { unit: u32, name: String, secs: f32, use_root: bool },
     Weather { phenomenon: i32 },
     SiteSwitch { site: String },
 }
@@ -115,12 +119,14 @@ pub(crate) enum Cond {
     PlayerNear { to: Target, within: f32 },
     NpcNear { unit: u32, to: Target, within: f32 },
     PhenomenonIs(i32),
+    /// The character's action state (`Idle`, `Walk`, `Rest`, `Talk`, ...).
+    NpcAction { unit: u32, is: String },
 }
 
 const ACTIONS: &[&str] = &[
     "wait", "wait_until", "assert", "log", "where", "capture", "parallel", "repeat",
     "player.walk_to", "player.interact", "player.stick", "player.release", "player.talk_to", "tap",
-    "npc.take", "npc.walk_to", "npc.release",
+    "npc.take", "npc.walk_to", "npc.face", "npc.emote", "npc.release",
     "weather.set", "site.switch", "site.enter_room", "site.go_home",
 ];
 
@@ -250,6 +256,22 @@ fn step(value: &Value, at: &str) -> Result<Vec<Step>, String> {
             Some(60.0),
         )],
         "npc.release" => vec![one(Node::NpcRelease { unit: fields.req_u32("unit")? }, None)],
+        "npc.face" => {
+            let unit = fields.req_u32("unit")?;
+            let to = target(fields.req("to")?, &at)?;
+            let secs = fields.opt_f32("secs")?.unwrap_or(1.0);
+            if !(secs >= 0.0) {
+                return Err(format!("{at}: secs must not be negative"));
+            }
+            vec![one(Node::NpcFace { unit, to, secs }, Some(secs + 5.0))]
+        }
+        "npc.emote" => {
+            let unit = fields.req_u32("unit")?;
+            let name = fields.req_str("name")?.to_owned();
+            let secs = fields.opt_f32("secs")?.unwrap_or(2.0);
+            let use_root = fields.opt_bool("use_root")?.unwrap_or(false);
+            vec![one(Node::NpcEmote { unit, name, secs, use_root }, None)]
+        }
         "weather.set" => vec![one(Node::Weather { phenomenon: fields.req_i32("phenomenon")? }, None)],
         "site.switch" => vec![one(Node::SiteSwitch { site: fields.req_str("site")?.to_owned() }, Some(60.0))],
         // Through the house's door: walk to its entry box, press the entry
@@ -325,6 +347,16 @@ fn cond(value: &Value, at: &str) -> Result<Cond, String> {
             fields.finish()?;
             near
         }
+        "npc_action" => {
+            let mut fields = Fields::new(inner, &at)?;
+            let unit = fields.req_u32("unit")?;
+            let is = fields.req_str("is")?.to_owned();
+            if !NPC_ACTIONS.contains(&is.as_str()) {
+                return Err(format!("{at}: unknown action state {is}; the states are {}", NPC_ACTIONS.join(", ")));
+            }
+            fields.finish()?;
+            Cond::NpcAction { unit, is }
+        }
         "npc_near" => {
             let mut fields = Fields::new(inner, &at)?;
             let near = Cond::NpcNear {
@@ -384,6 +416,13 @@ fn pair(value: &Value, at: &str) -> Result<[f32; 2], String> {
         _ => Err(format!("{at}: expected [x, z]")),
     }
 }
+
+/// The character action states a condition may name.
+const NPC_ACTIONS: &[&str] = &[
+    "Idle", "AutoMove", "Rotate", "Talk", "Walk", "Rest", "None", "Tweet", "Greeting",
+    "FixtureAction", "FixtureActionIdle", "ChangeSite", "MainSomeFixtureAction",
+    "SomeFixtureAction", "Communication",
+];
 
 /// The action buttons a script may press, by their type names.
 const BUTTONS: &[ButtonType] = &[

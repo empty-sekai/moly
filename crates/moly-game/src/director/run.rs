@@ -110,6 +110,8 @@ enum Kind {
     Interact(Interact),
     Stick { stick: Vec2, until: f32 },
     NpcWalk { entity: Entity, unit: u32, goal: Vec3, within: f32 },
+    NpcFace { entity: Entity, unit: u32, towards: Vec3, secs: f32, started: bool },
+    Emote { lease: crate::emoticon::timeline::EmoteLease, until: f32 },
     Parallel { tracks: Vec<Track>, join: Join },
     SiteSwitch { site: String },
 }
@@ -154,8 +156,10 @@ impl Track {
                     track.abort(world, shared);
                 }
             }
-            if let Kind::NpcWalk { entity, .. } = active.kind {
-                crate::npc::stop_for_external_activity(world, entity);
+            match active.kind {
+                Kind::NpcWalk { entity, .. } => crate::npc::stop_for_external_activity(world, entity),
+                Kind::Emote { lease, .. } => crate::emoticon::timeline::hide(world, lease, true),
+                _ => {}
             }
             shared.release_hand_of(world, &active.path);
             shared.record(&active.path, "stopped", String::new());
@@ -215,8 +219,10 @@ impl Track {
                             track.abort(world, shared);
                         }
                     }
-                    if let Kind::NpcWalk { entity, .. } = active.kind {
-                        crate::npc::stop_for_external_activity(world, entity);
+                    match active.kind {
+                        Kind::NpcWalk { entity, .. } => crate::npc::stop_for_external_activity(world, entity),
+                        Kind::Emote { lease, .. } => crate::emoticon::timeline::hide(world, lease, true),
+                        _ => {}
                     }
                     shared.release_hand_of(world, &active.path);
                     shared.record(&active.path, "failed", note.clone());
@@ -356,6 +362,26 @@ fn start(world: &mut World, shared: &mut Shared, step: Step, path: String) -> St
             }
             Kind::NpcWalk { entity, unit: *unit, goal, within: *within }
         }
+        Node::NpcFace { unit, to, secs } => {
+            let Some(&(_, entity)) = shared.owned.iter().find(|(owned, _)| owned == unit) else {
+                return ended(path, Err(format!("character {unit} is not taken by this script (npc.take first)")), optional);
+            };
+            let towards = match cond::resolve(world, to) {
+                Ok(towards) => towards,
+                Err(error) => return ended(path, Err(error), optional),
+            };
+            Kind::NpcFace { entity, unit: *unit, towards, secs: *secs, started: false }
+        }
+        Node::NpcEmote { unit, name, secs, use_root } => {
+            let entity = match cond::npc(world, *unit) {
+                Ok(entity) => entity,
+                Err(error) => return ended(path, Err(error), optional),
+            };
+            match crate::emoticon::timeline::show(world, entity, name, *use_root) {
+                Ok(lease) => Kind::Emote { lease, until: shared.now + secs },
+                Err(error) => return ended(path, Err(error), optional),
+            }
+        }
         Node::Parallel { tracks, join } => Kind::Parallel {
             tracks: tracks
                 .iter()
@@ -408,9 +434,42 @@ fn poll(world: &mut World, shared: &mut Shared, active: &mut Active) -> Poll {
             let distance = flat(at, *goal);
             match super::npc::walk_outcome(world, *entity) {
                 Some(true) => Poll::Done(format!("arrived at {distance:.2} m")),
-                _ if distance <= *within => Poll::Done(format!("within {distance:.2} m")),
+                _ if distance <= *within => {
+                    // Close enough: the character stops where it is.
+                    crate::npc::stop_for_external_activity(world, *entity);
+                    Poll::Done(format!("within {distance:.2} m; stopped there"))
+                }
                 Some(false) => Poll::Failed(format!("stopped short at {distance:.2} m")),
                 None => Poll::Running(format!("{distance:.2} m to go")),
+            }
+        }
+        Kind::NpcFace { entity, unit, towards, secs, started } => {
+            if world.get_entity(*entity).is_err() {
+                return Poll::Failed(format!("character {unit} is gone"));
+            }
+            if !*started {
+                // The turn starts once the character stands.
+                if !super::npc::standing(world, *entity) {
+                    return Poll::Running(format!("waiting for character {unit} to stand"));
+                }
+                if let Err(error) = super::npc::face(world, *entity, *towards, *secs) {
+                    return Poll::Failed(error);
+                }
+                *started = true;
+                return Poll::Running(format!("character {unit} turning"));
+            }
+            if super::npc::facing(world, *entity) {
+                Poll::Running(format!("character {unit} turning"))
+            } else {
+                Poll::Done(String::new())
+            }
+        }
+        Kind::Emote { lease, until } => {
+            if shared.now >= *until {
+                crate::emoticon::timeline::hide(world, *lease, false);
+                Poll::Done(String::new())
+            } else {
+                Poll::Running(format!("{:.1} s left", *until - shared.now))
             }
         }
         Kind::Parallel { tracks, join } => {

@@ -182,6 +182,15 @@ pub(crate) fn eval(world: &mut World, cond: &Cond) -> (bool, String) {
         }
         Cond::PlayerNear { to, within } => near(world, None, to, *within),
         Cond::NpcNear { unit, to, within } => near(world, Some(*unit), to, *within),
+        Cond::NpcAction { unit, is } => match npc(world, *unit) {
+            Ok(entity) => {
+                let current = world
+                    .get::<crate::npc::NpcActions>(entity)
+                    .map(|actions| format!("{:?}", actions.current));
+                (current.as_deref() == Some(is.as_str()), format!("character {unit} action {current:?}"))
+            }
+            Err(error) => (false, error),
+        },
         Cond::PhenomenonIs(want) => {
             let current = world
                 .get_resource::<crate::weather::CurrentPhenomenonId>()
