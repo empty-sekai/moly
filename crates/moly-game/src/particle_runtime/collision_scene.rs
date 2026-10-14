@@ -1712,15 +1712,27 @@ pub(crate) fn observe_product(
     retiring: bevy::prelude::Res<crate::weather_fx::WeatherFxRetirements>,
     ready: Option<bevy::prelude::Res<crate::site::SiteScenesReady>>,
     players: bevy::prelude::Query<
-        (&bevy::prelude::GlobalTransform, bevy::prelude::Has<crate::player_avatar::body::BodyAttached>),
+        (
+            &bevy::prelude::Transform,
+            &bevy::prelude::GlobalTransform,
+            bevy::prelude::Has<bevy::prelude::ChildOf>,
+            bevy::prelude::Has<crate::player_avatar::body::BodyAttached>,
+        ),
         bevy::prelude::With<crate::player::PlayerControlled>,
     >,
 ) {
     let found: Vec<_> = players.iter().collect();
     let avatar = match found.as_slice() {
         [] => Ok(None),
-        [(world, loaded)] => {
-            let (scale, rotation, translation) = world.to_scale_rotation_translation();
+        [(local, world, parented, loaded)] => {
+            // A root's world transform is its own Transform. Decomposing the
+            // propagated matrix of a turned root gives a scale off one by a
+            // rounding, which is no scale.
+            let (scale, rotation, translation) = if *parented {
+                world.to_scale_rotation_translation()
+            } else {
+                (local.scale, local.rotation, local.translation)
+            };
             if scale == bevy::prelude::Vec3::ONE {
                 // Source axes: the canonical frame's x reflected.
                 Ok(Some((([rotation.x, -rotation.y, -rotation.z, rotation.w],
