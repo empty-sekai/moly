@@ -677,12 +677,17 @@ fn build_floor(
     } else {
         TileOccupancySnapshot::unavailable()
     };
+    // A cell outside the floor grid is skipped, not a gap: GridData's
+    // per-cell AddTileData writes only a position its TileList holds, and
+    // SetupGridData builds that list for the grid's cells alone, so a
+    // footprint or AddUsing cell past the floor's edge (a gate or a house at
+    // the edge, whose AddUsing reaches beyond it) leaves no record.
     let mut floor = FixtureFloorTiles::new(signature.floor, signature.origin, snapshot)?;
     if floor.ignored_out_of_grid > 0 {
-        gaps.push(format!(
-            "{} supplied cells lie outside the selected authored floor",
+        info!(
+            "[fixture-scene-inputs] {} supplied cells lie past the floor grid's edge and are skipped",
             floor.ignored_out_of_grid
-        ));
+        );
     }
     if floor.conflicting_cells > 0 {
         gaps.push(format!(

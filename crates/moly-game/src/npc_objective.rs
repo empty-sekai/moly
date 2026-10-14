@@ -1750,6 +1750,17 @@ fn general_talk_target(
 /// 一次决策的抽签账目一行日志：抽签落点、门占比、目标家具与环、落点
 /// 坐标——「每员目标选取可从日志复算」。
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+/// The editor's hold: expected to last as long as an edit session.
+const HOLD_EDITOR: &str = "the layout editor owns the actors";
+/// The AI loop's hold: every input the decisions read has a gate that holds
+/// the whole loop until it is in.
+const DECISIONS: crate::hold::HoldSite = crate::hold::HoldSite {
+    tag: "npc-ai",
+    what: "decisions",
+    effect: "every NPC stands",
+    quiet: &[HOLD_EDITOR],
+};
+
 pub(crate) fn decide(
     (time, frame_count, clock): (
         Res<Time>,
@@ -1762,12 +1773,13 @@ pub(crate) fn decide(
     epoch: Option<Res<GroundEpoch>>,
     selection: Option<Res<SiteSelection>>,
     placements: Res<FixturePlacements>,
-    (mut seeder, mut reported_gaps, mut last_placed, mut groups, mut forced_talks): (
+    (mut seeder, mut reported_gaps, mut last_placed, mut groups, mut forced_talks, mut hold): (
         ResMut<SequencePickSeeder>,
         Local<HashSet<String>>,
         Local<String>,
         ResMut<crate::npc_fixture_talk::FixtureTalkGroups>,
         Option<ResMut<ForcedFixtureTalks>>,
+        Local<crate::hold::HoldReport>,
     ),
     (configs, talk_list, together, extras, extras_pending): (
         Option<Res<ClientConfigs>>,
@@ -1814,69 +1826,70 @@ pub(crate) fn decide(
             mind.unmovable_fixtures.clear();
         }
     }
+    let now = time.elapsed_secs();
     // Keep change-tick invalidation above, but consume no ordinary AI timer
     // or RNG while Hide owns the actors or saved geometry is still reloading.
     if editor.is_active() {
-        return;
+        return hold.hold(&DECISIONS, HOLD_EDITOR, now);
     }
     let Some(face) = face else {
-        return;
+        return hold.hold(&DECISIONS, "the objective face is not built", now);
     };
     let Some(config) = configs.as_deref() else {
-        return;
+        return hold.hold(&DECISIONS, "the client configs are not loaded", now);
     };
     // The talk list is set before any NPC exists; hold without it.
     let Some(talk_list) = talk_list.as_deref() else {
-        return;
+        return hold.hold(&DECISIONS, "the client talk list is not set", now);
     };
     // 代数资源在场才算「面已定案」：首站定案（inactiveNodes 清扫）之前
     // 的面可能还含即将被撤的实例，不在它上面做决策。
     let Some(epoch) = epoch else {
-        return;
+        return hold.hold(&DECISIONS, "the ground epoch is not settled", now);
     };
     let face: &ObjectiveFace = &*face;
     if !face.is_fresh(epoch.0) {
-        return;
+        return hold.hold(&DECISIONS, "the objective face is not of the current ground epoch", now);
     }
     // 可行走面（执行侧的折线来源）：不在场时整帧让路——决策写了落点也
     // 算不出路线，等面与目标面同帧链齐（站点链先建面再建目标面）。
     let Some(walk_face) = walk_face else {
-        return;
+        return hold.hold(&DECISIONS, "the walk face is not built", now);
     };
     let walk_face: &crate::walk_face::WalkFace = &*walk_face;
     if face.generation != walk_face.generation() {
-        return;
+        return hold.hold(&DECISIONS, "the objective face and the walk face are of different generations", now);
     }
     // 动作点世界位组合表：不在场时整帧让路（组合晚解析一帧落地）——
     // 缺表时动作点支读不出挂点，静默落环带会把「表没到」伪装成「该
     // 家具没有动作点」。
     let attach = attach_worlds.as_deref();
     if !catalog.ready() {
-        return;
+        return hold.hold(&DECISIONS, "the talk catalog is not ready (talk store, site table or the phenomenon of the day)", now);
     }
     // The together-communication table loads on its own; its loader always
     // installs a result (the rows, or why this asset source lacks them).
     let Some(together) = together.as_deref() else {
-        return;
+        return hold.hold(&DECISIONS, "the together-communication table is not installed", now);
     };
     // The other talk tables load on their own as well; hold while their
     // loads are pending (without their loader the paths that read them name
     // the missing table).
     if extras_pending.is_some() {
-        return;
+        return hold.hold(&DECISIONS, "the talk tables beyond the activity tables are loading", now);
     }
     let extras = extras.as_deref();
     // No decision before the engine's frame clock runs (and none at all if
     // its settings were refused).
     if !clock.ready() {
-        return;
+        return hold.hold(&DECISIONS, "the NPC frame clock has not started", now);
     }
     let dt = clock.delta();
     let frame = frame_count.0;
     // The site's walkable list (the general talk's floor position reads
     // it): the AI holds until it exists, as it holds for the site data.
     let Ok(walkable_cells) = walkable.cells() else {
-        return;
+        return hold.hold(&DECISIONS, "the site's walkable cell list is not available (named by [npc-walkable])", now);
     };
 
     // 成员快照：社交链的候选（位置 + 导航目的地 + 对话目标位）与游走链的
@@ -1929,8 +1942,9 @@ pub(crate) fn decide(
     // while anchored fixtures stand, so a table still loading never reads as
     // a fixture without action points.
     if attach.is_none() && placements.fixture_ids().iter().any(|id| *id != 0) {
-        return;
+        return hold.hold(&DECISIONS, "the action-point attachment table is not composed", now);
     }
+    hold.run(&DECISIONS, now);
     // Branch A's input: any unread row in the whole client talk list.
     let yet_unread_available = talk_list.any_unread();
     // The avatar store's NPC list as the talk lotteries read it.

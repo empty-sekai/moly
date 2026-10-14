@@ -78,6 +78,7 @@ pub mod gesture;
 pub mod get_resource;
 pub mod learn_phenomena_dialog;
 mod gpu_image_release;
+mod hold;
 pub mod harvest;
 pub mod harvest_material;
 mod home_action;

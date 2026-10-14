@@ -70,8 +70,9 @@ pub(crate) struct FixtureFloorTiles {
     pub(crate) site_origin: Vec3,
     cells: HashMap<GridPosition, FixtureTileKnowledge>,
     coverage: OccupancyCoverage,
-    /// Entries outside the authored floor grid are retained as diagnostics,
-    /// never wrapped into an i8 coordinate and never made occupied.
+    /// Entries outside the authored floor grid, counted and skipped as the
+    /// source's grid skips a position it does not hold: never wrapped into
+    /// an i8 coordinate and never made occupied.
     pub(crate) ignored_out_of_grid: usize,
     /// Conflicting duplicate identities make that tile unknown.  This covers
     /// duplicate UIDs at one position and a UID/Unknown collision.
