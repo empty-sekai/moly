@@ -108,8 +108,6 @@
 //!   ground highlight (`LoadSprite`: `img_map_shadow`) and the two corners
 //!   (`bg_corner`) need their sibling order, rotation and serialized sprites,
 //!   which the screen layer document does not carry yet;
-//! - the no-party dialog (`ShowCommon1ButtonDialog("MSG_NOTHING_BIRTHDAY_DIALOG_BODY")`)
-//!   has no Common1 body view: the tap logs it and stays;
 //! - `open_cloud`'s animator enters `clip_open_cloud` through a transition
 //!   with exit time 0.75 and a 0.25 s blend; the curves here start at the
 //!   trigger;
@@ -2594,9 +2592,19 @@ fn tap(
             let in_session = parties.labels_in_session(now);
             if in_session.is_empty() {
                 info!(
-                    "sitemap: tap festival_garden → no birthday party in session ({} rows, now={now}) → ShowCommon1ButtonDialog(MSG_NOTHING_BIRTHDAY_DIALOG_BODY): no Common1 body view, the map stays",
+                    "sitemap: tap festival_garden → no birthday party in session ({} rows, now={now}) → ShowCommon1ButtonDialog(MSG_NOTHING_BIRTHDAY_DIALOG_BODY), the map stays",
                     parties.len()
                 );
+                commands.queue(|world: &mut World| {
+                    const CALLER: &str = "DialogUtility.ShowCommon1ButtonDialog";
+                    let body = crate::common_dialog::wording(world, CALLER, "MSG_NOTHING_BIRTHDAY_DIALOG_BODY");
+                    crate::common_dialog::open_detached(
+                        world,
+                        CALLER,
+                        body,
+                        crate::common_dialog::Buttons::One { ok: "WORD_OK" },
+                    );
+                });
                 return true;
             }
             info!(
@@ -2674,6 +2682,7 @@ pub(crate) fn click(
     if leave_dialog
         .map(|d| d.blocks_field_input())
         .unwrap_or(false)
+        || manager.as_deref().is_some_and(crate::ui_layers::ScreenManager::exists_dialog)
     {
         return;
     }

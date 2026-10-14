@@ -12,14 +12,22 @@
 //! - The click (`OnClickBirthdayCutScene`): `IsExecutable` (the fixture's
 //!   system fixture row and its party exist); `IsWithinBirthdayStartTime`
 //!   (the party's `birthdayStartAt`/`closedAt` window holds the current
-//!   time), else the "party closed" dialog and an action button refresh;
-//!   the fixture's cut-scene area must lie inside the grid and overlap no
-//!   other fixture, else the overlap dialog; then `ExecuteAsync`.
-//! - `ExecuteAsync` (call order): `Initialize` (party, unit,
-//!   character), `IsActionedSystemFixture` (the user's
-//!   `userMysekaiSystemFixtureActions`), `ShowConfirmDialog(isActioned)`,
-//!   `MysekaiSystemFixtureActionService.ExecuteAPI`, `AddContext(Birthday)`,
-//!   the multiplayer hides (single player: not connected), then
+//!   time), else `ShowCommon1ButtonDialog(MSG_MYSEKAI_BIRTHDAY_PARTY_CLOSED,
+//!   WORD_OK)` and an action button refresh; the fixture's cut-scene area
+//!   must lie inside the grid and overlap no other fixture, else the overlap
+//!   dialog; then `ExecuteAsync`.
+//! - `ExecuteAsync` (call order): `Initialize` (party, unit, character:
+//!   `gameCharacterUnits` then `gameCharacters`), `IsActionedSystemFixture`
+//!   (the user's `userMysekaiSystemFixtureActions`),
+//!   `ShowConfirmDialog(isActioned)`: a `Common2ButtonDialog` whose body is
+//!   `WORD_MYSEKAI_BIRTHDAY_PARTY_CONFIRM` (the first time; OK labelled
+//!   `WORD_START_BIRTHDAY_PARTY`) or `WORD_MYSEKAI_BIRTHDAY_PARTY_REMEMBER_CONFIRM`
+//!   (after; OK labelled `WORD_OK`) formatted with the character's
+//!   `givenName`, cancel `WORD_CANCEL`. Its cancel ends `ExecuteAsync`.
+//!   Then `MysekaiSystemFixtureActionService.ExecuteAPI` (only when the
+//!   fixture was not actioned), `MultiplayCore.IsConnected` (else the room's
+//!   error dialog and the end), `AddContext(Birthday)`, the other players'
+//!   hides, then
 //!   `PlayCutSceneAsync`: `CutSceneExecutor.PlayAsync([party unit],
 //!   GetMasterMysekaiBirthdayCutSceneByExternalId(party id).id, the fixture's
 //!   view transform, useAlreadyExistCharacter true, hidePlayer false, showUI
@@ -37,7 +45,8 @@
 //!   `RemoveContext`, the reward dialog): named, not run here.
 //!
 //! Server values, all the server model's: the current time (the server
-//! clock), the placed party fixture (the served home housing layout, whose
+//! clock), the realtime room (the own room, connected, with no other
+//! players), the placed party fixture (the served home housing layout, whose
 //! party cakes are its `policies.birthdayPartyFixtures`), the user's
 //! `userMysekaiSystemFixtureActions` rows (the client's copy
 //! [`ClientSystemFixtureActions`]) and the
@@ -46,9 +55,9 @@
 //! [`crate::server::system_fixture_action`]). A refused reply is the source's
 //! null reply: `ExecuteAsync` stops before its cut-scene.
 //!
-//! Named differences: the confirm dialog, the closed and overlap dialogs and
-//! the home screen's `HideUI` are UI not drawn here (the confirm is taken as
-//! pressed); the cut-scene area check is not modelled; the birthday
+//! Named differences: the overlap dialog (`ShowCommonSubWindowDialog`) and
+//! the home screen's `HideUI` are UI not drawn here; the cut-scene area
+//! check is not modelled; the birthday
 //! character is the cast's new avatar, created while the package loads and
 //! hidden until the director's first frame (see [`super::cast`]); the voice
 //! download is the root's stream table (the voice track plays from it).
@@ -63,6 +72,8 @@
 //! touch stream (the gesture layer, the button's hit and its dispatch, which
 //! writes [`BirthdayCutSceneClick`]). The placement is the instrument's (a
 //! player walks there); the game mode reads no environment variable.
+//! `MOLY_BIRTHDAY_CONFIRM_SECS=<seconds>` taps the confirm dialog's OK that
+//! many seconds after it shows.
 
 use bevy::ecs::system::SystemState;
 use bevy::input::touch::{TouchInput, TouchPhase};
@@ -71,8 +82,12 @@ use moly_assets::json::master::{self, MasterData, MasterTable};
 use moly_law::action_button::ButtonType;
 use serde_json::Value;
 
+use std::collections::HashMap;
+
 use super::{Cast, CastCaller, CastPlay};
+use crate::common_dialog::Buttons;
 use crate::fixture_activity_state::FixtureActivityIdentity;
+use crate::ui_layers::DialogId;
 use crate::server::client::system_fixture_action::{self as action, ClientSystemFixtureActions};
 
 /// `MysekaiCutSceneConditionType` of the birthday rows.
@@ -80,6 +95,21 @@ const CONDITION: &str = "birthday_party";
 /// `MysekaiSystemFixtureType` of a party fixture.
 const PARTY_FIXTURE_TYPE: &str = "birthday";
 const INSTRUMENT: &str = "MOLY_BIRTHDAY_PARTY_ACTION";
+const CONFIRM_INSTRUMENT: &str = "MOLY_BIRTHDAY_CONFIRM_SECS";
+const CONFIRM_FIRST: &str = "WORD_MYSEKAI_BIRTHDAY_PARTY_CONFIRM";
+const CONFIRM_AFTER: &str = "WORD_MYSEKAI_BIRTHDAY_PARTY_REMEMBER_CONFIRM";
+const START: &str = "WORD_START_BIRTHDAY_PARTY";
+const CLOSED: &str = "MSG_MYSEKAI_BIRTHDAY_PARTY_CLOSED";
+
+/// The wordings the birthday dialogs and the site map's no-party dialog
+/// draw (the shell charset takes them).
+pub(crate) const WORDINGS: &[&str] = &[
+    CONFIRM_FIRST,
+    CONFIRM_AFTER,
+    START,
+    CLOSED,
+    "MSG_NOTHING_BIRTHDAY_DIALOG_BODY",
+];
 /// `PutCharacterBesideFixture`: the angle added to the fixture's and the
 /// distance from it; the unit `NIGO_MIKU_GAME_CHARACTER_UNIT_ID` has its own.
 const CHARACTER_ANGLE: f32 = 30.0;
@@ -122,7 +152,7 @@ pub(crate) struct BirthdayContext {
     pub(crate) party: i64,
 }
 
-/// The three master tables, read from the region's master hosts.
+/// The master tables, read from the region's master hosts.
 const PARTIES: MasterTable<Vec<Party>> = MasterTable {
     table: "birthdayParties",
     name: "birthdayParties (the birthday cut-scene)",
@@ -138,8 +168,26 @@ const CUT_SCENES: MasterTable<Vec<(i64, i64, String)>> = MasterTable {
     name: "mysekaiCutScenes (the birthday cut-scene)",
     parse: parse_cut_scenes,
 };
+const CHARACTER_UNITS: MasterTable<HashMap<u32, i64>> = MasterTable {
+    table: "gameCharacterUnits",
+    name: "gameCharacterUnits (the birthday party's character)",
+    parse: parse_character_units,
+};
+const CHARACTERS: MasterTable<HashMap<i64, String>> = MasterTable {
+    table: "gameCharacters",
+    name: "gameCharacters (the birthday confirm's given name)",
+    parse: parse_characters,
+};
 
-/// The tables: requested, then taken once all three have resolved (a
+/// The glyphs the birthday dialogs draw beyond their wordings: the party
+/// characters' given names, once the tables are taken (empty when a table
+/// failed, which the master layer names).
+#[derive(Resource, Default)]
+pub(crate) struct BirthdayCharset {
+    pub(crate) chars: Option<Vec<char>>,
+}
+
+/// The tables: requested, then taken once all of them have resolved (a
 /// missing or malformed table is named once by the master layer and kept
 /// here as the error).
 #[derive(Resource)]
@@ -169,6 +217,16 @@ struct SystemFixture {
 #[derive(Resource)]
 struct BirthdayPresenter {
     party: Party,
+    fixture: Entity,
+}
+
+/// `ExecuteAsync` awaiting `ShowConfirmDialog`.
+#[derive(Resource)]
+struct BirthdayConfirm {
+    dialog: DialogId,
+    party: Party,
+    system_fixture: i32,
+    actioned: bool,
     fixture: Entity,
 }
 
@@ -204,6 +262,8 @@ pub(super) fn load(mut commands: Commands, mut masters: ResMut<MasterData>) {
     masters.request(&PARTIES);
     masters.request(&SYSTEM_FIXTURES);
     masters.request(&CUT_SCENES);
+    masters.request(&CHARACTER_UNITS);
+    masters.request(&CHARACTERS);
     commands.insert_resource(BirthdayTables::Requested);
     if let Some(raw) = crate::server::instrument_env(INSTRUMENT) {
         let (seconds, fixture) = match raw.split_once(':') {
@@ -282,11 +342,52 @@ fn parse_cut_scenes(text: &str) -> Result<Vec<(i64, i64, String)>, String> {
         .collect()
 }
 
-/// Shared, so that the readers of every frame take the tables without a copy.
-type Tables = std::sync::Arc<(Vec<Party>, Vec<SystemFixture>, Vec<(i64, i64, String)>)>;
+/// `gameCharacterUnits`: unit id to `gameCharacterId`.
+fn parse_character_units(text: &str) -> Result<HashMap<u32, i64>, String> {
+    master::rows(text)?
+        .iter()
+        .map(|row| {
+            let unit = u32::try_from(int(row, "id")?).map_err(|_| "a unit id is negative")?;
+            Ok((unit, int(row, "gameCharacterId")?))
+        })
+        .collect()
+}
 
-/// The party rows, the system fixture rows and the birthday cut-scene rows,
-/// once the master layer has resolved all three.
+/// `gameCharacters`: id to `givenName`.
+fn parse_characters(text: &str) -> Result<HashMap<i64, String>, String> {
+    master::rows(text)?
+        .iter()
+        .map(|row| Ok((int(row, "id")?, master::text(row, "givenName")?.to_owned())))
+        .collect()
+}
+
+struct TableRows {
+    parties: Vec<Party>,
+    system: Vec<SystemFixture>,
+    cut_scenes: Vec<(i64, i64, String)>,
+    units: HashMap<u32, i64>,
+    characters: HashMap<i64, String>,
+}
+
+impl TableRows {
+    /// `Initialize`'s character: the party unit's `gameCharacterId`, then
+    /// that character's `givenName`.
+    fn given_name(&self, unit: u32) -> Result<&str, String> {
+        let character = self
+            .units
+            .get(&unit)
+            .ok_or_else(|| format!("GetMasterGameCharacterUnit({unit}) = null"))?;
+        self.characters
+            .get(character)
+            .map(String::as_str)
+            .ok_or_else(|| format!("GetMasterGameCharacter({character}) = null (unit {unit})"))
+    }
+}
+
+/// Shared, so that the readers of every frame take the tables without a copy.
+type Tables = std::sync::Arc<TableRows>;
+
+/// The master rows, once the master layer has resolved every table.
 fn tables(world: &mut World) -> Result<Option<Tables>, String> {
     match world.get_resource::<BirthdayTables>() {
         None => return Err("the birthday tables were not requested".into()),
@@ -294,37 +395,65 @@ fn tables(world: &mut World) -> Result<Option<Tables>, String> {
         Some(BirthdayTables::Requested) => {}
     }
     let mut masters = world.resource_mut::<MasterData>();
-    let keys = [PARTIES.key(), SYSTEM_FIXTURES.key(), CUT_SCENES.key()];
+    let keys = [
+        PARTIES.key(),
+        SYSTEM_FIXTURES.key(),
+        CUT_SCENES.key(),
+        CHARACTER_UNITS.key(),
+        CHARACTERS.key(),
+    ];
     if keys.into_iter().any(|key| !masters.is_resolved(key)) {
         return Ok(None);
     }
-    let (Some(parties), Some(system), Some(cut_scenes)) = (
+    let (Some(parties), Some(system), Some(cut_scenes), Some(units), Some(characters)) = (
         masters.take(&PARTIES),
         masters.take(&SYSTEM_FIXTURES),
         masters.take(&CUT_SCENES),
+        masters.take(&CHARACTER_UNITS),
+        masters.take(&CHARACTERS),
     ) else {
         return Err("a birthday master table was taken by another reader".into());
     };
-    let taken = (|| Ok(std::sync::Arc::new((parties?, system?, cut_scenes?))))()
-        .map_err(|error: master::MasterError| error.to_string());
+    let taken = (|| {
+        Ok(std::sync::Arc::new(TableRows {
+            parties: parties?,
+            system: system?,
+            cut_scenes: cut_scenes?,
+            units: units?,
+            characters: characters?,
+        }))
+    })()
+    .map_err(|error: master::MasterError| error.to_string());
+    let mut chars = Vec::new();
     if let Ok(tables) = &taken {
-        let (parties, system, cut_scenes) = &**tables;
         info!(
-            "[birthday] master tables: {} parties, {} system fixtures ({} of type {PARTY_FIXTURE_TYPE}), {} birthday cut-scenes",
-            parties.len(),
-            system.len(),
-            system.iter().filter(|row| row.kind == PARTY_FIXTURE_TYPE).count(),
-            cut_scenes.len()
+            "[birthday] master tables: {} parties, {} system fixtures ({} of type {PARTY_FIXTURE_TYPE}), {} birthday cut-scenes, {} character units, {} characters",
+            tables.parties.len(),
+            tables.system.len(),
+            tables.system.iter().filter(|row| row.kind == PARTY_FIXTURE_TYPE).count(),
+            tables.cut_scenes.len(),
+            tables.units.len(),
+            tables.characters.len()
         );
+        for party in &tables.parties {
+            match tables.given_name(party.unit) {
+                Ok(name) => chars.extend(name.chars()),
+                Err(reason) => warn!("[birthday] party {}: {reason}; its confirm cannot show", party.id),
+            }
+        }
+        chars.sort_unstable();
+        chars.dedup();
     }
+    world.resource_mut::<BirthdayCharset>().chars = Some(chars);
     world.insert_resource(BirthdayTables::Taken(taken.clone()));
     taken.map(Some)
 }
 
 /// Update (exclusive): the party fixtures' button state, the button's
-/// clicks, and the instrument's press.
+/// clicks, the confirm's answer, and the instrument's press.
 pub(super) fn advance(world: &mut World) {
     update_buttons(world);
+    confirm_answer(world);
     let clicks: Vec<BirthdayCutSceneClick> = world
         .resource_mut::<Messages<BirthdayCutSceneClick>>()
         .drain()
@@ -340,7 +469,7 @@ fn update_buttons(world: &mut World) {
     let Ok(Some(tables)) = tables(world) else {
         return;
     };
-    let (parties, system, _) = &*tables;
+    let TableRows { parties, system, .. } = &*tables;
     let now = crate::birthday::now_ms();
     let context = world.contains_resource::<BirthdayContext>();
     let placed: Vec<(Entity, i64, Option<BirthdayButton>)> = world
@@ -435,7 +564,7 @@ fn instrument_place(world: &mut World, wanted: Option<i32>, now: f64) {
             return set_stage(world, InstrumentStage::Done);
         }
     };
-    let (parties, system, _) = &*tables;
+    let TableRows { parties, system, .. } = &*tables;
     let party_fixtures: Vec<i64> = system
         .iter()
         .filter(|row| row.kind == PARTY_FIXTURE_TYPE)
@@ -575,6 +704,10 @@ fn on_click(world: &mut World, fixture: Entity) {
         info!("[birthday] OnClickBirthdayCutScene: the Birthday context is set (party {}): CanShowBirthdayCutSceneButton is false, so there is no button to click", context.party);
         return;
     }
+    if world.contains_resource::<BirthdayConfirm>() {
+        info!("[birthday] OnClickBirthdayCutScene: the confirm dialog is shown (it takes every tap); the click does nothing");
+        return;
+    }
     let tables = match tables(world) {
         Ok(Some(tables)) => tables,
         Ok(None) => {
@@ -586,7 +719,7 @@ fn on_click(world: &mut World, fixture: Entity) {
             return;
         }
     };
-    let (parties, system, cut_scenes) = &*tables;
+    let TableRows { parties, system, .. } = &*tables;
     // IsExecutable.
     let Some(master) = world
         .get::<FixtureActivityIdentity>(fixture)
@@ -610,21 +743,22 @@ fn on_click(world: &mut World, fixture: Entity) {
     // IsWithinBirthdayStartTime(party).
     let now = crate::birthday::now_ms();
     if !crate::birthday::is_within_time(now, party.birthday_start_at, party.closed_at) {
-        info!("[birthday] OnClickBirthdayCutScene: party {} is not within its birthday start time at {now} ([{}, {})): ShowCommon1ButtonDialog(MSG_MYSEKAI_BIRTHDAY_PARTY_CLOSED) (UI, not drawn); publish ActionButtonRefresh", party.id, party.birthday_start_at, party.closed_at);
+        let body = crate::common_dialog::wording(world, "DialogUtility.ShowCommon1ButtonDialog", CLOSED);
+        let dialog = crate::common_dialog::open_detached(
+            world,
+            "DialogUtility.ShowCommon1ButtonDialog",
+            body,
+            Buttons::One { ok: "WORD_OK" },
+        );
+        info!("[birthday] OnClickBirthdayCutScene: party {} is not within its birthday start time at {now} ([{}, {})): ShowCommon1ButtonDialog({CLOSED}, WORD_OK) {dialog:?}; publish ActionButtonRefresh (the action buttons here are re-evaluated every frame)", party.id, party.birthday_start_at, party.closed_at);
         return;
     }
     info!("[birthday] OnClickBirthdayCutScene: party {} (unit {}, window [{}, {}), birthday start {}) at {now}: IsCutsceneAreaOverlap / IsCutsceneAreaWithinGrid are not modelled (taken as clear); ExecuteAsync", party.id, party.unit, party.start_at, party.closed_at, party.birthday_start_at);
-    execute(world, party, row, fixture, &cut_scenes);
+    execute(world, party, row, fixture, &tables);
 }
 
-/// `ExecuteAsync` up to `PlayCutSceneAsync`.
-fn execute(
-    world: &mut World,
-    party: Party,
-    row: SystemFixture,
-    fixture: Entity,
-    cut_scenes: &[(i64, i64, String)],
-) {
+/// `ExecuteAsync` up to `ShowConfirmDialog`.
+fn execute(world: &mut World, party: Party, row: SystemFixture, fixture: Entity, tables: &TableRows) {
     let Ok(system_fixture) = i32::try_from(row.id) else {
         error!("[birthday] ExecuteAsync: system fixture id {} does not fit the API's int; nothing plays", row.id);
         return;
@@ -636,15 +770,92 @@ fn execute(
         error!("[birthday] ExecuteAsync: the client has no copy of userMysekaiSystemFixtureActions (no server model); nothing plays");
         return;
     };
-    info!("[birthday] ExecuteAsync(party {}, fixture {fixture:?}): Initialize; IsActionedSystemFixture({system_fixture}) = {actioned}; ShowConfirmDialog({actioned}): {} confirm dialog (UI, not drawn; taken as confirmed)", party.id, if actioned { "the after-second-time" } else { "the first" });
-    let reply = action::post(world, system_fixture);
-    if !reply.success {
-        error!("[birthday] MysekaiSystemFixtureActionService.ExecuteAPI({system_fixture}): the reply is null ({}): the API error (UI, not drawn); ExecuteAsync stops, nothing plays", reply.refusal.unwrap_or_default());
+    let given_name = match tables.given_name(party.unit) {
+        Ok(name) => name.to_owned(),
+        Err(reason) => {
+            error!("[birthday] Initialize(party {}): {reason}; ShowConfirmDialog dereferences the character and throws: nothing plays", party.id);
+            return;
+        }
+    };
+    // ShowConfirmDialog(isActioned): ShowFirstConfirmDialog or
+    // ShowAfterSecondTimeConfirmDialog.
+    let (caller, body_key, ok) = if actioned {
+        ("BirthdayPartyPresenter.ShowAfterSecondTimeConfirmDialog", CONFIRM_AFTER, "WORD_OK")
+    } else {
+        ("BirthdayPartyPresenter.ShowFirstConfirmDialog", CONFIRM_FIRST, START)
+    };
+    let format = crate::common_dialog::wording(world, caller, body_key);
+    let body = moly_law::text::custom_text_mesh::format_wording(&format, &[given_name.clone()])
+        .unwrap_or_else(|reason| {
+            error!("[birthday] {caller}: {reason}; the body is drawn unformatted");
+            format.clone()
+        });
+    let Some(dialog) = crate::common_dialog::open(
+        world,
+        caller,
+        body,
+        Buttons::Two { ok, cancel: "WORD_CANCEL" },
+        Some(CONFIRM_INSTRUMENT),
+    ) else {
+        error!("[birthday] ExecuteAsync(party {}): the confirm dialog cannot show; nothing plays", party.id);
+        return;
+    };
+    info!("[birthday] ExecuteAsync(party {}, fixture {fixture:?}): Initialize (character {given_name}); IsActionedSystemFixture({system_fixture}) = {actioned}; {caller}: Show2ButtonDialog(Common2ButtonDialog, {ok}, WORD_CANCEL), SetWordingText({body_key}, {given_name}) {dialog:?}", party.id);
+    world.insert_resource(BirthdayConfirm {
+        dialog,
+        party,
+        system_fixture,
+        actioned,
+        fixture,
+    });
+}
+
+/// `ShowConfirmDialog`'s answer: its cancel ends `ExecuteAsync`; its OK
+/// goes on.
+fn confirm_answer(world: &mut World) {
+    let Some(dialog) = world.get_resource::<BirthdayConfirm>().map(|confirm| confirm.dialog) else {
+        return;
+    };
+    let Some(ok) = crate::common_dialog::answer(world, dialog) else {
+        return;
+    };
+    let confirm = world.remove_resource::<BirthdayConfirm>().expect("pending confirm");
+    if !ok {
+        info!("[birthday] ShowConfirmDialog = false (cancel): ExecuteAsync ends, nothing plays");
         return;
     }
-    info!("[birthday] MysekaiSystemFixtureActionService.ExecuteAPI({system_fixture}): success; updatedResources merged (IsActionedSystemFixture now {}); obtainedResources {} rows kept for the reward dialog (not run here)", world.get_resource::<ClientSystemFixtureActions>().is_some_and(|copy| copy.is_actioned(system_fixture)), reply.obtained_resources.len());
+    let rows = match tables(world) {
+        Ok(Some(tables)) => tables,
+        Ok(None) => unreachable!("the confirm shows only once the tables are taken"),
+        Err(reason) => {
+            error!("[birthday] ShowConfirmDialog = true: {reason}; nothing plays");
+            return;
+        }
+    };
+    confirmed(world, confirm, &rows.cut_scenes);
+}
+
+/// `ExecuteAsync` from the confirm's OK up to `PlayCutSceneAsync`.
+fn confirmed(world: &mut World, confirm: BirthdayConfirm, cut_scenes: &[(i64, i64, String)]) {
+    let BirthdayConfirm {
+        party,
+        system_fixture,
+        actioned,
+        fixture,
+        ..
+    } = confirm;
+    if actioned {
+        info!("[birthday] ShowConfirmDialog = true; the fixture is actioned: no ExecuteAPI, no rewards");
+    } else {
+        let reply = action::post(world, system_fixture);
+        if !reply.success {
+            error!("[birthday] MysekaiSystemFixtureActionService.ExecuteAPI({system_fixture}): the reply is null ({}): the API error (UI, not drawn); ExecuteAsync stops, nothing plays", reply.refusal.unwrap_or_default());
+            return;
+        }
+        info!("[birthday] ShowConfirmDialog = true; MysekaiSystemFixtureActionService.ExecuteAPI({system_fixture}): success; updatedResources merged (IsActionedSystemFixture now {}); obtainedResources {} rows kept for the reward dialog (not run here)", world.get_resource::<ClientSystemFixtureActions>().is_some_and(|copy| copy.is_actioned(system_fixture)), reply.obtained_resources.len());
+    }
     world.insert_resource(BirthdayContext { party: party.id });
-    info!("[birthday] GameStateManager.AddContext(Birthday); MultiplayCore not connected: no other players to hide; back key process cleared");
+    info!("[birthday] MultiplayCore.IsConnected (the server model's own room); GameStateManager.AddContext(Birthday); no other players to hide; back key process cleared");
     // PlayCutSceneAsync.
     let Some((cut_scene_id, _, timeline)) = cut_scenes
         .iter()
@@ -753,7 +964,8 @@ pub(super) fn cut_scene_returned(world: &mut World, cast: &Cast) {
 }
 
 pub(super) fn install(app: &mut App) {
-    app.add_message::<BirthdayCutSceneClick>()
+    app.init_resource::<BirthdayCharset>()
+        .add_message::<BirthdayCutSceneClick>()
         .add_systems(Startup, load)
         .add_systems(Update, advance.before(super::advance));
 }

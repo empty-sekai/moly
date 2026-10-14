@@ -129,9 +129,19 @@ pub(crate) struct InteractionEligibility<'w, 's> {
     entry: Option<Res<'w, crate::entry::EntrySequence>>,
     delivery: Option<Res<'w, crate::delivery::DeliveryGameState>>,
     holds: crate::game_state::PerformanceHolds<'w>,
+    screens: Option<Res<'w, crate::ui_layers::ScreenManager>>,
 }
 
 impl InteractionEligibility<'_, '_> {
+    /// `ExistsDialog(Layer_Dialog)`: a dialog is shown over the field, and
+    /// the dialog layer takes the taps the field's buttons would get (the
+    /// buttons stay drawn under it).
+    pub(crate) fn dialog_shown(&self) -> bool {
+        self.screens
+            .as_deref()
+            .is_some_and(crate::ui_layers::ScreenManager::exists_dialog)
+    }
+
     pub(crate) fn available(&self) -> bool {
         crate::entry::control_open(self.entry.as_deref())
             && self.layers.on_field()

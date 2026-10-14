@@ -1373,7 +1373,6 @@ pub(crate) fn install(app: &mut App) {
         .add_systems(
             Update,
             (
-                craft::spawn_when_ready,
                 craft::view::spawn_when_ready,
                 craft::result::spawn_when_ready,
             ),
@@ -1381,11 +1380,11 @@ pub(crate) fn install(app: &mut App) {
         .add_systems(
             Update,
             (
-                craft::click.run_if(crate::game_settings::scene_input_enabled),
+                crate::common_dialog::click.run_if(crate::game_settings::scene_input_enabled),
                 craft::result::click.run_if(crate::game_settings::scene_input_enabled),
                 craft::view::click.run_if(crate::game_settings::scene_input_enabled),
                 craft::advance,
-                craft::place,
+                crate::common_dialog::place,
                 craft::result::place,
                 craft::view::place,
             )

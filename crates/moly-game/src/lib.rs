@@ -161,6 +161,7 @@ mod zoom_player_camera;
 mod talk_ingest;
 pub mod talk_window;
 mod two_button_dialog;
+mod common_dialog;
 pub mod ui_font;
 pub mod uber_particle;
 pub mod ui_layers;
@@ -298,6 +299,7 @@ pub fn app(
     ));
     app.add_plugins(delivery::DeliveryPlugin);
     app.add_plugins(ui_particle::UiParticlePlugin);
+    common_dialog::install(&mut app);
     home_action::install(&mut app);
     app
 }

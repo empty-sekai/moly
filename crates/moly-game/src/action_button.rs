@@ -2061,21 +2061,23 @@ pub(crate) fn click(
     let shown = roots
         .iter()
         .any(|visibility| *visibility != Visibility::Hidden);
+    let dialog = eligibility.dialog_shown();
     if let (Some(&tap), Some((head, _))) = (taps.first(), state.current()) {
         let on_change = state.change_shown() && screen.change_hit(tap, window, head);
-        if head != ButtonType::Talk
-            && !on_change
-            && (!open || !shown || !screen.hit(tap, window, head))
+        if dialog
+            || head != ButtonType::Talk
+                && !on_change
+                && (!open || !shown || !screen.hit(tap, window, head))
         {
             info!(
-                "[action_button] tap at ({:.0},{:.0}) not taken for {head:?}: field open {open}, button shown {shown}, on the button {}",
+                "[action_button] tap at ({:.0},{:.0}) not taken for {head:?}: field open {open}, button shown {shown}, dialog over the field {dialog}, on the button {}",
                 tap.x,
                 tap.y,
                 screen.hit(tap, window, head)
             );
         }
     }
-    if taps.is_empty() || !open || !shown {
+    if taps.is_empty() || !open || !shown || dialog {
         return;
     }
     let Some((button, target)) = state.current() else {

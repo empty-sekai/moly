@@ -566,9 +566,10 @@ pub(crate) fn parse(
         Option<Res<crate::delivery::screen::DeliveryScreen>>,
         Option<Res<crate::delivery::screen::DeliveryCharset>>,
     ),
-    (get_resource_inputs, get_resource): (
+    (get_resource_inputs, get_resource, birthday): (
         Option<Res<crate::get_resource::GetResourceInputs>>,
         Option<Res<crate::get_resource::GetResourceCharset>>,
+        Option<Res<crate::cutscene::birthday::BirthdayCharset>>,
     ),
 ) {
     let Some(handle) = handle else { return; };
@@ -599,6 +600,15 @@ pub(crate) fn parse(
     // The acquisition dialogs' names and wordings (masters and wordings
     // read), when the acquisition dialogs are installed.
     if get_resource_inputs.is_some() && get_resource.is_none() { return; }
+    // The birthday confirm's character names, when the birthday party is
+    // installed.
+    let birthday_names = match birthday.as_deref() {
+        Some(birthday) => match &birthday.chars {
+            Some(chars) => chars.as_slice(),
+            None => return,
+        },
+        None => &[],
+    };
     let parsed: Value = serde_json::from_str(&asset.0).expect("site name document");
     let rows = parsed["sites"].as_array().expect("site name rows");
     let mut chars = layouts.text_chars();
@@ -617,6 +627,7 @@ pub(crate) fn parse(
     if let Some(get_resource) = get_resource.as_deref() {
         chars.extend(get_resource.chars.iter().copied());
     }
+    chars.extend(birthday_names.iter().copied());
     for wording in ["WORD_LEFT_ROOM", "WORD_CANCEL", "MSG_CONFIRM_LEAVE_MYSEKAI",
         "WORD_NOT_SAVE_RETURN", "WORD_SAVE_RETURN", "WORD_EDIT_SAVE_CONFIRMATION", "MSG_LEARN_PHENOMENA"]
         .into_iter().chain(crate::menu_dialog::RANK_GAUGE_WORDINGS) {
@@ -627,6 +638,8 @@ pub(crate) fn parse(
     // the screen that writes it.
     for wording in crate::option_dialog::WORDINGS
         .iter()
+        .chain(crate::common_dialog::WORDINGS)
+        .chain(crate::cutscene::birthday::WORDINGS)
         .chain(crate::info::WORDINGS)
         .chain(crate::delivery::screen::WORDINGS.iter())
         .chain(crate::inventory::WORDINGS)

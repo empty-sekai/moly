@@ -356,7 +356,8 @@ pub(crate) fn read_input(
     let events: Vec<GestureEvent> = gestures.read().copied().collect();
     let visible =
         screen_visible(&stack, entry.as_deref(), site.as_deref()) && eligibility.field_input_open();
-    if !visible {
+    // A dialog over the field takes the taps; the button stays drawn.
+    if !visible || eligibility.dialog_shown() {
         button.pointer = false;
         button.key = false;
         button.is_press = false;

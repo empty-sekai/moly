@@ -100,22 +100,19 @@
 //! = `blueprint[xcount]` selects when the screen opens;
 //! `MOLY_CRAFT_APPLY_SECS` presses the apply button that many seconds after
 //! the screen opens; `MOLY_CRAFT_CONFIRM_SECS` taps the confirm's OK button
-//! (at its drawn rect) that many seconds after the confirm shows;
+//! (at its drawn rect, through [`crate::common_dialog`]) that many seconds
+//! after the confirm shows;
 //! `MOLY_CRAFT_STAGE_RESULT=<count>[,first]` stages the dialogs after the
 //! hold two seconds after the screen opens, for the selected blueprint, with
 //! no craft request and no sequence (the result dialog's view without a
 //! reachable craft; loud in the log).
 
-use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
 use moly_assets::json::master::{MasterData, MasterTable};
 use moly_law::ui::mysekai_rank::{MasterMysekaiRank, get_mysekai_rank};
 
-use crate::action_button::ActionTapConsumed;
 use crate::audio::{SeClass, SeRequest, SeRequests};
 use crate::fixture_activity_state::FixtureTarget;
-use crate::gesture::{GestureEvent, GestureKind, GestureState};
 use crate::server::client::craft::{
     CRAFT_COUNT_MAX, CRAFT_COUNT_MIN, CraftMasters, CraftOwned, MasterBlueprint, MysekaiCraftType,
     UserMysekaiCraftRequest, is_create_count_limit, is_enough_material_to_craft, is_first_craft,
@@ -125,12 +122,12 @@ use crate::server::client::instrument_env;
 use crate::server::client::inventory::{
     ClientMysekaiInventory, PossessionMasters, fixture_total_count,
 };
-use crate::sitemap::SITEMAP_LAYER;
+use crate::common_dialog::Buttons;
 use crate::ui_layers::{
-    DialogBackKey, DialogBackKeyEvent, DialogId, DialogType, DisplayLayerType, LayerCommand,
-    MenuScreenType, ScreenManager,
+    DialogBackKey, DialogId, DialogType, DisplayLayerType, LayerCommand, MenuScreenType,
+    ScreenManager,
 };
-use crate::ui_layout::{UiLayouts, UiPrefabView};
+use crate::ui_layout::UiLayouts;
 
 pub(crate) mod result;
 pub(crate) mod view;
@@ -141,7 +138,6 @@ const CRAFT_RESULT_DIALOG: DialogType = DialogType(377);
 const SE_CRAFT_RESULT: &str = "se_craft_result";
 /// The dialogs' views sit above the screens' (a screen view is at z 20 and
 /// its nodes add their order).
-const DIALOG_Z: f32 = 100.0;
 /// `DialogType.FixtureBonusSubWindowDialog`.
 const FIXTURE_BONUS_DIALOG: DialogType = DialogType(405);
 /// `DialogType.MysekaiRankUpDialog`.
@@ -149,20 +145,10 @@ const RANK_UP_DIALOG: DialogType = DialogType(335);
 const SE_ENTER_CRAFT_TOOL: &str = "se_enter_crafttool";
 /// `SetupContentList`'s `SetTabClickSe`.
 const SE_TAB_CLICK: &str = "se_mysekai_ui_select";
-const COMMON1: &str = "Common1";
-const COMMON2: &str = "Common2";
-const FOOTER_BUTTON: &str = "WindowRoot/FooterButtons/UIPartsCommonButton";
-const FOOTER_TEXT: &str = "WindowRoot/FooterButtons/UIPartsCommonButton/Text";
-const MESSAGE_BODY: &str = "ContentRoot/Content/MessageBody";
-const CLOSE_BUTTON: &str = "WindowRoot/UIPartsCloseButton";
-const WINDOW_ROOT: &str = "WindowRoot";
-const TABS: &str = "WindowRoot/Tabs";
 /// The wordings the craft screen and its two common dialogs draw (the shell
 /// charset takes them).
 pub(crate) const WORDINGS: &[&str] = &[
     "WORD_CREATE_CONFIRM",
-    "WORD_OK",
-    "WORD_CANCEL",
     "MSG_CRAFT_TERM_LIMIT_DIALOG_BODY",
     // The tab cells.
     "WORD_FIXTURE",
@@ -278,7 +264,7 @@ enum Stage {
     #[default]
     Idle,
     /// The confirm (Common2ButtonDialog) is shown.
-    Confirm { dialog: DialogId, body: String },
+    Confirm { dialog: DialogId },
     /// The term limit dialog (Common1ButtonDialog) is shown.
     TermLimit { dialog: DialogId },
     /// The world sequence plays.
@@ -338,12 +324,10 @@ pub(crate) struct CraftScreen {
     button: Option<ApplyButton>,
     requests: Vec<ViewRequest>,
     stage: Stage,
-    shown_at: f32,
-    /// The confirm's or the term dialog's answer (true: OK).
+    /// The result dialog's close (its view's taps).
     answer: Option<bool>,
     /// The instruments already fired this opening.
     applied: bool,
-    confirm_tapped: bool,
     rank_reported: bool,
     /// The rank table (`None` until it resolves; `Err`: why the region has
     /// none).
@@ -353,18 +337,6 @@ pub(crate) struct CraftScreen {
     /// The dialogs were staged by the instrument (no sequence closes them).
     staged: bool,
     staged_fired: bool,
-}
-
-/// The two common dialogs' views and their buttons. Common2's OK, cancel and
-/// close buttons are [`crate::two_button_dialog::resolve`]'s (the footer
-/// buttons found by their serialized labels); Common1's single footer button
-/// is its OK (the dialogs' button fields are not decoded).
-#[derive(Component)]
-pub(crate) struct CommonDialogView {
-    key: &'static str,
-    /// Common2: `[cancel, OK]`; Common1: `[OK]`.
-    buttons: Vec<String>,
-    close: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -789,17 +761,26 @@ fn term_limited(world: &World, selection: &Selection) -> bool {
 }
 
 fn open_term_limit(world: &mut World, screen: &mut CraftScreen) {
-    if let Some(dialog) = show(
+    let body = match world.resource::<UiLayouts>().wordings.get("MSG_CRAFT_TERM_LIMIT_DIALOG_BODY") {
+        Some(body) => body.clone(),
+        None => {
+            error!(
+                "[craft] MSG_CRAFT_TERM_LIMIT_DIALOG_BODY is not on the root; the term dialog's body stays empty"
+            );
+            String::new()
+        }
+    };
+    if let Some(dialog) = crate::common_dialog::open(
         world,
-        DialogType::Common1ButtonDialog,
         "DialogUtility.ShowCommon1ButtonDialog",
+        body,
+        Buttons::One { ok: "WORD_OK" },
+        None,
     ) {
         info!(
             "[craft] the blueprint's term is over: ShowCommon1ButtonDialog(MSG_CRAFT_TERM_LIMIT_DIALOG_BODY, WORD_OK) {dialog:?}"
         );
         screen.stage = Stage::TermLimit { dialog };
-        screen.shown_at = world.resource::<Time>().elapsed_secs();
-        screen.answer = None;
     }
 }
 
@@ -850,19 +831,18 @@ fn click_apply(world: &mut World, screen: &mut CraftScreen) {
             return;
         }
     };
-    if let Some(dialog) = show(
+    if let Some(dialog) = crate::common_dialog::open(
         world,
-        DialogType::Common2ButtonDialog,
         "CraftPreview.OpenCraftConfirmDialog",
+        body,
+        Buttons::Two { ok: "WORD_OK", cancel: "WORD_CANCEL" },
+        Some("MOLY_CRAFT_CONFIRM_SECS"),
     ) {
         info!(
             "[craft] OpenCraftConfirmDialog: Show2ButtonDialog(Common2ButtonDialog, null, WORD_OK, WORD_CANCEL) {dialog:?}, body GetFormat(WORD_CREATE_CONFIRM, name, {})",
             selection.count
         );
-        screen.stage = Stage::Confirm { dialog, body };
-        screen.shown_at = world.resource::<Time>().elapsed_secs();
-        screen.answer = None;
-        screen.confirm_tapped = false;
+        screen.stage = Stage::Confirm { dialog };
     }
 }
 
@@ -1291,8 +1271,8 @@ pub(crate) fn advance(world: &mut World) {
     } else if !open && screen.open {
         screen.open = false;
         info!("[craft] the craft screen closed");
-        if let Stage::Confirm { dialog, .. } | Stage::TermLimit { dialog } = screen.stage {
-            close(world, dialog);
+        if let Stage::Confirm { dialog } | Stage::TermLimit { dialog } = screen.stage {
+            crate::common_dialog::dismiss(world, dialog);
             screen.stage = Stage::Idle;
         }
     }
@@ -1337,13 +1317,12 @@ pub(crate) fn advance(world: &mut World) {
     }
     stage_instrument(world, &mut screen, now);
     match screen.stage.clone() {
-        Stage::Confirm { dialog, .. } => {
-            if let Some(ok) = screen.answer.take() {
+        Stage::Confirm { dialog } => {
+            if let Some(ok) = crate::common_dialog::answer(world, dialog) {
                 info!(
                     "[craft] the confirm's {}: Close",
                     if ok { "OK" } else { "cancel" }
                 );
-                close(world, dialog);
                 screen.stage = Stage::Idle;
                 if ok {
                     send(world, &mut screen);
@@ -1351,9 +1330,8 @@ pub(crate) fn advance(world: &mut World) {
             }
         }
         Stage::TermLimit { dialog } => {
-            if screen.answer.take().is_some() {
+            if crate::common_dialog::answer(world, dialog).is_some() {
                 info!("[craft] the term dialog's OK: Close, BackUIScreen");
-                close(world, dialog);
                 screen.stage = Stage::Idle;
                 world.write_message(LayerCommand::Pop);
             }
@@ -1367,246 +1345,4 @@ pub(crate) fn advance(world: &mut World) {
         _ => {}
     }
     *world.resource_mut::<CraftScreen>() = screen;
-}
-
-/// Spawn the two common dialogs' views once their documents are ready.
-pub(crate) fn spawn_when_ready(
-    mut commands: Commands,
-    layouts: Res<UiLayouts>,
-    server: Res<AssetServer>,
-    mut spawned: Local<bool>,
-) {
-    if *spawned
-        || ![COMMON1, COMMON2]
-            .iter()
-            .all(|key| layouts.ready(key, &server))
-    {
-        return;
-    }
-    *spawned = true;
-    for key in [COMMON1, COMMON2] {
-        let doc = layouts.document(key).expect("ready document");
-        let mut view = UiPrefabView::new(key, SITEMAP_LAYER);
-        view.set_visible(TABS, false);
-        let label = |view: &mut UiPrefabView, text: &str, wording: &str| match layouts
-            .wordings
-            .get(wording)
-        {
-            Some(value) => view.set_text(text, value.clone()),
-            None => error!("[craft] {key}: {wording} is not on the root; its button text stays"),
-        };
-        let (buttons, close) = if key == COMMON2 {
-            match crate::two_button_dialog::resolve(doc) {
-                Ok(dialog) => {
-                    label(&mut view, &dialog.negative_label, "WORD_CANCEL");
-                    label(&mut view, &dialog.positive_label, "WORD_OK");
-                    (vec![dialog.negative, dialog.positive], dialog.close)
-                }
-                Err(reason) => {
-                    error!("[craft] {key}: {reason}; the confirm's buttons are not bound");
-                    (Vec::new(), CLOSE_BUTTON.to_owned())
-                }
-            }
-        } else {
-            let ids = |suffix: &str| -> Vec<String> {
-                doc.nodes
-                    .iter()
-                    .filter(|node| node.path.ends_with(suffix))
-                    .map(|node| format!("@{}", node.game_object_id))
-                    .collect()
-            };
-            let buttons = ids(FOOTER_BUTTON);
-            let texts = ids(FOOTER_TEXT);
-            if buttons.len() != 1 || texts.len() != 1 {
-                error!(
-                    "[craft] {key}: {} footer buttons and {} texts, not one; its button is not labelled",
-                    buttons.len(),
-                    texts.len()
-                );
-            } else {
-                label(&mut view, &texts[0], "WORD_OK");
-            }
-            (buttons, CLOSE_BUTTON.to_owned())
-        };
-        info!("[craft] {key} view spawned: buttons {buttons:?} (the last is OK), close {close}");
-        commands.spawn((
-            CommonDialogView {
-                key,
-                buttons,
-                close,
-            },
-            Visibility::Hidden,
-            Transform::from_xyz(0., 0., DIALOG_Z),
-            RenderLayers::layer(SITEMAP_LAYER),
-            view,
-        ));
-    }
-}
-
-/// Draw the shown common dialog (the confirm or the term dialog); the
-/// confirm instrument's tap.
-pub(crate) fn place(
-    mut screen: ResMut<CraftScreen>,
-    layouts: Res<UiLayouts>,
-    time: Res<Time>,
-    windows: Query<&Window, With<PrimaryWindow>>,
-    root_canvas: Option<Res<crate::canvas::RootCanvas>>,
-    mut views: Query<(
-        &CommonDialogView,
-        &mut Visibility,
-        &mut Transform,
-        &mut UiPrefabView,
-    )>,
-    mut injected: MessageWriter<GestureEvent>,
-) {
-    let (Ok(window), Some(root_canvas)) = (windows.single(), root_canvas.as_deref()) else {
-        return;
-    };
-    let scale = root_canvas.scale(window);
-    let size = root_canvas.size(window);
-    for (common, mut visible, mut transform, mut view) in &mut views {
-        crate::canvas::set_scale(&mut transform, scale);
-        let body = match (&screen.stage, common.key) {
-            (Stage::Confirm { body, .. }, COMMON2) => Some(body.clone()),
-            (Stage::TermLimit { .. }, COMMON1) => {
-                match layouts.wordings.get("MSG_CRAFT_TERM_LIMIT_DIALOG_BODY") {
-                    Some(body) => Some(body.clone()),
-                    None => {
-                        error!(
-                            "[craft] MSG_CRAFT_TERM_LIMIT_DIALOG_BODY is not on the root; the term dialog's body stays empty"
-                        );
-                        Some(String::new())
-                    }
-                }
-            }
-            _ => None,
-        };
-        let Some(body) = body else {
-            visible.set_if_neq(Visibility::Hidden);
-            continue;
-        };
-        visible.set_if_neq(Visibility::Inherited);
-        view.set_text(MESSAGE_BODY, body);
-        // The instrument: a tap at the confirm's OK button's drawn centre.
-        if common.key != COMMON2 || screen.confirm_tapped {
-            continue;
-        }
-        let Some(secs) = seconds_instrument("MOLY_CRAFT_CONFIRM_SECS") else {
-            continue;
-        };
-        if time.elapsed_secs() - screen.shown_at < secs {
-            continue;
-        }
-        let Some(rect) = common
-            .buttons
-            .last()
-            .and_then(|ok| view.rect(&layouts, ok, size))
-        else {
-            continue;
-        };
-        let centre = rect.center();
-        let position = Vec2::new(
-            centre.x * scale + window.width() / 2.0,
-            window.height() / 2.0 - centre.y * scale,
-        );
-        screen.confirm_tapped = true;
-        info!(
-            "[craft] instrument: tap injected at ({:.0},{:.0}) on the confirm's OK",
-            position.x, position.y
-        );
-        injected.write(GestureEvent {
-            kind: GestureKind::Tap,
-            state: GestureState::End,
-            position,
-            delta: Vec2::ZERO,
-            ui_owned: false,
-        });
-    }
-}
-
-/// Taps and the back key on the shown common dialog (modal: every tap is
-/// its). Common2: OK, or cancel by its cancel button, the close button, a
-/// tap outside the window or the back key. Common1: every one of these is
-/// OK.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn click(
-    mut screen: ResMut<CraftScreen>,
-    layouts: Res<UiLayouts>,
-    windows: Query<&Window, With<PrimaryWindow>>,
-    root_canvas: Option<Res<crate::canvas::RootCanvas>>,
-    views: Query<(&CommonDialogView, &UiPrefabView)>,
-    mut gestures: MessageReader<GestureEvent>,
-    mut back_keys: MessageReader<DialogBackKeyEvent>,
-    mut consumed: ResMut<ActionTapConsumed>,
-) {
-    let (key, dialog) = match screen.stage {
-        Stage::Confirm { dialog, .. } => (COMMON2, dialog),
-        Stage::TermLimit { dialog } => (COMMON1, dialog),
-        _ => {
-            gestures.clear();
-            back_keys.clear();
-            return;
-        }
-    };
-    if screen.answer.is_some() {
-        return;
-    }
-    if back_keys.read().any(|event| event.id == dialog) {
-        info!("[craft] {key}: back key (OnHardwareBackKeyProcess)");
-        screen.answer = Some(key == COMMON1);
-        return;
-    }
-    let taps: Vec<Vec2> = gestures
-        .read()
-        .filter(|event| event.kind.is_tap_family() && event.state == GestureState::End)
-        .map(|event| event.position)
-        .collect();
-    if taps.is_empty() {
-        return;
-    }
-    let (Ok(window), Some(root_canvas)) = (windows.single(), root_canvas.as_deref()) else {
-        return;
-    };
-    let Some((common, view)) = views.iter().find(|(common, _)| common.key == key) else {
-        return;
-    };
-    let size = root_canvas.size(window);
-    let scale = root_canvas.scale(window);
-    for position in taps {
-        consumed.0 = true;
-        let canvas = Vec2::new(
-            position.x - window.width() / 2.0,
-            window.height() / 2.0 - position.y,
-        ) / scale;
-        let hit = |path: &str| {
-            view.rect(&layouts, path, size)
-                .is_some_and(|rect| rect.active && rect.contains(canvas))
-        };
-        let ok = common
-            .buttons
-            .last()
-            .is_some_and(|button| hit(button.as_str()));
-        let cancel = key == COMMON2
-            && common
-                .buttons
-                .first()
-                .is_some_and(|button| hit(button.as_str()));
-        let external = hit(common.close.as_str()) || !hit(WINDOW_ROOT);
-        if ok || cancel || external {
-            let answer = ok || (external && key == COMMON1);
-            info!(
-                "[craft] {key}: tap on {}",
-                if ok {
-                    "OK"
-                } else if cancel {
-                    "cancel"
-                } else {
-                    "the close button or outside (OnCloseExternal)"
-                }
-            );
-            screen.answer = Some(answer);
-            break;
-        }
-        info!("[craft] {key}: tap inside the window off its buttons: nothing");
-    }
 }

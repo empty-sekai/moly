@@ -1129,7 +1129,11 @@ fn read_inputs(
 /// The charset of every text these dialogs draw.
 fn charset(masters: Option<&Masters>, wordings: &HashMap<String, String>) -> Vec<char> {
     let mut chars: Vec<char> = Vec::new();
-    for key in WORDINGS.iter().chain(crate::home_action::craft::WORDINGS) {
+    for key in WORDINGS
+        .iter()
+        .chain(crate::home_action::craft::WORDINGS)
+        .chain(crate::common_dialog::WORDINGS)
+    {
         match wordings.get(*key) {
             Some(text) => chars.extend(text.chars()),
             None => error!(
