@@ -915,7 +915,9 @@ impl UiLayouts {
 
     /// The clicked source control's serialized sound fields (`se` and
     /// `otherSeName`), for `CustomSelectableDefine.PlaySE`. None when the
-    /// control has no sound fields or is not interactable.
+    /// control has no sound fields or is not interactable. A toggle, a
+    /// dropdown and an input field carry no `otherSeName`: their clicks pass
+    /// the empty name.
     pub(crate) fn button_se(
         &self, key: &str, path: &str,
     ) -> Option<(moly_law::ui::custom_button::SeType, String)> {
@@ -932,7 +934,10 @@ impl UiLayouts {
         let se = control.fields["se"].as_i64()
             .and_then(moly_law::ui::custom_button::SeType::from_serialized)
             .expect("button SeType");
-        let other = control.fields["otherSeName"].as_str().expect("button otherSeName").to_owned();
+        let other = match control.class.as_str() {
+            "Sekai.UI.CustomToggle" | "Sekai.UI.CustomDropdown" | "Sekai.UI.CustomInputFieldTextMesh" => String::new(),
+            _ => control.fields["otherSeName"].as_str().expect("button otherSeName").to_owned(),
+        };
         Some((se, other))
     }
 
