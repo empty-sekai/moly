@@ -526,14 +526,25 @@ fn parse_index(
     commands.remove_resource::<IndexRequest>();
 }
 
+/// The phenomenon resolution hold: no phenomenon resolves until every pending
+/// phenomenon's documents and ramp are loaded.
+const RESOLVE: crate::hold::HoldSite = crate::hold::HoldSite {
+    tag: "weather",
+    what: "weather resolutions",
+    effect: "the weather does not take effect",
+    quiet: &[],
+};
+
 /// Update：15 档三路产物全部到达 → 解出全部档位、当前档落地、如实记账。
 fn resolve_all(
     server: Res<AssetServer>,
     json: Res<Assets<JsonAsset>>,
+    time: Res<Time>,
     mut run: ResMut<WeatherRun>,
     mut phenomenon: ResMut<CurrentPhenomenon>,
     mut phenomenon_id: ResMut<CurrentPhenomenonId>,
     mut catalogue: ResMut<PhenomenonCatalogue>,
+    mut hold: Local<crate::hold::HoldReport>,
 ) {
     if run.pending.is_empty() || !run.phenomena.is_empty() {
         return;
@@ -565,6 +576,7 @@ fn resolve_all(
             panic!("现象 {} 的渐变条装载失败：{err:?}", p.name);
         }
     }
+    let now = time.elapsed_secs();
     let all_loaded = run.pending.iter().all(|p| {
         server.load_state(&p.config).is_loaded()
             && p.timeline.as_ref().is_none_or(|h| server.load_state(h).is_loaded())
@@ -583,8 +595,9 @@ fn resolve_all(
             })
     });
     if !all_loaded {
-        return;
+        return hold.hold(&RESOLVE, "the phenomenon documents or ramps are still loading", now);
     }
+    hold.run(&RESOLVE, now);
     let mut resolved: Vec<ResolvedPhenomenon> = Vec::with_capacity(run.pending.len());
     let mut display_options = Vec::with_capacity(run.pending.len());
     for p in run.pending.drain(..) {

@@ -645,12 +645,23 @@ enum SegPlay {
     Once,
 }
 
+/// The attachment hold: a member's runtime is not attached until the idle
+/// action table, the facial tables and the motion library are in.
+const ATTACH: crate::hold::HoldSite = crate::hold::HoldSite {
+    tag: "alone",
+    what: "idle action attachments",
+    effect: "NPCs run no idle actions",
+    quiet: &[],
+};
+
 /// Update：两份表到齐 + 装配完成（有驱动与 toon 材质）的成员逐名挂
 /// 运行时。挂上即核数据面：池里用到的 facial 键与动作段必须全部在
 /// 表/库里——核不过响亮失败（事件分发时才查就是静默丢步）。
 #[allow(clippy::type_complexity)]
 pub(crate) fn attach(
     mut commands: Commands,
+    time: Res<Time>,
+    server: Res<AssetServer>,
     actions: Option<Res<AloneActions>>,
     tables: Option<Res<FacialTables>>,
     library: Res<MotionLibrary>,
@@ -664,13 +675,22 @@ pub(crate) fn attach(
             Without<crate::player::PlayerControlled>,
         ),
     >,
+    mut hold: Local<crate::hold::HoldReport>,
 ) {
-    let (Some(actions), Some(tables)) = (actions, tables) else {
-        return;
+    let now = time.elapsed_secs();
+    let Some(actions) = actions else {
+        return hold.hold(&ATTACH, "the idle action table is not loaded", now);
+    };
+    let Some(tables) = tables else {
+        return hold.hold(&ATTACH, "the facial tables are not loaded", now);
     };
     let Some(lib) = libraries.get(&library.gltf) else {
-        return; // 动作库还没到齐（有驱动即已到齐，此行只是防序）
+        // The motion library is normally in by the time a driver exists; this
+        // gate only guards the order.
+        crate::talk::report_motion_library_failure(&server, &library);
+        return hold.hold(&ATTACH, crate::talk::MOTION_LIBRARY_HOLD, now);
     };
+    hold.run(&ATTACH, now);
     for (npc, unit, toon) in &npcs {
         let pool = actions.units.get(&unit.0);
         if let Some(pool) = pool {
@@ -850,11 +870,22 @@ pub(crate) fn apply_mouth_pattern(
 
 // ---- 主循环 ----
 
+/// The step hold: the idle actions do not advance until the facial tables and
+/// the motion library are in.
+const STEP: crate::hold::HoldSite = crate::hold::HoldSite {
+    tag: "alone",
+    what: "idle action steps",
+    effect: "the NPC idle actions stand",
+    quiet: &[],
+};
+
 /// Execute exactly one script invocation for the current Rest epoch. Other
 /// activity owners keep their existing animation and presentation channels.
 #[allow(clippy::type_complexity)]
 pub(crate) fn advance(
     clock: Res<crate::npc_clock::NpcClock>,
+    time: Res<Time>,
+    server: Res<AssetServer>,
     gate: Res<AloneExecutionGate>,
     tables: Option<Res<FacialTables>>,
     library: Res<MotionLibrary>,
@@ -873,10 +904,17 @@ pub(crate) fn advance(
     )>,
     mut players: Query<&mut AnimationPlayer>,
     mut transitions: Query<&mut AnimationTransitions>,
+    mut hold: Local<crate::hold::HoldReport>,
 ) {
-    let (Some(tables), Some(lib)) = (tables, libraries.get(&library.gltf)) else {
-        return;
+    let now = time.elapsed_secs();
+    let Some(tables) = tables else {
+        return hold.hold(&STEP, "the facial tables are not loaded", now);
     };
+    let Some(lib) = libraries.get(&library.gltf) else {
+        crate::talk::report_motion_library_failure(&server, &library);
+        return hold.hold(&STEP, crate::talk::MOTION_LIBRARY_HOLD, now);
+    };
+    hold.run(&STEP, now);
     let wall = wall_second();
     let delta_time = clock.delta();
     for (npc, unit, rest, mut runtime, mut driver, talk) in &mut npcs {

@@ -127,6 +127,15 @@ pub fn load(mut commands: Commands) {
     });
 }
 
+/// The player's placement hold: the player does not appear until its three
+/// inputs (the body spec, the client configs and the site ground) are in.
+const SPAWN: crate::hold::HoldSite = crate::hold::HoldSite {
+    tag: "player",
+    what: "player spawns",
+    effect: "the player does not appear",
+    quiet: &[],
+};
+
 /// Update：规格、面板与站点地表都就绪后，铺一次玩家。实体形状：移动
 /// 相位、身体输入（avatar 模型与动作组），另加玩家专属件：[`AvatarRoot`]
 /// （相机自此追玩家）、dash 模式、输入。面板门与名册铺装同款：速度律
@@ -135,6 +144,7 @@ pub fn load(mut commands: Commands) {
 #[allow(clippy::type_complexity)]
 pub(crate) fn spawn_when_ready(
     mut commands: Commands,
+    time: Res<Time>,
     meshes: Res<Assets<Mesh>>,
     specs: Option<Res<PlayerSpecs>>,
     configs: Option<Res<crate::client_config::ClientConfigs>>,
@@ -142,17 +152,26 @@ pub(crate) fn spawn_when_ready(
     face: Option<Res<walk_face::WalkFace>>,
     spawned: Option<Res<PlayerSpawned>>,
     parts: Query<(&Mesh3d, &GlobalTransform)>,
+    mut hold: Local<crate::hold::HoldReport>,
 ) {
     if spawned.is_some() {
         return;
     }
-    let (Some(specs), Some(configs), Some(ground)) = (specs, configs, ground) else {
-        return;
+    let now = time.elapsed_secs();
+    let Some(specs) = specs else {
+        return hold.hold(&SPAWN, "the player body spec is not loaded", now);
+    };
+    let Some(configs) = configs else {
+        return hold.hold(&SPAWN, "the client configs are not loaded", now);
+    };
+    let Some(ground) = ground else {
+        return hold.hold(&SPAWN, "the ground meshes are not loaded", now);
     };
     let verts = crate::npc::ground_verts(&meshes, &ground, &parts);
     if verts.is_empty() {
-        return; // 站点 scene 还没展开，下一帧再试
+        return hold.hold(&SPAWN, "the site scene has no ground vertices yet", now);
     }
+    hold.run(&SPAWN, now);
     let (center, center_y) = crate::npc::center_of(&verts);
     let scale = crate::npc::ring_scale(&verts);
     // The adaptation ring (see SEED_RADIUS): opposite the roster's first

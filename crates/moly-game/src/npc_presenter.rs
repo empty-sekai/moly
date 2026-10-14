@@ -71,6 +71,15 @@ fn halt(mind: &mut ObjectiveMind, unit: u32, reason: String) {
     mind.greeting_halt = Some(reason);
 }
 
+/// The greeting hold: no character approaches the player until the server
+/// panel, the talk data and the talk catalog are in.
+const GREETING: crate::hold::HoldSite = crate::hold::HoldSite {
+    tag: "npc-greeting",
+    what: "NPC greetings",
+    effect: "no NPC greets the player",
+    quiet: &[],
+};
+
 /// Presenter call 10, per character in the avatar list order.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(crate) fn try_greeting(
@@ -107,23 +116,34 @@ pub(crate) fn try_greeting(
             Without<crate::npc::residency::Away>,
         ),
     >,
+    mut hold: Local<crate::hold::HoldReport>,
 ) {
     // The avatar store's per-frame NPC update, of which this is call 10.
     if !crate::npc::residency::loaded_site_runs(site.as_deref()) {
         return;
     }
     let frame = frame.0;
-    let (Some(panel), Some(talk_list), Some(tables), Some(configs)) = (
-        panel.as_deref(),
-        talk_list.as_deref(),
-        tables.as_deref(),
-        configs.as_deref(),
-    ) else {
-        return;
+    let now = time.elapsed_secs();
+    let Some(panel) = panel.as_deref() else {
+        return hold.hold(&GREETING, "the server panel is not installed", now);
+    };
+    let Some(talk_list) = talk_list.as_deref() else {
+        return hold.hold(&GREETING, "the client talk list is not set", now);
+    };
+    let Some(tables) = tables.as_deref() else {
+        return hold.hold(&GREETING, "the activity tables are not loaded", now);
+    };
+    let Some(configs) = configs.as_deref() else {
+        return hold.hold(&GREETING, "the client configs are not loaded", now);
     };
     if !catalog.ready() {
-        return;
+        return hold.hold(
+            &GREETING,
+            "the talk catalog is not ready (talk store, site table or the phenomenon of the day)",
+            now,
+        );
     }
+    hold.run(&GREETING, now);
     let weights = LotteryWeights {
         talk1: configs.float(KEY_NPC_LOTTERY_TALK1_WIGHT),
         talk2: configs.float(KEY_NPC_LOTTERY_TALK2_WIGHT),

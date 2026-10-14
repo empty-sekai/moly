@@ -2481,6 +2481,15 @@ fn validate_fixture_declarations(
 // 步进与事件分发
 // ---------------------------------------------------------------------------
 
+/// The player conversation's step hold: an admitted session does not advance
+/// until its facial tables, its talk store and its motion library are in.
+const SESSION_STEP: crate::hold::HoldSite = crate::hold::HoldSite {
+    tag: "player-talk",
+    what: "player talk steps",
+    effect: "the player conversation stays frozen",
+    quiet: &[],
+};
+
 /// Update：步进主循环（同配对对话侧的形状）：发起点按的闩耗尽、
 /// 窗体点击放行门、`advance` 一拍、逐触发步分发、对话动作播完交还、
 /// 段收口。挂在窗体输入之后（闩先于步进）。
@@ -2491,8 +2500,6 @@ pub(crate) fn advance_session(
     session: Option<ResMut<PlayerTalkSession>>,
     tables: Option<Res<FacialTables>>,
     store: Option<Res<PlayerTalkStore>>,
-    library: Res<MotionLibrary>,
-    libraries: Res<Assets<Gltf>>,
     mut playback: crate::talk::TalkPlayback,
     mut materials: ResMut<Assets<CharacterMaterial>>,
     mut window: ResMut<TalkWindowState>,
@@ -2509,7 +2516,14 @@ pub(crate) fn advance_session(
     >,
     mut runtimes: Query<&mut PlayerTalkRuntime>,
     live_entities: Query<()>,
-    (mut ledger, mut motion): (ResMut<PlayerTalkLedger>, PlayerTalkMotion),
+    (library, libraries, mut ledger, mut motion, mut hold, server): (
+        Res<MotionLibrary>,
+        Res<Assets<Gltf>>,
+        ResMut<PlayerTalkLedger>,
+        PlayerTalkMotion,
+        Local<crate::hold::HoldReport>,
+        Res<AssetServer>,
+    ),
 ) {
     let explicit_cancel = drain_talk_cancellation(&mut playback.cancel);
     let Some(mut session) = session else {
@@ -2561,14 +2575,19 @@ pub(crate) fn advance_session(
         );
         return;
     }
-    let (Some(tables), Some(store)) = (tables, store) else {
-        return;
+    let now = time.elapsed_secs();
+    let Some(tables) = tables else {
+        return hold.hold(&SESSION_STEP, "the facial tables are not loaded", now);
+    };
+    let Some(store) = store else {
+        return hold.hold(&SESSION_STEP, "the player talk store is not loaded", now);
     };
     let Some(lib) = libraries.get(&library.gltf) else {
-        return;
+        crate::talk::report_motion_library_failure(&server, &library);
+        return hold.hold(&SESSION_STEP, crate::talk::MOTION_LIBRARY_HOLD, now);
     };
+    hold.run(&SESSION_STEP, now);
     let dt = time.delta_secs();
-    let now = time.elapsed_secs();
     let crate::talk::TalkPlayback {
         mut graphs,
         mut players,

@@ -1310,6 +1310,32 @@ pub(crate) struct FixtureSide<'w, 's> {
     pub(crate) player_transforms: Query<'w, 's, &'static Transform, With<PlayerControlled>>,
 }
 
+/// The NPC conversation's step hold: an active talk does not advance until
+/// its facial tables and its motion library are in.
+const TALK_STEP: crate::hold::HoldSite = crate::hold::HoldSite {
+    tag: "talk",
+    what: "talk steps",
+    effect: "the NPC conversation stays frozen",
+    quiet: &[],
+};
+
+/// The reason a gate holds on while the shared motion library is not in.
+pub(crate) const MOTION_LIBRARY_HOLD: &str = "the motion library is not loaded yet";
+
+/// Logs a failed motion-library load as an error, once per process, naming the
+/// library path. The gates that read the library call it before they hold.
+pub(crate) fn report_motion_library_failure(server: &AssetServer, library: &MotionLibrary) {
+    static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if let LoadState::Failed(err) = server.load_state(&library.gltf) {
+        if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            error!(
+                "[talk] motion library {} failed to load: {err:?}",
+                moly_assets::motion_library()
+            );
+        }
+    }
+}
+
 /// Update：步进主循环——窗体点击闩、`advance` 一拍、逐
 /// 触发步分发、对话动作播完交还、段收口。挂在选取与窗体输入之后
 /// （会话当帧即可步进）。
@@ -1319,8 +1345,12 @@ pub(crate) fn advance_talk(
     time: Res<Time>,
     active: Option<ResMut<ActiveTalk>>,
     tables: Option<Res<FacialTables>>,
-    library: Res<MotionLibrary>,
-    libraries: Res<Assets<Gltf>>,
+    (library, libraries, server, mut hold): (
+        Res<MotionLibrary>,
+        Res<Assets<Gltf>>,
+        Res<AssetServer>,
+        Local<crate::hold::HoldReport>,
+    ),
     timelines: Res<FixtureTimelines>,
     mut materials: ResMut<Assets<CharacterMaterial>>,
     mut emote_reqs: ResMut<TalkEmoteReqs>,
@@ -1434,12 +1464,15 @@ pub(crate) fn advance_talk(
         }
         return;
     }
+    let now = time.elapsed_secs();
     let Some(tables) = tables else {
-        return;
+        return hold.hold(&TALK_STEP, "the facial tables are not loaded", now);
     };
     let Some(lib) = libraries.get(&library.gltf) else {
-        return;
+        report_motion_library_failure(&server, &library);
+        return hold.hold(&TALK_STEP, MOTION_LIBRARY_HOLD, now);
     };
+    hold.run(&TALK_STEP, now);
     let dt = time.delta_secs();
     // LoopUpdate yields before its first clock increment. Afterwards, due
     // callbacks precede this frame's Lua continuation, including while waiting.

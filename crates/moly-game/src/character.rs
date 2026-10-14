@@ -276,6 +276,15 @@ pub fn load(mut commands: Commands, server: Res<AssetServer>) {
     });
 }
 
+/// The character plan's hold: no body is planned until the character manifest
+/// has loaded with its dependencies.
+const PLAN_HOLD: crate::hold::HoldSite = crate::hold::HoldSite {
+    tag: "npc",
+    what: "character plans",
+    effect: "the NPCs have no body and stay invisible",
+    quiet: &[],
+};
+
 /// Update：名册成员到齐后逐名发角色包装载。清单的 `unit` 字段是代号
 /// （成员 unitId 加 100——两份资产各持一半，清单持包文件、名册持身份），
 /// 代码里把两侧折到同一坐标系再对。清单里没有某成员的包即响亮失败。
@@ -284,7 +293,9 @@ pub(crate) fn plan_when_ready(
     server: Res<AssetServer>,
     jsons: Res<Assets<JsonAsset>>,
     manifest_files: Res<ManifestAssets>,
+    time: Res<Time>,
     npcs: Query<(Entity, &CharacterUnitId), (With<MotionClips>, Without<CharacterPack>)>,
+    mut hold: Local<crate::hold::HoldReport>,
 ) {
     if npcs.is_empty() {
         return; // 没有待装配的成员：名册未铺，或已全部装配
@@ -292,9 +303,11 @@ pub(crate) fn plan_when_ready(
     if let LoadState::Failed(err) = server.load_state(&manifest_files.json) {
         panic!("角色清单装载失败：{err:?}");
     }
+    let now = time.elapsed_secs();
     if !server.is_loaded_with_dependencies(&manifest_files.json) {
-        return;
+        return hold.hold(&PLAN_HOLD, "the character manifest is still loading", now);
     }
+    hold.run(&PLAN_HOLD, now);
     let manifest =
         schema::CharacterManifest::parse(&jsons.get(&manifest_files.json).expect("清单已到齐").0)
             .expect("角色清单解析失败");

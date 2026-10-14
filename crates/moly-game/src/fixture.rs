@@ -1507,8 +1507,18 @@ pub(crate) fn waits_for_panel_layout(
                 && !layouts::home_starter_ready()))
 }
 
+/// The layout restore's hold: the selected site's fixtures are not placed until
+/// the site table is in and, on the home site, the house and gate are in.
+const RESTORE: crate::hold::HoldSite = crate::hold::HoldSite {
+    tag: "offline-layout",
+    what: "layout restores",
+    effect: "the site's fixture layout is not restored",
+    quiet: &[],
+};
+
 fn restore_selected_layout(
     mut commands: Commands,
+    time: Res<Time>,
     selection: Res<crate::site::SiteSelection>,
     sites: Option<Res<crate::site::Sites>>,
     saved: Res<layouts::SiteFixtureLayouts>,
@@ -1521,9 +1531,11 @@ fn restore_selected_layout(
     source_region: Option<Res<crate::site::NavMeshSourceRegion>>,
     homes: Option<Res<crate::entry::house::HomeFixtures>>,
     gate_model: Option<Res<crate::gate_flow::HomeGateModel>>,
+    mut hold: Local<crate::hold::HoldReport>,
 ) {
+    let now = time.elapsed_secs();
     let Some(sites) = sites else {
-        return;
+        return hold.hold(&RESTORE, "the site table is not loaded", now);
     };
     let Some(site_id) = sites.site_id(selection.site_type()) else {
         return;
@@ -1537,13 +1549,14 @@ fn restore_selected_layout(
     // The home site's layout is completed with the player's house, which
     // needs the fixture tables.
     if selection.site_type() == "home_site" && homes.is_none() {
-        return;
+        return hold.hold(&RESTORE, "the player's house fixtures are not installed", now);
     }
     // The home gate shows the model of the gate the server set at the home
     // site (`MysekaiGateModel.AssetBundleName`).
     if selection.site_type() == "home_site" && gate_model.is_none() {
-        return;
+        return hold.hold(&RESTORE, "the home gate model is not installed", now);
     }
+    hold.run(&RESTORE, now);
     // An embedded stage starts with no preset or persisted layout. The same
     // layout owner later installs/restores exact content-scoped fixtures.
     // In particular, never instantiate a CN offline preset in a JP snapshot.

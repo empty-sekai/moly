@@ -341,6 +341,14 @@ impl BalloonArt {
     }
 }
 
+/// The atlas bake's hold: no balloon is drawn until its skin images are in.
+const ATLAS_BAKE: crate::hold::HoldSite = crate::hold::HoldSite {
+    tag: "tweet",
+    what: "balloon atlas bakes",
+    effect: "no tweet balloon is drawn",
+    quiet: &[],
+};
+
 /// Update：主表就绪即烘一次图集（资源在即是闩）。字体在仓内
 /// （include_bytes），光栅走 swash 的 `scale::Render`。烘制次序按码点
 /// 升序——同数据同图。真源纹源两件（bg/箭头裁图）在同一次调用里
@@ -349,6 +357,7 @@ impl BalloonArt {
 pub(crate) fn bake_atlas(
     mut commands: Commands,
     server: Res<AssetServer>,
+    time: Res<Time>,
     render_device: Res<RenderDevice>,
     mut images: ResMut<Assets<Image>>,
     tables: Option<Res<crate::npc_tweet::TweetTables>>,
@@ -370,12 +379,14 @@ pub(crate) fn bake_atlas(
     bgm_select_charset: Option<Res<crate::bgm_select::BgmSelectCharset>>,
     skin: Option<Res<SkinHandle>>,
     art: Option<Res<BalloonArt>>,
+    mut hold: Local<crate::hold::HoldReport>,
 ) {
     if art.is_some() {
         return;
     }
+    let now = time.elapsed_secs();
     let Some(skin) = skin else {
-        return;
+        return hold.hold(&ATLAS_BAKE, "the balloon skin handles are not installed", now);
     };
     for (name, handle) in [
         ("bg btn_r30_wh", &skin.bg),
@@ -387,8 +398,9 @@ pub(crate) fn bake_atlas(
     }
     let loaded = |h: &Handle<Image>| matches!(server.load_state(h), LoadState::Loaded);
     if !(loaded(&skin.bg) && loaded(&skin.arrow)) {
-        return;
+        return hold.hold(&ATLAS_BAKE, "the balloon skin images are still loading", now);
     }
+    hold.run(&ATLAS_BAKE, now);
     // 尺寸核验：裁件尺寸与九宫/箭头采样常量脱节时，错采样是静默的——
     // 具名拒绝。两值都读自真源（sprite 账本按打包身份对齐）。
     let bg_image = images
