@@ -28,6 +28,7 @@ pub(crate) mod entry_probe;
 pub(crate) mod gate_entries;
 pub(crate) mod random_fixture_action;
 pub(crate) mod residency;
+pub(crate) mod restore;
 pub(crate) mod walkable;
 
 // The door move inserts the pending resource and orders itself after the
@@ -1041,14 +1042,18 @@ pub(crate) fn spawn_when_ready(
         Option<Res<crate::server_panel::ServerPanel>>,
         Option<Res<crate::server_panel::VisitingCharacters>>,
         Option<Res<crate::server_panel::TalkDataStore>>,
+        Option<Res<restore::ReturnedFromOtherRoom>>,
     ),
 ) {
     if spawned.is_some() {
         return;
     }
-    let (Some(server), Some(visitors), Some(_talk_list)) =
-        (panel.0.as_deref(), panel.1.as_deref(), panel.2.as_deref())
-    else {
+    let (Some(server), Some(visitors), Some(_talk_list), returned) = (
+        panel.0.as_deref(),
+        panel.1.as_deref(),
+        panel.2.as_deref(),
+        panel.3.as_deref(),
+    ) else {
         return;
     };
     let Some(catalog) = catalog else {
@@ -1125,7 +1130,15 @@ pub(crate) fn spawn_when_ready(
             (
                 PauseSeconds(*pause_seconds),
                 RestLifecycle::default(),
-                NpcActions::placed_on(own_site.clone()),
+                {
+                let mut actions = NpcActions::placed_on(own_site.clone());
+                // `SetupNpcVisitingAsync(hasReturnedFromOtherRoom: true)`
+                // completes every member's first talk.
+                if returned.is_some() {
+                    actions.first_talk_complete = true;
+                }
+                actions
+            },
             ),
             WalkState(LawWalkState::new(seed, FORWARD_FALLBACK)),
             MoveTarget(seed),
@@ -1161,6 +1174,10 @@ pub(crate) fn spawn_when_ready(
         character_unit_ids: ids.clone(),
     });
     commands.insert_resource(Spawned);
+    if returned.is_some() {
+        commands.remove_resource::<restore::ReturnedFromOtherRoom>();
+        info!("[npc-residency] RestoreNpcAsync: SetupNpcVisitingAsync(visitingFromGate false, hasReturnedFromOtherRoom true): the roster is created again with every member's first talk complete (SetCompleteFirstTalk)");
+    }
     use crate::client_config::{
         KEY_NPC_LOTTERY_ALREADY_READ_FIXTURE_TALK_PERCENT,
         KEY_NPC_LOTTERY_ALREADY_READ_WHEN_HAS_NOT_READ, KEY_NPC_LOTTERY_FIXTURE_TALK_PERCENT,

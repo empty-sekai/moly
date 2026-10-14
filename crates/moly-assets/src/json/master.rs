@@ -130,6 +130,12 @@ impl Default for MasterBases {
 const UNPUBLISHED: &[(RemoteRegion, &str)] = &[
     // Both CN master hosts answer 404 for it.
     (RemoteRegion::Cn, "configs"),
+    // The birthday party's talk scripts: the official master directories do
+    // not carry the table (the birthday parties themselves are in
+    // `birthdayParties`). A root that ships the table for its region
+    // publishes it; a consumer must name what it reads instead.
+    (RemoteRegion::Jp, "birthdayPartyScenarios"),
+    (RemoteRegion::Cn, "birthdayPartyScenarios"),
 ];
 
 fn unpublished(region: RemoteRegion, table: &str) -> Option<String> {

@@ -21,6 +21,7 @@ use moly_law::ui::graphic_tap_effect as tap_rule;
 use crate::site::SiteActive;
 use crate::sitemap::SITEMAP_LAYER;
 use crate::ui_layers::{LayerCommand, LayerId, UiLayerStack};
+use crate::cutscene::birthday_party::{BirthdayParty, EndBirthdayPartyClick, PartyUi};
 use crate::ui_layout::{Pointer, UiLayouts, UiPrefabView};
 
 const SITES_DATA: &str = "moly://site/sites.json";
@@ -262,11 +263,15 @@ enum ShellAction {
     ScreenShot,
     CameraReset,
     UiHide,
+    /// The housing screens' end-party button, an authored child of theirs
+    /// (`ComponentRoot/LeftTop/EndBirthdayPartyButton`).
+    EndParty,
 }
 
 impl ShellAction {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::SiteMap, Self::FixtureEdit, Self::Menu, Self::ScreenShot, Self::CameraReset, Self::UiHide,
+        Self::EndParty,
     ];
 
     fn field(self) -> &'static str {
@@ -277,13 +282,20 @@ impl ShellAction {
             Self::ScreenShot => "_screenShotButton",
             Self::CameraReset => "_cameraResetButton",
             Self::UiHide => "_uiDisableButton",
+            Self::EndParty => "_endBirthdayPartyButton",
         }
     }
 
-    fn visible(self, host: ShellHost, hidden: bool) -> bool {
+    /// `ShowUI`: with the `Birthday` context set, `SetUIForBirthday` hides
+    /// the edit and site-map buttons and, while the context is `InProgress`,
+    /// shows the end-party button; its `AfterClose` branch hides that one
+    /// too.
+    fn visible(self, host: ShellHost, hidden: bool, party: Option<PartyUi>) -> bool {
+        let housing = matches!(host, ShellHost::Home | ShellHost::MyRoom);
         match self {
-            Self::SiteMap => host.shows_site_map() && !hidden,
-            Self::FixtureEdit => matches!(host, ShellHost::Home | ShellHost::MyRoom) && !hidden,
+            Self::SiteMap => host.shows_site_map() && !hidden && party.is_none(),
+            Self::FixtureEdit => housing && !hidden && party.is_none(),
+            Self::EndParty => housing && party == Some(PartyUi::InProgress),
             Self::ScreenShot | Self::UiHide => true,
             Self::Menu | Self::CameraReset => !hidden,
         }
@@ -371,6 +383,7 @@ impl MenuShellRoot {
         set_up: bool,
         drawn: bool,
         hidden: bool,
+        party: Option<PartyUi>,
         delta: f32,
         now_ms: impl FnOnce() -> i64,
         doc: &UiPrefab,
@@ -386,7 +399,7 @@ impl MenuShellRoot {
         if !drawn { return; }
         for action in ShellAction::ALL {
             if let Some(path) = self.bindings.refs.get(action.field()) {
-                view.set_visible(path, action.visible(host, hidden));
+                view.set_visible(path, action.visible(host, hidden, party));
             }
         }
         self.motion.apply(hidden, delta, doc, &self.bindings, view);
@@ -403,9 +416,9 @@ pub(crate) fn settled_host_view(doc: &UiPrefab, key: &str) -> UiPrefabView {
     let mut view = UiPrefabView::new(host.key(), BALLOON_LAYER);
     let mut root = MenuShellRoot::new(host, doc, &mut view);
     let no_clock = || unreachable!("no event is in session");
-    root.advance_view(true, true, false, 0., no_clock, doc, &mut view);
+    root.advance_view(true, true, false, None, 0., no_clock, doc, &mut view);
     // Long enough for the gauge slide and the chrome motion to end.
-    root.advance_view(false, true, false, GAUGE_SLIDE_SECONDS.max(CHROME_MOVE_DURATION), no_clock, doc, &mut view);
+    root.advance_view(false, true, false, None, GAUGE_SLIDE_SECONDS.max(CHROME_MOVE_DURATION), no_clock, doc, &mut view);
     view
 }
 
@@ -446,6 +459,17 @@ impl ShellBindings {
             doc.find(&identity).unwrap_or_else(|error| panic!("{error}"));
             refs.insert(field, identity);
         }
+        // The end-party button is an authored child of the housing screens as
+        // the entry is; the view's own field for it is not serialized.
+        let party_button = if matches!(doc.prefab.as_str(), "ScreenLayerMysekaiHome" | "ScreenLayerMysekaiMyRoom") {
+            let path = "ComponentRoot/LeftTop/EndBirthdayPartyButton";
+            let index = doc.find(path).expect("housing host end-party button");
+            let button = doc.nodes[index].components.iter()
+                .find(|component| component.class == "Sekai.UI.CustomButton")
+                .expect("housing host end-party button component");
+            refs.insert("_endBirthdayPartyButton", format!("@{}", button.path_id));
+            Some(doc.nodes[index].path.as_str())
+        } else { None };
         // The housing entry is an authored sibling of the common chrome, not
         // part of MysekaiMenuUIContent. Reuse that actual host button; its
         // screen-605 editor is a separate presenter behind EditCommand.
@@ -482,7 +506,10 @@ impl ShellBindings {
             let is_edit = edit_root.is_some_and(|edit| node.path == edit
                 || edit.starts_with(&format!("{}/", node.path))
                 || node.path.starts_with(&format!("{edit}/")));
-            if node.path != *path && !is_ancestor && !is_descendant && !is_edit {
+            let is_party = party_button.is_some_and(|party| node.path == party
+                || party.starts_with(&format!("{}/", node.path))
+                || node.path.starts_with(&format!("{party}/")));
+            if node.path != *path && !is_ancestor && !is_descendant && !is_edit && !is_party {
                 view.set_visible(&format!("@{}", node.game_object_id), false);
             }
         }
@@ -640,6 +667,7 @@ pub(crate) fn parse(
         .iter()
         .chain(crate::common_dialog::WORDINGS)
         .chain(crate::cutscene::birthday::WORDINGS)
+        .chain(crate::cutscene::birthday_party::WORDINGS)
         .chain(crate::info::WORDINGS)
         .chain(crate::delivery::screen::WORDINGS.iter())
         .chain(crate::inventory::WORDINGS)
@@ -708,7 +736,11 @@ pub(crate) fn place(
     mut dialogs: Query<(&mut Visibility, &mut Transform, &mut UiPrefabView), (With<ShellDialogRoot>, Without<MenuShellRoot>)>,
     mut solved: Local<std::collections::HashSet<&'static str>>,
     root_canvas: Option<Res<RootCanvas>>,
-    (user, real): (Option<Res<crate::server::ClientUserData>>, Res<Time<Real>>),
+    (user, real, party): (
+        Option<Res<crate::server::ClientUserData>>,
+        Res<Time<Real>>,
+        Option<Res<BirthdayParty>>,
+    ),
 ) {
     let (Ok(window), Some(root_canvas)) = (windows.single(), root_canvas.as_deref()) else { return; };
     let scale = root_canvas.scale(window);
@@ -737,7 +769,8 @@ pub(crate) fn place(
                 .expect("TimeUtility.GetCurrentTimestamp before the server model's first response")
                 .current_timestamp(real.elapsed_secs())
         };
-        root.advance_view(set_up, visible, ui.hidden, time.delta_secs(), now_ms, doc, &mut view);
+        let party = party.as_deref().and_then(BirthdayParty::ui);
+        root.advance_view(set_up, visible, ui.hidden, party, time.delta_secs(), now_ms, doc, &mut view);
         if !visible { continue; }
         let canvas = root_canvas.size(window);
         if !solved.contains(view.key) {
@@ -833,6 +866,82 @@ fn close_leave_confirm(dialog: &mut ShellDialogState, screens: &mut crate::ui_la
 
 /// A window position (logical pixels, origin top-left) in root canvas units
 /// (origin at the canvas centre, y up).
+/// A root-canvas point (origin at the canvas centre, y up) in window
+/// position units (origin top-left), the inverse of [`to_canvas`].
+fn from_canvas(canvas: Vec2, window: &Window, root: &RootCanvas) -> Vec2 {
+    let scaled = canvas * root.scale(window);
+    Vec2::new(scaled.x + window.width() / 2., window.height() / 2. - scaled.y)
+}
+
+/// `MOLY_BIRTHDAY_END_SECS=<seconds>`: the native instrument taps the
+/// housing screen's end-party button once the app has run that many seconds
+/// and the party's UI shows it, through the window's touch stream as a
+/// player does (the button's hit test and its dispatch both run).
+#[derive(Resource, Default)]
+pub(crate) struct EndPartyInstrument {
+    read: bool,
+    after: Option<f64>,
+    tapped: bool,
+}
+
+/// The party instrument's touch id (a finger no real touch uses).
+const PARTY_INSTRUMENT_FINGER: u64 = 99022;
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn end_party_instrument(
+    mut events: MessageWriter<bevy::window::WindowEvent>,
+    mut instrument: ResMut<EndPartyInstrument>,
+    party: Option<Res<BirthdayParty>>,
+    layouts: Res<UiLayouts>,
+    active: Option<Res<SiteActive>>,
+    roots: Query<(&MenuShellRoot, &UiPrefabView)>,
+    windows: Query<(Entity, &Window), With<PrimaryWindow>>,
+    root_canvas: Option<Res<RootCanvas>>,
+    time: Res<Time<Real>>,
+) {
+    if !instrument.read {
+        instrument.read = true;
+        instrument.after = crate::server::client::instrument_env("MOLY_BIRTHDAY_END_SECS").map(|raw| {
+            raw.trim().parse::<f64>().unwrap_or_else(|_| {
+                panic!("MOLY_BIRTHDAY_END_SECS={raw:?} is not a number of seconds")
+            })
+        });
+        if let Some(after) = instrument.after {
+            info!("[menu-shell] native instrument MOLY_BIRTHDAY_END_SECS: after {after} s, once the party's UI shows it, one tap on the end-party button");
+        }
+    }
+    let Some(after) = instrument.after else { return; };
+    if instrument.tapped || time.elapsed_secs_f64() < after { return; }
+    if party.as_deref().and_then(BirthdayParty::ui) != Some(PartyUi::InProgress) { return; }
+    let (Ok((window_entity, window)), Some(root_canvas), Some(active)) =
+        (windows.single(), root_canvas.as_deref(), active.as_deref())
+    else {
+        return;
+    };
+    let host = ShellHost::for_site(active);
+    let Some((root, view)) = roots.iter().find(|(root, _)| root.host == host) else { return; };
+    instrument.tapped = true;
+    let path = root.bindings.get(ShellAction::EndParty.field());
+    let Some(rect) = view.rect(&layouts, path, root_canvas.size(window)).filter(|rect| rect.active) else {
+        error!("[menu-shell] MOLY_BIRTHDAY_END_SECS: the end-party button {path} is not laid out and active; no press");
+        return;
+    };
+    let position = from_canvas(rect.center(), window, root_canvas);
+    for phase in [bevy::input::touch::TouchPhase::Started, bevy::input::touch::TouchPhase::Ended] {
+        events.write(bevy::window::WindowEvent::TouchInput(bevy::input::touch::TouchInput {
+            phase,
+            position,
+            window: window_entity,
+            force: None,
+            id: PARTY_INSTRUMENT_FINGER,
+        }));
+    }
+    info!(
+        "[menu-shell] MOLY_BIRTHDAY_END_SECS: tap on the end-party button {path} at ({:.0},{:.0}) through the window's touch stream",
+        position.x, position.y
+    );
+}
+
 fn to_canvas(position: Vec2, window: &Window, root: &RootCanvas) -> Vec2 {
     Vec2::new(position.x - window.width() / 2., window.height() / 2. - position.y) / root.scale(window)
 }
@@ -937,9 +1046,14 @@ pub(crate) fn click(
     roots: Query<(&MenuShellRoot, &UiPrefabView)>,
     dialogs: Query<(&ShellDialogRoot, &UiPrefabView)>,
     root_canvas: Option<Res<RootCanvas>>,
-    mut sounds: ResMut<crate::audio::SeRequests>,
+    (mut sounds, party, mut end_party): (
+        ResMut<crate::audio::SeRequests>,
+        Option<Res<BirthdayParty>>,
+        MessageWriter<EndBirthdayPartyClick>,
+    ),
 ) {
     let (mut captures, mut edit_commands) = requests;
+    let party = party.as_deref().and_then(BirthdayParty::ui);
     let taps: Vec<Vec2> = gestures.read()
         .filter(|event| event.kind.is_tap_family() && event.state == GestureState::End)
         .map(|event| event.position).collect();
@@ -977,7 +1091,7 @@ pub(crate) fn click(
         let canvas = to_canvas(position, window, root_canvas);
         if let Some(action) = ShellAction::ALL.into_iter().find(|action| {
             !matches!(action, ShellAction::CameraReset)
-                && action.visible(host, ui.hidden)
+                && action.visible(host, ui.hidden, party)
                 && hit(view, &layouts, root.bindings.get(action.field()), canvas, size)
         }) {
             consumed.0 = true;
@@ -985,7 +1099,12 @@ pub(crate) fn click(
             match action {
                 ShellAction::SiteMap => { layer_commands.write(LayerCommand::Push(LayerId::MysekaiSiteMap)); }
                 ShellAction::FixtureEdit => { edit_commands.write(crate::fixture_edit::EditCommand::Enter); }
+                // `EnableMenuButton(false)` on the closing party's screens.
+                ShellAction::Menu if party == Some(PartyUi::AfterClose) => {
+                    info!("[menu-shell] the menu button is disabled while the birthday party closes: nothing");
+                }
                 ShellAction::Menu => { dialog.menu_open = true; }
+                ShellAction::EndParty => { end_party.write(EndBirthdayPartyClick); }
                 ShellAction::ScreenShot => { captures.write(CaptureFrame); }
                 ShellAction::UiHide => { ui.hidden = !ui.hidden; }
                 ShellAction::CameraReset => {

@@ -82,12 +82,15 @@
 //! the header's back button, when the header shows it and
 //! `EnableBackUIScreen` holds, calls `BackUIScreen`; then the scene's handler
 //! runs: in MySekai `OnExecuteMysekaiBackKeyProcess` while
-//! `EnableMysekaiBackKeyProcess` holds. The field screen presenter adds
-//! `MysekaiUtility.OnBackKey` to that handler outside the birthday context;
-//! the scene enables it at its setup. `OnBackKey` leaves MySekai
-//! (`TransitionToOutGame`) when the player is idle and owns the room. A
-//! single player owns the room; the exit out of MySekai is not available in
-//! this product and says so.
+//! `EnableMysekaiBackKeyProcess` holds. The handler holds one delegate at a
+//! time ([`MysekaiBackKeyProcess`]): the field screen presenter adds
+//! `MysekaiUtility.OnBackKey` outside the birthday context; the birthday
+//! party's wait replaces it with `OnBackKeyForBirthday`, and the close-down
+//! takes it off altogether, so the key does nothing until a field screen's
+//! presenter is built again. The scene enables the check at its setup.
+//! `OnBackKey` leaves MySekai (`TransitionToOutGame`) when the player is idle
+//! and owns the room. A single player owns the room; the exit out of MySekai
+//! is not available in this product and says so.
 //!
 //! ## Product mapping (read before changing)
 //!
@@ -469,6 +472,22 @@ pub(crate) struct DialogBackKeyEvent {
     pub(crate) back_key: DialogBackKey,
 }
 
+/// What `OnExecuteMysekaiBackKeyProcess` holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MysekaiBackKeyProcess {
+    /// Null: the back key does nothing in the scene.
+    None,
+    /// `MysekaiUtility.OnBackKey`, which the field screen presenter adds.
+    OnBackKey,
+    /// `BirthdayPartyPresenter.OnBackKeyForBirthday` while the party waits
+    /// for its end.
+    Birthday,
+}
+
+/// The back key reached `OnBackKeyForBirthday`.
+#[derive(Message, Debug, Clone, Copy)]
+pub(crate) struct BirthdayBackKey;
+
 // ---------------------------------------------------------------------------
 // The manager
 // ---------------------------------------------------------------------------
@@ -499,8 +518,8 @@ pub(crate) struct ScreenManager {
     next_dialog: u64,
     /// `EnableMysekaiBackKeyProcess`.
     mysekai_back_key_enabled: bool,
-    /// `MysekaiUtility.OnBackKey` in `OnExecuteMysekaiBackKeyProcess`.
-    mysekai_back_key_handler: bool,
+    /// `OnExecuteMysekaiBackKeyProcess`.
+    mysekai_back_key_handler: MysekaiBackKeyProcess,
     scene_set_up: bool,
     events: Vec<ScreenLayerEvent>,
     edges: Vec<String>,
@@ -528,7 +547,7 @@ impl Default for ScreenManager {
             dialogs: Vec::new(),
             next_dialog: 1,
             mysekai_back_key_enabled: false,
-            mysekai_back_key_handler: false,
+            mysekai_back_key_handler: MysekaiBackKeyProcess::None,
             scene_set_up: false,
             events: Vec::new(),
             edges: Vec::new(),
@@ -631,6 +650,16 @@ impl ScreenManager {
 
     /// `ExistsDialog(Layer_Dialog)`.
     #[allow(dead_code)]
+    /// Writes `OnExecuteMysekaiBackKeyProcess` (`= null`, `= handler`,
+    /// `-= handler`).
+    pub(crate) fn set_mysekai_back_key_process(&mut self, process: MysekaiBackKeyProcess, caller: &str) {
+        info!(
+            "[screen] {caller}: OnExecuteMysekaiBackKeyProcess {:?} -> {process:?}",
+            self.mysekai_back_key_handler
+        );
+        self.mysekai_back_key_handler = process;
+    }
+
     pub(crate) fn exists_dialog(&self) -> bool {
         self.dialogs
             .iter()
@@ -1448,8 +1477,8 @@ impl ScreenManager {
                 "ScreenLayerSiteEditMode",
             );
         }
-        if screen.is_field() && !self.mysekai_back_key_handler {
-            self.mysekai_back_key_handler = true;
+        if screen.is_field() && self.mysekai_back_key_handler == MysekaiBackKeyProcess::None {
+            self.mysekai_back_key_handler = MysekaiBackKeyProcess::OnBackKey;
             info!(
                 "[screen]   {screen:?} presenter: OnExecuteMysekaiBackKeyProcess += MysekaiUtility.OnBackKey (not the birthday context)"
             );
@@ -1857,6 +1886,7 @@ pub(crate) fn back_key(
     player: Option<Res<crate::player_state::PlayerAvatarStates>>,
     mut dialog_keys: MessageWriter<DialogBackKeyEvent>,
     mut layer_commands: MessageWriter<LayerCommand>,
+    mut birthday: MessageWriter<BirthdayBackKey>,
 ) {
     if !keys.just_pressed(KeyCode::Escape) {
         return;
@@ -1899,7 +1929,16 @@ pub(crate) fn back_key(
         );
         layer_commands.write(LayerCommand::Pop);
     }
-    if stack.mysekai_back_key_enabled && stack.mysekai_back_key_handler {
+    if stack.mysekai_back_key_enabled
+        && stack.mysekai_back_key_handler == MysekaiBackKeyProcess::Birthday
+    {
+        info!("[screen] back key: OnExecuteMysekaiBackKeyProcess -> BirthdayPartyPresenter.OnBackKeyForBirthday");
+        birthday.write(BirthdayBackKey);
+        return;
+    }
+    if stack.mysekai_back_key_enabled
+        && stack.mysekai_back_key_handler == MysekaiBackKeyProcess::OnBackKey
+    {
         let idle = player
             .as_deref()
             .is_some_and(|player| player.current == crate::player_state::PlayerActionState::Idle);
@@ -1920,6 +1959,7 @@ pub(crate) fn back_key(
 pub(crate) fn install(app: &mut App) {
     app.add_message::<ScreenLayerEvent>()
         .add_message::<DialogBackKeyEvent>()
+        .add_message::<BirthdayBackKey>()
         .add_systems(
             Startup,
             |mut commands: Commands, server: Res<AssetServer>| {

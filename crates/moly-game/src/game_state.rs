@@ -113,6 +113,12 @@ impl GameStateManager {
         self.current.unwrap_or(GameStateType::None)
     }
 
+    /// `IsEnableClickBackKey`: `CurrentType < Edit`, so only `None` and
+    /// `Normal` let a presenter's back-key click run.
+    pub(crate) fn allows_click_back_key(&self) -> bool {
+        (self.current_type() as u32) < (GameStateType::Edit as u32)
+    }
+
     /// `ChangeState(type)`. Returns false when the machine is already there.
     pub(crate) fn change_state(&mut self, state: GameStateType, caller: &str) -> bool {
         if self.current == Some(state) {

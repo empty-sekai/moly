@@ -487,6 +487,11 @@ pub(crate) struct ActionButtonState {
     /// The change-target button was tapped; OnChangeActionTarget runs on
     /// the next scan.
     change_tapped: bool,
+    /// `_disableActionButtonTypes` of the last `ActionButtonRefresh`: the
+    /// birthday party disables eighteen types while its context is set. The
+    /// list only disables (`GetButtonEnable`): a disabled type still
+    /// collides, it is simply not stacked.
+    disabled: &'static [ButtonType],
     /// The house-entry candidate's overlap and last next-frame wait, named
     /// when they change.
     house_touching: Option<bool>,
@@ -517,6 +522,7 @@ impl Default for ActionButtonState {
             surveyed: false,
             sensor_wait: None,
             change_tapped: false,
+            disabled: &[],
             house_touching: None,
             house_wait: None,
         }
@@ -973,9 +979,41 @@ pub(crate) fn advance(
     site_move: Option<Res<crate::site_move::SiteMoveActive>>,
     homes: Option<Res<crate::entry::house::HomeFixtures>>,
     room_door: Option<Res<crate::site_move::room_door::RoomDoor>>,
-    system_fixtures: Res<crate::system_fixture::SystemFixtures>,
+    (system_fixtures, birthday): (
+        Res<crate::system_fixture::SystemFixtures>,
+        Option<Res<crate::cutscene::birthday::BirthdayContext>>,
+    ),
 ) {
     let state = &mut *state;
+    // `ActionButtonRefresh` (event 45): the birthday context publishes its
+    // disabled types when it enters and an empty list when it exits.
+    let disabled: &'static [ButtonType] = if birthday.is_some() {
+        crate::cutscene::birthday_party::DISABLED
+    } else {
+        &[]
+    };
+    if !std::ptr::eq(state.disabled, disabled) {
+        state.disabled = disabled;
+        if disabled.is_empty() {
+            info!("[action_button] ActionButtonRefresh with an empty list: every action button is enabled again (UpdateButtonsView(_actionButtons))");
+        } else {
+            // `RemoveNotCollisionObject`, `UpdateShowButtonStack(false)`: a
+            // disabled type leaves the stack.
+            while let Some((button, target)) = state.stack.first() {
+                if !disabled.contains(&button) {
+                    break;
+                }
+                state.stack.remove(target);
+                info!(
+                    "[action_button] ActionButtonRefresh: {button:?} {target:?} is disabled by the birthday party; UpdateShowButtonStack(false) takes it off the stack"
+                );
+            }
+            info!(
+                "[action_button] ActionButtonRefresh: {} disabled types ({disabled:?}); Talk is not among them",
+                disabled.len()
+            );
+        }
+    }
     // A saved layout re-fires entry once the scan next runs.
     if saved.read().count() > 0 {
         state.force_update = true;
@@ -1448,6 +1486,10 @@ fn fixture_enter(
     let Some(identity) = candidate.identity else {
         return;
     };
+    // GetButtonEnable: a type the birthday party disabled is not stacked.
+    if state.disabled.contains(&candidate.button) {
+        return;
+    }
     if revision.is_some() && state.deferred.get(&entity) == revision.as_ref() {
         return;
     }
@@ -1705,6 +1747,10 @@ fn remove_not_colliding(
             world: candidate.world,
             kind: kind_of(candidate.button),
         };
+        if state.disabled.contains(&candidate.button) {
+            removed.push(key);
+            continue;
+        }
         let available = match candidate.house_entry {
             Some(door) if candidate.button == ButtonType::HouseEntry => {
                 inputs.house_entry(player, position, door).map(|shown| {

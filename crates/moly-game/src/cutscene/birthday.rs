@@ -89,6 +89,7 @@ use crate::common_dialog::Buttons;
 use crate::fixture_activity_state::FixtureActivityIdentity;
 use crate::ui_layers::DialogId;
 use crate::server::client::system_fixture_action::{self as action, ClientSystemFixtureActions};
+use crate::server::client::talk_read::UserResource;
 
 /// `MysekaiCutSceneConditionType` of the birthday rows.
 const CONDITION: &str = "birthday_party";
@@ -218,6 +219,7 @@ struct SystemFixture {
 struct BirthdayPresenter {
     party: Party,
     fixture: Entity,
+    rewards: Option<Vec<UserResource>>,
 }
 
 /// `ExecuteAsync` awaiting `ShowConfirmDialog`.
@@ -228,6 +230,10 @@ struct BirthdayConfirm {
     system_fixture: i32,
     actioned: bool,
     fixture: Entity,
+    /// The API reply's `obtainedResources`, kept for the party's reward
+    /// dialog; `None` when the fixture was already actioned (the source
+    /// nulls the field then, and the dialog is skipped).
+    rewards: Option<Vec<UserResource>>,
 }
 
 #[derive(Resource)]
@@ -807,6 +813,7 @@ fn execute(world: &mut World, party: Party, row: SystemFixture, fixture: Entity,
         system_fixture,
         actioned,
         fixture,
+        rewards: None,
     });
 }
 
@@ -838,6 +845,7 @@ fn confirm_answer(world: &mut World) {
 /// `ExecuteAsync` from the confirm's OK up to `PlayCutSceneAsync`.
 fn confirmed(world: &mut World, confirm: BirthdayConfirm, cut_scenes: &[(i64, i64, String)]) {
     let BirthdayConfirm {
+        mut rewards,
         party,
         system_fixture,
         actioned,
@@ -845,17 +853,24 @@ fn confirmed(world: &mut World, confirm: BirthdayConfirm, cut_scenes: &[(i64, i6
         ..
     } = confirm;
     if actioned {
-        info!("[birthday] ShowConfirmDialog = true; the fixture is actioned: no ExecuteAPI, no rewards");
+        info!("[birthday] ShowConfirmDialog = true; the fixture is actioned: no ExecuteAPI, no rewards (the party ends without a reward dialog)");
     } else {
         let reply = action::post(world, system_fixture);
         if !reply.success {
             error!("[birthday] MysekaiSystemFixtureActionService.ExecuteAPI({system_fixture}): the reply is null ({}): the API error (UI, not drawn); ExecuteAsync stops, nothing plays", reply.refusal.unwrap_or_default());
             return;
         }
-        info!("[birthday] ShowConfirmDialog = true; MysekaiSystemFixtureActionService.ExecuteAPI({system_fixture}): success; updatedResources merged (IsActionedSystemFixture now {}); obtainedResources {} rows kept for the reward dialog (not run here)", world.get_resource::<ClientSystemFixtureActions>().is_some_and(|copy| copy.is_actioned(system_fixture)), reply.obtained_resources.len());
+        rewards = Some(reply.obtained_resources);
+        info!("[birthday] ShowConfirmDialog = true; MysekaiSystemFixtureActionService.ExecuteAPI({system_fixture}): success; updatedResources merged (IsActionedSystemFixture now {}); obtainedResources {} rows kept for the party's reward dialog", world.get_resource::<ClientSystemFixtureActions>().is_some_and(|copy| copy.is_actioned(system_fixture)), rewards.as_ref().map_or(0, Vec::len));
     }
     world.insert_resource(BirthdayContext { party: party.id });
-    info!("[birthday] MultiplayCore.IsConnected (the server model's own room); GameStateManager.AddContext(Birthday); no other players to hide; back key process cleared");
+    info!("[birthday] MultiplayCore.IsConnected (the server model's own room); GameStateManager.AddContext(Birthday) (MysekaiBirthdayPartyContext.OnEnter: InProgress; ActionButtonRefresh with its disabled types); no other players to hide");
+    if let Some(mut screens) = world.get_resource_mut::<crate::ui_layers::ScreenManager>() {
+        screens.set_mysekai_back_key_process(
+            crate::ui_layers::MysekaiBackKeyProcess::None,
+            "BirthdayPartyPresenter.ExecuteAsync",
+        );
+    }
     // PlayCutSceneAsync.
     let Some((cut_scene_id, _, timeline)) = cut_scenes
         .iter()
@@ -878,7 +893,11 @@ fn confirmed(world: &mut World, confirm: BirthdayConfirm, cut_scenes: &[(i64, i6
     };
     match super::play_async(world, play) {
         Ok(()) => {
-            world.insert_resource(BirthdayPresenter { party, fixture });
+            world.insert_resource(BirthdayPresenter {
+                party,
+                fixture,
+                rewards,
+            });
         }
         Err(reason) => {
             error!("[birthday] PlayCutSceneAsync: {reason}; nothing plays");
@@ -939,8 +958,20 @@ pub(super) fn end_fade_out_callback(world: &mut World, cast: &Cast) {
         transform.rotation = rotation;
     }
     info!("[birthday] OnEndFadeOutCallback: FindNPC({unit}).Show(); PutCharacterBesideFixture: {length} m at {:.1} deg in the fixture's frame, facing away from its forward -> ({:.3},{:.3},{:.3}); home screen HideUI (UI, not drawn)", 90.0 + offset, at.x, at.y, at.z);
-    // PutAndLookPlayerBesideFixture.
-    let (at, rotation) = place(180.0, PLAYER_LENGTH, 0.0);
+    put_and_look_player_beside_fixture(world, fixture);
+}
+
+/// `PutAndLookPlayerBesideFixture`: the player 0.5 m behind the fixture's
+/// forward, facing it (see [`end_fade_out_callback`]).
+pub(super) fn put_and_look_player_beside_fixture(world: &mut World, fixture: Entity) {
+    let Some(pose) = world
+        .get::<GlobalTransform>(fixture)
+        .map(GlobalTransform::compute_transform)
+    else {
+        error!("[birthday] PutAndLookPlayerBesideFixture: the party fixture {fixture:?} has no pose");
+        return;
+    };
+    let (at, rotation) = beside(&pose, 180.0, PLAYER_LENGTH, 0.0);
     let player = player_entity(world);
     if let Some(mut transform) = player.and_then(|player| world.get_mut::<Transform>(player)) {
         transform.translation = at;
@@ -949,17 +980,41 @@ pub(super) fn end_fade_out_callback(world: &mut World, cast: &Cast) {
     info!("[birthday] PutAndLookPlayerBesideFixture: player {player:?} ForceSetPosition {PLAYER_LENGTH} m behind the fixture's forward -> ({:.3},{:.3},{:.3}), LookAt(the fixture)", at.x, at.y, at.z);
 }
 
-/// `PlayCutSceneAsync` returned: `ExecuteAsync` goes on with the party.
+/// `PlayCutSceneAsync` returned: `ExecuteAsync` goes on with the party (see
+/// [`super::birthday_party`]).
 pub(super) fn cut_scene_returned(world: &mut World, cast: &Cast) {
     let presenter = world.remove_resource::<BirthdayPresenter>();
     let outcome = cast.outcome.clone().unwrap_or(Ok(()));
     info!(
-        "[birthday] PlayCutSceneAsync returned {outcome:?} (party {:?}); the party's own sequence (CacheBirthdayBgm, ChangeUIForBirthday, ForceBirthdayPartyTalk(1), SetCharacterWaitTalkObjective(2), WaitEndBirthdayPartyAsync, the closing fades, ForceBirthdayPartyTalk(3), DeleteBirthdayCharacters, RestoreCharacters, the site BGM, RemoveContext, the reward dialog) is not run here (named)",
+        "[birthday] PlayCutSceneAsync returned {outcome:?} (party {:?})",
         presenter.as_ref().map(|presenter| presenter.party.id)
     );
-    if outcome.is_err() {
-        // The cut-scene did not play: nothing of the party is under way.
-        world.remove_resource::<BirthdayContext>();
+    match (outcome, presenter) {
+        (Ok(()), Some(presenter)) => {
+            let avatar = cast
+                .avatars()
+                .into_iter()
+                .find(|(unit, _)| *unit == presenter.party.unit)
+                .map(|(_, entity)| entity);
+            super::birthday_party::start(
+                world,
+                super::birthday_party::Party {
+                    id: presenter.party.id,
+                    unit: presenter.party.unit,
+                    fixture: presenter.fixture,
+                    avatar,
+                },
+                presenter.rewards,
+            );
+        }
+        (Ok(()), None) => {
+            error!("[birthday] PlayCutSceneAsync returned with no presenter; the party cannot go on");
+            world.remove_resource::<BirthdayContext>();
+        }
+        (Err(_), _) => {
+            // The cut-scene did not play: nothing of the party is under way.
+            world.remove_resource::<BirthdayContext>();
+        }
     }
 }
 

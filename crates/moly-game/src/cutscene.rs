@@ -98,6 +98,7 @@ use crate::site_expansion::law::SiteLevelRow;
 use crate::site_expansion::{ExpansionMasters, MysekaiLocalSettings, UserMysekaiRank};
 
 pub(crate) mod birthday;
+pub(crate) mod birthday_party;
 mod cast;
 mod hidden_effects;
 mod screen;
@@ -2541,7 +2542,7 @@ fn end_async(world: &mut World, plan: &mut Plan, play: &Play) {
         let definition = plan.definition.clone();
         cast::after_dispose(world, cast, &definition);
         if cast.play.caller == CastCaller::Birthday {
-            crate::audio::cutscene::release_bgm(world, "EndAsync(restoreBGM false): the party sequence that takes the music over is not run here, so the cut-scene's BGM is handed back to the site's choice (named)");
+            info!("[cutscene] EndAsync(restoreBGM false): the cut-scene's BGM plays on; the birthday party hands it back at its close-down");
         } else {
             crate::audio::cutscene::release_bgm(
                 world,
@@ -2569,6 +2570,7 @@ fn end_async(world: &mut World, plan: &mut Plan, play: &Play) {
 
 pub(crate) fn install(app: &mut App) {
     birthday::install(app);
+    birthday_party::install(app);
     app.add_message::<HomeScreenStartAnimation>().add_systems(
         Update,
         (

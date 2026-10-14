@@ -691,6 +691,39 @@ impl GetResourceOpeners {
     }
 }
 
+/// Shows a caller's `CommonRewardSubWindowDialog` and hands it its payload:
+/// the open animation passes at once, the dialog is not awaited, and its own
+/// close area or the back key closes it. The caller names itself in the log.
+pub(crate) fn show_common_reward(
+    world: &mut bevy::prelude::World,
+    caller: &str,
+    message_key: &str,
+    resources: usize,
+) -> Result<DialogId, String> {
+    let (id, payload) = {
+        let mut screens = world.resource_mut::<crate::ui_layers::ScreenManager>();
+        let id = screens.show_dialog(
+            COMMON_REWARD_DIALOG,
+            DisplayLayerType::LayerDialog,
+            DialogBackKey::Close,
+            caller,
+        )?;
+        screens.open_dialog(id);
+        screens.dialog_open_finished(id);
+        (
+            id,
+            RewardPayload::Common {
+                message_key: message_key.to_owned(),
+                resources,
+            },
+        )
+    };
+    world
+        .resource_mut::<GetResourceOpeners>()
+        .set_reward_payload(id, payload);
+    Ok(id)
+}
+
 // ---------------------------------------------------------------------------
 // The text charset
 // ---------------------------------------------------------------------------

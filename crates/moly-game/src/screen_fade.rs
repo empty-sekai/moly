@@ -152,6 +152,33 @@ pub(crate) fn fade_in(world: &mut World, delay: f32, duration: f32, label: &'sta
     play(world, base, FADE_IN_COLOR, delay, duration, label);
 }
 
+/// `ScreenManager.FadeIn(color, delay, duration, onFinish)`: `Play` to the
+/// colour from wherever the fader stands, with no `Set` before it.
+pub(crate) fn fade_in_color(
+    world: &mut World,
+    colour: [f32; 4],
+    delay: f32,
+    duration: f32,
+    label: &'static str,
+) {
+    let base = world.resource::<ScreenFader>().colour;
+    play(world, base, colour, delay, duration, label);
+}
+
+/// `ScreenManager.FadeOut(color, delay, duration, onFinish)`: `Set(0, 0, 0,
+/// current.a)` first, then `Play` to the colour.
+pub(crate) fn fade_out_color(
+    world: &mut World,
+    colour: [f32; 4],
+    delay: f32,
+    duration: f32,
+    label: &'static str,
+) {
+    let current = world.resource::<ScreenFader>().colour;
+    let base = [0.0, 0.0, 0.0, current[3]];
+    play(world, base, colour, delay, duration, label);
+}
+
 fn play(
     world: &mut World,
     base: [f32; 4],

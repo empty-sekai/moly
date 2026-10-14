@@ -126,7 +126,8 @@ enum Begin {
     Run(Run),
 }
 
-/// The appearance's progress (once per app run: a scene is set up once).
+/// The appearance's progress (once per scene set-up; the birthday party's
+/// `RestoreCharacters` restarts it, see [`GateAppearance::restart`]).
 #[derive(Resource, Default)]
 pub(crate) struct GateAppearance {
     state: State,
@@ -137,6 +138,19 @@ impl GateAppearance {
     /// appeared flags the player's entry waits for).
     pub(crate) fn appeared(&self) -> bool {
         matches!(self.state, State::Done)
+    }
+
+    /// Whether the appearance has ended, however it ended (an empty
+    /// gathering ends it too). The scene's restore awaits this.
+    pub(crate) fn settled(&self) -> bool {
+        matches!(self.state, State::Done | State::Ended)
+    }
+
+    /// `SetupNpcVisitingAsync` again: the appearance runs for the roster
+    /// created after a `DisposeNPCAll` (the birthday party's
+    /// `RestoreCharacters`).
+    pub(crate) fn restart(&mut self) {
+        self.state = State::Waiting;
     }
 }
 

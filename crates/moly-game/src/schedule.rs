@@ -1024,6 +1024,9 @@ pub fn install(app: &mut App) {
         // Source press/click of the camera reset button: same input gate and
         // order as the tap dispatch (after the action buttons' tap flag, before
         // the world pick).
+        // The native instrument's tap on the birthday end-party button.
+        .init_resource::<menu_shell::EndPartyInstrument>()
+        .add_systems(Update, menu_shell::end_party_instrument.before(menu_shell::click))
         .init_resource::<menu_shell::SourceInputManager>()
         .init_resource::<menu_shell::CameraResetPress>()
         .add_systems(

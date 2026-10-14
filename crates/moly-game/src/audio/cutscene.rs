@@ -17,13 +17,12 @@
 //! Named rule of the port: the BGM channel chooses its music every frame
 //! from the site, the phenomenon, the site's music record setting and the
 //! BGM select screen's choice ([`super::record`]). A cut-scene's call stands
-//! over all of them from the call until the cut-scene's `EndAsync`
-//! ([`release_bgm`]); then the channel's own choice plays again (crossfaded
-//! with its own fade time). For the callers whose `EndAsync` restores the
-//! BGM that is the source's order. The birthday party passes `restoreBGM
-//! false` and its party sequence (`CacheBirthdayBgm`, the party's talks and
-//! the site BGM it plays at the end) takes the music over, which is not run
-//! here: its cut-scene's music is handed back at the end, named.
+//! over all of them from the call until it is released ([`release_bgm`]);
+//! then the channel's own choice plays again (crossfaded with its own fade
+//! time). The callers whose `EndAsync` restores the BGM release it there.
+//! The birthday party passes `restoreBGM false`: its cut-scene's music plays
+//! on through the party (`CacheBirthdayBgm`) and is released when the party's
+//! close-down plays the site's BGM (`MysekaiBGMManager.PlayBGMAsync`).
 //!
 //! A cue whose stream is not in the root's stream table is refused loudly
 //! once per cue and changes nothing (the current music keeps playing).
@@ -86,7 +85,8 @@ pub(crate) fn play_bgm(world: &mut World, cue: &str, bundle: &str, caller: &str)
     });
 }
 
-/// The cut-scene's `EndAsync`: the channel's own choice plays again.
+/// The channel's own choice plays again: a cut-scene's `EndAsync`, or the
+/// birthday party's `PlayBGMAsync(site, environment)`.
 pub(crate) fn release_bgm(world: &mut World, why: &str) {
     let mut audio = world.resource_mut::<CutSceneAudio>();
     audio.refused = None;
