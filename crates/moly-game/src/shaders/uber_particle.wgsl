@@ -66,11 +66,27 @@ struct UberVertexOutput {
     @location(2) custom1: vec4<f32>,
     @location(3) custom2: vec4<f32>,
 }
+// `_ZOffset` (`luminance.w`). When |_ZOffset| > 0.004 the source vertex
+// program reads the clip z as a depth-buffer value, turns it into eye depth
+// with `_ZBufferParams`, adds the offset and writes the depth-buffer value of
+// that eye depth back as clip z, saturated, with w unchanged. The fragment's
+// soft-particle depth is that same z / w. The reversed-Z `_ZBufferParams` of
+// the view projection are z = 1 / m32 and w = m22 / m32.
+fn apply_z_offset(position: vec4<f32>, offset: f32) -> vec4<f32> {
+    if !(0.004 < abs(offset)) {
+        return position;
+    }
+    let zb_z = 1.0 / view.clip_from_view[3][2];
+    let zb_w = view.clip_from_view[2][2] / view.clip_from_view[3][2];
+    let eye = 1.0 / (zb_z * position.z + zb_w) + offset;
+    let depth = clamp((-zb_w * eye + 1.0) / (eye * zb_z), 0.0, 1.0);
+    return vec4<f32>(position.xy, depth, position.w);
+}
 #ifdef UBER_EFFECT_PASS
 @vertex
 fn emission_vertex(mesh: EffectVertex) -> UberVertexOutput {
     var out: UberVertexOutput;
-    out.position = object.clip_from_local * vec4<f32>(mesh.position, 1.0);
+    out.position = apply_z_offset(object.clip_from_local * vec4<f32>(mesh.position, 1.0), object.params.luminance.w);
     out.uv = mesh.uv;
     out.colour = mesh.colour;
     out.custom1 = mesh.custom1;
@@ -81,7 +97,7 @@ fn emission_vertex(mesh: EffectVertex) -> UberVertexOutput {
 @vertex
 fn vertex(mesh: UberVertex) -> UberVertexOutput {
     var out: UberVertexOutput;
-    out.position = position_view_to_clip(position_world_to_view(mesh.position));
+    out.position = apply_z_offset(position_view_to_clip(position_world_to_view(mesh.position)), params.luminance.w);
     out.uv = mesh.uv;
     out.colour = mesh.color;
     out.custom1 = mesh.custom1;

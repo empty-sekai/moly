@@ -264,8 +264,6 @@ struct Tally {
     start_rotation_3d: usize,
     state_arm: Vec<String>,
     keyword: Vec<String>,
-    /// 放行但少一步（软粒子、深度偏置）——逐条具名，不静默。
-    shading_shortfall: Vec<String>,
     no_base_map: usize,
     node_unresolved: usize,
     node_inactive: usize,
@@ -1016,8 +1014,7 @@ pub(crate) fn plan(
          仿真空间 {} · 起始三轴旋转 {} · 状态档 {:?} · 关键字 {:?} · \
          缺基础贴图 {} · 节点未解析 {} · 节点链关 {} · 律拒 {:?} · \
          自旋律拒 {:?} · 限速律拒 {:?} · 钳制字段缺 {} · 锥缺角 {} · \
-         起始延迟 {}；\
-         放行但未实现（逐条具名，不静默）：{:?}",
+         起始延迟 {}",
         doc.tier,
         doc.env_site,
         selected.len(),
@@ -1049,7 +1046,6 @@ pub(crate) fn plan(
         tally.clamp_missing,
         tally.cone_no_angle,
         tally.start_delay,
-        count_names(&tally.shading_shortfall),
     );
     if !tally.animation_refused.is_empty() {
         warn!("[weather-animation] source playback refused: {:?}", tally.animation_refused);

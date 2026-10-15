@@ -60,7 +60,7 @@ pub struct UberT1Params {
     pub scalars: Vec4,
     /// 亮度键控透明的标量：x = `_LuminanceTransparencyProgress`
     /// · y = `_LuminanceTransparencySharpness` · z = `_InverseLuminanceTransparency`
-    /// · w 留空。
+    /// · w = `_ZOffset`（顶点段的深度偏置，见 wgsl 的 `apply_z_offset`）。
     ///
     /// 源程序里 progress 与 sharpness 各自还叠一个逐粒子自定义流
     /// （`coord = 分量号 × 10 + 来源号`，来源 0 取常量零向量），本站材质集上
@@ -515,9 +515,6 @@ struct Tally {
     sim_space: usize,
     /// 缺基础贴图槽。
     no_base_map: usize,
-    /// 着色轴门不过，按轴名计数（这些是**未实现**，不是拒绝理由——
-    /// 放行但少一步，逐条具名）。
-    shading_shortfall: Vec<String>,
     /// 状态档不认（`_BlendDst` / `_Cull` / `_ZTest` 取到族外值）。
     state_arm: Vec<String>,
     /// 放行的条数。
@@ -632,8 +629,7 @@ pub(crate) fn plan(
          挡下——节点路径未解析 {}（多为运行时实例化的 prefab，见模块注释）· \
          绘制模式 {:?} · 对齐档 {:?} · 发射形状律缺 {:?} · 缺形状模块 {} · \
          缺 emission {} · 缺 system 块 {} · 律拒 {:?} · 仿真空间 {} · 缺基础贴图 {} · 状态档族外 {:?} · \
-         渲染器关 {} · 无渲染器 {} · 无材质 {} · 非本族 {:?}；\
-         放行但未实现（逐条具名，不静默）：{:?}",
+         渲染器关 {} · 无渲染器 {} · 无材质 {} · 非本族 {:?}",
         active.scene,
         tally.records,
         tally.admitted,
@@ -652,7 +648,6 @@ pub(crate) fn plan(
         tally.no_renderer,
         tally.no_material,
         count_names(&tally.other_family),
-        count_names(&tally.shading_shortfall),
     );
     commands.insert_resource(UberParticlePlan {
         planned: plans,
@@ -887,7 +882,7 @@ fn judge(
         get("_LuminanceTransparencyProgress").unwrap_or(0.0),
         get("_LuminanceTransparencySharpness").unwrap_or(0.0),
         get("_InverseLuminanceTransparency").unwrap_or(0.0),
-        0.0,
+        get("_ZOffset").unwrap_or(0.0),
     );
     // 逐粒子自定义流选择器：`coord = 分量号 × 10 + 来源号`，0 = 取常量 0。
     // 本链只实现常量 0 那一档（本站材质集上恰好全 0）。
@@ -906,9 +901,8 @@ fn judge(
             return None;
         }
     }
-    // 关键字：T1 全集之外的关键字意味着源程序里编进了本链没有的步。
-    // 软粒子是**放行但未实现**的那一项（alpha 乘法链的末段，要读场景
-    // 深度纹理）——具名计数，不静默。
+    // 关键字：T1 全集之外的关键字意味着源程序里编进了本链没有的步，
+    // 按关键字名拦下并计数。
     for keyword in &material.keywords {
         match keyword.as_str() {
             "_BASE_MAP_MODE_2D" | "_EMISSION_MAP_MODE_2D" | "_TINT_COLOR_ENABLED"
@@ -922,14 +916,6 @@ fn judge(
             }
         }
     }
-    // 深度偏置：源程序的顶点段在 |_ZOffset| > 0.004 时把裁剪空间 z 按
-    // 线性视深重映射一次。本链没有这一步——放行并具名计数。
-    if get("_ZOffset").map(|v| v.abs() > 0.004).unwrap_or(false) {
-        tally
-            .shading_shortfall
-            .push(format!("深度偏置 _ZOffset={:?}", get("_ZOffset")));
-    }
-
     // ---- 贴图与 uniform ----
     let Some(uri) = base_map_uri(doc, material) else {
         tally.no_base_map += 1;
@@ -1379,8 +1365,7 @@ pub(crate) fn plan_fixture_particles(
              挡下——非 playOnAwake {} · 节点路径未解析 {} · 绘制模式 {:?} · 对齐档 {:?} · \
              发射形状律缺 {:?} · 缺形状模块 {} · 缺 emission {} · 缺 system 块 {} · \
              律拒 {:?} · 仿真空间 {} · 缺基础贴图 {} · 状态档族外 {:?} · \
-             渲染器关 {} · 无渲染器 {} · 无材质 {} · 非本族 {:?}；\
-             放行但未实现（逐条具名，不静默）：{:?}",
+             渲染器关 {} · 无渲染器 {} · 无材质 {} · 非本族 {:?}",
             request.package,
             tally.records,
             tally.admitted,
@@ -1400,7 +1385,6 @@ pub(crate) fn plan_fixture_particles(
             tally.no_renderer,
             tally.no_material,
             count_names(&tally.other_family),
-            count_names(&tally.shading_shortfall),
         );
         request.planned = Some(plans);
     }
