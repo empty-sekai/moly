@@ -857,11 +857,11 @@ impl GlobalValues {
     fn new(world_from_view: Mat4, clip_from_view: Mat4, camera: &Projection) -> Result<Self> {
         let source_to_render = Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0));
         let view_from_world = world_from_view.inverse() * source_to_render;
-        // Invert only the qualified output adapter: source GLES [-w,+w] forward Z
-        // becomes renderer [w,0] reversed Z. Matrix arithmetic remains in source VS.
-        let projection = crate::source_camera::gles_projection(clip_from_view);
+        // The programs run under the reversed-Z conventions, which the
+        // render projection already has (see `source_camera`).
+        let projection = clip_from_view;
         // Validate the authored planes even when a shader only uses VP.
-        let source_z = crate::source_camera::gles_z_buffer_params(camera)?;
+        let source_z = crate::source_camera::z_buffer_params(camera)?;
         let (near, far, ortho) = match camera {
             Projection::Perspective(p) => (p.near, p.far, false),
             Projection::Orthographic(p) => (p.near, p.far, true),
@@ -1469,8 +1469,8 @@ mod tests {
     ) -> Result<UniformValue> {
         let source_to_render = Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0));
         let view_from_world = world_from_view.inverse() * source_to_render;
-        let projection = crate::source_camera::gles_projection(clip_from_view);
-        let source_z = crate::source_camera::gles_z_buffer_params(camera)?;
+        let projection = clip_from_view;
+        let source_z = crate::source_camera::z_buffer_params(camera)?;
         let (near, far, ortho) = match camera {
             Projection::Perspective(p) => (p.near, p.far, false),
             Projection::Orthographic(p) => (p.near, p.far, true),

@@ -14,8 +14,9 @@ use std::sync::Arc;
 #[derive(Asset, TypePath, Debug, Clone)]
 pub struct SourceProgramAsset {
     pub receipt: Arc<ProgramReceipt>,
-    /// The source program with its independently validated output-only clip
-    /// adapter. Unadapted GLES clip positions are never exposed as this handle.
+    /// The source vertex program as translated. Its clip position is drawn
+    /// as written: the host feeds the reversed-Z camera conventions, which are
+    /// the renderer's own, so the receipt's GL-to-reversed adapter is not used.
     #[dependency]
     pub vertex: Handle<Shader>,
     #[dependency]
@@ -150,17 +151,13 @@ impl AssetLoader for SourceProgramLoader {
         let root = extraction_root(context.path(), settings, &["compiled", "shaders"])?;
         // Code identity is verified independently of the translated output.
         dependency(context, &root, &receipt.source.program.code).await?;
-        dependency(context, &root, &receipt.stages.vertex.shader).await?;
-        let adapter = receipt.stages.vertex.renderer.as_ref().ok_or_else(|| {
-            SourceShaderError("source vertex shader lacks a qualified renderer clip adapter".into())
-        })?;
-        let vertex_bytes = dependency(context, &root, &adapter.shader).await?;
+        let vertex_bytes = dependency(context, &root, &receipt.stages.vertex.shader).await?;
         let fragment = dependency(context, &root, &receipt.stages.fragment.shader).await?;
         let vertex = context.add_labeled_asset(
             "Vertex".into(),
             Shader::from_wgsl(
                 String::from_utf8(vertex_bytes).map_err(|e| SourceShaderError(e.to_string()))?,
-                adapter.shader.file.clone(),
+                receipt.stages.vertex.shader.file.clone(),
             ),
         );
         let fragment = context.add_labeled_asset(

@@ -25,8 +25,8 @@ pub(crate) struct WeatherDepthSnapshot;
 #[derive(Component)]
 pub(crate) struct PreparedDepthSnapshot {
     texture: CachedTexture,
-    // Original GLES programs sample forward depth with a bottom-left origin.
-    // Legacy renderer-native consumers keep the unchanged reversed snapshot.
+    // The original programs sample it with a bottom-left origin (rows
+    // flipped). Renderer-native consumers keep the unflipped snapshot.
     source_texture: CachedTexture,
     source: BindGroup,
 }
@@ -41,10 +41,10 @@ impl PreparedDepthSnapshot {
 #[derive(Resource, Default)]
 pub(crate) struct DepthSnapshotReaders {
     /// A transparent uber particle was routed to the raw-depth draw, which
-    /// binds the reversed copy through `RawDepthBinding`.
+    /// binds the unflipped copy through `RawDepthBinding`.
     uber: bool,
     /// Some main-world entity carries a source particle. Only those entities
-    /// become source particle packets, the only readers of the GLES copy.
+    /// become source particle packets, the only readers of the flipped copy.
     source: bool,
 }
 
@@ -71,13 +71,14 @@ impl ViewNode for WeatherOpaqueDepthNode {
         let cache = world.resource::<PipelineCache>();
         let Some(pipeline) = cache.get_render_pipeline(gpu.copy_pipeline) else { return Ok(()); };
         let Some(source_pipeline) = cache.get_render_pipeline(gpu.source_copy_pipeline) else { return Ok(()); };
-        // The reversed copy is read by routed uber particles and by the particle
-        // draws of the emission pass; the GLES copy only by source particles.
+        // The unflipped copy is read by routed uber particles and by the
+        // particle draws of the emission pass; the flipped copy only by source
+        // particles.
         let readers = world.get_resource::<DepthSnapshotReaders>();
-        let reversed_read = readers.is_none_or(|readers| readers.uber)
+        let unflipped_read = readers.is_none_or(|readers| readers.uber)
             || crate::fixture_emission::has_particle_emission_draws(world);
         let source_read = readers.is_none_or(|readers| readers.source);
-        if reversed_read {
+        if unflipped_read {
             let mut pass = render_context.command_encoder().begin_render_pass(&RenderPassDescriptor {
                 label: Some("weather_copy_actual_opaque_depth"),
                 color_attachments: &[],
@@ -97,11 +98,11 @@ impl ViewNode for WeatherOpaqueDepthNode {
         }
         if source_read {
             let mut pass = render_context.command_encoder().begin_render_pass(&RenderPassDescriptor {
-                label: Some("source_GLES_opaque_depth_coordinates"),
+                label: Some("source_opaque_depth_flipped_rows"),
                 color_attachments: &[],
                 depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
                     view: &snapshot.source_texture.default_view,
-                    depth_ops: Some(Operations { load: LoadOp::Clear(1.0), store: StoreOp::Store }),
+                    depth_ops: Some(Operations { load: LoadOp::Clear(0.0), store: StoreOp::Store }),
                     stencil_ops: None,
                 }),
                 timestamp_writes: None,

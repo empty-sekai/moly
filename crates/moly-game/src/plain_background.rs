@@ -16,12 +16,10 @@
 //! (`shaders/plain_background.wgsl`). `ChangePlainBgTexture` sets a main
 //! texture that this program never samples.
 //!
-//! Open: the program writes the depth-buffer value of that eye distance
-//! (from `_ZBufferParams`) as clip z with w = 1. That lands at the distance
-//! only where clip z reaches the depth buffer unchanged, the reversed-Z
-//! reading (Vulkan); under OpenGL ES the same value maps to another depth.
-//! The source's graphics API is not decided, and the product takes the
-//! reversed-Z (Vulkan) reading.
+//! The program writes the depth-buffer value of that eye distance (from
+//! `_ZBufferParams`) as clip z with w = 1. The game's build lists Vulkan first
+//! among its graphics APIs, where clip z reaches the reversed depth buffer
+//! unchanged, so the quad lands at that distance (see `source_camera`).
 //!
 //! Inputs: the shell package whose inventory carries `PlainBackground` (the
 //! same package the sky reads), its `components.PlainBackground` distance and

@@ -12,7 +12,7 @@ fn source_globals_match_current_native_writer() {
     let rows = data["rows"].as_array().unwrap();
     let mut compared = 0;
     for row in rows {
-        if row["reversed"].as_bool().unwrap() {
+        if !row["reversed"].as_bool().unwrap() {
             continue;
         }
         let camera = Projection::Perspective(PerspectiveProjection {
@@ -20,7 +20,7 @@ fn source_globals_match_current_native_writer() {
             far: row["far"].as_f64().unwrap() as f32,
             ..default()
         });
-        let actual = gles_z_buffer_params(&camera).unwrap().map(f32::to_bits);
+        let actual = z_buffer_params(&camera).unwrap().map(f32::to_bits);
         let expected: Vec<u32> = row["bits"]
             .as_array()
             .unwrap()
@@ -34,5 +34,5 @@ fn source_globals_match_current_native_writer() {
         compared >= 16,
         "an empty or reduced native corpus cannot pass"
     );
-    println!("Current native GLES camera writer: {compared} bit-exact cases");
+    println!("Current native reversed-Z camera writer: {compared} bit-exact cases");
 }

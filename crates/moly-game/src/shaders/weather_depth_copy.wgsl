@@ -24,12 +24,13 @@ fn fragment(@builtin(position) pixel: vec4<f32>) -> @builtin(frag_depth) f32 {
     return depth_at(pixel.xy);
 }
 
-// The original GLES program's ComputeScreenPos is bottom-left-origin and
-// its ZBufferParams describe forward [0,1] depth. Adapt the sampled attachment,
-// not the original program or its clip-space varyings. Actual depth testing
-// continues against the unchanged reversed camera attachment.
+// The original programs' ComputeScreenPos is bottom-left-origin (see
+// `source_camera`) and their ZBufferParams describe reversed [0,1] depth, the
+// attachment's own. Only the rows are flipped, not the program or its
+// clip-space varyings. Actual depth testing continues against the camera
+// attachment.
 @fragment
 fn source_fragment(@builtin(position) pixel: vec4<f32>) -> @builtin(frag_depth) f32 {
     let height = f32(textureDimensions(camera_depth).y);
-    return 1.0 - depth_at(vec2<f32>(pixel.x, height - pixel.y));
+    return depth_at(vec2<f32>(pixel.x, height - pixel.y));
 }
