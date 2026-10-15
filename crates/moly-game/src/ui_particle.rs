@@ -1304,6 +1304,11 @@ fn bake_frame(
                     }
                 }
             }
+            // An idle system over an empty mesh has nothing to bake or clear;
+            // taking the mesh mutably would re-upload it unchanged.
+            if system.runtime.pool.is_empty() && meshes.get(&mesh.0).is_some_and(|mesh| mesh.count_vertices() == 0) {
+                continue;
+            }
             let Some(mesh) = meshes.get_mut(&mesh.0) else {
                 continue;
             };

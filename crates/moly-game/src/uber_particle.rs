@@ -20,7 +20,7 @@ use std::marker::PhantomData;
 
 use crate::billboard::{self, Alignment, SizeClamp};
 use crate::env::SiteEnvGpuBuffer;
-use crate::particle_runtime::{Runtime, Rng, Context, EffectKind, simulate, PREWARM_STEP};
+use crate::particle_runtime::{Runtime, Rng, Context, EffectKind, simulate, PREWARM_STEP, clear_drawn, draws_change};
 use crate::site::{SiteActive, SiteRoot, SiteScenesReady};
 use crate::site_material::SiteSidecarAsset;
 
@@ -1152,9 +1152,7 @@ pub(crate) fn advance(
         // A system a prefab's director owner took over is the owner's, drawn
         // by the fixture host.
         if system.anchor.is_some_and(|entity| inactive.get(entity).is_ok() || taken.get(entity).is_ok()) {
-            if let Some(mesh) = meshes.get_mut(&system.mesh) {
-                if mesh.count_vertices() != 0 { billboard::clear(mesh); }
-            }
+            clear_drawn(&mut meshes, &system.mesh);
             continue;
         }
         let Some(anchor) = system.anchor.and_then(|entity| anchors.get(entity).ok()).copied() else { continue; };
@@ -1176,6 +1174,9 @@ pub(crate) fn advance(
             SimulationSpace::World => GlobalTransform::IDENTITY,
             _ => anchor,
         };
+        if !draws_change(&meshes, &system.mesh, system) {
+            continue;
+        }
         let Some(mesh) = meshes.get_mut(&system.mesh) else {
             continue;
         };
@@ -1473,17 +1474,13 @@ pub(crate) fn advance_fixture_particles(
                 clock = None;
                 system.prewarmed = false;
             } else {
-                if let Some(mesh) = meshes.get_mut(&system.mesh) {
-                    if mesh.count_vertices() != 0 { billboard::clear(mesh); }
-                }
+                clear_drawn(&mut meshes, &system.mesh);
                 clear_trail_mesh(&mut meshes, trail);
                 continue;
             }
         }
         if dormant && clock.is_none() {
-            if let Some(mesh) = meshes.get_mut(&system.mesh) {
-                if mesh.count_vertices() != 0 { billboard::clear(mesh); }
-            }
+            clear_drawn(&mut meshes, &system.mesh);
             clear_trail_mesh(&mut meshes, trail);
             continue;
         }
@@ -1502,9 +1499,7 @@ pub(crate) fn advance_fixture_particles(
                 }
                 Err(reason) => {
                     error!(%reason, effect=%system.effect, node=%system.node, "Shape scaling owner refused: the system draws nothing");
-                    if let Some(mesh) = meshes.get_mut(&system.mesh) {
-                        if mesh.count_vertices() != 0 { billboard::clear(mesh); }
-                    }
+                    clear_drawn(&mut meshes, &system.mesh);
                     continue;
                 }
             }
@@ -1524,9 +1519,7 @@ pub(crate) fn advance_fixture_particles(
             // The Director's ParticleControlPlayable: PrepareFrame and its
             // Simulate calls. An inactive or retired system draws nothing.
             if !crate::fixture_timeline_particles::advance(system, &mut clock, &ctx, dormant) {
-                if let Some(mesh) = meshes.get_mut(&system.mesh) {
-                    if mesh.count_vertices() != 0 { billboard::clear(mesh); }
-                }
+                clear_drawn(&mut meshes, &system.mesh);
                 clear_trail_mesh(&mut meshes, trail);
                 continue;
             }
@@ -1564,13 +1557,17 @@ pub(crate) fn advance_fixture_particles(
             continue;
         }
         let transform = if system.emitter.simulation_space == SimulationSpace::World { GlobalTransform::IDENTITY } else { anchor };
-        if let Some(mesh) = meshes.get_mut(&system.mesh) {
-            crate::particle_runtime::write_geometry(mesh, system, &transform, &anchor, camera_transform, basis);
+        if draws_change(&meshes, &system.mesh, system) {
+            if let Some(mesh) = meshes.get_mut(&system.mesh) {
+                crate::particle_runtime::write_geometry(mesh, system, &transform, &anchor, camera_transform, basis);
+            }
         }
         // The renderer's second draw: the trail strip from this frame's
         // recorded points.
-        if let Some(mesh) = trail.and_then(|trail| meshes.get_mut(&trail.0)) {
-            crate::particle_runtime::write_trail_mesh(mesh, system, &anchor, camera_transform);
+        if let Some(trail) = trail.filter(|trail| draws_change(&meshes, &trail.0, system)) {
+            if let Some(mesh) = meshes.get_mut(&trail.0) {
+                crate::particle_runtime::write_trail_mesh(mesh, system, &anchor, camera_transform);
+            }
         }
     }
     for (entity, anchor) in advance_director_families(&mut live, &director_families, &anchors, &locals, &activity,
@@ -1578,9 +1575,7 @@ pub(crate) fn advance_fixture_particles(
         match anchor {
             Some(anchor) => targets.push((entity, anchor)),
             None => if let Ok((_, particle, _, _, _, trail)) = live.get(entity) {
-                if let Some(mesh) = meshes.get_mut(&particle.0.mesh) {
-                    if mesh.count_vertices() != 0 { billboard::clear(mesh); }
-                }
+                clear_drawn(&mut meshes, &particle.0.mesh);
                 clear_trail_mesh(&mut meshes, trail);
             },
         }
@@ -1590,13 +1585,17 @@ pub(crate) fn advance_fixture_particles(
         let Ok((_, mut particle, _, _, _, trail)) = live.get_mut(entity) else { continue };
         let system = &mut particle.0;
         let transform = if system.emitter.simulation_space == SimulationSpace::World { GlobalTransform::IDENTITY } else { anchor };
-        if let Some(mesh) = meshes.get_mut(&system.mesh) {
-            crate::particle_runtime::write_geometry(mesh, system, &transform, &anchor, camera_transform, basis);
+        if draws_change(&meshes, &system.mesh, system) {
+            if let Some(mesh) = meshes.get_mut(&system.mesh) {
+                crate::particle_runtime::write_geometry(mesh, system, &transform, &anchor, camera_transform, basis);
+            }
         }
         // The renderer's second draw: the trail strip from this frame's
         // recorded points.
-        if let Some(mesh) = trail.and_then(|trail| meshes.get_mut(&trail.0)) {
-            crate::particle_runtime::write_trail_mesh(mesh, system, &anchor, camera_transform);
+        if let Some(trail) = trail.filter(|trail| draws_change(&meshes, &trail.0, system)) {
+            if let Some(mesh) = meshes.get_mut(&trail.0) {
+                crate::particle_runtime::write_trail_mesh(mesh, system, &anchor, camera_transform);
+            }
         }
     }
     commands.queue(crate::fixture_timeline_particles::collect_garbage);
@@ -1671,9 +1670,7 @@ fn advance_director_families(live: &mut FixtureLive<'_, '_>, families: &[(Entity
 
 /// Empty a fixture-host system's trail draw with its particle draw.
 fn clear_trail_mesh(meshes: &mut Assets<Mesh>, trail: Option<&crate::weather_fx::fixture::FixtureTrailDraw>) {
-    if let Some(mesh) = trail.and_then(|trail| meshes.get_mut(&trail.0)) {
-        if mesh.count_vertices() != 0 { billboard::clear(mesh); }
-    }
+    if let Some(trail) = trail { clear_drawn(meshes, &trail.0); }
 }
 
 /// Hands each played parent's commands of this frame, in the order recorded,

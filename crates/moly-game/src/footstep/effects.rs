@@ -637,15 +637,18 @@ pub(crate) fn step(
             } else {
                 anchor
             };
-            if let Some(mesh) = meshes.get_mut(&system.mesh) {
-                crate::particle_runtime::write_geometry(
-                    mesh,
-                    system,
-                    &transform,
-                    &anchor,
-                    camera_transform,
-                    basis,
-                );
+            // An idle system over an empty mesh leaves the mesh untouched.
+            if crate::particle_runtime::draws_change(&meshes, &system.mesh, system) {
+                if let Some(mesh) = meshes.get_mut(&system.mesh) {
+                    crate::particle_runtime::write_geometry(
+                        mesh,
+                        system,
+                        &transform,
+                        &anchor,
+                        camera_transform,
+                        basis,
+                    );
+                }
             }
             if trace {
                 let (enabled, visible) = sources

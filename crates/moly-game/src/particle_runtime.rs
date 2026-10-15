@@ -2436,6 +2436,28 @@ fn source_view(camera: &GlobalTransform) -> [f32; 16] {
     a
 }
 
+/// Empties a particle mesh that still holds vertices. An empty one is left
+/// alone: `Assets::get_mut` marks the asset modified, and the renderer then
+/// extracts and prepares the mesh again although nothing changed.
+pub(crate) fn clear_drawn(meshes: &mut Assets<Mesh>, mesh: &Handle<Mesh>) {
+    if meshes.get(mesh).is_some_and(holds_vertices) {
+        if let Some(mesh) = meshes.get_mut(mesh) { crate::billboard::clear(mesh); }
+    }
+}
+
+/// Whether this frame's geometry can change the mesh. A system without live
+/// particles writes no vertex, and its trail has no ring left (a qualified
+/// trail dies with its particles), so an empty mesh stays as it is.
+pub(crate) fn draws_change(meshes: &Assets<Mesh>, mesh: &Handle<Mesh>, system: &Runtime) -> bool {
+    !system.pool.is_empty() || meshes.get(mesh).is_some_and(holds_vertices)
+}
+
+/// A particle mesh holds vertices when its position stream is not empty
+/// (every stream is written to the same length, so one lookup answers).
+fn holds_vertices(mesh: &Mesh) -> bool {
+    mesh.attribute(Mesh::ATTRIBUTE_POSITION).is_some_and(|positions| !positions.is_empty())
+}
+
 pub(crate) fn write_geometry(
     mesh: &mut Mesh, system: &Runtime, to_world: &GlobalTransform,
     owner: &GlobalTransform, camera: &GlobalTransform, basis: crate::billboard::CameraBasis,
