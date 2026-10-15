@@ -737,9 +737,11 @@ pub(crate) struct HudBalloon {
 
 /// Update：消费 NPC 状态机的 HUD 事件（类型 25）。Show 上屏（每名成员
 /// 一只 HUD 气泡，新的替换在屏那只）；Hide 从当前缩放起收场 0.2s；
-/// Retire（宿主换站重置）立即撤。独立场景（内容库占场）里 Show 不上屏，
-/// 与背景气泡让位同一条门。图集未就绪时到达的事件读掉并具名。家具前置
-/// 动作、摆设编辑反应与对话预览的气泡不归这里。
+/// Retire（宿主换站重置、成员离站挂起）立即撤该成员头上的全部气泡
+/// （含家具前置动作与摆设编辑反应那两条链的——头顶槽位只有一个，挂起
+/// 的成员模型已隐藏）。独立场景（内容库占场）里 Show 不上屏，与背景
+/// 气泡让位同一条门。图集未就绪时到达的事件读掉并具名。家具前置动作、
+/// 摆设编辑反应与对话预览的气泡的上屏不归这里。
 #[allow(clippy::type_complexity)]
 pub(crate) fn hud_event(
     mut commands: Commands,
@@ -747,6 +749,7 @@ pub(crate) fn hud_event(
     art: Option<Res<BalloonArt>>,
     mut events: MessageReader<crate::npc_state::TweetHudEvent>,
     mut balloons: Query<(Entity, &BalloonAnchor, &Elapsed, &mut HudBalloon)>,
+    others: Query<(Entity, &BalloonAnchor), Without<HudBalloon>>,
 ) {
     use crate::npc_state::TweetHudEvent;
     let Some(art) = art else {
@@ -817,10 +820,16 @@ pub(crate) fn hud_event(
             }
             TweetHudEvent::Retire { npc } => {
                 drop_spawned(&mut commands, &mut spawned, *npc);
-                for (root, anchor, _, _) in &balloons {
+                let hud = balloons.iter().map(|(root, anchor, _, _)| (root, anchor));
+                let mut removed = 0;
+                for (root, anchor) in hud.chain(others.iter()) {
                     if anchor.npc == *npc {
                         commands.entity(root).despawn();
+                        removed += 1;
                     }
+                }
+                if removed > 0 {
+                    info!("[tweet] HUD retire npc={npc}：撤下头顶气泡 {removed} 只");
                 }
             }
         }

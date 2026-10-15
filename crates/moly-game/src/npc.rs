@@ -1386,7 +1386,8 @@ pub(crate) fn remove_temporary_units(world: &mut World, entities: &[Entity]) {
 ///
 /// Each member is handled by its own site (see [`residency`]):
 /// - its own site is not the loaded one: it is suspended where it stood
-///   (hidden, route and Rest ended, objective kept) and not placed here;
+///   (hidden, balloon retired, route and Rest ended, objective kept) and not
+///   placed here;
 /// - it was suspended and the loaded site is its own again: it resumes where
 ///   it stood (the source never re-places an NPC on entering a site) if that
 ///   point is on the rebuilt walk face, else at a seed point; its current
@@ -1402,6 +1403,7 @@ pub(crate) fn reseed(
     site: Option<Res<crate::site::SiteActive>>,
     mut last: Local<u64>,
     face: Option<Res<crate::npc_objective::ObjectiveFace>>,
+    mut hud: MessageWriter<crate::npc_state::TweetHudEvent>,
     mut npcs: Query<(
         Entity,
         &CharacterUnitId,
@@ -1468,6 +1470,9 @@ pub(crate) fn reseed(
             if !away {
                 commands.entity(entity).insert(residency::Away);
                 visibility.set_if_neq(Visibility::Hidden);
+                // The state machine skips away members, so its hide would
+                // never reach a balloon left over the hidden model.
+                hud.write(crate::npc_state::TweetHudEvent::Retire { npc: entity });
                 *slot = PathSlot(NpcPathWalkSlot::from_corners(Vec::new()));
                 *route = RouteStops::default();
                 *stuck = StuckBaseline::default();

@@ -84,11 +84,14 @@ pub(crate) struct Away;
 /// state machine registers, so a member whose own site differs from the
 /// loaded one is suspended from its first frame there. The return to the own
 /// site is [`crate::npc::reseed`]'s (it restarts the objective on the rebuilt
-/// site); a member is never marked back here.
+/// site); a member is never marked back here. A suspended member's balloon is
+/// retired with it: the state machine skips away members, so no hide would
+/// reach a balloon left over its hidden model.
 #[allow(clippy::type_complexity)]
 pub(crate) fn mark_away(
     mut commands: Commands,
     site: Option<Res<crate::site::SiteActive>>,
+    mut hud: MessageWriter<crate::npc_state::TweetHudEvent>,
     mut npcs: Query<
         (
             Entity,
@@ -109,6 +112,7 @@ pub(crate) fn mark_away(
         }
         commands.entity(entity).insert(Away);
         visibility.set_if_neq(Visibility::Hidden);
+        hud.write(crate::npc_state::TweetHudEvent::Retire { npc: entity });
         rest.leave_for_residency();
         info!(
             "[npc-residency] unit={} stays on {} (site type {:?}) while {} (site type {:?}) is loaded: suspended, not placed here; per-frame NPC update on this site: {}",
