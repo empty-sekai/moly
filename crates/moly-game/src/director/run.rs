@@ -117,6 +117,8 @@ enum Kind {
     Emote { lease: crate::emoticon::timeline::EmoteLease, until: f32 },
     NpcUse { ticket: u64 },
     Tweet { entity: Entity, until: f32 },
+    /// A talk requested of a character, until its decision builds it.
+    NpcTalk { entity: Entity },
     /// `down` is false until the finger has touched down at `from`.
     CameraDrag { from: Vec2, by: Vec2, start: f32, secs: f32, down: bool },
     CameraZoom { left: f32, per_sec: f32, until: f32 },
@@ -133,6 +135,7 @@ impl Kind {
             Kind::Emote { lease, .. } => crate::emoticon::timeline::hide(world, *lease, true),
             Kind::NpcUse { ticket } => super::npc::end_activity(world, *ticket, true),
             Kind::Tweet { entity, .. } => super::npc::hide_tweet(world, *entity),
+            Kind::NpcTalk { entity } => super::npc::drop_talk(world, *entity),
             Kind::CameraDrag { from, by, down: true, .. } => {
                 let _ = hand::drag_touch(world, TouchPhase::Ended, *from + *by);
             }
@@ -417,6 +420,15 @@ fn start(world: &mut World, shared: &mut Shared, step: Step, path: String) -> St
             }
             Kind::NpcUse { ticket }
         }
+        Node::NpcTalk { unit, talk } => {
+            let entity = match super::npc::open_talk(world, *unit, *talk) {
+                Ok(entity) => entity,
+                Err(error) => return ended(path, Err(error), optional),
+            };
+            // The character is its AI's again; the AI plays the talk.
+            shared.owned.retain(|(_, owned)| *owned != entity);
+            Kind::NpcTalk { entity }
+        }
         Node::NpcTweet { unit, tweet, secs } => {
             let Some(&(_, entity)) = shared.owned.iter().find(|(owned, _)| owned == unit) else {
                 return ended(path, Err(format!("character {unit} is not taken by this script (npc.take first)")), optional);
@@ -554,6 +566,11 @@ fn poll(world: &mut World, shared: &mut Shared, active: &mut Active) -> Poll {
             super::npc::end_activity(world, ticket, false);
             poll
         }
+        Kind::NpcTalk { entity } => match super::npc::talk_outcome(world, *entity) {
+            Some(Ok(note)) => Poll::Done(note),
+            Some(Err(reason)) => Poll::Failed(reason),
+            None => Poll::Running("waiting for the character's next decision".into()),
+        },
         Kind::Tweet { entity, until } => {
             if shared.now >= *until {
                 super::npc::hide_tweet(world, *entity);

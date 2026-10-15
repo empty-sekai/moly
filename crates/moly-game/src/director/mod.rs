@@ -33,7 +33,12 @@
 //! the nearest instance; the first activity and timeline by default) through
 //! the furniture owner its AI uses, and ends when the activity has; `npc.tweet
 //! {unit, tweet, secs}` shows a tweet of the master over a taken character;
-//! `npc.release {unit}` gives it back to its AI. A script's taken characters
+//! `npc.talk {unit, talk}` hands the character (taken or not) to its AI with
+//! a talk to open: its next decision builds that talk as the talk-by-id
+//! factories build a drawn one (the talk's fixture, the other speakers
+//! drafted) instead of drawing, and the step ends when the talk is built or
+//! refused, the talk then playing under the AI; `npc.release {unit}` gives
+//! it back to its AI. A script's taken characters
 //! are released when it ends.
 //!
 //! Camera: `camera.drag {by: [dx, dy], secs, from: [fx, fy]}` drags one

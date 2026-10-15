@@ -70,6 +70,8 @@ pub(crate) enum Node {
     NpcUse { unit: u32, fixture: FixtureRef, activity: Option<i32>, variant: Option<u32>, rests: bool },
     /// Shows a tweet of the master over a taken character for `secs`.
     NpcTweet { unit: u32, tweet: i32, secs: f32 },
+    /// Hands a character to its AI with a talk to open on its next decision.
+    NpcTalk { unit: u32, talk: i32 },
     /// A one-finger drag of `by` logical pixels (x right, y down) over
     /// `secs`, starting at `from` (fractions of the window).
     CameraDrag { by: [f32; 2], secs: f32, from: [f32; 2] },
@@ -152,7 +154,7 @@ pub(crate) enum Cond {
 const ACTIONS: &[&str] = &[
     "wait", "wait_until", "assert", "log", "where", "capture", "parallel", "repeat",
     "player.walk_to", "player.interact", "player.stick", "player.release", "player.talk_to", "tap",
-    "npc.take", "npc.walk_to", "npc.face", "npc.emote", "npc.use", "npc.tweet", "npc.release",
+    "npc.take", "npc.walk_to", "npc.face", "npc.emote", "npc.use", "npc.tweet", "npc.talk", "npc.release",
     "camera.drag", "camera.zoom", "server.edit", "weather.set", "site.switch", "site.enter_room", "site.go_home",
 ];
 
@@ -314,6 +316,11 @@ fn step(value: &Value, at: &str) -> Result<Vec<Step>, String> {
             let tweet = fields.req_i32("tweet")?;
             let secs = fields.opt_f32("secs")?.unwrap_or(3.0);
             vec![one(Node::NpcTweet { unit, tweet, secs }, None)]
+        }
+        "npc.talk" => {
+            let unit = fields.req_u32("unit")?;
+            let talk = fields.req_i32("talk")?;
+            vec![one(Node::NpcTalk { unit, talk }, Some(60.0))]
         }
         "camera.drag" => {
             let by = pair(fields.req("by")?, &format!("{at}.by"))?;
@@ -708,7 +715,8 @@ mod tests {
         let script = parse(&json!({ "steps": [
             { "do": "npc.use", "unit": 2, "fixture": 1053, "activity": 7, "variant": 2 },
             { "do": "npc.use", "unit": 2, "fixture": "p-12" },
-            { "do": "npc.tweet", "unit": 2, "tweet": 301 }
+            { "do": "npc.tweet", "unit": 2, "tweet": 301 },
+            { "do": "npc.talk", "unit": 2, "talk": 4105 }
         ] }))
         .unwrap();
         let Node::NpcUse { fixture: FixtureRef::Id(1053), activity: Some(7), variant: Some(2), .. } = &script.steps[0].node
@@ -718,6 +726,8 @@ mod tests {
         assert!(matches!(&script.steps[1].node, Node::NpcUse { fixture: FixtureRef::Uid(uid), activity: None, .. } if uid == "p-12"));
         assert_eq!(script.steps[1].timeout, Some(300.0));
         assert!(matches!(&script.steps[2].node, Node::NpcTweet { tweet: 301, secs, .. } if *secs == 3.0));
+        assert!(matches!(&script.steps[3].node, Node::NpcTalk { unit: 2, talk: 4105 }));
+        assert_eq!(script.steps[3].timeout, Some(60.0));
         let error = parse(&json!({ "steps": [{ "do": "npc.use", "unit": 2, "fixture": 1, "variant": 0 }] })).unwrap_err();
         assert!(error.contains("variant counts from 1"), "{error}");
     }

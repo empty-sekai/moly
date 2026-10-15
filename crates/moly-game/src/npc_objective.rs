@@ -384,6 +384,16 @@ impl PreparedFixtureTalk {
 #[derive(Resource, Default)]
 pub(crate) struct ForcedFixtureTalks(pub(crate) HashMap<Entity, npc_talk_lottery::FixtureTalkData>);
 
+/// Talks the director asks characters to open: a character's next decision
+/// (not a forced update) builds that talk instead of the ladder's pick (see
+/// [`npc_talk_lottery::director_talk`]) and leaves what it built, or why it
+/// built nothing, in `outcomes`.
+#[derive(Resource, Default)]
+pub(crate) struct DirectedTalks {
+    pub(crate) requests: HashMap<Entity, i32>,
+    pub(crate) outcomes: HashMap<Entity, Result<String, String>>,
+}
+
 /// Fixture talk data made ready for this host's execution: the fixture
 /// entity, for a single-character talk with a timeline its fixture session,
 /// the locator names, IsGeneralTalk, and the members' data from `drafts`.
@@ -1464,6 +1474,8 @@ enum TalkFactory {
     GeneralTalk,
     AlreadyReadFixtureTalk,
     FixtureCommonTalk,
+    /// A talk the director names (see [`DirectedTalks`]).
+    Directed(i32),
 }
 
 impl TalkFactory {
@@ -1483,6 +1495,7 @@ impl TalkFactory {
             TalkFactory::GeneralTalk => "talk:general",
             TalkFactory::AlreadyReadFixtureTalk => "talk:read",
             TalkFactory::FixtureCommonTalk => "talk:common",
+            TalkFactory::Directed(_) => "talk:director",
         }
     }
 
@@ -1508,6 +1521,7 @@ impl TalkFactory {
             TalkFactory::FixtureCommonTalk => {
                 npc_talk_lottery::change_fixture_common_talk_objective(scene, seeker, draws)
             }
+            TalkFactory::Directed(talk) => npc_talk_lottery::director_talk(scene, seeker, talk, draws),
         }
     }
 }
@@ -1773,12 +1787,13 @@ pub(crate) fn decide(
     epoch: Option<Res<GroundEpoch>>,
     selection: Option<Res<SiteSelection>>,
     placements: Res<FixturePlacements>,
-    (mut seeder, mut reported_gaps, mut last_placed, mut groups, mut forced_talks, mut hold): (
+    (mut seeder, mut reported_gaps, mut last_placed, mut groups, mut forced_talks, mut directed_talks, mut hold): (
         ResMut<SequencePickSeeder>,
         Local<HashSet<String>>,
         Local<String>,
         ResMut<crate::npc_fixture_talk::FixtureTalkGroups>,
         Option<ResMut<ForcedFixtureTalks>>,
+        Option<ResMut<DirectedTalks>>,
         Local<crate::hold::HoldReport>,
     ),
     (configs, talk_list, together, extras, extras_pending): (
@@ -2295,7 +2310,14 @@ pub(crate) fn decide(
                 first_talk_complete: actions.first_talk_complete,
             };
             let mut percent = PercentSource::new(&mut trial);
-            let decision = if force_update {
+            // A talk the director asked for replaces the ladder's pick; owed
+            // forced updates come first.
+            let directed = if force_update {
+                None
+            } else {
+                directed_talks.as_mut().and_then(|talks| talks.requests.remove(&entity))
+            };
+            let decision = if force_update || directed.is_some() {
                 objective::Decision::RefuelAndTalk
             } else {
                 objective::decide(&view, &percents, yet_unread_available, &mut percent)
@@ -2307,6 +2329,7 @@ pub(crate) fn decide(
                 &actions.site_type,
                 time.elapsed_secs_f64(),
                 match decision {
+                    _ if directed.is_some() => "director_talk",
                     _ if force_update => "force_update_objective",
                     objective::Decision::RefuelAndTalk => "empty_talk_data",
                     objective::Decision::Greeting => "greeting",
@@ -2322,6 +2345,12 @@ pub(crate) fn decide(
                 &percent.draws,
             );
             let decision_route = match decision {
+                // A talk the director asked for: its own factory, after the
+                // reset each talk factory makes.
+                _ if directed.is_some() => {
+                    slot.reset_ai_talk_data();
+                    DecisionRoute::Factory(TalkFactory::Directed(directed.unwrap_or_default()))
+                }
                 // Row 1: ForceUpdateObjective resets, then UpdateObjective resets
                 // again before it builds the data, so Previous ends empty.
                 objective::Decision::RefuelAndTalk => {
@@ -2926,6 +2955,25 @@ pub(crate) fn decide(
                 DecisionRoute::BirthdayPartyWait => {
                     unreachable!("the birthday wait objective returned above")
                 }
+            }
+            if let (Some(talk), Some(talks)) = (directed, directed_talks.as_mut()) {
+                let outcome = match (&halt, &null_talk) {
+                    (Some(npc_talk_lottery::Halt::Fault(reason) | npc_talk_lottery::Halt::Gap(reason)), _)
+                    | (None, Some(reason)) => Err(reason.clone()),
+                    _ => match (&fixture_talk, &general_talk) {
+                        (Some(prepared), _) => Ok(format!(
+                            "talk {talk} ({:?}) at fixture {}, speakers {:?}, drafted {:?}",
+                            prepared.data.kind,
+                            prepared.data.fixture,
+                            prepared.data.members,
+                            prepared.drafts.iter().filter(|draft| draft.drafted).map(|draft| draft.unit).collect::<Vec<_>>()
+                        )),
+                        (None, Some(_)) => Ok(format!("general talk {talk}")),
+                        (None, None) => Err(format!("talk {talk} built no talk data")),
+                    },
+                };
+                info!("[npc unit={}] director talk {talk}: {outcome:?}", unit.0);
+                talks.outcomes.insert(entity, outcome);
             }
             match halt {
                 Some(npc_talk_lottery::Halt::Fault(reason)) => {

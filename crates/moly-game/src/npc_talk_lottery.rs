@@ -1922,6 +1922,78 @@ fn create_ai_talk_data_by_talk_id(
     lottery_and_create_general_talk_data(scene, seeker, draws)
 }
 
+/// A talk the director names for `seeker`, built as the data-by-talk-id
+/// factories build a drawn talk: the seeker opens it (it is the talk's first
+/// speaker); a talk with a fixture row takes the first admissible placed
+/// fixture of that id, every other speaker on the site and free for a
+/// multi-character action, then the three fixture factories; a talk without
+/// one whose only speaker is the seeker is a general talk. No talk is drawn.
+/// Every refusal, the source's exceptions included, is a gap: the request is
+/// the director's, so the character's AI goes on.
+pub(crate) fn director_talk(
+    scene: &LotteryScene<'_>,
+    seeker: &NpcView,
+    talk: i32,
+    draws: &mut Draws<'_>,
+) -> Result<TalkPlan, Halt> {
+    build_director_talk(scene, seeker, talk, draws).map_err(|halt| match halt {
+        Halt::Fault(reason) | Halt::Gap(reason) => Halt::Gap(reason),
+    })
+}
+
+fn build_director_talk(
+    scene: &LotteryScene<'_>,
+    seeker: &NpcView,
+    talk: i32,
+    draws: &mut Draws<'_>,
+) -> Result<TalkPlan, Halt> {
+    if scene.tables.talk_master(talk).is_none() {
+        return Err(Halt::gap(format!("talk {talk} has no master row")));
+    }
+    let members = scene.members(talk)?;
+    if members.first() != Some(&seeker.unit) {
+        return Err(Halt::gap(format!(
+            "talk {talk} is opened by its first speaker, not by character {} (speakers {members:?})",
+            seeker.unit
+        )));
+    }
+    let Some(fixture_id) = first_fixture_row(&scene.conditions(talk)?) else {
+        if members.len() == 1 {
+            return Ok(TalkPlan::General { talk_id: talk, interrupt: false });
+        }
+        return Err(Halt::gap(format!("talk {talk} has speakers {members:?} and no fixture row")));
+    };
+    for &member in &members[1..] {
+        match scene.npc(member) {
+            None => return Err(Halt::gap(format!("talk {talk}: speaker {member} is not on this site"))),
+            Some(npc) if !can_play_multi_character_fixture_action(npc) => {
+                return Err(Halt::gap(format!(
+                    "talk {talk}: speaker {member} is not free (state {}, objective {:?}, talk type {:?})",
+                    npc.state, npc.objective, npc.talk_type
+                )));
+            }
+            Some(_) => {}
+        }
+    }
+    let fixture = target_character_talk_fixture_by_condition(scene, talk, fixture_id)?;
+    let mut steps = Vec::new();
+    let built = run_fixture_factories(scene, seeker, talk, fixture.as_deref(), draws, &mut steps)?;
+    let results = steps
+        .iter()
+        .map(|step| format!("{} {}", step["factory"].as_str().unwrap_or("?"), step["result"].as_str().unwrap_or("?")))
+        .collect::<Vec<_>>();
+    draws.record.push(json!({
+        "use": "director_talk_steps", "talk_id": talk, "fixture": fixture, "steps": steps,
+    }));
+    built.map(TalkPlan::Fixture).ok_or_else(|| {
+        Halt::gap(format!(
+            "talk {talk} at fixture {}: no fixture factory built its data ({})",
+            fixture.as_deref().unwrap_or("-"),
+            results.join(", ")
+        ))
+    })
+}
+
 /// A fresh general lottery, then its data. A talk without a master row
 /// leaves the factory result null, which its caller dereferences.
 fn lottery_and_create_general_talk_data(

@@ -44,6 +44,69 @@ pub(crate) fn take(world: &mut World, unit: u32) -> Result<Entity, String> {
     Ok(entity)
 }
 
+/// Hands the character of `unit` the talk `talk` to open on its next
+/// decision, which builds that talk instead of drawing one (see
+/// `npc_objective::DirectedTalks`). A taken character goes back to its AI
+/// with no forced update owed; any other has its current objective
+/// cancelled. Either way the next decision skips the Rest pause. The talk's
+/// other speakers must be free, so one the director holds is refused.
+pub(crate) fn open_talk(world: &mut World, unit: u32, talk: i32) -> Result<Entity, String> {
+    let entity = super::cond::npc(world, unit)?;
+    let speakers = {
+        let tables = world
+            .get_resource::<crate::fixture_activity_data::FixtureActivityTables>()
+            .ok_or("the furniture activity tables are not loaded")?;
+        let master = tables.talk_master(talk).ok_or_else(|| format!("talk {talk} has no master row"))?;
+        tables.unit_ids_of_group(master.unit_group_id)?
+    };
+    if speakers.first() != Some(&unit) {
+        return Err(format!("talk {talk} is opened by its first speaker, not by character {unit} (speakers {speakers:?})"));
+    }
+    for &speaker in &speakers[1..] {
+        if super::cond::npc(world, speaker).is_ok_and(|other| world.get::<DirectorOwned>(other).is_some()) {
+            return Err(format!("character {speaker} speaks in talk {talk} and the director holds it (npc.release first)"));
+        }
+    }
+    let mind = world.get::<ObjectiveMind>(entity).ok_or_else(|| format!("character {unit} has no AI"))?;
+    if let Some(reason) = mind.ai_stopped.as_deref().filter(|reason| *reason != OWNED) {
+        return Err(format!("character {unit}'s AI loop has ended: {reason}"));
+    }
+    if world.get::<NpcActions>(entity).is_some_and(|actions| actions.current == NpcAction::Talk) {
+        return Err(format!("character {unit} is in a conversation"));
+    }
+    if world.get::<DirectorOwned>(entity).is_some() {
+        crate::npc::stop_for_external_activity(world, entity);
+        world.entity_mut(entity).remove::<DirectorOwned>();
+    } else {
+        crate::npc::gate_entries::try_cancel_current_objective(world, entity);
+    }
+    if let Some(mut mind) = world.get_mut::<ObjectiveMind>(entity) {
+        if mind.ai_stopped.as_deref() == Some(OWNED) {
+            mind.ai_stopped = None;
+        }
+        mind.skip_next_rest = true;
+    }
+    let mut talks = world.get_resource_or_insert_with(crate::npc_objective::DirectedTalks::default);
+    talks.outcomes.remove(&entity);
+    talks.requests.insert(entity, talk);
+    info!("[director] character {unit} asked to open talk {talk} on its next decision");
+    Ok(entity)
+}
+
+/// What the character's decision built for its requested talk, once it has
+/// decided.
+pub(crate) fn talk_outcome(world: &mut World, entity: Entity) -> Option<Result<String, String>> {
+    world.get_resource_mut::<crate::npc_objective::DirectedTalks>()?.outcomes.remove(&entity)
+}
+
+/// Withdraws a talk request its character has not decided on yet.
+pub(crate) fn drop_talk(world: &mut World, entity: Entity) {
+    if let Some(mut talks) = world.get_resource_mut::<crate::npc_objective::DirectedTalks>() {
+        talks.requests.remove(&entity);
+        talks.outcomes.remove(&entity);
+    }
+}
+
 /// Releases a taken character: its walk stops, its loop reopens and a forced
 /// objective update is owed to its next decision.
 pub(crate) fn release(world: &mut World, entity: Entity) {
