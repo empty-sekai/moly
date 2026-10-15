@@ -6,8 +6,11 @@
 //! A bounded single-Transform Euler lane also preserves authored coefficients.
 //! Non-interrupting source Trigger bits wait for the next eligible evaluation.
 //! The player's switch plays its source clip `c_000_mov_fixture_action_01_01`.
+//! The view's effect events show and hide its named effect objects (see
+//! [`effect`]).
 //! General controllers and nonzero interruption sources remain separate gaps.
 
+mod effect;
 mod rotation;
 pub(crate) mod catalog_stream;
 pub(crate) mod house_door;
@@ -47,6 +50,8 @@ enum Effect {
     FinishOneShot,
     /// An audited source receiver with no serialized or static runtime supply.
     EmptyActivate,
+    /// `ShowFixtureEffect` / `HideFixtureEffect` with the object's name.
+    FixtureEffect(effect::Call, String),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -153,6 +158,7 @@ struct Instance {
     rotation: Option<rotation::Binding>,
     pending: PendingTriggers,
     outputs: Vec<Entity>,
+    effects: effect::Effects,
 }
 
 struct PlayerSwitch {
@@ -538,6 +544,13 @@ fn program(
             ),
             "OnFinishOneShotGimmick" => Effect::FinishOneShot,
             "PlayFixtureActivateEffect" if empty_activate => Effect::EmptyActivate,
+            "ShowFixtureEffect" | "HideFixtureEffect" => Effect::FixtureEffect(
+                if function == "ShowFixtureEffect" { effect::Call::Show } else { effect::Call::Hide },
+                event["data"]
+                    .as_str()
+                    .ok_or("animation fixture effect event has no string parameter")?
+                    .to_owned(),
+            ),
             _ => return Err(format!("animation event {function} has no consumer")),
         };
         let time = number(event, "time")?;
@@ -663,6 +676,7 @@ pub(crate) fn start(
             rotation,
             pending: PendingTriggers::default(),
             outputs: outputs.clone(),
+            effects: effect::Effects::default(),
         });
         // Completion is the authored callback, not the clip's playback end.
         if one_shot && instance.on {
@@ -713,6 +727,7 @@ fn start_exclusive(
             rotation,
             pending: PendingTriggers::default(),
             outputs: outputs.clone(),
+            effects: effect::Effects::default(),
         });
         if one_shot && instance.on {
             return Err("fixture one-shot is still on".into());
@@ -902,6 +917,7 @@ pub(crate) fn advance(world: &mut World) {
                     Effect::EmptyActivate => {
                         info!("[fixture-gimmick] {} event={} source-time={} audited CN receiver has no activation-particle supply", target.uid, event.function, event.time);
                     }
+                    Effect::FixtureEffect(call, name) => instance.effects.request(*call, name.clone()),
                 }
             }
             if !playback.transitioning() { playback.previous = None; }
@@ -915,6 +931,13 @@ pub(crate) fn advance(world: &mut World) {
             } else if playback.elapsed < playback.program.duration || instance.rotation.is_some() {
                 instance.playback = Some(playback);
             }
+        }
+        // The view's effect calls of this update, then its idle systems'
+        // update (Time.deltaTime; none while the game is paused).
+        let dt = if delta > 0.0 { crate::particle_runtime::source_delta_time(world.resource::<Time>().delta()) } else { 0.0 };
+        for (target, instance) in &mut runtime.instances {
+            let Some(view) = world.get::<FixtureViewInstance>(target.entity).map(|view| view.0) else { continue };
+            instance.effects.advance(world, target.entity, view, &target.uid, dt);
         }
         let Some(mut player) = runtime.player.take() else { return; };
         let alive = world.get_resource::<GroundEpoch>().is_some_and(|epoch| epoch.0 == player.site_epoch)

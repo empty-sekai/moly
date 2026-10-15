@@ -29,7 +29,7 @@ fn acquire(world: &mut World, target: &FixtureTarget, owner: Entity, scope: Scop
     let mut runtime = world.resource_mut::<Gimmicks>();
     let previous = runtime.instances.remove(target);
     runtime.instances.insert(target.clone(), Instance { on: false, definition, playback: None, rotation,
-        pending: PendingTriggers::default(), outputs });
+        pending: PendingTriggers::default(), outputs, effects: super::effect::Effects::default() });
     runtime.leases.insert(target.clone(), Lease { owner, scope, previous, emission, rotation: rotation_snapshot,
         stop_after: None, one_shot });
     Ok(())

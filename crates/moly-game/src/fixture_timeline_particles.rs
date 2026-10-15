@@ -677,6 +677,36 @@ pub(crate) fn prepare_played_object(
     object: Entity,
     package: &str,
 ) -> Result<ParticlePlayBinding, TimelineFailure> {
+    prepare_played(world, owner, object, Some(package), true)
+}
+
+/// An effect object a FixtureView finds by name (`FindOrCacheEffect`) on a
+/// placed fixture: the systems of its Transform subtree, prepared as
+/// [`prepare_played_object`]'s over the fixture's own particle document, and
+/// the record of the object's own ParticleSystem (`None` when it carries
+/// none), whose play state `ShowFixtureEffect` and `HideFixtureEffect` read.
+/// Retry while the error is retryable.
+pub(crate) fn prepare_effect_object(
+    world: &mut World,
+    fixture: Entity,
+    object: Entity,
+) -> Result<(ParticlePlayBinding, Option<Value>), TimelineFailure> {
+    let binding = prepare_played(world, fixture, object, None, false)?;
+    let doc = archive(world, fixture, None)?;
+    let inventory = Inventory::of(&doc)?;
+    let own = instance_identity(world, object)
+        .and_then(|id| inventory.by_id.get(&id))
+        .map(|&ordinal| inventory.particles[ordinal]["system"].clone());
+    Ok((binding, own))
+}
+
+fn prepare_played(
+    world: &mut World,
+    owner: Entity,
+    object: Entity,
+    package: Option<&str>,
+    require_own: bool,
+) -> Result<ParticlePlayBinding, TimelineFailure> {
     if world.get_entity(owner).is_err() || world.get_entity(object).is_err() {
         return Err(invalid("particle owner or played object was destroyed"));
     }
@@ -688,10 +718,11 @@ pub(crate) fn prepare_played_object(
     }
     let root_id = instance_identity(world, object)
         .ok_or_else(|| invalid("played object carries no source GameObject identity"))?;
-    let doc = archive(world, owner, Some(package))?;
+    let doc = archive(world, owner, package)?;
     let inventory = Inventory::of(&doc)?;
-    if !inventory.by_id.contains_key(&root_id) {
-        return Err(invalid(format!("GameObject {root_id} carries no ParticleSystem in the {package} particle document")));
+    if require_own && !inventory.by_id.contains_key(&root_id) {
+        return Err(invalid(format!("GameObject {root_id} carries no ParticleSystem in the {} particle document",
+            package.unwrap_or("fixture's"))));
     }
     let instances = inventory.instances(world, object)?;
     let mut selected = Vec::new();
@@ -717,9 +748,13 @@ pub(crate) fn prepare_played_object(
     for (anchor, _) in &selected {
         world.entity_mut(*anchor).insert(DrivenByPrefabOwner);
     }
-    let draws = crate::weather_fx::fixture::prepare_play_later(world, object, &doc, &selected)
-        .map_err(invalid)?
-        .ok_or_else(|| loading("source particle shader/geometry is preparing"))?;
+    let draws = if selected.is_empty() {
+        Vec::new()
+    } else {
+        crate::weather_fx::fixture::prepare_play_later(world, object, &doc, &selected)
+            .map_err(invalid)?
+            .ok_or_else(|| loading("source particle shader/geometry is preparing"))?
+    };
     for &draw in &draws {
         if let Some(mut source) = world.get_mut::<SourceParticle>(draw) {
             source.enabled = true;
@@ -927,6 +962,99 @@ pub(crate) fn stop_and_clear_object(world: &mut World, binding: &ParticlePlayBin
         prepared.stopped = true;
     }
     stopped
+}
+
+/// Whether a prepared system's object is active in the source hierarchy.
+fn anchor_active(world: &World, draw: Entity) -> bool {
+    world.get::<FixtureParticleLive>(draw)
+        .and_then(|live| live.0.anchor)
+        .is_some_and(|anchor| world.get::<moly_assets::scene_state::SourceInactive>(anchor).is_none())
+}
+
+/// `ParticleSystem.isPlaying` of the played object's own system when this
+/// host simulates it (`None` when no prepared system sits on the object
+/// itself). A system that never played is not playing.
+pub(crate) fn object_system_playing(world: &World, binding: &ParticlePlayBinding) -> Option<bool> {
+    binding.draws.iter().copied()
+        .find(|&draw| world.get::<FixtureParticleLive>(draw).is_some_and(|live| live.0.anchor == Some(binding.root)))
+        .map(|draw| crate::weather_fx::fixture::system_playing(world, draw))
+}
+
+/// `ParticleSystem.Play()` with children on the played object, system by
+/// system as the engine's `PlayChildrenRecursive` reaches them: a system
+/// whose object is inactive in the hierarchy is skipped (`Play` returns at
+/// once on an inactive GameObject), one that never played takes its first
+/// Play, a stopped one plays again and a playing one is left as it is.
+/// Returns how many systems it played.
+pub(crate) fn play_systems(world: &mut World, binding: &ParticlePlayBinding) -> Result<usize, String> {
+    let draws = binding.draws.clone();
+    play_listed(world, binding, &draws)
+}
+
+fn play_listed(world: &mut World, binding: &ParticlePlayBinding, draws: &[Entity]) -> Result<usize, String> {
+    let mut again = Vec::new();
+    let mut first = false;
+    let mut played = 0;
+    for &draw in draws {
+        if world.get_entity(draw).is_err() || !anchor_active(world, draw) {
+            continue;
+        }
+        if crate::weather_fx::fixture::play_pending(world, draw)? {
+            first = true;
+            played += 1;
+        } else if !crate::weather_fx::fixture::system_playing(world, draw) {
+            again.push(draw);
+        }
+    }
+    played += crate::weather_fx::fixture::play_draws(world, &again)?;
+    if first {
+        crate::weather_fx::fixture::link_targets(world, &binding.draws);
+    }
+    if let Some(mut prepared) = world.get_mut::<PreparedPlay>(binding.root) {
+        prepared.stopped = false;
+    }
+    Ok(played)
+}
+
+/// `GameObject.SetActive(true)` on an inactive played object: its source
+/// activity turns on, and each system below it that becomes active in the
+/// hierarchy takes the engine's `ParticleSystem::AwakeFromLoad`, which plays
+/// a play-on-awake system. Returns how many systems it played; an object
+/// already active is left as it is (`Ok(None)`).
+pub(crate) fn activate_played_object(world: &mut World, binding: &ParticlePlayBinding) -> Result<Option<usize>, String> {
+    let activity = world.get::<moly_assets::scene_state::SourceNodeActivity>(binding.root)
+        .ok_or("played object carries no source activity")?;
+    if activity.active_self() {
+        return Ok(None);
+    }
+    let dormant: Vec<Entity> = binding.draws.iter().copied().filter(|&draw| !anchor_active(world, draw)).collect();
+    moly_assets::scene_state::SetSourceActive { entity: binding.root, active: true }.apply(world);
+    let woken: Vec<Entity> = dormant.into_iter()
+        .filter(|&draw| anchor_active(world, draw)
+            && world.get::<FixtureParticleLive>(draw).is_some_and(|live| live.0.emitter.play_on_awake))
+        .collect();
+    play_listed(world, binding, &woken).map(Some)
+}
+
+/// `GameObject.SetActive(false)` on an active played object: its source
+/// activity turns off, and each system below it that was active in the
+/// hierarchy takes the engine's `ParticleSystem::Deactivate`, which clears it
+/// and takes it out of the manager, so its play ends and a later activation
+/// plays it from the start. Returns how many played systems it stopped; an
+/// object already inactive is left as it is (`Ok(None)`).
+pub(crate) fn deactivate_played_object(world: &mut World, binding: &ParticlePlayBinding) -> Result<Option<usize>, String> {
+    let activity = world.get::<moly_assets::scene_state::SourceNodeActivity>(binding.root)
+        .ok_or("played object carries no source activity")?;
+    if !activity.active_self() {
+        return Ok(None);
+    }
+    let live: Vec<Entity> = binding.draws.iter().copied().filter(|&draw| anchor_active(world, draw)).collect();
+    moly_assets::scene_state::SetSourceActive { entity: binding.root, active: false }.apply(world);
+    let stopped = crate::weather_fx::fixture::stop_and_clear(world, &live);
+    if let Some(mut prepared) = world.get_mut::<PreparedPlay>(binding.root) {
+        prepared.stopped = true;
+    }
+    Ok(Some(stopped))
 }
 
 /// A played object over draws a replay built itself (no document, no GPU
