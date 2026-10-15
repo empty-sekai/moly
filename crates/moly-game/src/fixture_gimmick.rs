@@ -184,16 +184,11 @@ pub(crate) fn load(
     mut commands: Commands, server: Res<AssetServer>,
     stage: Option<Res<crate::browser_stage::BrowserStage>>,
 ) {
-    // A browser publication carries the per-package documents, not the native
-    // monolith, so every browser profile streams. The game profile also
-    // streams the placed house's record, which its entry and door read.
-    if stage.is_some() || cfg!(target_arch = "wasm32") {
-        catalog_stream::load(&mut commands, &server, stage.is_none());
-        return;
-    }
-    commands.insert_resource(CatalogLoad(
-        server.load("moly://fixture-gimmick/gimmicks.json"),
-    ));
+    // Every target streams: an index, then only the placed fixtures' package
+    // documents; the game profile also streams the placed house's record,
+    // which its entry and door read. A root without the index falls back to
+    // the monolithic catalogue once a placed fixture needs it.
+    catalog_stream::load(&mut commands, &server, stage.is_none());
 }
 
 pub(crate) fn parse(

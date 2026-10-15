@@ -1,9 +1,9 @@
-//! Transport-only, source-scoped loading for the existing fixture controller.
-//! Native keeps its original full catalogue. The browser fetches an index,
-//! then only the definitions for actual placed gimmick fixtures; the game
-//! profile also fetches the placed house's package for its `HouseView` record.
-//! Definition compilation, admission, leases, source events and restoration are
-//! unchanged.
+//! Transport-only, source-scoped loading for the existing fixture controller,
+//! the same on every target. It fetches an index, then only the definitions
+//! for actual placed gimmick fixtures; the game profile also fetches the
+//! placed house's package for its `HouseView` record. A root without the index
+//! falls back to the monolithic catalogue. Definition compilation, admission,
+//! leases, source events and restoration are unchanged.
 use super::house_door::HouseCatalog;
 use super::*;
 use std::collections::HashSet;
@@ -271,26 +271,6 @@ pub(crate) fn house_pending(world: &World, package: &str) -> Option<String> {
             .get_resource::<Catalog>()
             .is_some_and(|catalog| catalog.0.contains_key(package));
     (!settled).then(|| format!("{package}: house controller record is loading"))
-}
-
-/// [`house_pending`] over the placed home fixtures, for the entry's wait.
-pub(crate) fn home_pending(world: &mut World) -> Option<String> {
-    if !world
-        .get_resource::<Stream>()
-        .is_some_and(|stream| stream.houses)
-    {
-        return None;
-    }
-    let packages: Vec<String> = world
-        .query::<&FixtureActivityIdentity>()
-        .iter(world)
-        .map(|identity| identity.model_package.clone())
-        .collect();
-    let homes = world.get_resource::<crate::entry::house::HomeFixtures>()?;
-    packages
-        .iter()
-        .filter(|package| homes.is_home(package) == Ok(true))
-        .find_map(|package| house_pending(world, package))
 }
 
 /// Resource readiness only, not another eligibility implementation. Ordinary

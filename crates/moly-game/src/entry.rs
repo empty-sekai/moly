@@ -279,17 +279,12 @@ fn join_blocker(world: &mut World) -> Option<String> {
     {
         return Some(FIXTURE_BINDING_BLOCKER.into());
     }
-    // A failed catalogue load is not waited on: the lookup names it.
-    if !world.contains_resource::<house_door::HouseCatalog>()
-        && world.contains_resource::<crate::fixture_gimmick::CatalogLoad>()
-    {
-        return Some("house controller catalogue is loading".into());
+    // The house's tables, streamed record and view arrive asynchronously. A
+    // settled failure is not waited on: the join's lookup names it.
+    match house_door::find_house(world) {
+        HouseLookup::Pending(reason) => Some(reason),
+        _ => None,
     }
-    // The browser streams the house's record; a settled failure is not waited on either.
-    if let Some(reason) = crate::fixture_gimmick::catalog_stream::home_pending(world) {
-        return Some(reason);
-    }
-    None
 }
 
 /// `WaitCharacterSpawnedAsync`: `npcList.Any()` and every NPC's spawn flag
@@ -420,8 +415,13 @@ fn join_core(world: &mut World, seq: &mut EntrySequence, dt: f32) {
         HouseLookup::Absent => {
             return error_branch(world, seq, "no placed fixture is a home fixture", dt)
         }
-        HouseLookup::Failed(reason) | HouseLookup::Pending(reason) => {
-            return error_branch(world, seq, &reason, dt);
+        HouseLookup::Failed(reason) => return error_branch(world, seq, &reason, dt),
+        // A transfer is in flight again although the blocker saw it settle:
+        // wait under the cover; a transfer is never a missing room.
+        HouseLookup::Pending(reason) => {
+            info!("[entry] JoinMysekaiActionCore deferred: {reason}");
+            seq.phase = Phase::Loading;
+            return;
         }
     };
     let Some(player) = player else {
