@@ -7,6 +7,8 @@ pub mod site_request;
 
 #[cfg(target_arch = "wasm32")]
 mod render_backend;
+#[cfg(target_arch = "wasm32")]
+mod wasm_heap;
 
 #[cfg(target_arch = "wasm32")]
 use bevy::prelude::*;

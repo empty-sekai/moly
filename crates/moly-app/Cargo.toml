@@ -25,3 +25,5 @@ console_error_panic_hook = "0.1"
 # Browser startup events and same-origin page parameters.
 web-sys = { version = "0.3", features = ["Window", "Location", "UrlSearchParams", "Navigator", "Event", "EventTarget", "CustomEvent", "CustomEventInit", "Url"] }
 js-sys = "0.3"
+# The global allocator's heap; its system layer is the crate's own (src/wasm_heap.rs).
+dlmalloc = "0.2"
