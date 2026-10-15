@@ -82,7 +82,7 @@ struct ParticleFrame {
 }
 fn extract(
     mut frame: ResMut<ParticleFrame>,
-    particles: Extract<Query<(Entity, &RenderEntity, &Mesh3d, &SourceParticle)>>,
+    particles: Extract<Query<(Entity, &RenderEntity, &Mesh3d, Ref<SourceParticle>)>>,
     meshes: Extract<Res<Assets<Mesh>>>,
     catalogues: Extract<Res<Assets<SourceShaderCatalogue>>>,
     mut catalogue_events: Extract<MessageReader<AssetEvent<SourceShaderCatalogue>>>,
@@ -131,13 +131,14 @@ fn extract(
             .entry(component.catalogue.id())
             .or_insert_with(|| catalogue.clone());
         let main: MainEntity = main.into();
-        // Main-world systems take the component mutably every frame, so change
-        // ticks do not say whether it changed; compare what drawing reads.
-        // Mesh writers may write without marking the asset changed, so the
-        // geometry is compared by content too, against the kept copy.
+        // A component not written since the last extract draws as the kept
+        // copy; a written one is compared on what drawing reads, since a
+        // write can leave those fields as they were. Mesh writers may write
+        // without marking the asset changed, so the geometry is compared by
+        // content, against the kept copy.
         let (source, mut geometry, mut own_center) = match previous.remove(&main) {
             Some(kept) => (
-                if same_draw(&kept.source, &component) {
+                if !component.is_changed() || same_draw(&kept.source, &component) {
                     kept.source
                 } else {
                     SourceParticle::clone(&component)
