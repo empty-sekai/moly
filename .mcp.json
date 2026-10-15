@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "moly": {
+      "command": "node",
+      "args": [
+        "tools/mcp/server.mjs"
+      ]
+    }
+  }
+}

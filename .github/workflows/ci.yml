@@ -32,6 +32,10 @@ jobs:
         run: npm run --prefix web format:check
       - name: Test browser protocols and resource transport
         run: npm test --prefix web
+      - name: Install MCP server dependencies
+        run: npm ci --prefix tools/mcp --ignore-scripts
+      - name: Test MCP server
+        run: npm test --prefix tools/mcp
       - name: Check workspace version
         run: python tools/version/check.py
       - name: Check JavaScript syntax

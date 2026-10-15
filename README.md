@@ -113,7 +113,18 @@ GitHub Actions 在推送、拉取请求和手动触发时执行版本一致性�
 | `crates/moly-app` | 原生与浏览器入口 |
 | `web` | 浏览器页面与构建工具 |
 | `tools` | 仓库边界与渲染顺序检查 |
+| `tools/mcp` | MCP 服务器，启动并驱动原生与浏览器实例 |
 | `screenshots/readme.png` | README 展示图 |
+
+## MCP 服务器
+
+`tools/mcp` 是 MCP 服务器，供 AI 客户端启动游戏的原生程序或浏览器实例，并通过 JSON-RPC 读取状态、执行导演脚本与截取画面。依赖安装命令：
+
+```sh
+npm ci --prefix tools/mcp
+```
+
+仓库根目录的 `.mcp.json` 已将它注册为 `moly`。工具、JSON-RPC 方法与安全说明见 [tools/mcp/README.md](tools/mcp/README.md)。
 
 ## 许可
 

@@ -1,0 +1,849 @@
+#!/usr/bin/env node
+// moly MCP server: process management and transport for game instances.
+// Native instances answer JSON-RPC 2.0 over HTTP. Browser instances run in a
+// Chrome started by this server and are driven over the Chrome DevTools
+// Protocol; the page reaches the same JSON-RPC surface through its control module.
+// stdout carries the MCP protocol; every log line goes to stderr.
+import { spawn, spawnSync, execFile } from 'node:child_process';
+import { once } from 'node:events';
+import net from 'node:net';
+import { promisify } from 'node:util';
+import { existsSync, statSync, mkdirSync, openSync, closeSync, readFileSync, appendFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { z } from 'zod';
+
+const execFileP = promisify(execFile);
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const LOG_DIR = path.join(HERE, 'logs');
+const PROFILE_DIR = path.join(HERE, 'profiles');
+const DEFAULT_RPC_PORT = 15702;
+// The Chrome executable used when browser_launch names none: MOLY_CHROME if set,
+// otherwise the standard install location of the platform. On Linux the bare name
+// is looked up on PATH.
+function defaultChrome() {
+  if (process.env.MOLY_CHROME) return process.env.MOLY_CHROME;
+  switch (process.platform) {
+    case 'win32':
+      return 'C:/Program Files/Google/Chrome/Application/chrome.exe';
+    case 'darwin':
+      return '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+    default:
+      return 'google-chrome';
+  }
+}
+const DEFAULT_CHROME = defaultChrome();
+const RPC_TIMEOUT_MS = 10_000;
+const CDP_TIMEOUT_MS = 10_000;
+const CHROME_START_MS = 30_000;
+const BOOT_DEFAULT_S = 600;
+const STOP_WAIT_MS = 5_000;
+const POLL_MS = 250;
+const CAPTURE_POLL_MS = 200;
+const TERMINAL_STATUS = new Set(['done', 'failed', 'stopped']);
+
+const log = (...args) => console.error('[moly-mcp]', ...args);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+mkdirSync(LOG_DIR, { recursive: true });
+
+/** @type {Map<string, object>} instance id -> instance record (this process only) */
+const instances = new Map();
+let launchSeq = 0;
+let rpcSeq = 0;
+
+const text = (value, isError = false) => ({
+  content: [{ type: 'text', text: value }],
+  ...(isError ? { isError: true } : {}),
+});
+const json = (value, isError = false) => text(JSON.stringify(value ?? null, null, 2), isError);
+
+// Errors thrown inside a handler become tool errors, not protocol errors.
+const guard = (name, fn) => async (args) => {
+  try {
+    return await fn(args);
+  } catch (err) {
+    log(`${name} failed:`, err.message);
+    return text(`${name}: ${err.message}`, true);
+  }
+};
+
+function getInstance(id) {
+  const inst = instances.get(id);
+  if (!inst) throw new Error(`no instance with id "${id}"`);
+  return inst;
+}
+
+function describe(inst) {
+  return {
+    id: inst.id,
+    kind: inst.kind,
+    pid: inst.pid,
+    started: inst.started,
+    rpc: inst.rpc,
+    running: !inst.exited,
+    ...(inst.kind === 'browser' ? { port: inst.port, url: inst.url, profile: inst.profile } : {}),
+  };
+}
+
+// Starts a child with stdin ignored and stdout and stderr appended to one log file.
+function spawnLogged({ exePath, args, cwd, env, logPath, header, hide = true }) {
+  appendFileSync(logPath, `# ${new Date().toISOString()} ${header}\n`);
+  const fd = openSync(logPath, 'a');
+  try {
+    return spawn(exePath, args, { cwd, env, stdio: ['ignore', fd, fd], windowsHide: hide });
+  } finally {
+    closeSync(fd); // the child holds its own duplicate of the handle
+  }
+}
+
+// Records the child's exit on the instance record. inst.exitPromise resolves once it is gone.
+function trackExit(inst) {
+  let markExited;
+  inst.exitPromise = new Promise((resolve) => { markExited = resolve; });
+  inst.child.once('exit', (code, signal) => {
+    inst.exited = true;
+    inst.exitCode = code;
+    inst.signal = signal;
+    markExited();
+  });
+  inst.child.once('error', (err) => {
+    log(`instance ${inst.id} error:`, err.message);
+    inst.exited = true;
+    markExited();
+  });
+}
+
+async function nativeLaunch({ exe, env, args = [], cwd, rpcPort = DEFAULT_RPC_PORT }) {
+  const exePath = path.resolve(exe);
+  if (!existsSync(exePath) || !statSync(exePath).isFile()) {
+    throw new Error(`executable not found: ${exePath}`);
+  }
+  const cwdPath = cwd === undefined ? undefined : path.resolve(cwd);
+  if (cwdPath !== undefined && !(existsSync(cwdPath) && statSync(cwdPath).isDirectory())) {
+    throw new Error(`cwd not found: ${cwdPath}`);
+  }
+
+  const id = `native-${++launchSeq}-${randomBytes(3).toString('hex')}`;
+  const logPath = path.join(LOG_DIR, `${id}.log`);
+  // The control port: the caller's MOLY_CONTROL_PORT if given, else rpcPort. The game
+  // is started with it, and inst.rpc points at it.
+  const controlPort = env?.MOLY_CONTROL_PORT ?? String(rpcPort);
+  const child = spawnLogged({
+    exePath,
+    args,
+    cwd: cwdPath,
+    env: { ...process.env, ...(env ?? {}), MOLY_CONTROL_PORT: controlPort },
+    logPath,
+    header: `launch ${exePath} ${args.join(' ')}`,
+    // A hidden first window is created at 0x0: no UI layout, one-pixel captures.
+    hide: false,
+  });
+
+  const inst = {
+    id,
+    kind: 'native',
+    pid: child.pid,
+    started: new Date().toISOString(),
+    rpc: `http://127.0.0.1:${controlPort}/`,
+    exe: exePath,
+    log: logPath,
+    child,
+    exited: false,
+    exitCode: null,
+    signal: null,
+    stopped: false,
+  };
+  trackExit(inst);
+  try {
+    await once(child, 'spawn');
+  } catch (err) {
+    throw new Error(`failed to spawn ${exePath}: ${err.message}`);
+  }
+  instances.set(id, inst);
+  log(`launched ${id} pid=${child.pid} log=${logPath}`);
+  return { id, pid: child.pid, log: logPath };
+}
+
+// Kills exactly one process tree: the pid this server spawned.
+async function killTree(inst) {
+  if (process.platform === 'win32') {
+    await execFileP('taskkill', ['/PID', String(inst.pid), '/T', '/F']).catch((err) =>
+      log(`taskkill ${inst.pid}:`, (err.stderr || err.message).toString().trim()),
+    );
+  } else {
+    inst.child.kill('SIGKILL');
+  }
+  await Promise.race([inst.exitPromise, sleep(STOP_WAIT_MS)]);
+}
+
+// Shared by native_stop and browser_stop. Only ever touches a process this server spawned.
+async function stopInstance(inst) {
+  inst.cdp?.close();
+  if (!inst.exited) await killTree(inst);
+  inst.stopped = true;
+  if (!inst.exited) throw new Error(`pid ${inst.pid} did not exit within ${STOP_WAIT_MS / 1000} s after taskkill`);
+  return { id: inst.id, pid: inst.pid, stopped: true, exitCode: inst.exitCode, signal: inst.signal };
+}
+
+function nativeStopTool(id) {
+  const inst = getInstance(id);
+  if (inst.kind !== 'native') throw new Error(`instance ${id} is not a native instance`);
+  return stopInstance(inst);
+}
+
+function instanceLogs({ id, tail = 200, grep }) {
+  const inst = getInstance(id);
+  const raw = existsSync(inst.log) ? readFileSync(inst.log, 'utf8') : '';
+  let lines = raw.split(/\r?\n/);
+  if (lines.at(-1) === '') lines.pop();
+  if (grep) lines = lines.filter((line) => line.includes(grep));
+  const out = tail > 0 ? lines.slice(-tail) : lines;
+  return text(out.join('\n'));
+}
+
+// ---------------------------------------------------------------------------
+// Transport
+//
+// call(inst, method, params) resolves to {result} on success or {error} on a
+// JSON-RPC error or a transport failure. It never throws.
+// ---------------------------------------------------------------------------
+
+function parseReply(raw, where) {
+  let reply;
+  try {
+    reply = JSON.parse(raw);
+  } catch {
+    throw new Error(`non-JSON reply from ${where}: ${String(raw).slice(0, 200)}`);
+  }
+  return reply?.error !== undefined ? { error: reply.error } : { result: reply?.result ?? null };
+}
+
+async function nativeCall(inst, request) {
+  let raw;
+  try {
+    const res = await fetch(inst.rpc, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(request),
+      signal: AbortSignal.timeout(RPC_TIMEOUT_MS),
+    });
+    raw = await res.text();
+  } catch (err) {
+    if (err.name === 'TimeoutError' || err.name === 'AbortError') {
+      throw new Error(`timed out after ${RPC_TIMEOUT_MS / 1000} s on ${inst.rpc}`);
+    }
+    throw new Error(`transport error on ${inst.rpc}: ${err.cause?.code ?? err.message}`);
+  }
+  return parseReply(raw, inst.rpc);
+}
+
+// Minimal Chrome DevTools Protocol client over the global WebSocket.
+class Cdp {
+  constructor(url) {
+    this.seq = 0;
+    this.pending = new Map();
+    this.listeners = new Map();
+    this.closed = false;
+    this.ws = new WebSocket(url);
+    this.ws.addEventListener('error', () => {});
+    this.ws.addEventListener('message', (ev) => this.#onMessage(ev.data));
+    this.ws.addEventListener('close', () => {
+      this.closed = true;
+      for (const waiter of this.pending.values()) waiter.reject(new Error('DevTools socket closed'));
+      this.pending.clear();
+    });
+  }
+
+  open(timeoutMs) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('DevTools socket did not open')), timeoutMs);
+      this.ws.addEventListener('open', () => { clearTimeout(timer); resolve(); }, { once: true });
+    });
+  }
+
+  send(method, params = {}, timeoutMs = CDP_TIMEOUT_MS) {
+    if (this.closed) return Promise.reject(new Error('DevTools socket is closed'));
+    const id = ++this.seq;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`${method} timed out after ${timeoutMs / 1000} s`));
+      }, timeoutMs);
+      this.pending.set(id, {
+        resolve: (value) => { clearTimeout(timer); resolve(value); },
+        reject: (err) => { clearTimeout(timer); reject(err); },
+      });
+      this.ws.send(JSON.stringify({ id, method, params }));
+    });
+  }
+
+  on(method, fn) {
+    if (!this.listeners.has(method)) this.listeners.set(method, new Set());
+    this.listeners.get(method).add(fn);
+  }
+
+  off(method, fn) {
+    this.listeners.get(method)?.delete(fn);
+  }
+
+  // Resolves with the params of the next event with this method name.
+  waitFor(method, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      const fn = (params) => {
+        clearTimeout(timer);
+        this.off(method, fn);
+        resolve(params);
+      };
+      const timer = setTimeout(() => {
+        this.off(method, fn);
+        reject(new Error(`${method} not seen within ${timeoutMs / 1000} s`));
+      }, timeoutMs);
+      this.on(method, fn);
+    });
+  }
+
+  close() {
+    this.closed = true;
+    try {
+      this.ws.close();
+    } catch {
+      // already closed
+    }
+  }
+
+  #onMessage(data) {
+    let msg;
+    try {
+      msg = JSON.parse(String(data));
+    } catch {
+      return;
+    }
+    if (msg.id !== undefined) {
+      const waiter = this.pending.get(msg.id);
+      if (!waiter) return;
+      this.pending.delete(msg.id);
+      if (msg.error) waiter.reject(new Error(msg.error.message ?? 'DevTools error'));
+      else waiter.resolve(msg.result ?? {});
+      return;
+    }
+    for (const fn of this.listeners.get(msg.method) ?? []) fn(msg.params ?? {});
+  }
+}
+
+// Runs an expression in the page and returns its value by value.
+async function cdpEvaluate(cdp, expression, timeoutMs = CDP_TIMEOUT_MS) {
+  const res = await cdp.send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, timeoutMs);
+  if (res.exceptionDetails) {
+    const message = res.exceptionDetails.exception?.description ?? res.exceptionDetails.text ?? 'evaluation failed';
+    throw new Error(message.split('\n')[0]);
+  }
+  return res.result?.value;
+}
+
+// The page's control module is found among its loaded resources by path, ignoring the query string.
+// The request travels as a JSON string literal, so it needs no escaping by hand.
+function controlExpression(requestJson) {
+  return `(async () => {
+    const entry = performance.getEntriesByType('resource').map((e) => e.name).find((name) => {
+      try { return new URL(name).pathname.endsWith('/moly-app.js'); } catch { return false; }
+    });
+    if (!entry) throw new Error('moly-app.js has not been loaded by the page');
+    const m = await import(entry);
+    return await m.control(${JSON.stringify(requestJson)});
+  })()`;
+}
+
+async function browserCall(inst, request) {
+  if (!inst.cdp) throw new Error(`browser ${inst.id} has no DevTools session`);
+  const value = await cdpEvaluate(inst.cdp, controlExpression(JSON.stringify(request)), RPC_TIMEOUT_MS);
+  return parseReply(String(value), `page of ${inst.id}`);
+}
+
+async function call(inst, method, params) {
+  if (inst.exited) return { error: { message: `instance ${inst.id} is not running` } };
+  const request = { jsonrpc: '2.0', id: ++rpcSeq, method, ...(params !== undefined ? { params } : {}) };
+  try {
+    return inst.kind === 'browser' ? await browserCall(inst, request) : await nativeCall(inst, request);
+  } catch (err) {
+    return { error: { message: err.message } };
+  }
+}
+
+// Like call(), but returns the result or throws with the method name in the message.
+async function callOk(inst, method, params) {
+  const res = await call(inst, method, params);
+  if (res.error) throw new Error(`${method}: ${res.error.message ?? JSON.stringify(res.error)}`);
+  return res.result;
+}
+
+// ---------------------------------------------------------------------------
+// Browser instances
+// ---------------------------------------------------------------------------
+
+function portFree(port) {
+  return new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.once('error', () => resolve(false));
+    srv.listen(port, '127.0.0.1', () => srv.close(() => resolve(true)));
+  });
+}
+
+async function freePort() {
+  const srv = net.createServer();
+  srv.listen(0, '127.0.0.1');
+  await once(srv, 'listening');
+  const { port } = srv.address();
+  await new Promise((resolve) => srv.close(resolve));
+  return port;
+}
+
+async function waitForPageTarget(debugPort, inst, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (inst.exited) throw new Error(`browser exited during start (exit code ${inst.exitCode})`);
+    try {
+      const res = await fetch(`http://127.0.0.1:${debugPort}/json/list`, { signal: AbortSignal.timeout(2_000) });
+      const page = (await res.json()).find((t) => t.type === 'page' && t.webSocketDebuggerUrl);
+      if (page) return page;
+    } catch {
+      // not listening yet
+    }
+    if (Date.now() > deadline) throw new Error(`no page target on port ${debugPort} within ${timeoutMs / 1000} s`);
+    await sleep(POLL_MS);
+  }
+}
+
+function attachConsole(cdp, logPath) {
+  const write = (line) => appendFileSync(logPath, `${new Date().toISOString()} ${line}\n`);
+  const remoteText = (arg) => {
+    if (arg.value !== undefined) return typeof arg.value === 'string' ? arg.value : JSON.stringify(arg.value);
+    return String(arg.description ?? arg.unserializableValue ?? arg.type);
+  };
+  cdp.on('Runtime.consoleAPICalled', (p) => write(`console.${p.type} ${(p.args ?? []).map(remoteText).join(' ')}`));
+  cdp.on('Runtime.exceptionThrown', (p) => {
+    const d = p.exceptionDetails ?? {};
+    write(`exception ${d.exception?.description ?? d.text ?? ''}`.trimEnd());
+  });
+  cdp.on('Log.entryAdded', (p) => {
+    const e = p.entry ?? {};
+    write(`log.${e.level} ${e.source} ${e.text} ${e.url ?? ''}`.trimEnd());
+  });
+}
+
+const BOOT_STATE_EXPR = `(() => {
+  const el = document.getElementById('boot');
+  return el
+    ? { present: true, state: el.dataset.state ?? '', text: el.textContent.trim().slice(0, 300) }
+    : { present: false, state: '', text: '' };
+})()`;
+
+const ENTER_CENTRE_EXPR = `(() => {
+  const el = document.getElementById('boot-enter');
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+})()`;
+
+// Polls the boot screen. Ready means tap #boot-enter once; a missing #boot element means
+// the boot screen has gone (or never existed, for a stage page). Returns the outcome.
+async function waitForBoot(cdp, timeoutS) {
+  const deadline = Date.now() + timeoutS * 1000;
+  let tapped = false;
+  let sawBoot = false;
+  let last = 'none';
+  for (;;) {
+    let boot = null;
+    try {
+      boot = await cdpEvaluate(cdp, BOOT_STATE_EXPR, 5_000);
+    } catch {
+      // the page may still be settling; try again
+    }
+    if (boot) {
+      if (!boot.present) {
+        if (tapped) return 'running';
+        return sawBoot ? 'dismissed' : 'no-boot';
+      }
+      sawBoot = true;
+      last = boot.state || '(no state)';
+      if (boot.state === 'failed') throw new Error(`boot failed: ${boot.text || 'no detail'}`);
+      if (boot.state === 'ready' && !tapped) {
+        const at = await cdpEvaluate(cdp, ENTER_CENTRE_EXPR, 5_000).catch(() => null);
+        if (at) {
+          await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: at.x, y: at.y, button: 'left', clickCount: 1 });
+          await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: at.x, y: at.y, button: 'left', clickCount: 1 });
+          tapped = true;
+        }
+      }
+    }
+    if (Date.now() > deadline) throw new Error(`boot did not finish within ${timeoutS} s (last state: ${last})`);
+    await sleep(POLL_MS);
+  }
+}
+
+// A bare name (no path separator) is looked up on PATH, which is how the Linux default
+// is found. Any other value is a file path, relative to the directory the server runs in.
+function resolveExecutable(name) {
+  if (/[\\/]/.test(name)) return path.resolve(name);
+  for (const dir of (process.env.PATH ?? '').split(path.delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, name);
+    if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
+  }
+  throw new Error(`browser executable not found on PATH: ${name}`);
+}
+
+async function browserLaunch({ url, width = 1280, height = 720, port, chrome = DEFAULT_CHROME, timeout = BOOT_DEFAULT_S }) {
+  const chromePath = resolveExecutable(chrome);
+  if (!existsSync(chromePath) || !statSync(chromePath).isFile()) {
+    throw new Error(`browser executable not found: ${chromePath}`);
+  }
+  let debugPort = port;
+  if (debugPort === undefined) {
+    debugPort = await freePort();
+  } else if (!(await portFree(debugPort))) {
+    throw new Error(`port ${debugPort} is already in use`);
+  }
+
+  const id = `browser-${++launchSeq}-${randomBytes(3).toString('hex')}`;
+  const profile = path.join(PROFILE_DIR, id);
+  mkdirSync(profile, { recursive: true }); // the id is new, so the profile is new and empty
+  const logPath = path.join(LOG_DIR, `${id}.log`);
+  const args = [
+    `--remote-debugging-port=${debugPort}`,
+    `--user-data-dir=${profile}`,
+    '--no-first-run',
+    '--no-default-browser-check',
+    `--window-size=${width},${height}`,
+    '--autoplay-policy=no-user-gesture-required',
+    '--disable-background-timer-throttling',
+    '--disable-renderer-backgrounding',
+    '--disable-backgrounding-occluded-windows',
+    '--new-window',
+    'about:blank',
+  ];
+  const child = spawnLogged({ exePath: chromePath, args, env: process.env, logPath, header: `launch ${chromePath} ${url}` });
+
+  const inst = {
+    id,
+    kind: 'browser',
+    pid: child.pid,
+    started: new Date().toISOString(),
+    rpc: null,
+    port: debugPort,
+    url,
+    profile,
+    log: logPath,
+    child,
+    exited: false,
+    exitCode: null,
+    signal: null,
+    stopped: false,
+    cdp: null,
+  };
+  trackExit(inst);
+  try {
+    await once(child, 'spawn');
+  } catch (err) {
+    throw new Error(`failed to start ${chromePath}: ${err.message}`);
+  }
+  instances.set(id, inst);
+
+  let state;
+  try {
+    const target = await waitForPageTarget(debugPort, inst, CHROME_START_MS);
+    const cdp = new Cdp(target.webSocketDebuggerUrl);
+    inst.cdp = cdp;
+    await cdp.open(CDP_TIMEOUT_MS);
+    attachConsole(cdp, logPath);
+    await cdp.send('Page.enable');
+    await cdp.send('Runtime.enable');
+    await cdp.send('Log.enable');
+    // The page loads hundreds of resources; keep every timing entry so the
+    // engine module's URL is still listed when the control transport looks for it.
+    await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
+      source: 'performance.setResourceTimingBufferSize(100000);',
+    });
+    // Register the load waiter before navigating so the event cannot be missed.
+    const loaded = cdp.waitFor('Page.loadEventFired', timeout * 1000);
+    loaded.catch(() => {}); // awaited below; this only marks an early rejection as handled
+    const nav = await cdp.send('Page.navigate', { url });
+    if (nav.errorText) throw new Error(`navigation failed: ${nav.errorText}`);
+    await loaded;
+    state = await waitForBoot(cdp, timeout);
+  } catch (err) {
+    await stopInstance(inst).catch((stopErr) => log(`cleanup of ${id}:`, stopErr.message));
+    throw new Error(`${err.message} (log: ${logPath})`);
+  }
+  log(`launched ${id} pid=${child.pid} port=${debugPort} state=${state}`);
+  return { id, pid: child.pid, port: debugPort, state };
+}
+
+async function browserScreenshot({ id }) {
+  const inst = getInstance(id);
+  if (inst.kind !== 'browser') throw new Error(`instance ${id} is not a browser instance`);
+  if (inst.exited || !inst.cdp) throw new Error(`instance ${id} is not running`);
+  const res = await inst.cdp.send('Page.captureScreenshot', { format: 'png' });
+  return { content: [{ type: 'image', data: res.data, mimeType: 'image/png' }] };
+}
+
+function browserStopTool(id) {
+  const inst = getInstance(id);
+  if (inst.kind !== 'browser') throw new Error(`instance ${id} is not a browser instance`);
+  return stopInstance(inst);
+}
+
+// ---------------------------------------------------------------------------
+// Game tools
+// ---------------------------------------------------------------------------
+
+const summarize = (snap) => ({
+  status: snap.status,
+  error: snap.error ?? null,
+  log: (snap.log ?? []).slice(-20),
+});
+
+// Sends a director command and polls the snapshot until the run is terminal,
+// or once for a fire-and-forget start when wait is false.
+async function runCommand(inst, script, { wait, timeoutS }) {
+  await callOk(inst, 'moly.director.command', { run: script });
+  const deadline = Date.now() + timeoutS * 1000;
+  for (;;) {
+    const snap = (await callOk(inst, 'moly.director.snapshot')) ?? {};
+    const out = summarize(snap);
+    if (!wait || TERMINAL_STATUS.has(snap.status)) return out;
+    if (Date.now() >= deadline) return { ...out, error: `timed out after ${timeoutS} s`, timedOut: true };
+    await sleep(POLL_MS);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// MCP tools
+// ---------------------------------------------------------------------------
+
+const server = new McpServer({ name: 'moly', version: '0.0.1' });
+
+server.registerTool(
+  'instance_list',
+  { description: 'List instances started by this server: id, kind, pid, started, rpc URL (native) or port/url (browser), running.' },
+  guard('instance_list', async () => json([...instances.values()].map(describe))),
+);
+
+server.registerTool(
+  'native_launch',
+  {
+    description:
+      'Start a native executable (absolute or relative file path, no PATH lookup). stdin is closed; stdout and stderr go to logs/<id>.log. MOLY_CONTROL_PORT is set from rpcPort unless env overrides it.',
+    inputSchema: {
+      exe: z.string().describe('Path to the executable file'),
+      env: z.record(z.string(), z.string()).optional().describe('Environment variables merged over process.env'),
+      args: z.array(z.string()).optional().describe('Command-line arguments'),
+      cwd: z.string().optional().describe('Working directory; must exist'),
+      rpcPort: z.number().int().min(1).max(65535).optional().describe('JSON-RPC port, default 15702'),
+    },
+  },
+  guard('native_launch', async (args) => json(await nativeLaunch(args))),
+);
+
+server.registerTool(
+  'native_stop',
+  {
+    description: 'Kill a native instance and its process tree (taskkill /T /F on Windows) and mark it stopped.',
+    inputSchema: { id: z.string() },
+  },
+  guard('native_stop', async ({ id }) => json(await nativeStopTool(id))),
+);
+
+server.registerTool(
+  'instance_logs',
+  {
+    description: 'Return the last lines of an instance log, optionally only lines containing a substring.',
+    inputSchema: {
+      id: z.string(),
+      tail: z.number().int().min(0).optional().describe('Number of trailing lines, default 200; 0 means all'),
+      grep: z.string().optional().describe('Keep only lines containing this substring'),
+    },
+  },
+  guard('instance_logs', async (args) => instanceLogs(args)),
+);
+
+server.registerTool(
+  'rpc',
+  {
+    description:
+      'Send one JSON-RPC 2.0 request to a native or browser instance. Returns the result, or the error object with isError set. 10 s timeout.',
+    inputSchema: {
+      id: z.string(),
+      method: z.string(),
+      params: z.any().optional(),
+    },
+  },
+  guard('rpc', async ({ id, method, params }) => {
+    const res = await call(getInstance(id), method, params);
+    return res.error !== undefined ? json(res.error, true) : json(res.result);
+  }),
+);
+
+server.registerTool(
+  'browser_launch',
+  {
+    description:
+      'Start Chrome with a fresh profile and remote debugging, open url, and tap #boot-enter when the boot screen is ready. Returns {id, pid, port, state}; state "running" means the boot screen was dismissed, "no-boot" means the page has no boot screen. Console output goes to logs/<id>.log.',
+    inputSchema: {
+      url: z.string().describe('Page to open'),
+      width: z.number().int().min(1).optional().describe('Window width, default 1280'),
+      height: z.number().int().min(1).optional().describe('Window height, default 720'),
+      port: z.number().int().min(1).max(65535).optional().describe('Remote debugging port; picked free if omitted'),
+      chrome: z.string().optional().describe(`Chrome executable (a file path, or a command name found on PATH), default ${DEFAULT_CHROME}`),
+      timeout: z.number().positive().optional().describe('Seconds to wait for the boot screen, default 600'),
+    },
+  },
+  guard('browser_launch', async (args) => json(await browserLaunch(args))),
+);
+
+server.registerTool(
+  'browser_screenshot',
+  {
+    description: 'Capture the current page of a browser instance as a PNG image.',
+    inputSchema: { id: z.string() },
+  },
+  guard('browser_screenshot', async ({ id }) => browserScreenshot({ id })),
+);
+
+server.registerTool(
+  'browser_stop',
+  {
+    description: 'Close the DevTools connection and kill the Chrome process this server started (taskkill /T /F on Windows).',
+    inputSchema: { id: z.string() },
+  },
+  guard('browser_stop', async ({ id }) => json(await browserStopTool(id))),
+);
+
+server.registerTool(
+  'methods',
+  {
+    description: 'List the methods of a game instance: rpc.discover and moly.methods.',
+    inputSchema: { id: z.string() },
+  },
+  guard('methods', async ({ id }) => {
+    const inst = getInstance(id);
+    const discover = await callOk(inst, 'rpc.discover');
+    const moly = await callOk(inst, 'moly.methods');
+    return json({ discover, moly });
+  }),
+);
+
+server.registerTool(
+  'act',
+  {
+    description:
+      'Run one director step on a game instance and wait for it to finish. Returns {status, error, log} with the last 20 log entries. Status failed or a timeout sets isError.',
+    inputSchema: {
+      id: z.string(),
+      step: z.any().describe('One director step (see director_schema)'),
+      timeout: z.number().positive().optional().describe('Seconds to wait, default 60'),
+    },
+  },
+  guard('act', async ({ id, step, timeout = 60 }) => {
+    const out = await runCommand(getInstance(id), { name: 'act', steps: [step] }, { wait: true, timeoutS: timeout });
+    return json(out, out.status === 'failed' || out.timedOut === true);
+  }),
+);
+
+server.registerTool(
+  'run_script',
+  {
+    description:
+      'Run a whole director script ({name, exit?, steps}). With wait true (default) it polls until done, failed or stopped and returns {status, error, log}; with wait false it returns the first snapshot.',
+    inputSchema: {
+      id: z.string(),
+      script: z.any().describe('Director script: {name, exit?, steps: [...]}'),
+      wait: z.boolean().optional().describe('Poll until the run is terminal, default true'),
+      timeout: z.number().positive().optional().describe('Seconds to wait, default 300'),
+    },
+  },
+  guard('run_script', async ({ id, script, wait = true, timeout = 300 }) => {
+    const out = await runCommand(getInstance(id), script, { wait, timeoutS: timeout });
+    return json(out, out.status === 'failed' || out.timedOut === true);
+  }),
+);
+
+server.registerTool(
+  'check',
+  {
+    description: 'Evaluate one director condition on a game instance. Returns {holds, read}.',
+    inputSchema: {
+      id: z.string(),
+      cond: z.any().describe('Condition (see director_schema)'),
+    },
+  },
+  guard('check', async ({ id, cond }) => json(await callOk(getInstance(id), 'moly.director.check', { cond }))),
+);
+
+server.registerTool(
+  'capture',
+  {
+    description: 'Capture the game frame as a PNG image. Polls until the image is ready; an error answer from the game is a tool error.',
+    inputSchema: {
+      id: z.string(),
+      timeout: z.number().positive().optional().describe('Seconds to wait, default 10'),
+    },
+  },
+  guard('capture', async ({ id, timeout = 10 }) => {
+    const inst = getInstance(id);
+    const { id: captureId } = (await callOk(inst, 'moly.capture')) ?? {};
+    if (captureId === undefined) throw new Error('moly.capture returned no id');
+    const deadline = Date.now() + timeout * 1000;
+    for (;;) {
+      const take = await callOk(inst, 'moly.capture.take', { id: captureId });
+      if (take === null || take === undefined) {
+        if (Date.now() >= deadline) throw new Error(`capture ${captureId}: no image within ${timeout} s`);
+        await sleep(CAPTURE_POLL_MS);
+        continue;
+      }
+      if (take.error !== undefined) {
+        const detail = typeof take.error === 'string' ? take.error : take.error.message ?? JSON.stringify(take.error);
+        throw new Error(`capture ${captureId}: ${detail}`);
+      }
+      if (typeof take.png !== 'string') throw new Error(`capture ${captureId}: reply has no png`);
+      return {
+        content: [
+          { type: 'image', data: take.png, mimeType: 'image/png' },
+          { type: 'text', text: JSON.stringify({ id: captureId, width: take.width, height: take.height }) },
+        ],
+      };
+    }
+  }),
+);
+
+server.registerTool(
+  'director_schema',
+  {
+    description: 'Return the JSON Schema of director steps and conditions (keys: common, steps, conditions, definitions).',
+    inputSchema: { id: z.string() },
+  },
+  guard('director_schema', async ({ id }) => json(await callOk(getInstance(id), 'moly.director.schema'))),
+);
+
+// Kill every child this server still owns when it exits, native or browser.
+// Synchronous on purpose: this runs from the 'exit' event.
+function killOwnedChildrenSync() {
+  for (const inst of instances.values()) {
+    if (inst.exited || !inst.child) continue;
+    if (process.platform === 'win32') {
+      spawnSync('taskkill', ['/PID', String(inst.pid), '/T', '/F'], { stdio: 'ignore' });
+    } else {
+      inst.child.kill('SIGKILL');
+    }
+  }
+}
+process.on('exit', killOwnedChildrenSync);
+process.on('SIGINT', () => process.exit(0));
+process.on('SIGTERM', () => process.exit(0));
+// The client closing stdin means the session is over.
+process.stdin.on('end', () => process.exit(0));
+
+await server.connect(new StdioServerTransport());
+log(`ready; logs in ${LOG_DIR}`);
