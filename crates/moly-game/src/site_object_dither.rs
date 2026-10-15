@@ -25,13 +25,22 @@
 //! # How the product reproduces it
 //!
 //! Views that hold the same state share their material copies: a view's
-//! primitives take their base material with the view's keyword and alpha,
-//! one asset for each distinct (base, keyword, alpha), released once no view
-//! holds that state. A base that already holds the state is kept. The Tree
-//! program reads the keyword (`SITE_TREE_DITHER`) and the alpha; the
-//! FieldObject program dithers on the alpha alone. A view over a primitive
-//! of another family is refused by name once; that primitive keeps its
-//! material.
+//! primitives take their base material with the view's keyword and alpha
+//! level, one asset for each distinct (base, keyword, level), released once
+//! no view holds that state. A base that already holds the state is kept. The
+//! Tree program reads the keyword (`SITE_TREE_DITHER`) and the alpha; the
+//! FieldObject program dithers on the alpha alone.
+//!
+//! Both programs use the alpha only in the Bayer test: a fragment is
+//! discarded when `_DitherAlpha` minus its table threshold is below zero, and
+//! the sixteen thresholds are fixed. Alphas that pass the same thresholds
+//! (the same level, see [`dither_level`]) draw the same pixels, so a view's
+//! state is its keyword and level, and the copy holds an alpha inside that
+//! level away from its edges. A moving camera then changes a view's material
+//! when its alpha crosses a threshold, not on every frame.
+//!
+//! A view over a primitive of another family is refused by name once; that
+//! primitive keeps its material.
 //!
 //! # Not in this host (named)
 //!
@@ -142,6 +151,28 @@ pub(crate) struct SiteObjectView {
 #[derive(Component)]
 pub(crate) struct SiteObjectViewsAttached;
 
+/// The `bayer_value` threshold of table entry `k` (`k` · 0.0618750006 +
+/// 0.00999999978), the value the site programs subtract from `_DitherAlpha`.
+fn threshold(k: u32) -> f32 {
+    k as f32 * 0.061_875_000_6 + 0.009_999_999_78
+}
+
+/// How many of the sixteen thresholds `alpha` passes (`alpha` − threshold is
+/// not below zero). Alphas of one level keep and discard the same fragments.
+fn dither_level(alpha: f32) -> u32 {
+    (0..16).filter(|&k| alpha - threshold(k) >= 0.0).count() as u32
+}
+
+/// The alpha a copy holds for `level`: 0 below the first threshold, 1 above
+/// the last, otherwise midway between the two thresholds that bound it.
+fn level_alpha(level: u32) -> f32 {
+    match level {
+        0 => 0.0,
+        16.. => 1.0,
+        level => 0.5 * (threshold(level - 1) + threshold(level)),
+    }
+}
+
 /// The material of `base` holding the view state, or `None` when `base`
 /// already holds it. `Err` names a family without the dither axes.
 fn with_state(base: &SiteMaterial, active: bool, alpha: f32) -> Result<Option<SiteMaterial>, SiteFamily> {
@@ -156,7 +187,7 @@ fn with_state(base: &SiteMaterial, active: bool, alpha: f32) -> Result<Option<Si
             Ok(Some(material))
         }
         SiteFamily::FieldObject => {
-            if base.params.dither_alpha.to_bits() == alpha.to_bits() {
+            if dither_level(base.params.dither_alpha) == dither_level(alpha) {
                 return Ok(None);
             }
             let mut material = base.clone();
@@ -285,15 +316,16 @@ fn update_dither(
         if active {
             if alpha == config.far_alpha { far += 1 } else { ramp += 1 }
         }
-        let state = (active, alpha.to_bits());
+        let level = dither_level(alpha);
+        let state = (active, level);
         if view.written == Some(state) {
             for (_, base) in &view.primitives {
-                used.insert((base.id(), active, alpha.to_bits()));
+                used.insert((base.id(), active, level));
             }
             continue;
         }
         for (entity, base) in &view.primitives {
-            let key = (base.id(), active, alpha.to_bits());
+            let key = (base.id(), active, level);
             used.insert(key);
             let target = if let Some(copy) = copies.get(&key) {
                 copy.clone()
@@ -301,7 +333,7 @@ fn update_dither(
                 let Some(base_material) = materials.get(base) else {
                     continue;
                 };
-                match with_state(base_material, active, alpha) {
+                match with_state(base_material, active, level_alpha(level)) {
                     Ok(None) => base.clone(),
                     Ok(Some(material)) => {
                         let copy = materials.add(material);
