@@ -49,6 +49,8 @@ pub(crate) enum Node {
     WalkTo { to: Target, within: f32 },
     Interact { target: Target, button: ButtonType, stop: f32 },
     Tap { at: [f32; 2], fraction: bool },
+    /// A tap at the centre of a node of a shown UI view.
+    UiTap { view: String, path: String },
     /// The joystick held at a stick ratio (x right, y up, within the unit
     /// circle) for `secs`.
     Stick { stick: [f32; 2], secs: f32 },
@@ -149,11 +151,16 @@ pub(crate) enum Cond {
     PhenomenonIs(i32),
     /// The character's action state (`Idle`, `Walk`, `Rest`, `Talk`, ...).
     NpcAction { unit: u32, is: String },
+    /// The character is on this site with its AI (a roster character, not a
+    /// cut-scene stand-in).
+    NpcHere(u32),
+    /// The node at `path` of the UI view `view` is shown and active.
+    UiShown { view: String, path: String },
 }
 
 const ACTIONS: &[&str] = &[
     "wait", "wait_until", "assert", "log", "where", "capture", "parallel", "repeat",
-    "player.walk_to", "player.interact", "player.stick", "player.release", "player.talk_to", "tap",
+    "player.walk_to", "player.interact", "player.stick", "player.release", "player.talk_to", "tap", "ui.tap",
     "npc.take", "npc.walk_to", "npc.face", "npc.emote", "npc.use", "npc.tweet", "npc.talk", "npc.release",
     "camera.drag", "camera.zoom", "server.edit", "weather.set", "site.switch", "site.enter_room", "site.go_home",
 ];
@@ -272,6 +279,11 @@ fn step(value: &Value, at: &str) -> Result<Vec<Step>, String> {
                 _ => return Err(format!("{at}: give exactly one of at (logical pixels) or at_fraction (0..1 of the window)")),
             };
             vec![one(Node::Tap { at: pair(at_value, &format!("{at}.at"))?, fraction }, None)]
+        }
+        "ui.tap" => {
+            let view = fields.req_str("view")?.to_owned();
+            let path = fields.req_str("path")?.to_owned();
+            vec![one(Node::UiTap { view, path }, None)]
         }
         "npc.take" => vec![one(Node::NpcTake { unit: fields.req_u32("unit")? }, None)],
         "npc.walk_to" => vec![one(
@@ -429,6 +441,18 @@ fn cond(value: &Value, at: &str) -> Result<Cond, String> {
             fields.finish()?;
             near
         }
+        "ui_shown" => {
+            let mut fields = Fields::new(inner, &at)?;
+            let shown = Cond::UiShown { view: fields.req_str("view")?.to_owned(), path: fields.req_str("path")?.to_owned() };
+            fields.finish()?;
+            shown
+        }
+        "npc_here" => Cond::NpcHere(
+            inner
+                .as_u64()
+                .and_then(|unit| u32::try_from(unit).ok())
+                .ok_or_else(|| format!("{at}: expected a character unit"))?,
+        ),
         "npc_action" => {
             let mut fields = Fields::new(inner, &at)?;
             let unit = fields.req_u32("unit")?;
@@ -698,11 +722,26 @@ mod tests {
                     [{ "do": "npc.walk_to", "unit": 3, "to": { "npc": 4, "offset": [0.5, 0.0] } }]
                 ] },
                 { "do": "repeat", "times": 2, "steps": [{ "do": "wait", "secs": 0.5 }] },
-                { "do": "wait_until", "until": { "all": ["entry_done", { "not": "site_moving" }] } }
+                { "do": "wait_until", "until": { "all": ["entry_done", { "not": "site_moving" }] } },
+                { "do": "wait_until", "until": { "all": [{ "npc_here": 13 }, { "npc_here": 14 }] } }
             ]
         }))
         .unwrap();
         assert_eq!(script.name, "two walkers");
+        let Node::WaitUntil { until: Cond::All(here) } = &script.steps[3].node else { panic!() };
+        assert!(matches!(here.as_slice(), [Cond::NpcHere(13), Cond::NpcHere(14)]));
+        let error = parse(&json!({ "steps": [{ "do": "wait_until", "until": { "npc_here": "x" } }] })).unwrap_err();
+        assert!(error.contains("expected a character unit"), "{error}");
+        let ui = parse(&json!({ "steps": [
+            { "do": "wait_until", "until": { "ui_shown": { "view": "ShellHome", "path": "MenuButton" } } },
+            { "do": "ui.tap", "view": "ShellHome", "path": "MenuButton" }
+        ] }))
+        .unwrap();
+        assert!(matches!(&ui.steps[0].node, Node::WaitUntil { until: Cond::UiShown { view, path } }
+            if view == "ShellHome" && path == "MenuButton"));
+        assert!(matches!(&ui.steps[1].node, Node::UiTap { view, .. } if view == "ShellHome"));
+        let error = parse(&json!({ "steps": [{ "do": "ui.tap", "view": "ShellHome" }] })).unwrap_err();
+        assert!(error.contains("path"), "{error}");
         let Node::Parallel { tracks, join } = &script.steps[0].node else { panic!() };
         assert_eq!((tracks.len(), *join), (2, Join::Any));
         let Node::NpcWalkTo { to, .. } = &tracks[1][0].node else { panic!() };

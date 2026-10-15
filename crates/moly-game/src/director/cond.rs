@@ -197,6 +197,14 @@ pub(crate) fn eval(world: &mut World, cond: &Cond) -> (bool, String) {
             }
             Err(error) => (false, error),
         },
+        Cond::UiShown { view, path } => match super::hand::ui_point(world, view, path) {
+            Ok(at) => (true, format!("{view} {path} shown at ({:.0}, {:.0})", at.x, at.y)),
+            Err(error) => (false, error),
+        },
+        Cond::NpcHere(unit) => match npc(world, *unit) {
+            Ok(_) => (true, format!("character {unit} is here")),
+            Err(error) => (false, error),
+        },
         Cond::PhenomenonIs(want) => {
             let current = world
                 .get_resource::<crate::weather::CurrentPhenomenonId>()

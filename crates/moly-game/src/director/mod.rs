@@ -19,7 +19,10 @@
 //! `player.talk_to {unit}` is an interaction on the character's Talk button;
 //! `player.stick {stick: [x, y], secs}` holds the stick at a ratio (x right,
 //! y up) like a thumb; `player.release` lifts the joystick finger; `tap {at |
-//! at_fraction}` taps the screen. Every input gate of the product applies to
+//! at_fraction}` taps the screen; `ui.tap {view, path}` taps the centre of a
+//! node of a shown UI view (`view` its document key, `path` a unique node
+//! path suffix or `@<id>`; a view that is not shown is refused with the
+//! views that are). Every input gate of the product applies to
 //! these.
 //!
 //! Characters: `npc.take {unit}` cancels the character's objective and holds
@@ -66,7 +69,9 @@
 //! `"talk_active"`, `"camera_settled"` (the entry shot has handed over and
 //! no camera transition is in flight), or `{site_is}`, `{site_kind: home|room|harvest|delivery}`,
 //! `{button_head}`, `{button_stacked}`, `{phenomenon_is}`, `{player_near: {to,
-//! within}}`, `{npc_near: {unit, to, within}}`, `{npc_action: {unit, is}}`
+//! within}}`, `{npc_near: {unit, to, within}}`, `{npc_here: unit}` (the
+//! character is on this site), `{ui_shown: {view, path}}` (the node is
+//! shown and active), `{npc_action: {unit, is}}`
 //! (an action state such as `Walk` or `Talk`), `{all: [..]}`, `{any: [..]}`,
 //! `{not: ..}`.
 //!

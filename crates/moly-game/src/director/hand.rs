@@ -132,6 +132,47 @@ pub(crate) fn window_size(world: &mut World) -> Option<Vec2> {
     window(world).map(|(_, window)| Vec2::new(window.width(), window.height()))
 }
 
+/// The centre of the node at `path` on the shown UI view `view` (its
+/// document key), in logical pixels with a top-left origin. Several views
+/// can share a document (a host's screen and a layout read for geometry
+/// only); the first whose node is active is taken. A view that is not shown
+/// is named with the views that are; a node active on none is refused.
+pub(crate) fn ui_point(world: &mut World, view: &str, path: &str) -> Result<Vec2, String> {
+    let (_, window) = window(world).ok_or("no primary window")?;
+    let root = *world.get_resource::<crate::canvas::RootCanvas>().ok_or("the root canvas is not set up")?;
+    let (scale, canvas) = (root.scale(&window), root.size(&window));
+    let mut views = world.query::<(&crate::ui_layout::UiPrefabView, Option<&InheritedVisibility>)>();
+    let layouts = world.get_resource::<crate::ui_layout::UiLayouts>().ok_or("the UI layouts are not loaded")?;
+    let shown: Vec<&crate::ui_layout::UiPrefabView> = views
+        .iter(world)
+        .filter(|(_, visibility)| visibility.is_none_or(|visibility| visibility.get()))
+        .map(|(view, _)| view)
+        .collect();
+    let candidates: Vec<_> = shown.iter().filter(|candidate| candidate.key == view).collect();
+    if candidates.is_empty() {
+        let mut keys: Vec<&str> = shown.iter().map(|candidate| candidate.key).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        return Err(format!("no view {view} is shown (shown: {})", keys.join(", ")));
+    }
+    let (mut found, mut refused) = (None, None);
+    for candidate in candidates {
+        match candidate.try_rect(layouts, path, canvas) {
+            Ok(rect) if rect.active => {
+                found = Some(rect);
+                break;
+            }
+            Ok(_) => {}
+            Err(reason) => refused = refused.or(Some(reason)),
+        }
+    }
+    let Some(rect) = found else {
+        return Err(refused.unwrap_or_else(|| format!("{view} {path} is not active")));
+    };
+    let centre = rect.center();
+    Ok(Vec2::new(centre.x * scale + window.width() / 2.0, window.height() / 2.0 - centre.y * scale))
+}
+
 /// The screen position of an action button on its laid-out view.
 pub(crate) fn button_position(
     world: &mut World,

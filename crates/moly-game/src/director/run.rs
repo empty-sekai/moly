@@ -336,6 +336,14 @@ fn start(world: &mut World, shared: &mut Shared, step: Step, path: String) -> St
                 .map_err(str::to_owned);
             return ended(path, result, optional);
         }
+        Node::UiTap { view, path: node } => {
+            let result = hand::ui_point(world, view, node).and_then(|position| {
+                hand::tap(world, position)
+                    .map(|()| format!("tapped {view} {node} at ({:.0}, {:.0})", position.x, position.y))
+                    .map_err(str::to_owned)
+            });
+            return ended(path, result, optional);
+        }
         Node::NpcTake { unit } => {
             let result = super::npc::take(world, *unit).map(|entity| {
                 if !shared.owned.iter().any(|(_, owned)| *owned == entity) {

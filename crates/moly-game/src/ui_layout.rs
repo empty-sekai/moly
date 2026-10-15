@@ -1771,6 +1771,17 @@ impl UiPrefabView {
         self.resolved(layouts, canvas).map(|r| r[index].clone())
     }
 
+    /// The solved rect of the node at `path` (a unique path suffix or
+    /// `@<id>`), or why there is none: no document, a path that matches no
+    /// node or several, or a view not laid out yet.
+    pub(crate) fn try_rect(&self, layouts: &UiLayouts, path: &str, canvas: Vec2) -> Result<UiRect, String> {
+        let doc = layouts.document(self.key).ok_or_else(|| format!("view {} has no document", self.key))?;
+        let index = doc.find(path)?;
+        self.resolved(layouts, canvas)
+            .and_then(|rects| rects.get(index).cloned())
+            .ok_or_else(|| format!("view {} is not laid out yet", self.key))
+    }
+
     /// The drawn rects of this view (host overrides and layout controllers
     /// applied), one per document node.
     #[cfg(test)]
