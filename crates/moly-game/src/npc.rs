@@ -1923,7 +1923,7 @@ fn start_waypoint(
     *slot = NpcPathWalkSlot::from_corners(corners);
     route.navigation_destination = Some(target);
     state.next_corner = 0;
-    info!(
+    debug!(
         "[npc unit={}] 路点 {}/{} {:?} 出发 → ({:.2},{:.2},{:.2})",
         unit.0,
         route.next + 1,
@@ -2520,7 +2520,7 @@ pub fn advance(
         let mut agent_rotation: Option<Quat> = None;
         if let Some(distance) = leg_arrival {
             if route.stops.get(route.next).is_some_and(|point| point.kind == WaypointKind::CheckPoint) {
-                info!("[npc unit={}] t={now:.1} 路点 {}/{} CheckPoint 通过，距 {distance:.3}m",
+                debug!("[npc unit={}] t={now:.1} 路点 {}/{} CheckPoint 通过，距 {distance:.3}m",
                     unit.0, route.next + 1, route.stops.len());
                 slot.0 = NpcPathWalkSlot::from_corners(Vec::new());
                 state.0.next_corner = 0;
@@ -2581,7 +2581,7 @@ pub fn advance(
                         let step = (to - from + 540.0).rem_euclid(360.0) - 180.0;
                         if step.abs() >= 0.5 {
                             let v = route.crowd.velocity;
-                            info!(
+                            debug!(
                                 "[npc-rotation] unit={} t={now:.2} yaw {from:.1} -> {to:.1} (step {step:+.2} deg, dt {dt:.3}, speed {:.3})",
                                 unit.0,
                                 (v[0] * v[0] + v[2] * v[2]).sqrt()

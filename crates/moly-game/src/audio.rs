@@ -3684,7 +3684,7 @@ pub(crate) fn advance_se(
         }
         channel.live.push(entity);
         channel.played += 1;
-        info!(
+        debug!(
             "SE 起播：{}（{} · {} {} 轨 · {} · 平铺 2D）",
             label(cue),
             request.source,

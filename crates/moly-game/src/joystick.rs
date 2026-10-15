@@ -336,7 +336,7 @@ pub(crate) fn advance(
                     }
                     if (state.direction - *last_logged).length() > 0.2 {
                         *last_logged = state.direction;
-                        info!(
+                        debug!(
                             "[joystick] 方向 ({:.2},{:.2}) → 世界向量 ({:.2},{:.2},{:.2})",
                             state.direction.x,
                             state.direction.y,

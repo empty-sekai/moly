@@ -600,7 +600,7 @@ pub(crate) fn advance(
                 Boundary::Snapped
             };
             if *boundary != next_boundary {
-                info!(
+                debug!(
                     "[player] 导航线段裁决 {:?}：请求 ({:.2},{:.2}) → ({:.2},{:.2})，代数 {}",
                     next_boundary,
                     requested.x,
@@ -686,7 +686,7 @@ pub fn tune_animation_speed(
         // 速率账（变更时一行，本系统单玩家）：速率律的现算观测面——
         // 站点档乘数与上夹是否生效从这行读（斜向输入的数是它给的）。
         if speed != *last_speed {
-            info!("[player] 动画速率 -> {:.3}（乘数 {:.2}）", speed, anim_mul);
+            debug!("[player] 动画速率 -> {:.3}（乘数 {:.2}）", speed, anim_mul);
             *last_speed = speed;
         }
     }
@@ -722,7 +722,7 @@ pub fn report(
             Some(face) if face.on_face(p.x, p.z) => "内",
             Some(_) => "外",
         };
-        info!(
+        debug!(
             "[player] t={:.1} pos=({:.3},{:.3},{:.3}) yaw={:.1} phase={} dash={} 输入=({:.2},{:.2}) 速度档 {:.3} m/s 界={}",
             time.elapsed_secs(),
             p.x,

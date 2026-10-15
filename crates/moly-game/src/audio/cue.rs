@@ -287,7 +287,7 @@ fn start_due_tracks(
             ChildOf(entity),
         ));
         if playback.plan.work_key.is_some() {
-            info!(
+            debug!(
                 "[audio-seq] 序列轨起声：{} · cue={} round={} track={} due={due:.6} t={now:.6} 音量 {linear:.3}{}",
                 playback.channel,
                 label(&playback.cue),
@@ -362,7 +362,7 @@ fn start_round(
                 area,
                 rngs.get(playback.rng),
             );
-            info!(
+            debug!(
                 "[audio-seq] 序列轮起：{} · cue={} @ {} type={} round={} pos_before={} pos={} slots={:?} tracks={:?} t={:.6}",
                 playback.channel,
                 label(&playback.cue),
@@ -442,7 +442,7 @@ pub(crate) fn advance_cue_playbacks(
             }
             let empty_round = playback.voices.is_empty();
             if playback.plan.work_key.is_some() {
-                info!(
+                debug!(
                     "[audio-seq] 序列轮终：{} · cue={} round={} t={now:.6} repeat={}",
                     playback.channel,
                     label(&playback.cue),

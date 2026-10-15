@@ -764,7 +764,7 @@ pub fn drive(
         let from = old
             .map(|kind| word(kind))
             .unwrap_or_else(|| "未起播".to_owned());
-        info!(
+        debug!(
             "[npc unit={}] 动画段 {from} -> {}（{}）",
             unit.0,
             word(kind),

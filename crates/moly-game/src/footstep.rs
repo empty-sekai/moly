@@ -834,7 +834,7 @@ fn footstep(world: &mut World, event: FootEvent) {
             None => error!("[footstep] no SE request queue: cue {cue} not played"),
         }
     }
-    info!(
+    debug!(
         "{head}: {what}; cue {}; water {water}",
         cue.as_deref().unwrap_or("none")
     );
