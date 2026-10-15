@@ -29,7 +29,10 @@
 //! `PlayGateCharacterAppearTimelineInternal` (`se_gate_chime`, 0.2 s, the
 //! visitor's forced fixture timeline on the gate: `tl_visitgate_w_001` for
 //! the first, `tl_visitgate_w_002` for the others, of the literal package
-//! `mdl_non0006_gate_lon1`), 1000 ms apart; `HideEffect(...).Forget()`;
+//! `mdl_non0006_gate_lon1`; it returns once no NPC fixture timeline lists
+//! the visitor among its presenters), each awaited and followed by a
+//! 1000 ms delay, so one visitor's timeline plays on the gate at a time;
+//! `HideEffect(...).Forget()`;
 //! `PlayCloseGateAsync(tl_visitgate_w_003)` with no NPC), then `FadeInLayer`.
 //!
 //! `FixtureController.HideEffect` walks the active particle systems of the
@@ -431,7 +434,8 @@ struct Change {
 
 struct Appearance {
     units: Vec<u32>,
-    /// The loop's clock: the next visitor starts at this time.
+    /// The loop's clock: the next visitor starts at this time. It is
+    /// infinite while a visitor's part plays and set 1000 ms after its end.
     next_at: f64,
     visitors: Vec<Visitor>,
     stay: Option<crate::fixture_timeline_particles::ParticlePlayBinding>,
@@ -1623,7 +1627,8 @@ fn appearance_step(world: &mut World, appearance: &mut Appearance) -> bool {
             });
         }
     }
-    // The loop: each visitor starts 1000 ms after the previous one.
+    // The loop: each visitor starts 1000 ms after the previous one's part
+    // ends.
     let mut index = 0;
     while index < appearance.visitors.len() {
         let visitor = &mut appearance.visitors[index];
@@ -1632,7 +1637,7 @@ fn appearance_step(world: &mut World, appearance: &mut Appearance) -> bool {
                 break;
             }
             visitor.started = appearance.next_at;
-            appearance.next_at += VISITOR_INTERVAL;
+            appearance.next_at = f64::INFINITY;
             if index > 0 {
                 warn!("[gate] TryCancelIfFixtureActionGate() before unit {}: FirstOrDefault(the NPC fixture timeline list, its controller's FixtureUID == GetGateFixture().UId), then TryCancelCurrentObjective on its presenter and, on true, ForceUpdateObjective: not routed: the NPC decision ladder has no objective 12 route (next NPC lane), and no NPC-side read gives the NPC fixture timelines on the gate", visitor.unit);
             }
@@ -1647,6 +1652,7 @@ fn appearance_step(world: &mut World, appearance: &mut Appearance) -> bool {
     for index in 0..appearance.visitors.len() {
         let mut visitor =
             std::mem::replace(&mut appearance.visitors[index], Visitor::placeholder());
+        let was_done = visitor.done;
         visitor_step(
             world,
             gate,
@@ -1655,6 +1661,9 @@ fn appearance_step(world: &mut World, appearance: &mut Appearance) -> bool {
             &mut appearance.generation,
             earlier_started,
         );
+        if visitor.done && !was_done {
+            appearance.next_at = t + VISITOR_INTERVAL;
+        }
         earlier_started = visitor.token.is_some() || visitor.done;
         appearance.visitors[index] = visitor;
     }
