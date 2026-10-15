@@ -127,6 +127,11 @@ struct SiteExtension {
 
 @group(3) @binding(7) var<uniform> site_extension: SiteExtension;
 
+// The clip mask (character_silhouette.rs): per pixel, 1 where the source
+// stencil test of the wall (red) or the door outside (green) passes when that
+// attribute's queue is drawn.
+@group(3) @binding(8) var clip_mask: texture_2d<f32>;
+
 fn srgb_format_encode(linear: vec3<f32>) -> vec3<f32> {
     let x = max(linear, vec3<f32>(0.0));
     let hi = 1.055 * pow(x, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
@@ -361,6 +366,16 @@ fn apply_fog(rgb: vec3<f32>, world_y: f32, fog_ramp: f32) -> vec3<f32> {
 
 @fragment
 fn fragment(in: RoomVertexOutput, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+#ifdef ROOM_CLIP_RED
+    if textureLoad(clip_mask, vec2<i32>(in.position.xy), 0).r < 0.5 {
+        discard;
+    }
+#endif
+#ifdef ROOM_CLIP_GREEN
+    if textureLoad(clip_mask, vec2<i32>(in.position.xy), 0).g < 0.5 {
+        discard;
+    }
+#endif
     let normal = normalize(in.world_normal);
     let view = view_direction(in.world_position.xyz);
 #ifdef ROOM_OBJECT

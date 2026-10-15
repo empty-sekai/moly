@@ -37,6 +37,22 @@
 //! stencil mesh is shown; with no writer of 1 the stencil holds no 1, and
 //! the pass is known to draw nothing.
 //!
+//! # The room shell's stencil tests
+//!
+//! The same stencil decides what a room shows through its door. The wall's
+//! row tests Equal against the table's 0 at its queue, so the door-wall
+//! clip, drawn before it with Always and Replace 1, cuts the doorway out of
+//! the wall; the door outside's row tests Equal 1 at a later queue, so it is
+//! drawn only inside that cut. The replay therefore runs before the main
+//! opaque pass, and it stops at each of these two rows' queues: a draw over
+//! the whole target with that row's stencil test writes 1 into the row's
+//! channel of the clip mask ([`StencilClipMask`]; red the wall, green the
+//! door outside) where the test passes on the stencil the draws below that
+//! queue left. The room shell programs of those two attributes keep a pixel
+//! only where their channel holds 1. Without a replay the mask holds each
+//! test's result on a stencil of 0, the stencil no draw has written; without
+//! the graphics configuration it holds 1 in both channels.
+//!
 //! Draws replayed: the room door's parts (by the attribute the door binds on
 //! them, [`SourceStencilAttribute`]), the room shell (floor, walls, entrance),
 //! the fixtures with the fixture material, the player avatar and the NPCs.
@@ -57,6 +73,11 @@
 //! - The source's silhouette writes the avatar's depth into the camera depth;
 //!   here the camera depth is only read.
 //! - Face morphs are not applied to the replayed meshes.
+//! - In the main pass only the wall and door-outside programs apply their
+//!   stencil test; the other programs whose rows test the stencil (the
+//!   floor and ground lookups, window clips, fixtures) draw without it.
+//! - The clip mask follows the first active 3D camera's target; a view of
+//!   another size gets no replay that frame and is counted.
 //! - The source's pipeline renders MySekai single-sample (its asset's MSAA
 //!   quality is Disabled) and the engine's 3D view depth is one format, so a
 //!   multisampled or non-Depth32 3D view has no source counterpart and stops
@@ -71,6 +92,7 @@ use std::num::NonZeroU64;
 use std::sync::Mutex;
 
 use bevy::asset::uuid::Uuid;
+use bevy::asset::RenderAssetUsages;
 use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
 use bevy::core_pipeline::core_3d::CORE_3D_DEPTH_FORMAT;
 use bevy::diagnostic::FrameCount;
@@ -81,6 +103,7 @@ use bevy::prelude::*;
 use bevy::render::camera::ExtractedCamera;
 use bevy::render::mesh::allocator::MeshAllocator;
 use bevy::render::mesh::{RenderMesh, RenderMeshBufferInfo};
+use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_graph::{
     NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, RenderSubGraph, ViewNode,
@@ -89,7 +112,7 @@ use bevy::render::render_graph::{
 use bevy::render::render_resource::binding_types::uniform_buffer_sized;
 use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
-use bevy::render::texture::{CachedTexture, TextureCache};
+use bevy::render::texture::{CachedTexture, GpuImage, TextureCache};
 use bevy::render::view::{ExtractedView, ViewDepthTexture, ViewTarget};
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems};
 use moly_assets::json::JsonAsset;
@@ -136,6 +159,125 @@ mod attribute {
     pub const GROUND_OTHER: u8 = 16;
     pub const RUG_OPAQUE: u8 = 28;
     pub const RUG_ALPHA_BLENDED: u8 = 29;
+}
+
+/// A room shell attribute whose stencil test the main pass applies through
+/// the clip mask.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum StencilClip {
+    Wall,
+    DoorOutside,
+}
+
+impl StencilClip {
+    const ALL: [Self; 2] = [Self::Wall, Self::DoorOutside];
+
+    /// The clip of an object-program material, by its usage's attribute.
+    pub(crate) fn of_object_usage(usage: u32) -> Option<Self> {
+        match object_usage_attribute(usage)? {
+            attribute::WALL => Some(Self::Wall),
+            attribute::DOOR_OUTSIDE => Some(Self::DoorOutside),
+            _ => None,
+        }
+    }
+
+    fn attribute(self) -> u8 {
+        match self {
+            Self::Wall => attribute::WALL,
+            Self::DoorOutside => attribute::DOOR_OUTSIDE,
+        }
+    }
+
+    /// The mask channel: red the wall, green the door outside.
+    fn channel(self) -> usize {
+        match self {
+            Self::Wall => 0,
+            Self::DoorOutside => 1,
+        }
+    }
+
+    fn write_mask(self) -> ColorWrites {
+        match self {
+            Self::Wall => ColorWrites::RED,
+            Self::DoorOutside => ColorWrites::GREEN,
+        }
+    }
+
+    /// The room shell program's shader def that reads the channel.
+    pub(crate) fn shader_def(self) -> &'static str {
+        match self {
+            Self::Wall => "ROOM_CLIP_RED",
+            Self::DoorOutside => "ROOM_CLIP_GREEN",
+        }
+    }
+}
+
+const CLIP_MASK_FORMAT: TextureFormat = TextureFormat::Rg8Unorm;
+
+/// The clip mask's texture, at the size of the 3D camera's target.
+#[derive(Resource, Clone, ExtractResource)]
+pub(crate) struct StencilClipMask {
+    pub image: Handle<Image>,
+    size: UVec2,
+}
+
+impl StencilClipMask {
+    /// Whether a prepared texture has the size the main world gave the mask.
+    pub(crate) fn fits(&self, size: Extent3d) -> bool {
+        size.width == self.size.x && size.height == self.size.y
+    }
+}
+
+fn extent(size: UVec2) -> Extent3d {
+    Extent3d {
+        width: size.x,
+        height: size.y,
+        depth_or_array_layers: 1,
+    }
+}
+
+fn init_clip_mask(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+    let size = UVec2::ONE;
+    let mut image = Image::new_uninit(
+        extent(size),
+        TextureDimension::D2,
+        CLIP_MASK_FORMAT,
+        RenderAssetUsages::default(),
+    );
+    image.texture_descriptor.label = Some("stencil_clip_mask");
+    image.texture_descriptor.usage =
+        TextureUsages::TEXTURE_BINDING | TextureUsages::RENDER_ATTACHMENT;
+    commands.insert_resource(StencilClipMask {
+        image: images.add(image),
+        size,
+    });
+}
+
+/// Sizes the mask to the first active 3D camera's target. The room shell
+/// materials' bind groups hold the mask's view, so every one is marked
+/// modified and rebuilt with the new texture.
+fn size_clip_mask(
+    mut mask: ResMut<StencilClipMask>,
+    cameras: Query<&Camera, With<Camera3d>>,
+    mut images: ResMut<Assets<Image>>,
+    mut shells: ResMut<Assets<RoomShellMaterial>>,
+) {
+    let Some(size) = cameras
+        .iter()
+        .filter(|camera| camera.is_active)
+        .find_map(|camera| camera.physical_target_size())
+    else {
+        return;
+    };
+    if size == mask.size || size.min_element() == 0 {
+        return;
+    }
+    let Some(image) = images.get_mut(&mask.image) else {
+        return;
+    };
+    image.resize(extent(size));
+    mask.size = size;
+    for _ in shells.iter_mut() {}
 }
 
 /// Opaque queues end here; above it a queue is transparent.
@@ -214,6 +356,21 @@ fn stencil_compare(value: u64) -> Result<CompareFunction, String> {
         8 => CompareFunction::Always,
         other => return Err(format!("stencil comparison {other}")),
     })
+}
+
+/// Whether a stencil test passes on a buffer value (the reference is
+/// compared against the value).
+fn stencil_passes(compare: CompareFunction, reference: u32, value: u32) -> bool {
+    match compare {
+        CompareFunction::Never => false,
+        CompareFunction::Less => reference < value,
+        CompareFunction::Equal => reference == value,
+        CompareFunction::LessEqual => reference <= value,
+        CompareFunction::Greater => reference > value,
+        CompareFunction::NotEqual => reference != value,
+        CompareFunction::GreaterEqual => reference >= value,
+        CompareFunction::Always => true,
+    }
 }
 
 /// Unity's CompareFunction as a depth test in the product's reversed depth
@@ -516,6 +673,18 @@ struct SilhouetteDraw {
     pipeline: CachedRenderPipelineId,
 }
 
+/// One clip's mask write: after the replayed draws below its queue, its
+/// row's stencil test over the whole target, writing 1 into its channel
+/// where the test passes. A row the replay cannot state leaves the test off
+/// (Always): the program draws as it would without a stencil.
+struct ClipStep {
+    clip: StencilClip,
+    queue: u32,
+    compare: CompareFunction,
+    reference: u32,
+    pipeline: CachedRenderPipelineId,
+}
+
 #[derive(Clone, Default, Debug)]
 struct SilhouetteTally {
     door_masks: usize,
@@ -540,6 +709,10 @@ struct SilhouetteDrawList {
     colour: [f32; 4],
     replay: Vec<ReplayDraw>,
     silhouette: Vec<SilhouetteDraw>,
+    /// In queue order.
+    clips: Vec<ClipStep>,
+    /// The mask where no replay writes it, by channel.
+    clip_rest: [bool; 2],
     transform_bytes: Vec<u8>,
     palette_bytes: Vec<u8>,
     tally: SilhouetteTally,
@@ -676,9 +849,28 @@ fn extract_silhouette_draws(
     list.transform_bytes.clear();
     list.palette_bytes.clear();
     list.tally = SilhouetteTally::default();
+    list.clips.clear();
+    list.clip_rest = [true; 2];
     let Some(rules) = rules.as_ref().map(|rules| &**rules) else {
         return;
     };
+    for clip in StencilClip::ALL {
+        let rule = rules.attributes.get(&clip.attribute());
+        let (compare, reference) = rule
+            .and_then(|rule| rule.state.stencil)
+            .map_or((CompareFunction::Always, 0), |stencil| {
+                (stencil.compare, stencil.reference)
+            });
+        list.clip_rest[clip.channel()] = stencil_passes(compare, reference, 0);
+        list.clips.push(ClipStep {
+            clip,
+            queue: rule.map_or(0, |rule| rule.queue),
+            compare,
+            reference,
+            pipeline: CachedRenderPipelineId::INVALID,
+        });
+    }
+    list.clips.sort_by_key(|step| step.queue);
     let (joints, visibility, names, cameras) = &*lookups;
     let (bindposes, shell_materials, fixture_materials, character_materials) = &*assets;
     // A door part hidden for writing no colour is shown when its parent is.
@@ -1032,6 +1224,60 @@ struct PipelineKey {
 #[derive(Resource, Default)]
 struct SilhouettePipelines(HashMap<PipelineKey, CachedRenderPipelineId>);
 
+#[derive(Resource, Default)]
+struct ClipPipelines(HashMap<(StencilClip, CompareFunction), CachedRenderPipelineId>);
+
+/// A clip's mask write: one triangle over the target, the row's stencil
+/// comparison with every operation Keep and no stencil write, its channel
+/// the only colour written.
+fn queue_clip_pipeline(
+    cache: &PipelineCache,
+    clip: StencilClip,
+    compare: CompareFunction,
+) -> CachedRenderPipelineId {
+    let face = StencilFaceState {
+        compare,
+        fail_op: StencilOperation::Keep,
+        depth_fail_op: StencilOperation::Keep,
+        pass_op: StencilOperation::Keep,
+    };
+    cache.queue_render_pipeline(RenderPipelineDescriptor {
+        label: Some("stencil_clip_mask_pipeline".into()),
+        layout: Vec::new(),
+        vertex: VertexState {
+            shader: SILHOUETTE_SHADER.clone(),
+            shader_defs: Vec::new(),
+            entry_point: Some("clip_vertex".into()),
+            buffers: Vec::new(),
+        },
+        fragment: Some(FragmentState {
+            shader: SILHOUETTE_SHADER.clone(),
+            shader_defs: Vec::new(),
+            entry_point: Some("clip_fragment".into()),
+            targets: vec![Some(ColorTargetState {
+                format: CLIP_MASK_FORMAT,
+                blend: None,
+                write_mask: clip.write_mask(),
+            })],
+        }),
+        primitive: PrimitiveState::default(),
+        depth_stencil: Some(DepthStencilState {
+            format: DEPTH_STENCIL_FORMAT,
+            depth_write_enabled: false,
+            depth_compare: CompareFunction::Always,
+            stencil: StencilState {
+                front: face,
+                back: face,
+                read_mask: 0xff,
+                write_mask: 0,
+            },
+            bias: DepthBiasState::default(),
+        }),
+        multisample: MultisampleState::default(),
+        ..Default::default()
+    })
+}
+
 fn stencil_state(rule: Option<StencilRule>) -> StencilState {
     let Some(rule) = rule else {
         return StencilState::default();
@@ -1158,6 +1404,7 @@ fn prepare_silhouette(
     mut commands: Commands,
     mut list: ResMut<SilhouetteDrawList>,
     mut pipelines: ResMut<SilhouettePipelines>,
+    mut clip_pipelines: ResMut<ClipPipelines>,
     pipeline_cache: Res<PipelineCache>,
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
@@ -1248,6 +1495,12 @@ fn prepare_silhouette(
     }
     if !list.active {
         return;
+    }
+    for step in &mut list.clips {
+        step.pipeline = *clip_pipelines
+            .0
+            .entry((step.clip, step.compare))
+            .or_insert_with(|| queue_clip_pipeline(&pipeline_cache, step.clip, step.compare));
     }
     let gpu = &mut *gpu;
     gpu.views.write(&device, &queue, &view_bytes, 0);
@@ -1340,6 +1593,10 @@ struct AccountInner {
     colour: [f32; 4],
     frames_drawn: u64,
     frames_not_ready: u64,
+    /// Frames whose view had another size than the clip mask.
+    mask_mismatch: u64,
+    /// The frame of the last replay and its draws recorded.
+    replayed: Option<(u32, usize)>,
     silhouette_not_ready: u64,
     next_probe: u64,
     /// The stencil before and after the silhouette, and their byte size.
@@ -1423,26 +1680,16 @@ impl ViewNode for CharacterSilhouetteNode {
             return Ok(());
         };
         let list = world.resource::<SilhouetteDrawList>();
-        if !list.active {
-            return Ok(());
-        }
         let account = world.resource::<SilhouetteAccount>();
+        let frame = world.resource::<FrameCount>().0;
+        // The pass tests the stencil the replay left in this frame.
+        let replayed = account.0.lock().unwrap().replayed;
+        let Some(replayed) =
+            replayed.and_then(|(at, recorded)| (at == frame).then_some(recorded))
+        else {
+            return Ok(());
+        };
         let cache = world.resource::<PipelineCache>();
-        // Every replay pipeline must be ready: a draw left out would change
-        // the stencil the silhouette tests. A draw without a pipeline (its
-        // mesh lacks a stream) is counted in prepare.
-        let mut replay_pipelines = Vec::with_capacity(list.replay.len());
-        for draw in &list.replay {
-            if draw.pipeline == CachedRenderPipelineId::INVALID {
-                replay_pipelines.push(None);
-                continue;
-            }
-            let Some(pipeline) = cache.get_render_pipeline(draw.pipeline) else {
-                account.0.lock().unwrap().frames_not_ready += 1;
-                return Ok(());
-            };
-            replay_pipelines.push(Some(pipeline));
-        }
         let mut silhouette_pipelines = Vec::with_capacity(list.silhouette.len());
         for draw in &list.silhouette {
             if draw.pipeline == CachedRenderPipelineId::INVALID {
@@ -1463,95 +1710,25 @@ impl ViewNode for CharacterSilhouetteNode {
         let gpu = world.resource::<SilhouetteGpu>();
         let meshes = world.resource::<RenderAssets<RenderMesh>>();
         let allocator = world.resource::<MeshAllocator>();
-        let frame = world.resource::<FrameCount>().0;
-        let (view_group, rigid_group, skin_group, composite_group) = {
-            let device = render_context.render_device();
-            let mut groups = self.bind_groups.lock();
-            let view_group = groups.get(
-                device,
-                "character_silhouette_view",
-                &cache.get_bind_group_layout(&gpu.view_layout),
-                &[(
-                    0,
-                    Bound::Buffer(&gpu.views.buffer, 0, NonZeroU64::new(MATRIX_BYTES)),
-                )],
-                frame,
-            );
-            let rigid_group = groups.get(
-                device,
-                "character_silhouette_rigid",
-                &cache.get_bind_group_layout(&gpu.rigid_layout),
-                &[(
-                    0,
-                    Bound::Buffer(&gpu.transforms.buffer, 0, NonZeroU64::new(MATRIX_BYTES)),
-                )],
-                frame,
-            );
-            let skin_group = groups.get(
-                device,
-                "character_silhouette_skin",
-                &cache.get_bind_group_layout(&gpu.skin_layout),
-                &[(
-                    0,
-                    Bound::Buffer(&gpu.palettes.buffer, 0, NonZeroU64::new(PALETTE_WINDOW)),
-                )],
-                frame,
-            );
-            let composite_group = groups.get(
-                device,
-                "character_silhouette_composite",
-                &cache.get_bind_group_layout(&gpu.composite_layout),
-                &[
-                    (0, Bound::View(&target.scratch.default_view)),
-                    (1, Bound::View(depth.view())),
-                    (2, Bound::whole(&gpu.colour)),
-                    (3, Bound::Sampler(&gpu.depth_sampler)),
-                ],
-                frame,
-            );
-            (view_group, rigid_group, skin_group, composite_group)
-        };
-
-        // The replay: depth and stencil of the stencil-relevant draws in
-        // queue order, from a cleared target (far depth, stencil 0).
-        let mut replayed = 0usize;
-        {
-            let mut pass =
-                render_context
-                    .command_encoder()
-                    .begin_render_pass(&RenderPassDescriptor {
-                        label: Some("character_silhouette_replay"),
-                        color_attachments: &[],
-                        depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
-                            view: &target.depth_stencil.default_view,
-                            depth_ops: Some(Operations {
-                                load: LoadOp::Clear(0.0),
-                                store: StoreOp::Store,
-                            }),
-                            stencil_ops: Some(Operations {
-                                load: LoadOp::Clear(0),
-                                store: StoreOp::Store,
-                            }),
-                        }),
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                    });
-            for (draw, pipeline) in list.replay.iter().zip(&replay_pipelines) {
-                let Some(pipeline) = pipeline else {
-                    continue;
-                };
-                pass.set_pipeline(pipeline);
-                pass.set_stencil_reference(draw.state.stencil.map_or(0, |rule| rule.reference));
-                pass.set_bind_group(0, &view_group, &[target.view_offset]);
-                match draw.space {
-                    Space::Rigid(offset) => pass.set_bind_group(1, &rigid_group, &[offset]),
-                    Space::Skinned(offset) => pass.set_bind_group(1, &skin_group, &[offset]),
-                }
-                if draw_mesh!(pass, &draw.mesh, meshes, allocator) {
-                    replayed += 1;
-                }
-            }
-        }
+        let (view_group, rigid_group, skin_group) = space_groups(
+            &self.bind_groups,
+            render_context.render_device(),
+            cache,
+            gpu,
+            frame,
+        );
+        let composite_group = self.bind_groups.lock().get(
+            render_context.render_device(),
+            "character_silhouette_composite",
+            &cache.get_bind_group_layout(&gpu.composite_layout),
+            &[
+                (0, Bound::View(&target.scratch.default_view)),
+                (1, Bound::View(depth.view())),
+                (2, Bound::whole(&gpu.colour)),
+                (3, Bound::Sampler(&gpu.depth_sampler)),
+            ],
+            frame,
+        );
 
         let probe_due = {
             let mut inner = account.0.lock().unwrap();
@@ -1648,6 +1825,277 @@ impl ViewNode for CharacterSilhouetteNode {
         #[cfg(target_arch = "wasm32")]
         let _ = (replayed, silhouette_drawn);
         Ok(())
+    }
+}
+
+/// The groups every replayed and silhouette draw binds: the view window and
+/// the draw's space (a world matrix window or a skin palette window).
+fn space_groups(
+    groups: &SharedBindGroupCache,
+    device: &RenderDevice,
+    cache: &PipelineCache,
+    gpu: &SilhouetteGpu,
+    frame: u32,
+) -> (BindGroup, BindGroup, BindGroup) {
+    let mut groups = groups.lock();
+    let view = groups.get(
+        device,
+        "character_silhouette_view",
+        &cache.get_bind_group_layout(&gpu.view_layout),
+        &[(
+            0,
+            Bound::Buffer(&gpu.views.buffer, 0, NonZeroU64::new(MATRIX_BYTES)),
+        )],
+        frame,
+    );
+    let rigid = groups.get(
+        device,
+        "character_silhouette_rigid",
+        &cache.get_bind_group_layout(&gpu.rigid_layout),
+        &[(
+            0,
+            Bound::Buffer(&gpu.transforms.buffer, 0, NonZeroU64::new(MATRIX_BYTES)),
+        )],
+        frame,
+    );
+    let skin = groups.get(
+        device,
+        "character_silhouette_skin",
+        &cache.get_bind_group_layout(&gpu.skin_layout),
+        &[(
+            0,
+            Bound::Buffer(&gpu.palettes.buffer, 0, NonZeroU64::new(PALETTE_WINDOW)),
+        )],
+        frame,
+    );
+    (view, rigid, skin)
+}
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
+struct StencilReplayLabel;
+
+/// The replay and the clip mask, before the main opaque pass.
+struct StencilReplayNode {
+    bind_groups: SharedBindGroupCache,
+    /// The mask texture and the value a frame without a replay cleared it
+    /// to; `None` once a replay has written it.
+    mask_rest: Mutex<Option<(TextureId, [bool; 2])>>,
+}
+
+impl FromWorld for StencilReplayNode {
+    fn from_world(world: &mut World) -> Self {
+        Self {
+            bind_groups: SharedBindGroupCache::from_world(world),
+            mask_rest: Mutex::new(None),
+        }
+    }
+}
+
+impl ViewNode for StencilReplayNode {
+    type ViewQuery = Option<&'static SilhouetteTarget>;
+
+    fn run(
+        &self,
+        _graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext,
+        target: QueryItem<Self::ViewQuery>,
+        world: &World,
+    ) -> Result<(), NodeRunError> {
+        let list = world.resource::<SilhouetteDrawList>();
+        let Some(mask) = world
+            .get_resource::<StencilClipMask>()
+            .and_then(|mask| world.resource::<RenderAssets<GpuImage>>().get(&mask.image))
+        else {
+            return Ok(());
+        };
+        let replayed = match target {
+            Some(target) if list.active => self.replay(render_context, world, list, target, mask),
+            _ => false,
+        };
+        if replayed {
+            *self.mask_rest.lock().unwrap() = None;
+        } else {
+            self.rest_mask(render_context, mask, list.clip_rest);
+        }
+        Ok(())
+    }
+}
+
+impl StencilReplayNode {
+    /// Replays the stencil-relevant draws in queue order into the view's
+    /// target, from a cleared target (far depth, stencil 0), and writes the
+    /// clip mask at each clip's queue. False when the frame cannot (a
+    /// pipeline still compiling, or the view at another size than the mask);
+    /// the mask then gets its rest value.
+    fn replay(
+        &self,
+        render_context: &mut RenderContext,
+        world: &World,
+        list: &SilhouetteDrawList,
+        target: &SilhouetteTarget,
+        mask: &GpuImage,
+    ) -> bool {
+        let account = world.resource::<SilhouetteAccount>();
+        if target.depth_stencil.texture.size() != mask.size {
+            account.0.lock().unwrap().mask_mismatch += 1;
+            return false;
+        }
+        let cache = world.resource::<PipelineCache>();
+        // Every replay pipeline must be ready: a draw left out would change
+        // the stencil the mask and the silhouette test. A draw without a
+        // pipeline (its mesh lacks a stream) is counted in prepare.
+        let mut replay_pipelines = Vec::with_capacity(list.replay.len());
+        for draw in &list.replay {
+            if draw.pipeline == CachedRenderPipelineId::INVALID {
+                replay_pipelines.push(None);
+                continue;
+            }
+            let Some(pipeline) = cache.get_render_pipeline(draw.pipeline) else {
+                account.0.lock().unwrap().frames_not_ready += 1;
+                return false;
+            };
+            replay_pipelines.push(Some(pipeline));
+        }
+        let mut clip_pipelines = Vec::with_capacity(list.clips.len());
+        for step in &list.clips {
+            let Some(pipeline) = cache.get_render_pipeline(step.pipeline) else {
+                account.0.lock().unwrap().frames_not_ready += 1;
+                return false;
+            };
+            clip_pipelines.push(pipeline);
+        }
+
+        let gpu = world.resource::<SilhouetteGpu>();
+        let meshes = world.resource::<RenderAssets<RenderMesh>>();
+        let allocator = world.resource::<MeshAllocator>();
+        let frame = world.resource::<FrameCount>().0;
+        let (view_group, rigid_group, skin_group) = space_groups(
+            &self.bind_groups,
+            render_context.render_device(),
+            cache,
+            gpu,
+            frame,
+        );
+        let mut recorded = 0usize;
+        let mut start = 0usize;
+        // The draws below each clip's queue, then that clip's mask write;
+        // after the last clip, the rest of the draws.
+        for (index, step) in list.clips.iter().map(Some).chain([None]).enumerate() {
+            let end = step.map_or(list.replay.len(), |step| {
+                start + list.replay[start..].partition_point(|draw| draw.queue < step.queue)
+            });
+            {
+                let first = index == 0;
+                let mut pass =
+                    render_context
+                        .command_encoder()
+                        .begin_render_pass(&RenderPassDescriptor {
+                            label: Some("character_silhouette_replay"),
+                            color_attachments: &[],
+                            depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                                view: &target.depth_stencil.default_view,
+                                depth_ops: Some(Operations {
+                                    load: if first { LoadOp::Clear(0.0) } else { LoadOp::Load },
+                                    store: StoreOp::Store,
+                                }),
+                                stencil_ops: Some(Operations {
+                                    load: if first { LoadOp::Clear(0) } else { LoadOp::Load },
+                                    store: StoreOp::Store,
+                                }),
+                            }),
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                        });
+                for (draw, pipeline) in list.replay[start..end]
+                    .iter()
+                    .zip(&replay_pipelines[start..end])
+                {
+                    let Some(pipeline) = pipeline else {
+                        continue;
+                    };
+                    pass.set_pipeline(pipeline);
+                    pass.set_stencil_reference(draw.state.stencil.map_or(0, |rule| rule.reference));
+                    pass.set_bind_group(0, &view_group, &[target.view_offset]);
+                    match draw.space {
+                        Space::Rigid(offset) => pass.set_bind_group(1, &rigid_group, &[offset]),
+                        Space::Skinned(offset) => pass.set_bind_group(1, &skin_group, &[offset]),
+                    }
+                    if draw_mesh!(pass, &draw.mesh, meshes, allocator) {
+                        recorded += 1;
+                    }
+                }
+            }
+            if let Some(step) = step {
+                let mut pass =
+                    render_context
+                        .command_encoder()
+                        .begin_render_pass(&RenderPassDescriptor {
+                            label: Some("stencil_clip_mask"),
+                            color_attachments: &[Some(RenderPassColorAttachment {
+                                view: &mask.texture_view,
+                                depth_slice: None,
+                                resolve_target: None,
+                                ops: Operations {
+                                    load: if index == 0 {
+                                        LoadOp::Clear(LinearRgba::NONE.into())
+                                    } else {
+                                        LoadOp::Load
+                                    },
+                                    store: StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                                view: &target.depth_stencil.default_view,
+                                depth_ops: Some(Operations {
+                                    load: LoadOp::Load,
+                                    store: StoreOp::Store,
+                                }),
+                                stencil_ops: Some(Operations {
+                                    load: LoadOp::Load,
+                                    store: StoreOp::Store,
+                                }),
+                            }),
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                        });
+                pass.set_pipeline(clip_pipelines[index]);
+                pass.set_stencil_reference(step.reference);
+                pass.draw(0..3, 0..1);
+            }
+            start = end;
+        }
+        account.0.lock().unwrap().replayed = Some((frame, recorded));
+        true
+    }
+
+    /// Clears the mask to its rest value, once per texture and value.
+    fn rest_mask(&self, render_context: &mut RenderContext, mask: &GpuImage, rest: [bool; 2]) {
+        let key = (mask.texture.id(), rest);
+        let mut last = self.mask_rest.lock().unwrap();
+        if *last == Some(key) {
+            return;
+        }
+        let channel = |on: bool| if on { 1.0 } else { 0.0 };
+        render_context
+            .command_encoder()
+            .begin_render_pass(&RenderPassDescriptor {
+                label: Some("stencil_clip_mask_rest"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &mask.texture_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Clear(
+                            LinearRgba::new(channel(rest[0]), channel(rest[1]), 0.0, 0.0).into(),
+                        ),
+                        store: StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+        *last = Some(key);
     }
 }
 
@@ -1793,7 +2241,7 @@ fn finish_pending_probe(world: &World, render_context: &RenderContext) {
     after.unmap();
     let tally = &probe.tally;
     info!(
-        "character silhouette account (replayed frame {}): door stencil meshes {}; replay draws recorded {} of {} (by shader attribute {:?}; pipelines missing {}), avatar meshes {}, NPC meshes {} and accessory meshes {} ({} left out, every fragment discarded by the dither), attribute rows missing {}, shown meshes of other programs not replayed {}, palettes refused {}; frames skipped with pipelines compiling: replay {}, silhouette {}; stencil at the pass over {}x{} pixels: 0: {}, 1: {}, 2: {}, 3: {}, 4 and above: {}; silhouette draws recorded {} of {}, pixels drawn {} (a 1 decremented to 0), 1 left after the pass {}; colour {:?} from the graphics configuration",
+        "character silhouette account (replayed frame {}): door stencil meshes {}; replay draws recorded {} of {} (by shader attribute {:?}; pipelines missing {}), avatar meshes {}, NPC meshes {} and accessory meshes {} ({} left out, every fragment discarded by the dither), attribute rows missing {}, shown meshes of other programs not replayed {}, palettes refused {}; frames skipped with pipelines compiling: replay {}, silhouette {}; frames with the view at another size than the clip mask {}; stencil at the pass over {}x{} pixels: 0: {}, 1: {}, 2: {}, 3: {}, 4 and above: {}; silhouette draws recorded {} of {}, pixels drawn {} (a 1 decremented to 0), 1 left after the pass {}; colour {:?} from the graphics configuration",
         probe.frame,
         tally.door_masks,
         probe.replay_recorded,
@@ -1809,6 +2257,7 @@ fn finish_pending_probe(world: &World, render_context: &RenderContext) {
         tally.palettes_refused,
         inner.frames_not_ready,
         inner.silhouette_not_ready,
+        inner.mask_mismatch,
         probe.width,
         probe.height,
         histogram[0],
@@ -1830,7 +2279,7 @@ fn finish_pending_probe(world: &World, render_context: &RenderContext) {
 fn log_counter_line(world: &World) {
     let inner = world.resource::<SilhouetteAccount>().0.lock().unwrap();
     info!(
-        "character silhouette account (counts): replayed frames {}, door stencil meshes {}, replay draws {} (pipelines missing {}), silhouette draws {}; frames skipped with pipelines compiling: replay {}, silhouette {}",
+        "character silhouette account (counts): replayed frames {}, door stencil meshes {}, replay draws {} (pipelines missing {}), silhouette draws {}; frames skipped with pipelines compiling: replay {}, silhouette {}; frames with the view at another size than the clip mask {}",
         inner.frames_drawn,
         inner.tally.door_masks,
         inner.replay_draws,
@@ -1838,6 +2287,7 @@ fn log_counter_line(world: &World) {
         inner.silhouette_draws,
         inner.frames_not_ready,
         inner.silhouette_not_ready,
+        inner.mask_mismatch,
     );
 }
 
@@ -1851,27 +2301,40 @@ fn load_shader(mut shaders: ResMut<Assets<Shader>>) {
     );
 }
 
-/// The stencil-shadow pass of the player avatar, after the transparents
-/// (where the source's feature runs) and before the main pass ends.
+/// The stencil replay and the clip mask before the main opaque pass, and the
+/// stencil-shadow pass of the player avatar after the transparents (where
+/// the source's feature runs) and before the main pass ends.
 pub struct CharacterSilhouettePlugin;
 
 impl Plugin for CharacterSilhouettePlugin {
     fn build(&self, app: &mut App) {
         crate::render::gpu::install_bind_group_caches(app);
-        app.add_systems(Startup, (load_shader, load_rules))
-            .add_systems(Update, settle_rules);
+        app.add_plugins(ExtractResourcePlugin::<StencilClipMask>::default())
+            .add_systems(Startup, (load_shader, load_rules, init_clip_mask))
+            .add_systems(Update, settle_rules)
+            .add_systems(Last, size_clip_mask);
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
         render_app
             .init_resource::<SilhouetteDrawList>()
             .init_resource::<SilhouettePipelines>()
+            .init_resource::<ClipPipelines>()
             .init_resource::<SilhouetteAccount>()
             .add_systems(RenderStartup, init_gpu)
             .add_systems(ExtractSchedule, extract_silhouette_draws)
             .add_systems(
                 Render,
                 prepare_silhouette.in_set(RenderSystems::PrepareBindGroups),
+            )
+            .add_render_graph_node::<ViewNodeRunner<StencilReplayNode>>(Core3d, StencilReplayLabel)
+            .add_render_graph_edges(
+                Core3d,
+                (
+                    Node3d::StartMainPass,
+                    StencilReplayLabel,
+                    Node3d::MainOpaquePass,
+                ),
             )
             .add_render_graph_node::<ViewNodeRunner<CharacterSilhouetteNode>>(
                 Core3d,

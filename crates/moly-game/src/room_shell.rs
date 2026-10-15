@@ -24,6 +24,14 @@
 //! uv-set export) gets a pipeline without it, which leaves the edge factor
 //! out; `room_appearance.rs` names that once per room load.
 //!
+//! The wall (usage 2) and the door outside (usage 10) carry a stencil test in
+//! the source (their attributes' rows in the graphics configuration): the
+//! wall is drawn where no door-wall clip wrote the stencil, the door outside
+//! only where one did. The main pass has no stencil; these programs read the
+//! clip mask the character silhouette's stencil replay writes before the
+//! opaque pass ([`StencilClipMask`]) and keep a pixel where their channel
+//! holds 1.
+//!
 //! The globals are the site ones (`SiteEnvGpuBuffer`: phenomena light and
 //! shade, drop-shadow colour 1, sky-bottom colour, fog, edge pair, treasure
 //! shadows), the main-light shadow consumer block of `shadowmap.rs` and the
@@ -40,6 +48,7 @@ use bevy::render::renderer::RenderDevice;
 use bevy::render::texture::GpuImage;
 use bevy::shader::ShaderRef;
 
+use crate::character_silhouette::{StencilClip, StencilClipMask};
 use crate::env::SiteEnvGpuBuffer;
 use crate::render::gpu::SharedSamplers;
 use crate::shadowmap::ShadowMapGpu;
@@ -80,6 +89,8 @@ pub(crate) struct RoomShellKey {
     /// The `_MAIN_LIGHT_SHADOWS` program without `_RECEIVE_SHADOWS_OFF`.
     pub receive_shadows: bool,
     pub queue: u32,
+    /// The source stencil test the program applies through the clip mask.
+    pub clip: Option<StencilClip>,
 }
 
 #[derive(Asset, TypePath, Debug, Clone)]
@@ -292,6 +303,7 @@ pub(crate) fn resolve(
                     program: ShellProgram::Object,
                     receive_shadows: !keywords.contains(&"_RECEIVE_SHADOWS_OFF"),
                     queue,
+                    clip: StencilClip::of_object_usage(usage as u32),
                 },
                 params,
                 // With _WallAOIntensity 0 the edge factor is exactly 1 and the
@@ -325,6 +337,7 @@ pub(crate) fn resolve(
                     program: ShellProgram::Floor,
                     receive_shadows: true,
                     queue,
+                    clip: None,
                 },
                 params,
                 reads_uv3: false,
@@ -369,6 +382,9 @@ impl Material for RoomShellMaterial {
         }];
         if key.receive_shadows {
             defs.push("ROOM_RECEIVE_SHADOWS");
+        }
+        if let Some(clip) = key.clip {
+            defs.push(clip.shader_def());
         }
         // The vertex input the room programs read: the standard attributes at
         // the mesh pipeline's locations (it sets the matching VERTEX_* defs)
@@ -490,6 +506,7 @@ impl AsBindGroup for RoomShellMaterial {
         SRes<RenderAssets<GpuImage>>,
         SRes<SharedSamplers>,
         SRes<SiteExtensionGpuBuffer>,
+        Option<SRes<StencilClipMask>>,
     );
 
     fn label() -> &'static str {
@@ -500,7 +517,7 @@ impl AsBindGroup for RoomShellMaterial {
         &self,
         _layout: &BindGroupLayout,
         _render_device: &RenderDevice,
-        (env_buffer, shadow, images, samplers, site_extension): &mut SystemParamItem<
+        (env_buffer, shadow, images, samplers, site_extension, clip_mask): &mut SystemParamItem<
             '_,
             '_,
             Self::Param,
@@ -509,6 +526,12 @@ impl AsBindGroup for RoomShellMaterial {
     ) -> Result<UnpreparedBindGroup, AsBindGroupError> {
         let main = images
             .get(&self.main_tex)
+            .ok_or(AsBindGroupError::RetryNextUpdate)?;
+        // The mask at the size the main world gave it: a group built on the
+        // texture of an earlier size would read the wrong pixels.
+        let clip_mask = clip_mask
+            .as_ref()
+            .and_then(|mask| images.get(&mask.image).filter(|image| mask.fits(image.size)))
             .ok_or(AsBindGroupError::RetryNextUpdate)?;
         let mut bytes = Vec::with_capacity(PARAM_SLOTS * 16);
         for slot in &self.params {
@@ -554,6 +577,13 @@ impl AsBindGroup for RoomShellMaterial {
             (
                 7,
                 OwnedBindingResource::Buffer(site_extension.buffer.clone()),
+            ),
+            (
+                8,
+                OwnedBindingResource::TextureView(
+                    TextureViewDimension::D2,
+                    clip_mask.texture_view.clone(),
+                ),
             ),
         ]);
         Ok(UnpreparedBindGroup { bindings })
@@ -622,6 +652,17 @@ impl AsBindGroup for RoomShellMaterial {
                     ty: BufferBindingType::Uniform,
                     has_dynamic_offset: false,
                     min_binding_size: None,
+                },
+                count: None,
+            },
+            // binding 8: the clip mask, read texel by texel.
+            BindGroupLayoutEntry {
+                binding: 8,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Texture {
+                    sample_type: TextureSampleType::Float { filterable: false },
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
                 },
                 count: None,
             },

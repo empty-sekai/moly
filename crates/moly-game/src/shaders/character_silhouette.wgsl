@@ -1,5 +1,5 @@
 // Character silhouette: the depth-stencil replay of the stencil-relevant
-// draws and the avatar's stencil-shadow pass. The slot layout is a contract
+// draws, the clip mask's writes and the avatar's stencil-shadow pass. The slot layout is a contract
 // with character_silhouette.rs; change both together.
 //
 // Group 0: the view. Group 1: the draw's space, one world matrix (rigid) or
@@ -88,4 +88,18 @@ fn silhouette_fragment(@builtin(position) pixel: vec4<f32>) -> @location(0) vec4
     let a = silhouette_colour.a;
     let rgb = silhouette_colour.rgb * a + encode(under.rgb) * (1.0 - a);
     return vec4<f32>(decode(rgb), a * a + under.a * (1.0 - a));
+}
+
+// The clip mask's write: one triangle over the whole target. The pipeline's
+// stencil test (a clip row's comparison against the replayed stencil) picks
+// the pixels, and its colour write mask the channel that gets 1.
+@vertex
+fn clip_vertex(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
+    let corner = vec2<f32>(f32((index << 1u) & 2u), f32(index & 2u));
+    return vec4<f32>(corner * 2.0 - 1.0, 0.0, 1.0);
+}
+
+@fragment
+fn clip_fragment() -> @location(0) vec4<f32> {
+    return vec4<f32>(1.0);
 }
