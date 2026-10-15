@@ -10,8 +10,8 @@
 //! Qualified target composition: Initial with constant or two-constant
 //! lifetime, size (one axis or three), speed and rotation, a constant start colour source the
 //! Initial law takes, a constant gravity modifier, Shape through the target's
-//! own Shape law (or no Shape with zero speed), RotationOverLifetime with
-//! constant, two-constant or single-curve axes, VelocityOverLifetime (linear
+//! own Shape law (or no Shape with zero speed), RotationOverLifetime (every
+//! axis mode, through the root path's law), VelocityOverLifetime (linear
 //! axes of one mode, in or out of world space, the constant
 //! speed modifier one; orbital, offset and radial constants or two constants,
 //! their orbital section only in a Local target), Noise (the qualified Noise
@@ -366,15 +366,11 @@ fn child_laws(emitter: &EmitterParams) -> Result<ChildLaws, Refused> {
         _ => return unsupported("target start lifetime curve mode"),
     };
     // RotationOverLifetime runs in the newborn pass as in any update: each
-    // axis is sampled at the lane's age before the step (a keyed curve
-    // through the same evaluation as the root path). A two-curve axis was
-    // not replayed in a child Emit.
-    if let Some(rol) = &emitter.rotation_over_lifetime {
-        let axes = [Some(&rol.curve), rol.x.as_ref(), rol.y.as_ref()];
-        if axes.iter().flatten().any(|curve| matches!(curve, MinMaxCurve::TwoCurves { .. })) {
-            return unsupported("target RotationOverLifetime two-curve mode");
-        }
-    }
+    // axis is sampled at the lane's age before the step through the root
+    // path's law, whatever its mode. A two-curve axis evaluates both keyed
+    // curves as a single-curve axis does and lerps them by the factor a
+    // two-constant axis draws from the particle seed, so the child path adds
+    // no mode-specific step of its own.
     match (emitter.shape_enabled, emitter.shape.as_ref()) {
         (Some(false), None) => {
             let zero = |curve: &MinMaxCurve| matches!(curve, MinMaxCurve::Constant(v) if *v == 0.0)
