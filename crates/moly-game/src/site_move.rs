@@ -186,6 +186,8 @@ enum Stage {
     WaitFinal(Delay),
     WaitHomeSummary(Delay),
     Done,
+    /// The destination cannot load; the pre-action is undone.
+    Refused,
 }
 
 struct PlayerTween {
@@ -416,11 +418,16 @@ fn advance(world: &mut World) {
     if !world.contains_resource::<SiteMove>() {
         return;
     }
-    let done = world.resource_scope(|world, mut session: Mut<SiteMove>| {
+    let stage = world.resource_scope(|world, mut session: Mut<SiteMove>| {
         session.frame(world, frame, dt);
-        matches!(session.stage, Stage::Done)
+        session.stage
     });
-    if done {
+    if matches!(stage, Stage::Refused) {
+        let session = world.remove_resource::<SiteMove>().expect("present above");
+        session.refuse(world);
+        return;
+    }
+    if matches!(stage, Stage::Done) {
         let mut session = world.remove_resource::<SiteMove>().expect("present above");
         let then = session.then.take();
         let composition = session.composition;
@@ -666,13 +673,21 @@ impl SiteMove {
         let waits = core_waits();
         loop {
             match &mut self.stage {
-                Stage::PreAction => {
-                    if !self.pre_action_ready(world) {
+                Stage::PreAction => match self.pre_action_ready(world) {
+                    Ok(false) => return,
+                    Ok(true) => {
+                        self.setup(world, frame);
+                        self.stage = Stage::WaitFirst(Delay::new(waits.first, frame));
+                    }
+                    Err(error) => {
+                        error!(
+                            "[site-move] {error}: the move to {} is refused; the player stays at {}",
+                            self.to, self.from
+                        );
+                        self.stage = Stage::Refused;
                         return;
                     }
-                    self.setup(world, frame);
-                    self.stage = Stage::WaitFirst(Delay::new(waits.first, frame));
-                }
+                },
                 Stage::WaitFirst(delay) => {
                     if !delay.tick(frame, dt) {
                         return;
@@ -790,19 +805,17 @@ impl SiteMove {
                     self.normal(world, frame);
                     self.stage = Stage::Done;
                 }
-                Stage::Done => return,
+                Stage::Done | Stage::Refused => return,
             }
         }
     }
 
-    fn pre_action_ready(&mut self, world: &mut World) -> bool {
+    /// Ok(true) once the destination, the cannon and the effects are loaded;
+    /// Err when the destination cannot load.
+    fn pre_action_ready(&mut self, world: &mut World) -> Result<bool, String> {
         let server = world.resource::<AssetServer>().clone();
         let site = match self.preload.as_ref().map(|preload| preload.ready(&server)) {
-            Some(Ok(ready)) => ready,
-            Some(Err(error)) => {
-                error!("[site-move] {error}");
-                false
-            }
+            Some(ready) => ready?,
             None => true,
         };
         let listed = world
@@ -821,7 +834,7 @@ impl SiteMove {
         let effects =
             !world.contains_resource::<SiteMoveEffects>() || effects::move_pools_settled(world);
         let arrival = self.arrival.poll(world);
-        site && cannon && effects && arrival
+        Ok(site && cannon && effects && arrival)
     }
 
     /// The Core's synchronous head, before its first wait.
@@ -1080,6 +1093,23 @@ impl SiteMove {
             world.write_message(LayerCommand::Change(LayerId::HomeField));
             world.write_message(crate::cutscene::HomeScreenStartAnimation {
                 caller: "a cannon arrival at home",
+            });
+        }
+    }
+
+    /// Undoes the admission when the destination cannot load. The pre-action
+    /// has not touched the current site, the player or the camera (the Core's
+    /// setup does), so the holds and the site-move screen are all there is to
+    /// undo; a composition's second leg and a nesting door move end here too.
+    fn refuse(self, world: &mut World) {
+        world.remove_resource::<SiteMoveActive>();
+        world.remove_resource::<EnvironmentHold>();
+        world.remove_resource::<BgmHold>();
+        world.remove_resource::<NestedOuter>();
+        world.write_message(LayerCommand::Change(LayerId::HomeField));
+        if self.from_category == "housing_home" {
+            world.write_message(crate::cutscene::HomeScreenStartAnimation {
+                caller: "a refused cannon move",
             });
         }
     }

@@ -123,7 +123,8 @@ enum Kind {
     CameraDrag { from: Vec2, by: Vec2, start: f32, secs: f32, down: bool },
     CameraZoom { left: f32, per_sec: f32, until: f32 },
     Parallel { tracks: Vec<Track>, join: Join },
-    SiteSwitch { site: String },
+    /// `moved` once the move has been seen in progress.
+    SiteSwitch { site: String, moved: bool },
 }
 
 impl Kind {
@@ -373,7 +374,7 @@ fn start(world: &mut World, shared: &mut Shared, step: Step, path: String) -> St
         }
         Node::SiteSwitch { site } => {
             world.insert_resource(crate::site::SiteChangeRequest(site.clone()));
-            Kind::SiteSwitch { site: site.clone() }
+            Kind::SiteSwitch { site: site.clone(), moved: false }
         }
         Node::WalkTo { to, within } => Kind::Walk(Walk::new(to.clone(), *within)),
         Node::Stick { stick, secs } => Kind::Stick { stick: Vec2::from(*stick), until: shared.now + secs },
@@ -642,12 +643,16 @@ fn poll(world: &mut World, shared: &mut Shared, active: &mut Active) -> Poll {
             }
             if running == 0 { Poll::Done(String::new()) } else { Poll::Running(format!("{running} tracks running")) }
         }
-        Kind::SiteSwitch { site } => {
+        Kind::SiteSwitch { site, moved } => {
             let current = world.get_resource::<crate::site::SiteActive>().map(|active| active.site_type.clone());
             let moving = world.contains_resource::<crate::site_move::SiteMoveActive>();
             if current.as_deref() == Some(site.as_str()) && !moving {
                 Poll::Done(format!("on {site}"))
+            } else if *moved && !moving {
+                // A move that ends elsewhere was refused.
+                Poll::Failed(format!("the move ended on {current:?}"))
             } else {
+                *moved |= moving;
                 Poll::Running(format!("site {current:?}, moving {moving}"))
             }
         }
