@@ -38,6 +38,39 @@ pub(crate) struct Draw {
     pub screen_size: Vec2,
     pub allow_roll: bool,
     pub scaling: crate::particle_geometry::Scaling,
+    /// The renderer's flip proportions for the quad's X and Y
+    /// ([`flip_corners`]); the writer does not read the Z proportion.
+    pub flip: Vec2,
+}
+
+/// Salts of the two particle streams the billboard writer draws its flips
+/// from: one draw from each, X then Y.
+const FLIP_X_SALT: u32 = 0x294f_b5c7;
+const FLIP_Y_SALT: u32 = 0x00d4_cb82;
+
+/// The quad's texture corners, in vertex order.
+const QUAD_UV: [[f32; 2]; 4] = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
+
+/// The texture corner each of the quad's four vertices takes. An axis is
+/// mirrored when its flip proportion is greater than the particle's draw for
+/// that axis (a NaN proportion never mirrors). A mirrored X swaps the corners
+/// of vertices 0 and 1 and of 2 and 3, a mirrored Y those of 0 and 3 and of 1
+/// and 2. The vertex positions, pivot included, do not change.
+pub(crate) fn flip_corners(seed: u32, flip: Vec2) -> [usize; 4] {
+    use moly_law::particle::random::ParticleRandom;
+    // Draws are never negative, so a proportion at or below zero never
+    // mirrors and the draws need not be made.
+    if flip.x <= 0.0 && flip.y <= 0.0 {
+        return [0, 1, 2, 3];
+    }
+    let x = flip.x > ParticleRandom::sample(seed, FLIP_X_SALT);
+    let y = flip.y > ParticleRandom::sample(seed, FLIP_Y_SALT);
+    match (x, y) {
+        (false, false) => [0, 1, 2, 3],
+        (true, false) => [1, 0, 3, 2],
+        (false, true) => [3, 2, 1, 0],
+        (true, true) => [2, 3, 0, 1],
+    }
 }
 
 fn euler(v: Vec3) -> Mat3 {
@@ -323,7 +356,7 @@ pub(crate) fn write(
         let (corners, normal) = vertices_sized(p, frame, draw, local_simulation, size, simulation);
         positions.extend(corners.map(|v| reflect(v).to_array()));
         normals.extend([reflect(normal).to_array(); 4]);
-        uv.extend([[0.0f32, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]);
+        uv.extend(flip_corners(p.seed, draw.flip).map(|corner| QUAD_UV[corner]));
         colours.extend([p.colour.to_array(); 4]);
         custom1.extend([p.custom1.to_array(); 4]);
         custom2.extend([p.custom2.to_array(); 4]);

@@ -2005,6 +2005,7 @@ fn renderer_draw(
         screen_size: Vec2::new(min_size, max_size),
         allow_roll,
         scaling,
+        flip: Vec2::ZERO,
     })
 }
 

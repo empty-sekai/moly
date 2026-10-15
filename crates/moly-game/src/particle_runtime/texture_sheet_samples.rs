@@ -18,7 +18,7 @@ fn texture_sheet_matches_native_in_shared_geometry() {
         mode: crate::source_billboard::Mode::Billboard,
         alignment: crate::particle_geometry::Alignment::View,
         pivot: Vec3::ZERO, screen_size: Vec2::new(0.0, 1.0), allow_roll: true,
-        scaling: crate::particle_geometry::Scaling::Hierarchy,
+        scaling: crate::particle_geometry::Scaling::Hierarchy, flip: Vec2::ZERO,
     });
     let mut mesh = crate::billboard::empty_mesh();
     let mut failures = Vec::new();

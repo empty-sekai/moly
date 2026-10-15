@@ -59,7 +59,7 @@ fn independent_billboard_vertices_and_normals_match_all_supported_engine_cases()
             pivot: vector(&row["pivot"]),
             screen_size: Vec2::new(0.0, 10000.0),
             allow_roll: true,
-            scaling: crate::particle_geometry::Scaling::Hierarchy,
+            scaling: crate::particle_geometry::Scaling::Hierarchy, flip: Vec2::ZERO,
         };
         let (actual, normal) = vertices(&p, &frame, &draw, local);
         for i in 0..4 {
@@ -102,7 +102,7 @@ fn source_billboard_writer_retains_zero_size_and_non_unit_normal() {
         pivot: Vec3::ZERO,
         screen_size: Vec2::new(0.0, 10000.0),
         allow_roll: true,
-        scaling: crate::particle_geometry::Scaling::Hierarchy,
+        scaling: crate::particle_geometry::Scaling::Hierarchy, flip: Vec2::ZERO,
     };
     let mut p = Instance {
         position: Vec3::new(1.0, 2.0, 3.0),
@@ -149,7 +149,7 @@ fn screen_limits_match_120_current_native_vertex_results() {
             pivot: array3(&row["pivot"]),
             allow_roll: true,
             screen_size: Vec2::new(0.0, 10000.0),
-            scaling: crate::particle_geometry::Scaling::Hierarchy,
+            scaling: crate::particle_geometry::Scaling::Hierarchy, flip: Vec2::ZERO,
         };
         let p = Instance {
             position: array3(&row["position"]),
@@ -198,7 +198,7 @@ fn camera_roll_matches_24_current_native_vertex_results() {
             pivot: Vec3::ZERO,
             allow_roll: row["allowRoll"].as_bool().unwrap(),
             screen_size: Vec2::new(0.0, 10000.0),
-            scaling: crate::particle_geometry::Scaling::Hierarchy,
+            scaling: crate::particle_geometry::Scaling::Hierarchy, flip: Vec2::ZERO,
         };
         let p = Instance {
             position: array3(&row["position"]),
@@ -274,7 +274,7 @@ fn velocity_billboard_matches_native_rows() {
             pivot: v3(&row["pivot"]),
             screen_size: Vec2::new(0.0, 10000.0),
             allow_roll: true,
-            scaling: crate::particle_geometry::Scaling::Hierarchy,
+            scaling: crate::particle_geometry::Scaling::Hierarchy, flip: Vec2::ZERO,
         };
         // Mutants: the simulation rotation left out, the world velocity read
         // as the simulation one, or the degenerate decisions taken after the
@@ -363,7 +363,7 @@ fn horizontal_and_vertical_billboards_match_native_rows() {
             pivot: v3(&row["pivot"]),
             screen_size: Vec2::new(0.0, 10000.0),
             allow_roll: true,
-            scaling: crate::particle_geometry::Scaling::Hierarchy,
+            scaling: crate::particle_geometry::Scaling::Hierarchy, flip: Vec2::ZERO,
         };
         let (corners, _) = vertices_sized(&p, &frame, &draw, row["simulation"] == "Local", p.size, owner);
         for (k, corner) in corners.iter().enumerate() {
@@ -379,4 +379,45 @@ fn horizontal_and_vertical_billboards_match_native_rows() {
     println!("horizontal/vertical billboard: {rows} particles ({vertical} vertical), max corner error {maximum}, {} mismatched corners", failures.len());
     assert!(rows > 0 && vertical > 0 && vertical < rows, "both modes must be present");
     assert!(failures.is_empty(), "{} mismatched corners:\n{}", failures.len(), failures.iter().take(12).cloned().collect::<Vec<_>>().join("\n"));
+}
+
+/// The flip draws as the engine's billboard writer computes them for a
+/// particle seed: the X draw's xorshift words start at seed + 0x294fb5c7 and
+/// seed * 0x6ab51b9d + 0x1b0c434a, the Y draw's at seed + 0x00d4cb82 and
+/// seed * 0x6ab51b9d + 0x1c2c4ff9, and a draw keeps the low 23 bits times
+/// 0x34000001. Its select network then gives the vertex corners from the two
+/// comparisons.
+#[test]
+fn billboard_flip_draws_and_corners_follow_the_engine_writer() {
+    let draw = |t: u32, w: u32| {
+        let t = t ^ (t << 11);
+        (((t ^ (t >> 8) ^ w ^ (w >> 19)) & 0x007f_ffff) as f32) * f32::from_bits(0x3400_0001)
+    };
+    // The writer's select network: four lanes p0..p3 take (1, 0, 3, 2) when
+    // X mirrors and (0, 1, 2, 3) when not; vertex k then takes p[k], or
+    // p[3 - k] when Y mirrors.
+    let network = |x: bool, y: bool| {
+        let p = if x { [1, 0, 3, 2] } else { [0, 1, 2, 3] };
+        std::array::from_fn::<usize, 4, _>(|k| if y { p[3 - k] } else { p[k] })
+    };
+    let mut flipped = [0usize; 4];
+    for index in 0..4096u32 {
+        let seed = index.wrapping_mul(0x9e37_79b9) ^ (index << 7);
+        let x_draw = draw(seed.wrapping_add(0x294f_b5c7), seed.wrapping_mul(0x6ab5_1b9d).wrapping_add(0x1b0c_434a));
+        let y_draw = draw(seed.wrapping_add(0x00d4_cb82), seed.wrapping_mul(0x6ab5_1b9d).wrapping_add(0x1c2c_4ff9));
+        for (slot, flip) in [Vec2::new(0.5, 0.0), Vec2::new(0.0, 0.25), Vec2::new(0.7, 0.6), Vec2::new(1.0, 0.0)]
+            .into_iter()
+            .enumerate()
+        {
+            let expected = network(flip.x > x_draw, flip.y > y_draw);
+            assert_eq!(super::flip_corners(seed, flip), expected, "seed {seed:#x} flip {flip}");
+            flipped[slot] += usize::from(expected != [0, 1, 2, 3]);
+        }
+        assert_eq!(super::flip_corners(seed, Vec2::ZERO), [0, 1, 2, 3]);
+        assert_eq!(super::flip_corners(seed, Vec2::new(f32::NAN, f32::NAN)), [0, 1, 2, 3]);
+    }
+    // Every case mirrors some particles and leaves others (1.0 mirrors all
+    // but a draw that rounds to 1.0).
+    assert!(flipped.iter().all(|&n| n > 0), "{flipped:?}");
+    assert!(flipped[..3].iter().all(|&n| n < 4096), "{flipped:?}");
 }

@@ -2452,10 +2452,23 @@ fn judge_in_host(
     if render_mode != "Stretch" && normal_direction != Some(1.0) {
         tally.render_mode.push("source billboard normalDirection other than one is not yet verified".into()); return None;
     }
-    if render_mode != "Mesh" && renderer.get("flip").and_then(Value::as_array)
-        .is_none_or(|v| v.len()!=3 || v.iter().any(|x| x.as_f64()!=Some(0.0))) {
-        tally.render_mode.push("source billboard particle flip is not yet consumed".into()); return None;
-    }
+    // The Billboard writer reads the X and Y flip proportions per particle
+    // (`source_billboard::flip_corners`); the other quad modes' flip is not
+    // read yet.
+    let quad_flip = renderer.get("flip").and_then(Value::as_array)
+        .filter(|v| v.len() == 3)
+        .and_then(|v| v.iter().map(Value::as_f64).collect::<Option<Vec<f64>>>());
+    let billboard_flip = match (render_mode, quad_flip) {
+        ("Mesh", _) => Vec2::ZERO,
+        (_, None) => {
+            tally.render_mode.push("source billboard flip is not three numbers".into()); return None;
+        }
+        ("Billboard", Some(flip)) => Vec2::new(flip[0] as f32, flip[1] as f32),
+        (_, Some(flip)) if flip.iter().any(|x| *x != 0.0) => {
+            tally.render_mode.push(format!("source {render_mode} particle flip is not yet consumed")); return None;
+        }
+        _ => Vec2::ZERO,
+    };
     let pivot = renderer
         .get("pivot")
         .and_then(Value::as_array)
@@ -2768,7 +2781,7 @@ fn judge_in_host(
                 },
                 alignment: mesh_alignment.expect("validated source Billboard alignment"),
                 screen_size: Vec2::new(min_particle_size as f32, max_particle_size as f32),
-                allow_roll, scaling, pivot: Vec3::from_array(pivot),
+                allow_roll, scaling, pivot: Vec3::from_array(pivot), flip: billboard_flip,
             })
         },
         cone_angle,

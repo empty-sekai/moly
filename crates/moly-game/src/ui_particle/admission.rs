@@ -501,6 +501,7 @@ pub(crate) fn admit(
         screen_size: Vec2::new(0.0, -1.0),
         allow_roll,
         scaling,
+        flip: Vec2::ZERO,
     });
     let runtime = Runtime {
         node,

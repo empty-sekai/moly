@@ -11,7 +11,7 @@ pub(crate) fn source_billboard(scaling: crate::particle_geometry::Scaling) -> cr
     crate::particle_runtime::Geometry::SourceBillboard(crate::source_billboard::Draw {
         mode: crate::source_billboard::Mode::Billboard,
         alignment: crate::particle_geometry::Alignment::View,
-        pivot: Vec3::ZERO, screen_size: Vec2::new(0.0, 1.0), allow_roll: true, scaling,
+        pivot: Vec3::ZERO, screen_size: Vec2::new(0.0, 1.0), allow_roll: true, scaling, flip: Vec2::ZERO,
     })
 }
 

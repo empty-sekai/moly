@@ -467,6 +467,7 @@ fn billboard_geometry(
         screen_size: Vec2::from_array(screen_size),
         allow_roll: true,
         scaling,
+        flip: Vec2::ZERO,
     }))
 }
 
@@ -1848,6 +1849,7 @@ mod billboard_native {
                     screen_size: Vec2::new(0.0, 10000.0),
                     allow_roll: row["allowRoll"].as_bool().unwrap(),
                     scaling: crate::particle_geometry::Scaling::Hierarchy,
+                    flip: Vec2::ZERO,
                 };
                 let f = Frame { scale, ..frame };
                 let error = compare(&vertices(&p, &f, &view, local).0);
