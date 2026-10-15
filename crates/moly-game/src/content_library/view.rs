@@ -132,7 +132,7 @@ fn surface(c: &mut Commands, parent: Entity, node: Node, region: Region) -> Enti
 }
 pub(crate) fn setup(
     mut c: Commands,
-    mut fonts: ResMut<Assets<Font>>,
+    ui_font: Res<crate::ui_font::UiFontAsset>,
     state: Res<ContentLibrary>,
     hud: Query<Entity, With<crate::balloon::HudCamera>>,
 ) {
@@ -142,7 +142,7 @@ pub(crate) fn setup(
         c.insert_resource(LibraryFont(Handle::default()));
         return;
     }
-    let font = fonts.add(Font::try_from_bytes(FONT.to_vec()).expect("bundled library font"));
+    let font = ui_font.0.clone();
     c.insert_resource(LibraryFont(font.clone()));
     // The library UI is drawn by the HUD overlay camera's UI pass, after the
     // HUD itself; a camera of its own would add its passes and a full-window
@@ -150,27 +150,6 @@ pub(crate) fn setup(
     let camera = hud
         .single()
         .expect("content library: the HUD overlay camera is spawned before the library UI");
-    let launcher = c
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                left: px(150),
-                bottom: px(14),
-                ..default()
-            },
-            UiTargetCamera(camera),
-            GlobalZIndex(1001),
-            Region::Launcher,
-        ))
-        .id();
-    button(
-        &mut c,
-        launcher,
-        &font,
-        "对话与互动 F9",
-        LibraryAction::Toggle,
-        ButtonKind::Secondary,
-    );
     let transport = c
         .spawn((
             Node {
@@ -224,7 +203,7 @@ pub(crate) fn setup(
         &mut c,
         transport,
         &font,
-        "对话与互动 F9",
+        "返回对话与互动",
         LibraryAction::Return,
         ButtonKind::Secondary,
     );
@@ -1448,7 +1427,7 @@ pub(crate) fn refresh(
         for (_, region, mut node, _, _, _) in &mut regions {
             if matches!(
                 region,
-                Region::Overlay | Region::Transport | Region::Launcher | Region::FixtureDialog
+                Region::Overlay | Region::Transport | Region::FixtureDialog
             ) {
                 set_if_neq!(node.display, Display::None);
             }
@@ -1476,7 +1455,6 @@ pub(crate) fn refresh(
             Region::Overlay => state.open,
             Region::Transport => state.watching,
             Region::FixtureDialog => state.fixture_dialog.is_some(),
-            Region::Launcher => !state.open && !state.watching && state.fixture_dialog.is_none(),
             Region::CharacterPicker => {
                 state.open && state.picker_open && state.fixture_dialog.is_none()
             }

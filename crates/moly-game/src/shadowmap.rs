@@ -700,6 +700,7 @@ fn extract_skinned_casters(
                 &InheritedVisibility,
                 Option<&MeshMaterial3d<CharacterMaterial>>,
                 Option<&MeshMaterial3d<AvatarMaterial>>,
+                Option<&MeshMaterial3d<crate::player_avatar::oc::OcMaterial>>,
                 Option<&ChildOf>,
             ),
             (
@@ -728,8 +729,9 @@ fn extract_skinned_casters(
     let mut palettes: HashMap<(AssetId<SkinnedMeshInverseBindposes>, Vec<Entity>), (u32, usize)> =
         HashMap::new();
     let mut palette_matrices: Vec<Vec<Mat4>> = Vec::new();
-    for (mesh, skin, visibility, character, avatar, parent) in &skinned {
-        let player = avatar.is_some();
+    for (mesh, skin, visibility, character, avatar, oc, parent) in &skinned {
+        // The player's body: the avatar's, or the player's own model (OC).
+        let player = avatar.is_some() || oc.is_some();
         if !player && character.is_none() {
             tally.other_skinned += 1;
             if !*others_logged && other_names.len() < 12 {

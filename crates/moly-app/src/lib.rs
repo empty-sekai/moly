@@ -311,6 +311,17 @@ pub fn director_snapshot() -> String {
     moly_game::director_snapshot()
 }
 
+/// Sends one JSON-RPC 2.0 request to the control surface (the methods of
+/// `rpc.discover`); resolves to its JSON-RPC 2.0 response, handled in the
+/// next frame.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn control(request: String) -> js_sys::Promise {
+    wasm_bindgen_futures::future_to_promise(async move {
+        Ok(wasm_bindgen::JsValue::from_str(&moly_game::control_request(&request).await))
+    })
+}
+
 /// The editable fields of the server document, for the page's panel.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]

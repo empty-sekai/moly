@@ -40,6 +40,8 @@ mod character_silhouette;
 pub mod client_config;
 pub mod cloth_runtime;
 mod content_library;
+mod control;
+mod control_panel;
 mod cutscene;
 mod cutscene_camera;
 mod delayed_faces;
@@ -194,6 +196,7 @@ pub use browser_game::{
 };
 pub use content_library::bridge::{configure_browser_library, library_catalog, library_command, library_snapshot};
 pub use content_library::library_diagnostics;
+pub use control::control_request;
 pub use dev_tools::{insert_dev_tools, DevTools};
 pub use director::{director_command, director_snapshot};
 
@@ -215,6 +218,7 @@ pub fn app(
     browser_log::install();
     // Asset sources must be registered before AssetPlugin is built.
     moly_assets::install(&mut app, source);
+    player_avatar::oc::source::register_source(&mut app);
     // The web asset plugin would add an `https` source that reaches any host;
     // remote resources go only through the admitted bases of
     // `moly_assets::remote`, which use the same reader.
@@ -287,6 +291,7 @@ pub fn app(
     app.add_plugins(material_order::MaterialOrderPlugin);
     app.add_plugins(character_material::CharacterMaterialPlugin);
     app.add_plugins(avatar_material::AvatarMaterialPlugin);
+    player_avatar::oc::install(&mut app);
     app.add_plugins(shadowmap::ShadowmapPlugin);
     app.add_plugins((
         fixture::FixturePlugin,

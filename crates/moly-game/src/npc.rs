@@ -66,7 +66,8 @@ pub(crate) const CREATION_POSITION: [f32; 3] = [0.0, 0.0, 0.0];
 const SURFACE_RADIUS: f32 = 2.0;
 
 /// 名册成员的身份：真源 `npcRegistry.characterUnitIds` 身份列的一行。
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct CharacterUnitId(pub u32);
 
 /// 常规路线的步行速度，来自角色清单的运行时米/秒列。

@@ -1,0 +1,1920 @@
+{
+ "common": {
+  "properties": {
+   "do": {
+    "type": "string",
+    "enum": [
+     "wait",
+     "wait_until",
+     "assert",
+     "log",
+     "where",
+     "capture",
+     "parallel",
+     "repeat",
+     "player.walk_to",
+     "player.interact",
+     "player.talk_to",
+     "player.stick",
+     "player.release",
+     "player.wear",
+     "player.wear_avatar",
+     "tap",
+     "ui.tap",
+     "npc.take",
+     "npc.walk_to",
+     "npc.release",
+     "npc.face",
+     "npc.emote",
+     "npc.use",
+     "npc.tweet",
+     "npc.talk",
+     "camera.drag",
+     "camera.zoom",
+     "server.edit",
+     "weather.set",
+     "site.switch",
+     "site.enter_room",
+     "site.go_home"
+    ],
+    "description": "The action name."
+   },
+   "label": {
+    "type": "string",
+    "description": "Name of the step in the log. Defaults to the action name. For macros and player.talk_to the label is applied to every node the step expands into."
+   },
+   "timeout": {
+    "type": "number",
+    "minimum": 0,
+    "description": "Seconds the step may run before it fails. Replaces the step's own default timeout where it has one (see timeout_default on each step). For macros and player.talk_to the value applies to every expanded node."
+   },
+   "optional": {
+    "type": "boolean",
+    "default": false,
+    "description": "When true a failure is logged and the script goes on."
+   }
+  },
+  "required": [
+   "do"
+  ],
+  "additionalProperties": false
+ },
+ "steps": [
+  {
+   "name": "wait",
+   "description": "Waits for secs seconds.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {
+     "secs": {
+      "type": "number",
+      "minimum": 0
+     }
+    },
+    "required": [
+     "secs"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "wait_until",
+   "description": "Waits until the condition holds, failing at its timeout.",
+   "macro": false,
+   "timeout_default": 30,
+   "params": {
+    "type": "object",
+    "properties": {
+     "until": {
+      "$ref": "#/definitions/condition"
+     }
+    },
+    "required": [
+     "until"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "assert",
+   "description": "Asserts that a condition holds at this point of the script.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {
+     "that": {
+      "$ref": "#/definitions/condition"
+     }
+    },
+    "required": [
+     "that"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "log",
+   "description": "Writes text to the log.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {
+     "text": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "text"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "where",
+   "description": "Logs the player's position and the position of each listed target.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {
+     "of": {
+      "type": "array",
+      "items": {
+       "$ref": "#/definitions/target"
+      },
+      "default": []
+     }
+    },
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "capture",
+   "description": "Saves the next rendered frame.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "parallel",
+   "description": "Runs several step lists as concurrent tracks; join all ends when every track has ended, join any ends when one track has ended and stops the others.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {
+     "tracks": {
+      "type": "array",
+      "items": {
+       "type": "array",
+       "items": {
+        "$ref": "#/definitions/step"
+       }
+      }
+     },
+     "join": {
+      "type": "string",
+      "enum": [
+       "all",
+       "any"
+      ],
+      "default": "all"
+     }
+    },
+    "required": [
+     "tracks"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "repeat",
+   "description": "Runs the nested steps a fixed number of times.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {
+     "times": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+     },
+     "steps": {
+      "type": "array",
+      "items": {
+       "$ref": "#/definitions/step"
+      }
+     }
+    },
+    "required": [
+     "times",
+     "steps"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "player.walk_to",
+   "description": "Walks the player to a target, stopping within the within tolerance.",
+   "macro": false,
+   "timeout_default": 60,
+   "params": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "$ref": "#/definitions/target"
+     },
+     "within": {
+      "type": "number",
+      "minimum": 0,
+      "default": 0.3
+     }
+    },
+    "required": [
+     "to"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "player.interact",
+   "description": "Walks the player to a target and presses an action button there; stop is the distance at which it stops (default 0.2).",
+   "macro": false,
+   "timeout_default": 60,
+   "params": {
+    "type": "object",
+    "properties": {
+     "target": {
+      "$ref": "#/definitions/target"
+     },
+     "button": {
+      "$ref": "#/definitions/button"
+     },
+     "stop": {
+      "type": "number",
+      "minimum": 0,
+      "default": 0.2
+     }
+    },
+    "required": [
+     "target",
+     "button"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "player.talk_to",
+   "description": "Walks the player to an NPC, presses its Talk button, then waits for a talk to become active.",
+   "macro": true,
+   "expansion": "player.interact with target {npc: unit, offset [0,0]}, button Talk, stop (default 0.8), timeout 60; then wait_until talk_active, timeout 10. Common label, timeout and optional apply to both nodes.",
+   "timeout_default": null,
+   "timeout_rule": "60 for the interact node, 10 for the wait_until node",
+   "params": {
+    "type": "object",
+    "properties": {
+     "unit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+     },
+     "stop": {
+      "type": "number",
+      "minimum": 0,
+      "default": 0.8
+     }
+    },
+    "required": [
+     "unit"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "player.stick",
+   "description": "Holds the joystick at a stick ratio for secs seconds.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {
+     "stick": {
+      "type": "array",
+      "items": {
+       "type": "number"
+      },
+      "minItems": 2,
+      "maxItems": 2,
+      "description": "[x, y] ratio, x right, y up."
+     },
+     "secs": {
+      "type": "number",
+      "minimum": 0
+     }
+    },
+    "required": [
+     "stick",
+     "secs"
+    ],
+    "additionalProperties": false
+   },
+   "constraints": [
+    "hypot(stick) <= 1 + 1e-4 (the ratio lies within the unit circle); refused at parse time"
+   ]
+  },
+  {
+   "name": "player.release",
+   "description": "Lifts the joystick finger.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "player.wear",
+   "description": "Dresses the player's body as the character body of the given unit.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {
+     "unit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+     }
+    },
+    "required": [
+     "unit"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "player.wear_avatar",
+   "description": "Dresses the player's body as the avatar body; the step ends once the choice is made.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "tap",
+   "description": "Taps one point, given either in logical pixels (at) or as window fractions (at_fraction); exactly one of the two must be present.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {
+     "at": {
+      "type": "array",
+      "items": {
+       "type": "number"
+      },
+      "minItems": 2,
+      "maxItems": 2,
+      "description": "[x, y] in logical pixels."
+     },
+     "at_fraction": {
+      "type": "array",
+      "items": {
+       "type": "number"
+      },
+      "minItems": 2,
+      "maxItems": 2,
+      "description": "[x, y] as fractions of the window (0..1 by the documented meaning;"
+     }
+    },
+    "additionalProperties": false,
+    "oneOf": [
+     {
+      "required": [
+       "at"
+      ],
+      "not": {
+       "required": [
+        "at_fraction"
+       ]
+      }
+     },
+     {
+      "required": [
+       "at_fraction"
+      ],
+      "not": {
+       "required": [
+        "at"
+       ]
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "ui.tap",
+   "description": "Taps the centre of the node at path in the UI view named view.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {
+     "view": {
+      "type": "string"
+     },
+     "path": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "view",
+     "path"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "npc.take",
+   "description": "Takes the roster character of the given unit under script control.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {
+     "unit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+     }
+    },
+    "required": [
+     "unit"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "npc.walk_to",
+   "description": "Walks a taken character to a target, stopping within the within tolerance; rests keeps the walk law's rest stops on the route.",
+   "macro": false,
+   "timeout_default": 60,
+   "params": {
+    "type": "object",
+    "properties": {
+     "unit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+     },
+     "to": {
+      "$ref": "#/definitions/target"
+     },
+     "within": {
+      "type": "number",
+      "minimum": 0,
+      "default": 0.3
+     },
+     "rests": {
+      "type": "boolean",
+      "default": false
+     }
+    },
+    "required": [
+     "unit",
+     "to"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "npc.release",
+   "description": "Gives a taken character back to its AI.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {
+     "unit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+     }
+    },
+    "required": [
+     "unit"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "npc.face",
+   "description": "Turns a taken, standing character toward a target over secs seconds.",
+   "macro": false,
+   "timeout_default": null,
+   "timeout_rule": "secs + 5 (computed from secs when the step is parsed)",
+   "params": {
+    "type": "object",
+    "properties": {
+     "unit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+     },
+     "to": {
+      "$ref": "#/definitions/target"
+     },
+     "secs": {
+      "type": "number",
+      "minimum": 0,
+      "default": 1.0
+     }
+    },
+    "required": [
+     "unit",
+     "to"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "npc.emote",
+   "description": "Shows the named emoticon over a character for secs seconds.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {
+     "unit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+     },
+     "name": {
+      "type": "string"
+     },
+     "secs": {
+      "type": "number",
+      "minimum": 0,
+      "default": 2.0
+     },
+     "use_root": {
+      "type": "boolean",
+      "default": false
+     }
+    },
+    "required": [
+     "unit",
+     "name"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "npc.use",
+   "description": "Plays one of a character's authored no-talk activities at a placed fixture; activity picks the action by id and variant (1-based) picks its timeline, with the first of each when absent.",
+   "macro": false,
+   "timeout_default": 300,
+   "params": {
+    "type": "object",
+    "properties": {
+     "unit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+     },
+     "fixture": {
+      "oneOf": [
+       {
+        "type": "string",
+        "description": "Placement UID."
+       },
+       {
+        "type": "integer",
+        "minimum": -2147483648,
+        "maximum": 2147483647,
+        "description": "Master id; the nearest placed instance is used."
+       }
+      ]
+     },
+     "activity": {
+      "type": "integer",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+     },
+     "variant": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4294967295
+     },
+     "rests": {
+      "type": "boolean",
+      "default": false
+     }
+    },
+    "required": [
+     "unit",
+     "fixture"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "npc.tweet",
+   "description": "Shows a tweet of the master over a taken character for secs seconds.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {
+     "unit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+     },
+     "tweet": {
+      "type": "integer",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+     },
+     "secs": {
+      "type": "number",
+      "minimum": 0,
+      "default": 3.0
+     }
+    },
+    "required": [
+     "unit",
+     "tweet"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "npc.talk",
+   "description": "Hands a character to its AI with the given talk set to open on its next decision.",
+   "macro": false,
+   "timeout_default": 60,
+   "params": {
+    "type": "object",
+    "properties": {
+     "unit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+     },
+     "talk": {
+      "type": "integer",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+     }
+    },
+    "required": [
+     "unit",
+     "talk"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "camera.drag",
+   "description": "Drags with one finger by by logical pixels over secs seconds, starting at from (window fractions).",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {
+     "by": {
+      "type": "array",
+      "items": {
+       "type": "number"
+      },
+      "minItems": 2,
+      "maxItems": 2,
+      "description": "[x, y] pixels; x right, y down."
+     },
+     "secs": {
+      "type": "number",
+      "minimum": 0,
+      "default": 0.5
+     },
+     "from": {
+      "type": "array",
+      "items": {
+       "type": "number",
+       "minimum": 0,
+       "maximum": 1
+      },
+      "minItems": 2,
+      "maxItems": 2,
+      "default": [
+       0.5,
+       0.35
+      ],
+      "description": "[x, y] window fractions; each must lie in 0..1."
+     }
+    },
+    "required": [
+     "by"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "camera.zoom",
+   "description": "Turns the wheel by by pixels (positive zooms in) spread over secs seconds.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {
+     "by": {
+      "type": "number",
+      "description": "Pixels; positive zooms in."
+     },
+     "secs": {
+      "type": "number",
+      "minimum": 0,
+      "default": 0.5
+     }
+    },
+    "required": [
+     "by"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "server.edit",
+   "description": "Sends one server.edit command built from the step's own fields; the server model checks the edit when the step runs.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {
+     "path": {
+      "type": "string",
+      "description": "Field path, for a value edit."
+     },
+     "value": {},
+     "action": {
+      "type": "string",
+      "description": "Action name, for an action edit."
+     }
+    },
+    "additionalProperties": true,
+    "anyOf": [
+     {
+      "required": [
+       "path"
+      ]
+     },
+     {
+      "required": [
+       "action"
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "weather.set",
+   "description": "Sets the weather to the given phenomenon id.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {
+     "phenomenon": {
+      "type": "integer",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+     }
+    },
+    "required": [
+     "phenomenon"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "site.switch",
+   "description": "Switches the active site to the named site.",
+   "macro": false,
+   "timeout_default": 60,
+   "params": {
+    "type": "object",
+    "properties": {
+     "site": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "site"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "site.enter_room",
+   "description": "Macro: walks to the house entry box, presses HouseEntry, then waits for the move to start and to land in a room.",
+   "macro": true,
+   "expansion": "player.interact with target house_door, button HouseEntry, stop 0.2, timeout 60; then wait_until site_moving, timeout 5; then wait_until all[not site_moving, site_kind room], timeout 60. Common label, timeout and optional apply to all three nodes.",
+   "timeout_default": null,
+   "timeout_rule": "60, 5 and 60 for the three nodes",
+   "params": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "site.go_home",
+   "description": "Macro: walks to the room door sensor, presses GoHomeSite, then waits for the move to start and to land on the home site.",
+   "macro": true,
+   "expansion": "player.interact with target room_door, button GoHomeSite, stop 0.2, timeout 60; then wait_until site_moving, timeout 5; then wait_until all[not site_moving, site_kind home], timeout 60. Common label, timeout and optional apply to all three nodes.",
+   "timeout_default": null,
+   "timeout_rule": "60, 5 and 60 for the three nodes",
+   "params": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+   }
+  }
+ ],
+ "conditions": [
+  {
+   "name": "site_moving",
+   "form": "bare",
+   "description": "A site move (cannon or door) is in progress.",
+   "params": null
+  },
+  {
+   "name": "entry_done",
+   "form": "bare",
+   "description": "The entry sequence has ended, including the stamina refresh clip when the join reports one.",
+   "params": null
+  },
+  {
+   "name": "dialog_shown",
+   "form": "bare",
+   "description": "A dialog screen is shown.",
+   "params": null
+  },
+  {
+   "name": "talk_active",
+   "form": "bare",
+   "description": "A player or NPC conversation is playing.",
+   "params": null
+  },
+  {
+   "name": "camera_settled",
+   "form": "bare",
+   "description": "The camera has left its entry shot and no transition tween is in flight.",
+   "params": null
+  },
+  {
+   "name": "all",
+   "form": "object",
+   "description": "Every listed condition holds.",
+   "params": {
+    "type": "array",
+    "items": {
+     "$ref": "#/definitions/condition"
+    }
+   }
+  },
+  {
+   "name": "any",
+   "form": "object",
+   "description": "At least one listed condition holds.",
+   "params": {
+    "type": "array",
+    "items": {
+     "$ref": "#/definitions/condition"
+    }
+   }
+  },
+  {
+   "name": "not",
+   "form": "object",
+   "description": "The inner condition does not hold.",
+   "params": {
+    "$ref": "#/definitions/condition"
+   }
+  },
+  {
+   "name": "site_is",
+   "form": "object",
+   "description": "The active site type equals the given string, for example home_site or first_floor.",
+   "params": {
+    "type": "string"
+   }
+  },
+  {
+   "name": "site_kind",
+   "form": "object",
+   "description": "The active site is of the given kind.",
+   "params": {
+    "type": "string",
+    "enum": [
+     "home",
+     "room",
+     "harvest",
+     "delivery"
+    ]
+   }
+  },
+  {
+   "name": "button_head",
+   "form": "object",
+   "description": "The action button shown at the head of the button stack is this type.",
+   "params": {
+    "$ref": "#/definitions/button"
+   }
+  },
+  {
+   "name": "button_stacked",
+   "form": "object",
+   "description": "An action button of this type is in the stack.",
+   "params": {
+    "$ref": "#/definitions/button"
+   }
+  },
+  {
+   "name": "phenomenon_is",
+   "form": "object",
+   "description": "The current weather phenomenon id equals the value.",
+   "params": {
+    "type": "integer",
+    "minimum": -2147483648,
+    "maximum": 2147483647
+   }
+  },
+  {
+   "name": "player_near",
+   "form": "object",
+   "description": "The player's horizontal distance to the target is within within (default 0.5).",
+   "params": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "$ref": "#/definitions/target"
+     },
+     "within": {
+      "type": "number",
+      "minimum": 0,
+      "default": 0.5
+     }
+    },
+    "required": [
+     "to"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "ui_shown",
+   "form": "object",
+   "description": "The node at path in the UI view named view is shown and active.",
+   "params": {
+    "type": "object",
+    "properties": {
+     "view": {
+      "type": "string"
+     },
+     "path": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "view",
+     "path"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "npc_here",
+   "form": "object",
+   "description": "The roster character of this unit is on this site with its AI.",
+   "params": {
+    "type": "integer",
+    "minimum": 0,
+    "maximum": 4294967295
+   }
+  },
+  {
+   "name": "npc_action",
+   "form": "object",
+   "description": "The character's current action state equals is.",
+   "params": {
+    "type": "object",
+    "properties": {
+     "unit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+     },
+     "is": {
+      "$ref": "#/definitions/npc_action"
+     }
+    },
+    "required": [
+     "unit",
+     "is"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "npc_near",
+   "form": "object",
+   "description": "The character's horizontal distance to the target is within within (default 0.5).",
+   "params": {
+    "type": "object",
+    "properties": {
+     "unit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+     },
+     "to": {
+      "$ref": "#/definitions/target"
+     },
+     "within": {
+      "type": "number",
+      "minimum": 0,
+      "default": 0.5
+     }
+    },
+    "required": [
+     "unit",
+     "to"
+    ],
+    "additionalProperties": false
+   }
+  }
+ ],
+ "definitions": {
+  "pair": {
+   "type": "array",
+   "items": {
+    "type": "number"
+   },
+   "minItems": 2,
+   "maxItems": 2
+  },
+  "target": {
+   "description": "A place in the world: a named place, a [x, z] point, or an object naming an NPC, a fixture or a point.",
+   "oneOf": [
+    {
+     "enum": [
+      "house_door",
+      "room_door",
+      "player"
+     ]
+    },
+    {
+     "$ref": "#/definitions/pair",
+     "description": "[x, z] world point; no offset is possible in this form."
+    },
+    {
+     "type": "object",
+     "properties": {
+      "npc": {
+       "type": "integer",
+       "minimum": 0,
+       "maximum": 4294967295,
+       "description": "Roster character unit."
+      },
+      "fixture": {
+       "oneOf": [
+        {
+         "type": "string",
+         "description": "Placement UID."
+        },
+        {
+         "type": "integer",
+         "minimum": -2147483648,
+         "maximum": 2147483647,
+         "description": "Master id; the placed instance nearest the player."
+        }
+       ]
+      },
+      "point": {
+       "$ref": "#/definitions/pair",
+       "description": "[x, z] world point."
+      },
+      "offset": {
+       "$ref": "#/definitions/pair",
+       "default": [
+        0,
+        0
+       ],
+       "description": "[dx, dz] metres added on x and z after resolution."
+      }
+     },
+     "additionalProperties": false,
+     "allOf": [
+      {
+       "oneOf": [
+        {
+         "required": [
+          "npc"
+         ],
+         "not": {
+          "anyOf": [
+           {
+            "required": [
+             "fixture"
+            ]
+           },
+           {
+            "required": [
+             "point"
+            ]
+           }
+          ]
+         }
+        },
+        {
+         "required": [
+          "fixture"
+         ],
+         "not": {
+          "anyOf": [
+           {
+            "required": [
+             "npc"
+            ]
+           },
+           {
+            "required": [
+             "point"
+            ]
+           }
+          ]
+         }
+        },
+        {
+         "required": [
+          "point"
+         ],
+         "not": {
+          "anyOf": [
+           {
+            "required": [
+             "npc"
+            ]
+           },
+           {
+            "required": [
+             "fixture"
+            ]
+           }
+          ]
+         }
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  "button": {
+   "type": "string",
+   "enum": [
+    "Talk",
+    "GimmickFixture",
+    "TimelineFixture",
+    "HouseEntry",
+    "OpenChest",
+    "GateEdit",
+    "OpenCraftTool",
+    "OpenMysekaiInfo",
+    "OpenMysekaiBgmSelect",
+    "OpenMysekaiConvert",
+    "OpenOtherMysekai",
+    "OpenAvatarDressUp",
+    "OpenSecretShop",
+    "GoHomeSite",
+    "LeaveMysekai",
+    "Sketch",
+    "Delivery",
+    "BirthdayCutScene",
+    "GateInvitation",
+    "OpenMysekaiCompetition",
+    "DeliveryInformation"
+   ]
+  },
+  "npc_action": {
+   "type": "string",
+   "enum": [
+    "Idle",
+    "AutoMove",
+    "Rotate",
+    "Talk",
+    "Walk",
+    "Rest",
+    "None",
+    "Tweet",
+    "Greeting",
+    "FixtureAction",
+    "FixtureActionIdle",
+    "ChangeSite",
+    "MainSomeFixtureAction",
+    "SomeFixtureAction",
+    "Communication"
+   ]
+  },
+  "step": {
+   "description": "One step as written in a script: do, the common fields, and the fields of the named action (see steps[i].params). Nested steps (parallel tracks, repeat steps) use this definition.",
+   "type": "object",
+   "properties": {
+    "do": {
+     "$ref": "#/common/properties/do"
+    },
+    "label": {
+     "type": "string"
+    },
+    "timeout": {
+     "type": "number",
+     "minimum": 0
+    },
+    "optional": {
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "do"
+   ],
+   "allOf": [
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "wait"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/0/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "wait_until"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/1/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "assert"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/2/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "log"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/3/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "where"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/4/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "capture"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/5/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "parallel"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/6/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "repeat"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/7/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "player.walk_to"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/8/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "player.interact"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/9/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "player.talk_to"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/10/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "player.stick"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/11/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "player.release"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/12/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "player.wear"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/13/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "player.wear_avatar"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/14/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "tap"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/15/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "ui.tap"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/16/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "npc.take"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/17/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "npc.walk_to"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/18/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "npc.release"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/19/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "npc.face"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/20/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "npc.emote"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/21/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "npc.use"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/22/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "npc.tweet"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/23/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "npc.talk"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/24/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "camera.drag"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/25/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "camera.zoom"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/26/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "server.edit"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/27/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "weather.set"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/28/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "site.switch"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/29/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "site.enter_room"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/30/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "site.go_home"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/31/params"
+     }
+    }
+   ],
+   "unevaluatedProperties": false
+  },
+  "condition": {
+   "description": "A condition: a bare name, or an object with exactly one key.",
+   "oneOf": [
+    {
+     "enum": [
+      "site_moving",
+      "entry_done",
+      "dialog_shown",
+      "talk_active",
+      "camera_settled"
+     ]
+    },
+    {
+     "type": "object",
+     "required": [
+      "all"
+     ],
+     "properties": {
+      "all": {
+       "$ref": "#/conditions/5/params"
+      }
+     },
+     "additionalProperties": false
+    },
+    {
+     "type": "object",
+     "required": [
+      "any"
+     ],
+     "properties": {
+      "any": {
+       "$ref": "#/conditions/6/params"
+      }
+     },
+     "additionalProperties": false
+    },
+    {
+     "type": "object",
+     "required": [
+      "not"
+     ],
+     "properties": {
+      "not": {
+       "$ref": "#/conditions/7/params"
+      }
+     },
+     "additionalProperties": false
+    },
+    {
+     "type": "object",
+     "required": [
+      "site_is"
+     ],
+     "properties": {
+      "site_is": {
+       "$ref": "#/conditions/8/params"
+      }
+     },
+     "additionalProperties": false
+    },
+    {
+     "type": "object",
+     "required": [
+      "site_kind"
+     ],
+     "properties": {
+      "site_kind": {
+       "$ref": "#/conditions/9/params"
+      }
+     },
+     "additionalProperties": false
+    },
+    {
+     "type": "object",
+     "required": [
+      "button_head"
+     ],
+     "properties": {
+      "button_head": {
+       "$ref": "#/conditions/10/params"
+      }
+     },
+     "additionalProperties": false
+    },
+    {
+     "type": "object",
+     "required": [
+      "button_stacked"
+     ],
+     "properties": {
+      "button_stacked": {
+       "$ref": "#/conditions/11/params"
+      }
+     },
+     "additionalProperties": false
+    },
+    {
+     "type": "object",
+     "required": [
+      "phenomenon_is"
+     ],
+     "properties": {
+      "phenomenon_is": {
+       "$ref": "#/conditions/12/params"
+      }
+     },
+     "additionalProperties": false
+    },
+    {
+     "type": "object",
+     "required": [
+      "player_near"
+     ],
+     "properties": {
+      "player_near": {
+       "$ref": "#/conditions/13/params"
+      }
+     },
+     "additionalProperties": false
+    },
+    {
+     "type": "object",
+     "required": [
+      "ui_shown"
+     ],
+     "properties": {
+      "ui_shown": {
+       "$ref": "#/conditions/14/params"
+      }
+     },
+     "additionalProperties": false
+    },
+    {
+     "type": "object",
+     "required": [
+      "npc_here"
+     ],
+     "properties": {
+      "npc_here": {
+       "$ref": "#/conditions/15/params"
+      }
+     },
+     "additionalProperties": false
+    },
+    {
+     "type": "object",
+     "required": [
+      "npc_action"
+     ],
+     "properties": {
+      "npc_action": {
+       "$ref": "#/conditions/16/params"
+      }
+     },
+     "additionalProperties": false
+    },
+    {
+     "type": "object",
+     "required": [
+      "npc_near"
+     ],
+     "properties": {
+      "npc_near": {
+       "$ref": "#/conditions/17/params"
+      }
+     },
+     "additionalProperties": false
+    }
+   ]
+  }
+ }
+}

@@ -88,17 +88,20 @@ const MAX_ANIMATION_SPEED: f32 = 1.8;
 /// 玩家标记：NPC 独占的域（待机动作演出、tweet 气泡、表情编排）用它把
 /// 玩家排除在外——玩家不是名册成员，那些域的触发器（驻留计时、编排表）
 /// 对玩家没有真源对应物。
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct PlayerControlled;
 
 /// dash 模式开关（真源 `PlayerAvatarPresenter.IsDashMode`；切换来源是
 /// HUD 的冲刺按钮）。
-#[derive(Component, Default)]
+#[derive(Component, Default, Reflect)]
+#[reflect(Component)]
 pub struct DashMode(pub bool);
 
 /// 本帧输入：方向（世界系，相机相对合成）与是否活跃。输入系统写、推进
 /// 系统读。
-#[derive(Component, Default)]
+#[derive(Component, Default, Reflect)]
+#[reflect(Component)]
 pub struct PlayerInput {
     pub direction: Vec3,
     pub active: bool,
@@ -315,7 +318,7 @@ pub(crate) fn read_input(
     time: Res<Time>,
     edits: Res<crate::fixture_edit::EditSessionActive>,
     joystick: Res<crate::joystick::JoystickState>,
-    settings_panel: Res<crate::game_settings::SettingsPanel>,
+    overlays: crate::game_settings::OverlayPanels,
     library: Res<crate::content_library::ContentLibrary>,
     site_move: Option<Res<crate::site_move::SiteMoveActive>>,
     entry: Option<Res<crate::entry::EntrySequence>>,
@@ -330,7 +333,7 @@ pub(crate) fn read_input(
     // A dialog over the field takes the field's input, as it takes the stick's
     // new presses (ExistsDialog(Layer_Dialog)), so the adaptation is off too.
     if edits.is_active()
-        || settings_panel.blocks_world_input()
+        || overlays.block_world_input()
         || library.blocks_exploration_input()
         || site_move.is_some()
         || screens.as_deref().is_some_and(crate::ui_layers::ScreenManager::exists_dialog)

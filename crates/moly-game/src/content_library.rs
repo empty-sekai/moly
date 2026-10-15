@@ -56,7 +56,6 @@ pub(crate) use qa::qa_open;
 pub(crate) use staging::{stage_fixture_talk_observer, prepare_pending, retire_scene};
 pub(crate) use view::{refresh, setup};
 
-use crate::ui_font::UI_FONT as FONT;
 const CHARACTERS: &str = "moly://characters.json";
 const FIXTURES: &str = "moly://mysekai-fixtures.json";
 const THUMBNAILS: &str = "moly://fixture-thumbnails/fixture-thumbnails.json";
@@ -200,7 +199,7 @@ pub(crate) struct LibraryAssets {
     processed: [bool; 6],
 }
 #[derive(Resource)]
-pub(crate) struct LibraryFont(Handle<Font>);
+pub(crate) struct LibraryFont(pub(crate) Handle<Font>);
 #[derive(Resource, Default)]
 pub(crate) struct LibraryCatalog {
     talks: Vec<LibraryTalk>,
@@ -623,7 +622,6 @@ pub(crate) enum Region {
     FixtureDialog,
     FixtureDialogBody,
     Transport,
-    Launcher,
     Back,
     CharacterFilter,
     SpecialFilter,

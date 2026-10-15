@@ -242,10 +242,13 @@ pub fn install(app: &mut App) {
     );
     crate::game_settings::install(app);
     crate::director::install(app);
+    crate::control::install(app);
+    crate::control_panel::install(app);
     crate::player_data::install(app);
     crate::fixture_colors::install(app);
     app.add_message::<crate::frame_capture::CaptureFrame>()
         .add_systems(PostUpdate, crate::frame_capture::capture);
+    app.add_systems(bevy::app::PreStartup, crate::ui_font::add_asset);
     app.add_systems(
         Startup,
         crate::game_settings::setup

@@ -77,7 +77,8 @@ pub(crate) fn spawn_site(_loaded: &str) -> String {
 
 /// A member whose own site is not the loaded site: suspended while it is
 /// away (see the module notes).
-#[derive(Component, Debug)]
+#[derive(Component, Debug, Reflect)]
+#[reflect(Component)]
 pub(crate) struct Away;
 
 /// Marks members away from the loaded site. It runs every frame after the

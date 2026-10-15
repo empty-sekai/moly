@@ -666,6 +666,22 @@ impl ScreenManager {
             .any(|dialog| dialog.layer == DisplayLayerType::LayerDialog)
     }
 
+    /// The current screen, the back stack (oldest first), whether a
+    /// transition runs, and the shown dialogs.
+    pub(crate) fn summary(&self) -> serde_json::Value {
+        serde_json::json!({
+            "current": self.current.map(|screen| format!("{screen:?}")),
+            "stack": self.stack.list.iter().map(|entry| format!("{:?}", entry.screen)).collect::<Vec<_>>(),
+            "transition": self.transition.is_some(),
+            "dialogs": self.dialogs.iter().map(|dialog| serde_json::json!({
+                "dialog": format!("{:?}", dialog.dialog),
+                "layer": format!("{:?}", dialog.layer),
+                "state": format!("{:?}", dialog.state),
+                "caller": dialog.caller,
+            })).collect::<Vec<_>>(),
+        })
+    }
+
     /// A dialog's state.
     #[allow(dead_code)]
     pub(crate) fn dialog_state(&self, id: DialogId) -> Option<DialogState> {

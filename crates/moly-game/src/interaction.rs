@@ -123,7 +123,7 @@ pub(crate) struct InteractionEligibility<'w, 's> {
     dialogs: Res<'w, ShellDialogState>,
     player_state: Res<'w, PlayerAvatarStates>,
     edits: Res<'w, crate::fixture_edit::EditSessionActive>,
-    settings_panel: Res<'w, crate::game_settings::SettingsPanel>,
+    overlays: crate::game_settings::OverlayPanels<'w>,
     player_talk: Option<Res<'w, PlayerTalkSession>>,
     pair_talk: Option<Res<'w, ActiveTalk>>,
     entry: Option<Res<'w, crate::entry::EntrySequence>>,
@@ -145,7 +145,7 @@ impl InteractionEligibility<'_, '_> {
     pub(crate) fn available(&self) -> bool {
         crate::entry::control_open(self.entry.as_deref())
             && self.layers.on_field()
-            && !self.settings_panel.blocks_world_input()
+            && !self.overlays.block_world_input()
             && !self.edits.is_active()
             && !self.dialogs.blocks_field_input()
             && self.player_state.can_intercept
@@ -160,7 +160,7 @@ impl InteractionEligibility<'_, '_> {
     pub(crate) fn field_input_open(&self) -> bool {
         crate::entry::control_open(self.entry.as_deref())
             && self.layers.on_field()
-            && !self.settings_panel.blocks_world_input()
+            && !self.overlays.block_world_input()
             && !self.edits.is_active()
             && !self.dialogs.blocks_field_input()
             && !self.player_in_talk()

@@ -140,7 +140,7 @@ pub(crate) fn window_size(world: &mut World) -> Option<Vec2> {
 pub(crate) fn ui_point(world: &mut World, view: &str, path: &str) -> Result<Vec2, String> {
     let (_, window) = window(world).ok_or("no primary window")?;
     let root = *world.get_resource::<crate::canvas::RootCanvas>().ok_or("the root canvas is not set up")?;
-    let (scale, canvas) = (root.scale(&window), root.size(&window));
+    let canvas = root.size(&window);
     let mut views = world.query::<(&crate::ui_layout::UiPrefabView, Option<&InheritedVisibility>)>();
     let layouts = world.get_resource::<crate::ui_layout::UiLayouts>().ok_or("the UI layouts are not loaded")?;
     let shown: Vec<&crate::ui_layout::UiPrefabView> = views
@@ -169,8 +169,7 @@ pub(crate) fn ui_point(world: &mut World, view: &str, path: &str) -> Result<Vec2
     let Some(rect) = found else {
         return Err(refused.unwrap_or_else(|| format!("{view} {path} is not active")));
     };
-    let centre = rect.center();
-    Ok(Vec2::new(centre.x * scale + window.width() / 2.0, window.height() / 2.0 - centre.y * scale))
+    Ok(root.to_window(&window, rect.center()))
 }
 
 /// The screen position of an action button on its laid-out view.

@@ -17,7 +17,7 @@ static INSTALLED: AtomicBool = AtomicBool::new(false);
 pub(crate) const GATED: [&str; 8] = [
     "settings panel UI (F10 panel, its buttons and refresh)",
     "settings panel keys F10/F12",
-    "content library F9 key and its QA auto-open",
+    "content library QA auto-open",
     "fixture gallery preview rows",
     "player-data UI",
     "site Tab key",

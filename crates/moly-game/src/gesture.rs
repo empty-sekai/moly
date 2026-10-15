@@ -208,7 +208,7 @@ pub(crate) fn advance(
     windows: Query<(Entity, &Window), With<bevy::window::PrimaryWindow>>,
     time: Res<Time>,
     real: Res<Time<Real>>,
-    settings_panel: Res<crate::game_settings::SettingsPanel>,
+    overlays: crate::game_settings::OverlayPanels,
     ui: crate::ui_layout::PointerUi,
 ) {
     use bevy::{input::ButtonState, window::WindowEvent};
@@ -219,7 +219,7 @@ pub(crate) fn advance(
     let input: Vec<WindowEvent> = input.read().cloned().collect();
     let touch_count = layer.frame_touch_count(&input, window_entity);
     let now = real.elapsed_secs();
-    if settings_panel.blocks_world_input() {
+    if overlays.block_world_input() {
         drop_pointer(&mut layer, &mut events, &mut pointers, touch_count);
         layer.cursor = window.cursor_position();
         return;

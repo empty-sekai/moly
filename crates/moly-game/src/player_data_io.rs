@@ -1,5 +1,8 @@
 //! Bounded, cancellable player-data transfers. Only one transfer allocates a
 //! body buffer at a time; cancelled operations release their queue position.
+//! The same file picker and readers serve other local files the player
+//! chooses ([`FileKind`]); a chosen file is read into memory and never sent
+//! anywhere.
 
 use async_lock::Semaphore;
 use futures_util::future::{AbortHandle, Abortable};
@@ -7,6 +10,24 @@ use moly_assets::player_data::MAX_IMPORT_BYTES;
 use std::{future::Future, sync::OnceLock};
 
 pub(crate) struct ReadTask(AbortHandle);
+
+/// A family of local files the picker offers: the native dialog's filter
+/// and the browser input's `accept` list and element id.
+pub(crate) struct FileKind {
+    /// The native dialog's filter name (native builds only).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) label: &'static str,
+    pub(crate) extensions: &'static [&'static str],
+    /// The browser input element's id (browser builds only).
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub(crate) input_id: &'static str,
+}
+
+const PLAYER_DATA: FileKind = FileKind {
+    label: "Mysekai player data",
+    extensions: &["json"],
+    input_id: "moly-player-data-file",
+};
 
 impl Drop for ReadTask {
     fn drop(&mut self) {
@@ -82,15 +103,28 @@ pub(crate) fn read_file(
 pub(crate) fn choose_file(
     complete: impl FnOnce(Result<Option<String>, String>) + Send + 'static,
 ) -> Result<ReadTask, String> {
-    let selection = platform::pick_file()?;
+    choose_bytes(&PLAYER_DATA, MAX_IMPORT_BYTES, move |result| {
+        complete(result.and_then(|file| file.map(|(_, bytes)| decode_bytes(bytes)).transpose()))
+    })
+}
+
+/// Lets the player choose one local file of `kind` and reads it whole, up to
+/// `limit` bytes: `Ok(Some((file name, bytes)))`, or `Ok(None)` when the
+/// choice is cancelled.
+pub(crate) fn choose_bytes(
+    kind: &'static FileKind,
+    limit: usize,
+    complete: impl FnOnce(Result<Option<(String, Vec<u8>)>, String>) + Send + 'static,
+) -> Result<ReadTask, String> {
+    let selection = platform::pick_file(kind)?;
     spawn(async move {
         let result = match selection.await {
             Ok(Some(file)) => {
                 let _permit = transfers().acquire().await;
-                platform::file(&file, MAX_IMPORT_BYTES)
+                let name = platform::file_name(&file);
+                platform::file(&file, limit)
                     .await
-                    .and_then(decode_bytes)
-                    .map(Some)
+                    .map(|bytes| Some((name, bytes)))
             }
             Ok(None) => Ok(None),
             Err(error) => Err(error),
@@ -99,13 +133,45 @@ pub(crate) fn choose_file(
     })
 }
 
-fn too_large() -> String {
-    "Player data exceeds the 32 MiB import limit".into()
+/// Reads one local file whole, up to `limit` bytes.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn read_bytes(
+    path: std::path::PathBuf,
+    limit: usize,
+    complete: impl FnOnce(Result<Vec<u8>, String>) + Send + 'static,
+) -> Result<ReadTask, String> {
+    spawn(async move {
+        let _permit = transfers().acquire().await;
+        complete(platform::read_file(&path, limit).await);
+    })
+}
+
+/// Reads a browser `File` (one the player dropped on the page) whole, up to
+/// `limit` bytes.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn read_web_file(
+    file: web_sys::File,
+    limit: usize,
+    complete: impl FnOnce(Result<Vec<u8>, String>) + 'static,
+) -> Result<ReadTask, String> {
+    spawn(async move {
+        let _permit = transfers().acquire().await;
+        complete(platform::file(&file, limit).await);
+    })
+}
+
+fn too_large(limit: usize) -> String {
+    let what = if limit == MAX_IMPORT_BYTES {
+        "Player data"
+    } else {
+        "The file"
+    };
+    format!("{what} exceeds the {} MiB import limit", limit >> 20)
 }
 
 fn check_length(length: Option<u64>, limit: usize) -> Result<(), String> {
     if length.is_some_and(|length| length > limit as u64) {
-        Err(too_large())
+        Err(too_large(limit))
     } else {
         Ok(())
     }
@@ -130,8 +196,8 @@ impl Body {
     fn new(limit: usize) -> Result<Self, String> {
         let mut bytes = Vec::new();
         bytes
-            .try_reserve_exact(limit.checked_add(1).ok_or_else(too_large)?)
-            .map_err(|error| format!("Allocate player-data buffer: {error}"))?;
+            .try_reserve_exact(limit.checked_add(1).ok_or_else(|| too_large(limit))?)
+            .map_err(|error| format!("Allocate file buffer: {error}"))?;
         Ok(Self { bytes, limit })
     }
 
@@ -143,7 +209,7 @@ impl Body {
         let count = self.remaining().min(bytes.len());
         self.bytes.extend_from_slice(&bytes[..count]);
         if count != bytes.len() || self.bytes.len() > self.limit {
-            return Err(too_large());
+            return Err(too_large(self.limit));
         }
         Ok(())
     }
@@ -165,11 +231,16 @@ mod platform {
     use tokio::io::AsyncReadExt;
 
     pub(super) fn pick_file(
+        kind: &FileKind,
     ) -> Result<impl Future<Output = Result<Option<rfd::FileHandle>, String>> + Send, String> {
         let selection = rfd::AsyncFileDialog::new()
-            .add_filter("Mysekai player data", &["json"])
+            .add_filter(kind.label, kind.extensions)
             .pick_file();
         Ok(async move { Ok(selection.await) })
+    }
+
+    pub(super) fn file_name(file: &rfd::FileHandle) -> String {
+        file.file_name()
     }
 
     pub(super) async fn fetch(url: &str, limit: usize) -> Result<Vec<u8>, String> {
@@ -251,7 +322,7 @@ mod platform {
     }
 
     impl FilePicker {
-        fn new() -> Result<Self, String> {
+        fn new(kind: &FileKind) -> Result<Self, String> {
             let document = web_sys::window()
                 .and_then(|window| window.document())
                 .ok_or("Browser document is unavailable")?;
@@ -260,9 +331,10 @@ mod platform {
                 .map_err(|_| "Create file picker")?
                 .dyn_into()
                 .map_err(|_| "Create file picker input")?;
-            input.set_id("moly-player-data-file");
+            input.set_id(kind.input_id);
             input.set_type("file");
-            input.set_accept(".json");
+            let accept: Vec<String> = kind.extensions.iter().map(|ext| format!(".{ext}")).collect();
+            input.set_accept(&accept.join(","));
             input.set_hidden(true);
             let (send, result) = futures_channel::oneshot::channel();
             let send = Rc::new(RefCell::new(Some(send)));
@@ -319,8 +391,13 @@ mod platform {
     }
 
     pub(super) fn pick_file(
+        kind: &FileKind,
     ) -> Result<impl Future<Output = Result<Option<web_sys::File>, String>>, String> {
-        Ok(FilePicker::new()?.finish())
+        Ok(FilePicker::new(kind)?.finish())
+    }
+
+    pub(super) fn file_name(file: &web_sys::File) -> String {
+        file.name()
     }
 
     struct RequestGuard {
@@ -402,7 +479,7 @@ mod platform {
                 .subarray(0, count as u32)
                 .copy_to(&mut body.bytes[offset..]);
             if count != bytes.length() as usize || body.bytes.len() > limit {
-                return Err(too_large());
+                return Err(too_large(limit));
             }
         }
         Ok(body.bytes)
@@ -445,7 +522,7 @@ mod platform {
     pub(super) async fn read_file(file: &web_sys::File, limit: usize) -> Result<Vec<u8>, String> {
         let size = file.size();
         if !size.is_finite() || size < 0.0 || size > limit as f64 {
-            return Err(too_large());
+            return Err(too_large(limit));
         }
         read_stream(file.stream(), limit).await
     }

@@ -703,6 +703,10 @@ pub(crate) fn drop_files(
 ) {
     for event in files.read() {
         if let bevy::window::FileDragAndDrop::DroppedFile { path_buf, .. } = event {
+            // A dropped model file is the player's body, not player data.
+            if crate::player_avatar::oc::source::is_model_name(&path_buf.to_string_lossy()) {
+                continue;
+            }
             panel.open = true;
             panel.player_data = true;
             if let Err(error) = state.read_file(path_buf.clone()) {

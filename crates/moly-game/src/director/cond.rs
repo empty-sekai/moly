@@ -154,8 +154,8 @@ pub(crate) fn eval(world: &mut World, cond: &Cond) -> (bool, String) {
             (moving, format!("site moving {moving}"))
         }
         Cond::EntryDone => {
-            let open = crate::entry::control_open(world.get_resource::<crate::entry::EntrySequence>());
-            (open, format!("player control {}", if open { "open" } else { "closed" }))
+            let done = crate::entry::entry_settled(world.get_resource::<crate::entry::EntrySequence>());
+            (done, format!("entry {}", if done { "settled" } else { "in progress" }))
         }
         Cond::DialogShown => {
             let shown = world

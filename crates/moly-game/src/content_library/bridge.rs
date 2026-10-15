@@ -29,6 +29,8 @@ static INPUT_CAPTURED: AtomicBool = AtomicBool::new(false);
 #[derive(Debug)]
 pub(super) enum BrowserCommand {
     Open,
+    /// Opens the in-game overlay (the control panel's entry to the library).
+    Show,
     Close,
     Action(LibraryAction),
     Query(String),
@@ -129,6 +131,7 @@ fn parse_command(input: &str) -> Result<BrowserCommand, String> {
     }
     Ok(match string(&value, "type")? {
         "open" => BrowserCommand::Open,
+        "show" => BrowserCommand::Show,
         "close" => BrowserCommand::Close,
         "settings" => {
             if value
@@ -322,6 +325,11 @@ pub(super) fn apply_command(
             state.picker_open = false;
             state.ime_preedit.clear();
             state.changed();
+        }
+        BrowserCommand::Show => {
+            if !state.external_ui && !state.open {
+                apply_action(LibraryAction::Toggle, state, catalog, world, io);
+            }
         }
         BrowserCommand::Close => {
             apply_action(LibraryAction::Close, state, catalog, world, io);

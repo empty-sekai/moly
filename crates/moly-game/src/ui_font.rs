@@ -44,6 +44,19 @@ fn bytes() -> &'static [u8] {
         .unwrap_or_else(|| panic!("{UI_FONT_MISSING}"))
 }
 
+/// The UI font as one font asset, shared by every bevy_ui text.
+#[derive(bevy::prelude::Resource, Clone)]
+pub(crate) struct UiFontAsset(pub(crate) bevy::prelude::Handle<bevy::prelude::Font>);
+
+/// PreStartup: adds the UI font to the font assets, once.
+pub(crate) fn add_asset(
+    mut commands: bevy::prelude::Commands,
+    mut fonts: bevy::prelude::ResMut<bevy::prelude::Assets<bevy::prelude::Font>>,
+) {
+    let font = bevy::prelude::Font::try_from_bytes(UI_FONT.to_vec()).expect("the UI font is valid");
+    commands.insert_resource(UiFontAsset(fonts.add(font)));
+}
+
 /// Checks font bytes against the font this build was made with.
 pub fn verify(bytes: &[u8]) -> Result<(), String> {
     use sha2::{Digest, Sha256};

@@ -188,7 +188,7 @@ pub(crate) fn advance(
     cameras: Query<&GlobalTransform, With<Camera3d>>,
     edits: Res<crate::fixture_edit::EditSessionActive>,
     player_talk: Option<Res<crate::player_talk::PlayerTalkSession>>,
-    settings_panel: Res<crate::game_settings::SettingsPanel>,
+    overlays: crate::game_settings::OverlayPanels,
     library: Res<crate::content_library::ContentLibrary>,
     mut last_logged: Local<Vec2>,
     site_move: Option<Res<crate::site_move::SiteMoveActive>>,
@@ -209,7 +209,7 @@ pub(crate) fn advance(
     let was_enabled = state.enabled;
     state.enabled = !edits.is_active()
         && player_talk.is_none()
-        && !settings_panel.blocks_world_input()
+        && !overlays.block_world_input()
         && !library.blocks_exploration_input()
         // GameState SiteMove: EnableGestureLayer(false).
         && site_move.is_none()

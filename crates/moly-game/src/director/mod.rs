@@ -18,7 +18,10 @@
 //! change-target button when it is stacked behind another) and presses it;
 //! `player.talk_to {unit}` is an interaction on the character's Talk button;
 //! `player.stick {stick: [x, y], secs}` holds the stick at a ratio (x right,
-//! y up) like a thumb; `player.release` lifts the joystick finger; `tap {at |
+//! y up) like a thumb; `player.release` lifts the joystick finger;
+//! `player.wear {unit}` and `player.wear_avatar` choose the player's body (a
+//! character body of the cast, or the avatar body; the step ends once the
+//! choice is made, and the body is worn when it has loaded); `tap {at |
 //! at_fraction}` taps the screen; `ui.tap {view, path}` taps the centre of a
 //! node of a shown UI view (`view` its document key, `path` a unique node
 //! path suffix or `@<id>`; a view that is not shown is refused with the
@@ -85,6 +88,9 @@
 
 mod cond;
 mod hand;
+
+/// The touch the director's steps write, for the control surface's own steps.
+pub(crate) use hand::{tap, ui_point, window_size};
 mod npc;
 mod run;
 mod script;
@@ -207,6 +213,27 @@ pub fn director_snapshot() -> String {
         snapshot["pending"] = json!(pending);
     }
     snapshot.to_string()
+}
+
+/// Whether a condition holds now, and what was read.
+pub(crate) fn check(world: &mut World, condition: &Value) -> Result<(bool, String), String> {
+    let condition = script::condition(condition)?;
+    Ok(cond::eval(world, &condition))
+}
+
+/// The steps, conditions and target forms of a script, as JSON Schema.
+pub(crate) const SCHEMA: &str = include_str!("schema.json");
+
+/// The bundled example scripts: `[{id, title, script}]`.
+pub(crate) const EXAMPLES: &str = include_str!("examples.json");
+
+/// The bundled examples' titles and scripts, in order.
+pub(crate) fn examples() -> Vec<(String, Value)> {
+    let examples: Vec<Value> = serde_json::from_str(EXAMPLES).expect("bundled director examples are JSON");
+    examples
+        .into_iter()
+        .map(|example| (example["title"].as_str().unwrap_or_default().to_owned(), example["script"].clone()))
+        .collect()
 }
 
 pub(crate) fn install(app: &mut App) {
@@ -387,6 +414,34 @@ mod tests {
         assert!(matches!(parse_command(r#"{ "stop": true }"#), Ok(Command::Stop)));
         assert!(parse_command(r#"{ "stop": false }"#).is_err());
         assert!(parse_command(r#"{ "jump": true }"#).is_err());
+    }
+
+    #[test]
+    fn the_schema_names_every_action_the_parser_takes() {
+        let schema: Value = serde_json::from_str(SCHEMA).unwrap();
+        let steps: Vec<&str> = schema["steps"].as_array().unwrap().iter().map(|step| step["name"].as_str().unwrap()).collect();
+        let mut named = steps.clone();
+        named.sort_unstable();
+        let mut parsed = script::ACTIONS.to_vec();
+        parsed.sort_unstable();
+        assert_eq!(named, parsed);
+        for condition in schema["conditions"].as_array().unwrap() {
+            let name = condition["name"].as_str().unwrap();
+            let probe = if condition["form"] == "bare" { json!(name) } else { json!({ name: null }) };
+            if let Err(error) = script::condition(&probe) {
+                assert!(!error.contains("unknown condition"), "{name}: {error}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_bundled_example_parses() {
+        let examples = examples();
+        assert!(!examples.is_empty());
+        for (title, script) in examples {
+            assert!(!title.is_empty());
+            script::parse(&script).unwrap_or_else(|error| panic!("{title}: {error}"));
+        }
     }
 
     #[test]

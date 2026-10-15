@@ -20,7 +20,6 @@ use crate::{
 
 const COMPOSITE_LAYER: usize = 30;
 const UI_ORDER: isize = 100;
-use crate::ui_font::UI_FONT as FONT;
 
 /// What the source `SetImageQuality` writes for one image quality: the target
 /// DPI it passes to `SetTargetDpi` and `IsFXAAEnable`. High is (299, on),
@@ -162,6 +161,36 @@ impl SettingsPanel {
     }
 }
 
+/// The panels drawn over the field: the settings modal and the control
+/// panel. The host input routes consult them before the field's own input.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct OverlayPanels<'w> {
+    settings: Res<'w, SettingsPanel>,
+    control: Option<Res<'w, crate::control_panel::ControlPanel>>,
+}
+
+impl OverlayPanels<'_> {
+    /// A panel takes the field's input as a whole (a modal, or a drawer
+    /// covering the field).
+    pub(crate) fn block_world_input(&self) -> bool {
+        self.settings.blocks_world_input()
+            || self
+                .control
+                .as_deref()
+                .is_some_and(crate::control_panel::ControlPanel::blocks_world_input)
+    }
+
+    /// As [`Self::block_world_input`], and also while the pointer is over
+    /// the control panel's drawer beside the field.
+    pub(crate) fn block_pointer(&self) -> bool {
+        self.block_world_input()
+            || self
+                .control
+                .as_deref()
+                .is_some_and(crate::control_panel::ControlPanel::holds_pointer)
+    }
+}
+
 #[derive(Message)]
 pub(crate) enum SettingsPanelRequest {
     Open,
@@ -208,6 +237,10 @@ pub(crate) enum Action {
     PlayerData,
     SettingsPage,
     ClearInactiveResources,
+    OcPick,
+    OcAvatar,
+    OcPreviousCharacter,
+    OcNextCharacter,
 }
 
 #[derive(Component)]
@@ -219,6 +252,7 @@ pub(crate) enum ValueLabel {
     Fxaa,
     Status,
     Residency,
+    OcModel,
 }
 
 /// Register once in the shared app assembly, after DefaultPlugins.
@@ -254,28 +288,28 @@ pub(crate) fn perf_plugin() -> moly_perf::PerfPlugin {
 }
 
 pub(crate) fn scene_input_enabled(
-    panel: Res<SettingsPanel>,
+    overlays: OverlayPanels,
     library: Res<crate::content_library::ContentLibrary>,
 ) -> bool {
-    !panel.blocks_world_input() && !library.blocks_world_input()
+    !overlays.block_pointer() && !library.blocks_world_input()
 }
 
 pub(crate) fn camera_input_enabled(
-    panel: Res<SettingsPanel>,
+    overlays: OverlayPanels,
     library: Res<crate::content_library::ContentLibrary>,
     entry: Option<Res<crate::entry::EntrySequence>>,
 ) -> bool {
     // Camera drag belongs to the gesture layer the entry enables in Finish.
-    !panel.blocks_world_input()
+    !overlays.block_pointer()
         && !library.blocks_camera_input()
         && crate::entry::control_open(entry.as_deref())
 }
 
 pub(crate) fn talk_input_enabled(
-    panel: Res<SettingsPanel>,
+    overlays: OverlayPanels,
     library: Res<crate::content_library::ContentLibrary>,
 ) -> bool {
-    !panel.blocks_world_input() && !library.blocks_talk_input()
+    !overlays.block_pointer() && !library.blocks_talk_input()
 }
 
 /// Version of the stored `GameSettings` section. Version 2 changed the meaning
@@ -317,7 +351,7 @@ fn graphics_from_document(document: &Value) -> GraphicsSettings {
 
 pub(crate) fn setup(
     mut commands: Commands,
-    mut fonts: ResMut<Assets<Font>>,
+    ui_font: Res<crate::ui_font::UiFontAsset>,
     mut store: ResMut<SettingsStore>,
     mut settings: ResMut<GameSettings>,
     mut panel: ResMut<SettingsPanel>,
@@ -339,7 +373,7 @@ pub(crate) fn setup(
     }
     // The saved graphics above apply everywhere; the panel is developer UI.
     if stage.is_some() || dev.is_none() { return; }
-    let font = fonts.add(Font::try_from_bytes(FONT.to_vec()).expect("bundled open font is valid"));
+    let font = ui_font.0.clone();
     let camera = commands
         .spawn((
             Camera2d,
@@ -353,28 +387,6 @@ pub(crate) fn setup(
             SettingsUiCamera,
         ))
         .id();
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let trigger = commands
-            .spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    left: px(14),
-                    bottom: px(14),
-                    ..default()
-                },
-                UiTargetCamera(camera),
-                GlobalZIndex(1000),
-            ))
-            .id();
-        add_button(
-            &mut commands,
-            trigger,
-            &font,
-            "Settings  F10",
-            Action::Toggle,
-        );
-    }
 
     let root = commands
         .spawn((
@@ -513,6 +525,32 @@ pub(crate) fn setup(
         Some(ValueLabel::Fxaa),
     );
     add_button(&mut commands, fxaa, &font, "Toggle", Action::Fxaa);
+    let model = row(&mut commands, content);
+    add_text(
+        &mut commands,
+        model,
+        &font,
+        "Player model: avatar",
+        16.,
+        Some(ValueLabel::OcModel),
+    );
+    add_button(&mut commands, model, &font, "Choose model file", Action::OcPick);
+    add_button(&mut commands, model, &font, "Avatar", Action::OcAvatar);
+    let character = row(&mut commands, content);
+    add_button(
+        &mut commands,
+        character,
+        &font,
+        "Previous character",
+        Action::OcPreviousCharacter,
+    );
+    add_button(
+        &mut commands,
+        character,
+        &font,
+        "Next character",
+        Action::OcNextCharacter,
+    );
     let footer = row(&mut commands, content);
     add_button(
         &mut commands,
@@ -664,6 +702,7 @@ pub(crate) fn input(
     mut store: ResMut<SettingsStore>,
     mut captures: MessageWriter<crate::frame_capture::CaptureFrame>,
     mut dialogs: ResMut<crate::menu_shell::ShellDialogState>,
+    mut oc_requests: MessageWriter<crate::player_avatar::oc::OcRequest>,
 ) {
     let mut queued = Vec::new();
     if keys.just_pressed(KeyCode::F12) {
@@ -712,6 +751,22 @@ pub(crate) fn input(
             }
             _ if !panel.open => continue,
             Action::PlayerData => panel.player_data = true,
+            Action::OcPick => {
+                oc_requests.write(crate::player_avatar::oc::OcRequest::Pick);
+            }
+            Action::OcAvatar => {
+                oc_requests.write(crate::player_avatar::oc::OcRequest::Avatar);
+            }
+            Action::OcPreviousCharacter => {
+                oc_requests.write(crate::player_avatar::oc::OcRequest::Character(
+                    crate::player_avatar::oc::CharacterChoice::Previous,
+                ));
+            }
+            Action::OcNextCharacter => {
+                oc_requests.write(crate::player_avatar::oc::OcRequest::Character(
+                    crate::player_avatar::oc::CharacterChoice::Next,
+                ));
+            }
             Action::SettingsPage => panel.player_data = false,
             Action::ClearInactiveResources => {
                 panel.resource_clear_requested = true;
@@ -794,6 +849,7 @@ pub(crate) fn refresh_ui(
     diagnostics: Res<bevy::diagnostic::DiagnosticsStore>,
     surface: Res<SceneSurface>,
     time: Res<Time<Real>>,
+    oc: Option<Res<crate::player_avatar::oc::OcSelection>>,
     mut last_performance: Local<f64>,
     mut residency_sample: Local<Option<(f64, u64, u64, u64)>>,
 ) {
@@ -845,6 +901,9 @@ pub(crate) fn refresh_ui(
                 if settings.graphics.fxaa { "On" } else { "Off" }
             ),
             ValueLabel::Status => panel.status.clone(),
+            ValueLabel::OcModel => oc
+                .as_deref()
+                .map_or_else(|| "Player model: avatar".into(), |oc| oc.status.label()),
             ValueLabel::Residency => {
                 let now = time.elapsed_secs_f64();
                 if residency_sample.as_ref().is_none_or(|(at, _, _, _)| now - *at >= 1.0) {

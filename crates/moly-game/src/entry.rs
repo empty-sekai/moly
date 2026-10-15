@@ -193,6 +193,11 @@ pub(crate) fn control_open(entry: Option<&EntrySequence>) -> bool {
     entry.is_none_or(|entry| entry.control_open)
 }
 
+/// The entry has ended and settled: no later frame of it changes anything.
+pub(crate) fn entry_settled(entry: Option<&EntrySequence>) -> bool {
+    entry.is_none_or(EntrySequence::settled)
+}
+
 /// The home HUD (`ScreenLayerMysekaiHome`) exists only from
 /// `HomeSiteController.OnFinishEnterAsync`.
 pub(crate) fn hud_open(entry: Option<&EntrySequence>) -> bool {

@@ -323,6 +323,15 @@ fn start(world: &mut World, shared: &mut Shared, step: Step, path: String) -> St
             shared.hand_owner = None;
             return ended(path, Ok(String::new()), optional);
         }
+        Node::Wear { unit } => {
+            use crate::player_avatar::oc::{CharacterChoice, OcRequest};
+            let (request, note) = match unit {
+                Some(unit) => (OcRequest::Character(CharacterChoice::Unit(*unit)), format!("character body {unit} requested")),
+                None => (OcRequest::Avatar, "avatar body requested".to_owned()),
+            };
+            world.write_message(request);
+            return ended(path, Ok(note), optional);
+        }
         Node::Tap { at, fraction } => {
             let position = if *fraction {
                 match hand::window_size(world) {

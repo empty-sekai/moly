@@ -55,6 +55,9 @@ pub(crate) enum Node {
     /// circle) for `secs`.
     Stick { stick: [f32; 2], secs: f32 },
     Release,
+    /// The player's body: a character body by unit, or the avatar body
+    /// (`None`).
+    Wear { unit: Option<u32> },
     /// Logs the player's position and each target's.
     Where { of: Vec<Target> },
     NpcTake { unit: u32 },
@@ -136,7 +139,7 @@ pub(crate) enum Cond {
     SiteKind(SiteKindName),
     /// A site move (cannon or door) is in progress.
     SiteMoving,
-    /// The entry sequence has given the player control.
+    /// The entry sequence has ended, including the stamina refresh clip when the join reports one.
     EntryDone,
     DialogShown,
     /// A player or NPC conversation is playing.
@@ -158,9 +161,10 @@ pub(crate) enum Cond {
     UiShown { view: String, path: String },
 }
 
-const ACTIONS: &[&str] = &[
+pub(super) const ACTIONS: &[&str] = &[
     "wait", "wait_until", "assert", "log", "where", "capture", "parallel", "repeat",
-    "player.walk_to", "player.interact", "player.stick", "player.release", "player.talk_to", "tap", "ui.tap",
+    "player.walk_to", "player.interact", "player.stick", "player.release", "player.talk_to", "player.wear",
+    "player.wear_avatar", "tap", "ui.tap",
     "npc.take", "npc.walk_to", "npc.face", "npc.emote", "npc.use", "npc.tweet", "npc.talk", "npc.release",
     "camera.drag", "camera.zoom", "server.edit", "weather.set", "site.switch", "site.enter_room", "site.go_home",
 ];
@@ -272,6 +276,8 @@ fn step(value: &Value, at: &str) -> Result<Vec<Step>, String> {
             vec![one(Node::Stick { stick, secs }, None)]
         }
         "player.release" => vec![one(Node::Release, None)],
+        "player.wear" => vec![one(Node::Wear { unit: Some(fields.req_u32("unit")?) }, None)],
+        "player.wear_avatar" => vec![one(Node::Wear { unit: None }, None)],
         "tap" => {
             let (at_value, fraction) = match (fields.opt("at"), fields.opt("at_fraction")) {
                 (Some(value), None) => (value, false),
@@ -395,6 +401,11 @@ fn door_steps(
             Some(60.0),
         ),
     ]
+}
+
+/// A condition outside a script, as the control surface sends one.
+pub(crate) fn condition(value: &Value) -> Result<Cond, String> {
+    cond(value, "condition")
 }
 
 /// A condition: a bare name, or an object with one key.

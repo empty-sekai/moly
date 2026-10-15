@@ -383,14 +383,19 @@ pub fn plan_and_swap(
     meshes_3d: Query<&Mesh3d>,
     children: Query<&Children>,
     wear_parts: Query<(), With<WearPart>>,
+    oc_models: Query<(), With<crate::player_avatar::oc::OcModel>>,
     standard: Query<&MeshMaterial3d<StandardMaterial>>,
     standard_materials: Res<Assets<StandardMaterial>>,
 ) {
     for (player, _kids) in &players {
         // 收集玩家子树里全部身体网格实体（挂件实体除外）。
+        // The player's own model (OC) has its own material.
         let mut stack = vec![player];
         let mut mesh_entities = Vec::new();
         while let Some(entity) = stack.pop() {
+            if oc_models.get(entity).is_ok() {
+                continue;
+            }
             if meshes_3d.get(entity).is_ok() && wear_parts.get(entity).is_err() {
                 mesh_entities.push(entity);
             }
@@ -610,6 +615,8 @@ pub(crate) fn player_dither(
     cameras: Query<&GlobalTransform, With<Camera3d>>,
     bodies: Query<&MeshMaterial3d<AvatarMaterial>>,
     mut materials: ResMut<Assets<AvatarMaterial>>,
+    oc_bodies: Query<&MeshMaterial3d<crate::player_avatar::oc::OcMaterial>>,
+    mut oc_materials: ResMut<Assets<crate::player_avatar::oc::OcMaterial>>,
     mut local: Local<PlayerDither>,
 ) {
     use crate::camera::CameraStateType as S;
@@ -705,6 +712,21 @@ pub(crate) fn player_dither(
         if stale {
             if let Some(material) = materials.get_mut(id) {
                 material.params.alpha_dither_gate[1] = value;
+            }
+        }
+    }
+    // The player's own model (OC) dithers with the body it replaces.
+    let mut ids: Vec<AssetId<crate::player_avatar::oc::OcMaterial>> =
+        oc_bodies.iter().map(|material| material.0.id()).collect();
+    ids.sort();
+    ids.dedup();
+    for id in ids {
+        let stale = oc_materials
+            .get(id)
+            .is_some_and(|material| material.params.cutoff_dither[1] != value);
+        if stale {
+            if let Some(material) = oc_materials.get_mut(id) {
+                material.params.cutoff_dither[1] = value;
             }
         }
     }

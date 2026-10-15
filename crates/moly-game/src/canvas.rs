@@ -266,6 +266,13 @@ impl RootCanvas {
     pub(crate) fn size(&self, window: &Window) -> Vec2 {
         Vec2::from_array(self.for_window(window).size)
     }
+
+    /// A canvas point (centre origin, y up) as a window position in logical
+    /// pixels (top-left origin, y down).
+    pub(crate) fn to_window(&self, window: &Window, point: Vec2) -> Vec2 {
+        let scale = self.scale(window);
+        Vec2::new(point.x * scale + window.width() / 2.0, window.height() / 2.0 - point.y * scale)
+    }
 }
 
 /// Gives a view root the uniform `scale`, writing the transform only when the

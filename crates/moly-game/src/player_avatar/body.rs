@@ -153,6 +153,7 @@ pub(crate) fn wire(
     meshes_3d: Query<&Mesh3d>,
     skinned: Query<(), With<SkinnedMesh>>,
     globals: Query<&GlobalTransform>,
+    transforms: Query<&Transform>,
 ) {
     for (player, body, load) in &players {
         if let LoadState::Failed(error) = server.load_state(&load.manifest) {
@@ -233,6 +234,9 @@ pub(crate) fn wire(
         let driver = AvatarDriver::new(*animator, model, graph, Arc::new(clips));
         let idle_length = driver.clip_length(IDLE_CLIP).unwrap_or(f32::NAN);
         let height = max.y - min.y;
+        // The skeleton's rest, before any clip plays: an OC body is fitted
+        // to it.
+        let proxy = super::oc::capture_proxy(*animator, &children, &names, &transforms);
         commands.entity(player).remove::<BodySceneReady>().insert((
             driver,
             clip_names,
@@ -241,6 +245,7 @@ pub(crate) fn wire(
                 height,
                 lowest: min.y,
             },
+            proxy,
         ));
         info!(
             "[player] body wired: {} animator {:?} ({}) model {model:?}, {mesh_entities} mesh entities, height {height:.3}, {clip_count} clips, idle {IDLE_CLIP} {idle_length:.3}s",

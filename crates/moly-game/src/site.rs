@@ -825,7 +825,8 @@ pub struct GroundMeshes(pub Vec<Handle<Mesh>>);
 pub struct WalkFaceMeshes(pub Vec<Handle<Mesh>>);
 
 /// 站点场景实体标记（场景包站一个；房间站的壳、模块两面、寻路面各一）。
-#[derive(Component)]
+#[derive(Component, Reflect)]
+#[reflect(Component)]
 pub struct SiteRoot;
 
 /// A renderable scene root is withheld until its source materials are installed.

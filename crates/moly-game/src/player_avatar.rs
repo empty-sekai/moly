@@ -33,6 +33,7 @@
 pub(crate) mod avatar_item;
 pub(crate) mod body;
 pub(crate) mod item_timeline;
+pub mod oc;
 pub(crate) mod switch_gesture;
 
 use crate::npc::MotionPhase;

@@ -1,0 +1,257 @@
+[
+ {
+  "id": "room-round-trip",
+  "title": "进屋再回家",
+  "script": {
+   "name": "Room round trip",
+   "steps": [
+    {
+     "do": "wait_until",
+     "until": "entry_done",
+     "timeout": 120
+    },
+    {
+     "do": "site.enter_room"
+    },
+    {
+     "do": "wait",
+     "secs": 3
+    },
+    {
+     "do": "capture"
+    },
+    {
+     "do": "site.go_home"
+    }
+   ]
+  }
+ },
+ {
+  "id": "weather-tour",
+  "title": "天气巡览",
+  "script": {
+   "name": "Weather tour",
+   "steps": [
+    {
+     "do": "wait_until",
+     "until": "entry_done",
+     "timeout": 120
+    },
+    {
+     "do": "weather.set",
+     "phenomenon": 6
+    },
+    {
+     "do": "wait",
+     "secs": 8
+    },
+    {
+     "do": "weather.set",
+     "phenomenon": 8
+    },
+    {
+     "do": "wait",
+     "secs": 8
+    },
+    {
+     "do": "weather.set",
+     "phenomenon": 10
+    },
+    {
+     "do": "wait",
+     "secs": 8
+    },
+    {
+     "do": "weather.set",
+     "phenomenon": 1
+    }
+   ]
+  }
+ },
+ {
+  "id": "where",
+  "title": "我在哪",
+  "script": {
+   "name": "Where am I",
+   "steps": [
+    {
+     "do": "where",
+     "of": [
+      "house_door",
+      "player"
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "id": "character-walk",
+  "title": "角色 1 走到玩家身边",
+  "script": {
+   "name": "Character 1 comes to the player",
+   "steps": [
+    {
+     "do": "wait_until",
+     "until": "entry_done",
+     "timeout": 120
+    },
+    {
+     "do": "npc.take",
+     "unit": 1
+    },
+    {
+     "do": "npc.walk_to",
+     "unit": 1,
+     "to": "player",
+     "within": 1.5
+    },
+    {
+     "do": "npc.face",
+     "unit": 1,
+     "to": "player"
+    },
+    {
+     "do": "npc.emote",
+     "unit": 1,
+     "name": "fx_emote_001",
+     "secs": 2
+    },
+    {
+     "do": "npc.release",
+     "unit": 1
+    }
+   ]
+  }
+ },
+ {
+  "id": "wear-character",
+  "title": "玩家换上角色 21 的身体",
+  "script": {
+   "name": "Wear a character body",
+   "steps": [
+    {
+     "do": "wait_until",
+     "until": "entry_done",
+     "timeout": 120
+    },
+    {
+     "do": "player.wear",
+     "unit": 21
+    }
+   ]
+  }
+ },
+ {
+  "id": "wear-avatar",
+  "title": "玩家换回豆腐人身体",
+  "script": {
+   "name": "Wear the avatar body",
+   "steps": [
+    {
+     "do": "player.wear_avatar"
+    }
+   ]
+  }
+ },
+ {
+  "id": "look-around",
+  "title": "环顾四周",
+  "script": {
+   "name": "Look around",
+   "steps": [
+    {
+     "do": "wait_until",
+     "until": "entry_done",
+     "timeout": 120
+    },
+    {
+     "do": "wait_until",
+     "until": "camera_settled",
+     "timeout": 30
+    },
+    {
+     "do": "camera.drag",
+     "by": [
+      320,
+      0
+     ],
+     "secs": 1
+    },
+    {
+     "do": "camera.drag",
+     "by": [
+      0,
+      -120
+     ],
+     "secs": 0.6
+    },
+    {
+     "do": "camera.zoom",
+     "by": 240,
+     "secs": 0.6
+    },
+    {
+     "do": "wait",
+     "secs": 2
+    },
+    {
+     "do": "camera.zoom",
+     "by": -240,
+     "secs": 0.6
+    }
+   ]
+  }
+ },
+ {
+  "id": "group-talk",
+  "title": "大门来客与群聊（日服）",
+  "script": {
+   "name": "Gate visitors and a group talk",
+   "steps": [
+    {
+     "do": "wait_until",
+     "until": "entry_done",
+     "timeout": 120
+    },
+    {
+     "do": "server.edit",
+     "action": "gate.change",
+     "mysekaiGateId": 4,
+     "mysekaiGateSkinId": 0,
+     "mysekaiGameCharacterUnitGroupIds": [
+      13,
+      14,
+      15,
+      16
+     ]
+    },
+    {
+     "do": "wait",
+     "secs": 25
+    },
+    {
+     "do": "npc.talk",
+     "unit": 13,
+     "talk": 5657
+    },
+    {
+     "do": "where",
+     "of": [
+      {
+       "npc": 13
+      },
+      {
+       "npc": 14
+      },
+      {
+       "npc": 15
+      },
+      {
+       "npc": 16
+      }
+     ]
+    }
+   ]
+  }
+ }
+]

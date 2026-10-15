@@ -778,6 +778,97 @@ impl ToonMaterials {
 #[derive(Component)]
 pub struct HeadBone;
 
+/// A character body the player wears in place of the avatar body. Like the
+/// member the player controls, its materials keep alpha 1.0 without dither.
+#[derive(Component)]
+pub(crate) struct PlayerWorn;
+
+/// A member's name in logs and refusals: the cast member's unit, or the
+/// player's worn body.
+fn member_label(unit: Option<&CharacterUnitId>) -> String {
+    unit.map_or_else(|| "player body".to_owned(), |unit| format!("npc unit={}", unit.0))
+}
+
+/// One body's toon plan: every mesh below `model` joined by its glb material
+/// name to the rig profile's slots, and its Head and Hips bones. The head
+/// marker and the accessories' shadow opt-out are inserted once the plan
+/// holds.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn plan_body(
+    commands: &mut Commands,
+    server: &AssetServer,
+    render_device: &RenderDevice,
+    gltf: &Gltf,
+    rig_raw: &str,
+    rig_file: &str,
+    model: Entity,
+    children: &Query<&Children>,
+    names: &Query<&Name>,
+    materials: &Query<&MeshMaterial3d<StandardMaterial>>,
+) -> Result<ToonPlan, String> {
+    let rig = parse_rig(rig_raw, rig_file).map_err(|reason| format!("骨架档案解析失败：{reason}"))?;
+    // glb 材质句柄 → 名：换装按名 join 档案。
+    let mut name_by_handle: HashMap<&Handle<StandardMaterial>, String> = HashMap::new();
+    for (name, handle) in &gltf.named_materials {
+        name_by_handle.insert(handle, name.to_string());
+    }
+    // 模型子实体 → 整树走一遍：收网格实体的材质与头骨节点。
+    let mut stack = vec![model];
+    let mut mesh_parts: Vec<(Entity, String)> = Vec::new();
+    let mut head = None;
+    let mut hips = None;
+    while let Some(entity) = stack.pop() {
+        if let Ok(name) = names.get(entity) {
+            if name.as_str() == "Hips" { hips = Some(entity); }
+            if name.as_str() == HEAD_BONE_NAME {
+                if let Some(previous) = head {
+                    return Err(format!(
+                        "角色包里不止一个 {HEAD_BONE_NAME} 节点（{previous:?} 与 {entity:?}）"
+                    ));
+                }
+                head = Some(entity);
+            }
+        }
+        if let Ok(material) = materials.get(entity) {
+            let name = name_by_handle
+                .get(&material.0)
+                .ok_or("有网格实体的材质不在 glb 命名材质表里")?;
+            mesh_parts.push((entity, name.clone()));
+        }
+        if let Ok(kids) = children.get(entity) {
+            for kid in kids.iter() {
+                stack.push(kid);
+            }
+        }
+    }
+    let head = head.ok_or_else(|| format!("角色包里没有 {HEAD_BONE_NAME} 节点：头参考点无处可写"))?;
+    let hips = hips.ok_or("角色缺少 Hips 骨节点")?;
+    if mesh_parts.is_empty() {
+        return Err("角色包里没有带 StandardMaterial 的网格实体".into());
+    }
+    let mut parts = Vec::new();
+    let mut accessories = Vec::new();
+    for (entity, name) in mesh_parts {
+        let slot = rig
+            .slots
+            .get(name.as_str())
+            .ok_or_else(|| format!("骨架档案里没有 glb 网格材质 {name}"))?;
+        // The accessory program declares no ShadowCaster pass, so its
+        // renderer never draws into the main light's shadow map.
+        if slot.shader == law::SHADER_NAME_ACCESSORY {
+            accessories.push(entity);
+        }
+        let material = build_material(&rig, slot, rig_file, server, render_device, true)
+            .map_err(|reason| format!("角色材质解析失败：{reason}"))?;
+        parts.push((entity, name, material));
+    }
+    commands.entity(head).insert(HeadBone);
+    for entity in accessories {
+        commands.entity(entity).insert(crate::shadowmap::NoShadowCast);
+    }
+    Ok(ToonPlan { parts, head, hips })
+}
+
 /// Update：装配完成的成员解析骨架档案、建材质计划。等雾档案进表
 /// （雾变体按桥在场分，全侧一致）；档案装载失败响亮失败。
 #[allow(clippy::type_complexity)]
@@ -815,19 +906,9 @@ pub fn plan_when_wired(
         let Some(json) = jsons.get(&pack.rig) else {
             continue;
         };
-        let rig = match parse_rig(&json.0, &pack.rig_file) {
-            Ok(rig) => rig,
-            Err(reason) => panic!("unit {} 的骨架档案解析失败：{reason}", unit.0),
-        };
         let Some(gltf) = gltfs.get(&pack.gltf) else {
             continue;
         };
-        // glb 材质句柄 → 名：换装按名 join 档案。
-        let mut name_by_handle: HashMap<&Handle<StandardMaterial>, String> = HashMap::new();
-        for (name, handle) in &gltf.named_materials {
-            name_by_handle.insert(handle, name.to_string());
-        }
-        // 模型子实体 → 整树走一遍：收网格实体的材质与头骨节点。
         let Some(model) = children
             .get(npc)
             .expect("模型挂载后有子链")
@@ -836,62 +917,20 @@ pub fn plan_when_wired(
         else {
             panic!("unit {} 的成员实体下没有 CharacterModel 子实体", unit.0);
         };
-        let mut stack = vec![model];
-        let mut mesh_parts: Vec<(Entity, String)> = Vec::new();
-        let mut head = None;
-        let mut hips = None;
-        while let Some(entity) = stack.pop() {
-            if let Ok(name) = names.get(entity) {
-                if name.as_str() == "Hips" { hips = Some(entity); }
-                if name.as_str() == HEAD_BONE_NAME {
-                    if let Some(previous) = head {
-                        panic!(
-                            "unit {} 的角色包里不止一个 {HEAD_BONE_NAME} 节点（{previous:?} 与 {entity:?}）",
-                            unit.0
-                        );
-                    }
-                    head = Some(entity);
-                    commands.entity(entity).insert(HeadBone);
-                }
-            }
-            if let Ok(material) = materials.get(entity) {
-                let name = name_by_handle.get(&material.0).unwrap_or_else(|| {
-                    panic!("unit {} 有网格实体的材质不在 glb 命名材质表里", unit.0)
-                });
-                mesh_parts.push((entity, name.clone()));
-            }
-            if let Ok(kids) = children.get(entity) {
-                for kid in kids.iter() {
-                    stack.push(kid);
-                }
-            }
-        }
-        let head = head.unwrap_or_else(|| {
-            panic!(
-                "unit {} 的角色包里没有 {HEAD_BONE_NAME} 节点：头参考点无处可写",
-                unit.0
-            )
-        });
-        if mesh_parts.is_empty() {
-            panic!("unit {} 的角色包里没有带 StandardMaterial 的网格实体", unit.0);
-        }
-        let mut parts = Vec::new();
-        for (entity, name) in mesh_parts {
-            let slot = rig.slots.get(name.as_str()).unwrap_or_else(|| {
-                panic!("unit {} 的骨架档案里没有 glb 网格材质 {name}", unit.0)
-            });
-            // The accessory program declares no ShadowCaster pass, so its
-            // renderer never draws into the main light's shadow map.
-            if slot.shader == law::SHADER_NAME_ACCESSORY {
-                commands.entity(entity).insert(crate::shadowmap::NoShadowCast);
-            }
-            let material = match build_material(&rig, slot, &pack.rig_file, &server, &render_device, true) {
-                Ok(material) => material,
-                Err(reason) => panic!("unit {} 的角色材质解析失败：{reason}", unit.0),
-            };
-            parts.push((entity, name, material));
-        }
-        commands.entity(npc).insert(ToonPlan { parts, head, hips: hips.expect("角色缺少 Hips 骨节点") });
+        let plan = plan_body(
+            &mut commands,
+            &server,
+            &render_device,
+            gltf,
+            &json.0,
+            &pack.rig_file,
+            model,
+            &children,
+            &names,
+            &materials,
+        )
+        .unwrap_or_else(|reason| panic!("unit {}：{reason}", unit.0));
+        commands.entity(npc).insert(plan);
     }
 }
 
@@ -899,32 +938,47 @@ pub fn plan_when_wired(
 /// （挂在 Hips 下的无子节点），不是头骨。
 const HEAD_BONE_NAME: &str = "Head";
 
+/// 一份计划的贴图装载进度：全到、未齐、或第一张失败的原因。
+pub(crate) enum PlanTextures {
+    Loaded,
+    Pending,
+    Failed(String),
+}
+
+pub(crate) fn plan_textures(plan: &ToonPlan, server: &AssetServer) -> PlanTextures {
+    let mut state = PlanTextures::Loaded;
+    for (_, _, material) in &plan.parts {
+        let textures = std::iter::once(&material.main_tex)
+            .chain(material.body_mask_tex.iter())
+            .chain(material.eyebrow_tex.iter());
+        for texture in textures {
+            match server.load_state(texture) {
+                LoadState::Failed(err) => return PlanTextures::Failed(format!("{err:?}")),
+                LoadState::Loaded => {}
+                _ => state = PlanTextures::Pending,
+            }
+        }
+    }
+    state
+}
+
 /// Update：计划就绪且贴图到齐后换装——摘 StandardMaterial、挂角色
 /// toon 材质。早于贴图到位会让实体闪回默认材质，所以等齐再换。
+/// 成员的贴图装载失败即 panic；玩家穿的角色身体由
+/// [`crate::player_avatar::oc`] 拒绝该选择、退回豆腐人身体。
 pub fn swap_when_planned(
     mut commands: Commands,
     server: Res<AssetServer>,
     mut materials: ResMut<Assets<CharacterMaterial>>,
-    npcs: Query<(Entity, &CharacterUnitId, &ToonPlan), Without<ToonMaterials>>,
+    npcs: Query<(Entity, Option<&CharacterUnitId>, &ToonPlan, Has<PlayerWorn>), Without<ToonMaterials>>,
 ) {
-    for (npc, unit, plan) in &npcs {
-        let mut all_loaded = true;
-        for (_, _, material) in &plan.parts {
-            let textures = std::iter::once(&material.main_tex)
-                .chain(material.body_mask_tex.iter())
-                .chain(material.eyebrow_tex.iter());
-            for texture in textures {
-                match server.load_state(texture) {
-                    LoadState::Failed(err) => {
-                        panic!("unit {} 的角色贴图装载失败：{err:?}", unit.0)
-                    }
-                    LoadState::Loaded => {}
-                    _ => all_loaded = false,
-                }
-            }
-        }
-        if !all_loaded {
-            continue;
+    for (npc, unit, plan, worn) in &npcs {
+        let who = member_label(unit);
+        match plan_textures(plan, &server) {
+            PlanTextures::Loaded => {}
+            PlanTextures::Pending => continue,
+            PlanTextures::Failed(_) if worn => continue,
+            PlanTextures::Failed(err) => panic!("{who} 的角色贴图装载失败：{err}"),
         }
         let mut slots = Vec::new();
         let mut names = Vec::new();
@@ -946,8 +1000,7 @@ pub fn swap_when_planned(
             })
             .remove::<ToonPlan>();
         info!(
-            "[npc unit={}] 角色材质换装 {} 实体（{}）",
-            unit.0,
+            "[{who}] 角色材质换装 {} 实体（{}）",
             names.len(),
             names.join(",")
         );
@@ -963,20 +1016,25 @@ pub fn swap_when_planned(
 /// buffer during this frame's extraction.
 pub fn update_head(
     mut materials: ResMut<Assets<CharacterMaterial>>,
-    npcs: Query<(&CharacterUnitId, &ToonMaterials, Option<&crate::player::PlayerControlled>)>,
+    npcs: Query<(
+        Option<&CharacterUnitId>,
+        &ToonMaterials,
+        Has<crate::player::PlayerControlled>,
+        Has<PlayerWorn>,
+    )>,
     globals: Query<&GlobalTransform>,
 ) {
     // The NPC dither alpha is the presenter's call 5 (npc_dither). A member
-    // the player controls keeps alpha 1.0 without dither: the player view's
-    // own dither is not in this host.
-    for (unit, toon, controlled) in &npcs {
+    // the player controls, and a body the player wears, keep alpha 1.0
+    // without dither: the player view's own dither is not in this host.
+    for (unit, toon, controlled, worn) in &npcs {
         let Ok(global) = globals.get(toon.head) else { continue; };
         let position = global.translation();
         if position == Vec3::ZERO {
-            panic!("unit {} 的头参考点是零向量：头骨的世界变换没有传播", unit.0);
+            panic!("{} 的头参考点是零向量：头骨的世界变换没有传播", member_label(unit));
         }
         let head_position = [position.x, position.y, position.z, 0.0];
-        let player = controlled.is_some();
+        let player = controlled || worn;
         for (_, handle) in &toon.slots {
             let changed = materials.get(handle).is_some_and(|material| {
                 material.params.head_position.map(f32::to_bits) != head_position.map(f32::to_bits)

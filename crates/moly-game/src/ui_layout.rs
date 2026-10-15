@@ -165,10 +165,12 @@ pub(crate) struct PointerUi<'w, 's> {
     views: Query<'w, 's, (Entity, &'static UiPrefabView, &'static GlobalTransform)>,
     hierarchy: Query<'w, 's, (Option<&'static Visibility>, Option<&'static ChildOf>)>,
     root: Option<Res<'w, crate::canvas::RootCanvas>>,
+    control: Option<Res<'w, crate::control_panel::ControlPanel>>,
 }
 
 impl PointerUi<'_, '_> {
     pub(crate) fn captures(&self, position: Vec2, window: &Window) -> bool {
+        if self.control.as_deref().is_some_and(|panel| panel.captures(position)) { return true; }
         if self.dialogs.blocks_field_input() { return true; }
         let editor_layer = self.layers.current() == crate::ui_layers::LayerId::MysekaiSiteEdit;
         if !self.layers.on_field() && !editor_layer { return true; }
@@ -1780,6 +1782,31 @@ impl UiPrefabView {
         self.resolved(layouts, canvas)
             .and_then(|rects| rects.get(index).cloned())
             .ok_or_else(|| format!("view {} is not laid out yet", self.key))
+    }
+
+    /// The view's controls: the nodes with an enabled Button, Toggle or
+    /// Slider component, in document order. Each comes with the path that
+    /// names it to [`UiPrefabView::try_rect`] (its full path, or
+    /// `@<transform id>` when that path is not unique), the component class,
+    /// whether it is interactable, and its rect. `None` until the view is
+    /// laid out.
+    pub(crate) fn controls(&self, layouts: &UiLayouts, canvas: Vec2) -> Option<Vec<(String, String, bool, UiRect)>> {
+        let doc = layouts.document(self.key)?;
+        let rects = self.resolved(layouts, canvas)?;
+        let mut out = Vec::new();
+        for (index, (node, rect)) in doc.nodes.iter().zip(rects.iter()).enumerate() {
+            let Some(component) = node.components.iter().find(|component| {
+                component.enabled
+                    && component.fields.get("m_Interactable").is_some()
+                    && (component.class.ends_with("Button") || component.class.ends_with("Toggle") || component.class.ends_with("Slider"))
+            }) else {
+                continue;
+            };
+            let path = if doc.find(&node.path) == Ok(index) { node.path.clone() } else { format!("@{}", node.transform_id) };
+            let interactable = component.fields["m_Interactable"].as_bool().unwrap_or(component.fields["m_Interactable"] == 1);
+            out.push((path, component.class.clone(), interactable, rect.clone()));
+        }
+        Some(out)
     }
 
     /// The drawn rects of this view (host overrides and layout controllers
