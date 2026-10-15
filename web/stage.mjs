@@ -17,8 +17,6 @@ import { createStageController } from "./stage-controller.mjs";
 import { stageMessages } from "./stage-locale.mjs";
 import { presentWeather } from "./weather-presentation.mjs";
 import { createWeatherArtwork } from "./weather-artwork.mjs";
-import { createWeatherPicker } from "./weather-picker.mjs";
-import { weatherPhaseLabel } from "./weather-ui-locale.mjs";
 
 const params = new URLSearchParams(location.search);
 const $ = (id) => document.getElementById(id);
@@ -36,40 +34,7 @@ let configuration = null,
   backend = null;
 let configuredResourceBase = null;
 let lastPlayerData = "";
-// The last weather block the runtime published. The dial is drawn from it and
-// the selector admits only IDs the runtime itself listed, so the stage never
-// invents an ID the catalogue does not contain.
-let weather = null;
 let weatherArtwork = null;
-const weatherPicker = createWeatherPicker({
-  dialog: $("weather-dialog"),
-  trigger: $("stage-weather"),
-  onSelect: (id) => {
-    if (weather?.options.some((option) => option.id === id))
-      controller?.dispatch("weather", id);
-  },
-  onFocus: (captured) => controller?.focus(captured),
-});
-// The last site block the runtime published, and whether a switch may be
-// asked for now: never while the scene is loading or an experience owns it.
-let site = null,
-  siteLocked = true;
-const siteSelect = $("site-select");
-siteSelect.addEventListener("change", () => {
-  const id = siteSelect.value;
-  if (
-    !siteLocked &&
-    id !== site?.id &&
-    site?.options.some((option) => option.id === id)
-  )
-    controller?.dispatch("site", id);
-  else if (site) siteSelect.value = site.id;
-});
-// Keys pressed in the menu belong to it, not to the scene behind it.
-for (const type of ["keydown", "keyup"])
-  siteSelect.addEventListener(type, (event) => event.stopPropagation());
-siteSelect.addEventListener("focus", () => controller?.focus(true));
-siteSelect.addEventListener("blur", () => controller?.focus(false));
 const weatherIconUrls = new Map();
 const weatherIconRequests = new Set();
 function weatherPresentationOptions() {
@@ -96,7 +61,6 @@ function loadWeatherIcons(value) {
       })
       .then((url) => {
         weatherIconUrls.set(option.icon, url);
-        renderWeather();
         const snapshot = controller?.getSnapshot();
         if (snapshot) send("snapshot", decorateWeather(snapshot));
       });
@@ -189,55 +153,6 @@ function render() {
       : amount
         ? `${t.progress} ${new Intl.NumberFormat(ui.locale, { maximumFractionDigits: 1 }).format(amount / 1e6)} MB`
         : "";
-  $("stage-hint").textContent = t.controls;
-  renderWeather();
-  renderSite();
-}
-function renderSite() {
-  const field = $("stage-site");
-  if (!site) {
-    field.hidden = true;
-    return;
-  }
-  const names = JSON.stringify(
-    site.options.map((option) => [option.id, option.name]),
-  );
-  if (siteSelect.dataset.options !== names) {
-    siteSelect.dataset.options = names;
-    siteSelect.replaceChildren(
-      ...site.options.map((option) => new Option(option.name, option.id)),
-    );
-  }
-  if (siteSelect.value !== site.id) siteSelect.value = site.id;
-  siteSelect.disabled = siteLocked;
-  siteSelect.setAttribute("aria-label", stageMessages(ui.locale).site);
-  field.hidden = false;
-}
-function renderWeather() {
-  const button = $("stage-weather");
-  if (!weather) {
-    button.hidden = true;
-    return;
-  }
-  const shown = presentWeather(weather, weatherPresentationOptions());
-  $("weather-label").textContent = shown.label;
-  const icon = $("weather-icon");
-  const source = shown.iconUrl;
-  if (source && icon.dataset.source !== source) {
-    icon.dataset.source = source;
-    icon.hidden = false;
-    icon.src = source;
-  } else if (!source) {
-    delete icon.dataset.source;
-    icon.removeAttribute("src");
-    icon.hidden = true;
-  }
-  button.hidden = false;
-  button.dataset.weatherId = String(shown.committedId ?? "");
-  button.dataset.requestedId = String(shown.transition?.requestedId ?? "");
-  button.dataset.phase = shown.transition?.phase ?? "ready";
-  button.title = weatherPhaseLabel(shown, ui.locale);
-  weatherPicker.update(shown, ui.locale);
 }
 // The runtime publishes the档位 in game terms (id + name). Names are localized
 // here, once, so the host can render the catalogue verbatim in the reader's
@@ -248,14 +163,6 @@ function decorateWeather(state) {
   state.weather = presentWeather(state.weather, weatherPresentationOptions());
   return state;
 }
-$("weather-icon").addEventListener("error", () => {
-  $("weather-icon").hidden = true;
-  $("stage-weather").dataset.iconState = "unavailable";
-});
-$("weather-icon").addEventListener("load", () => {
-  $("stage-weather").dataset.iconState = "ready";
-});
-$("stage-weather").addEventListener("click", () => weatherPicker.open());
 
 function fail(code, error) {
   if (failed) return;
@@ -458,8 +365,8 @@ window.addEventListener("message", (event) => {
         };
       controller?.configure(configuration);
       render();
-      // A locale change relabels the weather dial; the host keeps reading the
-      // same projection instead of caching a stale translation.
+      // A locale change relabels the weather catalogue; the host keeps reading
+      // the same projection instead of caching a stale translation.
       const snapshot = controller?.getSnapshot();
       if (snapshot) send("snapshot", decorateWeather(snapshot));
     } else if (type === "player-data") {
@@ -509,15 +416,6 @@ window.addEventListener("moly-ready", () => {
       }
       const state = controller?.poll();
       if (!state) return;
-      if (state.weather) {
-        weather = state.weather;
-        renderWeather();
-      }
-      if (state.site) {
-        site = state.site;
-        siteLocked = !state.scene?.ready || state.status.canStop;
-        renderSite();
-      }
       if (state.ready) mark("catalogReady");
       if (state.scene?.ready) {
         mark("sceneReady");

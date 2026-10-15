@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { JSDOM } from "jsdom";
 import {
   contentKey,
@@ -563,4 +564,24 @@ test("sites are chosen by runtime ID and survive a document reload before Play",
     handle?.dispose();
     env.cleanup();
   }
+});
+
+test("the stage page has no site select or weather pill beyond the boot overlay", () => {
+  const html = fs.readFileSync(
+    new URL("./stage.html", import.meta.url),
+    "utf8",
+  );
+  const { document } = new JSDOM(html).window;
+  const absent = [
+    "stage-site",
+    "stage-weather",
+    "weather-dialog",
+    "stage-hint",
+  ];
+  for (const id of absent) assert.equal(document.getElementById(id), null, id);
+  assert.equal(document.querySelector("select, dialog"), null);
+  const boot = document.getElementById("stage-boot");
+  const buttons = [...document.querySelectorAll("button")];
+  assert.ok(buttons.length > 0);
+  for (const button of buttons) assert.ok(boot.contains(button), button.id);
 });

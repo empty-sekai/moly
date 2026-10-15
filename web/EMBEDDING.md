@@ -97,10 +97,8 @@ lists every site the runtime can switch to, in the source's order, with the
 display name from the snapshot's master table, and the site the scene is on.
 `setSite(id)` asks the runtime to move the live scene there. The runtime
 refuses IDs it did not list and refuses a switch while an experience owns the
-scene (`status.canStop` is true). The stage also shows this list as its own
-site menu, disabled while the scene is loading (`scene.ready` is false) or
-owned. Like the weather setting, the last chosen site is applied again after a
-reload of the iframe.
+scene (`status.canStop` is true). The last site set through `setSite` is applied
+again after a reload of the iframe, as the weather setting is.
 
 A retry or WebGL fallback reloads the iframe realm, so two renderers/audio
 contexts are never initialized within one realm. The handshake distinguishes a

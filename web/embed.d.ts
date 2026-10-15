@@ -108,15 +108,15 @@ export interface MolySnapshot {
   issues: string[];
   scene?: { ready: boolean; actorUnits: number[]; fixtureIds: number[] };
   /**
-   * The weather dial, in the runtime's own numbered order. `options` is the
-   * complete catalogue the runtime published — never a partial guess — and
+   * The weather catalogue, in the runtime's own numbered order. `options` is
+   * the complete catalogue the runtime published — never a partial guess — and
    * `setWeather` accepts only IDs from it. `label` is localized by the stage in
    * the locale the host asked for, so the host renders it verbatim.
    */
   weather?: MolyWeather;
   /**
-   * The site dial: the site the scene is on (or switching to) and every site
-   * the runtime can switch to, in the source's own order, named by the
+   * The site catalogue: the site the scene is on (or switching to) and every
+   * site the runtime can switch to, in the source's own order, named by the
    * snapshot's master table. `setSite` accepts only IDs from `options`, and
    * the runtime refuses a switch while `status.canStop` is true.
    */

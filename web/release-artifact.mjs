@@ -46,8 +46,6 @@ export const STAGE_FILES = [
   "stage-locale.mjs",
   "weather-presentation.mjs",
   "weather-artwork.mjs",
-  "weather-picker.mjs",
-  "weather-ui-locale.mjs",
   "boot.mjs",
   "engine-loader.mjs",
 ];
