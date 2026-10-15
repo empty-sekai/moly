@@ -42,6 +42,12 @@
 //! the wheel by pixels (positive zooms in). Both go through the gesture
 //! layer and the camera's own input law.
 //!
+//! Server: `server.edit {path, value}` or `server.edit {action, ...}` makes
+//! one edit of the server document (the clock, the stamina, the phenomenon
+//! schedule, the gate actions and the rest the server panel offers); the
+//! server model checks it as it does the panel's, and the step fails with
+//! the model's refusal.
+//!
 //! World: `weather.set {phenomenon}`, `site.switch {site}` (a site type such
 //! as `first_floor`), and the door sequences `site.enter_room` and
 //! `site.go_home` (walk to the door, press its button, wait for the move to

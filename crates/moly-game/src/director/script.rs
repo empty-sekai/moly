@@ -76,6 +76,9 @@ pub(crate) enum Node {
     /// A wheel turn of `by` pixels (positive zooms in) spread over `secs`.
     CameraZoom { by: f32, secs: f32 },
     Weather { phenomenon: i32 },
+    /// One `server.edit` on the server document (a field path and value, or
+    /// an action with its fields), checked by the server model when it runs.
+    ServerEdit { command: Map<String, Value> },
     SiteSwitch { site: String },
 }
 
@@ -150,7 +153,7 @@ const ACTIONS: &[&str] = &[
     "wait", "wait_until", "assert", "log", "where", "capture", "parallel", "repeat",
     "player.walk_to", "player.interact", "player.stick", "player.release", "player.talk_to", "tap",
     "npc.take", "npc.walk_to", "npc.face", "npc.emote", "npc.use", "npc.tweet", "npc.release",
-    "camera.drag", "camera.zoom", "weather.set", "site.switch", "site.enter_room", "site.go_home",
+    "camera.drag", "camera.zoom", "server.edit", "weather.set", "site.switch", "site.enter_room", "site.go_home",
 ];
 
 /// Parses a script document.
@@ -332,6 +335,16 @@ fn step(value: &Value, at: &str) -> Result<Vec<Step>, String> {
                 .ok_or_else(|| format!("{at}: by must be a number of pixels"))? as f32;
             let secs = fields.opt_f32("secs")?.unwrap_or(0.5);
             vec![one(Node::CameraZoom { by, secs }, None)]
+        }
+        "server.edit" => {
+            // The step's other fields are the edit; the server model checks
+            // them when the step runs and names what it refuses.
+            let mut command = fields.rest();
+            if !command.contains_key("path") && !command.contains_key("action") {
+                return Err(format!("{at}: a server edit has a path and a value, or an action"));
+            }
+            command.insert("type".into(), "server.edit".into());
+            vec![one(Node::ServerEdit { command }, None)]
         }
         "weather.set" => vec![one(Node::Weather { phenomenon: fields.req_i32("phenomenon")? }, None)],
         "site.switch" => vec![one(Node::SiteSwitch { site: fields.req_str("site")?.to_owned() }, Some(60.0))],
@@ -549,6 +562,18 @@ impl<'a> Fields<'a> {
         Some(value)
     }
 
+    /// Every field not read yet, now counted as read.
+    fn rest(&mut self) -> Map<String, Value> {
+        let rest: Map<String, Value> = self
+            .map
+            .iter()
+            .filter(|(key, _)| !self.used.contains(&key.as_str()))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        self.used.extend(self.map.keys().map(String::as_str));
+        rest
+    }
+
     fn req(&mut self, key: &'a str) -> Result<&'a Value, String> {
         let at = self.at.clone();
         self.opt(key).ok_or_else(|| format!("{at}: missing field {key}"))
@@ -695,6 +720,21 @@ mod tests {
         assert!(matches!(&script.steps[2].node, Node::NpcTweet { tweet: 301, secs, .. } if *secs == 3.0));
         let error = parse(&json!({ "steps": [{ "do": "npc.use", "unit": 2, "fixture": 1, "variant": 0 }] })).unwrap_err();
         assert!(error.contains("variant counts from 1"), "{error}");
+    }
+
+    #[test]
+    fn server_edits_pass_their_fields_through() {
+        let script = parse(&json!({ "steps": [
+            { "do": "server.edit", "path": "clock.offsetMs", "value": 3600000, "label": "an hour on" },
+            { "do": "server.edit", "action": "sync" }
+        ] }))
+        .unwrap();
+        let Node::ServerEdit { command } = &script.steps[0].node else { panic!("not a server edit") };
+        assert_eq!(Value::Object(command.clone()), json!({ "type": "server.edit", "path": "clock.offsetMs", "value": 3600000 }));
+        assert_eq!(script.steps[0].label, "an hour on");
+        assert!(matches!(&script.steps[1].node, Node::ServerEdit { command } if command["action"] == "sync"));
+        let error = parse(&json!({ "steps": [{ "do": "server.edit", "value": 1 }] })).unwrap_err();
+        assert!(error.contains("a path and a value, or an action"), "{error}");
     }
 
     #[test]

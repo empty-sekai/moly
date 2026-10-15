@@ -354,6 +354,12 @@ fn start(world: &mut World, shared: &mut Shared, step: Step, path: String) -> St
             world.write_message(crate::server_panel::PhenomenaScheduleEdit::Set(*phenomenon));
             return ended(path, Ok(format!("phenomenon {phenomenon} requested")), optional);
         }
+        Node::ServerEdit { command } => {
+            let result = crate::server::with_model(|model| model.edit(command))
+                .ok_or_else(|| "the server model is not installed".to_owned())
+                .and_then(|receipt| receipt.map(|receipt| receipt.to_string()));
+            return ended(path, result, optional);
+        }
         Node::SiteSwitch { site } => {
             world.insert_resource(crate::site::SiteChangeRequest(site.clone()));
             Kind::SiteSwitch { site: site.clone() }
