@@ -57,10 +57,10 @@
 //! - The **read report** handler records the talk as read on the server side
 //!   and answers with no obtained resources.
 //! - **Device time zone.** The client converts server timestamps to device
-//!   local time. The browser supplies its own offset; the native host has no
-//!   time-zone source and uses UTC. The checked-in default schedule covers
-//!   three days of windows with the same phenomenon, so every offset from
-//!   UTC-12 to UTC+14 resolves to it.
+//!   local time. The browser and the native host both read the device's
+//!   offset from the platform's local time conversion. The checked-in default
+//!   schedule covers three days of windows with the same phenomenon, so every
+//!   offset from UTC-12 to UTC+14 resolves to it.
 //!
 //! The document is the server model's NPC slice (`crate::server`), taken
 //! once the client has joined: the rows the join served and the client's
@@ -539,19 +539,8 @@ fn parse_periods(text: &str) -> Result<Vec<RefreshTimePeriod>, String> {
 // ---------------------------------------------------------------------------
 
 /// Offset of device local time from UTC, in seconds, at an epoch second.
-#[cfg(target_arch = "wasm32")]
 fn device_utc_offset_seconds(epoch_seconds: i64) -> i64 {
-    let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(
-        epoch_seconds as f64 * 1000.0,
-    ));
-    // getTimezoneOffset is UTC minus local, in minutes.
-    -(date.get_timezone_offset() as i64) * 60
-}
-
-/// The native host has no time-zone source; UTC stands in (named above).
-#[cfg(not(target_arch = "wasm32"))]
-fn device_utc_offset_seconds(_epoch_seconds: i64) -> i64 {
-    0
+    crate::server::clock::device_utc_offset_ms(epoch_seconds.saturating_mul(1000)) / 1000
 }
 
 /// What a schedule write selects.

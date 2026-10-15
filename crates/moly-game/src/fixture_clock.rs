@@ -453,32 +453,14 @@ fn local_hour_minute() -> (i32, i32) {
     device_local_hour_minute()
 }
 
-#[cfg(target_arch = "wasm32")]
 fn device_local_hour_minute() -> (i32, i32) {
-    let now = js_sys::Date::new_0();
-    (now.get_hours() as i32, now.get_minutes() as i32)
-}
-
-#[cfg(all(not(target_arch = "wasm32"), unix))]
-fn device_local_hour_minute() -> (i32, i32) {
-    // SAFETY: time(NULL) and localtime_r with a zeroed out-parameter owned here.
-    unsafe {
-        let now = libc::time(std::ptr::null_mut());
-        let mut local: libc::tm = std::mem::zeroed();
-        assert!(!libc::localtime_r(&now, &mut local).is_null(), "localtime_r failed");
-        (local.tm_hour, local.tm_min)
-    }
-}
-
-#[cfg(all(not(target_arch = "wasm32"), windows))]
-fn device_local_hour_minute() -> (i32, i32) {
-    // SAFETY: time(NULL) and localtime_s with a zeroed out-parameter owned here.
-    unsafe {
-        let now = libc::time(std::ptr::null_mut());
-        let mut local: libc::tm = std::mem::zeroed();
-        assert_eq!(libc::localtime_s(&mut local, &now), 0, "localtime_s failed");
-        (local.tm_hour, local.tm_min)
-    }
+    let now = crate::server::clock::device_now_ms();
+    let local = now + crate::server::clock::device_utc_offset_ms(now);
+    let minutes = local.div_euclid(60_000);
+    (
+        minutes.div_euclid(60).rem_euclid(24) as i32,
+        minutes.rem_euclid(60) as i32,
+    )
 }
 
 #[cfg(test)]

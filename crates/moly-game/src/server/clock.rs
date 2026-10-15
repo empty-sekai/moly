@@ -3,9 +3,8 @@
 //!
 //! The windows are the master refresh time periods (`startHour`, `endHour`;
 //! hours may pass 24), read in device local time, the frame the client's
-//! schedule selection reads timestamps in. The browser supplies its own
-//! offset; the native host has no time-zone source and uses UTC, as the
-//! server panel does.
+//! schedule selection reads timestamps in. The browser and the native host
+//! both read the device's offset from the platform's local time conversion.
 
 use super::document::{Clock, ScheduleRow};
 
@@ -44,8 +43,39 @@ pub(crate) fn device_utc_offset_ms(epoch_ms: i64) -> i64 {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn device_utc_offset_ms(_epoch_ms: i64) -> i64 {
-    0
+pub(crate) fn device_utc_offset_ms(epoch_ms: i64) -> i64 {
+    let seconds = epoch_ms.div_euclid(1000);
+    let t = seconds as libc::time_t;
+    // SAFETY: the out-parameter is a zeroed value owned here, and the input
+    // pointer refers to a local that outlives the call.
+    let local = unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        #[cfg(windows)]
+        assert_eq!(libc::localtime_s(&mut tm, &t), 0, "localtime_s failed");
+        #[cfg(unix)]
+        assert!(!libc::localtime_r(&t, &mut tm).is_null(), "localtime_r failed");
+        tm
+    };
+    let local_seconds = days_from_civil(
+        local.tm_year as i64 + 1900,
+        local.tm_mon as i64 + 1,
+        local.tm_mday as i64,
+    ) * 86_400
+        + local.tm_hour as i64 * 3600
+        + local.tm_min as i64 * 60
+        + local.tm_sec as i64;
+    (local_seconds - seconds) * 1000
+}
+
+/// Days from 1970-01-01 to the proleptic Gregorian date `year-month-day`.
+#[cfg(not(target_arch = "wasm32"))]
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let yoe = year - era * 400;
+    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 /// The server clock's epoch millisecond.
