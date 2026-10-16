@@ -107,10 +107,12 @@ GitHub Actions 在推送、拉取请求和手动触发时执行版本一致性�
 
 | 目录 | 职责 |
 |---|---|
-| `crates/moly-law` | 不依赖引擎的行为与计算逻辑 |
-| `crates/moly-assets` | 资源目录、资源包与数据加载 |
-| `crates/moly-game` | 场景、交互、UI 与渲染 |
-| `crates/moly-app` | 原生与浏览器入口 |
+| `crates/base/moly-law` | 不依赖引擎的行为与计算逻辑 |
+| `crates/engine/moly-assets` | 资源目录、资源包与数据加载 |
+| `crates/engine/moly-perf` | 逐帧性能计数 |
+| `crates/game/moly-game` | 场景、交互、UI 与渲染 |
+| `crates/app/moly-app` | 原生与浏览器入口 |
+| `crates/vendor/cpal` | 带一处网页音频修正的 CPAL |
 | `web` | 浏览器页面与构建工具 |
 | `tools` | 仓库边界与渲染顺序检查 |
 | `tools/mcp` | MCP 服务器，启动并驱动原生与浏览器实例 |

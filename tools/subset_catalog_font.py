@@ -20,7 +20,7 @@ coverage report before installing it. Example:
   python tools/subset_catalog_font.py census --root ROOT_JP --region jp \
     --masters MASTERS/jp --output census-jp.json
   python tools/subset_catalog_font.py build --source ORIGINAL.ttf \
-    --existing crates/moly-game/assets/font/ResourceHanRoundedSC-Medium.subset.ttf \
+    --existing crates/game/moly-game/assets/font/ResourceHanRoundedSC-Medium.subset.ttf \
     --census census-jp.json --census census-cn.json --output candidate.ttf
 """
 from __future__ import annotations

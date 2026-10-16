@@ -91,7 +91,7 @@ The page must load a module at a URL path that ends in `/moly-app.js` and export
 
 A director script is an object with a `name`, an optional `exit`, and `steps`. Each step has a `do` field. `run_script` sends a whole script, and `act` sends one step. `director_schema` returns the JSON Schema of the steps and conditions.
 
-The "Look around" example is bundled with the game (`crates/moly-game/src/director/examples.json`, also returned by `moly.director.examples`). Its `script` object is:
+The "Look around" example is bundled with the game (`crates/game/moly-game/src/director/examples.json`, also returned by `moly.director.examples`). Its `script` object is:
 
 ```json
 {
@@ -112,7 +112,7 @@ Pass the object as `script` to `run_script`, together with the instance's `id`. 
 
 ## RPC methods
 
-The game answers 22 `moly.*` methods. Their names are listed in `METHODS` in `crates/moly-game/src/control.rs`, and each is registered in `install` in the same file. The table also includes the four protocol methods that the repository names: `rpc.discover`, `registry.schema`, `world.list_components` and `world.list_resources`. The Bevy Remote Protocol provides further `world.*` methods that this table does not list.
+The game answers 22 `moly.*` methods. Their names are listed in `METHODS` in `crates/game/moly-game/src/control.rs`, and each is registered in `install` in the same file. The table also includes the four protocol methods that the repository names: `rpc.discover`, `registry.schema`, `world.list_components` and `world.list_resources`. The Bevy Remote Protocol provides further `world.*` methods that this table does not list.
 
 | Method | Params | Purpose |
 |---|---|---|

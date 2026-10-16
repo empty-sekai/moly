@@ -5,13 +5,13 @@
 
 ## Resource Han Rounded（字体子集）
 
-`crates/moly-game/assets/font/ResourceHanRoundedSC-Medium.subset.ttf` 是
+`crates/game/moly-game/assets/font/ResourceHanRoundedSC-Medium.subset.ttf` 是
 Resource Han Rounded SC Medium 0.990（作者 GitHub 发布的 TTF 版本）的一个
 字形子集，运行时用于烘焙文字图集。子集保留此前全部码点，并覆盖日服、国服
 产品可显示文本（界面文案、对话与推文语料、主表文本字段）以及产品自身写入的
 文字；[tools/subset_catalog_font.py](tools/subset_catalog_font.py) 可由原字体与
 同一组输入重建它。按 SIL Open Font License 1.1 授权，许可全文及版权声明见
-[OFL-1.1.txt](crates/moly-game/assets/font/OFL-1.1.txt)
+[OFL-1.1.txt](crates/game/moly-game/assets/font/OFL-1.1.txt)
 （© 2018–2019 Cyano Hao；部分 © 2014、2015、2018 Adobe）。
 
 子集化是 OFL 意义上的修改版本，文件名以 `.subset` 后缀标注。字体名不含
@@ -19,7 +19,7 @@ Adobe 的保留字体名（Reserved Font Name "Source"）。
 
 ## Arm Optimized Routines（单精度 powf 移植）
 
-`crates/moly-law/src/powf.rs` 是 Arm Optimized Routines 中单精度 `powf`
+`crates/base/moly-law/src/powf.rs` 是 Arm Optimized Routines 中单精度 `powf`
 （`math/powf.c`，及其数据表 `math/powf_log2_data.c`、`math/exp2f_data.c`）
 的 Rust 移植，逐位复现 Android 10 起系统 libm 所用的那份实现。上游按
 MIT 许可证授权，许可全文如下：
@@ -78,7 +78,7 @@ crates.io 源码包提供。分发构建产物时，应一并保留适用的第�
 
 ## Arm Optimized Routines（logf、exp、cosf 移植）
 
-`crates/moly-law/src/particle/device_libm.rs` 中的 `logf`、`exp`、`cosf`
+`crates/base/moly-law/src/particle/device_libm.rs` 中的 `logf`、`exp`、`cosf`
 是 Arm Optimized Routines（`math/logf.c`、`math/logf_data.c`、`math/exp.c`、
 `math/exp_data.c`、`math/cosf.c`、`math/sincosf.h`、`math/sincosf_data.c`）
 的 Rust 移植，逐位复现 Android 10 起系统 libm 所用的那份实现（加权曲线段的
@@ -110,7 +110,7 @@ SOFTWARE.
 
 ## FreeBSD msun（atan2f、atanf 移植）
 
-`crates/moly-law/src/particle/device_libm.rs` 中的 `atan2f` 与 `atanf` 是
+`crates/base/moly-law/src/particle/device_libm.rs` 中的 `atan2f` 与 `atanf` 是
 FreeBSD msun（`e_atan2f.c`、`s_atanf.c`，bionic libm 沿用）的 Rust 移植。
 上游声明如下：
 

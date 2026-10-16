@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-moly-law = { path = "../moly-law" }
+moly-law = { path = "../../base/moly-law" }
 bevy = { workspace = true }
 gltf = { version = "1.4", default-features = false }
 # 清单类提取产物（manifest.json / characters.json）与站点 sidecar 的解析；

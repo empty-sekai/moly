@@ -65,7 +65,7 @@ test("WebGPU and WebGL2 renderer features are selected separately", () => {
     "utf8",
   );
   const application = fs.readFileSync(
-    new URL("../crates/moly-app/Cargo.toml", import.meta.url),
+    new URL("../crates/app/moly-app/Cargo.toml", import.meta.url),
     "utf8",
   );
   const build = fs.readFileSync(

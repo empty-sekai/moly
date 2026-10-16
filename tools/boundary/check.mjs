@@ -197,25 +197,26 @@ const SOURCE_EXTENSIONS = new Set(['.ts', '.rs', '.wgsl', '.mjs', '.js', '.html'
 const SOURCE_DIR_PREFIXES = ['web/', 'tools/', 'src/', 'tests/', '.cargo/', '.github/', '.cnb/', '.ide/'];
 
 // Per-crate source directories. Enumerated rather than collapsed into a single
-// `^crates/[^/]+/` catch-all on purpose: a catch-all would cover every future
+// `^crates/<group>/<crate>/` catch-all on purpose: a catch-all would cover every future
 // subdirectory of every crate in advance, which is precisely what would keep
 // the coverage assertion below from ever firing inside the crates tree.
 const CRATE_SOURCE_DIR_PATTERNS = [
-  /^crates\/[^/]+\/src\//,
-  /^crates\/[^/]+\/tests\//,
+  // Crates sit one group directory deep: crates/<group>/<crate>/.
+  /^crates\/[^/]+\/[^/]+\/src\//,
+  /^crates\/[^/]+\/[^/]+\/tests\//,
   // examples/ ships with the crate and `git add` publishes it like any
   // other source. It held tracked source while this list named only src/
   // and tests/, which is the exact staleness checkSourceDirCoverage()
   // exists to catch -- and did.
-  /^crates\/[^/]+\/examples\//,
+  /^crates\/[^/]+\/[^/]+\/examples\//,
 ];
 
 // A source file sitting directly in a crate's own directory rather than in one
 // of its subdirectories (per-crate build and smoke scripts live here).
-const CRATE_ROOT_DIR = /^crates\/[^/]+\/$/;
+const CRATE_ROOT_DIR = /^crates\/[^/]+\/[^/]+\/$/;
 
 const SOURCE_DIR_DESCRIPTION =
-  'the repo root, web/, tools/, src/, tests/, .cargo/, .github/, .cnb/, .ide/, crates/*/ and crates/*/{src,tests,examples}/';
+  'the repo root, web/, tools/, src/, tests/, .cargo/, .github/, .cnb/, .ide/, crates/*/*/ and crates/*/*/{src,tests,examples}/';
 
 // Directories deliberately outside the coverage assertion, each with the reason
 // it is out. Stated explicitly rather than left to "no prefix happens to match
