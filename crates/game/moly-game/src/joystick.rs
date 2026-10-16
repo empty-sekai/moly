@@ -191,6 +191,7 @@ pub(crate) fn advance(
     overlays: crate::game_settings::OverlayPanels,
     library: Res<crate::content_library::ContentLibrary>,
     mut last_logged: Local<Vec2>,
+    mut no_area: Local<bool>,
     site_move: Option<Res<crate::site_move::SiteMoveActive>>,
     entry: Option<Res<crate::entry::EntrySequence>>,
     root_canvas: Option<Res<RootCanvas>>,
@@ -254,6 +255,27 @@ pub(crate) fn advance(
         return;
     };
     let radius = HANDLE_SIZE * root_canvas.scale(window);
+    // A window with no drawable area has no canvas scale, so the stick has no
+    // radius to measure a ratio against and every ratio would be NaN; the
+    // stick is released as a lifted finger is. The refusal is logged once per
+    // entry into the state, not once per frame of it.
+    if !(radius.is_finite() && radius > 0.0) {
+        touches.clear();
+        if state.captured.take().is_some() {
+            state.active = false;
+            state.dragging = false;
+            state.direction = Vec2::ZERO;
+            state.move_vector = Vec3::ZERO;
+        }
+        if !*no_area {
+            *no_area = true;
+            info!(
+                "[joystick] refused: the window has no drawable area (size {width}x{height}); the stick is released"
+            );
+        }
+        return;
+    }
+    *no_area = false;
     // Touch positions are logical pixels; the threshold is in device pixels.
     let drag_threshold = DRAG_THRESHOLD_DEVICE_PIXELS / window.scale_factor();
     // A dialog over the field (ExistsDialog(Layer_Dialog)) takes a new press;

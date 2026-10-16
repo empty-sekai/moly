@@ -70,6 +70,12 @@ impl Hand {
             .get_resource::<crate::canvas::RootCanvas>()
             .map(|canvas| canvas.scale(&window))
             .ok_or("the root canvas is not loaded")?;
+        // A window with no drawable area has no canvas scale, and the reach of
+        // the finger is that scale times the handle: there is no position to
+        // put the finger at, so the lean is refused and the caller waits.
+        if !(scale.is_finite() && scale > 0.0) {
+            return Err("the window has no drawable area (minimized)");
+        }
         let position = base + Vec2::new(stick.x, -stick.y) * HANDLE_SIZE * scale;
         touch(world, entity, STICK_FINGER, TouchPhase::Moved, position);
         Ok(())
