@@ -20,7 +20,7 @@ MYSEKAI的还原项目，使用 Rust 与 [Bevy](https://bevyengine.org/) 构建�
 进入游戏。已有站点可通过 [嵌入接口](web/EMBEDDING.md) 使用 `stage.html`，由宿主
 提供内容目录和页面导航。网页检查说明见 [浏览器检查](web/TESTING.md)。
 
-在原生程序中按 **F9** 打开“对话与互动”。默认的 **独立体验** 会前往一处
+嵌入舞台的“对话与互动”内容中，默认的 **独立体验** 会前往一处
 临时空场景，只布置所选内容确实需要的角色与源资源家具；结束、关闭或失败后
 返回原场景并恢复布局、名册、玩家与相机。**当前场景** 则只使用眼前已经存在
 的角色和家具，不会自动补齐。没有角色动作的陈设家具在独立体验中用于查看，
@@ -36,6 +36,13 @@ MYSEKAI的还原项目，使用 Rust 与 [Bevy](https://bevyengine.org/) 构建�
 安装稳定版 Rust 和 Node.js 22，将 `MOLY_ASSET_ROOT` 指向已提取的资源目录，
 运行 `cargo run --release -p moly-app`。构建默认写入仓库的 `target/`；需要共享缓存时，
 自行设置 `CARGO_TARGET_DIR`，增量编译可通过 `CARGO_INCREMENTAL` 配置。
+
+原生程序默认运行与网页相同的游戏：从家园进入，家园等级随服务端文档中的等级，
+不读取其他环境开关。设置、服务端文档和本地列表分别保存在设置文件
+（`MOLY_SETTINGS_FILE`，缺省为数据目录下的 `settings.json`，数据目录见下文“启动器”）及其旁边的
+`settings.server.json`、`settings.local.json` 中；同时运行的第二个进程只读这些文件。
+设置 `MOLY_DEV=1` 则启动开发窗口：它读取各项原生环境开关，服务端文档只保存在内存中，
+并提供玩家数据导入等开发工具。两种模式下按 **F10** 打开画面与音量设置，按 **F9** 打开控制面板。
 
 浏览器版需要 `wasm32-unknown-unknown` target 和与 Cargo.lock 一致的 wasm-bindgen CLI：
 
@@ -112,7 +119,7 @@ GitHub Actions 在推送、拉取请求和手动触发时执行版本一致性�
 | `crates/engine/moly-assets` | 资源目录、资源包与数据加载 |
 | `crates/engine/moly-perf` | 逐帧性能计数 |
 | `crates/game/moly-game` | 场景、交互、UI 与渲染 |
-| `crates/app/moly-app` | 原生与浏览器入口 |
+| `crates/app/moly-app` | 游戏程序：原生与浏览器入口 |
 | `crates/vendor/cpal` | 带一处网页音频修正的 CPAL |
 | `web` | 浏览器页面与构建工具 |
 | `tools` | 仓库边界与渲染顺序检查 |

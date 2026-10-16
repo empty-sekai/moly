@@ -36,10 +36,23 @@ static PUBLISHED: Mutex<Option<Published>> = Mutex::new(None);
 // Set synchronously by the page, before the next input schedule.
 static INPUT_CAPTURED: AtomicBool = AtomicBool::new(false);
 
+/// Who keeps the game's three documents.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GameHost {
+    /// The page: it seeds the documents and stores the revisions it takes.
+    Page,
+    /// The native program: the documents are files beside the settings file,
+    /// written when a revision is committed. Its asset root is the one the
+    /// program was started with, so the seed's location fields are empty
+    /// and unread.
+    Native,
+}
+
 /// One validated seed. Its documents move into the page backend and the
 /// server model when the storage is installed; the resource keeps the rest.
 #[derive(Resource, Clone, Debug)]
 pub struct GameSeed {
+    pub host: GameHost,
     pub region: String,
     pub version: String,
     pub snapshot_id: String,
@@ -164,16 +177,9 @@ pub fn parse_game_seed(input: &str) -> Result<GameSeed, String> {
     let settings = document("settings")?;
     let server = document("server")?;
     let local = document("local")?;
-    // A stored document this engine cannot read is refused, never reset.
-    if let Some(text) = &server {
-        crate::server::check_seed_document(text)
-            .map_err(|error| format!("seed document server: {error}"))?;
-    }
-    if let Some(text) = &local {
-        crate::server::check_seed_local(text)
-            .map_err(|error| format!("seed document local: {error}"))?;
-    }
+    check_documents(&server, &local)?;
     Ok(GameSeed {
+        host: GameHost::Page,
         region,
         version: text(seed, "version")?,
         snapshot_id: text(seed, "snapshotId")?,
@@ -194,8 +200,51 @@ pub fn parse_game_seed(input: &str) -> Result<GameSeed, String> {
     })
 }
 
+/// A stored document this engine cannot read is refused, never reset.
+fn check_documents(server: &Option<String>, local: &Option<String>) -> Result<(), String> {
+    if let Some(text) = server {
+        crate::server::check_seed_document(text)
+            .map_err(|error| format!("seed document server: {error}"))?;
+    }
+    if let Some(text) = local {
+        crate::server::check_seed_local(text)
+            .map_err(|error| format!("seed document local: {error}"))?;
+    }
+    Ok(())
+}
+
+/// The native program's seed: the three documents read from the files the
+/// native host keeps, checked as a page's seed is. The process that holds
+/// the files' write lease is writable; a second process reads the same
+/// documents and commits nothing.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn native_game_seed() -> Result<GameSeed, String> {
+    let (writable, [settings, server, local]) = crate::settings_store::open_native_game()?;
+    check_documents(&server, &local)?;
+    Ok(GameSeed {
+        host: GameHost::Native,
+        region: String::new(),
+        version: crate::VERSION.to_owned(),
+        snapshot_id: String::new(),
+        release_id: String::new(),
+        assets: String::new(),
+        packs: false,
+        asset_catalog: None,
+        resource_base: None,
+        resource_origin: None,
+        storage_base: None,
+        storage_mirror_base: None,
+        master_base: None,
+        master_mirror_base: None,
+        writable,
+        settings,
+        server,
+        local,
+    })
+}
+
 /// Before the app is built: some plugins read the settings document while
-/// they are added. Selects the page backend and the page's storage lease.
+/// they are added. Selects the page backend and the host's storage lease.
 pub fn install_game_storage(seed: &mut GameSeed) {
     crate::settings_store::install_page_document(
         seed.settings.take(),
@@ -203,7 +252,6 @@ pub fn install_game_storage(seed: &mut GameSeed) {
         seed.local.clone(),
     );
     crate::server::install_from_seed(seed.server.take(), seed.local.take());
-    #[cfg(target_arch = "wasm32")]
     crate::settings_store::set_browser_storage_writable(seed.writable);
     ACTIVE.store(true, Ordering::Relaxed);
 }
@@ -455,6 +503,7 @@ pub fn configure_browser_game(app: &mut App, seed: GameSeed) {
     if let Err(error) = crate::settings_store::read_document() {
         errors.push(format!("settings document: {error}"));
     }
+    let host = seed.host;
     app.insert_resource(seed)
         .insert_resource(errors)
         .add_systems(Startup, announce)
@@ -468,19 +517,41 @@ pub fn configure_browser_game(app: &mut App, seed: GameSeed) {
         )
         .add_systems(
             Last,
-            (close_orphan_panel, check_source_region, publish).chain(),
+            (
+                check_source_region.run_if(move || host == GameHost::Page),
+                publish,
+            )
+                .chain(),
         );
+    #[cfg(not(target_arch = "wasm32"))]
+    if host == GameHost::Native {
+        app.add_systems(Last, persist_native.after(publish));
+    }
 }
 
 fn announce(seed: Res<GameSeed>) {
-    info!(
-        "[game] seed {} {} snapshot {} release {}; developer tools absent, gated: {}",
-        seed.region,
-        seed.version,
-        seed.snapshot_id,
-        seed.release_id,
-        crate::dev_tools::GATED.join(" · ")
-    );
+    let gated = crate::dev_tools::GATED.join(" · ");
+    match seed.host {
+        GameHost::Page => info!(
+            "[game] seed {} {} snapshot {} release {}; developer tools absent, gated: {gated}",
+            seed.region, seed.version, seed.snapshot_id, seed.release_id,
+        ),
+        GameHost::Native => info!(
+            "[game] native {}; documents at {} ({}); developer tools absent, gated: {gated}",
+            seed.version,
+            crate::settings_store::location(),
+            if seed.writable { "writable" } else { "read-only: another process holds them" },
+        ),
+    }
+}
+
+/// Native host: writes the newest committed revision of the documents to
+/// their files and acknowledges it, as the page stores what it takes.
+#[cfg(not(target_arch = "wasm32"))]
+fn persist_native(mut errors: ResMut<GameErrors>) {
+    if let Err(error) = crate::settings_store::persist_native_game() {
+        errors.push(format!("persist: {error}"));
+    }
 }
 
 fn gate_input(
@@ -505,19 +576,6 @@ fn drain_commands(mut library: ResMut<crate::content_library::ContentLibrary>) {
             GameCommand::Input(captured) => library.set_host_input_capture(captured),
             GameCommand::PersistAck(_) | GameCommand::ServerEdit(_) => {}
         }
-    }
-}
-
-/// The settings panel is developer UI and is not spawned in the game. A
-/// writer that opens it (a colour or import failure) would otherwise hold
-/// world input behind an invisible modal.
-fn close_orphan_panel(
-    mut panel: ResMut<crate::game_settings::SettingsPanel>,
-    mut errors: ResMut<GameErrors>,
-) {
-    if panel.open {
-        panel.close_after_import();
-        errors.push("settings panel was requested; it is not part of the game".into());
     }
 }
 

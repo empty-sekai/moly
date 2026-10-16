@@ -15,9 +15,10 @@ use bevy::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::wasm_bindgen;
 
-/// What one start installs. The native window and embedded stage
-/// read their inputs from env or the page URL and carry developer tools; the
-/// browser game reads only its seed and carries none.
+/// What one start installs. The developer window (`MOLY_DEV=1`) and the
+/// embedded stage read their inputs from env or the page URL and carry
+/// developer tools; the game, native or in a page, reads only its seed and
+/// carries none.
 enum StartMode {
     #[cfg(not(target_arch = "wasm32"))]
     Library,
@@ -116,15 +117,54 @@ fn announce_ready(app: &mut App) {
     });
 }
 
+/// The native program starts the game, as the page does, unless
+/// `MOLY_DEV=1` asks for the developer window.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run() {
-    run_app(StartMode::Library);
+    match std::env::var("MOLY_DEV").ok().as_deref() {
+        None | Some("") | Some("0") => run_native_game(),
+        Some("1") => run_app(StartMode::Library),
+        Some(other) => fail_loud(&format!("MOLY_DEV must be 1 or 0, not {other:?}")),
+    }
+}
+
+/// The native game: the page game's start with the native host's documents.
+/// The asset root and the remote hosts are read as the developer window
+/// reads them; nothing else in the environment changes the game.
+#[cfg(not(target_arch = "wasm32"))]
+fn run_native_game() {
+    let source = asset_source::resolve().unwrap_or_else(|message| fail_loud(&message));
+    let remote = asset_source::resolve_remote().unwrap_or_else(|message| fail_loud(&message));
+    let mut seed = moly_game::native_game_seed().unwrap_or_else(|message| fail_loud(&message));
+    moly_game::install_game_storage(&mut seed);
+    let mut app = moly_game::app(source, site_request::game());
+    moly_assets::remote::admit(&mut app, remote);
+    moly_game::configure_browser_game(&mut app, seed);
+    app.run();
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn fail_loud(message: &str) -> ! {
     eprintln!("moly-app: {message}");
+    #[cfg(windows)]
+    show_error_without_stderr(message);
     std::process::exit(1);
+}
+
+/// A program started without standard error (the release build opened from
+/// the file manager) also shows the message in a dialog.
+#[cfg(windows)]
+fn show_error_without_stderr(message: &str) {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+    if !std::io::stderr().as_raw_handle().is_null() {
+        return;
+    }
+    let wide = |text: &str| text.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let (text, caption) = (wide(message), wide("moly"));
+    // SAFETY: both strings are NUL-terminated and outlive the call; the
+    // dialog has no owner window.
+    unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), MB_OK | MB_ICONERROR) };
 }
 
 #[cfg(target_arch = "wasm32")]

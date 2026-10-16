@@ -40,7 +40,7 @@ fn parse_level(raw: Option<&str>, name: &str) -> Result<Option<u32>, String> {
     .transpose()
 }
 
-/// The browser game enters like the source: always on the home site, with no
+/// The game, native or in a page, enters like the source: always on the home site, with no
 /// remembered site and no level or content overrides.
 pub fn game() -> SiteRequest {
     SiteRequest {

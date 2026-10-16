@@ -273,8 +273,7 @@ pub fn install(app: &mut App) {
         PreUpdate,
         crate::game_settings::input
             .after(bevy::ui::UiSystems::Focus)
-            .run_if(crate::browser_stage::standalone)
-            .run_if(crate::dev_tools::dev_tools),
+            .run_if(crate::browser_stage::standalone),
     )
     .add_systems(
         PreUpdate,
@@ -286,7 +285,7 @@ pub fn install(app: &mut App) {
         Update,
         (
             crate::game_settings::apply_graphics.after(info::click),
-            crate::game_settings::refresh_ui.run_if(crate::dev_tools::dev_tools),
+            crate::game_settings::refresh_ui,
         )
             .chain(),
     )

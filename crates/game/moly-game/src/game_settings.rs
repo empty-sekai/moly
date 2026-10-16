@@ -371,8 +371,9 @@ pub(crate) fn setup(
     } else {
         panel.status = "Storage unavailable. Changes will apply to this session.".into();
     }
-    // The saved graphics above apply everywhere; the panel is developer UI.
-    if stage.is_some() || dev.is_none() { return; }
+    // The saved graphics above apply everywhere. The panel (F10) is part of
+    // the game; an embedded stage's page draws its own controls.
+    if stage.is_some() { return; }
     let font = ui_font.0.clone();
     let camera = commands
         .spawn((
@@ -437,15 +438,20 @@ pub(crate) fn setup(
         "Audio/video",
         Action::SettingsPage,
     );
-    add_button(
-        &mut commands,
-        heading,
-        &font,
-        "Player data",
-        Action::PlayerData,
-    );
+    // Player data is developer UI: its systems run only with DevTools.
+    if dev.is_some() {
+        add_button(
+            &mut commands,
+            heading,
+            &font,
+            "Player data",
+            Action::PlayerData,
+        );
+    }
     add_button(&mut commands, heading, &font, "Close", Action::Close);
-    crate::player_data_ui::spawn(&mut commands, content, &font);
+    if dev.is_some() {
+        crate::player_data_ui::spawn(&mut commands, content, &font);
+    }
     let settings_body = commands
         .spawn((
             Node {

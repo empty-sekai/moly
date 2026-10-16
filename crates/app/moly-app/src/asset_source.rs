@@ -309,9 +309,9 @@ mod public_resource_tests {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn resolve() -> Result<AssetSource, String> {
-    let raw = std::env::var("MOLY_ASSET_ROOT").map_err(|_| {
-        "MOLY_ASSET_ROOT is not set; point it at the extracted-asset directory".to_owned()
-    })?;
+    let Ok(raw) = std::env::var("MOLY_ASSET_ROOT") else {
+        return installed_resources();
+    };
     if raw.trim().is_empty() {
         return Err("MOLY_ASSET_ROOT is empty; point it at the extracted-asset directory".into());
     }
@@ -329,6 +329,25 @@ pub fn resolve() -> Result<AssetSource, String> {
     } else {
         Ok(AssetSource::NativeDir { path })
     }
+}
+
+/// Without `MOLY_ASSET_ROOT`, the resources the launcher installed: its
+/// resource directory and the selected (or newest) complete snapshot there.
+#[cfg(not(target_arch = "wasm32"))]
+fn installed_resources() -> Result<AssetSource, String> {
+    let (path, installed) = moly_store::config::default_selection()?.ok_or_else(|| {
+        let dir = moly_store::config::LauncherConfig::load()
+            .and_then(|config| config.resource_dir())
+            .map(|dir| dir.display().to_string())
+            .unwrap_or_else(|error| error);
+        format!(
+            "no resources are installed in {dir}; download them with moly-launcher, \
+             or set MOLY_ASSET_ROOT to a resource directory"
+        )
+    })?;
+    let catalog = std::env::var("MOLY_ASSET_CATALOG").ok().or(Some(installed.catalog));
+    validate_catalog_id(&catalog)?;
+    Ok(AssetSource::NativePacks { path, catalog })
 }
 
 /// One admission for the page query and the game seed.

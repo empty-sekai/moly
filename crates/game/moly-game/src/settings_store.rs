@@ -5,7 +5,9 @@
 //! beside the server model's two documents (`server` and `local`): the page
 //! seeds all three, every committed write of any of them bumps the one
 //! revision, and the page stores the revision it takes, all three together.
-//! Settings writers are the same in every backend.
+//! The native game uses the same backend and stores each revision in three
+//! files ([`open_native_game`]). Settings writers are the same in every
+//! backend.
 
 use bevy::prelude::*;
 use serde_json::{Map, Value};
@@ -128,16 +130,7 @@ fn path() -> Result<std::path::PathBuf, String> {
             return Ok(PathBuf::from(value));
         }
     }
-    #[cfg(target_os = "windows")]
-    let base = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .ok_or_else(|| "LOCALAPPDATA is unavailable".to_owned())?;
-    #[cfg(not(target_os = "windows"))]
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|value| PathBuf::from(value).join(".local/share")))
-        .ok_or_else(|| "User data directory is unavailable".to_owned())?;
-    Ok(base.join("moly/settings.json"))
+    Ok(moly_store::location::data_dir()?.join("settings.json"))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -176,8 +169,8 @@ static BROWSER_WRITABLE: AtomicBool = AtomicBool::new(false);
 
 const READ_ONLY: &str = "This tab is read-only. Exclusive browser storage access is unavailable; close other moly tabs and reload to save.";
 
-/// The browser host sets this only while it holds the exclusive storage lock.
-#[cfg(target_arch = "wasm32")]
+/// The host sets this only while it holds the exclusive storage lock (the
+/// page's Web Lock, or the native game's lease file).
 pub fn set_browser_storage_writable(writable: bool) {
     BROWSER_WRITABLE.store(writable, Ordering::Relaxed);
 }
@@ -197,8 +190,14 @@ fn platform_guard() -> Result<(), String> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn platform_write_text(text: &str) -> Result<(), String> {
+    write_file(&path()?, text)
+}
+
+/// Replaces `destination` with `text` through a synced temporary file in the
+/// same directory.
+#[cfg(not(target_arch = "wasm32"))]
+fn write_file(destination: &std::path::Path, text: &str) -> Result<(), String> {
     use std::io::Write;
-    let destination = path()?;
     let parent = destination
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -216,9 +215,94 @@ fn platform_write_text(text: &str) -> Result<(), String> {
         .sync_all()
         .map_err(|error| format!("Sync settings: {error}"))?;
     temporary
-        .persist(&destination)
+        .persist(destination)
         .map_err(|error| format!("Replace settings: {error}"))?;
     Ok(())
+}
+
+/// The native game's files: the settings document at the settings path and
+/// the server model's documents beside it (`<name>.server.json` and
+/// `<name>.local.json`), in [`PAGE_DOCUMENTS`] order, with the write lease
+/// (`<name>.game.lock`) when this process holds it.
+#[cfg(not(target_arch = "wasm32"))]
+struct NativeGameFiles {
+    paths: [std::path::PathBuf; 3],
+    lease: Option<std::fs::File>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+static NATIVE_GAME: Mutex<Option<NativeGameFiles>> = Mutex::new(None);
+
+/// Opens the native game's files: whether this process holds their write
+/// lease, and each document's text (`None` when its file does not exist).
+/// Called once, before the page backend is installed.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn open_native_game() -> Result<(bool, [Option<String>; 3]), String> {
+    let settings = path()?;
+    let parent = settings
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .to_path_buf();
+    std::fs::create_dir_all(&parent)
+        .map_err(|error| format!("Create settings directory: {error}"))?;
+    let name = settings
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| format!("settings path {} has no file name", settings.display()))?
+        .to_owned();
+    let lease = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(parent.join(format!("{name}.game.lock")))
+        .map_err(|error| format!("Open the game lease: {error}"))?;
+    let lease = lease.try_lock().is_ok().then_some(lease);
+    let paths = [
+        settings,
+        parent.join(format!("{name}.server.json")),
+        parent.join(format!("{name}.local.json")),
+    ];
+    let mut texts = [None, None, None];
+    for (text, path) in texts.iter_mut().zip(&paths) {
+        *text = match std::fs::read_to_string(path) {
+            Ok(value) => Some(value),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(format!("Read {}: {error}", path.display())),
+        };
+    }
+    let writable = lease.is_some();
+    if let Ok(mut slot) = NATIVE_GAME.lock() {
+        *slot = Some(NativeGameFiles { paths, lease });
+    }
+    Ok((writable, texts))
+}
+
+/// Writes the page backend's newest unacknowledged revision to the native
+/// game's files and acknowledges it. Nothing to do without a lease or a
+/// newer revision.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn persist_native_game() -> Result<(), String> {
+    let native = NATIVE_GAME
+        .lock()
+        .map_err(|_| "the native game files are unavailable".to_owned())?;
+    let Some(files) = native.as_ref().filter(|files| files.lease.is_some()) else {
+        return Ok(());
+    };
+    let Some((revision, texts)) = with_page(|page| {
+        page.take(page.acked())
+            .map(|(revision, texts)| (revision, texts.map(|text| text.map(str::to_owned))))
+    })
+    .flatten() else {
+        return Ok(());
+    };
+    for (path, text) in files.paths.iter().zip(texts) {
+        if let Some(text) = text {
+            write_file(path, &text)?;
+        }
+    }
+    with_page(|page| page.ack(revision)).unwrap_or(Ok(()))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -245,6 +329,19 @@ fn platform_write_text(text: &str) -> Result<(), String> {
 }
 
 pub(crate) fn location() -> String {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(location) = NATIVE_GAME.lock().ok().and_then(|native| {
+        native.as_ref().map(|files| {
+            files
+                .paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+    }) {
+        return location;
+    }
     if page_installed() {
         return "page settings document".into();
     }

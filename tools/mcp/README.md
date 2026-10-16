@@ -75,6 +75,8 @@ Relative paths given to `native_launch` (`exe`, `cwd`) and to `browser_launch` (
 
 `native_launch` starts the executable with `MOLY_CONTROL_PORT` set to `rpcPort` (default 15702), unless the `env` argument sets `MOLY_CONTROL_PORT` itself. The instance's RPC URL uses that same port.
 
+It also sets `MOLY_SETTINGS_FILE` to `logs/<id>.settings.json` unless `env` sets it, so each instance keeps its documents in its own files and starts from a first run's state. Without `MOLY_DEV=1` in `env` the program runs the game; with it, the developer window, which reads the native environment switches.
+
 The game opens its JSON-RPC endpoint on `127.0.0.1` only when `MOLY_CONTROL_PORT` is set. A value that is not a port number from 1 to 65535 stops the game with a panic, which appears in the instance log.
 
 The endpoint opens once the app has built. Poll `rpc` with `rpc.discover` until it answers, as the example does.

@@ -3852,9 +3852,11 @@ dependencies = [
  "moly-assets",
  "moly-game",
  "moly-perf",
+ "moly-store",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3898,6 +3900,7 @@ dependencies = [
  "moly-assets",
  "moly-law",
  "moly-perf",
+ "moly-store",
  "naga",
  "parry3d",
  "regex",

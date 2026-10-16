@@ -8,6 +8,7 @@ license.workspace = true
 moly-law = { path = "../../base/moly-law" }
 moly-assets = { path = "../../engine/moly-assets" }
 moly-perf = { path = "../../engine/moly-perf" }
+moly-store = { path = "../../base/moly-store" }
 bevy = { workspace = true }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }

@@ -139,13 +139,15 @@ pub(super) fn pair(c: &mut Commands, parent: Entity, font: &Handle<Font>, label:
             width: percent(100),
             min_width: px(0),
             column_gap: px(10),
+            flex_wrap: FlexWrap::Wrap,
             flex_shrink: 0.,
             ..default()
         },
     );
+    // Short keys line up in a 96 px column; a longer key keeps its own width
+    // and the value moves to the next line when the two do not fit side by side.
     let key = text(c, line, font, label, 12., MUTED);
     c.entity(key).insert(Node {
-        width: px(96),
         min_width: px(96),
         flex_shrink: 0.,
         ..default()

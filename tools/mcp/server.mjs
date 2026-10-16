@@ -131,11 +131,15 @@ async function nativeLaunch({ exe, env, args = [], cwd, rpcPort = DEFAULT_RPC_PO
   // The control port: the caller's MOLY_CONTROL_PORT if given, else rpcPort. The game
   // is started with it, and inst.rpc points at it.
   const controlPort = env?.MOLY_CONTROL_PORT ?? String(rpcPort);
+  // Each instance keeps its documents in its own files beside its log, so a run starts
+  // from a first run's state and leaves the user's save alone. The caller's
+  // MOLY_SETTINGS_FILE, if given, is used instead.
+  const settingsFile = env?.MOLY_SETTINGS_FILE ?? path.join(LOG_DIR, `${id}.settings.json`);
   const child = spawnLogged({
     exePath,
     args,
     cwd: cwdPath,
-    env: { ...process.env, ...(env ?? {}), MOLY_CONTROL_PORT: controlPort },
+    env: { ...process.env, ...(env ?? {}), MOLY_CONTROL_PORT: controlPort, MOLY_SETTINGS_FILE: settingsFile },
     logPath,
     header: `launch ${exePath} ${args.join(' ')}`,
     // A hidden first window is created at 0x0: no UI layout, one-pixel captures.
@@ -635,7 +639,7 @@ server.registerTool(
   'native_launch',
   {
     description:
-      'Start a native executable (absolute or relative file path, no PATH lookup). stdin is closed; stdout and stderr go to logs/<id>.log. MOLY_CONTROL_PORT is set from rpcPort unless env overrides it.',
+      'Start a native executable (absolute or relative file path, no PATH lookup). stdin is closed; stdout and stderr go to logs/<id>.log. MOLY_CONTROL_PORT is set from rpcPort and MOLY_SETTINGS_FILE to logs/<id>.settings.json unless env overrides them. Without MOLY_DEV=1 in env the program runs the game; with it, the developer window.',
     inputSchema: {
       exe: z.string().describe('Path to the executable file'),
       env: z.record(z.string(), z.string()).optional().describe('Environment variables merged over process.env'),

@@ -192,8 +192,10 @@ use bevy::prelude::*;
 pub use browser_game::{
     configure_browser_game, game_command, game_mode_active, game_server_document,
     game_server_schema, game_snapshot, game_take_persist, install_game_storage, parse_game_seed,
-    GameSeed,
+    GameHost, GameSeed,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use browser_game::native_game_seed;
 pub use content_library::bridge::{configure_browser_library, library_catalog, library_command, library_snapshot};
 pub use content_library::library_diagnostics;
 pub use control::control_request;
@@ -203,7 +205,6 @@ pub use director::{director_command, director_snapshot};
 /// Product version shared by the settings panel and application entry points.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[cfg(target_arch = "wasm32")]
 pub use settings_store::set_browser_storage_writable;
 
 /// Shared native/browser assembly. Only renderer initialization and native
