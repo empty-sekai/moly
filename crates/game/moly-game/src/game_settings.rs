@@ -237,6 +237,7 @@ pub(crate) enum Action {
     PlayerData,
     SettingsPage,
     ClearInactiveResources,
+    MaxHomeSize,
     OcPick,
     OcAvatar,
     OcPreviousCharacter,
@@ -557,6 +558,15 @@ pub(crate) fn setup(
         "Next character",
         Action::OcNextCharacter,
     );
+    let home = row(&mut commands, content);
+    add_text(&mut commands, home, &font, "Home site", 18., None);
+    add_button(
+        &mut commands,
+        home,
+        &font,
+        "Max home size",
+        Action::MaxHomeSize,
+    );
     let footer = row(&mut commands, content);
     add_button(
         &mut commands,
@@ -709,6 +719,8 @@ pub(crate) fn input(
     mut captures: MessageWriter<crate::frame_capture::CaptureFrame>,
     mut dialogs: ResMut<crate::menu_shell::ShellDialogState>,
     mut oc_requests: MessageWriter<crate::player_avatar::oc::OcRequest>,
+    ranks: Option<Res<crate::mysekai_rank::MysekaiRanks>>,
+    total_exp: Option<Res<crate::mysekai_rank::UserTotalExp>>,
 ) {
     let mut queued = Vec::new();
     if keys.just_pressed(KeyCode::F12) {
@@ -774,6 +786,47 @@ pub(crate) fn input(
                 ));
             }
             Action::SettingsPage => panel.player_data = false,
+            Action::MaxHomeSize => {
+                let (Some(ranks), Some(total_exp)) = (ranks.as_deref(), total_exp.as_deref())
+                else {
+                    error!(
+                        "[game-settings] Max home size: the master rank table (mysekaiRanks) or \
+                         the user's total experience is not seated; the rank is not requested"
+                    );
+                    panel.status = "Max home size: the rank table is not loaded.".into();
+                    continue;
+                };
+                match max_mysekai_rank(ranks, total_exp.0) {
+                    Err(reason) => {
+                        error!(
+                            "[game-settings] Max home size: {reason}; the rank is not requested"
+                        );
+                        panel.status = format!("Max home size: {reason}");
+                    }
+                    Ok(rank) => {
+                        let edits =
+                            crate::server::with_model(|model| expand_home_to_max(model, rank));
+                        match edits {
+                            Some((Ok(edit), Ok(sync))) => {
+                                info!("[game-settings] Max home size: userMysekaiGamedata.mysekaiRank = {rank} (the highest master rank): {edit}; sync: {sync}");
+                                panel.status = format!(
+                                    "Max home size: the server gave rank {rank}; the housing sites expand through the rank-up path."
+                                );
+                            }
+                            Some((edit, sync)) => {
+                                error!("[game-settings] Max home size: the rank edit {edit:?}, the sync {sync:?}");
+                                panel.status =
+                                    "Max home size: the server refused the rank edit.".into();
+                            }
+                            None => {
+                                error!("[game-settings] Max home size: no server model is installed; nothing is requested");
+                                panel.status =
+                                    "Max home size: no server model is installed.".into();
+                            }
+                        }
+                    }
+                }
+            }
             Action::ClearInactiveResources => {
                 panel.resource_clear_requested = true;
                 panel.resource_status =
@@ -840,6 +893,39 @@ pub(crate) fn input(
             }
         }
     }
+}
+
+/// The highest rank of the client's master rank table, through the rank model
+/// the rank gauges build: `MysekaiRankModel`'s `maxMysekaiRank` is the
+/// maximum `mysekaiRank` over the rows. The housing site's expansion tops out
+/// there, so the panel reads it from the table instead of naming a rank.
+fn max_mysekai_rank(
+    ranks: &crate::mysekai_rank::MysekaiRanks,
+    total_exp: i32,
+) -> Result<i32, String> {
+    ranks
+        .try_model(total_exp)
+        .map(|model| model.max_mysekai_rank)
+}
+
+/// The two server edits the max-home-size button sends: the rank edit (the
+/// server sets `userMysekaiGamedata.totalExp` to that rank's threshold, the
+/// same field pair the server panel's rank row writes) and the `sync` whose
+/// response delivers `userMysekaiGamedata` to the client. The client rebuilds
+/// the housing sites from the delivered rank through its ordinary rank-up
+/// path; the panel does not touch the expansion law.
+fn expand_home_to_max(
+    model: &mut crate::server::ServerModel,
+    rank: i32,
+) -> (Result<Value, String>, Result<Value, String>) {
+    let mut edit = serde_json::Map::new();
+    edit.insert("type".into(), "server.edit".into());
+    edit.insert("path".into(), "userMysekaiGamedata.mysekaiRank".into());
+    edit.insert("value".into(), json!(rank));
+    let mut sync = serde_json::Map::new();
+    sync.insert("type".into(), "server.edit".into());
+    sync.insert("action".into(), "sync".into());
+    (model.edit(&edit), model.edit(&sync))
 }
 
 pub(crate) fn refresh_ui(
