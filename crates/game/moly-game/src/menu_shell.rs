@@ -671,6 +671,7 @@ pub(crate) fn parse(
         .chain(crate::info::WORDINGS)
         .chain(crate::delivery::screen::WORDINGS.iter())
         .chain(crate::inventory::WORDINGS)
+        .chain(crate::fixture_edit::WORDINGS)
     {
         if let Some(text) = layouts.wordings.get(*wording) {
             chars.extend(text.chars());

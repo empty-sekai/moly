@@ -341,7 +341,8 @@ pub(crate) fn click(
 ) {
     let events: Vec<_> = gestures.read().copied().collect();
     let scroll_events: Vec<_> = wheel.read().copied().collect();
-    if !edit.active || stack.current() != LayerId::MysekaiSiteEdit || consumed.0 {
+    // A save dialog (common dialog) takes the taps while it is shown.
+    if !edit.active || stack.current() != LayerId::MysekaiSiteEdit || consumed.0 || edit.save_dialog {
         ui.drag = None;
         return;
     }

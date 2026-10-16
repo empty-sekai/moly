@@ -172,6 +172,8 @@ pub(crate) struct EditView {
     pub exit_dialog: bool,
     /// The remove-all confirmation is open.
     pub clean_up_dialog: bool,
+    /// A save dialog (common dialog) is shown and takes the input.
+    pub save_dialog: bool,
     pub selected: Option<EditSelectionView>,
     pub placed_rows: Vec<EditItemView>,
     pub inventory: Vec<EditItemView>,
@@ -220,8 +222,41 @@ pub(crate) struct EditSession {
     selected: Option<Selection>,
     exit_dialog: bool,
     clean_up_dialog: bool,
+    /// The dialog a refused save shows (`SaveLayoutWithValidation`), while
+    /// it is shown; the editor takes no command until it is answered.
+    save_dialog: Option<SaveDialog>,
     feedback: String,
 }
+
+/// The dialogs of `SiteLayoutEditor.SaveLayoutWithValidation`.
+#[derive(Clone, Debug)]
+struct SaveDialog {
+    id: crate::ui_layers::DialogId,
+    kind: SaveDialogKind,
+    /// The save was asked from the exit prompt.
+    exit_after: bool,
+}
+
+#[derive(Clone, Debug)]
+enum SaveDialogKind {
+    /// `ShowCutsceneAreaConfirmDialog`: OK saves without the cutscene check.
+    CutsceneArea,
+    /// `ShowConfirmRemoveInValidFixtureDialog`: OK stores the listed
+    /// fixtures and saves.
+    RemoveInvalid(Vec<String>),
+    /// `ShowErrorGoToHomeDialog`: the house or the gate cannot stay; OK
+    /// reloads the saved layout.
+    GoToHome,
+}
+
+const CUTSCENE_CONFIRM: &str = "MSG_MYSEKAI_BIRTHDAY_PARTY_SAVE_CONFIRMATION";
+const INVALID_GO_HOME: &str = "WORD_MYSEKAI_INVALID_LAYOUT";
+const INVALID_REMOVE: &str = "MSG_MYSEKAI_CONFIRM_REMOVE_FIXTURE_INVALID_LAYOUT";
+const INVALID_REMOVE_OK: &str = "WORD_MYSEKAI_INVALID_FIXTURE_LIST_OK_BUTTON";
+
+/// The wordings of the save dialogs (the shell charset takes them).
+pub(crate) const WORDINGS: &[&str] =
+    &[CUTSCENE_CONFIRM, INVALID_GO_HOME, INVALID_REMOVE, INVALID_REMOVE_OK];
 
 impl EditSession {
     fn changed(&mut self) {
@@ -234,6 +269,7 @@ impl EditSession {
     fn say(&mut self, message: impl Into<String>) {
         let message = message.into();
         if self.feedback != message {
+            info!("[edit-feedback] {message}");
             self.feedback = message;
             self.changed();
         }
@@ -1164,8 +1200,8 @@ fn clean_up_all(world: &World, session: &mut EditSession) {
     ));
 }
 
-fn save(session: &mut EditSession, world: &mut World, exit_after: bool) {
-    if session.phase == EditPhase::Idle {
+fn save(session: &mut EditSession, world: &mut World, exit_after: bool, validate_cutscene: bool) {
+    if session.phase == EditPhase::Idle || session.save_dialog.is_some() {
         return;
     }
     if let Some(pending) = session.pending_reload.as_mut() {
@@ -1194,15 +1230,15 @@ fn save(session: &mut EditSession, world: &mut World, exit_after: bool) {
         return;
     };
     let rules = tile_rules::rules(world, base.floor_grid());
-    if let Err(error) = validation::save(
+    if let Err((status, error)) = validation::save(
         &session.rows,
         base.floor_grid(),
         areas,
         rules.as_ref().map_err(|missing| *missing),
+        validate_cutscene,
     ) {
-        session.say(format!(
-            "保存未完成：{error}。未自动回收家具，原布局与草稿均保留。"
-        ));
+        let floor = base.floor_grid();
+        refused_save(world, session, status, &error, floor, rules.as_ref().ok(), exit_after);
         return;
     }
     let next = match base.with_editor_rows(&session.rows, session.next_fixture_uid) {
@@ -1266,6 +1302,144 @@ fn save(session: &mut EditSession, world: &mut World, exit_after: bool) {
     session.pending_reload = Some(actors::wait_for_reload(world, true, exit_after));
     session.changed();
     session.say("已保存本地图及库存；正在恢复家具与可行走场，角色继续暂停。");
+}
+
+/// `SaveLayoutWithValidation` after `CheckSaveLayout` refused: status 3
+/// asks to save over the cutscene area; any other verdict lists the invalid
+/// fixtures (`CreateInValidFixtureList`) and either asks to store them or,
+/// when the house or the gate is on the list, sends the player home.
+fn refused_save(
+    world: &mut World,
+    session: &mut EditSession,
+    status: validation::LayoutStatus,
+    error: &str,
+    floor: Option<crate::site::FloorGridLayout>,
+    rules: Option<&tile_rules::Rules>,
+    exit_after: bool,
+) {
+    use crate::common_dialog::Buttons;
+    use validation::LayoutStatus;
+    let (caller, body, buttons, kind) = match status {
+        LayoutStatus::Unavailable => {
+            session.say(format!("保存未完成：{error}。原布局与草稿均保留。"));
+            return;
+        }
+        LayoutStatus::CutsceneAreaOverridden => (
+            "SiteLayoutEditor.ShowCutsceneAreaConfirmDialog",
+            CUTSCENE_CONFIRM,
+            Buttons::Two { ok: "WORD_OK", cancel: "WORD_CANCEL" },
+            SaveDialogKind::CutsceneArea,
+        ),
+        LayoutStatus::ErrorLayout | LayoutStatus::ErrorAnimationSpace => {
+            let homes = world.get_resource::<crate::entry::house::HomeFixtures>();
+            let listed = match (floor, rules, homes) {
+                (Some(floor), Some(rules), Some(homes)) => validation::invalid_fixtures(
+                    &session.rows,
+                    floor,
+                    rules,
+                    |package| !homes.can_clean_up(package),
+                ),
+                _ => Err("家具主表或摆放规则仍在加载".into()),
+            };
+            let listed = match listed {
+                Ok(listed) if !listed.is_empty() => listed,
+                Ok(_) => {
+                    session.say(format!("保存未完成：{error}；无效家具列表为空。原布局与草稿均保留。"));
+                    warn!("[edit-save] CheckSaveLayout refused ({error}) but CreateInValidFixtureList found nothing");
+                    return;
+                }
+                Err(reason) => {
+                    session.say(format!("保存未完成：{error}；{reason}。原布局与草稿均保留。"));
+                    return;
+                }
+            };
+            let homes = world.get_resource::<crate::entry::house::HomeFixtures>();
+            let house_or_gate = session.rows.iter().any(|row| {
+                listed.contains(&row.uid) && homes.is_some_and(|homes| !homes.can_clean_up(&row.package))
+            });
+            info!("[edit-save] CreateInValidFixtureList: {listed:?} (house or gate listed: {house_or_gate})");
+            if house_or_gate {
+                (
+                    "SiteLayoutEditor.ShowErrorGoToHomeDialog",
+                    INVALID_GO_HOME,
+                    Buttons::One { ok: "WORD_OK" },
+                    SaveDialogKind::GoToHome,
+                )
+            } else {
+                // The source shows the list in its own dialog
+                // (InValidLayoutFixtureListDialog); the common dialog shows
+                // its message and buttons, and the log names the fixtures.
+                (
+                    "SiteLayoutEditor.ShowConfirmRemoveInValidFixtureDialog",
+                    INVALID_REMOVE,
+                    Buttons::Two { ok: INVALID_REMOVE_OK, cancel: "WORD_CANCEL" },
+                    SaveDialogKind::RemoveInvalid(listed),
+                )
+            }
+        }
+    };
+    let text = crate::common_dialog::wording(world, caller, body);
+    let Some(id) = crate::common_dialog::open(world, caller, text, buttons, None) else {
+        session.say(format!("保存未完成：{error}；确认窗口无法显示。原布局与草稿均保留。"));
+        return;
+    };
+    info!("[edit-save] CheckSaveLayout: {error}; {caller} ({body}) {id:?}");
+    session.save_dialog = Some(SaveDialog { id, kind, exit_after });
+    session.changed();
+}
+
+/// The save dialog's answer, once it has one.
+fn answer_save_dialog(world: &mut World) {
+    let Some(dialog) = world
+        .get_resource::<EditSession>()
+        .and_then(|session| session.save_dialog.clone())
+    else {
+        return;
+    };
+    let Some(ok) = crate::common_dialog::answer(world, dialog.id) else {
+        return;
+    };
+    let Some(mut session) = world.remove_resource::<EditSession>() else {
+        return;
+    };
+    session.save_dialog = None;
+    session.changed();
+    info!("[edit-save] {:?} answered {}", dialog.kind, if ok { "OK" } else { "cancel" });
+    match (dialog.kind, ok) {
+        (_, false) => session.say("已取消保存；草稿仍保留。"),
+        (SaveDialogKind::CutsceneArea, true) => save(&mut session, world, dialog.exit_after, false),
+        (SaveDialogKind::RemoveInvalid(listed), true) => {
+            // RemoveInValidFixture: the listed fixtures go to storage.
+            let mut index = 0;
+            while index < session.rows.len() {
+                if listed.contains(&session.rows[index].uid) {
+                    let row = session.rows.remove(index);
+                    if !session.inventory.iter().any(|item| item.uid == row.uid) {
+                        session.inventory.push(row);
+                    }
+                } else {
+                    index += 1;
+                }
+            }
+            info!("[edit-save] RemoveInValidFixture: {listed:?} to storage; saving");
+            save(&mut session, world, dialog.exit_after, true);
+        }
+        (SaveDialogKind::GoToHome, true) => {
+            // RequestScene(home): the saved layout is shown again and the
+            // draft is dropped.
+            presentation::clear(world);
+            if let Some(base) = session.baseline.as_ref() {
+                session.rows = base.editor_rows();
+            }
+            session.inventory = session.initial_inventory.clone();
+            session.selected = None;
+            session.phase = EditPhase::Browsing;
+            session.exit_dialog = false;
+            session.pending_reload = Some(actors::wait_for_reload(world, false, true));
+            session.say("布局无效：已恢复保存的布局。");
+        }
+    }
+    world.insert_resource(session);
 }
 
 fn apply_command(world: &mut World, session: &mut EditSession, command: EditCommand) {
@@ -1392,9 +1566,9 @@ fn apply_command(world: &mut World, session: &mut EditSession, command: EditComm
         EditCommand::ReturnToInventory => return_item(session),
         EditCommand::Save => {
             let exit_after = session.exit_dialog;
-            save(session, world, exit_after);
+            save(session, world, exit_after, true);
         }
-        EditCommand::SaveAndExit => save(session, world, true),
+        EditCommand::SaveAndExit => save(session, world, true, true),
         EditCommand::RequestExit => {
             if session.exit_dialog {
                 session.exit_dialog = false;
@@ -1470,6 +1644,11 @@ fn apply_commands(world: &mut World) {
     let Some(mut session) = world.remove_resource::<EditSession>() else {
         return;
     };
+    if let Some(dialog) = &session.save_dialog {
+        info!("[edit-save] {:?} is shown; {} editor commands dropped", dialog.kind, pending.len());
+        world.insert_resource(session);
+        return;
+    }
     for command in pending {
         apply_command(world, &mut session, command);
     }
@@ -1579,12 +1758,16 @@ fn publish_view(world: &mut World) {
         dirty: session.dirty(),
         exit_dialog: session.exit_dialog,
         clean_up_dialog: session.clean_up_dialog,
+        save_dialog: session.save_dialog.is_some(),
         selected,
         placed_rows: session.rows.iter().map(&editable).collect(),
         inventory: session.inventory.iter().map(&editable).collect(),
         catalog,
         owned_revision,
-        can_save: active && session.selected.is_none() && session.pending_reload.is_none(),
+        can_save: active
+            && session.selected.is_none()
+            && session.pending_reload.is_none()
+            && session.save_dialog.is_none(),
         feedback: session.feedback.clone(),
     };
     world.insert_resource(next);
@@ -1669,7 +1852,7 @@ impl Plugin for FixtureEditPlugin {
             )
             .add_systems(
                 Update,
-                (receive_commands, apply_commands, advance_recovery)
+                (receive_commands, answer_save_dialog, apply_commands, advance_recovery)
                     .chain()
                     .in_set(FixtureEditSystems::Commands)
                     .after(FixtureEditSystems::Input)

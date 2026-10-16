@@ -97,11 +97,12 @@ fn malformed_draft_rows_return_layout_errors() {
         ..Default::default()
     };
     assert!(
-        validation::save(&[invalid], Some(floor()), &areas, Ok(&rules()))
+        validation::save(&[invalid], Some(floor()), &areas, Ok(&rules()), true)
             .unwrap_err()
+            .1
             .starts_with("ErrorLayout(1)")
     );
-    assert!(validation::save(&[valid], Some(floor()), &areas, Ok(&rules())).is_ok());
+    assert!(validation::save(&[valid], Some(floor()), &areas, Ok(&rules()), true).is_ok());
 }
 
 #[test]

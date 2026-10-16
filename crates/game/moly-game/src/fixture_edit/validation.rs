@@ -98,15 +98,49 @@ fn cutscene_cells(meta: &MetaGrid, owner: &EditableFixture) -> Result<HashSet<(i
         .collect()
 }
 
-/// Source CheckSaveLayout status precedence: cutscene(3), animation space(2),
-/// layout(1), success(0). The repair-confirmation UI is intentionally not
-/// simulated by deleting rejected objects. Source master enforcement flags
-/// still await a producer; the prior named empty enforcement mock is retained.
+/// `MysekaiLayoutStatus`, the verdict of `SiteLayoutEditor.CheckSaveLayout`,
+/// plus `Unavailable` for a check whose inputs are not ready (no verdict).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum LayoutStatus {
+    ErrorLayout = 1,
+    ErrorAnimationSpace = 2,
+    CutsceneAreaOverridden = 3,
+    Unavailable,
+}
+
+/// `CheckSaveLayout(shouldValidateCutsceneArea)`: the cutscene-area check runs
+/// only when `validate_cutscene` is set (the confirmation's OK runs the save
+/// again without it).
 pub(super) fn save(
     rows: &[EditableFixture],
     floor: Option<FloorGridLayout>,
     areas: &FixtureAreas,
     rules: Result<&Rules, Missing>,
+    validate_cutscene: bool,
+) -> Result<(), (LayoutStatus, String)> {
+    check_save(rows, floor, areas, rules, validate_cutscene).map_err(|message| {
+        let status = if message.starts_with("CutsceneAreaOverridden") {
+            LayoutStatus::CutsceneAreaOverridden
+        } else if message.starts_with("ErrorAnimationSpace") {
+            LayoutStatus::ErrorAnimationSpace
+        } else if message.starts_with("ErrorLayout") {
+            LayoutStatus::ErrorLayout
+        } else {
+            LayoutStatus::Unavailable
+        };
+        (status, message)
+    })
+}
+
+/// Source CheckSaveLayout status precedence: cutscene(3), animation space(2),
+/// layout(1), success(0). Source master enforcement flags still await a
+/// producer; the prior named empty enforcement mock is retained.
+fn check_save(
+    rows: &[EditableFixture],
+    floor: Option<FloorGridLayout>,
+    areas: &FixtureAreas,
+    rules: Result<&Rules, Missing>,
+    validate_cutscene: bool,
 ) -> Result<(), String> {
     if !areas.loaded {
         return Err("家具区域表仍在加载".into());
@@ -123,7 +157,7 @@ pub(super) fn save(
                 .map_err(|error| format!("ErrorLayout(1)：{}：{error}", row.uid))
         })
         .collect::<Result<_, _>>()?;
-    for owner in rows {
+    for owner in rows.iter().filter(|_| validate_cutscene) {
         if let Some(meta) = areas.cutscene.get(&owner.package) {
             let protected = cutscene_cells(meta, owner)?;
             if protected
@@ -139,7 +173,7 @@ pub(super) fn save(
                     })
             {
                 return Err(
-                    "CutsceneAreaOverridden(3)：有家具占用了切景区域，需要原作确认分支".into(),
+                    "CutsceneAreaOverridden(3)：有家具占用了切景区域".into(),
                 );
             }
         }
@@ -226,4 +260,79 @@ pub(super) fn save(
         }
     }
     Ok(())
+}
+
+/// `InValidLayoutFixtureListData.CreateInValidFixtureList` over the placed
+/// floor-grid fixtures: each one whose `IsValidPutStatus` fails goes on the
+/// list with what is stacked on it (`AddStackFixtureToInValidFixtureList`).
+/// A failing house or gate (`AddInValidFixtureListCaseHouseOrGate`) puts the
+/// fixtures standing on its ground tiles there instead, with their stacks,
+/// and itself only when its box leaves the grid. The list is in row order.
+///
+/// Not covered: the `GetPlacedLayoutType` branch (its fixtures are listed
+/// without the put check) and the house's extra entrance bounds; both read
+/// fields of the scene's fixture controllers this draft does not carry.
+pub(super) fn invalid_fixtures(
+    rows: &[EditableFixture],
+    floor: FloorGridLayout,
+    rules: &Rules,
+    is_house_or_gate: impl Fn(&str) -> bool,
+) -> Result<Vec<String>, String> {
+    let board = Board::new(rows, floor, rules)
+        .map_err(|missing| format!("摆放检查缺少输入 {missing:?}"))?;
+    let mut listed: Vec<String> = Vec::new();
+    let add = |uid: &str, listed: &mut Vec<String>| {
+        for uid in std::iter::once(uid.to_owned()).chain(board.stacked_on(uid)) {
+            if !listed.contains(&uid) {
+                listed.push(uid);
+            }
+        }
+    };
+    for item in rows {
+        if item.layout & layout_type::FIELD == 0 {
+            continue;
+        }
+        let Some(piece) = board.piece(&item.uid) else {
+            continue;
+        };
+        let valid = if piece.traits.joint {
+            board.holds_own_center(piece)
+        } else {
+            let stacked: Vec<Piece> = board
+                .stacked_on(&item.uid)
+                .iter()
+                .filter_map(|uid| board.piece(uid).cloned())
+                .collect();
+            board.can_put_floor(piece, &stacked).is_ok()
+        };
+        if valid {
+            continue;
+        }
+        if !is_house_or_gate(&item.package) {
+            add(&item.uid, &mut listed);
+            continue;
+        }
+        let (min, max) = item.footprint()?;
+        let inside = axis_inside(min.x, floor.width)
+            && axis_inside(max.x, floor.width)
+            && axis_inside(min.z, floor.depth)
+            && axis_inside(max.z, floor.depth);
+        if !inside && !listed.contains(&item.uid) {
+            listed.push(item.uid.clone());
+        }
+        for other in rows {
+            if other.uid == item.uid || other.layout & layout_type::FIELD == 0 {
+                continue;
+            }
+            let Ok((a, b)) = other.footprint() else {
+                continue;
+            };
+            let on_ground = a.y <= 0 && b.y >= 0;
+            let overlaps = a.x <= max.x && b.x >= min.x && a.z <= max.z && b.z >= min.z;
+            if on_ground && overlaps {
+                add(&other.uid, &mut listed);
+            }
+        }
+    }
+    Ok(listed)
 }
