@@ -85,6 +85,8 @@ It also sets `MOLY_SETTINGS_FILE` to `logs/<id>.settings.json` unless `env` sets
 
 The game opens its JSON-RPC endpoint on `127.0.0.1` only when `MOLY_CONTROL_PORT` is set. A value that is not a port number from 1 to 65535 stops the game with a panic, which appears in the instance log.
 
+A native run may start with its window hidden by setting `MOLY_WINDOW_HIDDEN` (any value): the batch runner sets it, so an instance draws without a window on screen. `native_launch` itself does not set it, and a run without it opens the window as usual.
+
 The endpoint opens once the app has built. Poll `rpc` with `rpc.discover` until it answers, as the example does.
 
 The game reads its resources from the directory named by `MOLY_ASSET_ROOT`, which is passed through `env`. For how to prepare that directory, see the local-run section of the repository's root README.
@@ -165,6 +167,88 @@ node examples/move-check.mjs <exe> <outDir> <assetRoot> [catalog]
 
 It starts the executable with `MOLY_ASSET_ROOT` set to `assetRoot` (and `MOLY_ASSET_CATALOG` set to `catalog` when one is given). It waits for the entry sequence and reads the player position, pushes the joystick forward, releases it, and reads the position again. It then drags the camera and compares the field camera's yaw before and after the drag. It writes `report.txt` and `server-stderr.log` into `outDir`, and `tail.txt` when the run fails. It needs a built game and a prepared resource root.
 
+## Reference agent
+
+`agent/reference-agent.mjs` drives an instance from a task file without a language model: it reads the world with `moly.observe`, acts through director steps (`moly.director.command`), and judges the task's success conditions against the observations it took.
+
+```sh
+node tools/mcp/agent/reference-agent.mjs <port> <task.json> <runlog.jsonl>
+```
+
+The instance must already run with its control endpoint on `<port>`; this script starts nothing. The exit code is 0 when every success condition holds and no plan item failed, and 1 otherwise.
+
+Every request and result is appended to the runlog, one JSON object per line. The first line is the run's header — `kind: "run"`, the task, its site, the port and the world seed read from `moly.time` — and carries that first request and result. Later lines are one RPC each (`{n, request, result | error, ms}`); a plan item appends `{kind: "plan", item, result, note}`, and the last line is `{kind: "result", ...}` with the checks and the failure, if any.
+
+`agent/rpc.mjs` is the JSON-RPC transport the three agent scripts share (`call`, `runStep`, `runScript`, `waitFrames`, `waitFor`).
+
+## Tasks
+
+`tasks/` holds the task files the reference agent runs:
+
+```json
+{
+  "id": "gather-wood",
+  "title": "Go to the harvest site and gather five wood",
+  "site": "grassland",
+  "plan": [ ... ],
+  "success": { "checks": [ ... ] }
+}
+```
+
+`site` is the site type the task runs on. It is what a launcher may pass as `MOLY_SITE`, and it is also where the plan travels: a task whose plan has no `site` item is taken there first, so a run never needs the instance to have been placed on it.
+
+A plan item is one action the agent knows:
+
+| Item | What the agent does |
+|---|---|
+| `{"do": "wait_entry", "timeout"?}` | Waits for the entry sequence with a `wait_until entry_done` step. |
+| `{"do": "site", "site"?, "entry_timeout"?, "timeout"?}` | Travels to `site` (the task's site when the item names none) with the game's own move: a `wait_until all[entry_done, not site_moving]` step, a `site.switch` step and a `wait_until all[not site_moving, site_is site]` step, then reads the site back. An instance already standing there is left alone. |
+| `{"do": "observe", "what": [sections]}` | One `moly.observe` read, kept as the newest reading of those sections. |
+| `{"do": "director", "step": {...}, "timeout"?}` | Runs one director step and waits for the run to end. |
+| `{"do": "answer_dialog", "wait"?, "ok"?}` | Waits up to `wait` seconds (default 10) for `moly.director.check` to report `dialog_shown`, then runs `dialog.answer` (with `optional` true, so a dialog that will not close does not end the plan); no dialog is not a failure. |
+| `{"do": "gather", "kind"?, "count", "step_timeout"?}` | Harvests `count` gatherables of `kind` (any kind when absent), one `player.gather` step each, re-reading `gatherables` between them. |
+| `{"do": "craft_first", "list"?, "step_timeout"?}` | Reads `recipes`, takes the first row whose `can_craft` is true and runs `player.craft`; with no craftable row it fails, naming the first row's reason. |
+| `{"do": "place", "from"?, "center", "rotate"?, "save"?, "step_timeout"?}` | Runs `layout.place` for the fixture `from` names (`"crafted"` is the target of the last craft, else a master id) on `center` (`[x, y, z]`, or `"free"` for the first tile the placed fixtures do not cover). |
+| `{"do": "talk", "unit"?, "step_timeout"?}` | Runs `player.talk_to` for `unit`, or for the first character whose `away` is false. |
+
+Each success check is read against the newest observation of its section:
+
+| Check | Holds when |
+|---|---|
+| `{"section": "bag", "rule": "bag_gained", "at_least": n}` | The summed material quantities gained `n` over the reading taken before the plan. |
+| `{"section": "gatherables", "rule": "harvested_kind", "kind"?, "at_least": n}` | `n` gatherables of `kind` are harvested. |
+| `{"section": "fixtures", "rule": "placed_fixtures", "at_least": n}` | `n` more fixtures are placed than before the plan. |
+| `{"section": "characters", "rule": "talking_character", "at_least": n}` | `n` characters have `talking` true or the action `Talk`. |
+
+The bundled tasks are `gather-wood` (travel to the grassland, answer the dialog the arrival opens, gather five wood), `craft-and-place` (travel home, craft the first craftable blueprint of the fixture list, place it on the first free tile and save) and `talk-to-visitor` (a character on the site). Their ids, positions and steps are the public ones the observations report; no player data is in them.
+
+The dialog step matters on a harvest site: the arrival opens the learn-phenomenon sub-window dialog about 1.3 s later, and the joystick stays disabled until it is answered, so a plan that gathers must answer dialogs after it travels.
+
+## Replay
+
+`agent/replay.mjs` sends a recorded run again and compares the two runs' event kinds:
+
+```sh
+node tools/mcp/agent/replay.mjs <runlog.jsonl> <port> [--settle <seconds>] [--quiet <seconds>]
+```
+
+It replays the recorded calls that change state — `moly.director.command`, `moly.time`, `moly.server.edit` and `moly.layout.command` — in the order they were recorded, waiting for each the way the agent waited on it (the director's snapshot, the clock's `step`, two frames for a layout command). Reads are not sent again. It then reads the instance's events and compares the kind sequence with the one the runlog recorded, printing `REPLAY MATCH` or the first difference; the exit code is 0 on a match and 1 otherwise. `--settle` is the seconds one replayed call may take (default 300) and `--quiet` the seconds with no new event that end the comparison (default 10): some events follow a step later, so a window shorter than the run's own tail reports a difference that is only timing.
+
+The seed comes from the runlog's first line. A run cannot be reseeded through the endpoint — the game reads `MOLY_SEED` once, at its first draw — so an instance whose seed is missing or different is refused by name, with the `MOLY_SEED` to start it with.
+
+## Batch runs
+
+`agent/batch.mjs` runs a whole task set, every (task, seed) on its own hidden instance:
+
+```sh
+node tools/mcp/agent/batch.mjs --exe <exe> --tasks <dir> --seeds 1,2,3 \
+  --parallel 1 --base-port 15740 --out <dir> [--asset-root <dir>] [--boot 300] [--timeout 900]
+```
+
+Each run gets its own directory `<out>/<id>-seed<seed>/` with `instance.log` (the instance's own output), `agent.log`, `runlog.jsonl` and `settings.json`. The instance is started with `MOLY_SEED`, `MOLY_WINDOW_HIDDEN`, the task's `MOLY_SITE` when it names one, `MOLY_SETTINGS_FILE`, the run's own `MOLY_CONTROL_PORT` (from `--base-port`, one port per run) and `--asset-root` as `MOLY_ASSET_ROOT`; `--boot` is the seconds to wait for its endpoint. The run's outcome is appended to `<out>/results.json` as `{task, seed, success, seconds, runlog, port, run_dir, error}`, with the failure and the checks when the agent ran. The exit code is 0 when every run succeeded.
+
+`--parallel` is the number of instances at once: 1 or 2 on this host, and a higher value is refused rather than lowered. A port already in use is refused for that run. `--asset-root` is required when `MOLY_ASSET_ROOT` is not set.
+
 ## Security
 
 - The game's JSON-RPC endpoint listens on `127.0.0.1` with no authentication. Any local process can send requests while the instance runs, including requests that change game state.
@@ -195,4 +279,6 @@ The test starts the server over stdio and launches `test/fake-game.mjs`, a JSON-
 - `server.mjs`: the server.
 - `test/`: the self test and its stub game.
 - `examples/`: the example script.
+- `agent/`: the reference agent, the replay, the batch runner and their transport.
+- `tasks/`: the task files the reference agent runs.
 - `logs/` and `profiles/`: created at run time and not tracked.

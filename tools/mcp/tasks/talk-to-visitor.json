@@ -1,0 +1,14 @@
+{
+  "id": "talk-to-visitor",
+  "title": "Talk to a character on the site",
+  "plan": [
+    { "do": "wait_entry", "timeout": 180 },
+    { "do": "talk", "unit": "present", "step_timeout": 180 },
+    { "do": "observe", "what": ["characters"] }
+  ],
+  "success": {
+    "checks": [
+      { "section": "characters", "rule": "talking_character", "at_least": 1 }
+    ]
+  }
+}

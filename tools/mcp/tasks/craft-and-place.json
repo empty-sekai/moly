@@ -1,0 +1,16 @@
+{
+  "id": "craft-and-place",
+  "title": "Go home, craft the first craftable blueprint and place it",
+  "site": "home_site",
+  "plan": [
+    { "do": "site", "timeout": 180 },
+    { "do": "craft_first", "list": "fixture", "step_timeout": 300 },
+    { "do": "place", "from": "crafted", "center": "free", "rotate": 0, "save": true, "step_timeout": 180 },
+    { "do": "observe", "what": ["fixtures"] }
+  ],
+  "success": {
+    "checks": [
+      { "section": "fixtures", "rule": "placed_fixtures", "at_least": 1 }
+    ]
+  }
+}

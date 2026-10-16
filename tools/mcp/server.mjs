@@ -862,7 +862,14 @@ server.registerTool(
       'Run one director step on a game instance and wait for it to finish. Returns {status, error, log} with the last 20 log entries. Status failed or a timeout sets isError.',
     inputSchema: {
       id: z.string(),
-      step: z.any().describe('One director step (see director_schema)'),
+      step: z.any().describe(
+        'One director step (director_schema names every field). Steps: wait, wait_until, assert, log, where, capture, parallel, repeat; ' +
+          'player.walk_to, player.interact, player.gather, player.craft, player.talk_to, player.deliver (the delivery button of a birthday party in session, pressed and released), ' +
+          'player.stick, player.release, player.wear, player.wear_avatar, tap, ui.tap, dialog.answer, key.back, ' +
+          'layout.place (one owned fixture through the editor commands layout_place sends: enter, select_catalog, rotate, move_to, decide, save); ' +
+          'npc.take, npc.walk_to, npc.release, npc.face, npc.emote, npc.use, npc.tweet, npc.talk; ' +
+          'camera.drag, camera.zoom, server.edit, weather.set, site.switch, site.enter_room, site.go_home.',
+      ),
       timeout: z.number().positive().optional().describe('Seconds to wait, default 60'),
     },
   },
@@ -1055,7 +1062,7 @@ server.registerTool(
   'layout_place',
   {
     description:
-      'Place one owned fixture: opens the editor when it is closed, selects the first catalog row of the fixture (and texture) with a placeable copy, turns it a quarter turn rotate times, moves it until its reported center is on the x and z of center (y follows the column height), and decides it when its put status is ok. Returns {placed, uid, center, direction, put_status, reason?, row?, view}. A refused put leaves the fixture selected and sets isError; cancel it or move it with layout_command. Saving stays a separate save or save_and_exit command.',
+      'Place one owned fixture: opens the editor when it is closed, selects the first catalog row of the fixture (and texture) with a placeable copy, turns it a quarter turn rotate times, moves it until its reported center is on the x and z of center (y follows the column height), and decides it when its put status is ok. Returns {placed, uid, center, direction, put_status, reason?, row?, view}. A refused put leaves the fixture selected and sets isError; cancel it or move it with layout_command. Saving stays a separate save or save_and_exit command. The director step layout.place sends the same sequence from inside the game, and saves when its save field is set.',
     inputSchema: {
       id: z.string(),
       fixture_id: z.number().int(),

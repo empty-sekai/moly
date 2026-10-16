@@ -1,0 +1,17 @@
+{
+  "id": "gather-wood",
+  "title": "Go to the harvest site and gather five wood",
+  "site": "grassland",
+  "plan": [
+    { "do": "site", "timeout": 180 },
+    { "do": "answer_dialog", "wait": 20, "ok": true },
+    { "do": "gather", "kind": "wood", "count": 5, "step_timeout": 300 },
+    { "do": "observe", "what": ["gatherables", "bag"] }
+  ],
+  "success": {
+    "checks": [
+      { "section": "gatherables", "rule": "harvested_kind", "kind": "wood", "at_least": 5 },
+      { "section": "bag", "rule": "bag_gained", "at_least": 5 }
+    ]
+  }
+}
