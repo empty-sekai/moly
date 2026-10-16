@@ -247,6 +247,10 @@ fn edit_path(
             doc.stamina_refresh = document::parse_stamina_refresh(value)?;
             Ok(Delivery::Live)
         }
+        ["policies", "siteLevelReleases"] => {
+            doc.site_level_releases = document::parse_site_level_releases(value)?;
+            Ok(Delivery::Live)
+        }
         ["userMysekaiGamedata", "mysekaiRank"] => {
             let rank = int32(value, "userMysekaiGamedata.mysekaiRank")?;
             let exp = masters.exp_of(rank).ok_or_else(|| match masters.ranks {
@@ -642,6 +646,10 @@ fn sections(masters: &Masters) -> Value {
                     {"value": document::REFILL_POLICY, "label": document::REFILL_POLICY_TEXT},
                     {"value": document::NO_REFILL_POLICY, "label": "no automatic refill"},
                 ]})),
+                field("policies.siteLevelReleases", "enum", json!({"values": [
+                    {"value": document::RANK_RELEASE_POLICY, "label": document::RANK_RELEASE_POLICY_TEXT},
+                    {"value": document::EVERY_LEVEL_POLICY, "label": "extension: release every authored housing site level at the highest rank"},
+                ]})),
             ],
         },
         {
@@ -709,6 +717,7 @@ fn actions() -> Value {
 fn policies() -> Value {
     json!([
         {"name": document::REFILL_POLICY_TEXT, "key": "policies.staminaRefresh", "rule": "when the server clock enters a master refresh window (phenomena index refreshTimePeriods, device local time) later than refreshedAt, the server stamps refreshedAt with its clock, sets the normal pool to the master normal maxStamina, and the response says isRefreshed"},
+        {"name": "site level releases", "key": "policies.siteLevelReleases", "rule": "the released site levels are the mysekaiRankReleases rows (rankReleases, the default: what the source server serves); with everyAuthoredLevel — an extension this mock adds, the source server sends no such policy — the server appends a mysekai_site_level row for every authored level of a housing site above the level that site's rows release, one rank each with the highest level at the highest master rank, and the client reads the rows alone"},
         {"name": "initial stamina", "rule": "a document without stamina gets normal at the master maximum, enhance 0 and boost of one recovery grant"},
         {"name": "rank from experience", "rule": "mysekaiRank is the master rank of totalExp; editing either sets the other"},
         {"name": "harvest stamina", "rule": "the harvest reply carries the rests the client sent, unless a panel stamina edit is pending"},

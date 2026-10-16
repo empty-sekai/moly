@@ -169,7 +169,8 @@ fn parse_site_levels(text: &str) -> Result<Vec<SiteLevelRow>, String> {
 }
 
 fn parse_rank_releases(text: &str) -> Result<Vec<(i64, String, i64)>, String> {
-    master::rows(text)?
+    let releases = crate::site_expansion::law::rank_release_rows(master::rows(text)?);
+    releases
         .iter()
         .map(|row| {
             Ok((

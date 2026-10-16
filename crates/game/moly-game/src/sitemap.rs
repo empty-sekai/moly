@@ -425,7 +425,7 @@ impl SiteReleases {
                 )
             })
             .collect();
-        let releases = rows("mysekaiRankReleases")
+        let releases = crate::site_expansion::law::rank_release_rows(rows("mysekaiRankReleases"))
             .iter()
             // The master column carries the source's own misspelling.
             .filter(|row| row["mysekaiRankRelaseType"].as_str() == Some(SITE_LEVEL_RELEASE))

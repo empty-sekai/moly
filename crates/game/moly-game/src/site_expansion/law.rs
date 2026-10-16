@@ -75,6 +75,17 @@ fn rows(text: &str) -> Result<Vec<Value>, String> {
     moly_assets::json::master::rows(text)
 }
 
+/// The `mysekaiRankReleases` rows a reader walks: the rows it read itself,
+/// plus the rows the server appends under its site-level release policy
+/// ([`crate::server::overlay_rank_releases`]). Every reader of the table
+/// takes its rows through here, so they agree on what the releases are; with
+/// no server model, and under the source's own policy, the table's rows are
+/// all of them.
+pub(crate) fn rank_release_rows(mut rows: Vec<Value>) -> Vec<Value> {
+    rows.extend(crate::server::overlay_rank_releases());
+    rows
+}
+
 /// The four master tables of [`Masters`] as one consumer reads them, each
 /// under that consumer's name.
 pub(crate) struct MasterTables {
@@ -196,9 +207,10 @@ pub(crate) fn parse_levels(text: &str) -> Result<Vec<SiteLevelRow>, String> {
         .collect()
 }
 
-/// `mysekaiRankReleases`, master order.
+/// `mysekaiRankReleases`, master order, with the server's appended rows.
 pub(crate) fn parse_releases(text: &str) -> Result<Vec<RankReleaseRow>, String> {
-    rows(text)?
+    let releases = rank_release_rows(rows(text)?);
+    releases
         .iter()
         .map(|row| {
             Ok(RankReleaseRow {

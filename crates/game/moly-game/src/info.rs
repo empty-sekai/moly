@@ -986,7 +986,7 @@ struct PutLimitTables {
 
 fn parse_put_limit_releases(text: &str) -> Result<Vec<(i64, i64)>, String> {
     let mut releases = Vec::new();
-    for row in master::rows(text)? {
+    for row in crate::site_expansion::law::rank_release_rows(master::rows(text)?) {
         if master::text(&row, "mysekaiRankRelaseType")? == "mysekai_fixture_put_limit" {
             releases.push((master::int(&row, "mysekaiRank")?, master::int(&row, "externalId")?));
         }

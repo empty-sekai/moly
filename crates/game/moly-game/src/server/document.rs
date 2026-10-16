@@ -43,6 +43,16 @@ pub(crate) const REFILL_POLICY_TEXT: &str =
 /// panel edits.
 pub(crate) const NO_REFILL_POLICY: &str = "none";
 
+/// The named site-level release policy, as the schema and the document spell
+/// it.
+pub(crate) const RANK_RELEASE_POLICY: &str = "rankReleases";
+/// Its description in the schema.
+pub(crate) const RANK_RELEASE_POLICY_TEXT: &str =
+    "the released site levels are the mysekaiRankReleases rows";
+/// The extended site-level release policy: every authored level of a housing
+/// site is released at the highest master rank.
+pub(crate) const EVERY_LEVEL_POLICY: &str = "everyAuthoredLevel";
+
 /// The server clock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Clock {
@@ -106,6 +116,22 @@ pub(crate) enum StaminaRefresh {
     None,
 }
 
+/// How the server decides which housing site levels are released.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SiteLevelReleases {
+    /// [`RANK_RELEASE_POLICY`]: the master's `mysekaiRankReleases` rows name
+    /// them, as the source server serves them. The default, and what a
+    /// document that states no policy reads as.
+    RankReleases,
+    /// [`EVERY_LEVEL_POLICY`]: an extension the source server does not have.
+    /// The server appends a release row for every authored level of a housing
+    /// site that lies above the level the site's release rows name, at one
+    /// rank each with the highest level at the highest master rank, so the
+    /// expansion law releases the levels the master authors without a rank
+    /// release.
+    EveryAuthoredLevel,
+}
+
 /// `UserMysekaiGate`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Gate {
@@ -132,6 +158,8 @@ pub(crate) struct ServerDocument {
     pub(crate) about: String,
     pub(crate) clock: Clock,
     pub(crate) stamina_refresh: StaminaRefresh,
+    /// `policies.siteLevelReleases`.
+    pub(crate) site_level_releases: SiteLevelReleases,
     pub(crate) gamedata: Gamedata,
     /// `None` until the server seats a new user's pools from the masters.
     pub(crate) stamina: Option<Stamina>,
@@ -440,6 +468,24 @@ pub(crate) fn parse_stamina_refresh(value: &Value) -> Result<StaminaRefresh, Str
     }
 }
 
+pub(crate) fn parse_site_level_releases(value: &Value) -> Result<SiteLevelReleases, String> {
+    match value.as_str() {
+        Some(RANK_RELEASE_POLICY) => Ok(SiteLevelReleases::RankReleases),
+        Some(EVERY_LEVEL_POLICY) => Ok(SiteLevelReleases::EveryAuthoredLevel),
+        _ => Err(format!(
+            "policies.siteLevelReleases is neither \"{RANK_RELEASE_POLICY}\" ({RANK_RELEASE_POLICY_TEXT}) nor \"{EVERY_LEVEL_POLICY}\""
+        )),
+    }
+}
+
+/// The value a document's site-level release policy is written with.
+pub(crate) fn site_level_releases_value(policy: SiteLevelReleases) -> &'static str {
+    match policy {
+        SiteLevelReleases::RankReleases => RANK_RELEASE_POLICY,
+        SiteLevelReleases::EveryAuthoredLevel => EVERY_LEVEL_POLICY,
+    }
+}
+
 pub(crate) fn parse_stamina(value: &Value) -> Result<Option<Stamina>, String> {
     const AT: &str = "userMysekaiStamina";
     if value.is_null() {
@@ -569,6 +615,7 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
         .to_owned();
     let policies = object(field(doc, "policies", "the server document")?, "policies")?;
     let allowed: Vec<&str> = std::iter::once("staminaRefresh")
+        .chain(std::iter::once("siteLevelReleases"))
         .chain(super::delivery::POLICY_KEYS.iter().copied())
         .chain(std::iter::once(super::home_action::POLICY_KEY))
         .chain(super::inventory::POLICY_KEYS.iter().copied())
@@ -623,6 +670,12 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
         about,
         clock: parse_clock(field(doc, "clock", "the server document")?)?,
         stamina_refresh: parse_stamina_refresh(field(policies, "staminaRefresh", "policies")?)?,
+        // A document written before the extension states no policy: it reads
+        // as the source's own, which is what it was written under.
+        site_level_releases: match policies.get("siteLevelReleases") {
+            Some(value) => parse_site_level_releases(value)?,
+            None => SiteLevelReleases::RankReleases,
+        },
         gamedata: parse_gamedata(field(doc, "userMysekaiGamedata", "the server document")?)?,
         stamina: parse_stamina(field(doc, "userMysekaiStamina", "the server document")?)?,
         colorful_pass: parse_colorful_pass(field(
@@ -748,6 +801,7 @@ pub(crate) fn migrate_v1(text: &str, migration: Migration) -> Result<ServerDocum
         about,
         clock,
         stamina_refresh: StaminaRefresh::RefillNormal,
+        site_level_releases: SiteLevelReleases::RankReleases,
         gamedata: Gamedata {
             mysekai_rank: None,
             total_exp: DEFAULT_TOTAL_EXP,
@@ -904,7 +958,8 @@ impl ServerDocument {
             "policies": {"staminaRefresh": match self.stamina_refresh {
                 StaminaRefresh::RefillNormal => REFILL_POLICY,
                 StaminaRefresh::None => NO_REFILL_POLICY,
-            }},
+            },
+            "siteLevelReleases": site_level_releases_value(self.site_level_releases)},
             "userMysekaiGamedata": self.gamedata_value(),
             "userMysekaiStamina": self.stamina.map(stamina_value),
             "userMysekaiColorfulPass": self.colorful_pass.map(|pass| json!({

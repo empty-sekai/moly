@@ -65,6 +65,12 @@
 //!   home gate takes the new gate and skin and the stated unit groups become
 //!   its characters (`isReservation` false, `visitCount` 1).
 //! - *Daily schedule*: see [`document::SchedulePolicy::Daily`].
+//! - *Site level releases*: [`document::RANK_RELEASE_POLICY_TEXT`]. The
+//!   extension `everyAuthoredLevel` — which the source server does not send —
+//!   appends to `mysekaiRankReleases` one `mysekai_site_level` row for every
+//!   authored level of a housing site that lies above the level its release
+//!   rows name, at one rank each, the highest level at the highest master
+//!   rank; the client reads the table alone ([`overlay_rank_releases`]).
 //!
 //! **Persistence.** In the browser game the document and the local lists
 //! live in the settings page backend beside the settings document and are
@@ -112,7 +118,7 @@ use serde_json::{json, Value};
 pub(crate) use document::{ColorfulPass, Gamedata, GateCharacter, ScheduleRow, Stamina};
 
 use clock::RefreshPeriod;
-use document::{Migration, SchedulePolicy, ServerDocument, StaminaRefresh};
+use document::{Migration, SchedulePolicy, ServerDocument, SiteLevelReleases, StaminaRefresh};
 
 /// Asset source and path of a native slice that replaces the checked-in one.
 const SLICE_SOURCE: &str = "moly";
@@ -154,6 +160,13 @@ pub(crate) struct Masters {
     pub(crate) boost_grant: Option<i32>,
     /// (rank, cumulative totalExp), master order.
     pub(crate) ranks: Option<Vec<(i32, i32)>>,
+    /// `mysekaiSites`: (id, mysekaiSiteCategory), master order.
+    site_categories: Option<Vec<(i32, String)>>,
+    /// `mysekaiSiteLevels`: (id, mysekaiSiteId, level), master order.
+    site_levels: Option<Vec<(i32, i32, i32)>>,
+    /// `mysekaiRankReleases`: (mysekaiRank, mysekaiRankRelaseType,
+    /// externalId), master order.
+    rank_releases: Option<Vec<(i32, String, i32)>>,
     /// Gate ids and gate skin ids.
     pub(crate) gates: Option<(Vec<i32>, Vec<i32>)>,
     /// `mysekaiGates` ids, until the skin ids join them in `gates`.
@@ -253,6 +266,121 @@ impl Masters {
             .find(|(row, _)| *row == rank)
             .map(|(_, exp)| *exp)
     }
+}
+
+/// `MysekaiRankReleaseType.mysekai_site_level` as the master names it.
+const SITE_LEVEL_RELEASE: &str = "mysekai_site_level";
+
+/// The rows the extended site-level release policy appends, in master order:
+/// for every authored level of a housing site that lies above the highest
+/// level that site's release rows name, one `mysekai_site_level` row, the
+/// highest level at the highest master rank and each lower one a rank below
+/// it (`max_rank - n + 1` to `max_rank`), so that no two of them share a rank
+/// and the greatest rank is the greatest level's.
+///
+/// An authored level a release row leaves unnamed but that lies *below* the
+/// level the site's rows release gets no row: the site's greatest rank is the
+/// one the expansion unlocks, so a row for it would take that rank and lower
+/// the site's level. The second value names the levels left out, for the
+/// model to report. `Err` names the master tables the rows are read from that
+/// the model has not seated.
+fn appended_release_rows(masters: &Masters) -> Result<(Vec<Value>, Vec<String>), String> {
+    let (Some(categories), Some(levels), Some(releases), Some(ranks)) = (
+        &masters.site_categories,
+        &masters.site_levels,
+        &masters.rank_releases,
+        &masters.ranks,
+    ) else {
+        return Err(
+            "policies.siteLevelReleases everyAuthoredLevel reads the mysekaiSites, mysekaiSiteLevels, mysekaiRankReleases and mysekaiRanks master tables, and this root has not seated them all; no release row is appended"
+                .to_owned(),
+        );
+    };
+    let Some(max_rank) = ranks.iter().map(|(rank, _)| *rank).max() else {
+        return Err(
+            "the mysekaiRanks master table has no row, so the extended site-level release policy has no rank to release at; no release row is appended"
+                .to_owned(),
+        );
+    };
+    let mut appended = Vec::new();
+    let mut notes = Vec::new();
+    for (site_id, category) in categories {
+        if !is_housing_category(category) {
+            continue;
+        }
+        // The site's authored levels no release row names, the level its rows
+        // release and the greatest rank they carry.
+        let mut unnamed = Vec::new();
+        let mut released_level = 0;
+        let mut released_rank = 0;
+        for (id, _, level) in levels.iter().filter(|(_, site, _)| site == site_id) {
+            let mut named = false;
+            for (rank, _, _) in releases
+                .iter()
+                .filter(|(_, kind, external)| kind == SITE_LEVEL_RELEASE && external == id)
+            {
+                named = true;
+                released_rank = released_rank.max(*rank);
+                released_level = released_level.max(*level);
+            }
+            if !named {
+                unnamed.push((*id, *level));
+            }
+        }
+        let mut above: Vec<(i32, i32)> = unnamed
+            .iter()
+            .copied()
+            .filter(|(_, level)| *level > released_level)
+            .collect();
+        above.sort_by_key(|(_, level)| *level);
+        let below: Vec<i32> = unnamed
+            .iter()
+            .filter(|(_, level)| *level < released_level)
+            .map(|(id, _)| *id)
+            .collect();
+        if !below.is_empty() {
+            notes.push(format!(
+                "policies.siteLevelReleases everyAuthoredLevel: housing site {site_id} leaves the levels {below:?} unnamed, below its released level {released_level}; they get no release row, because the greatest rank is the one the expansion unlocks and a row for one of them would lower the site's level"
+            ));
+        }
+        // One rank per level, the highest level at the highest master rank;
+        // the ranks above the site's released rank hold that many rows.
+        let free = (max_rank - released_rank).max(0) as usize;
+        if above.len() > free {
+            let dropped: Vec<i32> = above[..above.len() - free]
+                .iter()
+                .map(|(id, _)| *id)
+                .collect();
+            notes.push(format!(
+                "policies.siteLevelReleases everyAuthoredLevel: housing site {site_id} has {} levels above its released level {released_level}, and the {free} master rank(s) above its released rank {released_rank} hold only {free} of them; the levels {dropped:?} get no release row",
+                above.len()
+            ));
+            above = above.split_off(above.len() - free);
+        }
+        for (index, (id, _)) in above.iter().enumerate() {
+            appended.push(json!({
+                "mysekaiRank": max_rank - (above.len() as i32 - 1 - index as i32),
+                "mysekaiRankRelaseType": SITE_LEVEL_RELEASE,
+                "externalId": id,
+            }));
+        }
+    }
+    Ok((appended, notes))
+}
+
+/// Whether the master's site category is a housing one (`housing_home`,
+/// `housing_room`). Every other site is a harvest map or the festival garden,
+/// whose levels no housing expansion reads.
+fn is_housing_category(category: &str) -> bool {
+    matches!(category, "housing_home" | "housing_room")
+}
+
+/// The rows the server appends to `mysekaiRankReleases`, for the client's
+/// readers of that table. No model is installed (or the document holds the
+/// source's own policy): none — the appendix is a server rule, and the table
+/// alone is what the client reads.
+pub(crate) fn overlay_rank_releases() -> Vec<Value> {
+    with_model(|model| model.overlay_rank_releases()).unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -577,6 +705,28 @@ impl ServerModel {
 
     pub(crate) fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// The rows the extended site-level release policy appends to
+    /// `mysekaiRankReleases` ([`SiteLevelReleases::EveryAuthoredLevel`]).
+    /// The source's own policy appends none; a model that has not seated a
+    /// table the rows are read from refuses by name and appends none.
+    pub(crate) fn overlay_rank_releases(&mut self) -> Vec<Value> {
+        if self.doc.site_level_releases != SiteLevelReleases::EveryAuthoredLevel {
+            return Vec::new();
+        }
+        match appended_release_rows(&self.masters) {
+            Ok((rows, notes)) => {
+                for note in notes {
+                    self.push_error(note);
+                }
+                rows
+            }
+            Err(reason) => {
+                self.push_error(reason);
+                Vec::new()
+            }
+        }
     }
 
     pub(crate) fn errors(&self) -> &[String] {
@@ -1150,6 +1300,24 @@ static SERVER_TABLES: &[ServerTable] = &[
         ranks
     ),
     server_table!(
+        "mysekaiSites",
+        "mysekaiSites (the server's housing site categories)",
+        parse_site_categories,
+        site_categories
+    ),
+    server_table!(
+        "mysekaiSiteLevels",
+        "mysekaiSiteLevels (the server's authored site levels)",
+        parse_site_levels,
+        site_levels
+    ),
+    server_table!(
+        "mysekaiRankReleases",
+        "mysekaiRankReleases (the server's released site levels)",
+        parse_rank_releases,
+        rank_releases
+    ),
+    server_table!(
         "mysekaiGates",
         "mysekaiGates (the server's gate ids)",
         parse_gates,
@@ -1488,6 +1656,56 @@ fn parse_ranks(text: &str, masters: &mut Masters) -> Result<(), String> {
         .map(|row| Ok((int32(row, "mysekaiRank")?, int32(row, "totalExp")?)))
         .collect::<Result<Vec<_>, String>>()?;
     masters.ranks = Some(ranks);
+    Ok(())
+}
+
+/// `mysekaiSites`: (id, mysekaiSiteCategory), master order. The category
+/// tells a housing site (`housing_home`, `housing_room`) from a harvest map
+/// and the festival garden.
+fn parse_site_categories(text: &str, masters: &mut Masters) -> Result<(), String> {
+    let categories = master::rows(text)?
+        .iter()
+        .map(|row| {
+            Ok((
+                int32(row, "id")?,
+                master::text(row, "mysekaiSiteCategory")?.to_owned(),
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    masters.site_categories = Some(categories);
+    Ok(())
+}
+
+/// `mysekaiSiteLevels`: (id, mysekaiSiteId, level), master order.
+fn parse_site_levels(text: &str, masters: &mut Masters) -> Result<(), String> {
+    let levels = master::rows(text)?
+        .iter()
+        .map(|row| {
+            Ok((
+                int32(row, "id")?,
+                int32(row, "mysekaiSiteId")?,
+                int32(row, "level")?,
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    masters.site_levels = Some(levels);
+    Ok(())
+}
+
+/// `mysekaiRankReleases`: (mysekaiRank, mysekaiRankRelaseType, externalId),
+/// master order.
+fn parse_rank_releases(text: &str, masters: &mut Masters) -> Result<(), String> {
+    let releases = master::rows(text)?
+        .iter()
+        .map(|row| {
+            Ok((
+                int32(row, "mysekaiRank")?,
+                master::text(row, "mysekaiRankRelaseType")?.to_owned(),
+                int32(row, "externalId")?,
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    masters.rank_releases = Some(releases);
     Ok(())
 }
 
