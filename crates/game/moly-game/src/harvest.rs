@@ -80,6 +80,7 @@ pub(crate) use learn::{
 };
 pub(crate) use pickup::move_towards;
 pub(crate) use arrival::HarvestViewNodes;
+pub(crate) use ui::{action_button_node, HarvestButton};
 
 /// `UserMysekaiSiteHarvestFixtureStatus.harvested`.
 pub(crate) const STATUS_HARVESTED: i32 = server_mock::FIXTURE_HARVESTED;

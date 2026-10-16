@@ -41,14 +41,19 @@
 //!
 //! Named mocks (server algorithms with no client code):
 //! - The **talk-list policy** builds the list when a document does not state
-//!   one. It keeps a master talk when every speaker is a visitor and its site
-//!   group holds the site the list is built for, then applies the two
-//!   condition types the client treats as always true: a visit-count row
+//!   one. It keeps a master talk when every speaker is a visitor and its
+//!   conditions pass on at least one site of its site group. It applies the
+//!   two condition types the client treats as always true: a visit-count row
 //!   passes when its value is at most the speaker's visit count, and an
 //!   event-story row passes when the document marks that episode as read.
-//!   A fixture-condition row passes when that fixture is placed on the site.
-//!   Rows of one talk combine as "any row passes". Phenomenon rows are left
-//!   to the client. Every kept talk starts unread unless the server recorded
+//!   A fixture-condition row passes when that fixture is placed on that
+//!   site: the loaded site's current layout, any other site's kept or saved
+//!   layout (a site with neither has nothing placed). Rows of one talk
+//!   combine as "any row passes". Phenomenon rows are left to the client.
+//!   The list covers every site, not only the loaded one: the client sets it
+//!   when the scene loads, which lands at home, and no site move sets it
+//!   again, while a floor's change-site lottery looks in that same list for
+//!   the talks of the floor's fixtures. Every kept talk starts unread unless the server recorded
 //!   its read. The list keeps the talk table's order. The talk-term start
 //!   is not checked: the asset source carries no talk-term table. A
 //!   character that is not a visitor has no talk in the list, so an NPC of
@@ -75,10 +80,10 @@
 //!
 //! Gate replies: the gate presenter's `UpdateTalkList` / `SetTalkList` calls
 //! arrive as `crate::server::ClientTalkListUpdates`; each replaces the talk
-//! list (the reply's stated rows, or the talk-list policy's list for the
-//! booted site) and, with a change reply, the visitors.
+//! list (the reply's stated rows, or the talk-list policy's list) and, with
+//! a change reply, the visitors.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use bevy::asset::LoadState;
 use bevy::prelude::*;
@@ -643,17 +648,29 @@ fn write_schedule(
 struct PolicyInputs<'a> {
     visitors: &'a VisitingCharacters,
     panel: &'a ServerPanel,
-    site_id: i32,
-    placed_fixture_ids: &'a [i32],
+    /// The loaded site and the master fixture ids of its current layout.
+    loaded_site: i32,
+    loaded_fixture_ids: &'a [i32],
+    /// The kept and saved layouts of every other site.
+    layouts: Option<&'a crate::fixture::layouts::SiteFixtureLayouts>,
     read_event_stories: &'a ReadEventStories,
+}
+
+/// The policy's list, and the fixtures it found placed on each site it
+/// looked at (site id order).
+struct PolicyList {
+    rows: Vec<TalkWithReadHistory>,
+    placed: Vec<(i32, Vec<i32>)>,
 }
 
 fn policy_talk_list(
     tables: &crate::fixture_activity_data::FixtureActivityTables,
     inputs: &PolicyInputs<'_>,
-) -> Result<Vec<TalkWithReadHistory>, String> {
+) -> Result<PolicyList, String> {
     let visitors: HashSet<u32> = inputs.visitors.units.iter().copied().collect();
     let reported: HashSet<i32> = inputs.panel.reported_reads.iter().copied().collect();
+    let mut placed_on: HashMap<i32, Vec<i32>> = HashMap::new();
+    placed_on.insert(inputs.loaded_site, inputs.loaded_fixture_ids.to_vec());
     let mut list = Vec::new();
     for talk in tables.talk_list_facts()? {
         if talk.units.is_empty() || !talk.units.iter().all(|unit| visitors.contains(unit)) {
@@ -662,38 +679,57 @@ fn policy_talk_list(
         let sites = talk
             .sites
             .ok_or_else(|| format!("talk {} names a site group the site-group table does not hold", talk.id))?;
-        if !sites.contains(&inputs.site_id) {
-            continue;
-        }
         let speaker_visits = inputs.panel.visit_count_of(&inputs.visitors.groups, talk.units[0]);
-        let mut any_row_passes = false;
-        for (kind, value) in &talk.conditions {
-            any_row_passes |= match *kind {
-                "mysekai_character_visit_count" => {
-                    speaker_visits.is_some_and(|visits| *value <= visits)
-                }
-                "read_event_story_episode_id" => match inputs.read_event_stories {
-                    ReadEventStories::All => true,
-                    ReadEventStories::Episodes(read) => read.contains(value),
-                },
-                "mysekai_fixture_id" => inputs.placed_fixture_ids.contains(value),
-                "mysekai_phenomena_id" => true,
-                other => {
-                    return Err(format!(
-                        "talk {} carries condition type {other}, which the talk-list policy has no rule for",
-                        talk.id
-                    ))
-                }
-            };
+        let mut listed = false;
+        for site in sites {
+            if !placed_on.contains_key(site) {
+                let ids = match inputs.layouts {
+                    Some(layouts) => {
+                        let site_id = u32::try_from(*site).map_err(|_| {
+                            format!("talk {} names site {site}, which is not a site id", talk.id)
+                        })?;
+                        layouts.placed_fixture_ids(site_id)?
+                    }
+                    None => Vec::new(),
+                };
+                placed_on.insert(*site, ids);
+            }
+            let placed = &placed_on[site];
+            let mut any_row_passes = false;
+            for (kind, value) in &talk.conditions {
+                any_row_passes |= match *kind {
+                    "mysekai_character_visit_count" => {
+                        speaker_visits.is_some_and(|visits| *value <= visits)
+                    }
+                    "read_event_story_episode_id" => match inputs.read_event_stories {
+                        ReadEventStories::All => true,
+                        ReadEventStories::Episodes(read) => read.contains(value),
+                    },
+                    "mysekai_fixture_id" => placed.contains(value),
+                    "mysekai_phenomena_id" => true,
+                    other => {
+                        return Err(format!(
+                            "talk {} carries condition type {other}, which the talk-list policy has no rule for",
+                            talk.id
+                        ))
+                    }
+                };
+            }
+            if any_row_passes {
+                listed = true;
+                break;
+            }
         }
-        if any_row_passes {
+        if listed {
             list.push(TalkWithReadHistory {
                 talk_id: talk.id,
                 is_read: reported.contains(&talk.id),
             });
         }
     }
-    Ok(list)
+    let mut placed: Vec<(i32, Vec<i32>)> = placed_on.into_iter().collect();
+    placed.sort_by_key(|(site, _)| *site);
+    Ok(PolicyList { rows: list, placed })
 }
 
 // ---------------------------------------------------------------------------
@@ -823,9 +859,10 @@ fn boot_visitors(
     commands.insert_resource(VisitingCharacters { units, groups });
 }
 
-/// The talk list for the booted site, set into the client's store once. A
-/// stated list is checked against the talk table; the policy waits for the
-/// booted site's placements.
+/// The talk list at boot, set into the client's store once. A stated list
+/// is checked against the talk table; the policy waits for the booted
+/// site's placements.
+#[allow(clippy::too_many_arguments)]
 fn boot_talk_list(
     mut commands: Commands,
     panel: Option<Res<ServerPanel>>,
@@ -834,6 +871,7 @@ fn boot_talk_list(
     store: Option<Res<TalkDataStore>>,
     selection: Res<crate::site::SiteSelection>,
     placements: Res<crate::fixture::FixturePlacements>,
+    layouts: Option<Res<crate::fixture::layouts::SiteFixtureLayouts>>,
 ) {
     if store.is_some() {
         return;
@@ -862,29 +900,32 @@ fn boot_talk_list(
             let site_id = i32::try_from(placements.site_id()).expect("site id fits i32");
             if selection.site_type() != "home_site" {
                 // The source sets the talk list when the scene loads, which
-                // always lands at home, and no site move sets it again; the
-                // list below is for a site the source never boots on.
+                // always lands at home; booted elsewhere, the home site counts
+                // only a layout saved earlier, not the starter it would
+                // restore.
                 warn!(
-                    "[server-panel] booted on {}: the source sets the talk list on the scene load, which lands at home, and no site move replaces it; this list is built for the booted site",
+                    "[server-panel] booted on {}: the source sets the talk list on the scene load, which lands at home; the home site counts only a saved layout here",
                     selection.site_type()
                 );
             }
-            let placed = placements.fixture_ids();
-            let rows = policy_talk_list(
+            let loaded = placements.fixture_ids();
+            let built = policy_talk_list(
                 &tables,
                 &PolicyInputs {
                     visitors: &visitors,
                     panel: &panel,
-                    site_id,
-                    placed_fixture_ids: &placed,
+                    loaded_site: site_id,
+                    loaded_fixture_ids: &loaded,
+                    layouts: layouts.as_deref(),
                     read_event_stories,
                 },
             )
             .unwrap_or_else(|reason| panic!("talk-list policy: {reason}"));
             (
-                rows,
+                built.rows,
                 format!(
-                    "built by the talk-list policy for site {site_id} with placed fixtures {placed:?} (talk-term start not checked: no talk-term table in this asset source)"
+                    "built by the talk-list policy, loaded site {site_id}, placed fixtures by site {:?} (talk-term start not checked: no talk-term table in this asset source)",
+                    built.placed
                 ),
             )
         }
@@ -950,7 +991,7 @@ fn follow_live_schedule(
 
 /// The gate presenter's talk-list calls: a change reply's visitors first,
 /// then the talk list (stated rows, or the talk-list policy's list for the
-/// booted site and the new visitors).
+/// new visitors).
 #[allow(clippy::too_many_arguments)]
 fn apply_talk_list_updates(
     mut commands: Commands,
@@ -961,6 +1002,7 @@ fn apply_talk_list_updates(
     store: Option<ResMut<TalkDataStore>>,
     selection: Res<crate::site::SiteSelection>,
     placements: Res<crate::fixture::FixturePlacements>,
+    layouts: Option<Res<crate::fixture::layouts::SiteFixtureLayouts>>,
 ) {
     if updates.0.is_empty() {
         return;
@@ -1046,18 +1088,19 @@ fn apply_talk_list_updates(
                     continue;
                 }
                 let site_id = i32::try_from(placements.site_id()).expect("site id fits i32");
-                let placed = placements.fixture_ids();
+                let loaded = placements.fixture_ids();
                 match policy_talk_list(
                     &tables,
                     &PolicyInputs {
                         visitors: &current,
                         panel: &panel,
-                        site_id,
-                        placed_fixture_ids: &placed,
+                        loaded_site: site_id,
+                        loaded_fixture_ids: &loaded,
+                        layouts: layouts.as_deref(),
                         read_event_stories,
                     },
                 ) {
-                    Ok(rows) => rows,
+                    Ok(built) => built.rows,
                     Err(reason) => {
                         error!("[server-panel] {}: talk-list policy: {reason}", update.caller);
                         continue;

@@ -1860,9 +1860,17 @@ pub(crate) fn tick(
         Option<&mut HudBalloon>,
     )>,
     mut anims: Query<&mut Transform, With<BalloonAnim>>,
+    entities: &bevy::ecs::entity::Entities,
 ) {
     let dt = time.delta_secs();
     for (entity, anchor, mut elapsed, kids, activity, preview, hud) in &mut balloons {
+        // A HUD balloon has no timer of its own; once its character is gone
+        // nothing else would take it down.
+        if hud.is_some() && !entities.contains(anchor.npc) {
+            info!("[tweet] HUD balloon {entity:?}: its character {:?} is gone; taken down", anchor.npc);
+            commands.entity(entity).despawn();
+            continue;
+        }
         if let Some(preview) = preview {
             if !library.owns_talk_preview(preview.ticket) {
                 commands.entity(entity).despawn();

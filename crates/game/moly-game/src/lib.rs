@@ -17,6 +17,7 @@ macro_rules! set_if_neq {
 
 pub mod action_button;
 pub mod alone_action_runtime;
+mod animation_time;
 pub mod audio;
 mod audio_sequence;
 mod asset_cache;
@@ -176,6 +177,7 @@ mod voice_pcm;
 pub mod walk_face;
 pub mod weather;
 pub mod weather_fx;
+mod world_seed;
 mod weather_stock_post;
 mod weather_depth;
 mod weather_transition;

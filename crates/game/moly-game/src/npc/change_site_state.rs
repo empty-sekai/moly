@@ -40,10 +40,10 @@
 //! Host shape. This host holds one site at a time, and every order targets
 //! the site the player has just entered, so the walk to the door and the
 //! leaving leg always run on a site that is not loaded; the NPC is suspended
-//! there (see `npc::residency`). Named gaps:
-//! - the walk to the own door and the leaving leg (the house or room exit
-//!   clip) are not run: the unseen site has no ground here; the objective
-//!   proceeds as if the walk succeeded on its first frame;
+//! there (see `npc::residency`, which keeps the navigation of the site the
+//! player has left, and [`door_walk`]). Named gaps:
+//! - the leaving leg (the house or room exit clip) is not run: it is a clip
+//!   on the unseen site, with nothing to show;
 //! - the other-NPC wait compares the NPCs on the loaded site only (an NPC on
 //!   another site stands on that site's ground, away from this door in the
 //!   source's world); the zero start position of a first change is this
@@ -60,8 +60,7 @@
 //!   (towards the player's position over the rotate time, out-quart), with
 //!   the same clips; the knock sound is awaited until its playback is over
 //!   (one frame late: the sound player drops a finished playback on its next
-//!   run), the door's open wait ends at once (the room door does not report
-//!   its open clip's end to the NPC side); the brightness
+//!   run); the brightness
 //!   fade, the tweet's eye, mouth and emoticon, and the facial reset are not
 //!   played.
 
@@ -75,7 +74,9 @@ use moly_law::objective::change_site as law;
 use moly_law::objective::{InterruptMarker, ObjectiveType, TalkType};
 
 use super::residency::{self, Away};
-use crate::npc::{CharacterUnitId, NpcAction, NpcActions, RestLifecycle, WalkState};
+use crate::npc::{
+    CharacterUnitId, NpcAction, NpcActions, PathSlot, RestLifecycle, RouteStops, WalkState,
+};
 use crate::npc_objective::{AiTalkData, ObjectiveMind, TalkSlot};
 
 /// The change-site interrupt `MoveNPC` raises.
@@ -117,6 +118,9 @@ enum Stage {
     /// The NPC's own decision built the objective (see
     /// [`ChangeSiteRuns::decided`]); its body starts at the next step.
     Objective,
+    /// The objective's awaited walk to the door action point of the NPC's own
+    /// site (see [`door_walk`]).
+    DoorWalk,
     WaitPlayerLeaveDoor,
     WaitOtherNpcLeaveDoor,
     WaitNotMoveMode,
@@ -129,7 +133,9 @@ enum Stage {
     KnockWait,
     /// FloorEnter's awaited `OpenDoorAsync`: the room door's open clip runs
     /// (its length in delta time); the show and the entry clip follow.
-    DoorOpenWait,
+    DoorOpenWait {
+        wait: crate::site_move::room_door::OpenWait,
+    },
     /// The entry clip plays; home shows the NPC one frame after it starts.
     EntryClip {
         node: AnimationNodeIndex,
@@ -193,6 +199,160 @@ impl ChangeSiteRuns {
 /// driver leaves its animation player alone.
 #[derive(Component)]
 pub(crate) struct ChangeSiteClip;
+
+/// Marker: the objective's walk to the door of the NPC's own site is running
+/// on that site's retained navigation. The locomotion driver steps an NPC
+/// carrying it although the NPC is away from the loaded site.
+#[derive(Component)]
+pub(crate) struct ChangeSiteWalking;
+
+/// What one poll of the door walk reports.
+enum DoorWalk {
+    /// The walk is still running.
+    Running,
+    /// The walk is over: the NPC stands at its own door, or there is no
+    /// navigation here to run it on.
+    Arrived,
+    /// The route stopped without arriving: the change-site objective ends
+    /// without the change.
+    Failed,
+}
+
+/// The objective's awaited `MoveAsync(door action point, 0.1f)`, polled once
+/// per step: starts it on the first call and reports its result afterwards.
+///
+/// Every order targets the site the player has just entered, so the NPC's own
+/// site is never the loaded one and the walk cannot run on the active
+/// navigation. It runs instead on the navigation retained for the NPC's own
+/// site (`npc::residency::SiteNavigation`) with the NPC hidden there; the
+/// members of one draw start from different points on that site, so their
+/// walks end at different times and the entry chain of each runs on its own.
+fn door_walk(world: &mut World, actor: Entity, unit: u32, frame: u32) -> DoorWalk {
+    if world.get::<ChangeSiteWalking>(actor).is_none() {
+        return begin_door_walk(world, actor, unit, frame);
+    }
+    let outcome = world.get::<RouteStops>(actor).and_then(|route| route.outcome);
+    let arrived = match outcome {
+        Some(crate::npc::RouteOutcome::Arrived) => {
+            info!("[npc-change-site] unit={unit} frame={frame} MoveAsync(own door): arrived");
+            true
+        }
+        Some(crate::npc::RouteOutcome::Stopped) => {
+            warn!("[npc-change-site] unit={unit} frame={frame} MoveAsync(own door): the route stopped without arriving");
+            false
+        }
+        None => return DoorWalk::Running,
+    };
+    crate::npc::stop_movement(world, actor);
+    world.entity_mut(actor).remove::<ChangeSiteWalking>();
+    if arrived { DoorWalk::Arrived } else { DoorWalk::Failed }
+}
+
+/// Starts the door walk on the retained navigation of the NPC's own site.
+/// `Arrived` (the state starts at once, as it did before the walk was run)
+/// whenever the walk cannot run here: the navigation is not retained, the
+/// door is off its walkable field, its gate refuses the door, or the agent
+/// finds no path. Each of those is named in the log.
+fn begin_door_walk(world: &mut World, actor: Entity, unit: u32, frame: u32) -> DoorWalk {
+    let Some(own) = world
+        .get::<NpcActions>(actor)
+        .map(|actions| actions.site_type.clone())
+    else {
+        return DoorWalk::Arrived;
+    };
+    let loaded = world
+        .get_resource::<crate::site::SiteActive>()
+        .map(|site| site.site_type.clone());
+    if loaded.as_deref() == Some(own.as_str()) {
+        // The NPC's own site is the loaded one: the objective machine walks
+        // it there. No order here ever targets the site the NPC stands on.
+        return DoorWalk::Arrived;
+    }
+    let retained = world
+        .resource::<residency::SiteNavigation>()
+        .get(&own)
+        .and_then(|nav| {
+            nav.door
+                .map(|(position, _)| (nav.walk.clone(), nav.objective.clone(), position))
+        });
+    let Some((walk, face, door)) = retained else {
+        info!(
+            "[npc-change-site] unit={unit} frame={frame} the navigation of {own} is not retained: MoveAsync(own door) is not run, ChangeStatus(ChangeSite) at once"
+        );
+        return DoorWalk::Arrived;
+    };
+    let Some(from) = world
+        .get::<WalkState>(actor)
+        .map(|state| [state.0.position[0], state.0.position[2]])
+    else {
+        return DoorWalk::Arrived;
+    };
+    let Some(landing) = face.sample(door.to_array(), crate::npc_objective::SAMPLE_GATE_TOLERANCE)
+    else {
+        warn!(
+            "[npc-change-site] unit={unit} frame={frame} the door action point of {own} is off its retained walkable field: MoveAsync(own door) is not run"
+        );
+        return DoorWalk::Arrived;
+    };
+    let landing_xz = [landing[0], landing[2]];
+    if !walk.field.if_move_target_position(from, landing_xz) {
+        info!(
+            "[npc-change-site] unit={unit} frame={frame} MoveAsync(own door): the agent's gate refuses the door from ({:.2},{:.2}); the walk is not run",
+            from[0], from[1]
+        );
+        return DoorWalk::Arrived;
+    }
+    let polyline = walk.field.generate_path(from, landing_xz);
+    let started = {
+        let mut query = world.query::<(
+            &mut WalkState,
+            &mut PathSlot,
+            &mut RouteStops,
+            &mut crate::npc_objective::MemberRng,
+            &mut crate::npc::MotionPhase,
+            &mut NpcActions,
+            &mut RestLifecycle,
+        )>();
+        let Ok((mut state, mut path, mut route, mut rng, mut phase, mut actions, mut rest)) =
+            query.get_mut(world, actor)
+        else {
+            return DoorWalk::Arrived;
+        };
+        match crate::npc::depart_along(
+            &CharacterUnitId(unit),
+            &mut state.0,
+            &mut path.0,
+            &mut route,
+            &walk,
+            &face,
+            landing,
+            None,
+            &mut rng,
+            polyline,
+        ) {
+            Some(depart_phase) => {
+                // The departure's phase drives the walk; the action state
+                // follows it as for every other move.
+                *phase = depart_phase;
+                crate::npc::declare_navigation_action(&mut actions, &mut rest, &phase, &route);
+                true
+            }
+            None => false,
+        }
+    };
+    if !started {
+        warn!(
+            "[npc-change-site] unit={unit} frame={frame} MoveAsync(own door): no path on the retained navigation of {own}; the walk is not run"
+        );
+        return DoorWalk::Arrived;
+    }
+    world.entity_mut(actor).insert(ChangeSiteWalking);
+    info!(
+        "[npc-change-site] unit={unit} frame={frame} MoveAsync(door ({:.2},{:.2},{:.2}) of {own}), awaited: walking on that site's retained navigation, hidden here",
+        door.x, door.y, door.z
+    );
+    DoorWalk::Running
+}
 
 /// `MoveNPC(npc, target)`. Returns whether the order took.
 pub(crate) fn move_npc(
@@ -356,6 +516,7 @@ fn set_stage(world: &mut World, actor: Entity, stage: Stage, frame: u32) {
 fn end_run(world: &mut World, actor: Entity) {
     world.resource_mut::<ChangeSiteRuns>().runs.remove(&actor);
     world.entity_mut(actor).remove::<ChangeSiteClip>();
+    world.entity_mut(actor).remove::<ChangeSiteWalking>();
 }
 
 /// `ForceUpdateObjective` from inside the objective, which then ends.
@@ -402,6 +563,7 @@ fn step(world: &mut World, actor: Entity, frame: u32) {
                 visibility.set_if_neq(Visibility::Inherited);
             }
             info!("[npc-change-site] unit={unit} frame={frame} the change-site objective was cancelled by another owner: its state steps stop");
+            world.entity_mut(actor).remove::<ChangeSiteWalking>();
             world.resource_mut::<ChangeSiteRuns>().runs.remove(&actor);
             return;
         }
@@ -411,7 +573,7 @@ fn step(world: &mut World, actor: Entity, frame: u32) {
         .copied()
         .unwrap_or("none");
     match stage {
-        Stage::Ordered | Stage::Objective => {
+        Stage::Ordered | Stage::Objective | Stage::DoorWalk => {
             if matches!(stage, Stage::Ordered) {
                 // The NPC's next decision: the change-site interrupt (5)
                 // builds the change-site objective, and the interrupt flag is
@@ -437,10 +599,24 @@ fn step(world: &mut World, actor: Entity, frame: u32) {
                 end_run(world, actor);
                 return;
             }
-            // MoveAsync to the own door runs on the unseen site (not run
-            // here; see the module notes), then ChangeStatus(ChangeSite). An
-            // objective the NPC decided on the loaded site walks to its
-            // data's door position first; that walk is not run here either.
+            // MoveAsync to the own door, awaited; ChangeStatus(ChangeSite)
+            // only follows it. The walk runs on the navigation retained for
+            // the NPC's own site (see [`door_walk`]).
+            match door_walk(world, actor, unit, frame) {
+                DoorWalk::Running => {
+                    set_stage(world, actor, Stage::DoorWalk, frame);
+                    return;
+                }
+                DoorWalk::Failed => {
+                    crate::npc::stop_movement(world, actor);
+                    world.entity_mut(actor).remove::<ChangeSiteWalking>();
+                    change_state(world, actor, NpcAction::Idle);
+                    force_update_objective(world, actor, frame);
+                    end_run(world, actor);
+                    return;
+                }
+                DoorWalk::Arrived => {}
+            }
             change_state(world, actor, NpcAction::ChangeSite);
             let start = if target == 0 {
                 // HomeSiteEnter takes its start position before the waits.
@@ -470,7 +646,7 @@ fn step(world: &mut World, actor: Entity, frame: u32) {
                 None
             };
             info!(
-                "[npc-change-site] unit={unit} frame={frame} change-site objective on target {target} ({target_name}): the walk to its own door is on the unseen site (not run), ChangeStatus(ChangeSite); {} starts, start position {:?}",
+                "[npc-change-site] unit={unit} frame={frame} change-site objective on target {target} ({target_name}): MoveAsync(own door) over, ChangeStatus(ChangeSite); {} starts, start position {:?}",
                 if target == 0 { "HomeSiteEnter" } else { "FloorEnter" },
                 start.or_else(|| world.resource::<ChangeSiteRuns>().start_positions.get(&actor).copied())
                     .unwrap_or(Vec3::ZERO),
@@ -583,8 +759,12 @@ fn step(world: &mut World, actor: Entity, frame: u32) {
             );
             floor_door(world, actor, unit, frame, true);
         }
-        Stage::DoorOpenWait => {
-            if !crate::site_move::room_door::open_finished(world) {
+        Stage::DoorOpenWait { mut wait } => {
+            let dt = world.resource::<Time>().delta_secs();
+            if !wait.tick(world, u64::from(frame), dt) {
+                if let Some(run) = world.resource_mut::<ChangeSiteRuns>().runs.get_mut(&actor) {
+                    run.stage = Stage::DoorOpenWait { wait };
+                }
                 return;
             }
             info!("[npc-change-site] unit={unit} frame={frame} OpenDoorAsync done (the open clip's length has passed)");
@@ -769,7 +949,8 @@ fn floor_door(world: &mut World, actor: Entity, unit: u32, frame: u32, on_site: 
         info!("[npc-change-site] unit={unit} frame={frame} OpenDoorAsync awaited (off the player's site: no sounds)");
     }
     crate::site_move::room_door::open(world);
-    set_stage(world, actor, Stage::DoorOpenWait, frame);
+    let wait = crate::site_move::room_door::OpenWait::new(u64::from(frame));
+    set_stage(world, actor, Stage::DoorOpenWait { wait }, frame);
 }
 
 /// FloorEnter after the door opened: the show and the entry clip.
@@ -939,11 +1120,17 @@ fn end_clip(world: &mut World, actor: Entity, unit: u32) {
 /// player position), out-quart)`, awaited: `Some(true)` while it turns,
 /// `Some(false)` when there is no turn (no player, or a target at the world
 /// origin).
+///
+/// The presenter's `Stop` stops the navigation agent and plays the idle
+/// motion; it does not change the action state, which stays ChangeSite until
+/// the objective ends. The overlap cancel runs only in the idle, move, rest
+/// and group-talk states, so NPCs that came in through the same door stand
+/// on one point through the turn and the tweet without it ending the entry.
 fn begin_entry_tweet(world: &mut World, actor: Entity, unit: u32, frame: u32) -> Option<bool> {
     if !can_show_entry_reaction(world) {
         return None;
     }
-    crate::npc::stop_for_external_activity(world, actor);
+    crate::npc::stop_movement(world, actor);
     let Some(player) = player_position(world) else {
         return Some(false);
     };
@@ -994,6 +1181,10 @@ fn show_entry_tweet(
     let site = world
         .get::<NpcActions>(actor)
         .and_then(|actions| residency::site_type_value(&actions.site_type));
+    crate::control::events::emit(
+        "tweet_shown",
+        serde_json::json!({ "unit": unit, "tweet_id": tweet_id, "text": text, "entry": true }),
+    );
     world.write_message(crate::npc_state::TweetHudEvent::Show {
         npc: actor,
         unit,

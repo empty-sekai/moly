@@ -2873,7 +2873,8 @@ pub(crate) fn auto_unlock(
 fn shuffle<T>(items: &mut [T]) {
     for i in (1..items.len()).rev() {
         let mut word = [0u8; 8];
-        getrandom::getrandom(&mut word).expect("sitemap: the icon order needs OS entropy");
+        crate::world_seed::fill(crate::world_seed::Stream::SiteMap, &mut word)
+            .expect("sitemap: the icon order needs OS entropy");
         let j = (u64::from_le_bytes(word) % (i as u64 + 1)) as usize;
         items.swap(i, j);
     }

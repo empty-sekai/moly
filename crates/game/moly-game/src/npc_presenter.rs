@@ -521,7 +521,8 @@ pub(crate) fn try_cancel_if_overlap(world: &mut World) {
         if !actions.ready() || !shown.contains(&unit) {
             continue;
         }
-        let state = actions.current as u32;
+        let action = actions.current;
+        let state = action as u32;
         let Some(mind) = world.get::<ObjectiveMind>(entity) else {
             continue;
         };
@@ -572,7 +573,7 @@ pub(crate) fn try_cancel_if_overlap(world: &mut World) {
         mind.overlap_seconds = 0.0;
         mind.overlap_cancel_frame = Some(frame);
         info!(
-            "[npc unit={unit}] 角色重叠超过源时限，取消目标并立即重选 (frame {frame}, {owed} calls owed)"
+            "[npc unit={unit}] 角色重叠超过源时限，取消目标并立即重选 (frame {frame}, state {action:?}, {owed} calls owed)"
         );
     }
 }

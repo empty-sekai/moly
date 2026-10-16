@@ -12,7 +12,7 @@ use moly_law::action_button::{ButtonType, TargetId, ACTION_BUTTON_INPUT_INTERVAL
 
 use super::cond::{self, flat};
 use super::hand::{self, Hand};
-use super::script::{Join, Node, Step, Target, TargetKind};
+use super::script::{GatherRef, Join, Node, Step, Target, TargetKind};
 
 /// Steps one track may start on one frame.
 const STEPS_PER_FRAME: usize = 64;
@@ -111,6 +111,9 @@ enum Kind {
     WaitUntil(super::script::Cond),
     Walk(Walk),
     Interact(Interact),
+    Gather(Gather),
+    Craft(CraftStep),
+    DialogAnswer(DialogAnswer),
     Stick { stick: Vec2, until: f32 },
     NpcWalk { entity: Entity, unit: u32, goal: Vec3, within: f32 },
     NpcFace { entity: Entity, unit: u32, towards: Vec3, secs: f32, started: bool },
@@ -386,6 +389,13 @@ fn start(world: &mut World, shared: &mut Shared, step: Step, path: String) -> St
             Kind::SiteSwitch { site: site.clone(), moved: false }
         }
         Node::WalkTo { to, within } => Kind::Walk(Walk::new(to.clone(), *within)),
+        Node::Gather { what, collect } => Kind::Gather(Gather::new(what.clone(), *collect)),
+        Node::Craft { blueprint } => Kind::Craft(CraftStep::new(*blueprint)),
+        Node::DialogAnswer { ok } => Kind::DialogAnswer(DialogAnswer { ok: *ok, tapped: None }),
+        Node::BackKey => {
+            let result = hand::back_key(world).map(|()| "the back key pressed".to_owned()).map_err(str::to_owned);
+            return ended(path, result, optional);
+        }
         Node::Stick { stick, secs } => Kind::Stick { stick: Vec2::from(*stick), until: shared.now + secs },
         Node::Interact { target, button, stop } => Kind::Interact(Interact {
             walk: Walk::new(target.clone(), *stop),
@@ -518,6 +528,9 @@ fn poll(world: &mut World, shared: &mut Shared, active: &mut Active) -> Poll {
             }
         }
         Kind::Interact(interact) => interact.poll(world, shared, &path),
+        Kind::Gather(gather) => gather.poll(world, shared, &path),
+        Kind::Craft(craft) => craft.poll(world, shared),
+        Kind::DialogAnswer(answer) => answer.poll(world, shared),
         Kind::NpcWalk { entity, unit, goal, within } => {
             let at = world.get::<GlobalTransform>(*entity).map(GlobalTransform::translation);
             let Some(at) = at else {
@@ -748,6 +761,477 @@ impl Walk {
             (self.next + 1).min(self.corners.len()),
             self.corners.len()
         ))
+    }
+}
+
+/// Drops are taken from this far around the harvested object (metres).
+const DROP_REACH: f32 = 6.0;
+/// A drop the player has stood on this long (seconds) is not taken.
+const DROP_REFUSED_SECS: f32 = 3.0;
+/// A press that has started no swing after this long (seconds) is refused.
+const PRESS_ANSWER_SECS: f32 = 1.5;
+/// Presses are this far apart (seconds), as a hand taps.
+const PRESS_INTERVAL: f32 = 0.3;
+
+enum GatherPhase {
+    /// Walking into the object's contact circle until it is the target.
+    Approach,
+    /// Tapping the harvest button while the object has hit points left.
+    Swing,
+    /// Walking over the landed drops.
+    Collect,
+}
+
+/// `player.gather`: one harvest object through the harvest button, then its
+/// drops. The object is chosen once, when the step starts; the button is
+/// tapped as a finger taps it, so the harvest screen's own rules (the tool
+/// for the kind, the stamina, the swing loop) decide each press.
+struct Gather {
+    what: GatherRef,
+    collect: bool,
+    /// The object: its entity, UID and position.
+    object: Option<(Entity, u64, Vec3)>,
+    walk: Option<Walk>,
+    phase: GatherPhase,
+    /// When the joystick finger was lifted for the presses.
+    lifted_at: Option<f32>,
+    last_press: Option<f32>,
+    presses: u32,
+    /// The hit points when the last unanswered press went out.
+    hp_at_press: i32,
+    /// The drop walked to, and since when the player has stood on it.
+    drop: Option<(Vec3, Option<f32>)>,
+    drops_taken: u32,
+}
+
+impl Gather {
+    fn new(what: GatherRef, collect: bool) -> Self {
+        Self {
+            what,
+            collect,
+            object: None,
+            walk: None,
+            phase: GatherPhase::Approach,
+            lifted_at: None,
+            last_press: None,
+            presses: 0,
+            hp_at_press: 0,
+            drop: None,
+            drops_taken: 0,
+        }
+    }
+
+    /// The harvest object the step names: entity, UID, position, radius.
+    fn find(&self, world: &mut World) -> Result<(Entity, u64, Vec3, f32), String> {
+        let from = cond::player(world).unwrap_or(Vec3::ZERO);
+        let mut objects = world.query::<(Entity, &crate::harvest::HarvestObject, &GlobalTransform)>();
+        let rows: Vec<(Entity, u64, Vec3, f32, bool, i32)> = objects
+            .iter(world)
+            .map(|(entity, object, at)| {
+                (
+                    entity,
+                    object.uid,
+                    at.translation(),
+                    object.radius,
+                    object.status == crate::harvest::STATUS_HARVESTED,
+                    object.fixture_type,
+                )
+            })
+            .collect();
+        if rows.is_empty() {
+            return Err("this site has no gatherables".into());
+        }
+        match &self.what {
+            GatherRef::Uid(uid) => {
+                let (entity, uid, at, radius, harvested, _) = rows
+                    .into_iter()
+                    .find(|row| row.1 == *uid)
+                    .ok_or_else(|| format!("no gatherable with UID {uid} on this site"))?;
+                if harvested {
+                    return Err(format!("gatherable {uid} is already harvested"));
+                }
+                Ok((entity, uid, at, radius))
+            }
+            GatherRef::Nearest { kind } => rows
+                .into_iter()
+                .filter(|row| !row.4)
+                .filter(|row| kind.as_deref().is_none_or(|kind| crate::harvest::kind_word(row.5) == kind))
+                .min_by(|a, b| a.2.distance_squared(from).total_cmp(&b.2.distance_squared(from)))
+                .map(|(entity, uid, at, radius, _, _)| (entity, uid, at, radius))
+                .ok_or_else(|| match kind {
+                    Some(kind) => format!("no {kind} gatherable left to harvest on this site"),
+                    None => "no gatherable left to harvest on this site".to_owned(),
+                }),
+        }
+    }
+
+    fn poll(&mut self, world: &mut World, shared: &mut Shared, path: &str) -> Poll {
+        let (entity, uid, origin) = match self.object {
+            Some(object) => object,
+            None => match self.find(world) {
+                Ok((entity, uid, at, radius)) => {
+                    self.object = Some((entity, uid, at));
+                    // Contact is the player inside the object's circle.
+                    let within = (radius * 0.6).max(0.15);
+                    self.walk = Some(Walk::new(Target { what: TargetKind::Gatherable(uid), offset: [0.0; 2] }, within));
+                    (entity, uid, at)
+                }
+                Err(error) => {
+                    shared.release_hand_of(world, path);
+                    return Poll::Failed(error);
+                }
+            },
+        };
+        let Some(object) = world.get::<crate::harvest::HarvestObject>(entity) else {
+            shared.release_hand_of(world, path);
+            return Poll::Failed(format!("gatherable {uid} left the site"));
+        };
+        let (hp, kind, harvested) =
+            (object.hp, object.fixture_type, object.status == crate::harvest::STATUS_HARVESTED);
+        let targeted = world
+            .get_resource::<crate::harvest::action::HarvestTargeting>()
+            .and_then(|targeting| targeting.target);
+        let swinging = world
+            .get_resource::<crate::harvest::action::HarvestAction>()
+            .is_some_and(crate::harvest::action::HarvestAction::in_progress);
+        let now = shared.now;
+        match self.phase {
+            GatherPhase::Approach => {
+                if harvested {
+                    self.phase = GatherPhase::Collect;
+                    return Poll::Running(format!("gatherable {uid} is harvested"));
+                }
+                if targeted == Some(entity) {
+                    self.phase = GatherPhase::Swing;
+                    return Poll::Running(format!("gatherable {uid} is the target"));
+                }
+                let walk = self.walk.as_mut().expect("the walk is planned with the object");
+                match walk.poll(world, shared, path) {
+                    // In reach while another object is the target: walk on
+                    // into this one, which the player then faces.
+                    Poll::Done(note) => {
+                        walk.within = 0.05;
+                        Poll::Running(format!("{note}; the target is {targeted:?}, not gatherable {uid}"))
+                    }
+                    other => other,
+                }
+            }
+            GatherPhase::Swing => {
+                if harvested {
+                    if swinging {
+                        return Poll::Running(format!("gatherable {uid} harvested; the swing ends"));
+                    }
+                    if !self.collect {
+                        return Poll::Done(self.summary(uid, hp));
+                    }
+                    self.phase = GatherPhase::Collect;
+                    return Poll::Running(format!("gatherable {uid} harvested after {} presses", self.presses));
+                }
+                if swinging {
+                    return Poll::Running(format!("swinging: hp {hp}"));
+                }
+                if targeted != Some(entity) {
+                    self.phase = GatherPhase::Approach;
+                    self.lifted_at = None;
+                    return Poll::Running(format!("gatherable {uid} is no longer the target ({targeted:?})"));
+                }
+                // Lift the joystick finger first and press on a later frame.
+                if shared.hand.pressing() || self.lifted_at.is_none() {
+                    shared.release_hand_of(world, path);
+                    self.lifted_at = Some(now);
+                    return Poll::Running("standing for the presses".into());
+                }
+                let Some(button) = world.get_resource::<crate::harvest::HarvestButton>() else {
+                    return Poll::Running("the harvest screen is not set up".into());
+                };
+                if button.cannot {
+                    let tool = (0..=9).contains(&kind).then(|| crate::harvest::law::tool_type_for(kind)).flatten();
+                    return Poll::Failed(format!(
+                        "the harvest button shows it cannot act: no tool for gatherable {uid} (it needs {tool:?})"
+                    ));
+                }
+                if !(button.shown && button.interactable) {
+                    return Poll::Running(format!(
+                        "the harvest button is not ready (shown {}, interactable {})",
+                        button.shown, button.interactable
+                    ));
+                }
+                if let Some(last) = self.last_press {
+                    if hp == self.hp_at_press && now - last > PRESS_ANSWER_SECS {
+                        let stamina = world
+                            .get_resource::<crate::harvest::action::HarvestPlayerModel>()
+                            .map(|model| model.stamina.sum());
+                        return Poll::Failed(format!(
+                            "the press on gatherable {uid} started no swing (hp {hp}, stamina {stamina:?}, {} presses)",
+                            self.presses
+                        ));
+                    }
+                    if now - last < PRESS_INTERVAL {
+                        return Poll::Running(format!("hp {hp}"));
+                    }
+                }
+                let (view, node) = crate::harvest::action_button_node();
+                let position = match hand::ui_point(world, view, node) {
+                    Ok(position) => position,
+                    Err(error) => return Poll::Running(error),
+                };
+                match hand::tap(world, position) {
+                    Ok(()) => {
+                        self.hp_at_press = hp;
+                        self.last_press = Some(now);
+                        self.presses += 1;
+                        Poll::Running(format!("pressed the harvest button ({}), hp {hp}", self.presses))
+                    }
+                    Err(error) => Poll::Running(error.to_owned()),
+                }
+            }
+            GatherPhase::Collect => self.collect(world, shared, path, uid, origin, hp),
+        }
+    }
+
+    fn collect(&mut self, world: &mut World, shared: &mut Shared, path: &str, uid: u64, origin: Vec3, hp: i32) -> Poll {
+        let mut landed = Vec::new();
+        let mut falling = 0;
+        let mut drops = world.query::<(&crate::harvest::HarvestDropItem, &GlobalTransform)>();
+        for (drop, at) in drops.iter(world) {
+            let at = at.translation();
+            if flat(at, origin) > DROP_REACH {
+                continue;
+            }
+            if drop.radius > 0.0 {
+                landed.push(at);
+            } else {
+                falling += 1;
+            }
+        }
+        let player = match cond::player(world) {
+            Ok(player) => player,
+            Err(error) => return Poll::Running(error),
+        };
+        // The drop walked to is taken once nothing lies where it was.
+        if let Some((at, _)) = self.drop {
+            if !landed.iter().any(|drop| drop.distance(at) < 0.05) {
+                self.drop = None;
+                self.walk = None;
+                self.drops_taken += 1;
+            }
+        }
+        if self.drop.is_none() {
+            let Some(next) = landed.iter().copied().min_by(|a, b| flat(*a, player).total_cmp(&flat(*b, player))) else {
+                if falling > 0 {
+                    return Poll::Running(format!("{falling} drops still falling"));
+                }
+                shared.release_hand_of(world, path);
+                return Poll::Done(self.summary(uid, hp));
+            };
+            self.drop = Some((next, None));
+            self.walk = Some(Walk::new(Target { what: TargetKind::Point([next.x, next.z]), offset: [0.0; 2] }, 0.2));
+        }
+        let walk = self.walk.as_mut().expect("the walk is planned with the drop");
+        let polled = walk.poll(world, shared, path);
+        let (at, since) = self.drop.as_mut().expect("a drop is chosen above");
+        match polled {
+            Poll::Done(_) => {
+                let since = *since.get_or_insert(shared.now);
+                if shared.now - since <= DROP_REFUSED_SECS {
+                    return Poll::Running(format!("on the drop at ({:.2}, {:.2})", at.x, at.z));
+                }
+                let at = *at;
+                let bag = world
+                    .get_resource::<crate::server::client::inventory::ClientMysekaiInventory>()
+                    .map(|inventory| {
+                        let limit = world
+                            .get_resource::<crate::server::client::inventory::PossessionMasters>()
+                            .and_then(|masters| inventory.material_max_count(masters));
+                        (inventory.total_material_possession(), limit)
+                    });
+                shared.release_hand_of(world, path);
+                Poll::Failed(format!(
+                    "the drop at ({:.2}, {:.2}) is not taken after {DROP_REFUSED_SECS} s on it (bag held and limit {bag:?})",
+                    at.x, at.z
+                ))
+            }
+            other => other,
+        }
+    }
+
+    fn summary(&self, uid: u64, hp: i32) -> String {
+        format!("gatherable {uid} harvested: {} presses, hp {hp}, {} drops taken", self.presses, self.drops_taken)
+    }
+}
+
+/// A tap on the craft screen that has not shown its answer after this long
+/// (seconds) is refused.
+const CRAFT_ANSWER_SECS: f32 = 2.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CraftStepPhase {
+    /// Waiting for the open screen, then choosing the blueprint.
+    Choose,
+    /// The choice is handed over; reading the apply button.
+    Check,
+    /// The apply button is tapped; the confirm is answered.
+    Confirm,
+    /// The confirm's OK is tapped; the craft runs to its result.
+    Craft,
+}
+
+/// `player.craft`'s last step: one blueprint on the open craft screen. The
+/// screen's own checks decide (the apply button's balloon, the term, the
+/// server's answer), and each refusal ends the step with its reason.
+struct CraftStep {
+    blueprint: i32,
+    phase: CraftStepPhase,
+    /// When the last tap or key went out.
+    input_at: f32,
+    executed: bool,
+    chosen: String,
+}
+
+impl CraftStep {
+    fn new(blueprint: i32) -> Self {
+        Self { blueprint, phase: CraftStepPhase::Choose, input_at: 0.0, executed: false, chosen: String::new() }
+    }
+
+    fn poll(&mut self, world: &mut World, shared: &mut Shared) -> Poll {
+        use crate::home_action::craft::{self as craft, CraftPhase};
+        let now = shared.now;
+        let screen = craft::phase(world);
+        match self.phase {
+            CraftStepPhase::Choose => {
+                if screen != CraftPhase::Idle {
+                    return Poll::Running(format!("waiting for the open craft screen ({screen:?})"));
+                }
+                match craft::choose(world, self.blueprint) {
+                    Ok(note) => {
+                        self.chosen = note;
+                        self.phase = CraftStepPhase::Check;
+                        self.input_at = now;
+                        Poll::Running(format!("blueprint {} chosen: {}", self.blueprint, self.chosen))
+                    }
+                    Err(error) => Poll::Failed(error),
+                }
+            }
+            CraftStepPhase::Check => match craft::selected(world) {
+                Some((id, state)) if id == self.blueprint => match state {
+                    Err(reason) => Poll::Failed(format!("blueprint {} cannot be crafted: {reason}", self.blueprint)),
+                    Ok(()) => {
+                        let Some((view, node)) = crate::home_action::craft::view::apply_button_node(world) else {
+                            return Poll::Running("the craft screen's view is not built".into());
+                        };
+                        let position = match hand::ui_point(world, view, &node) {
+                            Ok(position) => position,
+                            Err(error) => return Poll::Running(error),
+                        };
+                        match hand::tap(world, position) {
+                            Ok(()) => {
+                                self.phase = CraftStepPhase::Confirm;
+                                self.input_at = now;
+                                Poll::Running("the apply button tapped".into())
+                            }
+                            Err(error) => Poll::Running(error.to_owned()),
+                        }
+                    }
+                },
+                _ if now - self.input_at > CRAFT_ANSWER_SECS => {
+                    Poll::Failed(format!("blueprint {} was not selected ({})", self.blueprint, self.chosen))
+                }
+                _ => Poll::Running(format!("waiting for blueprint {} to be selected", self.blueprint)),
+            },
+            CraftStepPhase::Confirm => match screen {
+                CraftPhase::Confirm => {
+                    let (_, caller, view, node) = match crate::common_dialog::shown_button(world, true) {
+                        Ok(button) => button,
+                        Err(error) => return Poll::Running(error),
+                    };
+                    let position = match hand::ui_point(world, view, &node) {
+                        Ok(position) => position,
+                        Err(error) => return Poll::Running(error),
+                    };
+                    match hand::tap(world, position) {
+                        Ok(()) => {
+                            self.phase = CraftStepPhase::Craft;
+                            self.input_at = now;
+                            Poll::Running(format!("the confirm's OK tapped ({caller})"))
+                        }
+                        Err(error) => Poll::Running(error.to_owned()),
+                    }
+                }
+                CraftPhase::TermLimit => {
+                    Poll::Failed(format!("blueprint {}'s term is over: the term limit dialog shows", self.blueprint))
+                }
+                _ if now - self.input_at > CRAFT_ANSWER_SECS => Poll::Failed(format!(
+                    "the apply tap opened no confirm ({screen:?}){}",
+                    craft::refusal(world).map(|reason| format!(": {reason}")).unwrap_or_default()
+                )),
+                _ => Poll::Running("waiting for the confirm".into()),
+            },
+            CraftStepPhase::Craft => match screen {
+                CraftPhase::Executing | CraftPhase::Dialogs | CraftPhase::Done => {
+                    self.executed = true;
+                    Poll::Running(format!("crafting ({screen:?})"))
+                }
+                CraftPhase::Result => {
+                    self.executed = true;
+                    // The result dialog closes on the back key, as on its
+                    // close area.
+                    if now - self.input_at > 1.0 {
+                        self.input_at = now;
+                        if let Err(error) = hand::back_key(world) {
+                            return Poll::Running(error.to_owned());
+                        }
+                        return Poll::Running("the result shows; the back key closes it".into());
+                    }
+                    Poll::Running("the result shows".into())
+                }
+                CraftPhase::Idle | CraftPhase::Closed if self.executed => {
+                    Poll::Done(format!("blueprint {} crafted ({})", self.blueprint, self.chosen))
+                }
+                CraftPhase::Confirm if now - self.input_at > CRAFT_ANSWER_SECS => {
+                    Poll::Failed("the confirm's OK tap did not answer it".into())
+                }
+                _ if now - self.input_at > CRAFT_ANSWER_SECS => Poll::Failed(format!(
+                    "the craft was not done: {}",
+                    craft::refusal(world).unwrap_or_else(|| format!("the screen is {screen:?}"))
+                )),
+                _ => Poll::Running("waiting for the craft".into()),
+            },
+        }
+    }
+}
+
+/// `dialog.answer`: a tap on the shown common dialog's OK or cancel button,
+/// done once the dialog is gone.
+struct DialogAnswer {
+    ok: bool,
+    tapped: Option<(crate::ui_layers::DialogId, f32)>,
+}
+
+impl DialogAnswer {
+    fn poll(&mut self, world: &mut World, shared: &mut Shared) -> Poll {
+        if let Some((id, at)) = self.tapped {
+            if !crate::common_dialog::is_shown(world, id) {
+                return Poll::Done(format!("answered {}", if self.ok { "OK" } else { "cancel" }));
+            }
+            if shared.now - at < 1.0 {
+                return Poll::Running("waiting for the dialog to close".into());
+            }
+        }
+        let (id, caller, view, node) = match crate::common_dialog::shown_button(world, self.ok) {
+            Ok(button) => button,
+            Err(error) => return Poll::Running(error),
+        };
+        let position = match hand::ui_point(world, view, &node) {
+            Ok(position) => position,
+            Err(error) => return Poll::Running(error),
+        };
+        match hand::tap(world, position) {
+            Ok(()) => {
+                self.tapped = Some((id, shared.now));
+                Poll::Running(format!("tapped {} on {view} from {caller}", if self.ok { "OK" } else { "cancel" }))
+            }
+            Err(error) => Poll::Running(error.to_owned()),
+        }
     }
 }
 

@@ -161,6 +161,7 @@ impl Plugin for NpcStatePlugin {
             // floor and its loop (see `npc::change_site`).
             .init_resource::<crate::npc::change_site::ChangeSiteController>()
             .init_resource::<crate::npc::change_site_state::ChangeSiteRuns>()
+            .init_resource::<crate::npc::residency::SiteNavigation>()
             .add_systems(Startup, crate::npc::change_site::load)
             .add_systems(
                 Update,
@@ -463,6 +464,10 @@ pub(crate) fn on_update(
                     set_expressions(unit, &row, face.as_mut());
                     info!(
                         "[npc-state] unit={unit} frame={frame} tweet enter: tweet={id} state=InProgress show",
+                    );
+                    crate::control::events::emit(
+                        "tweet_shown",
+                        serde_json::json!({ "unit": unit, "tweet_id": id, "text": row.text }),
                     );
                     hud.write(TweetHudEvent::Show {
                         npc: entity,

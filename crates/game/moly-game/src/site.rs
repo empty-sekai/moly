@@ -1043,6 +1043,10 @@ impl ResidentSites {
             let old = std::mem::replace(&mut self.loaded_floor, site.to_owned());
             if let Some(index) = self.position(&old) {
                 let entry = self.sites.remove(index);
+                let removed = old.clone();
+                commands.queue(move |world: &mut World| {
+                    world.resource_mut::<crate::npc::residency::SiteNavigation>().forget(&removed);
+                });
                 despawn_roots(commands, entry.view.roots());
                 info!("[site] UpdateLoadedFloor({site}): RemoveSite({old})");
             }
@@ -2185,6 +2189,7 @@ pub(crate) fn queue_cannon_swap(commands: &mut Commands, roots: Vec<Entity>, nex
 fn queue_exit(commands: &mut Commands, roots: Vec<Entity>, next: SiteSelection, exit: Exit) {
     // Release furniture ownership and detach the logical player before any
     // scene subtree disappears or the next site reseeds that same player.
+    commands.queue(crate::npc::residency::retain_navigation);
     commands.queue(crate::player_fixture_action::cancel_for_site_change);
     commands.queue(crate::npc_fixture_activity::cancel_for_site_change);
     commands.queue(crate::fixture_gimmick::cancel_for_site_change);

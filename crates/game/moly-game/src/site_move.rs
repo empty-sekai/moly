@@ -971,7 +971,8 @@ impl SiteMove {
         // transparent blocks (no-op).
         let roll = forced_landing_draw().unwrap_or_else(|| {
             let mut word = [0_u8; 4];
-            getrandom::getrandom(&mut word).expect("landing draw needs OS entropy");
+            crate::world_seed::fill(crate::world_seed::Stream::Landing, &mut word)
+                .expect("landing draw needs OS entropy");
             range_int(
                 u32::from_le_bytes(word),
                 timeline::LANDING_RANGE.0,

@@ -353,6 +353,7 @@ pub(crate) fn show_tweet(world: &mut World, entity: Entity, tweet: i32) -> Resul
 /// Hides the tweet balloon of a character.
 pub(crate) fn hide_tweet(world: &mut World, entity: Entity) {
     if world.get_entity(entity).is_err() {
+        world.write_message(crate::npc_state::TweetHudEvent::Retire { npc: entity });
         return;
     }
     let unit = world.get::<CharacterUnitId>(entity).map_or(0, |unit| unit.0);

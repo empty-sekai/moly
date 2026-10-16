@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 /// 站点可行走面：世界系三角网的 xz 投影 + 挖洞烘焙出的可行走场。换站
 /// 拆资源后由 [`build`] 按新站重建。
-#[derive(Resource)]
+#[derive(Resource, Clone)]
 pub struct WalkFace {
     pub(crate) field: Arc<WalkField>,
     generation: u64,

@@ -48,6 +48,16 @@ pub(crate) enum Node {
     Repeat { times: u32, steps: Arc<[Step]> },
     WalkTo { to: Target, within: f32 },
     Interact { target: Target, button: ButtonType, stop: f32 },
+    /// Harvests one gatherable through the harvest button and, with
+    /// `collect`, walks over the drops it leaves.
+    Gather { what: GatherRef, collect: bool },
+    /// Crafts one blueprint on the open craft screen: its choice, the apply
+    /// button, the confirm's OK and the result's close.
+    Craft { blueprint: i32 },
+    /// Taps the shown common dialog's OK (`ok`) or cancel button.
+    DialogAnswer { ok: bool },
+    /// One press of the back key.
+    BackKey,
     Tap { at: [f32; 2], fraction: bool },
     /// A tap at the centre of a node of a shown UI view.
     UiTap { view: String, path: String },
@@ -97,6 +107,14 @@ pub(crate) enum FixtureRef {
     Id(i32),
 }
 
+/// A gatherable (a harvest object of the loaded site): by its UID, or the
+/// nearest one not yet harvested, of one kind when `kind` names it.
+#[derive(Clone, Debug)]
+pub(crate) enum GatherRef {
+    Uid(u64),
+    Nearest { kind: Option<String> },
+}
+
 /// A place in the world, resolved every frame.
 #[derive(Clone, Debug)]
 pub(crate) struct Target {
@@ -119,6 +137,10 @@ pub(crate) enum TargetKind {
     FixtureUid(String),
     /// The placed fixture of this master id nearest the player.
     FixtureId(i32),
+    /// A harvest object of the loaded site by its UID.
+    Gatherable(u64),
+    /// The placed workbench (a craft tool system fixture) nearest the player.
+    Workbench,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -163,8 +185,8 @@ pub(crate) enum Cond {
 
 pub(super) const ACTIONS: &[&str] = &[
     "wait", "wait_until", "assert", "log", "where", "capture", "parallel", "repeat",
-    "player.walk_to", "player.interact", "player.stick", "player.release", "player.talk_to", "player.wear",
-    "player.wear_avatar", "tap", "ui.tap",
+    "player.walk_to", "player.interact", "player.gather", "player.craft", "player.stick", "player.release", "player.talk_to", "player.wear",
+    "player.wear_avatar", "tap", "ui.tap", "dialog.answer", "key.back",
     "npc.take", "npc.walk_to", "npc.face", "npc.emote", "npc.use", "npc.tweet", "npc.talk", "npc.release",
     "camera.drag", "camera.zoom", "server.edit", "weather.set", "site.switch", "site.enter_room", "site.go_home",
 ];
@@ -253,6 +275,48 @@ fn step(value: &Value, at: &str) -> Result<Vec<Step>, String> {
             },
             Some(60.0),
         )],
+        "player.gather" => {
+            let what = match fields.req("gatherable")? {
+                Value::String(word) if word == "nearest" => {
+                    GatherRef::Nearest { kind: fields.opt_str("kind")?.map(str::to_owned) }
+                }
+                value => GatherRef::Uid(
+                    value
+                        .as_u64()
+                        .ok_or_else(|| format!("{at}: gatherable is a harvest object UID or \"nearest\""))?,
+                ),
+            };
+            if matches!(what, GatherRef::Uid(_)) && fields.opt("kind").is_some() {
+                return Err(format!("{at}: kind only narrows gatherable \"nearest\""));
+            }
+            let collect = fields.opt_bool("collect")?.unwrap_or(true);
+            vec![one(Node::Gather { what, collect }, Some(120.0))]
+        }
+        "player.craft" => {
+            let blueprint = fields.req_i32("blueprint")?;
+            let workbench = match fields.opt("workbench") {
+                Some(Value::Bool(false)) => None,
+                Some(fixture) => Some(match fixture_ref(fixture, &at)? {
+                    FixtureRef::Uid(uid) => TargetKind::FixtureUid(uid),
+                    FixtureRef::Id(id) => TargetKind::FixtureId(id),
+                }),
+                None => Some(TargetKind::Workbench),
+            };
+            let mut out = Vec::new();
+            if let Some(what) = workbench {
+                out.push(one(
+                    Node::Interact { target: Target { what, offset: [0.0; 2] }, button: ButtonType::OpenCraftTool, stop: 0.2 },
+                    Some(60.0),
+                ));
+            }
+            out.push(one(Node::Craft { blueprint }, Some(60.0)));
+            out
+        }
+        "dialog.answer" => {
+            let ok = fields.opt_bool("ok")?.unwrap_or(true);
+            vec![one(Node::DialogAnswer { ok }, Some(10.0))]
+        }
+        "key.back" => vec![one(Node::BackKey, None)],
         "player.talk_to" => {
             let unit = fields.req_u32("unit")?;
             vec![
@@ -501,7 +565,8 @@ fn target(value: &Value, at: &str) -> Result<Target, String> {
             "house_door" => TargetKind::HouseDoor,
             "room_door" => TargetKind::RoomDoor,
             "player" => TargetKind::Player,
-            other => return Err(format!("{at}: unknown target {other}; use house_door, room_door, player, [x, z] or an object")),
+            "workbench" => TargetKind::Workbench,
+            other => return Err(format!("{at}: unknown target {other}; use house_door, room_door, player, workbench, [x, z] or an object")),
         };
         return Ok(Target { what, offset: [0.0; 2] });
     }
@@ -510,14 +575,17 @@ fn target(value: &Value, at: &str) -> Result<Target, String> {
         Some(offset) => pair(offset, &format!("{at}.offset"))?,
         None => [0.0; 2],
     };
-    let what = match (fields.opt("npc"), fields.opt("fixture"), fields.opt("point")) {
-        (Some(_), None, None) => TargetKind::Npc(fields.req_u32("npc")?),
-        (None, Some(fixture), None) => match fixture_ref(fixture, &at)? {
+    let what = match (fields.opt("npc"), fields.opt("fixture"), fields.opt("point"), fields.opt("gatherable")) {
+        (Some(_), None, None, None) => TargetKind::Npc(fields.req_u32("npc")?),
+        (None, Some(fixture), None, None) => match fixture_ref(fixture, &at)? {
             FixtureRef::Uid(uid) => TargetKind::FixtureUid(uid),
             FixtureRef::Id(id) => TargetKind::FixtureId(id),
         },
-        (None, None, Some(point)) => TargetKind::Point(pair(point, &format!("{at}.point"))?),
-        _ => return Err(format!("{at}: give exactly one of npc, fixture or point")),
+        (None, None, Some(point), None) => TargetKind::Point(pair(point, &format!("{at}.point"))?),
+        (None, None, None, Some(uid)) => TargetKind::Gatherable(
+            uid.as_u64().ok_or_else(|| format!("{at}: gatherable is a harvest object UID"))?,
+        ),
+        _ => return Err(format!("{at}: give exactly one of npc, fixture, point or gatherable")),
     };
     fields.finish()?;
     Ok(Target { what, offset })

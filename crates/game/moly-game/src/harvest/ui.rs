@@ -58,6 +58,11 @@ use crate::ui_layout::{UiLayouts, UiPrefabView};
 const KEY: &str = "ShellHarvest";
 const BUTTON: &str = "ComponentRoot/RightBottom/ButtonAction";
 const CANNOT: &str = "ComponentRoot/RightBottom/ButtonActionCannot";
+
+/// The harvest screen's document key and its action button's node path.
+pub(crate) fn action_button_node() -> (&'static str, &'static str) {
+    (KEY, BUTTON)
+}
 const BALLOON_WORDING: &str = "MSG_NOT_HAVE_TOOL";
 const BALLOON_FADE: f32 = 0.1;
 const BALLOON_HOLD: f32 = 2.0;

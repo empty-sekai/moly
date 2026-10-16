@@ -88,6 +88,9 @@ pub(crate) fn dispose_npc(world: &mut World, entity: Entity, caller: &str) -> Re
     if let Some(mut registry) = world.get_resource_mut::<crate::npc::Registry>() {
         registry.character_unit_ids.retain(|id| *id != unit);
     }
+    // The tweet listener goes with the character: its head balloon has no
+    // anchor left, so it is taken down with the entity.
+    world.write_message(crate::npc_state::TweetHudEvent::Retire { npc: entity });
     world.despawn(entity);
     info!(
         "[npc-dispose] unit={unit} frame={frame} {caller}: DisposeNPC({entity:?}): objective {objective:?} cancelled and disposed, state {state:?}, fixture session {}; some-character communication ends with the entity; despawned{}",

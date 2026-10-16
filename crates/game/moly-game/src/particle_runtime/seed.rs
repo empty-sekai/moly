@@ -58,7 +58,7 @@ impl SystemSeedManager {
     pub(crate) fn try_init(&mut self) -> Result<(), SeedError> {
         self.try_init_with(|| {
             let mut bytes = [0_u8; 16];
-            getrandom::getrandom(&mut bytes)?;
+            crate::world_seed::fill(crate::world_seed::Stream::Particle, &mut bytes)?;
             Ok(bytes)
         })
     }

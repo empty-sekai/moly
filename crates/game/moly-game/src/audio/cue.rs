@@ -494,7 +494,14 @@ fn seeded_sequence_rng(slot: RngSlot) -> SequenceRng {
                 .wrapping_add(offset),
             "环境变量",
         ),
-        Err(_) => (clock_seed(), "时钟"),
+        Err(_) => match crate::world_seed::seed() {
+            Some(_) => (
+                crate::world_seed::next_u64(crate::world_seed::Stream::Audio, "the audio sequence")
+                    as u32,
+                "world seed",
+            ),
+            None => (clock_seed(), "时钟"),
+        },
     };
     let rng = SequenceRng::seeded(seed);
     info!(

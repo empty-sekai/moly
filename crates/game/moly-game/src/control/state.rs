@@ -33,7 +33,7 @@ fn vec3(value: Vec3) -> Value {
     json!([value.x, value.y, value.z])
 }
 
-fn time(world: &World) -> Value {
+pub(super) fn time(world: &World) -> Value {
     let virtual_time = world.get_resource::<Time<Virtual>>();
     json!({
         "elapsed": virtual_time.map(Time::elapsed_secs_f64),
@@ -43,7 +43,7 @@ fn time(world: &World) -> Value {
     })
 }
 
-fn site(world: &World) -> Value {
+pub(super) fn site(world: &World) -> Value {
     let Some(site) = world.get_resource::<crate::site::SiteActive>() else {
         return Value::Null;
     };
@@ -57,7 +57,7 @@ fn site(world: &World) -> Value {
     })
 }
 
-fn weather(world: &World) -> Value {
+pub(super) fn weather(world: &World) -> Value {
     let Some(current) = world.get_resource::<crate::weather::CurrentPhenomenonId>() else {
         return Value::Null;
     };
@@ -83,7 +83,7 @@ fn player(world: &mut World) -> Value {
     }
 }
 
-fn characters(world: &mut World) -> Value {
+pub(super) fn characters(world: &mut World) -> Value {
     let mut roster = world.query_filtered::<(
         Entity,
         &CharacterUnitId,

@@ -1346,6 +1346,11 @@ impl PlayerTalkSession {
         self.npc == npc && self.end_state == Some(crate::npc::NpcAction::FixtureActionIdle)
     }
 
+    /// The character unit the player talks with.
+    pub(crate) fn unit(&self) -> u32 {
+        self.unit
+    }
+
     /// 会话的段 id（窗体日志的链名读取点用）。
     pub(crate) fn talk_id(&self) -> i32 {
         self.talk_id

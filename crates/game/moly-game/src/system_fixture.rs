@@ -191,6 +191,15 @@ impl SystemFixtures {
         ))
     }
 
+    /// The system fixture type of a master fixture (`None`: no system row,
+    /// or the table has not resolved).
+    pub(crate) fn of_master(&self, master_fixture_id: i32) -> Option<SystemFixtureType> {
+        match &self.system {
+            Some(Ok(rows)) => rows.get(&master_fixture_id).copied(),
+            _ => None,
+        }
+    }
+
     /// `MysekaiFixtureUtility.IsMusicPlay(fixtureId)`: the fixture's system
     /// fixture row is of type music_play.
     #[allow(dead_code)] // Read by the BGM select screen's entry.

@@ -160,6 +160,17 @@ fn on_collect_drop_item(
         "[harvest-pickup] collected uid {} ({reason}): resourceType {} id {} qty {} rarity {}",
         item.uid, item.resource_type, item.resource_id, item.row.quantity, item.rarity
     );
+    crate::control::events::emit(
+        "item_obtained",
+        serde_json::json!({
+            "uid": item.uid,
+            "site_id": item.site_id,
+            "resource_type": item.resource_type,
+            "resource_id": item.resource_id,
+            "quantity": item.row.quantity,
+            "rarity": item.rarity,
+        }),
+    );
 }
 
 /// Update: the collision scan, then the manager's frame pass.

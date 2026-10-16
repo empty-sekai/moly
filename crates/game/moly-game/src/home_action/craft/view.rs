@@ -647,6 +647,16 @@ pub(crate) struct CraftViewRoot {
     bindings: Bindings,
 }
 
+/// The craft screen's document key and its apply button's node path, for a
+/// tap at the button's drawn centre.
+pub(crate) fn apply_button_node(world: &mut World) -> Option<(&'static str, String)> {
+    let mut roots = world.query::<&CraftViewRoot>();
+    roots
+        .iter(world)
+        .next()
+        .map(|root| (SCREEN, root.bindings.apply_button.clone()))
+}
+
 #[derive(Component)]
 pub(crate) struct CraftHeader {
     back: String,

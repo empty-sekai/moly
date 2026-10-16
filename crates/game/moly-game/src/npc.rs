@@ -507,12 +507,45 @@ pub(crate) fn stop_for_external_activity(world: &mut World, actor: Entity) {
     if actions.current == NpcAction::Talk {
         return;
     }
+    halt(&mut route, &mut path, &mut walk, &mut stuck, &mut phase);
+    actions.change(NpcAction::Idle, &mut rest);
+}
+
+/// `NPCAvatarPresenter.Stop`: the navigation agent stops and the idle motion
+/// plays (the locomotion driver's idle while dwelling); the action state
+/// stays as it is.
+///
+/// The agent stays bound to the field it stands on, so the route keeps that
+/// field's generation: a route reset to generation 0 is rebound by the walk
+/// on its next frame, and the rebinding declares the navigation state (Idle
+/// while dwelling) over the state the caller keeps.
+pub(crate) fn stop_movement(world: &mut World, actor: Entity) {
+    let mut query = world.query::<(
+        &mut RouteStops,
+        &mut PathSlot,
+        &mut WalkState,
+        &mut StuckBaseline,
+        &mut MotionPhase,
+    )>();
+    if let Ok((mut route, mut path, mut walk, mut stuck, mut phase)) = query.get_mut(world, actor) {
+        let generation = route.generation;
+        halt(&mut route, &mut path, &mut walk, &mut stuck, &mut phase);
+        route.generation = generation;
+    }
+}
+
+fn halt(
+    route: &mut RouteStops,
+    path: &mut PathSlot,
+    walk: &mut WalkState,
+    stuck: &mut StuckBaseline,
+    phase: &mut MotionPhase,
+) {
     route.cancel();
     path.0 = NpcPathWalkSlot::from_corners(Vec::new());
     walk.0.next_corner = 0;
     stuck.0 = None;
     *phase = MotionPhase::Dwelling { remaining: None };
-    actions.change(NpcAction::Idle, &mut rest);
 }
 
 /// Show synchronizes the retained actor with the rebuilt field. Unhandled
@@ -2270,6 +2303,7 @@ pub fn advance(
     editor: Res<crate::fixture_edit::EditSessionActive>,
     walk_face: Option<Res<crate::walk_face::WalkFace>>,
     objective_face: Option<Res<crate::npc_objective::ObjectiveFace>>,
+    navigation: Option<Res<residency::SiteNavigation>>,
     mut npcs: Query<
         (
             &CharacterUnitId,
@@ -2286,11 +2320,9 @@ pub fn advance(
             &mut NpcActions,
             &mut RestLifecycle,
             Option<&crate::talk::fixture_action::TalkFixtureActorLease>,
+            (Has<residency::Away>, Has<change_site_state::ChangeSiteWalking>),
         ),
-        (
-            Without<crate::npc_fixture_activity::NpcFixtureMotionOwner>,
-            Without<residency::Away>,
-        ),
+        Without<crate::npc_fixture_activity::NpcFixtureMotionOwner>,
     >,
 ) {
     if editor.is_active() {
@@ -2315,8 +2347,18 @@ pub fn advance(
         mut actions,
         mut rest,
         talk_lease,
+        (away, change_site_walk),
     ) in &mut npcs
     {
+        if away && !change_site_walk {
+            continue;
+        }
+        let retained = away.then(|| navigation.as_deref()?.get(&actions.site_type)).flatten();
+        let (walk_face, objective_face) = if away {
+            (retained.map(|nav| &nav.walk), retained.map(|nav| &nav.objective))
+        } else {
+            (walk_face.as_deref(), objective_face.as_deref())
+        };
         // 外部截断的自愈：收场位（`Dwelling::None`）与非空路点表/路径槽
         // 并存，只可能来自相位被外部改写（对话域对参演者的收场写入）。
         // 本域的状态机里收场位必然伴随空表空槽；这里把残表清掉——被谈话
@@ -2399,9 +2441,7 @@ pub fn advance(
                 unit.0
             );
         }
-        let (Some(walk_face), Some(objective_face)) =
-            (walk_face.as_deref(), objective_face.as_deref())
-        else {
+        let (Some(walk_face), Some(objective_face)) = (walk_face, objective_face) else {
             continue;
         };
         if objective_face.navigation_generation() != walk_face.generation() {

@@ -578,9 +578,28 @@ impl ServerModel {
                     self.doc.gamedata.mysekai_rank,
                     self.doc.delivery.mysekai_materials,
                 );
+                crate::control::events::emit(
+                    "craft_done",
+                    serde_json::json!({
+                        "blueprint_id": crafted.blueprint.id,
+                        "craft_type": crafted.blueprint.craft_type.name(),
+                        "target_id": target,
+                        "texture_id": crafted.texture_id,
+                        "quantity": request.quantity,
+                        "spent": crafted.spent.iter().map(|(material, quantity)| serde_json::json!({ "material_id": material, "quantity": quantity })).collect::<Vec<_>>(),
+                        "first": crafted.first,
+                        "exp": crafted.exp,
+                    }),
+                );
                 self.answer(kind, &changed)
             }
-            Err(reason) => self.refuse(kind, reason),
+            Err(reason) => {
+                crate::control::events::emit(
+                    "craft_refused",
+                    serde_json::json!({ "blueprint_id": request.blueprint_id, "quantity": request.quantity, "reason": reason }),
+                );
+                self.refuse(kind, reason)
+            }
         }
     }
 

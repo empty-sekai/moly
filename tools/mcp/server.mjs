@@ -43,6 +43,8 @@ const BOOT_DEFAULT_S = 600;
 const STOP_WAIT_MS = 5_000;
 const POLL_MS = 250;
 const CAPTURE_POLL_MS = 200;
+const STEP_POLL_MS = 20;
+const EVENT_POLL_MS = 100;
 const TERMINAL_STATUS = new Set(['done', 'failed', 'stopped']);
 
 const log = (...args) => console.error('[moly-mcp]', ...args);
@@ -943,6 +945,73 @@ server.registerTool(
     inputSchema: { id: z.string() },
   },
   guard('director_schema', async ({ id }) => json(await callOk(getInstance(id), 'moly.director.schema'))),
+);
+
+server.registerTool(
+  'time',
+  {
+    description:
+      'Read or set the game clock: scale (1 is normal speed), paused, step (run that many frames, then pause; the tool waits until they have run) and fixed_dt (seconds each frame advances, null for real time). Returns {elapsed, scale, paused, stepping, fixed_dt, frame, seed, draws}; seed is the world seed the instance was started with (MOLY_SEED), or null.',
+    inputSchema: {
+      id: z.string(),
+      scale: z.number().min(0).optional(),
+      paused: z.boolean().optional(),
+      step: z.number().int().min(1).optional().describe('Frames to run before pausing again'),
+      fixed_dt: z.number().positive().max(1).nullable().optional().describe('Seconds per frame; null for real time'),
+      timeout: z.number().positive().optional().describe('Seconds to wait for a step, default 60'),
+    },
+  },
+  guard('time', async ({ id, timeout = 60, ...params }) => {
+    const inst = getInstance(id);
+    const request = Object.fromEntries(Object.entries(params).filter(([, value]) => value !== undefined));
+    let clock = await callOk(inst, 'moly.time', request);
+    const deadline = Date.now() + timeout * 1000;
+    while (request.step !== undefined && clock.stepping > 0) {
+      if (Date.now() >= deadline) return json({ ...clock, timedOut: true }, true);
+      await sleep(STEP_POLL_MS);
+      clock = await callOk(inst, 'moly.time');
+    }
+    return json(clock);
+  }),
+);
+
+server.registerTool(
+  'events',
+  {
+    description:
+      'Read the event stream: what happened after the event numbered since (default 0), oldest first. Kinds: item_obtained, craft_done, craft_refused, delivery_started, delivery_refused, delivery_done, character_arrived, character_left, weather_changed, site_entered, talk_started, talk_ended, tweet_shown. Each event has seq, frame, time, kind and its fields. Returns {events, next, missed, latest}; pass next as since on the following read. missed counts events dropped before they were read. With wait (seconds) the tool waits until at least one event arrives.',
+    inputSchema: {
+      id: z.string(),
+      since: z.number().int().min(0).optional(),
+      limit: z.number().int().min(1).max(1000).optional().describe('Most events to return, default 200'),
+      kinds: z.array(z.string()).optional().describe('Only these kinds'),
+      wait: z.number().positive().optional().describe('Seconds to wait for an event, default 0'),
+    },
+  },
+  guard('events', async ({ id, wait = 0, ...params }) => {
+    const inst = getInstance(id);
+    const request = Object.fromEntries(Object.entries(params).filter(([, value]) => value !== undefined));
+    const deadline = Date.now() + wait * 1000;
+    for (;;) {
+      const read = await callOk(inst, 'moly.events', request);
+      if (read.events.length > 0 || Date.now() >= deadline) return json(read);
+      request.since = read.next;
+      await sleep(EVENT_POLL_MS);
+    }
+  }),
+);
+
+server.registerTool(
+  'observe',
+  {
+    description:
+      'Read the world as structured data: the moly.observe sections named in what (default all): site (tiles, grid size and occupied cells), gatherables, bag (materials, items and limits), tools, recipes (blueprints with costs and whether they can be crafted now), fixtures (owned and placed), characters (position, site, action, objective), weather, time.',
+    inputSchema: {
+      id: z.string(),
+      what: z.array(z.string()).optional().describe('Sections to read, default all'),
+    },
+  },
+  guard('observe', async ({ id, what }) => json(await callOk(getInstance(id), 'moly.observe', what ? { what } : {}))),
 );
 
 const tile = z.array(z.number().int().min(-128).max(127)).length(3);

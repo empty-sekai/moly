@@ -193,6 +193,45 @@ fn show(
     Some(id)
 }
 
+/// The shown dialog's button for a tap at its drawn centre: the dialog, its
+/// caller, its view's document key and the node path of its OK button
+/// (`ok`) or its cancel button. Refused while no dialog is shown, while its
+/// first taps still belong to the screen under it, and for a cancel on a
+/// one-button dialog.
+pub(crate) fn shown_button(
+    world: &mut World,
+    ok: bool,
+) -> Result<(DialogId, &'static str, &'static str, String), String> {
+    let (id, key, caller, fresh) = world
+        .get_resource::<CommonDialogs>()
+        .and_then(|dialogs| dialogs.shown.as_ref())
+        .map(|shown| (shown.id, shown.key, shown.caller, shown.fresh))
+        .ok_or("no common dialog is shown")?;
+    if fresh {
+        return Err(format!("{key} from {caller} has just opened"));
+    }
+    let mut views = world.query::<&CommonDialogView>();
+    let view = views
+        .iter(world)
+        .find(|view| view.key == key)
+        .ok_or_else(|| format!("{key} from {caller} has no view"))?;
+    let path = match (ok, view.buttons.as_slice()) {
+        (true, [.., ok]) => ok.clone(),
+        (false, [cancel, _]) => cancel.clone(),
+        (false, _) => return Err(format!("{key} from {caller} has no cancel button")),
+        (true, []) => return Err(format!("{key} from {caller} has no buttons")),
+    };
+    Ok((id, caller, key, path))
+}
+
+/// The dialog `id` is the shown common dialog.
+pub(crate) fn is_shown(world: &World, id: DialogId) -> bool {
+    world
+        .get_resource::<CommonDialogs>()
+        .and_then(|dialogs| dialogs.shown.as_ref())
+        .is_some_and(|shown| shown.id == id)
+}
+
 /// The answer of the dialog `id` (true: OK), once it has one; the dialog is
 /// then closed. A dialog closed from outside answers as its cancel.
 pub(crate) fn answer(world: &mut World, id: DialogId) -> Option<bool> {

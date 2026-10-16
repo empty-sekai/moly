@@ -1010,14 +1010,12 @@ pub struct MemberRng {
     calls: u64,
 }
 
-/// Eight bytes from the platform's random source. The source's generators
-/// are seeded from operating-system randomness and the clock, so every launch
-/// draws a different sequence; a platform without a random source is refused.
+/// Eight bytes from the NPC stream of the world seed (see `world_seed`).
+/// The source's generators are seeded from operating-system randomness and
+/// the clock, so without a world seed every launch draws a different
+/// sequence; a platform without a random source is refused.
 pub(crate) fn platform_seed() -> u64 {
-    let mut bytes = [0u8; 8];
-    getrandom::getrandom(&mut bytes)
-        .unwrap_or_else(|error| panic!("the platform random source seeds the NPC generators: {error}"));
-    u64::from_le_bytes(bytes)
+    crate::world_seed::next_u64(crate::world_seed::Stream::Npc, "the NPC generators")
 }
 
 impl MemberRng {

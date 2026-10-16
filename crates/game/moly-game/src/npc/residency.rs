@@ -29,6 +29,61 @@
 //! suspended NPC keeps the state it had.
 
 use bevy::prelude::*;
+use std::collections::HashMap;
+
+/// Navigation retained in each site's local frame while its view is hidden.
+/// The walk and objective faces are kept together so they share a generation.
+#[derive(Resource, Default)]
+pub(crate) struct SiteNavigation(HashMap<String, Navigation>);
+
+pub(crate) struct Navigation {
+    pub(crate) walk: crate::walk_face::WalkFace,
+    pub(crate) objective: crate::npc_objective::ObjectiveFace,
+    pub(crate) door: Option<(Vec3, Vec3)>,
+}
+
+impl SiteNavigation {
+    pub(crate) fn get(&self, site: &str) -> Option<&Navigation> {
+        self.0.get(site)
+    }
+
+    pub(crate) fn forget(&mut self, site: &str) {
+        self.0.remove(site);
+    }
+}
+
+/// Before the current site's fixtures and navigation are detached, retain
+/// the same baked faces and the door locator that the active agents use.
+pub(crate) fn retain_navigation(world: &mut World) {
+    let Some(site) = world.get_resource::<crate::site::SiteActive>() else {
+        return;
+    };
+    let name = site.site_type.clone();
+    if !npc_update_runs(&name) {
+        return;
+    }
+    let (Some(walk), Some(objective)) = (
+        world.get_resource::<crate::walk_face::WalkFace>().cloned(),
+        world.get_resource::<crate::npc_objective::ObjectiveFace>().cloned(),
+    ) else {
+        return;
+    };
+    if walk.generation() != objective.navigation_generation() {
+        return;
+    }
+    let point = match site_type_value(&name) {
+        Some(0) => match crate::fixture_gimmick::house_door::find_house(world) {
+            crate::fixture_gimmick::house_door::HouseLookup::Found(house) => house.inside_door,
+            _ => None,
+        },
+        Some(1..=3) => crate::site_move::room_door::inside_point(world),
+        _ => None,
+    };
+    let door = point.and_then(|point| world.get::<GlobalTransform>(point))
+        .map(|transform| (transform.translation(), transform.rotation() * Vec3::Z));
+    world.resource_mut::<SiteNavigation>().0.insert(name.clone(), Navigation { walk, objective, door });
+    info!("[npc-residency] retained navigation of {name}, door {door:?}");
+}
 
 /// `MysekaiSiteType`, in its declaration order: the value of each site type
 /// is its index.

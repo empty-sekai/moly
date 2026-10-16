@@ -107,6 +107,25 @@ pub(crate) fn tap(world: &mut World, position: Vec2) -> Result<(), &'static str>
     Ok(())
 }
 
+/// One press and release of the back key (Escape) in one frame, as a
+/// keyboard sends them.
+pub(crate) fn back_key(world: &mut World) -> Result<(), &'static str> {
+    use bevy::input::keyboard::{Key, KeyboardInput};
+    use bevy::input::ButtonState;
+    let (entity, _) = window(world).ok_or("no primary window")?;
+    for state in [ButtonState::Pressed, ButtonState::Released] {
+        world.write_message(KeyboardInput {
+            key_code: KeyCode::Escape,
+            logical_key: Key::Escape,
+            state,
+            text: None,
+            repeat: false,
+            window: entity,
+        });
+    }
+    Ok(())
+}
+
 /// The drag finger at `position` in `phase`.
 pub(crate) fn drag_touch(world: &mut World, phase: TouchPhase, position: Vec2) -> Result<(), &'static str> {
     let (entity, _) = window(world).ok_or("no primary window")?;

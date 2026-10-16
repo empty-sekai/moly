@@ -87,6 +87,29 @@ pub(crate) fn resolve(world: &mut World, target: &Target) -> Result<Vec3, String
                 .min_by(|a, b| a.distance_squared(from).total_cmp(&b.distance_squared(from)))
                 .ok_or_else(|| format!("no placed fixture of master id {id}"))?
         }
+        TargetKind::Gatherable(uid) => world
+            .query::<(&crate::harvest::HarvestObject, &GlobalTransform)>()
+            .iter(world)
+            .find(|(object, _)| object.uid == *uid)
+            .map(|(_, at)| at.translation())
+            .ok_or_else(|| format!("no gatherable with UID {uid} on this site"))?,
+        TargetKind::Workbench => {
+            let from = player(world).unwrap_or(Vec3::ZERO);
+            let placed: Vec<(i32, Vec3)> = world
+                .query_filtered::<(&FixtureActivityIdentity, &GlobalTransform), With<FixtureRoot>>()
+                .iter(world)
+                .map(|(identity, at)| (identity.master_id, at.translation()))
+                .collect();
+            let systems = world
+                .get_resource::<crate::system_fixture::SystemFixtures>()
+                .ok_or("the system fixture table is not set up")?;
+            placed
+                .into_iter()
+                .filter(|(id, _)| systems.of_master(*id) == Some(crate::system_fixture::SystemFixtureType::CraftTool))
+                .map(|(_, at)| at)
+                .min_by(|a, b| a.distance_squared(from).total_cmp(&b.distance_squared(from)))
+                .ok_or("no placed workbench (a craft tool fixture) on this site")?
+        }
     };
     Ok(at + Vec3::new(target.offset[0], 0.0, target.offset[1]))
 }

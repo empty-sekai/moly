@@ -909,6 +909,14 @@ pub fn install(app: &mut App) {
             )
                 .chain(),
         )
+        // A clip time that is not a number stops the game with the clip
+        // named, before the animation system samples it.
+        .add_systems(
+            PostUpdate,
+            crate::animation_time::refuse_non_finite
+                .after(bevy::animation::advance_animations)
+                .before(bevy::animation::animate_targets),
+        )
         // 骨布推进与写回：动画系统写好骨的当帧局部变换之后、变换传播
         // 之前——写回的布料姿势当帧传播到渲染与蒙皮。世界变换由布层
         // 自己沿父链合成（全局变换此刻还是上一帧的）。

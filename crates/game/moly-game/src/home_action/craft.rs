@@ -337,6 +337,8 @@ pub(crate) struct CraftScreen {
     /// The dialogs were staged by the instrument (no sequence closes them).
     staged: bool,
     staged_fired: bool,
+    /// Why the last confirmed craft was not sent or not done.
+    refusal: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -582,8 +584,153 @@ fn craft_rows(world: &World, kind: CraftListType) -> Result<Vec<MasterBlueprint>
         .collect())
 }
 
+/// The craft lists as the craft screen would show them now, for the
+/// observation: per list, each blueprint with its target, name, colours,
+/// material costs, and whether the apply button would be on for one craft
+/// of its first colour (else the balloon wording key that says why).
+pub(crate) fn recipes(world: &World) -> serde_json::Value {
+    use serde_json::json;
+    let mut lists = serde_json::Map::new();
+    for kind in CRAFT_LIST_TYPES {
+        let key = match kind {
+            CraftListType::Craft => "fixture",
+            CraftListType::Tool => "tool",
+            CraftListType::LimitedCraft => "limited",
+        };
+        let rows = match craft_rows(world, kind) {
+            Ok(rows) => rows,
+            Err(reason) => {
+                lists.insert(key.into(), json!({ "error": reason }));
+                continue;
+            }
+        };
+        let masters = world.get_resource::<CraftMasters>();
+        let inventory = world.get_resource::<ClientMysekaiInventory>();
+        let possession = world.get_resource::<PossessionMasters>();
+        let entries: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|blueprint| {
+                let costs: Vec<serde_json::Value> = masters
+                    .and_then(|masters| masters.blueprint_costs(blueprint.id))
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|cost| json!({ "material_id": cost.mysekai_material_id, "quantity": cost.quantity }))
+                    .collect();
+                let selection = select(world, blueprint.id, 1);
+                let state = match (&selection, masters, inventory) {
+                    (Ok(selection), Some(masters), Some(inventory)) => {
+                        match apply_state(selection, masters, &owned(inventory, possession)) {
+                            Ok(None) => json!({ "can_craft": true }),
+                            Ok(Some(balloon)) => json!({ "can_craft": false, "reason": balloon }),
+                            Err(reason) => json!({ "can_craft": false, "reason": reason }),
+                        }
+                    }
+                    (Err(reason), ..) => json!({ "can_craft": false, "reason": reason }),
+                    _ => json!({ "can_craft": false, "reason": "the craft masters or the client copy of the user's tables are not installed" }),
+                };
+                json!({
+                    "blueprint_id": blueprint.id,
+                    "craft_type": blueprint.craft_type.name(),
+                    "target_id": blueprint.craft_target_id,
+                    "name": selection.as_ref().ok().map(|selection| selection.name.clone()),
+                    "colors": selection.as_ref().ok().map(|selection| selection.colors.clone()),
+                    "costs": costs,
+                    "can_craft": state["can_craft"],
+                    "reason": state.get("reason"),
+                })
+            })
+            .collect();
+        lists.insert(key.into(), json!(entries));
+    }
+    serde_json::Value::Object(lists)
+}
+
 /// The client's current timestamp (`ClientUserData`'s server date plus the
 /// time since it was read).
+// ---------------------------------------------------------------------------
+// A script's hand on the screen
+// ---------------------------------------------------------------------------
+
+/// Where the craft screen stands, as a script waits on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CraftPhase {
+    /// The screen is not open.
+    Closed,
+    /// Open and taking taps.
+    Idle,
+    /// The confirm dialog is shown.
+    Confirm,
+    /// The term limit dialog is shown.
+    TermLimit,
+    /// The craft's world sequence plays.
+    Executing,
+    /// The result dialog is shown.
+    Result,
+    /// The dialogs after the result.
+    Dialogs,
+    /// The dialogs are done; the sequence closes.
+    Done,
+}
+
+pub(crate) fn phase(world: &World) -> CraftPhase {
+    let Some(screen) = world.get_resource::<CraftScreen>() else {
+        return CraftPhase::Closed;
+    };
+    match &screen.stage {
+        Stage::Idle if !screen.open => CraftPhase::Closed,
+        Stage::Idle => CraftPhase::Idle,
+        Stage::Confirm { .. } => CraftPhase::Confirm,
+        Stage::TermLimit { .. } => CraftPhase::TermLimit,
+        Stage::Executing(_) => CraftPhase::Executing,
+        Stage::Dialogs { next: DialogStep::Result { shown: Some(_) }, .. } => CraftPhase::Result,
+        Stage::Dialogs { .. } => CraftPhase::Dialogs,
+        Stage::Done => CraftPhase::Done,
+    }
+}
+
+/// Chooses `blueprint` on the open screen with the taps a finger makes: the
+/// tab of the list that holds it when another is shown, then its cell
+/// (`OnSelectContentType`, `OnClickCell`), handed over as the view hands
+/// them. Refused when the screen is not open and idle, or when no shown list
+/// holds the blueprint.
+pub(crate) fn choose(world: &mut World, blueprint: i32) -> Result<String, String> {
+    let mut screen = world.resource_mut::<CraftScreen>();
+    if !screen.open || !matches!(screen.stage, Stage::Idle) {
+        return Err("the craft screen is not open and idle".into());
+    }
+    let found = (0..CRAFT_LIST_TYPES.len())
+        .filter(|index| CRAFT_LIST_TYPES[*index] != CraftListType::LimitedCraft || screen.limited_tab)
+        .find_map(|index| {
+            screen.lists[index]
+                .iter()
+                .position(|row| row.id == blueprint)
+                .map(|row| (index, row))
+        });
+    let Some((list, row)) = found else {
+        return Err(format!("blueprint {blueprint} is not a row of a shown craft list"));
+    };
+    if list != screen.list {
+        screen.requests.push(ViewRequest::Tab(list));
+    }
+    screen.requests.push(ViewRequest::Select(row));
+    Ok(format!("{:?} list row {row}", CRAFT_LIST_TYPES[list]))
+}
+
+/// The selected blueprint and its apply button: enabled, or the wording key
+/// of the balloon that says why it is off.
+pub(crate) fn selected(world: &World) -> Option<(i32, Result<(), &'static str>)> {
+    let screen = world.get_resource::<CraftScreen>()?;
+    let selection = screen.selection.as_ref()?;
+    let button = screen.button?;
+    let state = if button.enabled { Ok(()) } else { Err(button.balloon.unwrap_or("the apply button is off")) };
+    Some((selection.blueprint.id, state))
+}
+
+/// Why the last confirmed craft was not sent or not done.
+pub(crate) fn refusal(world: &World) -> Option<String> {
+    world.get_resource::<CraftScreen>()?.refusal.clone()
+}
+
 fn current_timestamp(world: &World) -> Result<i64, String> {
     let user = world
         .get_resource::<crate::server::ClientUserData>()
@@ -852,10 +999,12 @@ fn send(world: &mut World, screen: &mut CraftScreen) {
         error!("[craft] SendCraftApiAsync: no blueprint selected");
         return;
     };
+    screen.refusal = None;
     let Some(workbench) = world.get_resource::<CraftWorkbench>().cloned() else {
         error!(
             "[craft] SendCraftApiAsync: no pressed workbench was handed over; the craft is refused"
         );
+        screen.refusal = Some("no pressed workbench was handed over".into());
         return;
     };
     let (Some(masters), Some(inventory)) = (
@@ -882,6 +1031,10 @@ fn send(world: &mut World, screen: &mut CraftScreen) {
             "[craft] SendCraftApiAsync: blueprint {} is a first craft, and its bonus row (craft_mysekai_fixture_first_bonus of the rank experience master) is not carried: refused",
             selection.blueprint.id
         );
+        screen.refusal = Some(format!(
+            "blueprint {} is a first craft, and the first-craft bonus row is not carried",
+            selection.blueprint.id
+        ));
         screen.button = Some(setup_apply_button(world, &selection));
         return;
     }
@@ -909,6 +1062,10 @@ fn send(world: &mut World, screen: &mut CraftScreen) {
             "[craft] PostUserMysekaiCraftApi refused ({}): the API error shows; the preview is set up again",
             reply.refusal.as_deref().unwrap_or("no reason")
         );
+        screen.refusal = Some(format!(
+            "the craft API refused: {}",
+            reply.refusal.as_deref().unwrap_or("no reason")
+        ));
         screen.button = Some(setup_apply_button(world, &selection));
         return;
     }

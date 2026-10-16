@@ -868,14 +868,57 @@ pub(crate) fn open(world: &mut World) {
     }
 }
 
-/// Whether an awaited `OpenDoorAsync` would have returned: the open clip of
-/// the current room's door has reached its end. True without a door (the
-/// await has nothing to wait on); false while the open clip plays or a close
-/// clip is playing.
-pub(crate) fn open_finished(world: &World) -> bool {
-    match current(world).and_then(|door| door.playback.as_ref()) {
-        Some(playback) => playback.clip == Clip::Open && playback.ended,
-        None => current(world).is_none_or(|door| door.instance.is_none()),
+/// An awaited `OpenDoorAsync`, started on the frame of [`open`]: one
+/// `Yield`, then the length of the clip the door's animator is in on that
+/// frame (`GetCurrentAnimatorStateInfo(0).length`, read once), then
+/// `t += deltaTime` each frame until `t` reaches it. A room without a door
+/// animator, or a zero length, ends the wait on the frame after the call.
+/// The wait is the caller's own: a later `Play` on the door (another NPC's
+/// open, the player's move closing it) does not shorten or extend it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct OpenWait {
+    started: u64,
+    length: Option<f32>,
+    t: f32,
+}
+
+impl OpenWait {
+    pub(crate) fn new(frame: u64) -> Self {
+        Self {
+            started: frame,
+            length: None,
+            t: 0.0,
+        }
+    }
+
+    /// One frame of the wait; true on the frame the await returns.
+    pub(crate) fn tick(&mut self, world: &World, frame: u64, dt: f32) -> bool {
+        if frame == self.started {
+            return false;
+        }
+        let length = *self.length.get_or_insert_with(|| current_clip_length(world));
+        if self.t < length {
+            self.t += dt;
+            false
+        } else {
+            true
+        }
+    }
+}
+
+/// The length of the clip the current room's door animator is in; 0 without
+/// a door animator or a clip played on it.
+fn current_clip_length(world: &World) -> f32 {
+    let Some(door) = current(world) else {
+        return 0.0;
+    };
+    let Some(instance) = door.instance.as_ref().filter(|instance| instance.animator.is_some()) else {
+        return 0.0;
+    };
+    match door.playback.as_ref().map(|playback| playback.clip) {
+        Some(Clip::Open) => instance.lengths.0,
+        Some(Clip::Close) => instance.lengths.1,
+        None => 0.0,
     }
 }
 

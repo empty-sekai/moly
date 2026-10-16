@@ -7,7 +7,9 @@
 //! JSON-RPC 2.0 objects, and a request is handled in the frame after it
 //! arrives. `moly.methods` lists the moly methods with what each takes.
 
+pub(crate) mod events;
 mod layout;
+mod observe;
 mod state;
 mod ui;
 
@@ -49,8 +51,18 @@ const METHODS: &[(&str, &str, &str)] = &[
     ),
     (
         "moly.time",
-        "Reads or sets the game clock: scale (0 or more, 1 is normal speed) and paused. Answers the clock after the change.",
-        r#"{"type":"object","properties":{"scale":{"type":"number","minimum":0},"paused":{"type":"boolean"}},"additionalProperties":false}"#,
+        "Reads or sets the game clock: scale (0 or more, 1 is normal speed), paused, step (run that many frames, then pause), and fixed_dt (seconds each frame advances, whatever the frame took; null for real time). Answers the clock after the change: elapsed, scale, paused, stepping (frames of a step still to run), fixed_dt, frame, and the world seed with each random stream's draws.",
+        r#"{"type":"object","properties":{"scale":{"type":"number","minimum":0},"paused":{"type":"boolean"},"step":{"type":"integer","minimum":1},"fixed_dt":{"type":["number","null"],"exclusiveMinimum":0}},"additionalProperties":false}"#,
+    ),
+    (
+        "moly.observe",
+        "The world as structured data, by section (what; every section when it is absent): site (with the layout grid's floor size and the tiles each placed fixture covers), gatherables (harvest objects with position, hit points, the tool type they need and whether the player targets one; and the drops on the ground), bag (materials, items, held total and limit), tools (gathering tools and stamina), recipes (the craft lists with costs and whether the apply button is on, else its balloon key), fixtures (owned and placed), characters, weather and time.",
+        r#"{"type":"object","properties":{"what":{"type":"array","items":{"enum":["site","gatherables","bag","tools","recipes","fixtures","characters","weather","time"]}}},"additionalProperties":false}"#,
+    ),
+    (
+        "moly.events",
+        "The event stream: the events after the one numbered since (default 0), oldest first, at most limit (default 200, at most 1000), only of kinds when given. Each event has seq, frame, time, kind and its fields; kinds are item_obtained, craft_done, craft_refused, delivery_started, delivery_refused, delivery_done, character_arrived, character_left, weather_changed, site_entered, talk_started, talk_ended and tweet_shown. Answers {events, next, missed, latest}: pass next as since on the following read; missed counts the events dropped before they were read.",
+        r#"{"type":"object","properties":{"since":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":1000},"kinds":{"type":"array","items":{"type":"string"}}},"additionalProperties":false}"#,
     ),
     (
         "moly.director.schema",
@@ -148,6 +160,8 @@ pub(crate) fn install(app: &mut App) {
         .with_method("moly.ui.tap", ui_tap)
         .with_method("moly.panel", panel)
         .with_method("moly.time", time)
+        .with_method("moly.events", read_events)
+        .with_method("moly.observe", observe_world)
         .with_method("moly.director.schema", director_schema)
         .with_method("moly.director.command", director_command)
         .with_method("moly.director.examples", director_examples)
@@ -167,7 +181,10 @@ pub(crate) fn install(app: &mut App) {
         .with_method("moly.capture.take", capture_take);
     app.add_plugins(remote)
         .init_resource::<Captures>()
-        .add_systems(Startup, share_sender);
+        .init_resource::<TimeStep>()
+        .add_systems(Startup, share_sender)
+        .add_systems(First, events::stamp)
+        .add_systems(Last, (events::watch, end_step));
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(port) = native_port() {
         info!("[control] listening on 127.0.0.1:{port}");
@@ -329,7 +346,31 @@ fn world_state(In(_): In<Option<Value>>, world: &mut World) -> BrpResult {
     Ok(state::snapshot(world))
 }
 
-fn time(In(params): In<Option<Value>>, mut time: ResMut<Time<Virtual>>) -> BrpResult {
+/// A step in progress: frames still to run before the clock pauses again.
+#[derive(Resource, Default)]
+struct TimeStep {
+    remaining: u32,
+}
+
+/// Last: counts a frame of a step; the clock pauses after its last frame, so
+/// the next frame's virtual delta is zero.
+fn end_step(mut step: ResMut<TimeStep>, mut time: ResMut<Time<Virtual>>) {
+    if step.remaining == 0 {
+        return;
+    }
+    step.remaining -= 1;
+    if step.remaining == 0 {
+        time.pause();
+    }
+}
+
+fn time(
+    In(params): In<Option<Value>>,
+    mut time: ResMut<Time<Virtual>>,
+    mut step: ResMut<TimeStep>,
+    mut strategy: ResMut<bevy::time::TimeUpdateStrategy>,
+    frame: Res<bevy::diagnostic::FrameCount>,
+) -> BrpResult {
     let params = object(params, "moly.time")?;
     if let Some(scale) = params.get("scale") {
         let scale = scale
@@ -338,13 +379,101 @@ fn time(In(params): In<Option<Value>>, mut time: ResMut<Time<Virtual>>) -> BrpRe
             .ok_or_else(|| refuse("moly.time: scale must be a number of 0 or more"))?;
         time.set_relative_speed_f64(scale);
     }
-    match params.get("paused") {
+    match params.get("fixed_dt") {
         None => {}
-        Some(Value::Bool(true)) => time.pause(),
-        Some(Value::Bool(false)) => time.unpause(),
-        Some(_) => return Err(refuse("moly.time: paused must be true or false")),
+        Some(Value::Null) => *strategy = bevy::time::TimeUpdateStrategy::Automatic,
+        Some(dt) => {
+            let dt = dt
+                .as_f64()
+                .filter(|dt| dt.is_finite() && *dt > 0. && *dt <= 1.)
+                .ok_or_else(|| refuse("moly.time: fixed_dt must be seconds above 0 and at most 1, or null"))?;
+            *strategy = bevy::time::TimeUpdateStrategy::ManualDuration(std::time::Duration::from_secs_f64(dt));
+        }
     }
-    Ok(json!({ "elapsed": time.elapsed_secs_f64(), "scale": time.relative_speed_f64(), "paused": time.is_paused() }))
+    let frames = match params.get("step") {
+        None => None,
+        Some(frames) => Some(
+            frames
+                .as_u64()
+                .filter(|frames| (1..=u64::from(u32::MAX)).contains(frames))
+                .ok_or_else(|| refuse("moly.time: step must be a whole number of frames, 1 or more"))? as u32,
+        ),
+    };
+    match (params.get("paused"), frames) {
+        (Some(_), Some(_)) => return Err(refuse("moly.time: give paused or step, not both")),
+        (None, None) => {}
+        (Some(Value::Bool(true)), None) => {
+            step.remaining = 0;
+            time.pause();
+        }
+        (Some(Value::Bool(false)), None) => {
+            step.remaining = 0;
+            time.unpause();
+        }
+        (Some(_), None) => return Err(refuse("moly.time: paused must be true or false")),
+        (None, Some(frames)) => {
+            // The request is answered after this frame's Last, so the step's
+            // frames are the next `frames` frames.
+            step.remaining = frames;
+            time.unpause();
+        }
+    }
+    let fixed_dt = match *strategy {
+        bevy::time::TimeUpdateStrategy::ManualDuration(dt) => json!(dt.as_secs_f64()),
+        _ => Value::Null,
+    };
+    Ok(json!({
+        "elapsed": time.elapsed_secs_f64(),
+        "scale": time.relative_speed_f64(),
+        "paused": time.is_paused(),
+        "stepping": step.remaining,
+        "fixed_dt": fixed_dt,
+        "frame": frame.0,
+        "seed": crate::world_seed::seed(),
+        "draws": crate::world_seed::draws().iter().map(|(name, count)| (name.to_string(), json!(count))).collect::<Map<String, Value>>(),
+    }))
+}
+
+fn observe_world(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
+    let params = object(params, "moly.observe")?;
+    let what = match params.get("what") {
+        None => Vec::new(),
+        Some(Value::Array(names)) => names
+            .iter()
+            .map(|name| name.as_str().map(str::to_owned))
+            .collect::<Option<Vec<String>>>()
+            .ok_or_else(|| refuse("moly.observe: what must be section names"))?,
+        Some(_) => return Err(refuse("moly.observe: what must be an array of section names")),
+    };
+    observe::observe(world, &what).map_err(refuse)
+}
+
+fn read_events(In(params): In<Option<Value>>) -> BrpResult {
+    let params = object(params, "moly.events")?;
+    let since = match params.get("since") {
+        None => 0,
+        Some(since) => since.as_u64().ok_or_else(|| refuse("moly.events: since must be a whole number, 0 or more"))?,
+    };
+    let limit = match params.get("limit") {
+        None => 200,
+        Some(limit) => limit
+            .as_u64()
+            .filter(|limit| (1..=events::MOST_PER_READ as u64).contains(limit))
+            .ok_or_else(|| refuse(format!("moly.events: limit must be a whole number from 1 to {}", events::MOST_PER_READ)))?
+            as usize,
+    };
+    let kinds = match params.get("kinds") {
+        None => None,
+        Some(Value::Array(kinds)) => Some(
+            kinds
+                .iter()
+                .map(|kind| kind.as_str().map(str::to_owned))
+                .collect::<Option<Vec<String>>>()
+                .ok_or_else(|| refuse("moly.events: kinds must be strings"))?,
+        ),
+        Some(_) => return Err(refuse("moly.events: kinds must be an array of strings")),
+    };
+    Ok(events::read(since, limit, kinds.as_deref()))
 }
 
 fn director_examples(In(_): In<Option<Value>>) -> BrpResult {

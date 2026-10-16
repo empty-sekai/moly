@@ -303,6 +303,30 @@ impl SiteFixtureLayouts {
         Ok(counts)
     }
 
+    /// The master fixture ids placed on `site_id` as this session knows
+    /// them: the kept layout of a site it has visited, otherwise the site's
+    /// saved record; none for a site with neither (a floor never furnished).
+    pub(crate) fn placed_fixture_ids(&self, site_id: u32) -> Result<Vec<i32>, String> {
+        if let Some(layout) = self.visited.get(&site_id) {
+            return Ok(layout.fixture_ids());
+        }
+        let document = self.document.as_ref().map_err(Clone::clone)?;
+        let Some(site) = saved_site(document, site_id)? else {
+            return Ok(Vec::new());
+        };
+        site["fixtures"]
+            .as_array()
+            .ok_or_else(|| format!("saved site {site_id} fixtures must be an array"))?
+            .iter()
+            .map(|record| {
+                record["mysekaiFixtureId"]
+                    .as_i64()
+                    .and_then(|v| i32::try_from(v).ok())
+                    .ok_or_else(|| format!("saved site {site_id}: mysekaiFixtureId must be i32"))
+            })
+            .collect()
+    }
+
     /// Called only after a durable receipt. Its exact written document is
     /// installed directly; a separate read can neither invalidate this success
     /// nor replace the baseline with some later writer's unrelated document.

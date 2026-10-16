@@ -1319,6 +1319,13 @@ pub(crate) fn put_birthday_party_delivery(
         let (response, changed) =
             model.birthday_party_delivery(birthday_party_id, consumed_delivery_material_count)?;
         let update = model.delivery_reply(ResponseKind::BirthdayPartyDelivery, &changed);
+        crate::control::events::emit(
+            "delivery_done",
+            serde_json::json!({
+                "party_id": birthday_party_id,
+                "consumed": consumed_delivery_material_count,
+            }),
+        );
         Ok((response, update))
     })
     .unwrap_or_else(|| Err("the server model is not installed".to_owned()))
