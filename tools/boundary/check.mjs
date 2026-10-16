@@ -187,7 +187,7 @@ function gitUntrackedFiles() {
 // exactly when the check was blind. Compressed and binary fixtures (.br, .brz,
 // .bin, .gzz) stay out: they are not text, and scanning them would report
 // matches no human wrote.
-const SOURCE_EXTENSIONS = new Set(['.ts', '.rs', '.wgsl', '.mjs', '.js', '.html', '.toml', '.json', '.py', '.yml', '.yaml']);
+const SOURCE_EXTENSIONS = new Set(['.ts', '.rs', '.wgsl', '.mjs', '.js', '.html', '.css', '.toml', '.json', '.py', '.yml', '.yaml']);
 
 // Directory prefixes (trailing slash mandatory) holding source that is part of
 // the published product. This list is hand-maintained, which is exactly why
@@ -209,6 +209,8 @@ const CRATE_SOURCE_DIR_PATTERNS = [
   // and tests/, which is the exact staleness checkSourceDirCoverage()
   // exists to catch -- and did.
   /^crates\/[^/]+\/[^/]+\/examples\//,
+  // The launcher's page (HTML, script and styles) ships inside its crate.
+  /^crates\/app\/moly-launcher\/(ui|capabilities)\//,
 ];
 
 // A source file sitting directly in a crate's own directory rather than in one
@@ -216,7 +218,7 @@ const CRATE_SOURCE_DIR_PATTERNS = [
 const CRATE_ROOT_DIR = /^crates\/[^/]+\/[^/]+\/$/;
 
 const SOURCE_DIR_DESCRIPTION =
-  'the repo root, web/, tools/, src/, tests/, .cargo/, .github/, .cnb/, .ide/, crates/*/*/ and crates/*/*/{src,tests,examples}/';
+  'the repo root, web/, tools/, src/, tests/, .cargo/, .github/, .cnb/, .ide/, crates/*/*/, crates/*/*/{src,tests,examples}/ and crates/app/moly-launcher/{ui,capabilities}/';
 
 // Directories deliberately outside the coverage assertion, each with the reason
 // it is out. Stated explicitly rather than left to "no prefix happens to match

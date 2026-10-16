@@ -1,0 +1,238 @@
+name: Release
+
+# A version tag (v<workspace version>) builds the native programs and the
+# browser package, and attaches the published targets to a draft release.
+# Publishing the draft is a manual step. Targets marked `publish: false` are
+# built and version-checked but not attached. A manual run builds the same
+# files as workflow artifacts and creates no release.
+#
+# Only third-party dependencies are cached (one cache per target); the
+# workspace crates are compiled on every run.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RUST_TOOLCHAIN: '1.98.1'
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - id: read
+        name: Read the workspace version
+        shell: bash
+        run: |
+          version=$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "workspace version $version"
+      - name: Match the tag to the workspace version
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.read.outputs.version }}
+        run: |
+          if [[ "$TAG" != "v$VERSION" ]]; then
+            echo "tag $TAG does not name the workspace version v$VERSION" >&2
+            exit 1
+          fi
+
+  native:
+    needs: [checks, version]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            exe: moly-app.exe
+            launcher: moly-launcher.exe
+            archive: zip
+            publish: true
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            exe: moly-app
+            launcher: moly-launcher
+            archive: tar.gz
+            publish: false
+          - os: macos-14
+            target: aarch64-apple-darwin
+            exe: moly-app
+            launcher: moly-launcher
+            archive: tar.gz
+            publish: false
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 240
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target ${{ matrix.target }}
+          rustup default "$RUST_TOOLCHAIN"
+      - name: Install system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev             libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+          cache-on-failure: true
+      - name: Build
+        run: cargo build --release --locked -p moly-app -p moly-launcher --target ${{ matrix.target }}
+      - name: Check the reported version
+        shell: bash
+        run: |
+          reported=$("target/${{ matrix.target }}/release/${{ matrix.exe }}" --version)
+          if [[ "$reported" != "moly $VERSION" ]]; then
+            echo "the program reports \"$reported\", expected \"moly $VERSION\"" >&2
+            exit 1
+          fi
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          name="moly-$VERSION-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/${{ matrix.exe }}" "dist/$name/"
+          cp "target/${{ matrix.target }}/release/${{ matrix.launcher }}" "dist/$name/"
+          cp LICENSE README.md THIRD_PARTY_NOTICES.md "dist/$name/"
+          cd dist
+          if [[ "${{ matrix.archive }}" == zip ]]; then
+            7z a -tzip "$name.zip" "$name" > /dev/null
+            echo "file=dist/$name.zip" >> "$GITHUB_OUTPUT"
+          else
+            tar -czf "$name.tar.gz" "$name"
+            echo "file=dist/$name.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: matrix.publish
+        with:
+          name: native-${{ matrix.target }}
+          path: ${{ steps.package.outputs.file }}
+          if-no-files-found: error
+
+  browser:
+    needs: [checks, version]
+    strategy:
+      fail-fast: false
+      matrix:
+        renderer: [webgpu, webgl2]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target wasm32-unknown-unknown
+          rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm32-${{ matrix.renderer }}
+          cache-on-failure: true
+          cache-bin: true
+      - name: Install the wasm-bindgen CLI named by Cargo.lock
+        shell: bash
+        run: |
+          version=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)
+          if ! wasm-bindgen --version 2>/dev/null | grep -qx "wasm-bindgen $version"; then
+            cargo install wasm-bindgen-cli --version "$version" --locked --force
+          fi
+          wasm-bindgen --version
+      - name: Build the ${{ matrix.renderer }} package
+        env:
+          CARGO_BUILD_JOBS: '4'
+        run: node web/build-wasm.mjs --renderer ${{ matrix.renderer }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: browser-${{ matrix.renderer }}
+          path: web/pkg
+          if-no-files-found: error
+
+  browser-package:
+    needs: [version, browser]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: browser-*
+          path: pkg
+          merge-multiple: true
+      - name: Check both renderers and the font are present
+        run: |
+          test -f pkg/webgpu/build.json
+          test -f pkg/webgl2/build.json
+          test "$(find pkg/fonts -name '*.ttf' | wc -l)" -eq 1
+      - name: Package
+        run: |
+          mkdir -p dist
+          tar -czf "dist/moly-$VERSION-web.tar.gz" pkg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: browser
+          path: dist/moly-${{ env.VERSION }}-web.tar.gz
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [version, native, browser-package]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: browser
+          path: dist
+      - name: Write checksums
+        working-directory: dist
+        run: sha256sum moly-* > SHA256SUMS && cat SHA256SUMS
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/moly-* dist/SHA256SUMS \
+            --draft --verify-tag --title "moly $VERSION" --generate-notes

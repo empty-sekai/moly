@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>moly</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="sky" aria-hidden="true">
+    <span class="glow g1"></span><span class="glow g2"></span><span class="glow g3"></span>
+  </div>
+
+  <header class="titlebar" data-tauri-drag-region>
+    <div class="brand" data-tauri-drag-region>
+      <span class="name" data-tauri-drag-region>moly</span>
+      <span class="version" id="version" data-tauri-drag-region></span>
+    </div>
+    <div class="window-buttons">
+      <button class="icon-button" id="open-settings" title="设置" aria-label="设置">
+        <svg viewBox="0 0 24 24"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.6 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>
+      </button>
+      <span class="divider"></span>
+      <button class="window-button" id="minimize" aria-label="最小化"><svg viewBox="0 0 12 12"><path d="M2 6h8"/></svg></button>
+      <button class="window-button" id="maximize" aria-label="最大化"><svg viewBox="0 0 12 12"><rect x="2.5" y="2.5" width="7" height="7" rx="1.5"/></svg></button>
+      <button class="window-button close" id="close" aria-label="关闭"><svg viewBox="0 0 12 12"><path d="m3 3 6 6M9 3l-6 6"/></svg></button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="column">
+      <div class="card start">
+        <div class="play-area">
+          <button class="play" id="play" disabled>
+            <span class="play-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.4-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5Z"/></svg></span>
+            <span class="play-text"><strong id="play-title">开始游戏</strong><small id="play-sub">正在读取…</small></span>
+          </button>
+          <label class="snapshot-pick" id="snapshot-pick" hidden>
+            <span>资源版本</span>
+            <select id="snapshot-select"></select>
+          </label>
+        </div>
+
+        <div class="status-line" id="game-status" hidden></div>
+      </div>
+
+      <div class="card resources">
+        <div class="card-head">
+          <div>
+            <h2>资源</h2>
+            <p class="muted" id="cdn-line">—</p>
+          </div>
+          <button class="ghost small" id="refresh" title="重新读取资源列表">
+            <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg>刷新
+          </button>
+        </div>
+        <ul class="snapshots" id="snapshots">
+          <li class="placeholder">正在读取资源列表…</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="card download" id="download" hidden>
+        <div class="download-top">
+          <div class="ring" id="ring" style="--p: 0">
+            <svg viewBox="0 0 64 64"><circle class="track" cx="32" cy="32" r="27"/><circle class="value" cx="32" cy="32" r="27"/></svg>
+            <span id="ring-text">0%</span>
+          </div>
+          <div class="download-text">
+            <h3 id="download-title">准备下载</h3>
+            <p class="muted" id="download-phase">—</p>
+            <div class="stats">
+              <span><b id="stat-bytes">—</b><small id="stat-bytes-label">已下载</small></span>
+              <span><b id="stat-speed">—</b><small>速度</small></span>
+              <span><b id="stat-eta">—</b><small id="stat-eta-label">剩余</small></span>
+            </div>
+          </div>
+          <button class="ghost small danger" id="cancel">取消</button>
+        </div>
+        <div class="bar"><span id="bar"></span></div>
+        <p class="note" id="download-note"></p>
+      </div>
+      <div class="card places" id="places">
+        <h2>位置</h2>
+        <ul class="place-list">
+          <li class="place"><span>游戏程序</span><code id="place-game">—</code><button data-open="game">打开</button></li>
+          <li class="place"><span>资源</span><code id="place-resources">—</code><button data-open="resources">打开</button></li>
+          <li class="place"><span>存档与设置</span><code id="place-data">—</code><button data-open="data">打开</button></li>
+          <li class="place"><span>日志</span><code id="place-logs">—</code><button data-open="logs">打开</button></li>
+        </ul>
+      </div>
+    </section>
+  </main>
+
+  <div class="scrim" id="scrim" hidden></div>
+  <aside class="drawer" id="drawer" aria-hidden="true">
+    <div class="drawer-head">
+      <h2>设置</h2>
+      <button class="icon-button" id="close-settings" aria-label="关闭设置"><svg viewBox="0 0 12 12"><path d="m3 3 6 6M9 3l-6 6"/></svg></button>
+    </div>
+    <form id="settings" class="settings" autocomplete="off">
+      <fieldset>
+        <legend>下载来源</legend>
+        <label class="field">
+          <span>CDN 地址</span>
+          <input id="cdn" type="url" spellcheck="false" required>
+        </label>
+        <div class="row-actions">
+          <button type="button" class="ghost small" id="cdn-default">恢复默认</button>
+          <button type="button" class="ghost small" id="cdn-test">测试连接</button>
+          <span class="hint" id="cdn-result"></span>
+        </div>
+        <label class="field">
+          <span>并行下载 <b id="jobs-value"></b></span>
+          <input id="jobs" type="range" min="1" max="64" step="1">
+        </label>
+      </fieldset>
+      <fieldset>
+        <legend>资源目录</legend>
+        <div class="path" id="dir"></div>
+        <div class="row-actions">
+          <button type="button" class="ghost small" id="dir-pick">选择…</button>
+          <button type="button" class="ghost small" id="dir-open">打开</button>
+          <button type="button" class="ghost small" id="dir-default">恢复默认</button>
+        </div>
+        <p class="hint">选一个盘或文件夹即可，会自动在里面建 moly 文件夹。游戏直接读取这里已安装的资源，多个版本共用相同的文件。</p>
+      </fieldset>
+      <fieldset>
+        <legend>游戏</legend>
+        <label class="switch">
+          <input id="developer" type="checkbox">
+          <span class="track"><span class="thumb"></span></span>
+          <span class="switch-text">开发者窗口<small>环境开关、内存服务器与 F10 设置面板</small></span>
+        </label>
+        <div class="row-actions">
+          <button type="button" class="ghost small" id="data-open">打开数据目录</button>
+        </div>
+      </fieldset>
+      <div class="drawer-foot">
+        <div class="move-confirm" id="move-confirm" hidden>
+          <p id="move-text"></p>
+          <div class="row-actions">
+            <button type="button" class="primary" id="move-yes">迁移</button>
+            <button type="button" class="ghost small" id="move-no">不迁移，直接切换</button>
+            <button type="button" class="ghost small" id="move-cancel">取消</button>
+          </div>
+        </div>
+        <span class="hint" id="save-result"></span>
+        <button type="submit" class="primary" id="save">保存</button>
+      </div>
+    </form>
+  </aside>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+  <script src="main.js"></script>
+</body>
+</html>

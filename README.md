@@ -99,13 +99,42 @@ UID 与文件启动参数只能选择一种。
 已包含转发。使用 Cloudflare 静态资源绑定时，可使用 `web/player-api-worker.mjs`。
 页面参数 `player_uid`、`player_region`、`player_api` 可覆盖获取输入。
 
+## 启动器
+
+`moly-launcher` 是原生版的入口程序。它从 CDN（默认 `https://assets.pjsk.moe/sekai-extra-assets/`）
+读取发布清单 `game/manifest.json`，列出可下载的资源版本，把选中版本的目录、包清单与资源文件
+下载到资源目录并逐个核对 SHA-256，然后启动同目录下的 `moly-app`。下载可随时取消，下次从断点
+继续；对已安装的版本再执行一次即为校验与修复。多个版本共用内容相同的文件。
+
+CDN 地址、资源目录、并行下载数与开发者窗口在启动器的设置中修改，保存在数据目录的
+`launcher.json`。数据目录在 Windows 上是程序所在文件夹里的 `data\`，启动器与游戏在同一个
+文件夹中共用它；其他系统是 `$XDG_DATA_HOME/moly`（或 `~/.local/share/moly`）。设置环境变量
+`MOLY_DATA_DIR` 可改用别的目录，启动器启动游戏时会把自己的数据目录传给游戏。游戏的存档与
+设置文件、启动器写的游戏日志（`logs/`）也在数据目录里。
+
+资源目录首次打开时确定并写入 `launcher.json`：默认是数据目录里的 `resources/`；若它位于
+Windows 系统盘，则改用剩余空间最大的其他固定磁盘根下的 `moly\`。在设置中选择文件夹时，
+选中的文件夹为空、已含资源或名为 `moly` 则直接使用，否则使用其中的 `moly\`（选 `E:\` 得到
+`E:\moly`）。更换资源目录时可把已安装的资源迁移过去：同一磁盘内直接移动文件夹；跨磁盘时
+逐个复制并按文件名中的 SHA-256 校验，切换到新目录后才删除旧文件，中途取消或失败时原目录
+保持可用。
+
+不经启动器直接运行 `moly-app` 且未设置 `MOLY_ASSET_ROOT` 时，游戏读取启动器资源目录中
+已安装的版本：`launcher.json` 选中的版本，没有选中时取最近安装的版本。
+
 ## 版本与 CI
 
 版本统一定义在 `Cargo.toml` 的 `[workspace.package]` 中，所有 crate 继承该版本。
 设置面板显示当前版本；原生程序可通过 `moly-app --version` 查询，无需加载资源。
 
 GitHub Actions 在推送、拉取请求和手动触发时执行版本一致性、JavaScript 语法、
-开源边界及提交空白检查。CI 不编译、不打包，也不需要游戏资源。
+开源边界及提交空白检查，不编译、不打包，也不需要游戏资源。
+
+推送 `v<版本>` 标签时，发布工作流先运行上述检查并核对标签与工作区版本一致，再编译
+Windows x64、Linux x64、macOS arm64 原生程序和 WebGPU、WebGL2 两个网页后端，
+把 Windows 程序包（游戏与启动器）、网页包（`pkg/` 目录）和 `SHA256SUMS` 附加到一个草稿 Release。
+Linux 与 macOS 程序只编译并核对版本，不附加。手动触发只生成工作流产物，不创建 Release。
+发布包不含任何游戏资源。
 版本和边界检查可在本地运行 `python tools/version/check.py`、`node tools/boundary/check.mjs`。
 本地无 GPU 的核心与回归测试可运行 `cargo test --release --workspace --lib -- --test-threads=1`，
 其中的网络和存档检查使用回环服务、合成输入及临时文件，不需要游戏资源。
@@ -120,6 +149,7 @@ GitHub Actions 在推送、拉取请求和手动触发时执行版本一致性�
 | `crates/engine/moly-perf` | 逐帧性能计数 |
 | `crates/game/moly-game` | 场景、交互、UI 与渲染 |
 | `crates/app/moly-app` | 游戏程序：原生与浏览器入口 |
+| `crates/app/moly-launcher` | 启动器：下载资源、设置、启动游戏（Tauri，页面在 `ui/`） |
 | `crates/vendor/cpal` | 带一处网页音频修正的 CPAL |
 | `web` | 浏览器页面与构建工具 |
 | `tools` | 仓库边界与渲染顺序检查 |

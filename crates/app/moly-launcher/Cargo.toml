@@ -1,0 +1,21 @@
+[package]
+name = "moly-launcher"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Downloads moly's resources, keeps its settings and starts the game."
+
+[[bin]]
+name = "moly-launcher"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "=2.7.1", features = [] }
+
+[dependencies]
+moly-store = { path = "../../base/moly-store" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { workspace = true }
+tauri = { version = "=2.12.1", features = [] }
+tauri-plugin-dialog = "=2.8.0"
+tauri-plugin-opener = "=2.7.0"

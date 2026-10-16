@@ -6,3 +6,5 @@
 /build-guarded.log
 /balloon-order-*.log
 /balloon-order-*.json
+# Tauri regenerates the launcher's permission schemas on every build.
+/crates/app/moly-launcher/gen/
