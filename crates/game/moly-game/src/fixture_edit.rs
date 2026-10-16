@@ -1252,6 +1252,12 @@ fn save(session: &mut EditSession, world: &mut World, exit_after: bool) {
     session.storage_baseline = Some(next_storage_baseline);
     session.initial_inventory = session.inventory.clone();
     session.exit_dialog = false;
+    // Newly placed fixtures are loaded only by the preview so far.
+    let previews: Vec<_> = world
+        .get_resource::<assets::CandidateAssets>()
+        .map(|candidates| candidates.glbs.values().cloned().collect())
+        .unwrap_or_default();
+    crate::fixture::retain_sources_until_swapped(world, previews);
     presentation::clear(world);
     crate::fixture::reload_after_save(world);
     world.write_message(LayoutSaved);

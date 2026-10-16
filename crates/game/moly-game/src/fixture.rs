@@ -1640,6 +1640,7 @@ pub(crate) fn reload_current_layout(world: &mut World) {
     world.remove_resource::<crate::fixture_attach::AttachWorlds>();
     world.remove_resource::<crate::fixture_talk::TimelinesPlanned>();
     world.remove_resource::<crate::fixture_talk::TimelineAssets>();
+    world.remove_resource::<crate::site_move::door::HouseEntryTagged>();
     world.insert_resource(FixtureSpawnedCount::default());
     world.insert_resource(FixtureScenesReadyCount::default());
     let mut revision = world.resource_mut::<FixtureLayoutRevision>();
@@ -1678,8 +1679,38 @@ pub(crate) fn clear_for_site_change(world: &mut World) {
         }
     }
     reload_current_layout(world);
+    world.remove_resource::<RetainedFixtureSources>();
     world.insert_resource(FixturePlacements::default());
     crate::fixture_edit::clear_for_site_change(world);
+}
+
+/// GLB sources of the layout a save replaced, held until the reloaded
+/// layout's materials are swapped. A load request for a path whose last handle
+/// was just dropped parses the file again; the second parse replaces the
+/// labeled scenes in place after the new roots were expanded and swapped, and
+/// the scene spawner expands them again with the imported materials. Holding
+/// the handles makes the reload reuse the loaded assets.
+#[derive(Resource, Default)]
+pub(crate) struct RetainedFixtureSources(Vec<Handle<Gltf>>);
+
+pub(crate) fn retain_sources_until_swapped(
+    world: &mut World,
+    handles: impl IntoIterator<Item = Handle<Gltf>>,
+) {
+    world
+        .get_resource_or_insert_with(RetainedFixtureSources::default)
+        .0
+        .extend(handles);
+}
+
+fn release_retained_sources(
+    mut commands: Commands,
+    retained: Option<Res<RetainedFixtureSources>>,
+    swapped: Option<Res<crate::fixture_material::FixtureMaterialsSwapped>>,
+) {
+    if retained.is_some() && swapped.is_some() {
+        commands.remove_resource::<RetainedFixtureSources>();
+    }
 }
 
 pub(crate) fn reload_after_save(world: &mut World) {
@@ -1687,6 +1718,15 @@ pub(crate) fn reload_after_save(world: &mut World) {
     crate::npc_fixture_activity::cancel_for_site_change(world);
     crate::fixture_gimmick::cancel_for_site_change(world);
     crate::fixture_scene_inputs::invalidate_for_site_change(world);
+    let mut sources: Vec<_> = world
+        .query::<&FixtureSource>()
+        .iter(world)
+        .map(|source| source.0.clone())
+        .collect();
+    if let Some(loader) = world.get_resource::<FixtureGltfAssets>() {
+        sources.extend(loader.handles.values().cloned());
+    }
+    retain_sources_until_swapped(world, sources);
     reload_current_layout(world);
 }
 
@@ -2365,6 +2405,7 @@ impl Plugin for FixturePlugin {
             .init_resource::<FixtureScenesReadyCount>()
             .add_systems(Startup, load)
             .add_systems(PostUpdate, crate::fixture_activity_provider::retire_lookup_caches)
+            .add_systems(PostUpdate, release_retained_sources)
             .add_observer(on_scene_ready)
             .add_systems(
                 Update,
