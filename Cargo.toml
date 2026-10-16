@@ -5,6 +5,7 @@ members = [
     "crates/base/moly-store",
     "crates/engine/moly-assets",
     "crates/engine/moly-perf",
+    "crates/game/moly-core",
     "crates/game/moly-game",
     "crates/app/moly-app",
     "crates/app/moly-launcher",

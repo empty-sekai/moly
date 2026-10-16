@@ -14,12 +14,12 @@ use bevy::prelude::*;
 /// The component that names the character unit an entity animates, for the
 /// owner this check names in its message. The domain that owns the component
 /// implements it, so the check itself knows no character component.
-pub(crate) trait UnitId {
+pub trait UnitId {
     fn unit_id(&self) -> u32;
 }
 
 /// PostUpdate, after the clips advance and before they are sampled.
-pub(crate) fn refuse_non_finite<U: UnitId + Component>(
+pub fn refuse_non_finite<U: UnitId + Component>(
     players: Query<(Entity, &AnimationPlayer, Option<&AnimationGraphHandle>)>,
     graphs: Res<Assets<AnimationGraph>>,
     clips: Res<Assets<AnimationClip>>,

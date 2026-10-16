@@ -14,7 +14,7 @@ pub struct DevTools;
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 
 /// Every surface gated by [`dev_tools`], named in the game-mode startup line.
-pub(crate) const GATED: [&str; 6] = [
+pub const GATED: [&str; 6] = [
     "content library QA auto-open",
     "fixture gallery preview rows",
     "player-data UI",
@@ -30,19 +30,19 @@ pub fn insert_dev_tools(app: &mut App) {
 }
 
 /// Run condition of every gated registration.
-pub(crate) fn dev_tools(tools: Option<Res<DevTools>>) -> bool {
+pub fn dev_tools(tools: Option<Res<DevTools>>) -> bool {
     tools.is_some()
 }
 
 /// Gate for plain functions that have no World access.
-pub(crate) fn installed() -> bool {
+pub fn installed() -> bool {
     INSTALLED.load(Ordering::Relaxed)
 }
 
 /// A native instrument's time window from its variable: `<until>` (from the
 /// start) or `<from>:<until>`, in seconds of app time. `None` when unset or
 /// not numbers.
-pub(crate) fn instrument_window(name: &str) -> Option<(f32, f32)> {
+pub fn instrument_window(name: &str) -> Option<(f32, f32)> {
     let raw = std::env::var(name).ok()?;
     let secs = |text: &str| {
         text.trim()
@@ -57,6 +57,6 @@ pub(crate) fn instrument_window(name: &str) -> Option<(f32, f32)> {
 }
 
 /// Whether `now` lies inside the instrument window of `name`.
-pub(crate) fn instrument_open(name: &str, now: f32) -> bool {
+pub fn instrument_open(name: &str, now: f32) -> bool {
     instrument_window(name).is_some_and(|(from, until)| from <= now && now < until)
 }

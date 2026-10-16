@@ -15,7 +15,7 @@ use std::sync::OnceLock;
 
 /// The random sources of the game, one per kind of draw.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Stream {
+pub enum Stream {
     /// The NPC generators: objectives, pairing, change-site draws.
     Npc,
     /// The particle seed manager.
@@ -34,7 +34,7 @@ static SEED: OnceLock<Option<u64>> = OnceLock::new();
 static DRAWS: [AtomicU64; STREAMS] = [const { AtomicU64::new(0) }; STREAMS];
 
 /// The world seed, when one was given.
-pub(crate) fn seed() -> Option<u64> {
+pub fn seed() -> Option<u64> {
     *SEED.get_or_init(|| {
         let raw = given()?;
         let seed = raw
@@ -59,7 +59,7 @@ fn given() -> Option<String> {
 
 /// Fills `bytes` from `stream`: the seeded sequence when there is a seed,
 /// else the platform's random source.
-pub(crate) fn fill(stream: Stream, bytes: &mut [u8]) -> Result<(), getrandom::Error> {
+pub fn fill(stream: Stream, bytes: &mut [u8]) -> Result<(), getrandom::Error> {
     let Some(seed) = seed() else {
         return getrandom::getrandom(bytes);
     };
@@ -73,14 +73,14 @@ pub(crate) fn fill(stream: Stream, bytes: &mut [u8]) -> Result<(), getrandom::Er
 
 /// Eight bytes from `stream`; a platform without a random source is refused
 /// with a panic naming `what`.
-pub(crate) fn next_u64(stream: Stream, what: &str) -> u64 {
+pub fn next_u64(stream: Stream, what: &str) -> u64 {
     let mut bytes = [0u8; 8];
     fill(stream, &mut bytes).unwrap_or_else(|error| panic!("{what} needs the platform random source: {error}"));
     u64::from_le_bytes(bytes)
 }
 
 /// The draws taken from each stream so far, by stream name.
-pub(crate) fn draws() -> [(&'static str, u64); STREAMS] {
+pub fn draws() -> [(&'static str, u64); STREAMS] {
     let count = |stream: Stream| DRAWS[stream as usize].load(Ordering::Relaxed);
     [
         ("npc", count(Stream::Npc)),

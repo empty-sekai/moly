@@ -4851,6 +4851,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "moly-core"
+version = "0.0.1"
+dependencies = [
+ "bevy",
+ "getrandom 0.2.17",
+ "js-sys",
+ "moly-assets",
+ "moly-store",
+ "serde_json",
+ "tempfile",
+ "tracing-wasm",
+ "web-sys",
+]
+
+[[package]]
 name = "moly-game"
 version = "0.0.1"
 dependencies = [
@@ -4867,6 +4882,7 @@ dependencies = [
  "js-sys",
  "libc",
  "moly-assets",
+ "moly-core",
  "moly-law",
  "moly-perf",
  "moly-store",

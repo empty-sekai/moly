@@ -15,6 +15,8 @@
 use moly_assets::json::master::{MasterData, MasterTable};
 use serde_json::Value;
 
+pub(crate) use crate::server::local::LocalLists;
+
 /// `MysekaiTopicEnum.SiteExpansion`.
 pub(crate) const TOPIC_SITE_EXPANSION: i32 = 1;
 /// `MysekaiTopicsManager.MIN_MYSEKAI_RANK_RELEASE`: a rank below it adds no
@@ -324,15 +326,6 @@ impl Masters {
         self.master_site_level(site_id, rank)
             .map_or(0, |row| row.level)
     }
-}
-
-/// The client-local part of the application's local settings the
-/// expansion reads and writes: `MysekaiTopics` (topic values) and
-/// `UnlockedMasterSiteLevelIds`. State of the web save layer.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct LocalLists {
-    pub(crate) topics: Vec<i32>,
-    pub(crate) unlocked_master_site_level_ids: Vec<i32>,
 }
 
 impl LocalLists {

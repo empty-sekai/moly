@@ -527,13 +527,7 @@ pub(crate) fn saved_total_exp() -> Option<i32> {
         .and_then(profile_total_exp)
 }
 
-/// The saved profile's total experience, seated where the rank gauge and the
-/// server responses read it. [`saved_total_exp`] reads the settings document;
-/// this resource holds that answer so a reader without the document's
-/// ownership reads it too, and it is seated again whenever an import
-/// replaces the document.
-#[derive(Resource, Default, Clone, Copy, Debug)]
-pub(crate) struct SavedTotalExp(pub(crate) Option<i32>);
+pub(crate) use moly_core::saved_total_exp::SavedTotalExp;
 
 /// PreStartup: the value the store already carries, before the first frame
 /// that reads it.

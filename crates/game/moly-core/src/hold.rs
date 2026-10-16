@@ -11,23 +11,23 @@
 use bevy::prelude::*;
 
 /// A hold of one reason this long is reported as a warning.
-pub(crate) const WARN_AFTER_SECS: f32 = 10.0;
+pub const WARN_AFTER_SECS: f32 = 10.0;
 
 /// Where a hold is reported from and what it stops.
-pub(crate) struct HoldSite {
+pub struct HoldSite {
     /// The log tag, without brackets.
-    pub(crate) tag: &'static str,
+    pub tag: &'static str,
     /// What holds, as the subject of the log line ("decisions").
-    pub(crate) what: &'static str,
+    pub what: &'static str,
     /// What the user sees while it holds ("every NPC stands").
-    pub(crate) effect: &'static str,
+    pub effect: &'static str,
     /// Reasons expected to last (an edit session): named, never warned.
-    pub(crate) quiet: &'static [&'static str],
+    pub quiet: &'static [&'static str],
 }
 
 /// The current hold of one system.
 #[derive(Default)]
-pub(crate) struct HoldReport {
+pub struct HoldReport {
     reason: Option<&'static str>,
     since: f32,
     warned: bool,
@@ -35,7 +35,7 @@ pub(crate) struct HoldReport {
 
 impl HoldReport {
     /// The system yields this frame for `reason`.
-    pub(crate) fn hold(&mut self, site: &HoldSite, reason: &'static str, now: f32) {
+    pub fn hold(&mut self, site: &HoldSite, reason: &'static str, now: f32) {
         if self.reason != Some(reason) {
             info!("[{}] {} hold: {reason}", site.tag, site.what);
             *self = Self {
@@ -59,7 +59,7 @@ impl HoldReport {
     }
 
     /// The system runs this frame.
-    pub(crate) fn run(&mut self, site: &HoldSite, now: f32) {
+    pub fn run(&mut self, site: &HoldSite, now: f32) {
         if let Some(reason) = self.reason.take() {
             info!(
                 "[{}] {} run after holding {:.1} s: {reason}",

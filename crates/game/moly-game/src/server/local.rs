@@ -9,8 +9,6 @@
 use bevy::prelude::*;
 use serde_json::{json, Map, Value};
 
-use crate::site_expansion::law::LocalLists;
-
 pub(crate) const SCHEMA_VERSION: u64 = 1;
 
 /// `MysekaiTopicEnum`, name and value.
@@ -114,6 +112,15 @@ impl LocalDocument {
         })
         .to_string()
     }
+}
+
+/// The client-local part of the application's local settings the
+/// expansion reads and writes: `MysekaiTopics` (topic values) and
+/// `UnlockedMasterSiteLevelIds`. State of the web save layer.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct LocalLists {
+    pub(crate) topics: Vec<i32>,
+    pub(crate) unlocked_master_site_level_ids: Vec<i32>,
 }
 
 /// The client-local lists of the application's local settings

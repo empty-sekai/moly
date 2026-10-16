@@ -10,7 +10,7 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-pub(crate) struct NativeGraphicsDiagnosticsPlugin;
+pub struct NativeGraphicsDiagnosticsPlugin;
 
 impl Plugin for NativeGraphicsDiagnosticsPlugin {
     fn build(&self, _app: &mut App) {}

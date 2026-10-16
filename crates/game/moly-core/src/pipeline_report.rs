@@ -17,7 +17,7 @@ use bevy::{
     },
 };
 
-pub(crate) fn install(app: &mut App) {
+pub fn install(app: &mut App) {
     if let Some(render) = app.get_sub_app_mut(RenderApp) {
         render.add_systems(Render, report.in_set(RenderSystems::Cleanup));
     }

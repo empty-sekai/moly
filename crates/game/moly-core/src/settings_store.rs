@@ -15,12 +15,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 #[derive(Resource, Default)]
-pub(crate) struct SettingsStore {
-    pub(crate) last_error: Option<String>,
+pub struct SettingsStore {
+    pub last_error: Option<String>,
 }
 
 impl SettingsStore {
-    pub(crate) fn load(&mut self) -> Option<Value> {
+    pub fn load(&mut self) -> Option<Value> {
         match read_document() {
             Ok(document) => {
                 self.last_error = None;
@@ -33,7 +33,7 @@ impl SettingsStore {
         }
     }
 
-    pub(crate) fn save(&mut self, sections: &[(&str, Value)]) -> bool {
+    pub fn save(&mut self, sections: &[(&str, Value)]) -> bool {
         match save_sections(sections) {
             Ok(()) => {
                 self.last_error = None;
@@ -49,7 +49,7 @@ impl SettingsStore {
 
 /// Missing storage is a first run. Malformed existing data is an error and is
 /// never silently overwritten by an unrelated settings domain.
-pub(crate) fn read_document() -> Result<Value, String> {
+pub fn read_document() -> Result<Value, String> {
     match read_text()? {
         None => Ok(Value::Object(Map::new())),
         Some(text) => {
@@ -65,7 +65,7 @@ pub(crate) fn read_document() -> Result<Value, String> {
 
 /// Also callable by the legacy Option audio writer without a World borrow.
 /// A fresh read on each synchronous write preserves changes from other domains.
-pub(crate) fn save_sections(sections: &[(&str, Value)]) -> Result<(), String> {
+pub fn save_sections(sections: &[(&str, Value)]) -> Result<(), String> {
     save_sections_checked(|_| {
         Ok(sections
             .iter()
@@ -83,7 +83,7 @@ pub(crate) fn save_sections(sections: &[(&str, Value)]) -> Result<(), String> {
 ///
 /// The transaction guard excludes other native writers. Browser writes require
 /// the exclusive Web Lock held by the page for its lifetime.
-pub(crate) fn save_sections_checked(
+pub fn save_sections_checked(
     prepare: impl FnOnce(&Value) -> Result<Vec<(String, Value)>, String>,
 ) -> Result<Value, String> {
     update_document_checked(|document| {
@@ -100,7 +100,7 @@ pub(crate) fn save_sections_checked(
 
 /// Replace complete domain records after validation against the fresh document.
 /// Other domains are retained, and no in-memory state changes before this returns.
-pub(crate) fn update_document_checked(
+pub fn update_document_checked(
     update: impl FnOnce(&mut Value) -> Result<(), String>,
 ) -> Result<Value, String> {
     let _guard = transaction_guard()?;
@@ -175,7 +175,7 @@ pub fn set_browser_storage_writable(writable: bool) {
     BROWSER_WRITABLE.store(writable, Ordering::Relaxed);
 }
 
-pub(crate) fn browser_storage_writable() -> bool {
+pub fn browser_storage_writable() -> bool {
     BROWSER_WRITABLE.load(Ordering::Relaxed)
 }
 
@@ -237,7 +237,7 @@ static NATIVE_GAME: Mutex<Option<NativeGameFiles>> = Mutex::new(None);
 /// lease, and each document's text (`None` when its file does not exist).
 /// Called once, before the page backend is installed.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn open_native_game() -> Result<(bool, [Option<String>; 3]), String> {
+pub fn open_native_game() -> Result<(bool, [Option<String>; 3]), String> {
     let settings = path()?;
     let parent = settings
         .parent()
@@ -283,7 +283,7 @@ pub(crate) fn open_native_game() -> Result<(bool, [Option<String>; 3]), String> 
 /// game's files and acknowledges it. Nothing to do without a lease or a
 /// newer revision.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn persist_native_game() -> Result<(), String> {
+pub fn persist_native_game() -> Result<(), String> {
     let native = NATIVE_GAME
         .lock()
         .map_err(|_| "the native game files are unavailable".to_owned())?;
@@ -328,7 +328,7 @@ fn platform_write_text(text: &str) -> Result<(), String> {
         .map_err(|error| format!("Write localStorage: {error:?}"))
 }
 
-pub(crate) fn location() -> String {
+pub fn location() -> String {
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(location) = NATIVE_GAME.lock().ok().and_then(|native| {
         native.as_ref().map(|files| {
@@ -358,7 +358,7 @@ pub(crate) fn location() -> String {
 }
 
 /// The page backend's document, or the platform store when none is installed.
-pub(crate) fn read_text() -> Result<Option<String>, String> {
+pub fn read_text() -> Result<Option<String>, String> {
     match with_page(|page| page.texts[0].clone()) {
         Some(text) => Ok(text),
         None => platform_read_text(),
@@ -394,14 +394,14 @@ fn transaction_guard() -> Result<Option<PlatformGuard>, String> {
 }
 
 /// The documents of the page backend, in the order the page stores them.
-pub(crate) const PAGE_DOCUMENTS: [&str; 3] = ["settings", "server", "local"];
+pub const PAGE_DOCUMENTS: [&str; 3] = ["settings", "server", "local"];
 
 /// In-memory documents of the browser game: the settings document and the
 /// server model's `server` and `local` documents. Revision 0 is the seed;
 /// each committed write of any document is the next revision. `acked` is
 /// the newest revision the page reported as stored.
 #[derive(Debug, Default)]
-pub(crate) struct PageDocument {
+pub struct PageDocument {
     texts: [Option<String>; 3],
     revision: u32,
     acked: u32,
@@ -409,7 +409,7 @@ pub(crate) struct PageDocument {
 }
 
 impl PageDocument {
-    pub(crate) fn seeded(
+    pub fn seeded(
         settings: Option<String>,
         server: Option<String>,
         local: Option<String>,
@@ -450,7 +450,7 @@ impl PageDocument {
 
     /// Every document (null when never written) when the newest revision is
     /// newer than `after`.
-    pub(crate) fn take(&self, after: u32) -> Option<(u32, [Option<&str>; 3])> {
+    pub fn take(&self, after: u32) -> Option<(u32, [Option<&str>; 3])> {
         if self.revision <= after {
             return None;
         }
@@ -465,7 +465,7 @@ impl PageDocument {
     }
 
     /// The page may only acknowledge a revision it was offered.
-    pub(crate) fn ack(&mut self, revision: u32) -> Result<(), String> {
+    pub fn ack(&mut self, revision: u32) -> Result<(), String> {
         if revision > self.revision {
             return Err(format!(
                 "persist.ack revision {revision} was never offered (newest is {})",
@@ -476,16 +476,16 @@ impl PageDocument {
         Ok(())
     }
 
-    pub(crate) fn revision(&self) -> u32 {
+    pub fn revision(&self) -> u32 {
         self.revision
     }
 
-    pub(crate) fn acked(&self) -> u32 {
+    pub fn acked(&self) -> u32 {
         self.acked
     }
 
     /// Writes refused because this tab holds no storage lease.
-    pub(crate) fn refused(&self) -> u32 {
+    pub fn refused(&self) -> u32 {
         self.refused
     }
 }
@@ -494,7 +494,7 @@ static PAGE: Mutex<Option<PageDocument>> = Mutex::new(None);
 
 /// Selects the page backend before the app is built; the platform store is
 /// never read or written afterwards.
-pub(crate) fn install_page_document(
+pub fn install_page_document(
     settings: Option<String>,
     server: Option<String>,
     local: Option<String>,
@@ -507,7 +507,7 @@ pub(crate) fn install_page_document(
 /// Commits the new text of the page's `server` or `local` document, under
 /// the same exclusive-writer rule as the settings document. `Err` without a
 /// page backend.
-pub(crate) fn commit_page_document(name: &str, text: String) -> Result<(), String> {
+pub fn commit_page_document(name: &str, text: String) -> Result<(), String> {
     let writable = browser_storage_writable();
     with_page(|page| {
         if !writable {
@@ -524,7 +524,7 @@ fn page_installed() -> bool {
 }
 
 /// `None` when no page backend is installed.
-pub(crate) fn with_page<R>(operation: impl FnOnce(&mut PageDocument) -> R) -> Option<R> {
+pub fn with_page<R>(operation: impl FnOnce(&mut PageDocument) -> R) -> Option<R> {
     PAGE.lock().ok()?.as_mut().map(operation)
 }
 

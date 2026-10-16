@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+moly-core = { path = "../moly-core" }
 moly-law = { path = "../../base/moly-law" }
 moly-assets = { path = "../../engine/moly-assets" }
 moly-perf = { path = "../../engine/moly-perf" }

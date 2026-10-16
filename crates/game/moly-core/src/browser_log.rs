@@ -6,7 +6,7 @@ use bevy::log::tracing_subscriber::{
     Layer, Registry,
 };
 
-pub(crate) fn install() {
+pub fn install() {
     let mut config = tracing_wasm::WASMLayerConfigBuilder::new();
     config.set_report_logs_in_timings(false);
     // tracing-wasm 0.2 records EVERY entered/exited span even with event

@@ -4,9 +4,9 @@ use bevy::{
 };
 
 #[derive(Message)]
-pub(crate) struct CaptureFrame;
+pub struct CaptureFrame;
 
-pub(crate) fn capture(mut commands: Commands, mut requests: MessageReader<CaptureFrame>) {
+pub fn capture(mut commands: Commands, mut requests: MessageReader<CaptureFrame>) {
     if requests.read().next().is_none() {
         return;
     }

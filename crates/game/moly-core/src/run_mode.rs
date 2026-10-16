@@ -12,6 +12,6 @@ use bevy::prelude::*;
 
 /// Whether a game owns this instance.
 #[derive(Resource, Default, Clone, Copy, Debug)]
-pub(crate) struct RunMode {
-    pub(crate) game: bool,
+pub struct RunMode {
+    pub game: bool,
 }

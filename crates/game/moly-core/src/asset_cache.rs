@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub(crate) struct AssetCache<V, const LIMIT: usize> {
+pub struct AssetCache<V, const LIMIT: usize> {
     entries: HashMap<String, (AtomicU64, V)>,
     frame: u64,
 }
@@ -19,26 +19,26 @@ impl<V, const LIMIT: usize> Default for AssetCache<V, LIMIT> {
 }
 
 impl<V, const LIMIT: usize> AssetCache<V, LIMIT> {
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.entries.len()
     }
-    pub(crate) fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
         self.entries.values_mut().map(|(_, value)| value)
     }
 
-    pub(crate) fn get(&self, key: &str) -> Option<&V> {
+    pub fn get(&self, key: &str) -> Option<&V> {
         let (touched, value) = self.entries.get(key)?;
         touched.store(self.frame, Ordering::Relaxed);
         Some(value)
     }
 
-    pub(crate) fn get_mut(&mut self, key: &str) -> Option<&mut V> {
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut V> {
         let (touched, value) = self.entries.get_mut(key)?;
         touched.store(self.frame, Ordering::Relaxed);
         Some(value)
     }
 
-    pub(crate) fn insert(&mut self, key: String, value: V) {
+    pub fn insert(&mut self, key: String, value: V) {
         // LIMIT is an initial allocation hint, never a cap on live requests.
         // Earlier systems must not evict a request that a later system will
         // touch this frame. Retirement happens once, after all preparation.
@@ -46,7 +46,7 @@ impl<V, const LIMIT: usize> AssetCache<V, LIMIT> {
             .insert(key, (AtomicU64::new(self.frame), value));
     }
 
-    pub(crate) fn get_or_insert_with(&mut self, key: &str, load: impl FnOnce() -> V) -> &mut V {
+    pub fn get_or_insert_with(&mut self, key: &str, load: impl FnOnce() -> V) -> &mut V {
         if !self.entries.contains_key(key) {
             self.insert(key.to_owned(), load());
         }
@@ -56,7 +56,7 @@ impl<V, const LIMIT: usize> AssetCache<V, LIMIT> {
     /// Called once after all preparation systems. Keep this frame's requested
     /// resources, drop lookup copies not touched for one complete frame. The
     /// consumer's cloned handles/Arcs are deliberately not inspected or removed.
-    pub(crate) fn sweep_unused(&mut self) -> usize {
+    pub fn sweep_unused(&mut self) -> usize {
         let before = self.entries.len();
         self.entries
             .retain(|_, (touched, _)| touched.load(Ordering::Relaxed) == self.frame);
