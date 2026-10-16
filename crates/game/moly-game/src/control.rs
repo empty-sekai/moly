@@ -7,6 +7,7 @@
 //! JSON-RPC 2.0 objects, and a request is handled in the frame after it
 //! arrives. `moly.methods` lists the moly methods with what each takes.
 
+mod layout;
 mod state;
 mod ui;
 
@@ -104,6 +105,16 @@ const METHODS: &[(&str, &str, &str)] = &[
     ),
     ("moly.library.catalog", "The content library's catalogue export.", NONE),
     (
+        "moly.layout.view",
+        "The layout editor's state: whether it is open, the selection with its put status, the placed fixtures, the inventory, the owned catalog (index, fixture, placeable count), whether Save is offered, and feedback naming the last refusal. Grid centers are [x, y, z] tiles; y is the stack height.",
+        NONE,
+    ),
+    (
+        "moly.layout.command",
+        "Queues one layout editor command for the next frame, as the editor's own buttons, list cells and drags send it: enter, select_catalog {index}, select_placed {uid}, select_inventory {uid}, move_to {center: [x, y, z]} (the tile a drag touches), nudge {x, z}, rotate, decide, cancel, store, save, save_and_exit, request_exit, keep_editing, discard_and_exit, rotate_camera, change_look, request_clean_up, clean_up_all, cancel_clean_up. Read moly.layout.view afterwards for the result.",
+        r#"{"type":"object","properties":{"command":{"type":"string"},"index":{"type":"integer","minimum":0},"uid":{"type":"string"},"center":{"type":"array","items":{"type":"integer"},"minItems":3,"maxItems":3},"x":{"type":"integer"},"z":{"type":"integer"}},"required":["command"]}"#,
+    ),
+    (
         "moly.perf.snapshot",
         "Frame time percentiles over the last 600 frames and over the newest `frames` frames (120 by default).",
         r#"{"type":"object","properties":{"frames":{"type":"integer","minimum":1}}}"#,
@@ -149,6 +160,8 @@ pub(crate) fn install(app: &mut App) {
         .with_method("moly.library.command", library_command)
         .with_method("moly.library.snapshot", library_snapshot)
         .with_method("moly.library.catalog", library_catalog)
+        .with_method("moly.layout.view", layout_view)
+        .with_method("moly.layout.command", layout_command)
         .with_method("moly.perf.snapshot", perf_snapshot)
         .with_method("moly.capture", capture)
         .with_method("moly.capture.take", capture_take);
@@ -350,6 +363,18 @@ fn library_snapshot(In(_): In<Option<Value>>) -> BrpResult {
 
 fn library_catalog(In(_): In<Option<Value>>) -> BrpResult {
     projection(crate::content_library::bridge::library_catalog())
+}
+
+fn layout_view(In(_): In<Option<Value>>, world: &mut World) -> BrpResult {
+    Ok(layout::view(world))
+}
+
+fn layout_command(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
+    let params = object(params, "moly.layout.command")?;
+    let command = layout::command(&params).map_err(refuse)?;
+    let queued = format!("{command:?}");
+    world.write_message(command);
+    Ok(json!({ "queued": queued }))
 }
 
 fn director_schema(In(_): In<Option<Value>>) -> BrpResult {

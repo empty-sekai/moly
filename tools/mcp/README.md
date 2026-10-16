@@ -114,7 +114,7 @@ Pass the object as `script` to `run_script`, together with the instance's `id`. 
 
 ## RPC methods
 
-The game answers 22 `moly.*` methods. Their names are listed in `METHODS` in `crates/game/moly-game/src/control.rs`, and each is registered in `install` in the same file. The table also includes the four protocol methods that the repository names: `rpc.discover`, `registry.schema`, `world.list_components` and `world.list_resources`. The Bevy Remote Protocol provides further `world.*` methods that this table does not list.
+The game answers 24 `moly.*` methods. Their names are listed in `METHODS` in `crates/game/moly-game/src/control.rs`, and each is registered in `install` in the same file. The table also includes the four protocol methods that the repository names: `rpc.discover`, `registry.schema`, `world.list_components` and `world.list_resources`. The Bevy Remote Protocol provides further `world.*` methods that this table does not list.
 
 | Method | Params | Purpose |
 |---|---|---|
@@ -137,6 +137,8 @@ The game answers 22 `moly.*` methods. Their names are listed in `METHODS` in `cr
 | `moly.library.command` | A command object with `type` (required), such as `{"type": "open"}` | Queues a content library command for the next frame. |
 | `moly.library.snapshot` | none | The content library's page snapshot. |
 | `moly.library.catalog` | none | The content library's catalogue export. |
+| `moly.layout.view` | none | The layout editor's state: whether it is active, its phase and site, the selected fixture with its put status, the placed rows, the storage, the owned catalogue, whether a dialog is shown, whether it can save, and its last feedback. |
+| `moly.layout.command` | `command` (required), plus `index`, `uid`, `center` (`[x, y, z]`), or `x` and `z` as the command needs | Queues one layout editor command for the next frame, as the editor's buttons, list cells and drags send it. Read `moly.layout.view` afterwards for the result. |
 | `moly.perf.snapshot` | `frames` (positive integer, optional) | Frame time percentiles over the last 600 frames and over the newest `frames` frames (120 by default). |
 | `moly.capture` | none | Requests a capture of the next rendered frame. Answers `{id}`. |
 | `moly.capture.take` | `id` (required) | The captured frame as `{png, width, height}` (base64 PNG) once it is ready, else `null`. A frame is handed out once. |
