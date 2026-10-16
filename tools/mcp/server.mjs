@@ -743,7 +743,7 @@ async function layoutPlace(inst, { fixture_id, texture_id, center, rotate = 0, d
 // MCP tools
 // ---------------------------------------------------------------------------
 
-const server = new McpServer({ name: 'moly', version: '0.0.1' });
+const server = new McpServer({ name: 'moly', version: '0.0.2' });
 
 server.registerTool(
   'instance_list',
