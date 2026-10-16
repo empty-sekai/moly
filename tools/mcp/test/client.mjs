@@ -13,6 +13,7 @@ const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0
 const EXPECTED_TOOLS = [
   'instance_list', 'native_launch', 'native_stop', 'instance_logs',
   'rpc', 'methods', 'act', 'run_script', 'check', 'capture', 'director_schema',
+  'time', 'events', 'observe',
   'layout_view', 'layout_command', 'layout_place',
   'browser_launch', 'browser_screenshot', 'browser_stop',
 ];

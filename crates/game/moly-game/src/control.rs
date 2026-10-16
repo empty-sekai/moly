@@ -262,13 +262,40 @@ fn refuse(message: impl Into<String>) -> BrpError {
     failure(error_codes::INVALID_PARAMS, message)
 }
 
-/// The params as an object; none reads as an empty one.
+/// The params as an object; none reads as an empty one. A method whose table
+/// schema closes its properties takes the parameters it names and no others,
+/// so a misspelled one is refused rather than quietly ignored.
 fn object(params: Option<Value>, method: &str) -> Result<Map<String, Value>, BrpError> {
-    match params {
-        None | Some(Value::Null) => Ok(Map::new()),
-        Some(Value::Object(object)) => Ok(object),
-        Some(_) => Err(refuse(format!("{method}: params must be an object"))),
+    let params = match params {
+        None | Some(Value::Null) => Map::new(),
+        Some(Value::Object(object)) => object,
+        Some(_) => return Err(refuse(format!("{method}: params must be an object"))),
+    };
+    let Some(schema) = closed_schema(method) else {
+        return Ok(params);
+    };
+    let properties = schema.get("properties").and_then(Value::as_object);
+    let unknown = params.keys().find(|key| match properties {
+        Some(properties) => !properties.contains_key(*key),
+        None => true,
+    });
+    if let Some(key) = unknown {
+        let takes = match properties {
+            Some(properties) if !properties.is_empty() => properties.keys().cloned().collect::<Vec<String>>().join(", "),
+            _ => "no parameters".to_owned(),
+        };
+        return Err(refuse(format!("{method}: unknown parameter \"{key}\"; it takes {takes}")));
     }
+    Ok(params)
+}
+
+/// The method's params schema, when the table gives it one that closes its
+/// properties; a method the table does not name is not checked.
+fn closed_schema(method: &str) -> Option<Value> {
+    let (_, _, schema) = METHODS.iter().find(|(name, ..)| *name == method)?;
+    let schema: Value = serde_json::from_str(schema).expect("method params are JSON Schema");
+    let closed = schema.get("additionalProperties") == Some(&Value::Bool(false));
+    closed.then_some(schema)
 }
 
 /// A projection the game publishes as JSON text.
