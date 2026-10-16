@@ -35,7 +35,13 @@
      "weather.set",
      "site.switch",
      "site.enter_room",
-     "site.go_home"
+     "site.go_home",
+     "player.gather",
+     "player.craft",
+     "layout.place",
+     "player.deliver",
+     "dialog.answer",
+     "key.back"
     ],
     "description": "The action name."
    },
@@ -848,6 +854,215 @@
    "expansion": "player.interact with target room_door, button GoHomeSite, stop 0.2, timeout 60; then wait_until site_moving, timeout 5; then wait_until all[not site_moving, site_kind home], timeout 60. Common label, timeout and optional apply to all three nodes.",
    "timeout_default": null,
    "timeout_rule": "60, 5 and 60 for the three nodes",
+   "params": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "player.gather",
+   "description": "Harvests one gatherable through the harvest button and then walks over the drops it leaves. The object is chosen once, when the step starts; the harvest screen's own rules (the tool the kind needs, the stamina, the hit points) decide each press.",
+   "macro": false,
+   "timeout_default": 120,
+   "params": {
+    "type": "object",
+    "properties": {
+     "gatherable": {
+      "oneOf": [
+       {
+        "type": "string",
+        "enum": [
+         "nearest"
+        ],
+        "description": "The nearest gatherable not yet harvested, of kind when kind is given."
+       },
+       {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 4294967295,
+        "description": "Harvest object UID of the loaded site."
+       }
+      ]
+     },
+     "kind": {
+      "type": "string",
+      "description": "Only narrows gatherable \"nearest\": the kind word of its fixture type (wood, mineral, plant, treasure_box_transport, treasure_box_fixed, other, tone, toolbox, driftage, birthday_plant)."
+     },
+     "collect": {
+      "type": "boolean",
+      "default": true,
+      "description": "Walk over the drops the object leaves."
+     }
+    },
+    "required": [
+     "gatherable"
+    ],
+    "additionalProperties": false
+   },
+   "constraints": [
+    "kind is refused together with a gatherable UID (it only narrows \"nearest\")",
+    "a site with no gatherable left, and a press the harvest button refuses, fail the step with what was read"
+   ]
+  },
+  {
+   "name": "player.craft",
+   "description": "Walks to a workbench, opens the craft screen, then crafts one blueprint: its choice, the apply button, the confirm's OK and the result's close.",
+   "macro": true,
+   "expansion": "player.interact with the named fixture, button OpenCraftTool, stop 0.2, timeout 60; then the craft node, timeout 60. With workbench false only the craft node runs, on the screen already open. Common label, timeout and optional apply to both nodes.",
+   "timeout_default": null,
+   "timeout_rule": "60 for each of the two nodes",
+   "params": {
+    "type": "object",
+    "properties": {
+     "blueprint": {
+      "type": "integer",
+      "minimum": -2147483648,
+      "maximum": 2147483647,
+      "description": "Blueprint (recipe) id, as moly.observe reports it."
+     },
+     "workbench": {
+      "oneOf": [
+       {
+        "type": "string",
+        "description": "Placement UID."
+       },
+       {
+        "type": "integer",
+        "minimum": -2147483648,
+        "maximum": 2147483647,
+        "description": "Master id; the nearest placed instance is used."
+       },
+       {
+        "type": "boolean",
+        "enum": [
+         false
+        ],
+        "description": "Craft on the screen already open."
+       }
+      ],
+      "default": "workbench",
+      "description": "The workbench to open; the nearest placed craft tool fixture when absent."
+     }
+    },
+    "required": [
+     "blueprint"
+    ],
+    "additionalProperties": false
+   },
+   "constraints": [
+    "a blueprint the craft screen refuses (its term, its materials, the server) fails the step with the refusal it shows"
+   ]
+  },
+  {
+   "name": "layout.place",
+   "description": "Puts one owned fixture through the layout editor's own commands, the ones moly.layout.command sends: opens the editor, selects the first catalog row of the fixture (and texture) with a placeable copy, turns it a quarter turn rotate times, moves it onto the tile, decides it and saves. The editor stays open afterwards.",
+   "macro": false,
+   "timeout_default": 120,
+   "params": {
+    "type": "object",
+    "properties": {
+     "fixture": {
+      "type": "integer",
+      "minimum": -2147483648,
+      "maximum": 2147483647,
+      "description": "Master id of the owned fixture."
+     },
+     "texture": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295,
+      "description": "Catalog texture to pick; the first placeable row of the fixture when absent."
+     },
+     "center": {
+      "type": "array",
+      "items": {
+       "type": "integer",
+       "minimum": -128,
+       "maximum": 127
+      },
+      "minItems": 3,
+      "maxItems": 3,
+      "description": "[x, y, z] tile to move the fixture onto; y follows the column height."
+     },
+     "rotate": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 3,
+      "default": 0,
+      "description": "Quarter turns before the move."
+     },
+     "decide": {
+      "type": "boolean",
+      "default": true,
+      "description": "Decide the placement when the editor's put status allows it."
+     },
+     "save": {
+      "type": "boolean",
+      "default": true,
+      "description": "Save the draft once the fixture is placed; a save confirmation is answered with its OK."
+     }
+    },
+    "required": [
+     "fixture",
+     "center"
+    ],
+    "additionalProperties": false
+   },
+   "constraints": [
+    "rotate above 3 is refused at parse time",
+    "a fixture with no placeable owned copy, a put the editor refuses, and a center the editor keeps elsewhere fail the step with its own put status and feedback"
+   ]
+  },
+  {
+   "name": "player.deliver",
+   "description": "Presses the delivery button on a birthday party in session, holds it (hold seconds, or until the party has nothing left to deliver) and releases it; the step ends once the end action has run and reports the points the party gained.",
+   "macro": false,
+   "timeout_default": 180,
+   "params": {
+    "type": "object",
+    "properties": {
+     "party": {
+      "type": "integer",
+      "minimum": -2147483648,
+      "maximum": 2147483647,
+      "description": "Birthday party id; the first party in session when absent."
+     },
+     "hold": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Seconds to hold the button; the whole delivery when absent."
+     }
+    },
+    "additionalProperties": false
+   },
+   "constraints": [
+    "a press with no birthday party in session fails with no birthday party is in session",
+    "a press the delivery flow refuses fails with the state and the count it read"
+   ]
+  },
+  {
+   "name": "dialog.answer",
+   "description": "Taps the shown common dialog's OK (ok) or cancel button and ends once the dialog is gone. A sub-window dialog with no common button (the learn-phenomenon one) is answered with the back key its own class takes; another family's dialog is left alone and named.",
+   "macro": false,
+   "timeout_default": 10,
+   "params": {
+    "type": "object",
+    "properties": {
+     "ok": {
+      "type": "boolean",
+      "default": true,
+      "description": "OK instead of cancel; a one-button dialog has no cancel."
+     }
+    },
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "key.back",
+   "description": "Presses and releases the back key (Escape) in one frame, as a keyboard does. The screen manager gives it to the topmost dialog, else to the header back button and the scene's own back-key process.",
+   "macro": false,
+   "timeout_default": null,
    "params": {
     "type": "object",
     "properties": {},
@@ -1741,6 +1956,96 @@
      },
      "then": {
       "$ref": "#/steps/31/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "player.gather"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/32/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "player.craft"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/33/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "layout.place"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/34/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "player.deliver"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/35/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "dialog.answer"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/36/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "key.back"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/37/params"
      }
     }
    ],

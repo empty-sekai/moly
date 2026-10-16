@@ -8,7 +8,7 @@
 //! arrives. `moly.methods` lists the moly methods with what each takes.
 
 pub(crate) mod events;
-mod layout;
+pub(crate) mod layout;
 mod observe;
 mod state;
 mod ui;

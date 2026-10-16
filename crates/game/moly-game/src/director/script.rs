@@ -54,7 +54,17 @@ pub(crate) enum Node {
     /// Crafts one blueprint on the open craft screen: its choice, the apply
     /// button, the confirm's OK and the result's close.
     Craft { blueprint: i32 },
-    /// Taps the shown common dialog's OK (`ok`) or cancel button.
+    /// Puts one owned fixture through the layout editor's own command
+    /// sequence: enter, select its catalog row, turn it, move it to the
+    /// tile, decide it and save.
+    LayoutPlace { fixture: i32, texture: Option<u32>, center: [i8; 3], rotate: u32, decide: bool, save: bool },
+    /// Presses the delivery button on a birthday party in session and holds
+    /// it (`hold` seconds, or until the party has nothing left to deliver),
+    /// then releases it: the delivery screen's own two requests.
+    Deliver { party: Option<i32>, hold: Option<f32> },
+    /// Taps the shown common dialog's OK (`ok`) or cancel button; a dialog
+    /// of the learn-phenomenon family, which has no common button, is
+    /// answered with the back key it takes.
     DialogAnswer { ok: bool },
     /// One press of the back key.
     BackKey,
@@ -186,7 +196,7 @@ pub(crate) enum Cond {
 pub(super) const ACTIONS: &[&str] = &[
     "wait", "wait_until", "assert", "log", "where", "capture", "parallel", "repeat",
     "player.walk_to", "player.interact", "player.gather", "player.craft", "player.stick", "player.release", "player.talk_to", "player.wear",
-    "player.wear_avatar", "tap", "ui.tap", "dialog.answer", "key.back",
+    "player.wear_avatar", "player.deliver", "tap", "ui.tap", "dialog.answer", "key.back", "layout.place",
     "npc.take", "npc.walk_to", "npc.face", "npc.emote", "npc.use", "npc.tweet", "npc.talk", "npc.release",
     "camera.drag", "camera.zoom", "server.edit", "weather.set", "site.switch", "site.enter_room", "site.go_home",
 ];
@@ -315,6 +325,26 @@ fn step(value: &Value, at: &str) -> Result<Vec<Step>, String> {
         "dialog.answer" => {
             let ok = fields.opt_bool("ok")?.unwrap_or(true);
             vec![one(Node::DialogAnswer { ok }, Some(10.0))]
+        }
+        "layout.place" => {
+            let fixture = fields.req_i32("fixture")?;
+            let texture = fields.opt_u32("texture")?;
+            let center = tile(fields.req("center")?, &format!("{at}.center"))?;
+            let rotate = fields.opt_u32("rotate")?.unwrap_or(0);
+            if rotate > 3 {
+                return Err(format!("{at}: rotate is 0 to 3 quarter turns, got {rotate}"));
+            }
+            let decide = fields.opt_bool("decide")?.unwrap_or(true);
+            let save = fields.opt_bool("save")?.unwrap_or(true);
+            vec![one(Node::LayoutPlace { fixture, texture, center, rotate, decide, save }, Some(120.0))]
+        }
+        "player.deliver" => {
+            let party = fields.opt_i32("party")?;
+            let hold = fields.opt_f32("hold")?;
+            if hold == Some(0.0) {
+                return Err(format!("{at}: hold is a number of seconds above 0"));
+            }
+            vec![one(Node::Deliver { party, hold }, Some(180.0))]
         }
         "key.back" => vec![one(Node::BackKey, None)],
         "player.talk_to" => {
@@ -607,6 +637,21 @@ fn pair(value: &Value, at: &str) -> Result<[f32; 2], String> {
         },
         _ => Err(format!("{at}: expected [x, z]")),
     }
+}
+
+/// A layout tile: three whole numbers in the grid's own range.
+fn tile(value: &Value, at: &str) -> Result<[i8; 3], String> {
+    let Some([x, y, z]) = value.as_array().map(Vec::as_slice) else {
+        return Err(format!("{at}: expected [x, y, z]"));
+    };
+    let mut out = [0i8; 3];
+    for (slot, value) in out.iter_mut().zip([x, y, z]) {
+        *slot = value
+            .as_i64()
+            .and_then(|number| i8::try_from(number).ok())
+            .ok_or_else(|| format!("{at}: expected three whole numbers from -128 to 127"))?;
+    }
+    Ok(out)
 }
 
 /// The character action states a condition may name.

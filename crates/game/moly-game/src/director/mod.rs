@@ -19,14 +19,20 @@
 //! `player.talk_to {unit}` is an interaction on the character's Talk button;
 //! `player.stick {stick: [x, y], secs}` holds the stick at a ratio (x right,
 //! y up) like a thumb; `player.release` lifts the joystick finger;
+//! `player.deliver {party, hold}` presses the delivery button of a birthday
+//! party in session, holds it (`hold` seconds, or until the party has
+//! nothing left to deliver) and releases it, the two requests the delivery
+//! screen sends; a press with no party in session is refused by name;
 //! `player.wear {unit}` and `player.wear_avatar` choose the player's body (a
 //! character body of the cast, or the avatar body; the step ends once the
 //! choice is made, and the body is worn when it has loaded); `tap {at |
 //! at_fraction}` taps the screen; `ui.tap {view, path}` taps the centre of a
 //! node of a shown UI view (`view` its document key, `path` a unique node
 //! path suffix or `@<id>`; a view that is not shown is refused with the
-//! views that are). Every input gate of the product applies to
-//! these.
+//! views that are); `dialog.answer {ok}` taps the shown common dialog's OK or
+//! cancel button, and answers a sub-window dialog that has no common button
+//! (the learn-phenomenon one) with the back key its own class takes. Every
+//! input gate of the product applies to these.
 //!
 //! Characters: `npc.take {unit}` cancels the character's objective and holds
 //! its AI; `npc.walk_to {unit, to, within, rests}` walks a taken character
@@ -58,6 +64,14 @@
 //! schedule, the gate actions and the rest the server panel offers); the
 //! server model checks it as it does the panel's, and the step fails with
 //! the model's refusal.
+//!
+//! The layout editor: `layout.place {fixture, texture, center, rotate,
+//! decide, save}` puts one owned fixture through the editor's own commands,
+//! the objects `moly.layout.command` takes, read by the same reader: enter,
+//! select the catalog row of the fixture (and texture) with a placeable
+//! copy, turn it a quarter turn `rotate` times, move it onto the tile,
+//! decide it and save. A refusal of the editor's is the step's failure, with
+//! its put status and feedback; the editor stays open afterwards.
 //!
 //! World: `weather.set {phenomenon}`, `site.switch {site}` (a site type such
 //! as `first_floor`), and the door sequences `site.enter_room` and

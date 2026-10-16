@@ -9,6 +9,7 @@ use std::sync::Arc;
 use bevy::input::touch::TouchPhase;
 use bevy::prelude::*;
 use moly_law::action_button::{ButtonType, TargetId, ACTION_BUTTON_INPUT_INTERVAL};
+use serde_json::{json, Value};
 
 use super::cond::{self, flat};
 use super::hand::{self, Hand};
@@ -113,6 +114,8 @@ enum Kind {
     Interact(Interact),
     Gather(Gather),
     Craft(CraftStep),
+    LayoutPlace(LayoutPlace),
+    Deliver(Deliver),
     DialogAnswer(DialogAnswer),
     Stick { stick: Vec2, until: f32 },
     NpcWalk { entity: Entity, unit: u32, goal: Vec3, within: f32 },
@@ -140,6 +143,15 @@ impl Kind {
             Kind::NpcUse { ticket } => super::npc::end_activity(world, *ticket, true),
             Kind::Tweet { entity, .. } => super::npc::hide_tweet(world, *entity),
             Kind::NpcTalk { entity } => super::npc::drop_talk(world, *entity),
+            // A press left holding the button is released.
+            Kind::Deliver(_) => {
+                world.write_message(crate::delivery::DeliveryRequest::End);
+            }
+            // A selection left in the editor is cancelled: the editor's own
+            // cancel restores the pose the fixture was selected at.
+            Kind::LayoutPlace(_) => {
+                world.write_message(crate::fixture_edit::EditCommand::Cancel);
+            }
             Kind::CameraDrag { from, by, down: true, .. } => {
                 let _ = hand::drag_touch(world, TouchPhase::Ended, *from + *by);
             }
@@ -391,7 +403,14 @@ fn start(world: &mut World, shared: &mut Shared, step: Step, path: String) -> St
         Node::WalkTo { to, within } => Kind::Walk(Walk::new(to.clone(), *within)),
         Node::Gather { what, collect } => Kind::Gather(Gather::new(what.clone(), *collect)),
         Node::Craft { blueprint } => Kind::Craft(CraftStep::new(*blueprint)),
-        Node::DialogAnswer { ok } => Kind::DialogAnswer(DialogAnswer { ok: *ok, tapped: None }),
+        Node::LayoutPlace { fixture, texture, center, rotate, decide, save } => {
+            Kind::LayoutPlace(LayoutPlace::new(*fixture, *texture, *center, *rotate, *decide, *save))
+        }
+        Node::Deliver { party, hold } => match Deliver::press(world, *party, *hold, shared.now) {
+            Ok(deliver) => Kind::Deliver(deliver),
+            Err(error) => return ended(path, Err(error), optional),
+        },
+        Node::DialogAnswer { ok } => Kind::DialogAnswer(DialogAnswer { ok: *ok, tapped: None, pressed: None }),
         Node::BackKey => {
             let result = hand::back_key(world).map(|()| "the back key pressed".to_owned()).map_err(str::to_owned);
             return ended(path, result, optional);
@@ -530,6 +549,8 @@ fn poll(world: &mut World, shared: &mut Shared, active: &mut Active) -> Poll {
         Kind::Interact(interact) => interact.poll(world, shared, &path),
         Kind::Gather(gather) => gather.poll(world, shared, &path),
         Kind::Craft(craft) => craft.poll(world, shared),
+        Kind::LayoutPlace(place) => place.poll(world, shared),
+        Kind::Deliver(deliver) => deliver.poll(world, shared),
         Kind::DialogAnswer(answer) => answer.poll(world, shared),
         Kind::NpcWalk { entity, unit, goal, within } => {
             let at = world.get::<GlobalTransform>(*entity).map(GlobalTransform::translation);
@@ -1200,15 +1221,518 @@ impl CraftStep {
     }
 }
 
+/// How long one layout command may take to show its effect (seconds).
+const LAYOUT_ANSWER_SECS: f32 = 15.0;
+/// How many times a move is sent while the reported center stands off the
+/// wanted tile.
+const LAYOUT_MOVES: u32 = 3;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlacePhase {
+    /// Waiting for the open editor.
+    Enter,
+    /// Choosing the owned catalog row.
+    Select,
+    /// Turning the selection a quarter turn at a time.
+    Rotate,
+    /// Moving the selection onto the wanted tile.
+    Move,
+    /// Deciding the placement.
+    Decide,
+    /// Saving the draft.
+    Save,
+}
+
+/// `layout.place`: one owned fixture through the layout editor's own commands.
+/// Each command object is the one `moly.layout.command` takes and is read by
+/// that method's own reader, so a step and the editor's buttons, list cells
+/// and drags go through the same checks; every phase reads the editor's view
+/// to see what its command did. The editor stays open afterwards, as it does
+/// after the same sequence of buttons.
+struct LayoutPlace {
+    fixture: i32,
+    texture: Option<u32>,
+    center: [i8; 3],
+    rotate: u32,
+    decide: bool,
+    save: bool,
+    phase: PlacePhase,
+    /// The catalog row chosen, the turns and the moves sent.
+    row: Option<usize>,
+    turns: u32,
+    moves: u32,
+    /// The tile the next move names: `move_to` takes the touched tile, and
+    /// the reported center can stand off it by a tile.
+    target: [i32; 3],
+    /// The selection the moves belong to.
+    uid: String,
+    /// The direction the turn in flight started from.
+    direction: Option<String>,
+    /// A command of this phase is in flight, and when it went out.
+    sent: bool,
+    sent_at: f32,
+    save_sent: bool,
+    /// When the save confirmation was last tapped.
+    tapped_at: f32,
+}
+
+impl LayoutPlace {
+    fn new(fixture: i32, texture: Option<u32>, center: [i8; 3], rotate: u32, decide: bool, save: bool) -> Self {
+        Self {
+            fixture,
+            texture,
+            center,
+            rotate,
+            decide,
+            save,
+            phase: PlacePhase::Enter,
+            row: None,
+            turns: 0,
+            moves: 0,
+            target: [center[0] as i32, center[1] as i32, center[2] as i32],
+            uid: String::new(),
+            direction: None,
+            sent: false,
+            sent_at: 0.0,
+            save_sent: false,
+            tapped_at: f32::NEG_INFINITY,
+        }
+    }
+
+    /// The command the current phase waits on.
+    fn word(&self) -> &'static str {
+        match self.phase {
+            PlacePhase::Enter => "enter",
+            PlacePhase::Select => "select_catalog",
+            PlacePhase::Rotate => "rotate",
+            PlacePhase::Move => "move_to",
+            PlacePhase::Decide => "decide",
+            PlacePhase::Save => "save",
+        }
+    }
+
+    fn begin(&mut self, phase: PlacePhase, now: f32) {
+        self.phase = phase;
+        self.sent = false;
+        self.sent_at = now;
+    }
+
+    /// Sends one command through the control surface's own reader and marks
+    /// this phase as waiting for its effect.
+    fn send(&mut self, world: &mut World, params: Value, now: f32) -> Poll {
+        let queued = match layout_command(world, params) {
+            Ok(queued) => queued,
+            Err(error) => return Poll::Failed(error),
+        };
+        self.sent = true;
+        self.sent_at = now;
+        Poll::Running(format!("sent {queued}"))
+    }
+
+    /// What the view shows now, for a wait that has to report itself.
+    fn reading(&self, view: &crate::fixture_edit::EditView) -> String {
+        let selected = match &view.selected {
+            Some(selected) => format!(
+                "{} fixture {} at [{}, {}, {}] {:?}",
+                selected.item.uid,
+                selected.item.fixture_id,
+                selected.item.center.x,
+                selected.item.center.y,
+                selected.item.center.z,
+                selected.put_status
+            ),
+            None => "no selection".to_owned(),
+        };
+        format!("{selected}; {} placed rows; feedback {}", view.placed_rows.len(), view.feedback)
+    }
+
+    fn poll(&mut self, world: &mut World, shared: &mut Shared) -> Poll {
+        let Some(view) = world.get_resource::<crate::fixture_edit::EditView>().cloned() else {
+            return Poll::Failed("the layout editor is not set up".into());
+        };
+        let now = shared.now;
+        if self.phase != PlacePhase::Enter && !view.active {
+            return Poll::Failed("the layout editor closed during the placement".into());
+        }
+        // The editor answers in the frame after a command arrives. While its
+        // own save confirmation is up, the save has an answer to wait for.
+        if self.sent && self.phase != PlacePhase::Save && now - self.sent_at > LAYOUT_ANSWER_SECS {
+            return Poll::Failed(format!(
+                "the {} command was not answered in {LAYOUT_ANSWER_SECS:.0} s ({})",
+                self.word(),
+                self.reading(&view)
+            ));
+        }
+        match self.phase {
+            PlacePhase::Enter => {
+                if view.active {
+                    self.begin(PlacePhase::Select, now);
+                    return Poll::Running("the layout editor is open".into());
+                }
+                if self.sent {
+                    return Poll::Running("waiting for the layout editor to open".into());
+                }
+                self.send(world, json!({ "command": "enter" }), now)
+            }
+            PlacePhase::Select => {
+                if let Some(selected) = view.selected.as_ref() {
+                    if selected.item.fixture_id != self.fixture
+                        || self.texture.is_some_and(|texture| selected.item.texture_id != texture)
+                    {
+                        return Poll::Failed(format!(
+                            "the editor selected fixture {} texture {} instead of fixture {}{}",
+                            selected.item.fixture_id,
+                            selected.item.texture_id,
+                            self.fixture,
+                            self.texture.map_or(String::new(), |texture| format!(" texture {texture}"))
+                        ));
+                    }
+                    self.uid = selected.item.uid.clone();
+                    self.begin(PlacePhase::Rotate, now);
+                    return Poll::Running(format!("selected {} of the owned catalog", self.uid));
+                }
+                if self.sent {
+                    return Poll::Running(format!("waiting for catalog row {} to be selected", self.row.unwrap_or_default()));
+                }
+                let row = view.catalog.iter().find(|row| {
+                    row.fixture_id == self.fixture
+                        && self.texture.is_none_or(|texture| row.texture_id == texture)
+                        && row.placeable > 0
+                });
+                let Some(row) = row else {
+                    return Poll::Failed(self.no_row(&view));
+                };
+                self.row = Some(row.index);
+                self.send(world, json!({ "command": "select_catalog", "index": row.index }), now)
+            }
+            PlacePhase::Rotate => {
+                let Some(selected) = view.selected.as_ref() else {
+                    return Poll::Failed(format!("the selection was dropped before the turns ({})", view.feedback));
+                };
+                if self.turns == self.rotate {
+                    self.begin(PlacePhase::Move, now);
+                    return Poll::Running(format!("turned {} quarter turn(s)", self.turns));
+                }
+                let direction = format!("{:?}", selected.item.direction);
+                if self.sent {
+                    if self.direction.as_deref() != Some(direction.as_str()) {
+                        self.turns += 1;
+                        self.direction = None;
+                        self.sent = false;
+                        return Poll::Running(format!("turn {} of {} done, now {direction}", self.turns, self.rotate));
+                    }
+                    return Poll::Running(format!("waiting for the turn; the direction is {direction}"));
+                }
+                self.direction = Some(direction);
+                self.send(world, json!({ "command": "rotate" }), now)
+            }
+            PlacePhase::Move => {
+                let Some(selected) = view.selected.as_ref() else {
+                    return Poll::Failed(format!("the selection was dropped before the move ({})", view.feedback));
+                };
+                let at = selected.item.center;
+                if at.x == self.center[0] && at.z == self.center[2] {
+                    self.begin(PlacePhase::Decide, now);
+                    return Poll::Running(format!("the fixture is on tile [{}, {}, {}]", at.x, at.y, at.z));
+                }
+                if self.sent {
+                    return Poll::Running(format!("waiting for the move; the center is [{}, {}, {}]", at.x, at.y, at.z));
+                }
+                if self.moves == LAYOUT_MOVES {
+                    return Poll::Failed(format!(
+                        "the editor kept the fixture's center at [{}, {}, {}] instead of tile [{}, ?, {}] ({})",
+                        at.x, at.y, at.z, self.center[0], self.center[2], view.feedback
+                    ));
+                }
+                // move_to takes the tile a drag touched; the difference
+                // between it and the reported center is added on the next
+                // send, as a drag correcting itself does.
+                let target = [
+                    self.target[0] + self.center[0] as i32 - at.x as i32,
+                    self.center[1] as i32,
+                    self.target[2] + self.center[2] as i32 - at.z as i32,
+                ];
+                let (Ok(x), Ok(y), Ok(z)) = (
+                    i8::try_from(target[0]),
+                    i8::try_from(target[1]),
+                    i8::try_from(target[2]),
+                ) else {
+                    return Poll::Failed(format!("the corrected tile {target:?} is outside the layout grid"));
+                };
+                self.target = target;
+                self.moves += 1;
+                self.send(world, json!({ "command": "move_to", "center": [x, y, z] }), now)
+            }
+            PlacePhase::Decide => {
+                if view.selected.is_none() {
+                    let placed = view.placed_rows.iter().find(|row| row.uid == self.uid);
+                    let Some(placed) = placed else {
+                        return Poll::Failed(format!(
+                            "the editor lists no fixture with uid {} after the decision ({})",
+                            self.uid, view.feedback
+                        ));
+                    };
+                    let at = placed.center;
+                    let note = format!("placed fixture {} ({}) at [{}, {}, {}]", self.fixture, self.uid, at.x, at.y, at.z);
+                    if !self.save {
+                        return Poll::Done(note);
+                    }
+                    self.begin(PlacePhase::Save, now);
+                    return Poll::Running(format!("{note}; saving"));
+                }
+                let selected = view.selected.as_ref().expect("checked above");
+                if let crate::fixture_edit::PutStatus::Refused(refusal) = selected.put_status {
+                    return Poll::Failed(format!(
+                        "the editor refuses to put fixture {} on tile [{}, {}, {}]: {refusal:?}",
+                        self.fixture,
+                        selected.item.center.x,
+                        selected.item.center.y,
+                        selected.item.center.z
+                    ));
+                }
+                if self.sent {
+                    return Poll::Running("waiting for the decision".into());
+                }
+                self.send(world, json!({ "command": "decide" }), now)
+            }
+            PlacePhase::Save => {
+                if view.save_dialog {
+                    // The editor asks before it saves over a cutscene area or
+                    // with invalid fixtures listed; its OK is the answer a
+                    // player gives.
+                    if now - self.tapped_at < 1.0 {
+                        return Poll::Running("waiting for the save confirmation to close".into());
+                    }
+                    let (_, caller, key, node) = match crate::common_dialog::shown_button(world, true) {
+                        Ok(button) => button,
+                        Err(error) => return Poll::Running(error),
+                    };
+                    let position = match hand::ui_point(world, key, &node) {
+                        Ok(position) => position,
+                        Err(error) => return Poll::Running(error),
+                    };
+                    return match hand::tap(world, position) {
+                        Ok(()) => {
+                            self.tapped_at = now;
+                            Poll::Running(format!("tapped OK on {key} from {caller}"))
+                        }
+                        Err(error) => Poll::Running(error.to_owned()),
+                    };
+                }
+                if self.save_sent {
+                    if !view.dirty {
+                        let at = view.placed_rows.iter().find(|row| row.uid == self.uid).map(|row| row.center);
+                        return Poll::Done(match at {
+                            Some(at) => format!("placed fixture {} ({}) at [{}, {}, {}] and saved", self.fixture, self.uid, at.x, at.y, at.z),
+                            None => format!("placed fixture {} ({}) and saved", self.fixture, self.uid),
+                        });
+                    }
+                    if now - self.sent_at > LAYOUT_ANSWER_SECS {
+                        return Poll::Failed(format!(
+                            "the save left the draft dirty for {LAYOUT_ANSWER_SECS:.0} s (selected {}, save dialog {})",
+                            view.selected.is_some(),
+                            view.save_dialog
+                        ));
+                    }
+                    return Poll::Running("waiting for the save".into());
+                }
+                if !view.can_save {
+                    return Poll::Running(format!(
+                        "waiting to save (selected {}, dialog {})",
+                        view.selected.is_some(),
+                        view.save_dialog
+                    ));
+                }
+                self.save_sent = true;
+                self.send(world, json!({ "command": "save" }), now)
+            }
+        }
+    }
+
+    /// Why no catalog row can be selected.
+    fn no_row(&self, view: &crate::fixture_edit::EditView) -> String {
+        let rows: Vec<usize> = view
+            .catalog
+            .iter()
+            .filter(|row| row.fixture_id == self.fixture)
+            .map(|row| row.index)
+            .collect();
+        let texture = self.texture.map_or(String::new(), |texture| format!(" texture {texture}"));
+        if rows.is_empty() {
+            format!("fixture {}{texture} is not in the owned catalog", self.fixture)
+        } else {
+            format!("fixture {}{texture}: every owned copy is placed (catalog rows {rows:?})", self.fixture)
+        }
+    }
+}
+
+/// One layout editor command built the way `moly.layout.command` builds it.
+fn layout_command(world: &mut World, params: Value) -> Result<String, String> {
+    let Value::Object(params) = params else {
+        return Err("a layout command is an object".to_owned());
+    };
+    let command = crate::control::layout::command(&params)?;
+    let queued = format!("{command:?}");
+    world.write_message(command);
+    Ok(queued)
+}
+
+/// A tap that has started no delivery after this long (seconds) is refused.
+const DELIVER_ANSWER_SECS: f32 = 2.0;
+
+/// `player.deliver`: the delivery button's press and release, the two
+/// requests the delivery screen sends, on a birthday party in session. The
+/// delivery's own rules decide what a press does (the release window,
+/// `CanDelivery`, the ends of the hold loop and the end action); the step
+/// ends once the end action has run, with the points the party gained.
+struct Deliver {
+    /// The party the press named.
+    party: i32,
+    /// Seconds to hold the button; none holds it until the party has nothing
+    /// left to deliver.
+    hold: Option<f32>,
+    /// When the press went out, and when the delivery was seen running.
+    asked_at: f32,
+    started_at: Option<f32>,
+    /// The release has been sent.
+    released: bool,
+    points_at_press: i32,
+    /// The refresh dialog's back key was pressed.
+    closed_refresh: bool,
+}
+
+impl Deliver {
+    /// The press: refused before it is sent when no party is in session.
+    fn press(world: &mut World, party: Option<i32>, hold: Option<f32>, now: f32) -> Result<Self, String> {
+        let Some(model) = world.get_resource::<crate::delivery::DeliveryModel>() else {
+            return Err("the delivery screen is not set up".to_owned());
+        };
+        if !model.parties.iter().any(|site| party.is_none_or(|id| site.id == id)) {
+            return Err(match party {
+                Some(id) => format!("no birthday party {id} is in session"),
+                None => "no birthday party is in session".to_owned(),
+            });
+        }
+        let id = party.unwrap_or_else(|| model.parties[0].id);
+        let points = model.party(id).map_or(0, |site| site.tally.current_points());
+        world.write_message(crate::delivery::DeliveryRequest::Start(Some(id)));
+        Ok(Self {
+            party: id,
+            hold,
+            asked_at: now,
+            started_at: None,
+            released: false,
+            points_at_press: points,
+            closed_refresh: false,
+        })
+    }
+
+    fn poll(&mut self, world: &mut World, shared: &mut Shared) -> Poll {
+        let Some(model) = world.get_resource::<crate::delivery::DeliveryModel>() else {
+            return Poll::Failed("the delivery screen is not set up".into());
+        };
+        let state = model.state;
+        let executing = model.executing;
+        let home = world
+            .get_resource::<crate::site::SiteActive>()
+            .map(|site| site.site_type.clone());
+        let (points, can, left) = model
+            .party(self.party)
+            .map_or((0, false, 0), |site| {
+                (site.tally.current_points(), site.tally.can_delivery(), site.tally.remaining())
+            });
+        if !executing && self.started_at.is_none() {
+            // The press starts the flow in the frame after the request; a
+            // press the flow refuses leaves the state where it was.
+            if shared.now - self.asked_at <= DELIVER_ANSWER_SECS {
+                return Poll::Running(format!("waiting for the delivery of party {} to start (state {state:?})", self.party));
+            }
+            return Poll::Failed(format!(
+                "the press on party {} started no delivery (state {state:?}, {} left to deliver, site {home:?})",
+                self.party, left
+            ));
+        }
+        if self.started_at.is_none() {
+            self.started_at = Some(shared.now);
+        }
+        if !self.released {
+            let held = self.hold.is_some_and(|hold| shared.now - self.asked_at >= hold);
+            if held || !can {
+                world.write_message(crate::delivery::DeliveryRequest::End);
+                self.released = true;
+                return Poll::Running(format!(
+                    "released the delivery button ({}, {left} left to deliver)",
+                    if held { "held long enough" } else { "nothing left to deliver" }
+                ));
+            }
+        }
+        if !executing && state == crate::delivery::DeliveryActionState::Idle {
+            return Poll::Done(format!(
+                "party {} delivered: points {} to {}",
+                self.party, self.points_at_press, points
+            ));
+        }
+        // The end action waits for the refresh dialog's close, which the back
+        // key gives it.
+        if !self.closed_refresh
+            && world
+                .get_resource::<crate::delivery::honor::DialogAwait>()
+                .is_some_and(|awaiting| awaiting.refresh.is_some())
+        {
+            self.closed_refresh = true;
+            return match hand::back_key(world) {
+                Ok(()) => Poll::Running("pressed the back key on the refresh dialog".into()),
+                Err(error) => Poll::Running(error.to_owned()),
+            };
+        }
+        Poll::Running(format!(
+            "delivering party {}: state {state:?}, {points} points, {left} left to deliver",
+            self.party
+        ))
+    }
+}
+
 /// `dialog.answer`: a tap on the shown common dialog's OK or cancel button,
-/// done once the dialog is gone.
+/// done once the dialog is gone. A sub-window dialog with no common button
+/// (the learn-phenomenon one) is answered with the back key its own class
+/// registers, which is the answer it takes from the screen.
 struct DialogAnswer {
     ok: bool,
     tapped: Option<(crate::ui_layers::DialogId, f32)>,
+    /// The sub-window dialog answered with the back key, and when.
+    pressed: Option<(crate::ui_layers::DialogId, f32)>,
+}
+
+/// Whether the screen manager still shows the dialog `id`.
+fn dialog_open(world: &World, id: crate::ui_layers::DialogId) -> bool {
+    world.get_resource::<crate::ui_layers::ScreenManager>().is_some_and(|screens| {
+        screens
+            .dialogs()
+            .any(|(open, _, state)| open == id && state != crate::ui_layers::DialogState::Closed)
+    })
+}
+
+/// The topmost dialog still open, with its handle: the one the screen
+/// manager hands the back key to.
+fn topmost_dialog(world: &World) -> Option<(crate::ui_layers::DialogId, crate::ui_layers::DialogType)> {
+    world
+        .get_resource::<crate::ui_layers::ScreenManager>()?
+        .dialogs()
+        .filter(|(_, _, state)| *state != crate::ui_layers::DialogState::Closed)
+        .map(|(id, dialog, _)| (id, dialog))
+        .last()
 }
 
 impl DialogAnswer {
     fn poll(&mut self, world: &mut World, shared: &mut Shared) -> Poll {
+        if let Some((id, at)) = self.pressed {
+            if !dialog_open(world, id) {
+                return Poll::Done(format!("closed the dialog ({})", if self.ok { "answer" } else { "cancel" }));
+            }
+            if shared.now - at < 1.0 {
+                return Poll::Running("waiting for the dialog to close".into());
+            }
+        }
         if let Some((id, at)) = self.tapped {
             if !crate::common_dialog::is_shown(world, id) {
                 return Poll::Done(format!("answered {}", if self.ok { "OK" } else { "cancel" }));
@@ -1219,7 +1743,7 @@ impl DialogAnswer {
         }
         let (id, caller, view, node) = match crate::common_dialog::shown_button(world, self.ok) {
             Ok(button) => button,
-            Err(error) => return Poll::Running(error),
+            Err(error) => return self.answer_without_button(world, shared, error),
         };
         let position = match hand::ui_point(world, view, &node) {
             Ok(position) => position,
@@ -1229,6 +1753,27 @@ impl DialogAnswer {
             Ok(()) => {
                 self.tapped = Some((id, shared.now));
                 Poll::Running(format!("tapped {} on {view} from {caller}", if self.ok { "OK" } else { "cancel" }))
+            }
+            Err(error) => Poll::Running(error.to_owned()),
+        }
+    }
+
+    /// The shown dialog that has no common button. The learn-phenomenon one
+    /// takes the back key its own class registers as its whole answer: its
+    /// close area, its panel body and the hardware back key all call
+    /// `CloseProcess -> Close`, and the run that opened it waits for its
+    /// close. Another family's dialog is named and left alone.
+    fn answer_without_button(&mut self, world: &mut World, shared: &mut Shared, error: String) -> Poll {
+        let Some((id, dialog)) = topmost_dialog(world) else {
+            return Poll::Running(error);
+        };
+        if dialog != crate::ui_layers::DialogType::LearnPhenomenaSubWindowDialog {
+            return Poll::Running(format!("{error}; the topmost dialog is {dialog:?}"));
+        }
+        match hand::back_key(world) {
+            Ok(()) => {
+                self.pressed = Some((id, shared.now));
+                Poll::Running(format!("pressed the back key on {dialog:?}"))
             }
             Err(error) => Poll::Running(error.to_owned()),
         }

@@ -99,8 +99,9 @@ fn catalog(row: &EditCatalogView) -> Value {
     })
 }
 
-/// The command object as the editor's command.
-pub(super) fn command(params: &Map<String, Value>) -> Result<EditCommand, String> {
+/// The command object as the editor's command, the reader `moly.layout.command`
+/// and the director's own layout step share.
+pub(crate) fn command(params: &Map<String, Value>) -> Result<EditCommand, String> {
     let name = params
         .get("command")
         .and_then(Value::as_str)
