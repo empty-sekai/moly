@@ -13,6 +13,7 @@ const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0
 const EXPECTED_TOOLS = [
   'instance_list', 'native_launch', 'native_stop', 'instance_logs',
   'rpc', 'methods', 'act', 'run_script', 'check', 'capture', 'director_schema',
+  'layout_view', 'layout_command', 'layout_place',
   'browser_launch', 'browser_screenshot', 'browser_stop',
 ];
 const STEP_MS = 15_000;
@@ -195,6 +196,32 @@ async function run() {
   const idat = pngChunk(png, 'IDAT');
   assert(idat && zlib.inflateSync(idat).length > 0, 'capture: IDAT does not inflate');
   console.log('ok - capture: image/png, 1x1, IDAT inflates');
+
+  const closed = await callJson('layout_view', { id: launched.id });
+  assert(closed.active === false && closed.catalog_rows === 2 && !('catalog' in closed), `layout_view: ${JSON.stringify(closed)}`);
+  const withCatalog = await callJson('layout_view', { id: launched.id, catalog: true });
+  assert(Array.isArray(withCatalog.catalog) && withCatalog.catalog.length === 2, 'layout_view catalog true: no catalog rows');
+  console.log('ok - layout_view: closed editor, catalog cut to its row count unless asked for');
+
+  const placed = await callJson('layout_place', { id: launched.id, fixture_id: 695, center: [3, 0, 4], rotate: 1 });
+  assert(placed.placed === true && placed.view.active === true, `layout_place: ${JSON.stringify(placed)}`);
+  assert(placed.row.center.join() === '3,0,4' && placed.row.direction === 'Left', `layout_place row: ${JSON.stringify(placed.row)}`);
+  assert(placed.view.selected === null && placed.view.placed.length === 1, 'layout_place: selection left or nothing placed');
+  console.log('ok - layout_place: opens the editor, places fixture 695 at [3,0,4] turned once');
+
+  const again = await callRaw('layout_place', { id: launched.id, fixture_id: 695, center: [5, 0, 5] });
+  assert(again.isError === true && again.content[0].text.includes('every owned copy is placed'), `layout_place again: ${JSON.stringify(again.content)}`);
+  console.log('ok - layout_place: no placeable copy left is a tool error');
+
+  const refused = await callRaw('layout_place', { id: launched.id, fixture_id: 100, center: [9, 0, 9] });
+  const refusedOut = JSON.parse(refused.content[0].text);
+  assert(refused.isError === true && refusedOut.placed === false && refusedOut.put_status === 'Occupied', `layout_place refused: ${JSON.stringify(refusedOut)}`);
+  assert(refusedOut.view.selected?.item.fixture_id === 100, 'layout_place refused: the selection was not kept');
+  console.log('ok - layout_place: a refused put keeps the selection and is a tool error');
+
+  const cancelled = await callJson('layout_command', { id: launched.id, command: 'cancel' });
+  assert(cancelled.selected === null && cancelled.placed.length === 1, `layout_command cancel: ${JSON.stringify(cancelled)}`);
+  console.log('ok - layout_command: cancel answers the view after its frame');
 
   await callJson('native_stop', { id: launched.id });
   await waitFor(async () => !pidAlive(launched.pid), STEP_MS, `pid ${launched.pid} gone`);

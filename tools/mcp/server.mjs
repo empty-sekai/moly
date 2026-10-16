@@ -624,6 +624,120 @@ async function runCommand(inst, script, { wait, timeoutS }) {
 }
 
 // ---------------------------------------------------------------------------
+// Layout editor
+// ---------------------------------------------------------------------------
+
+// A layout command runs in the frame after the request; once two frames have
+// run past the request the view shows its result.
+const LAYOUT_SETTLE_FRAMES = 2;
+const LAYOUT_WAIT_MS = 10_000;
+const LAYOUT_POLL_MS = 30;
+
+async function gameFrame(inst) {
+  const state = (await callOk(inst, 'moly.state')) ?? {};
+  if (typeof state.frame !== 'number') throw new Error('moly.state returned no frame');
+  return state.frame;
+}
+
+// Waits until the game has run `frames` frames past the current one.
+async function waitFrames(inst, frames = LAYOUT_SETTLE_FRAMES) {
+  const target = (await gameFrame(inst)) + frames;
+  const deadline = Date.now() + LAYOUT_WAIT_MS;
+  while ((await gameFrame(inst)) < target) {
+    if (Date.now() >= deadline) throw new Error(`the game did not run ${frames} frames within ${LAYOUT_WAIT_MS / 1000} s`);
+    await sleep(LAYOUT_POLL_MS);
+  }
+}
+
+async function readLayout(inst) {
+  return (await callOk(inst, 'moly.layout.view')) ?? {};
+}
+
+// The view with the owned catalog cut to its row count unless it is asked for.
+function layoutOut(view, catalog = false) {
+  if (catalog || !Array.isArray(view.catalog)) return view;
+  const { catalog: rows, ...rest } = view;
+  return { ...rest, catalog_rows: rows.length };
+}
+
+// Sends one editor command and answers the editor's view after the frame
+// that ran it.
+async function layoutCommand(inst, params) {
+  await callOk(inst, 'moly.layout.command', params);
+  await waitFrames(inst);
+  return readLayout(inst);
+}
+
+// Polls the view until `holds(view)`, failing with `what` at the deadline.
+async function layoutUntil(inst, holds, what) {
+  const deadline = Date.now() + LAYOUT_WAIT_MS;
+  for (;;) {
+    const view = await readLayout(inst);
+    if (holds(view)) return view;
+    if (Date.now() >= deadline) throw new Error(`${what} within ${LAYOUT_WAIT_MS / 1000} s; feedback: ${view.feedback ?? ''}`);
+    await sleep(LAYOUT_POLL_MS * 4);
+  }
+}
+
+// The editor picks y from the column height, so only x and z are compared.
+const sameColumn = (a, b) => Array.isArray(a) && Array.isArray(b) && a[0] === b[0] && a[2] === b[2];
+
+// move_to takes the touched tile; the center the view reports can differ
+// from it by a tile (an even-sized fixture's center mirrored into the view's
+// frame). Moves again by the difference until the reported center is on the
+// wanted column, at most twice more.
+async function layoutMoveCenter(inst, center) {
+  let target = [...center];
+  let view = await layoutCommand(inst, { command: 'move_to', center: target });
+  for (let again = 0; again < 2; again++) {
+    const at = view.selected?.item.center;
+    if (!at || sameColumn(at, center)) break;
+    target = [target[0] + center[0] - at[0], target[1], target[2] + center[2] - at[2]];
+    view = await layoutCommand(inst, { command: 'move_to', center: target });
+  }
+  return view;
+}
+
+// Opens the editor when it is closed, picks the catalog row of the fixture,
+// turns it, moves its center to the tile and decides it when its put status
+// allows.
+async function layoutPlace(inst, { fixture_id, texture_id, center, rotate = 0, decide = true }) {
+  let view = await readLayout(inst);
+  if (!view.active) {
+    await layoutCommand(inst, { command: 'enter' });
+    view = await layoutUntil(inst, (v) => v.active === true, 'the layout editor did not open');
+  }
+  if (view.selected) {
+    throw new Error(`fixture ${view.selected.item?.uid} is selected; decide or cancel it first`);
+  }
+  const rows = (view.catalog ?? []).filter(
+    (row) => row.fixture_id === fixture_id && (texture_id === undefined || row.texture_id === texture_id),
+  );
+  if (rows.length === 0) throw new Error(`fixture ${fixture_id}${texture_id === undefined ? '' : ` texture ${texture_id}`} is not in the owned catalog`);
+  const row = rows.find((candidate) => candidate.placeable > 0);
+  if (!row) throw new Error(`fixture ${fixture_id}: every owned copy is placed (catalog rows ${rows.map((r) => r.index).join(', ')})`);
+  view = await layoutCommand(inst, { command: 'select_catalog', index: row.index });
+  if (!view.selected) throw new Error(`select_catalog ${row.index} selected nothing; feedback: ${view.feedback}`);
+  for (let turn = 0; turn < rotate; turn++) view = await layoutCommand(inst, { command: 'rotate' });
+  view = await layoutMoveCenter(inst, center);
+  const selected = view.selected;
+  if (!selected) throw new Error(`the selection was dropped; feedback: ${view.feedback}`);
+  const out = { catalog_index: row.index, uid: selected.item.uid, center: selected.item.center, direction: selected.item.direction, put_status: selected.put_status };
+  if (!sameColumn(selected.item.center, center)) {
+    return { ...out, placed: false, reason: `the editor kept the fixture's center at ${JSON.stringify(selected.item.center)}; feedback: ${view.feedback}`, view: layoutOut(view) };
+  }
+  if (selected.put_status !== 'ok' || !decide) {
+    return { ...out, placed: false, reason: selected.put_status !== 'ok' ? `put status ${selected.put_status}` : 'decide was false', view: layoutOut(view) };
+  }
+  view = await layoutCommand(inst, { command: 'decide' });
+  const placed = (view.placed ?? []).find((item) => item.uid === selected.item.uid);
+  if (view.selected || !placed) {
+    return { ...out, placed: false, reason: `decide did not place it; feedback: ${view.feedback}`, view: layoutOut(view) };
+  }
+  return { ...out, placed: true, row: placed, view: layoutOut(view) };
+}
+
+// ---------------------------------------------------------------------------
 // MCP tools
 // ---------------------------------------------------------------------------
 
@@ -829,6 +943,63 @@ server.registerTool(
     inputSchema: { id: z.string() },
   },
   guard('director_schema', async ({ id }) => json(await callOk(getInstance(id), 'moly.director.schema'))),
+);
+
+const tile = z.array(z.number().int().min(-128).max(127)).length(3);
+
+server.registerTool(
+  'layout_view',
+  {
+    description:
+      'Read the layout editor: {revision, active, phase, site_id, site_type, dirty, selected, placed, inventory, catalog, can_save, feedback, and the exit, clean-up and save dialogs}. Placed and inventory rows carry uid, fixture_id, texture_id, center [x,y,z] in tiles, direction, grid_size and editable; the catalog lists owned fixtures with index and placeable copies. Without catalog true the catalog is replaced by catalog_rows.',
+    inputSchema: {
+      id: z.string(),
+      catalog: z.boolean().optional().describe('Include the owned catalog rows, default false'),
+    },
+  },
+  guard('layout_view', async ({ id, catalog = false }) => json(layoutOut(await readLayout(getInstance(id)), catalog))),
+);
+
+server.registerTool(
+  'layout_command',
+  {
+    description:
+      'Send one layout editor command and return the editor view after the frame that ran it. Commands: enter, select_catalog {index}, select_placed {uid}, select_inventory {uid}, move_to {center} (the touched tile of a drag; the center an even-sized fixture reports can differ from it by a tile, and y follows the column height), nudge {x, z}, rotate, decide, cancel, store, save, save_and_exit, request_exit, keep_editing, discard_and_exit, rotate_camera, change_look, request_clean_up, clean_up_all, cancel_clean_up. A command the editor refuses answers through feedback and the selection put_status.',
+    inputSchema: {
+      id: z.string(),
+      command: z.string(),
+      index: z.number().int().nonnegative().optional().describe('select_catalog: catalog row index'),
+      uid: z.string().optional().describe('select_placed / select_inventory: fixture uid'),
+      center: tile.optional().describe('move_to: target tile [x, y, z]'),
+      x: z.number().int().min(-128).max(127).optional().describe('nudge: tiles along x (nudge needs x and z)'),
+      z: z.number().int().min(-128).max(127).optional().describe('nudge: tiles along z (nudge needs x and z)'),
+      catalog: z.boolean().optional().describe('Include the owned catalog rows in the answer, default false'),
+    },
+  },
+  guard('layout_command', async ({ id, catalog = false, ...params }) => {
+    const command = Object.fromEntries(Object.entries(params).filter(([, value]) => value !== undefined));
+    return json(layoutOut(await layoutCommand(getInstance(id), command), catalog));
+  }),
+);
+
+server.registerTool(
+  'layout_place',
+  {
+    description:
+      'Place one owned fixture: opens the editor when it is closed, selects the first catalog row of the fixture (and texture) with a placeable copy, turns it a quarter turn rotate times, moves it until its reported center is on the x and z of center (y follows the column height), and decides it when its put status is ok. Returns {placed, uid, center, direction, put_status, reason?, row?, view}. A refused put leaves the fixture selected and sets isError; cancel it or move it with layout_command. Saving stays a separate save or save_and_exit command.',
+    inputSchema: {
+      id: z.string(),
+      fixture_id: z.number().int(),
+      texture_id: z.number().int().optional().describe('Catalog texture to pick, default the first placeable row'),
+      center: tile.describe('Wanted center [x, y, z] in the frame of the placed rows; y is ignored'),
+      rotate: z.number().int().min(0).max(3).optional().describe('Quarter turns before the move, default 0'),
+      decide: z.boolean().optional().describe('Decide the placement when its put status is ok, default true'),
+    },
+  },
+  guard('layout_place', async ({ id, ...params }) => {
+    const out = await layoutPlace(getInstance(id), params);
+    return json(out, out.placed !== true && params.decide !== false);
+  }),
 );
 
 // Kill every child this server still owns when it exits, native or browser.

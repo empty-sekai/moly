@@ -50,7 +50,7 @@ For Claude Desktop, add the server to `claude_desktop_config.json`, using the ab
 
 ## Tools
 
-The server provides 14 tools.
+The server provides 17 tools.
 
 | Tool | Purpose |
 |---|---|
@@ -68,6 +68,9 @@ The server provides 14 tools.
 | `check` | Evaluates one director condition (`cond`). Returns `{holds, read}`. |
 | `capture` | Captures the game frame as a PNG image. `timeout` is in seconds, default 10. An error from the game is a tool error. |
 | `director_schema` | Returns the JSON Schema of director steps and conditions. |
+| `layout_view` | Reads the layout editor: whether it is active, its phase and site, the selected fixture with its put status, the placed rows, the storage, the dialogs, whether it can save, and its last feedback. Rows carry `uid`, `fixture_id`, `texture_id`, `center` (`[x, y, z]` in tiles), `direction` and `grid_size`. The owned catalogue is replaced by `catalog_rows` unless `catalog` is true. |
+| `layout_command` | Sends one layout editor command (`command`, plus `index`, `uid`, `center`, or `x` and `z` as the command needs; see `moly.layout.command`) and returns the editor view once two game frames have run after the request. `move_to` takes the touched tile of a drag: an even-sized fixture's reported center can differ from it by a tile, and y follows the column height. A command the editor refuses answers through `feedback` and the selection's `put_status`. |
+| `layout_place` | Places one owned fixture: opens the editor when it is closed, selects the first catalogue row of `fixture_id` (and `texture_id`) with a placeable copy, turns it a quarter turn `rotate` times (0 to 3), moves it until the center the view reports is on the x and z of `center` (y follows the column height), and decides it when its put status is `ok` (`decide` false stops before that). Returns `{placed, uid, center, direction, put_status, reason, row, view}`. A refused put leaves the fixture selected and is a tool error. Saving is a separate `save` or `save_and_exit` command. |
 
 Relative paths given to `native_launch` (`exe`, `cwd`) and to `browser_launch` (`chrome`, when it contains a path separator) resolve against the directory the server runs in.
 
@@ -87,7 +90,7 @@ The game reads its resources from the directory named by `MOLY_ASSET_ROOT`, whic
 
 `browser_launch` starts Chrome with a new profile under `profiles/<id>`, with remote debugging on `port` (a free port when `port` is omitted), and opens `url`. If the page has a `#boot` element, the server waits for its `data-state` attribute to reach `ready`, taps `#boot-enter`, and waits until `#boot` is gone. `state` is `running` after such a tap, `dismissed` when the screen went away without one, and `no-boot` for a page without a boot screen. A `failed` boot state fails the launch with the element's text. `timeout` is the number of seconds to wait for the page to load and for the boot screen, default 600.
 
-The page must load a module at a URL path that ends in `/moly-app.js` and export `control(request)`. The server calls `control` with one JSON-RPC 2.0 request as text, and the function resolves to the reply as text. For browser instances, `rpc`, `methods`, `act`, `run_script`, `check`, `capture` and `director_schema` all use this path. Console output and exceptions go to `logs/<id>.log`.
+The page must load a module at a URL path that ends in `/moly-app.js` and export `control(request)`. The server calls `control` with one JSON-RPC 2.0 request as text, and the function resolves to the reply as text. For browser instances, `rpc`, `methods`, `act`, `run_script`, `check`, `capture`, `director_schema` and the layout tools all use this path. Console output and exceptions go to `logs/<id>.log`.
 
 ## Director scripts
 
@@ -180,7 +183,7 @@ npm ci --prefix tools/mcp
 npm test --prefix tools/mcp
 ```
 
-The test starts the server over stdio and launches `test/fake-game.mjs`, a JSON-RPC stub on port 15799, as a native instance. It then checks the tool list, `ping`, the error for an unknown method, the instance log, the game tools (`methods`, `director_schema`, `act`, `run_script`, `check` and `capture`), and `native_stop`. It exits with code 0 on success and 1 on failure. Port 15799 must be free. The browser tools and a real game are not covered.
+The test starts the server over stdio and launches `test/fake-game.mjs`, a JSON-RPC stub on port 15799, as a native instance. It then checks the tool list, `ping`, the error for an unknown method, the instance log, the game tools (`methods`, `director_schema`, `act`, `run_script`, `check` and `capture`), the layout tools against a stub editor (a placement, a fixture with no placeable copy, a refused put and a cancel), and `native_stop`. It exits with code 0 on success and 1 on failure. Port 15799 must be free. The browser tools and a real game are not covered.
 
 ## Layout
 
