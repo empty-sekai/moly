@@ -1,0 +1,20 @@
+[package]
+name = "moly-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The local resource store: where moly keeps downloaded resources, the
+# publication document that lists them, and the installer that mirrors one
+# published catalog. No engine dependency, so the launcher and the game read
+# the same locations and records.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = "0.10"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }

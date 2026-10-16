@@ -108,6 +108,7 @@ GitHub Actions 在推送、拉取请求和手动触发时执行版本一致性�
 | 目录 | 职责 |
 |---|---|
 | `crates/base/moly-law` | 不依赖引擎的行为与计算逻辑 |
+| `crates/base/moly-store` | 本地资源库：数据目录、CDN 发布清单、资源下载与校验、安装记录 |
 | `crates/engine/moly-assets` | 资源目录、资源包与数据加载 |
 | `crates/engine/moly-perf` | 逐帧性能计数 |
 | `crates/game/moly-game` | 场景、交互、UI 与渲染 |

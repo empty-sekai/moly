@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/base/moly-law",
+    "crates/base/moly-store",
     "crates/engine/moly-assets",
     "crates/engine/moly-perf",
     "crates/game/moly-game",
