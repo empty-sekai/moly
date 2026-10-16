@@ -70,6 +70,13 @@ const SURFACE_RADIUS: f32 = 2.0;
 #[reflect(Component)]
 pub struct CharacterUnitId(pub u32);
 
+/// The unit an entity animates, as the animation-time check names it.
+impl crate::animation_time::UnitId for CharacterUnitId {
+    fn unit_id(&self) -> u32 {
+        self.0
+    }
+}
+
 /// 常规路线的步行速度，来自角色清单的运行时米/秒列。
 #[derive(Component)]
 pub struct WalkSpeed(pub f32);

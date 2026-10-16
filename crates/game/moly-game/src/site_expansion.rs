@@ -54,7 +54,7 @@ use crate::camera::{CameraStateType, FieldCameraModel, FieldCameraState};
 use crate::game_state::{self, GameStateType};
 use crate::player::PlayerControlled;
 use crate::site::{SiteActive, SiteSelection};
-use law::{LocalLists, Masters, EXPANSION_TABLES};
+use law::{Masters, EXPANSION_TABLES};
 
 const INSTRUMENT: &str = "MOLY_RANK_CHANGE";
 /// `SiteActionExecutor.DEFAULT_FADE_OUT_TIME`.
@@ -72,10 +72,9 @@ const SETTLE_FRAMES: u64 = 1;
 /// The housing sites whose displayed level follows the rank.
 const HOUSING: [&str; 4] = ["home_site", "first_floor", "second_floor", "third_floor"];
 
-/// The client's local lists (`ApplicationLocalSettings.MysekaiTopics` and
-/// `.UnlockedMasterSiteLevelIds`).
-#[derive(Resource, Default, Debug)]
-pub(crate) struct MysekaiLocalSettings(pub(crate) LocalLists);
+// The client's local lists: the server model owns the resource, beside the
+// local document it seats and persists it with.
+pub(crate) use crate::server::local::MysekaiLocalSettings;
 
 /// `UserMysekaiGamedata.mysekaiRank` of the server's latest reply, once a
 /// rank change has delivered it.

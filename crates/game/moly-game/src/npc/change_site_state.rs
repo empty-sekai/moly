@@ -1181,7 +1181,7 @@ fn show_entry_tweet(
     let site = world
         .get::<NpcActions>(actor)
         .and_then(|actions| residency::site_type_value(&actions.site_type));
-    crate::control::events::emit(
+    crate::bus::emit(
         "tweet_shown",
         serde_json::json!({ "unit": unit, "tweet_id": tweet_id, "text": text, "entry": true }),
     );

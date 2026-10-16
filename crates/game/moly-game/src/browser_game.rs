@@ -506,6 +506,9 @@ pub fn configure_browser_game(app: &mut App, seed: GameSeed) {
     let host = seed.host;
     app.insert_resource(seed)
         .insert_resource(errors)
+        // The host that seats the documents is the one that can answer
+        // whether a game owns this instance, and this is where it has.
+        .insert_resource(crate::run_mode::RunMode { game: game_mode_active() })
         .add_systems(Startup, announce)
         .add_systems(
             PreUpdate,

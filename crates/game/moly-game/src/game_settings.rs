@@ -166,7 +166,7 @@ impl SettingsPanel {
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct OverlayPanels<'w> {
     settings: Res<'w, SettingsPanel>,
-    control: Option<Res<'w, crate::control_panel::ControlPanel>>,
+    claims: Option<Res<'w, crate::input_claims::InputClaims>>,
 }
 
 impl OverlayPanels<'_> {
@@ -175,19 +175,15 @@ impl OverlayPanels<'_> {
     pub(crate) fn block_world_input(&self) -> bool {
         self.settings.blocks_world_input()
             || self
-                .control
+                .claims
                 .as_deref()
-                .is_some_and(crate::control_panel::ControlPanel::blocks_world_input)
+                .is_some_and(|claims| claims.holds(crate::input_claims::CONTROL_PANEL))
     }
 
     /// As [`Self::block_world_input`], and also while the pointer is over
     /// the control panel's drawer beside the field.
     pub(crate) fn block_pointer(&self) -> bool {
-        self.block_world_input()
-            || self
-                .control
-                .as_deref()
-                .is_some_and(crate::control_panel::ControlPanel::holds_pointer)
+        self.block_world_input() || self.claims.as_deref().is_some_and(crate::input_claims::InputClaims::holds_pointer)
     }
 }
 

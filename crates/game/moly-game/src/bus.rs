@@ -27,7 +27,7 @@ use crate::npc::{CharacterUnitId, NpcActions};
 const KEPT: usize = 4096;
 
 /// The most events one read answers.
-pub(super) const MOST_PER_READ: usize = 1000;
+pub(crate) const MOST_PER_READ: usize = 1000;
 
 struct Log {
     next: u64,
@@ -60,7 +60,7 @@ pub(crate) fn emit(kind: &str, fields: Value) {
 }
 
 /// The events after `since`, at most `limit`, only of `kinds` when given.
-pub(super) fn read(since: u64, limit: usize, kinds: Option<&[String]>) -> Value {
+pub(crate) fn read(since: u64, limit: usize, kinds: Option<&[String]>) -> Value {
     let log = LOG.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let oldest = log.events.front().and_then(|event| event["seq"].as_u64()).unwrap_or(log.next);
     let missed = oldest.saturating_sub(since + 1);
@@ -83,7 +83,7 @@ pub(super) fn read(since: u64, limit: usize, kinds: Option<&[String]>) -> Value 
 
 /// What [`watch`] saw last frame.
 #[derive(Default)]
-pub(super) struct Seen {
+pub(crate) struct Seen {
     started: bool,
     weather: Option<i32>,
     site: Option<(u32, String)>,
@@ -93,14 +93,14 @@ pub(super) struct Seen {
 }
 
 /// First: the frame and game time the events of this frame are stamped with.
-pub(super) fn stamp(frame: Res<FrameCount>, time: Res<Time<Virtual>>) {
+pub(crate) fn stamp(frame: Res<FrameCount>, time: Res<Time<Virtual>>) {
     FRAME.store(u64::from(frame.0), Ordering::Relaxed);
     ELAPSED_BITS.store(time.elapsed_secs_f64().to_bits(), Ordering::Relaxed);
 }
 
 /// Last: the events that follow from state, against the frame before. The
 /// first frame records the state it starts from without events.
-pub(super) fn watch(world: &mut World, mut seen: Local<Seen>) {
+pub(crate) fn watch(world: &mut World, mut seen: Local<Seen>) {
     let weather = world.get_resource::<crate::weather::CurrentPhenomenonId>().map(|id| id.0);
     let site = world
         .get_resource::<crate::site::SiteActive>()

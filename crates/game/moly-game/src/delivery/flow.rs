@@ -659,7 +659,7 @@ fn on_request(
             let id = id.or_else(|| world.model.parties.first().map(|p| p.id));
             let Some(party) = id.and_then(|id| world.model.party(id)) else {
                 info!("[delivery] OnStartDelivery: no party site data (no party in session): nothing happens");
-                crate::control::events::emit(
+                crate::bus::emit(
                     "delivery_refused",
                     serde_json::json!({ "party_id": id, "reason": "no party is in session" }),
                 );
@@ -670,7 +670,7 @@ fn on_request(
                     "[delivery] OnStartDelivery party {}: CanDelivery false (have {}, spent {}): nothing happens",
                     party.id, party.tally.synchronized_cost_quantity, party.tally.unsynchronized_cost
                 );
-                crate::control::events::emit(
+                crate::bus::emit(
                     "delivery_refused",
                     serde_json::json!({
                         "party_id": party.id,
@@ -682,7 +682,7 @@ fn on_request(
                 return;
             }
             let party_id = party.id;
-            crate::control::events::emit("delivery_started", serde_json::json!({ "party_id": party_id }));
+            crate::bus::emit("delivery_started", serde_json::json!({ "party_id": party_id }));
             world.model.enabled = true;
             execute_delivery(world, flow, players, animators, objects, party_id, now);
         }

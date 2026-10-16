@@ -37,7 +37,7 @@
 //!   both cakes stand at every time (the client's own windows decide whether
 //!   the button shows and whether the party opens). Each cake is checked when
 //!   the layout is served, against the layout's floor rows and the starter
-//!   house ([`crate::entry::house::STARTER_HOUSE`]), with the XZ overlap rule
+//!   house ([`STARTER_HOUSE`]), with the XZ overlap rule
 //!   the house append uses; a cake that overlaps one, or whose fixture a row
 //!   already places, is not served, loudly. `none` serves no cake.
 
@@ -335,6 +335,38 @@ fn overlaps(a: (GridPosition, GridPosition), b: (GridPosition, GridPosition)) ->
     a.0.x <= b.1.x && a.1.x >= b.0.x && a.0.z <= b.1.z && a.1.z >= b.0.z
 }
 
+/// The player's house on the offline HOME layout: a named server-decided
+/// mock. In the source the house is a placed system fixture in the user's
+/// saved housing layout, which the server supplies, and the home site always
+/// has one. It is the lowest `home` system fixture (`mysekaiSystemFixtures`
+/// row 1 names fixture 1, `mdl_mis0001_house_house1`, 12 x 12 x 13 cells, one
+/// colour); the fixture layout owner appends it to a home site layout that
+/// has no house, and the party cakes are checked against it here. Facing Back
+/// puts the door toward +Z, so the camera yaw the entry leaves behind equals
+/// the Normal camera's initial yaw.
+pub(crate) struct StarterHouse {
+    pub(crate) package: &'static str,
+    pub(crate) fixture_id: i32,
+    pub(crate) texture_id: u32,
+    /// Unrotated (Front) footprint corners, as a saved layout row stores them.
+    pub(crate) min: GridPosition,
+    pub(crate) max: GridPosition,
+    pub(crate) direction: Direction,
+}
+
+pub(crate) const STARTER_HOUSE: StarterHouse = StarterHouse {
+    package: "mysekai__fixture__mdl_mis0001_house_house1",
+    fixture_id: 1,
+    texture_id: 1,
+    min: GridPosition { x: 4, y: 0, z: -17 },
+    max: GridPosition {
+        x: 15,
+        y: 12,
+        z: -6,
+    },
+    direction: Direction::Back,
+};
+
 fn check_cake(cake: &PartyCake, rows: &[Value]) -> Result<(), String> {
     let cell = |[x, y, z]: [i8; 3]| GridPosition { x, y, z };
     let placed = footprint(
@@ -345,7 +377,7 @@ fn check_cake(cake: &PartyCake, rows: &[Value]) -> Result<(), String> {
         FLOOR_LAYOUT,
     )?
     .ok_or("a floor row has no floor footprint")?;
-    let house = &crate::entry::house::STARTER_HOUSE;
+    let house = &STARTER_HOUSE;
     let house_placed = footprint(house.min, house.max, 0, house.direction, FLOOR_LAYOUT)?
         .ok_or("the starter house has no floor footprint")?;
     if overlaps(placed, house_placed) {

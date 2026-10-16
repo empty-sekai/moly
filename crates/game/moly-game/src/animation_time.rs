@@ -11,14 +11,21 @@ use bevy::animation::graph::{AnimationGraph, AnimationGraphHandle, AnimationNode
 use bevy::animation::AnimationPlayer;
 use bevy::prelude::*;
 
+/// The component that names the character unit an entity animates, for the
+/// owner this check names in its message. The domain that owns the component
+/// implements it, so the check itself knows no character component.
+pub(crate) trait UnitId {
+    fn unit_id(&self) -> u32;
+}
+
 /// PostUpdate, after the clips advance and before they are sampled.
-pub(crate) fn refuse_non_finite(
+pub(crate) fn refuse_non_finite<U: UnitId + Component>(
     players: Query<(Entity, &AnimationPlayer, Option<&AnimationGraphHandle>)>,
     graphs: Res<Assets<AnimationGraph>>,
     clips: Res<Assets<AnimationClip>>,
     names: Query<&Name>,
     parents: Query<&ChildOf>,
-    units: Query<&crate::npc::CharacterUnitId>,
+    units: Query<&U>,
 ) {
     for (entity, player, graph) in &players {
         for (node, active) in player.playing_animations() {
@@ -44,7 +51,7 @@ pub(crate) fn refuse_non_finite(
             let mut at = Some(entity);
             while let Some(current) = at {
                 if unit.is_none() {
-                    unit = units.get(current).ok().map(|unit| unit.0);
+                    unit = units.get(current).ok().map(U::unit_id);
                 }
                 if let Ok(name) = names.get(current) {
                     chain.push(name.as_str().to_owned());

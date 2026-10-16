@@ -578,7 +578,7 @@ impl ServerModel {
                     self.doc.gamedata.mysekai_rank,
                     self.doc.delivery.mysekai_materials,
                 );
-                crate::control::events::emit(
+                crate::bus::emit(
                     "craft_done",
                     serde_json::json!({
                         "blueprint_id": crafted.blueprint.id,
@@ -594,7 +594,7 @@ impl ServerModel {
                 self.answer(kind, &changed)
             }
             Err(reason) => {
-                crate::control::events::emit(
+                crate::bus::emit(
                     "craft_refused",
                     serde_json::json!({ "blueprint_id": request.blueprint_id, "quantity": request.quantity, "reason": reason }),
                 );

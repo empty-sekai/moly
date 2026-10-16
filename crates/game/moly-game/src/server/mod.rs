@@ -1938,7 +1938,7 @@ fn deliver(
     mut live: ResMut<LiveSchedule>,
     mut replies: ResMut<ServerGateReplies>,
     mut ranks: MessageWriter<RankDelivered>,
-    mut local: Option<ResMut<crate::site_expansion::MysekaiLocalSettings>>,
+    mut local: Option<ResMut<local::MysekaiLocalSettings>>,
     mut total_exp: Option<ResMut<crate::mysekai_rank::UserTotalExp>>,
     mut birthday: ResMut<delivery::ClientBirthdayPartyData>,
     mut music_copy: ResMut<client::music::ClientMusicPlaySettings>,
@@ -1947,6 +1947,11 @@ fn deliver(
     mut records_copy: ResMut<client::music_play::ClientMusicRecords>,
     mut actions_copy: ResMut<client::system_fixture_action::ClientSystemFixtureActions>,
     mut tools_copy: ResMut<tools::ClientMysekaiTools>,
+    // Paired: this system is at the parameter-count limit.
+    (mode, saved): (
+        Res<crate::run_mode::RunMode>,
+        Option<Res<crate::player_data::SavedTotalExp>>,
+    ),
 ) {
     let taken = with_model(|model| {
         (
@@ -2021,14 +2026,15 @@ fn deliver(
             // UserMysekaiGamedata.totalExp is what both rank gauges read;
             // imported player data keeps its own value.
             if let Some(total) = total_exp.as_deref_mut() {
-                if total.0 != gamedata.total_exp && crate::player_data::saved_total_exp().is_none()
+                if total.0 != gamedata.total_exp
+                    && saved.as_deref().and_then(|saved| saved.0).is_none()
                 {
                     total.0 = gamedata.total_exp;
                 }
             }
             if let Some(current) = gamedata.mysekai_rank {
                 let join = response.kind == ResponseKind::Join;
-                if join && crate::browser_game::game_mode_active() {
+                if join && mode.game {
                     ranks.write(RankDelivered {
                         previous: None,
                         current,
@@ -2089,7 +2095,7 @@ fn deliver(
 
 /// Startup: the local lists from the seed's local document (the browser
 /// game); natively they start empty, as on a fresh install.
-fn seat_local(local: Option<ResMut<crate::site_expansion::MysekaiLocalSettings>>) {
+fn seat_local(local: Option<ResMut<local::MysekaiLocalSettings>>) {
     let Some(text) = LOCAL_SEED.lock().ok().and_then(|mut slot| slot.take()) else {
         return;
     };
@@ -2111,10 +2117,11 @@ fn seat_local(local: Option<ResMut<crate::site_expansion::MysekaiLocalSettings>>
 
 /// Last: a changed local list is written to the page backend.
 fn persist_local(
-    local: Option<Res<crate::site_expansion::MysekaiLocalSettings>>,
+    local: Option<Res<local::MysekaiLocalSettings>>,
+    mode: Res<crate::run_mode::RunMode>,
     mut written: Local<Option<String>>,
 ) {
-    if !crate::browser_game::game_mode_active() {
+    if !mode.game {
         return;
     }
     let Some(local) = local else {
@@ -2147,6 +2154,7 @@ pub(crate) struct ServerPlugin;
 impl Plugin for ServerPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<RankDelivered>()
+            .init_resource::<crate::run_mode::RunMode>()
             .init_resource::<LiveSchedule>()
             .init_resource::<ServerGateReplies>()
             .init_resource::<ClientTalkListUpdates>()

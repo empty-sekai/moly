@@ -44,17 +44,21 @@ impl UserTotalExp {
     pub(crate) fn set(&mut self, imported: Option<i32>) {
         self.0 = imported.unwrap_or_else(Self::panel);
     }
-}
 
-impl Default for UserTotalExp {
-    fn default() -> Self {
-        UserTotalExp(crate::player_data::saved_total_exp().unwrap_or_else(Self::panel))
+    /// The value the world was seated with: the saved player data's total
+    /// experience, else the server document's.
+    fn seated(saved: Option<&crate::player_data::SavedTotalExp>) -> Self {
+        UserTotalExp(saved.and_then(|saved| saved.0).unwrap_or_else(Self::panel))
     }
 }
 
 /// Startup: request the table and seat the user's total experience.
-pub(crate) fn load(mut commands: Commands, mut masters: ResMut<MasterData>) {
-    commands.init_resource::<UserTotalExp>();
+pub(crate) fn load(
+    mut commands: Commands,
+    saved: Option<Res<crate::player_data::SavedTotalExp>>,
+    mut masters: ResMut<MasterData>,
+) {
+    commands.insert_resource(UserTotalExp::seated(saved.as_deref()));
     masters.request(&RANKS);
 }
 

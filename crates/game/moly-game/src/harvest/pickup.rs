@@ -160,7 +160,7 @@ fn on_collect_drop_item(
         "[harvest-pickup] collected uid {} ({reason}): resourceType {} id {} qty {} rarity {}",
         item.uid, item.resource_type, item.resource_id, item.row.quantity, item.rarity
     );
-    crate::control::events::emit(
+    crate::bus::emit(
         "item_obtained",
         serde_json::json!({
             "uid": item.uid,

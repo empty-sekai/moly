@@ -6,7 +6,10 @@
 //! value; the document keeps the same map. It is client state, not server
 //! state: the panel never edits it.
 
+use bevy::prelude::*;
 use serde_json::{json, Map, Value};
+
+use crate::site_expansion::law::LocalLists;
 
 pub(crate) const SCHEMA_VERSION: u64 = 1;
 
@@ -112,6 +115,15 @@ impl LocalDocument {
         .to_string()
     }
 }
+
+/// The client-local lists of the application's local settings
+/// (`ApplicationLocalSettings.MysekaiTopics` and
+/// `.UnlockedMasterSiteLevelIds`), as the site expansion reads and writes
+/// them. It is client state: the server model seats it from the local
+/// document and persists it there, and it starts empty natively, as on a
+/// fresh install.
+#[derive(Resource, Default, Debug)]
+pub(crate) struct MysekaiLocalSettings(pub(crate) LocalLists);
 
 #[cfg(test)]
 mod tests {

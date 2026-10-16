@@ -7,7 +7,6 @@
 //! JSON-RPC 2.0 objects, and a request is handled in the frame after it
 //! arrives. `moly.methods` lists the moly methods with what each takes.
 
-pub(crate) mod events;
 pub(crate) mod layout;
 mod observe;
 mod state;
@@ -183,8 +182,8 @@ pub(crate) fn install(app: &mut App) {
         .init_resource::<Captures>()
         .init_resource::<TimeStep>()
         .add_systems(Startup, share_sender)
-        .add_systems(First, events::stamp)
-        .add_systems(Last, (events::watch, end_step));
+        .add_systems(First, crate::bus::stamp)
+        .add_systems(Last, (crate::bus::watch, end_step));
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(port) = native_port() {
         info!("[control] listening on 127.0.0.1:{port}");
@@ -323,11 +322,14 @@ fn ui_views(In(_): In<Option<Value>>, world: &mut World) -> BrpResult {
 fn panel(
     In(params): In<Option<Value>>,
     panel: Option<ResMut<crate::control_panel::ControlPanel>>,
+    mut claims: ResMut<crate::input_claims::InputClaims>,
     time: Res<Time<Real>>,
 ) -> BrpResult {
     let params = object(params, "moly.panel")?;
     let mut panel = panel.ok_or_else(|| failure(error_codes::RESOURCE_NOT_PRESENT, "moly.panel: the control panel is not installed"))?;
-    crate::control_panel::command(&mut panel, &params, time.elapsed_secs_f64()).map_err(refuse)
+    let answer = crate::control_panel::command(&mut panel, &params, time.elapsed_secs_f64()).map_err(refuse);
+    crate::control_panel::publish(&panel, &mut claims);
+    answer
 }
 
 fn tap(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
@@ -485,8 +487,8 @@ fn read_events(In(params): In<Option<Value>>) -> BrpResult {
         None => 200,
         Some(limit) => limit
             .as_u64()
-            .filter(|limit| (1..=events::MOST_PER_READ as u64).contains(limit))
-            .ok_or_else(|| refuse(format!("moly.events: limit must be a whole number from 1 to {}", events::MOST_PER_READ)))?
+            .filter(|limit| (1..=crate::bus::MOST_PER_READ as u64).contains(limit))
+            .ok_or_else(|| refuse(format!("moly.events: limit must be a whole number from 1 to {}", crate::bus::MOST_PER_READ)))?
             as usize,
     };
     let kinds = match params.get("kinds") {
@@ -500,7 +502,7 @@ fn read_events(In(params): In<Option<Value>>) -> BrpResult {
         ),
         Some(_) => return Err(refuse("moly.events: kinds must be an array of strings")),
     };
-    Ok(events::read(since, limit, kinds.as_deref()))
+    Ok(crate::bus::read(since, limit, kinds.as_deref()))
 }
 
 fn director_examples(In(_): In<Option<Value>>) -> BrpResult {

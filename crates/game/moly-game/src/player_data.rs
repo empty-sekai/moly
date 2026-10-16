@@ -386,6 +386,7 @@ impl PlayerDataImport {
             preview.data.rank
         );
         replace_live(world, document, selection);
+        reseat_saved_total_exp(world);
         self.preview = None;
         Ok(())
     }
@@ -466,6 +467,7 @@ impl PlayerDataImport {
         self.cancel();
         self.status = "Restored the layout from before the import.".into();
         replace_live(world, document, restored_selection.unwrap());
+        reseat_saved_total_exp(world);
         Ok(())
     }
 }
@@ -523,6 +525,28 @@ pub(crate) fn saved_total_exp() -> Option<i32> {
         .ok()
         .as_ref()
         .and_then(profile_total_exp)
+}
+
+/// The saved profile's total experience, seated where the rank gauge and the
+/// server responses read it. [`saved_total_exp`] reads the settings document;
+/// this resource holds that answer so a reader without the document's
+/// ownership reads it too, and it is seated again whenever an import
+/// replaces the document.
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub(crate) struct SavedTotalExp(pub(crate) Option<i32>);
+
+/// PreStartup: the value the store already carries, before the first frame
+/// that reads it.
+fn seat_saved_total_exp(world: &mut World) {
+    world.insert_resource(SavedTotalExp(saved_total_exp()));
+}
+
+/// Seats the value the document now carries; an import and a restore call it
+/// once their write has landed.
+fn reseat_saved_total_exp(world: &mut World) {
+    if let Some(mut saved) = world.get_resource_mut::<SavedTotalExp>() {
+        saved.0 = saved_total_exp();
+    }
 }
 
 /// Prefer the imported home on restart when the entry point has no explicit site.
@@ -719,6 +743,8 @@ pub(crate) fn drop_files(
 
 pub(crate) fn install(app: &mut App) {
     app.init_resource::<PlayerDataImport>();
+    app.init_resource::<SavedTotalExp>()
+        .add_systems(PreStartup, seat_saved_total_exp);
     app.add_systems(Update, update.before(crate::fixture::FixtureLayoutSet));
     app.add_systems(
         PreUpdate,

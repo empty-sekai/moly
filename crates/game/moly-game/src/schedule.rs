@@ -913,7 +913,7 @@ pub fn install(app: &mut App) {
         // named, before the animation system samples it.
         .add_systems(
             PostUpdate,
-            crate::animation_time::refuse_non_finite
+            crate::animation_time::refuse_non_finite::<crate::npc::CharacterUnitId>
                 .after(bevy::animation::advance_animations)
                 .before(bevy::animation::animate_targets),
         )

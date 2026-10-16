@@ -465,7 +465,7 @@ pub(crate) fn on_update(
                     info!(
                         "[npc-state] unit={unit} frame={frame} tweet enter: tweet={id} state=InProgress show",
                     );
-                    crate::control::events::emit(
+                    crate::bus::emit(
                         "tweet_shown",
                         serde_json::json!({ "unit": unit, "tweet_id": id, "text": row.text }),
                     );

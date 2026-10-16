@@ -165,12 +165,12 @@ pub(crate) struct PointerUi<'w, 's> {
     views: Query<'w, 's, (Entity, &'static UiPrefabView, &'static GlobalTransform)>,
     hierarchy: Query<'w, 's, (Option<&'static Visibility>, Option<&'static ChildOf>)>,
     root: Option<Res<'w, crate::canvas::RootCanvas>>,
-    control: Option<Res<'w, crate::control_panel::ControlPanel>>,
+    claims: Option<Res<'w, crate::input_claims::InputClaims>>,
 }
 
 impl PointerUi<'_, '_> {
     pub(crate) fn captures(&self, position: Vec2, window: &Window) -> bool {
-        if self.control.as_deref().is_some_and(|panel| panel.captures(position)) { return true; }
+        if self.claims.as_deref().is_some_and(|claims| claims.captures(position)) { return true; }
         if self.dialogs.blocks_field_input() { return true; }
         let editor_layer = self.layers.current() == crate::ui_layers::LayerId::MysekaiSiteEdit;
         if !self.layers.on_field() && !editor_layer { return true; }

@@ -17,31 +17,11 @@ use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
 use moly_assets::json::master::{self, MasterData, MasterTable};
-use moly_law::fixture::{Direction, GridPosition};
 use serde_json::Value;
 
-pub(crate) struct StarterHouse {
-    pub(crate) package: &'static str,
-    pub(crate) fixture_id: i32,
-    pub(crate) texture_id: u32,
-    /// Unrotated (Front) footprint corners, as a saved layout row stores them.
-    pub(crate) min: GridPosition,
-    pub(crate) max: GridPosition,
-    pub(crate) direction: Direction,
-}
-
-pub(crate) const STARTER_HOUSE: StarterHouse = StarterHouse {
-    package: "mysekai__fixture__mdl_mis0001_house_house1",
-    fixture_id: 1,
-    texture_id: 1,
-    min: GridPosition { x: 4, y: 0, z: -17 },
-    max: GridPosition {
-        x: 15,
-        y: 12,
-        z: -6,
-    },
-    direction: Direction::Back,
-};
+// The mock house the layout owner appends and the server's party cakes are
+// checked against; the server side owns the value.
+pub(crate) use crate::server::system_fixture_action::STARTER_HOUSE;
 
 /// The instance UID the mock house gets when the layout owner appends it.
 /// Distinct from the starter's positional UIDs and the editor's

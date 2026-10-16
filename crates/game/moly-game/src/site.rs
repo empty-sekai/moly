@@ -1992,8 +1992,8 @@ pub(crate) fn read_switch(
     ),
     layouts: Res<crate::fixture::layouts::SiteFixtureLayouts>,
     // Paired: this system is at the parameter-count limit.
-    (panel, entry): (
-        Res<crate::game_settings::SettingsPanel>,
+    (claims, entry): (
+        Res<crate::input_claims::InputClaims>,
         Option<Res<crate::entry::EntrySequence>>,
     ),
     // Paired: this system is at the parameter-count limit.
@@ -2015,9 +2015,7 @@ pub(crate) fn read_switch(
     tour.deferred_logged = false;
     // Site-change keys and the tour follow the back key, enabled once the
     // entry's JoinMysekai returns.
-    let manual_input = !panel.blocks_world_input()
-        && !library.blocks_world_input()
-        && crate::entry::site_input_open(entry);
+    let manual_input = claims.world_input_free() && crate::entry::site_input_open(entry);
     // Tab and the digit keys are developer shortcuts; the tour is not a key.
     let mut requested = (manual_input && dev.is_some())
         .then(|| key_request(&keys, active.as_deref()))

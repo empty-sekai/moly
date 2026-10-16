@@ -181,11 +181,39 @@ impl ControlPanel {
         self.open && self.drawer.is_some_and(|drawer| drawer.contains(position))
     }
 
+    /// The region the pointer claim covers: the drawer's rect while it is
+    /// open, as [`Self::captures`] answers by position.
+    fn pointer_region(&self) -> Option<Rect> {
+        if self.open {
+            self.drawer
+        } else {
+            None
+        }
+    }
+
     fn close(&mut self) {
         self.open = false;
         self.release_guard = 2;
         self.changed();
     }
+}
+
+/// Publishes what the panel holds, from the system that changed it: the
+/// field's input as a whole, the pointer over the open drawer, and the
+/// region that pointer claim covers.
+pub(crate) fn publish(panel: &ControlPanel, claims: &mut crate::input_claims::InputClaims) {
+    let holder = crate::input_claims::CONTROL_PANEL;
+    if panel.blocks_world_input() {
+        claims.claim(holder);
+    } else {
+        claims.release(holder);
+    }
+    if panel.holds_pointer() {
+        claims.claim_pointer(holder);
+    } else {
+        claims.release_pointer(holder);
+    }
+    claims.hold_region(holder, panel.pointer_region());
 }
 
 /// The parts of the drawer the systems look up.
@@ -205,6 +233,7 @@ struct PanelFont(Handle<Font>);
 
 pub(crate) fn install(app: &mut App) {
     app.init_resource::<ControlPanel>()
+        .init_resource::<crate::input_claims::InputClaims>()
         .add_systems(
             Startup,
             setup
@@ -320,9 +349,15 @@ fn setup(mut c: Commands, ui_font: Res<crate::ui_font::UiFontAsset>, hud: Query<
     button(&mut c, entry, &font, "控制面板", PanelAction::Open, Kind::Primary);
 }
 
-fn release_guard(buttons: Res<ButtonInput<MouseButton>>, touches: Res<Touches>, mut panel: ResMut<ControlPanel>) {
+fn release_guard(
+    buttons: Res<ButtonInput<MouseButton>>,
+    touches: Res<Touches>,
+    mut panel: ResMut<ControlPanel>,
+    mut claims: ResMut<crate::input_claims::InputClaims>,
+) {
     if panel.release_guard > 0 && !buttons.any_pressed([MouseButton::Left, MouseButton::Right]) && touches.iter().next().is_none() {
         panel.release_guard -= 1;
+        publish(&panel, &mut claims);
     }
 }
 
@@ -345,6 +380,7 @@ fn input(
     touches: Res<Touches>,
     time: Res<Time<Real>>,
     mut drag: Local<Drag>,
+    mut claims: ResMut<crate::input_claims::InputClaims>,
 ) {
     let now = time.elapsed_secs_f64();
     for event in keyboard.read() {
@@ -363,6 +399,7 @@ fn input(
             _ => {}
         }
     }
+    publish(&panel, &mut claims);
     let pressed: Vec<PanelAction> = actions
         .iter()
         .filter(|(interaction, _, disabled)| **interaction == Interaction::Pressed && !disabled)
@@ -370,6 +407,7 @@ fn input(
         .collect();
     if !panel.open && pressed.contains(&PanelAction::Open) {
         open(&mut panel, now);
+        publish(&panel, &mut claims);
         return;
     }
     let wheels: Vec<MouseWheel> = wheels.read().cloned().collect();
@@ -379,6 +417,7 @@ fn input(
     if panel.pointer_over != over {
         panel.pointer_over = over;
     }
+    publish(&panel, &mut claims);
     if !panel.open {
         drag.from = None;
         return;
@@ -386,6 +425,7 @@ fn input(
     for action in pressed {
         apply(&mut panel, action, now);
     }
+    publish(&panel, &mut claims);
     // Wheel, mouse drag and touch drag scroll the body.
     let held = buttons.pressed(MouseButton::Left) || touch.is_some();
     for (part, cursor, computed, mut position) in &mut scroll {
@@ -514,6 +554,7 @@ fn refresh(
     mut footer: Query<(&Part, &mut Text, &mut TextColor)>,
     tabs: Query<(Entity, &PanelAction, Has<Selected>)>,
     mut shown: Local<Option<(Tab, u64)>>,
+    mut claims: ResMut<crate::input_claims::InputClaims>,
 ) {
     let Some(font) = font else {
         return;
@@ -552,6 +593,7 @@ fn refresh(
             _ => {}
         }
     }
+    publish(&panel, &mut claims);
     if !panel.open {
         return;
     }
