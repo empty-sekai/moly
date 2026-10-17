@@ -6,8 +6,11 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::LinkEvent;
 
+const CONNECT_RETRY: std::time::Duration = std::time::Duration::from_millis(200);
+
 pub(crate) fn connect(
     address: String,
+    window: std::time::Duration,
     outgoing: async_channel::Receiver<ClientMessage>,
     incoming: async_channel::Sender<LinkEvent>,
 ) {
@@ -16,9 +19,10 @@ pub(crate) fn connect(
         .spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_io()
+                .enable_time()
                 .build()
                 .expect("the link thread builds its runtime");
-            let lost = runtime.block_on(session(&address, outgoing, &incoming));
+            let lost = runtime.block_on(session(&address, window, outgoing, &incoming));
             let _ = incoming.try_send(LinkEvent::Lost(lost));
         });
     if let Err(error) = spawned {
@@ -29,12 +33,26 @@ pub(crate) fn connect(
 /// Runs the session until it ends; returns why it ended.
 async fn session(
     address: &str,
+    window: std::time::Duration,
     outgoing: async_channel::Receiver<ClientMessage>,
     incoming: &async_channel::Sender<LinkEvent>,
 ) -> String {
-    let socket = match tokio_tungstenite::connect_async(address).await {
-        Ok((socket, _)) => socket,
-        Err(error) => return format!("{address}: {error}"),
+    // A server started together with the game may not listen yet: retry
+    // until `window` has passed. Each attempt is bounded by what is left of
+    // the window, since a refused connect can itself take seconds.
+    let deadline = tokio::time::Instant::now() + window;
+    let socket = loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let error = match tokio::time::timeout(left, tokio_tungstenite::connect_async(address)).await
+        {
+            Ok(Ok((socket, _))) => break socket,
+            Ok(Err(error)) => error.to_string(),
+            Err(_) => format!("no answer within {window:?}"),
+        };
+        if tokio::time::Instant::now() + CONNECT_RETRY >= deadline {
+            return format!("{address}: {error}");
+        }
+        tokio::time::sleep(CONNECT_RETRY).await;
     };
     let (mut sink, mut source) = socket.split();
     let writer = async {

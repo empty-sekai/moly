@@ -25,6 +25,14 @@ pub struct LinkConfig {
     pub user: UserId,
     /// The game's name and version, for the server's log.
     pub client: String,
+    /// How long to keep trying to reach a server that does not answer yet
+    /// (one started together with the game).
+    pub connect_window: std::time::Duration,
+}
+
+impl LinkConfig {
+    /// The default connect window.
+    pub const CONNECT_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
 }
 
 /// The connection's state, for the game's notices and the control plane.
@@ -126,7 +134,7 @@ impl Plugin for LinkPlugin {
             client: config.client.clone(),
         });
         #[cfg(not(target_arch = "wasm32"))]
-        native::connect(config.address.clone(), to_server, to_game);
+        native::connect(config.address.clone(), config.connect_window, to_server, to_game);
         #[cfg(target_arch = "wasm32")]
         {
             let _ = (to_server, to_game);
