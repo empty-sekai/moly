@@ -131,6 +131,16 @@ const METHODS: &[(&str, &str, &str)] = &[
         r#"{"type":"object","properties":{"frames":{"type":"integer","minimum":1}}}"#,
     ),
     (
+        "moly.camera.free",
+        "Puts the field camera at a world pose for screenshots and holds it until reset: position, target, optional up (default +Y) and fov in degrees (default 45). Answers the applied pose.",
+        r#"{"type":"object","properties":{"position":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"target":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"up":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"fov":{"type":"number","minimum":5,"maximum":120}},"required":["position","target"]}"#,
+    ),
+    (
+        "moly.camera.reset",
+        "Clears the free camera and lets the player-following field camera take over on the next frame.",
+        NONE,
+    ),
+    (
         "moly.capture",
         "Captures the next rendered frame of the window; answers {id} for moly.capture.take.",
         NONE,
@@ -176,14 +186,18 @@ pub(crate) fn install(app: &mut App) {
         .with_method("moly.layout.view", layout_view)
         .with_method("moly.layout.command", layout_command)
         .with_method("moly.perf.snapshot", perf_snapshot)
+        .with_method("moly.camera.free", camera_free)
+        .with_method("moly.camera.reset", camera_reset)
         .with_method("moly.capture", capture)
         .with_method("moly.capture.take", capture_take);
     app.add_plugins(remote)
         .init_resource::<Captures>()
+        .init_resource::<crate::camera::FreeCameraPose>()
         .init_resource::<TimeStep>()
         .add_systems(Startup, share_sender)
         .add_systems(First, crate::bus::stamp)
-        .add_systems(Last, (crate::bus::watch, end_step));
+        .add_systems(Last, (crate::bus::watch, end_step))
+        .add_systems(Last, crate::camera::apply_free_camera);
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(port) = native_port() {
         info!("[control] listening on 127.0.0.1:{port}");
@@ -586,6 +600,62 @@ fn perf_snapshot(In(params): In<Option<Value>>) -> BrpResult {
             .ok_or_else(|| refuse("moly.perf.snapshot: frames must be a positive integer"))? as usize,
     };
     projection(moly_perf::snapshot_json(frames))
+}
+
+/// `[x, y, z]` from a JSON array, for the free camera's two points.
+fn vec3_param(value: Option<&Value>, method: &str, name: &str) -> Result<Vec3, BrpError> {
+    let array = value
+        .and_then(Value::as_array)
+        .filter(|array| array.len() == 3)
+        .ok_or_else(|| refuse(format!("{method}: {name} must be [x, y, z]")))?;
+    let mut out = [0.0f32; 3];
+    for (slot, value) in out.iter_mut().zip(array) {
+        *slot = value
+            .as_f64()
+            .ok_or_else(|| refuse(format!("{method}: {name} must be [x, y, z] of numbers")))? as f32;
+    }
+    Ok(Vec3::from(out))
+}
+
+fn camera_free(
+    In(params): In<Option<Value>>,
+    mut pose: ResMut<crate::camera::FreeCameraPose>,
+) -> BrpResult {
+    let params = object(params, "moly.camera.free")?;
+    let eye = vec3_param(params.get("position"), "moly.camera.free", "position")?;
+    let target = vec3_param(params.get("target"), "moly.camera.free", "target")?;
+    let up = match params.get("up") {
+        Some(value) => vec3_param(Some(value), "moly.camera.free", "up")?,
+        None => Vec3::Y,
+    };
+    let fov = match params.get("fov") {
+        None => 45.0,
+        Some(value) => value
+            .as_f64()
+            .filter(|fov| (5.0..=120.0).contains(fov))
+            .ok_or_else(|| refuse("moly.camera.free: fov must be a number in 5..=120"))? as f32,
+    };
+    *pose = crate::camera::FreeCameraPose(Some(crate::camera::FreeCameraPoseValue {
+        eye,
+        target,
+        up,
+        fov_degrees: fov,
+    }));
+    Ok(json!({
+        "free": true,
+        "position": [eye.x, eye.y, eye.z],
+        "target": [target.x, target.y, target.z],
+        "up": [up.x, up.y, up.z],
+        "fov": fov,
+    }))
+}
+
+fn camera_reset(
+    In(_): In<Option<Value>>,
+    mut pose: ResMut<crate::camera::FreeCameraPose>,
+) -> BrpResult {
+    *pose = crate::camera::FreeCameraPose(None);
+    Ok(json!({"free": false}))
 }
 
 /// Frames captured for `moly.capture.take`, by id; `None` while the frame

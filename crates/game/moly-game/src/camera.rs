@@ -62,6 +62,36 @@ const MIN_PITCH_AT_MAX_ZOOM_TO: f32 = 24.0;
 /// 滚轮一档折算的捏合像素数。源手势层是触屏、单位是像素；滚轮是 PC
 /// 独有输入，此值是手感常量，非真源量。
 pub(crate) const WHEEL_PINCH_PIXELS: f32 = 50.0;
+
+/// 截图用的自由机位：设着时 [`apply_free_camera`] 每帧覆盖场地相机的
+/// `Transform` 与 `Projection`。`moly.camera.free` 写入，`moly.camera.reset`
+/// 清掉；下一帧玩家跟随相机自然接管（跟随系统在 PostUpdate 已写好）。
+#[derive(Resource, Default)]
+pub struct FreeCameraPose(pub Option<FreeCameraPoseValue>);
+
+#[derive(Clone, Copy, Debug)]
+pub struct FreeCameraPoseValue {
+    pub eye: Vec3,
+    pub target: Vec3,
+    pub up: Vec3,
+    pub fov_degrees: f32,
+}
+
+/// `Last`：在所有相机态（跟随、过场、编辑、交付）都写完场地相机之后执行，
+/// 因此自由机位对这一帧的渲染生效，而不被同帧的跟随律覆盖。
+pub(crate) fn apply_free_camera(
+    pose: Res<FreeCameraPose>,
+    mut camera: Query<(&mut Transform, &mut Projection), With<Camera3d>>,
+) {
+    let Some(free) = &pose.0 else { return };
+    let Ok((mut transform, mut projection)) = camera.single_mut() else {
+        return;
+    };
+    *transform = Transform::from_translation(free.eye).looking_at(free.target, free.up);
+    if let Projection::Perspective(perspective) = &mut *projection {
+        perspective.fov = free.fov_degrees.to_radians();
+    }
+}
 // Product extension requested for close inspection: after entering FPS the
 // wheel narrows the lens down to 20 degrees. Reverse first restores the source
 // field of view, then the next outward gesture exits to the source Normal view.
