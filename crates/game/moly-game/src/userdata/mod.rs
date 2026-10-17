@@ -41,15 +41,19 @@ pub(crate) mod system_fixture_action;
 pub(crate) mod talk_read;
 pub(crate) mod tools;
 
+pub(crate) use local::check_seed_local;
+
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use bevy::prelude::*;
 use serde_json::json;
 
-use crate::server::{
-    with_model, ColorfulPass, Gamedata, GateCharacter, GateReply, ReplyTalkList, ResponseKind,
-    ScheduleRow, Stamina,
+use crate::server::{with_model, ResponseKind};
+
+pub(crate) use moly_protocol::gate::{GateReply, ReplyTalkList};
+pub(crate) use moly_protocol::rows::{
+    ColorfulPass, Gamedata, GateCharacter, ScheduleRow, Stamina,
 };
 
 static GAME_MODE: AtomicBool = AtomicBool::new(false);
@@ -213,62 +217,64 @@ pub(crate) fn deliver(
     let realtime = time.elapsed_secs();
     let mut copy = client.as_deref().cloned();
     let mut schedule = live_rows;
-    for mut response in responses {
-        birthday.apply(std::mem::take(&mut response.delivery));
-        if let Some(rows) = response.music.take() {
+    for response in responses {
+        let kind = response.kind;
+        let mut sections = response.sections;
+        birthday.apply(std::mem::take(&mut sections.delivery));
+        if let Some(rows) = sections.music.take() {
             music_copy.apply(rows);
         }
-        if let Some(avatar) = response.avatar.take() {
+        if let Some(avatar) = sections.avatar.take() {
             avatar_copy.apply(avatar);
         }
-        inventory_copy.apply(std::mem::take(&mut response.inventory));
-        if let Some(rows) = response.music_records.take() {
+        inventory_copy.apply(std::mem::take(&mut sections.inventory));
+        if let Some(rows) = sections.music_records.take() {
             records_copy.apply(rows);
         }
-        if let Some(rows) = response.system_fixture_actions.take() {
+        if let Some(rows) = sections.system_fixture_actions.take() {
             actions_copy.apply(rows);
         }
-        if let Some(rows) = response.tools.take() {
+        if let Some(rows) = sections.tools.take() {
             tools_copy.apply(rows);
         }
         let previous_rank = copy.as_ref().and_then(|copy| copy.gamedata.mysekai_rank);
         let next = match copy.take() {
             None => ClientUserData {
-                gamedata: response.gamedata.unwrap_or(Gamedata {
+                gamedata: sections.gamedata.unwrap_or(Gamedata {
                     mysekai_rank: None,
                     total_exp: 0,
                     refreshed_at: 0,
                     is_mysekai_tutorial_end: true,
                 }),
-                stamina: response.stamina,
-                colorful_pass: response.colorful_pass.flatten(),
-                last_got_server_date: response.server_date_ms,
+                stamina: sections.stamina,
+                colorful_pass: sections.colorful_pass.flatten(),
+                last_got_server_date: sections.server_date_ms,
                 application_time_at_last_got_server_date: realtime,
             },
             Some(mut copy) => {
-                if let Some(gamedata) = response.gamedata {
+                if let Some(gamedata) = sections.gamedata {
                     copy.gamedata = gamedata;
                 }
-                if let Some(stamina) = response.stamina {
+                if let Some(stamina) = sections.stamina {
                     copy.stamina = Some(stamina);
                 }
-                if let Some(pass) = response.colorful_pass {
+                if let Some(pass) = sections.colorful_pass {
                     copy.colorful_pass = pass;
                 }
-                copy.last_got_server_date = response.server_date_ms;
+                copy.last_got_server_date = sections.server_date_ms;
                 copy.application_time_at_last_got_server_date = realtime;
                 copy
             }
         };
-        if response.is_refreshed {
+        if sections.is_refreshed {
             if let Some(local) = local.as_deref_mut() {
                 if !local.0.topics.contains(&local::TOPIC_STAMINA_REFRESH) {
                     local.0.topics.push(local::TOPIC_STAMINA_REFRESH);
-                    info!("[server] {}: isRefreshed -> MysekaiTopicsManager.AddTopicIfNeeded adds StaminaRefresh", response.kind.name());
+                    info!("[server] {}: isRefreshed -> MysekaiTopicsManager.AddTopicIfNeeded adds StaminaRefresh", kind.name());
                 }
             }
         }
-        if let Some(gamedata) = response.gamedata {
+        if let Some(gamedata) = sections.gamedata {
             // UserMysekaiGamedata.totalExp is what both rank gauges read;
             // imported player data keeps its own value.
             if let Some(total) = total_exp.as_deref_mut() {
@@ -279,29 +285,29 @@ pub(crate) fn deliver(
                 }
             }
             if let Some(current) = gamedata.mysekai_rank {
-                let join = response.kind == ResponseKind::Join;
+                let join = kind == ResponseKind::Join;
                 if join && mode.game {
                     ranks.write(RankDelivered {
                         previous: None,
                         current,
-                        response: response.kind.name(),
+                        response: kind.name(),
                     });
                 } else if !join && previous_rank.is_some_and(|previous| previous != current) {
                     ranks.write(RankDelivered {
                         previous: previous_rank,
                         current,
-                        response: response.kind.name(),
+                        response: kind.name(),
                     });
                 }
             }
             if schedule.is_none()
-                && response.schedules.is_none()
+                && sections.schedules.is_none()
                 && live.refreshed_at != gamedata.refreshed_at
             {
                 schedule = Some(live.schedules.clone());
             }
         }
-        if let Some(rows) = response.schedules {
+        if let Some(rows) = sections.schedules {
             schedule = Some(rows);
         }
         copy = Some(next);
@@ -320,7 +326,7 @@ pub(crate) fn deliver(
             "totalExp": copy.gamedata.total_exp,
             "refreshedAt": copy.gamedata.refreshed_at,
         },
-        "userMysekaiStamina": copy.stamina.map(crate::server::document::stamina_value),
+        "userMysekaiStamina": copy.stamina.map(moly_protocol::json::stamina_value),
         "hasMysekaiColorfulPass": copy.has_mysekai_colorful_pass(realtime),
         "currentTimestamp": copy.current_timestamp(realtime),
         "birthdayParty": birthday.view(),
@@ -337,6 +343,13 @@ pub(crate) fn deliver(
             commands.insert_resource(copy);
         }
     }
+}
+
+/// The server panel's NPC slice (schemaVersion 1) once the client has
+/// joined: the rows served at the join and the client's `refreshedAt`.
+#[allow(dead_code)] // Read by the server panel's seam.
+pub(crate) fn npc_slice(client: &ClientUserData, live: &LiveSchedule) -> Option<String> {
+    with_model(|model| model.npc_slice(&live.schedules, client.gamedata.refreshed_at)).flatten()
 }
 
 /// Startup: the local lists from the seed's local document (the browser

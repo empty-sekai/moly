@@ -18,23 +18,10 @@
 
 use bevy::ecs::system::SystemId;
 use bevy::prelude::*;
-use serde_json::{json, Value};
+use serde_json::Value;
 
+pub(crate) use moly_protocol::json::music_records_value as owned_rows_value;
 pub(crate) use moly_protocol::rows::OwnedMusicRecord;
-
-/// The rows as the response key's JSON array.
-pub(crate) fn owned_rows_value(rows: &[OwnedMusicRecord]) -> Value {
-    Value::Array(
-        rows.iter()
-            .map(|row| {
-                json!({
-                    "mysekaiMusicRecordId": row.mysekai_music_record_id,
-                    "obtainedAt": row.obtained_at,
-                })
-            })
-            .collect(),
-    )
-}
 
 /// The client's copy of the owned records, set by responses only.
 #[derive(Resource, Debug, Clone, Default)]

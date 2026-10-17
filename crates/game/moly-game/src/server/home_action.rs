@@ -7,7 +7,7 @@
 //! succeeds, and builds the result dialogs from its own copies (the craft
 //! result's first-craft bonus is the master `mysekaiRankObtainedExps` row, the
 //! sketch result's blueprint is the one it asked for). The client sends a
-//! request through [`super::client::home_action::post`]; the server plugin
+//! request through the client's `post` helper; the server plugin
 //! installs [`handle`] as its endpoint.
 //!
 //! **Named policy** (the server's rules are not on disk):
@@ -25,7 +25,7 @@
 use bevy::prelude::*;
 use serde_json::{json, Map, Value};
 
-use super::client::home_action::{HomeActionApi, HomeActionPost, HomeActionReply};
+pub(crate) use moly_protocol::api::{HomeActionApi, HomeActionPost, HomeActionReply};
 use super::{ResponseKind, ServerModel};
 
 pub(crate) const POLICY_KEY: &str = "homeActionReply";
@@ -134,7 +134,7 @@ impl ServerModel {
 }
 
 /// The endpoint the server plugin installs for the client's requests
-/// ([`super::client::home_action::post`]). Refused while no server has joined
+/// (the client's `post` helper). Refused while no server has joined
 /// the client.
 pub(super) fn handle(In(request): In<HomeActionPost>) -> HomeActionReply {
     let HomeActionPost { api, target } = request;

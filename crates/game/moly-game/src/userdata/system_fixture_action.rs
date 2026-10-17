@@ -24,21 +24,13 @@
 
 use bevy::ecs::system::SystemId;
 use bevy::prelude::*;
-use serde_json::{json, Value};
+
+use crate::server::with_model;
 
 /// The API's name in the source.
 pub(crate) const API: &str = "PostUserMysekaiSystemFixtureActionApi";
 
 pub(crate) use moly_protocol::rows::UserMysekaiSystemFixtureAction;
-
-/// The rows as the response key's JSON array.
-pub(crate) fn rows_value(rows: &[UserMysekaiSystemFixtureAction]) -> Value {
-    Value::Array(
-        rows.iter()
-            .map(|row| json!({"mysekaiSystemFixtureId": row.mysekai_system_fixture_id}))
-            .collect(),
-    )
-}
 
 /// The client's copy of `userMysekaiSystemFixtureActions`, set by responses
 /// only.
@@ -99,4 +91,44 @@ pub(crate) fn post(world: &mut World, mysekai_system_fixture_id: i32) -> SystemF
     world
         .run_system_with(endpoint.0, mysekai_system_fixture_id)
         .unwrap_or_else(|error| SystemFixtureActionReply::refused(error.to_string()))
+}
+
+/// The endpoint the server plugin installs for the request: the reply's
+/// `updatedResources` are merged into the client's copy before it returns.
+pub(crate) fn handle(
+    In(mysekai_system_fixture_id): In<i32>,
+    mut copy: ResMut<ClientSystemFixtureActions>,
+) -> SystemFixtureActionReply {
+    let answer = with_model(|model| {
+        if !model.joined {
+            return Err("the server has not joined the client yet".to_owned());
+        }
+        let obtained = model.system_fixture_action(mysekai_system_fixture_id)?;
+        let response = model.responses.last().expect("the response just recorded");
+        Ok((
+            obtained,
+            response.sections.system_fixture_actions.clone(),
+        ))
+    })
+    .unwrap_or_else(|| Err("the server model is not installed".to_owned()));
+    match answer {
+        Ok((obtained_resources, rows)) => {
+            if let Some(rows) = rows {
+                copy.apply(rows);
+            }
+            SystemFixtureActionReply {
+                success: true,
+                refusal: None,
+                obtained_resources,
+            }
+        }
+        Err(reason) => SystemFixtureActionReply::refused(reason),
+    }
+}
+
+/// The endpoint and the client's copy.
+pub(crate) fn install(app: &mut App) {
+    app.init_resource::<ClientSystemFixtureActions>();
+    let endpoint = app.world_mut().register_system(handle);
+    app.insert_resource(SystemFixtureActionEndpoint(endpoint));
 }

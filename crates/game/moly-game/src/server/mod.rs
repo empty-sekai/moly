@@ -88,6 +88,7 @@
 //! environment variable ([`instrument_env`]).
 
 pub(crate) mod avatar;
+#[path = "../userdata/client_compat.rs"]
 pub(crate) mod client;
 pub(crate) mod clock;
 pub(crate) mod craft;
@@ -97,18 +98,17 @@ pub(crate) mod edit;
 pub(crate) mod home_action;
 pub(crate) mod housing_layout;
 pub(crate) mod inventory;
-pub(crate) mod local;
 pub(crate) mod music;
 pub(crate) mod music_play;
 pub(crate) mod system_fixture_action;
 pub(crate) mod talk_read;
 pub(crate) mod tools;
 
-// The client-side copies live in `crate::userdata`; these re-exports keep the
+// The client-side copies live with the client; these re-exports keep the
 // `crate::server` paths resolving.
-pub(crate) use crate::userdata::{
-    client_update_talk_list, ClientTalkListUpdates, ClientUserData, LiveSchedule,
-    RankDelivered, ServerGateReplies, TalkListUpdate,
+pub(crate) use client::{
+    check_seed_local, client_update_talk_list, local, npc_slice, ClientTalkListUpdates,
+    ClientUserData, LiveSchedule, RankDelivered, ServerGateReplies, TalkListUpdate,
 };
 
 use std::sync::Mutex;
@@ -121,7 +121,10 @@ use moly_assets::json::master::{self, MasterData, MasterTable};
 use moly_assets::remote::RemoteRegion;
 use serde_json::{json, Value};
 
-pub(crate) use document::{ColorfulPass, Gamedata, GateCharacter, ScheduleRow, Stamina};
+pub(crate) use moly_masters::StaminaMax;
+pub(crate) use moly_protocol::gate::{GateReply, ReplyTalkList};
+pub(crate) use moly_protocol::json::{SECTION_GAMEDATA, SECTION_PASS, SECTION_STAMINA};
+pub(crate) use document::{GateCharacter, ScheduleRow, Stamina};
 
 use clock::RefreshPeriod;
 use document::{Migration, SchedulePolicy, ServerDocument, SiteLevelReleases, StaminaRefresh};
@@ -138,22 +141,9 @@ const PHENOMENA_INDEX: &str = "moly://phenomena/index.json";
 const TICK_SECONDS: f32 = 1.0;
 const MAX_ERRORS: usize = 32;
 
-/// The document sections a response carries.
-pub(crate) const SECTION_GAMEDATA: &str = "userMysekaiGamedata";
-pub(crate) const SECTION_STAMINA: &str = "userMysekaiStamina";
-pub(crate) const SECTION_PASS: &str = "userMysekaiColorfulPass";
-
 // ---------------------------------------------------------------------------
 // Masters
 // ---------------------------------------------------------------------------
-
-/// The master pools' maxima (`mysekaiStaminas.maxStamina` per type).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct StaminaMax {
-    pub(crate) normal: i32,
-    pub(crate) enhance: i32,
-    pub(crate) boost: i32,
-}
 
 /// The master data the model reads. Each is `None` while loading or when
 /// its table is missing ([`Masters::missing`] names those).
@@ -190,14 +180,14 @@ pub(crate) struct Masters {
     /// The music record ids (`mysekaiMusicRecords`).
     pub(crate) music_records: Option<Vec<i32>>,
     /// The avatar wear masters.
-    pub(crate) avatar: client::avatar::AvatarMasters,
+    pub(crate) avatar: moly_masters::avatar::AvatarMasters,
     /// The craft masters (blueprints, costs, terms, first-craft bonus,
     /// material types, the white blueprint item).
-    pub(crate) craft: client::craft::CraftMasters,
+    pub(crate) craft: moly_masters::craft::CraftMasters,
     /// The fixture and material possession masters.
-    pub(crate) possession: client::inventory::PossessionMasters,
+    pub(crate) possession: moly_masters::inventory::PossessionMasters,
     /// The cards master (deferred): card id -> its character and rarity.
-    pub(crate) cards: Deferred<std::collections::BTreeMap<i32, craft::CardRow>>,
+    pub(crate) cards: Deferred<std::collections::BTreeMap<i32, moly_masters::craft::CardRow>>,
     /// The tool master (`mysekaiTools`).
     pub(crate) tools: Option<Vec<tools::ToolMaster>>,
     pub(crate) missing: Vec<String>,
@@ -443,62 +433,12 @@ impl ResponseKind {
     }
 }
 
-/// One response as the client receives it: the server date and the user
-/// data sections it carries.
+/// One response as the client receives it: its kind and the user data
+/// sections it carries.
 #[derive(Clone, Debug)]
 pub(crate) struct ServerResponse {
     pub(crate) kind: ResponseKind,
-    pub(crate) server_date_ms: i64,
-    pub(crate) is_refreshed: bool,
-    pub(crate) gamedata: Option<Gamedata>,
-    pub(crate) stamina: Option<Stamina>,
-    pub(crate) colorful_pass: Option<Option<ColorfulPass>>,
-    /// The rows the schedule write reads (join and refresh).
-    pub(crate) schedules: Option<Vec<ScheduleRow>>,
-    /// The birthday-party delivery sections it carries.
-    pub(crate) delivery: delivery::DeliveryUpdate,
-    /// `userMysekaiMusicPlayFixtureSettings` when it carries them.
-    pub(crate) music: Option<Vec<client::music::MusicPlaySetting>>,
-    /// `userAvatar` when it carries it.
-    pub(crate) avatar: Option<client::avatar::UserAvatar>,
-    /// The owned MySekai tables it carries (materials, their possession,
-    /// fixtures, canvases, blueprints, items, the gamedata's levels).
-    pub(crate) inventory: client::inventory::SuiteUserSections,
-    /// `userMysekaiMusicRecords` when it carries them.
-    pub(crate) music_records: Option<Vec<client::music_play::OwnedMusicRecord>>,
-    /// `userMysekaiSystemFixtureActions` when it carries them.
-    pub(crate) system_fixture_actions:
-        Option<Vec<client::system_fixture_action::UserMysekaiSystemFixtureAction>>,
-    /// `userMysekaiTools` when it carries them.
-    pub(crate) tools: Option<Vec<tools::UserMysekaiTool>>,
-}
-
-/// A reply's talk list (`mysekaiCharacterTalkWithReadHistories`): the rows
-/// the document states, or the talk-list policy's list, which the server
-/// panel builds for the new visitors.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ReplyTalkList {
-    Stated(Vec<(i32, bool)>),
-    Policy,
-}
-
-/// A gate reply for the gate presenter.
-#[derive(Clone, Debug)]
-#[allow(dead_code)] // Read by the owners' seams (harvest, menu, server panel, gate flow, site expansion).
-pub(crate) enum GateReply {
-    /// The reserve reply: the reserved row and the reply's talk list.
-    Reserve {
-        row: GateCharacter,
-        talks: ReplyTalkList,
-    },
-    /// The change reply: the home gate's new gate and skin, its characters
-    /// and the reply's talk list.
-    Change {
-        gate_id: i32,
-        skin_id: i32,
-        rows: Vec<GateCharacter>,
-        talks: ReplyTalkList,
-    },
+    pub(crate) sections: moly_protocol::Sections,
 }
 
 // ---------------------------------------------------------------------------
@@ -612,6 +552,13 @@ impl ServerModel {
 
     pub(crate) fn document(&self) -> &ServerDocument {
         &self.doc
+    }
+
+    /// The server panel's NPC slice (schemaVersion 1): the rows served at the
+    /// join and the client's `refreshedAt`.
+    #[allow(dead_code)] // Read by the server panel's seam.
+    pub(crate) fn npc_slice(&self, served: &[ScheduleRow], refreshed_at: i64) -> Option<String> {
+        Some(self.doc.npc_slice(served, refreshed_at).to_string())
     }
 
     pub(crate) fn revision(&self) -> u64 {
@@ -795,24 +742,27 @@ impl ServerModel {
         });
         let response = ServerResponse {
             kind,
-            server_date_ms: now,
-            is_refreshed,
-            gamedata: has(SECTION_GAMEDATA).then_some(self.doc.gamedata),
-            stamina: if has(SECTION_STAMINA) {
-                self.doc.stamina
-            } else {
-                None
+            sections: moly_protocol::Sections {
+                server_date_ms: now,
+                is_refreshed,
+                gamedata: has(SECTION_GAMEDATA).then_some(self.doc.gamedata),
+                stamina: if has(SECTION_STAMINA) {
+                    self.doc.stamina
+                } else {
+                    None
+                },
+                colorful_pass: has(SECTION_PASS).then_some(self.doc.colorful_pass),
+                schedules,
+                delivery: self.delivery_update(&sections),
+                music: has(music::SECTION).then(|| self.doc.music_settings.clone()),
+                avatar: has(avatar::SECTION).then_some(self.doc.avatar),
+                inventory: self.inventory_update(&sections),
+                music_records: has(music_play::RECORDS_SECTION)
+                    .then(|| self.doc.music_records.clone()),
+                system_fixture_actions: has(system_fixture_action::SECTION)
+                    .then(|| self.doc.system_fixture_actions.rows.clone()),
+                tools: has(tools::SECTION).then(|| self.doc.tools.clone().unwrap_or_default()),
             },
-            colorful_pass: has(SECTION_PASS).then_some(self.doc.colorful_pass),
-            schedules,
-            delivery: self.delivery_update(&sections),
-            music: has(music::SECTION).then(|| self.doc.music_settings.clone()),
-            avatar: has(avatar::SECTION).then_some(self.doc.avatar),
-            inventory: self.inventory_update(&sections),
-            music_records: has(music_play::RECORDS_SECTION).then(|| self.doc.music_records.clone()),
-            system_fixture_actions: has(system_fixture_action::SECTION)
-                .then(|| self.doc.system_fixture_actions.rows.clone()),
-            tools: has(tools::SECTION).then(|| self.doc.tools.clone().unwrap_or_default()),
         };
         info!(
             "[server] response {}: sections {sections:?}, isRefreshed {is_refreshed}, server date {now}",
@@ -899,11 +849,6 @@ impl ServerModel {
 /// newer or unknown schemaVersion, or a malformed document, is refused.
 pub(crate) fn check_seed_document(text: &str) -> Result<(), String> {
     document::parse_v2(text).map(|_| ())
-}
-
-/// The seed's local document, checked likewise.
-pub(crate) fn check_seed_local(text: &str) -> Result<(), String> {
-    local::LocalDocument::parse(text).map(|_| ())
 }
 
 /// The browser game: the seed's documents (checked by the seed parser),
@@ -1023,18 +968,6 @@ fn native_overlay(doc: &mut ServerDocument) -> avatar::AvatarInstrument {
 // ---------------------------------------------------------------------------
 // Reads for the other owners
 // ---------------------------------------------------------------------------
-
-/// The server panel's NPC slice (schemaVersion 1) once the client has
-/// joined: the rows served at the join and the client's `refreshedAt`.
-#[allow(dead_code)] // Read by the owners' seams (harvest, menu, server panel, gate flow, site expansion).
-pub(crate) fn npc_slice(client: &ClientUserData, live: &LiveSchedule) -> Option<String> {
-    with_model(|model| {
-        model
-            .doc
-            .npc_slice(&live.schedules, client.gamedata.refreshed_at)
-            .to_string()
-    })
-}
 
 /// The server clock's epoch millisecond, once a model is installed.
 pub(crate) fn server_now_ms() -> Option<i64> {
@@ -1514,18 +1447,11 @@ fn parse_configs(text: &str, masters: &mut Masters) -> Result<(), String> {
 
 fn parse_phenomena(text: &str, masters: &mut Masters) -> Result<(), String> {
     let value: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
-    let periods = value["refreshTimePeriods"]
-        .as_array()
-        .ok_or("no refreshTimePeriods")?
-        .iter()
-        .map(|row| {
-            Ok(RefreshPeriod {
-                id: int32(row, "id")?,
-                start_hour: row["startHour"].as_i64().ok_or("startHour is not an int")?,
-                end_hour: row["endHour"].as_i64().ok_or("endHour is not an int")?,
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
+    let periods = moly_masters::clock::parse_periods(
+        value["refreshTimePeriods"]
+            .as_array()
+            .ok_or("no refreshTimePeriods")?,
+    )?;
     let mut phenomena = value["phenomena"]
         .as_object()
         .ok_or("no phenomena")?
@@ -1870,10 +1796,10 @@ impl Plugin for ServerPlugin {
         app.insert_resource(client::home_action::HomeActionEndpoint(endpoint));
         let endpoint = app.world_mut().register_system(housing_layout::handle);
         app.insert_resource(client::housing_layout::HousingLayoutEndpoint(endpoint));
-        craft::install(app);
+        client::craft::install(app);
         let endpoint = app.world_mut().register_system(music_play::handle);
         app.insert_resource(client::music_play::MusicPlayEndpoint(endpoint));
-        system_fixture_action::install(app);
+        client::system_fixture_action::install(app);
     }
 }
 
@@ -1966,8 +1892,8 @@ mod tests {
         assert_eq!(model.doc.gamedata.mysekai_rank, Some(3));
         assert_eq!(model.doc.gamedata.refreshed_at, 1_790_300_000_000);
         let response = model.responses.last().unwrap();
-        assert!(response.is_refreshed);
-        assert_eq!(response.schedules.as_ref().unwrap().len(), 6);
+        assert!(response.sections.is_refreshed);
+        assert_eq!(response.sections.schedules.as_ref().unwrap().len(), 6);
     }
 
     #[test]
@@ -1978,7 +1904,7 @@ mod tests {
         server.masters = masters;
         server.masters_ready = true;
         server.join();
-        assert!(!server.responses.last().unwrap().is_refreshed);
+        assert!(!server.responses.last().unwrap().sections.is_refreshed);
         assert_eq!(server.doc.gamedata.refreshed_at, 1_790_218_800_000);
     }
 
@@ -1989,7 +1915,7 @@ mod tests {
             at_ms: 1_790_000_000_000,
         };
         model.join();
-        assert!(model.responses.last().unwrap().is_refreshed);
+        assert!(model.responses.last().unwrap().sections.is_refreshed);
         assert_eq!(model.doc.gamedata.refreshed_at, 1_790_000_000_000);
         model.responses.clear();
         model.tick();
@@ -2033,7 +1959,7 @@ mod tests {
         model.respond(ResponseKind::Harvest, false, &[SECTION_STAMINA]);
         assert!(model.pending.is_empty());
         assert_eq!(
-            model.responses.last().unwrap().stamina,
+            model.responses.last().unwrap().sections.stamina,
             Some(Stamina {
                 normal: 500,
                 enhance: 0,

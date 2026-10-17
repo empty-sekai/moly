@@ -7,7 +7,7 @@
 //!   `MysekaiMusicRecordModel.SetupUserData`), so this is the list the screen
 //!   offers. It is user data: the server document holds it and the join
 //!   carries it to the client's copy
-//!   ([`super::client::music_play::ClientMusicRecords`]).
+//!   (`ClientMusicRecords`).
 //! - `PutUserMysekaiMusicPlaySetApi` (`UserMysekaiMusicPlaySetRequest`
 //!   {mysekaiSiteId, mysekaiMusicRecordId, musicVocalId (nullable),
 //!   isInstrumental, mysekaiFixtureId, textureId}) and
@@ -44,14 +44,15 @@
 use bevy::prelude::*;
 use serde_json::{json, Map, Value};
 
-use super::client::music::MusicPlaySetting;
-use super::client::music_play::{
-    MusicPlayEjectRequest, MusicPlayPost, MusicPlayReply, MusicPlaySetRequest, OwnedMusicRecord,
+use moly_protocol::rows::{MusicPlaySetting, OwnedMusicRecord};
+
+pub(crate) use moly_protocol::api::{
+    MusicPlayEjectRequest, MusicPlayPost, MusicPlayReply, MusicPlaySetRequest,
 };
-use super::document::{int32, int64, object, only};
+pub(crate) use moly_protocol::json::SECTION_MUSIC_RECORDS as RECORDS_SECTION;
+
 use super::{ResponseKind, ServerModel};
 
-pub(crate) const RECORDS_SECTION: &str = "userMysekaiMusicRecords";
 pub(crate) const POLICY_KEY: &str = "musicPlayReply";
 pub(crate) const REPLY_SUCCESS: &str = "success";
 pub(crate) const REPLY_FAILURE: &str = "failure";
@@ -63,29 +64,7 @@ pub(crate) const OWNED_INSTRUMENT: &str = "MOLY_MUSIC_MOCK_OWNED_RECORDS";
 // ---------------------------------------------------------------------------
 
 pub(crate) fn parse_owned_rows(value: &Value) -> Result<Vec<OwnedMusicRecord>, String> {
-    let rows = value
-        .as_array()
-        .ok_or_else(|| format!("{RECORDS_SECTION} is not an array"))?;
-    let mut seen = std::collections::BTreeSet::new();
-    rows.iter()
-        .enumerate()
-        .map(|(i, row)| {
-            let at = format!("{RECORDS_SECTION}[{i}]");
-            let row = object(row, &at)?;
-            only(row, &["mysekaiMusicRecordId", "obtainedAt"], &at)?;
-            let record = OwnedMusicRecord {
-                mysekai_music_record_id: int32(row, "mysekaiMusicRecordId", &at)?,
-                obtained_at: int64(row, "obtainedAt", &at)?,
-            };
-            if !seen.insert(record.mysekai_music_record_id) {
-                return Err(format!(
-                    "{at} repeats record {}",
-                    record.mysekai_music_record_id
-                ));
-            }
-            Ok(record)
-        })
-        .collect()
+    moly_protocol::json::parse_music_records(value)
 }
 
 /// The section from a document (no row when absent: the named default).
@@ -317,7 +296,7 @@ impl ServerModel {
 }
 
 /// The endpoint the server plugin installs for the client's requests
-/// ([`super::client::music_play::post`]). Refused while no server has joined
+/// (the client post helper). Refused while no server has joined
 /// the client.
 pub(super) fn handle(In(request): In<MusicPlayPost>) -> MusicPlayReply {
     super::with_model(|model| {
@@ -416,7 +395,7 @@ mod tests {
         );
         let reply = model.responses.last().unwrap();
         assert_eq!(reply.kind, ResponseKind::MusicPlaySet);
-        assert_eq!(reply.music.as_ref().unwrap().len(), 1);
+        assert_eq!(reply.sections.music.as_ref().unwrap().len(), 1);
         let eject = MusicPlayPost::Eject(MusicPlayEjectRequest {
             mysekai_site_id: 5,
             mysekai_fixture_id: 70,
@@ -429,6 +408,7 @@ mod tests {
                 .responses
                 .last()
                 .unwrap()
+                .sections
                 .music
                 .as_ref()
                 .unwrap()
@@ -443,7 +423,7 @@ mod tests {
     #[test]
     fn the_sections_parse_strictly_and_round_trip() {
         let rows = parse_instrument("12,3", 100);
-        let value = super::super::client::music_play::owned_rows_value(&rows);
+        let value = moly_protocol::json::music_records_value(&rows);
         assert_eq!(parse_owned_rows(&value).unwrap(), rows);
         assert!(parse(&Map::new()).unwrap().is_empty());
         assert!(

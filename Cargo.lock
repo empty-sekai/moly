@@ -4876,7 +4876,9 @@ dependencies = [
  "js-sys",
  "moly-assets",
  "moly-game",
+ "moly-link",
  "moly-perf",
+ "moly-protocol",
  "moly-store",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -4940,6 +4942,7 @@ dependencies = [
  "moly-assets",
  "moly-core",
  "moly-law",
+ "moly-masters",
  "moly-perf",
  "moly-protocol",
  "moly-store",
@@ -4972,6 +4975,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4989,6 +4993,16 @@ dependencies = [
  "moly-server",
  "tokio",
  "tokio-tungstenite",
+]
+
+[[package]]
+name = "moly-masters"
+version = "0.0.3"
+dependencies = [
+ "bevy",
+ "moly-law",
+ "moly-protocol",
+ "serde_json",
 ]
 
 [[package]]

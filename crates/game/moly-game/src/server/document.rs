@@ -132,15 +132,15 @@ pub(crate) struct ServerDocument {
     /// `policies.homeActionReply` ([`super::home_action`]).
     pub(crate) home_action_reply: super::home_action::HomeActionReplyPolicy,
     /// `userMysekaiMusicPlayFixtureSettings` ([`super::music`]).
-    pub(crate) music_settings: Vec<super::client::music::MusicPlaySetting>,
+    pub(crate) music_settings: Vec<moly_protocol::rows::MusicPlaySetting>,
     /// `userAvatar` ([`super::avatar`]).
-    pub(crate) avatar: super::client::avatar::UserAvatar,
+    pub(crate) avatar: moly_protocol::rows::UserAvatar,
     /// The owned MySekai tables and possession levels ([`super::inventory`]).
     pub(crate) inventory: super::inventory::InventoryDoc,
     /// `policies.musicPlayReply` ([`super::music_play`]).
     pub(crate) music_play_reply: super::music_play::MusicPlayReplyPolicy,
     /// `userMysekaiMusicRecords` ([`super::music_play`]).
-    pub(crate) music_records: Vec<super::client::music_play::OwnedMusicRecord>,
+    pub(crate) music_records: Vec<moly_protocol::rows::OwnedMusicRecord>,
     /// `userMysekaiSystemFixtureActions` and its policies
     /// ([`super::system_fixture_action`]).
     pub(crate) system_fixture_actions: super::system_fixture_action::SystemFixtureActionDoc,
@@ -167,55 +167,8 @@ pub(crate) const DEFAULT_TOTAL_EXP: i32 = 180_000;
 // Field readers
 // ---------------------------------------------------------------------------
 
-pub(super) fn object<'a>(value: &'a Value, at: &str) -> Result<&'a Map<String, Value>, String> {
-    value
-        .as_object()
-        .ok_or_else(|| format!("{at} is not an object"))
-}
+pub(super) use moly_protocol::json::{array, boolean, field, int32, int64, object, only};
 
-pub(super) fn only(value: &Map<String, Value>, allowed: &[&str], at: &str) -> Result<(), String> {
-    match value.keys().find(|key| !allowed.contains(&key.as_str())) {
-        Some(key) => Err(format!("{at} has an unknown field {key}")),
-        None => Ok(()),
-    }
-}
-
-pub(super) fn field<'a>(
-    value: &'a Map<String, Value>,
-    key: &str,
-    at: &str,
-) -> Result<&'a Value, String> {
-    value
-        .get(key)
-        .ok_or_else(|| format!("{at} has no field {key}"))
-}
-
-pub(super) fn int64(value: &Map<String, Value>, key: &str, at: &str) -> Result<i64, String> {
-    field(value, key, at)?
-        .as_i64()
-        .ok_or_else(|| format!("{at}.{key} is not an integer"))
-}
-
-pub(super) fn int32(value: &Map<String, Value>, key: &str, at: &str) -> Result<i32, String> {
-    let raw = int64(value, key, at)?;
-    i32::try_from(raw).map_err(|_| format!("{at}.{key} = {raw} does not fit a 32-bit integer"))
-}
-
-pub(super) fn boolean(value: &Map<String, Value>, key: &str, at: &str) -> Result<bool, String> {
-    field(value, key, at)?
-        .as_bool()
-        .ok_or_else(|| format!("{at}.{key} is not a boolean"))
-}
-
-pub(super) fn array<'a>(
-    value: &'a Map<String, Value>,
-    key: &str,
-    at: &str,
-) -> Result<&'a Vec<Value>, String> {
-    field(value, key, at)?
-        .as_array()
-        .ok_or_else(|| format!("{at}.{key} is not an array"))
-}
 
 /// The schemaVersion of a document text, refused by name when absent.
 pub(crate) fn schema_version(value: &Value, what: &str) -> Result<u64, String> {
@@ -864,12 +817,7 @@ impl ServerDocument {
     }
 
     fn gamedata_value(&self) -> Value {
-        json!({
-            "mysekaiRank": self.gamedata.mysekai_rank,
-            "totalExp": self.gamedata.total_exp,
-            "refreshedAt": self.gamedata.refreshed_at,
-            "isMysekaiTutorialEnd": self.gamedata.is_mysekai_tutorial_end,
-        })
+        moly_protocol::json::gamedata_value(self.gamedata)
     }
 
     fn visit_value(&self, with_skin: bool) -> Value {
@@ -938,17 +886,17 @@ impl ServerDocument {
             super::home_action::write(self.home_action_reply, &mut policies);
             top.insert(
                 super::music::SECTION.into(),
-                super::client::music::rows_value(&self.music_settings),
+                moly_protocol::json::music_settings_value(&self.music_settings),
             );
             top.insert(
                 super::avatar::SECTION.into(),
-                super::client::avatar::value(&self.avatar),
+                moly_protocol::json::avatar_value(&self.avatar),
             );
             self.inventory.write(top, &mut policies);
             super::music_play::write_policy(self.music_play_reply, &mut policies);
             top.insert(
                 super::music_play::RECORDS_SECTION.into(),
-                super::client::music_play::owned_rows_value(&self.music_records),
+                moly_protocol::json::music_records_value(&self.music_records),
             );
             self.system_fixture_actions.write(top, &mut policies);
             top.insert(
@@ -992,27 +940,7 @@ pub(crate) fn clock_value(clock: Clock) -> Value {
     }
 }
 
-pub(crate) fn stamina_value(stamina: Stamina) -> Value {
-    json!({
-        "normalStamina": stamina.normal,
-        "enhanceStamina": stamina.enhance,
-        "boostStamina": stamina.boost,
-    })
-}
-
-pub(crate) fn schedule_rows_value(rows: &[ScheduleRow]) -> Value {
-    Value::Array(
-        rows.iter()
-            .map(|row| {
-                json!({
-                    "mysekaiRefreshTimePeriodId": row.refresh_time_period_id,
-                    "scheduleDate": row.schedule_date,
-                    "mysekaiPhenomenaId": row.phenomena_id,
-                })
-            })
-            .collect(),
-    )
-}
+pub(crate) use moly_protocol::json::{schedule_rows_value, stamina_value};
 
 #[cfg(test)]
 mod tests {

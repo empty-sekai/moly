@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::rows::{SuiteUserSections, UserResource};
+use crate::rows::{Reward, SuiteUserSections, UserResource};
 
 /// Which home-action API a request goes to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -188,4 +188,64 @@ pub struct TalkReadReply {
     pub obtained_resources: Vec<UserResource>,
     /// `updatedResources` (already merged into the client copy).
     pub updated: SuiteUserSections,
+}
+
+/// One row of the gather request (`UserBirthdayPartyGatherRequestContent`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatherContent {
+    pub birthday_party_id: i32,
+    pub gathered_count: i32,
+}
+
+/// `UserBirthdayPartyDeliveryResponse`; its `updatedResources` are already in
+/// the game's copies.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)] // Read by the delivery owner's seam.
+pub struct DeliveryResponse {
+    pub dropped_reward_count: i32,
+    pub obtained_delivery_total_rewards: Vec<Reward>,
+    pub is_refreshed: bool,
+}
+
+/// `UserBirthdayPartyGatherResponse`; its `updatedResources` are already in
+/// the game's copies.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)] // Read by the delivery owner's seam.
+pub struct GatherResponse {
+    pub obtained_delivery_total_rewards: Vec<Reward>,
+}
+
+/// One corner of a housing layout fixture's grid footprint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HousingLayoutCorner {
+    pub x: i8,
+    pub y: i8,
+    pub z: i8,
+}
+
+/// One placed fixture of a housing layout in the served record form: the
+/// package, the master fixture id, the footprint corners, the centre height,
+/// the layout type, the rotation and the texture.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HousingLayoutFixture {
+    pub package: String,
+    pub mysekai_fixture_id: i32,
+    pub minimum: HousingLayoutCorner,
+    pub maximum: HousingLayoutCorner,
+    pub center_y: i8,
+    pub layout_type: u8,
+    pub rotation: u8,
+    pub texture_id: u32,
+}
+
+/// `UserMysekaiHousingEditLayoutRequest`: the layout editor's save, the site
+/// and its whole layout.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserMysekaiHousingEditLayoutRequest {
+    pub mysekai_site_id: u32,
+    /// The site's type (`home_site`, ...), which names its served layout row.
+    pub site_type: String,
+    /// `userMysekaiSiteHousingLayout.mysekaiSiteHousingLayouts`: every placed
+    /// fixture of the site.
+    pub fixtures: Vec<HousingLayoutFixture>,
 }

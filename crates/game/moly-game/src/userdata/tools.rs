@@ -3,9 +3,8 @@
 use bevy::prelude::*;
 use serde_json::Value;
 
-use crate::server::tools::rows_value;
+use moly_protocol::json::tools_value as rows_value;
 use moly_protocol::rows::UserMysekaiTool;
-
 /// `UserDataManager.UserMysekaiTools`, set by the server model only.
 #[derive(Resource, Debug, Clone, Default)]
 pub(crate) struct ClientMysekaiTools {

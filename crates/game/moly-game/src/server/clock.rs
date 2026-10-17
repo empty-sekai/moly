@@ -8,16 +8,10 @@
 
 use super::document::{Clock, ScheduleRow};
 
+pub(crate) use moly_masters::clock::RefreshPeriod;
+
 const HOUR_MS: i64 = 3_600_000;
 const DAY_MS: i64 = 24 * HOUR_MS;
-
-/// One master refresh window.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct RefreshPeriod {
-    pub(crate) id: i32,
-    pub(crate) start_hour: i64,
-    pub(crate) end_hour: i64,
-}
 
 /// Device epoch milliseconds.
 #[cfg(target_arch = "wasm32")]

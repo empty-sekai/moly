@@ -21,7 +21,14 @@
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::rows::{
+    ColorfulPass, DeliveryUpdate, Gamedata, MusicPlaySetting, OwnedMusicRecord, ScheduleRow,
+    Stamina, SuiteUserSections, UserAvatar, UserMysekaiSystemFixtureAction, UserMysekaiTool,
+};
+
 pub mod api;
+pub mod gate;
+pub mod json;
 pub mod rows;
 
 /// Raised whenever a message changes shape. A peer with another version is
@@ -129,8 +136,8 @@ pub enum Reply {
     Joined,
 }
 
-/// The user data tables a reply or push carries. A `None` field is not
-/// carried and leaves the game's copy as it is.
+/// The user data tables a response carries. A `None` field is not carried and
+/// leaves the game's copy as it is.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Sections {
     /// The server time the sections were taken at, in milliseconds since the
@@ -138,6 +145,29 @@ pub struct Sections {
     pub server_date_ms: i64,
     /// Whether the server entered a new refresh window for this response.
     pub is_refreshed: bool,
+    /// `userMysekaiGamedata`.
+    pub gamedata: Option<Gamedata>,
+    /// `userMysekaiStamina`.
+    pub stamina: Option<Stamina>,
+    /// `userMysekaiColorfulPass`; `Some(None)` clears the pass the game holds.
+    pub colorful_pass: Option<Option<ColorfulPass>>,
+    /// `mysekaiPhenomenaSchedules` (the rows the schedule write reads).
+    pub schedules: Option<Vec<ScheduleRow>>,
+    /// The birthday-party delivery sections.
+    pub delivery: DeliveryUpdate,
+    /// `userMysekaiMusicPlayFixtureSettings`.
+    pub music: Option<Vec<MusicPlaySetting>>,
+    /// `userAvatar`.
+    pub avatar: Option<UserAvatar>,
+    /// The owned MySekai tables (materials, their possession, fixtures,
+    /// canvases, blueprints, items, the gamedata's levels).
+    pub inventory: SuiteUserSections,
+    /// `userMysekaiMusicRecords`.
+    pub music_records: Option<Vec<OwnedMusicRecord>>,
+    /// `userMysekaiSystemFixtureActions`.
+    pub system_fixture_actions: Option<Vec<UserMysekaiSystemFixtureAction>>,
+    /// `userMysekaiTools`.
+    pub tools: Option<Vec<UserMysekaiTool>>,
 }
 
 /// A frame could not be read.
@@ -170,6 +200,13 @@ pub fn to_json<T: Serialize>(message: &T) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rows::{
+        BirthdayPartyRow, CoordinateRow, HonorRow, MusicPlaySetting, Reward, UserMysekaiBlueprint,
+        UserMysekaiCanvas, UserMysekaiCharacterTalk, UserMysekaiFixture, UserMysekaiGamedata,
+        UserMysekaiItem, UserMysekaiMaterial, UserMysekaiMaterialPossession,
+    };
+
+    use std::collections::{BTreeMap, BTreeSet};
 
     #[test]
     fn a_session_round_trips_through_frames() {
@@ -193,9 +230,158 @@ mod tests {
             sections: Some(Box::new(Sections {
                 server_date_ms: 1_760_000_000_000,
                 is_refreshed: true,
+                ..Sections::default()
             })),
         };
         assert_eq!(decode::<ServerMessage>(&encode(&reply)).unwrap(), reply);
+    }
+
+    /// Every carried table has a row, so a shape the binary codec cannot
+    /// read shows up here rather than on the wire.
+    fn full_sections() -> Sections {
+        let material = UserMysekaiMaterial {
+            mysekai_material_id: 3,
+            quantity: 4,
+        };
+        let mut delivery = DeliveryUpdate::default();
+        delivery.parties = Some(vec![BirthdayPartyRow {
+            birthday_party_id: 1,
+            delivery_total_point: 2,
+            dropped_mysekai_material_count: 3,
+            obtained_mysekai_material_count: 4,
+        }]);
+        delivery.materials = Some(BTreeMap::from([(5, 6)]));
+        delivery.mysekai_materials = Some(BTreeMap::from([(7, 8)]));
+        delivery.cards = Some(BTreeSet::from([9]));
+        delivery.honors = Some(vec![HonorRow {
+            honor_id: 10,
+            level: 11,
+            obtained_at: 12,
+        }]);
+        delivery.configs = Some(BTreeMap::from([("a".to_owned(), 13)]));
+        Sections {
+            server_date_ms: 1_760_000_000_000,
+            is_refreshed: true,
+            gamedata: Some(Gamedata {
+                mysekai_rank: Some(1),
+                total_exp: 2,
+                refreshed_at: 3,
+                is_mysekai_tutorial_end: true,
+            }),
+            stamina: Some(Stamina {
+                normal: 4,
+                enhance: 5,
+                boost: 6,
+            }),
+            colorful_pass: Some(Some(ColorfulPass {
+                id: 7,
+                expired_at: 8,
+            })),
+            schedules: Some(vec![ScheduleRow {
+                refresh_time_period_id: 9,
+                schedule_date: 10,
+                phenomena_id: 11,
+            }]),
+            delivery,
+            music: Some(vec![MusicPlaySetting {
+                mysekai_site_id: 12,
+                mysekai_music_record_id: 13,
+                music_vocal_id: 14,
+                is_instrumental: true,
+            }]),
+            avatar: Some(UserAvatar {
+                costume: Some(15),
+                accessory: Some(16),
+                skin_color: Some(17),
+                coordinate: Some(18),
+            }),
+            inventory: SuiteUserSections {
+                user_mysekai_character_talks: Some(vec![UserMysekaiCharacterTalk {
+                    mysekai_character_talk_id: 19,
+                    is_read: true,
+                }]),
+                user_mysekai_materials: Some(vec![material]),
+                user_mysekai_material_possession: Some(UserMysekaiMaterialPossession {
+                    quantity: 20,
+                }),
+                user_mysekai_fixtures: Some(vec![UserMysekaiFixture {
+                    mysekai_fixture_id: 21,
+                    texture_id: 22,
+                    quantity: 23,
+                    last_obtained_at: 24,
+                }]),
+                user_mysekai_canvases: Some(vec![UserMysekaiCanvas {
+                    mysekai_fixture_id: 25,
+                    card_id: 26,
+                    is_special_training: true,
+                    quantity: 27,
+                    last_obtained_at: 28,
+                }]),
+                user_mysekai_blueprints: Some(vec![UserMysekaiBlueprint {
+                    mysekai_blueprint_id: 29,
+                    obtained_at: 30,
+                }]),
+                user_mysekai_items: Some(vec![UserMysekaiItem {
+                    mysekai_item_id: 31,
+                    quantity: 32,
+                    last_obtained_at: 33,
+                }]),
+                user_mysekai_gamedata: Some(UserMysekaiGamedata {
+                    mysekai_rank: Some(34),
+                    total_exp: 35,
+                    mysekai_material_possession_level: 36,
+                    mysekai_fixture_possession_level: 37,
+                }),
+            },
+            music_records: Some(vec![OwnedMusicRecord {
+                mysekai_music_record_id: 38,
+                obtained_at: 39,
+            }]),
+            system_fixture_actions: Some(vec![UserMysekaiSystemFixtureAction {
+                mysekai_system_fixture_id: 40,
+            }]),
+            tools: Some(vec![UserMysekaiTool {
+                mysekai_tool_id: 41,
+                quantity: 42,
+                durability: 43,
+                last_obtained_at: 44,
+            }]),
+        }
+    }
+
+    #[test]
+    fn every_section_round_trips_through_frames() {
+        let push = ServerMessage::Push {
+            kind: PushKind::Refresh,
+            sections: Box::new(full_sections()),
+        };
+        assert_eq!(decode::<ServerMessage>(&encode(&push)).unwrap(), push);
+        // The row types beside the sections are frames of their own.
+        let reward = Reward {
+            resource_type: "honor".to_owned(),
+            resource_id: 45,
+            quantity: 46,
+            level: Some(47),
+        };
+        assert_eq!(decode::<Reward>(&encode(&reward)).unwrap(), reward);
+        let reply = crate::api::DeliveryResponse {
+            dropped_reward_count: 48,
+            obtained_delivery_total_rewards: vec![reward],
+            is_refreshed: true,
+        };
+        assert_eq!(
+            decode::<crate::api::DeliveryResponse>(&encode(&reply)).unwrap(),
+            reply
+        );
+        let coordinate = CoordinateRow {
+            costume_assetbundle_name: Some("a".to_owned()),
+            accessory_assetbundle_name: None,
+            skin_color_code: Some("#ffffff".to_owned()),
+        };
+        assert_eq!(
+            decode::<CoordinateRow>(&encode(&coordinate)).unwrap(),
+            coordinate
+        );
     }
 
     #[test]

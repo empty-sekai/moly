@@ -16,23 +16,15 @@
 
 use bevy::ecs::system::SystemId;
 use bevy::prelude::*;
-use serde_json::Value;
 
 use super::craft::SuiteUserReply;
 
+pub(crate) use moly_protocol::api::{
+    HousingLayoutCorner, HousingLayoutFixture, UserMysekaiHousingEditLayoutRequest,
+};
+
 /// The API's name in the source.
 pub(crate) const API: &str = "PostUserMysekaiHousingLayoutApi";
-
-/// `UserMysekaiHousingEditLayoutRequest`.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct UserMysekaiHousingEditLayoutRequest {
-    pub(crate) mysekai_site_id: u32,
-    /// The site's type (`home_site`, ...), which names its served layout row.
-    pub(crate) site_type: String,
-    /// `userMysekaiSiteHousingLayout.mysekaiSiteHousingLayouts`: every placed
-    /// fixture of the site, in the served record form.
-    pub(crate) fixtures: Vec<Value>,
-}
 
 /// The server model's endpoint for the request.
 #[derive(Resource, Clone, Copy, Debug)]

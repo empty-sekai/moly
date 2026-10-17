@@ -1,5 +1,7 @@
 //! User data rows the server sends and the game keeps copies of.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde::{Deserialize, Serialize};
 
 /// `UserMysekaiStamina`.
@@ -188,4 +190,64 @@ pub struct UserMysekaiTool {
     pub quantity: i32,
     pub durability: i32,
     pub last_obtained_at: i64,
+}
+
+/// `MasterAvatarCoordinate`: the bundle and colour columns an avatar
+/// coordinate row carries.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoordinateRow {
+    pub costume_assetbundle_name: Option<String>,
+    pub accessory_assetbundle_name: Option<String>,
+    pub skin_color_code: Option<String>,
+}
+
+/// `UserBirthdayParty` (the one user's `userId` is left out).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BirthdayPartyRow {
+    pub birthday_party_id: i32,
+    pub delivery_total_point: i32,
+    pub dropped_mysekai_material_count: i32,
+    pub obtained_mysekai_material_count: i32,
+}
+
+/// `UserHonor`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HonorRow {
+    pub honor_id: i32,
+    pub level: i32,
+    pub obtained_at: i64,
+}
+
+/// One resource of a reply or a granted reward box.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reward {
+    pub resource_type: String,
+    pub resource_id: i64,
+    pub quantity: i32,
+    pub level: Option<i64>,
+}
+
+/// The delivery sections a response carries: each carried table replaces the
+/// game's copy whole, a `None` leaves it as it is.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryUpdate {
+    /// `userBirthdayParties`.
+    pub parties: Option<Vec<BirthdayPartyRow>>,
+    /// `userMaterials`: material id -> quantity.
+    pub materials: Option<BTreeMap<i32, i32>>,
+    /// `userMysekaiMaterials`: mysekai material id -> quantity.
+    pub mysekai_materials: Option<BTreeMap<i32, i32>>,
+    /// `userCards`: the owned card ids.
+    pub cards: Option<BTreeSet<i64>>,
+    /// `userHonors`.
+    pub honors: Option<Vec<HonorRow>>,
+    /// `masterConfigs`: the master configs the delivery reads.
+    pub configs: Option<BTreeMap<String, i32>>,
+}
+
+impl DeliveryUpdate {
+    /// Whether the update carries no table.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }

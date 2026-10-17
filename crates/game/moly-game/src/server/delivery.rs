@@ -79,15 +79,21 @@ use std::collections::{BTreeMap, BTreeSet};
 use bevy::prelude::*;
 use serde_json::{json, Map, Value};
 
-use super::document::{int32, int64, object, only};
+use super::document::int32;
 use super::{Masters, ResponseKind, ServerModel};
 
-pub(crate) const SECTION_BIRTHDAY_PARTIES: &str = "userBirthdayParties";
-pub(crate) const SECTION_MATERIALS: &str = "userMaterials";
-pub(crate) const SECTION_MYSEKAI_MATERIALS: &str = "userMysekaiMaterials";
-pub(crate) const SECTION_CARDS: &str = "userCards";
-pub(crate) const SECTION_HONORS: &str = "userHonors";
-pub(crate) const SECTION_MASTER_CONFIGS: &str = "masterConfigs";
+pub(crate) use crate::server::client::birthday_party::{
+    put_birthday_party_delivery, put_birthday_party_gather, ClientBirthdayPartyData,
+};
+pub(crate) use moly_masters::delivery::DeliveryTables;
+pub(crate) use moly_protocol::api::{DeliveryResponse, GatherContent, GatherResponse};
+pub(crate) use moly_protocol::json::{
+    honor_value, parse_cards, parse_honors, parse_parties, parse_quantities, party_value,
+    quantities_value, SECTION_BIRTHDAY_PARTIES, SECTION_CARDS, SECTION_HONORS, SECTION_MASTER_CONFIGS,
+    SECTION_MATERIALS, SECTION_MYSEKAI_MATERIALS,
+};
+pub(crate) use moly_protocol::rows::{BirthdayPartyRow, DeliveryUpdate, HonorRow, Reward};
+
 /// The sections of this part of the document a response carries.
 pub(crate) const SECTIONS: [&str; 6] = [
     SECTION_BIRTHDAY_PARTIES,
@@ -122,23 +128,6 @@ const POLICY_CONFIGS_STAND_IN: &str = "masterConfigsStandIn";
 
 pub(crate) const OWNED_EVERY_BONUS_CARD: &str = "everyPointBonusCard";
 pub(crate) const OWNED_STATED: &str = "stated";
-
-/// `UserBirthdayParty`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct BirthdayPartyRow {
-    pub(crate) birthday_party_id: i32,
-    pub(crate) delivery_total_point: i32,
-    pub(crate) dropped_mysekai_material_count: i32,
-    pub(crate) obtained_mysekai_material_count: i32,
-}
-
-/// `UserHonor`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct HonorRow {
-    pub(crate) honor_id: i32,
-    pub(crate) level: i32,
-    pub(crate) obtained_at: i64,
-}
 
 /// `policies.ownedCards`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -192,91 +181,6 @@ pub(crate) const DOCUMENT_KEYS: [&str; 6] = SECTIONS;
 /// The keys this section reads under `policies`.
 pub(crate) const POLICY_KEYS: [&str; 3] =
     ["ownedCards", "birthdayPlantRefreshPoints", POLICY_CONFIGS_STAND_IN];
-
-pub(crate) fn parse_parties(value: &Value) -> Result<Vec<BirthdayPartyRow>, String> {
-    let rows = value
-        .as_array()
-        .ok_or_else(|| format!("{SECTION_BIRTHDAY_PARTIES} is not an array"))?;
-    rows.iter()
-        .enumerate()
-        .map(|(i, row)| {
-            let at = format!("{SECTION_BIRTHDAY_PARTIES}[{i}]");
-            let row = object(row, &at)?;
-            only(
-                row,
-                &[
-                    "birthdayPartyId",
-                    "deliveryTotalPoint",
-                    "droppedMysekaiMaterialCount",
-                    "obtainedMysekaiMaterialCount",
-                ],
-                &at,
-            )?;
-            Ok(BirthdayPartyRow {
-                birthday_party_id: int32(row, "birthdayPartyId", &at)?,
-                delivery_total_point: int32(row, "deliveryTotalPoint", &at)?,
-                dropped_mysekai_material_count: int32(row, "droppedMysekaiMaterialCount", &at)?,
-                obtained_mysekai_material_count: int32(row, "obtainedMysekaiMaterialCount", &at)?,
-            })
-        })
-        .collect()
-}
-
-/// `userMaterials` / `userMysekaiMaterials`: rows of an id and a quantity.
-pub(crate) fn parse_quantities(
-    value: &Value,
-    at: &str,
-    id_key: &str,
-) -> Result<BTreeMap<i32, i32>, String> {
-    let rows = value
-        .as_array()
-        .ok_or_else(|| format!("{at} is not an array"))?;
-    let mut out = BTreeMap::new();
-    for (i, row) in rows.iter().enumerate() {
-        let row_at = format!("{at}[{i}]");
-        let row = object(row, &row_at)?;
-        only(row, &[id_key, "quantity"], &row_at)?;
-        let id = int32(row, id_key, &row_at)?;
-        if out.insert(id, int32(row, "quantity", &row_at)?).is_some() {
-            return Err(format!("{row_at} repeats {id_key} {id}"));
-        }
-    }
-    Ok(out)
-}
-
-pub(crate) fn parse_cards(value: &Value) -> Result<Vec<i64>, String> {
-    let rows = value
-        .as_array()
-        .ok_or_else(|| format!("{SECTION_CARDS} is not an array"))?;
-    rows.iter()
-        .enumerate()
-        .map(|(i, row)| {
-            let at = format!("{SECTION_CARDS}[{i}]");
-            let row = object(row, &at)?;
-            only(row, &["cardId"], &at)?;
-            int64(row, "cardId", &at)
-        })
-        .collect()
-}
-
-pub(crate) fn parse_honors(value: &Value) -> Result<Vec<HonorRow>, String> {
-    let rows = value
-        .as_array()
-        .ok_or_else(|| format!("{SECTION_HONORS} is not an array"))?;
-    rows.iter()
-        .enumerate()
-        .map(|(i, row)| {
-            let at = format!("{SECTION_HONORS}[{i}]");
-            let row = object(row, &at)?;
-            only(row, &["honorId", "level", "obtainedAt"], &at)?;
-            Ok(HonorRow {
-                honor_id: int32(row, "honorId", &at)?,
-                level: int32(row, "level", &at)?,
-                obtained_at: int64(row, "obtainedAt", &at)?,
-            })
-        })
-        .collect()
-}
 
 pub(crate) fn parse_owned_cards(value: &Value) -> Result<OwnedCards, String> {
     match value.as_str() {
@@ -473,127 +377,17 @@ fn parse_configs_stand_in(value: &Value) -> Result<BTreeMap<String, i32>, String
         .collect()
 }
 
-pub(crate) fn party_value(row: BirthdayPartyRow) -> Value {
-    json!({
-        "birthdayPartyId": row.birthday_party_id,
-        "deliveryTotalPoint": row.delivery_total_point,
-        "droppedMysekaiMaterialCount": row.dropped_mysekai_material_count,
-        "obtainedMysekaiMaterialCount": row.obtained_mysekai_material_count,
-    })
-}
-
-pub(crate) fn honor_value(row: HonorRow) -> Value {
-    json!({"honorId": row.honor_id, "level": row.level, "obtainedAt": row.obtained_at})
-}
-
-pub(crate) fn quantities_value(map: &BTreeMap<i32, i32>, id_key: &str) -> Value {
-    Value::Array(
-        map.iter()
-            .map(|(id, quantity)| json!({id_key: id, "quantity": quantity}))
-            .collect(),
-    )
-}
-
 // ---------------------------------------------------------------------------
 // Master tables (the delivery reward, point bonus and total reward tables
 // and the total reward boxes)
 // ---------------------------------------------------------------------------
 
-/// One resource of a reply (`UserResource`).
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Reward {
-    pub(crate) resource_type: String,
-    pub(crate) resource_id: i64,
-    pub(crate) quantity: i32,
-    pub(crate) level: Option<i64>,
-}
-
-#[derive(Clone, Debug)]
-pub(super) struct RewardRow {
-    party: i64,
-    requirement: i32,
-}
-
-#[derive(Clone, Debug)]
-pub(super) struct BonusRow {
-    party: i64,
-    card: i64,
-    rate: i32,
-}
-
-#[derive(Clone, Debug)]
-pub(super) struct TotalRow {
-    id: i64,
-    party: i64,
-    requirement: i32,
-    box_id: i64,
-}
-
-/// The delivery master tables: the reward rows and point bonus rows the
-/// client reads, and the total reward rows the server grants from (their
-/// boxes are the deferred [`Masters::reward_boxes`]). The server model reads them as a
-/// master and inserts this resource for the client's readers.
-#[derive(Resource, Clone, Debug)]
-pub(crate) struct DeliveryTables {
-    rewards: Vec<RewardRow>,
-    bonuses: Vec<BonusRow>,
-    totals: Vec<TotalRow>,
-}
-
-impl DeliveryTables {
-    /// The reward loop requirement of a party: its last reward row's, or 1.
-    pub(crate) fn reward_loop_requirement(&self, party: i64) -> i32 {
-        let rows: Vec<i32> = self
-            .rewards
-            .iter()
-            .filter(|row| row.party == party)
-            .map(|row| row.requirement)
-            .collect();
-        moly_law::delivery::reward_loop_requirement(&rows)
-    }
-
-    /// `MemberBonus`: the rates of the bonus rows whose card the user owns.
-    pub(crate) fn member_bonus(&self, party: i64, owned: &BTreeSet<i64>) -> f32 {
-        let rates: Vec<i32> = self
-            .bonuses
-            .iter()
-            .filter(|row| row.party == party && owned.contains(&row.card))
-            .map(|row| row.rate)
-            .collect();
-        moly_law::delivery::member_bonus(&rates)
-    }
-
-    /// Every card a point bonus row names (the owned cards policy
-    /// `everyPointBonusCard`).
-    pub(crate) fn bonus_cards(&self) -> BTreeSet<i64> {
-        self.bonuses.iter().map(|row| row.card).collect()
-    }
-
-    /// The total reward rows of a party an obtained count newly reaches:
-    /// `before < requirement <= after`, master order.
-    fn totals_reached(&self, party: i64, before: i32, after: i32) -> Vec<(i64, i32, i64)> {
-        self.totals
-            .iter()
-            .filter(|row| {
-                row.party == party && before < row.requirement && row.requirement <= after
-            })
-            .map(|row| (row.id, row.requirement, row.box_id))
-            .collect()
-    }
-}
-
-fn table_int(row: &Value, table: &str, key: &str) -> Result<i64, String> {
-    row.get(key)
-        .and_then(Value::as_i64)
-        .ok_or_else(|| format!("{table} row {:?} has no integer {key}", row.get("id")))
-}
-
 /// The delivery tables as their master tables resolve.
 #[derive(Default, Debug)]
 pub(crate) struct DeliveryParts {
-    pub(super) rewards: Option<Vec<RewardRow>>,
-    pub(super) bonuses: Option<Vec<BonusRow>>,
-    pub(super) totals: Option<Vec<TotalRow>>,
+    pub(super) rewards: Option<Vec<moly_masters::delivery::RewardRow>>,
+    pub(super) bonuses: Option<Vec<moly_masters::delivery::BonusRow>>,
+    pub(super) totals: Option<Vec<moly_masters::delivery::TotalRow>>,
 }
 
 impl DeliveryParts {
@@ -602,19 +396,24 @@ impl DeliveryParts {
         if self.rewards.is_none() || self.bonuses.is_none() || self.totals.is_none() {
             return None;
         }
-        let tables = DeliveryTables {
-            rewards: self.rewards.take()?,
-            bonuses: self.bonuses.take()?,
-            totals: self.totals.take()?,
-        };
+        let tables = DeliveryTables::new(
+            self.rewards.take()?,
+            self.bonuses.take()?,
+            self.totals.take()?,
+        );
+        let (rewards, bonuses, totals) = tables.counts();
         info!(
-            "[server] delivery tables: {} reward rows, {} point bonus rows, {} total reward rows",
-            tables.rewards.len(),
-            tables.bonuses.len(),
-            tables.totals.len()
+            "[server] delivery tables: {rewards} reward rows, {bonuses} point bonus rows, {totals} total reward rows"
         );
         Some(tables)
     }
+}
+
+/// The integer field of a table row, named by the row's id.
+fn table_int(row: &Value, table: &str, key: &str) -> Result<i64, String> {
+    row.get(key)
+        .and_then(Value::as_i64)
+        .ok_or_else(|| format!("{table} row {:?} has no integer {key}", row.get("id")))
 }
 
 /// Logs the total reward box rows once they arrive.
@@ -627,52 +426,25 @@ fn log_boxes(boxes: &[(i64, Reward)], table: &str) {
 
 /// `birthdayPartyDeliveryRewards`, master order.
 pub(crate) fn parse_rewards(text: &str, masters: &mut Masters) -> Result<(), String> {
-    const TABLE: &str = "birthdayPartyDeliveryRewards";
-    let rewards = moly_assets::json::master::rows(text)?
-        .iter()
-        .map(|row| {
-            Ok(RewardRow {
-                party: table_int(row, TABLE, "birthdayPartyId")?,
-                requirement: table_int(row, TABLE, "requirement")? as i32,
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    masters.delivery_parts.rewards = Some(rewards);
+    masters.delivery_parts.rewards = Some(moly_masters::delivery::parse_rewards(
+        &moly_assets::json::master::rows(text)?,
+    )?);
     Ok(())
 }
 
 /// `birthdayPartyDeliveryPointBonuses`, master order.
 pub(crate) fn parse_point_bonuses(text: &str, masters: &mut Masters) -> Result<(), String> {
-    const TABLE: &str = "birthdayPartyDeliveryPointBonuses";
-    let bonuses = moly_assets::json::master::rows(text)?
-        .iter()
-        .map(|row| {
-            Ok(BonusRow {
-                party: table_int(row, TABLE, "birthdayPartyId")?,
-                card: table_int(row, TABLE, "cardId")?,
-                rate: table_int(row, TABLE, "rate")? as i32,
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    masters.delivery_parts.bonuses = Some(bonuses);
+    masters.delivery_parts.bonuses = Some(moly_masters::delivery::parse_point_bonuses(
+        &moly_assets::json::master::rows(text)?,
+    )?);
     Ok(())
 }
 
 /// `birthdayPartyDeliveryTotalRewards`, master order.
 pub(crate) fn parse_total_rewards(text: &str, masters: &mut Masters) -> Result<(), String> {
-    const TABLE: &str = "birthdayPartyDeliveryTotalRewards";
-    let totals = moly_assets::json::master::rows(text)?
-        .iter()
-        .map(|row| {
-            Ok(TotalRow {
-                id: table_int(row, TABLE, "id")?,
-                party: table_int(row, TABLE, "birthdayPartyId")?,
-                requirement: table_int(row, TABLE, "requirement")? as i32,
-                box_id: table_int(row, TABLE, "resourceBoxId")?,
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    masters.delivery_parts.totals = Some(totals);
+    masters.delivery_parts.totals = Some(moly_masters::delivery::parse_total_rewards(
+        &moly_assets::json::master::rows(text)?,
+    )?);
     Ok(())
 }
 
@@ -750,52 +522,6 @@ pub(crate) struct PartyMaster {
     pub(crate) birthday_party_id: i32,
     pub(crate) delivery_item_material_id: i32,
     pub(crate) delivery_reward_mysekai_material_id: i32,
-}
-
-/// The delivery sections a response carries (full sections, replacing the
-/// client's copies).
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct DeliveryUpdate {
-    pub(crate) parties: Option<Vec<BirthdayPartyRow>>,
-    pub(crate) materials: Option<BTreeMap<i32, i32>>,
-    pub(crate) mysekai_materials: Option<BTreeMap<i32, i32>>,
-    pub(crate) cards: Option<BTreeSet<i64>>,
-    pub(crate) honors: Option<Vec<HonorRow>>,
-    pub(crate) configs: Option<BTreeMap<String, i32>>,
-}
-
-impl DeliveryUpdate {
-    pub(crate) fn is_empty(&self) -> bool {
-        *self == Self::default()
-    }
-}
-
-pub(crate) use crate::userdata::birthday_party::ClientBirthdayPartyData;
-
-/// The delivery reply (`UserBirthdayPartyDeliveryResponse`); its
-/// `updatedResources` are already in the client's copies.
-#[derive(Clone, Debug, PartialEq)]
-#[allow(dead_code)] // Read by the delivery owner's seam.
-pub(crate) struct DeliveryResponse {
-    pub(crate) dropped_reward_count: i32,
-    pub(crate) obtained_delivery_total_rewards: Vec<Reward>,
-    pub(crate) is_refreshed: bool,
-}
-
-/// The gather reply (`UserBirthdayPartyGatherResponse`); its
-/// `updatedResources` are already in the client's copies.
-#[derive(Clone, Debug, PartialEq)]
-#[allow(dead_code)] // Read by the delivery owner's seam.
-pub(crate) struct GatherResponse {
-    pub(crate) obtained_delivery_total_rewards: Vec<Reward>,
-}
-
-/// One row of the gather request (`UserBirthdayPartyGatherRequestContent`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // Built by the delivery owner's seam.
-pub(crate) struct GatherContent {
-    pub(crate) birthday_party_id: i32,
-    pub(crate) gathered_count: i32,
 }
 
 // ---------------------------------------------------------------------------
@@ -1001,7 +727,7 @@ impl ServerModel {
     }
 
     /// The delivery reply policy.
-    fn birthday_party_delivery(
+    pub(crate) fn birthday_party_delivery(
         &mut self,
         birthday_party_id: i32,
         consumed: i32,
@@ -1102,7 +828,7 @@ impl ServerModel {
     }
 
     /// The gather reply policy.
-    fn birthday_party_gather(
+    pub(crate) fn birthday_party_gather(
         &mut self,
         contents: &[GatherContent],
     ) -> Result<(GatherResponse, Vec<&'static str>), String> {
@@ -1183,7 +909,7 @@ impl ServerModel {
     /// (its other sections reach the client copies through the response
     /// queue), and the delivery sections it carries are returned for the
     /// caller to merge at once, as the API executor does.
-    fn delivery_reply(&mut self, kind: ResponseKind, changed: &[&'static str]) -> DeliveryUpdate {
+    pub(crate) fn delivery_reply(&mut self, kind: ResponseKind, changed: &[&'static str]) -> DeliveryUpdate {
         let mut sections: Vec<String> = changed.iter().map(|s| (*s).to_owned()).collect();
         for section in &self.pending {
             if SECTIONS.contains(&section.as_str()) && !sections.contains(section) {
@@ -1211,56 +937,6 @@ fn push_once(list: &mut Vec<&'static str>, section: &'static str) {
 }
 
 /// `PutUserMysekaiBirthdayPartyDeliveryApi`: the reply, with its
-/// `updatedResources` merged into the client's copies.
-#[allow(dead_code)] // Read by the delivery owner's seam.
-pub(crate) fn put_birthday_party_delivery(
-    client: &mut ClientBirthdayPartyData,
-    birthday_party_id: i32,
-    consumed_delivery_material_count: i32,
-) -> Result<DeliveryResponse, String> {
-    let (response, update) = super::with_model(|model| {
-        if !model.joined {
-            return Err("the server has not joined the client yet".to_owned());
-        }
-        let (response, changed) =
-            model.birthday_party_delivery(birthday_party_id, consumed_delivery_material_count)?;
-        let update = model.delivery_reply(ResponseKind::BirthdayPartyDelivery, &changed);
-        crate::bus::emit(
-            "delivery_done",
-            serde_json::json!({
-                "party_id": birthday_party_id,
-                "consumed": consumed_delivery_material_count,
-            }),
-        );
-        Ok((response, update))
-    })
-    .unwrap_or_else(|| Err("the server model is not installed".to_owned()))
-    .map_err(|reason| format!("PutUserMysekaiBirthdayPartyDeliveryApi: {reason}"))?;
-    client.apply(update);
-    Ok(response)
-}
-
-/// `PutUserMysekaiBirthdayPartyGatherApi`: the reply, with its
-/// `updatedResources` merged into the client's copies.
-#[allow(dead_code)] // Read by the delivery owner's seam.
-pub(crate) fn put_birthday_party_gather(
-    client: &mut ClientBirthdayPartyData,
-    contents: &[GatherContent],
-) -> Result<GatherResponse, String> {
-    let (response, update) = super::with_model(|model| {
-        if !model.joined {
-            return Err("the server has not joined the client yet".to_owned());
-        }
-        let (response, changed) = model.birthday_party_gather(contents)?;
-        let update = model.delivery_reply(ResponseKind::BirthdayPartyGather, &changed);
-        Ok((response, update))
-    })
-    .unwrap_or_else(|| Err("the server model is not installed".to_owned()))
-    .map_err(|reason| format!("PutUserMysekaiBirthdayPartyGatherApi: {reason}"))?;
-    client.apply(update);
-    Ok(response)
-}
-
 // ---------------------------------------------------------------------------
 // Panel edits and schema
 // ---------------------------------------------------------------------------

@@ -28,45 +28,17 @@ use serde_json::{json, Value};
 
 use super::talk_read::UserMysekaiCharacterTalk;
 
+pub(crate) use moly_masters::inventory::{
+    fixture_total_count, material_quantity, PossessionMasters,
+};
+pub(crate) use moly_protocol::json::{
+    canvases_value, fixtures_value, items_value, materials_value,
+    user_gamedata_value as gamedata_value,
+};
 pub(crate) use moly_protocol::rows::{
     UserMysekaiFixture, UserMysekaiCanvas, UserMysekaiBlueprint, UserMysekaiItem,
     UserMysekaiMaterial, UserMysekaiMaterialPossession, UserMysekaiGamedata, SuiteUserSections,
 };
-
-/// `MasterMysekaiFixturePossession` / `MasterMysekaiMaterialPossession`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct PossessionRow {
-    pub(crate) level: i32,
-    pub(crate) possession_limit: i32,
-}
-
-/// The possession masters (`mysekai-fixture-possessions.json`,
-/// `mysekai-material-possessions.json`), master order.
-#[derive(Resource, Clone, Debug, Default)]
-pub(crate) struct PossessionMasters {
-    pub(crate) fixture: Option<Vec<PossessionRow>>,
-    pub(crate) material: Option<Vec<PossessionRow>>,
-}
-
-fn first_limit(rows: Option<&Vec<PossessionRow>>, level: i32) -> Option<i32> {
-    rows?
-        .iter()
-        .find(|row| row.level == level)
-        .map(|row| row.possession_limit)
-}
-
-impl PossessionMasters {
-    /// `MysekaiUserDataUtility.GetFixtureMaxCount(level)`: the first row of
-    /// the level (`None` where the source would dereference a missing row).
-    pub(crate) fn fixture_max_count(&self, level: i32) -> Option<i32> {
-        first_limit(self.fixture.as_ref(), level)
-    }
-
-    /// `MysekaiUserDataUtility.GetMaterialMaxCount(level)`.
-    pub(crate) fn material_max_count(&self, level: i32) -> Option<i32> {
-        first_limit(self.material.as_ref(), level)
-    }
-}
 
 /// The client's copy, set by the server model only.
 #[derive(Resource, Debug, Clone, Default)]
@@ -258,111 +230,6 @@ impl ClientMysekaiInventory {
         })
     }
 }
-
-/// The sum of the rows' quantities (`GetFixtureTotalCount`).
-pub(crate) fn fixture_total_count(rows: &[UserMysekaiFixture]) -> i32 {
-    rows.iter().map(|row| row.quantity).sum()
-}
-
-/// The quantity of a material row (0 without one).
-pub(crate) fn material_quantity(rows: &[UserMysekaiMaterial], mysekai_material_id: i32) -> i32 {
-    rows.iter()
-        .find(|row| row.mysekai_material_id == mysekai_material_id)
-        .map_or(0, |row| row.quantity)
-}
-
-// ---------------------------------------------------------------------------
-// The response keys' JSON
-// ---------------------------------------------------------------------------
-
-pub(crate) fn fixtures_value(rows: &[UserMysekaiFixture]) -> Value {
-    Value::Array(
-        rows.iter()
-            .map(|row| {
-                json!({
-                    "mysekaiFixtureId": row.mysekai_fixture_id,
-                    "textureId": row.texture_id,
-                    "quantity": row.quantity,
-                    "lastObtainedAt": row.last_obtained_at,
-                })
-            })
-            .collect(),
-    )
-}
-
-pub(crate) fn canvases_value(rows: &[UserMysekaiCanvas]) -> Value {
-    Value::Array(
-        rows.iter()
-            .map(|row| {
-                json!({
-                    "mysekaiFixtureId": row.mysekai_fixture_id,
-                    "cardId": row.card_id,
-                    "isSpecialTraining": row.is_special_training,
-                    "quantity": row.quantity,
-                    "lastObtainedAt": row.last_obtained_at,
-                })
-            })
-            .collect(),
-    )
-}
-
-pub(crate) fn blueprints_value(rows: &[UserMysekaiBlueprint]) -> Value {
-    Value::Array(
-        rows.iter()
-            .map(|row| {
-                json!({
-                    "mysekaiBlueprintId": row.mysekai_blueprint_id,
-                    "obtainedAt": row.obtained_at,
-                })
-            })
-            .collect(),
-    )
-}
-
-pub(crate) fn items_value(rows: &[UserMysekaiItem]) -> Value {
-    Value::Array(
-        rows.iter()
-            .map(|row| {
-                json!({
-                    "mysekaiItemId": row.mysekai_item_id,
-                    "quantity": row.quantity,
-                    "lastObtainedAt": row.last_obtained_at,
-                })
-            })
-            .collect(),
-    )
-}
-
-pub(crate) fn materials_value(rows: &[UserMysekaiMaterial]) -> Value {
-    Value::Array(
-        rows.iter()
-            .map(|row| json!({"mysekaiMaterialId": row.mysekai_material_id, "quantity": row.quantity}))
-            .collect(),
-    )
-}
-
-pub(crate) fn character_talks_value(rows: &[UserMysekaiCharacterTalk]) -> Value {
-    Value::Array(
-        rows.iter()
-            .map(|row| {
-                json!({"mysekaiCharacterTalkId": row.mysekai_character_talk_id, "isRead": row.is_read})
-            })
-            .collect(),
-    )
-}
-
-pub(crate) fn gamedata_value(gamedata: UserMysekaiGamedata) -> Value {
-    json!({
-        "mysekaiRank": gamedata.mysekai_rank,
-        "totalExp": gamedata.total_exp,
-        "mysekaiMaterialPossessionLevel": gamedata.mysekai_material_possession_level,
-        "mysekaiFixturePossessionLevel": gamedata.mysekai_fixture_possession_level,
-    })
-}
-
-// ---------------------------------------------------------------------------
-// The client copy's other writer
-// ---------------------------------------------------------------------------
 
 /// The birthday-party delivery merges its replies' `userMysekaiMaterials`
 /// straight into its copy; this keeps the inventory copy's read view equal.

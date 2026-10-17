@@ -24,279 +24,19 @@
 // The craft, canvas and sketch screens read these.
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
-
 use bevy::ecs::system::SystemId;
 use bevy::prelude::*;
 
-use super::inventory::{
-    fixture_total_count, material_quantity, UserMysekaiCanvas, UserMysekaiFixture,
-    UserMysekaiMaterial,
+use super::birthday_party::ClientBirthdayPartyData;
+use super::inventory::ClientMysekaiInventory;
+use super::tools::ClientMysekaiTools;
+
+pub(crate) use moly_masters::craft::{
+    is_create_count_limit, is_enough_material_to_craft, is_first_craft,
+    is_reached_possession_limit_to_craft, CraftMasters, CraftOwned, MasterBlueprint,
+    CANVAS_MATERIAL_ID, CRAFT_COUNT_MAX, CRAFT_COUNT_MIN,
 };
-
 pub(crate) use moly_protocol::api::MysekaiCraftType;
-
-/// `MasterMysekaiBlueprint`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct MasterBlueprint {
-    pub(crate) id: i32,
-    pub(crate) craft_type: MysekaiCraftType,
-    pub(crate) craft_target_id: i32,
-    /// 0 when the master row has none (no limit).
-    pub(crate) craft_count_limit: i32,
-    pub(crate) is_enable_sketch: bool,
-    pub(crate) is_obtained_by_convert: bool,
-    pub(crate) is_available_without_possession: bool,
-}
-
-/// `MasterMysekaiBlueprintMysekaiMaterialCost`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct MaterialCost {
-    pub(crate) id: i32,
-    pub(crate) mysekai_blueprint_id: i32,
-    pub(crate) mysekai_material_id: i32,
-    pub(crate) seq: i32,
-    pub(crate) quantity: i32,
-}
-
-/// `MasterMysekaiBlueprintTerm`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct BlueprintTerm {
-    pub(crate) mysekai_blueprint_id: i32,
-    pub(crate) start_at: i64,
-    pub(crate) end_at: i64,
-}
-
-/// The craft masters the craft screen and the server read
-/// (`mysekai-blueprints.json`, `mysekai-blueprint-material-costs.json`,
-/// `mysekai-blueprint-terms.json`, `mysekai-rank-obtained-exps.json`,
-/// `mysekai-materials.json`, `mysekai-items.json`). Each is `None` when the
-/// runtime root lacks it; the server model names those.
-#[derive(Resource, Clone, Debug, Default)]
-pub(crate) struct CraftMasters {
-    pub(crate) blueprints: Option<BTreeMap<i32, MasterBlueprint>>,
-    /// Blueprint id -> its cost rows, master order.
-    pub(crate) costs: Option<BTreeMap<i32, Vec<MaterialCost>>>,
-    pub(crate) terms: Option<Vec<BlueprintTerm>>,
-    /// `MasterMysekaiRankObtainedExp` of `craft_mysekai_fixture_first_bonus`:
-    /// `Some(None)` when the master is present without that row.
-    pub(crate) first_craft_bonus: Option<Option<i32>>,
-    /// Material id -> `mysekaiMaterialType`.
-    pub(crate) material_types: Option<BTreeMap<i32, String>>,
-    /// The first `white_blueprint` item id of the items master.
-    pub(crate) white_blueprint_item: Option<Option<i32>>,
-}
-
-impl CraftMasters {
-    pub(crate) fn blueprint(&self, id: i32) -> Option<&MasterBlueprint> {
-        self.blueprints.as_ref()?.get(&id)
-    }
-
-    /// `MasterDataManager.GetMysekaiBlueprintMysekaiMaterialCost(id)`.
-    pub(crate) fn blueprint_costs(&self, id: i32) -> Option<&[MaterialCost]> {
-        self.costs.as_ref()?.get(&id).map(Vec::as_slice)
-    }
-
-    /// `MasterDataManager.GetMysekaiBlueprintTermByBlueprintId(id)`.
-    pub(crate) fn term(&self, id: i32) -> Option<&BlueprintTerm> {
-        self.terms
-            .as_ref()?
-            .iter()
-            .find(|term| term.mysekai_blueprint_id == id)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// The client's checks (`MysekaiUserDataUtility`)
-// ---------------------------------------------------------------------------
-
-/// The owned data a check reads.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct CraftOwned<'a> {
-    pub(crate) materials: &'a [UserMysekaiMaterial],
-    pub(crate) fixtures: &'a [UserMysekaiFixture],
-    pub(crate) canvases: &'a [UserMysekaiCanvas],
-    /// `GetFixtureMaxCount()`: the fixture possession limit of the user's
-    /// level (`None` when the master lacks the level).
-    pub(crate) fixture_max_count: Option<i32>,
-}
-
-impl CraftOwned<'_> {
-    /// `GetRemainingFixtureCapacity`: the limit less the total, never below 0.
-    fn remaining_fixture_capacity(&self) -> Result<i32, String> {
-        let max = self.fixture_max_count.ok_or(
-            "the fixture possession limit of the user's level is not in the possession master",
-        )?;
-        Ok((max - fixture_total_count(self.fixtures)).max(0))
-    }
-}
-
-/// `MysekaiCanvasUtility.CanvasMaterialId`: the cost id of the canvas's
-/// stand-in character material row (the canvas screen's "any member" cell).
-pub(crate) const CANVAS_MATERIAL_ID: i32 = -1;
-
-/// `IsEnoughMaterialToCraft(list, craftCount, useDummyMaterial)`: every cost
-/// row has a material row holding at least `cost.quantity * craftCount`; with
-/// `use_dummy_material` a row whose id is [`CANVAS_MATERIAL_ID`] is skipped.
-/// An empty list is not enough.
-pub(crate) fn is_enough_material_to_craft(
-    costs: &[MaterialCost],
-    craft_count: i32,
-    use_dummy_material: bool,
-    materials: &[UserMysekaiMaterial],
-) -> bool {
-    if costs.is_empty() {
-        return false;
-    }
-    costs.iter().all(|cost| {
-        if use_dummy_material && cost.id == CANVAS_MATERIAL_ID {
-            return true;
-        }
-        materials
-            .iter()
-            .find(|row| row.mysekai_material_id == cost.mysekai_material_id)
-            .is_some_and(|row| row.quantity >= cost.quantity.wrapping_mul(craft_count))
-    })
-}
-
-/// `GetCanCraftCount(blueprint, additionalMaterialCost)`: 1 for a blueprint
-/// limited to one craft; otherwise the fewest whole crafts any cost row's
-/// material pays for (0 when a material row is missing), capped at the
-/// remaining fixture capacity. The tutorial cap is left out (the tutorial is
-/// out of scope). `Err` names a missing master.
-pub(crate) fn can_craft_count(
-    blueprint: &MasterBlueprint,
-    costs: &[MaterialCost],
-    additional: Option<&MaterialCost>,
-    owned: &CraftOwned,
-) -> Result<i32, String> {
-    if costs.is_empty() {
-        return Ok(0);
-    }
-    if blueprint.craft_count_limit == 1 {
-        return Ok(1);
-    }
-    let mut count = i32::MAX;
-    for cost in costs.iter().chain(additional) {
-        let Some(row) = owned
-            .materials
-            .iter()
-            .find(|row| row.mysekai_material_id == cost.mysekai_material_id)
-        else {
-            return Ok(0);
-        };
-        // A signed division that gives 0 for a zero divisor, as the game's
-        // own build computes it.
-        let crafts = if cost.quantity == 0 {
-            0
-        } else {
-            row.quantity.wrapping_div(cost.quantity)
-        };
-        count = count.min(crafts);
-    }
-    Ok(count.min(owned.remaining_fixture_capacity()?))
-}
-
-/// `GetCraftCountLimit`: the blueprint's limit (unlimited when 0), lowered
-/// to the remaining fixture capacity when that is below the master limit.
-pub(crate) fn craft_count_limit(
-    blueprint: &MasterBlueprint,
-    owned: &CraftOwned,
-) -> Result<i32, String> {
-    let limit = if blueprint.craft_count_limit != 0 {
-        blueprint.craft_count_limit
-    } else {
-        i32::MAX
-    };
-    let remaining = owned.remaining_fixture_capacity()?;
-    Ok(if remaining < blueprint.craft_count_limit {
-        remaining
-    } else {
-        limit
-    })
-}
-
-/// `IsCreateCountLimit`: the owned quantity of the fixture in this texture
-/// is at least [`craft_count_limit`].
-pub(crate) fn is_create_count_limit(
-    blueprint: &MasterBlueprint,
-    texture_id: i32,
-    owned: &CraftOwned,
-) -> Result<bool, String> {
-    let have = owned
-        .fixtures
-        .iter()
-        .find(|row| {
-            row.mysekai_fixture_id == blueprint.craft_target_id && row.texture_id == texture_id
-        })
-        .map_or(0, |row| row.quantity);
-    Ok(have >= craft_count_limit(blueprint, owned)?)
-}
-
-/// `IsReachedPossessionLimitToCraft`: for a fixture or canvas blueprint, the
-/// create count limit, or a fixture total at or above the fixture limit.
-pub(crate) fn is_reached_possession_limit_to_craft(
-    blueprint: &MasterBlueprint,
-    texture_id: i32,
-    owned: &CraftOwned,
-) -> Result<bool, String> {
-    if !matches!(
-        blueprint.craft_type,
-        MysekaiCraftType::MysekaiFixture | MysekaiCraftType::MysekaiCanvas
-    ) {
-        return Ok(false);
-    }
-    if is_create_count_limit(blueprint, texture_id, owned)? {
-        return Ok(true);
-    }
-    let max = owned.fixture_max_count.ok_or(
-        "the fixture possession limit of the user's level is not in the possession master",
-    )?;
-    Ok(max <= fixture_total_count(owned.fixtures))
-}
-
-/// `IsFirstCraft`: a fixture blueprint with no fixture row of its target (any
-/// texture), or a canvas blueprint with no canvas row of its target; never
-/// for the other types.
-pub(crate) fn is_first_craft(blueprint: &MasterBlueprint, owned: &CraftOwned) -> bool {
-    match blueprint.craft_type {
-        MysekaiCraftType::MysekaiFixture => !owned
-            .fixtures
-            .iter()
-            .any(|row| row.mysekai_fixture_id == blueprint.craft_target_id),
-        MysekaiCraftType::MysekaiCanvas => !owned
-            .canvases
-            .iter()
-            .any(|row| row.mysekai_fixture_id == blueprint.craft_target_id),
-        _ => false,
-    }
-}
-
-/// The quantity a cost row needs for a craft count (`MaterialCostList`'s
-/// `cost.quantity * craftCount`).
-pub(crate) fn need_quantity(cost: &MaterialCost, craft_count: i32) -> i32 {
-    cost.quantity.wrapping_mul(craft_count)
-}
-
-/// The owned quantity of a cost row's material (0 without a row).
-pub(crate) fn have_quantity(cost: &MaterialCost, materials: &[UserMysekaiMaterial]) -> i32 {
-    material_quantity(materials, cost.mysekai_material_id)
-}
-
-/// `CraftPreview`'s count selector: at least 1, at most 999.
-pub(crate) const CRAFT_COUNT_MIN: i32 = 1;
-pub(crate) const CRAFT_COUNT_MAX: i32 = 999;
-
-/// `CraftPreview.SetupCraftCountInputSelector`: the selector's maximum, the
-/// craftable count when above 1 (else 1), capped at 999.
-pub(crate) fn craft_count_selector_max(can_craft_count: i32) -> i32 {
-    let count = if can_craft_count > 1 {
-        can_craft_count
-    } else {
-        1
-    };
-    count.min(CRAFT_COUNT_MAX)
-}
 
 // ---------------------------------------------------------------------------
 // Requests and replies
@@ -349,4 +89,86 @@ pub(crate) fn post_sketch(
 fn refused(api: &str, reason: String) -> SuiteUserReply {
     warn!("[server] {api} refused: {reason}");
     SuiteUserReply::refused(format!("{api}: {reason}"))
+}
+
+/// One request: the server model answers it, and the reply's sections reach
+/// the client's copies before the caller reads them (the API executor merges
+/// `updatedResources` before it returns).
+fn run(
+    api: &str,
+    inventory: &mut ClientMysekaiInventory,
+    birthday: &mut ClientBirthdayPartyData,
+    tools: &mut ClientMysekaiTools,
+    answer: impl FnOnce(&mut crate::server::ServerModel) -> crate::server::craft::Answer,
+) -> SuiteUserReply {
+    let answer = crate::server::with_model(|model| {
+        if !model.joined {
+            return crate::server::craft::Answer {
+                reply: SuiteUserReply::refused(format!(
+                    "{api}: the server has not joined the client yet"
+                )),
+                delivery: None,
+                tools: None,
+            };
+        }
+        answer(model)
+    })
+    .unwrap_or_else(|| crate::server::craft::Answer {
+        reply: SuiteUserReply::refused(format!("{api}: the server model is not installed")),
+        delivery: None,
+        tools: None,
+    });
+    if let Some(delivery) = answer.delivery {
+        birthday.apply(delivery);
+    }
+    if let Some(rows) = answer.tools {
+        tools.apply(rows);
+    }
+    inventory.apply(answer.reply.updated.clone());
+    answer.reply
+}
+
+/// The craft endpoint.
+pub(crate) fn handle_craft(
+    In(request): In<UserMysekaiCraftRequest>,
+    mut inventory: ResMut<ClientMysekaiInventory>,
+    mut birthday: ResMut<ClientBirthdayPartyData>,
+    mut tools: ResMut<ClientMysekaiTools>,
+) -> SuiteUserReply {
+    run(
+        "PostUserMysekaiCraftApi",
+        &mut inventory,
+        &mut birthday,
+        &mut tools,
+        |model| model.craft_reply(&request),
+    )
+}
+
+/// The sketch endpoint.
+pub(crate) fn handle_sketch(
+    In(request): In<UserMysekaiHousingSketchRequest>,
+    mut inventory: ResMut<ClientMysekaiInventory>,
+    mut birthday: ResMut<ClientBirthdayPartyData>,
+    mut tools: ResMut<ClientMysekaiTools>,
+) -> SuiteUserReply {
+    run(
+        "PostUserMysekaiHousingSketchApi",
+        &mut inventory,
+        &mut birthday,
+        &mut tools,
+        |model| model.sketch_reply(&request),
+    )
+}
+
+/// The endpoints and the client copy.
+pub(crate) fn install(app: &mut App) {
+    app.init_resource::<ClientMysekaiInventory>();
+    let craft = app.world_mut().register_system(handle_craft);
+    let sketch = app.world_mut().register_system(handle_sketch);
+    app.insert_resource(CraftEndpoints { craft, sketch });
+    super::talk_read::install(app);
+    app.add_systems(
+        PreUpdate,
+        super::inventory::mirror_materials.after(super::deliver),
+    );
 }

@@ -46,28 +46,25 @@
 //! separated) sets `userMysekaiMaterials` rows in the native document; game
 //! mode reads no environment variable.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use bevy::prelude::*;
 use serde_json::{json, Map, Value};
 
-use super::client::craft::MasterBlueprint;
-use super::client::inventory::character_talks_value;
-use super::client::inventory::{
-    blueprints_value, canvases_value, fixtures_value, items_value, PossessionRow, SuiteUserSections,
-    UserMysekaiBlueprint, UserMysekaiCanvas, UserMysekaiFixture, UserMysekaiGamedata,
-    UserMysekaiItem, UserMysekaiMaterial, UserMysekaiMaterialPossession,
+pub(crate) use moly_masters::craft::MasterBlueprint;
+pub(crate) use moly_protocol::json::{
+    blueprints_value, canvases_value, character_talks_value, fixtures_value, items_value,
+    resources_value, SECTION_BLUEPRINTS, SECTION_CANVASES, SECTION_CHARACTER_TALKS,
+    SECTION_FIXTURES, SECTION_ITEMS,
 };
-use super::client::talk_read::{UserMysekaiCharacterTalk, UserResource};
+pub(crate) use moly_protocol::rows::{
+    SuiteUserSections, UserMysekaiBlueprint, UserMysekaiCanvas, UserMysekaiCharacterTalk,
+    UserMysekaiFixture, UserMysekaiGamedata, UserMysekaiItem, UserMysekaiMaterial,
+    UserMysekaiMaterialPossession, UserResource,
+};
 use super::delivery::SECTION_MYSEKAI_MATERIALS;
-use super::document::{boolean, int32, int64, object, only};
 use super::{Masters, ServerModel, SECTION_GAMEDATA};
 
-pub(crate) const SECTION_FIXTURES: &str = "userMysekaiFixtures";
-pub(crate) const SECTION_CANVASES: &str = "userMysekaiCanvases";
-pub(crate) const SECTION_BLUEPRINTS: &str = "userMysekaiBlueprints";
-pub(crate) const SECTION_ITEMS: &str = "userMysekaiItems";
-pub(crate) const SECTION_CHARACTER_TALKS: &str = "userMysekaiCharacterTalks";
 /// The sections of this part a response carries (the document keys).
 pub(crate) const SECTIONS: [&str; 5] = [
     SECTION_FIXTURES,
@@ -138,160 +135,31 @@ impl Default for InventoryDoc {
 // Reading and writing
 // ---------------------------------------------------------------------------
 
-fn rows<'a>(value: &'a Value, at: &str) -> Result<&'a Vec<Value>, String> {
-    value
-        .as_array()
-        .ok_or_else(|| format!("{at} is not an array"))
-}
-
 pub(crate) fn parse_fixtures(value: &Value) -> Result<Vec<UserMysekaiFixture>, String> {
-    rows(value, SECTION_FIXTURES)?
-        .iter()
-        .enumerate()
-        .map(|(i, row)| {
-            let at = format!("{SECTION_FIXTURES}[{i}]");
-            let row = object(row, &at)?;
-            only(
-                row,
-                &[
-                    "mysekaiFixtureId",
-                    "textureId",
-                    "quantity",
-                    "lastObtainedAt",
-                ],
-                &at,
-            )?;
-            Ok(UserMysekaiFixture {
-                mysekai_fixture_id: int32(row, "mysekaiFixtureId", &at)?,
-                texture_id: int32(row, "textureId", &at)?,
-                quantity: int32(row, "quantity", &at)?,
-                last_obtained_at: int64(row, "lastObtainedAt", &at)?,
-            })
-        })
-        .collect()
+    moly_protocol::json::parse_fixtures(value)
 }
 
 pub(crate) fn parse_canvases(value: &Value) -> Result<Vec<UserMysekaiCanvas>, String> {
-    rows(value, SECTION_CANVASES)?
-        .iter()
-        .enumerate()
-        .map(|(i, row)| {
-            let at = format!("{SECTION_CANVASES}[{i}]");
-            let row = object(row, &at)?;
-            only(
-                row,
-                &[
-                    "mysekaiFixtureId",
-                    "cardId",
-                    "isSpecialTraining",
-                    "quantity",
-                    "lastObtainedAt",
-                ],
-                &at,
-            )?;
-            Ok(UserMysekaiCanvas {
-                mysekai_fixture_id: int32(row, "mysekaiFixtureId", &at)?,
-                card_id: int32(row, "cardId", &at)?,
-                is_special_training: boolean(row, "isSpecialTraining", &at)?,
-                quantity: int32(row, "quantity", &at)?,
-                last_obtained_at: int64(row, "lastObtainedAt", &at)?,
-            })
-        })
-        .collect()
+    moly_protocol::json::parse_canvases(value)
 }
 
 pub(crate) fn parse_blueprints(value: &Value) -> Result<Vec<UserMysekaiBlueprint>, String> {
-    rows(value, SECTION_BLUEPRINTS)?
-        .iter()
-        .enumerate()
-        .map(|(i, row)| {
-            let at = format!("{SECTION_BLUEPRINTS}[{i}]");
-            let row = object(row, &at)?;
-            only(row, &["mysekaiBlueprintId", "obtainedAt"], &at)?;
-            Ok(UserMysekaiBlueprint {
-                mysekai_blueprint_id: int32(row, "mysekaiBlueprintId", &at)?,
-                obtained_at: int64(row, "obtainedAt", &at)?,
-            })
-        })
-        .collect()
+    moly_protocol::json::parse_blueprints(value)
 }
 
 pub(crate) fn parse_items(value: &Value) -> Result<Vec<UserMysekaiItem>, String> {
-    rows(value, SECTION_ITEMS)?
-        .iter()
-        .enumerate()
-        .map(|(i, row)| {
-            let at = format!("{SECTION_ITEMS}[{i}]");
-            let row = object(row, &at)?;
-            only(row, &["mysekaiItemId", "quantity", "lastObtainedAt"], &at)?;
-            Ok(UserMysekaiItem {
-                mysekai_item_id: int32(row, "mysekaiItemId", &at)?,
-                quantity: int32(row, "quantity", &at)?,
-                last_obtained_at: int64(row, "lastObtainedAt", &at)?,
-            })
-        })
-        .collect()
+    moly_protocol::json::parse_items(value)
 }
 
 pub(crate) fn parse_character_talks(
     value: &Value,
 ) -> Result<Vec<UserMysekaiCharacterTalk>, String> {
-    rows(value, SECTION_CHARACTER_TALKS)?
-        .iter()
-        .enumerate()
-        .map(|(i, row)| {
-            let at = format!("{SECTION_CHARACTER_TALKS}[{i}]");
-            let row = object(row, &at)?;
-            only(row, &["mysekaiCharacterTalkId", "isRead"], &at)?;
-            Ok(UserMysekaiCharacterTalk {
-                mysekai_character_talk_id: int32(row, "mysekaiCharacterTalkId", &at)?,
-                is_read: boolean(row, "isRead", &at)?,
-            })
-        })
-        .collect()
+    moly_protocol::json::parse_character_talks(value)
 }
 
 /// `policies.talkReadObtainedResources`: `UserResource` rows.
 pub(crate) fn parse_resources(value: &Value) -> Result<Vec<UserResource>, String> {
-    const AT: &str = "policies.talkReadObtainedResources";
-    rows(value, AT)?
-        .iter()
-        .enumerate()
-        .map(|(i, row)| {
-            let at = format!("{AT}[{i}]");
-            let row = object(row, &at)?;
-            only(
-                row,
-                &["resourceType", "resourceId", "resourceLevel", "quantity"],
-                &at,
-            )?;
-            Ok(UserResource {
-                resource_type: row
-                    .get("resourceType")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| format!("{at}.resourceType is not a string"))?
-                    .to_owned(),
-                resource_id: int32(row, "resourceId", &at)?,
-                resource_level: int32(row, "resourceLevel", &at)?,
-                quantity: int32(row, "quantity", &at)?,
-            })
-        })
-        .collect()
-}
-
-pub(crate) fn resources_value(rows: &[UserResource]) -> Value {
-    Value::Array(
-        rows.iter()
-            .map(|row| {
-                json!({
-                    "resourceType": row.resource_type,
-                    "resourceId": row.resource_id,
-                    "resourceLevel": row.resource_level,
-                    "quantity": row.quantity,
-                })
-            })
-            .collect(),
-    )
+    moly_protocol::json::parse_resources(value)
 }
 
 pub(crate) fn parse_owned_blueprints(value: &Value) -> Result<OwnedBlueprints, String> {
@@ -653,61 +521,44 @@ pub(crate) fn native_overlay(doc: &mut super::document::ServerDocument) {
 // Masters
 // ---------------------------------------------------------------------------
 
-fn possession_rows(text: &str, table: &str) -> Result<Vec<PossessionRow>, String> {
+fn master_rows(text: &str, table: &str) -> Result<Vec<Value>, String> {
     let value: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
-    super::master_rows(&value, table)?
-        .iter()
-        .map(|row| {
-            Ok(PossessionRow {
-                level: super::int32(row, "level")?,
-                possession_limit: super::int32(row, "possessionLimit")?,
-            })
-        })
-        .collect()
+    super::master_rows(&value, table)
 }
 
 /// `mysekaiFixturePossessions`.
 pub(crate) fn parse_fixture_possessions(text: &str, masters: &mut Masters) -> Result<(), String> {
-    masters.possession.fixture = Some(possession_rows(text, "mysekaiFixturePossessions")?);
+    masters.possession.fixture = Some(moly_masters::inventory::parse_possession_rows(
+        &master_rows(text, "mysekaiFixturePossessions")?,
+    )?);
     Ok(())
 }
 
 /// `mysekaiMaterialPossessions`.
 pub(crate) fn parse_material_possessions(text: &str, masters: &mut Masters) -> Result<(), String> {
-    masters.possession.material = Some(possession_rows(text, "mysekaiMaterialPossessions")?);
+    masters.possession.material = Some(moly_masters::inventory::parse_possession_rows(
+        &master_rows(text, "mysekaiMaterialPossessions")?,
+    )?);
     Ok(())
 }
 
 /// `mysekaiMaterials`: material id -> `mysekaiMaterialType`.
 pub(crate) fn parse_materials(text: &str, masters: &mut Masters) -> Result<(), String> {
-    let value: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
-    let types = super::master_rows(&value, "mysekaiMaterials")?
-        .iter()
-        .map(|row| {
-            let kind = row["mysekaiMaterialType"]
-                .as_str()
-                .ok_or_else(|| format!("mysekaiMaterialType of {row} is not a string"))?;
-            Ok((super::int32(row, "id")?, kind.to_owned()))
-        })
-        .collect::<Result<BTreeMap<_, _>, String>>()?;
-    masters.craft.material_types = Some(types);
+    masters.craft.material_types = Some(moly_masters::craft::parse_material_types(&master_rows(
+        text,
+        "mysekaiMaterials",
+    )?)?);
     Ok(())
 }
 
 /// `mysekaiItems`: the first `white_blueprint` item.
 pub(crate) fn parse_items_master(text: &str, masters: &mut Masters) -> Result<(), String> {
-    let value: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
-    let rows = super::master_rows(&value, "mysekaiItems")?;
-    let white = rows
-        .iter()
-        .find(|row| row["mysekaiItemType"].as_str() == Some("white_blueprint"))
-        .map(|row| super::int32(row, "id"))
-        .transpose()?;
-    masters.craft.white_blueprint_item = Some(white);
+    masters.craft.white_blueprint_item = Some(moly_masters::craft::parse_white_blueprint_item(
+        &master_rows(text, "mysekaiItems")?,
+    )?);
     Ok(())
 }
 
-pub(crate) use crate::userdata::inventory::mirror_materials;
 
 // ---------------------------------------------------------------------------
 // Panel edits and schema

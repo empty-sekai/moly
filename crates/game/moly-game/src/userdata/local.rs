@@ -22,6 +22,11 @@ pub(crate) const TOPICS: [(&str, i32); 4] = [
 /// `MysekaiTopicEnum.StaminaRefresh`.
 pub(crate) const TOPIC_STAMINA_REFRESH: i32 = 0;
 
+/// The seed's local document, checked before the install.
+pub(crate) fn check_seed_local(text: &str) -> Result<(), String> {
+    LocalDocument::parse(text).map(|_| ())
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct LocalDocument {
     /// Topic values, in the order they were added.

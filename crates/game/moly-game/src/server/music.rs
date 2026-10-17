@@ -3,7 +3,7 @@
 //! the vocal version and whether it plays instrumental). The BGM reads the
 //! setting of the site it plays on; the setting is user data, so it lives in
 //! the server document and reaches the client as its copy
-//! ([`super::client::music::ClientMusicPlaySettings`]).
+//! (`ClientMusicPlaySettings`).
 //!
 //! Named default: no row (no site has a setting; the default BGM choice
 //! plays). The record master (`mysekai-music-records.json`) checks the record
@@ -11,46 +11,12 @@
 
 use serde_json::{json, Map, Value};
 
-use super::client::music::MusicPlaySetting;
-use super::document::{int32, object, only};
+use moly_protocol::rows::MusicPlaySetting;
 
-pub(crate) const SECTION: &str = "userMysekaiMusicPlayFixtureSettings";
+pub(crate) use moly_protocol::json::SECTION_MUSIC_SETTINGS as SECTION;
 
 pub(crate) fn parse_rows(value: &Value) -> Result<Vec<MusicPlaySetting>, String> {
-    let rows = value
-        .as_array()
-        .ok_or_else(|| format!("{SECTION} is not an array"))?;
-    let mut sites = std::collections::BTreeSet::new();
-    rows.iter()
-        .enumerate()
-        .map(|(i, row)| {
-            let at = format!("{SECTION}[{i}]");
-            let row = object(row, &at)?;
-            only(
-                row,
-                &[
-                    "mysekaiSiteId",
-                    "mysekaiMusicRecordId",
-                    "musicVocalId",
-                    "isInstrumental",
-                ],
-                &at,
-            )?;
-            let setting = MusicPlaySetting {
-                mysekai_site_id: int32(row, "mysekaiSiteId", &at)?,
-                mysekai_music_record_id: int32(row, "mysekaiMusicRecordId", &at)?,
-                music_vocal_id: int32(row, "musicVocalId", &at)?,
-                is_instrumental: row
-                    .get("isInstrumental")
-                    .and_then(Value::as_bool)
-                    .ok_or_else(|| format!("{at}.isInstrumental is not a boolean"))?,
-            };
-            if !sites.insert(setting.mysekai_site_id) {
-                return Err(format!("{at} repeats site {}", setting.mysekai_site_id));
-            }
-            Ok(setting)
-        })
-        .collect()
+    moly_protocol::json::parse_music_settings(value)
 }
 
 /// The section from a document (no row when absent).
@@ -151,7 +117,7 @@ pub(crate) fn schema_sections() -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::super::client::music::rows_value;
+    use moly_protocol::json::music_settings_value as rows_value;
     use super::*;
 
     #[test]

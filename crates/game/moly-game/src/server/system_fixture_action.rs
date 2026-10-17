@@ -6,7 +6,7 @@
 //!   {userId, mysekaiSystemFixtureId}): the system fixtures the user has
 //!   actioned. It is user data: the document holds it and the join carries
 //!   it to the client's copy
-//!   ([`super::client::system_fixture_action::ClientSystemFixtureActions`]),
+//!   (`ClientSystemFixtureActions`),
 //!   which `IsActionedSystemFixture` reads. **Named default**: no row.
 //! - `PostUserMysekaiSystemFixtureActionApi` (`userId`,
 //!   `mysekaiSystemFixtureId`; an empty body), sent by
@@ -14,7 +14,7 @@
 //!   party's `ExecuteAsync` calls after its confirm dialog. The reply
 //!   (`UserMysekaiSystemFixtureActionResponse`) carries `updatedResources`
 //!   (`SuiteUser`) and `obtainedResources`. The client sends it through
-//!   [`super::client::system_fixture_action::post`]; [`install`] puts the
+//!   the client's `post` helper; [`install`] puts the
 //!   endpoint in place.
 //!
 //! **Named policies** (the server's rules are not in the client):
@@ -45,14 +45,15 @@ use bevy::prelude::*;
 use moly_law::fixture::{Direction, GridPosition};
 use serde_json::{json, Map, Value};
 
-use super::client::system_fixture_action::{
-    rows_value, ClientSystemFixtureActions, SystemFixtureActionEndpoint, SystemFixtureActionReply,
-    SystemFixtureActionReplyExt, UserMysekaiSystemFixtureAction, API,
-};
-use super::document::{int32, object, only};
 use super::{ResponseKind, ServerModel};
 
-pub(crate) const SECTION: &str = "userMysekaiSystemFixtureActions";
+/// The API's name in the source.
+pub(crate) const API: &str = "PostUserMysekaiSystemFixtureActionApi";
+
+pub(crate) use moly_protocol::json::system_fixture_actions_value as rows_value;
+pub(crate) use moly_protocol::json::SECTION_SYSTEM_FIXTURE_ACTIONS as SECTION;
+pub(crate) use moly_protocol::rows::UserMysekaiSystemFixtureAction;
+
 pub(crate) const REPLY_POLICY: &str = "systemFixtureActionReply";
 pub(crate) const PARTY_FIXTURES_POLICY: &str = "birthdayPartyFixtures";
 const REPLY_SUCCESS: &str = "success";
@@ -121,28 +122,7 @@ pub(crate) struct SystemFixtureActionDoc {
 // ---------------------------------------------------------------------------
 
 fn parse_rows(value: &Value) -> Result<Vec<UserMysekaiSystemFixtureAction>, String> {
-    let rows = value
-        .as_array()
-        .ok_or_else(|| format!("{SECTION} is not an array"))?;
-    let mut seen = std::collections::BTreeSet::new();
-    rows.iter()
-        .enumerate()
-        .map(|(i, row)| {
-            let at = format!("{SECTION}[{i}]");
-            let row = object(row, &at)?;
-            only(row, &["mysekaiSystemFixtureId"], &at)?;
-            let id = int32(row, "mysekaiSystemFixtureId", &at)?;
-            if id < 1 {
-                return Err(format!("{at}.mysekaiSystemFixtureId = {id} is below 1"));
-            }
-            if !seen.insert(id) {
-                return Err(format!("{at} repeats system fixture {id}"));
-            }
-            Ok(UserMysekaiSystemFixtureAction {
-                mysekai_system_fixture_id: id,
-            })
-        })
-        .collect()
+    moly_protocol::json::parse_system_fixture_actions(value)
 }
 
 fn parse_reply(value: &Value) -> Result<ReplyPolicy, String> {
@@ -408,15 +388,15 @@ fn check_cake(cake: &PartyCake, rows: &[Value]) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
-// The endpoint
+// The reply policy
 // ---------------------------------------------------------------------------
 
 impl ServerModel {
     /// The reply policy on one request: the reply's `obtainedResources`.
-    fn system_fixture_action(
+    pub(crate) fn system_fixture_action(
         &mut self,
         mysekai_system_fixture_id: i32,
-    ) -> Result<Vec<super::client::talk_read::UserResource>, String> {
+    ) -> Result<Vec<moly_protocol::rows::UserResource>, String> {
         if self.doc.system_fixture_actions.reply == ReplyPolicy::Failure {
             return Err(format!("policies.{REPLY_POLICY} is {REPLY_FAILURE}"));
         }
@@ -442,43 +422,6 @@ impl ServerModel {
         self.respond(ResponseKind::SystemFixtureAction, false, &[SECTION]);
         Ok(Vec::new())
     }
-}
-
-/// The endpoint ([`super::client::system_fixture_action::post`]): the reply's
-/// `updatedResources` are merged into the client's copy before it returns.
-pub(super) fn handle(
-    In(mysekai_system_fixture_id): In<i32>,
-    mut copy: ResMut<ClientSystemFixtureActions>,
-) -> SystemFixtureActionReply {
-    let answer = super::with_model(|model| {
-        if !model.joined {
-            return Err("the server has not joined the client yet".to_owned());
-        }
-        let obtained = model.system_fixture_action(mysekai_system_fixture_id)?;
-        let response = model.responses.last().expect("the response just recorded");
-        Ok((obtained, response.system_fixture_actions.clone()))
-    })
-    .unwrap_or_else(|| Err("the server model is not installed".to_owned()));
-    match answer {
-        Ok((obtained_resources, rows)) => {
-            if let Some(rows) = rows {
-                copy.apply(rows);
-            }
-            SystemFixtureActionReply {
-                success: true,
-                refusal: None,
-                obtained_resources,
-            }
-        }
-        Err(reason) => SystemFixtureActionReply::refused(reason),
-    }
-}
-
-/// The endpoint and the client's copy.
-pub(crate) fn install(app: &mut App) {
-    app.init_resource::<ClientSystemFixtureActions>();
-    let endpoint = app.world_mut().register_system(handle);
-    app.insert_resource(SystemFixtureActionEndpoint(endpoint));
 }
 
 // ---------------------------------------------------------------------------

@@ -851,7 +851,7 @@ mod tests {
         assert!(model.responses.is_empty());
         assert_eq!(model.pending, vec![SECTION_STAMINA.to_owned()]);
         edit(&mut model, r#"{"type":"server.edit","action":"sync"}"#).unwrap();
-        assert_eq!(model.responses.last().unwrap().stamina.unwrap().normal, 10);
+        assert_eq!(model.responses.last().unwrap().sections.stamina.unwrap().normal, 10);
     }
 
     #[test]

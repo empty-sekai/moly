@@ -51,7 +51,7 @@ fn answer(mut calls: MessageReader<CallReceived>, sessions: Res<Sessions>) {
                 outcome: Ok(reply),
                 sections: Some(Box::new(Sections {
                     server_date_ms: now_ms(),
-                    is_refreshed: false,
+                    ..Sections::default()
                 })),
             },
         );

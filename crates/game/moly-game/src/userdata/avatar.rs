@@ -8,70 +8,11 @@
 //! resolved, so the resource's presence means "resolved": each map is `None`
 //! when the runtime root lacks its master.
 
-use std::collections::BTreeMap;
-
 use bevy::prelude::*;
-use serde_json::{json, Value};
 
-/// The section's field names, in the source's order.
-pub(crate) const FIELDS: [&str; 4] = [
-    "avatarCostumeId",
-    "avatarAccessoryId",
-    "avatarSkinColorId",
-    "avatarCoordinateId",
-];
-
+pub(crate) use moly_masters::avatar::AvatarMasters;
+pub(crate) use moly_protocol::json::avatar_value as value;
 pub(crate) use moly_protocol::rows::UserAvatar;
-
-/// Field-name access to [`UserAvatar`], backed by this module's field table.
-pub(crate) trait UserAvatarExt {
-    /// The ids by field name, in [`FIELDS`] order.
-    fn values(&self) -> [(&'static str, Option<i32>); 4];
-}
-
-impl UserAvatarExt for UserAvatar {
-    fn values(&self) -> [(&'static str, Option<i32>); 4] {
-        [
-            (FIELDS[0], self.costume),
-            (FIELDS[1], self.accessory),
-            (FIELDS[2], self.skin_color),
-            (FIELDS[3], self.coordinate),
-        ]
-    }
-}
-
-/// The wear as the response key's JSON object.
-pub(crate) fn value(avatar: &UserAvatar) -> Value {
-    Value::Object(
-        avatar
-            .values()
-            .into_iter()
-            .map(|(field, id)| (field.to_owned(), json!(id)))
-            .collect(),
-    )
-}
-
-/// `MasterAvatarCoordinate`, the columns the player chain reads.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CoordinateRow {
-    pub(crate) costume_assetbundle_name: Option<String>,
-    pub(crate) accessory_assetbundle_name: Option<String>,
-    pub(crate) skin_color_code: Option<String>,
-}
-
-/// The avatar wear masters (`avatar-costumes.json`, `avatar-accessories.json`,
-/// `avatar-skin-colors.json`, `avatar-coordinates.json`). A map is `None`
-/// when the runtime root lacks its master (the server model names it).
-#[derive(Resource, Clone, Debug, Default)]
-pub(crate) struct AvatarMasters {
-    /// id -> `assetbundleName`.
-    pub(crate) costumes: Option<BTreeMap<i32, String>>,
-    /// id -> `assetbundleName`.
-    pub(crate) accessories: Option<BTreeMap<i32, String>>,
-    /// id -> `colorCode`.
-    pub(crate) skin_colors: Option<BTreeMap<i32, String>>,
-    pub(crate) coordinates: Option<BTreeMap<i32, CoordinateRow>>,
-}
 
 /// The client's copy, set by responses only.
 #[derive(Resource, Debug, Clone, Default)]

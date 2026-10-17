@@ -720,23 +720,32 @@ pub(crate) fn validate_floor_layout(
 pub(crate) fn housing_layout_request(
     layout: &FixturePlacements,
 ) -> crate::server::client::housing_layout::UserMysekaiHousingEditLayoutRequest {
-    crate::server::client::housing_layout::UserMysekaiHousingEditLayoutRequest {
+    use crate::server::client::housing_layout::{
+        HousingLayoutCorner, HousingLayoutFixture, UserMysekaiHousingEditLayoutRequest,
+    };
+    UserMysekaiHousingEditLayoutRequest {
         mysekai_site_id: layout.site_id,
         site_type: layout.site_type.clone(),
         fixtures: layout
             .rows
             .iter()
-            .map(|row| {
-                json!({
-                    "package": row.package,
-                    "mysekaiFixtureId": row.fixture_id,
-                    "minimum": grid_json(row.min),
-                    "maximum": grid_json(row.max),
-                    "centerY": row.center_y,
-                    "layoutType": row.layout,
-                    "rotation": row.direction as u8,
-                    "textureId": row.texture_id,
-                })
+            .map(|row| HousingLayoutFixture {
+                package: row.package.clone(),
+                mysekai_fixture_id: row.fixture_id,
+                minimum: HousingLayoutCorner {
+                    x: row.min.x,
+                    y: row.min.y,
+                    z: row.min.z,
+                },
+                maximum: HousingLayoutCorner {
+                    x: row.max.x,
+                    y: row.max.y,
+                    z: row.max.z,
+                },
+                center_y: row.center_y,
+                layout_type: row.layout,
+                rotation: row.direction as u8,
+                texture_id: row.texture_id,
             })
             .collect(),
     }

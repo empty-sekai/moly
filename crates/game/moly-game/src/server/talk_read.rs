@@ -1,8 +1,7 @@
 //! The talk read report (`PutUserMysekaiCharacterTalkReadApi`, an empty
 //! body naming the talk) and its reply (`UserMysekaiCharacterTalkReadResponse`:
-//! `obtainedResources` and `updatedResources`). The client sends it through
-//! [`super::client::talk_read::put_talk_read`]; [`install`] puts the endpoint
-//! in place.
+//! `obtainedResources` and `updatedResources`). The client's request runs the
+//! endpoint the client side installs.
 //!
 //! **Named policies** (the server's rules are not in the client):
 //! - *Talk read record*: the reply sets the talk's `userMysekaiCharacterTalks`
@@ -18,20 +17,21 @@
 //!   table; the other resource types are carried in the reply only (the
 //!   document does not track them).
 
+
 use bevy::prelude::*;
 
-use super::client::inventory::ClientMysekaiInventory;
-use super::client::talk_read::{TalkReadEndpoint, TalkReadReply, UserResource};
-use super::delivery::{ClientBirthdayPartyData, SECTION_MATERIALS, SECTION_MYSEKAI_MATERIALS};
+use super::delivery::{SECTION_MATERIALS, SECTION_MYSEKAI_MATERIALS};
 use super::inventory::{SECTION_CHARACTER_TALKS, SECTION_ITEMS};
-use super::{ResponseKind, ServerModel};
+use super::ServerModel;
+
+pub(crate) use moly_protocol::rows::{UserMysekaiCharacterTalk, UserResource};
 
 const API: &str = "PutUserMysekaiCharacterTalkReadApi";
 
 impl ServerModel {
     /// The talk read policies: the resources and the sections the reply
     /// carries.
-    fn talk_read(
+    pub(crate) fn talk_read(
         &mut self,
         mysekai_character_talk_id: i32,
     ) -> Result<(Vec<UserResource>, Vec<&'static str>), String> {
@@ -51,7 +51,7 @@ impl ServerModel {
             None => {
                 inventory
                     .character_talks
-                    .push(super::client::talk_read::UserMysekaiCharacterTalk {
+                    .push(UserMysekaiCharacterTalk {
                         mysekai_character_talk_id,
                         is_read: true,
                     })
@@ -78,7 +78,7 @@ impl ServerModel {
                             row.quantity += quantity;
                             row.last_obtained_at = now;
                         }
-                        None => items.push(super::client::inventory::UserMysekaiItem {
+                        None => items.push(moly_protocol::rows::UserMysekaiItem {
                             mysekai_item_id: id,
                             quantity,
                             last_obtained_at: now,
@@ -102,54 +102,4 @@ impl ServerModel {
         );
         Ok((resources, changed))
     }
-}
-
-/// The talk read endpoint ([`super::client::talk_read::put_talk_read`]).
-pub(super) fn handle(
-    In(mysekai_character_talk_id): In<i32>,
-    mut inventory: ResMut<ClientMysekaiInventory>,
-    mut birthday: ResMut<ClientBirthdayPartyData>,
-) -> TalkReadReply {
-    let refused = |reason: String| {
-        warn!("[server] {API} refused: {reason}");
-        TalkReadReply {
-            success: false,
-            refusal: Some(format!("{API}: {reason}")),
-            obtained_resources: Vec::new(),
-            updated: Default::default(),
-        }
-    };
-    let answer = super::with_model(|model| {
-        if !model.joined {
-            return Err("the server has not joined the client yet".to_owned());
-        }
-        let (resources, changed) = model.talk_read(mysekai_character_talk_id)?;
-        model.respond(ResponseKind::CharacterTalkRead, false, &changed);
-        let response = model.responses.last().expect("the response just recorded");
-        Ok((
-            resources,
-            response.inventory.clone(),
-            response.delivery.clone(),
-        ))
-    })
-    .unwrap_or_else(|| Err("the server model is not installed".to_owned()));
-    match answer {
-        Ok((obtained_resources, updated, delivery)) => {
-            birthday.apply(delivery);
-            inventory.apply(updated.clone());
-            TalkReadReply {
-                success: true,
-                refusal: None,
-                obtained_resources,
-                updated,
-            }
-        }
-        Err(reason) => refused(reason),
-    }
-}
-
-/// The endpoint.
-pub(crate) fn install(app: &mut App) {
-    let endpoint = app.world_mut().register_system(handle);
-    app.insert_resource(TalkReadEndpoint(endpoint));
 }

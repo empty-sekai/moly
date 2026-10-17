@@ -1,0 +1,15 @@
+[package]
+name = "moly-masters"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The typed master tables the game and its server both read: the rows of one
+# upstream master document, its parse, and the pure rules over them. Bevy is
+# here only for the resource derive the tables carry; no asset loading and no
+# engine dependency beyond it.
+[dependencies]
+moly-protocol = { path = "../../net/moly-protocol" }
+moly-law = { path = "../../base/moly-law" }
+bevy = { version = "0.18.1", default-features = false, features = ["std"] }
+serde_json = { workspace = true }

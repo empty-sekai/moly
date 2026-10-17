@@ -3,7 +3,7 @@
 //! `PostUserMysekaiHousingSketchApi` (`UserMysekaiHousingSketchRequest`).
 //! Both reply with `SuiteUser`, the tables they changed; the client merges
 //! them before it reads its copies. The client sends them through
-//! [`super::client::craft::post_craft`] and [`super::client::craft::post_sketch`];
+//! the client's `post_craft` and `post_sketch` request helpers;
 //! [`install`] puts the endpoints in place.
 //!
 //! **Named policies.** The server's rules are not in the client, so each
@@ -79,21 +79,20 @@
 //! makes the home action's craft request (which carries no blueprint) a craft
 //! of that blueprint; game mode reads no environment variable.
 
-use std::collections::BTreeMap;
-
 use bevy::prelude::*;
 use serde_json::{json, Value};
 
-use super::client::craft::{
+pub(crate) use moly_masters::craft::{
     can_craft_count, craft_count_selector_max, is_enough_material_to_craft, is_first_craft,
-    is_reached_possession_limit_to_craft, BlueprintTerm, CraftEndpoints, CraftOwned,
-    MasterBlueprint, MaterialCost, MysekaiCraftType, SuiteUserReply, UserMysekaiCraftRequest,
-    UserMysekaiHousingSketchRequest, CRAFT_COUNT_MAX, CRAFT_COUNT_MIN,
+    is_reached_possession_limit_to_craft, is_within_time, CraftOwned, MasterBlueprint, MaterialCost,
+    CRAFT_COUNT_MAX, CRAFT_COUNT_MIN,
 };
-use super::client::inventory::{ClientMysekaiInventory, UserMysekaiBlueprint, UserMysekaiFixture};
-use super::delivery::{ClientBirthdayPartyData, SECTION_MYSEKAI_MATERIALS};
+pub(crate) use moly_protocol::api::{
+    MysekaiCraftType, SuiteUserReply, UserMysekaiCraftRequest, UserMysekaiHousingSketchRequest,
+};
+pub(crate) use moly_protocol::rows::{UserMysekaiBlueprint, UserMysekaiFixture};
+use super::delivery::SECTION_MYSEKAI_MATERIALS;
 use super::inventory::{SECTION_BLUEPRINTS, SECTION_FIXTURES, SECTION_ITEMS};
-use super::tools::ClientMysekaiTools;
 use super::{Masters, ResponseKind, ServerModel, SECTION_GAMEDATA};
 
 /// The texture a request without one takes (the client's base colour).
@@ -124,122 +123,46 @@ fn flag(row: &Value, key: &str) -> Result<bool, String> {
         .ok_or_else(|| format!("{key} of {row} is not a boolean"))
 }
 
-/// A cards master row as the canvas craft reads it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // Read by the canvas craft once it is modelled.
-pub(crate) struct CardRow {
-    pub(crate) character_id: i32,
-    /// `cardRarityType` (`rarity_1` to `rarity_4`, `rarity_birthday`).
-    pub(crate) rarity: String,
-}
-
 /// `cards`: card id -> the card's character and rarity.
 pub(crate) fn parse_cards(text: &str, masters: &mut Masters) -> Result<(), String> {
-    let cards = moly_assets::json::master::rows(text)?
-        .iter()
-        .map(|row| {
-            let id = super::int32(row, "id")?;
-            let rarity = row["cardRarityType"]
-                .as_str()
-                .ok_or_else(|| format!("card {id} has no cardRarityType"))?;
-            Ok((
-                id,
-                CardRow {
-                    character_id: super::int32(row, "characterId")?,
-                    rarity: rarity.to_owned(),
-                },
-            ))
-        })
-        .collect::<Result<BTreeMap<_, _>, String>>()?;
+    let cards = moly_masters::craft::parse_cards(&moly_assets::json::master::rows(text)?)?;
     masters.cards = super::Deferred::Ready(cards);
     Ok(())
 }
 
 /// `mysekaiBlueprints`.
 pub(crate) fn parse_blueprints(text: &str, masters: &mut Masters) -> Result<(), String> {
-    let rows = table_rows(text, "mysekaiBlueprints")?;
-    let blueprints = rows
-        .iter()
-        .map(|row| {
-            let kind = row["mysekaiCraftType"].as_str().unwrap_or_default();
-            let craft_type = MysekaiCraftType::parse(kind)
-                .ok_or_else(|| format!("mysekaiCraftType {kind:?} of {row} is not known"))?;
-            let id = super::int32(row, "id")?;
-            Ok((
-                id,
-                MasterBlueprint {
-                    id,
-                    craft_type,
-                    craft_target_id: super::int32(row, "craftTargetId")?,
-                    craft_count_limit: optional_int(row, "craftCountLimit")?,
-                    is_enable_sketch: flag(row, "isEnableSketch")?,
-                    is_obtained_by_convert: flag(row, "isObtainedByConvert")?,
-                    is_available_without_possession: flag(row, "isAvailableWithoutPossession")?,
-                },
-            ))
-        })
-        .collect::<Result<BTreeMap<_, _>, String>>()?;
+    let blueprints =
+        moly_masters::craft::parse_blueprints(&table_rows(text, "mysekaiBlueprints")?)?;
     masters.craft.blueprints = Some(blueprints);
     Ok(())
 }
 
 /// `mysekaiBlueprintMysekaiMaterialCosts`: the rows per blueprint.
 pub(crate) fn parse_costs(text: &str, masters: &mut Masters) -> Result<(), String> {
-    let rows = table_rows(text, "mysekaiBlueprintMysekaiMaterialCosts")?;
-    let mut costs: BTreeMap<i32, Vec<MaterialCost>> = BTreeMap::new();
-    for row in &rows {
-        let cost = MaterialCost {
-            id: super::int32(row, "id")?,
-            mysekai_blueprint_id: super::int32(row, "mysekaiBlueprintId")?,
-            mysekai_material_id: super::int32(row, "mysekaiMaterialId")?,
-            seq: super::int32(row, "seq")?,
-            quantity: super::int32(row, "quantity")?,
-        };
-        costs
-            .entry(cost.mysekai_blueprint_id)
-            .or_default()
-            .push(cost);
-    }
+    let costs = moly_masters::craft::parse_costs(&table_rows(
+        text,
+        "mysekaiBlueprintMysekaiMaterialCosts",
+    )?)?;
     masters.craft.costs = Some(costs);
     Ok(())
 }
 
 /// `mysekaiBlueprintTerms`.
 pub(crate) fn parse_terms(text: &str, masters: &mut Masters) -> Result<(), String> {
-    let rows = table_rows(text, "mysekaiBlueprintTerms")?;
-    let terms = rows
-        .iter()
-        .map(|row| {
-            Ok(BlueprintTerm {
-                mysekai_blueprint_id: super::int32(row, "mysekaiBlueprintId")?,
-                start_at: row["startAt"].as_i64().ok_or("startAt is not an integer")?,
-                end_at: row["endAt"].as_i64().ok_or("endAt is not an integer")?,
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
+    let terms = moly_masters::craft::parse_terms(&table_rows(text, "mysekaiBlueprintTerms")?)?;
     masters.craft.terms = Some(terms);
     Ok(())
 }
 
 /// `mysekaiRankObtainedExps`: the first-craft bonus row.
 pub(crate) fn parse_rank_obtained_exps(text: &str, masters: &mut Masters) -> Result<(), String> {
-    let rows = table_rows(text, "mysekaiRankObtainedExps")?;
-    let bonus = rows
-        .iter()
-        .find(|row| row["mysekaiRankObtainedExpType"].as_str() == Some(FIRST_BONUS_TYPE))
-        .map(|row| super::int32(row, "quantity"))
-        .transpose()?;
+    let bonus = moly_masters::craft::parse_rank_obtained_exps(&table_rows(
+        text,
+        "mysekaiRankObtainedExps",
+    )?)?;
     masters.craft.first_craft_bonus = Some(bonus);
     Ok(())
-}
-
-/// `TimeUtility.IsWithinTime(checkAt, startAt, endAt)`: from `startAt` up to,
-/// not including, `endAt`; an `endAt` of 0 has no end.
-pub(crate) fn is_within_time(check_at: i64, start_at: i64, end_at: i64) -> bool {
-    if end_at == 0 {
-        return start_at != 0 && start_at <= check_at;
-    }
-    start_at <= check_at && check_at < end_at
 }
 
 // ---------------------------------------------------------------------------
@@ -376,7 +299,7 @@ impl ServerModel {
                 "IsReachedPossessionLimitToCraft: fixture {} texture {texture_id} is at its create count limit or the fixtures are at the possession limit {} (total {})",
                 blueprint.craft_target_id,
                 owned.fixture_max_count.unwrap_or_default(),
-                super::client::inventory::fixture_total_count(owned.fixtures)
+                moly_masters::inventory::fixture_total_count(owned.fixtures)
             ));
         }
         let can = can_craft_count(&blueprint, &costs, None, &owned)?;
@@ -539,7 +462,7 @@ impl ServerModel {
     /// A craft request answered: the document changed and a response is
     /// recorded; the reply's tables are returned for the caller to merge at
     /// once, as the API executor merges them before the caller reads them.
-    pub(super) fn craft_reply(&mut self, request: &UserMysekaiCraftRequest) -> Answer {
+    pub(crate) fn craft_reply(&mut self, request: &UserMysekaiCraftRequest) -> Answer {
         let kind = match self.masters.craft.blueprint(request.blueprint_id) {
             Some(blueprint) if blueprint.craft_type == MysekaiCraftType::MysekaiCanvas => {
                 ResponseKind::HomeActionCanvas
@@ -603,7 +526,7 @@ impl ServerModel {
         }
     }
 
-    pub(super) fn sketch_reply(&mut self, request: &UserMysekaiHousingSketchRequest) -> Answer {
+    pub(crate) fn sketch_reply(&mut self, request: &UserMysekaiHousingSketchRequest) -> Answer {
         let kind = ResponseKind::HomeActionSketch;
         match self.sketch(request) {
             Ok(changed) => self.answer(kind, &changed),
@@ -618,10 +541,10 @@ impl ServerModel {
             reply: SuiteUserReply {
                 success: true,
                 refusal: None,
-                updated: response.inventory.clone(),
+                updated: response.sections.inventory.clone(),
             },
-            delivery: Some(response.delivery.clone()),
-            tools: response.tools.clone(),
+            delivery: Some(response.sections.delivery.clone()),
+            tools: response.sections.tools.clone(),
         }
     }
 
@@ -643,77 +566,11 @@ impl ServerModel {
 }
 
 /// A reply and the delivery sections to merge with it.
-pub(super) struct Answer {
-    pub(super) reply: SuiteUserReply,
-    pub(super) delivery: Option<super::delivery::DeliveryUpdate>,
+pub(crate) struct Answer {
+    pub(crate) reply: SuiteUserReply,
+    pub(crate) delivery: Option<super::delivery::DeliveryUpdate>,
     /// `userMysekaiTools` when the reply carries it.
-    pub(super) tools: Option<Vec<super::tools::UserMysekaiTool>>,
-}
-
-fn run(
-    api: &str,
-    inventory: &mut ClientMysekaiInventory,
-    birthday: &mut ClientBirthdayPartyData,
-    tools: &mut ClientMysekaiTools,
-    answer: impl FnOnce(&mut ServerModel) -> Answer,
-) -> SuiteUserReply {
-    let answer = super::with_model(|model| {
-        if !model.joined {
-            return Answer {
-                reply: SuiteUserReply::refused(format!(
-                    "{api}: the server has not joined the client yet"
-                )),
-                delivery: None,
-                tools: None,
-            };
-        }
-        answer(model)
-    })
-    .unwrap_or_else(|| Answer {
-        reply: SuiteUserReply::refused(format!("{api}: the server model is not installed")),
-        delivery: None,
-        tools: None,
-    });
-    if let Some(delivery) = answer.delivery {
-        birthday.apply(delivery);
-    }
-    if let Some(rows) = answer.tools {
-        tools.apply(rows);
-    }
-    inventory.apply(answer.reply.updated.clone());
-    answer.reply
-}
-
-/// The craft endpoint ([`super::client::craft::post_craft`]).
-pub(super) fn handle_craft(
-    In(request): In<UserMysekaiCraftRequest>,
-    mut inventory: ResMut<ClientMysekaiInventory>,
-    mut birthday: ResMut<ClientBirthdayPartyData>,
-    mut tools: ResMut<ClientMysekaiTools>,
-) -> SuiteUserReply {
-    run(
-        "PostUserMysekaiCraftApi",
-        &mut inventory,
-        &mut birthday,
-        &mut tools,
-        |model| model.craft_reply(&request),
-    )
-}
-
-/// The sketch endpoint ([`super::client::craft::post_sketch`]).
-pub(super) fn handle_sketch(
-    In(request): In<UserMysekaiHousingSketchRequest>,
-    mut inventory: ResMut<ClientMysekaiInventory>,
-    mut birthday: ResMut<ClientBirthdayPartyData>,
-    mut tools: ResMut<ClientMysekaiTools>,
-) -> SuiteUserReply {
-    run(
-        "PostUserMysekaiHousingSketchApi",
-        &mut inventory,
-        &mut birthday,
-        &mut tools,
-        |model| model.sketch_reply(&request),
-    )
+    pub(crate) tools: Option<Vec<super::tools::UserMysekaiTool>>,
 }
 
 /// The native instrument `MOLY_CRAFT_MOCK_REQUEST`
@@ -739,19 +596,6 @@ pub(crate) fn instrument_request() -> Option<UserMysekaiCraftRequest> {
         is_special_training: None,
         quantity,
     })
-}
-
-/// The endpoints and the client copy.
-pub(crate) fn install(app: &mut App) {
-    app.init_resource::<ClientMysekaiInventory>();
-    let craft = app.world_mut().register_system(handle_craft);
-    let sketch = app.world_mut().register_system(handle_sketch);
-    app.insert_resource(CraftEndpoints { craft, sketch });
-    super::talk_read::install(app);
-    app.add_systems(
-        PreUpdate,
-        super::inventory::mirror_materials.after(crate::userdata::deliver),
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -784,7 +628,7 @@ pub(crate) fn schema_policies() -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::super::client::inventory::UserMysekaiFixture;
+    use moly_protocol::rows::UserMysekaiFixture;
     use super::*;
 
     /// A master table in its upstream form.

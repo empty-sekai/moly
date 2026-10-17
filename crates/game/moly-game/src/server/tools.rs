@@ -37,43 +37,23 @@ use std::collections::BTreeSet;
 use bevy::prelude::*;
 use serde_json::{json, Map, Value};
 
-use super::document::{int32, int64, object, only, ServerDocument};
+use super::document::ServerDocument;
 use super::{Masters, ResponseKind, ServerModel};
 
-pub(crate) const SECTION: &str = "userMysekaiTools";
+pub(crate) use moly_protocol::json::SECTION_TOOLS as SECTION;
 const INSTRUMENT: &str = "MOLY_HARVEST_MOCK_TOOLS";
 /// The tool types the initial tools policy seats, in seating order.
 const INITIAL_TYPES: [&str; 2] = ["pickaxe", "axe"];
 
+pub(crate) use moly_masters::tools::ToolMaster;
+pub(crate) use moly_protocol::json::tools_section_value as value;
 pub(crate) use moly_protocol::rows::UserMysekaiTool;
-
-/// The `mysekaiTools` fields the server reads.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ToolMaster {
-    pub(crate) id: i32,
-    pub(crate) tool_type: String,
-    pub(crate) level: i32,
-    pub(crate) max_durability: i32,
-}
 
 /// `mysekaiTools`, id order.
 pub(crate) fn parse_master(text: &str, masters: &mut Masters) -> Result<(), String> {
-    let value: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
-    let rows = super::master_rows(&value, "mysekaiTools")?
-        .iter()
-        .map(|row| {
-            Ok(ToolMaster {
-                id: super::int32(row, "id")?,
-                tool_type: row["mysekaiToolType"]
-                    .as_str()
-                    .ok_or_else(|| format!("mysekaiToolType of {row} is not a string"))?
-                    .to_owned(),
-                level: super::int32(row, "toolLevel")?,
-                max_durability: super::int32(row, "maxDurability")?,
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    masters.tools = Some(rows);
+    masters.tools = Some(moly_masters::tools::parse_tool_master(
+        &moly_assets::json::master::rows(text)?,
+    )?);
     Ok(())
 }
 
@@ -92,31 +72,7 @@ fn max_durability(masters: &Masters, tool_id: i32) -> Option<i32> {
 
 /// The rows of a section value (`null`: not seated).
 pub(crate) fn parse_rows(value: &Value) -> Result<Option<Vec<UserMysekaiTool>>, String> {
-    if value.is_null() {
-        return Ok(None);
-    }
-    let rows = value
-        .as_array()
-        .ok_or_else(|| format!("{SECTION} is neither null nor an array"))?;
-    rows.iter()
-        .enumerate()
-        .map(|(i, row)| {
-            let at = format!("{SECTION}[{i}]");
-            let row = object(row, &at)?;
-            only(
-                row,
-                &["mysekaiToolId", "quantity", "durability", "lastObtainedAt"],
-                &at,
-            )?;
-            Ok(UserMysekaiTool {
-                mysekai_tool_id: int32(row, "mysekaiToolId", &at)?,
-                quantity: int32(row, "quantity", &at)?,
-                durability: int32(row, "durability", &at)?,
-                last_obtained_at: int64(row, "lastObtainedAt", &at)?,
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()
-        .map(Some)
+    moly_protocol::json::parse_tools(value)
 }
 
 /// This part from a schemaVersion 2 document (absent: not seated).
@@ -125,26 +81,6 @@ pub(crate) fn parse(doc: &Map<String, Value>) -> Result<Option<Vec<UserMysekaiTo
         None => Ok(None),
         Some(value) => parse_rows(value),
     }
-}
-
-pub(crate) fn rows_value(rows: &[UserMysekaiTool]) -> Value {
-    Value::Array(
-        rows.iter()
-            .map(|row| {
-                json!({
-                    "mysekaiToolId": row.mysekai_tool_id,
-                    "quantity": row.quantity,
-                    "durability": row.durability,
-                    "lastObtainedAt": row.last_obtained_at,
-                })
-            })
-            .collect(),
-    )
-}
-
-/// The section's value in the document (`null` while not seated).
-pub(crate) fn value(rows: &Option<Vec<UserMysekaiTool>>) -> Value {
-    rows.as_deref().map_or(Value::Null, rows_value)
 }
 
 /// The checks that need no master data: a tool id of at least 1 once per
@@ -401,7 +337,7 @@ pub(crate) fn harvest_tool_use(
     super::with_model(|model| model.harvest_tool_use(tool_id, use_count, sent_durability))
 }
 
-pub(crate) use crate::userdata::tools::ClientMysekaiTools;
+pub(crate) use crate::server::client::tools::ClientMysekaiTools;
 
 // ---------------------------------------------------------------------------
 // Native instrument and the panel

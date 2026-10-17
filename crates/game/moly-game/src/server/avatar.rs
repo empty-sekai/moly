@@ -1,10 +1,10 @@
 //! The player's avatar wear (`userAvatar`, `UserAvatar`: four nullable ids,
 //! `avatarCostumeId`, `avatarAccessoryId`, `avatarSkinColorId`,
 //! `avatarCoordinateId`). The wear is user data, so it lives in the server
-//! document and reaches the client as its copy
-//! ([`super::client::avatar::ClientUserAvatar`]); the client resolves the ids
-//! through the avatar masters (`AvatarData.Build`), which the server model
-//! reads and hands to the client as [`AvatarMasters`].
+//! document and reaches the client as its copy (`ClientUserAvatar`); the
+//! client resolves the ids through the avatar masters (`AvatarData.Build`),
+//! which the server model reads and hands to the client as
+//! `AvatarMasters`.
 //!
 //! Named default: every id null (the source's unset wear: the "default" skin
 //! bundle, white skin, no accessory). The four masters check the ids when
@@ -14,10 +14,10 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Map, Value};
 
-use super::client::avatar::{AvatarMasters, CoordinateRow, UserAvatar, FIELDS};
-use super::document::object;
-
-pub(crate) const SECTION: &str = "userAvatar";
+use moly_masters::avatar::AvatarMasters;
+pub(crate) use moly_protocol::json::SECTION_AVATAR as SECTION;
+use moly_protocol::json::{parse_avatar, AVATAR_FIELDS as FIELDS};
+use moly_protocol::rows::UserAvatar;
 
 /// The slot of a field name.
 fn slot<'a>(avatar: &'a mut UserAvatar, field: &str) -> Option<&'a mut Option<i32>> {
@@ -41,22 +41,10 @@ fn nullable_id(value: &Value, at: &str) -> Result<Option<i32>, String> {
     }
 }
 
-pub(crate) fn parse_value(value: &Value) -> Result<UserAvatar, String> {
-    let row = object(value, SECTION)?;
-    super::document::only(row, &FIELDS, SECTION)?;
-    let mut avatar = UserAvatar::default();
-    for field in FIELDS {
-        let at = format!("{SECTION}.{field}");
-        let id = nullable_id(row.get(field).unwrap_or(&Value::Null), &at)?;
-        *slot(&mut avatar, field).expect("a known field") = id;
-    }
-    Ok(avatar)
-}
-
 /// The section from a document (all null when absent).
 pub(crate) fn parse(doc: &Map<String, Value>) -> Result<UserAvatar, String> {
     doc.get(SECTION)
-        .map_or(Ok(UserAvatar::default()), parse_value)
+        .map_or(Ok(UserAvatar::default()), parse_avatar)
 }
 
 /// A `server.edit` of the section (next response); `None` for another path.
@@ -67,7 +55,7 @@ pub(crate) fn edit_path(
     value: &Value,
 ) -> Option<Result<(), String>> {
     match parts {
-        [SECTION] => Some(parse_value(value).map(|parsed| *avatar = parsed)),
+        [SECTION] => Some(parse_avatar(value).map(|parsed| *avatar = parsed)),
         [SECTION, field] => Some(match slot(avatar, field) {
             Some(slot) => nullable_id(value, path).map(|id| *slot = id),
             None => Err(format!("{path} is not a UserAvatar field")),
@@ -113,52 +101,40 @@ fn id_of(map: &Option<BTreeMap<i32, String>>, wanted: &str) -> Option<i32> {
         .map(|(id, _)| *id)
 }
 
-fn string_rows(text: &str, table: &str, column: &str) -> Result<BTreeMap<i32, String>, String> {
+fn master_rows(text: &str, table: &str) -> Result<Vec<Value>, String> {
     let value: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
-    super::master_rows(&value, table)?
-        .iter()
-        .map(|row| {
-            let id = super::int32(row, "id")?;
-            let text = row[column]
-                .as_str()
-                .ok_or_else(|| format!("{table} row {id} has no string {column}"))?;
-            Ok((id, text.to_owned()))
-        })
-        .collect()
+    super::master_rows(&value, table)
 }
 
 pub(crate) fn parse_costumes(text: &str, masters: &mut super::Masters) -> Result<(), String> {
-    masters.avatar.costumes = Some(string_rows(text, "avatarCostumes", "assetbundleName")?);
+    masters.avatar.costumes = Some(moly_masters::avatar::parse_costumes(&master_rows(
+        text,
+        "avatarCostumes",
+    )?)?);
     Ok(())
 }
 
 pub(crate) fn parse_accessories(text: &str, masters: &mut super::Masters) -> Result<(), String> {
-    masters.avatar.accessories = Some(string_rows(text, "avatarAccessories", "assetbundleName")?);
+    masters.avatar.accessories = Some(moly_masters::avatar::parse_accessories(&master_rows(
+        text,
+        "avatarAccessories",
+    )?)?);
     Ok(())
 }
 
 pub(crate) fn parse_skin_colors(text: &str, masters: &mut super::Masters) -> Result<(), String> {
-    masters.avatar.skin_colors = Some(string_rows(text, "avatarSkinColors", "colorCode")?);
+    masters.avatar.skin_colors = Some(moly_masters::avatar::parse_skin_colors(&master_rows(
+        text,
+        "avatarSkinColors",
+    )?)?);
     Ok(())
 }
 
 pub(crate) fn parse_coordinates(text: &str, masters: &mut super::Masters) -> Result<(), String> {
-    let value: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
-    let text_of = |row: &Value, column: &str| row[column].as_str().map(str::to_owned);
-    let rows = super::master_rows(&value, "avatarCoordinates")?
-        .iter()
-        .map(|row| {
-            Ok((
-                super::int32(row, "id")?,
-                CoordinateRow {
-                    costume_assetbundle_name: text_of(row, "costumeAssetbundleName"),
-                    accessory_assetbundle_name: text_of(row, "accessoryAssetbundleName"),
-                    skin_color_code: text_of(row, "skinColorCode"),
-                },
-            ))
-        })
-        .collect::<Result<BTreeMap<_, _>, String>>()?;
-    masters.avatar.coordinates = Some(rows);
+    masters.avatar.coordinates = Some(moly_masters::avatar::parse_coordinates(&master_rows(
+        text,
+        "avatarCoordinates",
+    )?)?);
     Ok(())
 }
 
@@ -249,7 +225,8 @@ pub(crate) fn schema_sections() -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::super::client::avatar::value;
+    use moly_masters::avatar::CoordinateRow;
+    use moly_protocol::json::avatar_value as value;
     use super::*;
 
     fn masters() -> AvatarMasters {
@@ -279,7 +256,7 @@ mod tests {
             skin_color: Some(3),
             coordinate: None,
         };
-        assert_eq!(parse_value(&value(&avatar)).unwrap(), avatar);
+        assert_eq!(parse_avatar(&value(&avatar)).unwrap(), avatar);
         assert_eq!(parse(&Map::new()).unwrap(), UserAvatar::default());
         let mut edited = avatar;
         edit_path(

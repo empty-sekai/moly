@@ -5,11 +5,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use bevy::prelude::*;
 use serde_json::{json, Value};
 
-use crate::server::delivery::{
-    honor_value, party_value, quantities_value, BirthdayPartyRow, DeliveryUpdate, HonorRow,
-    SECTION_BIRTHDAY_PARTIES, SECTION_HONORS, SECTION_MASTER_CONFIGS, SECTION_MATERIALS,
-    SECTION_MYSEKAI_MATERIALS,
+use crate::server::{with_model, ResponseKind};
+
+pub(crate) use moly_protocol::api::{DeliveryResponse, GatherContent, GatherResponse};
+pub(crate) use moly_protocol::json::{
+    honor_value, party_value, quantities_value, SECTION_BIRTHDAY_PARTIES, SECTION_HONORS,
+    SECTION_MASTER_CONFIGS, SECTION_MATERIALS, SECTION_MYSEKAI_MATERIALS,
 };
+pub(crate) use moly_protocol::rows::{BirthdayPartyRow, DeliveryUpdate, HonorRow};
 
 /// The client's copies of the delivery user data (`UserDataManager`) and of
 /// the two master configs (`MasterDataManager`), set by responses only.
@@ -105,4 +108,55 @@ impl ClientBirthdayPartyData {
             "revision": self.revision,
         })
     }
+}
+
+/// `PutUserMysekaiBirthdayPartyDeliveryApi`: the reply, with its
+/// `updatedResources` merged into the client's copies.
+#[allow(dead_code)] // Read by the delivery owner's seam.
+pub(crate) fn put_birthday_party_delivery(
+    client: &mut ClientBirthdayPartyData,
+    birthday_party_id: i32,
+    consumed_delivery_material_count: i32,
+) -> Result<DeliveryResponse, String> {
+    let (response, update) = with_model(|model| {
+        if !model.joined {
+            return Err("the server has not joined the client yet".to_owned());
+        }
+        let (response, changed) =
+            model.birthday_party_delivery(birthday_party_id, consumed_delivery_material_count)?;
+        let update = model.delivery_reply(ResponseKind::BirthdayPartyDelivery, &changed);
+        crate::bus::emit(
+            "delivery_done",
+            serde_json::json!({
+                "party_id": birthday_party_id,
+                "consumed": consumed_delivery_material_count,
+            }),
+        );
+        Ok((response, update))
+    })
+    .unwrap_or_else(|| Err("the server model is not installed".to_owned()))
+    .map_err(|reason| format!("PutUserMysekaiBirthdayPartyDeliveryApi: {reason}"))?;
+    client.apply(update);
+    Ok(response)
+}
+
+/// `PutUserMysekaiBirthdayPartyGatherApi`: the reply, with its
+/// `updatedResources` merged into the client's copies.
+#[allow(dead_code)] // Read by the delivery owner's seam.
+pub(crate) fn put_birthday_party_gather(
+    client: &mut ClientBirthdayPartyData,
+    contents: &[GatherContent],
+) -> Result<GatherResponse, String> {
+    let (response, update) = with_model(|model| {
+        if !model.joined {
+            return Err("the server has not joined the client yet".to_owned());
+        }
+        let (response, changed) = model.birthday_party_gather(contents)?;
+        let update = model.delivery_reply(ResponseKind::BirthdayPartyGather, &changed);
+        Ok((response, update))
+    })
+    .unwrap_or_else(|| Err("the server model is not installed".to_owned()))
+    .map_err(|reason| format!("PutUserMysekaiBirthdayPartyGatherApi: {reason}"))?;
+    client.apply(update);
+    Ok(response)
 }

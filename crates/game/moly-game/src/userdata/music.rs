@@ -7,25 +7,10 @@
 use std::collections::BTreeMap;
 
 use bevy::prelude::*;
-use serde_json::{json, Value};
+use serde_json::Value;
 
+pub(crate) use moly_protocol::json::music_settings_value as rows_value;
 pub(crate) use moly_protocol::rows::MusicPlaySetting;
-
-/// The rows as the response key's JSON array.
-pub(crate) fn rows_value(rows: &[MusicPlaySetting]) -> Value {
-    Value::Array(
-        rows.iter()
-            .map(|row| {
-                json!({
-                    "mysekaiSiteId": row.mysekai_site_id,
-                    "mysekaiMusicRecordId": row.mysekai_music_record_id,
-                    "musicVocalId": row.music_vocal_id,
-                    "isInstrumental": row.is_instrumental,
-                })
-            })
-            .collect(),
-    )
-}
 
 /// The client's copy, set by responses only.
 #[derive(Resource, Debug, Clone, Default)]

@@ -2,7 +2,7 @@
 //! {mysekaiSiteId, userMysekaiSiteHousingLayout, mysekaiPhenomenaId}): the
 //! layout editor's save. The server stores the site's layout and replies with
 //! the user data it changed (`SuiteUser`). The client sends it through
-//! [`super::client::housing_layout::post`]; the server plugin installs
+//! the client post helper; the server plugin installs
 //! [`handle`] as its endpoint.
 //!
 //! The stored layout is the served one: the document's
@@ -20,36 +20,15 @@
 //! the talk lotteries a new layout would draw.
 
 use bevy::prelude::*;
-use serde_json::Value;
 
-use super::client::craft::SuiteUserReply;
-use super::client::housing_layout::{API, UserMysekaiHousingEditLayoutRequest};
-use super::client::inventory::SuiteUserSections;
+pub(crate) use moly_protocol::api::{
+    SuiteUserReply, UserMysekaiHousingEditLayoutRequest,
+};
+pub(crate) use moly_protocol::rows::SuiteUserSections;
 use super::{ResponseKind, ServerModel};
 
-/// The fields a served row needs, with a check of each.
-fn check_row(row: &Value, index: usize) -> Result<(), String> {
-    let at = format!("row {index}");
-    let object = row
-        .as_object()
-        .ok_or_else(|| format!("{at} is not an object"))?;
-    let has = |key: &str, ok: fn(&Value) -> bool| {
-        object
-            .get(key)
-            .filter(|value| ok(value))
-            .map(|_| ())
-            .ok_or_else(|| format!("{at}: {key} is missing or malformed"))
-    };
-    has("package", Value::is_string)?;
-    has("mysekaiFixtureId", Value::is_i64)?;
-    has("minimum", Value::is_object)?;
-    has("maximum", Value::is_object)?;
-    has("centerY", Value::is_i64)?;
-    has("layoutType", Value::is_u64)?;
-    has("rotation", Value::is_u64)?;
-    has("textureId", Value::is_u64)?;
-    Ok(())
-}
+/// The API's name in the source.
+pub(crate) const API: &str = "PostUserMysekaiHousingLayoutApi";
 
 impl ServerModel {
     fn housing_layout(&mut self, request: UserMysekaiHousingEditLayoutRequest) -> SuiteUserReply {
@@ -58,14 +37,6 @@ impl ServerModel {
             site_type,
             fixtures,
         } = request;
-        if let Err(error) = fixtures
-            .iter()
-            .enumerate()
-            .try_for_each(|(index, row)| check_row(row, index))
-        {
-            warn!("[server] {API} for site {mysekai_site_id} ({site_type}) refused: {error}");
-            return SuiteUserReply::refused(format!("{API}: {error}"));
-        }
         let count = fixtures.len();
         let served = self.doc.layouts.as_array_mut().and_then(|rows| {
             rows.iter_mut()
@@ -73,7 +44,8 @@ impl ServerModel {
         });
         match served {
             Some(row) => {
-                row["mysekaiFixtures"] = Value::Array(fixtures);
+                row["mysekaiFixtures"] =
+                    moly_protocol::json::housing_layout_fixtures_value(&fixtures);
                 info!(
                     "[server] {} for site {mysekai_site_id} ({site_type}): {count} rows stored in the served layout; the reply's SuiteUser carries no owned table (a layout moves the layouted count, not the quantity)",
                     ResponseKind::HousingLayout.name()
