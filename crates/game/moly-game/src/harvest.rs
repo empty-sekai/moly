@@ -784,6 +784,7 @@ impl Plugin for HarvestPlugin {
                     possession::build,
                     clips::parse,
                     tool_model::parse,
+                    server_mock::refresh_maps,
                     arrival::place,
                     arrival::bind_views,
                     obstacles::set_up,

@@ -18,8 +18,8 @@ use moly_assets::json::JsonAsset;
 
 use super::law::{Stamina, ToolType};
 use super::server_mock::{
-    HarvestServerMock, MockFixtureRow, MockInputs, MockMaterialRow, MockSpot, UserHarvestMap,
-    UserTool, MOCK_EXCLUDED,
+    HarvestServerMock, MockFixtureRow, MockInputs, MockMaterialRow, UserHarvestMap, UserTool,
+    MOCK_EXCLUDED,
 };
 use super::ActionInterface;
 
@@ -55,10 +55,10 @@ const ITEM_IDS: MasterTable<HashSet<i64>> = MasterTable {
     name: "mysekaiItems (harvest drop rows of item type)",
     parse: parse_ids,
 };
-const MUSIC_RECORD_IDS: MasterTable<HashSet<i64>> = MasterTable {
+const MUSIC_RECORDS: MasterTable<MusicRecords> = MasterTable {
     table: "mysekaiMusicRecords",
-    name: "mysekaiMusicRecords (harvest drop rows of music-record type)",
-    parse: parse_ids,
+    name: "mysekaiMusicRecords (harvest drop rows of music-record type, the fixed treasure box's record)",
+    parse: parse_music_records,
 };
 const TOOLS: MasterTable<Vec<ToolDef>> = MasterTable {
     table: "mysekaiTools",
@@ -72,13 +72,8 @@ const STAMINAS: MasterTable<i32> = MasterTable {
 };
 const MATERIALS: MasterTable<Vec<MockMaterialRow>> = MasterTable {
     table: "mysekaiMaterials",
-    name: "mysekaiMaterials (the sites each material drops on, HarvestMapMock)",
+    name: "mysekaiMaterials (the sites each material drops on, TreasureBoxSpawnMock)",
     parse: parse_materials,
-};
-const SPOTS: MasterTable<Vec<MockSpot>> = MasterTable {
-    table: "mysekaiSiteHarvestUnavailableSpots",
-    name: "mysekaiSiteHarvestUnavailableSpots (the rectangles HarvestMapMock places around)",
-    parse: parse_spots,
 };
 const STAMINA_RECOVERY: MasterTable<i32> = MasterTable {
     table: "mysekaiStaminaRecovery",
@@ -86,16 +81,15 @@ const STAMINA_RECOVERY: MasterTable<i32> = MasterTable {
     parse: parse_boost_grant,
 };
 
-fn master_keys() -> [MasterKey; 9] {
+fn master_keys() -> [MasterKey; 8] {
     [
         FIXTURE_IDS.key(),
         BLUEPRINT_IDS.key(),
         ITEM_IDS.key(),
-        MUSIC_RECORD_IDS.key(),
+        MUSIC_RECORDS.key(),
         TOOLS.key(),
         STAMINAS.key(),
         MATERIALS.key(),
-        SPOTS.key(),
         STAMINA_RECOVERY.key(),
     ]
 }
@@ -105,11 +99,10 @@ struct HarvestMasters {
     fixture_ids: Result<HashSet<i64>, MasterError>,
     blueprint_ids: Result<HashSet<i64>, MasterError>,
     item_ids: Result<HashSet<i64>, MasterError>,
-    music_record_ids: Result<HashSet<i64>, MasterError>,
+    music_records: Result<MusicRecords, MasterError>,
     tools: Result<Vec<ToolDef>, MasterError>,
     max_normal_stamina: Result<i32, MasterError>,
     materials: Result<Vec<MockMaterialRow>, MasterError>,
-    spots: Result<Vec<MockSpot>, MasterError>,
     boost_grant: Result<i32, MasterError>,
 }
 
@@ -126,11 +119,10 @@ impl HarvestMasters {
             fixture_ids: masters.take(&FIXTURE_IDS)?,
             blueprint_ids: masters.take(&BLUEPRINT_IDS)?,
             item_ids: masters.take(&ITEM_IDS)?,
-            music_record_ids: masters.take(&MUSIC_RECORD_IDS)?,
+            music_records: masters.take(&MUSIC_RECORDS)?,
             tools: masters.take(&TOOLS)?,
             max_normal_stamina: masters.take(&STAMINAS)?,
             materials: masters.take(&MATERIALS)?,
-            spots: masters.take(&SPOTS)?,
             boost_grant: masters.take(&STAMINA_RECOVERY)?,
         })
     }
@@ -142,11 +134,10 @@ impl HarvestMasters {
             self.fixture_ids.as_ref().err(),
             self.blueprint_ids.as_ref().err(),
             self.item_ids.as_ref().err(),
-            self.music_record_ids.as_ref().err(),
+            self.music_records.as_ref().err(),
             self.tools.as_ref().err(),
             self.max_normal_stamina.as_ref().err(),
             self.materials.as_ref().err(),
-            self.spots.as_ref().err(),
             self.boost_grant.as_ref().err(),
         ]
         .into_iter()
@@ -169,11 +160,10 @@ pub(crate) fn load(
     masters.request(&FIXTURE_IDS);
     masters.request(&BLUEPRINT_IDS);
     masters.request(&ITEM_IDS);
-    masters.request(&MUSIC_RECORD_IDS);
+    masters.request(&MUSIC_RECORDS);
     masters.request(&TOOLS);
     masters.request(&STAMINAS);
     masters.request(&MATERIALS);
-    masters.request(&SPOTS);
     masters.request(&STAMINA_RECOVERY);
 }
 
@@ -255,22 +245,27 @@ fn parse_materials(text: &str) -> Result<Vec<MockMaterialRow>, String> {
         .collect()
 }
 
-fn parse_spots(text: &str) -> Result<Vec<MockSpot>, String> {
-    rows_by_id(text)?
-        .iter()
-        .map(|row| {
-            Ok(MockSpot {
-                site_id: row["mysekaiSiteId"]
-                    .as_u64()
-                    .and_then(|id| u32::try_from(id).ok())
-                    .ok_or("mysekaiSiteId is not a site id")?,
-                start_x: master::int32(row, "startX")?,
-                start_z: master::int32(row, "startZ")?,
-                width: master::int32(row, "width")?,
-                height: master::int32(row, "height")?,
-            })
-        })
-        .collect()
+/// `mysekaiMusicRecords`: every id, and the ids by track type.
+pub(crate) struct MusicRecords {
+    ids: HashSet<i64>,
+    by_track_type: std::collections::BTreeMap<String, Vec<i64>>,
+}
+
+fn parse_music_records(text: &str) -> Result<MusicRecords, String> {
+    let mut records = MusicRecords {
+        ids: HashSet::new(),
+        by_track_type: Default::default(),
+    };
+    for row in rows_by_id(text)? {
+        let id = master::int(&row, "id")?;
+        records.ids.insert(id);
+        records
+            .by_track_type
+            .entry(master::text(&row, "mysekaiMusicTrackType")?.to_owned())
+            .or_default()
+            .push(id);
+    }
+    Ok(records)
 }
 
 /// Files of one exported package.
@@ -462,11 +457,10 @@ pub(crate) fn build(
         fixture_ids: Ok(fixture_ids),
         blueprint_ids: Ok(blueprint_ids),
         item_ids: Ok(item_ids),
-        music_record_ids: Ok(music_record_ids),
+        music_records: Ok(music_records),
         tools: Ok(tool_defs),
         max_normal_stamina: Ok(max_normal_stamina),
         materials: Ok(mock_materials),
-        spots: Ok(mock_spots),
         boost_grant: Ok(boost_grant),
     }) = inputs.masters.take()
     else {
@@ -605,24 +599,22 @@ pub(crate) fn build(
             id: def.id,
             kind: def.master_kind,
             hp: def.hp,
-            rare: def.is_rare,
         })
         .collect();
     mock_fixtures.sort_by_key(|row| row.id);
     let mock_inputs = MockInputs {
         fixtures: mock_fixtures,
         materials: mock_materials,
-        spots: mock_spots,
         max_normal_stamina,
         boost_grant,
         harvest_sites: harvest_sites.clone(),
-        toolbox_blueprint: blueprint_ids.iter().copied().min(),
+        music_records: music_records.by_track_type,
     };
-    let mock = HarvestServerMock::new(&mock_inputs);
+    let mock = HarvestServerMock::new(mock_inputs, crate::server::refresh_window_start());
     let (maps, stamina) = mock.login();
     let user_tools = super::server_mock::user_tools(server_tools.rows());
     info!(
-        "[harvest] catalog: {} master fixtures on {} packages, {} drop materials, {} tools; HarvestServerMock (the mock's own placement rule, not the source's) for harvest sites {:?}; left out of the mock map: {}",
+        "[harvest] catalog: {} master fixtures on {} packages, {} drop materials, {} tools; HarvestServerMock (the built-in map rules, one map per refresh window) for harvest sites {:?}; left out of the mock map: {}",
         defs.len(),
         packages.len(),
         materials_by_id.len(),
@@ -681,7 +673,7 @@ pub(crate) fn build(
         fixture_ids,
         blueprint_ids,
         item_ids,
-        music_record_ids,
+        music_record_ids: music_records.ids,
         tools: tool_defs,
     });
     commands.remove_resource::<HarvestInputs>();

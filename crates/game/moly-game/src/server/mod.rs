@@ -1130,6 +1130,16 @@ pub(crate) fn server_now_ms() -> Option<i64> {
     with_model(|model| model.now_ms())
 }
 
+/// The start (epoch ms) of the master refresh window holding the server
+/// clock's now, once a model with the windows is installed.
+pub(crate) fn refresh_window_start() -> Option<i64> {
+    with_model(|model| {
+        let periods = model.masters.periods.as_ref()?;
+        clock::window_start(model.now_ms(), periods, clock::device_utc_offset_ms)
+    })
+    .flatten()
+}
+
 /// The home gate as the document holds it (gate id, skin id).
 #[allow(dead_code)] // Read by the owners' seams (harvest, menu, server panel, gate flow, site expansion).
 pub(crate) fn home_gate() -> Option<(i32, i32)> {

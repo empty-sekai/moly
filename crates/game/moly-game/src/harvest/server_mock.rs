@@ -9,8 +9,8 @@
 //!
 //! Entries, as the server replies are shaped:
 //! - `HarvestMapMock`: the user harvest map of each harvest site (fixture rows
-//!   and their drop rows), generated once per session by the mock's placement
-//!   rule below.
+//!   and their drop rows), generated from the built-in map rules below for
+//!   each refresh window, and generated anew when a new window begins.
 //! - The stamina mock: the stamina triple (`StaminaMock`: the normal pool at
 //!   its master maximum, enhance 0, and the boost pool of one boost
 //!   recovery, the recovery master's `recoveryBoostStamina`; boost is spent
@@ -40,22 +40,44 @@
 //!   this flow). The client's today stands in for the server's (the weather
 //!   chain's current phenomenon id on the harvest site).
 //!
-//! The placement rule is **the mock's own, not the source's** (the source
-//! places on the server from spawn zones that are not on disk). It picks
-//! integer site-local cells inside the site's unavailable-spot frame, away
-//! from every unavailable rectangle, 3 m clear of the arrival point and 3 m
-//! apart; the kinds and counts per site are the mock's choice, and a kind
-//! appears only on a site where a material of its type lists that site.
-//! The fixed treasure box is placed once per site with one drop row of a
-//! material of type 3, a tone once per site where a tone material lists the
-//! site (the mock's choices); the transported box (paper airplane) and
-//! birthday plants (event calendar) are left out of the map and named.
+//! The map rules (`map_rules.json`) are statistics of the server's harvest
+//! map replies, aggregated per site; they hold no user data. The server
+//! decides the map, so the rules reproduce its frequencies, not its code:
+//! - Spawn points. Every fixture id has its own fixed set of site-local
+//!   points (a stone stands only on stone points, each flower only on its
+//!   own points); ids never share a point across types. A group is one such
+//!   set (two ids that stand on the same points form one group).
+//! - Counts. A group places one weighted mix of (fixture id, count): most
+//!   counts are fixed (fourteen trees, six toolboxes), some are "none or n"
+//!   (two rare leaf piles, one rare tree). The mix's fixtures take distinct
+//!   points: the group's fixed points (filled in every map) first, then
+//!   points drawn at random from the rest. Which points stand is random;
+//!   where they can stand is not.
+//! - Drops. A struck fixture (hp above 0) has a row at each step hp with
+//!   the step resource (wood or stone); every fixture then has a weighted
+//!   number of last-attack rows: the first from its first-row table (the
+//!   site's own wood, stone or flower material), the rest from its
+//!   other-row table. The fixed treasure box's row is a music record of the
+//!   rule's track type, every master record of that type at equal weight.
+//! - Refresh. A map belongs to one master refresh window (05:00 and 17:00
+//!   device local time); a new window replaces every harvest map, harvested
+//!   rows and unpicked drops included. The maps are not replaced while a
+//!   harvest site is loaded; the next arrival after the window change sees
+//!   the new ones.
+//!
+//! Two other flower-garden plant mixes exist (every flower doubled; a
+//! hydrangea mix with the rare white flower). What selects them is not in
+//! the rules, so the generator places the common mix. The transported box
+//! (paper airplane) and birthday plants (event calendar) are left out of
+//! the map and named.
 
 use std::collections::BTreeMap;
 
 use bevy::prelude::*;
+use serde::Deserialize;
 
 use super::law::Stamina;
+use super::{RT_MATERIAL, RT_MYSEKAI_FIXTURE, RT_MYSEKAI_ITEM, RT_MYSEKAI_MATERIAL, RT_MYSEKAI_MUSIC_RECORD};
 
 /// `UserMysekaiSiteHarvestFixtureStatus`.
 pub(crate) const FIXTURE_SPAWNED: i32 = 1;
@@ -142,7 +164,6 @@ pub(crate) struct MockFixtureRow {
     /// Master fixture type value (wood 0 ... birthday_plant 9).
     pub(crate) kind: i32,
     pub(crate) hp: i32,
-    pub(crate) rare: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -153,55 +174,21 @@ pub(crate) struct MockMaterialRow {
     pub(crate) site_ids: Vec<u32>,
 }
 
-/// One `mysekaiSiteHarvestUnavailableSpots` row. The rectangle covers
-/// `x in [startX, startX + width)` and `z in (startZ - height, startZ]`: read
-/// from how the rows tile (the site-5 strips at z 30 height 7 and the side
-/// strips from z 23 down join without gap or overlap under this reading).
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct MockSpot {
-    pub(crate) site_id: u32,
-    pub(crate) start_x: i32,
-    pub(crate) start_z: i32,
-    pub(crate) width: i32,
-    pub(crate) height: i32,
-}
-
-impl MockSpot {
-    fn contains(&self, x: i32, z: i32) -> bool {
-        self.start_x <= x
-            && x < self.start_x + self.width
-            && self.start_z - self.height < z
-            && z <= self.start_z
-    }
-}
-
 /// What the panel is built from.
+#[derive(Clone)]
 pub(crate) struct MockInputs {
     pub(crate) fixtures: Vec<MockFixtureRow>,
     pub(crate) materials: Vec<MockMaterialRow>,
-    pub(crate) spots: Vec<MockSpot>,
     /// Master `maxStamina` of the normal pool.
     pub(crate) max_normal_stamina: i32,
     /// `recoveryBoostStamina` of one boost recovery.
     pub(crate) boost_grant: i32,
     /// The harvest sites (master category harvest).
     pub(crate) harvest_sites: Vec<u32>,
-    /// A blueprint id for the toolbox's drop row (mock choice: the lowest).
-    pub(crate) toolbox_blueprint: Option<i64>,
+    /// Master music record ids by `mysekaiMusicTrackType`.
+    pub(crate) music_records: BTreeMap<String, Vec<i64>>,
 }
 
-/// Kinds the map mock places, with the mock's per-site count and the material
-/// type its drop rows come from.
-const MOCK_KINDS: [(i32, &str, usize, Option<i32>); 8] = [
-    (0, "wood", 6, Some(0)),
-    (1, "mineral", 5, Some(1)),
-    (2, "plant", 5, Some(2)),
-    (5, "other", 4, Some(3)),
-    (8, "driftage", 1, Some(3)),
-    (7, "toolbox", 1, None),
-    (4, "treasure_box_fixed", 1, Some(3)),
-    (6, "tone", 1, Some(6)),
-];
 /// Kinds left out of the mock map, and who places them.
 pub(crate) const MOCK_EXCLUDED: [(&str, &str); 2] = [
     (
@@ -211,19 +198,133 @@ pub(crate) const MOCK_EXCLUDED: [(&str, &str); 2] = [
     ("birthday_plant", "birthday party calendar (event gated)"),
 ];
 
-const ARRIVAL_CLEARANCE: i32 = 3;
-const SPACING: i32 = 3;
-/// Mock drop thresholds of a multi-hit fixture (hp 90): three rows fall at
-/// 60, at 30 and on the last attack.
-const MULTI_THRESHOLDS: [i32; 3] = [60, 30, 0];
-/// Resource types of drop rows.
-pub(crate) const RT_MYSEKAI_BLUEPRINT: i32 = 40;
-pub(crate) const RT_MYSEKAI_MATERIAL: i32 = 41;
+/// The built-in map rules (see the module comment).
+const MAP_RULES: &str = include_str!("map_rules.json");
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct MapRules {
+    schema_version: u32,
+    sites: Vec<SiteRules>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SiteRules {
+    site_id: u32,
+    groups: Vec<GroupRules>,
+    drops: Vec<DropRules>,
+}
+
+/// One set of spawn points and what a map places on it.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GroupRules {
+    /// The master fixture type word of the group's fixtures.
+    kind: String,
+    /// Site-local (x, z).
+    points: Vec<[i32; 2]>,
+    /// The points every map fills.
+    fixed_points: Vec<[i32; 2]>,
+    mixes: Vec<Mix>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Mix {
+    weight: u32,
+    /// (fixture id, count).
+    fixtures: Vec<(i32, usize)>,
+}
+
+/// (resource type word, resource id, quantity).
+type DropResource = (String, i64, i32);
+/// (resource type word, resource id, quantity, weight).
+type WeightedResource = (String, i64, i32, u32);
+
+/// The drop rows of one fixture id on one site.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DropRules {
+    fixture_id: i32,
+    /// The step rows' hps, in seq order.
+    step_hps: Vec<i32>,
+    step_resource: Option<DropResource>,
+    /// (last-attack rows, weight).
+    row_counts: Vec<(usize, u32)>,
+    first_row: Vec<WeightedResource>,
+    /// The first last-attack row is a music record of this track type.
+    #[serde(default)]
+    record_track_type: Option<String>,
+    other_rows: Vec<WeightedResource>,
+}
+
+impl MapRules {
+    /// The built-in rules. They are checked once here; a malformed table is
+    /// a build defect, not an input.
+    pub(crate) fn builtin() -> Self {
+        let rules: Self = serde_json::from_str(MAP_RULES)
+            .unwrap_or_else(|error| panic!("map_rules.json: {error}"));
+        assert_eq!(rules.schema_version, 1, "map_rules.json: schemaVersion");
+        for site in &rules.sites {
+            for group in &site.groups {
+                assert!(
+                    group.fixed_points.iter().all(|p| group.points.contains(p)),
+                    "map_rules.json site {}: a fixed point outside its group",
+                    site.site_id
+                );
+                assert!(
+                    group.mixes.iter().any(|mix| mix.weight > 0),
+                    "map_rules.json site {}: a group without weight",
+                    site.site_id
+                );
+            }
+            for drops in &site.drops {
+                let words = drops
+                    .step_resource
+                    .iter()
+                    .map(|row| &row.0)
+                    .chain(drops.first_row.iter().map(|row| &row.0))
+                    .chain(drops.other_rows.iter().map(|row| &row.0));
+                for word in words {
+                    assert!(
+                        resource_type_value(word).is_some(),
+                        "map_rules.json: resource type {word} is outside the drop families"
+                    );
+                }
+                assert!(
+                    drops.first_row.is_empty() != drops.record_track_type.is_none(),
+                    "map_rules.json fixture {}: the first row needs exactly one of a table and a record track type",
+                    drops.fixture_id
+                );
+            }
+        }
+        rules
+    }
+}
+
+/// The drop families' resource type words (`Sekai.Constants.ResourceType`).
+fn resource_type_value(word: &str) -> Option<i32> {
+    match word {
+        "material" => Some(RT_MATERIAL),
+        "mysekai_fixture" => Some(RT_MYSEKAI_FIXTURE),
+        "mysekai_material" => Some(RT_MYSEKAI_MATERIAL),
+        "mysekai_item" => Some(RT_MYSEKAI_ITEM),
+        "mysekai_music_record" => Some(RT_MYSEKAI_MUSIC_RECORD),
+        _ => None,
+    }
+}
 
 /// The panel resource.
 #[derive(Resource)]
 pub(crate) struct HarvestServerMock {
     maps: BTreeMap<u32, UserHarvestMap>,
+    /// What a refresh generates the maps from.
+    inputs: MockInputs,
+    rules: MapRules,
+    /// The refresh window (its start, epoch ms) the maps belong to; `None`
+    /// when no window was known at generation.
+    window: Option<i64>,
     boxes: Vec<UserTreasureBox>,
     /// The `treasure_box_transport` master row (lowest id).
     transport_fixture: Option<i32>,
@@ -286,13 +387,14 @@ impl MockRng {
 }
 
 impl HarvestServerMock {
-    /// Build the panel: every harvest site's map by the mock's rule and the
-    /// normal stamina at its master maximum.
-    pub(crate) fn new(inputs: &MockInputs) -> Self {
-        let mut maps = BTreeMap::new();
-        for &site_id in &inputs.harvest_sites {
-            maps.insert(site_id, generate_map(site_id, inputs));
+    /// Build the panel: every harvest site's map for `window` by the map
+    /// rules and the normal stamina at its master maximum.
+    pub(crate) fn new(inputs: MockInputs, window: Option<i64>) -> Self {
+        let rules = MapRules::builtin();
+        if window.is_none() {
+            info!("[harvest-mock] HarvestMapMock: no refresh window is known yet; the maps hold until one is");
         }
+        let maps = generate_maps(&inputs, &rules, window.unwrap_or(0));
         // TreasureBoxListMock (the mock's choice).
         let boxes = inputs
             .harvest_sites
@@ -333,6 +435,9 @@ impl HarvestServerMock {
             materials: BTreeMap::new(),
             others: BTreeMap::new(),
             phenomena: Vec::new(),
+            inputs,
+            rules,
+            window,
         }
     }
 
@@ -340,6 +445,25 @@ impl HarvestServerMock {
     /// (the tools come from the server document).
     pub(crate) fn login(&self) -> (BTreeMap<u32, UserHarvestMap>, Stamina) {
         (self.maps.clone(), self.stamina)
+    }
+
+    /// The refresh: the maps of a new refresh window replace every harvest
+    /// site's map. `None` when the maps already belong to `window`.
+    pub(crate) fn refresh(&mut self, window: i64) -> Option<BTreeMap<u32, UserHarvestMap>> {
+        if self.window == Some(window) {
+            return None;
+        }
+        let before = self.window.replace(window);
+        self.maps = generate_maps(&self.inputs, &self.rules, window);
+        info!(
+            "[harvest-mock] HarvestMapMock refresh: window {before:?} -> {window}; {}",
+            self.maps
+                .iter()
+                .map(|(site, map)| format!("site {site} {} fixtures {} drop rows", map.fixtures.len(), map.drops.len()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        Some(self.maps.clone())
     }
 
     /// The user phenomena rows at login.
@@ -518,135 +642,156 @@ impl HarvestServerMock {
     }
 }
 
-/// `HarvestMapMock` for one site (the mock's placement rule, see the module
-/// comment). Deterministic per site id.
-pub(crate) fn generate_map(site_id: u32, inputs: &MockInputs) -> UserHarvestMap {
-    let spots: Vec<&MockSpot> = inputs
-        .spots
+/// Update: a new refresh window replaces the harvest maps, between harvest
+/// site visits only (a loaded harvest site keeps the rows its objects stand
+/// for; the next arrival reads the new maps).
+pub(crate) fn refresh_maps(
+    arrival: Res<super::arrival::HarvestArrival>,
+    mock: Option<ResMut<HarvestServerMock>>,
+    user: Option<ResMut<super::catalog::HarvestUserData>>,
+) {
+    let (Some(mut mock), Some(mut user)) = (mock, user) else {
+        return;
+    };
+    if arrival.site_id().is_some() {
+        return;
+    }
+    let Some(window) = crate::server::refresh_window_start() else {
+        return;
+    };
+    if let Some(maps) = mock.refresh(window) {
+        user.maps = maps;
+    }
+}
+
+/// Every harvest site's map for one refresh window.
+fn generate_maps(inputs: &MockInputs, rules: &MapRules, window: i64) -> BTreeMap<u32, UserHarvestMap> {
+    inputs
+        .harvest_sites
         .iter()
-        .filter(|spot| spot.site_id == site_id)
-        .collect();
+        .map(|&site_id| (site_id, generate_map(site_id, window, rules, inputs)))
+        .collect()
+}
+
+/// One weighted draw.
+fn pick<'a, T>(rng: &mut MockRng, items: &'a [T], weight: impl Fn(&T) -> u32) -> Option<&'a T> {
+    let total: u64 = items.iter().map(|item| u64::from(weight(item))).sum();
+    if total == 0 {
+        return None;
+    }
+    let mut draw = rng.next_u64() % total;
+    for item in items {
+        let w = u64::from(weight(item));
+        if draw < w {
+            return Some(item);
+        }
+        draw -= w;
+    }
+    None
+}
+
+/// `HarvestMapMock` for one site in one refresh window (the map rules, see
+/// the module comment). Deterministic per (site, window).
+pub(crate) fn generate_map(
+    site_id: u32,
+    window: i64,
+    rules: &MapRules,
+    inputs: &MockInputs,
+) -> UserHarvestMap {
     let mut map = UserHarvestMap {
         site_id,
         ..default()
     };
-    if spots.is_empty() {
-        warn!(
-            "[harvest-mock] HarvestMapMock: site {site_id} has no unavailable-spot rows; the mock places nothing there"
-        );
+    let Some(site) = rules.sites.iter().find(|site| site.site_id == site_id) else {
+        warn!("[harvest-mock] HarvestMapMock: the map rules have no site {site_id}; the mock places nothing there");
         return map;
-    }
-    let min_x = spots.iter().map(|s| s.start_x).min().unwrap();
-    let max_x = spots.iter().map(|s| s.start_x + s.width - 1).max().unwrap();
-    let max_z = spots.iter().map(|s| s.start_z).max().unwrap();
-    let min_z = spots
-        .iter()
-        .map(|s| s.start_z - s.height + 1)
-        .min()
-        .unwrap();
-    let mut free: Vec<(i32, i32)> = Vec::new();
-    for x in min_x..=max_x {
-        for z in min_z..=max_z {
-            if x.abs() < ARRIVAL_CLEARANCE && z.abs() < ARRIVAL_CLEARANCE {
-                continue;
-            }
-            if spots.iter().any(|spot| spot.contains(x, z)) {
-                continue;
-            }
-            free.push((x, z));
-        }
-    }
-    let mut rng = MockRng(0x4841_5256_0000_0000 ^ site_id as u64);
+    };
+    let mut rng = MockRng(0x4841_5256_0000_0000 ^ u64::from(site_id) ^ (window as u64).rotate_left(20));
     let mut seq = 0;
-    for (kind, word, count, material_type) in MOCK_KINDS {
-        let materials: Vec<&MockMaterialRow> = match material_type {
-            Some(material_type) => inputs
-                .materials
-                .iter()
-                .filter(|row| row.material_type == material_type && row.site_ids.contains(&site_id))
-                .collect(),
-            None => Vec::new(),
+    for group in &site.groups {
+        let Some(mix) = pick(&mut rng, &group.mixes, |mix| mix.weight) else {
+            continue;
         };
-        if material_type.is_some() && materials.is_empty() {
-            info!(
-                "[harvest-mock] HarvestMapMock site {site_id}: no {word} (no material of its type lists this site)"
-            );
-            continue;
-        }
-        if material_type.is_none() && inputs.toolbox_blueprint.is_none() {
-            info!(
-                "[harvest-mock] HarvestMapMock site {site_id}: no {word} (no blueprint row for its drop)"
-            );
-            continue;
-        }
-        let common: Vec<&MockFixtureRow> = inputs
+        let wanted: Vec<i32> = mix
             .fixtures
             .iter()
-            .filter(|row| row.kind == kind && !row.rare)
+            .flat_map(|&(id, count)| std::iter::repeat_n(id, count))
             .collect();
-        let rare: Vec<&MockFixtureRow> = inputs
-            .fixtures
+        let mut free: Vec<[i32; 2]> = group
+            .points
             .iter()
-            .filter(|row| row.kind == kind && row.rare)
+            .filter(|point| !group.fixed_points.contains(point))
+            .copied()
             .collect();
-        if common.is_empty() && rare.is_empty() {
-            warn!("[harvest-mock] HarvestMapMock: no master row of kind {word}");
-            continue;
+        let mut slots = group.fixed_points.clone();
+        while slots.len() < wanted.len() && !free.is_empty() {
+            let at = rng.below(free.len());
+            slots.push(free.swap_remove(at));
         }
-        for _ in 0..count {
-            if free.is_empty() {
-                warn!("[harvest-mock] HarvestMapMock site {site_id}: no free cell left for {word}");
-                break;
-            }
-            let (x, z) = free[rng.below(free.len())];
-            free.retain(|(fx, fz)| (fx - x).abs() >= SPACING || (fz - z).abs() >= SPACING);
-            // Mock choice: one in ten objects is the kind's rare row.
-            let row = if !rare.is_empty() && (rng.below(10) == 0 || common.is_empty()) {
-                rare[rng.below(rare.len())]
-            } else {
-                common[rng.below(common.len())]
+        if slots.len() < wanted.len() {
+            warn!(
+                "[harvest-mock] HarvestMapMock site {site_id}: {} {} fixtures on {} points; the rest is not placed",
+                wanted.len(),
+                group.kind,
+                slots.len()
+            );
+        }
+        for (&fixture_id, &[x, z]) in wanted.iter().zip(&slots) {
+            let Some(row) = inputs.fixtures.iter().find(|row| row.id == fixture_id) else {
+                warn!(
+                    "[harvest-mock] HarvestMapMock site {site_id}: rule fixture {fixture_id} ({}) has no master row; not placed",
+                    group.kind
+                );
+                continue;
             };
             map.fixtures.push(UserFixture {
-                fixture_id: row.id,
+                fixture_id,
                 position_x: x,
                 position_z: z,
                 hp: row.hp,
                 status: FIXTURE_SPAWNED,
                 group_id: 0,
             });
-            let thresholds: &[i32] = if row.hp > 0 {
-                &MULTI_THRESHOLDS
-            } else if kind == 5 || kind == 8 {
-                &[0, 0]
-            } else {
-                &[0]
+            let Some(drops) = site.drops.iter().find(|drops| drops.fixture_id == fixture_id) else {
+                warn!("[harvest-mock] HarvestMapMock site {site_id}: fixture {fixture_id} has no drop rule; it drops nothing");
+                continue;
             };
-            for &threshold in thresholds {
-                if threshold >= row.hp && row.hp > 0 {
-                    continue;
-                }
+            let mut push = |(word, resource_id, quantity): (&str, i64, i32), hp: i32| {
                 seq += 1;
-                let (resource_type, resource_id) = match material_type {
-                    Some(_) => (
-                        RT_MYSEKAI_MATERIAL,
-                        materials[rng.below(materials.len())].id,
-                    ),
-                    None => (
-                        RT_MYSEKAI_BLUEPRINT,
-                        inputs.toolbox_blueprint.expect("checked above"),
-                    ),
-                };
                 map.drops.push(UserDrop {
-                    resource_type,
+                    resource_type: resource_type_value(word).expect("checked by MapRules::builtin"),
                     resource_id,
                     position_x: x,
                     position_z: z,
-                    hp: threshold,
+                    hp,
                     seq,
                     status: DROP_BEFORE,
-                    quantity: 1,
+                    quantity,
                     group_id: 0,
                 });
+            };
+            if let Some((word, id, quantity)) = &drops.step_resource {
+                for &hp in &drops.step_hps {
+                    push((word, *id, *quantity), hp);
+                }
+            }
+            let rows = pick(&mut rng, &drops.row_counts, |row| row.1).map_or(0, |row| row.0);
+            for k in 0..rows {
+                if k == 0 {
+                    if let Some(track_type) = &drops.record_track_type {
+                        match inputs.music_records.get(track_type).filter(|ids| !ids.is_empty()) {
+                            Some(ids) => push(("mysekai_music_record", ids[rng.below(ids.len())], 1), 0),
+                            None => warn!(
+                                "[harvest-mock] HarvestMapMock site {site_id}: no master music record of track type {track_type}; fixture {fixture_id} drops no record"
+                            ),
+                        }
+                        continue;
+                    }
+                }
+                let table = if k == 0 { &drops.first_row } else { &drops.other_rows };
+                if let Some((word, id, quantity, _)) = pick(&mut rng, table, |row| row.3) {
+                    push((word, *id, *quantity), 0);
+                }
             }
         }
     }
@@ -657,150 +802,110 @@ pub(crate) fn generate_map(site_id: u32, inputs: &MockInputs) -> UserHarvestMap 
 mod value_checks {
     use super::*;
 
+    /// Master rows for every fixture the built-in rules name (struck kinds
+    /// at hp 90), the four harvest sites and a record pool.
     fn inputs() -> MockInputs {
+        let rules = MapRules::builtin();
+        let mut fixtures: Vec<MockFixtureRow> = Vec::new();
+        for group in rules.sites.iter().flat_map(|site| &site.groups) {
+            for &(id, _) in group.mixes.iter().flat_map(|mix| &mix.fixtures) {
+                if !fixtures.iter().any(|row| row.id == id) {
+                    let struck = group.kind == "wood" || group.kind == "mineral";
+                    fixtures.push(MockFixtureRow {
+                        id,
+                        kind: 0,
+                        hp: if struck { 90 } else { 0 },
+                    });
+                }
+            }
+        }
         MockInputs {
-            fixtures: vec![
-                MockFixtureRow {
-                    id: 1002,
-                    kind: 0,
-                    hp: 90,
-                    rare: false,
-                },
-                MockFixtureRow {
-                    id: 2001,
-                    kind: 1,
-                    hp: 90,
-                    rare: false,
-                },
-                MockFixtureRow {
-                    id: 4009,
-                    kind: 2,
-                    hp: 0,
-                    rare: false,
-                },
-                MockFixtureRow {
-                    id: 5004,
-                    kind: 5,
-                    hp: 0,
-                    rare: false,
-                },
-            ],
-            materials: vec![
-                MockMaterialRow {
-                    id: 1,
-                    material_type: 0,
-                    site_ids: vec![5],
-                },
-                MockMaterialRow {
-                    id: 6,
-                    material_type: 1,
-                    site_ids: vec![5],
-                },
-                MockMaterialRow {
-                    id: 13,
-                    material_type: 3,
-                    site_ids: vec![5],
-                },
-            ],
-            // The four site-5 frame strips.
-            spots: vec![
-                MockSpot {
-                    site_id: 5,
-                    start_x: -30,
-                    start_z: 30,
-                    width: 60,
-                    height: 7,
-                },
-                MockSpot {
-                    site_id: 5,
-                    start_x: 13,
-                    start_z: 23,
-                    width: 17,
-                    height: 53,
-                },
-                MockSpot {
-                    site_id: 5,
-                    start_x: -30,
-                    start_z: -23,
-                    width: 43,
-                    height: 7,
-                },
-                MockSpot {
-                    site_id: 5,
-                    start_x: -30,
-                    start_z: 23,
-                    width: 12,
-                    height: 46,
-                },
-            ],
+            fixtures,
+            materials: vec![MockMaterialRow {
+                id: 13,
+                material_type: 3,
+                site_ids: vec![5],
+            }],
             max_normal_stamina: 1000,
             boost_grant: 100,
-            harvest_sites: vec![5],
-            toolbox_blueprint: None,
+            harvest_sites: rules.sites.iter().map(|site| site.site_id).collect(),
+            music_records: [("music".to_owned(), vec![1, 2, 3])].into_iter().collect(),
         }
     }
 
-    /// The mock's placement rule on the site-5 frame: every cell inside the
-    /// frame's interior, outside every rectangle, clear of the arrival point
-    /// and spaced; plant skipped (no plant material lists the site here).
+    /// Every placed fixture stands on a point of a group that names it, no
+    /// point holds two, the fixed points are filled, and each fixture's rows
+    /// are its step rows then at least one last-attack row, seq contiguous.
     #[test]
-    fn placement_rule_on_the_site_frame() {
+    fn maps_follow_the_rules() {
+        let rules = MapRules::builtin();
         let inputs = inputs();
-        let map = generate_map(5, &inputs);
-        let kinds: Vec<i32> = map.fixtures.iter().map(|f| f.fixture_id).collect();
-        assert_eq!(kinds.iter().filter(|id| **id == 1002).count(), 6);
-        assert_eq!(kinds.iter().filter(|id| **id == 2001).count(), 5);
-        assert_eq!(kinds.iter().filter(|id| **id == 4009).count(), 0);
-        assert_eq!(kinds.iter().filter(|id| **id == 5004).count(), 4);
-        for fixture in &map.fixtures {
-            let (x, z) = (fixture.position_x, fixture.position_z);
-            assert!(
-                (-18..13).contains(&x) && (-22..=23).contains(&z),
-                "({x}, {z})"
-            );
-            assert!(!inputs.spots.iter().any(|s| s.contains(x, z)));
-            assert!(x.abs() >= ARRIVAL_CLEARANCE || z.abs() >= ARRIVAL_CLEARANCE);
-        }
-        for (i, a) in map.fixtures.iter().enumerate() {
-            for b in &map.fixtures[i + 1..] {
-                assert!(
-                    (a.position_x - b.position_x).abs() >= SPACING
-                        || (a.position_z - b.position_z).abs() >= SPACING
-                );
+        for window in [0, 1_790_200_000_000, 1_790_243_200_000] {
+            for site in &rules.sites {
+                let map = generate_map(site.site_id, window, &rules, &inputs);
+                assert!(!map.fixtures.is_empty(), "site {}", site.site_id);
+                let mut used = std::collections::HashSet::new();
+                for fixture in &map.fixtures {
+                    let point = [fixture.position_x, fixture.position_z];
+                    assert!(used.insert(point), "site {} point {point:?} twice", site.site_id);
+                    assert!(site.groups.iter().any(|group| group.points.contains(&point)
+                        && group.mixes.iter().any(|mix| mix.fixtures.iter().any(|f| f.0 == fixture.fixture_id))));
+                    let drops = site.drops.iter().find(|d| d.fixture_id == fixture.fixture_id).unwrap();
+                    let hps: Vec<i32> = map
+                        .drops
+                        .iter()
+                        .filter(|d| d.position_x == point[0] && d.position_z == point[1])
+                        .map(|d| d.hp)
+                        .collect();
+                    assert_eq!(&hps[..drops.step_hps.len()], &drops.step_hps[..]);
+                    assert!(hps.len() > drops.step_hps.len());
+                    assert!(hps[drops.step_hps.len()..].iter().all(|hp| *hp == 0));
+                }
+                for group in &site.groups {
+                    for point in &group.fixed_points {
+                        assert!(used.contains(point), "site {} fixed point {point:?}", site.site_id);
+                    }
+                }
+                let seqs: Vec<i32> = map.drops.iter().map(|d| d.seq).collect();
+                assert_eq!(seqs, (1..=seqs.len() as i32).collect::<Vec<_>>());
+                assert_eq!(generate_map(site.site_id, window, &rules, &inputs).fixtures, map.fixtures);
             }
         }
-        // Multi-hit rows: 60 / 30 / 0; junk mountains: two rows at 0.
-        let tree = map.fixtures.iter().find(|f| f.fixture_id == 1002).unwrap();
-        let rows: Vec<i32> = map
-            .drops
-            .iter()
-            .filter(|d| d.position_x == tree.position_x && d.position_z == tree.position_z)
-            .map(|d| d.hp)
-            .collect();
-        assert_eq!(rows, vec![60, 30, 0]);
-        // Deterministic per site.
-        assert_eq!(generate_map(5, &inputs).fixtures, map.fixtures);
+        // A new window draws other points.
+        assert_ne!(
+            generate_map(5, 0, &rules, &inputs).fixtures,
+            generate_map(5, 43_200_000, &rules, &inputs).fixtures
+        );
+    }
+
+    #[test]
+    fn refresh_replaces_the_maps_once_per_window() {
+        let mut mock = HarvestServerMock::new(inputs(), Some(0));
+        assert!(mock.refresh(0).is_none());
+        let maps = mock.refresh(43_200_000).expect("a new window");
+        assert_eq!(mock.login().0[&5].fixtures, maps[&5].fixtures);
+        assert!(mock.refresh(43_200_000).is_none());
     }
 
     /// The echo replies keep the drop rows consistent with the client: rows
     /// above the sent hp fall; gathered rows leave the map.
     #[test]
     fn harvest_and_gather_echo() {
-        let mut mock = HarvestServerMock::new(&inputs());
+        let mut mock = HarvestServerMock::new(inputs(), Some(0));
         let (maps, stamina) = mock.login();
         assert_eq!(stamina.normal, 1000);
         assert_eq!(stamina.boost, 100);
         let tree = maps[&5]
             .fixtures
             .iter()
-            .find(|f| f.fixture_id == 1002)
+            .find(|f| f.fixture_id == 1001)
             .unwrap()
             .clone();
         let reply = mock.harvest(&HarvestRequest {
             site_id: 5,
             position_x: tree.position_x,
             position_z: tree.position_z,
-            fixture_id: 1002,
+            fixture_id: 1001,
             hp: 50,
             is_last_attack: false,
             tool: Some((6, 2, 28)),
@@ -809,15 +914,23 @@ mod value_checks {
         assert_eq!(reply.stamina.normal, 960);
         let map = reply.map.unwrap();
         let at = |d: &&UserDrop| d.position_x == tree.position_x && d.position_z == tree.position_z;
-        let status: Vec<(i32, i32)> = map
+        let steps: Vec<(i32, i32)> = map
             .drops
             .iter()
             .filter(at)
+            .filter(|d| d.hp > 0)
             .map(|d| (d.hp, d.status))
             .collect();
         assert_eq!(
-            status,
-            vec![(60, DROP_DROPPED), (30, DROP_BEFORE), (0, DROP_BEFORE)]
+            steps,
+            vec![
+                (1, DROP_BEFORE),
+                (16, DROP_BEFORE),
+                (31, DROP_BEFORE),
+                (46, DROP_BEFORE),
+                (61, DROP_DROPPED),
+                (76, DROP_DROPPED)
+            ]
         );
         let dropped: Vec<UserDrop> = map
             .drops
@@ -836,9 +949,10 @@ mod value_checks {
             .drops
             .iter()
             .filter(at)
+            .filter(|d| d.hp > 0)
             .map(|d| d.hp)
             .collect();
-        assert_eq!(left, vec![30, 0]);
-        assert_eq!(reply.materials.values().sum::<i64>(), 1);
+        assert_eq!(left, vec![1, 16, 31, 46]);
+        assert_eq!(reply.materials.values().sum::<i64>(), 2);
     }
 }
