@@ -5,10 +5,40 @@
 //! [`super`] 的模块注释里。本文件只有形状与常数，不出现任何 bevy。
 
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 
 use super::{
     BuildVolume, ColliderPolygon, Obstacle, AGENT_CLIMB, AGENT_HEIGHT, AGENT_SLOPE_DEGREES,
 };
+
+/// Hasher for maps keyed by a dense cell index. The keys are small integers
+/// derived from the bake's own grid, never adversarial input, and the bake
+/// never lets map iteration order decide a result (every map pass is per-cell
+/// or a set closure), so a multiply mix is enough and much cheaper than the
+/// default SipHash on the hot neighbour lookups.
+#[derive(Default)]
+struct CellHasher(u64);
+
+impl Hasher for CellHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        let mut value = 0xcbf2_9ce4_8422_2325_u64;
+        for byte in bytes {
+            value = (value ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        self.0 = value;
+    }
+
+    fn write_usize(&mut self, value: usize) {
+        self.0 = (value as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+}
+
+/// A map keyed by cell index (see [`CellHasher`]).
+type CellMap<V> = HashMap<usize, V, BuildHasherDefault<CellHasher>>;
 
 /// 烘焙格面：世界 xz 平面上的等距格，`walkable` 是侵蚀与小区过滤都
 /// 过完之后的净可行走表。格原点是面三角网包围盒的最小角——引擎侧
@@ -234,8 +264,10 @@ pub(crate) struct SurfaceBake {
     /// Cells where more than one walkable span was reached from the ground;
     /// the highest one became the cell's surface.
     pub(crate) multi_surface: usize,
-    /// Walkable cells adjacent to a direction they are not connected to.
-    pub(crate) boundary: Vec<bool>,
+    /// Walkable cells whose chosen span is not connected to a walkable
+    /// neighbour's chosen span (the erosion adds these to its walkability
+    /// boundary).
+    pub(crate) edges: Vec<u32>,
 }
 
 fn triangle_normal(tri: &[[f32; 3]; 3]) -> Option<[f32; 3]> {
@@ -273,7 +305,7 @@ fn surface_plane(tri: &[[f32; 3]; 3], normal: [f32; 3]) -> Option<[f32; 3]> {
     (a.is_finite() && b.is_finite() && c.is_finite()).then_some([a, b, c])
 }
 
-fn push_span(columns: &mut HashMap<usize, Vec<Span>>, heights: &[f32], index: usize, span: Span) {
+fn push_span(columns: &mut CellMap<Vec<Span>>, heights: &[f32], index: usize, span: Span) {
     if !heights[index].is_finite() {
         return;
     }
@@ -283,10 +315,14 @@ fn push_span(columns: &mut HashMap<usize, Vec<Span>>, heights: &[f32], index: us
         .push(span);
 }
 
-/// Clip one source triangle to every cell column it touches and return the
-/// cells' vertical intervals.
-fn triangle_cell_intervals(grid: &Grid, tri: &[[f32; 3]; 3]) -> Vec<(usize, [f32; 2])> {
-    let mut spans = Vec::new();
+/// Visit every cell column the triangle touches with the triangle's vertical
+/// interval inside it. The caller decides what the interval yields; nothing is
+/// allocated per triangle.
+fn for_each_triangle_cell(
+    grid: &Grid,
+    tri: &[[f32; 3]; 3],
+    mut visit: impl FnMut(usize, [f32; 2]),
+) {
     let mut min = [f32::INFINITY; 2];
     let mut max = [f32::NEG_INFINITY; 2];
     for p in tri {
@@ -311,11 +347,10 @@ fn triangle_cell_intervals(grid: &Grid, tri: &[[f32; 3]; 3]) -> Vec<(usize, [f32
                 grid.origin[1] + z as f32 * grid.voxel,
             ];
             if let Some(span) = triangle_cell_interval(tri, cell_min, grid.voxel) {
-                spans.push((index, span));
+                visit(index, span);
             }
         }
     }
-    spans
 }
 
 /// Clip one source triangle to every cell column it touches and add its
@@ -323,16 +358,16 @@ fn triangle_cell_intervals(grid: &Grid, tri: &[[f32; 3]; 3]) -> Vec<(usize, [f32
 /// is placed above or below it by the merge.
 fn rasterize_triangle_spans(
     grid: &Grid,
-    columns: &mut HashMap<usize, Vec<Span>>,
+    columns: &mut CellMap<Vec<Span>>,
     heights: &[f32],
     tri: &[[f32; 3]; 3],
     normal: [f32; 3],
     walkable: bool,
 ) {
     let plane = surface_plane(tri, normal);
-    for (index, span) in triangle_cell_intervals(grid, tri) {
+    for_each_triangle_cell(grid, tri, |index, span| {
         push_span(
-            columns,
+            &mut *columns,
             heights,
             index,
             Span {
@@ -343,7 +378,7 @@ fn rasterize_triangle_spans(
                 reached: false,
             },
         );
-    }
+    });
 }
 
 /// Spans of a source that has no triangle list: the projected hull with its
@@ -425,9 +460,9 @@ fn span_is_ledge(
     ceiling: f32,
     cx: usize,
     cz: usize,
-    near: bool,
+    near: &[bool],
     grid: &Grid,
-    columns: &HashMap<usize, Vec<Span>>,
+    columns: &CellMap<Vec<Span>>,
     heights: &[f32],
 ) -> bool {
     let mut lowest_difference = f32::INFINITY;
@@ -444,7 +479,9 @@ fn span_is_ledge(
             return true;
         }
         let base = Span::site(heights[index]);
-        let spans: &[Span] = if near {
+        // Only a cell next to a column has a span stack of its own; every
+        // other cell's whole column is its site face.
+        let spans: &[Span] = if near[index] {
             columns
                 .get(&index)
                 .map_or_else(|| std::slice::from_ref(&base), |list| list.as_slice())
@@ -472,6 +509,81 @@ fn span_is_ledge(
     lowest_difference < -AGENT_CLIMB || highest - lowest > AGENT_CLIMB
 }
 
+/// [`span_is_ledge`] for a cell whose own column and whose four neighbour
+/// columns are the site face alone: every neighbour span is one base span with
+/// an unbounded ceiling, so the verdict is a handful of height comparisons and
+/// no span stack is built.
+fn site_span_is_ledge(bot: f32, cx: usize, cz: usize, grid: &Grid, heights: &[f32]) -> bool {
+    let mut lowest_difference = f32::INFINITY;
+    let mut lowest = bot;
+    let mut highest = bot;
+    for (dx, dz) in [(1isize, 0isize), (-1, 0), (0, 1), (0, -1)] {
+        let nx = cx as isize + dx;
+        let nz = cz as isize + dz;
+        if !grid.in_bounds(nx, nz) {
+            return true;
+        }
+        let index = nz as usize * grid.cols + nx as usize;
+        if !grid.walkable[index] || !heights[index].is_finite() {
+            return true;
+        }
+        let neighbour = heights[index];
+        // The space below the neighbour's base span, then the base span itself
+        // (its ceiling is unbounded, so that gap always qualifies).
+        if neighbour - bot.max(-AGENT_CLIMB) >= AGENT_HEIGHT - 1e-5 {
+            lowest_difference = lowest_difference.min(-AGENT_CLIMB - bot);
+        }
+        lowest_difference = lowest_difference.min(neighbour - bot);
+        if (neighbour - bot).abs() <= AGENT_CLIMB {
+            lowest = lowest.min(neighbour);
+            highest = highest.max(neighbour);
+        }
+    }
+    lowest_difference < -AGENT_CLIMB || highest - lowest > AGENT_CLIMB
+}
+
+/// Whether the chosen span of a walkable cell is disconnected from a walkable
+/// neighbour's chosen span. The erosion's own walkability boundary covers
+/// neighbours that are out of bounds or not walkable; this is the part the
+/// shared walkable flag cannot express.
+fn span_is_disconnected(
+    index: usize,
+    cx: usize,
+    cz: usize,
+    near: &[bool],
+    grid: &Grid,
+    ceilings: &CellMap<f32>,
+    heights: &[f32],
+) -> bool {
+    let top = heights[index];
+    let ceiling = if near[index] {
+        ceilings.get(&index).copied().unwrap_or(f32::INFINITY)
+    } else {
+        f32::INFINITY
+    };
+    for (dx, dz) in [(1isize, 0isize), (-1, 0), (0, 1), (0, -1)] {
+        let nx = cx as isize + dx;
+        let nz = cz as isize + dz;
+        if !grid.in_bounds(nx, nz) {
+            continue;
+        }
+        let nindex = nz as usize * grid.cols + nx as usize;
+        if !grid.walkable[nindex] {
+            continue;
+        }
+        // A cell away from every column has no ceiling entry.
+        let next = if near[nindex] {
+            ceilings.get(&nindex).copied().unwrap_or(f32::INFINITY)
+        } else {
+            f32::INFINITY
+        };
+        if !connected(top, ceiling, heights[nindex], next) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Resolve the non-carving collider sources into the walk surface the way the
 /// engine's bake builds its span columns, then carve the explicit obstacles
 /// against the selected surface (see the caller). Returns the collision
@@ -485,7 +597,7 @@ pub(crate) fn mark_collider_spans(
     let cells = grid.cols * grid.rows;
     debug_assert_eq!(heights.len(), cells);
     let slope_cos = AGENT_SLOPE_DEGREES.to_radians().cos();
-    let mut columns: HashMap<usize, Vec<Span>> = HashMap::new();
+    let mut columns: CellMap<Vec<Span>> = CellMap::default();
     let mut carving: Vec<(usize, [f32; 2])> = Vec::new();
     for polygon in polygons {
         if polygon.carve {
@@ -518,19 +630,23 @@ pub(crate) fn mark_collider_spans(
             // covers: one span per cell from the merged interval, never an
             // empty room inside a box. Its top is taken as flat at the cell's
             // own height, the conservative reading the foot support used.
-            let mut per_cell: HashMap<usize, [f32; 2]> = HashMap::new();
+            let mut intervals: Vec<(u32, [f32; 2])> = Vec::new();
             for triangle in &polygon.triangles {
-                for (index, interval) in triangle_cell_intervals(grid, triangle) {
-                    per_cell
-                        .entry(index)
-                        .and_modify(|span| {
-                            span[0] = span[0].min(interval[0]);
-                            span[1] = span[1].max(interval[1]);
-                        })
-                        .or_insert(interval);
-                }
+                for_each_triangle_cell(grid, triangle, |index, interval| {
+                    intervals.push((index as u32, interval));
+                });
             }
-            for (index, span) in per_cell {
+            intervals.sort_unstable_by_key(|(index, _)| *index);
+            let mut at = 0;
+            while at < intervals.len() {
+                let index = intervals[at].0 as usize;
+                let mut span = intervals[at].1;
+                at += 1;
+                while at < intervals.len() && intervals[at].0 as usize == index {
+                    span[0] = span[0].min(intervals[at].1[0]);
+                    span[1] = span[1].max(intervals[at].1[1]);
+                    at += 1;
+                }
                 push_span(
                     &mut columns,
                     heights,
@@ -564,9 +680,13 @@ pub(crate) fn mark_collider_spans(
     // inherits it when the climb covers the step (the low-hanging filter).
     for list in columns.values_mut() {
         list.sort_by(|a, b| a.min.total_cmp(&b.min).then(a.max.total_cmp(&b.max)));
-        let mut merged: Vec<Span> = Vec::with_capacity(list.len());
-        for span in list.drain(..) {
-            if let Some(last) = merged.last_mut() {
+        // Merge in place: `write` never overtakes `read`, so each merged span
+        // can be stored where the first span of its group was.
+        let mut write = 0;
+        for read in 0..list.len() {
+            let span = list[read];
+            if write > 0 {
+                let last = &mut list[write - 1];
                 if span.min <= last.max + 1e-6 {
                     if (span.max - last.max).abs() <= AGENT_CLIMB + 1e-5 {
                         last.walkable |= span.walkable;
@@ -582,11 +702,13 @@ pub(crate) fn mark_collider_spans(
                     continue;
                 }
             }
-            merged.push(span);
+            list[write] = span;
+            write += 1;
         }
+        list.truncate(write);
         let mut previous_walkable = false;
         let mut previous_max = 0.0;
-        for span in merged.iter_mut() {
+        for span in list.iter_mut() {
             let original = span.walkable;
             if !original
                 && previous_walkable
@@ -598,7 +720,6 @@ pub(crate) fn mark_collider_spans(
             previous_walkable = original;
             previous_max = span.max;
         }
-        *list = merged;
     }
 
     // Cells next to a column are the only ones whose ledge test has to look at
@@ -620,58 +741,58 @@ pub(crate) fn mark_collider_spans(
     // floors on one side, or those floors are spread over more than a climb.
     let mut span_kills: Vec<(usize, usize)> = Vec::new();
     let mut cell_kills: Vec<usize> = Vec::new();
-    for index in 0..cells {
-        if !grid.walkable[index] {
-            continue;
-        }
-        // A face rasterized at the cell's centre without a height sample (a
-        // degenerate triangle) has no surface to stand on.
-        if !heights[index].is_finite() {
-            cell_kills.push(index);
-            continue;
-        }
-        let (cx, cz) = (index % grid.cols, index / grid.cols);
-        if !near[index] {
-            // No cell within reach has a collider column: the site face is
-            // every neighbour's whole column, so no map lookup is needed.
-            if span_is_ledge(
-                heights[index],
-                f32::INFINITY,
-                cx,
-                cz,
-                false,
-                grid,
-                &columns,
-                heights,
-            ) {
-                cell_kills.push(index);
+    // Range of the sampled site heights over the walkable cells, needed later
+    // to know whether untouched cells can have a site step at all.
+    let (mut site_min, mut site_max) = (f32::INFINITY, f32::NEG_INFINITY);
+    for cz in 0..grid.rows {
+        for cx in 0..grid.cols {
+            let index = cz * grid.cols + cx;
+            if !grid.walkable[index] {
+                continue;
             }
-            continue;
-        }
-        match columns.get(&index) {
-            Some(list) => {
-                for (k, span) in list.iter().enumerate() {
-                    if !span.walkable {
-                        continue;
-                    }
-                    let ceiling = list.get(k + 1).map_or(f32::INFINITY, |next| next.min);
-                    if span_is_ledge(span.max, ceiling, cx, cz, true, grid, &columns, heights) {
-                        span_kills.push((index, k));
+            let height = heights[index];
+            // A face rasterized at the cell's centre without a height sample
+            // (a degenerate triangle) has no surface to stand on.
+            if !height.is_finite() {
+                cell_kills.push(index);
+                continue;
+            }
+            site_min = site_min.min(height);
+            site_max = site_max.max(height);
+            if !near[index] {
+                // No cell within reach has a collider column: the site face is
+                // every neighbour's whole column.
+                if site_span_is_ledge(height, cx, cz, grid, heights) {
+                    cell_kills.push(index);
+                }
+                continue;
+            }
+            match columns.get(&index) {
+                Some(list) => {
+                    for (k, span) in list.iter().enumerate() {
+                        if !span.walkable {
+                            continue;
+                        }
+                        let ceiling = list.get(k + 1).map_or(f32::INFINITY, |next| next.min);
+                        if span_is_ledge(span.max, ceiling, cx, cz, &near, grid, &columns, heights)
+                        {
+                            span_kills.push((index, k));
+                        }
                     }
                 }
-            }
-            None => {
-                if span_is_ledge(
-                    heights[index],
-                    f32::INFINITY,
-                    cx,
-                    cz,
-                    true,
-                    grid,
-                    &columns,
-                    heights,
-                ) {
-                    cell_kills.push(index);
+                None => {
+                    if span_is_ledge(
+                        height,
+                        f32::INFINITY,
+                        cx,
+                        cz,
+                        &near,
+                        grid,
+                        &columns,
+                        heights,
+                    ) {
+                        cell_kills.push(index);
+                    }
                 }
             }
         }
@@ -718,7 +839,11 @@ pub(crate) fn mark_collider_spans(
                         continue;
                     }
                     let nindex = nz as usize * grid.cols + nx as usize;
-                    if !grid.walkable[nindex] || columns.contains_key(&nindex) {
+                    // A cell away from every column has no span stack of its
+                    // own; only a cell next to one needs the map.
+                    if !grid.walkable[nindex]
+                        || (near[nindex] && columns.contains_key(&nindex))
+                    {
                         continue;
                     }
                     if connected(span.max, ceiling, heights[nindex], f32::INFINITY) {
@@ -741,6 +866,7 @@ pub(crate) fn mark_collider_spans(
             }
         }
     }
+    let mut found: Vec<(usize, usize)> = Vec::new();
     while let Some((index, k)) = queue.pop() {
         let (top, ceiling) = {
             let list = &columns[&index];
@@ -751,7 +877,7 @@ pub(crate) fn mark_collider_spans(
             )
         };
         let (cx, cz) = (index % grid.cols, index / grid.cols);
-        let mut found: Vec<(usize, usize)> = Vec::new();
+        found.clear();
         for (dx, dz) in [(1isize, 0isize), (-1, 0), (0, 1), (0, -1)] {
             let nx = cx as isize + dx;
             let nz = cz as isize + dz;
@@ -759,7 +885,8 @@ pub(crate) fn mark_collider_spans(
                 continue;
             }
             let nindex = nz as usize * grid.cols + nx as usize;
-            if !grid.walkable[nindex] {
+            // A cell away from every column has no span stack to reach into.
+            if !grid.walkable[nindex] || !near[nindex] {
                 continue;
             }
             let Some(list) = columns.get(&nindex) else {
@@ -775,7 +902,7 @@ pub(crate) fn mark_collider_spans(
                 }
             }
         }
-        for (nindex, j) in found {
+        for &(nindex, j) in &found {
             if let Some(span) = columns.get_mut(&nindex).and_then(|list| list.get_mut(j)) {
                 if !span.reached {
                     span.reached = true;
@@ -789,7 +916,7 @@ pub(crate) fn mark_collider_spans(
     // all when nothing was reached. A column that reached several spans is
     // counted; a single-surface host cannot represent more than one.
     let mut surfaces: HashMap<usize, [f32; 3]> = HashMap::new();
-    let mut ceilings: HashMap<usize, f32> = HashMap::new();
+    let mut ceilings: CellMap<f32> = CellMap::default();
     let mut multi_surface = 0;
     for (index, list) in columns.iter() {
         let mut best: Option<usize> = None;
@@ -836,99 +963,105 @@ pub(crate) fn mark_collider_spans(
         }
     }
 
-    // Erosion edges come from connectivity, not from a shared walkable flag: a
-    // deck cell next to the ground below it is not connected to it even though
-    // both cells are walkable, and the agent's radius must not overhang.
-    let mut boundary = vec![false; cells];
-    for index in 0..cells {
-        if !grid.walkable[index] {
-            continue;
+    // Span-connection edges the walkable mask cannot express: a deck cell next
+    // to the ground below it is walkable on both sides but not connected, and
+    // the agent's radius must not overhang. Every other edge (an out-of-bounds
+    // or unwalkable neighbour) is the erosion's own walkability boundary.
+    //
+    // A cell whose own column and whose four neighbour columns are the site
+    // face alone can only disconnect on a site step. When the sampled site
+    // heights span at most one climb there is no such step, so only cells next
+    // to a collider column need the check.
+    let mut edges: Vec<u32> = Vec::new();
+    // The sparse walk is only worth it when the near region is smaller than
+    // the grid; otherwise the plain scan is cheaper and equally correct.
+    if site_max - site_min <= AGENT_CLIMB && columns.len().saturating_mul(5) < cells {
+        for &key in columns.keys() {
+            let (cx, cz) = (key % grid.cols, key / grid.cols);
+            if grid.walkable[key] && span_is_disconnected(key, cx, cz, &near, grid, &ceilings, heights)
+            {
+                edges.push(key as u32);
+            }
+            for (dx, dz) in [(1isize, 0isize), (-1, 0), (0, 1), (0, -1)] {
+                let nx = cx as isize + dx;
+                let nz = cz as isize + dz;
+                if nx < 0 || nz < 0 || (nx as usize) >= grid.cols || (nz as usize) >= grid.rows {
+                    continue;
+                }
+                let nindex = nz as usize * grid.cols + nx as usize;
+                if grid.walkable[nindex]
+                    && span_is_disconnected(
+                        nindex,
+                        nx as usize,
+                        nz as usize,
+                        &near,
+                        grid,
+                        &ceilings,
+                        heights,
+                    )
+                {
+                    edges.push(nindex as u32);
+                }
+            }
         }
-        let (cx, cz) = (index % grid.cols, index / grid.cols);
-        let top = heights[index];
-        let near_columns = near[index];
-        let ceiling = if near_columns {
-            ceilings.get(&index).copied().unwrap_or(f32::INFINITY)
-        } else {
-            f32::INFINITY
-        };
-        let mut edge = false;
-        for (dx, dz) in [(1isize, 0isize), (-1, 0), (0, 1), (0, -1)] {
-            let nx = cx as isize + dx;
-            let nz = cz as isize + dz;
-            if !grid.in_bounds(nx, nz) {
-                edge = true;
-                break;
-            }
-            let nindex = nz as usize * grid.cols + nx as usize;
-            if !grid.walkable[nindex] {
-                edge = true;
-                break;
-            }
-            let linked = if near_columns {
-                let next = ceilings.get(&nindex).copied().unwrap_or(f32::INFINITY);
-                connected(top, ceiling, heights[nindex], next)
-            } else {
-                // Both columns are site face only: no ceiling, so only a site
-                // step can disconnect them.
-                (top - heights[nindex]).abs() <= AGENT_CLIMB + 1e-5
-            };
-            if !linked {
-                edge = true;
-                break;
+    } else {
+        for cz in 0..grid.rows {
+            for cx in 0..grid.cols {
+                let index = cz * grid.cols + cx;
+                if grid.walkable[index]
+                    && span_is_disconnected(index, cx, cz, &near, grid, &ceilings, heights)
+                {
+                    edges.push(index as u32);
+                }
             }
         }
-        boundary[index] = edge;
     }
     SurfaceBake {
         obstacle_nulled: nulled,
         site: Vec::new(),
         surfaces,
         multi_surface,
-        boundary,
+        edges,
     }
-}
-
-/// Erosion edges for a field with no collider spans: a walkable cell is an
-/// edge when a four-neighbour is not walkable, exactly as before the span
-/// pipeline (all its surfaces are the site face, one height per cell).
-pub(crate) fn walkable_edges(grid: &Grid) -> Vec<bool> {
-    let mut boundary = vec![false; grid.cols * grid.rows];
-    for cz in 0..grid.rows as isize {
-        for cx in 0..grid.cols as isize {
-            let index = cz as usize * grid.cols + cx as usize;
-            if !grid.walkable[index] {
-                continue;
-            }
-            boundary[index] = [(cx + 1, cz), (cx - 1, cz), (cx, cz + 1), (cx, cz - 1)]
-                .into_iter()
-                .any(|(nx, nz)| !grid.walkable_cell(nx, nz));
-        }
-    }
-    boundary
 }
 
 /// 侵蚀（`rcErodeWalkableArea` 的 2D 转录）：
 /// * 距离场初值：null 格 0，可行走格 255；
-/// * 边界标记：`boundary` 里的格距离为 0——它由 span 连接性（或纯站点
-///   面的四邻可走性）给出，虚空与障碍同为 0 距离源，外边界同样被侵蚀；
+/// * 边界标记：可行走格的四邻有 null **或出界（虚空）** → 距离 0 ——
+///   虚空与障碍同为 0 距离源，外边界同样被侵蚀；`extra_edges` 再补上
+///   四邻可走性表达不了的 span 连接断点（两块都走但不同层）；
 /// * 两遍 chamfer（基数向步长 2、斜向 3，u8 饱和 255）；
 /// * 距离 < 2×半径格的可行走格杀掉。
 ///
 /// 返回杀掉的可行走格数（账目面：重烘前后可对账）。
-pub(crate) fn erode(grid: &mut Grid, radius_cells: u32, boundary: &[bool]) -> usize {
+pub(crate) fn erode(grid: &mut Grid, radius_cells: u32, extra_edges: &[u32]) -> usize {
     let threshold = radius_cells
         .checked_mul(2)
         .filter(|value| *value <= 255)
         .expect("侵蚀半径格数溢出 u8 距离场（voxel 过小），烘焙拒绝");
     let threshold = threshold as u8;
     let (cols, rows) = (grid.cols, grid.rows);
-    assert_eq!(boundary.len(), cols * rows, "侵蚀边界表与格面不同尺寸");
     let mut dist = vec![255u8; cols * rows];
-    for (index, walkable) in grid.walkable.iter().enumerate() {
-        if !walkable || boundary[index] {
-            dist[index] = 0;
+    // Walkability boundary, unchanged from before the span pipeline: a walkable
+    // cell next to a null cell or the void is a distance source.
+    for cz in 0..rows as isize {
+        for cx in 0..cols as isize {
+            let index = cz as usize * cols + cx as usize;
+            if !grid.walkable[index] {
+                dist[index] = 0;
+                continue;
+            }
+            if [(cx + 1, cz), (cx - 1, cz), (cx, cz + 1), (cx, cz - 1)]
+                .into_iter()
+                .any(|(nx, nz)| !grid.walkable_cell(nx, nz))
+            {
+                dist[index] = 0;
+            }
         }
+    }
+    // Span-connection edges the walkable mask cannot express.
+    for &index in extra_edges {
+        dist[index as usize] = 0;
     }
     // 读邻格距离：出界（虚空）按 0。
     let read = |dist: &[u8], cx: isize, cz: isize| -> u8 {

@@ -38,8 +38,8 @@
 //!    最高的可达 span（多于一条可达 span 的格计数上报）。不可达的可行走
 //!    span（桌面、灯帽）不入场。
 //! 5. **足迹标 null**：显式挖洞障碍的 hull 对着选中的面做净空判定后杀格。
-//! 6. **侵蚀**：边界由 span 连接性给出（不是单纯的四邻可走），再按半径
-//!    两遍 chamfer 杀格。
+//! 6. **侵蚀**：边界是四邻可走性（虚空 / 障碍 / 外缘，同旧）与 span 连接
+//!    断点（两块都走但不同层）的并，再按半径两遍 chamfer 杀格。
 //! 7. **小区过滤**：4 连通小区面积阈。
 //!
 //! 家具足迹的旧接口（[`blocking_footprint`]）仍是布局矩形的 2D 投影：
@@ -496,7 +496,6 @@ impl WalkField {
         let mut grid = grid::rasterize(&input.tris, input.voxel, None);
         let face = grid.walkable.iter().filter(|w| **w).count();
         let obstacle_nulled = grid::mark_obstacles(&mut grid, &input.obstacles);
-        let boundary = grid::walkable_edges(&grid);
         Self::finish_bake(
             grid,
             face,
@@ -506,7 +505,7 @@ impl WalkField {
                 site: Vec::new(),
                 surfaces: std::collections::HashMap::new(),
                 multi_surface: 0,
-                boundary,
+                edges: Vec::new(),
             },
         )
     }
@@ -552,9 +551,9 @@ impl WalkField {
             site,
             surfaces,
             multi_surface,
-            boundary,
+            edges,
         } = bake;
-        let erosion_nulled = grid::erode(&mut grid, radius_cells(voxel), &boundary);
+        let erosion_nulled = grid::erode(&mut grid, radius_cells(voxel), &edges);
         let region_nulled = grid::filter_regions(&mut grid, min_region_spans(voxel));
         let walkable = grid.walkable.iter().filter(|w| **w).count();
         let regions = region::build_monotone(&grid);
