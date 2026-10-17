@@ -44,11 +44,21 @@
 //!
 //! ## Named gaps (roadmap)
 //!
-//! - The category tabs, the sort dropdown, the free-word search, the filter
-//!   button and its dialog (`BGMFilterDialog`), and the grid view mode are
-//!   hidden: the list shows tab ALL in sort key Default.
-//! - The change-vocal dialog (`MysekaiBGMSelectChangeVocalDialog`) is not
-//!   built: its button is refused by name. The remembered vocal of each
+//! - The category tabs, the sort dropdown, the free-word search and the grid
+//!   view mode are hidden: the list shows tab ALL in sort key Default. The
+//!   filter button and `BGMFilterDialog` are built in [`dialogs`], and the
+//!   change-vocal dialog (`MysekaiBGMSelectChangeVocalDialog`) is built there
+//!   too.
+//! - The filter's character checkboxes and its two music toggles are the
+//!   prefab's own controls; OK saves `BGMFilterData` into the local settings
+//!   document and the list re-filters. The grid view and the sort key stay at
+//!   their defaults.
+//! - `UserMysekaiMusicVocals` (`UserDataManager.UserMusicVocals`) is not
+//!   carried: the change-vocal dialog cannot reproduce a vocal's release
+//!   state (the lock and the release-condition balloon), and it omits
+//!   `streaming_live` vocals rather than offering one whose ownership is
+//!   unknown. The current special season is not carried either, so
+//!   special-season vocals are omitted too. The remembered vocal of each
 //!   record (`MysekaiRecordSettingDataList`) lives for the session only.
 //! - The list view is not `RepeatListVew`: no looping, snapping or centring,
 //!   no fade materials; cells stack from the content's top, the highlighted
@@ -61,6 +71,7 @@
 //! - Each push builds a new presenter; `Resume` without `Initialize` (a
 //!   screen above this one closing) does not occur in this product.
 
+mod dialogs;
 mod model;
 
 use std::collections::{BTreeSet, HashMap};
@@ -141,6 +152,12 @@ pub(crate) struct BgmSelect {
     /// Pool cell -> the record it shows this frame.
     bound: Vec<Option<i32>>,
     refused_textures: BTreeSet<String>,
+    /// `BGMFilterData`: the filter dialog's saved data.
+    filter: dialogs::BgmFilter,
+    /// The dialog the last click asked for, taken by the dialog host.
+    dialog_request: Option<dialogs::DialogRequest>,
+    /// A dialog of this screen is open: the screen takes no taps behind it.
+    dialog_open: bool,
 }
 
 impl BgmSelect {
@@ -425,6 +442,9 @@ pub(crate) struct Bindings {
     switch_button: String,
     change_vocal_button: String,
     jacket_shadow: String,
+    filter_button: String,
+    filter_off: String,
+    filter_on: String,
 }
 
 /// The contents fields a record cell turns off: the difficulty, clear
@@ -495,12 +515,7 @@ fn compose(layouts: &UiLayouts) -> Result<(UiPrefab, Bindings), String> {
     .clone();
 
     let mut hidden = Vec::new();
-    for name in [
-        "categoryTabList",
-        "sortDropDown",
-        "freeWordFilterContent",
-        "filterButton",
-    ] {
+    for name in ["categoryTabList", "sortDropDown", "freeWordFilterContent"] {
         hidden.push(field(&view, name)?);
     }
     for name in ["gridView", "_changeViewButton"] {
@@ -615,6 +630,9 @@ fn compose(layouts: &UiLayouts) -> Result<(UiPrefab, Bindings), String> {
         switch_button: field(&player, "_switchPlayStatusButton")?,
         change_vocal_button: field(&player, "_changeVocalButton")?,
         jacket_shadow: field(&player, "_jacketShadow")?,
+        filter_button: field(&view, "filterButton")?,
+        filter_off: field(&view, "filterOffImage")?,
+        filter_on: field(&view, "filterOnImage")?,
     };
     Ok((doc, bindings))
 }
@@ -883,6 +901,7 @@ pub(crate) fn follow_screen(
     real: Res<Time<Real>>,
     mut choice: ResMut<crate::audio::RecordChoice>,
     mut sounds: ResMut<crate::audio::SeRequests>,
+    details: Option<Res<dialogs::Details>>,
 ) {
     for event in events.read() {
         if event.screen != SCREEN {
@@ -924,11 +943,22 @@ pub(crate) fn follow_screen(
                     }
                 };
                 let site_row = settings.as_deref().and_then(|s| s.row(boot.site_id));
-                let presenter = Presenter::initialize(
+                let mut presenter = Presenter::initialize(
                     boot,
                     models,
                     site_row.map(|row| row.mysekai_music_record_id),
                 );
+                // A saved filter may hide the record the default selection
+                // picked: Resume's rule keeps the highlighted record only
+                // when it is displayed.
+                let visible = dialogs::display(&presenter, &state.filter, details.as_deref());
+                let selected = presenter.select.unwrap_or(0);
+                if !visible
+                    .iter()
+                    .any(|&index| presenter.all[index].record_id == selected)
+                {
+                    presenter.select = visible.first().map(|&index| presenter.all[index].record_id);
+                }
                 info!(
                     "[bgm-select] OnBoot -> BootProcess: Initialize(site {}, fixture {}, colour {}): {} owned records, {} displayed (tab ALL, sort Default); site setting {:?}; chosen {:?}, highlighted {:?}, playing record {}",
                     boot.site_id,
@@ -1062,11 +1092,16 @@ fn read_music_answer(mut answers: MessageReader<Answered>, mut state: ResMut<Bgm
 // ---------------------------------------------------------------------------
 
 /// The list's rows: (top, height) of each displayed record from the content's
-/// top; the highlighted one at its highlight height.
-fn row_layout(presenter: &Presenter, bindings: &Bindings) -> (Vec<(f32, f32)>, f32) {
+/// top; the highlighted one at its highlight height. `display` is the
+/// filtered index list (`dialogs::display`).
+fn row_layout(
+    presenter: &Presenter,
+    bindings: &Bindings,
+    display: &[usize],
+) -> (Vec<(f32, f32)>, f32) {
     let mut top = 0.;
-    let mut rows = Vec::with_capacity(presenter.display.len());
-    for &index in &presenter.display {
+    let mut rows = Vec::with_capacity(display.len());
+    for &index in display {
         let height = if presenter.select == Some(presenter.all[index].record_id) {
             bindings.highlight_size.y
         } else {
@@ -1103,6 +1138,7 @@ pub(crate) fn place(
         Without<BgmSelectRoot>,
     >,
     root_canvas: Option<Res<crate::canvas::RootCanvas>>,
+    details: Option<Res<dialogs::Details>>,
 ) {
     let open = stack.current() == SCREEN;
     if open != state.was_open {
@@ -1148,6 +1184,7 @@ pub(crate) fn place(
         view.set_visible(&bindings.not_found, true);
         return;
     };
+    let display = dialogs::display(presenter, &state.filter, details.as_deref());
 
     // The player view (MysekaiBGMPlayerView.Setup / SetupEmpty).
     match presenter.model(presenter.select) {
@@ -1197,11 +1234,13 @@ pub(crate) fn place(
             set_enabled(&mut view, doc, &bindings.change_vocal_button, false);
         }
     }
-    view.set_visible(&bindings.not_found, presenter.display.is_empty());
+    view.set_visible(&bindings.not_found, display.is_empty());
+    view.set_visible(&bindings.filter_on, state.filter.is_filtered());
+    view.set_visible(&bindings.filter_off, !state.filter.is_filtered());
 
     // The list: content height, scroll clamp, the pool bound to the rows the
     // viewport shows.
-    let (rows, height) = row_layout(presenter, bindings);
+    let (rows, height) = row_layout(presenter, bindings, &display);
     view.set_size_delta(&bindings.content, Vec2::new(0., height));
     let viewport_height = view
         .rect(&layouts, &bindings.viewport, canvas)
@@ -1226,7 +1265,7 @@ pub(crate) fn place(
             view.set_visible(&cell.root, false);
             continue;
         }
-        let model = &presenter.all[presenter.display[row]];
+        let model = &presenter.all[display[row]];
         bound[slot] = Some(model.record_id);
         view.set_visible(&cell.root, true);
         view.set_anchored_position(&cell.root, Vec2::new(0., -top));
@@ -1329,6 +1368,11 @@ pub(crate) fn click(
         }
         return;
     }
+    if state.dialog_open {
+        // The open dialog owns the pointer; its host consumes the taps.
+        state.dragging = false;
+        return;
+    }
     let (Ok((window_entity, window)), Some(root_canvas)) =
         (windows.single(), root_canvas.as_deref())
     else {
@@ -1401,13 +1445,22 @@ pub(crate) fn click(
             continue;
         }
         if hit(view, &layouts, &bindings.change_vocal_button, point, canvas) {
-            if presenter
-                .model(presenter.select)
-                .is_some_and(|m| m.multiple_vocals)
-            {
-                sounds.source_button(&layouts, view.key, &bindings.change_vocal_button);
-                warn!("[bgm-select] change vocal button -> ShowChangeVocalDialog refused: the change-vocal dialog is not built");
+            if let Some(model) = presenter.model(presenter.select) {
+                if model.multiple_vocals {
+                    sounds.source_button(&layouts, view.key, &bindings.change_vocal_button);
+                    state.dialog_request = Some(dialogs::DialogRequest::ChangeVocal(model.record_id));
+                    info!(
+                        "[bgm-select] change vocal button -> ShowChangeVocalDialog(record {})",
+                        model.record_id
+                    );
+                }
             }
+            continue;
+        }
+        if hit(view, &layouts, &bindings.filter_button, point, canvas) {
+            sounds.source_button(&layouts, view.key, &bindings.filter_button);
+            state.dialog_request = Some(dialogs::DialogRequest::Filter);
+            info!("[bgm-select] filter button -> Show2ButtonDialog(BGMFilterDialog)");
             continue;
         }
         if let Some(record) = bindings
@@ -1582,4 +1635,5 @@ pub(crate) fn install(app: &mut App) {
             ),
         )
         .add_systems(Update, read_music_answer.after(follow_screen));
+    dialogs::install(app);
 }

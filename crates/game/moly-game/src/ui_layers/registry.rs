@@ -481,6 +481,8 @@ impl DialogType {
     pub(crate) const MysekaiEditSaveConfirmationDialog: DialogType = DialogType(310);
     pub(crate) const MysekaiWeatherDialog: DialogType = DialogType(369);
     pub(crate) const LearnPhenomenaSubWindowDialog: DialogType = DialogType(381);
+    pub(crate) const MysekaiBGMSelectChangeVocalDialog: DialogType = DialogType(320);
+    pub(crate) const BGMFilterDialog: DialogType = DialogType(398);
     pub(crate) const MysekaiLeaveConfirmDialog: DialogType = DialogType(465);
 }
 
