@@ -23,7 +23,10 @@ def check():
         if local_packages.get(name) != version:
             raise ValueError(f"{name}: Cargo.lock does not match workspace version {version}")
         members.append(name)
-    print(f"moly {version}: all {len(members)} workspace crates and Cargo.lock agree")
+    changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    if f"## [{version}]" not in changelog:
+        raise ValueError(f"CHANGELOG.md has no section for {version}")
+    print(f"moly {version}: all {len(members)} workspace crates, Cargo.lock and CHANGELOG.md agree")
 
 
 if __name__ == "__main__":

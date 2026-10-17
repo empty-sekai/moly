@@ -122,18 +122,31 @@ Windows 系统盘，则改用剩余空间最大的其他固定磁盘根下的 `m
 不经启动器直接运行 `moly-app` 且未设置 `MOLY_ASSET_ROOT` 时，游戏读取启动器资源目录中
 已安装的版本：`launcher.json` 选中的版本，没有选中时取最近安装的版本。
 
+## 更新日志
+
+每个版本的改动见 [CHANGELOG.md](CHANGELOG.md)，由 [git-cliff](https://git-cliff.org/) 按
+`cliff.toml` 从提交记录生成。
+
 ## 版本与 CI
 
 版本统一定义在 `Cargo.toml` 的 `[workspace.package]` 中，所有 crate 继承该版本。
 设置面板显示当前版本；原生程序可通过 `moly-app --version` 查询，无需加载资源。
 
-GitHub Actions 在推送、拉取请求和手动触发时执行版本一致性、JavaScript 语法、
-开源边界及提交空白检查，不编译、不打包，也不需要游戏资源。
+提交信息遵循 [Conventional Commits](https://www.conventionalcommits.org/)；拉取请求的标题和提交由
+commitlint 按 `commitlint.config.mjs` 检查。提升版本的提交同时更新 CHANGELOG.md：
+
+```bash
+git cliff --unreleased --tag v<版本> --prepend CHANGELOG.md
+```
+
+GitHub Actions 在推送、拉取请求和手动触发时执行版本一致性（含 CHANGELOG.md 中有当前版本的段落）、
+JavaScript 语法、开源边界及提交空白检查，不编译、不打包，也不需要游戏资源。
 
 推送 `v<版本>` 标签时，发布工作流先运行上述检查并核对标签与工作区版本一致，再编译
 Windows x64、Linux x64、macOS arm64 原生程序和 WebGPU、WebGL2 两个网页后端，
 把 Windows 程序包（游戏与启动器）、网页包（`pkg/` 目录）和 `SHA256SUMS` 附加到一个草稿 Release。
-Linux 与 macOS 程序只编译并核对版本，不附加。手动触发只生成工作流产物，不创建 Release。
+Linux 与 macOS 程序只编译并核对版本，不附加。Release 说明是 git-cliff 按同一配置生成的该版本段落；
+仓库中有 `release-notes/v<版本>.md` 时改用该文件。手动触发只生成工作流产物，不创建 Release。
 发布包不含任何游戏资源。
 版本和边界检查可在本地运行 `python tools/version/check.py`、`node tools/boundary/check.mjs`。
 本地无 GPU 的核心与回归测试可运行 `cargo test --release --workspace --lib -- --test-threads=1`，

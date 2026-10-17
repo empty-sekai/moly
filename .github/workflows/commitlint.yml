@@ -1,0 +1,40 @@
+name: Commit messages
+
+# Pull requests: the title and the commits follow Conventional Commits
+# (commitlint.config.mjs). A manual run checks the branch's commits since the
+# default branch.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  commitlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install commitlint
+        run: npm install --no-save --no-package-lock @commitlint/cli@19 @commitlint/config-conventional@19
+      - name: Pull request title
+        if: github.event_name == 'pull_request'
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: printf '%s\n' "$TITLE" | npx --no-install commitlint --verbose
+      - name: Commits
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          from=${BASE:-$(git merge-base "origin/$DEFAULT_BRANCH" "$HEAD")}
+          npx --no-install commitlint --verbose --from "$from" --to "$HEAD"

@@ -2,6 +2,8 @@ name: Release
 
 # A version tag (v<workspace version>) builds the native programs and the
 # browser package, and attaches the published targets to a draft release.
+# The release notes are the tag's CHANGELOG section as git-cliff writes it
+# from cliff.toml, or release-notes/<tag>.md when that file exists.
 # Publishing the draft is a manual step. Targets marked `publish: false` are
 # built and version-checked but not attached. A manual run builds the same
 # files as workflow artifacts and creates no release.
@@ -217,6 +219,24 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Write the release notes
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --latest --strip all
+        env:
+          OUTPUT: RELEASE_NOTES.md
+          GITHUB_REPO: ${{ github.repository }}
+      - name: Use reviewed release notes when present
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ -f "release-notes/$TAG.md" ]]; then
+            cp "release-notes/$TAG.md" RELEASE_NOTES.md
+          fi
+          cat RELEASE_NOTES.md
       - uses: actions/download-artifact@v4
         with:
           pattern: native-*
@@ -235,4 +255,4 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           gh release create "$TAG" dist/moly-* dist/SHA256SUMS \
-            --draft --verify-tag --title "moly $VERSION" --generate-notes
+            --draft --verify-tag --title "moly $VERSION" --notes-file RELEASE_NOTES.md
