@@ -25,25 +25,67 @@ fn js_error(value: &JsValue) -> String {
         _ => value.as_string().unwrap_or_else(|| format!("{value:?}")),
     }
 }
+/// The global scope requests run in: the page's window, or the worker's
+/// global scope when the reader runs inside a Web Worker.
+enum Scope {
+    Window(web_sys::Window),
+    Worker(web_sys::WorkerGlobalScope),
+}
+impl Scope {
+    fn current(what: &str) -> Result<Self, AssetReaderError> {
+        let global = js_sys::global();
+        if let Some(window) = global.dyn_ref::<web_sys::Window>() {
+            return Ok(Self::Window(window.clone()));
+        }
+        global
+            .dyn_into::<web_sys::WorkerGlobalScope>()
+            .map(Self::Worker)
+            .map_err(|_| error(format!("{what} require a browser window or worker")))
+    }
+    fn set_timeout(&self, callback: &js_sys::Function, ms: i32) -> Result<i32, JsValue> {
+        match self {
+            Self::Window(window) => {
+                window.set_timeout_with_callback_and_timeout_and_arguments_0(callback, ms)
+            }
+            Self::Worker(worker) => {
+                worker.set_timeout_with_callback_and_timeout_and_arguments_0(callback, ms)
+            }
+        }
+    }
+    fn clear_timeout_with_handle(&self, handle: i32) {
+        match self {
+            Self::Window(window) => window.clear_timeout_with_handle(handle),
+            Self::Worker(worker) => worker.clear_timeout_with_handle(handle),
+        }
+    }
+    fn fetch_with_request(&self, request: &Request) -> js_sys::Promise {
+        match self {
+            Self::Window(window) => window.fetch_with_request(request),
+            Self::Worker(worker) => worker.fetch_with_request(request),
+        }
+    }
+    fn fetch_with_str_and_init(&self, url: &str, init: &RequestInit) -> js_sys::Promise {
+        match self {
+            Self::Window(window) => window.fetch_with_str_and_init(url, init),
+            Self::Worker(worker) => worker.fetch_with_str_and_init(url, init),
+        }
+    }
+}
 struct RequestGuard {
     controller: AbortController,
-    window: web_sys::Window,
+    window: Scope,
     timer: i32,
     _callback: Closure<dyn FnMut()>,
 }
 impl RequestGuard {
     fn new() -> Result<Self, AssetReaderError> {
-        let window =
-            web_sys::window().ok_or_else(|| error("HTTP assets require a browser window"))?;
+        let window = Scope::current("HTTP assets")?;
         let controller = AbortController::new()
             .map_err(|e| error(format!("Create asset request: {}", js_error(&e))))?;
         let abort = controller.clone();
         let callback = Closure::wrap(Box::new(move || abort.abort()) as Box<dyn FnMut()>);
         let timer = window
-            .set_timeout_with_callback_and_timeout_and_arguments_0(
-                callback.as_ref().unchecked_ref(),
-                60_000,
-            )
+            .set_timeout(callback.as_ref().unchecked_ref(), 60_000)
             .map_err(|e| error(format!("Set asset timeout: {}", js_error(&e))))?;
         Ok(Self {
             controller,
@@ -188,16 +230,13 @@ pub(crate) async fn read_first_byte_bounded(
     url: &str,
     first_byte_ms: i32,
 ) -> Result<Vec<u8>, AssetReaderError> {
-    let window = web_sys::window().ok_or_else(|| error("remote reads require a browser window"))?;
+    let window = Scope::current("remote reads")?;
     let controller = AbortController::new()
         .map_err(|e| error(format!("Create remote request: {}", js_error(&e))))?;
     let abort = controller.clone();
     let callback = Closure::wrap(Box::new(move || abort.abort()) as Box<dyn FnMut()>);
     let timer = window
-        .set_timeout_with_callback_and_timeout_and_arguments_0(
-            callback.as_ref().unchecked_ref(),
-            first_byte_ms,
-        )
+        .set_timeout(callback.as_ref().unchecked_ref(), first_byte_ms)
         .map_err(|e| error(format!("Set remote timeout: {}", js_error(&e))))?;
     let init = RequestInit::new();
     init.set_signal(Some(&controller.signal()));
