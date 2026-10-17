@@ -132,7 +132,7 @@
 //! injects a tap at the top-left corner of the window (the close area) that
 //! many seconds after any of these dialogs shows.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use bevy::asset::LoadState;
 use bevy::camera::visibility::RenderLayers;
@@ -140,7 +140,9 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use moly_assets::json::JsonAsset;
-use moly_assets::json::master::{self, MasterData, MasterTable};
+use moly_masters::craft::MasterBlueprint;
+use moly_masters::load::MasterTables;
+use moly_protocol::api::MysekaiCraftType;
 use serde_json::Value;
 
 use crate::action_button::ActionTapConsumed;
@@ -208,41 +210,6 @@ const WORDINGS: &[&str] = &[
     MSG_RECEIVED_REWARD,
     FORMAT_MYSEKAI_BLUEPRINT_NAME,
     WORD_FORMAT_RECORD_NAME,
-];
-
-/// The master tables the openers and the craft screen read, from the
-/// region's master hosts (plain row arrays, master order).
-const MASTERS: [MasterTable<Vec<Value>>; 6] = [
-    MasterTable {
-        table: "mysekaiMaterials",
-        name: "mysekaiMaterials (the acquisition dialogs and the craft screen)",
-        parse: master::rows,
-    },
-    MasterTable {
-        table: "mysekaiBlueprints",
-        name: "mysekaiBlueprints (the acquisition dialogs and the craft screen)",
-        parse: master::rows,
-    },
-    MasterTable {
-        table: "mysekaiFixtures",
-        name: "mysekaiFixtures (the acquisition dialogs and the craft screen)",
-        parse: master::rows,
-    },
-    MasterTable {
-        table: "mysekaiTools",
-        name: "mysekaiTools (the acquisition dialogs and the craft screen)",
-        parse: master::rows,
-    },
-    MasterTable {
-        table: "mysekaiItems",
-        name: "mysekaiItems (the acquisition dialogs)",
-        parse: master::rows,
-    },
-    MasterTable {
-        table: "mysekaiMusicRecords",
-        name: "mysekaiMusicRecords (the acquisition dialogs)",
-        parse: master::rows,
-    },
 ];
 
 const SE_GET_MATERIAL: &str = "se_get_material";
@@ -345,8 +312,14 @@ struct Masters {
 }
 
 impl Masters {
-    fn parse(tables: &[Vec<Value>]) -> Result<Masters, String> {
-        let entries = |index: usize| -> Result<&Vec<Value>, String> { Ok(&tables[index]) };
+    fn parse(
+        material_rows: &[Value],
+        blueprint_master: &BTreeMap<i32, MasterBlueprint>,
+        fixture_rows: &[Value],
+        tool_rows: &[Value],
+        item_rows: &[Value],
+        record_rows: &[Value],
+    ) -> Result<Masters, String> {
         let int = |row: &Value, key: &str, file: &str| -> Result<i32, String> {
             row[key]
                 .as_i64()
@@ -360,8 +333,8 @@ impl Masters {
                 .ok_or_else(|| format!("{file}: a row without {key}"))
         };
         let mut materials = HashMap::new();
-        for row in entries(0)? {
-            let file = MASTERS[0].table;
+        for row in material_rows {
+            let file = "mysekaiMaterials";
             let kind = match row["mysekaiMaterialType"].as_str() {
                 Some("wood") => 0,
                 Some("mineral") => 1,
@@ -391,26 +364,24 @@ impl Masters {
             );
         }
         let mut blueprints = HashMap::new();
-        for row in entries(1)? {
-            let file = MASTERS[1].table;
-            let craft_type = match row["mysekaiCraftType"].as_str() {
-                Some("mysekai_fixture") => CraftType::Fixture,
-                Some("mysekai_tool") => CraftType::Tool,
-                Some("mysekai_canvas") => CraftType::Canvas,
-                Some("material") => CraftType::Material,
-                other => return Err(format!("{file}: craft type {other:?}")),
+        for blueprint in blueprint_master.values() {
+            let craft_type = match blueprint.craft_type {
+                MysekaiCraftType::MysekaiFixture => CraftType::Fixture,
+                MysekaiCraftType::MysekaiTool => CraftType::Tool,
+                MysekaiCraftType::MysekaiCanvas => CraftType::Canvas,
+                MysekaiCraftType::Material => CraftType::Material,
             };
             blueprints.insert(
-                int(row, "id", file)?,
+                blueprint.id,
                 BlueprintRow {
                     craft_type,
-                    target: int(row, "craftTargetId", file)?,
+                    target: blueprint.craft_target_id,
                 },
             );
         }
         let mut fixtures = HashMap::new();
-        for row in entries(2)? {
-            let file = MASTERS[2].table;
+        for row in fixture_rows {
+            let file = "mysekaiFixtures";
             let kind = match row["mysekaiFixtureType"].as_str() {
                 Some("system") => 0,
                 Some("custom") => 1,
@@ -458,18 +429,18 @@ impl Masters {
             );
         }
         let mut tools = HashMap::new();
-        for row in entries(3)? {
+        for row in tool_rows {
             tools.insert(
-                int(row, "id", MASTERS[3].table)?,
+                int(row, "id", "mysekaiTools")?,
                 ToolRow {
-                    name: text(row, "name", MASTERS[3].table)?,
+                    name: text(row, "name", "mysekaiTools")?,
                     bundle: row["assetbundleName"].as_str().map(str::to_owned),
                 },
             );
         }
         let mut items = HashMap::new();
-        for row in entries(4)? {
-            let file = MASTERS[4].table;
+        for row in item_rows {
+            let file = "mysekaiItems";
             let kind = match row["mysekaiItemType"].as_str() {
                 Some("white_blueprint") => 0,
                 Some("surplus_blueprint") => ITEM_TYPE_SURPLUS_BLUEPRINT,
@@ -488,8 +459,8 @@ impl Masters {
             );
         }
         let mut records = HashSet::new();
-        for row in entries(5)? {
-            records.insert(int(row, "id", MASTERS[5].table)?);
+        for row in record_rows {
+            records.insert(int(row, "id", "mysekaiMusicRecords")?);
         }
         Ok(Masters {
             materials,
@@ -747,8 +718,6 @@ pub(crate) const FIXED_TEXTS: &[&str] = &["×0123456789"];
 /// The requested masters and what was read from them.
 #[derive(Resource, Default)]
 pub(crate) struct GetResourceInputs {
-    /// The tables taken so far, in [`MASTERS`] order.
-    tables: Vec<Option<Vec<Value>>>,
     masters: Option<Masters>,
     absent: bool,
     /// The root's honor image index (`honor/index.json`), by honor id.
@@ -917,19 +886,11 @@ pub(crate) struct GetResourceSpawned {
 // Startup
 // ---------------------------------------------------------------------------
 
-pub(crate) fn init(
-    mut commands: Commands,
-    server: Res<AssetServer>,
-    mut master_data: ResMut<MasterData>,
-) {
+pub(crate) fn init(mut commands: Commands, server: Res<AssetServer>) {
     commands.init_resource::<GetResourceOpeners>();
     commands.init_resource::<GetResourcePlayer>();
     commands.init_resource::<GetResourceSpawned>();
-    for table in &MASTERS {
-        master_data.request(table);
-    }
     commands.insert_resource(GetResourceInputs {
-        tables: vec![None; MASTERS.len()],
         masters: None,
         absent: false,
         honors_handle: Some(server.load(bevy::asset::AssetPath::from(HONOR_INDEX.to_owned()))),
@@ -1078,12 +1039,27 @@ fn compose_honor(
 // Resolving the calls
 // ---------------------------------------------------------------------------
 
-/// Read the masters once they are served.
+/// Names a master table the shared loader cannot give and keeps the dialogs
+/// off.
+fn absent_master(inputs: &mut GetResourceInputs, shared: &MasterTables, table: &str) {
+    let line = shared
+        .missing
+        .iter()
+        .find(|line| line.starts_with(table))
+        .cloned()
+        .unwrap_or_else(|| format!("{table}: not in the runtime root"));
+    error!(
+        "[get_resource] input absent: {line}; NoticeCollectItem, the sketch result and the craft screen's names stay off"
+    );
+    inputs.absent = true;
+}
+
+/// The masters once the shared loader has served them.
 fn read_inputs(
     inputs: &mut GetResourceInputs,
     server: &AssetServer,
     json: &Assets<JsonAsset>,
-    master_data: &mut MasterData,
+    shared: Option<&MasterTables>,
 ) {
     if let Some(handle) = inputs.honors_handle.clone() {
         if let LoadState::Failed(error) = server.load_state(&handle) {
@@ -1114,30 +1090,41 @@ fn read_inputs(
     if inputs.masters.is_some() || inputs.absent {
         return;
     }
-    for (table, slot) in MASTERS.iter().zip(inputs.tables.iter_mut()) {
-        if slot.is_some() {
-            continue;
-        }
-        match master_data.take(table) {
-            None => {}
-            Some(Ok(rows)) => *slot = Some(rows),
-            Some(Err(error)) => {
-                error!(
-                    "[get_resource] input absent: {error}; NoticeCollectItem, the sketch result and the craft screen's names stay off"
-                );
-                inputs.absent = true;
-                return;
-            }
-        }
-    }
-    if inputs.tables.len() != MASTERS.len() || inputs.tables.iter().any(Option::is_none) {
+    let Some(shared) = shared else {
+        return;
+    };
+    if !shared.ready() || !shared.rows_ready() {
         return;
     }
-    let tables: Vec<Vec<Value>> = std::mem::take(&mut inputs.tables)
-        .into_iter()
-        .flatten()
-        .collect();
-    match Masters::parse(&tables) {
+    let Some(materials) = shared.rows.get("mysekaiMaterials") else {
+        absent_master(inputs, shared, "mysekaiMaterials");
+        return;
+    };
+    let Some(blueprint_master) = shared
+        .craft
+        .as_ref()
+        .and_then(|craft| craft.blueprints.as_ref())
+    else {
+        absent_master(inputs, shared, "mysekaiBlueprints");
+        return;
+    };
+    let Some(fixtures) = shared.rows.get("mysekaiFixtures") else {
+        absent_master(inputs, shared, "mysekaiFixtures");
+        return;
+    };
+    let Some(tools) = shared.rows.get("mysekaiTools") else {
+        absent_master(inputs, shared, "mysekaiTools");
+        return;
+    };
+    let Some(items) = shared.rows.get("mysekaiItems") else {
+        absent_master(inputs, shared, "mysekaiItems");
+        return;
+    };
+    let Some(records) = shared.rows.get("mysekaiMusicRecords") else {
+        absent_master(inputs, shared, "mysekaiMusicRecords");
+        return;
+    };
+    match Masters::parse(materials, blueprint_master, fixtures, tools, items, records) {
         Ok(masters) => {
             info!(
                 "[get_resource] masters read: {} materials, {} blueprints, {} fixtures, {} tools, {} items, {} records",
@@ -1571,7 +1558,7 @@ fn enqueue_chain(player: &mut GetResourcePlayer, entry: ResourceEntry, caller: &
 pub(crate) struct PlaceInputs<'w, 's> {
     server: Res<'w, AssetServer>,
     json: Res<'w, Assets<JsonAsset>>,
-    master_data: ResMut<'w, MasterData>,
+    master_tables: Option<Res<'w, MasterTables>>,
     layouts: ResMut<'w, crate::ui_layout::UiLayouts>,
     art: Option<Res<'w, BalloonArt>>,
     time: Res<'w, Time>,
@@ -1719,7 +1706,7 @@ pub(crate) fn place(
     let PlaceInputs {
         server,
         json,
-        mut master_data,
+        master_tables,
         mut layouts,
         art,
         time,
@@ -1729,7 +1716,7 @@ pub(crate) fn place(
         records,
         mut harvest_notices,
     } = inputs_param;
-    read_inputs(&mut inputs, &server, &json, &mut master_data);
+    read_inputs(&mut inputs, &server, &json, master_tables.as_deref());
     let sources_ready = layouts.document(KEY_GET_RESOURCE).is_some();
     let inputs_settled = inputs.masters.is_some() || inputs.absent;
     if charset_present.is_none() && sources_ready && inputs_settled {

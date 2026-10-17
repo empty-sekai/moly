@@ -1,4 +1,5 @@
-//! The five typed master tables and the one loader that fills them.
+//! The five typed master tables and the loaders that fill them, plus the row
+//! tables a reader parses for itself.
 //!
 //! Each table is a [`MasterTable`] requested from the asset layer; every
 //! consumer in the process shares the request and the parsed value. A
@@ -9,7 +10,7 @@
 //! The assembly from a table's text to the resource field is here, so the
 //! server and the client cannot disagree about a column name.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use bevy::prelude::*;
 use moly_assets::json::master::{MasterData, MasterTable};
@@ -21,9 +22,9 @@ use crate::delivery::{BonusRow, DeliveryTables, RewardRow, TotalRow};
 use crate::inventory::PossessionMasters;
 use crate::StaminaMax;
 
-/// The five master resources one loader fills, plus the row slices a client
-/// reader parses for itself (the harvest drop classifier's ids and material
-/// rows, from the same three tables).
+/// The five master resources one loader fills, plus the row slices a reader
+/// parses for itself (the acquisition dialogs' six tables, the harvest drop
+/// classifier's ids and material rows), from the same requested tables.
 #[derive(Resource, Default)]
 pub struct MasterTables {
     /// `mysekaiBlueprints` and the five craft tables, if any are in.
@@ -46,6 +47,12 @@ pub struct MasterTables {
     /// `mysekaiMaterials`: id, `mysekaiMaterialType` and `mysekaiSiteIds`,
     /// for the harvest drop classifier (the craft reader takes the types).
     pub material_rows: Option<Vec<(i64, String, Vec<u32>)>>,
+    /// Tables a reader parses for itself, as their files hold them, by the
+    /// upstream table: [`MasterRowsPlugin`] adds the fixture, tool and record
+    /// rows, and the loader adds the material and item rows it parses anyway.
+    pub rows: BTreeMap<&'static str, Vec<Value>>,
+    /// Every row table [`MasterRowsPlugin`] requests has been taken.
+    rows_ready: bool,
     /// Tables still loading, by the names their consumers read.
     pub pending: Vec<&'static str>,
     /// Tables the master layer could not give.
@@ -64,6 +71,13 @@ impl MasterTables {
     /// not give counts as taken: it is named in [`Self::missing`]).
     pub fn ready(&self) -> bool {
         self.started && self.pending.is_empty()
+    }
+
+    /// Every row table [`MasterRowsPlugin`] requests has been taken (a table
+    /// the layer could not give counts as taken and is named in
+    /// [`Self::missing`]). A process without that plugin never reaches it.
+    pub fn rows_ready(&self) -> bool {
+        self.rows_ready
     }
 
     /// A small synthetic table set a harness seats directly: synthetic pool
@@ -159,6 +173,7 @@ struct Parts {
     blueprint_ids: Option<HashSet<i64>>,
     item_ids: Option<HashSet<i64>>,
     material_rows: Option<Vec<(i64, String, Vec<u32>)>>,
+    rows: Vec<(&'static str, Vec<Value>)>,
 }
 
 /// One master table the loader requests and where its rows go.
@@ -266,15 +281,16 @@ static TABLES: &[Entry] = &[
             parse: |text| {
                 let mut parts = Parts::default();
                 parse_material_types(text, &mut parts.craft)?;
-                parts.material_rows = table_rows(text, "mysekaiMaterials")
-                    .and_then(|rows| material_rows(&rows))
-                    .ok();
+                let rows = table_rows(text, "mysekaiMaterials")?;
+                parts.material_rows = material_rows(&rows).ok();
+                parts.rows.push(("mysekaiMaterials", rows));
                 Ok(parts)
             },
         },
         seat: |tables, partial| {
             tables.parts.craft.material_types = partial.craft.material_types;
             tables.material_rows = partial.material_rows;
+            tables.rows.extend(partial.rows);
         },
         group: Group::Craft,
     },
@@ -285,15 +301,16 @@ static TABLES: &[Entry] = &[
             parse: |text| {
                 let mut parts = Parts::default();
                 parse_white_blueprint_item(text, &mut parts.craft)?;
-                parts.item_ids = table_rows(text, "mysekaiItems")
-                    .and_then(|rows| row_ids(&rows))
-                    .ok();
+                let rows = table_rows(text, "mysekaiItems")?;
+                parts.item_ids = row_ids(&rows).ok();
+                parts.rows.push(("mysekaiItems", rows));
                 Ok(parts)
             },
         },
         seat: |tables, partial| {
             tables.parts.craft.white_blueprint_item = partial.craft.white_blueprint_item;
             tables.item_ids = partial.item_ids;
+            tables.rows.extend(partial.rows);
         },
         group: Group::Craft,
     },
@@ -421,6 +438,87 @@ impl Plugin for MasterTablesPlugin {
         app.init_resource::<MasterTables>()
             .add_systems(Startup, load)
             .add_systems(PreUpdate, resolve_tables.after(moly_assets::json::master::resolve));
+    }
+}
+
+/// The row tables a reader parses itself, each requested once per process:
+/// the acquisition dialogs read the fixture, tool and record rows from
+/// [`MasterTables::rows`] instead of requesting the tables again.
+static ROW_TABLES: &[MasterTable<Vec<Value>>] = &[
+    MasterTable {
+        table: "mysekaiFixtures",
+        name: "mysekaiFixtures (the acquisition dialogs' fixture rows)",
+        parse: moly_assets::json::master::rows,
+    },
+    MasterTable {
+        table: "mysekaiTools",
+        name: "mysekaiTools (the acquisition dialogs' and the harvest tools)",
+        parse: moly_assets::json::master::rows,
+    },
+    MasterTable {
+        table: "mysekaiMusicRecords",
+        name: "mysekaiMusicRecords (the acquisition dialogs' and the harvest records)",
+        parse: moly_assets::json::master::rows,
+    },
+];
+
+/// Which row tables are still out.
+#[derive(Resource, Default)]
+struct MasterRows {
+    pending: Vec<&'static str>,
+    started: bool,
+}
+
+/// Requests the row tables once.
+fn load_rows(mut data: ResMut<MasterData>, mut rows: ResMut<MasterRows>) {
+    if rows.started {
+        return;
+    }
+    rows.started = true;
+    rows.pending = ROW_TABLES.iter().map(|table| table.name).collect();
+    for table in ROW_TABLES {
+        data.request(table);
+    }
+}
+
+/// Seats each row table as it resolves; a table the layer cannot give is
+/// named in [`MasterTables::missing`] and counts as taken.
+fn resolve_rows(
+    mut data: ResMut<MasterData>,
+    mut rows: ResMut<MasterRows>,
+    mut tables: ResMut<MasterTables>,
+) {
+    if !rows.started {
+        return;
+    }
+    for table in ROW_TABLES {
+        if !rows.pending.contains(&table.name) {
+            continue;
+        }
+        match data.take(table) {
+            None => continue,
+            Some(Ok(values)) => {
+                tables.rows.insert(table.table, values);
+            }
+            Some(Err(error)) => tables.missing.push(error.to_string()),
+        }
+        rows.pending.retain(|known| *known != table.name);
+    }
+    if rows.pending.is_empty() {
+        tables.rows_ready = true;
+    }
+}
+
+/// The extra row tables' loader. A process that reads no rows for itself
+/// leaves it out, and [`MasterTables::rows_ready`] stays false there.
+pub struct MasterRowsPlugin;
+
+impl Plugin for MasterRowsPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<MasterTables>()
+            .init_resource::<MasterRows>()
+            .add_systems(Startup, load_rows)
+            .add_systems(PreUpdate, resolve_rows.after(moly_assets::json::master::resolve));
     }
 }
 

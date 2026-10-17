@@ -1078,6 +1078,7 @@ pub(crate) struct UserDataPlugin;
 impl Plugin for UserDataPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(moly_masters::load::MasterTablesPlugin)
+            .add_plugins(moly_masters::load::MasterRowsPlugin)
             .add_message::<RankDelivered>()
             .add_message::<Answered>()
             .init_resource::<LiveSchedule>()

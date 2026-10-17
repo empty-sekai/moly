@@ -15,6 +15,7 @@ use bevy::asset::LoadState;
 use bevy::prelude::*;
 use moly_assets::json::master::{self, MasterData, MasterError, MasterKey, MasterTable};
 use moly_assets::json::JsonAsset;
+use serde_json::Value;
 
 use super::law::{Stamina, ToolType};
 use super::server_mock::{
@@ -40,41 +41,18 @@ pub(crate) struct HarvestInputs {
 #[derive(Resource)]
 pub(crate) struct HarvestInputsAbsent(pub(crate) Vec<String>);
 
-const FIXTURE_IDS: MasterTable<HashSet<i64>> = MasterTable {
-    table: "mysekaiFixtures",
-    name: "mysekaiFixtures (harvest drop rows of fixture type)",
-    parse: parse_ids,
-};
-const MUSIC_RECORDS: MasterTable<MusicRecords> = MasterTable {
-    table: "mysekaiMusicRecords",
-    name: "mysekaiMusicRecords (harvest drop rows of music-record type, the fixed treasure box's record)",
-    parse: parse_music_records,
-};
-const TOOLS: MasterTable<Vec<ToolDef>> = MasterTable {
-    table: "mysekaiTools",
-    name: "mysekaiTools (harvest tools: power, cool time, durability, level)",
-    parse: parse_tools,
-};
 const STAMINA_RECOVERY: MasterTable<i32> = MasterTable {
     table: "mysekaiStaminaRecovery",
     name: "mysekaiStaminaRecovery (the boost grant of the stamina mock)",
     parse: parse_boost_grant,
 };
 
-fn master_keys() -> [MasterKey; 4] {
-    [
-        FIXTURE_IDS.key(),
-        MUSIC_RECORDS.key(),
-        TOOLS.key(),
-        STAMINA_RECOVERY.key(),
-    ]
+fn master_keys() -> [MasterKey; 1] {
+    [STAMINA_RECOVERY.key()]
 }
 
 /// The master tables the catalog and the server mock read.
 struct HarvestMasters {
-    fixture_ids: Result<HashSet<i64>, MasterError>,
-    music_records: Result<MusicRecords, MasterError>,
-    tools: Result<Vec<ToolDef>, MasterError>,
     boost_grant: Result<i32, MasterError>,
 }
 
@@ -88,9 +66,6 @@ impl HarvestMasters {
             return None;
         }
         Some(HarvestMasters {
-            fixture_ids: masters.take(&FIXTURE_IDS)?,
-            music_records: masters.take(&MUSIC_RECORDS)?,
-            tools: masters.take(&TOOLS)?,
             boost_grant: masters.take(&STAMINA_RECOVERY)?,
         })
     }
@@ -98,12 +73,7 @@ impl HarvestMasters {
     /// The tables this consumer does not get (already named by the master
     /// layer).
     fn absent(&self) -> Vec<String> {
-        [
-            self.fixture_ids.as_ref().err(),
-            self.music_records.as_ref().err(),
-            self.tools.as_ref().err(),
-            self.boost_grant.as_ref().err(),
-        ]
+        [self.boost_grant.as_ref().err()]
         .into_iter()
         .flatten()
         .map(MasterError::to_string)
@@ -121,23 +91,27 @@ pub(crate) fn load(
         index: server.load(bevy::asset::AssetPath::from(format!("moly://{INDEX}"))),
         masters: None,
     });
-    masters.request(&FIXTURE_IDS);
-    masters.request(&MUSIC_RECORDS);
-    masters.request(&TOOLS);
     masters.request(&STAMINA_RECOVERY);
 }
 
-/// The ids of a master table's rows.
-fn parse_ids(text: &str) -> Result<HashSet<i64>, String> {
-    master::rows(text)?
+/// The absent line for a table a reader takes from the shared loader.
+fn row_absent(shared: &moly_masters::load::MasterTables, table: &str) -> String {
+    shared
+        .missing
         .iter()
-        .map(|row| master::int(row, "id"))
-        .collect()
+        .find(|line| line.starts_with(table))
+        .cloned()
+        .unwrap_or_else(|| format!("{table}: not in the runtime root"))
 }
 
-/// A master table's rows in id order.
-fn rows_by_id(text: &str) -> Result<Vec<serde_json::Value>, String> {
-    let mut rows = master::rows(text)?;
+/// The ids of a table's rows.
+fn parse_ids(rows: &[Value]) -> Result<HashSet<i64>, String> {
+    rows.iter().map(|row| master::int(row, "id")).collect()
+}
+
+/// A table's rows in id order.
+fn rows_by_id(rows: &[Value]) -> Result<Vec<Value>, String> {
+    let mut rows = rows.to_vec();
     for row in &rows {
         master::int(row, "id")?;
     }
@@ -145,8 +119,8 @@ fn rows_by_id(text: &str) -> Result<Vec<serde_json::Value>, String> {
     Ok(rows)
 }
 
-fn parse_tools(text: &str) -> Result<Vec<ToolDef>, String> {
-    rows_by_id(text)?
+fn parse_tools(rows: &[Value]) -> Result<Vec<ToolDef>, String> {
+    rows_by_id(rows)?
         .iter()
         .map(|row| {
             let word = master::text(row, "mysekaiToolType")?;
@@ -177,17 +151,18 @@ fn parse_boost_grant(text: &str) -> Result<i32, String> {
 
 
 /// `mysekaiMusicRecords`: every id, and the ids by track type.
+#[derive(Default)]
 pub(crate) struct MusicRecords {
     ids: HashSet<i64>,
     by_track_type: std::collections::BTreeMap<String, Vec<i64>>,
 }
 
-fn parse_music_records(text: &str) -> Result<MusicRecords, String> {
+fn parse_music_records(rows: &[Value]) -> Result<MusicRecords, String> {
     let mut records = MusicRecords {
         ids: HashSet::new(),
         by_track_type: Default::default(),
     };
-    for row in rows_by_id(text)? {
+    for row in rows_by_id(rows)? {
         let id = master::int(&row, "id")?;
         records.ids.insert(id);
         records
@@ -361,7 +336,10 @@ pub(crate) fn build(
     // The drop classifier's blueprint and item ids and its material rows come
     // from the shared loader's tables, which the craft readers already
     // requested: the catalog asks for no second copy of them.
-    let Some(shared) = master_tables.as_deref().filter(|shared| shared.ready()) else {
+    let Some(shared) = master_tables
+        .as_deref()
+        .filter(|shared| shared.ready() && shared.rows_ready())
+    else {
         return;
     };
     let mut absent = tables.absent();
@@ -404,6 +382,31 @@ pub(crate) fn build(
             "mysekaiMaterials (the server's material types): not in the runtime root".to_owned(),
         ),
     }
+    // The fixture, tool and record rows come from the shared loader too.
+    let mut fixture_ids = HashSet::new();
+    match shared.rows.get("mysekaiFixtures") {
+        Some(rows) => match parse_ids(rows) {
+            Ok(ids) => fixture_ids = ids,
+            Err(error) => absent.push(format!("mysekaiFixtures: {error}")),
+        },
+        None => absent.push(row_absent(shared, "mysekaiFixtures")),
+    }
+    let mut tool_defs = Vec::new();
+    match shared.rows.get("mysekaiTools") {
+        Some(rows) => match parse_tools(rows) {
+            Ok(tools) => tool_defs = tools,
+            Err(error) => absent.push(format!("mysekaiTools: {error}")),
+        },
+        None => absent.push(row_absent(shared, "mysekaiTools")),
+    }
+    let mut music_records = MusicRecords::default();
+    match shared.rows.get("mysekaiMusicRecords") {
+        Some(rows) => match parse_music_records(rows) {
+            Ok(records) => music_records = records,
+            Err(error) => absent.push(format!("mysekaiMusicRecords: {error}")),
+        },
+        None => absent.push(row_absent(shared, "mysekaiMusicRecords")),
+    }
     match server.load_state(&inputs.index) {
         LoadState::Failed(error) => {
             let line = format!("{INDEX} ({INDEX_GATES}): {error}");
@@ -439,9 +442,6 @@ pub(crate) fn build(
     let index: serde_json::Value =
         serde_json::from_str(&asset.0).unwrap_or_else(|error| panic!("{INDEX}: not JSON: {error}"));
     let Some(HarvestMasters {
-        fixture_ids: Ok(fixture_ids),
-        music_records: Ok(music_records),
-        tools: Ok(tool_defs),
         boost_grant: Ok(boost_grant),
     }) = inputs.masters.take()
     else {
