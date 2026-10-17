@@ -803,8 +803,37 @@ fn parse(
         panel.refreshed_at,
         panel.tutorial_end,
     );
-    let placed = crate::fixture::layouts::install_home_starter_records(&panel.home_starter)
-        .unwrap_or_else(|reason| panic!("server panel housing layout is refused: {reason}"));
+    // A direct save can carry a texture id the server starter decoder refuses
+    // (0, fractional, or outside the fixture's colour list). Clamp it to
+    // texture id 1 and say so: the rest of the document (and the
+    // client save) stays usable. A hard refusal here would leave the home site
+    // empty, so the clamp is the named repair, not a silent default.
+    for (index, row) in panel.home_starter.iter_mut().enumerate() {
+        let positive = row
+            .get("textureId")
+            .and_then(|value| value.as_u64())
+            .is_some_and(|value| value > 0);
+        if !positive {
+            let shown = row
+                .get("textureId")
+                .map_or_else(|| "missing".to_owned(), |value| value.to_string());
+            warn!(
+                "[server-panel] housing starter row {index}: textureId {shown} is not a positive integer; clamped to 1"
+            );
+            row["textureId"] = serde_json::json!(1);
+        }
+    }
+    let placed = match crate::fixture::layouts::install_home_starter_records(&panel.home_starter) {
+        Ok(placed) => placed,
+        Err(reason) => {
+            // Other refusals keep the game alive and say what is wrong instead
+            // of taking the whole app down at boot.
+            error!(
+                "[server-panel] housing layout is refused; the client save stays authoritative and the panel starter is skipped: {reason}"
+            );
+            0
+        }
+    };
     info!(
         "[server-panel] housing layout: home site starter, {placed} rows: {}",
         serde_json::json!(panel
