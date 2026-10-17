@@ -93,7 +93,7 @@ pub(crate) use moly_protocol::api::{
 pub(crate) use moly_protocol::rows::{UserMysekaiBlueprint, UserMysekaiFixture};
 use super::delivery::SECTION_MYSEKAI_MATERIALS;
 use super::inventory::{SECTION_BLUEPRINTS, SECTION_FIXTURES, SECTION_ITEMS};
-use super::{Masters, ResponseKind, ServerModel, SECTION_GAMEDATA};
+use super::{Masters, ResponseKind, ServerModel, Tables, SECTION_GAMEDATA};
 
 /// The texture a request without one takes (the client's base colour).
 pub(crate) const BASE_TEXTURE_ID: i32 = 1;
@@ -105,63 +105,10 @@ const FIRST_BONUS_TYPE: &str = "craft_mysekai_fixture_first_bonus";
 // Masters
 // ---------------------------------------------------------------------------
 
-fn table_rows(text: &str, table: &str) -> Result<Vec<Value>, String> {
-    let value: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
-    super::master_rows(&value, table)
-}
-
-fn optional_int(row: &Value, key: &str) -> Result<i32, String> {
-    match row.get(key) {
-        None | Some(Value::Null) => Ok(0),
-        Some(_) => super::int32(row, key),
-    }
-}
-
-fn flag(row: &Value, key: &str) -> Result<bool, String> {
-    row[key]
-        .as_bool()
-        .ok_or_else(|| format!("{key} of {row} is not a boolean"))
-}
-
 /// `cards`: card id -> the card's character and rarity.
 pub(crate) fn parse_cards(text: &str, masters: &mut Masters) -> Result<(), String> {
     let cards = moly_masters::craft::parse_cards(&moly_assets::json::master::rows(text)?)?;
     masters.cards = super::Deferred::Ready(cards);
-    Ok(())
-}
-
-/// `mysekaiBlueprints`.
-pub(crate) fn parse_blueprints(text: &str, masters: &mut Masters) -> Result<(), String> {
-    let blueprints =
-        moly_masters::craft::parse_blueprints(&table_rows(text, "mysekaiBlueprints")?)?;
-    masters.craft.blueprints = Some(blueprints);
-    Ok(())
-}
-
-/// `mysekaiBlueprintMysekaiMaterialCosts`: the rows per blueprint.
-pub(crate) fn parse_costs(text: &str, masters: &mut Masters) -> Result<(), String> {
-    let costs = moly_masters::craft::parse_costs(&table_rows(
-        text,
-        "mysekaiBlueprintMysekaiMaterialCosts",
-    )?)?;
-    masters.craft.costs = Some(costs);
-    Ok(())
-}
-
-/// `mysekaiBlueprintTerms`.
-pub(crate) fn parse_terms(text: &str, masters: &mut Masters) -> Result<(), String> {
-    let terms = moly_masters::craft::parse_terms(&table_rows(text, "mysekaiBlueprintTerms")?)?;
-    masters.craft.terms = Some(terms);
-    Ok(())
-}
-
-/// `mysekaiRankObtainedExps`: the first-craft bonus row.
-pub(crate) fn parse_rank_obtained_exps(text: &str, masters: &mut Masters) -> Result<(), String> {
-    let bonus = moly_masters::craft::parse_rank_obtained_exps(&table_rows(
-        text,
-        "mysekaiRankObtainedExps",
-    )?)?;
-    masters.craft.first_craft_bonus = Some(bonus);
     Ok(())
 }
 
@@ -184,9 +131,9 @@ impl ServerModel {
     fn craft(
         &mut self,
         request: &UserMysekaiCraftRequest,
-        masters: &Masters,
+        masters: &Tables<'_>,
     ) -> Result<(Crafted, Vec<&'static str>), String> {
-        let craft_masters = &masters.craft;
+        let craft_masters = masters.craft();
         let blueprints = craft_masters.blueprints.as_ref().ok_or(
             "the blueprint master (mysekai-blueprints.json) is absent: the blueprint cannot be read",
         )?;
@@ -279,11 +226,11 @@ impl ServerModel {
             fixtures: &inventory.fixtures,
             canvases: &inventory.canvases,
             fixture_max_count: masters
-                .possession
+                .possession()
                 .fixture_max_count(inventory.fixture_possession_level),
         };
         if owned.fixture_max_count.is_none() {
-            return Err(match &masters.possession.fixture {
+            return Err(match &masters.possession().fixture {
                 None => {
                     "the fixture possession master (mysekai-fixture-possessions.json) is absent"
                         .to_owned()
@@ -402,9 +349,9 @@ impl ServerModel {
     fn sketch(
         &mut self,
         request: &UserMysekaiHousingSketchRequest,
-        masters: &Masters,
+        masters: &Tables<'_>,
     ) -> Result<Vec<&'static str>, String> {
-        let craft_masters = &masters.craft;
+        let craft_masters = masters.craft();
         let blueprint = *craft_masters
             .blueprints
             .as_ref()
@@ -466,9 +413,9 @@ impl ServerModel {
     pub(crate) fn craft_reply(
         &mut self,
         request: &UserMysekaiCraftRequest,
-        masters: &Masters,
+        masters: &Tables<'_>,
     ) -> Answer {
-        let kind = match masters.craft.blueprint(request.blueprint_id) {
+        let kind = match masters.craft().blueprint(request.blueprint_id) {
             Some(blueprint) if blueprint.craft_type == MysekaiCraftType::MysekaiCanvas => {
                 ResponseKind::HomeActionCanvas
             }
@@ -534,7 +481,7 @@ impl ServerModel {
     pub(crate) fn sketch_reply(
         &mut self,
         request: &UserMysekaiHousingSketchRequest,
-        masters: &Masters,
+        masters: &Tables<'_>,
     ) -> Answer {
         let kind = ResponseKind::HomeActionSketch;
         match self.sketch(request, masters) {
@@ -543,7 +490,7 @@ impl ServerModel {
         }
     }
 
-    fn answer(&mut self, kind: ResponseKind, changed: &[&'static str], masters: &Masters) -> Answer {
+    fn answer(&mut self, kind: ResponseKind, changed: &[&'static str], masters: &Tables<'_>) -> Answer {
         self.respond(kind, false, changed, masters);
         let response = self.responses.last().expect("the response just recorded");
         Answer {
@@ -572,7 +519,7 @@ impl ServerModel {
     pub(super) fn instrument_craft(
         &mut self,
         request: &UserMysekaiCraftRequest,
-        masters: &Masters,
+        masters: &Tables<'_>,
     ) -> bool {
         self.craft_reply(request, masters).reply.success
     }

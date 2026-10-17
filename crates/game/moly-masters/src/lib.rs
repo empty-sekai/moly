@@ -1,11 +1,12 @@
 //! The typed master tables the game and its server both read.
 //!
-//! A master table is one upstream JSON array of rows. The loading side (which
-//! asset holds which table, and when it arrives) stays with the process that
-//! loads it; the table's shape, its parse from the rows and the pure rules
-//! over it live here, so the two sides cannot disagree about a column name or
-//! a rule.
+//! A master table is one upstream JSON array of rows. The rows' shape, the
+//! parse from the rows, the pure rules over them and the loader that requests
+//! them live here, so the two sides cannot disagree about a column name, a
+//! rule or which asset holds what. [`load::MasterTables`] is the one request
+//! for the five resources both sides read.
 
+use bevy::prelude::Resource;
 use serde_json::Value;
 
 pub mod avatar;
@@ -13,10 +14,11 @@ pub mod clock;
 pub mod craft;
 pub mod delivery;
 pub mod inventory;
+pub mod load;
 pub mod tools;
 
 /// The master pools' maxima (`mysekaiStaminas.maxStamina` per type).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StaminaMax {
     pub normal: i32,
     pub enhance: i32,

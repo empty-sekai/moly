@@ -5,11 +5,15 @@ edition.workspace = true
 license.workspace = true
 
 # The typed master tables the game and its server both read: the rows of one
-# upstream master document, its parse, and the pure rules over them. Bevy is
-# here only for the resource derive the tables carry; no asset loading and no
-# engine dependency beyond it.
+# upstream master document, its parse, and the pure rules over them. The five
+# shared resources and their one loader live here too, so the two sides parse
+# a table the same way.
 [dependencies]
 moly-protocol = { path = "../../net/moly-protocol" }
 moly-law = { path = "../../base/moly-law" }
-bevy = { version = "0.18.1", default-features = false, features = ["std"] }
+# The master table layer the shared loader requests its tables from.
+moly-assets = { path = "../../engine/moly-assets", default-features = false }
+# `bevy_asset` brings the app, ECS and asset types the loader's plugin needs;
+# it carries no renderer.
+bevy = { version = "0.18.1", default-features = false, features = ["std", "bevy_asset"] }
 serde_json = { workspace = true }

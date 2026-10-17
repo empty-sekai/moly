@@ -26,7 +26,7 @@ use bevy::prelude::*;
 use serde_json::{json, Map, Value};
 
 pub(crate) use moly_protocol::api::{HomeActionApi, HomeActionReply};
-use super::{Masters, ResponseKind, ServerModel};
+use super::{ResponseKind, ServerModel, Tables};
 
 pub(crate) const POLICY_KEY: &str = "homeActionReply";
 pub(crate) const REPLY_SUCCESS: &str = "success";
@@ -100,7 +100,7 @@ impl ServerModel {
         &mut self,
         api: HomeActionApi,
         target: Option<&str>,
-        masters: &Masters,
+        masters: &Tables<'_>,
     ) -> HomeActionReply {
         let count = &mut self.home_action_replies[index(api)];
         *count += 1;

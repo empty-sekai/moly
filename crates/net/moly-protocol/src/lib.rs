@@ -45,7 +45,8 @@ pub mod rows;
 /// and the reserve reply carries every gate character.
 /// 3: the harvest request carries the hit, the tool the run used and the
 /// stamina that is left.
-pub const PROTOCOL_VERSION: u32 = 3;
+/// 4: the sections carry the server panel's NPC slice.
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// The account a session belongs to. The server keeps one document per user.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -329,6 +330,11 @@ pub struct Sections {
     pub system_fixture_actions: Option<Vec<UserMysekaiSystemFixtureAction>>,
     /// `userMysekaiTools`.
     pub tools: Option<Vec<UserMysekaiTool>>,
+    /// The developer server panel's NPC slice as JSON text: the gate and its
+    /// visitors, the schedule, the talk list, the layouts and the controls the
+    /// response changed.
+    #[serde(rename = "npcPanel")]
+    pub npc_panel: Option<String>,
 }
 
 /// A frame could not be read.
@@ -538,6 +544,7 @@ mod tests {
                 durability: 43,
                 last_obtained_at: 44,
             }]),
+            npc_panel: Some("{\"version\":1}".to_owned()),
         }
     }
 

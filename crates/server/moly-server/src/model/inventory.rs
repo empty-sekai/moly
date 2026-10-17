@@ -63,7 +63,7 @@ pub(crate) use moly_protocol::rows::{
     UserMysekaiMaterialPossession, UserResource,
 };
 use super::delivery::SECTION_MYSEKAI_MATERIALS;
-use super::{Masters, ServerModel, SECTION_GAMEDATA};
+use super::{ServerModel, Tables, SECTION_GAMEDATA};
 
 /// The sections of this part a response carries (the document keys).
 pub(crate) const SECTIONS: [&str; 5] = [
@@ -340,8 +340,8 @@ impl InventoryDoc {
 }
 
 /// The checks against the masters; an absent master skips its check.
-pub(crate) fn check_masters(doc: &InventoryDoc, masters: &Masters) -> Result<(), String> {
-    if let Some(blueprints) = &masters.craft.blueprints {
+pub(crate) fn check_masters(doc: &InventoryDoc, masters: &Tables<'_>) -> Result<(), String> {
+    if let Some(blueprints) = &masters.craft().blueprints {
         for (i, row) in doc.blueprints.iter().enumerate() {
             if !blueprints.contains_key(&row.mysekai_blueprint_id) {
                 return Err(format!(
@@ -355,12 +355,12 @@ pub(crate) fn check_masters(doc: &InventoryDoc, masters: &Masters) -> Result<(),
         (
             GAMEDATA_KEYS[0],
             doc.material_possession_level,
-            masters.possession.material.as_ref(),
+            masters.possession().material.as_ref(),
         ),
         (
             GAMEDATA_KEYS[1],
             doc.fixture_possession_level,
-            masters.possession.fixture.as_ref(),
+            masters.possession().fixture.as_ref(),
         ),
     ] {
         if let Some(rows) = rows {
@@ -380,11 +380,11 @@ pub(crate) fn check_masters(doc: &InventoryDoc, masters: &Masters) -> Result<(),
 
 impl ServerModel {
     /// The owned blueprint rows the policy gives.
-    pub(super) fn owned_blueprint_rows(&self, masters: &Masters) -> Vec<UserMysekaiBlueprint> {
+    pub(super) fn owned_blueprint_rows(&self, masters: &Tables<'_>) -> Vec<UserMysekaiBlueprint> {
         let stated = &self.doc.inventory.blueprints;
         match self.doc.inventory.owned_blueprints {
             OwnedBlueprints::Stated => stated.clone(),
-            OwnedBlueprints::EveryBlueprint => match &masters.craft.blueprints {
+            OwnedBlueprints::EveryBlueprint => match &masters.craft().blueprints {
                 Some(master) => master
                     .keys()
                     .map(|id| {
@@ -430,8 +430,8 @@ impl ServerModel {
     }
 
     /// The material possession policy (`None` without the materials master).
-    pub(super) fn material_possession(&self, masters: &Masters) -> Option<UserMysekaiMaterialPossession> {
-        let types = masters.craft.material_types.as_ref()?;
+    pub(super) fn material_possession(&self, masters: &Tables<'_>) -> Option<UserMysekaiMaterialPossession> {
+        let types = masters.craft().material_types.as_ref()?;
         let quantity = self
             .doc
             .delivery
@@ -457,7 +457,7 @@ impl ServerModel {
     }
 
     /// The owned tables named in `sections`, full, as the client merges them.
-    pub(super) fn inventory_update(&mut self, sections: &[String], masters: &Masters) -> SuiteUserSections {
+    pub(super) fn inventory_update(&mut self, sections: &[String], masters: &Tables<'_>) -> SuiteUserSections {
         let has = |name: &str| sections.iter().any(|section| section == name);
         let materials = has(SECTION_MYSEKAI_MATERIALS);
         let possession = if materials {
@@ -520,44 +520,6 @@ pub(crate) fn native_overlay(doc: &mut super::document::ServerDocument) {
 // ---------------------------------------------------------------------------
 // Masters
 // ---------------------------------------------------------------------------
-
-fn master_rows(text: &str, table: &str) -> Result<Vec<Value>, String> {
-    let value: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
-    super::master_rows(&value, table)
-}
-
-/// `mysekaiFixturePossessions`.
-pub(crate) fn parse_fixture_possessions(text: &str, masters: &mut Masters) -> Result<(), String> {
-    masters.possession.fixture = Some(moly_masters::inventory::parse_possession_rows(
-        &master_rows(text, "mysekaiFixturePossessions")?,
-    )?);
-    Ok(())
-}
-
-/// `mysekaiMaterialPossessions`.
-pub(crate) fn parse_material_possessions(text: &str, masters: &mut Masters) -> Result<(), String> {
-    masters.possession.material = Some(moly_masters::inventory::parse_possession_rows(
-        &master_rows(text, "mysekaiMaterialPossessions")?,
-    )?);
-    Ok(())
-}
-
-/// `mysekaiMaterials`: material id -> `mysekaiMaterialType`.
-pub(crate) fn parse_materials(text: &str, masters: &mut Masters) -> Result<(), String> {
-    masters.craft.material_types = Some(moly_masters::craft::parse_material_types(&master_rows(
-        text,
-        "mysekaiMaterials",
-    )?)?);
-    Ok(())
-}
-
-/// `mysekaiItems`: the first `white_blueprint` item.
-pub(crate) fn parse_items_master(text: &str, masters: &mut Masters) -> Result<(), String> {
-    masters.craft.white_blueprint_item = Some(moly_masters::craft::parse_white_blueprint_item(
-        &master_rows(text, "mysekaiItems")?,
-    )?);
-    Ok(())
-}
 
 
 // ---------------------------------------------------------------------------

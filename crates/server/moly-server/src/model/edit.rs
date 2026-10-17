@@ -19,8 +19,8 @@ use serde_json::{json, Map, Value};
 
 use super::document::{self, Clock, GateCharacter, SchedulePolicy, ServerDocument, Stamina};
 use super::{
-    GateReply, Masters, ReplyTalkList, ResponseKind, ServerModel, SECTION_GAMEDATA, SECTION_PASS,
-    SECTION_STAMINA,
+    GateReply, Masters, ReplyTalkList, ResponseKind, ServerModel, Tables, SECTION_GAMEDATA,
+    SECTION_PASS, SECTION_STAMINA,
 };
 
 /// Sections a response carries (the `pending` names).
@@ -66,8 +66,8 @@ fn int32(value: &Value, what: &str) -> Result<i32, String> {
 
 /// The checks against the masters. A master the root lacks skips its check;
 /// the schema names it as missing.
-pub(crate) fn check_masters(doc: &ServerDocument, masters: &Masters) -> Result<(), String> {
-    if let (Some(stamina), Some(max)) = (doc.stamina, masters.stamina_max) {
+pub(crate) fn check_masters(doc: &ServerDocument, masters: &Tables<'_>) -> Result<(), String> {
+    if let (Some(stamina), Some(max)) = (doc.stamina, masters.stamina_max()) {
         for (name, value, limit) in [
             ("normalStamina", stamina.normal, max.normal),
             ("enhanceStamina", stamina.enhance, max.enhance),
@@ -131,7 +131,7 @@ pub(crate) fn check_masters(doc: &ServerDocument, masters: &Masters) -> Result<(
         }
     }
     super::music::check_records(&doc.music_settings, masters.music_records.as_deref())?;
-    super::avatar::check(&masters.avatar, &doc.avatar)?;
+    super::avatar::check(masters.avatar(), &doc.avatar)?;
     super::inventory::check_masters(&doc.inventory, masters)?;
     super::tools::check_masters(&doc.tools, masters)?;
     super::music_play::check_owned(&doc.music_records, masters.music_records.as_deref())?;
@@ -155,7 +155,7 @@ pub(crate) fn check_masters(doc: &ServerDocument, masters: &Masters) -> Result<(
 /// One field edit on a copy of the document.
 fn edit_path(
     doc: &mut ServerDocument,
-    masters: &Masters,
+    masters: &Tables<'_>,
     now: i64,
     path: &str,
     value: &Value,
@@ -417,7 +417,7 @@ impl ServerModel {
     pub(crate) fn edit(
         &mut self,
         command: &Map<String, Value>,
-        masters: &Masters,
+        masters: &Tables<'_>,
     ) -> Result<Value, String> {
         if !self.joined {
             return Err(
@@ -473,7 +473,7 @@ impl ServerModel {
         action: &str,
         command: &Map<String, Value>,
         now: i64,
-        masters: &Masters,
+        masters: &Tables<'_>,
     ) -> Result<Value, String> {
         match action {
             "sync" => {
@@ -595,13 +595,13 @@ fn field(path: &str, kind: &str, extra: Value) -> Value {
 }
 
 /// The masters part of the schema.
-fn masters_value(masters: &Masters) -> Value {
+fn masters_value(masters: &Tables<'_>) -> Value {
     json!({
         "refreshTimePeriods": masters.periods.as_ref().map(|periods| periods.iter().map(|period| json!({
             "id": period.id, "startHour": period.start_hour, "endHour": period.end_hour,
         })).collect::<Vec<_>>()),
         "phenomena": masters.phenomena.as_ref().map(|rows| rows.iter().map(|(id, name)| json!({"id": id, "name": name})).collect::<Vec<_>>()),
-        "maxStamina": masters.stamina_max.map(|max| json!({
+        "maxStamina": masters.stamina_max().map(|max| json!({
             "normal": max.normal, "enhance": max.enhance, "boost": max.boost,
         })),
         "recoveryBoostStamina": masters.boost_grant,
@@ -611,29 +611,29 @@ fn masters_value(masters: &Masters) -> Value {
         "musicRecords": masters.music_records.as_ref().map(Vec::len),
         "configs": masters.configs.as_ref().map(|configs| configs.len()),
         "avatar": {
-            "costumes": masters.avatar.costumes.as_ref().map(|rows| rows.len()),
-            "accessories": masters.avatar.accessories.as_ref().map(|rows| rows.len()),
-            "skinColors": masters.avatar.skin_colors.as_ref().map(|rows| rows.len()),
-            "coordinates": masters.avatar.coordinates.as_ref().map(|rows| rows.len()),
+            "costumes": masters.avatar().costumes.as_ref().map(|rows| rows.len()),
+            "accessories": masters.avatar().accessories.as_ref().map(|rows| rows.len()),
+            "skinColors": masters.avatar().skin_colors.as_ref().map(|rows| rows.len()),
+            "coordinates": masters.avatar().coordinates.as_ref().map(|rows| rows.len()),
         },
         "craft": {
-            "blueprints": masters.craft.blueprints.as_ref().map(|rows| rows.len()),
-            "costBlueprints": masters.craft.costs.as_ref().map(|rows| rows.len()),
-            "terms": masters.craft.terms.as_ref().map(Vec::len),
-            "firstCraftBonus": masters.craft.first_craft_bonus,
-            "materials": masters.craft.material_types.as_ref().map(|rows| rows.len()),
-            "whiteBlueprintItem": masters.craft.white_blueprint_item,
+            "blueprints": masters.craft().blueprints.as_ref().map(|rows| rows.len()),
+            "costBlueprints": masters.craft().costs.as_ref().map(|rows| rows.len()),
+            "terms": masters.craft().terms.as_ref().map(Vec::len),
+            "firstCraftBonus": masters.craft().first_craft_bonus,
+            "materials": masters.craft().material_types.as_ref().map(|rows| rows.len()),
+            "whiteBlueprintItem": masters.craft().white_blueprint_item,
         },
         "possession": {
-            "fixture": masters.possession.fixture.as_ref().map(|rows| rows.iter().map(|row| json!({"level": row.level, "possessionLimit": row.possession_limit})).collect::<Vec<_>>()),
-            "material": masters.possession.material.as_ref().map(|rows| rows.iter().map(|row| json!({"level": row.level, "possessionLimit": row.possession_limit})).collect::<Vec<_>>()),
+            "fixture": masters.possession().fixture.as_ref().map(|rows| rows.iter().map(|row| json!({"level": row.level, "possessionLimit": row.possession_limit})).collect::<Vec<_>>()),
+            "material": masters.possession().material.as_ref().map(|rows| rows.iter().map(|row| json!({"level": row.level, "possessionLimit": row.possession_limit})).collect::<Vec<_>>()),
         },
         "missing": masters.missing,
     })
 }
 
-fn sections(masters: &Masters) -> Value {
-    let max = masters.stamina_max;
+fn sections(masters: &Tables<'_>) -> Value {
+    let max = masters.stamina_max();
     let ranks = masters.ranks.as_ref();
     json!([
         {
@@ -766,7 +766,7 @@ fn concat(first: Value, second: Value) -> Value {
     Value::Array(out)
 }
 
-pub(crate) fn schema(model: &ServerModel, masters: &Masters) -> Value {
+pub(crate) fn schema(model: &ServerModel, masters: &Tables<'_>) -> Value {
     json!({
         "schemaVersion": document::SCHEMA_VERSION,
         "command": "server.edit",
@@ -779,10 +779,12 @@ pub(crate) fn schema(model: &ServerModel, masters: &Masters) -> Value {
 }
 
 pub(crate) fn schema_without_model() -> Value {
+    let masters = Masters::default();
+    let tables = Tables::new(&masters, None);
     json!({
         "schemaVersion": document::SCHEMA_VERSION,
         "command": "server.edit",
-        "sections": other_sections(sections(&Masters::default()), super::delivery::schema_sections(None)),
+        "sections": other_sections(sections(&tables), super::delivery::schema_sections(None)),
         "actions": actions(),
         "policies": concat(concat(concat(policies(), super::delivery::schema_policies()), concat(super::home_action::schema_policies(), super::music_play::schema_policies())), concat(concat(super::inventory::schema_policies(), super::craft::schema_policies()), concat(super::system_fixture_action::schema_policies(), super::tools::schema_policies()))),
         "masters": null,

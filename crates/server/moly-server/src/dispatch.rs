@@ -16,9 +16,10 @@ use serde_json::{json, Map};
 use crate::admin;
 use crate::defaults::Defaults;
 use crate::hub::{CallReceived, Sessions};
-use crate::masters::Masters;
+use crate::masters::{Masters, Tables};
 use crate::model::{ResponseKind, ServerModel};
 use crate::users::Users;
+use moly_masters::load::MasterTables;
 use crate::ListenAddress;
 
 /// One call's answer.
@@ -66,7 +67,9 @@ pub(crate) fn answer_calls(
     sessions: Res<Sessions>,
     defaults: Option<Res<Defaults>>,
     listen: Option<Res<ListenAddress>>,
+    shared: Option<Res<MasterTables>>,
 ) {
+    let tables = Tables::new(&masters, shared.as_deref());
     for call in calls.read() {
         let session = call.session;
         let user = call.user.clone();
@@ -111,7 +114,7 @@ pub(crate) fn answer_calls(
                 server_json.clone(),
                 local_json.as_deref(),
                 defaults.as_deref(),
-                &masters,
+                &tables,
             ) {
                 Ok(text) => Answered {
                     outcome: Ok(Reply::Admin(text)),
@@ -137,7 +140,7 @@ pub(crate) fn answer_calls(
                             "the server has not joined this user yet",
                         ))
                     } else {
-                        answer_call(call.call.clone(), model, &masters)
+                        answer_call(call.call.clone(), model, &tables)
                     }
                 }
             }
@@ -155,7 +158,7 @@ pub(crate) fn answer_calls(
 
 /// One call answered by a joined model. The sections are the ones the model
 /// queued for this answer.
-pub(crate) fn answer_call(call: Call, model: &mut ServerModel, masters: &Masters) -> Answered {
+pub(crate) fn answer_call(call: Call, model: &mut ServerModel, masters: &Tables<'_>) -> Answered {
     let before = model.responses.len();
     // An administration call's sections are pushes, not a reply.
     let admin = matches!(call, Call::Admin(_));
@@ -177,7 +180,7 @@ pub(crate) fn answer_call(call: Call, model: &mut ServerModel, masters: &Masters
     }
 }
 
-fn run(call: Call, model: &mut ServerModel, masters: &Masters) -> Result<Reply, Refusal> {
+fn run(call: Call, model: &mut ServerModel, masters: &Tables<'_>) -> Result<Reply, Refusal> {
     match call {
         Call::Join => {
             // The join seats the user and answers with every section; a
@@ -327,11 +330,9 @@ fn run(call: Call, model: &mut ServerModel, masters: &Masters) -> Result<Reply, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::craft::{
-        parse_blueprints, parse_costs, parse_rank_obtained_exps, parse_terms, BASE_TEXTURE_ID,
-    };
+    use crate::model::craft::BASE_TEXTURE_ID;
     use crate::model::document::{self, Clock, Migration};
-    use crate::model::{inventory, Origin, SECTION_STAMINA};
+    use crate::model::{Origin, SECTION_STAMINA};
     use moly_protocol::api::{
         BirthdayPartyDeliveryRequest, BirthdayPartyGatherRequest, CharacterTalkReadRequest,
         GateChangeRequest, GateReserveRequest, HarvestRequest, HomeActionPost, MusicPlayEjectRequest,
@@ -368,7 +369,7 @@ mod tests {
         model
     }
 
-    fn joined_model(masters: &Masters) -> ServerModel {
+    fn joined_model(masters: &Tables<'_>) -> ServerModel {
         let mut model = fixture_model();
         model.join(masters);
         model.responses.clear();
@@ -386,6 +387,8 @@ mod tests {
     fn the_join_seats_the_user_and_carries_every_section() {
         let masters = fixture_masters();
         let mut model = fixture_model();
+        let shared = MasterTables::fixture();
+        let masters = Tables::new(&masters, Some(&shared));
         let answered = answer_call(Call::Join, &mut model, &masters);
         assert_eq!(ok(answered.clone()), Reply::Joined);
         let sections = answered.sections.expect("the join carries its sections");
@@ -403,6 +406,18 @@ mod tests {
             sections.schedules.as_ref().map(Vec::len),
             Some(6),
             "three days of both refresh windows"
+        );
+        let panel: serde_json::Value = serde_json::from_str(
+            sections
+                .npc_panel
+                .as_deref()
+                .expect("the join carries the panel slice"),
+        )
+        .expect("the panel slice is JSON");
+        assert_eq!(panel["version"].as_u64(), Some(1));
+        assert_eq!(
+            panel["userMysekaiGamedata"]["refreshedAt"].as_i64(),
+            Some(1_790_300_000_000)
         );
         assert_eq!(model.doc.gamedata.refreshed_at, 1_790_300_000_000);
     }
@@ -445,6 +460,8 @@ mod tests {
     #[test]
     fn the_harvest_reply_is_the_sent_rests_unless_an_edit_is_pending() {
         let masters = fixture_masters();
+        let shared = MasterTables::fixture();
+        let masters = Tables::new(&masters, Some(&shared));
         let mut model = joined_model(&masters);
         let sent = Stamina {
             normal: 7,
@@ -496,6 +513,8 @@ mod tests {
                 max_durability: 10,
             },
         ]);
+        let shared = MasterTables::fixture();
+        let masters = Tables::new(&masters, Some(&shared));
         let mut model = joined_model(&masters);
         let sent = Stamina {
             normal: 7,
@@ -536,6 +555,8 @@ mod tests {
     #[test]
     fn the_gather_reply_carries_the_pools() {
         let masters = fixture_masters();
+        let shared = MasterTables::fixture();
+        let masters = Tables::new(&masters, Some(&shared));
         let mut model = joined_model(&masters);
         let answered = answer_call(Call::Gather, &mut model, &masters);
         assert_eq!(ok(answered.clone()), Reply::Gather(model.doc.stamina));
@@ -548,6 +569,8 @@ mod tests {
     #[test]
     fn the_gate_reserve_and_change_answer_with_the_gate_rows() {
         let masters = fixture_masters();
+        let shared = MasterTables::fixture();
+        let masters = Tables::new(&masters, Some(&shared));
         let mut model = joined_model(&masters);
         let answered = answer_call(
             Call::GateReserve(GateReserveRequest {
@@ -555,6 +578,20 @@ mod tests {
             }),
             &mut model,
             &masters,
+        );
+        let panel: serde_json::Value = serde_json::from_str(
+            answered
+                .sections
+                .as_ref()
+                .and_then(|sections| sections.npc_panel.as_deref())
+                .expect("the reserve carries the panel slice"),
+        )
+        .expect("the panel slice is JSON");
+        assert_eq!(
+            panel["userMysekaiGateCharacterVisit"]["userMysekaiGateCharacters"]
+                .as_array()
+                .map(Vec::len),
+            Some(model.doc.gate_characters.len())
         );
         match ok(answered) {
             Reply::Gate(GateReply::Reserve { row, rows, .. }) => {
@@ -597,6 +634,8 @@ mod tests {
     #[test]
     fn the_delivery_refusal_keeps_the_models_text() {
         let masters = fixture_masters();
+        let shared = MasterTables::fixture();
+        let masters = Tables::new(&masters, Some(&shared));
         let mut model = joined_model(&masters);
         let answered = answer_call(
             Call::BirthdayPartyDelivery(BirthdayPartyDeliveryRequest {
@@ -619,6 +658,8 @@ mod tests {
     #[test]
     fn the_gather_of_no_party_answers_with_no_rewards() {
         let masters = fixture_masters();
+        let shared = MasterTables::fixture();
+        let masters = Tables::new(&masters, Some(&shared));
         let mut model = joined_model(&masters);
         let answered = answer_call(
             Call::BirthdayPartyGather(BirthdayPartyGatherRequest { contents: vec![] }),
@@ -637,6 +678,8 @@ mod tests {
     #[test]
     fn the_home_action_answers_and_carries_the_pending_sections() {
         let masters = fixture_masters();
+        let shared = MasterTables::fixture();
+        let masters = Tables::new(&masters, Some(&shared));
         let mut model = joined_model(&masters);
         let answered = answer_call(
             Call::HomeAction(HomeActionPost {
@@ -655,17 +698,21 @@ mod tests {
 
     /// The blueprints, costs, first-craft bonus, fixture possession row and
     /// term row the game's craft tests use.
-    fn craft_masters(mut masters: Masters) -> Masters {
+    fn craft_masters(tables: &mut MasterTables) {
         let upstream = |rows: serde_json::Value| rows.to_string();
-        parse_blueprints(
+        let craft = tables
+            .craft
+            .as_mut()
+            .expect("the fixture seats the craft masters");
+        moly_masters::load::parse_blueprints(
             &upstream(json!([
                 {"id": 1, "mysekaiCraftType": "mysekai_fixture", "craftTargetId": 1, "isEnableSketch": true, "isObtainedByConvert": true, "craftCountLimit": 1, "isAvailableWithoutPossession": false},
                 {"id": 4, "mysekaiCraftType": "mysekai_fixture", "craftTargetId": 4, "isEnableSketch": true, "isObtainedByConvert": true, "isAvailableWithoutPossession": false},
             ])),
-            &mut masters,
+            craft,
         )
         .unwrap();
-        parse_costs(
+        moly_masters::load::parse_costs(
             &upstream(json!([
                 {"id": 1, "mysekaiBlueprintId": 1, "mysekaiMaterialId": 1, "seq": 1, "quantity": 100},
                 {"id": 2, "mysekaiBlueprintId": 1, "mysekaiMaterialId": 2, "seq": 2, "quantity": 20},
@@ -676,36 +723,42 @@ mod tests {
                 {"id": 11, "mysekaiBlueprintId": 4, "mysekaiMaterialId": 21, "seq": 2, "quantity": 3},
                 {"id": 12, "mysekaiBlueprintId": 4, "mysekaiMaterialId": 10, "seq": 3, "quantity": 3},
             ])),
-            &mut masters,
+            craft,
         )
         .unwrap();
-        parse_terms(
+        moly_masters::load::parse_terms(
             &upstream(json!([
                 {"id": 1, "mysekaiBlueprintId": 844, "startAt": 1_759_330_800_000_i64, "endAt": 1_759_849_199_000_i64},
             ])),
-            &mut masters,
+            craft,
         )
         .unwrap();
-        parse_rank_obtained_exps(
+        moly_masters::load::parse_rank_obtained_exps(
             &upstream(json!([
                 {"id": 1, "mysekaiRankObtainedExpType": "craft_mysekai_fixture_first_bonus", "quantity": 1000},
             ])),
-            &mut masters,
+            craft,
         )
         .unwrap();
-        inventory::parse_fixture_possessions(
+        let possession = tables
+            .possession
+            .as_mut()
+            .expect("the fixture seats the possession masters");
+        moly_masters::load::parse_fixture_possessions(
             &upstream(json!([
                 {"id": 1, "level": 1, "possessionLimit": 1000},
             ])),
-            &mut masters,
+            possession,
         )
         .unwrap();
-        masters
     }
 
     #[test]
     fn the_craft_spends_its_cost_and_earns_the_first_craft_bonus() {
-        let masters = craft_masters(fixture_masters());
+        let masters = fixture_masters();
+        let mut shared = MasterTables::fixture();
+        craft_masters(&mut shared);
+        let masters = Tables::new(&masters, Some(&shared));
         let mut model = joined_model(&masters);
         model.doc.gamedata.total_exp = 0;
         model.doc.gamedata.mysekai_rank = Some(1);
@@ -749,6 +802,8 @@ mod tests {
     #[test]
     fn the_sketch_refusal_keeps_its_api_name() {
         let masters = fixture_masters();
+        let shared = MasterTables::fixture();
+        let masters = Tables::new(&masters, Some(&shared));
         let mut model = joined_model(&masters);
         let answered = answer_call(
             Call::HousingSketch(UserMysekaiHousingSketchRequest {
@@ -774,6 +829,8 @@ mod tests {
     #[test]
     fn the_housing_layout_save_stores_the_served_row() {
         let masters = fixture_masters();
+        let shared = MasterTables::fixture();
+        let masters = Tables::new(&masters, Some(&shared));
         let mut model = joined_model(&masters);
         let row = moly_protocol::api::HousingLayoutFixture {
             package: "mysekai__fixture__mdl_test".to_owned(),
@@ -812,6 +869,8 @@ mod tests {
     #[test]
     fn the_talk_read_sets_the_row_and_replies_with_the_table() {
         let masters = fixture_masters();
+        let shared = MasterTables::fixture();
+        let masters = Tables::new(&masters, Some(&shared));
         let mut model = joined_model(&masters);
         let answered = answer_call(
             Call::CharacterTalkRead(CharacterTalkReadRequest {
@@ -839,6 +898,8 @@ mod tests {
     fn the_music_play_set_and_eject_change_the_site_row() {
         let mut masters = fixture_masters();
         masters.music_records = Some(vec![12]);
+        let shared = MasterTables::fixture();
+        let masters = Tables::new(&masters, Some(&shared));
         let mut model = joined_model(&masters);
         model.doc.music_records = vec![OwnedMusicRecord {
             mysekai_music_record_id: 12,
@@ -888,6 +949,8 @@ mod tests {
     #[test]
     fn the_system_fixture_action_records_the_row() {
         let masters = fixture_masters();
+        let shared = MasterTables::fixture();
+        let masters = Tables::new(&masters, Some(&shared));
         let mut model = joined_model(&masters);
         let answered = answer_call(
             Call::SystemFixtureAction(SystemFixtureActionRequest {
@@ -914,6 +977,8 @@ mod tests {
     #[test]
     fn the_admin_views_and_edit_answer_with_json_text() {
         let masters = fixture_masters();
+        let shared = MasterTables::fixture();
+        let masters = Tables::new(&masters, Some(&shared));
         let mut model = joined_model(&masters);
         match ok(answer_call(
             Call::Admin(AdminCall::Schema),
@@ -956,6 +1021,8 @@ mod tests {
     #[test]
     fn a_live_edit_queues_a_sync_push_with_the_served_schedule() {
         let masters = fixture_masters();
+        let shared = MasterTables::fixture();
+        let masters = Tables::new(&masters, Some(&shared));
         let mut model = joined_model(&masters);
         model.responses.clear();
         // The default document serves a daily schedule; the phenomenon of
@@ -996,7 +1063,9 @@ mod tests {
         let session = SessionId(7);
         let (out, replies) = async_channel::unbounded::<Vec<u8>>();
         let masters = fixture_masters();
-        let model = joined_model(&masters);
+        let shared = MasterTables::fixture();
+        let tables = Tables::new(&masters, Some(&shared));
+        let model = joined_model(&tables);
         let mut users = Users::default();
         users.0.insert(
             UserId::local(),

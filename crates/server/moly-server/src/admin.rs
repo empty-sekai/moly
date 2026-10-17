@@ -5,14 +5,14 @@ use bevy::prelude::*;
 use moly_protocol::{AdminCall, Refusal};
 
 use crate::defaults::Defaults;
-use crate::masters::Masters;
+use crate::masters::Tables;
 use crate::model::document;
 use crate::model::{edit, Origin, ServerModel};
 use crate::users::UserEntry;
 
 /// The document with its clock, the pending sections and the missing
 /// masters: what the control plane reads.
-pub(crate) fn document_view(model: &ServerModel, masters: &Masters) -> String {
+pub(crate) fn document_view(model: &ServerModel, masters: &Tables<'_>) -> String {
     serde_json::json!({
         "schemaVersion": document::SCHEMA_VERSION,
         "origin": model.origin.name(),
@@ -37,7 +37,7 @@ pub(crate) fn document_view(model: &ServerModel, masters: &Masters) -> String {
 }
 
 /// The editable fields of the document.
-pub(crate) fn schema_view(model: &ServerModel, masters: &Masters) -> String {
+pub(crate) fn schema_view(model: &ServerModel, masters: &Tables<'_>) -> String {
     edit::schema(model, masters).to_string()
 }
 
@@ -50,7 +50,7 @@ pub(crate) fn schema_without_model() -> String {
 pub(crate) fn answer(
     call: AdminCall,
     model: &mut ServerModel,
-    masters: &Masters,
+    masters: &Tables<'_>,
 ) -> Result<String, Refusal> {
     match call {
         AdminCall::Schema => Ok(schema_view(model, masters)),
@@ -83,7 +83,7 @@ pub(crate) fn install(
     server_json: Option<String>,
     local_json: Option<&str>,
     defaults: Option<&Defaults>,
-    masters: &Masters,
+    masters: &Tables<'_>,
 ) -> Result<String, Refusal> {
     let (doc, origin, pending) = match server_json {
         Some(text) => {

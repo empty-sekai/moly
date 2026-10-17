@@ -63,7 +63,7 @@ pub(crate) mod tools;
 use bevy::prelude::*;
 
 pub(crate) use crate::instrument::instrument_env;
-pub(crate) use crate::masters::{int32, master_rows, Deferred, Masters};
+pub(crate) use crate::masters::{int32, master_rows, Deferred, Masters, Tables};
 pub(crate) use document::{ScheduleRow, Stamina};
 pub(crate) use moly_protocol::gate::{GateReply, ReplyTalkList};
 pub(crate) use moly_protocol::json::{SECTION_GAMEDATA, SECTION_PASS, SECTION_STAMINA};
@@ -89,7 +89,7 @@ const SITE_LEVEL_RELEASE: &str = "mysekai_site_level";
 /// the site's level. The second value names the levels left out, for the
 /// model to report. `Err` names the master tables the rows are read from that
 /// the model has not seated.
-fn appended_release_rows(masters: &Masters) -> Result<(Vec<RankReleaseRow>, Vec<String>), String> {
+fn appended_release_rows(masters: &Tables<'_>) -> Result<(Vec<RankReleaseRow>, Vec<String>), String> {
     let (Some(categories), Some(levels), Some(releases), Some(ranks)) = (
         &masters.site_categories,
         &masters.site_levels,
@@ -321,9 +321,24 @@ impl ServerModel {
 
     /// The server panel's NPC slice (schemaVersion 1): the rows served at the
     /// join and the client's `refreshedAt`.
-    #[allow(dead_code)] // Read by the server panel's seam.
     pub(crate) fn npc_slice(&self, served: &[ScheduleRow], refreshed_at: i64) -> Option<String> {
         Some(self.doc.npc_slice(served, refreshed_at).to_string())
+    }
+
+    /// The panel slice a response carries: the join, a refresh, a
+    /// synchronised edit, the gate's reserve or change, and a talk read.
+    fn npc_panel(&self, kind: ResponseKind) -> Option<String> {
+        matches!(
+            kind,
+            ResponseKind::Join
+                | ResponseKind::Refresh
+                | ResponseKind::Sync
+                | ResponseKind::GateReserve
+                | ResponseKind::GateChange
+                | ResponseKind::CharacterTalkRead
+        )
+        .then(|| self.npc_slice(&self.served, self.doc.gamedata.refreshed_at))
+        .flatten()
     }
 
     pub(crate) fn revision(&self) -> u64 {
@@ -336,7 +351,7 @@ impl ServerModel {
     /// table the rows are read from refuses by name and appends none.
     pub(crate) fn overlay_rank_releases(
         &mut self,
-        masters: &Masters,
+        masters: &Tables<'_>,
     ) -> Vec<RankReleaseRow> {
         if self.doc.site_level_releases != SiteLevelReleases::EveryAuthoredLevel {
             return Vec::new();
@@ -389,7 +404,7 @@ impl ServerModel {
     }
 
     /// The rows the schedule is served with at `now`.
-    pub(super) fn served_rows(&mut self, now: i64, masters: &Masters) -> Vec<ScheduleRow> {
+    pub(super) fn served_rows(&mut self, now: i64, masters: &Tables<'_>) -> Vec<ScheduleRow> {
         match &self.doc.schedule_policy {
             SchedulePolicy::Stated => self.doc.schedules.clone(),
             SchedulePolicy::Daily(map) => match &masters.periods {
@@ -408,7 +423,7 @@ impl ServerModel {
     /// `refreshedAt` refreshes the user.
     /// A clock set behind the last refresh counts as entering a new window
     /// too (the server's record is never in its own future).
-    pub(super) fn refresh_due(&self, now: i64, masters: &Masters) -> bool {
+    pub(super) fn refresh_due(&self, now: i64, masters: &Tables<'_>) -> bool {
         let Some(periods) = &masters.periods else {
             return false;
         };
@@ -418,12 +433,12 @@ impl ServerModel {
     }
 
     /// The refresh: `refreshedAt` := now; the stamina refresh policy.
-    pub(super) fn refresh(&mut self, now: i64, masters: &Masters) {
+    pub(super) fn refresh(&mut self, now: i64, masters: &Tables<'_>) {
         let before = self.doc.gamedata.refreshed_at;
         self.doc.gamedata.refreshed_at = now;
         let refill = match (
             self.doc.stamina_refresh,
-            masters.stamina_max,
+            masters.stamina_max(),
             &mut self.doc.stamina,
         ) {
             (StaminaRefresh::RefillNormal, Some(max), Some(stamina)) => {
@@ -449,10 +464,10 @@ impl ServerModel {
 
     /// Seats what a new user lacks: the pools (initial stamina policy) and
     /// the rank (rank from experience policy).
-    fn seat(&mut self, masters: &Masters) {
+    fn seat(&mut self, masters: &Tables<'_>) {
         let mut changed = false;
         if self.doc.stamina.is_none() {
-            match masters.stamina_max {
+            match masters.stamina_max() {
                 Some(max) => {
                     let boost = masters.boost_grant.unwrap_or(0);
                     self.doc.stamina = Some(Stamina {
@@ -496,7 +511,7 @@ impl ServerModel {
         kind: ResponseKind,
         is_refreshed: bool,
         carries: &[&str],
-        masters: &Masters,
+        masters: &Tables<'_>,
     ) {
         let now = self.now_ms();
         let mut sections: Vec<String> = carries.iter().map(|s| (*s).to_owned()).collect();
@@ -542,6 +557,7 @@ impl ServerModel {
                 system_fixture_actions: has(system_fixture_action::SECTION)
                     .then(|| self.doc.system_fixture_actions.rows.clone()),
                 tools: has(tools::SECTION).then(|| self.doc.tools.clone().unwrap_or_default()),
+                npc_panel: self.npc_panel(kind),
             },
         };
         info!(
@@ -555,7 +571,7 @@ impl ServerModel {
 
     /// The join: masters are in. Refresh when due, seat a new user, check
     /// the stored values against the masters, respond with every section.
-    pub(super) fn join(&mut self, masters: &Masters) {
+    pub(super) fn join(&mut self, masters: &Tables<'_>) {
         self.joined = true;
         let now = self.now_ms();
         self.seat(masters);
@@ -573,7 +589,7 @@ impl ServerModel {
         }
         if !self.avatar_instrument.is_empty() {
             let instrument = std::mem::take(&mut self.avatar_instrument);
-            let (avatar, unresolved) = instrument.resolve(&masters.avatar);
+            let (avatar, unresolved) = instrument.resolve(masters.avatar());
             for line in unresolved {
                 self.push_error(format!("native avatar instrument: {line}"));
             }
@@ -592,7 +608,7 @@ impl ServerModel {
     }
 
     /// The running clock's check.
-    pub(super) fn tick(&mut self, masters: &Masters) {
+    pub(super) fn tick(&mut self, masters: &Tables<'_>) {
         let now = self.now_ms();
         if self.refresh_due(now, masters) {
             self.refresh(now, masters);
@@ -606,7 +622,7 @@ impl ServerModel {
     }
 
     /// The served values changed: serve the schedule again.
-    pub(super) fn live_update(&mut self, masters: &Masters) {
+    pub(super) fn live_update(&mut self, masters: &Tables<'_>) {
         let now = self.now_ms();
         if self.joined && self.refresh_due(now, masters) {
             self.refresh(now, masters);
@@ -633,7 +649,7 @@ impl ServerModel {
     pub(super) fn harvest(
         &mut self,
         request: &moly_protocol::api::HarvestRequest,
-        masters: &Masters,
+        masters: &Tables<'_>,
     ) -> Stamina {
         let rest = |kind: &str| {
             request
@@ -671,7 +687,7 @@ impl ServerModel {
     }
 
     /// The gather reply's stamina, recorded as a response.
-    pub(super) fn gather(&mut self, masters: &Masters) -> Option<Stamina> {
+    pub(super) fn gather(&mut self, masters: &Tables<'_>) -> Option<Stamina> {
         self.respond(
             ResponseKind::Gather,
             false,

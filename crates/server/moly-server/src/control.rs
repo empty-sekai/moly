@@ -11,8 +11,9 @@ use serde_json::{json, Value};
 use crate::admin;
 use crate::defaults::Defaults;
 use crate::hub::Sessions;
-use crate::masters::Masters;
+use crate::masters::{Masters, Tables};
 use crate::users::{UserEntry, Users};
+use moly_masters::load::MasterTables;
 
 /// The server's remote-procedure plugin: the protocol's built-in methods and
 /// the `moly.server.*` control methods. The host adds it together with the
@@ -51,21 +52,33 @@ fn refusal(error: moly_protocol::Refusal) -> BrpError {
 
 /// `moly.server.document`: the document view, the same one `Call::Admin`
 /// answers with `Document`.
-fn document(In(params): In<Option<Value>>, users: Res<Users>, masters: Res<Masters>) -> BrpResult {
+fn document(
+    In(params): In<Option<Value>>,
+    users: Res<Users>,
+    masters: Res<Masters>,
+    shared: Option<Res<MasterTables>>,
+) -> BrpResult {
     let user = user_of(&params);
     let Some(model) = users.0.get(&user).and_then(|entry| entry.model.as_ref()) else {
         return Err(no_document(&user));
     };
-    json_of(admin::document_view(model, &masters))
+    let tables = Tables::new(&masters, shared.as_deref());
+    json_of(admin::document_view(model, &tables))
 }
 
 /// `moly.server.schema`: the editable fields of the document.
-fn schema(In(params): In<Option<Value>>, users: Res<Users>, masters: Res<Masters>) -> BrpResult {
+fn schema(
+    In(params): In<Option<Value>>,
+    users: Res<Users>,
+    masters: Res<Masters>,
+    shared: Option<Res<MasterTables>>,
+) -> BrpResult {
     let user = user_of(&params);
     let Some(model) = users.0.get(&user).and_then(|entry| entry.model.as_ref()) else {
         return Err(no_document(&user));
     };
-    json_of(admin::schema_view(model, &masters))
+    let tables = Tables::new(&masters, shared.as_deref());
+    json_of(admin::schema_view(model, &tables))
 }
 
 /// `moly.server.edit`: one `server.edit` command, under `params.command` or as
@@ -76,7 +89,9 @@ fn edit(
     In(params): In<Option<Value>>,
     mut users: ResMut<Users>,
     masters: Res<Masters>,
+    shared: Option<Res<MasterTables>>,
 ) -> BrpResult {
+    let tables = Tables::new(&masters, shared.as_deref());
     let params = params.unwrap_or(Value::Null);
     let user = user_of(&Some(params.clone()));
     // Either `{"command": {..}}` or the edit's own fields at the top level,
@@ -104,7 +119,7 @@ fn edit(
             command_json: Value::Object(command).to_string(),
         },
         model,
-        &masters,
+        &tables,
     ) {
         Ok(text) => Ok(json!({
             "ok": true,
@@ -125,7 +140,9 @@ fn install(
     mut users: ResMut<Users>,
     masters: Res<Masters>,
     defaults: Option<Res<Defaults>>,
+    shared: Option<Res<MasterTables>>,
 ) -> BrpResult {
+    let tables = Tables::new(&masters, shared.as_deref());
     let params = params.unwrap_or(Value::Null);
     let user = user_of(&Some(params.clone()));
     let server_json = params
@@ -142,7 +159,7 @@ fn install(
         server_json,
         local_json,
         defaults.as_deref(),
-        &masters,
+        &tables,
     )
     .map_err(refusal)?;
     json_of(text)

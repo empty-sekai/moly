@@ -51,7 +51,7 @@ pub(crate) use moly_protocol::api::{
 };
 pub(crate) use moly_protocol::json::SECTION_MUSIC_RECORDS as RECORDS_SECTION;
 
-use super::{Masters, ResponseKind, ServerModel};
+use super::{ResponseKind, ServerModel, Tables};
 
 pub(crate) const POLICY_KEY: &str = "musicPlayReply";
 pub(crate) const REPLY_SUCCESS: &str = "success";
@@ -210,7 +210,7 @@ impl ServerModel {
     fn music_play_set_row(
         &self,
         request: &MusicPlaySetRequest,
-        masters: &Masters,
+        masters: &Tables<'_>,
     ) -> Result<MusicPlaySetting, String> {
         let record = request.mysekai_music_record_id;
         if let Some(records) = masters.music_records.as_deref() {
@@ -236,7 +236,7 @@ impl ServerModel {
         })
     }
 
-    pub(crate) fn music_play(&mut self, request: MusicPlayPost, masters: &Masters) -> MusicPlayReply {
+    pub(crate) fn music_play(&mut self, request: MusicPlayPost, masters: &Tables<'_>) -> MusicPlayReply {
         let slot = match request {
             MusicPlayPost::Set(_) => 0,
             MusicPlayPost::Eject(_) => 1,

@@ -38,7 +38,7 @@ use bevy::prelude::*;
 use serde_json::{json, Map, Value};
 
 use super::document::ServerDocument;
-use super::{Masters, ResponseKind, ServerModel};
+use super::{Masters, ResponseKind, ServerModel, Tables};
 
 pub(crate) use moly_protocol::json::SECTION_TOOLS as SECTION;
 const INSTRUMENT: &str = "MOLY_HARVEST_MOCK_TOOLS";
@@ -57,7 +57,7 @@ pub(crate) fn parse_master(text: &str, masters: &mut Masters) -> Result<(), Stri
     Ok(())
 }
 
-fn max_durability(masters: &Masters, tool_id: i32) -> Option<i32> {
+fn max_durability(masters: &Tables<'_>, tool_id: i32) -> Option<i32> {
     masters
         .tools
         .as_ref()?
@@ -116,7 +116,7 @@ pub(crate) fn check_structure(rows: &Option<Vec<UserMysekaiTool>>) -> Result<(),
 /// tool, a durability at most its `maxDurability`.
 pub(crate) fn check_masters(
     rows: &Option<Vec<UserMysekaiTool>>,
-    masters: &Masters,
+    masters: &Tables<'_>,
 ) -> Result<(), String> {
     if masters.tools.is_none() {
         return Ok(());
@@ -143,7 +143,7 @@ pub(crate) fn check_masters(
 // ---------------------------------------------------------------------------
 
 /// The initial tools policy's rows (`Err`: the master cannot give them).
-pub(crate) fn initial_rows(masters: &Masters, now: i64) -> Result<Vec<UserMysekaiTool>, String> {
+pub(crate) fn initial_rows(masters: &Tables<'_>, now: i64) -> Result<Vec<UserMysekaiTool>, String> {
     let tools = masters
         .tools
         .as_ref()
@@ -236,7 +236,7 @@ pub(crate) fn grant_tool(
 impl ServerModel {
     /// The initial tools policy for a user without tool rows; whether the
     /// document changed.
-    pub(super) fn seat_tools(&mut self, masters: &Masters) -> bool {
+    pub(super) fn seat_tools(&mut self, masters: &Tables<'_>) -> bool {
         if self.doc.tools.is_some() {
             return false;
         }
@@ -260,7 +260,7 @@ impl ServerModel {
 
     /// The master `maxDurability` a crafted tool starts at, checked before
     /// the craft spends anything.
-    pub(super) fn crafted_tool_max(&self, tool_id: i32, masters: &Masters) -> Result<i32, String> {
+    pub(super) fn crafted_tool_max(&self, tool_id: i32, masters: &Tables<'_>) -> Result<i32, String> {
         max_durability(masters, tool_id).ok_or_else(|| match &masters.tools {
             None => "the tool master (mysekaiTools) is absent: the crafted tool cannot be granted"
                 .to_owned(),
@@ -287,7 +287,7 @@ impl ServerModel {
         tool_id: i32,
         use_count: i32,
         sent_durability: i32,
-        masters: &Masters,
+        masters: &Tables<'_>,
     ) -> bool {
         let outcome = match (
             max_durability(masters, tool_id),

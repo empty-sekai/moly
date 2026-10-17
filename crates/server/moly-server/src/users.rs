@@ -12,8 +12,9 @@ use moly_protocol::{PushKind, ServerMessage, UserId};
 
 use crate::defaults::Defaults;
 use crate::hub::{SessionOpened, Sessions};
-use crate::masters::{Masters, Parties};
+use crate::masters::{Masters, Parties, Tables};
 use crate::model::delivery::PartyMaster;
+use moly_masters::load::MasterTables;
 use crate::model::ResponseKind;
 use crate::model::document;
 use crate::model::{Origin, ServerModel};
@@ -101,9 +102,11 @@ fn seat_users(
 pub(crate) fn tick(
     mut users: ResMut<Users>,
     masters: Res<Masters>,
+    shared: Option<Res<MasterTables>>,
     time: Res<Time<Real>>,
     mut elapsed: Local<f32>,
 ) {
+    let tables = Tables::new(&masters, shared.as_deref());
     *elapsed += time.delta_secs();
     if *elapsed < TICK_SECONDS {
         return;
@@ -115,7 +118,7 @@ pub(crate) fn tick(
     for entry in users.0.values_mut() {
         if let Some(model) = &mut entry.model {
             if model.joined {
-                model.tick(&masters);
+                model.tick(&tables);
             }
         }
     }
@@ -127,8 +130,10 @@ pub(crate) fn tick(
 pub(crate) fn seat_parties(
     mut users: ResMut<Users>,
     masters: Res<Masters>,
+    shared: Option<Res<MasterTables>>,
     parties: Res<Parties>,
 ) {
+    let tables = Tables::new(&masters, shared.as_deref());
     if !masters.ready {
         return;
     }
@@ -174,7 +179,7 @@ pub(crate) fn seat_parties(
                 ResponseKind::BirthdayPartySeat,
                 false,
                 &changed,
-                &masters,
+                &tables,
             );
         }
     }

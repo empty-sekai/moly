@@ -101,43 +101,6 @@ fn id_of(map: &Option<BTreeMap<i32, String>>, wanted: &str) -> Option<i32> {
         .map(|(id, _)| *id)
 }
 
-fn master_rows(text: &str, table: &str) -> Result<Vec<Value>, String> {
-    let value: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
-    super::master_rows(&value, table)
-}
-
-pub(crate) fn parse_costumes(text: &str, masters: &mut super::Masters) -> Result<(), String> {
-    masters.avatar.costumes = Some(moly_masters::avatar::parse_costumes(&master_rows(
-        text,
-        "avatarCostumes",
-    )?)?);
-    Ok(())
-}
-
-pub(crate) fn parse_accessories(text: &str, masters: &mut super::Masters) -> Result<(), String> {
-    masters.avatar.accessories = Some(moly_masters::avatar::parse_accessories(&master_rows(
-        text,
-        "avatarAccessories",
-    )?)?);
-    Ok(())
-}
-
-pub(crate) fn parse_skin_colors(text: &str, masters: &mut super::Masters) -> Result<(), String> {
-    masters.avatar.skin_colors = Some(moly_masters::avatar::parse_skin_colors(&master_rows(
-        text,
-        "avatarSkinColors",
-    )?)?);
-    Ok(())
-}
-
-pub(crate) fn parse_coordinates(text: &str, masters: &mut super::Masters) -> Result<(), String> {
-    masters.avatar.coordinates = Some(moly_masters::avatar::parse_coordinates(&master_rows(
-        text,
-        "avatarCoordinates",
-    )?)?);
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Native instrument
 // ---------------------------------------------------------------------------

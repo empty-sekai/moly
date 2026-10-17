@@ -45,7 +45,7 @@ use bevy::prelude::*;
 use moly_law::fixture::{Direction, GridPosition};
 use serde_json::{json, Map, Value};
 
-use super::{Masters, ResponseKind, ServerModel};
+use super::{ResponseKind, ServerModel, Tables};
 
 /// The API's name in the source.
 pub(crate) const API: &str = "PostUserMysekaiSystemFixtureActionApi";
@@ -396,7 +396,7 @@ impl ServerModel {
     pub(crate) fn system_fixture_action(
         &mut self,
         mysekai_system_fixture_id: i32,
-        masters: &Masters,
+        masters: &Tables<'_>,
     ) -> Result<Vec<moly_protocol::rows::UserResource>, String> {
         if self.doc.system_fixture_actions.reply == ReplyPolicy::Failure {
             return Err(format!("policies.{REPLY_POLICY} is {REPLY_FAILURE}"));

@@ -25,7 +25,7 @@ pub(crate) use moly_protocol::api::{
     SuiteUserReply, UserMysekaiHousingEditLayoutRequest,
 };
 pub(crate) use moly_protocol::rows::SuiteUserSections;
-use super::{Masters, ResponseKind, ServerModel};
+use super::{ResponseKind, ServerModel, Tables};
 
 /// The API's name in the source.
 pub(crate) const API: &str = "PostUserMysekaiHousingLayoutApi";
@@ -34,7 +34,7 @@ impl ServerModel {
     pub(crate) fn housing_layout(
         &mut self,
         request: UserMysekaiHousingEditLayoutRequest,
-        masters: &Masters,
+        masters: &Tables<'_>,
     ) -> SuiteUserReply {
         let UserMysekaiHousingEditLayoutRequest {
             mysekai_site_id,

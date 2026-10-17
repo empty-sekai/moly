@@ -7,6 +7,7 @@
 //! load in the background and refuse by name until they arrive.
 
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
 use bevy::asset::io::{AssetReaderError, Reader};
 use bevy::asset::{AssetPath, AssetServer};
@@ -14,15 +15,18 @@ use bevy::prelude::*;
 use bevy::tasks::{block_on, futures_lite::future, IoTaskPool, Task};
 use moly_assets::json::master::{self, MasterData, MasterTable};
 use moly_assets::remote::RemoteRegion;
+use moly_masters::avatar::AvatarMasters;
 use moly_masters::clock::RefreshPeriod;
+use moly_masters::craft::CraftMasters;
+use moly_masters::delivery::DeliveryTables;
+use moly_masters::inventory::PossessionMasters;
+use moly_masters::load::{MasterTables, MasterTablesPlugin};
 use moly_masters::StaminaMax;
 use serde_json::Value;
 
 use crate::model::delivery;
-use crate::model::inventory;
 use crate::model::music;
 use crate::model::tools;
-use crate::model::avatar;
 
 const PHENOMENA_INDEX: &str = "moly://phenomena/index.json";
 
@@ -33,7 +37,6 @@ pub struct Masters {
     pub periods: Option<Vec<RefreshPeriod>>,
     /// Phenomenon id and master name.
     pub phenomena: Option<Vec<(i32, String)>>,
-    pub stamina_max: Option<StaminaMax>,
     pub boost_grant: Option<i32>,
     /// (rank, cumulative totalExp), master order.
     pub ranks: Option<Vec<(i32, i32)>>,
@@ -48,19 +51,12 @@ pub struct Masters {
     pub(crate) gate_ids: Option<Vec<i32>>,
     /// `mysekaiGateSkins` ids, until they join the gate ids in `gates`.
     pub(crate) gate_skin_ids: Option<Vec<i32>>,
-    /// The birthday-party delivery tables.
-    pub(crate) delivery: Option<delivery::DeliveryTables>,
-    /// The delivery tables as they resolve, until all three are in.
-    pub(crate) delivery_parts: delivery::DeliveryParts,
     /// The total reward boxes (deferred): what each granted box holds.
     pub(crate) reward_boxes: Deferred<Vec<(i64, delivery::Reward)>>,
     /// The master configs (`configs`): configKey -> value.
     pub(crate) configs: Option<BTreeMap<String, String>>,
     /// The music record ids (`mysekaiMusicRecords`).
     pub(crate) music_records: Option<Vec<i32>>,
-    pub(crate) avatar: moly_masters::avatar::AvatarMasters,
-    pub(crate) craft: moly_masters::craft::CraftMasters,
-    pub(crate) possession: moly_masters::inventory::PossessionMasters,
     /// The cards master (deferred): card id -> its character and rarity.
     pub(crate) cards: Deferred<BTreeMap<i32, moly_masters::craft::CardRow>>,
     /// The tool master (`mysekaiTools`).
@@ -121,9 +117,9 @@ impl<T> Deferred<T> {
 
 impl Masters {
     /// A small synthetic table set a harness seats directly: two refresh
-    /// windows, the pool maxima, one recovery grant and three ranks. It
-    /// carries no game data; the server's own tests extend it with the gate
-    /// and craft tables they need.
+    /// windows, one recovery grant and three ranks. It carries no game data;
+    /// the server's own tests extend it with the gate tables they need and
+    /// seat the shared resources with a [`MasterTables::fixture`].
     pub fn fixture() -> Self {
         let mut masters = Self::default();
         masters.periods = Some(vec![
@@ -138,11 +134,6 @@ impl Masters {
                 end_hour: 29,
             },
         ]);
-        masters.stamina_max = Some(StaminaMax {
-            normal: 1000,
-            enhance: 1000,
-            boost: 10000,
-        });
         masters.boost_grant = Some(100);
         masters.ranks = Some(vec![(1, 0), (2, 48_000), (3, 172_300)]);
         masters.phenomena = Some(vec![(1, "a".into()), (2, "b".into())]);
@@ -150,16 +141,12 @@ impl Masters {
         masters
     }
 
-    /// Joins the tables that resolve apart: the gate and gate skin ids, and
-    /// the three delivery tables.
+    /// Joins the tables that resolve apart: the gate and gate skin ids.
     fn join_parts(&mut self) {
         if self.gates.is_none() {
             if let (Some(gates), Some(skins)) = (&self.gate_ids, &self.gate_skin_ids) {
                 self.gates = Some((gates.clone(), skins.clone()));
             }
-        }
-        if self.delivery.is_none() {
-            self.delivery = self.delivery_parts.complete();
         }
     }
 
@@ -194,6 +181,73 @@ impl Masters {
             format!("the master tables are still loading: {}", names.join(", "))
         }
     }
+}
+
+/// The master tables one model call reads: the server's own tables
+/// ([`Masters`]) and the five shared resources. Field access falls through to
+/// the server's tables, so a reader names either set the same way.
+#[derive(Clone, Copy)]
+pub(crate) struct Tables<'a> {
+    server: &'a Masters,
+    shared: Option<&'a MasterTables>,
+}
+
+impl<'a> Tables<'a> {
+    pub(crate) fn new(server: &'a Masters, shared: Option<&'a MasterTables>) -> Self {
+        Self { server, shared }
+    }
+
+    /// The craft masters; an empty set before the tables are in (the model
+    /// reads them only after `Masters::ready`, so a missing table is a
+    /// missing field, not a missing part).
+    pub(crate) fn craft(&self) -> &'a CraftMasters {
+        self.shared
+            .and_then(|tables| tables.craft.as_ref())
+            .unwrap_or_else(|| empty_craft())
+    }
+
+    pub(crate) fn possession(&self) -> &'a PossessionMasters {
+        self.shared
+            .and_then(|tables| tables.possession.as_ref())
+            .unwrap_or_else(|| empty_possession())
+    }
+
+    pub(crate) fn avatar(&self) -> &'a AvatarMasters {
+        self.shared
+            .and_then(|tables| tables.avatar.as_ref())
+            .unwrap_or_else(|| empty_avatar())
+    }
+
+    pub(crate) fn delivery(&self) -> Option<&'a DeliveryTables> {
+        self.shared.and_then(|tables| tables.delivery.as_ref())
+    }
+
+    pub(crate) fn stamina_max(&self) -> Option<StaminaMax> {
+        self.shared.and_then(|tables| tables.stamina_max)
+    }
+}
+
+impl std::ops::Deref for Tables<'_> {
+    type Target = Masters;
+
+    fn deref(&self) -> &Masters {
+        self.server
+    }
+}
+
+fn empty_craft() -> &'static CraftMasters {
+    static EMPTY: OnceLock<CraftMasters> = OnceLock::new();
+    EMPTY.get_or_init(CraftMasters::default)
+}
+
+fn empty_possession() -> &'static PossessionMasters {
+    static EMPTY: OnceLock<PossessionMasters> = OnceLock::new();
+    EMPTY.get_or_init(PossessionMasters::default)
+}
+
+fn empty_avatar() -> &'static AvatarMasters {
+    static EMPTY: OnceLock<AvatarMasters> = OnceLock::new();
+    EMPTY.get_or_init(AvatarMasters::default)
 }
 
 /// One master table the model reads. The master layer parses it into a fresh
@@ -258,12 +312,6 @@ macro_rules! deferred_table {
 /// which are requested once the others are in and seated when they arrive.
 static SERVER_TABLES: &[ServerTable] = &[
     server_table!(
-        "mysekaiStaminas",
-        "mysekaiStaminas (the server's pool maxima)",
-        parse_staminas,
-        stamina_max
-    ),
-    server_table!(
         "mysekaiStaminaRecovery",
         "mysekaiStaminaRecovery (the server's boost grant)",
         parse_recovery,
@@ -318,100 +366,10 @@ static SERVER_TABLES: &[ServerTable] = &[
         music_records
     ),
     server_table!(
-        "avatarCostumes",
-        "avatarCostumes (the server's avatar costumes)",
-        avatar::parse_costumes,
-        avatar.costumes
-    ),
-    server_table!(
-        "avatarAccessories",
-        "avatarAccessories (the server's avatar accessories)",
-        avatar::parse_accessories,
-        avatar.accessories
-    ),
-    server_table!(
-        "avatarSkinColors",
-        "avatarSkinColors (the server's avatar skin colours)",
-        avatar::parse_skin_colors,
-        avatar.skin_colors
-    ),
-    server_table!(
-        "avatarCoordinates",
-        "avatarCoordinates (the server's avatar coordinates)",
-        avatar::parse_coordinates,
-        avatar.coordinates
-    ),
-    server_table!(
-        "mysekaiBlueprints",
-        "mysekaiBlueprints (the server's blueprints)",
-        crate::model::craft::parse_blueprints,
-        craft.blueprints
-    ),
-    server_table!(
-        "mysekaiBlueprintMysekaiMaterialCosts",
-        "mysekaiBlueprintMysekaiMaterialCosts (the server's blueprint material costs)",
-        crate::model::craft::parse_costs,
-        craft.costs
-    ),
-    server_table!(
-        "mysekaiBlueprintTerms",
-        "mysekaiBlueprintTerms (the server's blueprint craft terms)",
-        crate::model::craft::parse_terms,
-        craft.terms
-    ),
-    server_table!(
-        "mysekaiRankObtainedExps",
-        "mysekaiRankObtainedExps (the server's first-craft bonus)",
-        crate::model::craft::parse_rank_obtained_exps,
-        craft.first_craft_bonus
-    ),
-    server_table!(
-        "mysekaiFixturePossessions",
-        "mysekaiFixturePossessions (the server's fixture possession limits)",
-        inventory::parse_fixture_possessions,
-        possession.fixture
-    ),
-    server_table!(
-        "mysekaiMaterialPossessions",
-        "mysekaiMaterialPossessions (the server's material possession limits)",
-        inventory::parse_material_possessions,
-        possession.material
-    ),
-    server_table!(
-        "mysekaiMaterials",
-        "mysekaiMaterials (the server's material types)",
-        inventory::parse_materials,
-        craft.material_types
-    ),
-    server_table!(
-        "mysekaiItems",
-        "mysekaiItems (the server's white blueprint item)",
-        inventory::parse_items_master,
-        craft.white_blueprint_item
-    ),
-    server_table!(
         "mysekaiTools",
         "mysekaiTools (the server's tools: initial tools, durability resets, tool craft)",
         tools::parse_master,
         tools
-    ),
-    server_table!(
-        "birthdayPartyDeliveryRewards",
-        "birthdayPartyDeliveryRewards (the delivery's reward rows)",
-        delivery::parse_rewards,
-        delivery_parts.rewards
-    ),
-    server_table!(
-        "birthdayPartyDeliveryPointBonuses",
-        "birthdayPartyDeliveryPointBonuses (the delivery's point bonus rows)",
-        delivery::parse_point_bonuses,
-        delivery_parts.bonuses
-    ),
-    server_table!(
-        "birthdayPartyDeliveryTotalRewards",
-        "birthdayPartyDeliveryTotalRewards (the delivery's total reward rows)",
-        delivery::parse_total_rewards,
-        delivery_parts.totals
     ),
     // The total reward boxes: the CN master carries their rows as a table of
     // their own; the JP master nests them in each box's `details`.
@@ -482,8 +440,14 @@ async fn read_root_document(
 }
 
 pub(crate) fn install(app: &mut App) {
-    app.add_systems(Startup, load)
-        .add_systems(PreUpdate, resolve_masters.after(master::resolve));
+    app.add_plugins(MasterTablesPlugin)
+        .add_systems(Startup, load)
+        .add_systems(
+            PreUpdate,
+            resolve_masters
+                .after(master::resolve)
+                .after(moly_masters::load::resolve_tables),
+        );
 }
 
 fn load(mut commands: Commands, server: Res<AssetServer>, mut masters: ResMut<MasterData>) {
@@ -520,6 +484,7 @@ pub(crate) fn resolve_masters(
     mut master_data: ResMut<MasterData>,
     mut masters: ResMut<Masters>,
     mut parties: ResMut<Parties>,
+    tables: Option<Res<MasterTables>>,
 ) {
     let mut outcomes: Vec<(&'static str, Parser, Result<Option<String>, String>)> = Vec::new();
     let mut reads_done = true;
@@ -543,6 +508,7 @@ pub(crate) fn resolve_masters(
     let mut requested: Vec<&'static ServerTable> = Vec::new();
     let mut join_waits = false;
     let mut still_loading: Vec<&'static str> = Vec::new();
+    let shared_ready = tables.as_deref().is_none_or(MasterTables::ready);
     if let Some(mut seats) = seats {
         seats.pending.retain(|table| match master_data.take(&table.table) {
             Some(result) => {
@@ -557,7 +523,7 @@ pub(crate) fn resolve_masters(
                 still_loading.push(table.table.name);
             }
         }
-        if !seats.deferred_requested && reads_done && !join_waits {
+        if !seats.deferred_requested && reads_done && !join_waits && shared_ready {
             // The join's tables are in: the deferred ones load in the
             // background now. Without a region (named by the master layer)
             // every candidate is requested and each fails with that reason.
@@ -580,9 +546,15 @@ pub(crate) fn resolve_masters(
     if let Some(result) = master_data.take(&PARTIES) {
         *parties = Parties::from_result(result);
     }
-    if outcomes.is_empty() && seated.is_empty() && requested.is_empty() {
-        masters.pending = still_loading;
-        return;
+    if let Some(tables) = tables.as_deref() {
+        if !shared_ready {
+            still_loading.extend(tables.pending.iter().copied());
+        }
+        for name in &tables.missing {
+            if !masters.missing.iter().any(|known| known == name) {
+                masters.missing.push(name.clone());
+            }
+        }
     }
     for (name, parser, outcome) in outcomes {
         let error = match outcome {
@@ -622,7 +594,7 @@ pub(crate) fn resolve_masters(
         }
     }
     masters.pending = still_loading;
-    if !masters.ready && reads_done && !join_waits {
+    if !masters.ready && reads_done && !join_waits && shared_ready {
         info!(
             "[server] masters resolved; missing: {:?}",
             masters.missing
@@ -838,23 +810,6 @@ fn parse_phenomena(text: &str, masters: &mut Masters) -> Result<(), String> {
     phenomena.sort_by_key(|(id, _)| *id);
     masters.periods = Some(periods);
     masters.phenomena = Some(phenomena);
-    Ok(())
-}
-
-fn parse_staminas(text: &str, masters: &mut Masters) -> Result<(), String> {
-    let value: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
-    let rows = master_rows(&value, "mysekaiStaminas")?;
-    let max = |kind: &str| -> Result<i32, String> {
-        rows.iter()
-            .find(|row| row["mysekaiStaminaType"].as_str() == Some(kind))
-            .ok_or_else(|| format!("no {kind} stamina row"))
-            .and_then(|row| int32(row, "maxStamina"))
-    };
-    masters.stamina_max = Some(StaminaMax {
-        normal: max("normal")?,
-        enhance: max("enhance")?,
-        boost: max("boost")?,
-    });
     Ok(())
 }
 
