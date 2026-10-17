@@ -1,0 +1,22 @@
+[package]
+name = "moly-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The game's server: sessions, the user documents and the API handlers. It
+# runs headless (no window, renderer or UI), natively as its own process and
+# in the browser as a worker.
+[dependencies]
+moly-protocol = { path = "../../net/moly-protocol" }
+bevy = { version = "0.18.1", default-features = false, features = ["std", "bevy_log", "async_executor", "multi_threaded"] }
+async-channel = "2.5"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The native host's WebSocket listener runs on its own thread.
+tokio = { version = "1", default-features = false, features = ["rt", "net", "sync", "macros"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+
+[dev-dependencies]
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }

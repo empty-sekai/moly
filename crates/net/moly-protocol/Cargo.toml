@@ -1,0 +1,13 @@
+[package]
+name = "moly-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The messages between the game and its server. No engine dependency: the
+# server host, the browser worker and the game all build it as is.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { workspace = true }
+# Frames on the wire: compact binary through serde.
+bitcode = { version = "0.6", default-features = false, features = ["std", "serde"] }

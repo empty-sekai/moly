@@ -1,0 +1,20 @@
+[package]
+name = "moly-link"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The game's connection to its server: one session, calls numbered and
+# answered in order, and the server's pushes, as Bevy messages.
+[dependencies]
+moly-protocol = { path = "../moly-protocol" }
+bevy = { version = "0.18.1", default-features = false, features = ["std", "bevy_log"] }
+async-channel = "2.5"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1", default-features = false, features = ["rt", "net", "macros"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+
+[dev-dependencies]
+moly-server = { path = "../../server/moly-server" }
