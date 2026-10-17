@@ -9,7 +9,7 @@ use serde_json::{json, Map, Value};
 use crate::harvest::action::{HarvestPlayerModel, HarvestTargeting};
 use crate::harvest::catalog::HarvestCatalog;
 use crate::harvest::HarvestObject;
-use crate::server::client::inventory::{ClientMysekaiInventory, PossessionMasters};
+use crate::userdata::client::inventory::{ClientMysekaiInventory, PossessionMasters};
 
 pub(super) const SECTIONS: &[&str] =
     &["site", "gatherables", "bag", "tools", "recipes", "fixtures", "characters", "weather", "time"];
@@ -49,7 +49,7 @@ pub(super) fn observe(world: &mut World, what: &[String]) -> Result<Value, Strin
     if wanted("time") {
         out.insert(
             "time".into(),
-            json!({ "game": super::state::time(world), "server_clock_ms": crate::server::server_now_ms() }),
+            json!({ "game": super::state::time(world), "server_clock_ms": crate::userdata::clock::server_now_ms() }),
         );
     }
     Ok(Value::Object(out))

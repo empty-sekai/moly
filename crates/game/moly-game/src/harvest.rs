@@ -49,7 +49,9 @@ pub(crate) mod law;
 mod pickup;
 mod prop_animator;
 mod queue;
-pub(crate) mod server_mock;
+#[path = "harvest/server_mock.rs"]
+pub(crate) mod harvest_mock;
+pub(crate) use self::harvest_mock as server_mock;
 mod learn;
 pub(crate) mod notice;
 mod obstacles;

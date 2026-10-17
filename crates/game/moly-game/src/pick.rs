@@ -45,7 +45,7 @@ use crate::action_button::ActionTapConsumed;
 use crate::gesture::{GestureEvent, GestureKind, GestureState};
 use crate::npc::CharacterUnitId;
 use crate::player::PlayerControlled;
-use crate::server::client::instrument_env;
+use crate::userdata::client::instrument_env;
 
 /// The instrument's tap interval, seconds.
 const SMOKE_TAP_INTERVAL: f32 = 0.8;

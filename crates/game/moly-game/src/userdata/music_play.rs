@@ -12,11 +12,10 @@
 //!   Both reply with the updated user data (`SuiteUser`), which the executor
 //!   merges into the client copies before the caller reads them.
 //!
-//! A request runs through [`MusicPlayEndpoint`], a one-shot system the
-//! server model installs; [`post`] runs it and returns the reply. Without an
-//! endpoint the request is refused by name.
+//! The requests are `Call::MusicPlaySet` / `Call::MusicPlayEject` on the
+//! server link; the answer's tables reach the copies with the arrived
+//! sections.
 
-use bevy::ecs::system::SystemId;
 use bevy::prelude::*;
 use serde_json::Value;
 
@@ -54,12 +53,8 @@ impl ClientMusicRecords {
 }
 
 pub(crate) use moly_protocol::api::{
-    MusicPlaySetRequest, MusicPlayEjectRequest, MusicPlayPost, MusicPlayReply,
+    MusicPlaySetRequest, MusicPlayEjectRequest, MusicPlayPost,
 };
-
-/// The server model's endpoint for the music player's requests.
-#[derive(Resource, Clone, Copy, Debug)]
-pub(crate) struct MusicPlayEndpoint(pub(crate) SystemId<In<MusicPlayPost>, MusicPlayReply>);
 
 #[cfg(test)]
 mod tests {

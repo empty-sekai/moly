@@ -59,8 +59,8 @@
 //!   button and the cannot-recycle info off.
 //!
 //! The owned rows and the possession levels are the client's copy of the
-//! server data (`crate::server::client::inventory`, and
-//! `crate::server::tools` for the tools); the possession limits
+//! server data (`crate::userdata::client::inventory`, and
+//! `crate::userdata::client::tools` for the tools); the possession limits
 //! are master data the server model installs. The thumbnail and preview
 //! images are resolved by their client load path and resource through the
 //! shared item icon index ([`crate::item_icon`]); a path the index does not
@@ -99,8 +99,8 @@ use std::collections::{BTreeSet, HashMap};
 use crate::action_button::ActionTapConsumed;
 use crate::gesture::{GestureEvent, GestureKind, GestureState};
 use crate::item_icon::ItemIcons;
-use crate::server::client::inventory::{ClientMysekaiInventory, PossessionMasters};
-use crate::server::tools::ClientMysekaiTools;
+use crate::userdata::client::inventory::{ClientMysekaiInventory, PossessionMasters};
+use crate::userdata::client::tools::ClientMysekaiTools;
 use crate::sitemap::SITEMAP_LAYER;
 use crate::ui_layers::{LayerCommand, LayerId, UiLayerStack};
 use crate::ui_layout::{UiLayouts, UiPrefabView};

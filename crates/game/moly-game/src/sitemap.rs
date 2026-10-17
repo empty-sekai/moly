@@ -2900,7 +2900,7 @@ pub(crate) fn tick_entries(
     data: Option<Res<SitemapData>>,
     mut hooks: MessageReader<ScreenLayerEvent>,
     (client, active): (
-        Option<Res<crate::server::ClientUserData>>,
+        Option<Res<crate::userdata::client::ClientUserData>>,
         Option<Res<crate::site::SiteActive>>,
     ),
     mut se: Option<ResMut<SeRequests>>,

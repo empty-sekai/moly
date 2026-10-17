@@ -3,10 +3,9 @@
 //! `avatarSkinColorId`, `avatarCoordinateId`) and the avatar wear masters the
 //! client resolves them through (`AvatarData.Build`).
 //!
-//! The server model's responses set [`ClientUserAvatar`]. The server model
-//! reads the four masters and inserts [`AvatarMasters`] once every master has
-//! resolved, so the resource's presence means "resolved": each map is `None`
-//! when the runtime root lacks its master.
+//! The responses set [`ClientUserAvatar`]. [`AvatarMasters`] holds the four
+//! masters' maps once they resolve, so the resource's presence means
+//! "resolved": each map is `None` when the runtime root lacks its master.
 
 use bevy::prelude::*;
 

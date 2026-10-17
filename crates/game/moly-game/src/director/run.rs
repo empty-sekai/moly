@@ -1230,10 +1230,10 @@ impl Gather {
                 }
                 let at = *at;
                 let bag = world
-                    .get_resource::<crate::server::client::inventory::ClientMysekaiInventory>()
+                    .get_resource::<crate::userdata::client::inventory::ClientMysekaiInventory>()
                     .map(|inventory| {
                         let limit = world
-                            .get_resource::<crate::server::client::inventory::PossessionMasters>()
+                            .get_resource::<crate::userdata::client::inventory::PossessionMasters>()
                             .and_then(|masters| inventory.material_max_count(masters));
                         (inventory.total_material_possession(), limit)
                     });

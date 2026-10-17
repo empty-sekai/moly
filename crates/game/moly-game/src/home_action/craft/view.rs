@@ -86,12 +86,12 @@ use crate::fixture_edit_ui::EditorIcons;
 use crate::gesture::{GestureEvent, GestureKind, GestureState};
 use crate::home_action::HomeActionPresentation;
 use crate::item_icon::ItemIcons;
-use crate::server::client::craft::{
+use crate::userdata::client::craft::{
     CANVAS_MATERIAL_ID, CraftMasters, CraftOwned, MasterBlueprint, MysekaiCraftType,
     is_create_count_limit, is_enough_material_to_craft, is_reached_possession_limit_to_craft,
 };
-use crate::server::client::inventory::{ClientMysekaiInventory, PossessionMasters};
-use crate::server::tools::ClientMysekaiTools;
+use crate::userdata::client::inventory::{ClientMysekaiInventory, PossessionMasters};
+use crate::userdata::client::tools::ClientMysekaiTools;
 use crate::sitemap::SITEMAP_LAYER;
 use crate::ui_layers::{LayerCommand, LayerId, UiLayerStack};
 use crate::ui_layout::{UiLayouts, UiPrefabView};
@@ -1360,17 +1360,17 @@ pub(crate) fn place(
     let since = time.elapsed_secs() - state.opened_at;
     let target = if !state.tab_tapped && since >= 1.0 {
         state.tab_tapped = true;
-        crate::server::client::instrument_env("MOLY_CRAFT_TAP_TAB")
+        crate::userdata::client::instrument_env("MOLY_CRAFT_TAP_TAB")
             .and_then(|raw| raw.trim().parse::<usize>().ok())
             .and_then(|index| bindings.tabs.get(index))
             .map(|tab| ("tab cell", tab.button.clone()))
     } else {
         let target = match state.tapped {
-            0 if since >= 2.0 => crate::server::client::instrument_env("MOLY_CRAFT_TAP_CELL")
+            0 if since >= 2.0 => crate::userdata::client::instrument_env("MOLY_CRAFT_TAP_CELL")
                 .and_then(|raw| raw.trim().parse::<usize>().ok())
                 .and_then(|slot| bindings.cells.get(slot))
                 .map(|cell| ("cell", cell.button.clone())),
-            1 if since >= 3.0 => crate::server::client::instrument_env("MOLY_CRAFT_TAP_APPLY")
+            1 if since >= 3.0 => crate::userdata::client::instrument_env("MOLY_CRAFT_TAP_APPLY")
                 .map(|_| ("apply button", bindings.apply_button.clone())),
             _ => None,
         };

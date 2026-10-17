@@ -21,7 +21,7 @@ use serde_json::Value;
 
 // The mock house the layout owner appends and the server's party cakes are
 // checked against; the server side owns the value.
-pub(crate) use crate::server::system_fixture_action::STARTER_HOUSE;
+pub(crate) use crate::userdata::client::system_fixture_action::STARTER_HOUSE;
 
 /// The instance UID the mock house gets when the layout owner appends it.
 /// Distinct from the starter's positional UIDs and the editor's

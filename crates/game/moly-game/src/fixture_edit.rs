@@ -1803,7 +1803,7 @@ fn publish_view(world: &mut World) {
         return;
     };
     let owned_revision = world
-        .get_resource::<crate::server::client::inventory::ClientMysekaiInventory>()
+        .get_resource::<crate::userdata::client::inventory::ClientMysekaiInventory>()
         .map_or(0, |owned| owned.revision);
     if view.revision == session.revision && view.owned_revision == owned_revision {
         return;

@@ -86,7 +86,7 @@ use crate::player_avatar::{
     STATE_FADE,
 };
 use crate::player_state::{PlayerActionState, PlayerAvatarStates};
-use crate::server::client::home_action::HomeActionApi;
+use crate::userdata::client::home_action::HomeActionApi;
 use crate::ui_layers::{LayerCommand, LayerId};
 use crate::userdata::{Answered, ServerPending};
 use moly_link::ServerLink;
@@ -1143,7 +1143,7 @@ pub(crate) fn advance(world: &mut World) {
 /// The sketch target blueprint the instruments name
 /// (`MOLY_HOME_ACTION_SKETCH_BLUEPRINT`; game mode reads none).
 fn sketch_blueprint_instrument() -> Option<i32> {
-    crate::server::client::instrument_env("MOLY_HOME_ACTION_SKETCH_BLUEPRINT")
+    crate::userdata::client::instrument_env("MOLY_HOME_ACTION_SKETCH_BLUEPRINT")
         .and_then(|raw| raw.trim().parse::<i32>().ok())
 }
 

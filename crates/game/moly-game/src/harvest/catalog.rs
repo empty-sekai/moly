@@ -65,11 +65,6 @@ const TOOLS: MasterTable<Vec<ToolDef>> = MasterTable {
     name: "mysekaiTools (harvest tools: power, cool time, durability, level)",
     parse: parse_tools,
 };
-const STAMINAS: MasterTable<i32> = MasterTable {
-    table: "mysekaiStaminas",
-    name: "mysekaiStaminas (stamina maximum for the tools and stamina mock)",
-    parse: parse_max_normal_stamina,
-};
 const MATERIALS: MasterTable<Vec<MockMaterialRow>> = MasterTable {
     table: "mysekaiMaterials",
     name: "mysekaiMaterials (the sites each material drops on, TreasureBoxSpawnMock)",
@@ -81,14 +76,13 @@ const STAMINA_RECOVERY: MasterTable<i32> = MasterTable {
     parse: parse_boost_grant,
 };
 
-fn master_keys() -> [MasterKey; 8] {
+fn master_keys() -> [MasterKey; 7] {
     [
         FIXTURE_IDS.key(),
         BLUEPRINT_IDS.key(),
         ITEM_IDS.key(),
         MUSIC_RECORDS.key(),
         TOOLS.key(),
-        STAMINAS.key(),
         MATERIALS.key(),
         STAMINA_RECOVERY.key(),
     ]
@@ -101,7 +95,6 @@ struct HarvestMasters {
     item_ids: Result<HashSet<i64>, MasterError>,
     music_records: Result<MusicRecords, MasterError>,
     tools: Result<Vec<ToolDef>, MasterError>,
-    max_normal_stamina: Result<i32, MasterError>,
     materials: Result<Vec<MockMaterialRow>, MasterError>,
     boost_grant: Result<i32, MasterError>,
 }
@@ -121,7 +114,6 @@ impl HarvestMasters {
             item_ids: masters.take(&ITEM_IDS)?,
             music_records: masters.take(&MUSIC_RECORDS)?,
             tools: masters.take(&TOOLS)?,
-            max_normal_stamina: masters.take(&STAMINAS)?,
             materials: masters.take(&MATERIALS)?,
             boost_grant: masters.take(&STAMINA_RECOVERY)?,
         })
@@ -136,7 +128,6 @@ impl HarvestMasters {
             self.item_ids.as_ref().err(),
             self.music_records.as_ref().err(),
             self.tools.as_ref().err(),
-            self.max_normal_stamina.as_ref().err(),
             self.materials.as_ref().err(),
             self.boost_grant.as_ref().err(),
         ]
@@ -162,7 +153,6 @@ pub(crate) fn load(
     masters.request(&ITEM_IDS);
     masters.request(&MUSIC_RECORDS);
     masters.request(&TOOLS);
-    masters.request(&STAMINAS);
     masters.request(&MATERIALS);
     masters.request(&STAMINA_RECOVERY);
 }
@@ -208,15 +198,6 @@ fn parse_tools(text: &str) -> Result<Vec<ToolDef>, String> {
         .collect()
 }
 
-/// The lowest-id normal stamina row's maximum.
-fn parse_max_normal_stamina(text: &str) -> Result<i32, String> {
-    let rows = rows_by_id(text)?;
-    let row = rows
-        .iter()
-        .find(|row| row["mysekaiStaminaType"].as_str() == Some("normal"))
-        .ok_or("no normal stamina row")?;
-    master::int32(row, "maxStamina")
-}
 
 /// One boost recovery: the table's single row grants recoveryBoostStamina.
 fn parse_boost_grant(text: &str) -> Result<i32, String> {
@@ -409,16 +390,37 @@ pub(crate) fn build(
     json: Res<Assets<JsonAsset>>,
     inputs: Option<ResMut<HarvestInputs>>,
     mut masters: ResMut<MasterData>,
+    stamina: Option<Res<moly_masters::StaminaMax>>,
+    master_tables: Option<Res<moly_masters::load::MasterTables>>,
     sites: Option<Res<crate::site::Sites>>,
-    server_tools: Option<Res<crate::server::tools::ClientMysekaiTools>>,
+    server_tools: Option<Res<crate::userdata::client::tools::ClientMysekaiTools>>,
 ) {
     let Some(mut inputs) = inputs else {
         return;
     };
+    let stamina = stamina.as_deref().copied();
+    if let Some(max) = stamina {
+        crate::userdata::stamina::seat(max);
+    }
     if inputs.masters.is_none() {
         inputs.masters = HarvestMasters::take(&mut masters);
     }
     let Some(tables) = &inputs.masters else {
+        return;
+    };
+    let Some(max_stamina) = stamina else {
+        // The shared loader's stamina table has not arrived; once it has
+        // finished and the resource is still absent, the table is missing.
+        if master_tables.as_deref().is_some_and(|tables| tables.ready()) {
+            let mut absent = tables.absent();
+            absent.push(
+                "mysekaiStaminas (stamina maximum for the tools and stamina mock): not in the runtime root"
+                    .to_owned(),
+            );
+            warn!("[harvest] harvesting stays off: {} input(s) absent", absent.len());
+            commands.insert_resource(HarvestInputsAbsent(absent));
+            commands.remove_resource::<HarvestInputs>();
+        }
         return;
     };
     let mut absent = tables.absent();
@@ -459,7 +461,6 @@ pub(crate) fn build(
         item_ids: Ok(item_ids),
         music_records: Ok(music_records),
         tools: Ok(tool_defs),
-        max_normal_stamina: Ok(max_normal_stamina),
         materials: Ok(mock_materials),
         boost_grant: Ok(boost_grant),
     }) = inputs.masters.take()
@@ -605,12 +606,12 @@ pub(crate) fn build(
     let mock_inputs = MockInputs {
         fixtures: mock_fixtures,
         materials: mock_materials,
-        max_normal_stamina,
+        max_normal_stamina: max_stamina.normal,
         boost_grant,
         harvest_sites: harvest_sites.clone(),
         music_records: music_records.by_track_type,
     };
-    let mock = HarvestServerMock::new(mock_inputs, crate::server::refresh_window_start());
+    let mock = HarvestServerMock::new(mock_inputs, crate::userdata::clock::refresh_window_start());
     let (maps, stamina) = mock.login();
     let user_tools = super::server_mock::user_tools(server_tools.rows());
     info!(
@@ -685,7 +686,7 @@ pub(crate) fn build(
 /// leaves the player model alone, so hits the client has counted but not yet
 /// sent are not undone.
 pub(crate) fn follow_server_tools(
-    server_tools: Option<Res<crate::server::tools::ClientMysekaiTools>>,
+    server_tools: Option<Res<crate::userdata::client::tools::ClientMysekaiTools>>,
     user: Option<ResMut<HarvestUserData>>,
     model: Option<ResMut<super::action::HarvestPlayerModel>>,
     mut seen: Local<u64>,

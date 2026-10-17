@@ -146,7 +146,7 @@ pub(crate) struct UserTool {
 }
 
 /// The server's `userMysekaiTools` rows as the harvest reads them.
-pub(crate) fn user_tools(rows: &[crate::server::tools::UserMysekaiTool]) -> Vec<UserTool> {
+pub(crate) fn user_tools(rows: &[moly_protocol::rows::UserMysekaiTool]) -> Vec<UserTool> {
     rows.iter()
         .map(|row| UserTool {
             tool_id: i64::from(row.mysekai_tool_id),
@@ -648,7 +648,7 @@ pub(crate) fn refresh_maps(
     if arrival.site_id().is_some() {
         return;
     }
-    let Some(window) = crate::server::refresh_window_start() else {
+    let Some(window) = crate::userdata::clock::refresh_window_start() else {
         return;
     };
     if let Some(maps) = mock.refresh(window) {

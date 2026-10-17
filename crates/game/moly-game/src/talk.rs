@@ -27,7 +27,7 @@ use moly_law::talk::{
 use crate::alone_action_runtime::{node_for, play_idle, FacialTables, EYE_CELL, MOUTH_CELL};
 use crate::audio::{VoiceLine, VoiceSpeaker, VoiceWho};
 use crate::character::{MotionDriver, MotionLibrary, SEGMENT_BLEND};
-use crate::character_material::{CharacterMaterial, ToonMaterials};
+use crate::character_material::CharacterMaterial;
 use crate::delayed_faces::{DelayedFaces, FaceCommand};
 use crate::emoticon::EmoticonArchive;
 use crate::fixture::{FixturePlacement, FixturePlacements, FixtureRoot};
@@ -36,7 +36,7 @@ use crate::fixture_talk::{
     apply_face, fixture_node_for, FixtureAnimation, FixtureFace, FixtureTimelineSeq,
     FixtureTimelines, FixtureTurn,
 };
-use crate::npc::{CharacterUnitId, MotionPhase, Registry, WalkState};
+use crate::npc::{MotionPhase, Registry, WalkState};
 use crate::player::PlayerControlled;
 use crate::talk_window::{TalkSession, TalkWindowRoot, TalkWindowState};
 

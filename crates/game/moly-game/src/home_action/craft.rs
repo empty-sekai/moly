@@ -113,13 +113,13 @@ use moly_law::ui::mysekai_rank::{MasterMysekaiRank, get_mysekai_rank};
 
 use crate::audio::{SeClass, SeRequest, SeRequests};
 use crate::fixture_activity_state::FixtureTarget;
-use crate::server::client::craft::{
+use crate::userdata::client::craft::{
     CRAFT_COUNT_MAX, CRAFT_COUNT_MIN, CraftMasters, CraftOwned, MasterBlueprint, MysekaiCraftType,
     UserMysekaiCraftRequest, is_create_count_limit, is_enough_material_to_craft, is_first_craft,
     is_reached_possession_limit_to_craft,
 };
-use crate::server::client::instrument_env;
-use crate::server::client::inventory::{
+use crate::userdata::client::instrument_env;
+use crate::userdata::client::inventory::{
     ClientMysekaiInventory, PossessionMasters, fixture_total_count,
 };
 use crate::common_dialog::Buttons;
@@ -582,7 +582,7 @@ fn craft_rows(world: &World, kind: CraftListType) -> Result<Vec<MasterBlueprint>
             let in_term = match (term, now) {
                 (None, None) => true,
                 (Some(term), Some(now)) => {
-                    crate::server::craft::is_within_time(now, term.start_at, term.end_at)
+                    moly_masters::craft::is_within_time(now, term.start_at, term.end_at)
                 }
                 (None, Some(_)) | (Some(_), None) => false,
             };
@@ -747,7 +747,7 @@ pub(crate) fn refusal(world: &World) -> Option<String> {
 
 fn current_timestamp(world: &World) -> Result<i64, String> {
     let user = world
-        .get_resource::<crate::server::ClientUserData>()
+        .get_resource::<crate::userdata::client::ClientUserData>()
         .ok_or("the server has not answered yet (no current timestamp)")?;
     Ok(user.current_timestamp(world.resource::<Time<Real>>().elapsed_secs()))
 }
@@ -764,7 +764,7 @@ fn terms_in_session(world: &World) -> Result<usize, String> {
     let now = current_timestamp(world)?;
     Ok(terms
         .iter()
-        .filter(|term| crate::server::craft::is_within_time(now, term.start_at, term.end_at))
+        .filter(|term| moly_masters::craft::is_within_time(now, term.start_at, term.end_at))
         .count())
 }
 
@@ -911,14 +911,14 @@ fn term_limited(world: &World, selection: &Selection) -> bool {
     else {
         return false;
     };
-    let Some(user) = world.get_resource::<crate::server::ClientUserData>() else {
+    let Some(user) = world.get_resource::<crate::userdata::client::ClientUserData>() else {
         error!(
             "[craft] the blueprint's term is read before the server's first response: taken as outside it"
         );
         return true;
     };
     let now = user.current_timestamp(world.resource::<Time<Real>>().elapsed_secs());
-    !crate::server::craft::is_within_time(now, term.start_at, term.end_at)
+    !moly_masters::craft::is_within_time(now, term.start_at, term.end_at)
 }
 
 fn open_term_limit(world: &mut World, screen: &mut CraftScreen) {

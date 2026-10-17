@@ -15,7 +15,7 @@ pub(super) fn snapshot(world: &mut World) -> Value {
     json!({
         "frame": world.get_resource::<FrameCount>().map(|frame| frame.0),
         "time": time(world),
-        "server_clock_ms": crate::server::server_now_ms(),
+        "server_clock_ms": crate::userdata::clock::server_now_ms(),
         "entry_done": crate::entry::entry_settled(world.get_resource::<crate::entry::EntrySequence>()),
         "site_moving": world.contains_resource::<crate::site_move::SiteMoveActive>(),
         "talk_active": world.contains_resource::<crate::talk::ActiveTalk>()

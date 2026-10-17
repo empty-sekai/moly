@@ -79,8 +79,8 @@ use crate::fixture::FixturePlacement;
 use crate::fixture_activity_state::FixtureTarget;
 use crate::fixture_colors::FixtureColorChoice;
 use crate::gesture::{GestureEvent, GestureKind, GestureState};
-use crate::server::client::music::ClientMusicPlaySettings;
-use crate::server::client::music_play::ClientMusicRecords;
+use crate::userdata::client::music::ClientMusicPlaySettings;
+use crate::userdata::client::music_play::ClientMusicRecords;
 use crate::sitemap::SITEMAP_LAYER;
 use crate::ui_layers::{LayerCommand, LayerId, ScreenHook, ScreenLayerEvent, UiLayerStack};
 use crate::ui_layout::{SpriteLayoutMetrics, UiLayouts, UiPrefabView};
@@ -879,7 +879,7 @@ pub(crate) fn follow_screen(
     layouts: Res<UiLayouts>,
     owned: Option<Res<ClientMusicRecords>>,
     settings: Option<Res<ClientMusicPlaySettings>>,
-    user: Option<Res<crate::server::ClientUserData>>,
+    user: Option<Res<crate::userdata::client::ClientUserData>>,
     real: Res<Time<Real>>,
     mut choice: ResMut<crate::audio::RecordChoice>,
     mut sounds: ResMut<crate::audio::SeRequests>,

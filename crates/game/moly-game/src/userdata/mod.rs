@@ -30,6 +30,8 @@
 
 pub(crate) mod avatar;
 pub(crate) mod birthday_party;
+pub(crate) mod client;
+pub(crate) mod clock;
 pub(crate) mod craft;
 pub(crate) mod home_action;
 pub(crate) mod housing_layout;
@@ -37,6 +39,8 @@ pub(crate) mod inventory;
 pub(crate) mod local;
 pub(crate) mod music;
 pub(crate) mod music_play;
+pub(crate) mod snapshot;
+pub(crate) mod stamina;
 pub(crate) mod system_fixture_action;
 pub(crate) mod talk_read;
 pub(crate) mod tools;
@@ -133,6 +137,22 @@ pub(crate) fn client_update_talk_list(world: &mut World, update: TalkListUpdate)
         .get_resource_or_insert_with(ClientTalkListUpdates::default)
         .0
         .push(update);
+}
+
+/// The server panel's document (schemaVersion 1) as the last response
+/// carried it: `Sections.npcPanel`, the rows the join serves and the current
+/// schedule. `revision` counts the responses that carried one.
+#[derive(Resource, Default, Debug, Clone)]
+pub(crate) struct ClientNpcPanel {
+    pub(crate) text: Option<String>,
+    pub(crate) revision: u64,
+}
+
+impl ClientNpcPanel {
+    fn apply(&mut self, text: String) {
+        self.text = Some(text);
+        self.revision += 1;
+    }
 }
 
 /// A rank the client received: `UserMysekaiGamedata.mysekaiRank` of the
@@ -296,6 +316,7 @@ pub(crate) struct ClientCopies<'w> {
     pub(crate) records: ResMut<'w, music_play::ClientMusicRecords>,
     pub(crate) actions: ResMut<'w, system_fixture_action::ClientSystemFixtureActions>,
     pub(crate) tools: ResMut<'w, tools::ClientMysekaiTools>,
+    pub(crate) npc_panel: ResMut<'w, ClientNpcPanel>,
     pub(crate) cache: ResMut<'w, ServerViewCache>,
     pub(crate) answered: MessageWriter<'w, Answered>,
 }
@@ -633,6 +654,16 @@ fn apply_sections(
     mode: &crate::run_mode::RunMode,
     saved: Option<&crate::player_data::SavedTotalExp>,
 ) {
+    clock::seat_server_date(sections.server_date_ms);
+    if let Some(gate) = sections.gate {
+        snapshot::seat_gate(gate);
+    }
+    if let Some(rows) = sections.rank_releases.take() {
+        snapshot::seat_rank_releases(rows);
+    }
+    if let Some(text) = sections.npc_panel.take() {
+        copies.npc_panel.apply(text);
+    }
     copies.birthday.apply(std::mem::take(&mut sections.delivery));
     if let Some(rows) = sections.music.take() {
         copies.music.apply(rows);
@@ -1006,16 +1037,6 @@ pub(crate) fn admin_call(world: &mut World, call: AdminCall) -> Option<u32> {
         .map(|mut link| link.call(Call::Admin(call)))
 }
 
-/// The server panel's NPC slice (schemaVersion 1) once the client has
-/// joined: the rows served at the join and the client's `refreshedAt`.
-#[allow(dead_code)] // Read by the server panel's seam.
-pub(crate) fn npc_slice(client: &ClientUserData, live: &LiveSchedule) -> Option<String> {
-    crate::server::with_model(|model| {
-        model.npc_slice(&live.schedules, client.gamedata.refreshed_at)
-    })
-    .flatten()
-}
-
 /// Last: a changed local list is written to the page backend.
 fn persist_local(
     local: Option<Res<local::MysekaiLocalSettings>>,
@@ -1056,11 +1077,13 @@ pub(crate) struct UserDataPlugin;
 
 impl Plugin for UserDataPlugin {
     fn build(&self, app: &mut App) {
-        app.add_message::<RankDelivered>()
+        app.add_plugins(moly_masters::load::MasterTablesPlugin)
+            .add_message::<RankDelivered>()
             .add_message::<Answered>()
             .init_resource::<LiveSchedule>()
             .init_resource::<ServerGateReplies>()
             .init_resource::<ClientTalkListUpdates>()
+            .init_resource::<ClientNpcPanel>()
             .init_resource::<AnsweredLog>()
             .init_resource::<ServerJoin>()
             .init_resource::<LinkNoticed>()
@@ -1069,6 +1092,8 @@ impl Plugin for UserDataPlugin {
             .init_resource::<birthday_party::ClientBirthdayPartyData>()
             .init_resource::<music::ClientMusicPlaySettings>()
             .init_resource::<avatar::ClientUserAvatar>()
+            .init_resource::<inventory::ClientMysekaiInventory>()
+            .init_resource::<system_fixture_action::ClientSystemFixtureActions>()
             .init_resource::<music_play::ClientMusicRecords>()
             .init_resource::<tools::ClientMysekaiTools>()
             .add_systems(PreStartup, (seat_seed, seat_local))
@@ -1082,6 +1107,10 @@ impl Plugin for UserDataPlugin {
                     track_join,
                 )
                     .chain(),
+            )
+            .add_systems(
+                PreUpdate,
+                inventory::mirror_materials.after(apply_arrivals),
             )
             .add_systems(Last, persist_local);
     }

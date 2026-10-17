@@ -563,9 +563,9 @@ fn signal_receiver(doc: &Value, view: &Value) -> Result<SignalReceiverBinding, S
 pub(crate) fn arrive(
     mut state: ResMut<DeliverySite>,
     mut model: ResMut<DeliveryModel>,
-    client: Res<crate::server::delivery::ClientBirthdayPartyData>,
+    client: Res<crate::userdata::client::birthday_party::ClientBirthdayPartyData>,
     parties: Option<Res<crate::birthday::BirthdayParties>>,
-    tables: Option<Res<crate::server::delivery::DeliveryTables>>,
+    tables: Option<Res<moly_masters::delivery::DeliveryTables>>,
     configs: Option<Res<crate::client_config::ClientConfigs>>,
     mut spawns: ResMut<super::drops::DeliveryDropSpawns>,
     mut gather_loop: ResMut<super::drops::DeliveryGatherLoop>,
@@ -602,7 +602,7 @@ pub(crate) fn arrive(
         error!("[delivery] arrival on {}: the delivery tables (birthday-party-delivery.json) are absent (the server model names them among its missing masters); no delivery", objects.scene);
         return;
     };
-    use crate::server::delivery::{CONFIG_BASE_POINT, CONFIG_DROP_UPPER_LIMIT};
+    use crate::userdata::client::birthday_party::{CONFIG_BASE_POINT, CONFIG_DROP_UPPER_LIMIT};
     let (Some(base_point), Some(drop_upper_limit)) = (
         client.master_config_int(CONFIG_BASE_POINT),
         client.master_config_int(CONFIG_DROP_UPPER_LIMIT),

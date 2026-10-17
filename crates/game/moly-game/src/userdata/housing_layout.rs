@@ -11,20 +11,8 @@
 //! `mysekaiPhenomenaId` are not sent.
 //!
 //! The request is one `Call::HousingLayout` on the server link (see
-//! [`crate::fixture_edit`]); this module keeps the endpoint type the
-//! in-process model registers.
-
-use bevy::ecs::system::SystemId;
-use bevy::prelude::*;
-
-use super::craft::SuiteUserReply;
+//! [`crate::fixture_edit`]).
 
 pub(crate) use moly_protocol::api::{
     HousingLayoutCorner, HousingLayoutFixture, UserMysekaiHousingEditLayoutRequest,
 };
-
-/// The server model's endpoint for the request.
-#[derive(Resource, Clone, Copy, Debug)]
-pub(crate) struct HousingLayoutEndpoint(
-    pub(crate) SystemId<In<UserMysekaiHousingEditLayoutRequest>, SuiteUserReply>,
-);

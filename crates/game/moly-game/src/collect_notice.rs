@@ -164,7 +164,7 @@ fn load(mut commands: Commands, server: Res<AssetServer>) {
             .map(|path| (*path, server.load::<JsonAsset>(format!("moly://{path}"))))
             .collect(),
     ));
-    let count = crate::server::client::instrument_env(AUTOPLAY).map(|raw| {
+    let count = crate::userdata::client::instrument_env(AUTOPLAY).map(|raw| {
         let raw = raw.trim().to_owned();
         raw.parse::<usize>().unwrap_or(usize::MAX)
     });

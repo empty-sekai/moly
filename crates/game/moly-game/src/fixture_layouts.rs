@@ -719,8 +719,8 @@ pub(crate) fn validate_floor_layout(
 /// `userMysekaiSiteHousingLayouts` rows and the starter decoder use.
 pub(crate) fn housing_layout_request(
     layout: &FixturePlacements,
-) -> crate::server::client::housing_layout::UserMysekaiHousingEditLayoutRequest {
-    use crate::server::client::housing_layout::{
+) -> crate::userdata::client::housing_layout::UserMysekaiHousingEditLayoutRequest {
+    use crate::userdata::client::housing_layout::{
         HousingLayoutCorner, HousingLayoutFixture, UserMysekaiHousingEditLayoutRequest,
     };
     UserMysekaiHousingEditLayoutRequest {

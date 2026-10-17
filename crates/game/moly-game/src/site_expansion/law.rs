@@ -15,7 +15,7 @@
 use moly_assets::json::master::{MasterData, MasterTable};
 use serde_json::Value;
 
-pub(crate) use crate::server::local::LocalLists;
+pub(crate) use crate::userdata::client::local::LocalLists;
 
 /// `MysekaiTopicEnum.SiteExpansion`.
 pub(crate) const TOPIC_SITE_EXPANSION: i32 = 1;
@@ -79,12 +79,11 @@ fn rows(text: &str) -> Result<Vec<Value>, String> {
 
 /// The `mysekaiRankReleases` rows a reader walks: the rows it read itself,
 /// plus the rows the server appends under its site-level release policy
-/// ([`crate::server::overlay_rank_releases`]). Every reader of the table
-/// takes its rows through here, so they agree on what the releases are; with
-/// no server model, and under the source's own policy, the table's rows are
+/// ([`crate::userdata::snapshot::rank_release_rows`]). Every reader of the table
+/// takes its rows through here, so they agree on what the releases are; without a response, and under the source's own policy, the table's rows are
 /// all of them.
 pub(crate) fn rank_release_rows(mut rows: Vec<Value>) -> Vec<Value> {
-    rows.extend(crate::server::overlay_rank_releases());
+    rows.extend(crate::userdata::snapshot::rank_release_rows());
     rows
 }
 

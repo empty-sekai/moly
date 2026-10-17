@@ -6,7 +6,7 @@
 //! - **BGM**（BGM 管理器 `MysekaiBGMManager` 的选曲）：按「当前站点 × 当前
 //!   现象」现算。真源 `PlayBGMAsync(site, phenomenon)` 先问用户唱片设定（只在
 //!   住宅类站点查；设定是服务端用户态，由服务端模型的响应写进客户端副本
-//!   [`crate::server::client::music::ClientMusicPlaySettings`]，默认为空），再走默认选曲
+//!   [`crate::userdata::client::music::ClientMusicPlaySettings`]，默认为空），再走默认选曲
 //!   `PlayDefaultBGMAsync`：现象 id 等于客户端配置的配送现象 id → 站点
 //!   normal 档；现象主表亮度档非 none →
 //!   站点×亮度档行；none → 现象自己的 BGM 行（主数据缓存按 mysekaiPhenomenaId
@@ -2092,7 +2092,7 @@ pub(crate) struct BgmChannel {
 // `UserMysekaiMusicPlayFixtureSetting` rows: per site, the record the jukebox
 // plays and the vocal version) are server state: the server model holds them
 // (document section `userMysekaiMusicPlayFixtureSettings`) and its responses
-// write the client copy `crate::server::client::music::ClientMusicPlaySettings`.
+// write the client copy `crate::userdata::client::music::ClientMusicPlaySettings`.
 // It is empty by default (no site has a record set; the default choice plays).
 // The native instrument `MOLY_AUDIO_MOCK_MUSIC_RECORD` (`site:record:vocal`,
 // comma separated, refused loudly when malformed) writes the native server
@@ -2213,7 +2213,7 @@ pub(crate) fn advance_bgm(
     phenomenon: Res<CurrentPhenomenon>,
     site: Option<Res<SiteActive>>,
     configs: Option<Res<ClientConfigs>>,
-    music: Res<crate::server::client::music::ClientMusicPlaySettings>,
+    music: Res<crate::userdata::client::music::ClientMusicPlaySettings>,
     routing: Option<Res<Routing>>,
     mut channel: ResMut<BgmChannel>,
     mut sinks: Query<&mut AudioSink>,
@@ -3882,7 +3882,7 @@ pub(crate) fn install(app: &mut App) {
         .init_resource::<AudioGate>()
         .init_resource::<LocalVolumeSettings>()
         .init_resource::<CurrentPhenomenon>()
-        .init_resource::<crate::server::client::music::ClientMusicPlaySettings>()
+        .init_resource::<crate::userdata::client::music::ClientMusicPlaySettings>()
         .init_resource::<BgmChannel>()
         .init_resource::<record::RecordLibrary>()
         .init_resource::<RecordChoice>()

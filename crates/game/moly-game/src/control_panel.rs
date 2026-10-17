@@ -10,7 +10,11 @@
 
 mod director;
 mod methods;
-mod server;
+
+
+#[path = "control_panel/server.rs"]
+pub(crate) mod panel_server;
+pub(crate) use self::panel_server as server;
 mod state;
 mod widgets;
 

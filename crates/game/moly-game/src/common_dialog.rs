@@ -25,7 +25,7 @@ use bevy::window::PrimaryWindow;
 
 use crate::action_button::ActionTapConsumed;
 use crate::gesture::{GestureEvent, GestureKind, GestureState};
-use crate::server::client::instrument_env;
+use crate::userdata::client::instrument_env;
 use crate::sitemap::SITEMAP_LAYER;
 use crate::ui_layers::{
     DialogBackKey, DialogBackKeyEvent, DialogId, DialogType, DisplayLayerType, ScreenManager,

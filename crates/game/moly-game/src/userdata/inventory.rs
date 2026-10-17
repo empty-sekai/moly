@@ -13,12 +13,12 @@
 //! `UserDataManager.UpdateAll` replaces each table a reply carries as a whole,
 //! and so does [`ClientMysekaiInventory::apply`].
 //!
-//! The server model is the only writer: its responses and the craft and
-//! sketch replies set the copy, and it inserts [`PossessionMasters`] once its
-//! masters have resolved (each list is `None` when the runtime root lacks its
-//! master). The `userMysekaiMaterials` copy here is a read view of the one
-//! the birthday-party delivery also reads; the server model keeps the two
-//! equal.
+//! The responses and the craft and sketch replies set the copy.
+//! [`PossessionMasters`] holds the possession limits once their master has
+//! resolved (each list is `None` when the runtime root lacks its master). The
+//! `userMysekaiMaterials` copy here is a read view of the one the
+//! birthday-party delivery also reads; both are set from the same response
+//! sections.
 
 // The inventory and craft screens read these.
 #![allow(dead_code)]

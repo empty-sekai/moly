@@ -12,7 +12,7 @@
 //! Here the layouted count is the draft of the edited site plus the other
 //! sites' layouts ([`crate::fixture::layouts::SiteFixtureLayouts::placed_elsewhere`]).
 //! The quantities are the client's copy of the server data
-//! (`crate::server::client::inventory`).
+//! (`crate::userdata::client::inventory`).
 //!
 //! Named gaps: `IsSelectableFixture` (the home fixture and the wall and floor
 //! appearance fixtures) is not applied, because this floor editor edits
@@ -31,7 +31,7 @@ use serde_json::Value;
 
 use super::assets::CandidateAssets;
 use crate::fixture::EditableFixture;
-use crate::server::client::inventory::ClientMysekaiInventory;
+use crate::userdata::client::inventory::ClientMysekaiInventory;
 
 const FIXTURES: &str = "moly://mysekai-fixtures.json";
 

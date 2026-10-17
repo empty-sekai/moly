@@ -88,7 +88,8 @@ use super::{publish, DeliveryActionState, DeliveryModel, DeliveryProgress, DropM
 use crate::audio::{SeClass, SeRequest, SeRequests};
 use crate::harvest::{HarvestDocs, HarvestGltfs, Rng};
 use crate::player::PlayerControlled;
-use crate::server::delivery::{ClientBirthdayPartyData, GatherContent};
+use crate::userdata::client::birthday_party::ClientBirthdayPartyData;
+use moly_protocol::api::GatherContent;
 use crate::site_move::timeline::{delay_seconds, Delay};
 use crate::userdata::{Answered, ServerPending};
 use moly_link::ServerLink;

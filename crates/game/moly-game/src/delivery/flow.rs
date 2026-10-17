@@ -57,7 +57,7 @@
 //! OnEnter` publishes no game-state change.
 //!
 //! A refreshed reply (the server's birthday plant refresh policy,
-//! `crate::server::delivery`) runs `ExecuteHarvestSiteRefresh` after the
+//! `crate::userdata::client::birthday_party`) runs `ExecuteHarvestSiteRefresh` after the
 //! reward animation and before state Idle: `ShowSubWindowDialog<
 //! MysekaiRefreshBirthdayPlantSubWindowDialog>(null, onClose,
 //! allowCloseExternal true, DialogType 450, Layer_Overlay)` through the
@@ -323,7 +323,7 @@ pub(crate) struct FlowWorld<'w, 's> {
     runs: ResMut<'w, RewardRuns>,
     face: ResMut<'w, DeliveryFace>,
     link: ResMut<'w, ServerLink>,
-    client: ResMut<'w, crate::server::delivery::ClientBirthdayPartyData>,
+    client: ResMut<'w, crate::userdata::client::birthday_party::ClientBirthdayPartyData>,
     catalog: Option<Res<'w, crate::harvest::catalog::HarvestCatalog>>,
     navigation: Option<Res<'w, crate::player_fixture_action::PlayerFixtureNavigation>>,
     game_state: Option<Res<'w, DeliveryGameState>>,
@@ -1225,7 +1225,7 @@ fn delivery_api(
         finish_delivery_api(world, flow, players, now, None, None);
         return;
     };
-    let obtained = |client: &crate::server::delivery::ClientBirthdayPartyData| {
+    let obtained = |client: &crate::userdata::client::birthday_party::ClientBirthdayPartyData| {
         client
             .user_birthday_party(party_id)
             .map_or(0, |row| row.obtained_mysekai_material_count)

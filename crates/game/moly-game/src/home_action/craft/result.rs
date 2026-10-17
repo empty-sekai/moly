@@ -285,7 +285,7 @@ pub(crate) fn place(
         if shown.close_tapped {
             continue;
         }
-        let Some(secs) = crate::server::client::instrument_env("MOLY_CRAFT_RESULT_CLOSE_SECS")
+        let Some(secs) = crate::userdata::client::instrument_env("MOLY_CRAFT_RESULT_CLOSE_SECS")
             .and_then(|raw| raw.trim().parse::<f32>().ok())
         else {
             continue;

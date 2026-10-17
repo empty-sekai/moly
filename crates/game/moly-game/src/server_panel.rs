@@ -67,19 +67,13 @@
 //!   schedule covers three days of windows with the same phenomenon, so every
 //!   offset from UTC-12 to UTC+14 resolves to it.
 //!
-//! The document is the server model's NPC slice (`crate::server`), taken
-//! once the client has joined: the rows the join served and the client's
-//! `refreshedAt`. The server model reads the asset source's
-//! `server-panel/npc.json` when one is there (harness and owner states; a
-//! schemaVersion 1 slice keeps its fixed clock and stated rows, so replays
-//! see the same values), else the checked-in default beside this module
-//! (device clock, daily schedule), or the browser game's saved document. A
-//! document that fails to parse, names an unknown refresh window, or lists a
-//! talk the talk table does not hold is refused loudly; no field has a
-//! silent default.
+//! The document is the server panel's NPC slice (schemaVersion 1), carried
+//! as `Sections.npcPanel` and seated in
+//! [`ClientNpcPanel`](crate::userdata::ClientNpcPanel); the panel parses it
+//! once it arrives, alongside the refresh windows of the phenomena index.
 //!
 //! Gate replies: the gate presenter's `UpdateTalkList` / `SetTalkList` calls
-//! arrive as `crate::server::ClientTalkListUpdates`; each replaces the talk
+//! arrive as `crate::userdata::client::ClientTalkListUpdates`; each replaces the talk
 //! list (the reply's stated rows, or the talk-list policy's list) and, with
 //! a change reply, the visitors.
 
@@ -160,8 +154,8 @@ enum TalkListSource {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DocumentOrigin {
-    /// The server model's NPC slice.
-    ServerModel,
+    /// `Sections.npcPanel`, the server panel's document.
+    Protocol,
 }
 
 // ---------------------------------------------------------------------------
@@ -545,7 +539,7 @@ fn parse_periods(text: &str) -> Result<Vec<RefreshTimePeriod>, String> {
 
 /// Offset of device local time from UTC, in seconds, at an epoch second.
 fn device_utc_offset_seconds(epoch_seconds: i64) -> i64 {
-    crate::server::clock::device_utc_offset_ms(epoch_seconds.saturating_mul(1000)) / 1000
+    crate::userdata::clock::device_utc_offset_ms(epoch_seconds.saturating_mul(1000)) / 1000
 }
 
 /// What a schedule write selects.
@@ -751,27 +745,24 @@ fn load(mut commands: Commands, server: Res<AssetServer>) {
     });
 }
 
-/// The server model's NPC slice once the client has joined; then the
-/// refresh windows; then the first schedule write.
+/// The server panel's document (`Sections.npcPanel`) once a response carries
+/// it; then the refresh windows; then the first schedule write.
 fn parse(
     mut commands: Commands,
     server: Res<AssetServer>,
     jsons: Res<Assets<JsonAsset>>,
     requests: Option<Res<PanelRequests>>,
-    client: Option<Res<crate::server::ClientUserData>>,
-    live: Res<crate::server::LiveSchedule>,
+    npc_panel: Option<Res<crate::userdata::ClientNpcPanel>>,
+    live: Res<crate::userdata::client::LiveSchedule>,
     mut today: ResMut<TodayPhenomena>,
 ) {
     let Some(requests) = requests else {
         return;
     };
-    let Some(client) = client else {
-        return; // the join has not answered yet
+    let Some(text) = npc_panel.and_then(|panel| panel.text.clone()) else {
+        return; // no response has carried the panel yet
     };
-    let Some(text) = crate::server::npc_slice(&client, &live) else {
-        return;
-    };
-    let origin = DocumentOrigin::ServerModel;
+    let origin = DocumentOrigin::Protocol;
     if let LoadState::Failed(error) = server.load_state(&requests.periods) {
         panic!("phenomena index {PHENOMENA_INDEX} failed to load: {error:?}");
     }
@@ -780,6 +771,16 @@ fn parse(
     };
     let periods = parse_periods(&index.0)
         .unwrap_or_else(|reason| panic!("phenomena index refresh windows: {reason}"));
+    crate::userdata::clock::seat_periods(
+        periods
+            .iter()
+            .map(|period| moly_masters::clock::RefreshPeriod {
+                id: period.id,
+                start_hour: period.start_hour,
+                end_hour: period.end_hour,
+            })
+            .collect(),
+    );
     let mut panel = parse_document(&text, origin).unwrap_or_else(|reason| {
         panic!("server panel document ({origin:?}) is refused: {reason}")
     });
@@ -787,7 +788,7 @@ fn parse(
     info!(
         "[server-panel] document ready ({}): gate {} level {} (home {}, visit count {}, refreshed {}), {} visitor rows, talk list {}, {} schedule rows, server clock {}, tutorial finished {}",
         match panel.origin {
-            DocumentOrigin::ServerModel => "the server model's NPC slice",
+            DocumentOrigin::Protocol => "the protocol's npcPanel",
         },
         panel.gate.gate_id,
         panel.gate.level,
@@ -850,7 +851,6 @@ fn parse(
     commands.insert_resource(panel);
     commands.remove_resource::<PanelRequests>();
 }
-
 /// The visitor expansion, once the unit-group table is in.
 fn boot_visitors(
     mut commands: Commands,
@@ -987,7 +987,7 @@ fn boot_talk_list(
 /// A new schedule or `refreshedAt` from the server model: the schedule is
 /// written again. The panel's own row edits since the last one are replaced.
 fn follow_live_schedule(
-    live: Res<crate::server::LiveSchedule>,
+    live: Res<crate::userdata::client::LiveSchedule>,
     panel: Option<ResMut<ServerPanel>>,
     periods: Option<Res<RefreshTimePeriods>>,
     mut today: ResMut<TodayPhenomena>,
@@ -1024,7 +1024,7 @@ fn follow_live_schedule(
 #[allow(clippy::too_many_arguments)]
 fn apply_talk_list_updates(
     mut commands: Commands,
-    mut updates: ResMut<crate::server::ClientTalkListUpdates>,
+    mut updates: ResMut<crate::userdata::client::ClientTalkListUpdates>,
     panel: Option<ResMut<ServerPanel>>,
     tables: Option<Res<crate::fixture_activity_data::FixtureActivityTables>>,
     visitors: Option<Res<VisitingCharacters>>,
@@ -1081,7 +1081,7 @@ fn apply_talk_list_updates(
             current = VisitingCharacters { units, groups };
         }
         let rows = match &update.talks {
-            crate::server::ReplyTalkList::Stated(rows) => {
+            moly_protocol::gate::ReplyTalkList::Stated(rows) => {
                 let absent: Vec<i32> = rows
                     .iter()
                     .map(|(id, _)| *id)
@@ -1101,7 +1101,7 @@ fn apply_talk_list_updates(
                     })
                     .collect::<Vec<_>>()
             }
-            crate::server::ReplyTalkList::Policy => {
+            moly_protocol::gate::ReplyTalkList::Policy => {
                 let TalkListSource::Policy { read_event_stories } = &panel.talk_list else {
                     error!(
                         "[server-panel] {}: the reply asks for the talk-list policy but the document states its list; the talk list is not replaced",

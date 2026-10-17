@@ -1,33 +1,23 @@
-//! The system fixture action as the client holds it.
+//! The system fixture action as the client holds it, and the starter house
+//! the layout owner places.
 //!
 //! - `UserDataManager.UserMysekaiSystemFixtureActions`
 //!   (`UserMysekaiSystemFixtureAction` {userId, mysekaiSystemFixtureId}):
-//!   [`ClientSystemFixtureActions`], set by the server model's responses
-//!   only. `UpdateUserMysekaiSystemFixtureActions(data)` replaces the whole
-//!   array when a response carries one (a null keeps the copy), and
+//!   [`ClientSystemFixtureActions`], set by responses only.
+//!   `UpdateUserMysekaiSystemFixtureActions(data)` replaces the whole array
+//!   when a response carries one (a null keeps the copy), and
 //!   `IsActionedSystemFixture(id)` is false for a null or empty array, else
 //!   whether any row names the id. The user id is the session's and is not
 //!   kept.
-//! - `MysekaiSystemFixtureActionService.ExecuteAPI(systemFixtureId)`:
-//!   `PostUserMysekaiSystemFixtureActionApi(userId, mysekaiSystemFixtureId)`,
-//!   an empty body. The reply (`UserMysekaiSystemFixtureActionResponse`)
-//!   carries `updatedResources` (`SuiteUser`) and `obtainedResources`
-//!   (`UserResource` rows); on success `OnFinishAPI` merges
-//!   `updatedResources` (`UserDataManager.UpdateAll`) before the caller
-//!   reads the copies. The birthday party's `ExecuteAsync` stops when the
-//!   reply is null and keeps `obtainedResources` for its reward dialog.
-//!
-//! [`handle`] is the endpoint the server model still registers until it is
-//! removed; the client request itself is one `Call::SystemFixtureAction` on
-//! the server link (see [`crate::cutscene::birthday`]).
+//! - `MysekaiSystemFixtureActionService.ExecuteAPI(systemFixtureId)` is one
+//!   `Call::SystemFixtureAction` on the server link (see
+//!   [`crate::cutscene::birthday`]); the reply's `updatedResources` reach
+//!   this copy with the arrived sections.
+//! - [`STARTER_HOUSE`]: the house the layout owner appends to the home site,
+//!   with its unrotated footprint corners.
 
-use bevy::ecs::system::SystemId;
 use bevy::prelude::*;
-
-use crate::server::with_model;
-
-/// The API's name in the source.
-pub(crate) const API: &str = "PostUserMysekaiSystemFixtureActionApi";
+use moly_law::fixture::{Direction, GridPosition};
 
 pub(crate) use moly_protocol::rows::UserMysekaiSystemFixtureAction;
 
@@ -56,67 +46,27 @@ impl ClientSystemFixtureActions {
     }
 }
 
-pub(crate) use moly_protocol::api::SystemFixtureActionReply;
-
-/// Refusal constructor for [`SystemFixtureActionReply`].
-pub(crate) trait SystemFixtureActionReplyExt {
-    /// Logs the refusal and builds the reply that carries it.
-    fn refused(reason: String) -> Self;
+/// The house `MysekaiSystemFixtureAction` puts on the home site: the package,
+/// its fixture and texture ids, and the unrotated (Front) footprint corners as
+/// a saved layout row stores them.
+pub(crate) struct StarterHouse {
+    pub(crate) package: &'static str,
+    pub(crate) fixture_id: i32,
+    pub(crate) texture_id: u32,
+    pub(crate) min: GridPosition,
+    pub(crate) max: GridPosition,
+    pub(crate) direction: Direction,
 }
 
-impl SystemFixtureActionReplyExt for SystemFixtureActionReply {
-    fn refused(reason: String) -> Self {
-        warn!("[server] {API} refused: {reason}");
-        Self {
-            success: false,
-            refusal: Some(format!("{API}: {reason}")),
-            obtained_resources: Vec::new(),
-        }
-    }
-}
-
-/// The server model's endpoint for the request (the system fixture id).
-#[derive(Resource, Clone, Copy, Debug)]
-pub(crate) struct SystemFixtureActionEndpoint(
-    pub(crate) SystemId<In<i32>, SystemFixtureActionReply>,
-);
-
-/// The endpoint the server plugin installs for the request: the reply's
-/// `updatedResources` are merged into the client's copy before it returns.
-pub(crate) fn handle(
-    In(mysekai_system_fixture_id): In<i32>,
-    mut copy: ResMut<ClientSystemFixtureActions>,
-) -> SystemFixtureActionReply {
-    let answer = with_model(|model| {
-        if !model.joined {
-            return Err("the server has not joined the client yet".to_owned());
-        }
-        let obtained = model.system_fixture_action(mysekai_system_fixture_id)?;
-        let response = model.responses.last().expect("the response just recorded");
-        Ok((
-            obtained,
-            response.sections.system_fixture_actions.clone(),
-        ))
-    })
-    .unwrap_or_else(|| Err("the server model is not installed".to_owned()));
-    match answer {
-        Ok((obtained_resources, rows)) => {
-            if let Some(rows) = rows {
-                copy.apply(rows);
-            }
-            SystemFixtureActionReply {
-                success: true,
-                refusal: None,
-                obtained_resources,
-            }
-        }
-        Err(reason) => SystemFixtureActionReply::refused(reason),
-    }
-}
-
-/// The endpoint and the client's copy.
-pub(crate) fn install(app: &mut App) {
-    app.init_resource::<ClientSystemFixtureActions>();
-    let endpoint = app.world_mut().register_system(handle);
-    app.insert_resource(SystemFixtureActionEndpoint(endpoint));
-}
+pub(crate) const STARTER_HOUSE: StarterHouse = StarterHouse {
+    package: "mysekai__fixture__mdl_mis0001_house_house1",
+    fixture_id: 1,
+    texture_id: 1,
+    min: GridPosition { x: 4, y: 0, z: -17 },
+    max: GridPosition {
+        x: 15,
+        y: 12,
+        z: -6,
+    },
+    direction: Direction::Back,
+};

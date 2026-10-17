@@ -234,8 +234,8 @@ impl HarvestStaminaHud {
     }
 }
 
-fn server_stamina(stamina: Stamina) -> crate::server::Stamina {
-    crate::server::Stamina {
+fn server_stamina(stamina: Stamina) -> moly_protocol::rows::Stamina {
+    moly_protocol::rows::Stamina {
         normal: stamina.normal,
         enhance: stamina.enhance,
         boost: stamina.boost,
@@ -486,7 +486,7 @@ pub(crate) fn advance(
     layouts: Res<UiLayouts>,
     model: Option<Res<HarvestPlayerModel>>,
     configs: Option<Res<crate::client_config::ClientConfigs>>,
-    user: Option<Res<crate::server::ClientUserData>>,
+    user: Option<Res<crate::userdata::client::ClientUserData>>,
     (stack, entry, site): (
         Res<crate::ui_layers::UiLayerStack>,
         Option<Res<crate::entry::EntrySequence>>,
@@ -525,7 +525,7 @@ pub(crate) fn advance(
         hud.alpha = marks.serialized_alpha;
         hud.seated = true;
     }
-    let max = crate::server::stamina_max();
+    let max = crate::userdata::stamina::stamina_max();
     if let (Some(site_id), false) = (harvest_site, hud.initialized) {
         match (model.as_deref(), max) {
             (Some(model), Some(max)) => {

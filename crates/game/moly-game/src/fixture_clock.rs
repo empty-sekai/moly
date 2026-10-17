@@ -454,8 +454,8 @@ fn local_hour_minute() -> (i32, i32) {
 }
 
 fn device_local_hour_minute() -> (i32, i32) {
-    let now = crate::server::clock::device_now_ms();
-    let local = now + crate::server::clock::device_utc_offset_ms(now);
+    let now = crate::userdata::clock::device_now_ms();
+    let local = now + crate::userdata::clock::device_utc_offset_ms(now);
     let minutes = local.div_euclid(60_000);
     (
         minutes.div_euclid(60).rem_euclid(24) as i32,

@@ -52,7 +52,8 @@ use super::{publish, DeliveryActionState, DeliveryHold, DeliveryModel, DeliveryP
 use crate::player::PlayerControlled;
 use crate::player_avatar::item_timeline::PlayerStepItem;
 use crate::player_state::{PlayerActionState, PlayerAvatarStates};
-use crate::server::delivery::{Reward, HONOR};
+use moly_protocol::rows::Reward;
+use crate::userdata::client::birthday_party::HONOR;
 use crate::site_move::timeline::Delay;
 use crate::ui_layers::{
     DialogBackKey, DialogBackKeyEvent, DialogId, DialogType, DisplayLayerType, ScreenManager,

@@ -149,9 +149,9 @@ use crate::balloon::{BalloonArt, ascii_or};
 use crate::collect_notice::NoticeCollectItem;
 use crate::gesture::{GestureEvent, GestureKind, GestureState};
 use crate::menu_shell::ShellDialogState;
-use crate::server::client::instrument_env;
-use crate::server::client::inventory::ClientMysekaiInventory;
-use crate::server::client::music_play::ClientMusicRecords;
+use crate::userdata::client::instrument_env;
+use crate::userdata::client::inventory::ClientMysekaiInventory;
+use crate::userdata::client::music_play::ClientMusicRecords;
 use crate::sitemap::SITEMAP_LAYER;
 use crate::ui_layers::{
     DialogBackKey, DialogBackKeyEvent, DialogId, DialogState, DialogType, DisplayLayerType,

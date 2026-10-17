@@ -52,7 +52,7 @@
 //! [`ClientSystemFixtureActions`]) and the
 //! `PostUserMysekaiSystemFixtureActionApi` reply
 //! (`policies.systemFixtureActionReply`; see
-//! [`crate::server::system_fixture_action`]). A refused reply is the source's
+//! [`crate::userdata::client::system_fixture_action`]). A refused reply is the source's
 //! null reply: `ExecuteAsync` stops before its cut-scene.
 //!
 //! Named differences: the overlap dialog (`ShowCommonSubWindowDialog`) and
@@ -88,8 +88,8 @@ use super::{Cast, CastCaller, CastPlay};
 use crate::common_dialog::Buttons;
 use crate::fixture_activity_state::FixtureActivityIdentity;
 use crate::ui_layers::DialogId;
-use crate::server::client::system_fixture_action::ClientSystemFixtureActions;
-use crate::server::client::talk_read::UserResource;
+use crate::userdata::client::system_fixture_action::ClientSystemFixtureActions;
+use crate::userdata::client::talk_read::UserResource;
 use crate::userdata::{Answered, ServerPending};
 use moly_link::ServerLink;
 use moly_protocol::api::SystemFixtureActionRequest;
@@ -285,7 +285,7 @@ pub(super) fn load(mut commands: Commands, mut masters: ResMut<MasterData>) {
     masters.request(&CHARACTER_UNITS);
     masters.request(&CHARACTERS);
     commands.insert_resource(BirthdayTables::Requested);
-    if let Some(raw) = crate::server::instrument_env(INSTRUMENT) {
+    if let Some(raw) = crate::userdata::client::instrument_env(INSTRUMENT) {
         let (seconds, fixture) = match raw.split_once(':') {
             Some((seconds, fixture)) => (seconds, Some(fixture)),
             None => (raw.as_str(), None),

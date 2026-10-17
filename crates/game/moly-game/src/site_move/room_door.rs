@@ -1023,7 +1023,7 @@ pub(crate) fn small_buttons_active(
 /// the client copy. With no copy or no rank the source logs an error and
 /// returns 1; so does this. (Its visiting branch reads the multiplay
 /// controller's rank; no visit exists here.)
-pub(crate) fn mysekai_rank(client: Option<&crate::server::ClientUserData>) -> i32 {
+pub(crate) fn mysekai_rank(client: Option<&crate::userdata::client::ClientUserData>) -> i32 {
     match client.and_then(|client| client.gamedata.mysekai_rank) {
         Some(rank) => rank,
         None => {
@@ -1051,7 +1051,7 @@ impl FloorReleaseMasters {
     pub(crate) fn small_buttons_active(
         &self,
         current_site_type: &str,
-        client: Option<&crate::server::ClientUserData>,
+        client: Option<&crate::userdata::client::ClientUserData>,
     ) -> Result<[bool; 3], String> {
         match self {
             FloorReleaseMasters::Loading => {
@@ -1106,7 +1106,7 @@ fn parse_floor_release_masters(
 fn report_small_buttons(
     active: Option<Res<crate::site::SiteActive>>,
     masters: Option<Res<FloorReleaseMasters>>,
-    client: Option<Res<crate::server::ClientUserData>>,
+    client: Option<Res<crate::userdata::client::ClientUserData>>,
     mut last: Local<Option<u32>>,
 ) {
     let Some(site) = active.filter(|site| site.is_indoor()) else {

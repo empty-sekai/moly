@@ -202,14 +202,13 @@ pub fn parse_game_seed(input: &str) -> Result<GameSeed, String> {
     })
 }
 
-/// A stored document this engine cannot read is refused, never reset.
+/// A stored local document this engine cannot read is refused, never reset.
+/// The server document is checked by the server when the seed installs it
+/// (`AdminCall::Install`), which refuses a document it cannot read.
 fn check_documents(server: &Option<String>, local: &Option<String>) -> Result<(), String> {
-    if let Some(text) = server {
-        crate::server::check_seed_document(text)
-            .map_err(|error| format!("seed document server: {error}"))?;
-    }
+    let _ = server;
     if let Some(text) = local {
-        crate::server::check_seed_local(text)
+        crate::userdata::client::check_seed_local(text)
             .map_err(|error| format!("seed document local: {error}"))?;
     }
     Ok(())

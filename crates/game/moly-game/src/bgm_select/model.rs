@@ -7,8 +7,8 @@ use std::collections::{HashMap, HashSet};
 use moly_assets::json::master::{self, MasterData, MasterError, MasterTable};
 use serde_json::Value;
 
-use crate::server::client::music::MusicPlaySetting;
-use crate::server::client::music_play::{
+use crate::userdata::client::music::MusicPlaySetting;
+use crate::userdata::client::music_play::{
     ClientMusicRecords, MusicPlayEjectRequest, MusicPlayPost, MusicPlaySetRequest,
 };
 

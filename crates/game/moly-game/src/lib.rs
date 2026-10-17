@@ -133,9 +133,12 @@ mod room_appearance;
 mod room_shell;
 pub mod schedule;
 mod screen_fade;
-mod server;
 pub(crate) mod userdata;
-mod server_panel;
+
+
+#[path = "server_panel.rs"]
+pub(crate) mod panel;
+pub(crate) use self::panel as server_panel;
 pub mod shadowmap;
 pub mod site;
 pub mod site_material;
@@ -287,7 +290,6 @@ pub fn app(
     ui_layout::install(&mut app);
     app.add_plugins(site::SitePlugin(site));
     schedule::install(&mut app);
-    app.add_plugins(server::ServerPlugin);
     app.add_plugins(userdata::UserDataPlugin);
     app.add_plugins(server_panel::ServerPanelPlugin);
     app.add_plugins(npc_state::NpcStatePlugin);

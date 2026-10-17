@@ -84,7 +84,7 @@ use moly_law::talk::FaceSlot;
 
 use super::birthday::BirthdayContext;
 use crate::common_dialog::Buttons;
-use crate::server::client::talk_read::UserResource;
+use crate::userdata::client::talk_read::UserResource;
 use crate::ui_layers::{BirthdayBackKey, DialogId, MysekaiBackKeyProcess};
 
 /// `_disableActionButtonTypes`: the types the `Birthday` context disables

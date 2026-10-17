@@ -611,7 +611,7 @@ fn end_action(world: &mut World, seq: &mut EntrySequence, source_t: Option<f32>)
         .is_some_and(|local| {
             local
                 .0
-                .has_topic(crate::server::local::TOPIC_STAMINA_REFRESH)
+                .has_topic(crate::userdata::client::local::TOPIC_STAMINA_REFRESH)
         });
     let has_player = world
         .query_filtered::<(), With<PlayerControlled>>()
@@ -655,7 +655,7 @@ fn end_refresh(world: &mut World, seq: &mut EntrySequence) {
         local
             .0
             .topics
-            .retain(|topic| *topic != crate::server::local::TOPIC_STAMINA_REFRESH);
+            .retain(|topic| *topic != crate::userdata::client::local::TOPIC_STAMINA_REFRESH);
     }
     step(
         seq,

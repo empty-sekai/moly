@@ -47,11 +47,11 @@
 //! when the gate has a skin (id > 0), else the gate row's own bundle; the
 //! fixture factory loads `mysekai/fixture/<bundle>`.
 //!
-//! Server values come from the server model ([`crate::server`]): its gate
-//! replies ([`crate::server::ServerGateReplies`]) are consumed here, whoever
+//! Server values come from the server model ([`crate::userdata::client`]): its gate
+//! replies ([`crate::userdata::client::ServerGateReplies`]) are consumed here, whoever
 //! made the request (the server panel's gate actions, or the native
 //! instruments below). The talk lists of both replies go to the client's talk
-//! store through [`crate::server::client_update_talk_list`]. Native request
+//! store through [`crate::userdata::client::client_update_talk_list`]. Native request
 //! instruments (the gate screens' requests; those screens are the UI
 //! group's):
 //! - `MOLY_GATE_INVITE=<unit>[,pass]`: the reserve request for the selected
@@ -100,7 +100,9 @@ use crate::fixture_activity_timeline::{
     TimelineToken,
 };
 use crate::npc::CharacterUnitId;
-use crate::server::{GateCharacter, GateReply, ReplyTalkList, TalkListUpdate};
+use moly_protocol::rows::GateCharacter;
+use moly_protocol::gate::{GateReply, ReplyTalkList};
+use crate::userdata::client::TalkListUpdate;
 use crate::userdata::{Answered, ServerPending};
 use moly_link::ServerLink;
 use moly_protocol::api::{GateChangeRequest, GateReserveRequest};
@@ -508,7 +510,7 @@ fn now(world: &World) -> f64 {
 }
 
 fn parse_instruments() -> Option<Request> {
-    if let Some(raw) = crate::server::instrument_env(INVITE) {
+    if let Some(raw) = crate::userdata::client::instrument_env(INVITE) {
         let (unit, grant_pass) = match raw.trim().split_once(',') {
             Some((unit, "pass")) => (unit, true),
             Some(_) => ("", false),
@@ -522,7 +524,7 @@ fn parse_instruments() -> Option<Request> {
             }
         };
     }
-    if let Some(raw) = crate::server::instrument_env(CHANGE) {
+    if let Some(raw) = crate::userdata::client::instrument_env(CHANGE) {
         let parsed = raw.split_once(':').and_then(|(gate, groups)| {
             let (gate, skin) = match gate.split_once('/') {
                 Some((gate, skin)) => (
@@ -705,14 +707,12 @@ fn publish_home_gate(world: &mut World) {
         let flow = world.resource::<GateFlow>();
         match flow.parsed.as_ref() {
             Some(tables) => {
-                // The server model is present but its document is still
-                // loading.
-                if world.contains_resource::<crate::server::ServerGateReplies>()
-                    && !crate::server::installed()
-                {
+                // The client copy is not here yet: the join's answer is
+                // still in flight.
+                if !world.contains_resource::<crate::userdata::client::ClientUserData>() {
                     return;
                 }
-                let bundle = crate::server::home_gate().map(|(gate, skin)| {
+                let bundle = crate::userdata::snapshot::home_gate().map(|(gate, skin)| {
                     (
                         (gate, skin),
                         tables.gate_bundle(i64::from(gate), i64::from(skin)),
@@ -856,7 +856,7 @@ fn note_wait(world: &mut World, what: &str, reason: &'static str) {
 /// A gate reply of the server model, taken once the field is ready.
 fn take_reply(world: &mut World) -> Stage {
     let pending = world
-        .get_resource::<crate::server::ServerGateReplies>()
+        .get_resource::<crate::userdata::client::ServerGateReplies>()
         .is_some_and(|replies| !replies.0.is_empty());
     if !pending {
         restore_saved_gate(world);
@@ -877,7 +877,7 @@ fn take_reply(world: &mut World) -> Stage {
     };
     world.resource_mut::<GateFlow>().waiting = None;
     let Some(reply) = world
-        .resource_mut::<crate::server::ServerGateReplies>()
+        .resource_mut::<crate::userdata::client::ServerGateReplies>()
         .0
         .pop_front()
     else {
@@ -900,7 +900,7 @@ fn take_reply(world: &mut World) -> Stage {
 /// An instrument's request: made once the field is ready, the client has
 /// joined and the settle has passed.
 fn request_step(world: &mut World, request: Request, ready_since: Option<f64>) -> Stage {
-    let joined = world.contains_resource::<crate::server::ClientUserData>();
+    let joined = world.contains_resource::<crate::userdata::client::ClientUserData>();
     let readiness = ready(world).and_then(|_| {
         joined
             .then_some(())
@@ -937,7 +937,7 @@ fn request_step(world: &mut World, request: Request, ready_since: Option<f64>) -
         grant_pass: true,
     } = request
     {
-        grant_colorful_pass();
+        grant_colorful_pass(world);
         return Stage::Request {
             request: Request::Reserve {
                 unit,
@@ -949,7 +949,7 @@ fn request_step(world: &mut World, request: Request, ready_since: Option<f64>) -
     if let Request::Reserve { unit, .. } = request {
         let realtime = world.resource::<Time<Real>>().elapsed_secs();
         let pass = world
-            .resource::<crate::server::ClientUserData>()
+            .resource::<crate::userdata::client::ClientUserData>()
             .has_mysekai_colorful_pass(realtime);
         info!("[gate] ScreenLayerMysekaiGateInvitationPresenter.ReserveProcessAsync(unit {unit}): HasMysekaiColorfulPass = {pass} (the client's copy of userMysekaiColorfulPass)");
         if !pass {
@@ -980,26 +980,39 @@ fn request_step(world: &mut World, request: Request, ready_since: Option<f64>) -
 /// The server panel's edits that give the user a colorful pass for a day of
 /// the server clock (`userMysekaiColorfulPass`), then its `sync` action,
 /// which delivers the pass to the client's copy as a response.
-fn grant_colorful_pass() {
-    let result = crate::server::with_model(|model| {
-        let expired_at = model.now_ms().saturating_add(86_400_000);
-        let mut edit = serde_json::Map::new();
-        edit.insert("type".into(), "server.edit".into());
-        edit.insert("path".into(), "userMysekaiColorfulPass".into());
-        edit.insert(
-            "value".into(),
-            serde_json::json!({"mysekaiColorfulPassId": 1, "expiredAt": expired_at}),
-        );
-        let mut sync = serde_json::Map::new();
-        sync.insert("type".into(), "server.edit".into());
-        sync.insert("action".into(), "sync".into());
-        (model.edit(&edit), model.edit(&sync))
+fn grant_colorful_pass(world: &mut World) {
+    let Some(now) = crate::userdata::clock::server_now_ms() else {
+        error!("[gate] instrument: the server clock is not known; no colorful pass");
+        return;
+    };
+    let expired_at = now.saturating_add(86_400_000);
+    let edit = serde_json::json!({
+        "type": "server.edit",
+        "path": "userMysekaiColorfulPass",
+        "value": {"mysekaiColorfulPassId": 1, "expiredAt": expired_at},
     });
-    match result {
-        Some((Ok(pass), Ok(sync))) => info!("[gate] instrument: the server panel gives the user a colorful pass: {pass}; sync: {sync}"),
-        Some((pass, sync)) => error!("[gate] instrument: the colorful pass edit {pass:?}, sync {sync:?}"),
-        None => error!("[gate] instrument: no server model is installed; no colorful pass"),
-    }
+    let sync = serde_json::json!({"type": "server.edit", "action": "sync"});
+    let Some(pass_seq) = crate::userdata::admin_call(
+        world,
+        moly_protocol::AdminCall::Edit {
+            command_json: edit.to_string(),
+        },
+    ) else {
+        error!("[gate] instrument: the game has no server link; no colorful pass");
+        return;
+    };
+    let Some(sync_seq) = crate::userdata::admin_call(
+        world,
+        moly_protocol::AdminCall::Edit {
+            command_json: sync.to_string(),
+        },
+    ) else {
+        error!("[gate] instrument: the game has no server link; no colorful pass");
+        return;
+    };
+    info!(
+        "[gate] instrument: the server panel gives the user a colorful pass (seq {pass_seq}); sync (seq {sync_seq})"
+    );
 }
 
 /// `HideEffect`'s wait and `SetActive(false)` for each stopped stay effect.
@@ -1156,7 +1169,7 @@ fn reserve_process(
     // screen would have.
     let realtime = world.resource::<Time<Real>>().elapsed_secs();
     let pass = world
-        .get_resource::<crate::server::ClientUserData>()
+        .get_resource::<crate::userdata::client::ClientUserData>()
         .is_some_and(|client| client.has_mysekai_colorful_pass(realtime));
     if !pass {
         info!("[gate] ReserveProcessAsync: HasMysekaiColorfulPass false: ShowNotInvitationExpiredPassDialog (UI); the reply is not presented (the server holds the reservation)");
@@ -1170,7 +1183,7 @@ fn reserve_process(
     // `MysekaiBootData.AddGateCharacters`: the reply's rows are every gate
     // character the server holds.
     let visitors = rows;
-    crate::server::client_update_talk_list(
+    crate::userdata::client::client_update_talk_list(
         world,
         TalkListUpdate {
             caller: "ReserveProcessAsync: MysekaiBootData.AddGateCharacters(the reply's rows); MysekaiTalkDataStore.UpdateTalkList([], the reply's talk list, [])",
@@ -1271,7 +1284,7 @@ fn execute_change_gate_process(
         }
     }
     let change = Change { rows, units, talks };
-    let tutorial = match world.get_resource::<crate::server::ClientUserData>() {
+    let tutorial = match world.get_resource::<crate::userdata::client::ClientUserData>() {
         Some(client) => !client.gamedata.is_mysekai_tutorial_end,
         None => world
             .get_resource::<crate::server_panel::ServerPanel>()
@@ -1356,7 +1369,7 @@ fn execute_change_gate_process(
 /// gate: a home load places a new one. The document persists the gate
 /// change in the browser game.
 fn restore_saved_gate(world: &mut World) {
-    let Some((gate_id, skin_id)) = crate::server::home_gate() else {
+    let Some((gate_id, skin_id)) = crate::userdata::snapshot::home_gate() else {
         return;
     };
     if world
@@ -1483,7 +1496,7 @@ fn swap_gate_model(world: &mut World, package: &str) -> Result<String, String> {
 /// `SetupNpcVisitingAsync(visitingFromGate: true)` -> `ShowCharacterFromGate`.
 fn start_character_appearance(world: &mut World, change: Change) -> Stage {
     let Change { rows, units, talks } = change;
-    crate::server::client_update_talk_list(
+    crate::userdata::client::client_update_talk_list(
         world,
         TalkListUpdate {
             caller: "StartCharacterAppearanceAsync: MysekaiTalkDataStore.SetTalkList(the change reply's talk list); the reply's gate characters visit",

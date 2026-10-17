@@ -64,7 +64,7 @@ pub(crate) fn parse(mut commands: Commands, mut masters: ResMut<MasterData>) {
         .filter(|row| is_within_time(now, row.start_at, row.closed_at))
         .map(|row| row.label())
         .collect();
-    let clock = if crate::server::server_now_ms().is_some() {
+    let clock = if crate::userdata::clock::server_now_ms().is_some() {
         "server clock"
     } else {
         "device time (the server model is not installed yet)"
@@ -232,7 +232,7 @@ pub(crate) fn is_within_time(check_at: i64, start_at: i64, end_at: i64) -> bool 
 /// The epoch millisecond "now": the server clock, or device time before the
 /// server model is installed.
 pub(crate) fn now_ms() -> i64 {
-    crate::server::server_now_ms().unwrap_or_else(crate::server::clock::device_now_ms)
+    crate::userdata::clock::server_now_ms().unwrap_or_else(crate::userdata::clock::device_now_ms)
 }
 
 #[cfg(test)]

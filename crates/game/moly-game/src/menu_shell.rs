@@ -738,7 +738,7 @@ pub(crate) fn place(
     mut solved: Local<std::collections::HashSet<&'static str>>,
     root_canvas: Option<Res<RootCanvas>>,
     (user, real, party): (
-        Option<Res<crate::server::ClientUserData>>,
+        Option<Res<crate::userdata::client::ClientUserData>>,
         Res<Time<Real>>,
         Option<Res<BirthdayParty>>,
     ),
@@ -902,7 +902,7 @@ pub(crate) fn end_party_instrument(
 ) {
     if !instrument.read {
         instrument.read = true;
-        instrument.after = crate::server::client::instrument_env("MOLY_BIRTHDAY_END_SECS").map(|raw| {
+        instrument.after = crate::userdata::client::instrument_env("MOLY_BIRTHDAY_END_SECS").map(|raw| {
             raw.trim().parse::<f64>().unwrap_or_else(|_| {
                 panic!("MOLY_BIRTHDAY_END_SECS={raw:?} is not a number of seconds")
             })

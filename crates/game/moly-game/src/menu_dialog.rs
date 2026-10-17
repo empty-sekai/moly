@@ -122,7 +122,7 @@
 //! ## Server state
 //!
 //! The stamina triple is the client's copy of `UserMysekaiStamina`
-//! (`crate::server::ClientUserData`, set by the server model's responses:
+//! (`crate::userdata::client::ClientUserData`, set by the server model's responses:
 //! the join, the harvest and gather replies), the same copy the harvest
 //! login reads; the gauge maximum is the master normal `maxStamina`. Total
 //! experience (`UserMysekaiGamedata.totalExp`) comes from the same server
@@ -474,7 +474,7 @@ pub(crate) const FIXED_TEXTS: &[&str] = &[
 // ---------------------------------------------------------------------------
 
 /// The menu dialog's named mock enable inputs. The stamina is the client's
-/// copy of the server model (`crate::server::ClientUserData`); total
+/// copy of the server model (`crate::userdata::client::ClientUserData`); total
 /// experience is [`crate::mysekai_rank::UserTotalExp`]; the rank table is
 /// master data from the runtime root.
 #[derive(Resource)]
@@ -489,7 +489,7 @@ pub(crate) struct MenuMock {
 }
 
 /// `StaminaData.SumStamina` of the client's copy (normal + enhance + boost).
-fn stamina_sum(stamina: crate::server::Stamina) -> i32 {
+fn stamina_sum(stamina: moly_protocol::rows::Stamina) -> i32 {
     stamina
         .normal
         .wrapping_add(stamina.enhance)
@@ -507,13 +507,13 @@ fn stamina_sum(stamina: crate::server::Stamina) -> i32 {
 /// `mysekaiStaminas`). Both come from the server model; this is the seam the
 /// model switches.
 fn menu_stamina(
-    user: Option<&crate::server::ClientUserData>,
-) -> Result<(crate::server::Stamina, crate::server::StaminaMax), &'static str> {
+    user: Option<&crate::userdata::client::ClientUserData>,
+) -> Result<(moly_protocol::rows::Stamina, moly_masters::StaminaMax), &'static str> {
     let stamina = user
         .ok_or("the server model has made no response yet")?
         .stamina
         .ok_or("the server model has not seated the stamina pools")?;
-    let max = crate::server::stamina_max().ok_or("the stamina masters are not loaded")?;
+    let max = crate::userdata::stamina::stamina_max().ok_or("the stamina masters are not loaded")?;
     Ok((stamina, max))
 }
 
@@ -525,7 +525,7 @@ fn sdiv(a: i32, b: i32) -> i32 {
 
 /// `HarvestUtility.GetBoostStaminaStockCount(boost)`: the boost pool over a
 /// tenth of the boost master's `maxStamina` (C# integer division, both).
-pub(crate) fn boost_stamina_stock_count(boost: i32, max: crate::server::StaminaMax) -> i32 {
+pub(crate) fn boost_stamina_stock_count(boost: i32, max: moly_masters::StaminaMax) -> i32 {
     sdiv(boost, max.boost / 10)
 }
 
@@ -533,7 +533,7 @@ pub(crate) fn boost_stamina_stock_count(boost: i32, max: crate::server::StaminaM
 /// maximum, enhance / enhance maximum, (boost mod the boost stock unit) /
 /// unit), each quotient in single precision. The unit is a tenth of the boost
 /// maximum (integer), the remainder is `boost - sdiv(boost, unit) * unit`.
-pub(crate) fn stamina_gage_rate(stamina: crate::server::Stamina, max: crate::server::StaminaMax) -> (f32, f32, f32) {
+pub(crate) fn stamina_gage_rate(stamina: moly_protocol::rows::Stamina, max: moly_masters::StaminaMax) -> (f32, f32, f32) {
     let unit = max.boost / 10;
     let rest = stamina.boost.wrapping_sub(sdiv(stamina.boost, unit).wrapping_mul(unit));
     (
@@ -575,7 +575,7 @@ pub(crate) const STAMINA_EMPTY_ICON_COLOR_ENTRY: usize = 5;
 /// `UpdateStaminaGateView`'s two view calls: `UpdateStaminaView(staminaData,
 /// GetStaminaData's stock count, false)` and `UpdateStaminaGageRate(
 /// staminaData, GetStaminaGageRate(staminaData), false)`.
-pub(crate) fn stamina_view_state(stamina: crate::server::Stamina, max: crate::server::StaminaMax) -> StaminaViewState {
+pub(crate) fn stamina_view_state(stamina: moly_protocol::rows::Stamina, max: moly_masters::StaminaMax) -> StaminaViewState {
     let stock = boost_stamina_stock_count(stamina.boost, max);
     stamina_view_state_with(stamina, stock, stamina_gage_rate(stamina, max))
 }
@@ -585,7 +585,7 @@ pub(crate) fn stamina_view_state(stamina: crate::server::Stamina, max: crate::se
 /// `UpdateStaminaGageRate(staminaData, normal, enhance, boost, false)`
 /// (whose own stock count, from the same boost pool, equals `stock`).
 fn stamina_view_state_with(
-    stamina: crate::server::Stamina,
+    stamina: moly_protocol::rows::Stamina,
     stock: i32,
     (normal, enhance, boost): (f32, f32, f32),
 ) -> StaminaViewState {
@@ -701,7 +701,7 @@ fn update_stamina_gate_view(
     view: &mut UiPrefabView,
     layouts: &UiLayouts,
     doc: &UiPrefab,
-    user: Option<&crate::server::ClientUserData>,
+    user: Option<&crate::userdata::client::ClientUserData>,
 ) {
     let targets = StaminaTargets::from_document(doc);
     let (stamina, max) = match menu_stamina(user) {
@@ -751,7 +751,7 @@ fn update_stamina_gate_view(
 
 /// A native instrument (game mode reads none).
 fn env_bool(name: &str, default: bool) -> bool {
-    match crate::server::instrument_env(name) {
+    match crate::userdata::client::instrument_env(name) {
         Some(raw) => match raw.trim() {
             "true" | "1" => true,
             "false" | "0" => false,
@@ -926,7 +926,7 @@ pub(crate) fn spawn_when_ready(
 fn on_open(
     mock: &MenuMock,
     setup: &[ButtonSetup; 12],
-    user: Option<&crate::server::ClientUserData>,
+    user: Option<&crate::userdata::client::ClientUserData>,
     rank: Option<&moly_law::ui::mysekai_rank::MysekaiRankModel>,
 ) {
     info!(
@@ -965,8 +965,8 @@ fn on_open(
          through the master rank table: rank {} / max {} · this rank {} · next rank {} · {} exp to go",
         stamina,
         stamina.map(stamina_sum),
-        crate::server::stamina_max().map(|max| max.normal),
-        user.is_some_and(crate::server::ClientUserData::stamina_empty),
+        crate::userdata::stamina::stamina_max().map(|max| max.normal),
+        user.is_some_and(crate::userdata::client::ClientUserData::stamina_empty),
         rank.total_exp,
         rank.mysekai_rank,
         rank.max_mysekai_rank,
@@ -1031,7 +1031,7 @@ pub(crate) fn place(
     root_canvas: Option<Res<crate::canvas::RootCanvas>>,
     ranks: Option<Res<crate::mysekai_rank::MysekaiRanks>>,
     total_exp: Res<crate::mysekai_rank::UserTotalExp>,
-    user: Option<Res<crate::server::ClientUserData>>,
+    user: Option<Res<crate::userdata::client::ClientUserData>>,
     (mut screens, mut back_keys): (ResMut<ScreenManager>, MessageReader<DialogBackKeyEvent>),
     site: Option<Res<crate::site::SiteActive>>,
 ) {
@@ -1649,8 +1649,8 @@ mod tests {
     fn stamina_view_matches_the_source_rows() {
         let rates = (0.25, 0.5, 0.75);
         for row in SOURCE_ROWS {
-            let stamina = crate::server::Stamina { normal: row[0], enhance: row[1], boost: row[2] };
-            let max = crate::server::StaminaMax { normal: 1000, enhance: 1000, boost: 10000 };
+            let stamina = moly_protocol::rows::Stamina { normal: row[0], enhance: row[1], boost: row[2] };
+            let max = moly_masters::StaminaMax { normal: 1000, enhance: 1000, boost: 10000 };
             let state = stamina_view_state_with(stamina, boost_stamina_stock_count(stamina.boost, max), rates);
             let fill = [0.25, 0.5, 0.75, 1.0][row[9] as usize];
             assert_eq!(

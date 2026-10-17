@@ -40,7 +40,7 @@ const METHODS: &[(&str, &str, &str)] = &[
     ),
     (
         "moly.ui.tap",
-        "Taps the centre of one control of a shown UI view, the node a director ui.tap step takes: the path moly.ui.views answers.",
+        "Taps one control of a shown UI view, the node a director ui.tap step takes: the path moly.ui.views answers. The point is one inside the control's rect that the view's own press raycast gives to that control; when a control covering the rect takes every point, it is refused with the covering paths.",
         r#"{"type":"object","properties":{"view":{"type":"string"},"path":{"type":"string"}},"required":["view","path"],"additionalProperties":false}"#,
     ),
     (

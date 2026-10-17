@@ -15,7 +15,7 @@
 //!
 //! Server input: the rank before and after the change
 //! (`UserMysekaiGamedata.mysekaiRank` of the previous and the new reply),
-//! delivered by the server model (`crate::server::RankDelivered`). In the
+//! delivered by the server model (`crate::userdata::client::RankDelivered`). In the
 //! browser game the join delivers the rank with no previous reply (so no new
 //! topic: the displayed levels follow the rank and the local lists), and the
 //! site loader waits for it; natively the join delivers nothing and the
@@ -74,7 +74,7 @@ const HOUSING: [&str; 4] = ["home_site", "first_floor", "second_floor", "third_f
 
 // The client's local lists: the server model owns the resource, beside the
 // local document it seats and persists it with.
-pub(crate) use crate::server::local::MysekaiLocalSettings;
+pub(crate) use crate::userdata::client::local::MysekaiLocalSettings;
 
 /// `UserMysekaiGamedata.mysekaiRank` of the server's latest reply, once a
 /// rank change has delivered it.
@@ -112,7 +112,7 @@ pub(crate) struct LevelHold;
 struct JoinHold;
 
 fn parse_instrument() -> Option<PendingRankChange> {
-    let raw = crate::server::instrument_env(INSTRUMENT)?;
+    let raw = crate::userdata::client::instrument_env(INSTRUMENT)?;
     let parsed = raw.split_once(',').and_then(|(prev, current)| {
         Some((
             prev.trim().parse::<i32>().ok()?,
@@ -156,10 +156,10 @@ fn load(mut commands: Commands, mut masters: ResMut<MasterData>) {
 fn take_server_rank(
     mut commands: Commands,
     mut masters: ResMut<MasterData>,
-    mut ranks: MessageReader<crate::server::RankDelivered>,
+    mut ranks: MessageReader<crate::userdata::client::RankDelivered>,
     pending: Option<Res<PendingRankChange>>,
     join_hold: Option<Res<JoinHold>>,
-    user: Option<Res<crate::server::ClientUserData>>,
+    user: Option<Res<crate::userdata::client::ClientUserData>>,
 ) {
     let mut change = pending.as_deref().copied();
     let mut delivered_any = false;

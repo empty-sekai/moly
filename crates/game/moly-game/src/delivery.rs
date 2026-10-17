@@ -13,7 +13,7 @@
 //!   `OnChangeUILayer`: the delivery button's press and release are the
 //!   start / end requests.
 //! - The server's side is the server model's delivery section
-//!   (`crate::server::delivery`): the user rows and the two master configs
+//!   (`crate::userdata::client::birthday_party`): the user rows and the two master configs
 //!   the client reads as its copies (`ClientBirthdayPartyData`), the two API
 //!   replies, and the delivery master tables (`DeliveryTables`).
 //! - `flow`: `OnStartDelivery` / `ExecuteDelivery`: the approach, the start
@@ -208,7 +208,7 @@ impl PartySite {
     /// have-quantity and the party's `deliveryTotalPoint` (0 without a row).
     pub(crate) fn user_rows(
         &self,
-        client: &crate::server::delivery::ClientBirthdayPartyData,
+        client: &crate::userdata::client::birthday_party::ClientBirthdayPartyData,
     ) -> (i32, i32) {
         (
             i32::try_from(self.item_material_id).map_or(0, |id| client.have_quantity(id)),
@@ -310,7 +310,7 @@ impl DeliveryModel {
     /// item, `GetUserBirthdayParty(id).deliveryTotalPoint`, 0 without a row).
     pub(crate) fn update_synchronized(
         &mut self,
-        client: &crate::server::delivery::ClientBirthdayPartyData,
+        client: &crate::userdata::client::birthday_party::ClientBirthdayPartyData,
     ) {
         for party in &mut self.parties {
             let (have, points) = party.user_rows(client);
