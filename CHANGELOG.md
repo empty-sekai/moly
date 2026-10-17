@@ -2,6 +2,20 @@
 
 All notable changes to this project are listed here. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.0.3](https://github.com/empty-sekai/moly/compare/v0.0.2...v0.0.3) - 2026-10-17
+
+### Features
+
+- **harvest:** Generate harvest maps from built-in spawn rules
+
+### Bug fixes
+
+- **harvest:** Place harvest objects at the navigation surface height
+
+### CI
+
+- Generate the changelog and release notes with git-cliff
+
 ## [0.0.2](https://github.com/empty-sekai/moly/compare/v0.0.1...v0.0.2) - 2026-10-16
 
 ### Features
