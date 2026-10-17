@@ -208,22 +208,33 @@ pub(crate) fn place(
     if run.site_id != site.site_id || run.epoch != epoch.0 {
         return;
     }
-    let verts = ground_verts
+    // The drop rows land on these (drops, airplane); placement reads the
+    // navigation surface below.
+    ground_verts
         .0
-        .get_or_insert_with(|| super::ground_world_verts(ground, &inputs.meshes, &inputs.parts))
-        .clone();
-    let height_at = |x: f32, z: f32| -> f32 {
-        let face_point = inputs
-            .objective_face
-            .as_deref()
-            .filter(|surface| {
-                surface.navigation_generation() == face.generation() && surface.is_fresh(epoch.0)
+        .get_or_insert_with(|| super::ground_world_verts(ground, &inputs.meshes, &inputs.parts));
+    // GetCreateHarvestObjectPosition takes the navigation sample of the site
+    // point, so the height is the navigation surface's: the site's surface
+    // triangles (fixed for the epoch) plus the walk face's current low-step
+    // offset. Each placed object's carve advances the walk face generation a
+    // frame before the objective face is rebuilt; the triangles do not change
+    // with it.
+    let Some(surface) = inputs
+        .objective_face
+        .as_deref()
+        .filter(|surface| surface.is_fresh(epoch.0))
+    else {
+        return;
+    };
+    let height_at = |x: f32, z: f32| -> Option<f32> {
+        surface
+            .surface_height_at([x, z])
+            .or_else(|| {
+                surface
+                    .surface_sample([x, surface.ref_y(), z], f32::MAX)
+                    .map(|point| point[1])
             })
-            .and_then(|surface| surface.navigation_point_at([x, z]));
-        match face_point {
-            Some(point) => point[1],
-            None => super::surface_y(&verts, x, z, 0.0) + face.height_offset([x, z]),
-        }
+            .map(|y| y + face.height_offset([x, z]))
     };
     // GenerateUnclaimedDropItemsAsync: rows already dropped whose threshold
     // is at or above the fixture's hp come back on the ground.
@@ -310,7 +321,18 @@ pub(crate) fn place(
             def.leaf, def.id, fixture.position_x, fixture.position_z
         );
     }
-    let y = height_at(snapped.x, snapped.y);
+    let Some(y) = height_at(snapped.x, snapped.y) else {
+        warn!(
+            "[harvest] {}#{} at ({}, {}): the navigation surface has no triangle near ({:.2}, {:.2}); the row is not placed",
+            def.leaf, def.id, fixture.position_x, fixture.position_z, snapped.x, snapped.y
+        );
+        run.next += 1;
+        let total = run.fixtures.len();
+        if run.next == total {
+            arrival.next_uid += total as u64;
+        }
+        return;
+    };
     let alive = fixture.status < STATUS_HARVESTED;
     // HarvestBaseView.Setup: Random.Range(0f, 360f) * 0.017453292 (the yaw),
     // then SetupScaleRandom for trees and stones (Random.Range(min, max) of

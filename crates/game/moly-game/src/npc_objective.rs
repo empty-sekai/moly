@@ -256,6 +256,15 @@ impl ObjectiveFace {
     /// them on slopes, then repeatedly convert a step's height into terrain.
     /// Use the same highest covering site surface as the single-layer bake.
     pub(crate) fn navigation_point_at(&self, xz: [f32; 2]) -> Option<[f32; 3]> {
+        self.surface_height_at(xz)
+            .map(|y| [xz[0], y + self.field.height_offset(xz), xz[1]])
+    }
+
+    /// The highest covering triangle of the navigation input surface at x/z,
+    /// without the walk field's low-step offset. The triangles are fixed for
+    /// the site epoch; a carve (a new navigation generation) changes which
+    /// cells are walkable and the offsets, not this height.
+    pub(crate) fn surface_height_at(&self, xz: [f32; 2]) -> Option<f32> {
         if !xz.into_iter().all(f32::is_finite) {
             return None;
         }
@@ -277,7 +286,7 @@ impl ObjectiveFace {
                 height = Some(height.map_or(y, |prior| prior.max(y)));
             }
         }
-        height.map(|y| [xz[0], y + self.field.height_offset(xz), xz[1]])
+        height
     }
 
     /// 与执行器共用严格完整路径，目标不拉回到其他可达位置。
