@@ -608,6 +608,26 @@ pub(crate) fn advance_room(world: &mut World) {
                 info!("[site-expansion] the other floors: {}", other_floors_note());
                 let hold = world.remove_resource::<game_state::UiHold>();
                 info!("[site-expansion] PlayRoomSiteExpansionPerformAsync ends: AddCollisionSensorEvent; SetLayerCanvasGroup(UI, interactable true; hold {:?} released); game state 11 holds until the next ChangeState", hold.map(|hold| hold.0));
+                // The source's level-release dialog is the ChangeState that
+                // leaves 11; this product does not draw that dialog, so the
+                // room would hold LevelUpMyRoomSite forever (the field runs,
+                // the HUD/joystick stay in the level-up state). Leave to the
+                // field's Normal state here, where the dialog's OK would.
+                game_state::leave(
+                    world,
+                    "LevelUpMyRoomSiteGameState.OnExit (the level-release dialog is not drawn; the room view resumes)",
+                );
+                // rank_up left the camera in CameraStateType::None; the
+                // follow law only runs in Normal, so the player moved while
+                // the eye stayed on the room-view pose. NormalGameState.OnEnter
+                // changes the camera back (NormalCameraState.OnEnter).
+                let site_type = perform.site_type.clone();
+                crate::site_move::camera::enter_normal(
+                    world,
+                    &site_type,
+                    "housing_room",
+                    &site_type,
+                );
                 true
             } else {
                 false
