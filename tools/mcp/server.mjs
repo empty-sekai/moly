@@ -84,7 +84,9 @@ function describe(inst) {
     id: inst.id,
     kind: inst.kind,
     pid: inst.pid,
-    ...(inst.server ? { server: inst.server.pid } : {}),
+    ...(inst.server
+      ? { server: inst.server.pid, ...(inst.server.controlPort ? { serverControlPort: inst.server.controlPort } : {}) }
+      : {}),
     started: inst.started,
     rpc: inst.rpc,
     running: !inst.exited,
@@ -186,7 +188,10 @@ function startServer({ gamePath, cwd, logPath, env }) {
     if (child.stdout) {
       pipeServerLog(child.stdout, logPath, (line) => {
         const match = /listening on (ws:\/\/\S+)/.exec(line);
-        if (match) finish(null, { url: match[1], line: line.trim() });
+        if (match) {
+          const control = /control (http:\/\/[^\s,]+)/.exec(line);
+          finish(null, { url: match[1], line: line.trim(), control: control ? control[1] : null });
+        }
       });
     }
     child.once('exit', (code, signal) => {
@@ -231,8 +236,13 @@ async function nativeLaunch({ exe, env, args = [], cwd, rpcPort = DEFAULT_RPC_PO
   // MOLY_SETTINGS_FILE, if given, is used instead.
   const settingsFile = env?.MOLY_SETTINGS_FILE ?? path.join(LOG_DIR, `${id}.settings.json`);
   // The native game is two processes: the server names an address and the game is
-  // started with it.
-  const server = startServer({ gamePath: exePath, cwd: cwdPath, logPath, env });
+  // started with it. Each server gets its own control port (the caller may name
+  // one in env) so instances can run side by side.
+  const serverEnv = { ...(env ?? {}) };
+  if (!serverEnv.MOLY_SERVER_CONTROL_PORT) {
+    serverEnv.MOLY_SERVER_CONTROL_PORT = String(await freePort());
+  }
+  const server = startServer({ gamePath: exePath, cwd: cwdPath, logPath, env: serverEnv });
   let serverRecord = null;
   if (server) {
     let announced;
@@ -242,7 +252,19 @@ async function nativeLaunch({ exe, env, args = [], cwd, rpcPort = DEFAULT_RPC_PO
       await killServer(server.child);
       throw err;
     }
-    serverRecord = { pid: server.child.pid, child: server.child, url: announced.url, line: announced.line };
+    let serverControlPort = null;
+    if (announced.control) {
+      const port = Number(new URL(announced.control).port);
+      if (Number.isInteger(port) && port > 0) serverControlPort = port;
+    }
+    serverRecord = {
+      pid: server.child.pid,
+      child: server.child,
+      url: announced.url,
+      line: announced.line,
+      controlPort: serverControlPort,
+      control: serverControlPort ? `http://127.0.0.1:${serverControlPort}/` : null,
+    };
   }
   let child;
   try {
@@ -295,7 +317,14 @@ async function nativeLaunch({ exe, env, args = [], cwd, rpcPort = DEFAULT_RPC_PO
     id,
     pid: child.pid,
     log: logPath,
-    server: serverRecord ? { pid: serverRecord.pid, url: serverRecord.url, line: serverRecord.line } : null,
+    server: serverRecord
+      ? {
+          pid: serverRecord.pid,
+          url: serverRecord.url,
+          line: serverRecord.line,
+          control_port: serverRecord.controlPort,
+        }
+      : null,
   };
 }
 
@@ -361,10 +390,10 @@ function parseReply(raw, where) {
   return reply?.error !== undefined ? { error: reply.error } : { result: reply?.result ?? null };
 }
 
-async function nativeCall(inst, request) {
+async function postJson(url, request) {
   let raw;
   try {
-    const res = await fetch(inst.rpc, {
+    const res = await fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(request),
@@ -373,11 +402,29 @@ async function nativeCall(inst, request) {
     raw = await res.text();
   } catch (err) {
     if (err.name === 'TimeoutError' || err.name === 'AbortError') {
-      throw new Error(`timed out after ${RPC_TIMEOUT_MS / 1000} s on ${inst.rpc}`);
+      throw new Error(`timed out after ${RPC_TIMEOUT_MS / 1000} s on ${url}`);
     }
-    throw new Error(`transport error on ${inst.rpc}: ${err.cause?.code ?? err.message}`);
+    throw new Error(`transport error on ${url}: ${err.cause?.code ?? err.message}`);
   }
-  return parseReply(raw, inst.rpc);
+  return parseReply(raw, url);
+}
+
+async function nativeCall(inst, request) {
+  return postJson(inst.rpc, request);
+}
+
+// One JSON-RPC request to the server's control plane. The port is the one the
+// server announced in its ready line; it never throws.
+async function serverCall(inst, request) {
+  if (inst.exited) return { error: { message: `instance ${inst.id} is not running` } };
+  if (!inst.server?.control) {
+    return { error: { message: `instance ${inst.id} has no server control port` } };
+  }
+  try {
+    return await postJson(inst.server.control, request);
+  } catch (err) {
+    return { error: { message: err.message } };
+  }
 }
 
 // Minimal Chrome DevTools Protocol client over the global WebSocket.
@@ -881,7 +928,7 @@ const server = new McpServer({ name: 'moly', version: '0.0.3' });
 
 server.registerTool(
   'instance_list',
-  { description: 'List instances started by this server: id, kind, pid, started, rpc URL (native) or port/url (browser), running.' },
+  { description: 'List instances started by this server: id, kind, pid, started, rpc URL (native) or port/url (browser), the server control port of a native instance that has a server, running.' },
   guard('instance_list', async () => json([...instances.values()].map(describe))),
 );
 
@@ -889,7 +936,7 @@ server.registerTool(
   'native_launch',
   {
     description:
-      'Start a native executable (absolute or relative file path, no PATH lookup). stdin is closed; stdout and stderr go to logs/<id>.log. A moly-server(.exe) beside the executable is started first and the program is given its address as MOLY_SERVER_URL; the server stops when the program does, and the result names its pid and listening line (null when there is no server beside it). MOLY_CONTROL_PORT is set from rpcPort and MOLY_SETTINGS_FILE to logs/<id>.settings.json unless env overrides them. Without MOLY_DEV=1 in env the program runs the game; with it, the developer window.',
+      'Start a native executable (absolute or relative file path, no PATH lookup). stdin is closed; stdout and stderr go to logs/<id>.log. A moly-server(.exe) beside the executable is started first and the program is given its address as MOLY_SERVER_URL; the server stops when the program does, and the result names its pid, listening line and control port (null when there is no server beside it). MOLY_CONTROL_PORT is set from rpcPort and MOLY_SETTINGS_FILE to logs/<id>.settings.json unless env overrides them. Without MOLY_DEV=1 in env the program runs the game; with it, the developer window.',
     inputSchema: {
       exe: z.string().describe('Path to the executable file'),
       env: z.record(z.string(), z.string()).optional().describe('Environment variables merged over process.env'),
@@ -936,6 +983,30 @@ server.registerTool(
   },
   guard('rpc', async ({ id, method, params }) => {
     const res = await call(getInstance(id), method, params);
+    return res.error !== undefined ? json(res.error, true) : json(res.result);
+  }),
+);
+
+server.registerTool(
+  'server_rpc',
+  {
+    description:
+      'Send one JSON-RPC 2.0 request to the control plane of a native instance\'s server (the loopback port its ready line announced). Returns the result, or the error object with isError set. 10 s timeout.',
+    inputSchema: {
+      id: z.string(),
+      method: z.string(),
+      params: z.any().optional(),
+    },
+  },
+  guard('server_rpc', async ({ id, method, params }) => {
+    const inst = getInstance(id);
+    if (inst.kind !== 'native') throw new Error(`instance ${id} is not a native instance`);
+    const res = await serverCall(inst, {
+      jsonrpc: '2.0',
+      id: ++rpcSeq,
+      method,
+      ...(params !== undefined ? { params } : {}),
+    });
     return res.error !== undefined ? json(res.error, true) : json(res.result);
   }),
 );
