@@ -214,11 +214,10 @@ pub(crate) fn place(
         .0
         .get_or_insert_with(|| super::ground_world_verts(ground, &inputs.meshes, &inputs.parts));
     // GetCreateHarvestObjectPosition takes the navigation sample of the site
-    // point, so the height is the navigation surface's: the site's surface
-    // triangles (fixed for the epoch) plus the walk face's current low-step
-    // offset. Each placed object's carve advances the walk face generation a
-    // frame before the objective face is rebuilt; the triangles do not change
-    // with it.
+    // point, so the height is the walk field's surface (a collider plane where
+    // one produced the cell's surface, else the site's own triangles). Each
+    // placed object's carve advances the walk face generation a frame before
+    // the objective face is rebuilt; the triangles do not change with it.
     let Some(surface) = inputs
         .objective_face
         .as_deref()
@@ -227,14 +226,15 @@ pub(crate) fn place(
         return;
     };
     let height_at = |x: f32, z: f32| -> Option<f32> {
-        surface
-            .surface_height_at([x, z])
-            .or_else(|| {
-                surface
-                    .surface_sample([x, surface.ref_y(), z], f32::MAX)
-                    .map(|point| point[1])
-            })
-            .map(|y| y + face.height_offset([x, z]))
+        face.surface_height([x, z]).or_else(|| {
+            surface
+                .surface_height_at([x, z])
+                .or_else(|| {
+                    surface
+                        .surface_sample([x, surface.ref_y(), z], f32::MAX)
+                        .map(|point| point[1])
+                })
+        })
     };
     // GenerateUnclaimedDropItemsAsync: rows already dropped whose threshold
     // is at or above the fixture's hp come back on the ground.

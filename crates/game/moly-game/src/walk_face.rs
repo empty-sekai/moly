@@ -84,10 +84,10 @@ impl WalkFace {
         self.field.relocate(p, agent_radius)
     }
 
-    /// Local low-step elevation above the original site surface. The raw
-    /// surface remains responsible for continuous terrain height.
-    pub(crate) fn height_offset(&self, point: [f32; 2]) -> f32 {
-        self.field.height_offset(point)
+    /// The walk surface's height at an exact point: the collider triangle's
+    /// plane where one produced the cell's surface, else the site walk face.
+    pub(crate) fn surface_height(&self, point: [f32; 2]) -> Option<f32> {
+        self.field.surface_height(point)
     }
 
     /// 烘焙账目（重烘对账行的读面）。
@@ -150,7 +150,9 @@ pub(crate) fn build(
     });
     let n_obstacles = sources.colliders;
     let volume = site_volume(&sites, &site);
+    let started = std::time::Instant::now();
     let field = WalkField::bake_colliders_in(&tris, &sources.polygons, voxel, Some(volume));
+    let took = started.elapsed();
     let (min, max) =
         tris.iter()
             .flatten()
@@ -173,7 +175,7 @@ pub(crate) fn build(
         volume.min[1],
         volume.max[1]
     );
-    log_bake("烘好", &field, n_obstacles);
+    log_bake("烘好", &field, n_obstacles, took);
     commands.insert_resource(WalkFace {
         field: Arc::new(field),
         generation: 1,
@@ -275,8 +277,10 @@ fn rebake(
     let n_obstacles = sources.colliders;
     let prior = *face.carve_counts();
     let volume = site_volume(sites, site);
+    let started = std::time::Instant::now();
     let field = WalkField::bake_colliders_in(&tris, &sources.polygons, voxel, Some(volume));
-    log_bake("重烘（摆放变化）", &field, n_obstacles);
+    let took = started.elapsed();
+    log_bake("重烘（摆放变化）", &field, n_obstacles, took);
     let fresh = *field.counts();
     info!(
         "[walk-face] 重烘对账：可走 {} → {} 格 · 足迹杀 {} → {} · 侵蚀杀 {} → {} · 小区杀 {} → {}",
@@ -534,10 +538,10 @@ fn record_failure(commands: &mut Commands, prior: &mut String, reason: String) {
 }
 
 /// 烘焙账目行（建面与重烘同格式）。
-fn log_bake(tag: &str, field: &WalkField, obstacles: usize) {
+fn log_bake(tag: &str, field: &WalkField, obstacles: usize, took: std::time::Duration) {
     let counts = field.counts();
     info!(
-        "[walk-face] 可行走场{tag}：voxel {:.2} · 格 {} · 入面 {} · 阻挡足迹 {obstacles} 行（杀 {} 格）· 侵蚀杀 {} · 小区杀 {} · 可走 {} 格 · 单调分区 {} 区 · 轮廓 {} 条/{} 顶点 · 导航多边形 {} 个",
+        "[walk-face] 可行走场{tag}：voxel {:.2} · 格 {} · 入面 {} · 阻挡足迹 {obstacles} 行（杀 {} 格）· 侵蚀杀 {} · 小区杀 {} · 可走 {} 格 · 多层 {} 格 · 单调分区 {} 区 · 轮廓 {} 条/{} 顶点 · 导航多边形 {} 个 · 用时 {:.1} ms",
         field.voxel(),
         counts.cells,
         counts.face,
@@ -545,10 +549,12 @@ fn log_bake(tag: &str, field: &WalkField, obstacles: usize) {
         counts.erosion_nulled,
         counts.region_nulled,
         counts.walkable,
+        counts.multi_surface,
         counts.regions,
         counts.contours,
         counts.contour_verts,
         counts.polygons,
+        took.as_secs_f64() * 1000.0,
     );
 }
 

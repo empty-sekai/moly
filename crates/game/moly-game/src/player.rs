@@ -186,8 +186,10 @@ pub(crate) fn spawn_when_ready(
     if let Some(face) = face.as_deref() {
         (seed_x, seed_z) = face.seat(seed_x, seed_z);
     }
-    let offset = face.as_deref().map_or(0.0, |face| face.height_offset([seed_x, seed_z]));
-    let seed = [seed_x, navigation_y(&verts, seed_x, seed_z, center_y, offset), seed_z];
+    let surface = face
+        .as_deref()
+        .and_then(|face| face.surface_height([seed_x, seed_z]));
+    let seed = [seed_x, navigation_y(&verts, seed_x, seed_z, center_y, surface), seed_z];
     commands.spawn((
         Transform::from_translation(Vec3::from(seed)),
         // 玩家是渲染层级的节点：模型子实体的可见性沿父链向上查到本实体。
@@ -274,8 +276,10 @@ pub(crate) fn reseed(
     if let Some(face) = face.as_deref() {
         (seed_x, seed_z) = face.seat(seed_x, seed_z);
     }
-    let offset = face.as_deref().map_or(0.0, |face| face.height_offset([seed_x, seed_z]));
-    let seed = [seed_x, navigation_y(&verts, seed_x, seed_z, center_y, offset), seed_z];
+    let surface = face
+        .as_deref()
+        .and_then(|face| face.surface_height([seed_x, seed_z]));
+    let seed = [seed_x, navigation_y(&verts, seed_x, seed_z, center_y, surface), seed_z];
     for (mut transform, mut phase, driver) in &mut players {
         if let Some(mut driver) = driver {
             if let Ok(mut animator) = animators.get_mut(driver.player) {
@@ -551,21 +555,25 @@ pub(crate) fn advance(
         return;
     };
     let navigation_y_at = |x: f32, z: f32, raw_fallback: f32| {
-        objective_face.as_deref()
-            .filter(|surface| surface.navigation_generation() == face.generation()
-                && epoch.as_deref().is_some_and(|epoch| surface.is_fresh(epoch.0)))
+        objective_face
+            .as_deref()
+            .filter(|surface| {
+                surface.navigation_generation() == face.generation()
+                    && epoch.as_deref().is_some_and(|epoch| surface.is_fresh(epoch.0))
+            })
             .and_then(|surface| surface.navigation_point_at([x, z]))
-            .map_or_else(|| navigation_y(&ground.0, x, z, raw_fallback,
-                face.height_offset([x, z])), |point| point[1])
+            .map(|point| point[1])
+            .or_else(|| face.surface_height([x, z]))
+            .unwrap_or_else(|| surface_y(&ground.0, x, z, raw_fallback))
     };
     for (mut transform, mut phase, input, dash, driver) in &mut players {
         if driver.is_some_and(|driver| driver.blocks_manual_movement()) {
             continue;
         }
-        // A prior navigation offset is not terrain. Remove it from the
-        // fallback before sampling, then apply the destination's offset once.
-        let raw_y = transform.translation.y
-            - face.height_offset([transform.translation.x, transform.translation.z]);
+        // The fallback for a point with no sampled ground keeps the height the
+        // player already had; surface heights are absolute, so nothing is
+        // added twice.
+        let raw_y = transform.translation.y;
         // The source's crowd moves an agent only when its navigation polygon
         // is gone, that is once per build of the navigation cells (site and
         // generation): to the closest point of the nearest cell in its query
@@ -757,8 +765,8 @@ fn surface_y(verts: &[Vec3], x: f32, z: f32, fallback: f32) -> f32 {
         .unwrap_or(fallback)
 }
 
-fn navigation_y(verts: &[Vec3], x: f32, z: f32, raw_fallback: f32, offset: f32) -> f32 {
-    surface_y(verts, x, z, raw_fallback) + offset
+fn navigation_y(verts: &[Vec3], x: f32, z: f32, raw_fallback: f32, surface: Option<f32>) -> f32 {
+    surface.unwrap_or_else(|| surface_y(verts, x, z, raw_fallback))
 }
 
 #[cfg(test)]
@@ -766,20 +774,12 @@ mod navigation_height_tests {
     use super::*;
 
     #[test]
-    fn low_step_offset_is_applied_once_and_can_be_left() {
+    fn surface_height_wins_and_only_absent_ground_uses_the_fallback() {
         let ground = [Vec3::ZERO, Vec3::X];
-        let first = navigation_y(&ground, 0.0, 0.0, 0.0, 0.05);
-        let repeated = navigation_y(&ground, 0.0, 0.0, first - 0.05, 0.05);
-        assert!((first - 0.05).abs() < 1e-6);
-        assert!((repeated - first).abs() < 1e-6);
-        assert!(navigation_y(&ground, 1.0, 0.0, repeated - 0.05, 0.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn removed_rug_cannot_keep_the_previous_foot_height_as_a_floor() {
-        let ground = [Vec3::ZERO];
-        assert_eq!(navigation_y(&ground, 0.0, 0.0, 0.05, 0.0), 0.0);
-        assert_eq!(navigation_y(&[], 0.0, 0.0, 0.05, 0.0), 0.05,
-            "only absent ground uses the fallback");
+        assert_eq!(navigation_y(&ground, 0.0, 0.0, 0.0, Some(0.05)), 0.05);
+        // No surface at the point: the sampled ground vertex answers.
+        assert_eq!(navigation_y(&ground, 1.0, 0.0, 0.05, None), 0.0);
+        // No sampled ground either: the caller's prior height is kept.
+        assert_eq!(navigation_y(&[], 0.0, 0.0, 0.05, None), 0.05);
     }
 }

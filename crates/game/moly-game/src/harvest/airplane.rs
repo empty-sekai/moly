@@ -519,8 +519,8 @@ pub(crate) fn advance(
                 // Raycast straight down from 50 m above the box position.
                 let (px, pz) = (-(row.position_x as f32), row.position_z as f32);
                 // The placement's height rule: the walk field's navigation
-                // point, else the highest ground vertex within 2 m (plus the
-                // walk field's height offset); neither is a miss.
+                // surface where it has one, else the highest ground vertex
+                // within 2 m; neither is a miss.
                 let navigation = face.as_deref().and_then(|face| {
                     objective_face
                         .as_deref()
@@ -533,11 +533,12 @@ pub(crate) fn advance(
                 });
                 let hit = navigation
                     .or_else(|| {
+                        face.as_deref()
+                            .and_then(|face| face.surface_height([px, pz]))
+                    })
+                    .or_else(|| {
                         verts.as_deref().map(|verts| {
                             super::surface_y(verts, px, pz, f32::NEG_INFINITY)
-                                + face
-                                    .as_deref()
-                                    .map_or(0.0, |face| face.height_offset([px, pz]))
                         })
                     })
                     .filter(|y| y.is_finite() && *y <= RAY_HEIGHT);

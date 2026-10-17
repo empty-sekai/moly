@@ -1,5 +1,6 @@
-//! 可行走面的烘焙与查询律：站点面三角网 → 格面 → 家具足迹挖洞 →
-//! 半径侵蚀 → 小区过滤，以及面上的可走性 / 最近点 / 折线查询。
+//! 可行走面的烘焙与查询律：站点面三角网 → 碰撞面 span 列 → 从地面选面
+//! → 家具足迹挖洞 → 半径侵蚀 → 小区过滤，以及面上的可走性 / 最近点 /
+//! 折线查询。
 //!
 //! # 烘焙参数从哪来
 //!
@@ -19,22 +20,32 @@
 //!   截断（0.01 → 20000；0.05 的 f32 平方让 2.0/0.0025000001 截成
 //!   799 而非 800——原生同形，照抄）。
 //!
-//! # 烘焙链（四步，序照原生调度）
+//! # 烘焙链（序照原生调度）
 //!
-//! 1. **栅格化**：面三角按格中心含点判入面。
-//! 2. **足迹标 null**：格中心落在阻挡足迹矩形内即杀。
-//! 3. **侵蚀**（`rcErodeWalkableArea` 的 2D 转录）：距离场初值 null=0、
-//!    可走=255；可行走格的四邻有 null **或出界（虚空）** → 距离 0
-//!    ——外边界与障碍同为 0 距离源，外缘同样被侵蚀；两遍 chamfer
-//!    （基数向 +2、斜向 +3）；距离 < 2×半径格的可走格杀掉。
-//! 4. **小区过滤**（`rcBuildRegions` 小区规则的 2D 形）：4 连通区域格数
-//!    低于阈值的整区杀掉。
+//! 1. **栅格化**：站点面三角按格中心含点判入面；每格的地面高度是该格
+//!    最高覆盖面的高度。
+//! 2. **碰撞面 span**：每个非挖洞碰撞源的三角裁到格柱，得 [下, 上]
+//!    区间；同柱内重叠或相接的区间并成一条（上界取最大、下界取最小），
+//!    并时上界相差在一个 climb 内的两条把可行走标记相或——矮陡唇边
+//!    因此仍是可行走面。随后低悬规则再让紧贴可行走 span、顶差在一个
+//!    climb 内的非可行走 span 继承可行走标记。
+//! 3. **列过滤**：边缘规则（四邻的可达面：净空够 agent 高度才算，缺列
+//!    算跌落）把一个可达邻面低于本面超过一个 climb、或可达邻面高差超过
+//!    一个 climb 的可行走 span 杀掉；低高度规则把头顶到下一 span 不足
+//!    agent 高度的可行走 span 杀掉。
+//! 4. **从地面选面**：以站点面高度为种子（顶在一个 climb 内），沿连接
+//!    （高面到低天花净空 ≥ agent 高度、顶差 ≤ climb）向外泛洪；每格取
+//!    最高的可达 span（多于一条可达 span 的格计数上报）。不可达的可行走
+//!    span（桌面、灯帽）不入场。
+//! 5. **足迹标 null**：显式挖洞障碍的 hull 对着选中的面做净空判定后杀格。
+//! 6. **侵蚀**：边界由 span 连接性给出（不是单纯的四邻可走），再按半径
+//!    两遍 chamfer 杀格。
+//! 7. **小区过滤**：4 连通小区面积阈。
 //!
-//! 家具足迹的**参与门**是低高度过滤（`rcFilterWalkableLowHeightSpans`）
-//! 的 2D 投影：地面 span 头顶的净空 = 家具底面高（0.25 × center_y），
-//! 低于可行走高度（0.98）→ 地面 span 被杀 → 足迹挖洞；底面 ≥ 0.98
-//! （如挂在 1.5m/2.0m 墙位的家具）→ 地面照走，不挖。见
-//! [`blocking_footprint`]。
+//! 家具足迹的旧接口（[`blocking_footprint`]）仍是布局矩形的 2D 投影：
+//! 底面高 0.25 × `center_y` 低于可行走高度阈的落地家具挖洞，墙位不挖。
+//! 源 PhysicsCollider 的烘焙走 [`WalkField::bake_colliders`]，其抬升量
+//! 由上述 span 规则给出（地毯是落地面一个 climb 内的 span，不是特例）。
 //!
 //! # 查询链
 //!
@@ -64,22 +75,21 @@
 //!   不可估）；本烘焙是单张整场格，没有瓦缝。整场格的外缘在源里恰是
 //!   瓦边 ⇒ 若整片面小于小区阈（2 m²）会被这里误杀——真实站点的主
 //!   面远大于它，测试面也保持大于它。
-//! * **多层面不建模**：家具顶面若矮于 climb（0.1）是「走上去」而不是
-//!   「绕开」，矮障碍的顶面会并进可行走面。当前碰撞栅格将源面裁到每格
-//!   后量取局部 min/max 高度；高度在原地面 climb 内的物理几何提供脚面
-//!   抬升，净空从抬升后的脚面起算。显式 NavMeshObstacle 不提供脚面，
-//!   不享受低台阶豁免；重叠小件也不无限链式爬升。仍未完全等价 Unity
-//!   的多层 span 合并、台阶连通与高度体素量化。
+//! * **一格一面（宿主的地面选择）**：引擎的高度场保留同一柱内的多条
+//!   span，本宿主每格只留一条——从地面泛洪后取最高的可达 span，所以
+//!   同一柱上下的两层可走面只能留一层；多于一条可达 span 的格数在
+//!   账目里计数上报。高度用浮点米、不落原生的 0.005 高度格量化；小区
+//!   过滤仍是四邻可走（不是 span 连接）的 4 连通面积阈。
 //! * **墙格足迹链未转录**：墙布局的足迹走另一条派生链
 //!   （`CreateWallTileData`），而当前全部墙位摆放的底面高（1.5/2.0）
-//!   都在 0.98 之上、本就不挖——不转录无损。
-//! * **源物理几何的单层投影**：原版收集 PhysicsColliders。宿主走
-//!   `bake_colliders`，保留真实节点变换、源几何和每格高度范围；
-//!   旧的 `BakeInput` 矩形接口仅供独立律的兼容测试。本地投影不处理
-//!   多层连通。MeshCollider 不论是否标 convex，都以它共享网格自己的
-//!   三角形作分离表面入烘（引擎把碰撞体转成导航源时只读网格引用与
-//!   变换，不读 convex；物理凸包不是导航输入）；Box/Sphere/Capsule
-//!   仍是实心体。
+//!   都在可行走高度阈之上、本就不挖——不转录无损。
+//! * **源物理几何与站点面同源**：原版把全部 PhysicsColliders 与站点
+//!   自身的可走碰撞面一起当源。宿主走 `bake_colliders`，站点面三角是
+//!   每格的 span 种子与地面；碰撞源保留真实节点变换与三角几何，旧的
+//!   `BakeInput` 矩形接口仅供独立律的兼容测试。MeshCollider 不论是否
+//!   标 convex，都以它共享网格自己的三角形作分离表面入烘（引擎把碰撞
+//!   体转成导航源时只读网格引用与变换，不读 convex；物理凸包不是导航
+//!   输入）；Box/Sphere/Capsule 与只给 hull 的旧输入按实心区间入柱。
 //! * **重烘触发沿**：执行侧监听放稳足迹变化，每次变化重烘。
 //! * **NavMeshObstacle carving, two treatments.** The engine carves every
 //!   carving obstacle after the bake, per tile (`CarveNavMeshTile`: the
@@ -114,6 +124,11 @@ pub const AGENT_RADIUS: f32 = 0.24;
 
 /// 烘焙 agent 高度（米）：同表值（可行走净空阈）。
 pub const AGENT_HEIGHT: f32 = 0.98;
+
+/// 烘焙 agent 可走坡度（度）：同表值。三角的 up 法线分量严格大于其余弦
+/// 才是可行走面（原生的比较是严格的；坡度更大的面只能靠矮陡唇边的
+/// span 合并与低悬规则接进可行走面）。
+pub const AGENT_SLOPE_DEGREES: f32 = 45.0;
 
 /// 烘焙 agent 可攀越高度（米）：低于此高度的贴地碰撞面会作为新的
 /// walkable span，而不是把原地面挖掉。Unity 的 Recast 构造使用同一
@@ -443,6 +458,9 @@ pub struct BakeCounts {
     pub polygons: usize,
     /// Walk cells runtime obstacle carving removed (0 for a plain bake).
     pub carved: usize,
+    /// Cells where the flood from the ground reached more than one walkable
+    /// span (the highest became the cell's surface; this host keeps one).
+    pub multi_surface: usize,
 }
 
 /// 烘好的可行走场：格面 + 分区 + 轮廓 + 账目。查询全部走它。
@@ -453,9 +471,12 @@ pub struct WalkField {
     contours: Vec<contour::Contour>,
     polys: polymesh::PolyMesh,
     counts: BakeCounts,
-    /// Relative to the source ground, not an absolute replacement for sloped
-    /// terrain sampling. Empty when no low physical support was encountered.
-    height_offsets: Vec<f32>,
+    /// The site walk face triangles, kept to evaluate that surface at an exact
+    /// point (the cell's surface may come from one of them).
+    site: Vec<[[f32; 3]; 3]>,
+    /// Cells whose surface a collider triangle produced, as that triangle's
+    /// plane. Sparse: cells the site walk face supplies are absent.
+    surfaces: std::collections::HashMap<usize, [f32; 3]>,
     /// The baked field before runtime carving, kept once a carve is applied
     /// (the engine rebuilds a carved tile from its baked data).
     base: Option<std::sync::Arc<CarveBase>>,
@@ -475,7 +496,19 @@ impl WalkField {
         let mut grid = grid::rasterize(&input.tris, input.voxel, None);
         let face = grid.walkable.iter().filter(|w| **w).count();
         let obstacle_nulled = grid::mark_obstacles(&mut grid, &input.obstacles);
-        Self::finish_bake(grid, face, obstacle_nulled, input.voxel, Vec::new())
+        let boundary = grid::walkable_edges(&grid);
+        Self::finish_bake(
+            grid,
+            face,
+            input.voxel,
+            grid::SurfaceBake {
+                obstacle_nulled,
+                site: Vec::new(),
+                surfaces: std::collections::HashMap::new(),
+                multi_surface: 0,
+                boundary,
+            },
+        )
     }
 
     /// Bake actual collider footprints using the existing 2D host. Geometry
@@ -502,20 +535,26 @@ impl WalkField {
             .collect();
         let mut grid = grid::rasterize(&tris, voxel, volume);
         let face = grid.walkable.iter().filter(|w| **w).count();
-        let heights = grid::surface_heights(&grid, surface);
-        let (obstacle_nulled, height_offsets) =
-            grid::mark_collider_polygons(&mut grid, colliders, &heights);
-        Self::finish_bake(grid, face, obstacle_nulled, voxel, height_offsets)
+        let mut heights = grid::surface_heights(&grid, surface);
+        let mut bake = grid::mark_collider_spans(&mut grid, &mut heights, colliders);
+        bake.site = surface.to_vec();
+        Self::finish_bake(grid, face, voxel, bake)
     }
 
     fn finish_bake(
         mut grid: grid::Grid,
         face: usize,
-        obstacle_nulled: usize,
         voxel: f32,
-        height_offsets: Vec<f32>,
+        bake: grid::SurfaceBake,
     ) -> WalkField {
-        let erosion_nulled = grid::erode(&mut grid, radius_cells(voxel));
+        let grid::SurfaceBake {
+            obstacle_nulled,
+            site,
+            surfaces,
+            multi_surface,
+            boundary,
+        } = bake;
+        let erosion_nulled = grid::erode(&mut grid, radius_cells(voxel), &boundary);
         let region_nulled = grid::filter_regions(&mut grid, min_region_spans(voxel));
         let walkable = grid.walkable.iter().filter(|w| **w).count();
         let regions = region::build_monotone(&grid);
@@ -535,12 +574,14 @@ impl WalkField {
                 contour_verts: contours.iter().map(|c| c.verts.len()).sum(),
                 polygons: polys.polygon_count(),
                 carved: 0,
+                multi_surface,
             },
             regions,
             contours,
             polys,
             grid,
-            height_offsets,
+            site,
+            surfaces,
             base: None,
         }
     }
@@ -578,7 +619,8 @@ impl WalkField {
             contours: Vec::new(),
             polys,
             counts,
-            height_offsets: self.height_offsets.clone(),
+            site: self.site.clone(),
+            surfaces: self.surfaces.clone(),
             base: Some(base),
         }
     }
@@ -588,14 +630,48 @@ impl WalkField {
         query::walkable_at(&self.grid, p)
     }
 
-    /// Extra foot height above the source site's sampled terrain. Only baked
-    /// walkable cells contribute; explicit carve holes cannot become steps.
-    pub fn height_offset(&self, p: [f32; 2]) -> f32 {
-        if self.height_offsets.is_empty() || !self.walkable_at(p) {
-            return 0.0;
+    /// The walk surface's height at the exact point, from the source that
+    /// produced the cell's surface: a collider triangle's plane (evaluated at
+    /// the point, not sampled at the cell's centre) or, where the site walk
+    /// face supplies the surface, its highest covering triangle. `None` when
+    /// no surface covers the point. This answers "where is the surface", not
+    /// "may the agent stand here" (see [`Self::walkable_at`]).
+    pub fn surface_height(&self, p: [f32; 2]) -> Option<f32> {
+        if !p.iter().all(|value| value.is_finite()) {
+            return None;
         }
         let (x, z) = self.grid.cell_of(p[0], p[1]);
-        self.height_offsets[z as usize * self.grid.cols + x as usize]
+        if x >= 0 && z >= 0 && (x as usize) < self.grid.cols && (z as usize) < self.grid.rows {
+            let index = z as usize * self.grid.cols + x as usize;
+            if let Some(plane) = self.surfaces.get(&index) {
+                return Some(plane[0] * p[0] + plane[1] * p[1] + plane[2]);
+            }
+        }
+        self.site_plane_at(p)
+    }
+
+    /// The highest site walk face triangle covering the point.
+    fn site_plane_at(&self, p: [f32; 2]) -> Option<f32> {
+        let mut height: Option<f32> = None;
+        for triangle in &self.site {
+            let (min_x, max_x) = triangle
+                .iter()
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), point| {
+                    (lo.min(point[0]), hi.max(point[0]))
+                });
+            let (min_z, max_z) = triangle
+                .iter()
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), point| {
+                    (lo.min(point[2]), hi.max(point[2]))
+                });
+            if p[0] < min_x || p[0] > max_x || p[1] < min_z || p[1] > max_z {
+                continue;
+            }
+            if let Some(y) = grid::triangle_height(triangle, p) {
+                height = Some(height.map_or(y, |prior: f32| prior.max(y)));
+            }
+        }
+        height
     }
 
     /// 最近可走点（吸附上限 `max_dist`，超限返回 `None`）。
@@ -1158,8 +1234,10 @@ mod tests {
         };
         let field = WalkField::bake_colliders(&surface, &[rug], 0.05);
         assert!(field.walkable_at([0.5, 0.5]));
-        assert!((field.height_offset([0.5, 0.5]) - 0.05).abs() < 1e-5);
-        assert_eq!(field.height_offset([-2.0, -2.0]), 0.0);
+        // The rug's flat top is the cell's surface: the merged span reaches
+        // 0.05 above the floor.
+        assert!((field.surface_height([0.5, 0.5]).expect("rug surface") - 0.05).abs() < 1e-5);
+        assert_eq!(field.surface_height([-2.0, -2.0]), Some(0.0));
         let step = ColliderPolygon {
             vertices: vec![[0.0, 0.0], [2.0, 0.0], [0.0, 2.0]],
             min_y: 0.0,
@@ -1221,14 +1299,16 @@ mod tests {
             };
             let field = WalkField::bake_colliders(&floor_at(3.0), &[low.clone()], voxel);
             assert!(field.walkable_at([0.0, 0.0]));
-            assert!((field.height_offset([0.0, 0.0]) - 0.05).abs() < 1e-5);
+            assert!((field.surface_height([0.0, 0.0]).expect("low top") - 3.05).abs() < 1e-5);
             let mut explicit = low;
             explicit.carve = true;
             let field = WalkField::bake_colliders(&floor_at(3.0), &[explicit.clone()], voxel);
             let duplicated =
                 WalkField::bake_colliders(&floor_at(3.0), &[explicit.clone(), explicit], voxel);
             assert!(!field.walkable_at([0.0, 0.0]));
-            assert_eq!(field.height_offset([0.0, 0.0]), 0.0);
+            // Explicit carving removes walkability, not the site surface: the
+            // cell still reports the floor it was carved out of.
+            assert_eq!(field.surface_height([0.0, 0.0]), Some(3.0));
             assert_eq!(field.counts(), duplicated.counts());
         }
     }
@@ -1289,8 +1369,10 @@ mod tests {
         assert!(!field.walkable_at([0.0, 0.0]));
         lower.max_y = AGENT_CLIMB;
         let field = WalkField::bake_colliders(&floor_at(0.0), &[lower], 0.05);
-        assert!((field.height_offset([0.0, 0.0]) - AGENT_CLIMB).abs() < 1e-5);
-        assert_eq!(field.height_offset([f32::NAN, 0.0]), 0.0);
+        assert!(
+            (field.surface_height([0.0, 0.0]).expect("climb-high top") - AGENT_CLIMB).abs() < 1e-5
+        );
+        assert_eq!(field.surface_height([f32::NAN, 0.0]), None);
     }
 
     #[test]
@@ -1512,7 +1594,7 @@ mod tests {
         assert!(blocking_footprint(min, max, 4, layout_type::FLOOR, voxel).is_none());
         assert!(blocking_footprint(min, max, 6, layout_type::WALL_FRONT, voxel).is_none());
         // 平铺类（RUG/ROAD）没有布局足迹；源碰撞烘焙的低表面规则在
-        // `mark_collider_polygons` 中按实际几何高度处理。
+        // `mark_collider_spans` 中按实际几何高度处理。
         assert!(blocking_footprint(min, max, 0, layout_type::RUG, voxel).is_none());
         assert!(blocking_footprint(min, max, 0, layout_type::ROAD, voxel).is_none());
         // 地板族复合位（FIELD 含地板位）：挖。

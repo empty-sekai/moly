@@ -1733,10 +1733,10 @@ mod tests {
         let mut lines = vec![
             "# fixture walk census".to_owned(),
             format!("# root {}", root.display()),
-            "# name\tglb\tid\tmesh\tbox\tsphere\tcapsule\tother\tobstacles\terrors\twalkable\tabove_climb\tmax_offset\tfootprint_m2\twalkable_inside_m2".to_owned(),
+            "# name\tglb\tid\tmesh\tbox\tsphere\tcapsule\tother\tobstacles\terrors\twalkable\tabove_climb\tmax_offset\tfootprint_m2\twalkable_inside_m2\tmulti_surface".to_owned(),
         ];
         let (mut scanned, mut selected, mut missing, mut errors) = (0usize, 0usize, 0usize, 0usize);
-        let (mut walkable_total, mut above_total) = (0usize, 0usize);
+        let (mut walkable_total, mut above_total, mut multi_total) = (0usize, 0usize, 0usize);
         let packages = index["packages"]
             .as_object()
             .expect("fixture-models/index.json has no packages");
@@ -1781,9 +1781,11 @@ mod tests {
                         inside_footprint += 1;
                     }
                     if field.walkable_at(point) {
-                        let offset = field.height_offset(point);
-                        max_offset = max_offset.max(offset);
-                        if offset > moly_law::carve::AGENT_CLIMB + 1e-4 {
+                        // The census floor is flat at y = 0, so the surface
+                        // height is also the height above the floor.
+                        let height = field.surface_height(point).unwrap_or_default();
+                        max_offset = max_offset.max(height);
+                        if height > moly_law::carve::AGENT_CLIMB + 1e-4 {
                             above += 1;
                         }
                         if inside {
@@ -1794,13 +1796,14 @@ mod tests {
             }
             walkable_total += field.counts().walkable;
             above_total += above;
+            multi_total += field.counts().multi_surface;
             let id = master
                 .get(name)
                 .map(|id| id.to_string())
                 .unwrap_or_else(|| "-".to_owned());
             let cell_area = CENSUS_VOXEL * CENSUS_VOXEL;
             lines.push(format!(
-                "{name}\t{glb}\t{id}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{max_offset:.4}\t{:.4}\t{:.4}",
+                "{name}\t{glb}\t{id}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{max_offset:.4}\t{:.4}\t{:.4}\t{}",
                 source.kinds[0],
                 source.kinds[1],
                 source.kinds[2],
@@ -1812,6 +1815,7 @@ mod tests {
                 above,
                 inside_footprint as f32 * cell_area,
                 inside_walkable as f32 * cell_area,
+                field.counts().multi_surface,
             ));
         }
         assert!(
@@ -1825,7 +1829,7 @@ mod tests {
             root.display()
         );
         lines.push(format!(
-            "# summary scanned={scanned} selected={selected} missing_glb={missing} errors={errors} walkable={walkable_total} above_climb={above_total}"
+            "# summary scanned={scanned} selected={selected} missing_glb={missing} errors={errors} walkable={walkable_total} above_climb={above_total} multi_surface={multi_total}"
         ));
         std::fs::write(&output, lines.join("\n") + "\n")
             .unwrap_or_else(|error| panic!("{}: {error}", output.display()));

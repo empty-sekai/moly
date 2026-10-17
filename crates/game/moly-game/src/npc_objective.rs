@@ -227,11 +227,12 @@ impl ObjectiveFace {
         let xz = self
             .field
             .nearest_walkable([target[0], target[2]], Some(tolerance))?;
-        let (point, _) = self.closest([xz[0],
-            target[1] - self.field.height_offset(xz), xz[1]]);
-        let point = self.navigation_point(point);
-        (dist3(point, target) <= tolerance && self.field.walkable_at([point[0], point[2]]))
-            .then_some(point)
+        let y = self
+            .field
+            .surface_height(xz)
+            .or_else(|| self.surface_height_at(xz))?;
+        let point = [xz[0], y, xz[1]];
+        (dist3(point, target) <= tolerance && self.field.walkable_at(xz)).then_some(point)
     }
 
     /// 高度几何探针；不提供导航资格，只给已经验证的路线/挂点落高度。
@@ -247,23 +248,21 @@ impl ObjectiveFace {
         (dist3(point, target) <= tolerance).then_some(point)
     }
 
-    fn navigation_point(&self, mut point: [f32; 3]) -> [f32; 3] {
-        point[1] += self.field.height_offset([point[0], point[2]]);
-        point
-    }
-
     /// Navigation already owns x/z. A 3-D nearest-point projection would move
     /// them on slopes, then repeatedly convert a step's height into terrain.
-    /// Use the same highest covering site surface as the single-layer bake.
+    /// The walk field's surface (a collider triangle's plane, else the highest
+    /// covering site surface) supplies the height at the exact point.
     pub(crate) fn navigation_point_at(&self, xz: [f32; 2]) -> Option<[f32; 3]> {
-        self.surface_height_at(xz)
-            .map(|y| [xz[0], y + self.field.height_offset(xz), xz[1]])
+        self.field
+            .surface_height(xz)
+            .or_else(|| self.surface_height_at(xz))
+            .map(|y| [xz[0], y, xz[1]])
     }
 
     /// The highest covering triangle of the navigation input surface at x/z,
-    /// without the walk field's low-step offset. The triangles are fixed for
+    /// without the walk field's surface selection. The triangles are fixed for
     /// the site epoch; a carve (a new navigation generation) changes which
-    /// cells are walkable and the offsets, not this height.
+    /// cells are walkable and the surface, not this height.
     pub(crate) fn surface_height_at(&self, xz: [f32; 2]) -> Option<f32> {
         if !xz.into_iter().all(f32::is_finite) {
             return None;
@@ -4304,8 +4303,11 @@ mod navigation_height_tests {
         face.field = std::sync::Arc::new(WalkField::bake_colliders(&face.tris, &[rug], 0.05));
         let xz = [0.025, 0.025];
         assert!(face.field.walkable_at(xz));
-        let y = xz[0] * 0.25 + face.field.height_offset(xz);
-        assert!(face.field.height_offset(xz) > 0.0);
+        // The rug's plane, evaluated at the exact point: the site's own slope
+        // plus the 0.05 step. The field keeps one surface per cell.
+        let y = face.field.surface_height(xz).expect("rug surface");
+        assert!((y - (xz[0] * 0.25 + 0.05)).abs() < 1e-5);
+        assert!(y > xz[0] * 0.25, "the rug surface is above the site slope");
         let original = [xz[0], y, xz[1]];
         for result in [face.navigation_surface_sample(original, 0.25).unwrap(),
             face.reattach_after_layout(original).unwrap(),

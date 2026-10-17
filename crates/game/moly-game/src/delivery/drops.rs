@@ -308,10 +308,9 @@ fn height_at(
         });
     match point {
         Some(point) => point[1],
-        None => {
-            crate::harvest::surface_y(verts, x, z, 0.0)
-                + face.map_or(0.0, |f| f.height_offset([x, z]))
-        }
+        None => face
+            .and_then(|face| face.surface_height([x, z]))
+            .unwrap_or_else(|| crate::harvest::surface_y(verts, x, z, 0.0)),
     }
 }
 
