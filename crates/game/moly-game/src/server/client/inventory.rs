@@ -28,82 +28,10 @@ use serde_json::{json, Value};
 
 use super::talk_read::UserMysekaiCharacterTalk;
 
-/// `UserMysekaiFixture`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct UserMysekaiFixture {
-    pub(crate) mysekai_fixture_id: i32,
-    pub(crate) texture_id: i32,
-    pub(crate) quantity: i32,
-    pub(crate) last_obtained_at: i64,
-}
-
-/// `UserMysekaiCanvas`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct UserMysekaiCanvas {
-    pub(crate) mysekai_fixture_id: i32,
-    pub(crate) card_id: i32,
-    pub(crate) is_special_training: bool,
-    pub(crate) quantity: i32,
-    pub(crate) last_obtained_at: i64,
-}
-
-/// `UserMysekaiBlueprint`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct UserMysekaiBlueprint {
-    pub(crate) mysekai_blueprint_id: i32,
-    pub(crate) obtained_at: i64,
-}
-
-/// `UserMysekaiItem`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct UserMysekaiItem {
-    pub(crate) mysekai_item_id: i32,
-    pub(crate) quantity: i32,
-    pub(crate) last_obtained_at: i64,
-}
-
-/// `UserMysekaiMaterial` (id and quantity).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct UserMysekaiMaterial {
-    pub(crate) mysekai_material_id: i32,
-    pub(crate) quantity: i32,
-}
-
-/// `UserMysekaiMaterialPossession`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct UserMysekaiMaterialPossession {
-    pub(crate) quantity: i32,
-}
-
-/// The `UserMysekaiGamedata` fields the inventory and craft screens read.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct UserMysekaiGamedata {
-    /// `None` until the server has seated the rank from `totalExp`.
-    pub(crate) mysekai_rank: Option<i32>,
-    pub(crate) total_exp: i32,
-    pub(crate) mysekai_material_possession_level: i32,
-    pub(crate) mysekai_fixture_possession_level: i32,
-}
-
-/// The `SuiteUser` tables a response or reply carries; `None` for a table it
-/// does not carry. Applying it replaces each carried table whole.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct SuiteUserSections {
-    pub(crate) user_mysekai_character_talks: Option<Vec<UserMysekaiCharacterTalk>>,
-    pub(crate) user_mysekai_materials: Option<Vec<UserMysekaiMaterial>>,
-    pub(crate) user_mysekai_material_possession: Option<UserMysekaiMaterialPossession>,
-    pub(crate) user_mysekai_fixtures: Option<Vec<UserMysekaiFixture>>,
-    pub(crate) user_mysekai_canvases: Option<Vec<UserMysekaiCanvas>>,
-    pub(crate) user_mysekai_blueprints: Option<Vec<UserMysekaiBlueprint>>,
-    pub(crate) user_mysekai_items: Option<Vec<UserMysekaiItem>>,
-    pub(crate) user_mysekai_gamedata: Option<UserMysekaiGamedata>,
-}
-
-impl SuiteUserSections {
-    pub(crate) fn is_empty(&self) -> bool {
-        *self == Self::default()
-    }
-}
+pub(crate) use moly_protocol::rows::{
+    UserMysekaiFixture, UserMysekaiCanvas, UserMysekaiBlueprint, UserMysekaiItem,
+    UserMysekaiMaterial, UserMysekaiMaterialPossession, UserMysekaiGamedata, SuiteUserSections,
+};
 
 /// `MasterMysekaiFixturePossession` / `MasterMysekaiMaterialPossession`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

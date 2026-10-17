@@ -21,6 +21,9 @@
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+pub mod api;
+pub mod rows;
+
 /// Raised whenever a message changes shape. A peer with another version is
 /// refused at the handshake.
 pub const PROTOCOL_VERSION: u32 = 1;

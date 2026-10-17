@@ -9,14 +9,7 @@ use std::collections::BTreeMap;
 use bevy::prelude::*;
 use serde_json::{json, Value};
 
-/// `UserMysekaiMusicPlayFixtureSetting`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct MusicPlaySetting {
-    pub(crate) mysekai_site_id: i32,
-    pub(crate) mysekai_music_record_id: i32,
-    pub(crate) music_vocal_id: i32,
-    pub(crate) is_instrumental: bool,
-}
+pub(crate) use moly_protocol::rows::MusicPlaySetting;
 
 /// The rows as the response key's JSON array.
 pub(crate) fn rows_value(rows: &[MusicPlaySetting]) -> Value {

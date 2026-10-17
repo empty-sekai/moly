@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 moly-core = { path = "../moly-core" }
+moly-protocol = { path = "../../net/moly-protocol" }
 moly-law = { path = "../../base/moly-law" }
 moly-assets = { path = "../../engine/moly-assets" }
 moly-perf = { path = "../../engine/moly-perf" }

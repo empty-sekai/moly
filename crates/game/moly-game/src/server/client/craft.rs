@@ -30,39 +30,11 @@ use bevy::ecs::system::SystemId;
 use bevy::prelude::*;
 
 use super::inventory::{
-    fixture_total_count, material_quantity, SuiteUserSections, UserMysekaiCanvas,
-    UserMysekaiFixture, UserMysekaiMaterial,
+    fixture_total_count, material_quantity, UserMysekaiCanvas, UserMysekaiFixture,
+    UserMysekaiMaterial,
 };
 
-/// `MysekaiCraftType`, in the source's order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum MysekaiCraftType {
-    MysekaiFixture,
-    MysekaiTool,
-    MysekaiCanvas,
-    Material,
-}
-
-impl MysekaiCraftType {
-    pub(crate) fn parse(name: &str) -> Option<Self> {
-        match name {
-            "mysekai_fixture" => Some(Self::MysekaiFixture),
-            "mysekai_tool" => Some(Self::MysekaiTool),
-            "mysekai_canvas" => Some(Self::MysekaiCanvas),
-            "material" => Some(Self::Material),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            Self::MysekaiFixture => "mysekai_fixture",
-            Self::MysekaiTool => "mysekai_tool",
-            Self::MysekaiCanvas => "mysekai_canvas",
-            Self::Material => "material",
-        }
-    }
-}
+pub(crate) use moly_protocol::api::MysekaiCraftType;
 
 /// `MasterMysekaiBlueprint`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -330,44 +302,9 @@ pub(crate) fn craft_count_selector_max(can_craft_count: i32) -> i32 {
 // Requests and replies
 // ---------------------------------------------------------------------------
 
-/// `UserMysekaiCraftRequest`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct UserMysekaiCraftRequest {
-    pub(crate) blueprint_id: i32,
-    pub(crate) texture_id: Option<i32>,
-    pub(crate) card_id: Option<i32>,
-    pub(crate) is_special_training: Option<bool>,
-    pub(crate) quantity: i32,
-}
-
-/// `UserMysekaiHousingSketchRequest`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct UserMysekaiHousingSketchRequest {
-    pub(crate) mysekai_owner_user_id: i64,
-    pub(crate) mysekai_site_id: i32,
-    pub(crate) mysekai_blueprint_id: i32,
-}
-
-/// A `SuiteUser` reply: success with the tables the request changed, or a
-/// refusal the client shows as the API error (it starts nothing).
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct SuiteUserReply {
-    pub(crate) success: bool,
-    /// Why the server refused (`None` on success).
-    pub(crate) refusal: Option<String>,
-    /// The tables the reply carries (already merged into the client copy).
-    pub(crate) updated: SuiteUserSections,
-}
-
-impl SuiteUserReply {
-    pub(crate) fn refused(reason: String) -> Self {
-        Self {
-            success: false,
-            refusal: Some(reason),
-            updated: SuiteUserSections::default(),
-        }
-    }
-}
+pub(crate) use moly_protocol::api::{
+    UserMysekaiCraftRequest, UserMysekaiHousingSketchRequest, SuiteUserReply,
+};
 
 /// The server model's endpoints for the two requests.
 #[derive(Resource, Clone, Copy, Debug)]

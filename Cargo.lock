@@ -4941,6 +4941,7 @@ dependencies = [
  "moly-core",
  "moly-law",
  "moly-perf",
+ "moly-protocol",
  "moly-store",
  "naga",
  "parry3d",

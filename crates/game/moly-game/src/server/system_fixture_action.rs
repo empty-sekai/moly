@@ -47,7 +47,7 @@ use serde_json::{json, Map, Value};
 
 use super::client::system_fixture_action::{
     rows_value, ClientSystemFixtureActions, SystemFixtureActionEndpoint, SystemFixtureActionReply,
-    UserMysekaiSystemFixtureAction, API,
+    SystemFixtureActionReplyExt, UserMysekaiSystemFixtureAction, API,
 };
 use super::document::{int32, object, only};
 use super::{ResponseKind, ServerModel};

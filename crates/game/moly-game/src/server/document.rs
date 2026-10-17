@@ -62,39 +62,7 @@ pub(crate) enum Clock {
     Fixed { at_ms: i64 },
 }
 
-/// `UserMysekaiStamina`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Stamina {
-    pub(crate) normal: i32,
-    pub(crate) enhance: i32,
-    pub(crate) boost: i32,
-}
-
-/// `UserMysekaiGamedata`, the fields the client reads here.
-/// `mysekai_rank` is `None` until the server derives it from `totalExp`
-/// through the master rank table (a default or migrated document).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Gamedata {
-    pub(crate) mysekai_rank: Option<i32>,
-    pub(crate) total_exp: i32,
-    pub(crate) refreshed_at: i64,
-    pub(crate) is_mysekai_tutorial_end: bool,
-}
-
-/// `UserMysekaiColorfulPass`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ColorfulPass {
-    pub(crate) id: i32,
-    pub(crate) expired_at: i64,
-}
-
-/// `MysekaiPhenomenaSchedule`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ScheduleRow {
-    pub(crate) refresh_time_period_id: i32,
-    pub(crate) schedule_date: i64,
-    pub(crate) phenomena_id: i32,
-}
+pub(crate) use moly_protocol::rows::{Stamina, Gamedata, ColorfulPass, ScheduleRow};
 
 /// Where the served `mysekaiPhenomenaSchedules` come from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -132,25 +100,7 @@ pub(crate) enum SiteLevelReleases {
     EveryAuthoredLevel,
 }
 
-/// `UserMysekaiGate`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Gate {
-    pub(crate) gate_id: i32,
-    pub(crate) skin_id: i32,
-    pub(crate) level: i32,
-    pub(crate) visit_count: i32,
-    pub(crate) last_refreshed_at: i64,
-    pub(crate) is_setting_at_home_site: bool,
-}
-
-/// `UserMysekaiGateCharacter`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct GateCharacter {
-    pub(crate) gate_id: i32,
-    pub(crate) unit_group_id: i32,
-    pub(crate) is_reservation: bool,
-    pub(crate) visit_count: i32,
-}
+pub(crate) use moly_protocol::rows::{Gate, GateCharacter};
 
 /// One document.
 #[derive(Clone, Debug, PartialEq)]

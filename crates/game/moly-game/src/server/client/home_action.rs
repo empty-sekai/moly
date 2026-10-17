@@ -10,42 +10,7 @@
 use bevy::ecs::system::SystemId;
 use bevy::prelude::*;
 
-/// Which home-action API a request goes to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // Constructed by the home actions' seam.
-pub(crate) enum HomeActionApi {
-    /// `PostUserMysekaiCraftApi` from the craft screen.
-    Craft,
-    /// `PostUserMysekaiCraftApi` from the canvas screen (a canvas blueprint).
-    Canvas,
-    /// `PostUserMysekaiHousingSketchApi` from the sketch screen.
-    Sketch,
-}
-
-impl HomeActionApi {
-    /// The API's name in the source.
-    pub(crate) fn api_name(self) -> &'static str {
-        match self {
-            Self::Craft => "PostUserMysekaiCraftApi (craft)",
-            Self::Canvas => "PostUserMysekaiCraftApi (canvas)",
-            Self::Sketch => "PostUserMysekaiHousingSketchApi",
-        }
-    }
-}
-
-/// A request: the API and the fixture UID it names (craft and canvas name
-/// the tool; the sketch names none).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct HomeActionPost {
-    pub(crate) api: HomeActionApi,
-    pub(crate) target: Option<String>,
-}
-
-/// The reply the client reads before it starts the world sequence.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct HomeActionReply {
-    pub(crate) success: bool,
-}
+pub(crate) use moly_protocol::api::{HomeActionApi, HomeActionPost, HomeActionReply};
 
 /// The server model's endpoint for the home actions' requests.
 #[derive(Resource, Clone, Copy, Debug)]

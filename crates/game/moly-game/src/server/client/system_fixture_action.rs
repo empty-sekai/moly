@@ -26,16 +26,10 @@ use bevy::ecs::system::SystemId;
 use bevy::prelude::*;
 use serde_json::{json, Value};
 
-use super::talk_read::UserResource;
-
 /// The API's name in the source.
 pub(crate) const API: &str = "PostUserMysekaiSystemFixtureActionApi";
 
-/// `UserMysekaiSystemFixtureAction` (the user id is the session's).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct UserMysekaiSystemFixtureAction {
-    pub(crate) mysekai_system_fixture_id: i32,
-}
+pub(crate) use moly_protocol::rows::UserMysekaiSystemFixtureAction;
 
 /// The rows as the response key's JSON array.
 pub(crate) fn rows_value(rows: &[UserMysekaiSystemFixtureAction]) -> Value {
@@ -71,19 +65,16 @@ impl ClientSystemFixtureActions {
     }
 }
 
-/// `UserMysekaiSystemFixtureActionResponse`, or a refusal (the source's
-/// null reply: the API error, and the caller stops).
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct SystemFixtureActionReply {
-    pub(crate) success: bool,
-    /// Why the server refused (`None` on success).
-    pub(crate) refusal: Option<String>,
-    /// `obtainedResources`.
-    pub(crate) obtained_resources: Vec<UserResource>,
+pub(crate) use moly_protocol::api::SystemFixtureActionReply;
+
+/// Refusal constructor for [`SystemFixtureActionReply`].
+pub(crate) trait SystemFixtureActionReplyExt {
+    /// Logs the refusal and builds the reply that carries it.
+    fn refused(reason: String) -> Self;
 }
 
-impl SystemFixtureActionReply {
-    pub(crate) fn refused(reason: String) -> Self {
+impl SystemFixtureActionReplyExt for SystemFixtureActionReply {
+    fn refused(reason: String) -> Self {
         warn!("[server] {API} refused: {reason}");
         Self {
             success: false,

@@ -45,14 +45,7 @@ const INSTRUMENT: &str = "MOLY_HARVEST_MOCK_TOOLS";
 /// The tool types the initial tools policy seats, in seating order.
 const INITIAL_TYPES: [&str; 2] = ["pickaxe", "axe"];
 
-/// `UserMysekaiTool`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct UserMysekaiTool {
-    pub(crate) mysekai_tool_id: i32,
-    pub(crate) quantity: i32,
-    pub(crate) durability: i32,
-    pub(crate) last_obtained_at: i64,
-}
+pub(crate) use moly_protocol::rows::UserMysekaiTool;
 
 /// The `mysekaiTools` fields the server reads.
 #[derive(Clone, Debug, PartialEq, Eq)]

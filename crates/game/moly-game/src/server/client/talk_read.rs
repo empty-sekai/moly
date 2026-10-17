@@ -27,35 +27,9 @@ use bevy::prelude::*;
 
 use super::inventory::SuiteUserSections;
 
-/// `UserMysekaiCharacterTalk`: whether a talk has been read (the character
-/// archive reads these rows).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct UserMysekaiCharacterTalk {
-    pub(crate) mysekai_character_talk_id: i32,
-    pub(crate) is_read: bool,
-}
+pub(crate) use moly_protocol::rows::{UserMysekaiCharacterTalk, UserResource};
 
-/// `UserResource`, the fields a reply's `obtainedResources` row carries.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct UserResource {
-    pub(crate) resource_type: String,
-    pub(crate) resource_id: i32,
-    pub(crate) resource_level: i32,
-    pub(crate) quantity: i32,
-}
-
-/// `UserMysekaiCharacterTalkReadResponse`, or a refusal the client shows as
-/// the API error.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct TalkReadReply {
-    pub(crate) success: bool,
-    /// Why the server refused (`None` on success).
-    pub(crate) refusal: Option<String>,
-    /// `obtainedResources`.
-    pub(crate) obtained_resources: Vec<UserResource>,
-    /// `updatedResources` (already merged into the client copy).
-    pub(crate) updated: SuiteUserSections,
-}
+pub(crate) use moly_protocol::api::TalkReadReply;
 
 /// The server model's endpoint for the talk read report.
 #[derive(Resource, Clone, Copy, Debug)]

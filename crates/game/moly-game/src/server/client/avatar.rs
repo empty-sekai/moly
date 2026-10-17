@@ -21,18 +21,16 @@ pub(crate) const FIELDS: [&str; 4] = [
     "avatarCoordinateId",
 ];
 
-/// `UserAvatar`. All null is the source's unset wear.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub(crate) struct UserAvatar {
-    pub(crate) costume: Option<i32>,
-    pub(crate) accessory: Option<i32>,
-    pub(crate) skin_color: Option<i32>,
-    pub(crate) coordinate: Option<i32>,
+pub(crate) use moly_protocol::rows::UserAvatar;
+
+/// Field-name access to [`UserAvatar`], backed by this module's field table.
+pub(crate) trait UserAvatarExt {
+    /// The ids by field name, in [`FIELDS`] order.
+    fn values(&self) -> [(&'static str, Option<i32>); 4];
 }
 
-impl UserAvatar {
-    /// The ids by field name, in [`FIELDS`] order.
-    pub(crate) fn values(&self) -> [(&'static str, Option<i32>); 4] {
+impl UserAvatarExt for UserAvatar {
+    fn values(&self) -> [(&'static str, Option<i32>); 4] {
         [
             (FIELDS[0], self.costume),
             (FIELDS[1], self.accessory),

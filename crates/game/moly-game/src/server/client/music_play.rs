@@ -20,12 +20,7 @@ use bevy::ecs::system::SystemId;
 use bevy::prelude::*;
 use serde_json::{json, Value};
 
-/// `UserMysekaiMusicRecord`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct OwnedMusicRecord {
-    pub(crate) mysekai_music_record_id: i32,
-    pub(crate) obtained_at: i64,
-}
+pub(crate) use moly_protocol::rows::OwnedMusicRecord;
 
 /// The rows as the response key's JSON array.
 pub(crate) fn owned_rows_value(rows: &[OwnedMusicRecord]) -> Value {
@@ -71,61 +66,9 @@ impl ClientMusicRecords {
     }
 }
 
-/// `UserMysekaiMusicPlaySetRequest`, as `MysekaiMusicPlaySetService.Execute`
-/// fills it: the record's `SelectedId`, `isInstrumental` false, the model's
-/// `MusicVocalId` (null when the model has none), the fixture id and the
-/// fixture's colour id as `textureId`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // Constructed by the record list's seam.
-pub(crate) struct MusicPlaySetRequest {
-    pub(crate) mysekai_site_id: i32,
-    pub(crate) mysekai_music_record_id: i32,
-    pub(crate) music_vocal_id: Option<i32>,
-    pub(crate) is_instrumental: bool,
-    pub(crate) mysekai_fixture_id: i32,
-    pub(crate) texture_id: i32,
-}
-
-/// `UserMysekaiMusicPlayEjectRequest`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // Constructed by the record list's seam.
-pub(crate) struct MusicPlayEjectRequest {
-    pub(crate) mysekai_site_id: i32,
-    pub(crate) mysekai_fixture_id: i32,
-    pub(crate) texture_id: i32,
-}
-
-/// A request to one of the two APIs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // Constructed by the record list's seam.
-pub(crate) enum MusicPlayPost {
-    Set(MusicPlaySetRequest),
-    Eject(MusicPlayEjectRequest),
-}
-
-impl MusicPlayPost {
-    /// The API's name in the source.
-    pub(crate) fn api_name(&self) -> &'static str {
-        match self {
-            Self::Set(_) => "PutUserMysekaiMusicPlaySetApi",
-            Self::Eject(_) => "PutUserMysekaiMusicPlayEjectApi",
-        }
-    }
-
-    pub(crate) fn site_id(&self) -> i32 {
-        match self {
-            Self::Set(request) => request.mysekai_site_id,
-            Self::Eject(request) => request.mysekai_site_id,
-        }
-    }
-}
-
-/// The reply the caller reads (`MysekaiMusicPlaySetService` /
-/// `MysekaiMusicPlayEjectService` status Success or Error).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct MusicPlayReply {
-    pub(crate) success: bool,
-}
+pub(crate) use moly_protocol::api::{
+    MusicPlaySetRequest, MusicPlayEjectRequest, MusicPlayPost, MusicPlayReply,
+};
 
 /// The server model's endpoint for the music player's requests.
 #[derive(Resource, Clone, Copy, Debug)]
