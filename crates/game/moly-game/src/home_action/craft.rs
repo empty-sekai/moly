@@ -116,7 +116,7 @@ use crate::fixture_activity_state::FixtureTarget;
 use crate::server::client::craft::{
     CRAFT_COUNT_MAX, CRAFT_COUNT_MIN, CraftMasters, CraftOwned, MasterBlueprint, MysekaiCraftType,
     UserMysekaiCraftRequest, is_create_count_limit, is_enough_material_to_craft, is_first_craft,
-    is_reached_possession_limit_to_craft, post_craft,
+    is_reached_possession_limit_to_craft,
 };
 use crate::server::client::instrument_env;
 use crate::server::client::inventory::{
@@ -128,6 +128,9 @@ use crate::ui_layers::{
     ScreenManager,
 };
 use crate::ui_layout::UiLayouts;
+use crate::userdata::{Answered, ServerPending};
+use moly_link::ServerLink;
+use moly_protocol::{Call, Refusal, Reply};
 
 pub(crate) mod result;
 pub(crate) mod view;
@@ -265,6 +268,14 @@ enum Stage {
     Idle,
     /// The confirm (Common2ButtonDialog) is shown.
     Confirm { dialog: DialogId },
+    /// The request was sent and its reply has not arrived.
+    Sending {
+        pending: ServerPending,
+        executed: Executed,
+        fixture: FixtureTarget,
+        /// The blueprint's `craftTargetId`, for the reply's log.
+        target: i32,
+    },
     /// The term limit dialog (Common1ButtonDialog) is shown.
     TermLimit { dialog: DialogId },
     /// The world sequence plays.
@@ -660,6 +671,8 @@ pub(crate) enum CraftPhase {
     Idle,
     /// The confirm dialog is shown.
     Confirm,
+    /// The request waits for its reply.
+    Sending,
     /// The term limit dialog is shown.
     TermLimit,
     /// The craft's world sequence plays.
@@ -680,6 +693,7 @@ pub(crate) fn phase(world: &World) -> CraftPhase {
         Stage::Idle if !screen.open => CraftPhase::Closed,
         Stage::Idle => CraftPhase::Idle,
         Stage::Confirm { .. } => CraftPhase::Confirm,
+        Stage::Sending { .. } => CraftPhase::Sending,
         Stage::TermLimit { .. } => CraftPhase::TermLimit,
         Stage::Executing(_) => CraftPhase::Executing,
         Stage::Dialogs { next: DialogStep::Result { shown: Some(_) }, .. } => CraftPhase::Result,
@@ -1056,43 +1070,116 @@ fn send(world: &mut World, screen: &mut CraftScreen) {
         quantity: selection.count,
     };
     info!("[craft] MysekaiCraftService.Execute: PostUserMysekaiCraftApi {request:?}");
-    let reply = post_craft(world, request);
-    if !reply.success {
-        error!(
-            "[craft] PostUserMysekaiCraftApi refused ({}): the API error shows; the preview is set up again",
-            reply.refusal.as_deref().unwrap_or("no reason")
-        );
-        screen.refusal = Some(format!(
-            "the craft API refused: {}",
-            reply.refusal.as_deref().unwrap_or("no reason")
-        ));
-        screen.button = Some(setup_apply_button(world, &selection));
-        return;
+    let call = Call::Craft(request);
+    let kind = call.kind();
+    let seq = world.resource_mut::<ServerLink>().call(call);
+    info!("[craft] PostUserMysekaiCraftApi sent as seq {seq}; the preview waits for its reply");
+    screen.stage = Stage::Sending {
+        pending: ServerPending {
+            seq: Some(seq),
+            call: kind,
+        },
+        executed: Executed {
+            before_exp: gamedata.map(|g| g.total_exp),
+            is_first_craft: first,
+            bonus_fixture: None,
+            craft_type: selection.blueprint.craft_type,
+            count: selection.count,
+            name: selection.name.clone(),
+        },
+        fixture: workbench.0.clone(),
+        target: selection.blueprint.craft_target_id,
+    };
+}
+
+/// Reads the answer to the craft request.
+pub(super) fn read_answer(
+    mut answers: MessageReader<Answered>,
+    screen: Option<Res<CraftScreen>>,
+    mut commands: Commands,
+) {
+    for answer in answers.read() {
+        let Some(pending) = screen.as_deref().and_then(CraftScreen::server_pending) else {
+            continue;
+        };
+        if pending.seq != Some(answer.seq) {
+            continue;
+        }
+        let outcome = answer.outcome.clone();
+        commands.queue(move |world: &mut World| finish_send(world, outcome));
     }
-    let updated = &reply.updated;
-    info!(
-        "[craft] PostUserMysekaiCraftApi succeeded: materials {} rows, fixtures of {}: {:?}, gamedata {:?}",
-        updated.user_mysekai_materials.as_ref().map_or(0, Vec::len),
-        selection.blueprint.craft_target_id,
-        updated.user_mysekai_fixtures.as_ref().map(|rows| rows
-            .iter()
-            .filter(|row| row.mysekai_fixture_id == selection.blueprint.craft_target_id)
-            .map(|row| (row.texture_id, row.quantity))
-            .collect::<Vec<_>>()),
-        updated.user_mysekai_gamedata
-    );
-    screen.stage = Stage::Executing(Executed {
-        before_exp: gamedata.map(|g| g.total_exp),
-        is_first_craft: first,
-        bonus_fixture: None,
-        craft_type: selection.blueprint.craft_type,
-        count: selection.count,
-        name: selection.name.clone(),
-    });
-    world.write_message(super::HomeActionRequest::Craft {
-        fixture: workbench.0,
-        posted: true,
-    });
+}
+
+/// Continues the craft request: the success enters the world sequence, a
+/// refusal sets the screen's error and sets the apply button up again.
+fn finish_send(world: &mut World, outcome: Result<Reply, Refusal>) {
+    let mut screen = std::mem::take(&mut *world.resource_mut::<CraftScreen>());
+    let Stage::Sending {
+        executed,
+        fixture,
+        target,
+        ..
+    } = std::mem::take(&mut screen.stage)
+    else {
+        *world.resource_mut::<CraftScreen>() = screen;
+        return;
+    };
+    match outcome {
+        Ok(Reply::SuiteUser(reply)) if reply.success => {
+            let updated = &reply.updated;
+            info!(
+                "[craft] PostUserMysekaiCraftApi succeeded: materials {} rows, fixtures of {}: {:?}, gamedata {:?}",
+                updated.user_mysekai_materials.as_ref().map_or(0, Vec::len),
+                target,
+                updated.user_mysekai_fixtures.as_ref().map(|rows| rows
+                    .iter()
+                    .filter(|row| row.mysekai_fixture_id == target)
+                    .map(|row| (row.texture_id, row.quantity))
+                    .collect::<Vec<_>>()),
+                updated.user_mysekai_gamedata
+            );
+            screen.stage = Stage::Executing(executed);
+            world.write_message(super::HomeActionRequest::Craft {
+                fixture,
+                posted: true,
+            });
+        }
+        Ok(Reply::SuiteUser(reply)) => {
+            let reason = reply.refusal.unwrap_or_else(|| "no reason".to_owned());
+            error!(
+                "[craft] PostUserMysekaiCraftApi refused ({reason}): the API error shows; the preview is set up again"
+            );
+            screen.refusal = Some(format!("the craft API refused: {reason}"));
+            if let Some(selection) = screen.selection.clone() {
+                screen.button = Some(setup_apply_button(world, &selection));
+            }
+        }
+        Err(refusal) => {
+            error!(
+                "[craft] PostUserMysekaiCraftApi refused ({}): the API error shows; the preview is set up again",
+                refusal.reason
+            );
+            screen.refusal = Some(format!("the craft API refused: {}", refusal.reason));
+            if let Some(selection) = screen.selection.clone() {
+                screen.button = Some(setup_apply_button(world, &selection));
+            }
+        }
+        Ok(other) => {
+            error!("[craft] PostUserMysekaiCraftApi answered with {other:?}; no sequence starts");
+        }
+    }
+    *world.resource_mut::<CraftScreen>() = screen;
+}
+
+/// The server call this screen waits for, for the director.
+impl CraftScreen {
+    #[allow(dead_code)] // Read by the director's wait.
+    pub(crate) fn server_pending(&self) -> Option<&ServerPending> {
+        match &self.stage {
+            Stage::Sending { pending, .. } => Some(pending),
+            _ => None,
+        }
+    }
 }
 
 /// The rank table the rank dialog's ranks read.

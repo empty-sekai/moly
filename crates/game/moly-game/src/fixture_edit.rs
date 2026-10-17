@@ -34,10 +34,13 @@ mod tests;
 
 use crate::audio::{SeClass, SeRequest, SeRequests};
 use crate::fixture::{EditableFixture, FixturePlacements, OccupancyRow};
+use crate::userdata::{Answered, ServerPending};
 use assets::FixtureAreas;
 use bevy::prelude::*;
 use moly_law::fixture::position::layout_type;
 use moly_law::fixture::{Direction, GridPosition, Vector3Int};
+use moly_link::ServerLink;
+use moly_protocol::{Call, Refusal, Reply};
 
 pub(crate) use input::{read_keyboard, read_pointer};
 pub(crate) use put_effect::site_origin;
@@ -225,6 +228,12 @@ pub(crate) struct EditSession {
     /// The dialog a refused save shows (`SaveLayoutWithValidation`), while
     /// it is shown; the editor takes no command until it is answered.
     save_dialog: Option<SaveDialog>,
+    /// The layout-save call whose answer has not arrived.
+    saving: Option<ServerPending>,
+    /// The layout the waiting save sent.
+    saving_layout: Option<FixturePlacements>,
+    /// The waiting save was asked from the exit prompt.
+    saving_exit_after: bool,
     feedback: String,
 }
 
@@ -259,6 +268,12 @@ pub(crate) const WORDINGS: &[&str] =
     &[CUTSCENE_CONFIRM, INVALID_GO_HOME, INVALID_REMOVE, INVALID_REMOVE_OK];
 
 impl EditSession {
+    /// The server call the editor waits for, for the director.
+    #[allow(dead_code)] // Read by the director's wait.
+    pub(crate) fn server_pending(&self) -> Option<&ServerPending> {
+        self.saving.as_ref()
+    }
+
     fn changed(&mut self) {
         self.revision = self
             .revision
@@ -302,6 +317,9 @@ impl EditSession {
         self.selected = None;
         self.exit_dialog = false;
         self.clean_up_dialog = false;
+        self.saving = None;
+        self.saving_layout = None;
+        self.saving_exit_after = false;
         self.changed();
     }
 }
@@ -1204,6 +1222,9 @@ fn save(session: &mut EditSession, world: &mut World, exit_after: bool, validate
     if session.phase == EditPhase::Idle || session.save_dialog.is_some() {
         return;
     }
+    if session.saving.is_some() {
+        return;
+    }
     if let Some(pending) = session.pending_reload.as_mut() {
         pending.exit_after |= exit_after;
         session.say("保存已完成，正在等待家具与可行走场恢复；角色继续暂停。");
@@ -1254,17 +1275,83 @@ fn save(session: &mut EditSession, world: &mut World, exit_after: bool, validate
     }
     // PostUserMysekaiHousingLayoutApi first: the saved copy is written only
     // once the server has accepted the layout; a refusal keeps the draft.
-    let reply = crate::server::client::housing_layout::post(
-        world,
-        crate::fixture::layouts::housing_layout_request(&next),
-    );
-    if !reply.success {
-        session.say(format!(
-            "保存失败：服务器拒绝了布局（{}）。布局、库存及退出窗口均未提交，草稿仍保留。",
-            reply.refusal.unwrap_or_default()
-        ));
+    let call = Call::HousingLayout(crate::fixture::layouts::housing_layout_request(&next));
+    let kind = call.kind();
+    let seq = world.resource_mut::<ServerLink>().call(call);
+    info!("[edit-save] PostUserMysekaiHousingLayoutApi sent as seq {seq}; the draft is written on its reply");
+    session.saving = Some(ServerPending {
+        seq: Some(seq),
+        call: kind,
+    });
+    session.saving_layout = Some(next);
+    session.saving_exit_after = exit_after;
+}
+
+/// The layout save's answer.
+fn read_save_answer(
+    mut answers: MessageReader<Answered>,
+    session: Option<Res<EditSession>>,
+    mut commands: Commands,
+) {
+    for answer in answers.read() {
+        let Some(pending) = session.as_deref().and_then(EditSession::server_pending) else {
+            continue;
+        };
+        if pending.seq != Some(answer.seq) {
+            continue;
+        }
+        let outcome = answer.outcome.clone();
+        commands.queue(move |world: &mut World| finish_save(world, outcome));
+    }
+}
+
+/// Continues the save: an accepted layout is written and published, a
+/// refusal keeps the draft.
+fn finish_save(world: &mut World, outcome: Result<Reply, Refusal>) {
+    let Some(mut session) = world.remove_resource::<EditSession>() else {
+        return;
+    };
+    if session.saving.take().is_none() {
+        world.insert_resource(session);
         return;
     }
+    let Some(next) = session.saving_layout.take() else {
+        world.insert_resource(session);
+        return;
+    };
+    let exit_after = std::mem::take(&mut session.saving_exit_after);
+    match outcome {
+        Ok(Reply::SuiteUser(reply)) if reply.success => {
+            commit_saved_layout(world, &mut session, next, exit_after);
+        }
+        Ok(Reply::SuiteUser(reply)) => {
+            session.say(format!(
+                "保存失败：服务器拒绝了布局（{}）。布局、库存及退出窗口均未提交，草稿仍保留。",
+                reply.refusal.unwrap_or_default()
+            ));
+        }
+        Err(refusal) => {
+            session.say(format!(
+                "保存失败：服务器拒绝了布局（{}）。布局、库存及退出窗口均未提交，草稿仍保留。",
+                refusal.reason
+            ));
+        }
+        Ok(other) => {
+            session.say(format!(
+                "保存失败：服务器回复了意外的 {other:?}。布局、库存及退出窗口均未提交，草稿仍保留。"
+            ));
+        }
+    }
+    world.insert_resource(session);
+}
+
+/// Writes and publishes the accepted layout; a local failure keeps the draft.
+fn commit_saved_layout(
+    world: &mut World,
+    session: &mut EditSession,
+    next: FixturePlacements,
+    exit_after: bool,
+) {
     let Some(storage_baseline) = session.storage_baseline.as_ref() else {
         return;
     };
@@ -1443,6 +1530,10 @@ fn answer_save_dialog(world: &mut World) {
 }
 
 fn apply_command(world: &mut World, session: &mut EditSession, command: EditCommand) {
+    if session.saving.is_some() {
+        session.say("正在等待服务器保存回复，暂不接受新的操作。");
+        return;
+    }
     if matches!(command, EditCommand::Enter) {
         begin(world, session);
         return;
@@ -1866,6 +1957,7 @@ impl Plugin for FixtureEditPlugin {
                     .in_set(FixtureEditSystems::View)
                     .after(FixtureEditSystems::Commands),
             )
+            .add_systems(Update, read_save_answer.after(apply_commands))
             .add_systems(
                 Update,
                 autoplay::autoplay

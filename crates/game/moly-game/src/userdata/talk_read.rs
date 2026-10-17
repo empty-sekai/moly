@@ -13,11 +13,9 @@
 //! and before the talk in the set-talk path; birthday-party and forced
 //! tutorial talks send none.
 //!
-//! [`put_talk_read`] runs the endpoint the server model installs; when it
-//! returns, the reply's tables are already in
-//! [`ClientMysekaiInventory`](super::inventory::ClientMysekaiInventory)
-//! (its `userMysekaiCharacterTalks` read view). Without an endpoint the
-//! request is refused by name.
+//! [`handle`] is the endpoint the server model registers; the client request
+//! itself is one `Call::CharacterTalkRead` on the server link, whose answer
+//! carries the reply's tables.
 
 // The talk owners read these.
 #![allow(dead_code)]
@@ -26,7 +24,7 @@ use bevy::ecs::system::SystemId;
 use bevy::prelude::*;
 
 use super::birthday_party::ClientBirthdayPartyData;
-use super::inventory::{ClientMysekaiInventory, SuiteUserSections};
+use super::inventory::ClientMysekaiInventory;
 use crate::server::{with_model, ResponseKind};
 
 pub(crate) use moly_protocol::rows::{UserMysekaiCharacterTalk, UserResource};
@@ -38,26 +36,6 @@ const API: &str = "PutUserMysekaiCharacterTalkReadApi";
 /// The server model's endpoint for the talk read report.
 #[derive(Resource, Clone, Copy, Debug)]
 pub(crate) struct TalkReadEndpoint(pub(crate) SystemId<In<i32>, TalkReadReply>);
-
-/// `PutUserMysekaiCharacterTalkReadApi`: report a talk as read and read the
-/// reply.
-pub(crate) fn put_talk_read(world: &mut World, mysekai_character_talk_id: i32) -> TalkReadReply {
-    let refused = |reason: String| {
-        warn!("[server] PutUserMysekaiCharacterTalkReadApi refused: {reason}");
-        TalkReadReply {
-            success: false,
-            refusal: Some(format!("PutUserMysekaiCharacterTalkReadApi: {reason}")),
-            obtained_resources: Vec::new(),
-            updated: SuiteUserSections::default(),
-        }
-    };
-    let Some(endpoint) = world.get_resource::<TalkReadEndpoint>().copied() else {
-        return refused("no server endpoint is installed".into());
-    };
-    world
-        .run_system_with(endpoint.0, mysekai_character_talk_id)
-        .unwrap_or_else(|error| refused(error.to_string()))
-}
 
 /// The endpoint the server plugin installs for the report: the reply's
 /// `updatedResources` are merged into the client's copies before it returns.

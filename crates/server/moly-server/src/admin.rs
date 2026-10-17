@@ -112,7 +112,10 @@ pub(crate) fn install(
         model.avatar_instrument = defaults.avatar_instrument.clone();
     }
     if masters.ready {
+        // The install answers with its own JSON; the sections of a join are
+        // not carried here, so the next join answers with them.
         model.join(masters);
+        model.responses.clear();
     }
     entry.model = Some(model);
     entry.load_error = None;

@@ -104,7 +104,8 @@ pub(crate) enum Node {
     CameraZoom { by: f32, secs: f32 },
     Weather { phenomenon: i32 },
     /// One `server.edit` on the server document (a field path and value, or
-    /// an action with its fields), checked by the server model when it runs.
+    /// an action with its fields), checked by the server; the step ends on
+    /// the answer.
     ServerEdit { command: Map<String, Value> },
     SiteSwitch { site: String },
 }

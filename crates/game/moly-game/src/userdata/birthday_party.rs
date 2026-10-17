@@ -111,8 +111,8 @@ impl ClientBirthdayPartyData {
 }
 
 /// `PutUserMysekaiBirthdayPartyDeliveryApi`: the reply, with its
-/// `updatedResources` merged into the client's copies.
-#[allow(dead_code)] // Read by the delivery owner's seam.
+/// `updatedResources` merged into the client's copies. The in-process model re-exports it.
+#[allow(dead_code)]
 pub(crate) fn put_birthday_party_delivery(
     client: &mut ClientBirthdayPartyData,
     birthday_party_id: i32,
@@ -141,8 +141,8 @@ pub(crate) fn put_birthday_party_delivery(
 }
 
 /// `PutUserMysekaiBirthdayPartyGatherApi`: the reply, with its
-/// `updatedResources` merged into the client's copies.
-#[allow(dead_code)] // Read by the delivery owner's seam.
+/// `updatedResources` merged into the client's copies. The in-process model re-exports it.
+#[allow(dead_code)]
 pub(crate) fn put_birthday_party_gather(
     client: &mut ClientBirthdayPartyData,
     contents: &[GatherContent],

@@ -11,15 +11,14 @@
 //!
 //! Both reply with `SuiteUser`: the tables the request changed, which the
 //! client merges before it reads its copies (`UserDataManager.UpdateAll`).
-//! [`post_craft`] and [`post_sketch`] run the endpoints the server model
-//! installs; by the time they return, the reply's tables are already in
-//! [`ClientMysekaiInventory`](super::inventory::ClientMysekaiInventory)
-//! (the rank and total experience reach the server module's `ClientUserData`
-//! with the next response delivery, as every response does). Without an
-//! endpoint a request is refused by name.
+//! The screens send the request on the server link and continue on
+//! [`Answered`](crate::userdata::Answered); the reply's tables reach
+//! [`ClientMysekaiInventory`](super::inventory::ClientMysekaiInventory) with
+//! the arrived sections. The endpoint systems below are what the in-process
+//! model registers.
 //!
-//! The checks below are the client's; the server model applies the same
-//! checks to refuse a request the craft screen would not have sent.
+//! The checks below are the client's; the server applies the same checks to
+//! refuse a request the craft screen would not have sent.
 
 // The craft, canvas and sketch screens read these.
 #![allow(dead_code)]
@@ -51,39 +50,6 @@ pub(crate) use moly_protocol::api::{
 pub(crate) struct CraftEndpoints {
     pub(crate) craft: SystemId<In<UserMysekaiCraftRequest>, SuiteUserReply>,
     pub(crate) sketch: SystemId<In<UserMysekaiHousingSketchRequest>, SuiteUserReply>,
-}
-
-/// `PostUserMysekaiCraftApi`: send a craft or canvas request and read its
-/// reply.
-#[allow(dead_code)] // Called by the craft and canvas screens.
-pub(crate) fn post_craft(world: &mut World, request: UserMysekaiCraftRequest) -> SuiteUserReply {
-    let Some(endpoints) = world.get_resource::<CraftEndpoints>().copied() else {
-        return refused(
-            "PostUserMysekaiCraftApi",
-            "no server endpoint is installed".into(),
-        );
-    };
-    world
-        .run_system_with(endpoints.craft, request)
-        .unwrap_or_else(|error| refused("PostUserMysekaiCraftApi", error.to_string()))
-}
-
-/// `PostUserMysekaiHousingSketchApi`: send a sketch request and read its
-/// reply.
-#[allow(dead_code)] // Called by the sketch screen.
-pub(crate) fn post_sketch(
-    world: &mut World,
-    request: UserMysekaiHousingSketchRequest,
-) -> SuiteUserReply {
-    let Some(endpoints) = world.get_resource::<CraftEndpoints>().copied() else {
-        return refused(
-            "PostUserMysekaiHousingSketchApi",
-            "no server endpoint is installed".into(),
-        );
-    };
-    world
-        .run_system_with(endpoints.sketch, request)
-        .unwrap_or_else(|error| refused("PostUserMysekaiHousingSketchApi", error.to_string()))
 }
 
 fn refused(api: &str, reason: String) -> SuiteUserReply {
@@ -169,6 +135,6 @@ pub(crate) fn install(app: &mut App) {
     super::talk_read::install(app);
     app.add_systems(
         PreUpdate,
-        super::inventory::mirror_materials.after(super::deliver),
+        super::inventory::mirror_materials.after(super::apply_arrivals),
     );
 }

@@ -86,6 +86,7 @@ fn run_app(
     {
         moly_game::configure_browser_library(&mut app);
         if matches!(mode, StartMode::Stage) { moly_game::configure_browser_stage(&mut app); }
+        install_browser_link(&mut app);
         attach_canvas(&mut app);
         announce_ready(&mut app);
     }
@@ -104,9 +105,22 @@ fn run_game(web_render_settings: bevy::render::settings::WgpuSettings, start: Ga
     let mut app = moly_game::app(start.source, site_request::game(), web_render_settings);
     moly_assets::remote::admit(&mut app, start.remote);
     moly_game::configure_browser_game(&mut app, start.seed);
+    install_browser_link(&mut app);
     attach_canvas(&mut app);
     announce_ready(&mut app);
     app.run();
+}
+
+/// The browser game has no server transport yet: the link reports itself lost
+/// and refuses calls by name, so the game's notices say why.
+#[cfg(target_arch = "wasm32")]
+fn install_browser_link(app: &mut bevy::prelude::App) {
+    app.add_plugins(moly_link::LinkPlugin(moly_link::LinkConfig {
+        address: String::new(),
+        user: moly_protocol::UserId::local(),
+        client: format!("moly-app {}", moly_game::VERSION),
+        connect_window: std::time::Duration::ZERO,
+    }));
 }
 
 #[cfg(target_arch = "wasm32")]

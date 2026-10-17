@@ -28,8 +28,9 @@ use crate::api::{
     UserMysekaiHousingEditLayoutRequest, UserMysekaiHousingSketchRequest,
 };
 use crate::rows::{
-    ColorfulPass, DeliveryUpdate, Gamedata, MusicPlaySetting, OwnedMusicRecord, ScheduleRow,
-    Stamina, SuiteUserSections, UserAvatar, UserMysekaiSystemFixtureAction, UserMysekaiTool,
+    ColorfulPass, DeliveryUpdate, Gamedata, Gate, MusicPlaySetting, OwnedMusicRecord,
+    RankReleaseRow, ScheduleRow, Stamina, SuiteUserSections, UserAvatar,
+    UserMysekaiSystemFixtureAction, UserMysekaiTool,
 };
 
 pub mod api;
@@ -39,7 +40,12 @@ pub mod rows;
 
 /// Raised whenever a message changes shape. A peer with another version is
 /// refused at the handshake.
-pub const PROTOCOL_VERSION: u32 = 1;
+///
+/// 2: the sections carry the home gate row and the appended rank releases,
+/// and the reserve reply carries every gate character.
+/// 3: the harvest request carries the hit, the tool the run used and the
+/// stamina that is left.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// The account a session belongs to. The server keeps one document per user.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -169,6 +175,28 @@ pub enum Call {
 }
 
 impl Call {
+    /// The call's fieldless kind, for the game's ordered arrivals.
+    pub fn kind(&self) -> CallKind {
+        match self {
+            Self::Join => CallKind::Join,
+            Self::Harvest(_) => CallKind::Harvest,
+            Self::Gather => CallKind::Gather,
+            Self::GateReserve(_) => CallKind::GateReserve,
+            Self::GateChange(_) => CallKind::GateChange,
+            Self::BirthdayPartyDelivery(_) => CallKind::BirthdayPartyDelivery,
+            Self::BirthdayPartyGather(_) => CallKind::BirthdayPartyGather,
+            Self::HomeAction(_) => CallKind::HomeAction,
+            Self::Craft(_) => CallKind::Craft,
+            Self::HousingSketch(_) => CallKind::HousingSketch,
+            Self::HousingLayout(_) => CallKind::HousingLayout,
+            Self::CharacterTalkRead(_) => CallKind::CharacterTalkRead,
+            Self::MusicPlaySet(_) => CallKind::MusicPlaySet,
+            Self::MusicPlayEject(_) => CallKind::MusicPlayEject,
+            Self::SystemFixtureAction(_) => CallKind::SystemFixtureAction,
+            Self::Admin(_) => CallKind::Admin,
+        }
+    }
+
     /// The call's name, for logs and for a refused link's notice.
     pub fn name(&self) -> &'static str {
         match self {
@@ -190,6 +218,28 @@ impl Call {
             Self::Admin(_) => "admin",
         }
     }
+}
+
+/// A call without its request, so the game can name the call a reply or a
+/// push belongs to without copying the request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CallKind {
+    Join,
+    Harvest,
+    Gather,
+    GateReserve,
+    GateChange,
+    BirthdayPartyDelivery,
+    BirthdayPartyGather,
+    HomeAction,
+    Craft,
+    HousingSketch,
+    HousingLayout,
+    CharacterTalkRead,
+    MusicPlaySet,
+    MusicPlayEject,
+    SystemFixtureAction,
+    Admin,
 }
 
 /// The control plane's requests. Their replies carry JSON text, which the
@@ -257,6 +307,13 @@ pub struct Sections {
     pub colorful_pass: Option<Option<ColorfulPass>>,
     /// `mysekaiPhenomenaSchedules` (the rows the schedule write reads).
     pub schedules: Option<Vec<ScheduleRow>>,
+    /// `userMysekaiGate`: the home gate row, whose gate and skin ids select
+    /// the home gate model.
+    pub gate: Option<Gate>,
+    /// The `mysekaiRankReleases` rows this server appends to the master table
+    /// for the extended site-level release policy (empty when the document
+    /// states the source's own policy).
+    pub rank_releases: Option<Vec<RankReleaseRow>>,
     /// The birthday-party delivery sections.
     pub delivery: DeliveryUpdate,
     /// `userMysekaiMusicPlayFixtureSettings`.
@@ -305,9 +362,10 @@ pub fn to_json<T: Serialize>(message: &T) -> String {
 mod tests {
     use super::*;
     use crate::rows::{
-        BirthdayPartyRow, CoordinateRow, HonorRow, MusicPlaySetting, Reward, UserMysekaiBlueprint,
-        UserMysekaiCanvas, UserMysekaiCharacterTalk, UserMysekaiFixture, UserMysekaiGamedata,
-        UserMysekaiItem, UserMysekaiMaterial, UserMysekaiMaterialPossession,
+        BirthdayPartyRow, CoordinateRow, Gate, HonorRow, MusicPlaySetting, RankReleaseRow, Reward,
+        UserMysekaiBlueprint, UserMysekaiCanvas, UserMysekaiCharacterTalk, UserMysekaiFixture,
+        UserMysekaiGamedata, UserMysekaiItem, UserMysekaiMaterial,
+        UserMysekaiMaterialPossession,
     };
 
     use std::collections::{BTreeMap, BTreeSet};
@@ -402,6 +460,19 @@ mod tests {
                 refresh_time_period_id: 9,
                 schedule_date: 10,
                 phenomena_id: 11,
+            }]),
+            gate: Some(Gate {
+                gate_id: 12,
+                skin_id: 13,
+                level: 1,
+                visit_count: 2,
+                last_refreshed_at: 14,
+                is_setting_at_home_site: true,
+            }),
+            rank_releases: Some(vec![RankReleaseRow {
+                mysekai_rank: 15,
+                mysekai_rank_release_type: "mysekai_site_level".to_owned(),
+                external_id: 16,
             }]),
             delivery,
             music: Some(vec![MusicPlaySetting {
@@ -502,6 +573,52 @@ mod tests {
         assert_eq!(
             decode::<CoordinateRow>(&encode(&coordinate)).unwrap(),
             coordinate
+        );
+    }
+
+    #[test]
+    fn every_call_knows_its_fieldless_kind() {
+        assert_eq!(Call::Join.kind(), CallKind::Join);
+        assert_eq!(
+            Call::Harvest(crate::api::HarvestRequest {
+                mysekai_site_id: 5,
+                mysekai_site_harvest_fixture_target:
+                    crate::api::MysekaiSiteHarvestFixtureTarget {
+                        position_x: 3,
+                        position_z: -4,
+                        mysekai_site_harvest_fixture_id: 9,
+                        hp: 0,
+                        is_last_attack: true,
+                    },
+                mysekai_tool_used: None,
+                mysekai_stamina_useds: vec![crate::api::MysekaiStaminaUsed {
+                    mysekai_stamina_type: "normal".to_owned(),
+                    rest: 7,
+                }],
+            })
+            .kind(),
+            CallKind::Harvest
+        );
+        assert_eq!(Call::Gather.kind(), CallKind::Gather);
+        assert_eq!(
+            Call::GateReserve(crate::api::GateReserveRequest {
+                mysekai_game_character_unit_group_id: 4,
+            })
+            .kind(),
+            CallKind::GateReserve
+        );
+        assert_eq!(
+            Call::GateChange(crate::api::GateChangeRequest {
+                mysekai_gate_id: 1,
+                mysekai_gate_skin_id: 2,
+                mysekai_game_character_unit_group_ids: vec![3],
+            })
+            .kind(),
+            CallKind::GateChange
+        );
+        assert_eq!(
+            Call::Admin(AdminCall::Schema).kind(),
+            CallKind::Admin
         );
     }
 

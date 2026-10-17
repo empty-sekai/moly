@@ -506,7 +506,11 @@ impl ServerModel {
                     .map_err(|reason| format!("server.edit gate.reserve: {reason}"))?;
                 self.doc = next;
                 let talks = reply_talks(&self.doc);
-                self.gate_replies.push(GateReply::Reserve { row, talks });
+                self.gate_replies.push(GateReply::Reserve {
+                    row,
+                    rows: self.doc.gate_characters.clone(),
+                    talks,
+                });
                 self.respond(ResponseKind::GateReserve, false, &[], masters);
                 Ok(json!({"action": action, "row": {
                     "mysekaiGateId": row.gate_id,

@@ -18,9 +18,8 @@
 //!   and with the boost effects).
 //! - `HarvestApiMock` and `GatherApiMock`: echo replies to the harvest and
 //!   gather requests. The user tool rows are not this panel's: they are the
-//!   server document's `userMysekaiTools`, which the craft replies also
-//!   change; the harvest reply's tools come from the server model's tool use
-//!   policy (`crate::server::tools`).
+//!   server's `userMysekaiTools`, carried by the reply's `tools` section (the
+//!   craft replies change them too), and the client copy follows them.
 //! - `TreasureBoxListMock`: the user treasure box rows. The mock's choice:
 //!   one `once_a_day` box (seq 1, the first harvest site), status
 //!   before_spawned, `transportSeconds` = [`TRANSPORT_SECONDS`] (the server
@@ -544,63 +543,56 @@ impl HarvestServerMock {
         Some((self.boxes.clone(), map.clone()))
     }
 
-    /// `HarvestApiMock`: echo. Stamina := each type's sent rest; the tool's
-    /// rows are the server document's after its tool use policy (a
-    /// durability that reaches zero consumes one of the quantity and resets);
-    /// the target's hp := the sent hp, harvested on the last attack; drop
-    /// rows above the sent hp (all on the last attack) become dropped.
+    /// The hit's effect on the mock map: the target's hp := the sent hp,
+    /// harvested on the last attack; drop rows above the sent hp (all on the
+    /// last attack) become dropped. The stamina and the tool rows are the
+    /// server's reply, not this panel's.
+    pub(crate) fn hit(&mut self, request: &HarvestRequest) -> Option<UserHarvestMap> {
+        let map = self.maps.get_mut(&request.site_id)?;
+        if let Some(fixture) = map.fixtures.iter_mut().find(|fixture| {
+            fixture.position_x == request.position_x
+                && fixture.position_z == request.position_z
+                && fixture.fixture_id == request.fixture_id
+        }) {
+            fixture.hp = request.hp;
+            if request.is_last_attack {
+                fixture.status = FIXTURE_HARVESTED;
+            }
+        } else {
+            warn!(
+                "[harvest-mock] HarvestApiMock: no fixture {} at ({}, {}) on site {}",
+                request.fixture_id, request.position_x, request.position_z, request.site_id
+            );
+        }
+        for drop in &mut map.drops {
+            if drop.position_x == request.position_x
+                && drop.position_z == request.position_z
+                && drop.status == DROP_BEFORE
+                && (request.is_last_attack || drop.hp > request.hp)
+            {
+                drop.status = DROP_DROPPED;
+            }
+        }
+        Some(map.clone())
+    }
+
+    /// The server reply's stamina, kept so the gather echo carries the latest.
+    pub(crate) fn set_stamina(&mut self, stamina: Stamina) {
+        self.stamina = stamina;
+    }
+
+    /// `HarvestApiMock`: the echo the mock's own test reads (stamina := the
+    /// sent rests, then the hit). The panel no longer composes the reply's
+    /// tool rows and is no longer called by the harvest log.
+    #[cfg(test)]
     pub(crate) fn harvest(&mut self, request: &HarvestRequest) -> SuiteUserReply {
         self.stamina = Stamina {
             normal: request.stamina_rests[0],
             enhance: request.stamina_rests[1],
             boost: request.stamina_rests[2],
         };
-        let tools = request
-            .tool
-            .and_then(|(tool_id, use_count, sent_durability)| {
-                let Ok(tool_id) = i32::try_from(tool_id) else {
-                    warn!("[harvest-mock] HarvestApiMock: tool {tool_id} is not a 32-bit tool id");
-                    return None;
-                };
-                let rows = crate::server::tools::harvest_tool_use(tool_id, use_count, sent_durability);
-                if rows.is_none() {
-                    warn!("[harvest-mock] HarvestApiMock: no server model holds userMysekaiTools; the reply carries no tools");
-                }
-                rows
-            })
-            .map(|rows| user_tools(&rows));
-        let map = self.maps.get_mut(&request.site_id);
-        let map = match map {
-            Some(map) => {
-                if let Some(fixture) = map.fixtures.iter_mut().find(|fixture| {
-                    fixture.position_x == request.position_x
-                        && fixture.position_z == request.position_z
-                        && fixture.fixture_id == request.fixture_id
-                }) {
-                    fixture.hp = request.hp;
-                    if request.is_last_attack {
-                        fixture.status = FIXTURE_HARVESTED;
-                    }
-                } else {
-                    warn!(
-                        "[harvest-mock] HarvestApiMock: no fixture {} at ({}, {}) on site {}",
-                        request.fixture_id, request.position_x, request.position_z, request.site_id
-                    );
-                }
-                for drop in &mut map.drops {
-                    if drop.position_x == request.position_x
-                        && drop.position_z == request.position_z
-                        && drop.status == DROP_BEFORE
-                        && (request.is_last_attack || drop.hp > request.hp)
-                    {
-                        drop.status = DROP_DROPPED;
-                    }
-                }
-                Some(map.clone())
-            }
-            None => None,
-        };
-        self.reply(map, tools)
+        let map = self.hit(request);
+        self.reply(map, None)
     }
 
     /// `GatherApiMock`: echo. Materials grow by the gathered quantities (the

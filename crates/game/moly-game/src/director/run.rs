@@ -9,7 +9,11 @@ use std::sync::Arc;
 use bevy::input::touch::TouchPhase;
 use bevy::prelude::*;
 use moly_law::action_button::{ButtonType, TargetId, ACTION_BUTTON_INPUT_INTERVAL};
+use moly_link::ServerLink;
+use moly_protocol::{AdminCall, Call, CallKind};
 use serde_json::{json, Value};
+
+use crate::userdata::{Answered, AnsweredLog};
 
 use super::cond::{self, flat};
 use super::hand::{self, Hand};
@@ -103,8 +107,53 @@ struct Active {
     path: String,
     deadline: Option<f32>,
     kind: Kind,
+    /// The server exchange the step's effect goes through, once it is sent.
+    server: Option<ServerWait>,
     /// The last running note, for the timeout's report.
     note: String,
+}
+
+/// Waits for the server's answer to the step's own request.
+#[derive(Clone, Copy)]
+struct ServerWait {
+    call: CallKind,
+    /// The answer log's length when the step started: only a later answer is
+    /// this step's.
+    since: usize,
+    /// The request has been seen in flight, and, when the feature exposes
+    /// it, the sequence number it is waiting for.
+    seq: Option<u32>,
+    seen: bool,
+}
+
+impl ServerWait {
+    fn new(world: &World, call: CallKind) -> Self {
+        Self {
+            call,
+            since: world.resource::<crate::userdata::AnsweredLog>().len(),
+            seq: None,
+            seen: false,
+        }
+    }
+}
+
+/// The call the feature that owns `call` is waiting for, when it exposes one.
+fn feature_pending(world: &World, call: CallKind) -> Option<crate::userdata::ServerPending> {
+    match call {
+        CallKind::Craft => world
+            .get_resource::<crate::home_action::craft::CraftScreen>()
+            .and_then(|screen| screen.server_pending())
+            .copied(),
+        CallKind::HousingLayout => world
+            .get_resource::<crate::fixture_edit::EditSession>()
+            .and_then(|session| session.server_pending())
+            .copied(),
+        CallKind::BirthdayPartyDelivery => world
+            .get_resource::<crate::delivery::flow::DeliveryFlow>()
+            .and_then(|flow| flow.server_pending())
+            .copied(),
+        _ => None,
+    }
 }
 
 enum Kind {
@@ -131,6 +180,8 @@ enum Kind {
     Parallel { tracks: Vec<Track>, join: Join },
     /// `moved` once the move has been seen in progress.
     SiteSwitch { site: String, moved: bool },
+    /// One `server.edit`, until the server answers the call numbered `seq`.
+    ServerEdit { seq: u32 },
 }
 
 impl Kind {
@@ -159,7 +210,6 @@ impl Kind {
         }
     }
 }
-
 /// A sequence of steps.
 pub(crate) struct Track {
     frames: Vec<Frame>,
@@ -236,6 +286,10 @@ impl Track {
                     active.note
                 )),
                 _ => poll(world, shared, active),
+            };
+            let poll = match poll {
+                Poll::Done(note) => wait_server(world, active, note),
+                other => other,
             };
             match poll {
                 Poll::Running(note) => {
@@ -391,10 +445,18 @@ fn start(world: &mut World, shared: &mut Shared, step: Step, path: String) -> St
             return ended(path, Ok(format!("phenomenon {phenomenon} requested")), optional);
         }
         Node::ServerEdit { command } => {
-            let result = crate::server::with_model(|model| model.edit(command))
-                .ok_or_else(|| "the server model is not installed".to_owned())
-                .and_then(|receipt| receipt.map(|receipt| receipt.to_string()));
-            return ended(path, result, optional);
+            let command_json = Value::Object(command.clone()).to_string();
+            let Some(seq) = world
+                .get_resource_mut::<ServerLink>()
+                .map(|mut link| link.call(Call::Admin(AdminCall::Edit { command_json })))
+            else {
+                return ended(
+                    path,
+                    Err("the game has no server link".to_owned()),
+                    optional,
+                );
+            };
+            Kind::ServerEdit { seq }
         }
         Node::SiteSwitch { site } => {
             world.insert_resource(crate::site::SiteChangeRequest(site.clone()));
@@ -513,8 +575,88 @@ fn start(world: &mut World, shared: &mut Shared, step: Step, path: String) -> St
         },
         Node::Repeat { .. } => unreachable!("repeat blocks are entered by next_step"),
     };
+    let server = match &step.node {
+        Node::Gather { .. } => Some(ServerWait::new(world, CallKind::Harvest)),
+        Node::Craft { .. } => Some(ServerWait::new(world, CallKind::Craft)),
+        Node::LayoutPlace { save, .. } if *save => {
+            Some(ServerWait::new(world, CallKind::HousingLayout))
+        }
+        Node::Deliver { .. } => Some(ServerWait::new(world, CallKind::BirthdayPartyDelivery)),
+        _ => None,
+    };
     let deadline = step.timeout.map(|timeout| shared.now + timeout);
-    Started::Running(Active { step, path, deadline, kind, note: String::new() })
+    Started::Running(Active { step, path, deadline, kind, server, note: String::new() })
+}
+
+fn wait_server(world: &World, active: &mut Active, note: String) -> Poll {
+    let Some(mut wait) = active.server else {
+        return Poll::Done(note);
+    };
+    // The feature's own pending call first: its sequence number is the one the
+    // answer will carry and it clears once the feature has read the answer.
+    if let Some(pending) = feature_pending(world, wait.call) {
+        if let Some(seq) = pending.seq {
+            wait.seq = Some(seq);
+            wait.seen = true;
+            active.server = Some(wait);
+            return Poll::Running(format!(
+                "{note} · waiting for the server ({}, seq {seq})",
+                crate::userdata::call_name(wait.call)
+            ));
+        }
+    }
+    if wait.seq.is_none() {
+        // A feature without its own pending accessor (the harvest call): the
+        // link names the request in flight.
+        if world
+            .resource::<ServerLink>()
+            .waiting()
+            .any(|(_, kind)| *kind == wait.call)
+        {
+            wait.seen = true;
+            active.server = Some(wait);
+            return Poll::Running(format!(
+                "{note} · waiting for the server ({})",
+                crate::userdata::call_name(wait.call)
+            ));
+        }
+    }
+    let log = world.resource::<AnsweredLog>();
+    if !wait.seen {
+        // Not seen in flight: either the request went out and was answered
+        // while the step itself was still running, or none was sent.
+        return Poll::Done(match log.newest_since(wait.call, wait.since) {
+            Some(answer) => format!("{note} · {}", describe_answer(answer)),
+            None => note,
+        });
+    }
+    let answer = wait
+        .seq
+        .and_then(|seq| log.get(seq))
+        .or_else(|| log.newest_since(wait.call, wait.since));
+    match answer {
+        Some(answer) => {
+            let text = describe_answer(answer);
+            active.server = None;
+            Poll::Done(format!("{note} · {text}"))
+        }
+        None => Poll::Running(format!(
+            "{note} · waiting for the server's answer ({})",
+            crate::userdata::call_name(wait.call)
+        )),
+    }
+}
+
+/// A step's server answer as the run log reports it.
+fn describe_answer(answer: &Answered) -> String {
+    let call = crate::userdata::call_name(answer.call);
+    match &answer.outcome {
+        Ok(_) => format!("{{seq: {}, call: {call}, ok}}", answer.seq),
+        Err(refusal) => format!(
+            "{{seq: {}, call: {call}, refusal: {}}}",
+            answer.seq, refusal.code
+        ),
+    }
 }
 
 fn poll(world: &mut World, shared: &mut Shared, active: &mut Active) -> Poll {
@@ -551,6 +693,28 @@ fn poll(world: &mut World, shared: &mut Shared, active: &mut Active) -> Poll {
         Kind::Craft(craft) => craft.poll(world, shared),
         Kind::LayoutPlace(place) => place.poll(world, shared),
         Kind::Deliver(deliver) => deliver.poll(world, shared),
+        Kind::ServerEdit { seq } => {
+            let answered = world.resource::<AnsweredLog>().get(*seq).cloned();
+            if let Some(answer) = answered {
+                return match &answer.outcome {
+                    Ok(_) => Poll::Done(describe_answer(&answer)),
+                    Err(refusal) => Poll::Failed(format!(
+                        "{}: {}",
+                        describe_answer(&answer),
+                        refusal.reason
+                    )),
+                };
+            }
+            if world
+                .resource::<ServerLink>()
+                .waiting()
+                .any(|(waiting, _)| waiting == seq)
+            {
+                Poll::Running(format!("waiting for the server's answer (seq {seq})"))
+            } else {
+                Poll::Failed(format!("the server edit (seq {seq}) has no answer"))
+            }
+        }
         Kind::DialogAnswer(answer) => answer.poll(world, shared),
         Kind::NpcWalk { entity, unit, goal, within } => {
             let at = world.get::<GlobalTransform>(*entity).map(GlobalTransform::translation);
@@ -1045,8 +1209,15 @@ impl Gather {
                 shared.release_hand_of(world, path);
                 return Poll::Done(self.summary(uid, hp));
             };
+            // Pickups happen only while the player moves, so the walk aims
+            // past the drop: a drop already underfoot is still crossed.
+            let away = Vec2::new(next.x - player.x, next.z - player.z).normalize_or_zero();
+            let beyond = if away == Vec2::ZERO { Vec2::X } else { away } * 0.5;
             self.drop = Some((next, None));
-            self.walk = Some(Walk::new(Target { what: TargetKind::Point([next.x, next.z]), offset: [0.0; 2] }, 0.2));
+            self.walk = Some(Walk::new(
+                Target { what: TargetKind::Point([next.x + beyond.x, next.z + beyond.y]), offset: [0.0; 2] },
+                0.15,
+            ));
         }
         let walk = self.walk.as_mut().expect("the walk is planned with the drop");
         let polled = walk.poll(world, shared, path);

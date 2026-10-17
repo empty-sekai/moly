@@ -20,9 +20,11 @@ pub enum ReplyTalkList {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(dead_code)] // Read by the gate presenter's seam.
 pub enum GateReply {
-    /// The reserve reply: the reserved row and the reply's talk list.
+    /// The reserve reply: the reserved row, every gate character the server
+    /// holds and the reply's talk list.
     Reserve {
         row: GateCharacter,
+        rows: Vec<GateCharacter>,
         talks: ReplyTalkList,
     },
     /// The change reply: the home gate's new gate and skin, its characters

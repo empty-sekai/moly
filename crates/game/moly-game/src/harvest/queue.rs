@@ -6,23 +6,34 @@
 //! the queue: consecutive harvest stacks on the same fixture (key id, x, z)
 //! merge into one request unless the tool changed or broke in between
 //! (`GatheringActionLogToAPIConverter`); gather stacks become one gather
-//! request. The requests go to the `HarvestServerMock` panel; its replies
-//! update the user data (event 30: stamina and tools; event 31: the harvest
-//! map, from which each object's pending drop rows are rebuilt).
+//! request. One harvest request at a time goes to the server as
+//! `Call::Harvest` (the hit, the run's tool and the stamina that is left);
+//! its answer updates the stamina and the tools, and this client applies its
+//! own hit to the map, from which each object's pending drop rows are rebuilt.
+//! The gather requests go to the `HarvestServerMock` panel; its replies update
+//! the user data (event 30: stamina and tools; event 31: the harvest map).
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 
 use bevy::diagnostic::FrameCount;
 use bevy::prelude::*;
+use moly_link::ServerLink;
+use moly_protocol::api::{
+    HarvestRequest as HarvestCall, MysekaiSiteHarvestFixtureTarget, MysekaiStaminaUsed,
+    MysekaiToolUsed,
+};
+use moly_protocol::{Call, Refusal, Reply};
 
 use super::action::HarvestPlayerModel;
 use super::catalog::{HarvestCatalog, HarvestUserData};
 use super::law::Stamina;
 use super::server_mock::{
-    GatherRequest, HarvestRequest, HarvestServerMock, SuiteUserReply, UserDrop, DROP_BEFORE,
+    GatherRequest, HarvestRequest, HarvestServerMock, SuiteUserReply, UserDrop, UserHarvestMap,
+    DROP_BEFORE,
 };
 use super::HarvestObject;
 use crate::site_move::timeline::Delay;
+use crate::userdata::{Answered, ServerPending};
 
 /// One hit as the log records it.
 #[derive(Clone, Debug)]
@@ -53,6 +64,20 @@ pub(crate) struct HarvestLogQueue {
     timer: Option<(u32, Delay)>,
     pub(crate) harvest_requests: usize,
     pub(crate) gather_requests: usize,
+    /// The harvest call whose answer has not arrived.
+    awaiting: Option<ServerPending>,
+    /// The request the waiting call carries, for the map's hit on its answer.
+    in_flight: Option<HarvestRequest>,
+    /// Merged requests of the flush after the one in flight.
+    pending: VecDeque<HarvestRequest>,
+}
+
+impl HarvestLogQueue {
+    /// The server call this loop waits for, for the director.
+    #[allow(dead_code)] // Read by the director's wait.
+    pub(crate) fn server_pending(&self) -> Option<&ServerPending> {
+        self.awaiting.as_ref()
+    }
 }
 
 /// `CreateHarvestRequests`: merge consecutive stacks of one fixture while
@@ -104,6 +129,8 @@ pub(crate) fn merge_harvest(stacks: &[HarvestStack]) -> Vec<HarvestRequest> {
 pub(crate) fn advance(
     frames: Res<FrameCount>,
     time: Res<Time>,
+    mut answers: MessageReader<Answered>,
+    mut link: ResMut<ServerLink>,
     arrival: Res<super::arrival::HarvestArrival>,
     configs: Option<Res<crate::client_config::ClientConfigs>>,
     mut queue: ResMut<HarvestLogQueue>,
@@ -123,6 +150,33 @@ pub(crate) fn advance(
     ) else {
         return;
     };
+    // The harvest call's answer: the server's stamina is applied here, and the
+    // map's hit is this client's own effect of the swing. The tool rows ride
+    // the sections and reach the client copy through the user data owner.
+    for answer in answers.read() {
+        let Some(seq) = queue.awaiting.as_ref().and_then(|pending| pending.seq) else {
+            continue;
+        };
+        if seq != answer.seq {
+            continue;
+        }
+        queue.awaiting = None;
+        if let Some(request) = queue.in_flight.take() {
+            finish_harvest(
+                &request,
+                seq,
+                &answer.outcome,
+                server,
+                user,
+                model,
+                &catalog,
+                &mut objects,
+            );
+        }
+        if let Some(next) = queue.pending.pop_front() {
+            send_harvest(&mut queue, &mut link, next);
+        }
+    }
     let Some(site_id) = arrival.site_id() else {
         queue.timer = None;
         return;
@@ -146,6 +200,9 @@ pub(crate) fn advance(
         site_id,
         Delay::new(super::law::delay_seconds(interval as f64), frame),
     ));
+    if queue.awaiting.is_some() {
+        return;
+    }
     if queue.stacks.is_empty() {
         return;
     }
@@ -164,22 +221,10 @@ pub(crate) fn advance(
             Stack::Harvest(_) => None,
         })
         .collect();
-    for request in merge_harvest(&harvests) {
-        let reply = server.harvest(&request);
-        queue.harvest_requests += 1;
-        info!(
-            "[harvest-api] PostUserMysekaiHarvestApi (mock) site {} target ({}, {}) fixture {} hp {} last {} tool {:?} stamina rests {:?} -> stamina {:?}",
-            request.site_id,
-            request.position_x,
-            request.position_z,
-            request.fixture_id,
-            request.hp,
-            request.is_last_attack,
-            request.tool,
-            request.stamina_rests,
-            reply.stamina,
-        );
-        apply_reply(&reply, request.site_id, user, model, &catalog, &mut objects);
+    let mut requests = merge_harvest(&harvests).into_iter();
+    if let Some(first) = requests.next() {
+        send_harvest(&mut queue, &mut link, first);
+        queue.pending.extend(requests);
     }
     gathers.sort_by_key(|(site, _)| *site);
     let mut index = 0;
@@ -209,7 +254,163 @@ pub(crate) fn advance(
     }
 }
 
-/// Events 30 and 31 of a `SuiteUser` reply.
+/// Sends one merged harvest request; only one call is in flight at a time.
+fn send_harvest(queue: &mut HarvestLogQueue, link: &mut ServerLink, request: HarvestRequest) {
+    let call = Call::Harvest(HarvestCall {
+        mysekai_site_id: request.site_id as i32,
+        mysekai_site_harvest_fixture_target: MysekaiSiteHarvestFixtureTarget {
+            position_x: request.position_x,
+            position_z: request.position_z,
+            mysekai_site_harvest_fixture_id: request.fixture_id,
+            hp: request.hp,
+            is_last_attack: request.is_last_attack,
+        },
+        mysekai_tool_used: request.tool.map(|(tool_id, use_count, durability)| {
+            MysekaiToolUsed {
+                mysekai_tool_id: tool_id as i32,
+                use_count,
+                durability,
+            }
+        }),
+        mysekai_stamina_useds: vec![
+            MysekaiStaminaUsed {
+                mysekai_stamina_type: "normal".to_owned(),
+                rest: request.stamina_rests[0],
+            },
+            MysekaiStaminaUsed {
+                mysekai_stamina_type: "enhance".to_owned(),
+                rest: request.stamina_rests[1],
+            },
+            MysekaiStaminaUsed {
+                mysekai_stamina_type: "boost".to_owned(),
+                rest: request.stamina_rests[2],
+            },
+        ],
+    });
+    let kind = call.kind();
+    let seq = link.call(call);
+    info!(
+        "[harvest-api] PostUserMysekaiHarvestApi site {} target ({}, {}) fixture {} hp {} last {} tool {:?} stamina rests {:?} sent as seq {seq}",
+        request.site_id,
+        request.position_x,
+        request.position_z,
+        request.fixture_id,
+        request.hp,
+        request.is_last_attack,
+        request.tool,
+        request.stamina_rests,
+    );
+    queue.harvest_requests += 1;
+    queue.awaiting = Some(ServerPending {
+        seq: Some(seq),
+        call: kind,
+    });
+    queue.in_flight = Some(request);
+}
+
+/// The harvest answer: the server's stamina, and the map's hit as this client
+/// predicts it.
+#[allow(clippy::too_many_arguments)]
+fn finish_harvest(
+    request: &HarvestRequest,
+    seq: u32,
+    outcome: &Result<Reply, Refusal>,
+    server: &mut HarvestServerMock,
+    user: &mut HarvestUserData,
+    model: &mut HarvestPlayerModel,
+    catalog: &HarvestCatalog,
+    objects: &mut Query<&mut HarvestObject>,
+) {
+    match outcome {
+        Ok(Reply::Harvest(stamina)) => {
+            let stamina = Stamina {
+                normal: stamina.normal,
+                enhance: stamina.enhance,
+                boost: stamina.boost,
+            };
+            server.set_stamina(stamina);
+            info!(
+                "[harvest-api] PostUserMysekaiHarvestApi site {} target ({}, {}) fixture {} hp {} last {} tool {:?} stamina rests {:?} -> stamina {:?} (seq {seq})",
+                request.site_id,
+                request.position_x,
+                request.position_z,
+                request.fixture_id,
+                request.hp,
+                request.is_last_attack,
+                request.tool,
+                request.stamina_rests,
+                stamina,
+            );
+            apply_stamina(stamina, model, user);
+            if let Some(map) = server.hit(request) {
+                apply_map(&map, request.site_id, user, catalog, objects);
+            }
+        }
+        Err(refusal) => {
+            error!(
+                "[harvest-api] PostUserMysekaiHarvestApi (seq {seq}) refused: {} ({})",
+                refusal.reason, refusal.code
+            );
+        }
+        Ok(other) => {
+            error!(
+                "[harvest-api] PostUserMysekaiHarvestApi (seq {seq}) answered with {other:?}"
+            );
+        }
+    }
+}
+
+/// Event 30: the stamina. Every stack of the flush was sent before the reply,
+/// so nothing unsynchronised is left to subtract.
+fn apply_stamina(stamina: Stamina, model: &mut HarvestPlayerModel, user: &mut HarvestUserData) {
+    if model.stamina != stamina {
+        info!(
+            "[harvest-api] event 30: stamina {:?} -> server {:?}",
+            model.stamina, stamina
+        );
+    }
+    model.stamina = stamina;
+    user.stamina = stamina;
+}
+
+/// Event 31: the harvest map; the pending drop rows of the site's objects are
+/// rebuilt from it (`SynchronizedTargetBeforeDropItems`).
+fn apply_map(
+    map: &UserHarvestMap,
+    site_id: u32,
+    user: &mut HarvestUserData,
+    catalog: &HarvestCatalog,
+    objects: &mut Query<&mut HarvestObject>,
+) {
+    user.maps.insert(site_id, map.clone());
+    let mut rebuilt = 0usize;
+    for mut object in objects.iter_mut() {
+        if object.site_id != site_id {
+            continue;
+        }
+        let hp = object.hp;
+        let rows: Vec<_> = map
+            .drops
+            .iter()
+            .filter(|drop| {
+                drop.position_x == object.position_x
+                    && drop.position_z == object.position_z
+                    && drop.status == DROP_BEFORE
+                    && drop.hp <= hp
+            })
+            .map(|drop| super::pending_drop(catalog, drop))
+            .collect();
+        if rows.len() != object.pending_drops.len() {
+            rebuilt += 1;
+        }
+        object.pending_drops = rows;
+    }
+    if rebuilt > 0 {
+        info!("[harvest-api] event 31: pending drop rows rebuilt on {rebuilt} objects");
+    }
+}
+
+/// A `GatherApiMock` reply's user-data events.
 fn apply_reply(
     reply: &SuiteUserReply,
     site_id: u32,
@@ -218,50 +419,14 @@ fn apply_reply(
     catalog: &HarvestCatalog,
     objects: &mut Query<&mut HarvestObject>,
 ) {
-    // Event 30: the stamina and the tools. Every stack of this flush was sent
-    // before the reply, so nothing unsynchronised is left to subtract.
-    if model.stamina != reply.stamina {
-        info!(
-            "[harvest-api] event 30: stamina {:?} -> server {:?}",
-            model.stamina, reply.stamina
-        );
-    }
-    model.stamina = reply.stamina;
-    user.stamina = reply.stamina;
+    apply_stamina(reply.stamina, model, user);
     if let Some(tools) = &reply.tools {
         model.refresh_tools(tools);
         user.tools = tools.clone();
     }
     user.materials = reply.materials.clone();
-    // Event 31: the harvest map; the pending drop rows of the site's objects
-    // are rebuilt from it (`SynchronizedTargetBeforeDropItems`).
     if let Some(map) = reply.map.as_ref() {
-        user.maps.insert(site_id, map.clone());
-        let mut rebuilt = 0usize;
-        for mut object in objects.iter_mut() {
-            if object.site_id != site_id {
-                continue;
-            }
-            let hp = object.hp;
-            let rows: Vec<_> = map
-                .drops
-                .iter()
-                .filter(|drop| {
-                    drop.position_x == object.position_x
-                        && drop.position_z == object.position_z
-                        && drop.status == DROP_BEFORE
-                        && drop.hp <= hp
-                })
-                .map(|drop| super::pending_drop(catalog, drop))
-                .collect();
-            if rows.len() != object.pending_drops.len() {
-                rebuilt += 1;
-            }
-            object.pending_drops = rows;
-        }
-        if rebuilt > 0 {
-            info!("[harvest-api] event 31: pending drop rows rebuilt on {rebuilt} objects");
-        }
+        apply_map(map, site_id, user, catalog, objects);
     }
 }
 

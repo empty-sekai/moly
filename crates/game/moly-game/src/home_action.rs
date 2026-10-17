@@ -49,8 +49,7 @@
 //! part.
 //!
 //! Triggers: [`HomeActionRequest`] (what the screens send; each is first
-//! posted to the server model through
-//! [`crate::server::client::home_action::post`], and a refused reply starts
+//! sent as the server link's `Call::HomeAction`, and a refused reply starts
 //! nothing; a craft the craft screen already posted is not posted again),
 //! [`HomeActionSkip`] (the
 //! skip button), [`SketchModeRequest`] (the menu's sketch button enters game
@@ -87,8 +86,12 @@ use crate::player_avatar::{
     STATE_FADE,
 };
 use crate::player_state::{PlayerActionState, PlayerAvatarStates};
-use crate::server::client::home_action::{post, HomeActionApi};
+use crate::server::client::home_action::HomeActionApi;
 use crate::ui_layers::{LayerCommand, LayerId};
+use crate::userdata::{Answered, ServerPending};
+use moly_link::ServerLink;
+use moly_protocol::api::HomeActionPost;
+use moly_protocol::{Call, Refusal, Reply};
 
 /// `EffectType.Craft`.
 const CRAFT_EFFECT_TYPE: u16 = 15;
@@ -295,9 +298,22 @@ struct Sequence {
     last_probe: f32,
 }
 
+/// The request a home action sent and its continuation's data.
+#[derive(Clone, Debug)]
+struct StartRequest {
+    action: HomeAction,
+    target: Option<FixtureTarget>,
+    posted: bool,
+    sketch_blueprint: Option<i32>,
+}
+
 #[derive(Resource, Default)]
 pub(crate) struct HomeActions {
     sequence: Option<Sequence>,
+    /// The home-action request whose answer has not arrived.
+    starting: Option<ServerPending>,
+    /// What the waiting request continues with.
+    queued: Option<StartRequest>,
     inbox: Vec<HomeActionRequest>,
     skips: usize,
     sketch: Vec<SketchModeRequest>,
@@ -313,6 +329,12 @@ pub(crate) struct HomeActions {
 impl HomeActions {
     pub(crate) fn playing(&self) -> bool {
         self.sequence.is_some()
+    }
+
+    /// The server call this feature waits for, for the director.
+    #[allow(dead_code)] // Read by the director's wait.
+    pub(crate) fn server_pending(&self) -> Option<&ServerPending> {
+        self.starting.as_ref()
     }
 
     /// `MysekaiFixtureUtility.IsCraftTool`: the master fixture's system
@@ -704,6 +726,10 @@ fn start(world: &mut World, actions: &mut HomeActions, request: HomeActionReques
         warn!("[home-action] {request:?} dropped: {:?} is still playing", sequence.action);
         return;
     }
+    if actions.starting.is_some() {
+        warn!("[home-action] {request:?} dropped: the previous request is still waiting for its reply");
+        return;
+    }
     let mut sketch_blueprint = None;
     let mut posted = false;
     let (action, target) = match request {
@@ -731,12 +757,45 @@ fn start(world: &mut World, actions: &mut HomeActions, request: HomeActionReques
     }
     if posted {
         info!("[home-action] {action:?}: the craft screen already posted PostUserMysekaiCraftApi; no second request");
-    } else {
-        let reply = post(world, action.api(), target.as_ref().map(|target| target.uid.as_str()));
-        if !reply.success {
-            return;
-        }
+        begin_sequence(
+            world,
+            actions,
+            StartRequest {
+                action,
+                target,
+                posted,
+                sketch_blueprint,
+            },
+        );
+        return;
     }
+    let call = Call::HomeAction(HomeActionPost {
+        api: action.api(),
+        target: target.as_ref().map(|target| target.uid.clone()),
+    });
+    let kind = call.kind();
+    let seq = world.resource_mut::<ServerLink>().call(call);
+    info!("[home-action] {action:?}: PostUserMysekaiCraftApi sent as seq {seq}; the sequence starts on its reply");
+    actions.starting = Some(ServerPending {
+        seq: Some(seq),
+        call: kind,
+    });
+    actions.queued = Some(StartRequest {
+        action,
+        target,
+        posted,
+        sketch_blueprint,
+    });
+}
+
+/// The reply's success starts the world sequence.
+fn begin_sequence(world: &mut World, actions: &mut HomeActions, start: StartRequest) {
+    let StartRequest {
+        action,
+        target,
+        posted,
+        sketch_blueprint,
+    } = start;
     let now = world.resource::<Time>().elapsed_secs();
     let epoch = world.get_resource::<crate::site::GroundEpoch>().map_or(0, |epoch| epoch.0);
     let sequence = Sequence {
@@ -768,6 +827,56 @@ fn start(world: &mut World, actions: &mut HomeActions, request: HomeActionReques
     );
     hide_screens(world, &sequence);
     actions.sequence = Some(sequence);
+}
+
+/// Reads the answer to the home-action request.
+fn read_action_answer(
+    mut answers: MessageReader<Answered>,
+    actions: Option<Res<HomeActions>>,
+    mut commands: Commands,
+) {
+    for answer in answers.read() {
+        let Some(pending) = actions.as_deref().and_then(HomeActions::server_pending) else {
+            continue;
+        };
+        if pending.seq != Some(answer.seq) {
+            continue;
+        }
+        let outcome = answer.outcome.clone();
+        commands.queue(move |world: &mut World| finish_action(world, outcome));
+    }
+}
+
+/// Continues the home action once its reply arrived: the success builds the
+/// sequence, a refusal starts nothing.
+fn finish_action(world: &mut World, outcome: Result<Reply, Refusal>) {
+    world.resource_scope(|world, mut actions: Mut<HomeActions>| {
+        let Some(pending) = actions.starting.take() else {
+            return;
+        };
+        if pending.seq.is_none() {
+            return;
+        }
+        let Some(start) = actions.queued.take() else {
+            return;
+        };
+        match outcome {
+            Ok(Reply::HomeAction(reply)) => {
+                if !reply.success {
+                    return;
+                }
+            }
+            Ok(other) => {
+                error!("[home-action] the request answered with {other:?}; no sequence starts");
+                return;
+            }
+            Err(refusal) => {
+                warn!("[home-action] the request was refused: {} ({})", refusal.reason, refusal.code);
+                return;
+            }
+        }
+        begin_sequence(world, &mut *actions, start);
+    });
 }
 
 /// After the wait: camera, state, gate, skip button, SE.
@@ -1395,5 +1504,9 @@ pub(crate) fn install(app: &mut App) {
                 .before(crate::pick::pick)
                 .before(crate::ui_layers::advance)
                 .before(crate::audio::advance_se),
-        );
+        )
+        // The replies continue the request after the link applied their
+        // sections to the client copies.
+        .add_systems(Update, read_action_answer.after(advance))
+        .add_systems(Update, craft::read_answer.after(craft::advance));
 }

@@ -32,11 +32,11 @@
 //!
 //! The gather loop, from the arrival while the site is on: every
 //! `DeliveryGatherAPIInterval` (FloatConfigs 169), in state Gather with a
-//! non-empty stack: state InGathering (published), the gather API with a
+//! non-empty stack: state InGathering (published), the gather call with a
 //! copy of the stack (`contents`: per party of the stack, its gathered
-//! count; `crate::server::delivery::put_birthday_party_gather`), those items
-//! leave the stack, every party synchronizes, the total reward animation of
-//! the reply, then state Gather while the stack still holds items, else Idle
+//! count; the reply's `Call::BirthdayPartyGather`), those items leave the
+//! stack, every party synchronizes, the total reward animation of the reply,
+//! then state Gather while the stack still holds items, else Idle
 //! (published).
 //!
 //! `CanCollectResource(dropItem)`: a drop is the party's reward material,
@@ -90,6 +90,10 @@ use crate::harvest::{HarvestDocs, HarvestGltfs, Rng};
 use crate::player::PlayerControlled;
 use crate::server::delivery::{ClientBirthdayPartyData, GatherContent};
 use crate::site_move::timeline::{delay_seconds, Delay};
+use crate::userdata::{Answered, ServerPending};
+use moly_link::ServerLink;
+use moly_protocol::api::BirthdayPartyGatherRequest;
+use moly_protocol::{Call, Refusal, Reply};
 
 /// `DeliveryGatherAPIInterval` (FloatConfigs 169).
 pub(crate) const KEY_GATHER_API_INTERVAL: i32 = 169;
@@ -806,6 +810,10 @@ pub(crate) struct DeliveryGatherLoop {
     delay: Option<Delay>,
     interval: f32,
     awaiting_reward: bool,
+    /// The gather call whose answer has not arrived.
+    awaiting: Option<ServerPending>,
+    /// The drops the waiting call sent; they leave the stack on its answer.
+    sent: Vec<DropModel>,
 }
 
 impl DeliveryGatherLoop {
@@ -813,10 +821,18 @@ impl DeliveryGatherLoop {
         self.interval = interval;
         self.delay = Some(Delay::new(delay_seconds(interval as f64), frame));
         self.awaiting_reward = false;
+        self.awaiting = None;
+        self.sent.clear();
     }
 
     pub(crate) fn cancel(&mut self) {
         *self = Self::default();
+    }
+
+    /// The server call this loop waits for, for the director.
+    #[allow(dead_code)] // Read by the director's wait.
+    pub(crate) fn server_pending(&self) -> Option<&ServerPending> {
+        self.awaiting.as_ref()
     }
 }
 
@@ -824,6 +840,8 @@ impl DeliveryGatherLoop {
 pub(crate) fn gather_loop(
     frames: Res<FrameCount>,
     time: Res<Time>,
+    mut answers: MessageReader<Answered>,
+    mut link: ResMut<ServerLink>,
     mut gather: ResMut<DeliveryGatherLoop>,
     mut model: ResMut<DeliveryModel>,
     mut client: ResMut<ClientBirthdayPartyData>,
@@ -831,6 +849,27 @@ pub(crate) fn gather_loop(
     mut progress: MessageWriter<DeliveryProgress>,
 ) {
     let frame = u64::from(frames.0);
+    for answer in answers.read() {
+        let Some(seq) = gather.awaiting.as_ref().and_then(|pending| pending.seq) else {
+            continue;
+        };
+        if seq != answer.seq {
+            continue;
+        }
+        finish_gather(
+            &mut gather,
+            &mut model,
+            &client,
+            &mut runs,
+            &mut progress,
+            seq,
+            &answer.outcome,
+            frame,
+        );
+    }
+    if gather.awaiting.is_some() {
+        return;
+    }
     if gather.awaiting_reward {
         if !runs.take_finished(RewardOwner::Gather) {
             return;
@@ -874,19 +913,55 @@ pub(crate) fn gather_loop(
             }),
         }
     }
-    let rewards = match crate::server::delivery::put_birthday_party_gather(&mut client, &contents) {
-        Ok(reply) => reply.obtained_delivery_total_rewards,
-        Err(reason) => {
-            error!("[delivery-drop] {reason}: the error dialog (UI lane)");
+    let call = Call::BirthdayPartyGather(BirthdayPartyGatherRequest { contents });
+    let kind = call.kind();
+    let seq = link.call(call);
+    info!("[delivery-drop] PutUserMysekaiBirthdayPartyGatherApi sent as seq {seq}; state InGathering until its reply");
+    gather.awaiting = Some(ServerPending {
+        seq: Some(seq),
+        call: kind,
+    });
+    gather.sent = items;
+    gather.delay = None;
+}
+
+/// The gather answer: the reward rows start their run, the sent drops leave
+/// the stack and every party synchronizes from the updated client copy.
+#[allow(clippy::too_many_arguments)]
+fn finish_gather(
+    gather: &mut DeliveryGatherLoop,
+    model: &mut DeliveryModel,
+    client: &ClientBirthdayPartyData,
+    runs: &mut RewardRuns,
+    progress: &mut MessageWriter<DeliveryProgress>,
+    seq: u32,
+    outcome: &Result<Reply, Refusal>,
+    frame: u64,
+) {
+    if gather.awaiting.as_ref().and_then(|pending| pending.seq) != Some(seq) {
+        return;
+    }
+    gather.awaiting = None;
+    let rewards = match outcome {
+        Ok(Reply::GatherDelivery(reply)) => reply.obtained_delivery_total_rewards.clone(),
+        Err(refusal) => {
+            error!("[delivery-drop] {}: the error dialog (UI lane)", refusal.reason);
+            Vec::new()
+        }
+        Ok(other) => {
+            error!(
+                "[delivery-drop] the gather request answered with {other:?}: the error dialog (UI lane)"
+            );
             Vec::new()
         }
     };
-    for item in &items {
+    for item in &gather.sent {
         model.gather_stack.retain(|d| d != item);
     }
-    model.update_synchronized(&client);
+    gather.sent.clear();
+    model.update_synchronized(client);
     if rewards.is_empty() {
-        after_gather(&mut gather, &mut model, &mut progress, frame);
+        after_gather(gather, model, progress, frame);
     } else {
         runs.start(RewardOwner::Gather, rewards);
         gather.awaiting_reward = true;

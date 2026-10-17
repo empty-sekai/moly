@@ -17,10 +17,9 @@
 //!   reads the copies. The birthday party's `ExecuteAsync` stops when the
 //!   reply is null and keeps `obtainedResources` for its reward dialog.
 //!
-//! [`post`] runs [`SystemFixtureActionEndpoint`], a one-shot system the
-//! server model installs; when it returns, the reply's rows are already in
-//! [`ClientSystemFixtureActions`]. Without an endpoint the request is
-//! refused by name.
+//! [`handle`] is the endpoint the server model still registers until it is
+//! removed; the client request itself is one `Call::SystemFixtureAction` on
+//! the server link (see [`crate::cutscene::birthday`]).
 
 use bevy::ecs::system::SystemId;
 use bevy::prelude::*;
@@ -81,17 +80,6 @@ impl SystemFixtureActionReplyExt for SystemFixtureActionReply {
 pub(crate) struct SystemFixtureActionEndpoint(
     pub(crate) SystemId<In<i32>, SystemFixtureActionReply>,
 );
-
-/// `MysekaiSystemFixtureActionService.ExecuteAPI(systemFixtureId)`: send
-/// the request and read its reply.
-pub(crate) fn post(world: &mut World, mysekai_system_fixture_id: i32) -> SystemFixtureActionReply {
-    let Some(endpoint) = world.get_resource::<SystemFixtureActionEndpoint>().copied() else {
-        return SystemFixtureActionReply::refused("no server endpoint is installed".into());
-    };
-    world
-        .run_system_with(endpoint.0, mysekai_system_fixture_id)
-        .unwrap_or_else(|error| SystemFixtureActionReply::refused(error.to_string()))
-}
 
 /// The endpoint the server plugin installs for the request: the reply's
 /// `updatedResources` are merged into the client's copy before it returns.

@@ -2,18 +2,19 @@
 //!
 //! [`LinkPlugin`] opens one session for one user and keeps it in
 //! [`ServerLink`]. A system sends a request with [`ServerLink::call`] and
-//! gets its sequence number; the answer arrives in a later frame as a
-//! [`Replied`] message carrying that number. Data the server sends on its
-//! own arrives as [`Pushed`]. Nothing here answers for the server: when the
-//! server cannot be reached, the link says so in [`LinkState`] and every
-//! call is refused by name.
+//! gets its sequence number; the server's answer arrives in a later frame as
+//! a [`ServerArrived`] carrying that number. Everything the server sends —
+//! answers and data it sends on its own — arrives in the server's order on
+//! that one message. Nothing here answers for the server: when the server
+//! cannot be reached, the link says so in [`LinkState`] and every call is
+//! refused by name.
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 
 use bevy::prelude::*;
 use moly_protocol::{
-    Call, ClientMessage, PushKind, Refusal, Reply, Sections, ServerMessage, UserId,
+    Call, CallKind, ClientMessage, PushKind, Refusal, Reply, Sections, ServerMessage, UserId,
     PROTOCOL_VERSION,
 };
 
@@ -60,6 +61,30 @@ pub(crate) enum LinkEvent {
     Lost(String),
 }
 
+/// One thing the server sent, in the order it sent it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Arrival {
+    /// The answer to the call numbered [`ServerArrived::seq`].
+    Reply {
+        call: CallKind,
+        outcome: Result<Reply, Refusal>,
+        sections: Sections,
+    },
+    /// User data the server sent without a call.
+    Push {
+        kind: PushKind,
+        sections: Sections,
+    },
+}
+
+/// Everything the server sent, in order. A reply carries the number of the
+/// call it answers; a push has none.
+#[derive(Message, Clone, Debug, PartialEq)]
+pub struct ServerArrived {
+    pub seq: Option<u32>,
+    pub event: Arrival,
+}
+
 /// The session.
 #[derive(Resource)]
 pub struct ServerLink {
@@ -68,7 +93,9 @@ pub struct ServerLink {
     outgoing: async_channel::Sender<ClientMessage>,
     incoming: async_channel::Receiver<LinkEvent>,
     /// Calls sent and not yet answered: (seq, what was asked).
-    waiting: Vec<(u32, &'static str)>,
+    waiting: Vec<(u32, CallKind)>,
+    /// Calls made since the game last looked, for its event stream.
+    sent: Vec<(u32, Call)>,
 }
 
 impl ServerLink {
@@ -76,14 +103,16 @@ impl ServerLink {
         &self.state
     }
 
-    /// Sends a request and returns the number its [`Replied`] will carry.
-    /// A link that is not open refuses at once, also by a [`Replied`] in
-    /// the next frame, so a caller waits for its answer the same way.
+    /// Sends a request and returns the number its [`ServerArrived`] will
+    /// carry. A link that is not open refuses at once, also by a
+    /// [`ServerArrived`] in the next frame, so a caller waits for its answer
+    /// the same way.
     pub fn call(&mut self, call: Call) -> u32 {
         self.next_seq = self.next_seq.wrapping_add(1);
         let seq = self.next_seq;
-        let name = call_name(&call);
-        self.waiting.push((seq, name));
+        let kind = call.kind();
+        self.waiting.push((seq, kind));
+        self.sent.push((seq, call.clone()));
         if self.state.is_open() || self.state == LinkState::Connecting {
             if self
                 .outgoing
@@ -98,25 +127,16 @@ impl ServerLink {
         seq
     }
 
-    /// The calls waiting for an answer.
-    pub fn waiting(&self) -> impl Iterator<Item = &(u32, &'static str)> {
+    /// The calls waiting for an answer, as their kind.
+    pub fn waiting(&self) -> impl Iterator<Item = &(u32, CallKind)> {
         self.waiting.iter()
     }
-}
 
-/// The answer to one call.
-#[derive(Message, Clone, Debug)]
-pub struct Replied {
-    pub seq: u32,
-    pub outcome: Result<Reply, Refusal>,
-    pub sections: Option<Box<Sections>>,
-}
-
-/// Data the server sent without a call.
-#[derive(Message, Clone, Debug)]
-pub struct Pushed {
-    pub kind: PushKind,
-    pub sections: Box<Sections>,
+    /// The calls made since the last look, oldest first. The game reads this
+    /// once a frame for its event stream.
+    pub fn take_sent(&mut self) -> Vec<(u32, Call)> {
+        std::mem::take(&mut self.sent)
+    }
 }
 
 /// Opens the session when the app starts.
@@ -134,20 +154,25 @@ impl Plugin for LinkPlugin {
             client: config.client.clone(),
         });
         #[cfg(not(target_arch = "wasm32"))]
+        let state = LinkState::Connecting;
+        #[cfg(not(target_arch = "wasm32"))]
         native::connect(config.address.clone(), config.connect_window, to_server, to_game);
         #[cfg(target_arch = "wasm32")]
-        {
+        let state = {
             let _ = (to_server, to_game);
-        }
+            LinkState::Lost {
+                reason: "no browser transport".to_owned(),
+            }
+        };
         app.insert_resource(ServerLink {
-            state: LinkState::Connecting,
+            state,
             next_seq: 0,
             outgoing,
             incoming,
             waiting: Vec::new(),
+            sent: Vec::new(),
         })
-        .add_message::<Replied>()
-        .add_message::<Pushed>()
+        .add_message::<ServerArrived>()
         .add_systems(PreUpdate, pump);
     }
 }
@@ -155,8 +180,7 @@ impl Plugin for LinkPlugin {
 /// Turns what the transport received into messages, in arrival order.
 fn pump(
     mut link: ResMut<ServerLink>,
-    mut replied: MessageWriter<Replied>,
-    mut pushed: MessageWriter<Pushed>,
+    mut arrived: MessageWriter<ServerArrived>,
 ) {
     while let Ok(event) = link.incoming.try_recv() {
         match event {
@@ -173,15 +197,28 @@ fn pump(
                 outcome,
                 sections,
             }) => {
-                link.waiting.retain(|(waiting, _)| *waiting != seq);
-                replied.write(Replied {
-                    seq,
-                    outcome,
-                    sections,
+                let Some(at) = link.waiting.iter().position(|(waiting, _)| *waiting == seq) else {
+                    error!("[link] a reply numbered {seq} answers no call; it is dropped");
+                    continue;
+                };
+                let (_, call) = link.waiting.remove(at);
+                arrived.write(ServerArrived {
+                    seq: Some(seq),
+                    event: Arrival::Reply {
+                        call,
+                        outcome,
+                        sections: sections.map(|sections| *sections).unwrap_or_default(),
+                    },
                 });
             }
             LinkEvent::Message(ServerMessage::Push { kind, sections }) => {
-                pushed.write(Pushed { kind, sections });
+                arrived.write(ServerArrived {
+                    seq: None,
+                    event: Arrival::Push {
+                        kind,
+                        sections: *sections,
+                    },
+                });
             }
             LinkEvent::Lost(reason) => {
                 if !matches!(link.state, LinkState::Refused { .. }) {
@@ -197,16 +234,36 @@ fn pump(
         LinkState::Lost { reason } => format!("the server is not reachable: {reason}"),
         LinkState::Connecting | LinkState::Open { .. } => return,
     };
-    for (seq, name) in std::mem::take(&mut link.waiting) {
-        warn!("[link] {name} refused: {reason}");
-        replied.write(Replied {
-            seq,
-            outcome: Err(Refusal::new("unreachable", reason.clone())),
-            sections: None,
+    for (seq, call) in std::mem::take(&mut link.waiting) {
+        warn!("[link] {} refused: {reason}", call_name(call));
+        arrived.write(ServerArrived {
+            seq: Some(seq),
+            event: Arrival::Reply {
+                call,
+                outcome: Err(Refusal::new("link_lost", reason.clone())),
+                sections: Sections::default(),
+            },
         });
     }
 }
 
-fn call_name(call: &Call) -> &'static str {
-    call.name()
+fn call_name(call: CallKind) -> &'static str {
+    match call {
+        CallKind::Join => "join",
+        CallKind::Harvest => "harvest",
+        CallKind::Gather => "gather",
+        CallKind::GateReserve => "gate reserve",
+        CallKind::GateChange => "gate change",
+        CallKind::BirthdayPartyDelivery => "birthday party delivery",
+        CallKind::BirthdayPartyGather => "birthday party gather",
+        CallKind::HomeAction => "home action",
+        CallKind::Craft => "craft",
+        CallKind::HousingSketch => "housing sketch",
+        CallKind::HousingLayout => "housing layout",
+        CallKind::CharacterTalkRead => "character talk read",
+        CallKind::MusicPlaySet => "music play set",
+        CallKind::MusicPlayEject => "music play eject",
+        CallKind::SystemFixtureAction => "system fixture action",
+        CallKind::Admin => "admin",
+    }
 }

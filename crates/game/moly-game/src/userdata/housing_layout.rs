@@ -10,9 +10,9 @@
 //! request's `mysekaiFixtureSurfaceAppearances` (no surface editing here) and
 //! `mysekaiPhenomenaId` are not sent.
 //!
-//! The request runs through [`HousingLayoutEndpoint`], a one-shot system the
-//! server model installs; [`post`] runs it and returns the `SuiteUser` reply.
-//! Without an endpoint the request is refused by name.
+//! The request is one `Call::HousingLayout` on the server link (see
+//! [`crate::fixture_edit`]); this module keeps the endpoint type the
+//! in-process model registers.
 
 use bevy::ecs::system::SystemId;
 use bevy::prelude::*;
@@ -23,28 +23,8 @@ pub(crate) use moly_protocol::api::{
     HousingLayoutCorner, HousingLayoutFixture, UserMysekaiHousingEditLayoutRequest,
 };
 
-/// The API's name in the source.
-pub(crate) const API: &str = "PostUserMysekaiHousingLayoutApi";
-
 /// The server model's endpoint for the request.
 #[derive(Resource, Clone, Copy, Debug)]
 pub(crate) struct HousingLayoutEndpoint(
     pub(crate) SystemId<In<UserMysekaiHousingEditLayoutRequest>, SuiteUserReply>,
 );
-
-/// Send the request and read its reply.
-pub(crate) fn post(
-    world: &mut World,
-    request: UserMysekaiHousingEditLayoutRequest,
-) -> SuiteUserReply {
-    let Some(endpoint) = world.get_resource::<HousingLayoutEndpoint>().copied() else {
-        warn!("[server] {API} refused: no server endpoint is installed");
-        return SuiteUserReply::refused(format!("{API}: no server endpoint is installed"));
-    };
-    world
-        .run_system_with(endpoint.0, request)
-        .unwrap_or_else(|error| {
-            warn!("[server] {API} refused: {error}");
-            SuiteUserReply::refused(format!("{API}: {error}"))
-        })
-}

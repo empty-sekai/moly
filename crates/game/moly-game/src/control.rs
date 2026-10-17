@@ -60,7 +60,7 @@ const METHODS: &[(&str, &str, &str)] = &[
     ),
     (
         "moly.events",
-        "The event stream: the events after the one numbered since (default 0), oldest first, at most limit (default 200, at most 1000), only of kinds when given. Each event has seq, frame, time, kind and its fields; kinds are item_obtained, craft_done, craft_refused, delivery_started, delivery_refused, delivery_done, character_arrived, character_left, weather_changed, site_entered, talk_started, talk_ended and tweet_shown. Answers {events, next, missed, latest}: pass next as since on the following read; missed counts the events dropped before they were read.",
+        "The event stream: the events after the one numbered since (default 0), oldest first, at most limit (default 200, at most 1000), only of kinds when given. Each event has seq, frame, time, kind and its fields; kinds are item_obtained, craft_done, craft_refused, delivery_started, delivery_refused, delivery_done, character_arrived, character_left, weather_changed, site_entered, talk_started, talk_ended, tweet_shown, server.call, server.reply, server.push and server.link. Answers {events, next, missed, latest}: pass next as since on the following read; missed counts the events dropped before they were read.",
         r#"{"type":"object","properties":{"since":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":1000},"kinds":{"type":"array","items":{"type":"string"}}},"additionalProperties":false}"#,
     ),
     (
@@ -88,16 +88,21 @@ const METHODS: &[(&str, &str, &str)] = &[
         "Whether a director condition holds now, and what was read.",
         r#"{"type":"object","properties":{"cond":{"description":"A condition of moly.director.schema"}},"required":["cond"]}"#,
     ),
-    ("moly.server.schema", "The editable fields and the actions of the server document.", NONE),
+    ("moly.server.schema", "The editable fields and the actions of the server document; the server is asked, and this answers its last answer (a pending placeholder until then).", NONE),
     (
         "moly.server.document",
-        "The server document with its clock, the client's copies, the pending sections and the named refusals.",
+        "The server document with its clock, the client's copies, the pending sections and the named refusals; the server is asked, and this answers its last answer with the game's own `client` part (a pending placeholder until then).",
         NONE,
     ),
     (
         "moly.server.edit",
-        "Makes one edit of the server document, checked as the server panel's edits are; answers its receipt.",
+        "Sends one edit of the server document and answers {pending: seq}; the outcome is read with moly.server.result and by moly.server.document.",
         r#"{"type":"object","properties":{"path":{"type":"string"},"value":{},"action":{"type":"string"}}}"#,
+    ),
+    (
+        "moly.server.result",
+        "The answer to the edit numbered seq: {seq, ok: true, receipt} or {seq, ok: false, code, reason}, or {seq, pending: true}.",
+        r#"{"type":"object","properties":{"seq":{"type":"integer","minimum":1}},"required":["seq"]}"#,
     ),
     (
         "moly.game.snapshot",
@@ -179,6 +184,7 @@ pub(crate) fn install(app: &mut App) {
         .with_method("moly.server.schema", server_schema)
         .with_method("moly.server.document", server_document)
         .with_method("moly.server.edit", server_edit)
+        .with_method("moly.server.result", server_result)
         .with_method("moly.game.snapshot", game_snapshot)
         .with_method("moly.library.command", library_command)
         .with_method("moly.library.snapshot", library_snapshot)
@@ -570,20 +576,62 @@ fn director_check(In(params): In<Option<Value>>, world: &mut World) -> BrpResult
     Ok(json!({ "holds": holds, "read": read }))
 }
 
-fn server_schema(In(_): In<Option<Value>>) -> BrpResult {
-    projection(crate::server::schema_view())
+fn server_schema(In(_): In<Option<Value>>, world: &mut World) -> BrpResult {
+    if crate::userdata::admin_call(world, moly_protocol::AdminCall::Schema).is_none() {
+        return Err(refuse("the server link is not installed"));
+    }
+    let Some(cache) = world.get_resource::<crate::userdata::ServerViewCache>() else {
+        return Err(refuse("the server view cache is not installed"));
+    };
+    projection(cache.schema_text())
 }
 
-fn server_document(In(_): In<Option<Value>>) -> BrpResult {
-    projection(crate::server::document_view())
+fn server_document(In(_): In<Option<Value>>, world: &mut World) -> BrpResult {
+    if crate::userdata::admin_call(world, moly_protocol::AdminCall::Document).is_none() {
+        return Err(refuse("the server link is not installed"));
+    }
+    let Some(cache) = world.get_resource::<crate::userdata::ServerViewCache>() else {
+        return Err(refuse("the server view cache is not installed"));
+    };
+    projection(cache.document_text())
 }
 
-fn server_edit(In(params): In<Option<Value>>) -> BrpResult {
+fn server_edit(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
     let mut edit = object(params, "moly.server.edit")?;
     edit.insert("type".into(), "server.edit".into());
-    crate::server::with_model(|model| model.edit(&edit))
-        .ok_or_else(|| refuse("the server model is not installed"))?
-        .map_err(refuse)
+    let Some(seq) = crate::userdata::admin_call(
+        world,
+        moly_protocol::AdminCall::Edit {
+            command_json: Value::Object(edit).to_string(),
+        },
+    ) else {
+        return Err(refuse("the server link is not installed"));
+    };
+    Ok(json!({ "pending": seq }))
+}
+
+fn server_result(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
+    let params = object(params, "moly.server.result")?;
+    let seq = params
+        .get("seq")
+        .and_then(Value::as_u64)
+        .and_then(|seq| u32::try_from(seq).ok())
+        .ok_or_else(|| refuse("moly.server.result: seq must be a whole number"))?;
+    let Some(cache) = world.get_resource::<crate::userdata::ServerViewCache>() else {
+        return Err(refuse("the server view cache is not installed"));
+    };
+    match &cache.last_edit {
+        Some((at, Ok(receipt))) if *at == seq => {
+            Ok(json!({ "seq": seq, "ok": true, "receipt": receipt }))
+        }
+        Some((at, Err(refusal))) if *at == seq => Ok(json!({
+            "seq": seq,
+            "ok": false,
+            "code": refusal.code,
+            "reason": refusal.reason,
+        })),
+        _ => Ok(json!({ "seq": seq, "pending": true })),
+    }
 }
 
 fn game_snapshot(In(_): In<Option<Value>>) -> BrpResult {

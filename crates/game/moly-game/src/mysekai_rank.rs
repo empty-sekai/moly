@@ -2,8 +2,9 @@
 //! dialog and the info screen build from it.
 //!
 //! The table is master data, read from the region's master mirror
-//! (`mysekaiRanks`). The user's total experience is server-side user state
-//! from the server document, one value both screens read ([`UserTotalExp`]).
+//! (`mysekaiRanks`). The user's total experience is server-side user state,
+//! delivered with the join and every later response, one value both screens
+//! read ([`UserTotalExp`]).
 //! A root whose table is absent or malformed does not stop the start: the
 //! table is named once, and a rank model asked of it is refused with that
 //! name ([`MysekaiRanks::try_model`]), as the source throws when its table is
@@ -27,28 +28,24 @@ const RANKS: MasterTable<Vec<MasterMysekaiRank>> = MasterTable {
 pub(crate) struct MysekaiRanks(Result<Vec<MasterMysekaiRank>, String>);
 
 /// `UserMysekaiGamedata.totalExp`, the server-side user state both rank
-/// models read: the saved player data's value when it carries one, else the
-/// server document's (its responses keep it current; the native overlay of
-/// `MOLY_MENU_MOCK_TOTAL_EXP` lands in that document), else the document's
-/// default before the document is installed.
+/// models read: the saved player data's value when it carries one, else 0
+/// until the join's answer arrives. Its responses keep it current.
 #[derive(Resource)]
 pub(crate) struct UserTotalExp(pub(crate) i32);
 
 impl UserTotalExp {
-    fn panel() -> i32 {
-        crate::server::with_model(|model| model.document().gamedata.total_exp)
-            .unwrap_or(crate::server::document::DEFAULT_TOTAL_EXP)
-    }
-
-    /// Imported player data's total experience, or the server document's.
+    /// Imported player data's total experience; without one the current
+    /// value stays (the join's answer fills it).
     pub(crate) fn set(&mut self, imported: Option<i32>) {
-        self.0 = imported.unwrap_or_else(Self::panel);
+        if let Some(imported) = imported {
+            self.0 = imported;
+        }
     }
 
-    /// The value the world was seated with: the saved player data's total
-    /// experience, else the server document's.
+    /// The value the world is seated with: the saved player data's total
+    /// experience, else 0 until the join.
     fn seated(saved: Option<&crate::player_data::SavedTotalExp>) -> Self {
-        UserTotalExp(saved.and_then(|saved| saved.0).unwrap_or_else(Self::panel))
+        UserTotalExp(saved.and_then(|saved| saved.0).unwrap_or(0))
     }
 }
 

@@ -15,6 +15,8 @@ moly-law = { path = "../../base/moly-law" }
 bevy = { version = "0.18.1", default-features = false, features = ["std", "bevy_asset", "bevy_log", "async_executor", "multi_threaded"] }
 serde_json = { workspace = true }
 async-channel = "2.5"
+# The control port's JSON-RPC methods; the host adds the HTTP transport.
+bevy_remote = { version = "0.18.1", default-features = false }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # The server clock reads the device's local time (localtime_s / localtime_r).

@@ -3,14 +3,14 @@
 use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
-use moly_link::{LinkConfig, LinkPlugin, LinkState, Replied, ServerLink};
-use moly_protocol::{Call, Reply, UserId};
+use moly_link::{Arrival, LinkConfig, LinkPlugin, LinkState, ServerArrived, ServerLink};
+use moly_protocol::{Call, CallKind, Reply, UserId};
 
 #[derive(Resource, Default)]
-struct Answers(Vec<Replied>);
+struct Answers(Vec<ServerArrived>);
 
-fn collect(mut replied: MessageReader<Replied>, mut answers: ResMut<Answers>) {
-    answers.0.extend(replied.read().cloned());
+fn collect(mut arrived: MessageReader<ServerArrived>, mut answers: ResMut<Answers>) {
+    answers.0.extend(arrived.read().cloned());
 }
 
 fn game(address: String) -> App {
@@ -65,8 +65,14 @@ fn a_join_is_answered_by_the_server() {
     });
     let answers = &game.world().resource::<Answers>().0;
     assert_eq!(answers.len(), 1);
-    assert_eq!(answers[0].seq, seq);
-    assert_eq!(answers[0].outcome, Ok(Reply::Joined));
+    assert_eq!(answers[0].seq, Some(seq));
+    match &answers[0].event {
+        Arrival::Reply { call, outcome, .. } => {
+            assert_eq!(*call, CallKind::Join);
+            assert_eq!(outcome, &Ok(Reply::Joined));
+        }
+        other => panic!("not a reply: {other:?}"),
+    }
     assert_eq!(game.world().resource::<ServerLink>().waiting().count(), 0);
 }
 
@@ -88,10 +94,15 @@ fn without_a_server_the_link_is_lost_and_calls_are_refused_by_name() {
         LinkState::Lost { .. }
     ));
     let answer = &game.world().resource::<Answers>().0[0];
-    assert_eq!(answer.seq, seq);
-    let refusal = answer.outcome.as_ref().unwrap_err();
-    assert_eq!(refusal.code, "unreachable");
-    assert!(refusal.reason.contains("not reachable"), "{refusal}");
+    assert_eq!(answer.seq, Some(seq));
+    match &answer.event {
+        Arrival::Reply { outcome, .. } => {
+            let refusal = outcome.as_ref().unwrap_err();
+            assert_eq!(refusal.code, "link_lost");
+            assert!(refusal.reason.contains("not reachable"), "{refusal}");
+        }
+        other => panic!("not a reply: {other:?}"),
+    }
 }
 
 #[test]

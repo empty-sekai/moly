@@ -280,15 +280,15 @@ impl ServerModel {
         grant_tool(rows, tool_id, quantity, max, now)
     }
 
-    /// The harvest reply's tools: the tool use policy, answered as a response
-    /// that carries the section.
-    fn harvest_tool_use(
+    /// The harvest reply's tools: the tool use policy. Whether the document
+    /// has tool rows for the reply to carry.
+    pub(super) fn harvest_tool_use(
         &mut self,
         tool_id: i32,
         use_count: i32,
         sent_durability: i32,
         masters: &Masters,
-    ) -> Vec<UserMysekaiTool> {
+    ) -> bool {
         let outcome = match (
             max_durability(masters, tool_id),
             self.doc.tools.as_mut(),
@@ -317,14 +317,13 @@ impl ServerModel {
                     );
                 }
                 self.commit();
-                self.respond(ResponseKind::Harvest, false, &[SECTION], masters);
             }
             Err(reason) => warn!(
                 "[server] {}: the tool use is not applied: {reason}",
                 ResponseKind::Harvest.name()
             ),
         }
-        self.doc.tools.clone().unwrap_or_default()
+        self.doc.tools.is_some()
     }
 }
 

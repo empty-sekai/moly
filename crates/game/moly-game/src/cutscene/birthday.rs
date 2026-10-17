@@ -88,8 +88,12 @@ use super::{Cast, CastCaller, CastPlay};
 use crate::common_dialog::Buttons;
 use crate::fixture_activity_state::FixtureActivityIdentity;
 use crate::ui_layers::DialogId;
-use crate::server::client::system_fixture_action::{self as action, ClientSystemFixtureActions};
+use crate::server::client::system_fixture_action::ClientSystemFixtureActions;
 use crate::server::client::talk_read::UserResource;
+use crate::userdata::{Answered, ServerPending};
+use moly_link::ServerLink;
+use moly_protocol::api::SystemFixtureActionRequest;
+use moly_protocol::{Call, Refusal, Reply};
 
 /// `MysekaiCutSceneConditionType` of the birthday rows.
 const CONDITION: &str = "birthday_party";
@@ -222,18 +226,28 @@ struct BirthdayPresenter {
     rewards: Option<Vec<UserResource>>,
 }
 
-/// `ExecuteAsync` awaiting `ShowConfirmDialog`.
+/// `ExecuteAsync` awaiting `ShowConfirmDialog` or its action's answer.
 #[derive(Resource)]
-struct BirthdayConfirm {
+pub(crate) struct BirthdayConfirm {
     dialog: DialogId,
     party: Party,
     system_fixture: i32,
     actioned: bool,
     fixture: Entity,
+    /// The action's request, once the confirm's OK sent it.
+    awaiting: Option<ServerPending>,
     /// The API reply's `obtainedResources`, kept for the party's reward
     /// dialog; `None` when the fixture was already actioned (the source
     /// nulls the field then, and the dialog is skipped).
     rewards: Option<Vec<UserResource>>,
+}
+
+impl BirthdayConfirm {
+    /// The server call this confirm waits for, for the director.
+    #[allow(dead_code)] // Read by the director's wait.
+    pub(crate) fn server_pending(&self) -> Option<&ServerPending> {
+        self.awaiting.as_ref()
+    }
 }
 
 #[derive(Resource)]
@@ -813,12 +827,13 @@ fn execute(world: &mut World, party: Party, row: SystemFixture, fixture: Entity,
         system_fixture,
         actioned,
         fixture,
+        awaiting: None,
         rewards: None,
     });
 }
 
 /// `ShowConfirmDialog`'s answer: its cancel ends `ExecuteAsync`; its OK
-/// goes on.
+/// sends the action (or, when the fixture was already actioned, goes on).
 fn confirm_answer(world: &mut World) {
     let Some(dialog) = world.get_resource::<BirthdayConfirm>().map(|confirm| confirm.dialog) else {
         return;
@@ -826,43 +841,112 @@ fn confirm_answer(world: &mut World) {
     let Some(ok) = crate::common_dialog::answer(world, dialog) else {
         return;
     };
-    let confirm = world.remove_resource::<BirthdayConfirm>().expect("pending confirm");
     if !ok {
+        world.remove_resource::<BirthdayConfirm>();
         info!("[birthday] ShowConfirmDialog = false (cancel): ExecuteAsync ends, nothing plays");
         return;
     }
-    let rows = match tables(world) {
-        Ok(Some(tables)) => tables,
-        Ok(None) => unreachable!("the confirm shows only once the tables are taken"),
-        Err(reason) => {
-            error!("[birthday] ShowConfirmDialog = true: {reason}; nothing plays");
-            return;
-        }
+    let Some(confirm) = world.get_resource::<BirthdayConfirm>() else {
+        return;
     };
-    confirmed(world, confirm, &rows.cut_scenes);
+    if confirm.awaiting.is_some() {
+        return;
+    }
+    if confirm.actioned {
+        info!("[birthday] ShowConfirmDialog = true; the fixture is actioned: no ExecuteAPI, no rewards (the party ends without a reward dialog)");
+        let confirm = world.remove_resource::<BirthdayConfirm>().expect("pending confirm");
+        begin_party(world, confirm);
+        return;
+    }
+    let system_fixture = confirm.system_fixture;
+    let call = Call::SystemFixtureAction(SystemFixtureActionRequest {
+        mysekai_system_fixture_id: system_fixture,
+    });
+    let kind = call.kind();
+    let seq = world.resource_mut::<ServerLink>().call(call);
+    if let Some(mut confirm) = world.get_resource_mut::<BirthdayConfirm>() {
+        confirm.awaiting = Some(ServerPending {
+            seq: Some(seq),
+            call: kind,
+        });
+    }
+    info!("[birthday] ShowConfirmDialog = true; MysekaiSystemFixtureActionService.ExecuteAPI({system_fixture}) sent as seq {seq}; the party continues on its reply");
 }
 
-/// `ExecuteAsync` from the confirm's OK up to `PlayCutSceneAsync`.
-fn confirmed(world: &mut World, confirm: BirthdayConfirm, cut_scenes: &[(i64, i64, String)]) {
+/// Reads the answer to the confirm's action.
+fn read_action_answer(
+    mut answers: MessageReader<Answered>,
+    confirm: Option<Res<BirthdayConfirm>>,
+    mut commands: Commands,
+) {
+    for answer in answers.read() {
+        let Some(pending) = confirm
+            .as_deref()
+            .and_then(|confirm| confirm.awaiting.as_ref())
+        else {
+            continue;
+        };
+        if pending.seq != Some(answer.seq) {
+            continue;
+        }
+        let seq = answer.seq;
+        let outcome = answer.outcome.clone();
+        commands.queue(move |world: &mut World| finish_action(world, seq, outcome));
+    }
+}
+
+/// The action's answer: a success keeps the reward rows and goes on; a
+/// refusal is the source's null reply and stops the cut-scene.
+fn finish_action(world: &mut World, seq: u32, outcome: Result<Reply, Refusal>) {
+    let Some(confirm) = world.get_resource::<BirthdayConfirm>() else {
+        return;
+    };
+    if confirm.awaiting.as_ref().and_then(|pending| pending.seq) != Some(seq) {
+        return;
+    }
+    let system_fixture = confirm.system_fixture;
+    match outcome {
+        Ok(Reply::SystemFixtureAction(reply)) if reply.success => {
+            let mut confirm = world.remove_resource::<BirthdayConfirm>().expect("pending confirm");
+            confirm.awaiting = None;
+            confirm.rewards = Some(reply.obtained_resources);
+            info!("[birthday] ShowConfirmDialog = true; MysekaiSystemFixtureActionService.ExecuteAPI({system_fixture}): success; updatedResources merged (IsActionedSystemFixture now {}); obtainedResources {} rows kept for the party's reward dialog", world.get_resource::<ClientSystemFixtureActions>().is_some_and(|copy| copy.is_actioned(system_fixture)), confirm.rewards.as_ref().map_or(0, Vec::len));
+            begin_party(world, confirm);
+        }
+        Ok(Reply::SystemFixtureAction(reply)) => {
+            error!("[birthday] MysekaiSystemFixtureActionService.ExecuteAPI({system_fixture}): the reply is null ({}): the API error (UI, not drawn); ExecuteAsync stops, nothing plays", reply.refusal.unwrap_or_default());
+            world.remove_resource::<BirthdayConfirm>();
+        }
+        Ok(other) => {
+            error!("[birthday] MysekaiSystemFixtureActionService.ExecuteAPI({system_fixture}): answered an unexpected {other:?}; ExecuteAsync stops, nothing plays");
+            world.remove_resource::<BirthdayConfirm>();
+        }
+        Err(refusal) => {
+            error!("[birthday] MysekaiSystemFixtureActionService.ExecuteAPI({system_fixture}): the reply is null ({}): the API error (UI, not drawn); ExecuteAsync stops, nothing plays", refusal.reason);
+            world.remove_resource::<BirthdayConfirm>();
+        }
+    }
+}
+
+/// `ExecuteAsync` after the confirm, up to `PlayCutSceneAsync`.
+fn begin_party(world: &mut World, confirm: BirthdayConfirm) {
     let BirthdayConfirm {
-        mut rewards,
+        rewards,
         party,
-        system_fixture,
-        actioned,
         fixture,
         ..
     } = confirm;
-    if actioned {
-        info!("[birthday] ShowConfirmDialog = true; the fixture is actioned: no ExecuteAPI, no rewards (the party ends without a reward dialog)");
-    } else {
-        let reply = action::post(world, system_fixture);
-        if !reply.success {
-            error!("[birthday] MysekaiSystemFixtureActionService.ExecuteAPI({system_fixture}): the reply is null ({}): the API error (UI, not drawn); ExecuteAsync stops, nothing plays", reply.refusal.unwrap_or_default());
+    let rows = match tables(world) {
+        Ok(Some(tables)) => tables,
+        Ok(None) => {
+            error!("[birthday] ExecuteAsync: the birthday tables are not taken; nothing plays");
             return;
         }
-        rewards = Some(reply.obtained_resources);
-        info!("[birthday] ShowConfirmDialog = true; MysekaiSystemFixtureActionService.ExecuteAPI({system_fixture}): success; updatedResources merged (IsActionedSystemFixture now {}); obtainedResources {} rows kept for the party's reward dialog", world.get_resource::<ClientSystemFixtureActions>().is_some_and(|copy| copy.is_actioned(system_fixture)), rewards.as_ref().map_or(0, Vec::len));
-    }
+        Err(reason) => {
+            error!("[birthday] ExecuteAsync: {reason}; nothing plays");
+            return;
+        }
+    };
     world.insert_resource(BirthdayContext { party: party.id });
     info!("[birthday] MultiplayCore.IsConnected (the server model's own room); GameStateManager.AddContext(Birthday) (MysekaiBirthdayPartyContext.OnEnter: InProgress; ActionButtonRefresh with its disabled types); no other players to hide");
     if let Some(mut screens) = world.get_resource_mut::<crate::ui_layers::ScreenManager>() {
@@ -872,7 +956,8 @@ fn confirmed(world: &mut World, confirm: BirthdayConfirm, cut_scenes: &[(i64, i6
         );
     }
     // PlayCutSceneAsync.
-    let Some((cut_scene_id, _, timeline)) = cut_scenes
+    let Some((cut_scene_id, _, timeline)) = rows
+        .cut_scenes
         .iter()
         .find(|(_, external, _)| *external == party.id)
         .cloned()
@@ -1048,5 +1133,6 @@ pub(super) fn install(app: &mut App) {
     app.init_resource::<BirthdayCharset>()
         .add_message::<BirthdayCutSceneClick>()
         .add_systems(Startup, load)
-        .add_systems(Update, advance.before(super::advance));
+        .add_systems(Update, advance.before(super::advance))
+        .add_systems(Update, read_action_answer.after(advance));
 }

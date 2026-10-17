@@ -19,6 +19,7 @@ use crate::hub::{CallReceived, Sessions};
 use crate::masters::Masters;
 use crate::model::{ResponseKind, ServerModel};
 use crate::users::Users;
+use crate::ListenAddress;
 
 /// One call's answer.
 #[derive(Clone)]
@@ -37,6 +38,25 @@ impl Answered {
     }
 }
 
+/// Why an administration call cannot run here: the player socket is not a
+/// loopback address, or the server did not report one.
+pub(crate) fn admin_gate(listen: Option<&ListenAddress>) -> Result<(), Refusal> {
+    match listen {
+        Some(listen) if listen.0.ip().is_loopback() => Ok(()),
+        Some(listen) => Err(Refusal::new(
+            "admin_not_allowed",
+            format!(
+                "administration is only accepted on a loopback address; this server listens on {}",
+                listen.0
+            ),
+        )),
+        None => Err(Refusal::new(
+            "admin_not_allowed",
+            "administration needs the server's listen address, which was not reported",
+        )),
+    }
+}
+
 /// The dispatch system.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn answer_calls(
@@ -45,10 +65,25 @@ pub(crate) fn answer_calls(
     masters: Res<Masters>,
     sessions: Res<Sessions>,
     defaults: Option<Res<Defaults>>,
+    listen: Option<Res<ListenAddress>>,
 ) {
     for call in calls.read() {
         let session = call.session;
         let user = call.user.clone();
+        // The administration calls run only on the loopback player socket.
+        if matches!(&call.call, Call::Admin(_)) {
+            if let Err(refusal) = admin_gate(listen.as_deref()) {
+                sessions.send(
+                    session,
+                    &ServerMessage::Reply {
+                        seq: call.seq,
+                        outcome: Err(refusal),
+                        sections: None,
+                    },
+                );
+                continue;
+            }
+        }
         let Some(entry) = users.0.get_mut(&user) else {
             sessions.send(
                 session,
@@ -150,10 +185,7 @@ fn run(call: Call, model: &mut ServerModel, masters: &Masters) -> Result<Reply, 
             model.join(masters);
             Ok(Reply::Joined)
         }
-        Call::Harvest(request) => Ok(Reply::Harvest(model.harvest(
-            [request.normal, request.enhance, request.boost],
-            masters,
-        ))),
+        Call::Harvest(request) => Ok(Reply::Harvest(model.harvest(&request, masters))),
         Call::Gather => Ok(Reply::Gather(model.gather(masters))),
         Call::GateReserve(request) => {
             let mut command = Map::new();
@@ -303,12 +335,15 @@ mod tests {
     use moly_protocol::api::{
         BirthdayPartyDeliveryRequest, BirthdayPartyGatherRequest, CharacterTalkReadRequest,
         GateChangeRequest, GateReserveRequest, HarvestRequest, HomeActionPost, MusicPlayEjectRequest,
-        MusicPlayReply, MusicPlaySetRequest, SystemFixtureActionRequest, UserMysekaiCraftRequest,
+        MusicPlayReply, MusicPlaySetRequest, MysekaiSiteHarvestFixtureTarget, MysekaiStaminaUsed,
+        MysekaiToolUsed, SystemFixtureActionRequest, UserMysekaiCraftRequest,
         UserMysekaiHousingEditLayoutRequest, UserMysekaiHousingSketchRequest,
     };
     use moly_protocol::gate::GateReply;
-    use moly_protocol::rows::{MusicPlaySetting, OwnedMusicRecord, Stamina, UserMysekaiFixture};
-    use moly_protocol::AdminCall;
+    use moly_protocol::rows::{
+        MusicPlaySetting, OwnedMusicRecord, Stamina, UserMysekaiFixture, UserMysekaiTool,
+    };
+    use moly_protocol::{AdminCall, UserId};
 
     /// The shared synthetic tables, plus the gate ids the gate requests are
     /// checked against.
@@ -372,6 +407,41 @@ mod tests {
         assert_eq!(model.doc.gamedata.refreshed_at, 1_790_300_000_000);
     }
 
+    /// One merged harvest run on site 5, target (3, -4), fixture 9.
+    fn harvest_request(rests: [i32; 3], tool: Option<(i32, i32, i32)>) -> HarvestRequest {
+        HarvestRequest {
+            mysekai_site_id: 5,
+            mysekai_site_harvest_fixture_target: MysekaiSiteHarvestFixtureTarget {
+                position_x: 3,
+                position_z: -4,
+                mysekai_site_harvest_fixture_id: 9,
+                hp: 0,
+                is_last_attack: true,
+            },
+            mysekai_tool_used: tool.map(|(mysekai_tool_id, use_count, durability)| {
+                MysekaiToolUsed {
+                    mysekai_tool_id,
+                    use_count,
+                    durability,
+                }
+            }),
+            mysekai_stamina_useds: vec![
+                MysekaiStaminaUsed {
+                    mysekai_stamina_type: "normal".to_owned(),
+                    rest: rests[0],
+                },
+                MysekaiStaminaUsed {
+                    mysekai_stamina_type: "enhance".to_owned(),
+                    rest: rests[1],
+                },
+                MysekaiStaminaUsed {
+                    mysekai_stamina_type: "boost".to_owned(),
+                    rest: rests[2],
+                },
+            ],
+        }
+    }
+
     #[test]
     fn the_harvest_reply_is_the_sent_rests_unless_an_edit_is_pending() {
         let masters = fixture_masters();
@@ -382,11 +452,7 @@ mod tests {
             boost: 1,
         };
         let answered = answer_call(
-            Call::Harvest(HarvestRequest {
-                normal: sent.normal,
-                enhance: sent.enhance,
-                boost: sent.boost,
-            }),
+            Call::Harvest(harvest_request([7, 2, 1], None)),
             &mut model,
             &masters,
         );
@@ -406,15 +472,65 @@ mod tests {
         model.doc.stamina = Some(edited);
         model.mark_pending(SECTION_STAMINA);
         let answered = answer_call(
-            Call::Harvest(HarvestRequest {
-                normal: 9,
-                enhance: 9,
-                boost: 9,
-            }),
+            Call::Harvest(harvest_request([9, 9, 9], None)),
             &mut model,
             &masters,
         );
         assert_eq!(ok(answered), Reply::Harvest(edited));
+    }
+
+    #[test]
+    fn the_harvest_tool_use_is_one_response_with_stamina_and_tools() {
+        let mut masters = fixture_masters();
+        masters.tools = Some(vec![
+            crate::model::tools::ToolMaster {
+                id: 7,
+                tool_type: "pickaxe".to_owned(),
+                level: 1,
+                max_durability: 10,
+            },
+            crate::model::tools::ToolMaster {
+                id: 8,
+                tool_type: "axe".to_owned(),
+                level: 1,
+                max_durability: 10,
+            },
+        ]);
+        let mut model = joined_model(&masters);
+        let sent = Stamina {
+            normal: 7,
+            enhance: 2,
+            boost: 1,
+        };
+        let answered = answer_call(
+            Call::Harvest(harvest_request([7, 2, 1], Some((7, 3, 7)))),
+            &mut model,
+            &masters,
+        );
+        assert_eq!(ok(answered.clone()), Reply::Harvest(sent));
+        let sections = answered.sections.expect("the harvest response is carried");
+        assert_eq!(sections.stamina, Some(sent));
+        assert_eq!(
+            sections.tools,
+            Some(vec![
+                UserMysekaiTool {
+                    mysekai_tool_id: 7,
+                    quantity: 1,
+                    durability: 7,
+                    last_obtained_at: model.doc.tools.as_ref().expect("seated")[0]
+                        .last_obtained_at,
+                },
+                UserMysekaiTool {
+                    mysekai_tool_id: 8,
+                    quantity: 1,
+                    durability: 10,
+                    last_obtained_at: model.doc.tools.as_ref().expect("seated")[1]
+                        .last_obtained_at,
+                },
+            ])
+        );
+        assert!(model.responses.is_empty(), "one response per harvest call");
+        assert_eq!(model.doc.tools.as_ref().expect("seated")[0].durability, 7);
     }
 
     #[test]
@@ -441,10 +557,15 @@ mod tests {
             &masters,
         );
         match ok(answered) {
-            Reply::Gate(GateReply::Reserve { row, .. }) => {
+            Reply::Gate(GateReply::Reserve { row, rows, .. }) => {
                 assert_eq!(row.unit_group_id, 4);
                 assert!(row.is_reservation);
                 assert_eq!(row.visit_count, 1);
+                // The reply lists every gate character the server holds.
+                assert_eq!(rows, model.doc.gate_characters);
+                assert!(rows
+                    .iter()
+                    .any(|known| known.unit_group_id == 4 && known.is_reservation));
             }
             other => panic!("not the reserve's reply: {other:?}"),
         }
@@ -830,5 +951,103 @@ mod tests {
             other => panic!("not the edit's receipt: {other:?}"),
         }
         assert_eq!(model.doc.gamedata.total_exp, 100);
+    }
+
+    #[test]
+    fn a_live_edit_queues_a_sync_push_with_the_served_schedule() {
+        let masters = fixture_masters();
+        let mut model = joined_model(&masters);
+        model.responses.clear();
+        // The default document serves a daily schedule; the phenomenon of
+        // the first refresh window is served live.
+        let mut command = Map::new();
+        command.insert("type".into(), json!("server.edit"));
+        command.insert(
+            "path".into(),
+            json!("phenomenaSchedulePolicy.byRefreshTimePeriod.1"),
+        );
+        command.insert("value".into(), json!(2));
+        model
+            .edit(&command, &masters)
+            .expect("the schedule policy edit applies");
+        let push = model
+            .responses
+            .iter()
+            .find(|response| response.kind == ResponseKind::Sync)
+            .expect("the live edit queued a sync response");
+        let rows = push
+            .sections
+            .schedules
+            .as_ref()
+            .expect("the sync carries the served schedule");
+        assert_eq!(rows.len(), 6);
+        assert!(rows
+            .iter()
+            .any(|row| row.refresh_time_period_id == 1 && row.phenomena_id == 2));
+    }
+
+    /// One administration call over a session, with the given listen address,
+    /// answered by the dispatch system.
+    fn admin_over(listen: Option<std::net::SocketAddr>) -> Result<Reply, Refusal> {
+        use crate::hub::{CallReceived, HubEvent, SessionId};
+        use crate::users::UserEntry;
+        use crate::ListenAddress;
+
+        let session = SessionId(7);
+        let (out, replies) = async_channel::unbounded::<Vec<u8>>();
+        let masters = fixture_masters();
+        let model = joined_model(&masters);
+        let mut users = Users::default();
+        users.0.insert(
+            UserId::local(),
+            UserEntry {
+                model: Some(model),
+                load_error: None,
+            },
+        );
+        let mut app = App::new();
+        app.insert_resource(users)
+            .insert_resource(masters)
+            .add_plugins(MinimalPlugins)
+            .add_plugins(crate::ServerPlugin);
+        if let Some(listen) = listen {
+            app.insert_resource(ListenAddress(listen));
+        }
+        let hub = crate::hub(&app);
+        hub.send(HubEvent::Open { session, out }).unwrap();
+        app.update();
+        app.world_mut().write_message(CallReceived {
+            session,
+            user: UserId::local(),
+            seq: 5,
+            call: Call::Admin(AdminCall::Schema),
+        });
+        app.update();
+        let frame = replies.try_recv().expect("the server answered");
+        let ServerMessage::Reply { outcome, .. } =
+            moly_protocol::decode(&frame).expect("a protocol frame")
+        else {
+            panic!("not a reply");
+        };
+        outcome
+    }
+
+    #[test]
+    fn the_admin_calls_are_refused_on_a_non_loopback_address() {
+        match admin_over(Some("192.0.2.1:15800".parse().unwrap())) {
+            Err(refusal) => {
+                assert_eq!(refusal.code, "admin_not_allowed");
+                assert!(refusal.reason.contains("192.0.2.1:15800"), "{}", refusal.reason);
+            }
+            other => panic!("not a refusal: {other:?}"),
+        }
+        assert!(
+            admin_over(None).is_err(),
+            "a server that does not report its address accepts none"
+        );
+        match admin_over(Some("127.0.0.1:15800".parse().unwrap())) {
+            Ok(Reply::Admin(text)) => assert!(text.contains("\"sections\"")),
+            other => panic!("not the loopback's answer: {other:?}"),
+        }
     }
 }

@@ -1,9 +1,9 @@
 //! Browser game transport. The page starts one game from a seed, enqueues
 //! validated intents and polls a versioned projection; it never borrows the
-//! world. The settings document and the server model's `server` and `local`
-//! documents live in the page backend of `settings_store`, and the page
-//! persists the revisions it takes. `server.edit` is applied to the server
-//! model when `game_command` returns, and refused there by name.
+//! world. The settings document and the local document live in the page
+//! backend of `settings_store`, and the page persists the revisions it takes.
+//! `server.edit` is queued for the next frame, which sends it to the server;
+//! a refusal comes back through the snapshot's server errors.
 //!
 //! Input capture and persist acknowledgements take effect when
 //! `game_command` returns: a hidden page renders no frames, so nothing the
@@ -33,6 +33,8 @@ const MAX_ERRORS: usize = 32;
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static COMMANDS: Mutex<Vec<GameCommand>> = Mutex::new(Vec::new());
 static PUBLISHED: Mutex<Option<Published>> = Mutex::new(None);
+/// The server's control views as the last frame published them.
+static SERVER_VIEW: Mutex<Option<ServerViewText>> = Mutex::new(None);
 // Set synchronously by the page, before the next input schedule.
 static INPUT_CAPTURED: AtomicBool = AtomicBool::new(false);
 
@@ -251,7 +253,14 @@ pub fn install_game_storage(seed: &mut GameSeed) {
         seed.server.clone(),
         seed.local.clone(),
     );
-    crate::server::install_from_seed(seed.server.take(), seed.local.take());
+    // The page's seed document is the server document the page's server takes;
+    // a native start leaves the server's own store authoritative.
+    let server = seed.server.take();
+    let server = match seed.host {
+        GameHost::Page => server,
+        GameHost::Native => None,
+    };
+    crate::userdata::install_seed(server, seed.local.take());
     crate::settings_store::set_browser_storage_writable(seed.writable);
     ACTIVE.store(true, Ordering::Relaxed);
 }
@@ -356,11 +365,9 @@ pub fn game_command(input: &str) -> Result<(), String> {
             crate::settings_store::with_page(|page| page.ack(revision))
                 .ok_or("the settings page backend is not installed")?
         }
-        // Validated and applied to the server model now; the world reads
-        // the model's live changes and responses on its next frame.
-        GameCommand::ServerEdit(command) => crate::server::with_model(|model| model.edit(&command))
-            .ok_or("the server model is not installed")?
-            .map(|_| ()),
+        // Validated now and queued for the next frame, which sends it to the
+        // server; the answer arrives through the server view cache.
+        GameCommand::ServerEdit(command) => return enqueue(GameCommand::ServerEdit(command)),
         command => enqueue(command),
     }
 }
@@ -400,13 +407,30 @@ pub fn game_take_persist(after_revision: u32) -> String {
 
 /// The editable fields of the server document, for the page's panel.
 pub fn game_server_schema() -> String {
-    crate::server::schema_view()
+    SERVER_VIEW
+        .lock()
+        .ok()
+        .and_then(|view| view.as_ref().and_then(|view| view.schema.clone()))
+        .unwrap_or_else(|| json!({"schemaVersion": 2, "pending": true}).to_string())
 }
 
 /// The server document, its clock, the client's copies and the pending
-/// sections.
+/// sections. Its `client` part is the game's own.
 pub fn game_server_document() -> String {
-    crate::server::document_view()
+    SERVER_VIEW
+        .lock()
+        .ok()
+        .and_then(|view| view.as_ref().and_then(|view| view.document.clone()))
+        .unwrap_or_else(|| {
+            json!({
+                "schemaVersion": 2,
+                "document": null,
+                "joined": false,
+                "pending": true,
+                "errors": [],
+            })
+            .to_string()
+        })
 }
 
 /// The world's part of the projection, written by [`publish`].
@@ -429,6 +453,17 @@ impl Default for Published {
             errors: Vec::new(),
         }
     }
+}
+
+/// The server's control views as the last frame published them. `revision`
+/// and `last_edit` are null until the server has answered a document read.
+#[derive(Clone, Default)]
+struct ServerViewText {
+    schema: Option<String>,
+    document: Option<String>,
+    revision: Option<u64>,
+    errors: Vec<String>,
+    last_edit: Option<Value>,
 }
 
 /// Null until a game has started (and on native, which has no linear
@@ -458,12 +493,15 @@ pub fn game_snapshot() -> String {
             "persist: {refused} document writes refused because this tab is read-only"
         ));
     }
-    let server_revision = crate::server::with_model(|model| {
-        for error in model.errors() {
-            world.errors.push(format!("server: {error}"));
-        }
-        model.revision()
-    });
+    let (server_revision, server_errors, last_edit) = SERVER_VIEW
+        .lock()
+        .ok()
+        .and_then(|view| view.clone())
+        .map(|view| (view.revision, view.errors, view.last_edit))
+        .unwrap_or_default();
+    for error in server_errors {
+        world.errors.push(format!("server: {error}"));
+    }
     json!({
         "schemaVersion": SCHEMA,
         "abi": ABI,
@@ -475,7 +513,7 @@ pub fn game_snapshot() -> String {
         },
         "writable": crate::settings_store::browser_storage_writable(),
         "persist": {"revision": revision, "acked": acked},
-        "server": {"revision": server_revision},
+        "server": {"revision": server_revision, "lastEdit": last_edit},
         "memory": {"wasmBytes": wasm_bytes()},
         "errors": world.errors,
     })
@@ -484,10 +522,10 @@ pub fn game_snapshot() -> String {
 
 /// Named refusals seen by the world, oldest first, without repeats.
 #[derive(Resource, Default)]
-struct GameErrors(Vec<String>);
+pub(crate) struct GameErrors(Vec<String>);
 
 impl GameErrors {
-    fn push(&mut self, error: String) {
+    pub(crate) fn push(&mut self, error: String) {
         if self.0.len() < MAX_ERRORS && !self.0.contains(&error) {
             error!("[game] {error}");
             self.0.push(error);
@@ -568,7 +606,7 @@ fn gate_input(
     }
 }
 
-fn drain_commands(mut library: ResMut<crate::content_library::ContentLibrary>) {
+fn drain_commands(world: &mut World) {
     let commands = COMMANDS
         .lock()
         .map(|mut queue| std::mem::take(&mut *queue))
@@ -576,8 +614,25 @@ fn drain_commands(mut library: ResMut<crate::content_library::ContentLibrary>) {
     for command in commands {
         match command {
             GameCommand::Lifecycle(value) => info!("[game] page lifecycle {}", value.name()),
-            GameCommand::Input(captured) => library.set_host_input_capture(captured),
-            GameCommand::PersistAck(_) | GameCommand::ServerEdit(_) => {}
+            GameCommand::Input(captured) => {
+                if let Some(mut library) =
+                    world.get_resource_mut::<crate::content_library::ContentLibrary>()
+                {
+                    library.set_host_input_capture(captured);
+                }
+            }
+            GameCommand::ServerEdit(command) => {
+                let command_json = Value::Object(command).to_string();
+                if crate::userdata::admin_call(
+                    world,
+                    moly_protocol::AdminCall::Edit { command_json },
+                )
+                .is_none()
+                {
+                    error!("[game] server.edit: the game has no server link; the edit is dropped");
+                }
+            }
+            GameCommand::PersistAck(_) => {}
         }
     }
 }
@@ -606,7 +661,11 @@ fn check_source_region(
 
 /// The cover and the await as the entry itself holds them; "starting" until
 /// the entry exists.
-fn publish(entry: Option<Res<crate::entry::EntrySequence>>, errors: Res<GameErrors>) {
+fn publish(
+    entry: Option<Res<crate::entry::EntrySequence>>,
+    errors: Res<GameErrors>,
+    view: Option<Res<crate::userdata::ServerViewCache>>,
+) {
     let seq = entry.as_deref();
     let cover = seq.map_or("opaque", crate::entry::EntrySequence::cover_state);
     let step = seq.map_or("starting", crate::entry::EntrySequence::phase_name);
@@ -622,6 +681,27 @@ fn publish(entry: Option<Res<crate::entry::EntrySequence>>, errors: Res<GameErro
     if let Ok(mut slot) = PUBLISHED.lock() {
         if slot.as_ref() != Some(&next) {
             *slot = Some(next);
+        }
+    }
+    if let Some(view) = view.as_deref() {
+        let last_edit = view.last_edit.as_ref().map(|(seq, outcome)| match outcome {
+            Ok(receipt) => json!({"seq": seq, "ok": true, "receipt": receipt}),
+            Err(refusal) => json!({
+                "seq": seq,
+                "ok": false,
+                "code": refusal.code,
+                "reason": refusal.reason,
+            }),
+        });
+        let text = ServerViewText {
+            schema: Some(view.schema_text()),
+            document: Some(view.document_text()),
+            revision: view.document.as_ref().map(|_| view.revision),
+            errors: view.errors.clone(),
+            last_edit,
+        };
+        if let Ok(mut slot) = SERVER_VIEW.lock() {
+            *slot = Some(text);
         }
     }
 }

@@ -753,6 +753,8 @@ impl ServerModel {
                 },
                 colorful_pass: has(SECTION_PASS).then_some(self.doc.colorful_pass),
                 schedules,
+                gate: Some(self.doc.gate),
+                rank_releases: None,
                 delivery: self.delivery_update(&sections),
                 music: has(music::SECTION).then(|| self.doc.music_settings.clone()),
                 avatar: has(avatar::SECTION).then_some(self.doc.avatar),

@@ -101,6 +101,10 @@ use crate::fixture_activity_timeline::{
 };
 use crate::npc::CharacterUnitId;
 use crate::server::{GateCharacter, GateReply, ReplyTalkList, TalkListUpdate};
+use crate::userdata::{Answered, ServerPending};
+use moly_link::ServerLink;
+use moly_protocol::api::{GateChangeRequest, GateReserveRequest};
+use moly_protocol::{Call, Reply};
 
 const INVITE: &str = "MOLY_GATE_INVITE";
 const CHANGE: &str = "MOLY_GATE_CHANGE";
@@ -166,30 +170,6 @@ enum Request {
         skin: i32,
         groups: Vec<i32>,
     },
-}
-
-impl Request {
-    /// The server model's `server.edit` command for the request.
-    fn command(&self) -> serde_json::Map<String, Value> {
-        let mut map = serde_json::Map::new();
-        map.insert("type".into(), "server.edit".into());
-        match self {
-            Self::Reserve { unit, .. } => {
-                map.insert("action".into(), "gate.reserve".into());
-                map.insert("mysekaiGameCharacterUnitGroupId".into(), (*unit).into());
-            }
-            Self::Change { gate, skin, groups } => {
-                map.insert("action".into(), "gate.change".into());
-                map.insert("mysekaiGateId".into(), (*gate).into());
-                map.insert("mysekaiGateSkinId".into(), (*skin).into());
-                map.insert(
-                    "mysekaiGameCharacterUnitGroupIds".into(),
-                    groups.iter().copied().map(Value::from).collect(),
-                );
-            }
-        }
-        map
-    }
 }
 
 struct Tables {
@@ -490,12 +470,22 @@ pub(crate) struct GateFlow {
     hides: Vec<PendingHide>,
     /// The last reason a reply waited, for the logs.
     waiting: Option<&'static str>,
+    /// The instrument's request whose answer has not arrived.
+    pending: Option<ServerPending>,
     /// The placed gate the server document's home gate was last checked
     /// against.
     restore_checked: Option<Entity>,
     /// The running cast's cloth space, while one of this flow's cut-scenes
     /// plays.
     cast_space: Option<CastSpace>,
+}
+
+impl GateFlow {
+    /// The server call this flow waits for, for the director.
+    #[allow(dead_code)] // Read by the director's wait.
+    pub(crate) fn server_pending(&self) -> Option<&ServerPending> {
+        self.pending.as_ref()
+    }
 }
 
 /// The cloth space of the cast avatars of the running cut-scene. The cloth
@@ -601,6 +591,7 @@ fn start(mut commands: Commands, server: Res<AssetServer>, mut masters: ResMut<M
         rand: EngineRand::from_state(engine_state()),
         hides: Vec::new(),
         waiting: None,
+        pending: None,
         restore_checked: None,
         cast_space: None,
     });
@@ -892,8 +883,11 @@ fn take_reply(world: &mut World) -> Stage {
     else {
         return Stage::Idle;
     };
+    world.resource_mut::<GateFlow>().pending = None;
     match reply {
-        GateReply::Reserve { row, talks } => reserve_process(world, gate, row, talks),
+        GateReply::Reserve { row, rows, talks } => {
+            reserve_process(world, gate, row, rows, talks)
+        }
         GateReply::Change {
             gate_id,
             skin_id,
@@ -929,6 +923,14 @@ fn request_step(world: &mut World, request: Request, ready_since: Option<f64>) -
             ready_since: Some(since),
         };
     }
+    if world.resource::<GateFlow>().pending.is_some() {
+        note_wait(
+            world,
+            "the instrument's request",
+            "an earlier request is still waiting for its reply",
+        );
+        return Stage::Idle;
+    }
     world.resource_mut::<GateFlow>().waiting = None;
     if let Request::Reserve {
         unit,
@@ -955,13 +957,23 @@ fn request_step(world: &mut World, request: Request, ready_since: Option<f64>) -
             return Stage::Idle;
         }
     }
-    let command = request.command();
-    let text = serde_json::Value::Object(command.clone()).to_string();
-    match crate::server::with_model(|model| model.edit(&command)) {
-        Some(Ok(receipt)) => info!("[gate] instrument request {request:?} -> server.edit {text}: {receipt}; the reply comes through the server's gate replies"),
-        Some(Err(reason)) => error!("[gate] instrument request {request:?}: the server refused it: {reason}"),
-        None => error!("[gate] instrument request {request:?}: no server model is installed; nothing is requested"),
-    }
+    let call = match &request {
+        Request::Reserve { unit, .. } => Call::GateReserve(GateReserveRequest {
+            mysekai_game_character_unit_group_id: *unit,
+        }),
+        Request::Change { gate, skin, groups } => Call::GateChange(GateChangeRequest {
+            mysekai_gate_id: *gate,
+            mysekai_gate_skin_id: *skin,
+            mysekai_game_character_unit_group_ids: groups.clone(),
+        }),
+    };
+    let kind = call.kind();
+    let seq = world.resource_mut::<ServerLink>().call(call);
+    world.resource_mut::<GateFlow>().pending = Some(ServerPending {
+        seq: Some(seq),
+        call: kind,
+    });
+    info!("[gate] instrument request {request:?}: sent as seq {seq}; the reply comes through the server's gate replies");
     Stage::Idle
 }
 
@@ -1128,6 +1140,7 @@ fn reserve_process(
     world: &mut World,
     gate: Entity,
     row: GateCharacter,
+    rows: Vec<GateCharacter>,
     talks: ReplyTalkList,
 ) -> Stage {
     info!("[gate] ReserveProcessAsync: the reserve reply: userMysekaiGateCharacters row {row:?}; mysekaiCharacterTalkWithReadHistories {}", talks_text(&talks));
@@ -1154,10 +1167,9 @@ fn reserve_process(
         info!("[gate] ReserveProcessAsync: IsExistNPC({unit}) true: SetSelectedGameCharacterUnitId, Refresh and FadeInAsync (UI); no AddGateCharacters, no UpdateTalkList, no invite cut-scene");
         return Stage::Idle;
     }
-    // `MysekaiBootData.AddGateCharacters`: the reply's row joins the gate
-    // characters the server holds.
-    let visitors = crate::server::with_model(|model| model.document().gate_characters.clone())
-        .unwrap_or_else(|| vec![row]);
+    // `MysekaiBootData.AddGateCharacters`: the reply's rows are every gate
+    // character the server holds.
+    let visitors = rows;
     crate::server::client_update_talk_list(
         world,
         TalkListUpdate {
@@ -2232,5 +2244,33 @@ pub(crate) fn cut_scene_returned(world: &mut World, cast: Cast) {
 pub(crate) fn install(app: &mut App) {
     app.init_resource::<GateModelPackages>()
         .add_systems(Startup, start)
-        .add_systems(Update, advance.after(crate::cutscene::advance));
+        .add_systems(Update, advance.after(crate::cutscene::advance))
+        .add_systems(Update, read_gate_answer.after(advance));
+}
+
+/// The instrument request's refused answer; a success is queued for
+/// `take_reply` as a gate reply.
+fn read_gate_answer(mut answers: MessageReader<Answered>, mut flow: ResMut<GateFlow>) {
+    for answer in answers.read() {
+        let Some(seq) = flow.pending.as_ref().and_then(|pending| pending.seq) else {
+            continue;
+        };
+        if seq != answer.seq {
+            continue;
+        }
+        match &answer.outcome {
+            Ok(Reply::Gate(_)) => {}
+            Ok(other) => {
+                error!("[gate] the instrument request answered with {other:?}");
+                flow.pending = None;
+            }
+            Err(refusal) => {
+                error!(
+                    "[gate] the instrument request was refused: {} ({})",
+                    refusal.reason, refusal.code
+                );
+                flow.pending = None;
+            }
+        }
+    }
 }

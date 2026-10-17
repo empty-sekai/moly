@@ -12,6 +12,11 @@
 //! The events that follow from state (weather, site, conversations, NPC
 //! arrivals and departures) are read once per frame by [`watch`], which
 //! compares with the frame before.
+//!
+//! The exchange with the server process is emitted by the client's reader:
+//! `server.call` when a call is sent, `server.reply` and `server.push` when
+//! the server answers or sends on its own, and `server.link` when the
+//! connection's state changes.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};

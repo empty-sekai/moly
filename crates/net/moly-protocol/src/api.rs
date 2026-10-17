@@ -250,13 +250,43 @@ pub struct UserMysekaiHousingEditLayoutRequest {
     pub fixtures: Vec<HousingLayoutFixture>,
 }
 
-/// `PostUserMysekaiHarvestApi`: the rests the client sends. The reply's
-/// stamina is these, unless a server-side stamina edit is pending.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// `UserMysekaiHarvestRequest` (`PostUserMysekaiHarvestApi`): one merged run
+/// of hits, the tool the run used (absent when it used none) and the stamina
+/// that is left.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarvestRequest {
-    pub normal: i32,
-    pub enhance: i32,
-    pub boost: i32,
+    pub mysekai_site_id: i32,
+    pub mysekai_site_harvest_fixture_target: MysekaiSiteHarvestFixtureTarget,
+    pub mysekai_tool_used: Option<MysekaiToolUsed>,
+    pub mysekai_stamina_useds: Vec<MysekaiStaminaUsed>,
+}
+
+/// `MysekaiSiteHarvestFixtureTarget`: where the run hit, the target's hp
+/// after the hits and whether the last of them destroyed it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MysekaiSiteHarvestFixtureTarget {
+    pub position_x: i32,
+    pub position_z: i32,
+    pub mysekai_site_harvest_fixture_id: i32,
+    pub hp: i32,
+    pub is_last_attack: bool,
+}
+
+/// `MysekaiToolUsed`: the tool a run used, how many times, and the durability
+/// the client holds after them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MysekaiToolUsed {
+    pub mysekai_tool_id: i32,
+    pub use_count: i32,
+    pub durability: i32,
+}
+
+/// `MysekaiStaminaUsed`: one stamina pool and what is left of it after the
+/// run (`mysekaiStaminaType`: `normal`, `enhance` or `boost`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MysekaiStaminaUsed {
+    pub mysekai_stamina_type: String,
+    pub rest: i32,
 }
 
 /// `PostUserMysekaiGateReserveApi`: the selected character unit group.

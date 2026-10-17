@@ -49,6 +49,15 @@ pub struct Gate {
     pub is_setting_at_home_site: bool,
 }
 
+/// One `mysekaiRankReleases` row: a rank, the release type and the id of the
+/// released row (a site level for `mysekai_site_level`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RankReleaseRow {
+    pub mysekai_rank: i32,
+    pub mysekai_rank_release_type: String,
+    pub external_id: i32,
+}
+
 /// `UserMysekaiGateCharacter`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GateCharacter {

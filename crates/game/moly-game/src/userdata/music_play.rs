@@ -61,55 +61,12 @@ pub(crate) use moly_protocol::api::{
 #[derive(Resource, Clone, Copy, Debug)]
 pub(crate) struct MusicPlayEndpoint(pub(crate) SystemId<In<MusicPlayPost>, MusicPlayReply>);
 
-/// Send a request and read its reply.
-#[allow(dead_code)] // Called by the record list's seam.
-pub(crate) fn post(world: &mut World, request: MusicPlayPost) -> MusicPlayReply {
-    let Some(endpoint) = world.get_resource::<MusicPlayEndpoint>().copied() else {
-        warn!(
-            "[server] {} refused: no server endpoint is installed",
-            request.api_name()
-        );
-        return MusicPlayReply { success: false };
-    };
-    world
-        .run_system_with(endpoint.0, request)
-        .unwrap_or_else(|error| {
-            warn!("[server] {} refused: {error}", request.api_name());
-            MusicPlayReply { success: false }
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn echo(In(request): In<MusicPlayPost>) -> MusicPlayReply {
-        MusicPlayReply {
-            success: matches!(request, MusicPlayPost::Set(_)),
-        }
-    }
-
     #[test]
-    fn a_request_runs_through_the_endpoint_and_the_copy_answers_possession() {
-        let set = MusicPlayPost::Set(MusicPlaySetRequest {
-            mysekai_site_id: 5,
-            mysekai_music_record_id: 12,
-            music_vocal_id: Some(3),
-            is_instrumental: false,
-            mysekai_fixture_id: 70,
-            texture_id: 1,
-        });
-        let eject = MusicPlayPost::Eject(MusicPlayEjectRequest {
-            mysekai_site_id: 5,
-            mysekai_fixture_id: 70,
-            texture_id: 1,
-        });
-        let mut world = World::new();
-        assert!(!post(&mut world, set).success);
-        let endpoint = world.register_system(echo);
-        world.insert_resource(MusicPlayEndpoint(endpoint));
-        assert!(post(&mut world, set).success);
-        assert!(!post(&mut world, eject).success);
+    fn the_copy_answers_possession() {
         let mut copy = ClientMusicRecords::default();
         assert_eq!(copy.possession(12), None);
         copy.apply(vec![OwnedMusicRecord {

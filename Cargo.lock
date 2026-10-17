@@ -4943,6 +4943,7 @@ dependencies = [
  "moly-assets",
  "moly-core",
  "moly-law",
+ "moly-link",
  "moly-masters",
  "moly-perf",
  "moly-protocol",
@@ -5028,6 +5029,7 @@ version = "0.0.3"
 dependencies = [
  "async-channel",
  "bevy",
+ "bevy_remote",
  "futures-util",
  "js-sys",
  "libc",
@@ -5047,6 +5049,7 @@ name = "moly-server-host"
 version = "0.0.3"
 dependencies = [
  "bevy",
+ "bevy_remote",
  "moly-assets",
  "moly-server",
 ]

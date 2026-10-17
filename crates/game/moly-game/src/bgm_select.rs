@@ -40,7 +40,7 @@
 //!   the site's default (`PlayDefaultBGM`); `SetFadeTime(1.0)`.
 //!
 //! The BGM goes through [`crate::audio::RecordChoice`]; the requests go
-//! through [`crate::server::client::music_play::post`].
+//! through the server link's `Call::MusicPlaySet` / `Call::MusicPlayEject`.
 //!
 //! ## Named gaps (roadmap)
 //!
@@ -80,10 +80,14 @@ use crate::fixture_activity_state::FixtureTarget;
 use crate::fixture_colors::FixtureColorChoice;
 use crate::gesture::{GestureEvent, GestureKind, GestureState};
 use crate::server::client::music::ClientMusicPlaySettings;
-use crate::server::client::music_play::{self, ClientMusicRecords};
+use crate::server::client::music_play::ClientMusicRecords;
 use crate::sitemap::SITEMAP_LAYER;
 use crate::ui_layers::{LayerCommand, LayerId, ScreenHook, ScreenLayerEvent, UiLayerStack};
 use crate::ui_layout::{SpriteLayoutMetrics, UiLayouts, UiPrefabView};
+use crate::userdata::{Answered, ServerPending};
+use moly_link::ServerLink;
+use moly_protocol::api::MusicPlayPost;
+use moly_protocol::{Call, CallKind, Reply};
 use model::{BgmMasters, BootData, Pending, Presenter, VocalWordings};
 
 pub(crate) const SCREEN: LayerId = LayerId::MysekaiBgmSelect;
@@ -129,12 +133,22 @@ pub(crate) struct BgmSelect {
     dragging: bool,
     was_open: bool,
     map_pending: bool,
+    /// The music-play call sent on exit, until its answer arrives.
+    music_call: Option<ServerPending>,
     /// Why the screen cannot be drawn on this root.
     absent: Option<String>,
     refusal_popped: bool,
     /// Pool cell -> the record it shows this frame.
     bound: Vec<Option<i32>>,
     refused_textures: BTreeSet<String>,
+}
+
+impl BgmSelect {
+    /// The server call this screen waits for, for the director.
+    #[allow(dead_code)] // Read by the director's wait.
+    pub(crate) fn server_pending(&self) -> Option<&ServerPending> {
+        self.music_call.as_ref()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -859,9 +873,9 @@ fn setup_player_view(presenter: &Presenter, choice: &mut crate::audio::RecordCho
 /// Update, after the screen manager: the layer's hooks.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn follow_screen(
-    mut commands: Commands,
     mut events: MessageReader<ScreenLayerEvent>,
     mut state: ResMut<BgmSelect>,
+    mut link: ResMut<ServerLink>,
     layouts: Res<UiLayouts>,
     owned: Option<Res<ClientMusicRecords>>,
     settings: Option<Res<ClientMusicPlaySettings>>,
@@ -970,14 +984,20 @@ pub(crate) fn follow_screen(
                         site_row.map(|row| (row.mysekai_music_record_id, row.music_vocal_id))
                     ),
                     Some(request) => {
+                        if state.music_call.is_some() {
+                            info!("[bgm-select] OnWillExitAsync: {} is still waiting for its reply; no second request", request.api_name());
+                            continue;
+                        }
                         info!("[bgm-select] OnWillExitAsync: ExecuteMysekaiMusicPlaySetApiIfNeeded -> {} {request:?}", request.api_name());
-                        commands.queue(move |world: &mut World| {
-                            let reply = music_play::post(world, request);
-                            info!(
-                                "[bgm-select] {} replied success {}",
-                                request.api_name(),
-                                reply.success
-                            );
+                        let call = match request {
+                            MusicPlayPost::Set(request) => Call::MusicPlaySet(request),
+                            MusicPlayPost::Eject(request) => Call::MusicPlayEject(request),
+                        };
+                        let kind = call.kind();
+                        let seq = link.call(call);
+                        state.music_call = Some(ServerPending {
+                            seq: Some(seq),
+                            call: kind,
                         });
                     }
                 }
@@ -1005,6 +1025,35 @@ pub(crate) fn follow_screen(
             }
             _ => {}
         }
+    }
+}
+
+/// The music-play call's answer, logged once: the screen is already exiting.
+fn read_music_answer(mut answers: MessageReader<Answered>, mut state: ResMut<BgmSelect>) {
+    for answer in answers.read() {
+        let Some(pending) = state.music_call.as_ref() else {
+            continue;
+        };
+        if pending.seq != Some(answer.seq) {
+            continue;
+        }
+        let api = match &pending.call {
+            CallKind::MusicPlaySet => "PutUserMysekaiMusicPlaySetApi",
+            CallKind::MusicPlayEject => "PutUserMysekaiMusicPlayEjectApi",
+            _ => continue,
+        };
+        match &answer.outcome {
+            Ok(Reply::MusicPlay(reply)) => {
+                info!("[bgm-select] {api} replied success {}", reply.success);
+            }
+            Ok(other) => {
+                warn!("[bgm-select] {api} replied an unexpected {other:?}");
+            }
+            Err(refusal) => {
+                warn!("[bgm-select] {api} refused: {} ({})", refusal.reason, refusal.code);
+            }
+        }
+        state.music_call = None;
     }
 }
 
@@ -1531,5 +1580,6 @@ pub(crate) fn install(app: &mut App) {
                     .after(click)
                     .before(crate::ui_layout::render),
             ),
-        );
+        )
+        .add_systems(Update, read_music_answer.after(follow_screen));
 }

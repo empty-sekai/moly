@@ -13,6 +13,7 @@
 //! control plane's document and schema views, an edit, and the seed install.
 
 mod admin;
+mod control;
 mod defaults;
 mod dispatch;
 mod hub;
@@ -25,6 +26,7 @@ pub mod store;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod ws;
 
+pub use control::remote_plugin;
 pub use hub::Hub;
 pub use masters::Masters;
 pub use store::{DocumentStore, Store};
@@ -32,6 +34,13 @@ pub use moly_masters::clock::RefreshPeriod;
 pub use moly_masters::StaminaMax;
 
 use bevy::prelude::*;
+
+/// The address the player socket listens on. The host reports it after
+/// binding; the administration calls are accepted only on a loopback address
+/// (the bundled single-player case), so a server that does not report its
+/// address accepts none.
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ListenAddress(pub std::net::SocketAddr);
 
 /// Loads the master tables through the asset source. The host adds it after
 /// `AssetPlugin` and the `moly://` asset source; a harness that seats a

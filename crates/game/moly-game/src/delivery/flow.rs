@@ -103,6 +103,10 @@ use crate::site_move::timeline::{delay_seconds, Delay, TweenClock};
 use crate::ui_layers::{
     DialogBackKey, DialogBackKeyEvent, DialogId, DialogType, DisplayLayerType, ScreenManager,
 };
+use crate::userdata::{Answered, ServerPending};
+use moly_link::ServerLink;
+use moly_protocol::api::BirthdayPartyDeliveryRequest;
+use moly_protocol::{Call, Refusal, Reply};
 
 /// `DialogType.MysekaiRefreshBirthdayPlantSubWindowDialog`.
 const REFRESH_DIALOG: DialogType = DialogType(450);
@@ -243,6 +247,8 @@ enum Phase {
     EndTimeline {
         since: f64,
     },
+    /// The delivery API's answer is awaited; the reward animation follows it.
+    AwaitDeliveryReply(PendingDelivery),
     Reward {
         is_refreshed: bool,
     },
@@ -251,6 +257,18 @@ enum Phase {
     Refresh {
         dialog: DialogId,
     },
+}
+
+/// What the delivery API's continuation reads after its answer.
+struct PendingDelivery {
+    pending: ServerPending,
+    party_id: i32,
+    /// The party's site row before the request.
+    party: super::PartySite,
+    cost: i32,
+    unsynced: i32,
+    auto_count: i32,
+    obtained_before: i32,
 }
 
 #[derive(Resource, Default)]
@@ -269,6 +287,15 @@ impl DeliveryFlow {
         *self = Self::default();
     }
 
+    /// The server call this flow waits for, for the director.
+    #[allow(dead_code)] // Read by the director's wait.
+    pub(crate) fn server_pending(&self) -> Option<&ServerPending> {
+        match &self.phase {
+            Phase::AwaitDeliveryReply(pending) => Some(&pending.pending),
+            _ => None,
+        }
+    }
+
     fn phase_name(&self) -> &'static str {
         match self.phase {
             Phase::Idle => "idle",
@@ -276,6 +303,7 @@ impl DeliveryFlow {
             Phase::StartWait(_) => "start wait",
             Phase::Loop { .. } => "loop",
             Phase::EndTimeline { .. } => "end action (step item run-out)",
+            Phase::AwaitDeliveryReply(_) => "delivery reply",
             Phase::Reward { .. } => "reward",
             Phase::Refresh { .. } => "harvest site refresh",
         }
@@ -294,6 +322,7 @@ pub(crate) struct FlowWorld<'w, 's> {
     spawns: ResMut<'w, super::drops::DeliveryDropSpawns>,
     runs: ResMut<'w, RewardRuns>,
     face: ResMut<'w, DeliveryFace>,
+    link: ResMut<'w, ServerLink>,
     client: ResMut<'w, crate::server::delivery::ClientBirthdayPartyData>,
     catalog: Option<Res<'w, crate::harvest::catalog::HarvestCatalog>>,
     navigation: Option<Res<'w, crate::player_fixture_action::PlayerFixtureNavigation>>,
@@ -336,6 +365,7 @@ pub(crate) fn advance(
     mut world: FlowWorld,
     mut flow: ResMut<DeliveryFlow>,
     mut requests: MessageReader<DeliveryRequest>,
+    mut answers: MessageReader<Answered>,
     mut players: PlayerQuery,
     mut animators: AnimatorQuery,
 ) {
@@ -356,6 +386,29 @@ pub(crate) fn advance(
             &objects,
             request,
             now,
+        );
+    }
+    for answer in answers.read() {
+        let seq = answer.seq;
+        let pending = match std::mem::replace(&mut flow.phase, Phase::Idle) {
+            Phase::AwaitDeliveryReply(pending) => pending,
+            other => {
+                flow.phase = other;
+                continue;
+            }
+        };
+        if pending.pending.seq != Some(seq) {
+            flow.phase = Phase::AwaitDeliveryReply(pending);
+            continue;
+        }
+        let outcome = answer.outcome.clone();
+        finish_delivery_api(
+            &mut world,
+            &mut flow,
+            &mut players,
+            now,
+            Some(pending),
+            Some(&outcome),
         );
     }
     let Some(party_id) = flow.party else {
@@ -473,6 +526,9 @@ pub(crate) fn advance(
                 }
                 delivery_api(&mut world, &mut flow, &mut players, party_id, now);
             }
+        }
+        Phase::AwaitDeliveryReply(pending) => {
+            flow.phase = Phase::AwaitDeliveryReply(pending);
         }
         Phase::Reward { is_refreshed } => {
             if !world.runs.take_finished(RewardOwner::Delivery) {
@@ -1142,7 +1198,8 @@ fn start_end_action(world: &mut FlowWorld, flow: &mut DeliveryFlow, now: f64) {
     flow.phase = Phase::EndTimeline { since: now };
 }
 
-/// `DeliveryExecuteApiAsync`, the gate and Idle, then the reward animation.
+/// `DeliveryExecuteApiAsync`: state Pending, then the delivery request; the
+/// reward animation starts on its answer.
 fn delivery_api(
     world: &mut FlowWorld,
     flow: &mut DeliveryFlow,
@@ -1161,80 +1218,132 @@ fn delivery_api(
         0.0,
         world.model.rate,
     );
+    let Some(party) = party else {
+        error!(
+            "[delivery] DeliveryExecuteApiAsync without the party's site data: the error dialog (UI lane)"
+        );
+        finish_delivery_api(world, flow, players, now, None, None);
+        return;
+    };
+    let obtained = |client: &crate::server::delivery::ClientBirthdayPartyData| {
+        client
+            .user_birthday_party(party_id)
+            .map_or(0, |row| row.obtained_mysekai_material_count)
+    };
+    let obtained_before = obtained(&world.client);
+    let auto_count = party.auto_gathered.len() as i32;
+    let unsynced = party.unsynced_drops.len() as i32;
+    let cost = party.tally.unsynchronized_cost;
+    let call = Call::BirthdayPartyDelivery(BirthdayPartyDeliveryRequest {
+        birthday_party_id: party_id,
+        consumed_delivery_material_count: cost,
+    });
+    let kind = call.kind();
+    let seq = world.link.call(call);
+    info!("[delivery] PutUserMysekaiBirthdayPartyDeliveryApi party {party_id} sent as seq {seq}; state Pending until its reply");
+    flow.phase = Phase::AwaitDeliveryReply(PendingDelivery {
+        pending: ServerPending {
+            seq: Some(seq),
+            call: kind,
+        },
+        party_id,
+        party,
+        cost,
+        unsynced,
+        auto_count,
+        obtained_before,
+    });
+}
+
+/// The delivery answer and the end action: the gate, the idle state, the
+/// reward animation.
+fn finish_delivery_api(
+    world: &mut FlowWorld,
+    flow: &mut DeliveryFlow,
+    players: &mut PlayerQuery,
+    now: f64,
+    pending: Option<PendingDelivery>,
+    outcome: Option<&Result<Reply, Refusal>>,
+) {
     let mut rewards = Vec::new();
     let mut is_refreshed = false;
-    match party {
-        Some(party) => {
-            let obtained = |client: &crate::server::delivery::ClientBirthdayPartyData| {
-                client
+    if let (Some(pending), Some(outcome)) = (pending, outcome) {
+        let PendingDelivery {
+            party_id,
+            party,
+            cost,
+            unsynced,
+            auto_count,
+            obtained_before,
+            ..
+        } = pending;
+        match outcome {
+            Ok(Reply::Delivery(reply)) => {
+                // The source's own check: `droppedRewardCount` against the
+                // unsynchronized drop list, a LogError and
+                // `GenerateUnclaimedDropItemsIfNeededAsync` when they
+                // differ. They can differ in the source too: a drop
+                // gathered while its gather request still waits in the
+                // stack (the gather loop sends only in state Gather) is
+                // gone from the client's lists and still dropped on the
+                // server, and the delivery request carries only the
+                // consumed count.
+                let regenerate = reply.dropped_reward_count != unsynced;
+                if regenerate {
+                    error!(
+                        "[delivery] DeliveryExecuteApiAsync: the drop count after the delivery API does not match (the source's LogError): birthdayDeliveryId {party_id}, droppedRewardCount {}, unsynchronizedDropItemCount {unsynced}; GenerateUnclaimedDropItemsIfNeededAsync",
+                        reply.dropped_reward_count
+                    );
+                }
+                let (have, points) = party.user_rows(&world.client);
+                if let Some(site_party) = world.model.party_mut(party_id) {
+                    site_party.update_synchronized(have, points);
+                }
+                // Not a source check: the auto-gather list fills when a
+                // flying drop reaches the player, which can come after the
+                // reply, and the race above shifts the server's split, so
+                // the two counts are logged side by side only.
+                let obtained_after = world
+                    .client
                     .user_birthday_party(party_id)
-                    .map_or(0, |row| row.obtained_mysekai_material_count)
-            };
-            let obtained_before = obtained(&world.client);
-            let auto_count = party.auto_gathered.len() as i32;
-            let unsynced = party.unsynced_drops.len() as i32;
-            let cost = party.tally.unsynchronized_cost;
-            // PutUserMysekaiBirthdayPartyDeliveryApi; its updatedResources are
-            // in the client's copies when it returns.
-            match crate::server::delivery::put_birthday_party_delivery(
-                &mut world.client,
-                party_id,
-                cost,
-            ) {
-                Ok(reply) => {
-                    // The source's own check: `droppedRewardCount` against the
-                    // unsynchronized drop list, a LogError and
-                    // `GenerateUnclaimedDropItemsIfNeededAsync` when they
-                    // differ. They can differ in the source too: a drop
-                    // gathered while its gather request still waits in the
-                    // stack (the gather loop sends only in state Gather) is
-                    // gone from the client's lists and still dropped on the
-                    // server, and the delivery request carries only the
-                    // consumed count.
-                    let regenerate = reply.dropped_reward_count != unsynced;
-                    if regenerate {
-                        error!(
-                            "[delivery] DeliveryExecuteApiAsync: the drop count after the delivery API does not match (the source's LogError): birthdayDeliveryId {party_id}, droppedRewardCount {}, unsynchronizedDropItemCount {unsynced}; GenerateUnclaimedDropItemsIfNeededAsync",
-                            reply.dropped_reward_count
+                    .map_or(0, |row| row.obtained_mysekai_material_count);
+                info!(
+                    "[delivery] DeliveryExecuteApiAsync party {party_id}: sent {cost}; dropped {} (client {unsynced}), auto-gathered {auto_count} (obtained {obtained_before} -> {obtained_after}); synchronized: have {have}, points {points}; {} total rewards; isRefreshed {}",
+                    reply.dropped_reward_count,
+                    reply.obtained_delivery_total_rewards.len(),
+                    reply.is_refreshed
+                );
+                rewards = reply.obtained_delivery_total_rewards.clone();
+                is_refreshed = reply.is_refreshed;
+                if regenerate {
+                    if let Some(objects) = world.site.objects.clone() {
+                        super::drops::generate_unclaimed(
+                            &mut world.model,
+                            &world.client,
+                            &mut world.spawns,
+                            &objects,
+                            "reply mismatch",
                         );
                     }
-                    let (have, points) = party.user_rows(&world.client);
-                    if let Some(site_party) = world.model.party_mut(party_id) {
-                        site_party.update_synchronized(have, points);
-                    }
-                    // Not a source check: the auto-gather list fills when a
-                    // flying drop reaches the player, which can come after the
-                    // reply, and the race above shifts the server's split, so
-                    // the two counts are logged side by side only.
-                    let obtained_after = obtained(&world.client);
-                    info!(
-                        "[delivery] DeliveryExecuteApiAsync party {party_id}: sent {cost}; dropped {} (client {unsynced}), auto-gathered {auto_count} (obtained {obtained_before} -> {obtained_after}); synchronized: have {have}, points {points}; {} total rewards; isRefreshed {}",
-                        reply.dropped_reward_count,
-                        reply.obtained_delivery_total_rewards.len(),
-                        reply.is_refreshed
-                    );
-                    rewards = reply.obtained_delivery_total_rewards;
-                    is_refreshed = reply.is_refreshed;
-                    if regenerate {
-                        if let Some(objects) = world.site.objects.clone() {
-                            super::drops::generate_unclaimed(
-                                &mut world.model,
-                                &world.client,
-                                &mut world.spawns,
-                                &objects,
-                                "reply mismatch",
-                            );
-                        }
-                    }
-                }
-                Err(reason) => {
-                    error!("[delivery] {reason}: the error dialog (UI lane)")
                 }
             }
+            Err(refusal) => {
+                error!("[delivery] {}: the error dialog (UI lane)", refusal.reason);
+                crate::bus::emit(
+                    "delivery_refused",
+                    serde_json::json!({
+                        "party_id": party_id,
+                        "reason": refusal.reason,
+                        "code": refusal.code,
+                    }),
+                );
+            }
+            Ok(other) => {
+                error!(
+                    "[delivery] DeliveryExecuteApiAsync answered with {other:?}: the error dialog (UI lane)"
+                );
+            }
         }
-        None => error!(
-            "[delivery] DeliveryExecuteApiAsync without the party's site data: the error dialog (UI lane)"
-        ),
     }
     world.states.can_intercept = true;
     world.states.change_status(PlayerActionState::Idle);
