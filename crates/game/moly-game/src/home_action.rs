@@ -1441,6 +1441,7 @@ pub(crate) fn install(app: &mut App) {
         .init_resource::<HomeActionPresentation>()
         .init_resource::<craft::CraftScreen>()
         .init_resource::<craft::view::CraftViewState>()
+        .init_resource::<craft::follow_up::FollowUpMasters>()
         .init_resource::<AvatarItemView>()
         .add_message::<HomeActionRequest>()
         .add_message::<HomeActionSkip>()
@@ -1484,17 +1485,21 @@ pub(crate) fn install(app: &mut App) {
             (
                 craft::view::spawn_when_ready,
                 craft::result::spawn_when_ready,
+                craft::follow_up::spawn_when_ready,
+                craft::follow_up::resolve,
             ),
         )
         .add_systems(
             Update,
             (
                 crate::common_dialog::click.run_if(crate::game_settings::scene_input_enabled),
+                craft::follow_up::click.run_if(crate::game_settings::scene_input_enabled),
                 craft::result::click.run_if(crate::game_settings::scene_input_enabled),
                 craft::view::click.run_if(crate::game_settings::scene_input_enabled),
                 craft::advance,
                 crate::common_dialog::place,
                 craft::result::place,
+                craft::follow_up::place,
                 craft::view::place,
             )
                 .chain()

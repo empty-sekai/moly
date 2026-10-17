@@ -47,8 +47,10 @@
 //!   fixture bonus dialog (405) when the bonus data exists, and
 //!   `MysekaiRankUtility.OpenMysekaiRankDialogIfNeededAsync(before, after)`:
 //!   nothing when the two experiences give one rank, else the rank-up dialog
-//!   (335) and then the rank's release dialogs. Then the sequence closes
-//!   (gate, Idle, fades, camera).
+//!   (335) and then the rank's release dialogs (the new harvest site 408
+//!   first, then the player status update 343 for each release row). Each is
+//!   awaited to its close. Then the sequence closes (gate, Idle, fades,
+//!   camera). The follow-up views are [`follow_up`].
 //! - Common1's back key and outside tap answer OK; Common2's answer cancel
 //!   (their `OnHardwareBackKeyProcess` and `OnCloseExternal`).
 //!
@@ -81,14 +83,17 @@
 //!   as `SelectCellImmediate(0)`. A tool has no cells (the source keeps the
 //!   previous fixture's cells on a tool; the first selection has none).
 //! - The result dialog's view is [`result`] (a root without its document
-//!   shows it without a view, named and closed); the fixture bonus and rank
-//!   dialogs have no view in this build: each is shown through the screen
-//!   manager, named and closed.
+//!   shows it without a view, named and closed); the follow-up dialogs'
+//!   views are [`follow_up`] (a root without a document shows the dialog
+//!   without a view, named). The rank-up's title texture and particle
+//!   animation, the character icon of the bonus dialog, and the thumbnail
+//!   images of the status update and the new harvest site are not loaded:
+//!   the dialogs draw their texts and the prefab's image areas.
 //! - A first craft is refused by name while its bonus row
 //!   (`craft_mysekai_fixture_first_bonus` of the rank experience master) is
-//!   not carried; the fixture bonus table
-//!   (`MasterMysekaiFixtureGameCharacterGroupPerformanceBonus`) is not
-//!   carried, so no bonus dialog shows.
+//!   not carried. The fixture bonus's own rows are read from the masters;
+//!   when a fixture has no bonus row the bonus dialog does not show (as
+//!   `HasFixtureBonus` false).
 //! - The rank dialog's ranks are `MysekaiRankModel(totalExp)`'s over the
 //!   rank table (`mysekaiRanks`, the master layer) for the total experience
 //!   before and after; a region whose table is not served names it and
@@ -132,6 +137,7 @@ use crate::userdata::{Answered, ServerPending};
 use moly_link::ServerLink;
 use moly_protocol::{Call, Refusal, Reply};
 
+pub(crate) mod follow_up;
 pub(crate) mod result;
 pub(crate) mod view;
 
@@ -141,10 +147,6 @@ const CRAFT_RESULT_DIALOG: DialogType = DialogType(377);
 const SE_CRAFT_RESULT: &str = "se_craft_result";
 /// The dialogs' views sit above the screens' (a screen view is at z 20 and
 /// its nodes add their order).
-/// `DialogType.FixtureBonusSubWindowDialog`.
-const FIXTURE_BONUS_DIALOG: DialogType = DialogType(405);
-/// `DialogType.MysekaiRankUpDialog`.
-const RANK_UP_DIALOG: DialogType = DialogType(335);
 const SE_ENTER_CRAFT_TOOL: &str = "se_enter_crafttool";
 /// `SetupContentList`'s `SetTabClickSe`.
 const SE_TAB_CLICK: &str = "se_mysekai_ui_select";
@@ -172,6 +174,16 @@ pub(crate) const WORDINGS: &[&str] = &[
     "WORD_TOOL_CREATE_RESULT",
     "WORD_MULTIPLY_FORMAT",
     "WORD_FIRST_CRAFT_BONUS",
+    // The follow-up dialogs.
+    "FORMAT_ADD_PARAM",
+    "MSG_FIXTURE_BONUS_UP_DIALOG",
+    "MSG_HOME_SITE_SIZE_EXPAND",
+    "MSG_MYROOM_SITE_SIZE_EXPAND",
+    "MSG_MYROOM_SITE_RELEASE_NEW_FLOOR",
+    "MSG_MYSEKAI_FIXTURE_HOME_LAYOUT_COST_UP",
+    "MSG_MYSEKAI_FIXTURE_MYROOM_LAYOUT_COST_UP",
+    "MSG_MYSEKAI_FIXTURE_RELEASE_PUT_LIMIT",
+    "MSG_MYSEKAI_OPEN_SITE_MESSAGE",
 ];
 
 /// The craft screen's `ContentListType`s.
@@ -245,8 +257,8 @@ impl Selection {
 struct Executed {
     before_exp: Option<i32>,
     is_first_craft: bool,
-    /// The fixture whose bonus the bonus dialog shows.
-    bonus_fixture: Option<i32>,
+    /// The first craft's fixture bonus, captured before the request.
+    bonus: Option<follow_up::BonusStart>,
     craft_type: MysekaiCraftType,
     count: i32,
     name: String,
@@ -258,8 +270,16 @@ enum DialogStep {
     Result {
         shown: Option<DialogId>,
     },
-    Bonus,
-    Rank,
+    Bonus {
+        shown: Option<DialogId>,
+    },
+    Rank {
+        shown: Option<DialogId>,
+        before: i32,
+        after: i32,
+    },
+    /// The rank's release dialogs, one at a time from `release_queue`.
+    Release,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -345,6 +365,12 @@ pub(crate) struct CraftScreen {
     ranks: Option<Result<Vec<MasterMysekaiRank>, String>>,
     /// The shown result dialog's data (its view draws it).
     result: Option<result::ResultShown>,
+    /// The shown follow-up dialog and its data (its view draws it).
+    follow_up: Option<follow_up::FollowUp>,
+    /// The follow-up dialog's id while one is shown.
+    dialog: Option<DialogId>,
+    /// The release dialogs still to show after the rank-up.
+    release_queue: Vec<follow_up::FollowUp>,
     /// The dialogs were staged by the instrument (no sequence closes them).
     staged: bool,
     staged_fired: bool,
@@ -400,6 +426,9 @@ pub(super) fn sequence_closed(world: &mut World, cancelled: bool) {
         if cancelled {
             warn!("[craft] the craft sequence was cancelled: its dialogs do not show");
         }
+        screen.follow_up = None;
+        screen.dialog = None;
+        screen.release_queue.clear();
         screen.stage = Stage::Idle;
     }
 }
@@ -1056,12 +1085,20 @@ fn send(world: &mut World, screen: &mut CraftScreen) {
         "[craft] HeaderUtility.HideBackUIScreen, MysekaiMissionUtility.SetNoticeWait(true): no counterpart"
     );
     let gamedata = inventory.gamedata();
-    if first && selection.blueprint.craft_type == MysekaiCraftType::MysekaiFixture {
-        error!(
-            "[craft] MysekaiFixtureUtility.HasFixtureBonus({}): the fixture bonus master (MasterMysekaiFixtureGameCharacterGroupPerformanceBonus) is not carried; no bonus data",
-            selection.blueprint.craft_target_id
-        );
-    }
+    let bonus = if first && selection.blueprint.craft_type == MysekaiCraftType::MysekaiFixture {
+        match follow_up::bonus_start(world, selection.blueprint.craft_target_id) {
+            Some(bonus) => Some(bonus),
+            None => {
+                warn!(
+                    "[craft] MysekaiFixtureUtility.HasFixtureBonus({}): the fixture has no bonus row in the carried masters; the bonus dialog does not show",
+                    selection.blueprint.craft_target_id
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
     let request = UserMysekaiCraftRequest {
         blueprint_id: selection.blueprint.id,
         texture_id: selection.texture(),
@@ -1082,7 +1119,7 @@ fn send(world: &mut World, screen: &mut CraftScreen) {
         executed: Executed {
             before_exp: gamedata.map(|g| g.total_exp),
             is_first_craft: first,
-            bonus_fixture: None,
+            bonus,
             craft_type: selection.blueprint.craft_type,
             count: selection.count,
             name: selection.name.clone(),
@@ -1192,6 +1229,7 @@ const RANKS: MasterTable<Vec<MasterMysekaiRank>> = MasterTable {
 /// Startup: request the rank table.
 pub(crate) fn request_masters(mut masters: ResMut<MasterData>) {
     masters.request(&RANKS);
+    follow_up::request_masters(&mut masters);
 }
 
 /// `OnCloseCreateResponseDialog`: the preview is set up again; the fixture
@@ -1203,7 +1241,7 @@ fn result_closed(world: &mut World, screen: &mut CraftScreen) -> Option<DialogSt
     if let Some(selection) = screen.selection.clone() {
         screen.button = Some(setup_apply_button(world, &selection));
     }
-    Some(DialogStep::Bonus)
+    Some(DialogStep::Bonus { shown: None })
 }
 
 /// The instrument's staged dialogs (`MOLY_CRAFT_STAGE_RESULT`): the dialogs
@@ -1243,7 +1281,7 @@ fn stage_instrument(world: &mut World, screen: &mut CraftScreen, now: f32) {
         executed: Executed {
             before_exp: gamedata.map(|g| g.total_exp),
             is_first_craft: first,
-            bonus_fixture: None,
+            bonus: None,
             craft_type: selection.blueprint.craft_type,
             count,
             name: selection.name.clone(),
@@ -1251,6 +1289,97 @@ fn stage_instrument(world: &mut World, screen: &mut CraftScreen, now: f32) {
         after_exp: gamedata.map(|g| g.total_exp),
         next: DialogStep::Result { shown: None },
     };
+}
+
+/// The shown follow-up dialog closed (its view's tap, the back key or an
+/// outside close): close it on the manager and forget its data.
+fn shown_closed(world: &mut World, screen: &mut CraftScreen, dialog: DialogId) -> bool {
+    let gone = !world
+        .resource::<ScreenManager>()
+        .dialogs()
+        .any(|(shown, ..)| shown == dialog);
+    if screen.answer.take().is_some() || gone {
+        if gone {
+            warn!("[craft] follow-up dialog {dialog:?} was closed from outside");
+        }
+        info!("[craft] follow-up dialog {dialog:?}: Close");
+        close(world, dialog);
+        screen.dialog = None;
+        screen.follow_up = None;
+        true
+    } else {
+        false
+    }
+}
+
+/// `OpenMysekaiRankDialogIfNeededAsync(before, after)`: show the rank-up
+/// only when the two ranks differ, then its release dialogs.
+fn start_rank(
+    world: &mut World,
+    screen: &mut CraftScreen,
+    executed: &Executed,
+    after_exp: Option<i32>,
+) -> Option<DialogStep> {
+    let ranks = screen.ranks.clone();
+    let refusal = match (&ranks, executed.before_exp, after_exp) {
+        (Some(Ok(rows)), Some(before_exp), Some(after_exp)) => {
+            let before = get_mysekai_rank(rows, before_exp);
+            let after = get_mysekai_rank(rows, after_exp);
+            if before != after {
+                let data = follow_up::FollowUp::RankUp { before, after };
+                match follow_up::open(world, &data) {
+                    Some(dialog) => {
+                        info!(
+                            "[craft] OpenMysekaiRankUpDialogAsync({before}, {after}): ShowSubWindowDialog(MysekaiRankUpDialog {dialog:?})"
+                        );
+                        screen.dialog = Some(dialog);
+                        screen.follow_up = Some(data);
+                        return Some(DialogStep::Rank {
+                            shown: Some(dialog),
+                            before,
+                            after,
+                        });
+                    }
+                    None => {
+                        screen.release_queue = follow_up::release_dialogs(world, before, after);
+                        return Some(DialogStep::Release);
+                    }
+                }
+            } else {
+                info!(
+                    "[craft] OpenMysekaiRankDialogIfNeededAsync: one rank ({before}) for totalExp {before_exp} and {after_exp}; no dialog"
+                );
+                None
+            }
+        }
+        (Some(Err(reason)), ..) => Some(format!("the rank table is not served ({reason})")),
+        (None, ..) => Some("the rank table has not resolved".to_owned()),
+        _ => Some("the total experience before or after is not seated".to_owned()),
+    };
+    if let Some(reason) = refusal {
+        if !screen.rank_reported {
+            screen.rank_reported = true;
+            error!("[craft] OpenMysekaiRankDialogIfNeededAsync: {reason}; no rank dialog");
+        }
+    }
+    None
+}
+
+/// Show the next release dialog, or end the chain when none is left.
+fn next_release(world: &mut World, screen: &mut CraftScreen) -> Option<DialogStep> {
+    while !screen.release_queue.is_empty() {
+        let data = screen.release_queue.remove(0);
+        match follow_up::open(world, &data) {
+            Some(dialog) => {
+                info!("[craft] rank release {data:?}: ShowSubWindowDialog({dialog:?})");
+                screen.dialog = Some(dialog);
+                screen.follow_up = Some(data);
+                return Some(DialogStep::Release);
+            }
+            None => error!("[craft] rank release {data:?} did not open; the next one is tried"),
+        }
+    }
+    None
 }
 
 /// The dialogs after the hold, one step per frame.
@@ -1341,55 +1470,83 @@ fn advance_dialogs(world: &mut World, screen: &mut CraftScreen) {
                 })
             }
         }
-        DialogStep::Bonus => {
-            if let Some(fixture) = executed.bonus_fixture {
-                show_viewless(
-                    world,
-                    FIXTURE_BONUS_DIALOG,
-                    "CraftPreview.ShowFixtureBonusDialog",
-                    format!("fixture {fixture}"),
-                );
-            }
-            Some(DialogStep::Rank)
-        }
-        DialogStep::Rank => {
-            // `OpenMysekaiRankDialogIfNeededAsync(before, after)`: the two
-            // `MysekaiRankModel` ranks.
-            let refusal = match (&screen.ranks, executed.before_exp, after_exp) {
-                (Some(Ok(rows)), Some(before_exp), Some(after_exp)) => {
-                    let before = get_mysekai_rank(rows, before_exp);
-                    let after = get_mysekai_rank(rows, after_exp);
-                    if before != after {
-                        show_viewless(
-                            world,
-                            RANK_UP_DIALOG,
-                            "MysekaiRankUtility.OpenMysekaiRankUpDialogAsync",
-                            format!(
-                                "rank {before} -> {after} (totalExp {before_exp} -> {after_exp})"
-                            ),
-                        );
-                        error!(
-                            "[craft] OpenMysekaiRankReleaseDialogAsync({before}, {after}): the rank's release dialogs (the status update and the new harvest site) are not built"
-                        );
-                    } else {
+        DialogStep::Bonus { shown: None } => {
+            let data = executed
+                .bonus
+                .as_ref()
+                .and_then(|start| follow_up::bonus_dialog(world, start));
+            match data {
+                Some(data) => match follow_up::open(world, &data) {
+                    Some(dialog) => {
                         info!(
-                            "[craft] OpenMysekaiRankDialogIfNeededAsync: one rank ({before}) for totalExp {before_exp} and {after_exp}; no dialog"
+                            "[craft] ShowFixtureBonusDialog({data:?}): ShowSubWindowDialog(FixtureBonusSubWindowDialog {dialog:?})"
                         );
+                        screen.dialog = Some(dialog);
+                        screen.follow_up = Some(data);
+                        Some(DialogStep::Bonus {
+                            shown: Some(dialog),
+                        })
                     }
-                    None
-                }
-                (Some(Err(reason)), ..) => Some(format!("the rank table is not served ({reason})")),
-                (None, ..) => Some("the rank table has not resolved".to_owned()),
-                _ => Some("the total experience before or after is not seated".to_owned()),
-            };
-            if let Some(reason) = refusal {
-                if !screen.rank_reported {
-                    screen.rank_reported = true;
-                    error!("[craft] OpenMysekaiRankDialogIfNeededAsync: {reason}; no rank dialog");
+                    None => Some(DialogStep::Rank {
+                        shown: None,
+                        before: 0,
+                        after: 0,
+                    }),
+                },
+                None => Some(DialogStep::Rank {
+                    shown: None,
+                    before: 0,
+                    after: 0,
+                }),
+            }
+        }
+        DialogStep::Bonus {
+            shown: Some(dialog),
+        } => {
+            if shown_closed(world, screen, dialog) {
+                Some(DialogStep::Rank {
+                    shown: None,
+                    before: 0,
+                    after: 0,
+                })
+            } else {
+                Some(DialogStep::Bonus {
+                    shown: Some(dialog),
+                })
+            }
+        }
+        DialogStep::Rank { shown: None, .. } => {
+            start_rank(world, screen, &executed, after_exp)
+        }
+        DialogStep::Rank {
+            shown: Some(dialog),
+            before,
+            after,
+        } => {
+            if shown_closed(world, screen, dialog) {
+                screen.release_queue = follow_up::release_dialogs(world, before, after);
+                Some(DialogStep::Release)
+            } else {
+                Some(DialogStep::Rank {
+                    shown: Some(dialog),
+                    before,
+                    after,
+                })
+            }
+        }
+        DialogStep::Release => match screen.dialog {
+            Some(dialog) => {
+                if shown_closed(world, screen, dialog) {
+                    next_release(world, screen)
+                } else {
+                    Some(DialogStep::Release)
                 }
             }
-            None
-        }
+            None => {
+                screen.follow_up = None;
+                next_release(world, screen)
+            }
+        },
     };
     screen.stage = match next {
         Some(next) => Stage::Dialogs {

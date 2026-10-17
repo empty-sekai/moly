@@ -19,6 +19,10 @@ pub(crate) use crate::userdata::client::local::LocalLists;
 
 /// `MysekaiTopicEnum.SiteExpansion`.
 pub(crate) const TOPIC_SITE_EXPANSION: i32 = 1;
+/// `MysekaiTopicEnum.HarvestSiteMapReleased`.
+pub(crate) const TOPIC_HARVEST_SITE_MAP: i32 = 2;
+/// `MysekaiTopicEnum.HarvestSiteDialogReleased`.
+pub(crate) const TOPIC_HARVEST_SITE_DIALOG: i32 = 3;
 /// `MysekaiTopicsManager.MIN_MYSEKAI_RANK_RELEASE`: a rank below it adds no
 /// expansion topic.
 const MIN_MYSEKAI_RANK_RELEASE: i32 = 2;
@@ -272,6 +276,15 @@ impl Masters {
             .map(|(id, _)| *id)
     }
 
+    /// Whether the site's `mysekaiSiteType` is one of the harvest sites
+    /// (`MysekaiSiteCategory.harvest` in the master).
+    fn site_is_harvest(&self, site_id: i32) -> bool {
+        self.site_types
+            .iter()
+            .find(|(id, _)| *id == site_id)
+            .is_some_and(|(_, kind)| matches!(kind.as_str(), "grassland" | "shore" | "flower_garden" | "memorial_place"))
+    }
+
     /// `GetMasterMysekaiRankReleases(from, to)`.
     fn rank_releases(&self, from: i32, to: i32) -> impl Iterator<Item = &RankReleaseRow> {
         self.releases
@@ -352,6 +365,38 @@ impl LocalLists {
         }
         self.topics.push(TOPIC_SITE_EXPANSION);
         true
+    }
+
+    /// `AddHarvestSiteReleasedTopicIfNeeded(prev, current)`: when a rank
+    /// release in `(prev, current]` is a site-level row whose site is a
+    /// harvest site and the new rank is above 1, add both harvest topics
+    /// (each only when absent). True when either was added.
+    pub(crate) fn add_harvest_site_topics_if_needed(
+        &mut self,
+        masters: &Masters,
+        prev: i32,
+        current: i32,
+    ) -> bool {
+        if current <= 1 {
+            return false;
+        }
+        let harvest = masters.rank_releases(prev, current).any(|row| {
+            row.kind == SITE_LEVEL
+                && masters
+                    .site_level(row.external_id)
+                    .is_some_and(|level| masters.site_is_harvest(level.site_id))
+        });
+        if !harvest {
+            return false;
+        }
+        let mut added = false;
+        for topic in [TOPIC_HARVEST_SITE_MAP, TOPIC_HARVEST_SITE_DIALOG] {
+            if !self.has_topic(topic) {
+                self.topics.push(topic);
+                added = true;
+            }
+        }
+        added
     }
 
     /// `GetUnlockMasterMysekaiSiteLevel(rank, siteId)`.

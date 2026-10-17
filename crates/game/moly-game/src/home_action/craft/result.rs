@@ -342,6 +342,9 @@ pub(crate) fn click(
             ..
         } => dialog,
         _ => {
+            if screen.follow_up.is_some() {
+                return;
+            }
             gestures.clear();
             back_keys.clear();
             return;

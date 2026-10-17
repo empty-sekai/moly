@@ -230,11 +230,15 @@ fn apply_rank_change(
     let added = local
         .0
         .add_topic_if_needed(&masters, pending.prev, pending.current);
+    let harvest = local
+        .0
+        .add_harvest_site_topics_if_needed(&masters, pending.prev, pending.current);
     info!(
-        "[site-expansion] MysekaiTopicsManager.AddTopicIfNeeded(rank {} -> {}): AddSiteExpansionTopicIfNeeded {}; topics {:?}, UnlockedMasterSiteLevelIds {:?}",
+        "[site-expansion] MysekaiTopicsManager.AddTopicIfNeeded(rank {} -> {}): AddSiteExpansionTopicIfNeeded {}; AddHarvestSiteReleasedTopicIfNeeded {}; topics {:?}, UnlockedMasterSiteLevelIds {:?}",
         pending.prev,
         pending.current,
         if added { "added topic 1 (SiteExpansion)" } else { "added nothing" },
+        if harvest { "added topics 2 (HarvestSiteMapReleased) and 3 (HarvestSiteDialogReleased)" } else { "added nothing" },
         local.0.topics,
         local.0.unlocked_master_site_level_ids
     );

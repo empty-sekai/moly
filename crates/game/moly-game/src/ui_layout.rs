@@ -268,6 +268,10 @@ const OPTIONAL_DOCUMENTS: &[(&str, &str)] = &[
     ("CraftTabCell", "inventory/ContentListSelectorCell.json"),
     ("CraftCell", "craft/CraftThumbnailViewItem.json"),
     ("CraftResult", "craft/CraftResultSubWindowDialog.json"),
+    ("CraftBonus", "craft/FixtureBonusSubWindowDialog.json"),
+    ("CraftRankUp", "craft/MysekaiRankUpDialog.json"),
+    ("CraftStatus", "craft/MysekaiPlayerStatusUpdateDialog.json"),
+    ("CraftNewSite", "craft/MysekaiNewHarvestSiteOpenDialog.json"),
 ];
 
 /// How a region's `WordingManager.Get` answers a key its dictionary lacks
