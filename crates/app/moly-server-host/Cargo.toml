@@ -10,4 +10,5 @@ path = "src/main.rs"
 
 [dependencies]
 moly-server = { path = "../../server/moly-server" }
-bevy = { version = "0.18.1", default-features = false, features = ["std", "bevy_log", "async_executor", "multi_threaded"] }
+moly-assets = { path = "../../engine/moly-assets", default-features = false }
+bevy = { version = "0.18.1", default-features = false, features = ["std", "bevy_asset", "bevy_log", "async_executor", "multi_threaded"] }

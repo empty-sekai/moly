@@ -48,7 +48,10 @@ fn run_until(game: &mut App, server: Option<&mut App>, done: impl Fn(&World) -> 
 #[test]
 fn a_join_is_answered_by_the_server() {
     let mut server = App::new();
+    // The server needs its master tables before it answers; a test seats the
+    // synthetic set instead of loading them through an asset source.
     server
+        .insert_resource(moly_server::Masters::fixture())
         .add_plugins(MinimalPlugins)
         .add_plugins(moly_server::ServerPlugin);
     let address = moly_server::ws::listen("127.0.0.1:0", moly_server::hub(&server)).unwrap();
@@ -107,6 +110,7 @@ fn a_server_that_starts_after_the_game_is_reached() {
     assert_eq!(*game.world().resource::<ServerLink>().state(), LinkState::Connecting);
     let mut server = App::new();
     server
+        .insert_resource(moly_server::Masters::fixture())
         .add_plugins(MinimalPlugins)
         .add_plugins(moly_server::ServerPlugin);
     moly_server::ws::listen(&format!("127.0.0.1:{port}"), moly_server::hub(&server)).unwrap();

@@ -10,19 +10,24 @@ mod http_directory;
 #[cfg(any(target_arch = "wasm32", test))]
 mod http_path;
 pub mod material_passes;
+#[cfg(feature = "render")]
 pub mod source_shader;
+pub mod asset_source;
 pub mod weather_effect;
 pub mod weather_index;
 pub mod weather_icons;
 pub mod particle_geometry;
 pub mod particle_source;
 pub mod weather_timeline;
+#[cfg(feature = "render")]
 pub mod material_textures;
 mod packs;
 pub mod player_data;
 mod read_limits;
 pub mod remote;
+#[cfg(feature = "render")]
 pub mod residency;
+#[cfg(feature = "render")]
 pub mod scene_state;
 pub mod sidecar;
 pub mod source_navigation;

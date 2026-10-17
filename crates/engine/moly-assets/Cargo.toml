@@ -4,9 +4,19 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["render"]
+# The renderer-side asset types: glTF scenes, images and shader programs. A
+# headless consumer (the server) builds this crate without it.
+render = ["bevy/bevy_gltf", "bevy/bevy_image", "bevy/bevy_scene", "bevy/bevy_shader"]
+
 [dependencies]
 moly-law = { path = "../../base/moly-law" }
-bevy = { workspace = true }
+bevy = { version = "0.18.1", default-features = false, features = [
+    "std", "bevy_asset", "bevy_log", "async_executor", "multi_threaded",
+    # The remote asset reader (moly-assets/src/remote.rs) on the browser.
+    "https",
+] }
 gltf = { version = "1.4", default-features = false }
 # 清单类提取产物（manifest.json / characters.json）与站点 sidecar 的解析；
 # schema 归本 crate 的 character/sidecar 模块，解析只发生在装载边界这一次。
@@ -22,6 +32,8 @@ tokio = { version = "1", default-features = false, features = ["sync"] }
 # Native remote reads (`remote`): the whole transfer runs on the blocking
 # thread pool with bounded waits, through the client Bevy's web reader uses.
 blocking = "1.6"
+# The native asset root falls back to the resources the launcher installed.
+moly-store = { path = "../../base/moly-store" }
 ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

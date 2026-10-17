@@ -4,23 +4,73 @@
 //! ([`moly_protocol::Call`]). It runs as a headless Bevy app: natively as
 //! its own process behind a WebSocket listener ([`ws`]), and in the browser
 //! inside a worker. Transports reach it only through a [`hub::Hub`].
+//!
+//! The model itself ([`model`]) holds every server-decided value and the
+//! rules over them. [`MasterLoadPlugin`] loads the master tables the model
+//! reads (the host adds it with the asset source; a harness seats a
+//! [`Masters`] fixture instead); [`users`] keeps one model per user and its
+//! stored document; [`dispatch`] answers each call; [`admin`] serves the
+//! control plane's document and schema views, an edit, and the seed install.
 
-pub mod hub;
+mod admin;
+mod defaults;
+mod dispatch;
+mod hub;
+mod instrument;
+mod masters;
+mod model;
+mod users;
+
+pub mod store;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod ws;
 
+pub use hub::Hub;
+pub use masters::Masters;
+pub use store::{DocumentStore, Store};
+pub use moly_masters::clock::RefreshPeriod;
+pub use moly_masters::StaminaMax;
+
 use bevy::prelude::*;
-use moly_protocol::{Call, Reply, Sections, ServerMessage};
 
-use hub::{CallReceived, Sessions};
+/// Loads the master tables through the asset source. The host adds it after
+/// `AssetPlugin` and the `moly://` asset source; a harness that seats a
+/// [`Masters`] resource itself (see [`Masters::fixture`]) does not add it.
+pub struct MasterLoadPlugin;
 
-/// The server: sessions and the API handlers.
+impl Plugin for MasterLoadPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<Masters>()
+            .init_resource::<masters::Parties>();
+        masters::install(app);
+    }
+}
+
+/// The server: sessions, the users' documents and the API handlers.
 pub struct ServerPlugin;
 
 impl Plugin for ServerPlugin {
     fn build(&self, app: &mut App) {
+        instrument::install();
         hub::install(app);
-        app.add_systems(Update, answer);
+        app.init_resource::<Masters>();
+        app.init_resource::<masters::Parties>();
+        defaults::install(app);
+        if !app.world().contains_resource::<Store>() {
+            app.insert_resource(Store::memory());
+        }
+        users::install(app);
+        app.add_systems(
+            Update,
+            (
+                dispatch::answer_calls,
+                users::tick,
+                users::seat_parties,
+                users::flush_pushes,
+                users::save_changed,
+            )
+                .chain(),
+        );
     }
 }
 
@@ -30,30 +80,4 @@ pub fn hub(app: &App) -> hub::Hub {
         .get_resource::<hub::Hub>()
         .cloned()
         .expect("ServerPlugin is installed")
-}
-
-/// The server clock in milliseconds since the Unix epoch.
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_millis() as i64)
-}
-
-fn answer(mut calls: MessageReader<CallReceived>, sessions: Res<Sessions>) {
-    for call in calls.read() {
-        let reply = match call.call {
-            Call::Join => Reply::Joined,
-        };
-        sessions.send(
-            call.session,
-            &ServerMessage::Reply {
-                seq: call.seq,
-                outcome: Ok(reply),
-                sections: Some(Box::new(Sections {
-                    server_date_ms: now_ms(),
-                    ..Sections::default()
-                })),
-            },
-        );
-    }
 }

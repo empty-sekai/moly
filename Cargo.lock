@@ -4898,6 +4898,7 @@ dependencies = [
  "gltf",
  "js-sys",
  "moly-law",
+ "moly-store",
  "serde",
  "serde_json",
  "sha2",
@@ -5028,10 +5029,17 @@ dependencies = [
  "async-channel",
  "bevy",
  "futures-util",
+ "js-sys",
+ "libc",
+ "moly-assets",
+ "moly-law",
+ "moly-masters",
  "moly-protocol",
+ "serde_json",
  "tokio",
  "tokio-tungstenite",
  "tungstenite",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -5039,6 +5047,7 @@ name = "moly-server-host"
 version = "0.0.3"
 dependencies = [
  "bevy",
+ "moly-assets",
  "moly-server",
 ]
 

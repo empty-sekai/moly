@@ -208,7 +208,5 @@ fn pump(
 }
 
 fn call_name(call: &Call) -> &'static str {
-    match call {
-        Call::Join => "join",
-    }
+    call.name()
 }

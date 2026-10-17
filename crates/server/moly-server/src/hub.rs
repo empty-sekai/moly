@@ -57,7 +57,7 @@ impl Hub {
 }
 
 #[derive(Resource)]
-struct HubInbox(async_channel::Receiver<HubEvent>);
+pub(crate) struct HubInbox(async_channel::Receiver<HubEvent>);
 
 /// A session after its transport opened it.
 struct Session {
@@ -95,6 +95,20 @@ impl Sessions {
 
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// The sessions a user has open.
+    pub fn sessions_of<'a>(&'a self, user: &'a UserId) -> impl Iterator<Item = SessionId> + 'a {
+        self.0.iter().filter_map(move |(session, open)| {
+            (open.user.as_ref() == Some(user)).then_some(*session)
+        })
+    }
+
+    /// Sends one message to every open session of a user.
+    pub fn broadcast(&self, user: &UserId, message: &ServerMessage) {
+        for session in self.sessions_of(user) {
+            self.send(session, message);
+        }
     }
 }
 
@@ -145,7 +159,7 @@ pub(crate) fn install(app: &mut App) -> Hub {
 }
 
 /// Takes every event the transports reported since the last frame.
-fn pump(
+pub(crate) fn pump(
     inbox: Res<HubInbox>,
     mut sessions: ResMut<Sessions>,
     mut calls: MessageWriter<CallReceived>,

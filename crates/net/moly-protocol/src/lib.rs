@@ -21,6 +21,12 @@
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::api::{
+    BirthdayPartyDeliveryRequest, BirthdayPartyGatherRequest, CharacterTalkReadRequest,
+    GateChangeRequest, GateReserveRequest, HarvestRequest, HomeActionPost, MusicPlayEjectRequest,
+    MusicPlaySetRequest, SystemFixtureActionRequest, UserMysekaiCraftRequest,
+    UserMysekaiHousingEditLayoutRequest, UserMysekaiHousingSketchRequest,
+};
 use crate::rows::{
     ColorfulPass, DeliveryUpdate, Gamedata, MusicPlaySetting, OwnedMusicRecord, ScheduleRow,
     Stamina, SuiteUserSections, UserAvatar, UserMysekaiSystemFixtureAction, UserMysekaiTool,
@@ -122,11 +128,87 @@ pub enum PushKind {
     BirthdayPartySeat,
 }
 
-/// A request. Filled in by the API modules.
+/// A request. One variant per endpoint the game calls, carrying the request
+/// the endpoint takes.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Call {
-    /// The join: the server seats the user and answers with every section.
+    /// `PostUserMysekaiApi`: the server seats the user and answers with every
+    /// section.
     Join,
+    /// `PostUserMysekaiHarvestApi`.
+    Harvest(HarvestRequest),
+    /// `PostUserMysekaiGatherApi`.
+    Gather,
+    /// `PostUserMysekaiGateReserveApi`.
+    GateReserve(GateReserveRequest),
+    /// `PostUserMysekaiGateChangeApi`.
+    GateChange(GateChangeRequest),
+    /// `PutUserMysekaiBirthdayPartyDeliveryApi`.
+    BirthdayPartyDelivery(BirthdayPartyDeliveryRequest),
+    /// `PutUserMysekaiBirthdayPartyGatherApi`.
+    BirthdayPartyGather(BirthdayPartyGatherRequest),
+    /// The craft, canvas and sketch screens' requests.
+    HomeAction(HomeActionPost),
+    /// `PostUserMysekaiCraftApi`.
+    Craft(UserMysekaiCraftRequest),
+    /// `PostUserMysekaiHousingSketchApi`.
+    HousingSketch(UserMysekaiHousingSketchRequest),
+    /// `PostUserMysekaiHousingLayoutApi`.
+    HousingLayout(UserMysekaiHousingEditLayoutRequest),
+    /// `PutUserMysekaiCharacterTalkReadApi`.
+    CharacterTalkRead(CharacterTalkReadRequest),
+    /// `PutUserMysekaiMusicPlaySetApi`.
+    MusicPlaySet(MusicPlaySetRequest),
+    /// `PutUserMysekaiMusicPlayEjectApi`.
+    MusicPlayEject(MusicPlayEjectRequest),
+    /// `PostUserMysekaiSystemFixtureActionApi`.
+    SystemFixtureAction(SystemFixtureActionRequest),
+    /// The control plane's calls: the document and the schema, an edit, and
+    /// the browser game's seed install.
+    Admin(AdminCall),
+}
+
+impl Call {
+    /// The call's name, for logs and for a refused link's notice.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Join => "join",
+            Self::Harvest(_) => "harvest",
+            Self::Gather => "gather",
+            Self::GateReserve(_) => "gate reserve",
+            Self::GateChange(_) => "gate change",
+            Self::BirthdayPartyDelivery(_) => "birthday party delivery",
+            Self::BirthdayPartyGather(_) => "birthday party gather",
+            Self::HomeAction(_) => "home action",
+            Self::Craft(_) => "craft",
+            Self::HousingSketch(_) => "housing sketch",
+            Self::HousingLayout(_) => "housing layout",
+            Self::CharacterTalkRead(_) => "character talk read",
+            Self::MusicPlaySet(_) => "music play set",
+            Self::MusicPlayEject(_) => "music play eject",
+            Self::SystemFixtureAction(_) => "system fixture action",
+            Self::Admin(_) => "admin",
+        }
+    }
+}
+
+/// The control plane's requests. Their replies carry JSON text, which the
+/// caller parses: a document or schema view, an edit's receipt, or the seed
+/// install's result.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum AdminCall {
+    /// Apply one `server.edit` command, as JSON text.
+    Edit { command_json: String },
+    /// The editable fields of the document.
+    Schema,
+    /// The document with its clock, the pending sections and the errors.
+    Document,
+    /// Install the browser game's seed documents into the server: the server
+    /// document replaces the user's, and the local document is the page's.
+    Install {
+        server_json: Option<String>,
+        local_json: Option<String>,
+    },
 }
 
 /// A request's own answer, beside the sections it carries.
@@ -134,6 +216,28 @@ pub enum Call {
 pub enum Reply {
     /// The join's answer.
     Joined,
+    /// The harvest reply's stamina.
+    Harvest(Stamina),
+    /// The gather reply's stamina (`None` while the pools are unseated).
+    Gather(Option<Stamina>),
+    /// A gate reserve or gate change reply, for the gate presenter.
+    Gate(crate::gate::GateReply),
+    /// The birthday-party delivery reply.
+    Delivery(crate::api::DeliveryResponse),
+    /// The birthday-party gather reply.
+    GatherDelivery(crate::api::GatherResponse),
+    /// A home action's reply.
+    HomeAction(crate::api::HomeActionReply),
+    /// A `SuiteUser` reply: a craft, canvas, sketch or layout save.
+    SuiteUser(crate::api::SuiteUserReply),
+    /// The talk read report's reply.
+    TalkRead(crate::api::TalkReadReply),
+    /// The music player's reply.
+    MusicPlay(crate::api::MusicPlayReply),
+    /// The system fixture action's reply.
+    SystemFixtureAction(crate::api::SystemFixtureActionReply),
+    /// An administration answer, as JSON text.
+    Admin(String),
 }
 
 /// The user data tables a response carries. A `None` field is not carried and
@@ -219,6 +323,23 @@ mod tests {
             ClientMessage::Call {
                 seq: 7,
                 call: Call::Join,
+            },
+            ClientMessage::Call {
+                seq: 8,
+                call: Call::Craft(UserMysekaiCraftRequest {
+                    blueprint_id: 1,
+                    texture_id: Some(2),
+                    card_id: None,
+                    is_special_training: None,
+                    quantity: 3,
+                }),
+            },
+            ClientMessage::Call {
+                seq: 9,
+                call: Call::Admin(AdminCall::Install {
+                    server_json: Some("{}".to_owned()),
+                    local_json: None,
+                }),
             },
         ];
         for message in messages {

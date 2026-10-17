@@ -249,3 +249,55 @@ pub struct UserMysekaiHousingEditLayoutRequest {
     /// fixture of the site.
     pub fixtures: Vec<HousingLayoutFixture>,
 }
+
+/// `PostUserMysekaiHarvestApi`: the rests the client sends. The reply's
+/// stamina is these, unless a server-side stamina edit is pending.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarvestRequest {
+    pub normal: i32,
+    pub enhance: i32,
+    pub boost: i32,
+}
+
+/// `PostUserMysekaiGateReserveApi`: the selected character unit group.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GateReserveRequest {
+    pub mysekai_game_character_unit_group_id: i32,
+}
+
+/// `PostUserMysekaiGateChangeApi`: the home gate's new gate, skin and the
+/// unit groups that then visit it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GateChangeRequest {
+    pub mysekai_gate_id: i32,
+    pub mysekai_gate_skin_id: i32,
+    pub mysekai_game_character_unit_group_ids: Vec<i32>,
+}
+
+/// `PutUserMysekaiBirthdayPartyDeliveryApi`: the party and the delivery
+/// material the client spends on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BirthdayPartyDeliveryRequest {
+    pub birthday_party_id: i32,
+    pub consumed_delivery_material_count: i32,
+}
+
+/// `PutUserMysekaiBirthdayPartyGatherApi`: the count gathered from each
+/// party.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BirthdayPartyGatherRequest {
+    pub contents: Vec<GatherContent>,
+}
+
+/// `PutUserMysekaiCharacterTalkReadApi`: the talk that was read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CharacterTalkReadRequest {
+    pub mysekai_character_talk_id: i32,
+}
+
+/// `PostUserMysekaiSystemFixtureActionApi`: the system fixture that was
+/// actioned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemFixtureActionRequest {
+    pub mysekai_system_fixture_id: i32,
+}

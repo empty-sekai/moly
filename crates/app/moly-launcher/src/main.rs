@@ -205,8 +205,16 @@ fn drain(
 }
 
 /// Starts the server beside the game, gives its streams to the log and returns
-/// it with the address it announced.
-fn start_server(game: &Path, log: &std::fs::File) -> Result<(Server, String), String> {
+/// it with the address it announced. The server reads the same asset root and
+/// developer flag as the game; its documents live below `MOLY_SERVER_DATA`.
+fn start_server(
+    game: &Path,
+    log: &std::fs::File,
+    assets: &Path,
+    catalog: &str,
+    developer: bool,
+    data: &Path,
+) -> Result<(Server, String), String> {
     let exe = game.with_file_name(SERVER_FILE);
     if !exe.is_file() {
         return Err(format!(
@@ -222,6 +230,10 @@ fn start_server(game: &Path, log: &std::fs::File) -> Result<(Server, String), St
         .current_dir(exe.parent().unwrap_or_else(|| Path::new(".")))
         // Port 0 asks the system for a free port; the server announces it.
         .env("MOLY_SERVER_ADDR", "127.0.0.1:0")
+        .env("MOLY_ASSET_ROOT", assets)
+        .env("MOLY_ASSET_CATALOG", catalog)
+        .env("MOLY_DEV", if developer { "1" } else { "0" })
+        .env("MOLY_SERVER_DATA", data.join("server"))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -593,7 +605,14 @@ fn launch(snapshot: String, state: State<'_, Launcher>) -> Result<(), String> {
     let err = log.try_clone().map_err(|error| error.to_string())?;
     // A server left by the last game ends before this one starts.
     state.stop_server();
-    let (mut server, url) = start_server(&exe, &log)?;
+    let (mut server, url) = start_server(
+        &exe,
+        &log,
+        &dir,
+        &installed.catalog,
+        config.developer,
+        &data,
+    )?;
     let mut command = Command::new(&exe);
     command
         .current_dir(exe.parent().unwrap_or(&dir))

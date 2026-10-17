@@ -4,19 +4,30 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# The game's server: sessions, the user documents and the API handlers. It
+# The game's server: sessions, the users' documents and the API handlers. It
 # runs headless (no window, renderer or UI), natively as its own process and
 # in the browser as a worker.
 [dependencies]
 moly-protocol = { path = "../../net/moly-protocol" }
-bevy = { version = "0.18.1", default-features = false, features = ["std", "bevy_log", "async_executor", "multi_threaded"] }
+moly-masters = { path = "../../game/moly-masters" }
+moly-assets = { path = "../../engine/moly-assets", default-features = false }
+moly-law = { path = "../../base/moly-law" }
+bevy = { version = "0.18.1", default-features = false, features = ["std", "bevy_asset", "bevy_log", "async_executor", "multi_threaded"] }
+serde_json = { workspace = true }
 async-channel = "2.5"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The server clock reads the device's local time (localtime_s / localtime_r).
+libc = "0.2"
 # The native host's WebSocket listener runs on its own thread.
 tokio = { version = "1", default-features = false, features = ["rt", "net", "sync", "macros"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# The server clock on a browser: the page's wall clock and its time zone.
+js-sys = "0.3"
+wasm-bindgen = "0.2"
 
 [dev-dependencies]
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }

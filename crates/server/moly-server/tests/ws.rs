@@ -7,10 +7,14 @@ use bevy::prelude::*;
 use moly_protocol::{
     decode, encode, Call, ClientMessage, Reply, ServerMessage, UserId, PROTOCOL_VERSION,
 };
+use moly_server::Masters;
 use tungstenite::Message;
 
 fn server() -> (App, std::net::SocketAddr) {
     let mut app = App::new();
+    // A harness seats the masters it drives the model with; the server then
+    // loads none.
+    app.insert_resource(Masters::fixture());
     app.add_plugins(MinimalPlugins)
         .add_plugins(moly_server::ServerPlugin);
     let address = moly_server::ws::listen("127.0.0.1:0", moly_server::hub(&app)).unwrap();
