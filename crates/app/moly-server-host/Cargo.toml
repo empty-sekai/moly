@@ -1,0 +1,13 @@
+[package]
+name = "moly-server-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "moly-server"
+path = "src/main.rs"
+
+[dependencies]
+moly-server = { path = "../../server/moly-server" }
+bevy = { version = "0.18.1", default-features = false, features = ["std", "bevy_log", "async_executor", "multi_threaded"] }

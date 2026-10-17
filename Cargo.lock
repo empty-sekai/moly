@@ -5020,6 +5020,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "moly-server-host"
+version = "0.0.3"
+dependencies = [
+ "bevy",
+ "moly-server",
+]
+
+[[package]]
 name = "moly-store"
 version = "0.0.3"
 dependencies = [
