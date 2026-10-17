@@ -50,7 +50,7 @@ For Claude Desktop, add the server to `claude_desktop_config.json`, using the ab
 
 ## Tools
 
-The server provides 20 tools.
+The server provides 21 tools.
 
 | Tool | Purpose |
 |---|---|
@@ -74,6 +74,7 @@ The server provides 20 tools.
 | `layout_view` | Reads the layout editor: whether it is active, its phase and site, the selected fixture with its put status, the placed rows, the storage, the dialogs, whether it can save, and its last feedback. Rows carry `uid`, `fixture_id`, `texture_id`, `center` (`[x, y, z]` in tiles), `direction` and `grid_size`. The owned catalogue is replaced by `catalog_rows` unless `catalog` is true. |
 | `layout_command` | Sends one layout editor command (`command`, plus `index`, `uid`, `center`, or `x` and `z` as the command needs; see `moly.layout.command`) and returns the editor view once two game frames have run after the request. `move_to` takes the touched tile of a drag: an even-sized fixture's reported center can differ from it by a tile, and y follows the column height. A command the editor refuses answers through `feedback` and the selection's `put_status`. |
 | `layout_place` | Places one owned fixture: opens the editor when it is closed, selects the first catalogue row of `fixture_id` (and `texture_id`) with a placeable copy, turns it a quarter turn `rotate` times (0 to 3), moves it until the center the view reports is on the x and z of `center` (y follows the column height), and decides it when its put status is `ok` (`decide` false stops before that). Returns `{placed, uid, center, direction, put_status, reason, row, view}`. A refused put leaves the fixture selected and is a tool error. Saving is a separate `save` or `save_and_exit` command. |
+| `layout_place_many` | Places many owned fixtures in one call: runs the `layout_place` sequence for each placement (`fixture_id`, `texture_id`, `center`, `rotate`, `decide`) and returns `{placed, failed, results}` with each item's `uid`, `center`, `direction` and `put_status`. A refused or failed placement is cancelled and the batch continues; `save_every` saves every N placements (0, the default, leaves saving to the caller). |
 
 Relative paths given to `native_launch` (`exe`, `cwd`) and to `browser_launch` (`chrome`, when it contains a path separator) resolve against the directory the server runs in.
 

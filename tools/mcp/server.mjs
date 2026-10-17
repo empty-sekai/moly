@@ -1078,6 +1078,77 @@ server.registerTool(
   }),
 );
 
+server.registerTool(
+  'layout_place_many',
+  {
+    description:
+      'Place many owned fixtures in one call: runs the layout_place sequence for each placement (same fields: fixture_id, texture_id?, center, rotate?, decide?) and records each result. A refused or failed placement is cancelled and the batch continues; the answer is {placed, failed, results} with the per-item uid, center, direction and put_status. save_every saves every N placements (0, the default, leaves saving to the caller).',
+    inputSchema: {
+      id: z.string(),
+      placements: z
+        .array(
+          z.object({
+            fixture_id: z.number().int(),
+            texture_id: z.number().int().optional(),
+            center: tile,
+            rotate: z.number().int().min(0).max(3).optional(),
+            decide: z.boolean().optional(),
+          }),
+        )
+        .min(1),
+      save_every: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .describe('Save every N placements; 0 (default) leaves saving to the caller'),
+    },
+  },
+  guard('layout_place_many', async ({ id, placements, save_every = 0 }) => {
+    const inst = getInstance(id);
+    const results = [];
+    let placed = 0;
+    let failed = 0;
+    for (let index = 0; index < placements.length; index++) {
+      const item = placements[index];
+      try {
+        const out = await layoutPlace(inst, item);
+        const ok = out.placed === true;
+        if (ok) placed += 1;
+        else failed += 1;
+        results.push({
+          index,
+          ...item,
+          ok,
+          uid: out.uid,
+          center: out.center,
+          direction: out.direction,
+          put_status: out.put_status,
+          ...(out.reason === undefined ? {} : { reason: out.reason }),
+        });
+      } catch (err) {
+        failed += 1;
+        results.push({ index, ...item, ok: false, error: err.message });
+        // A refused put can leave its fixture selected; clear it so the next
+        // placement starts from the browsing phase.
+        try {
+          await layoutCommand(inst, { command: 'cancel' });
+        } catch {
+          /* the selection may already be gone */
+        }
+      }
+      if (save_every > 0 && (index + 1) % save_every === 0) {
+        try {
+          await layoutCommand(inst, { command: 'save' });
+        } catch {
+          /* a save confirmation is the caller's to answer */
+        }
+      }
+    }
+    return json({ placed, failed, results }, failed > 0);
+  }),
+);
+
 // Kill every child this server still owns when it exits, native or browser.
 // Synchronous on purpose: this runs from the 'exit' event.
 function killOwnedChildrenSync() {
