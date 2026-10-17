@@ -654,7 +654,7 @@ pub(crate) fn apply_button_node(world: &mut World) -> Option<(&'static str, Stri
     roots
         .iter(world)
         .next()
-        .map(|root| (SCREEN, root.bindings.apply_button.clone()))
+        .map(|root| (RUNTIME, root.bindings.apply_button.clone()))
 }
 
 #[derive(Component)]

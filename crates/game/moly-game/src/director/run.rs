@@ -1419,6 +1419,23 @@ impl CraftStep {
                 _ => Poll::Running("waiting for the confirm".into()),
             },
             CraftStepPhase::Craft => match screen {
+                CraftPhase::Dialogs
+                    if world
+                        .get_resource::<crate::ui_layers::ScreenManager>()
+                        .is_some_and(crate::ui_layers::ScreenManager::exists_dialog) =>
+                {
+                    self.executed = true;
+                    // The follow-up dialogs (bonus, rank-up, new site, status)
+                    // close on the back key, as on their close buttons.
+                    if now - self.input_at > 1.0 {
+                        self.input_at = now;
+                        if let Err(error) = hand::back_key(world) {
+                            return Poll::Running(error.to_owned());
+                        }
+                        return Poll::Running("a follow-up dialog shows; the back key closes it".into());
+                    }
+                    Poll::Running("a follow-up dialog shows".into())
+                }
                 CraftPhase::Executing | CraftPhase::Dialogs | CraftPhase::Done => {
                     self.executed = true;
                     Poll::Running(format!("crafting ({screen:?})"))
@@ -1675,14 +1692,23 @@ impl LayoutPlace {
                         at.x, at.y, at.z, self.center[0], self.center[2], view.feedback
                     ));
                 }
-                // move_to takes the tile a drag touched; the difference
-                // between it and the reported center is added on the next
-                // send, as a drag correcting itself does.
-                let target = [
-                    self.target[0] + self.center[0] as i32 - at.x as i32,
-                    self.center[1] as i32,
-                    self.target[2] + self.center[2] as i32 - at.z as i32,
-                ];
+                // The first move names the requested tile itself, as the
+                // proxy's sequence does; later moves add the difference
+                // between the last touched tile and the centre the editor
+                // reports, as a drag correcting itself does.
+                let target = if self.moves == 0 {
+                    [
+                        self.center[0] as i32,
+                        self.center[1] as i32,
+                        self.center[2] as i32,
+                    ]
+                } else {
+                    [
+                        self.target[0] + self.center[0] as i32 - at.x as i32,
+                        self.center[1] as i32,
+                        self.target[2] + self.center[2] as i32 - at.z as i32,
+                    ]
+                };
                 let (Ok(x), Ok(y), Ok(z)) = (
                     i8::try_from(target[0]),
                     i8::try_from(target[1]),
