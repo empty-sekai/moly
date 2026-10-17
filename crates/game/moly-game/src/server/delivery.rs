@@ -482,11 +482,11 @@ pub(crate) fn party_value(row: BirthdayPartyRow) -> Value {
     })
 }
 
-fn honor_value(row: HonorRow) -> Value {
+pub(crate) fn honor_value(row: HonorRow) -> Value {
     json!({"honorId": row.honor_id, "level": row.level, "obtainedAt": row.obtained_at})
 }
 
-fn quantities_value(map: &BTreeMap<i32, i32>, id_key: &str) -> Value {
+pub(crate) fn quantities_value(map: &BTreeMap<i32, i32>, id_key: &str) -> Value {
     Value::Array(
         map.iter()
             .map(|(id, quantity)| json!({id_key: id, "quantity": quantity}))
@@ -770,101 +770,7 @@ impl DeliveryUpdate {
     }
 }
 
-/// The client's copies of the delivery user data (`UserDataManager`) and of
-/// the two master configs (`MasterDataManager`), set by responses only.
-#[derive(Resource, Debug, Clone, Default)]
-pub(crate) struct ClientBirthdayPartyData {
-    parties: Vec<BirthdayPartyRow>,
-    materials: BTreeMap<i32, i32>,
-    mysekai_materials: BTreeMap<i32, i32>,
-    cards: BTreeSet<i64>,
-    honors: Vec<HonorRow>,
-    configs: BTreeMap<String, i32>,
-    /// Responses that carried a delivery section.
-    pub(crate) revision: u64,
-}
-
-#[allow(dead_code)] // Read by the delivery owner's seam.
-impl ClientBirthdayPartyData {
-    /// `UserDataManager.GetUserBirthdayParty(id)`.
-    pub(crate) fn user_birthday_party(&self, birthday_party_id: i32) -> Option<&BirthdayPartyRow> {
-        self.parties
-            .iter()
-            .find(|row| row.birthday_party_id == birthday_party_id)
-    }
-
-    /// `UserDataUtility.GetHaveQuantity(id, ResourceType.material)`: 0
-    /// without a row.
-    pub(crate) fn have_quantity(&self, material_id: i32) -> i32 {
-        self.materials.get(&material_id).copied().unwrap_or(0)
-    }
-
-    /// The `userMysekaiMaterials` quantity: 0 without a row.
-    pub(crate) fn mysekai_material_quantity(&self, mysekai_material_id: i32) -> i32 {
-        self.mysekai_materials
-            .get(&mysekai_material_id)
-            .copied()
-            .unwrap_or(0)
-    }
-
-    /// The `userMysekaiMaterials` rows: mysekai material id -> quantity.
-    pub(crate) fn mysekai_materials(&self) -> &BTreeMap<i32, i32> {
-        &self.mysekai_materials
-    }
-
-    /// The card ids of `userCards` (`UserDataManager.GetCard(id) != null`).
-    pub(crate) fn cards(&self) -> &BTreeSet<i64> {
-        &self.cards
-    }
-
-    pub(crate) fn honors(&self) -> &[HonorRow] {
-        &self.honors
-    }
-
-    /// `MasterDataManager.GetMasterConfigToInt(key)`; `None` before the
-    /// join delivered it.
-    pub(crate) fn master_config_int(&self, key: &str) -> Option<i32> {
-        self.configs.get(key).copied()
-    }
-
-    /// `updatedResources`: the carried sections replace the copies.
-    pub(crate) fn apply(&mut self, update: DeliveryUpdate) {
-        if update.is_empty() {
-            return;
-        }
-        if let Some(parties) = update.parties {
-            self.parties = parties;
-        }
-        if let Some(materials) = update.materials {
-            self.materials = materials;
-        }
-        if let Some(materials) = update.mysekai_materials {
-            self.mysekai_materials = materials;
-        }
-        if let Some(cards) = update.cards {
-            self.cards = cards;
-        }
-        if let Some(honors) = update.honors {
-            self.honors = honors;
-        }
-        if let Some(configs) = update.configs {
-            self.configs = configs;
-        }
-        self.revision += 1;
-    }
-
-    pub(crate) fn view(&self) -> Value {
-        json!({
-            SECTION_BIRTHDAY_PARTIES: self.parties.iter().map(|row| party_value(*row)).collect::<Vec<_>>(),
-            SECTION_MATERIALS: quantities_value(&self.materials, "materialId"),
-            SECTION_MYSEKAI_MATERIALS: quantities_value(&self.mysekai_materials, "mysekaiMaterialId"),
-            "userCardCount": self.cards.len(),
-            SECTION_HONORS: self.honors.iter().map(|row| honor_value(*row)).collect::<Vec<_>>(),
-            SECTION_MASTER_CONFIGS: self.configs,
-            "revision": self.revision,
-        })
-    }
-}
+pub(crate) use crate::userdata::birthday_party::ClientBirthdayPartyData;
 
 /// The delivery reply (`UserBirthdayPartyDeliveryResponse`); its
 /// `updatedResources` are already in the client's copies.

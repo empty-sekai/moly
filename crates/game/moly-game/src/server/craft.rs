@@ -750,7 +750,7 @@ pub(crate) fn install(app: &mut App) {
     super::talk_read::install(app);
     app.add_systems(
         PreUpdate,
-        super::inventory::mirror_materials.after(super::deliver),
+        super::inventory::mirror_materials.after(crate::userdata::deliver),
     );
 }
 

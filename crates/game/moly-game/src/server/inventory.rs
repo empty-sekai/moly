@@ -54,9 +54,9 @@ use serde_json::{json, Map, Value};
 use super::client::craft::MasterBlueprint;
 use super::client::inventory::character_talks_value;
 use super::client::inventory::{
-    blueprints_value, canvases_value, fixtures_value, items_value, ClientMysekaiInventory,
-    PossessionRow, SuiteUserSections, UserMysekaiBlueprint, UserMysekaiCanvas, UserMysekaiFixture,
-    UserMysekaiGamedata, UserMysekaiItem, UserMysekaiMaterial, UserMysekaiMaterialPossession,
+    blueprints_value, canvases_value, fixtures_value, items_value, PossessionRow, SuiteUserSections,
+    UserMysekaiBlueprint, UserMysekaiCanvas, UserMysekaiFixture, UserMysekaiGamedata,
+    UserMysekaiItem, UserMysekaiMaterial, UserMysekaiMaterialPossession,
 };
 use super::client::talk_read::{UserMysekaiCharacterTalk, UserResource};
 use super::delivery::SECTION_MYSEKAI_MATERIALS;
@@ -707,34 +707,7 @@ pub(crate) fn parse_items_master(text: &str, masters: &mut Masters) -> Result<()
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// The client copy's other writer
-// ---------------------------------------------------------------------------
-
-/// The birthday-party delivery merges its replies' `userMysekaiMaterials`
-/// straight into its copy; this keeps the inventory copy's read view equal.
-pub(crate) fn mirror_materials(
-    birthday: Res<super::delivery::ClientBirthdayPartyData>,
-    mut inventory: ResMut<ClientMysekaiInventory>,
-) {
-    if !birthday.is_changed() {
-        return;
-    }
-    let rows: Vec<UserMysekaiMaterial> = birthday
-        .mysekai_materials()
-        .iter()
-        .map(|(id, quantity)| UserMysekaiMaterial {
-            mysekai_material_id: *id,
-            quantity: *quantity,
-        })
-        .collect();
-    if rows != inventory.materials() {
-        inventory.apply(SuiteUserSections {
-            user_mysekai_materials: Some(rows),
-            ..Default::default()
-        });
-    }
-}
+pub(crate) use crate::userdata::inventory::mirror_materials;
 
 // ---------------------------------------------------------------------------
 // Panel edits and schema

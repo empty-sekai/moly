@@ -104,7 +104,13 @@ pub(crate) mod system_fixture_action;
 pub(crate) mod talk_read;
 pub(crate) mod tools;
 
-use std::collections::VecDeque;
+// The client-side copies live in `crate::userdata`; these re-exports keep the
+// `crate::server` paths resolving.
+pub(crate) use crate::userdata::{
+    client_update_talk_list, ClientTalkListUpdates, ClientUserData, LiveSchedule,
+    RankDelivered, ServerGateReplies, TalkListUpdate,
+};
+
 use std::sync::Mutex;
 
 use bevy::asset::io::{AssetReaderError, AssetSourceId, Reader};
@@ -495,101 +501,6 @@ pub(crate) enum GateReply {
     },
 }
 
-/// Gate replies waiting for the gate presenter, oldest first.
-#[derive(Resource, Default, Debug)]
-pub(crate) struct ServerGateReplies(pub(crate) VecDeque<GateReply>);
-
-/// `MysekaiTalkDataStore.UpdateTalkList` / `SetTalkList` calls of the gate
-/// presenter, for the talk store's owner. `visitors` is the reply's gate
-/// characters when the call also changes who visits.
-#[derive(Clone, Debug)]
-#[allow(dead_code)] // Read by the owners' seams (harvest, menu, server panel, gate flow, site expansion).
-pub(crate) struct TalkListUpdate {
-    pub(crate) caller: &'static str,
-    pub(crate) talks: ReplyTalkList,
-    pub(crate) visitors: Option<Vec<GateCharacter>>,
-}
-
-#[derive(Resource, Default, Debug)]
-#[allow(dead_code)] // Read by the owners' seams (harvest, menu, server panel, gate flow, site expansion).
-pub(crate) struct ClientTalkListUpdates(pub(crate) Vec<TalkListUpdate>);
-
-/// The gate presenter's `UpdateTalkList` / `SetTalkList` call.
-#[allow(dead_code)] // Read by the owners' seams (harvest, menu, server panel, gate flow, site expansion).
-pub(crate) fn client_update_talk_list(world: &mut World, update: TalkListUpdate) {
-    world
-        .get_resource_or_insert_with(ClientTalkListUpdates::default)
-        .0
-        .push(update);
-}
-
-/// A rank the client received: `UserMysekaiGamedata.mysekaiRank` of the
-/// previous reply (`None` for the join, which has none) and of this one.
-/// The join's rank is delivered only in the browser game; natively the
-/// sites keep their offline levels until a response changes the rank.
-#[derive(Message, Clone, Copy, Debug)]
-#[allow(dead_code)] // Read by the owners' seams (harvest, menu, server panel, gate flow, site expansion).
-pub(crate) struct RankDelivered {
-    pub(crate) previous: Option<i32>,
-    pub(crate) current: i32,
-    pub(crate) response: &'static str,
-}
-
-/// The schedule the phenomenon of the day is chosen from, as the client
-/// holds it: the rows and its copy of `refreshedAt`. `revision` counts
-/// changes; the server panel writes the schedule again on each.
-#[derive(Resource, Default, Debug, Clone)]
-pub(crate) struct LiveSchedule {
-    pub(crate) revision: u64,
-    pub(crate) schedules: Vec<ScheduleRow>,
-    pub(crate) refreshed_at: i64,
-}
-
-// ---------------------------------------------------------------------------
-// Client copies
-// ---------------------------------------------------------------------------
-
-/// The client's copies of the user data (`UserDataManager`), set by
-/// responses only. The menu, the harvest login, the rank gauges and the
-/// gate presenter read these.
-#[derive(Resource, Debug, Clone)]
-pub(crate) struct ClientUserData {
-    pub(crate) gamedata: Gamedata,
-    /// `None` when the server could not seat the pools (stamina masters
-    /// absent); named in the model's errors.
-    pub(crate) stamina: Option<Stamina>,
-    pub(crate) colorful_pass: Option<ColorfulPass>,
-    /// `MasterDataManager.LastGotServerDate`.
-    last_got_server_date: i64,
-    /// `MasterDataManager.ApplicationTimeAtLastGotServerDate`
-    /// (`Time.realtimeSinceStartup` at that response).
-    application_time_at_last_got_server_date: f32,
-}
-
-impl ClientUserData {
-    /// `TimeUtility.GetCurrentTimestamp`: the last server date plus the real
-    /// time since it, as whole milliseconds of the float seconds.
-    pub(crate) fn current_timestamp(&self, realtime_since_startup: f32) -> i64 {
-        let elapsed_ms =
-            (realtime_since_startup - self.application_time_at_last_got_server_date) * 1000.0;
-        self.last_got_server_date.saturating_add(elapsed_ms as i64)
-    }
-
-    /// `MysekaiUtility.HasMysekaiColorfulPass`: a pass whose `expiredAt` is
-    /// after the current timestamp.
-    pub(crate) fn has_mysekai_colorful_pass(&self, realtime_since_startup: f32) -> bool {
-        self.colorful_pass
-            .is_some_and(|pass| self.current_timestamp(realtime_since_startup) < pass.expired_at)
-    }
-
-    /// `StaminaData.IsEmptyStamina` of the copy (an unseated copy is empty).
-    #[allow(dead_code)] // Read by the owners' seams (harvest, menu, server panel, gate flow, site expansion).
-    pub(crate) fn stamina_empty(&self) -> bool {
-        self.stamina
-            .is_none_or(|s| s.normal <= 0 && s.boost <= 0 && s.enhance < 1)
-    }
-}
-
 // ---------------------------------------------------------------------------
 // The model
 // ---------------------------------------------------------------------------
@@ -624,13 +535,13 @@ pub(crate) struct ServerModel {
     /// Counts document changes.
     pub(super) revision: u64,
     /// The rows the client last received.
-    pub(super) served: Vec<ScheduleRow>,
-    pub(super) live_changed: bool,
-    pub(super) responses: Vec<ServerResponse>,
-    pub(super) gate_replies: Vec<GateReply>,
+    pub(crate) served: Vec<ScheduleRow>,
+    pub(crate) live_changed: bool,
+    pub(crate) responses: Vec<ServerResponse>,
+    pub(crate) gate_replies: Vec<GateReply>,
     pub(super) errors: Vec<String>,
     /// The client copies as last delivered (for the panel's document view).
-    pub(super) client: Value,
+    pub(crate) client: Value,
     /// The page backend persists the document.
     pub(super) persist: bool,
     /// The birthday parties in session at the server clock, as the server
@@ -649,7 +560,7 @@ pub(crate) struct ServerModel {
 
 static MODEL: Mutex<Option<ServerModel>> = Mutex::new(None);
 /// The seed's local document text, taken once by the local lists' seat.
-static LOCAL_SEED: Mutex<Option<String>> = Mutex::new(None);
+pub(crate) static LOCAL_SEED: Mutex<Option<String>> = Mutex::new(None);
 
 /// `None` when no model is installed.
 pub(crate) fn with_model<R>(operation: impl FnOnce(&mut ServerModel) -> R) -> Option<R> {
@@ -1925,7 +1836,7 @@ fn join() {
     });
 }
 
-fn tick(time: Res<Time<Real>>, mut elapsed: Local<f32>) {
+pub(crate) fn tick(time: Res<Time<Real>>, mut elapsed: Local<f32>) {
     *elapsed += time.delta_secs();
     if *elapsed < TICK_SECONDS {
         return;
@@ -1938,242 +1849,11 @@ fn tick(time: Res<Time<Real>>, mut elapsed: Local<f32>) {
     });
 }
 
-/// The client side of the responses: the copies, the refresh topic, the
-/// rank and the schedule the phenomenon of the day reads.
-#[allow(clippy::too_many_arguments)]
-fn deliver(
-    mut commands: Commands,
-    time: Res<Time<Real>>,
-    mut client: Option<ResMut<ClientUserData>>,
-    mut live: ResMut<LiveSchedule>,
-    mut replies: ResMut<ServerGateReplies>,
-    mut ranks: MessageWriter<RankDelivered>,
-    mut local: Option<ResMut<local::MysekaiLocalSettings>>,
-    mut total_exp: Option<ResMut<crate::mysekai_rank::UserTotalExp>>,
-    mut birthday: ResMut<delivery::ClientBirthdayPartyData>,
-    mut music_copy: ResMut<client::music::ClientMusicPlaySettings>,
-    mut avatar_copy: ResMut<client::avatar::ClientUserAvatar>,
-    mut inventory_copy: ResMut<client::inventory::ClientMysekaiInventory>,
-    mut records_copy: ResMut<client::music_play::ClientMusicRecords>,
-    mut actions_copy: ResMut<client::system_fixture_action::ClientSystemFixtureActions>,
-    mut tools_copy: ResMut<tools::ClientMysekaiTools>,
-    // Paired: this system is at the parameter-count limit.
-    (mode, saved): (
-        Res<crate::run_mode::RunMode>,
-        Option<Res<crate::player_data::SavedTotalExp>>,
-    ),
-) {
-    let taken = with_model(|model| {
-        (
-            std::mem::take(&mut model.responses),
-            std::mem::take(&mut model.gate_replies),
-            std::mem::replace(&mut model.live_changed, false).then(|| model.served.clone()),
-        )
-    });
-    let Some((responses, gate_replies, live_rows)) = taken else {
-        return;
-    };
-    replies.0.extend(gate_replies);
-    let realtime = time.elapsed_secs();
-    let mut copy = client.as_deref().cloned();
-    let mut schedule = live_rows;
-    for mut response in responses {
-        birthday.apply(std::mem::take(&mut response.delivery));
-        if let Some(rows) = response.music.take() {
-            music_copy.apply(rows);
-        }
-        if let Some(avatar) = response.avatar.take() {
-            avatar_copy.apply(avatar);
-        }
-        inventory_copy.apply(std::mem::take(&mut response.inventory));
-        if let Some(rows) = response.music_records.take() {
-            records_copy.apply(rows);
-        }
-        if let Some(rows) = response.system_fixture_actions.take() {
-            actions_copy.apply(rows);
-        }
-        if let Some(rows) = response.tools.take() {
-            tools_copy.apply(rows);
-        }
-        let previous_rank = copy.as_ref().and_then(|copy| copy.gamedata.mysekai_rank);
-        let next = match copy.take() {
-            None => ClientUserData {
-                gamedata: response.gamedata.unwrap_or(Gamedata {
-                    mysekai_rank: None,
-                    total_exp: 0,
-                    refreshed_at: 0,
-                    is_mysekai_tutorial_end: true,
-                }),
-                stamina: response.stamina,
-                colorful_pass: response.colorful_pass.flatten(),
-                last_got_server_date: response.server_date_ms,
-                application_time_at_last_got_server_date: realtime,
-            },
-            Some(mut copy) => {
-                if let Some(gamedata) = response.gamedata {
-                    copy.gamedata = gamedata;
-                }
-                if let Some(stamina) = response.stamina {
-                    copy.stamina = Some(stamina);
-                }
-                if let Some(pass) = response.colorful_pass {
-                    copy.colorful_pass = pass;
-                }
-                copy.last_got_server_date = response.server_date_ms;
-                copy.application_time_at_last_got_server_date = realtime;
-                copy
-            }
-        };
-        if response.is_refreshed {
-            if let Some(local) = local.as_deref_mut() {
-                if !local.0.topics.contains(&local::TOPIC_STAMINA_REFRESH) {
-                    local.0.topics.push(local::TOPIC_STAMINA_REFRESH);
-                    info!("[server] {}: isRefreshed -> MysekaiTopicsManager.AddTopicIfNeeded adds StaminaRefresh", response.kind.name());
-                }
-            }
-        }
-        if let Some(gamedata) = response.gamedata {
-            // UserMysekaiGamedata.totalExp is what both rank gauges read;
-            // imported player data keeps its own value.
-            if let Some(total) = total_exp.as_deref_mut() {
-                if total.0 != gamedata.total_exp
-                    && saved.as_deref().and_then(|saved| saved.0).is_none()
-                {
-                    total.0 = gamedata.total_exp;
-                }
-            }
-            if let Some(current) = gamedata.mysekai_rank {
-                let join = response.kind == ResponseKind::Join;
-                if join && mode.game {
-                    ranks.write(RankDelivered {
-                        previous: None,
-                        current,
-                        response: response.kind.name(),
-                    });
-                } else if !join && previous_rank.is_some_and(|previous| previous != current) {
-                    ranks.write(RankDelivered {
-                        previous: previous_rank,
-                        current,
-                        response: response.kind.name(),
-                    });
-                }
-            }
-            if schedule.is_none()
-                && response.schedules.is_none()
-                && live.refreshed_at != gamedata.refreshed_at
-            {
-                schedule = Some(live.schedules.clone());
-            }
-        }
-        if let Some(rows) = response.schedules {
-            schedule = Some(rows);
-        }
-        copy = Some(next);
-    }
-    let Some(copy) = copy else {
-        return;
-    };
-    if let Some(rows) = schedule {
-        live.revision += 1;
-        live.schedules = rows;
-        live.refreshed_at = copy.gamedata.refreshed_at;
-    }
-    let view = json!({
-        "userMysekaiGamedata": {
-            "mysekaiRank": copy.gamedata.mysekai_rank,
-            "totalExp": copy.gamedata.total_exp,
-            "refreshedAt": copy.gamedata.refreshed_at,
-        },
-        "userMysekaiStamina": copy.stamina.map(document::stamina_value),
-        "hasMysekaiColorfulPass": copy.has_mysekai_colorful_pass(realtime),
-        "currentTimestamp": copy.current_timestamp(realtime),
-        "birthdayParty": birthday.view(),
-        "userMysekaiMusicPlayFixtureSettings": music_copy.view(),
-        "userAvatar": client::avatar::value(&avatar_copy.avatar),
-        "mysekaiInventory": inventory_copy.view(),
-        "userMysekaiMusicRecords": records_copy.view(),
-        "userMysekaiTools": tools_copy.view(),
-    });
-    with_model(|model| model.client = view);
-    match client.as_deref_mut() {
-        Some(slot) => *slot = copy,
-        None => {
-            commands.insert_resource(copy);
-        }
-    }
-}
-
-/// Startup: the local lists from the seed's local document (the browser
-/// game); natively they start empty, as on a fresh install.
-fn seat_local(local: Option<ResMut<local::MysekaiLocalSettings>>) {
-    let Some(text) = LOCAL_SEED.lock().ok().and_then(|mut slot| slot.take()) else {
-        return;
-    };
-    let Some(mut local) = local else {
-        return;
-    };
-    match local::LocalDocument::parse(&text) {
-        Ok(doc) => {
-            info!(
-                "[server] local document: topics {:?}, UnlockedMasterSiteLevelIds {:?}",
-                doc.topics, doc.unlocked_master_site_level_ids
-            );
-            local.0.topics = doc.topics;
-            local.0.unlocked_master_site_level_ids = doc.unlocked_master_site_level_ids;
-        }
-        Err(error) => panic!("local document passed the seed check but is refused: {error}"),
-    }
-}
-
-/// Last: a changed local list is written to the page backend.
-fn persist_local(
-    local: Option<Res<local::MysekaiLocalSettings>>,
-    mode: Res<crate::run_mode::RunMode>,
-    mut written: Local<Option<String>>,
-) {
-    if !mode.game {
-        return;
-    }
-    let Some(local) = local else {
-        return;
-    };
-    let text = local::LocalDocument {
-        topics: local.0.topics.clone(),
-        unlocked_master_site_level_ids: local.0.unlocked_master_site_level_ids.clone(),
-    }
-    .to_text();
-    if written.as_deref() == Some(text.as_str()) {
-        return;
-    }
-    if written.is_none() {
-        // The seeded state (or a first run's empty lists) needs no write.
-        *written = Some(text);
-        return;
-    }
-    match crate::settings_store::commit_page_document("local", text.clone()) {
-        Ok(()) => *written = Some(text),
-        Err(error) => {
-            warn!("[server] the local document is not persisted: {error}");
-            *written = Some(text);
-        }
-    }
-}
-
 pub(crate) struct ServerPlugin;
 
 impl Plugin for ServerPlugin {
     fn build(&self, app: &mut App) {
-        app.add_message::<RankDelivered>()
-            .init_resource::<crate::run_mode::RunMode>()
-            .init_resource::<LiveSchedule>()
-            .init_resource::<ServerGateReplies>()
-            .init_resource::<ClientTalkListUpdates>()
-            .init_resource::<delivery::ClientBirthdayPartyData>()
-            .init_resource::<client::music::ClientMusicPlaySettings>()
-            .init_resource::<client::avatar::ClientUserAvatar>()
-            .init_resource::<client::music_play::ClientMusicRecords>()
-            .init_resource::<tools::ClientMysekaiTools>()
-            .add_systems(PreStartup, seat_local)
+        app.init_resource::<crate::run_mode::RunMode>()
             .add_systems(Startup, load)
             .add_systems(
                 PreUpdate,
@@ -2183,11 +1863,9 @@ impl Plugin for ServerPlugin {
                     join,
                     seat_birthday_parties,
                     tick,
-                    deliver,
                 )
                     .chain(),
-            )
-            .add_systems(Last, persist_local);
+            );
         let endpoint = app.world_mut().register_system(home_action::handle);
         app.insert_resource(client::home_action::HomeActionEndpoint(endpoint));
         let endpoint = app.world_mut().register_system(housing_layout::handle);
@@ -2364,25 +2042,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_client_clock_adds_real_time_to_the_last_server_date() {
-        let copy = ClientUserData {
-            gamedata: Gamedata {
-                mysekai_rank: Some(1),
-                total_exp: 0,
-                refreshed_at: 0,
-                is_mysekai_tutorial_end: true,
-            },
-            stamina: None,
-            colorful_pass: Some(ColorfulPass {
-                id: 1,
-                expired_at: 10_500,
-            }),
-            last_got_server_date: 10_000,
-            application_time_at_last_got_server_date: 2.0,
-        };
-        assert_eq!(copy.current_timestamp(2.25), 10_250);
-        assert!(copy.has_mysekai_colorful_pass(2.4));
-        assert!(!copy.has_mysekai_colorful_pass(2.5));
-    }
 }

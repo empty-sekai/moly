@@ -134,6 +134,7 @@ mod room_shell;
 pub mod schedule;
 mod screen_fade;
 mod server;
+pub(crate) mod userdata;
 mod server_panel;
 pub mod shadowmap;
 pub mod site;
@@ -287,6 +288,7 @@ pub fn app(
     app.add_plugins(site::SitePlugin(site));
     schedule::install(&mut app);
     app.add_plugins(server::ServerPlugin);
+    app.add_plugins(userdata::UserDataPlugin);
     app.add_plugins(server_panel::ServerPanelPlugin);
     app.add_plugins(npc_state::NpcStatePlugin);
     site_move::install(&mut app);

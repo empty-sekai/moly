@@ -359,3 +359,32 @@ pub(crate) fn gamedata_value(gamedata: UserMysekaiGamedata) -> Value {
         "mysekaiFixturePossessionLevel": gamedata.mysekai_fixture_possession_level,
     })
 }
+
+// ---------------------------------------------------------------------------
+// The client copy's other writer
+// ---------------------------------------------------------------------------
+
+/// The birthday-party delivery merges its replies' `userMysekaiMaterials`
+/// straight into its copy; this keeps the inventory copy's read view equal.
+pub(crate) fn mirror_materials(
+    birthday: Res<super::birthday_party::ClientBirthdayPartyData>,
+    mut inventory: ResMut<ClientMysekaiInventory>,
+) {
+    if !birthday.is_changed() {
+        return;
+    }
+    let rows: Vec<UserMysekaiMaterial> = birthday
+        .mysekai_materials()
+        .iter()
+        .map(|(id, quantity)| UserMysekaiMaterial {
+            mysekai_material_id: *id,
+            quantity: *quantity,
+        })
+        .collect();
+    if rows != inventory.materials() {
+        inventory.apply(SuiteUserSections {
+            user_mysekai_materials: Some(rows),
+            ..Default::default()
+        });
+    }
+}
