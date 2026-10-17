@@ -174,6 +174,9 @@ pub(crate) enum Cond {
     SiteMoving,
     /// The entry sequence has ended, including the stamina refresh clip when the join reports one.
     EntryDone,
+    /// The entry has opened movement and gestures (`entry::control_open`),
+    /// which a site move must wait for.
+    ControlOpen,
     DialogShown,
     /// A player or NPC conversation is playing.
     TalkActive,
@@ -467,7 +470,14 @@ fn step(value: &Value, at: &str) -> Result<Vec<Step>, String> {
             vec![one(Node::ServerEdit { command }, None)]
         }
         "weather.set" => vec![one(Node::Weather { phenomenon: fields.req_i32("phenomenon")? }, None)],
-        "site.switch" => vec![one(Node::SiteSwitch { site: fields.req_str("site")?.to_owned() }, Some(60.0))],
+        // The entry's Finish is what opens movement and gestures
+        // (`MysekaiUtility.EnableGestureLayer` / `EnableJoyStick`); a site
+        // move before it breaks the join's room/player check. Wait for it,
+        // then request the move.
+        "site.switch" => vec![
+            one(Node::WaitUntil { until: Cond::ControlOpen }, Some(30.0)),
+            one(Node::SiteSwitch { site: fields.req_str("site")?.to_owned() }, Some(60.0)),
+        ],
         // Through the house's door: walk to its entry box, press the entry
         // button, then wait for the move to start and to land in a room.
         "site.enter_room" => door_steps(&one, TargetKind::HouseDoor, ButtonType::HouseEntry, SiteKindName::Room),
@@ -487,6 +497,9 @@ fn door_steps(
     lands: SiteKindName,
 ) -> Vec<Step> {
     vec![
+        // The entry's control gate comes first: the door press belongs to the
+        // player who can move, not to the cover.
+        one(Node::WaitUntil { until: Cond::ControlOpen }, Some(30.0)),
         one(Node::Interact { target: Target { what: door, offset: [0.0; 2] }, button, stop: 0.2 }, Some(60.0)),
         one(Node::WaitUntil { until: Cond::SiteMoving }, Some(5.0)),
         one(
@@ -509,6 +522,7 @@ fn cond(value: &Value, at: &str) -> Result<Cond, String> {
         return Ok(match name {
             "site_moving" => Cond::SiteMoving,
             "entry_done" => Cond::EntryDone,
+            "control_open" => Cond::ControlOpen,
             "dialog_shown" => Cond::DialogShown,
             "talk_active" => Cond::TalkActive,
             "camera_settled" => Cond::CameraSettled,
@@ -819,11 +833,12 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn a_door_macro_expands_into_its_three_steps() {
+    fn a_door_macro_expands_into_its_four_steps() {
         let script = parse(&json!({ "steps": [{ "do": "site.enter_room" }] })).unwrap();
-        assert_eq!(script.steps.len(), 3);
-        assert!(matches!(script.steps[0].node, Node::Interact { button: ButtonType::HouseEntry, .. }));
-        assert!(matches!(script.steps[1].node, Node::WaitUntil { until: Cond::SiteMoving }));
+        assert_eq!(script.steps.len(), 4);
+        assert!(matches!(script.steps[0].node, Node::WaitUntil { until: Cond::ControlOpen }));
+        assert!(matches!(script.steps[1].node, Node::Interact { button: ButtonType::HouseEntry, .. }));
+        assert!(matches!(script.steps[2].node, Node::WaitUntil { until: Cond::SiteMoving }));
     }
 
     #[test]

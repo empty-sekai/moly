@@ -180,6 +180,10 @@ pub(crate) fn eval(world: &mut World, cond: &Cond) -> (bool, String) {
             let done = crate::entry::entry_settled(world.get_resource::<crate::entry::EntrySequence>());
             (done, format!("entry {}", if done { "settled" } else { "in progress" }))
         }
+        Cond::ControlOpen => {
+            let open = crate::entry::control_open(world.get_resource::<crate::entry::EntrySequence>());
+            (open, format!("entry control {}", if open { "open" } else { "closed" }))
+        }
         Cond::DialogShown => {
             let shown = world
                 .get_resource::<crate::ui_layers::ScreenManager>()

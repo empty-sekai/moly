@@ -74,15 +74,16 @@
 //! its put status and feedback; the editor stays open afterwards.
 //!
 //! World: `weather.set {phenomenon}`, `site.switch {site}` (a site type such
-//! as `first_floor`), and the door sequences `site.enter_room` and
-//! `site.go_home` (walk to the door, press its button, wait for the move to
-//! land).
+//! as `first_floor`; it waits until the entry has opened movement), and the
+//! door sequences `site.enter_room` and `site.go_home` (wait for the entry,
+//! walk to the door, press its button, wait for the move to land).
 //!
 //! Targets: `[x, z]`, `"house_door"`, `"room_door"`, `"player"`, or an object
 //! `{npc: unit}`, `{fixture: "uid" | master id}` or `{point: [x, z]}`, each
 //! with an optional `offset: [dx, dz]`.
 //!
-//! Conditions: `"site_moving"`, `"entry_done"`, `"dialog_shown"`,
+//! Conditions: `"site_moving"`, `"entry_done"`, `"control_open"` (the entry
+//! has opened movement and gestures), `"dialog_shown"`,
 //! `"talk_active"`, `"camera_settled"` (the entry shot has handed over and
 //! no camera transition is in flight), or `{site_is}`, `{site_kind: home|room|harvest|delivery}`,
 //! `{button_head}`, `{button_stacked}`, `{phenomenon_is}`, `{player_near: {to,

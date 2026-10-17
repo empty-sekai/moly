@@ -818,9 +818,11 @@
   },
   {
    "name": "site.switch",
-   "description": "Switches the active site to the named site.",
-   "macro": false,
-   "timeout_default": 60,
+   "description": "Waits until the entry has opened movement and gestures (control_open), then switches the active site to the named site.",
+   "macro": true,
+   "expansion": "wait_until control_open, timeout 30; then the site switch, timeout 60. Common label, timeout and optional apply to both nodes.",
+   "timeout_default": null,
+   "timeout_rule": "30 for the wait and 60 for the switch; a given timeout applies to both",
    "params": {
     "type": "object",
     "properties": {
@@ -836,11 +838,11 @@
   },
   {
    "name": "site.enter_room",
-   "description": "Macro: walks to the house entry box, presses HouseEntry, then waits for the move to start and to land in a room.",
+   "description": "Macro: waits until the entry has opened control, walks to the house entry box, presses HouseEntry, then waits for the move to start and to land in a room.",
    "macro": true,
-   "expansion": "player.interact with target house_door, button HouseEntry, stop 0.2, timeout 60; then wait_until site_moving, timeout 5; then wait_until all[not site_moving, site_kind room], timeout 60. Common label, timeout and optional apply to all three nodes.",
+   "expansion": "wait_until control_open, timeout 30; then player.interact with target house_door, button HouseEntry, stop 0.2, timeout 60; then wait_until site_moving, timeout 5; then wait_until all[not site_moving, site_kind room], timeout 60. Common label, timeout and optional apply to all four nodes.",
    "timeout_default": null,
-   "timeout_rule": "60, 5 and 60 for the three nodes",
+   "timeout_rule": "30, 60, 5 and 60 for the four nodes",
    "params": {
     "type": "object",
     "properties": {},
@@ -849,11 +851,11 @@
   },
   {
    "name": "site.go_home",
-   "description": "Macro: walks to the room door sensor, presses GoHomeSite, then waits for the move to start and to land on the home site.",
+   "description": "Macro: waits until the entry has opened control, walks to the room door sensor, presses GoHomeSite, then waits for the move to start and to land on the home site.",
    "macro": true,
-   "expansion": "player.interact with target room_door, button GoHomeSite, stop 0.2, timeout 60; then wait_until site_moving, timeout 5; then wait_until all[not site_moving, site_kind home], timeout 60. Common label, timeout and optional apply to all three nodes.",
+   "expansion": "wait_until control_open, timeout 30; then player.interact with target room_door, button GoHomeSite, stop 0.2, timeout 60; then wait_until site_moving, timeout 5; then wait_until all[not site_moving, site_kind home], timeout 60. Common label, timeout and optional apply to all four nodes.",
    "timeout_default": null,
-   "timeout_rule": "60, 5 and 60 for the three nodes",
+   "timeout_rule": "30, 60, 5 and 60 for the four nodes",
    "params": {
     "type": "object",
     "properties": {},
@@ -1282,6 +1284,12 @@
     ],
     "additionalProperties": false
    }
+  },
+  {
+   "name": "control_open",
+   "form": "bare",
+   "description": "The entry has opened movement and gestures (control open); a site move waits for it.",
+   "params": null
   }
  ],
  "definitions": {
@@ -2058,6 +2066,7 @@
      "enum": [
       "site_moving",
       "entry_done",
+      "control_open",
       "dialog_shown",
       "talk_active",
       "camera_settled"

@@ -479,7 +479,7 @@ fn start(world: &mut World, shared: &mut Shared, step: Step, path: String) -> St
         }
         Node::Stick { stick, secs } => Kind::Stick { stick: Vec2::from(*stick), until: shared.now + secs },
         Node::Interact { target, button, stop } => Kind::Interact(Interact {
-            walk: Walk::new(target.clone(), *stop),
+            walk: Walk::contact(target.clone(), *stop),
             button: *button,
             lifted_at: None,
             last_change: f32::NEG_INFINITY,
@@ -876,11 +876,34 @@ struct Walk {
     planned: Option<(Vec2, u64)>,
     /// The closest the player has come, and when.
     best: (f32, f32),
+    /// Whether a goal the walk field cannot reach within `within` refuses:
+    /// a point walk (`player.walk_to`) wants a place to stand; an approach
+    /// to a target's contact circle or a button, and a drop heading to cross,
+    /// stop before their point and opt out ([`Walk::contact`]).
+    refuse_unreachable: bool,
 }
 
 impl Walk {
     fn new(to: Target, within: f32) -> Self {
-        Self { to, within, corners: Vec::new(), next: 0, planned: None, best: (f32::INFINITY, 0.0) }
+        Self {
+            to,
+            within,
+            corners: Vec::new(),
+            next: 0,
+            planned: None,
+            best: (f32::INFINITY, 0.0),
+            refuse_unreachable: true,
+        }
+    }
+
+    /// A walk that ends on a contact circle or a button near the target, not
+    /// on the target point: the field may snap the point outward and that is
+    /// not a refusal.
+    fn contact(to: Target, within: f32) -> Self {
+        Self {
+            refuse_unreachable: false,
+            ..Self::new(to, within)
+        }
     }
 
     fn poll(&mut self, world: &mut World, shared: &mut Shared, path: &str) -> Poll {
@@ -924,11 +947,46 @@ impl Walk {
             }
         };
         if replan {
-            self.corners = world
+            let planned = world
                 .get_resource::<crate::walk_face::WalkFace>()
-                .and_then(|face| face.path(player_xz.into(), goal_xz.into()))
-                .map(|corners| corners.into_iter().map(Vec2::from).collect())
-                .unwrap_or_else(|| vec![goal_xz]);
+                .map(|face| face.path(player_xz.into(), goal_xz.into()));
+            match planned {
+                // No walk field (a stage or a headless run): the straight line
+                // stays the plan.
+                None => self.corners = vec![goal_xz],
+                Some(Some(corners)) => {
+                    let corners: Vec<Vec2> = corners.into_iter().map(Vec2::from).collect();
+                    if self.refuse_unreachable {
+                        let reached = corners.last().copied().unwrap_or(goal_xz);
+                        let off = reached.distance(goal_xz);
+                        if off > self.within {
+                            shared.release_hand_of(world, path);
+                            return Poll::Failed(format!(
+                                "the goal ({:.2}, {:.2}) is not reachable on the walk field: the nearest reachable point is ({:.2}, {:.2}), {off:.2} m away, more than within {:.2}",
+                                goal_xz.x, goal_xz.y, reached.x, reached.y, self.within
+                            ));
+                        }
+                    }
+                    self.corners = corners;
+                }
+                Some(None) => {
+                    if self.refuse_unreachable {
+                        shared.release_hand_of(world, path);
+                        let nearest = world
+                            .get_resource::<crate::walk_face::WalkFace>()
+                            .and_then(|face| face.sample(goal_xz.into(), 1.0e4))
+                            .map_or_else(
+                                || "none".to_owned(),
+                                |point| format!("({:.2}, {:.2})", point[0], point[1]),
+                            );
+                        return Poll::Failed(format!(
+                            "no walk path from ({:.2}, {:.2}) to the goal ({:.2}, {:.2}); the nearest walkable point to the goal is {nearest}",
+                            player_xz.x, player_xz.y, goal_xz.x, goal_xz.y
+                        ));
+                    }
+                    self.corners = vec![goal_xz];
+                }
+            }
             self.next = 0;
             self.planned = Some((goal_xz, generation));
             self.best = (distance, shared.now);
@@ -1058,7 +1116,7 @@ impl Gather {
                     self.object = Some((entity, uid, at));
                     // Contact is the player inside the object's circle.
                     let within = (radius * 0.6).max(0.15);
-                    self.walk = Some(Walk::new(Target { what: TargetKind::Gatherable(uid), offset: [0.0; 2] }, within));
+                    self.walk = Some(Walk::contact(Target { what: TargetKind::Gatherable(uid), offset: [0.0; 2] }, within));
                     (entity, uid, at)
                 }
                 Err(error) => {
@@ -1210,11 +1268,13 @@ impl Gather {
                 return Poll::Done(self.summary(uid, hp));
             };
             // Pickups happen only while the player moves, so the walk aims
-            // past the drop: a drop already underfoot is still crossed.
+            // past the drop: a drop already underfoot is still crossed. The
+            // point is a heading, not a place to stand (the drop's pickup
+            // radius takes it), so a snapped point is not a refusal.
             let away = Vec2::new(next.x - player.x, next.z - player.z).normalize_or_zero();
             let beyond = if away == Vec2::ZERO { Vec2::X } else { away } * 0.5;
             self.drop = Some((next, None));
-            self.walk = Some(Walk::new(
+            self.walk = Some(Walk::contact(
                 Target { what: TargetKind::Point([next.x + beyond.x, next.z + beyond.y]), offset: [0.0; 2] },
                 0.15,
             ));
