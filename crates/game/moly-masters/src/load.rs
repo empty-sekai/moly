@@ -9,6 +9,8 @@
 //! The assembly from a table's text to the resource field is here, so the
 //! server and the client cannot disagree about a column name.
 
+use std::collections::HashSet;
+
 use bevy::prelude::*;
 use moly_assets::json::master::{MasterData, MasterTable};
 use serde_json::Value;
@@ -19,7 +21,9 @@ use crate::delivery::{BonusRow, DeliveryTables, RewardRow, TotalRow};
 use crate::inventory::PossessionMasters;
 use crate::StaminaMax;
 
-/// The five master resources one loader fills.
+/// The five master resources one loader fills, plus the row slices a client
+/// reader parses for itself (the harvest drop classifier's ids and material
+/// rows, from the same three tables).
 #[derive(Resource, Default)]
 pub struct MasterTables {
     /// `mysekaiBlueprints` and the five craft tables, if any are in.
@@ -33,6 +37,15 @@ pub struct MasterTables {
     pub delivery: Option<DeliveryTables>,
     /// `mysekaiStaminas`.
     pub stamina_max: Option<StaminaMax>,
+    /// The blueprint ids the harvest drop classifier reads, from the same
+    /// table the craft reader takes (no second request for it).
+    pub blueprint_ids: Option<HashSet<i64>>,
+    /// The item ids the harvest drop classifier reads, from the same table
+    /// the craft reader takes.
+    pub item_ids: Option<HashSet<i64>>,
+    /// `mysekaiMaterials`: id, `mysekaiMaterialType` and `mysekaiSiteIds`,
+    /// for the harvest drop classifier (the craft reader takes the types).
+    pub material_rows: Option<Vec<(i64, String, Vec<u32>)>>,
     /// Tables still loading, by the names their consumers read.
     pub pending: Vec<&'static str>,
     /// Tables the master layer could not give.
@@ -66,6 +79,9 @@ impl MasterTables {
                 enhance: 1000,
                 boost: 10000,
             }),
+            blueprint_ids: Some(HashSet::new()),
+            item_ids: Some(HashSet::new()),
+            material_rows: Some(Vec::new()),
             started: true,
             ..Self::default()
         }
@@ -140,6 +156,9 @@ struct Parts {
     avatar: AvatarMasters,
     delivery: DeliveryParts,
     stamina_max: Option<StaminaMax>,
+    blueprint_ids: Option<HashSet<i64>>,
+    item_ids: Option<HashSet<i64>>,
+    material_rows: Option<Vec<(i64, String, Vec<u32>)>>,
 }
 
 /// One master table the loader requests and where its rows go.
@@ -197,14 +216,25 @@ static TABLES: &[Entry] = &[
         stamina_max,
         Stamina
     ),
-    table!(
-        "mysekaiBlueprints",
-        "mysekaiBlueprints (the server's blueprints)",
-        parse_blueprints,
-        craft,
-        blueprints,
-        Craft
-    ),
+    Entry {
+        table: MasterTable {
+            table: "mysekaiBlueprints",
+            name: "mysekaiBlueprints (the server's blueprints)",
+            parse: |text| {
+                let mut parts = Parts::default();
+                parse_blueprints(text, &mut parts.craft)?;
+                parts.blueprint_ids = table_rows(text, "mysekaiBlueprints")
+                    .and_then(|rows| row_ids(&rows))
+                    .ok();
+                Ok(parts)
+            },
+        },
+        seat: |tables, partial| {
+            tables.parts.craft.blueprints = partial.craft.blueprints;
+            tables.blueprint_ids = partial.blueprint_ids;
+        },
+        group: Group::Craft,
+    },
     table!(
         "mysekaiBlueprintMysekaiMaterialCosts",
         "mysekaiBlueprintMysekaiMaterialCosts (the server's blueprint material costs)",
@@ -229,22 +259,44 @@ static TABLES: &[Entry] = &[
         first_craft_bonus,
         Craft
     ),
-    table!(
-        "mysekaiMaterials",
-        "mysekaiMaterials (the server's material types)",
-        parse_material_types,
-        craft,
-        material_types,
-        Craft
-    ),
-    table!(
-        "mysekaiItems",
-        "mysekaiItems (the server's white blueprint item)",
-        parse_white_blueprint_item,
-        craft,
-        white_blueprint_item,
-        Craft
-    ),
+    Entry {
+        table: MasterTable {
+            table: "mysekaiMaterials",
+            name: "mysekaiMaterials (the server's material types)",
+            parse: |text| {
+                let mut parts = Parts::default();
+                parse_material_types(text, &mut parts.craft)?;
+                parts.material_rows = table_rows(text, "mysekaiMaterials")
+                    .and_then(|rows| material_rows(&rows))
+                    .ok();
+                Ok(parts)
+            },
+        },
+        seat: |tables, partial| {
+            tables.parts.craft.material_types = partial.craft.material_types;
+            tables.material_rows = partial.material_rows;
+        },
+        group: Group::Craft,
+    },
+    Entry {
+        table: MasterTable {
+            table: "mysekaiItems",
+            name: "mysekaiItems (the server's white blueprint item)",
+            parse: |text| {
+                let mut parts = Parts::default();
+                parse_white_blueprint_item(text, &mut parts.craft)?;
+                parts.item_ids = table_rows(text, "mysekaiItems")
+                    .and_then(|rows| row_ids(&rows))
+                    .ok();
+                Ok(parts)
+            },
+        },
+        seat: |tables, partial| {
+            tables.parts.craft.white_blueprint_item = partial.craft.white_blueprint_item;
+            tables.item_ids = partial.item_ids;
+        },
+        group: Group::Craft,
+    },
     table!(
         "avatarCostumes",
         "avatarCostumes (the server's avatar costumes)",
@@ -375,6 +427,40 @@ impl Plugin for MasterTablesPlugin {
 // ---------------------------------------------------------------------------
 // The assembly
 // ---------------------------------------------------------------------------
+
+/// The row ids a drop classifier reads (the same set a table's id column
+/// names).
+fn row_ids(rows: &[Value]) -> Result<HashSet<i64>, String> {
+    rows.iter()
+        .map(|row| {
+            row["id"]
+                .as_i64()
+                .ok_or_else(|| format!("id of {row} is not an integer"))
+        })
+        .collect()
+}
+
+/// `mysekaiMaterials`: id, `mysekaiMaterialType` and `mysekaiSiteIds`.
+fn material_rows(rows: &[Value]) -> Result<Vec<(i64, String, Vec<u32>)>, String> {
+    rows.iter()
+        .map(|row| {
+            let id = row["id"]
+                .as_i64()
+                .ok_or_else(|| format!("id of {row} is not an integer"))?;
+            let word = row["mysekaiMaterialType"]
+                .as_str()
+                .ok_or_else(|| format!("mysekaiMaterialType of {row} is not a string"))?
+                .to_owned();
+            let sites = row["mysekaiSiteIds"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|site| site.as_u64().map(|site| site as u32))
+                .collect();
+            Ok((id, word, sites))
+        })
+        .collect()
+}
 
 /// An upstream row table, sorted by `id` (a table without ids keeps its
 /// master order).

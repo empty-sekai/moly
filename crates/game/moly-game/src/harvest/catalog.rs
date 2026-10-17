@@ -45,16 +45,6 @@ const FIXTURE_IDS: MasterTable<HashSet<i64>> = MasterTable {
     name: "mysekaiFixtures (harvest drop rows of fixture type)",
     parse: parse_ids,
 };
-const BLUEPRINT_IDS: MasterTable<HashSet<i64>> = MasterTable {
-    table: "mysekaiBlueprints",
-    name: "mysekaiBlueprints (harvest drop rows of blueprint type)",
-    parse: parse_ids,
-};
-const ITEM_IDS: MasterTable<HashSet<i64>> = MasterTable {
-    table: "mysekaiItems",
-    name: "mysekaiItems (harvest drop rows of item type)",
-    parse: parse_ids,
-};
 const MUSIC_RECORDS: MasterTable<MusicRecords> = MasterTable {
     table: "mysekaiMusicRecords",
     name: "mysekaiMusicRecords (harvest drop rows of music-record type, the fixed treasure box's record)",
@@ -65,25 +55,17 @@ const TOOLS: MasterTable<Vec<ToolDef>> = MasterTable {
     name: "mysekaiTools (harvest tools: power, cool time, durability, level)",
     parse: parse_tools,
 };
-const MATERIALS: MasterTable<Vec<MockMaterialRow>> = MasterTable {
-    table: "mysekaiMaterials",
-    name: "mysekaiMaterials (the sites each material drops on, TreasureBoxSpawnMock)",
-    parse: parse_materials,
-};
 const STAMINA_RECOVERY: MasterTable<i32> = MasterTable {
     table: "mysekaiStaminaRecovery",
     name: "mysekaiStaminaRecovery (the boost grant of the stamina mock)",
     parse: parse_boost_grant,
 };
 
-fn master_keys() -> [MasterKey; 7] {
+fn master_keys() -> [MasterKey; 4] {
     [
         FIXTURE_IDS.key(),
-        BLUEPRINT_IDS.key(),
-        ITEM_IDS.key(),
         MUSIC_RECORDS.key(),
         TOOLS.key(),
-        MATERIALS.key(),
         STAMINA_RECOVERY.key(),
     ]
 }
@@ -91,11 +73,8 @@ fn master_keys() -> [MasterKey; 7] {
 /// The master tables the catalog and the server mock read.
 struct HarvestMasters {
     fixture_ids: Result<HashSet<i64>, MasterError>,
-    blueprint_ids: Result<HashSet<i64>, MasterError>,
-    item_ids: Result<HashSet<i64>, MasterError>,
     music_records: Result<MusicRecords, MasterError>,
     tools: Result<Vec<ToolDef>, MasterError>,
-    materials: Result<Vec<MockMaterialRow>, MasterError>,
     boost_grant: Result<i32, MasterError>,
 }
 
@@ -110,11 +89,8 @@ impl HarvestMasters {
         }
         Some(HarvestMasters {
             fixture_ids: masters.take(&FIXTURE_IDS)?,
-            blueprint_ids: masters.take(&BLUEPRINT_IDS)?,
-            item_ids: masters.take(&ITEM_IDS)?,
             music_records: masters.take(&MUSIC_RECORDS)?,
             tools: masters.take(&TOOLS)?,
-            materials: masters.take(&MATERIALS)?,
             boost_grant: masters.take(&STAMINA_RECOVERY)?,
         })
     }
@@ -124,11 +100,8 @@ impl HarvestMasters {
     fn absent(&self) -> Vec<String> {
         [
             self.fixture_ids.as_ref().err(),
-            self.blueprint_ids.as_ref().err(),
-            self.item_ids.as_ref().err(),
             self.music_records.as_ref().err(),
             self.tools.as_ref().err(),
-            self.materials.as_ref().err(),
             self.boost_grant.as_ref().err(),
         ]
         .into_iter()
@@ -149,11 +122,8 @@ pub(crate) fn load(
         masters: None,
     });
     masters.request(&FIXTURE_IDS);
-    masters.request(&BLUEPRINT_IDS);
-    masters.request(&ITEM_IDS);
     masters.request(&MUSIC_RECORDS);
     masters.request(&TOOLS);
-    masters.request(&MATERIALS);
     masters.request(&STAMINA_RECOVERY);
 }
 
@@ -205,26 +175,6 @@ fn parse_boost_grant(text: &str) -> Result<i32, String> {
     master::int32(&row, "recoveryBoostStamina")
 }
 
-fn parse_materials(text: &str) -> Result<Vec<MockMaterialRow>, String> {
-    rows_by_id(text)?
-        .iter()
-        .map(|row| {
-            let word = master::text(row, "mysekaiMaterialType")?;
-            Ok(MockMaterialRow {
-                id: master::int(row, "id")?,
-                material_type: material_type(word).ok_or_else(|| {
-                    format!("material type word {word} is outside the closed set")
-                })?,
-                site_ids: row["mysekaiSiteIds"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|id| id.as_u64().map(|id| id as u32))
-                    .collect(),
-            })
-        })
-        .collect()
-}
 
 /// `mysekaiMusicRecords`: every id, and the ids by track type.
 pub(crate) struct MusicRecords {
@@ -408,22 +358,52 @@ pub(crate) fn build(
     let Some(tables) = &inputs.masters else {
         return;
     };
-    let Some(max_stamina) = stamina else {
-        // The shared loader's stamina table has not arrived; once it has
-        // finished and the resource is still absent, the table is missing.
-        if master_tables.as_deref().is_some_and(|tables| tables.ready()) {
-            let mut absent = tables.absent();
-            absent.push(
-                "mysekaiStaminas (stamina maximum for the tools and stamina mock): not in the runtime root"
-                    .to_owned(),
-            );
-            warn!("[harvest] harvesting stays off: {} input(s) absent", absent.len());
-            commands.insert_resource(HarvestInputsAbsent(absent));
-            commands.remove_resource::<HarvestInputs>();
-        }
+    // The drop classifier's blueprint and item ids and its material rows come
+    // from the shared loader's tables, which the craft readers already
+    // requested: the catalog asks for no second copy of them.
+    let Some(shared) = master_tables.as_deref().filter(|shared| shared.ready()) else {
         return;
     };
     let mut absent = tables.absent();
+    if stamina.is_none() {
+        absent.push(
+            "mysekaiStaminas (stamina maximum for the tools and stamina mock): not in the runtime root"
+                .to_owned(),
+        );
+    }
+    let blueprint_ids = shared.blueprint_ids.clone().unwrap_or_else(|| {
+        absent.push(
+            "mysekaiBlueprints (the server's blueprints): not in the runtime root".to_owned(),
+        );
+        HashSet::new()
+    });
+    let item_ids = shared.item_ids.clone().unwrap_or_else(|| {
+        absent.push(
+            "mysekaiItems (the server's white blueprint item): not in the runtime root".to_owned(),
+        );
+        HashSet::new()
+    });
+    let mut mock_materials: Vec<MockMaterialRow> = Vec::new();
+    match &shared.material_rows {
+        Some(rows) => {
+            for (id, word, site_ids) in rows {
+                let Some(kind) = material_type(word) else {
+                    absent.push(format!(
+                        "mysekaiMaterials (the server's material types): material type word {word} is outside the closed set"
+                    ));
+                    break;
+                };
+                mock_materials.push(MockMaterialRow {
+                    id: *id,
+                    material_type: kind,
+                    site_ids: site_ids.clone(),
+                });
+            }
+        }
+        None => absent.push(
+            "mysekaiMaterials (the server's material types): not in the runtime root".to_owned(),
+        ),
+    }
     match server.load_state(&inputs.index) {
         LoadState::Failed(error) => {
             let line = format!("{INDEX} ({INDEX_GATES}): {error}");
@@ -442,6 +422,9 @@ pub(crate) fn build(
         commands.remove_resource::<HarvestInputs>();
         return;
     }
+    let Some(max_stamina) = stamina else {
+        return;
+    };
     let Some(sites) = sites else {
         return;
     };
@@ -457,11 +440,8 @@ pub(crate) fn build(
         serde_json::from_str(&asset.0).unwrap_or_else(|error| panic!("{INDEX}: not JSON: {error}"));
     let Some(HarvestMasters {
         fixture_ids: Ok(fixture_ids),
-        blueprint_ids: Ok(blueprint_ids),
-        item_ids: Ok(item_ids),
         music_records: Ok(music_records),
         tools: Ok(tool_defs),
-        materials: Ok(mock_materials),
         boost_grant: Ok(boost_grant),
     }) = inputs.masters.take()
     else {
