@@ -4985,6 +4985,14 @@ name = "moly-law"
 version = "0.0.3"
 
 [[package]]
+name = "moly-layout"
+version = "0.0.3"
+dependencies = [
+ "moly-law",
+ "moly-protocol",
+]
+
+[[package]]
 name = "moly-link"
 version = "0.0.3"
 dependencies = [

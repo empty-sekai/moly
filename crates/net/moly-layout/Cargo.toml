@@ -1,0 +1,11 @@
+[package]
+name = "moly-layout"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The layout operation vocabulary and its validator. No engine dependency: the
+# game, the server's room service and the MCP proxy all execute the same rules.
+[dependencies]
+moly-law = { path = "../../base/moly-law" }
+moly-protocol = { path = "../moly-protocol" }

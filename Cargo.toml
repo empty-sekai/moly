@@ -6,6 +6,7 @@ members = [
     "crates/engine/moly-assets",
     "crates/engine/moly-perf",
     "crates/net/moly-protocol",
+    "crates/net/moly-layout",
     "crates/net/moly-link",
     "crates/server/moly-server",
     "crates/game/moly-core",
