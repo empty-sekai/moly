@@ -39,6 +39,7 @@ const DEFAULT_CHROME = defaultChrome();
 const RPC_TIMEOUT_MS = 10_000;
 const CDP_TIMEOUT_MS = 10_000;
 const CHROME_START_MS = 30_000;
+const SERVER_START_MS = 10_000;
 const BOOT_DEFAULT_S = 600;
 const STOP_WAIT_MS = 5_000;
 const POLL_MS = 250;
@@ -83,6 +84,7 @@ function describe(inst) {
     id: inst.id,
     kind: inst.kind,
     pid: inst.pid,
+    ...(inst.server ? { server: inst.server.pid } : {}),
     started: inst.started,
     rpc: inst.rpc,
     running: !inst.exited,
@@ -109,6 +111,10 @@ function trackExit(inst) {
     inst.exited = true;
     inst.exitCode = code;
     inst.signal = signal;
+    // The server exists for the game, so it ends with it.
+    if (inst.server) {
+      killServer(inst.server.child).catch((err) => log(`server ${inst.server.pid}:`, err.message));
+    }
     markExited();
   });
   inst.child.once('error', (err) => {
@@ -116,6 +122,93 @@ function trackExit(inst) {
     inst.exited = true;
     markExited();
   });
+}
+
+const SERVER_FILE = process.platform === 'win32' ? 'moly-server.exe' : 'moly-server';
+
+// Appends one stream of the server to the log line by line and reports every
+// complete line. The stream is always read so the child's pipe never fills.
+function pipeServerLog(stream, logPath, onLine) {
+  let pending = '';
+  stream.setEncoding('utf8');
+  stream.on('data', (chunk) => {
+    pending += chunk;
+    const lines = pending.split(/\r?\n/);
+    pending = lines.pop();
+    for (const line of lines) {
+      appendFileSync(logPath, `[server] ${line}\n`);
+      onLine(line);
+    }
+  });
+  stream.on('end', () => {
+    if (!pending) return;
+    appendFileSync(logPath, `[server] ${pending}\n`);
+    onLine(pending);
+    pending = '';
+  });
+}
+
+// Starts the server beside the game. Returns null when no server program sits
+// beside the executable (a stub or a measurement binary has none); the log then
+// says the program starts without one.
+function startServer({ gamePath, cwd, logPath, env }) {
+  const serverExe = path.join(path.dirname(gamePath), SERVER_FILE);
+  if (!existsSync(serverExe) || !statSync(serverExe).isFile()) {
+    appendFileSync(logPath, `# no ${SERVER_FILE} beside ${gamePath}; it starts without a server\n`);
+    return null;
+  }
+  appendFileSync(logPath, `# ${new Date().toISOString()} server ${serverExe}\n`);
+  const child = spawn(serverExe, [], {
+    cwd,
+    env: { ...process.env, ...(env ?? {}), MOLY_SERVER_ADDR: '127.0.0.1:0' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  const stderrLines = [];
+  if (child.stderr) {
+    pipeServerLog(child.stderr, logPath, (line) => {
+      if (stderrLines.join('\n').length < 8192) stderrLines.push(line);
+    });
+  }
+  const ready = new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error, announced) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve(announced);
+    };
+    const timer = setTimeout(
+      () => finish(new Error(`the server did not announce its address within ${SERVER_START_MS / 1000} s`)),
+      SERVER_START_MS,
+    );
+    if (child.stdout) {
+      pipeServerLog(child.stdout, logPath, (line) => {
+        const match = /listening on (ws:\/\/\S+)/.exec(line);
+        if (match) finish(null, { url: match[1], line: line.trim() });
+      });
+    }
+    child.once('exit', (code, signal) => {
+      const tail = stderrLines.length ? `: ${stderrLines.join(' | ')}` : '';
+      finish(new Error(`the server exited before it announced its address (${code ?? signal})${tail}`));
+    });
+    child.once('error', (err) => finish(new Error(`failed to spawn ${serverExe}: ${err.message}`)));
+  });
+  return { child, ready };
+}
+
+// Ends a server process and waits until it is gone.
+async function killServer(child) {
+  if (!child || child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
+  if (process.platform === 'win32') {
+    await execFileP('taskkill', ['/PID', String(child.pid), '/T', '/F']).catch((err) =>
+      log(`taskkill server ${child.pid}:`, (err.stderr || err.message).toString().trim()),
+    );
+  } else {
+    child.kill('SIGKILL');
+  }
+  await Promise.race([once(child, 'exit').catch(() => {}), sleep(STOP_WAIT_MS)]);
 }
 
 async function nativeLaunch({ exe, env, args = [], cwd, rpcPort = DEFAULT_RPC_PORT }) {
@@ -137,16 +230,42 @@ async function nativeLaunch({ exe, env, args = [], cwd, rpcPort = DEFAULT_RPC_PO
   // from a first run's state and leaves the user's save alone. The caller's
   // MOLY_SETTINGS_FILE, if given, is used instead.
   const settingsFile = env?.MOLY_SETTINGS_FILE ?? path.join(LOG_DIR, `${id}.settings.json`);
-  const child = spawnLogged({
-    exePath,
-    args,
-    cwd: cwdPath,
-    env: { ...process.env, ...(env ?? {}), MOLY_CONTROL_PORT: controlPort, MOLY_SETTINGS_FILE: settingsFile },
-    logPath,
-    header: `launch ${exePath} ${args.join(' ')}`,
-    // A hidden first window is created at 0x0: no UI layout, one-pixel captures.
-    hide: false,
-  });
+  // The native game is two processes: the server names an address and the game is
+  // started with it.
+  const server = startServer({ gamePath: exePath, cwd: cwdPath, logPath, env });
+  let serverRecord = null;
+  if (server) {
+    let announced;
+    try {
+      announced = await server.ready;
+    } catch (err) {
+      await killServer(server.child);
+      throw err;
+    }
+    serverRecord = { pid: server.child.pid, child: server.child, url: announced.url, line: announced.line };
+  }
+  let child;
+  try {
+    child = spawnLogged({
+      exePath,
+      args,
+      cwd: cwdPath,
+      env: {
+        ...process.env,
+        ...(env ?? {}),
+        MOLY_CONTROL_PORT: controlPort,
+        MOLY_SETTINGS_FILE: settingsFile,
+        ...(serverRecord ? { MOLY_SERVER_URL: serverRecord.url } : {}),
+      },
+      logPath,
+      header: `launch ${exePath} ${args.join(' ')}`,
+      // A hidden first window is created at 0x0: no UI layout, one-pixel captures.
+      hide: false,
+    });
+  } catch (err) {
+    await killServer(serverRecord?.child);
+    throw new Error(`failed to spawn ${exePath}: ${err.message}`);
+  }
 
   const inst = {
     id,
@@ -157,6 +276,7 @@ async function nativeLaunch({ exe, env, args = [], cwd, rpcPort = DEFAULT_RPC_PO
     exe: exePath,
     log: logPath,
     child,
+    server: serverRecord,
     exited: false,
     exitCode: null,
     signal: null,
@@ -166,11 +286,17 @@ async function nativeLaunch({ exe, env, args = [], cwd, rpcPort = DEFAULT_RPC_PO
   try {
     await once(child, 'spawn');
   } catch (err) {
+    await killServer(serverRecord?.child);
     throw new Error(`failed to spawn ${exePath}: ${err.message}`);
   }
   instances.set(id, inst);
-  log(`launched ${id} pid=${child.pid} log=${logPath}`);
-  return { id, pid: child.pid, log: logPath };
+  log(`launched ${id} pid=${child.pid} log=${logPath}${serverRecord ? ` server=${serverRecord.pid}` : ''}`);
+  return {
+    id,
+    pid: child.pid,
+    log: logPath,
+    server: serverRecord ? { pid: serverRecord.pid, url: serverRecord.url, line: serverRecord.line } : null,
+  };
 }
 
 // Kills exactly one process tree: the pid this server spawned.
@@ -189,9 +315,17 @@ async function killTree(inst) {
 async function stopInstance(inst) {
   inst.cdp?.close();
   if (!inst.exited) await killTree(inst);
+  if (inst.server) await killServer(inst.server.child);
   inst.stopped = true;
   if (!inst.exited) throw new Error(`pid ${inst.pid} did not exit within ${STOP_WAIT_MS / 1000} s after taskkill`);
-  return { id: inst.id, pid: inst.pid, stopped: true, exitCode: inst.exitCode, signal: inst.signal };
+  return {
+    id: inst.id,
+    pid: inst.pid,
+    stopped: true,
+    exitCode: inst.exitCode,
+    signal: inst.signal,
+    server: inst.server ? inst.server.pid : null,
+  };
 }
 
 function nativeStopTool(id) {
@@ -755,7 +889,7 @@ server.registerTool(
   'native_launch',
   {
     description:
-      'Start a native executable (absolute or relative file path, no PATH lookup). stdin is closed; stdout and stderr go to logs/<id>.log. MOLY_CONTROL_PORT is set from rpcPort and MOLY_SETTINGS_FILE to logs/<id>.settings.json unless env overrides them. Without MOLY_DEV=1 in env the program runs the game; with it, the developer window.',
+      'Start a native executable (absolute or relative file path, no PATH lookup). stdin is closed; stdout and stderr go to logs/<id>.log. A moly-server(.exe) beside the executable is started first and the program is given its address as MOLY_SERVER_URL; the server stops when the program does, and the result names its pid and listening line (null when there is no server beside it). MOLY_CONTROL_PORT is set from rpcPort and MOLY_SETTINGS_FILE to logs/<id>.settings.json unless env overrides them. Without MOLY_DEV=1 in env the program runs the game; with it, the developer window.',
     inputSchema: {
       exe: z.string().describe('Path to the executable file'),
       env: z.record(z.string(), z.string()).optional().describe('Environment variables merged over process.env'),
@@ -770,7 +904,7 @@ server.registerTool(
 server.registerTool(
   'native_stop',
   {
-    description: 'Kill a native instance and its process tree (taskkill /T /F on Windows) and mark it stopped.',
+    description: 'Kill a native instance and its process tree (taskkill /T /F on Windows), stop the server started with it, and mark it stopped.',
     inputSchema: { id: z.string() },
   },
   guard('native_stop', async ({ id }) => json(await nativeStopTool(id))),
@@ -1149,15 +1283,25 @@ server.registerTool(
   }),
 );
 
-// Kill every child this server still owns when it exits, native or browser.
+// Kill every child this server still owns when it exits, native or browser,
+// with the server started beside each native program.
 // Synchronous on purpose: this runs from the 'exit' event.
 function killOwnedChildrenSync() {
   for (const inst of instances.values()) {
-    if (inst.exited || !inst.child) continue;
-    if (process.platform === 'win32') {
-      spawnSync('taskkill', ['/PID', String(inst.pid), '/T', '/F'], { stdio: 'ignore' });
-    } else {
-      inst.child.kill('SIGKILL');
+    if (!inst.exited && inst.child) {
+      if (process.platform === 'win32') {
+        spawnSync('taskkill', ['/PID', String(inst.pid), '/T', '/F'], { stdio: 'ignore' });
+      } else {
+        inst.child.kill('SIGKILL');
+      }
+    }
+    const server = inst.server?.child;
+    if (server && server.exitCode === null && server.signalCode === null) {
+      if (process.platform === 'win32') {
+        spawnSync('taskkill', ['/PID', String(server.pid), '/T', '/F'], { stdio: 'ignore' });
+      } else {
+        server.kill('SIGKILL');
+      }
     }
   }
 }

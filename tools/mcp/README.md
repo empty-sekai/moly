@@ -54,9 +54,9 @@ The server provides 21 tools.
 
 | Tool | Purpose |
 |---|---|
-| `instance_list` | Lists the instances this server started: `id`, `kind`, `pid`, `started`, `running`, and the RPC URL (native) or the port and URL (browser). |
-| `native_launch` | Starts a native executable: `exe` (a file path, with no `PATH` lookup), and optional `env`, `args`, `cwd` and `rpcPort` (default 15702). Output goes to `logs/<id>.log`. Returns `{id, pid, log}`. |
-| `native_stop` | Kills the instance's process tree (`taskkill /T /F` on Windows) and marks the instance stopped. |
+| `instance_list` | Lists the instances this server started: `id`, `kind`, `pid`, the server's pid (native), `started`, `running`, and the RPC URL (native) or the port and URL (browser). |
+| `native_launch` | Starts a native executable: `exe` (a file path, with no `PATH` lookup), and optional `env`, `args`, `cwd` and `rpcPort` (default 15702). A `moly-server` program beside the executable is started first and the executable is given its address as `MOLY_SERVER_URL`. Output goes to `logs/<id>.log`. Returns `{id, pid, log, server}`, where `server` is `{pid, url, line}` or `null`. |
+| `native_stop` | Kills the instance's process tree (`taskkill /T /F` on Windows), stops the server started with it, and marks the instance stopped. |
 | `instance_logs` | Returns the last lines of an instance log: `tail` (default 200; 0 for all lines) and an optional `grep`, which is a plain substring filter. |
 | `rpc` | Sends one JSON-RPC 2.0 request to any instance: `id`, `method` and optional `params`. Returns the result, or the error object with `isError` set. 10 s timeout. |
 | `browser_launch` | Starts Chrome with a fresh profile, opens `url`, and taps `#boot-enter` when the boot screen is ready. Returns `{id, pid, port, state}`. See [Browser instances](#browser-instances). |
@@ -79,6 +79,8 @@ The server provides 21 tools.
 Relative paths given to `native_launch` (`exe`, `cwd`) and to `browser_launch` (`chrome`, when it contains a path separator) resolve against the directory the server runs in.
 
 ## Native instances
+
+The native game is two processes: `moly-app` and its server. When a `moly-server` program (`.exe` on Windows) sits beside the executable, `native_launch` starts it first with `MOLY_SERVER_ADDR=127.0.0.1:0`, reads the address it announces on its stdout, and starts the executable with `MOLY_SERVER_URL` set to it. The launch result names the server's pid, address and announcing line. The server's output goes to the same log, and the server is stopped when the instance is stopped or its program exits. A program with no server beside it (a stub, a measurement binary) starts without one and its log says so; the result's `server` is `null`.
 
 `native_launch` starts the executable with `MOLY_CONTROL_PORT` set to `rpcPort` (default 15702), unless the `env` argument sets `MOLY_CONTROL_PORT` itself. The instance's RPC URL uses that same port.
 
@@ -260,7 +262,7 @@ Each run gets its own directory `<out>/<id>-seed<seed>/` with `instance.log` (th
 
 ## Platform notes
 
-- Windows: `native_stop`, `browser_stop` and the exit cleanup end the whole process tree with `taskkill /T /F`. The native game window is not hidden, because a hidden first window has no layout.
+- Windows: `native_stop`, `browser_stop` and the exit cleanup end the whole process tree with `taskkill /T /F`; the server started with a native instance is stopped as well. The native game window is not hidden, because a hidden first window has no layout.
 - macOS and Linux: those stops send `SIGKILL` to the process the server started. Its child processes are not signalled.
 - Default Chrome executable: `C:/Program Files/Google/Chrome/Application/chrome.exe` on Windows, `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome` on macOS, and `google-chrome` looked up on `PATH` elsewhere.
 - The `MOLY_CHROME` environment variable overrides the platform default. The `chrome` argument of `browser_launch` takes precedence over both.

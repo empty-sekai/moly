@@ -12,11 +12,13 @@ use moly_store::install::{self, Job, Phase, Progress};
 use moly_store::publication::Publication;
 use moly_store::record::{Installed, Record};
 use serde::Serialize;
-use std::path::PathBuf;
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tauri::http::Response;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
@@ -29,6 +31,16 @@ static FONT: &[u8] = include_bytes!("../../../game/moly-game/assets/font/Resourc
 const GAME_FILE: &str = "moly-app.exe";
 #[cfg(not(windows))]
 const GAME_FILE: &str = "moly-app";
+
+/// The game plays as two processes: this one runs beside `GAME_FILE` and the
+/// game is started with the address it announces.
+#[cfg(windows)]
+const SERVER_FILE: &str = "moly-server.exe";
+#[cfg(not(windows))]
+const SERVER_FILE: &str = "moly-server";
+
+/// How long the server may take to announce the address it listens on.
+const SERVER_START_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A download or a move of the resource directory; one runs at a time.
 struct Download {
@@ -64,12 +76,244 @@ impl Download {
     }
 }
 
+/// The server of the running game.
+struct Server {
+    child: Child,
+    #[cfg(windows)]
+    job: ServerJob,
+}
+
+impl Server {
+    /// Ends the server: the game exited or could not start.
+    fn stop(&mut self) {
+        #[cfg(windows)]
+        self.job.terminate();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// A Windows job whose processes end when the launcher's own handle closes, so
+/// a killed launcher does not leave a server behind.
+#[cfg(windows)]
+struct ServerJob(isize);
+
+#[cfg(windows)]
+impl ServerJob {
+    fn new() -> Result<Self, String> {
+        use windows_sys::Win32::System::JobObjects::{
+            CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        // SAFETY: no attributes and no name; the handle is closed by `Drop`.
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        let job = ServerJob(handle as isize);
+        // SAFETY: a zeroed limits record is valid; only the flags field is set.
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let size = std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32;
+        // SAFETY: the pointer and its length describe the record above.
+        let set = unsafe {
+            SetInformationJobObject(
+                job.handle(),
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as *const std::ffi::c_void,
+                size,
+            )
+        };
+        if set == 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        Ok(job)
+    }
+
+    fn handle(&self) -> windows_sys::Win32::Foundation::HANDLE {
+        self.0 as windows_sys::Win32::Foundation::HANDLE
+    }
+
+    /// Puts `child` in this job, so ending the job also ends it.
+    fn assign(&self, child: &Child) -> Result<(), String> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+        // SAFETY: both handles are live for the call.
+        let assigned =
+            unsafe { AssignProcessToJobObject(self.handle(), child.as_raw_handle() as _) };
+        if assigned == 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        Ok(())
+    }
+
+    fn terminate(&self) {
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+        // SAFETY: the handle is live until `Drop`.
+        unsafe { TerminateJobObject(self.handle(), 1) };
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ServerJob {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        // SAFETY: this value owns the handle and closes it once.
+        unsafe { CloseHandle(self.handle()) };
+    }
+}
+
+/// The address in the server's announcing line, if this is that line.
+fn announced_address(line: &str) -> Option<String> {
+    let (_, address) = line.split_once(" listening on ")?;
+    let address = address.trim();
+    address.starts_with("ws://").then(|| address.to_owned())
+}
+
+/// Copies one of the server's streams into the log line by line and reports
+/// every line to `each`. The stream is always read: a pipe that fills stops
+/// the server. The optional buffer keeps the beginning of its stderr for a
+/// start failure.
+fn drain(
+    stream: impl std::io::Read + Send + 'static,
+    mut log: std::fs::File,
+    kept: Option<Arc<Mutex<String>>>,
+    mut each: impl FnMut(&str) + Send + 'static,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    let line = line.trim_end();
+                    let _ = writeln!(log, "[server] {line}");
+                    if let Some(kept) = &kept {
+                        let mut kept = kept.lock().unwrap();
+                        if kept.len() < 8192 {
+                            kept.push_str(line);
+                            kept.push('\n');
+                        }
+                    }
+                    each(line);
+                }
+            }
+        }
+    })
+}
+
+/// Starts the server beside the game, gives its streams to the log and returns
+/// it with the address it announced.
+fn start_server(game: &Path, log: &std::fs::File) -> Result<(Server, String), String> {
+    let exe = game.with_file_name(SERVER_FILE);
+    if !exe.is_file() {
+        return Err(format!(
+            "the game's server program is missing: {}",
+            exe.display()
+        ));
+    }
+    #[cfg(windows)]
+    let job = ServerJob::new()
+        .map_err(|error| format!("the server cannot be tied to the launcher: {error}"))?;
+    let mut command = Command::new(&exe);
+    command
+        .current_dir(exe.parent().unwrap_or_else(|| Path::new(".")))
+        // Port 0 asks the system for a free port; the server announces it.
+        .env("MOLY_SERVER_ADDR", "127.0.0.1:0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("{}: {error}", exe.display()))?;
+    #[cfg(windows)]
+    {
+        if let Err(error) = job.assign(&child) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("the server cannot be tied to the launcher: {error}"));
+        }
+    }
+    let stdout = child.stdout.take().expect("the server's stdout is piped");
+    let stderr = child.stderr.take().expect("the server's stderr is piped");
+    let diagnostics = Arc::new(Mutex::new(String::new()));
+    let (ready, ready_rx) = mpsc::channel::<String>();
+    let out_log = log
+        .try_clone()
+        .map_err(|error| format!("{}: {error}", exe.display()))?;
+    // The server announces its address once; the first line settles the start.
+    let mut announced = false;
+    let out = drain(stdout, out_log, None, move |line| {
+        if let Some(url) = announced_address(line) {
+            if !announced {
+                announced = true;
+                let _ = ready.send(url);
+            }
+        }
+    });
+    let err_log = log
+        .try_clone()
+        .map_err(|error| format!("{}: {error}", exe.display()))?;
+    let err = drain(stderr, err_log, Some(diagnostics.clone()), |_| {});
+    let failure = |mut child: Child, reason: String| -> String {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = out.join();
+        let _ = err.join();
+        let details = diagnostics.lock().unwrap().trim().to_owned();
+        if details.is_empty() {
+            reason
+        } else {
+            format!("{reason}: {details}")
+        }
+    };
+    match ready_rx.recv_timeout(SERVER_START_TIMEOUT) {
+        Ok(url) => {
+            #[cfg(windows)]
+            let server = Server { child, job };
+            #[cfg(not(windows))]
+            let server = Server { child };
+            Ok((server, url))
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(failure(
+            child,
+            "the server exited before it announced its address".to_owned(),
+        )),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(failure(
+            child,
+            format!(
+                "the server did not announce its address within {} s",
+                SERVER_START_TIMEOUT.as_secs()
+            ),
+        )),
+    }
+}
+
 #[derive(Default)]
 struct Launcher {
     publication: Mutex<Option<(String, Publication)>>,
     download: Mutex<Option<Download>>,
     game: Mutex<Option<(Child, PathBuf)>>,
+    server: Mutex<Option<Server>>,
     last_exit: Mutex<Option<String>>,
+}
+
+impl Launcher {
+    /// Ends the server of the game that is gone. Lock the game first, then the
+    /// server: the poll that sees the game exit holds both in that order.
+    fn stop_server(&self) {
+        if let Some(mut server) = self.server.lock().unwrap().take() {
+            server.stop();
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -347,12 +591,16 @@ fn launch(snapshot: String, state: State<'_, Launcher>) -> Result<(), String> {
     let log_path = logs.join(format!("game-{stamp}.log"));
     let log = std::fs::File::create(&log_path).map_err(|error| format!("{}: {error}", log_path.display()))?;
     let err = log.try_clone().map_err(|error| error.to_string())?;
+    // A server left by the last game ends before this one starts.
+    state.stop_server();
+    let (mut server, url) = start_server(&exe, &log)?;
     let mut command = Command::new(&exe);
     command
         .current_dir(exe.parent().unwrap_or(&dir))
         .env(moly_store::location::DATA_DIR_ENV, &data)
         .env("MOLY_ASSET_ROOT", &dir)
         .env("MOLY_ASSET_CATALOG", &installed.catalog)
+        .env("MOLY_SERVER_URL", &url)
         .env("MOLY_DEV", if config.developer { "1" } else { "0" })
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
@@ -365,7 +613,14 @@ fn launch(snapshot: String, state: State<'_, Launcher>) -> Result<(), String> {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         command.creation_flags(CREATE_NO_WINDOW);
     }
-    let child = command.spawn().map_err(|error| format!("{}: {error}", exe.display()))?;
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            server.stop();
+            return Err(format!("{}: {error}", exe.display()));
+        }
+    };
+    *state.server.lock().unwrap() = Some(server);
     *game = Some((child, log_path));
     *state.last_exit.lock().unwrap() = None;
     if config.snapshot.as_deref() != Some(snapshot.as_str()) {
@@ -392,6 +647,8 @@ fn game_status(state: State<'_, Launcher>) -> GameView {
     match child.try_wait() {
         Ok(None) => GameView { running: true, log: log_text, exit: None },
         Ok(Some(status)) => {
+            // The server exists for the game; it ends when the game does.
+            state.stop_server();
             let exit = if status.success() { None } else { Some(format!("{status}")) };
             *last = exit.clone();
             GameView { running: false, log: log_text, exit }

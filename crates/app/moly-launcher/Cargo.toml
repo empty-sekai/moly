@@ -19,3 +19,14 @@ serde_json = { workspace = true }
 tauri = { version = "=2.12.1", features = [] }
 tauri-plugin-dialog = "=2.8.0"
 tauri-plugin-opener = "=2.7.0"
+
+[target.'cfg(windows)'.dependencies]
+# The job object that ends the game's server with the launcher.
+# CreateJobObjectW is declared behind Win32_Security and the extended limits
+# record behind Win32_System_Threading; both are needed beside JobObjects.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
