@@ -1316,4 +1316,522 @@ mod tests {
         }
         (world, rotation)
     }
+
+    const CENSUS_VOXEL: f32 = 0.01;
+    const CENSUS_HALF: f32 = 3.0;
+    /// One more cell than the grid's `6.0 / 0.01` cell count rounds to; points
+    /// outside the baked grid are not walkable, so a superset only costs empty
+    /// lookups.
+    const CENSUS_CELLS: usize = 601;
+
+    /// A fixture glb's collision sources in fixture-local space.
+    struct CensusSource {
+        physics: Vec<ColliderPolygon>,
+        carving: Vec<ColliderPolygon>,
+        kinds: [usize; 4],
+        other: usize,
+        errors: usize,
+    }
+
+    /// Reads logical asset paths the way the game's asset root does: either a
+    /// plain export tree, or an installed resource directory whose catalog maps
+    /// each logical path to a package manifest and then to a blob.
+    struct CensusAssets {
+        root: std::path::PathBuf,
+        tree: bool,
+        manifests: std::collections::HashMap<String, String>,
+    }
+
+    impl CensusAssets {
+        fn open(root: &std::path::Path) -> Self {
+            let tree = root.join("fixture-models/index.json").is_file();
+            let mut manifests = std::collections::HashMap::new();
+            if !tree {
+                let record_path = root.join("moly-resources.json");
+                let record: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(&record_path)
+                        .unwrap_or_else(|error| panic!("{}: {error}", record_path.display())),
+                )
+                .unwrap_or_else(|error| panic!("{}: {error}", record_path.display()));
+                let catalog = std::env::var("MOLY_ASSET_CATALOG").ok().unwrap_or_else(|| {
+                    record["snapshots"]
+                        .as_array()
+                        .and_then(|snapshots| {
+                            snapshots
+                                .iter()
+                                .max_by_key(|snapshot| snapshot["installed_at"].as_u64().unwrap_or(0))
+                        })
+                        .and_then(|snapshot| snapshot["catalog"].as_str())
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "{} names no installed catalog; set MOLY_ASSET_CATALOG",
+                                root.display()
+                            )
+                        })
+                });
+                let path = root.join("catalogs").join(format!("{catalog}.json"));
+                let document: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(&path)
+                        .unwrap_or_else(|error| panic!("{}: {error}", path.display())),
+                )
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+                assert_eq!(
+                    document["schema"], "moly-asset-packs/2",
+                    "{} is not a version-2 asset catalog",
+                    path.display()
+                );
+                for package in document["packages"].as_array().into_iter().flatten() {
+                    let Some(manifest) = package["manifest"].as_str() else {
+                        continue;
+                    };
+                    for logical in package["paths"].as_array().into_iter().flatten() {
+                        if let Some(logical) = logical.as_str() {
+                            manifests.insert(logical.to_owned(), manifest.to_owned());
+                        }
+                    }
+                }
+            }
+            Self {
+                root: root.to_path_buf(),
+                tree,
+                manifests,
+            }
+        }
+
+        fn read(&self, logical: &str) -> Option<Vec<u8>> {
+            if self.tree {
+                return std::fs::read(self.root.join(logical)).ok();
+            }
+            let manifest = self.manifests.get(logical)?;
+            let path = self.root.join(manifest.as_str());
+            let document: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+            let entry = document["entries"]
+                .as_array()?
+                .iter()
+                .find(|entry| entry["path"].as_str() == Some(logical))?;
+            let blob = entry["blob"].as_str()?;
+            std::fs::read(self.root.join("blobs").join(blob)).ok()
+        }
+    }
+
+    /// The JSON chunk of a glTF binary.
+    fn census_glb(bytes: &[u8]) -> Option<serde_json::Value> {
+        if bytes.len() < 20 || &bytes[..4] != b"glTF" {
+            return None;
+        }
+        let length = u32::from_le_bytes(bytes[12..16].try_into().ok()?) as usize;
+        serde_json::from_slice(bytes.get(20..20 + length)?).ok()
+    }
+
+    /// A glb's collision documents and per-node source records, turned into
+    /// collider polygons in the fixture's own space. The filters mirror the
+    /// bake's collection: active nodes, the navigation layer, the modifier
+    /// recursion, and the rule that drops physics sources on an object that
+    /// carries an agent or a carving obstacle.
+    fn census_source(gltf: &serde_json::Value) -> CensusSource {
+        let mut documents = Vec::new();
+        let mut errors = 0usize;
+        let mut values = vec![gltf["extras"]["fixtureCollision"].clone()];
+        for node in gltf["nodes"].as_array().into_iter().flatten() {
+            values.push(node["extras"]["fixtureCollision"].clone());
+        }
+        for value in values.into_iter().filter(|value| !value.is_null()) {
+            match serde_json::from_value::<Document>(value) {
+                Ok(document) => documents.push(document),
+                Err(_) => errors += 1,
+            }
+        }
+        let geometry: Vec<Geometry> = documents
+            .iter()
+            .flat_map(|document| document.geometry.iter().cloned())
+            .collect();
+        let nodes: Vec<serde_json::Value> = gltf["nodes"].as_array().cloned().unwrap_or_default();
+        let mut source = CensusSource {
+            physics: Vec::new(),
+            carving: Vec::new(),
+            kinds: [0; 4],
+            other: 0,
+            errors,
+        };
+        for (index, node) in nodes.iter().enumerate() {
+            let extras = &node["extras"];
+            if extras["active"].as_bool() == Some(false) {
+                continue;
+            }
+            let raw = &extras["sourceCollision"];
+            if raw.is_null() {
+                continue;
+            }
+            let record: Node = match serde_json::from_value(raw.clone()) {
+                Ok(record) => record,
+                Err(_) => {
+                    source.errors += 1;
+                    continue;
+                }
+            };
+            if !(record.fixture_nav_layer || record.authored_layer == Some(9)) {
+                continue;
+            }
+            if census_ignored(&nodes, index, &mut source.errors) {
+                continue;
+            }
+            let (transform, rotation) = test_node_world_transform(&nodes, index);
+            if !record.has_nav_mesh_agent && record.nav_mesh_obstacles.is_empty() {
+                for collider in &record.colliders {
+                    match (collider.enabled, collider.is_trigger) {
+                        (Some(false), _) | (_, Some(true)) => continue,
+                        (Some(true), Some(false)) => {}
+                        _ => {
+                            source.errors += 1;
+                            continue;
+                        }
+                    }
+                    if collider.gap.is_some() {
+                        source.errors += 1;
+                        continue;
+                    }
+                    match collider.kind.as_str() {
+                        "MeshCollider" => source.kinds[0] += 1,
+                        "BoxCollider" => source.kinds[1] += 1,
+                        "SphereCollider" => source.kinds[2] += 1,
+                        "CapsuleCollider" => source.kinds[3] += 1,
+                        _ => source.other += 1,
+                    }
+                    match collider_polygons(collider, &geometry, &transform, rotation) {
+                        Ok(polygons) => source.physics.extend(polygons),
+                        Err(_) => source.errors += 1,
+                    }
+                }
+            }
+            for obstacle in &record.nav_mesh_obstacles {
+                match (obstacle.enabled, obstacle.carve) {
+                    (Some(false), _) | (_, Some(false)) => continue,
+                    (Some(true), Some(true)) => {}
+                    _ => {
+                        source.errors += 1;
+                        continue;
+                    }
+                }
+                match obstacle_polygon(obstacle, &transform, rotation) {
+                    Ok(polygon) => source.carving.push(polygon),
+                    Err(_) => source.errors += 1,
+                }
+            }
+        }
+        source
+    }
+
+    /// Whether a node's ancestor chain marks its sources ignored
+    /// (`ignoreFromBuild` on a modifier that affects the home agent).
+    /// Malformed modifiers count as errors, as the bake refuses them.
+    fn census_ignored(nodes: &[serde_json::Value], start: usize, errors: &mut usize) -> bool {
+        let mut current = start;
+        let mut visited = std::collections::HashSet::new();
+        loop {
+            if !visited.insert(current) {
+                *errors += 1;
+                return true;
+            }
+            if let Some(raw) = nodes[current]["extras"].get("sourceCollision") {
+                if let Ok(record) = serde_json::from_value::<Node>(raw.clone()) {
+                    for modifier in &record.modifiers {
+                        match modifier.enabled {
+                            Some(false) => continue,
+                            Some(true) => {}
+                            None => {
+                                *errors += 1;
+                                return true;
+                            }
+                        }
+                        let Some(agents) = modifier.affected_agents.as_ref() else {
+                            *errors += 1;
+                            return true;
+                        };
+                        if !agents.contains(&-1) && !agents.contains(&super::AGENT) {
+                            continue;
+                        }
+                        if modifier.override_area.is_none() || modifier.ignore_from_build.is_none() {
+                            *errors += 1;
+                            return true;
+                        }
+                        if modifier.override_area == Some(true) && modifier.area != Some(0) {
+                            *errors += 1;
+                            return true;
+                        }
+                        if modifier.ignore_from_build == Some(true) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            let Some(parent) = nodes.iter().position(|node| {
+                node["children"].as_array().is_some_and(|children| {
+                    children
+                        .iter()
+                        .any(|child| child.as_u64() == Some(current as u64))
+                })
+            }) else {
+                break;
+            };
+            current = parent;
+        }
+        false
+    }
+
+    /// Cell mask of the fixture's projected source footprint (collider meshes,
+    /// solid primitives and carving hulls) at the bake's cell centres.
+    fn census_footprint(source: &CensusSource) -> Vec<bool> {
+        let mut mask = vec![false; CENSUS_CELLS * CENSUS_CELLS];
+        for polygon in source.physics.iter().chain(source.carving.iter()) {
+            if polygon.solid || polygon.triangles.is_empty() {
+                census_hull_mask(&polygon.vertices, &mut mask);
+            } else {
+                for triangle in &polygon.triangles {
+                    census_triangle_mask(triangle, &mut mask);
+                }
+            }
+        }
+        mask
+    }
+
+    fn census_hull_mask(vertices: &[[f32; 2]], mask: &mut [bool]) {
+        if vertices.len() < 3 {
+            return;
+        }
+        let min = vertices
+            .iter()
+            .fold([f32::INFINITY; 2], |a, p| [a[0].min(p[0]), a[1].min(p[1])]);
+        let max = vertices
+            .iter()
+            .fold([f32::NEG_INFINITY; 2], |a, p| [a[0].max(p[0]), a[1].max(p[1])]);
+        let (x0, z0) = census_cell_of(min[0], min[1]);
+        let (x1, z1) = census_cell_of(max[0], max[1]);
+        for z in z0.max(0)..=z1.min(CENSUS_CELLS as isize - 1) {
+            for x in x0.max(0)..=x1.min(CENSUS_CELLS as isize - 1) {
+                let point = [census_centre(x as usize), census_centre(z as usize)];
+                let mut positive = false;
+                let mut negative = false;
+                for i in 0..vertices.len() {
+                    let a = vertices[i];
+                    let b = vertices[(i + 1) % vertices.len()];
+                    let cross = (b[0] - a[0]) * (point[1] - a[1])
+                        - (b[1] - a[1]) * (point[0] - a[0]);
+                    positive |= cross > 1e-6;
+                    negative |= cross < -1e-6;
+                }
+                if !(positive && negative) {
+                    mask[z as usize * CENSUS_CELLS + x as usize] = true;
+                }
+            }
+        }
+    }
+
+    fn census_triangle_mask(triangle: &[[f32; 3]; 3], mask: &mut [bool]) {
+        let min = [
+            triangle.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min),
+            triangle.iter().map(|p| p[2]).fold(f32::INFINITY, f32::min),
+        ];
+        let max = [
+            triangle.iter().map(|p| p[0]).fold(f32::NEG_INFINITY, f32::max),
+            triangle.iter().map(|p| p[2]).fold(f32::NEG_INFINITY, f32::max),
+        ];
+        let (x0, z0) = census_cell_of(min[0], min[1]);
+        let (x1, z1) = census_cell_of(max[0], max[1]);
+        for z in z0.max(0)..=z1.min(CENSUS_CELLS as isize - 1) {
+            for x in x0.max(0)..=x1.min(CENSUS_CELLS as isize - 1) {
+                let point = [census_centre(x as usize), census_centre(z as usize)];
+                if census_point_in_triangle(point, triangle) {
+                    mask[z as usize * CENSUS_CELLS + x as usize] = true;
+                }
+            }
+        }
+    }
+
+    fn census_cell_of(x: f32, z: f32) -> (isize, isize) {
+        (
+            ((x + CENSUS_HALF) / CENSUS_VOXEL).floor() as isize,
+            ((z + CENSUS_HALF) / CENSUS_VOXEL).floor() as isize,
+        )
+    }
+
+    fn census_centre(index: usize) -> f32 {
+        -CENSUS_HALF + (index as f32 + 0.5) * CENSUS_VOXEL
+    }
+
+    fn census_point_in_triangle(point: [f32; 2], triangle: &[[f32; 3]; 3]) -> bool {
+        let a = [triangle[0][0], triangle[0][2]];
+        let b = [triangle[1][0], triangle[1][2]];
+        let c = [triangle[2][0], triangle[2][2]];
+        let determinant = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]);
+        if determinant.abs() < 1e-12 {
+            return false;
+        }
+        let u = ((b[1] - c[1]) * (point[0] - c[0]) + (c[0] - b[0]) * (point[1] - c[1])) / determinant;
+        let v = ((c[1] - a[1]) * (point[0] - c[0]) + (a[0] - c[0]) * (point[1] - c[1])) / determinant;
+        u >= -1e-5 && v >= -1e-5 && u + v <= 1.0 + 1e-5
+    }
+
+    /// Bakes every fixture glb that carries collider or obstacle extras over a
+    /// flat six-metre floor and writes one row per fixture to `MOLY_CENSUS_OUT`.
+    /// The row reports the source counts, the walkable cell count, the cells
+    /// whose walk surface is more than one climb above the floor, and the
+    /// walkable area inside the fixture's own projected source footprint.
+    #[test]
+    #[ignore = "requires MOLY_ASSET_ROOT and MOLY_CENSUS_OUT"]
+    fn fixture_walk_census() {
+        let root = std::path::PathBuf::from(
+            std::env::var("MOLY_ASSET_ROOT")
+                .expect("MOLY_ASSET_ROOT must point at the asset root"),
+        );
+        assert!(
+            root.is_dir(),
+            "MOLY_ASSET_ROOT is not a directory: {}",
+            root.display()
+        );
+        let output = std::path::PathBuf::from(
+            std::env::var("MOLY_CENSUS_OUT").expect("MOLY_CENSUS_OUT must name the output file"),
+        );
+        let assets = CensusAssets::open(&root);
+        let index = assets
+            .read("fixture-models/index.json")
+            .unwrap_or_else(|| panic!("{} has no fixture-models/index.json", root.display()));
+        let index: serde_json::Value =
+            serde_json::from_slice(&index).expect("fixture-models/index.json is not JSON");
+        let master: std::collections::HashMap<String, u64> = assets
+            .read("mysekai-fixtures.json")
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .map(|master| {
+                master["fixtures"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|row| {
+                        let bundle = row["assetbundleName"].as_str()?;
+                        Some((format!("mysekai__fixture__{bundle}"), row["id"].as_u64()?))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let floor: [[[f32; 3]; 3]; 2] = [
+            [
+                [-CENSUS_HALF, 0.0, -CENSUS_HALF],
+                [CENSUS_HALF, 0.0, -CENSUS_HALF],
+                [CENSUS_HALF, 0.0, CENSUS_HALF],
+            ],
+            [
+                [-CENSUS_HALF, 0.0, -CENSUS_HALF],
+                [CENSUS_HALF, 0.0, CENSUS_HALF],
+                [-CENSUS_HALF, 0.0, CENSUS_HALF],
+            ],
+        ];
+        let volume = moly_law::carve::BuildVolume::centred(
+            [0.0, 0.0],
+            [CENSUS_HALF * 2.0, CENSUS_HALF * 2.0],
+        );
+        let mut lines = vec![
+            "# fixture walk census".to_owned(),
+            format!("# root {}", root.display()),
+            "# name\tglb\tid\tmesh\tbox\tsphere\tcapsule\tother\tobstacles\terrors\twalkable\tabove_climb\tmax_offset\tfootprint_m2\twalkable_inside_m2".to_owned(),
+        ];
+        let (mut scanned, mut selected, mut missing, mut errors) = (0usize, 0usize, 0usize, 0usize);
+        let (mut walkable_total, mut above_total) = (0usize, 0usize);
+        let packages = index["packages"]
+            .as_object()
+            .expect("fixture-models/index.json has no packages");
+        for (name, entry) in packages {
+            if entry["status"] != "exported" {
+                continue;
+            }
+            let Some(glb) = entry["glb"].as_str() else {
+                continue;
+            };
+            scanned += 1;
+            let Some(bytes) = assets.read(&format!("fixture-models/{glb}")) else {
+                missing += 1;
+                continue;
+            };
+            let Some(gltf) = census_glb(&bytes) else {
+                errors += 1;
+                continue;
+            };
+            let source = census_source(&gltf);
+            errors += source.errors;
+            if source.physics.is_empty() && source.carving.is_empty() {
+                continue;
+            }
+            selected += 1;
+            let mut collision_sources = source.physics.clone();
+            collision_sources.extend(source.carving.iter().cloned());
+            let field = moly_law::carve::WalkField::bake_colliders_in(
+                &floor,
+                &collision_sources,
+                CENSUS_VOXEL,
+                Some(volume),
+            );
+            let footprint = census_footprint(&source);
+            let (mut above, mut inside_walkable, mut inside_footprint) = (0usize, 0usize, 0usize);
+            let mut max_offset = 0.0f32;
+            for z in 0..CENSUS_CELLS {
+                for x in 0..CENSUS_CELLS {
+                    let point = [census_centre(x), census_centre(z)];
+                    let inside = footprint[z * CENSUS_CELLS + x];
+                    if inside {
+                        inside_footprint += 1;
+                    }
+                    if field.walkable_at(point) {
+                        let offset = field.height_offset(point);
+                        max_offset = max_offset.max(offset);
+                        if offset > moly_law::carve::AGENT_CLIMB + 1e-4 {
+                            above += 1;
+                        }
+                        if inside {
+                            inside_walkable += 1;
+                        }
+                    }
+                }
+            }
+            walkable_total += field.counts().walkable;
+            above_total += above;
+            let id = master
+                .get(name)
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "-".to_owned());
+            let cell_area = CENSUS_VOXEL * CENSUS_VOXEL;
+            lines.push(format!(
+                "{name}\t{glb}\t{id}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{max_offset:.4}\t{:.4}\t{:.4}",
+                source.kinds[0],
+                source.kinds[1],
+                source.kinds[2],
+                source.kinds[3],
+                source.other,
+                source.carving.len(),
+                source.errors,
+                field.counts().walkable,
+                above,
+                inside_footprint as f32 * cell_area,
+                inside_walkable as f32 * cell_area,
+            ));
+        }
+        assert!(
+            scanned > 0,
+            "{} listed no exported fixture packages",
+            root.display()
+        );
+        assert!(
+            selected > 0,
+            "{} exported {scanned} fixture glbs but none carried collider or obstacle extras",
+            root.display()
+        );
+        lines.push(format!(
+            "# summary scanned={scanned} selected={selected} missing_glb={missing} errors={errors} walkable={walkable_total} above_climb={above_total}"
+        ));
+        std::fs::write(&output, lines.join("\n") + "\n")
+            .unwrap_or_else(|error| panic!("{}: {error}", output.display()));
+        eprintln!(
+            "fixture walk census: {selected} of {scanned} exported packages carry sources; wrote {}",
+            output.display()
+        );
+    }
 }
