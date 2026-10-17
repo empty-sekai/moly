@@ -58,4 +58,37 @@ impl Layout {
             rows,
         }
     }
+
+    /// The rows as an editing session loads them: the served rows in order,
+    /// each given the next piece number from 1.
+    pub fn from_rows(
+        site_id: u32,
+        site_type: String,
+        grid: SiteGrid,
+        rows: Vec<HousingLayoutFixture>,
+    ) -> Self {
+        let rows = rows
+            .into_iter()
+            .enumerate()
+            .map(|(index, row)| PlacedRow {
+                piece: crate::Piece(index as u32 + 1),
+                row,
+            })
+            .collect();
+        Self::new(site_id, site_type, grid, rows)
+    }
+
+    /// The served rows, for a save; the piece numbers are session-local and
+    /// do not leave the session.
+    pub fn into_rows(self) -> Vec<HousingLayoutFixture> {
+        self.rows.into_iter().map(|row| row.row).collect()
+    }
+
+    /// The row a piece names.
+    pub fn row(&self, piece: crate::Piece) -> Option<&HousingLayoutFixture> {
+        self.rows
+            .iter()
+            .find(|row| row.piece == piece)
+            .map(|row| &row.row)
+    }
 }

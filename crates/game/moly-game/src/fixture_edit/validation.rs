@@ -4,11 +4,9 @@
 //! the committed rows are the tile data, the selected fixture and the
 //! fixtures stacked on it are checked at their draft places.
 
-use super::{
-    assets::{FixtureAreas, MetaGrid},
-    tile_rules::{self, Board, Missing, Piece, Refusal, Rules},
-    PutStatus,
-};
+use super::{assets::FixtureAreas, PutStatus};
+use moly_layout::validate::{refusal_label, Board, Missing, Piece, Refusal, Rules};
+use moly_layout::MetaGrid;
 use crate::{fixture::EditableFixture, site::FloorGridLayout};
 use moly_law::fixture::areas::{motion_area_bounds, rotated_center_grid, GridAreaData};
 use moly_law::fixture::position::layout_type;
@@ -24,7 +22,7 @@ pub(super) fn is_ground(item: &EditableFixture) -> bool {
 pub(super) fn put_label(status: PutStatus) -> String {
     match status {
         PutStatus::Ok => "可以放置".into(),
-        PutStatus::Refused(refusal) => tile_rules::refusal_label(refusal),
+        PutStatus::Refused(refusal) => refusal_label(refusal),
     }
 }
 
@@ -255,7 +253,7 @@ fn check_save(
             return Err(format!(
                 "ErrorLayout(1)：{}{}",
                 item.uid,
-                tile_rules::refusal_label(refusal)
+                refusal_label(refusal)
             ));
         }
     }

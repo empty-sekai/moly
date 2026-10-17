@@ -8,25 +8,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use moly_law::fixture::{GridPosition, Vector3Int};
+use moly_law::fixture::GridPosition;
 
-/// One fixture master row, reduced to the columns the judgements read.
-#[derive(Clone, Debug, PartialEq)]
-pub struct MasterFixture {
-    /// `fixtureType`: `plant` and `house_plant` name the plant branch.
-    pub fixture_type: String,
-    /// Settable `layoutType`: `floor`, `rug` and the wall and road values.
-    pub settable_layout: String,
-    /// `putType`: `put_target`, `put_base`, `put_either` or none.
-    pub put_type: String,
-    /// `handleType`: `fence`, `road`, `block` and the other handles.
-    pub handle_type: String,
-    /// Unrotated extent (`gridWidth`, `gridHeight`, `gridDepth`).
-    pub grid_size: Vector3Int,
-    /// The model's stack height, when the bundle meta carries one. It affects
-    /// the stacking presentation, not the source's put check.
-    pub stack_height: Option<f32>,
-}
+use crate::validate::Traits;
 
 /// A bundle's `stackEnables` / `AddUsingGrid` meta grids.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -68,6 +52,28 @@ pub struct Zone {
     pub max: GridPosition,
 }
 
+impl Zone {
+    /// `GetUnavailableZone`: each axis spans start ..= start + size - 1, the
+    /// smaller end as Min; the grid position keeps the low byte.
+    pub fn from_row(id: i64, start: [i64; 3], size: [i64; 3]) -> Self {
+        let axis = |a: usize| {
+            let end = start[a] + size[a] - 1;
+            (start[a].min(end) as i8, start[a].max(end) as i8)
+        };
+        let (x, y, z) = (axis(0), axis(1), axis(2));
+        Self {
+            id,
+            min: GridPosition::new(x.0, y.0, z.0),
+            max: GridPosition::new(x.1, y.1, z.1),
+        }
+    }
+
+    /// `GridBound.IntersectsXZ`.
+    pub fn intersects_xz(&self, x: i8, z: i8) -> bool {
+        (self.min.x..=self.max.x).contains(&x) && (self.min.z..=self.max.z).contains(&z)
+    }
+}
+
 /// The player's owned quantity of a fixture and texture, and how many of them
 /// other sites already place. The edited site's draft count is in the
 /// [`Layout`](crate::Layout), not here.
@@ -82,12 +88,13 @@ pub struct OwnedCount {
 /// data.
 #[derive(Clone, Debug, Default)]
 pub struct Rules {
-    /// Fixture master rows by `mysekaiFixtureId`.
-    pub fixtures: HashMap<i32, MasterFixture>,
+    /// The master rows' predicates by `mysekaiFixtureId`.
+    pub traits: HashMap<i32, Traits>,
     /// Bundle meta by the package name the row and layout row carry.
     pub bundles: HashMap<String, BundleMeta>,
-    /// The edited site layout's unavailable zones.
-    pub zones: Vec<Zone>,
+    /// The edited site layout's unavailable zones; `None` while the zone
+    /// table is not read (a floor-grid check is then refused).
+    pub zones: Option<Vec<Zone>>,
     /// Owned counts by (`mysekaiFixtureId`, texture id).
     pub owned: HashMap<(i32, u32), OwnedCount>,
     /// Packages the player cannot store (the house and the gates).

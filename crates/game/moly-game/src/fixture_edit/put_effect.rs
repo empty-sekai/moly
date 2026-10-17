@@ -98,7 +98,7 @@ struct SoundTables {
     handle_of: HashMap<i32, String>,
     put_type_of: HashMap<i32, String>,
     /// The `MysekaiFixtureUtility` predicates of each row (`tile_rules`).
-    traits_of: Arc<HashMap<i32, super::tile_rules::Traits>>,
+    traits_of: Arc<HashMap<i32, moly_layout::validate::Traits>>,
     cue_of: HashMap<i64, String>,
 }
 
@@ -132,7 +132,7 @@ impl SoundTables {
                 .ok_or_else(|| format!("fixture row {id} carries no layoutType"))?;
             traits_of.insert(
                 id as i32,
-                super::tile_rules::Traits::from_row(
+                moly_layout::validate::Traits::from_row(
                     fixture_type,
                     settable_layout,
                     put_type,
@@ -395,7 +395,7 @@ pub(crate) fn put_type(world: &World, fixture_id: i32) -> Result<Option<String>,
 
 /// The master predicates of every fixture row, once the fixture table is
 /// read.
-pub(crate) fn traits_table(world: &World) -> Option<Arc<HashMap<i32, super::tile_rules::Traits>>> {
+pub(crate) fn traits_table(world: &World) -> Option<Arc<HashMap<i32, moly_layout::validate::Traits>>> {
     let effect = world.get_resource::<FixturePutEffect>()?;
     match &effect.tables {
         Tables::Read(Ok(tables)) => Some(tables.traits_of.clone()),
@@ -406,7 +406,7 @@ pub(crate) fn traits_table(world: &World) -> Option<Arc<HashMap<i32, super::tile
 /// Test hook: the fixture table owner with a read table of these rows'
 /// predicates only.
 #[cfg(test)]
-pub(super) fn insert_test_tables(world: &mut World, traits: &[(i32, super::tile_rules::Traits)]) {
+pub(super) fn insert_test_tables(world: &mut World, traits: &[(i32, moly_layout::validate::Traits)]) {
     world.insert_resource(FixturePutEffect {
         tables: Tables::Read(Ok(SoundTables {
             put_sound_of: HashMap::new(),

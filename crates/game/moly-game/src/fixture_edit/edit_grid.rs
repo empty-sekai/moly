@@ -100,7 +100,8 @@ use moly_law::fixture::GridPosition;
 use serde_json::Value;
 
 use super::assets::FixtureAreas;
-use super::tile_rules::{self, TileBox};
+use super::layout_rules::zones_of;
+use moly_layout::validate::{self as tile_rules, TileBox};
 use super::{EditSession, FixtureEditSystems, PutStatus};
 use crate::fixture::{EditableFixture, FixturePlacements};
 
@@ -1267,7 +1268,7 @@ fn current_fill(world: &World, tiles: &TileBox) -> Option<(Fill, bool)> {
     let empty = FixtureAreas::default();
     let areas = world.get_resource::<FixtureAreas>();
     let areas_loaded = areas.is_some_and(|a| a.loaded);
-    let zones = tile_rules::zones_of(world, floor.layout_id);
+    let zones = zones_of(world, floor.layout_id);
     let inputs = FillInputs {
         areas: areas.unwrap_or(&empty),
         zones: zones.as_deref(),

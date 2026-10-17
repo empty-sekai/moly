@@ -8,6 +8,7 @@ license.workspace = true
 moly-core = { path = "../moly-core" }
 moly-protocol = { path = "../../net/moly-protocol" }
 moly-link = { path = "../../net/moly-link" }
+moly-layout = { path = "../../net/moly-layout" }
 moly-masters = { path = "../moly-masters" }
 moly-law = { path = "../../base/moly-law" }
 moly-assets = { path = "../../engine/moly-assets" }

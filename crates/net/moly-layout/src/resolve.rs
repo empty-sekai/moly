@@ -39,11 +39,9 @@
 //! fixture at the candidate: it has no stacked fixtures yet, and its own tile
 //! data is not in the grid (the state adds the fixture after the search).
 
-use bevy::prelude::*;
 use moly_law::fixture::{Direction, GridPosition};
 
-use super::tile_rules::{self, Board, Missing, Piece, Refusal, Rules, TileBox};
-use crate::fixture::EditableFixture;
+use crate::validate::{self as tile_rules, Board, Missing, Piece, Refusal, RowLike, Rules, TileBox};
 
 /// `MysekaiConstants.TILE_SIZE` (all three axes).
 const TILE_SIZE: f32 = 0.25;
@@ -53,7 +51,7 @@ const MAX_RADIUS: i32 = 30;
 /// `MysekaiFixtureUtility.RotationToDirection(float)`. `None` for the
 /// source's -1 (an infinite angle) and for the negative results of angles
 /// below -360, which name no direction.
-pub(super) fn rotation_to_direction(yaw: f32) -> Option<Direction> {
+pub fn rotation_to_direction(yaw: f32) -> Option<Direction> {
     let angle = if yaw < 0.0 { yaw + 360.0 } else { yaw };
     let up = angle.ceil();
     if up == f32::INFINITY {
@@ -78,16 +76,16 @@ fn grid_axis(value: f32) -> i8 {
 }
 
 /// `FieldPosition.ToGridPosition` of a position relative to the site.
-pub(super) fn to_grid(position: Vec3) -> GridPosition {
+pub fn to_grid(position: [f32; 3]) -> GridPosition {
     GridPosition::new(
-        grid_axis(position.x / TILE_SIZE),
-        grid_axis(position.y.max(0.0) / TILE_SIZE),
-        grid_axis(position.z / TILE_SIZE),
+        grid_axis(position[0] / TILE_SIZE),
+        grid_axis(position[1].max(0.0) / TILE_SIZE),
+        grid_axis(position[2] / TILE_SIZE),
     )
 }
 
 /// `GetCurrentLockAtGrid` after the look-at's grid position.
-pub(super) fn nearest_ground_tile(grid: GridPosition, tiles: TileBox) -> GridPosition {
+pub fn nearest_ground_tile(grid: GridPosition, tiles: TileBox) -> GridPosition {
     let mut best = f32::MAX;
     let mut result = GridPosition::ZERO;
     for z in tiles.min[2]..=tiles.max[2] {
@@ -106,7 +104,7 @@ pub(super) fn nearest_ground_tile(grid: GridPosition, tiles: TileBox) -> GridPos
 }
 
 /// `SearchSpiralOnPlane`'s visiting order of one ring.
-pub(super) fn ring(center: GridPosition, radius: i32, y: i32) -> Vec<GridPosition> {
+pub fn ring(center: GridPosition, radius: i32, y: i32) -> Vec<GridPosition> {
     let (cx, cz) = (i32::from(center.x), i32::from(center.z));
     let at = |x: i32, z: i32| GridPosition::new(x as i8, y as i8, z as i8);
     let r = radius;
@@ -128,7 +126,7 @@ pub(super) fn ring(center: GridPosition, radius: i32, y: i32) -> Vec<GridPositio
 
 /// Why a spiral candidate was not taken.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum Reject {
+pub enum Reject {
     /// Not a tile of the layout's grid (`ContainsKey`).
     NotATile,
     /// `CanPutFloor` refused it.
@@ -138,9 +136,9 @@ pub(super) enum Reject {
 }
 
 /// The whole search, for the log.
-pub(super) struct Placement {
+pub struct Placement {
     /// Camera look-at relative to the site, in the source frame.
-    pub look_at: Vec3,
+    pub look_at: [f32; 3],
     pub look_at_grid: GridPosition,
     /// `GetCurrentLockAtGrid` (source frame).
     pub start: GridPosition,
@@ -155,21 +153,21 @@ pub(super) struct Placement {
 
 /// Is a put type one of the two that search raised rings (put_target,
 /// put_either)?
-pub(super) fn searches_raised(put_type: Option<&str>) -> bool {
+pub fn searches_raised(put_type: Option<&str>) -> bool {
     matches!(put_type, Some("put_target" | "put_either"))
 }
 
 /// `GetPlaceableTile(GetCurrentLockAtGrid(lookAt))` for `item` (its layout,
 /// fixture and grid size; its center and direction are replaced).
-pub(super) fn place(
-    item: &EditableFixture,
+pub fn place<R: RowLike>(
+    item: &R,
     source_direction: Direction,
-    look_at: Vec3,
+    look_at: [f32; 3],
     board: &Board,
     rules: &Rules,
     put_type: Option<&str>,
 ) -> Placement {
-    let tiles = board.tiles(item.layout);
+    let tiles = board.tiles(item.layout());
     let look_at_grid = to_grid(look_at);
     let start = nearest_ground_tile(look_at_grid, tiles);
     let search_raised = searches_raised(put_type);
@@ -217,8 +215,8 @@ pub(super) fn place(
 
 /// `TryPlaceAt` for one candidate (source frame): a tile of the grid, and
 /// `CanPutFloor` with the fixture's center there.
-fn candidate(
-    item: &EditableFixture,
+fn candidate<R: RowLike>(
+    item: &R,
     source_direction: Direction,
     p: GridPosition,
     tiles: TileBox,
@@ -229,19 +227,19 @@ fn candidate(
         return Err(Reject::NotATile);
     }
     let piece =
-        Piece::at(item, rules, p, source_direction, item.layout).map_err(Reject::Footprint)?;
+        Piece::at(item, rules, p, source_direction, item.layout()).map_err(Reject::Footprint)?;
     board.can_put_floor(&piece, &[]).map_err(Reject::Put)?;
-    let (center, direction, _) = moly_assets::player_data::mirror_fixture_layout(
+    let (center, direction, _) = tile_rules::mirror_fixture_layout(
         p,
-        item.grid_size,
+        item.grid_size(),
         source_direction,
-        item.layout,
+        item.layout(),
     )
     .map_err(|_| Reject::Footprint(Missing::Footprint))?;
     Ok((center, direction))
 }
 
-pub(super) fn reject_label(reason: &Reject) -> String {
+pub fn reject_label(reason: &Reject) -> String {
     match reason {
         Reject::NotATile => "not a tile of the grid".into(),
         Reject::Put(refusal) => tile_rules::refusal_label(*refusal),

@@ -5,43 +5,28 @@ use moly_assets::json::JsonAsset;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-#[derive(Clone)]
-pub(crate) struct MetaGrid {
-    pub rows: usize,
-    pub cols: usize,
-    pub cells: Vec<bool>,
-}
+pub(crate) use moly_layout::MetaGrid;
 
-impl MetaGrid {
-    pub fn cell(&self, row: usize, col: usize) -> bool {
-        self.cells
-            .get(row * self.cols + col)
-            .copied()
-            .unwrap_or(false)
+fn meta_grid(value: &serde_json::Value) -> Option<MetaGrid> {
+    let rows = value.get("dims")?.get("rows")?.as_u64()? as usize;
+    let cols = value.get("dims")?.get("cols")?.as_u64()? as usize;
+    if rows == 0 || cols == 0 {
+        return None;
     }
-
-    fn from_json(value: &serde_json::Value) -> Option<Self> {
-        let rows = value.get("dims")?.get("rows")?.as_u64()? as usize;
-        let cols = value.get("dims")?.get("cols")?.as_u64()? as usize;
-        if rows == 0 || cols == 0 {
+    let mut cells = Vec::with_capacity(rows.checked_mul(cols)?);
+    for row in value.get("cells")?.as_array()? {
+        if row.as_array()?.len() != cols {
             return None;
         }
-        let mut cells = Vec::with_capacity(rows.checked_mul(cols)?);
-        for row in value.get("cells")?.as_array()? {
-            if row.as_array()?.len() != cols {
-                return None;
-            }
-            for cell in row.as_array()? {
-                cells.push(cell.as_bool()?);
-            }
+        for cell in row.as_array()? {
+            cells.push(cell.as_bool()?);
         }
-        if cells.len() != rows * cols || !cells.iter().any(|cell| *cell) {
-            return None;
-        }
-        Some(Self { rows, cols, cells })
     }
+    if cells.len() != rows * cols || !cells.iter().any(|cell| *cell) {
+        return None;
+    }
+    Some(MetaGrid::new(rows, cols, cells))
 }
-
 #[derive(Resource, Default)]
 pub(super) struct FixtureAreas {
     pub loaded: bool,
@@ -49,7 +34,7 @@ pub(super) struct FixtureAreas {
     pub cutscene: HashMap<String, MetaGrid>,
     /// Each bundle meta's `stackEnables` and `AddUsingGrid` (the put rules'
     /// inputs).
-    pub stack: Arc<HashMap<String, super::tile_rules::StackMeta>>,
+    pub stack: Arc<HashMap<String, moly_layout::BundleMeta>>,
 }
 
 #[derive(Resource)]
@@ -103,17 +88,18 @@ pub(super) fn parse_areas(
         .expect("areas.json must contain packages");
     let mut stack = HashMap::with_capacity(packages.len());
     for (name, entry) in packages {
-        if let Some(meta) = entry.get("motionArea").and_then(MetaGrid::from_json) {
+        if let Some(meta) = entry.get("motionArea").and_then(meta_grid) {
             areas.motion.insert(name.clone(), meta);
         }
-        if let Some(meta) = entry.get("cutsceneArea").and_then(MetaGrid::from_json) {
+        if let Some(meta) = entry.get("cutsceneArea").and_then(meta_grid) {
             areas.cutscene.insert(name.clone(), meta);
         }
         stack.insert(
             name.clone(),
-            super::tile_rules::StackMeta {
-                stack_enables: entry.get("stackEnables").and_then(MetaGrid::from_json),
-                add_using: entry.get("AddUsingGrid").and_then(MetaGrid::from_json),
+            moly_layout::BundleMeta {
+                stack_enables: entry.get("stackEnables").and_then(meta_grid),
+                add_using: entry.get("AddUsingGrid").and_then(meta_grid),
+                stack_height: None,
             },
         );
     }

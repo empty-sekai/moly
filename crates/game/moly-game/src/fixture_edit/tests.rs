@@ -1,14 +1,15 @@
 use super::*;
 use crate::site::FloorGridLayout;
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
 
 /// Rules with no master rows, no bundle meta and no zones.
-fn rules() -> tile_rules::Rules {
-    tile_rules::Rules {
-        traits: Arc::new(HashMap::new()),
-        meta: Arc::new(HashMap::new()),
-        zones: Some(Arc::new(Vec::new())),
+fn rules() -> moly_layout::Rules {
+    moly_layout::Rules {
+        traits: HashMap::new(),
+        bundles: HashMap::new(),
+        zones: Some(Vec::new()),
+        owned: HashMap::new(),
+        cleanup_protected: HashSet::new(),
     }
 }
 
@@ -151,7 +152,7 @@ fn invalid_candidate_save_preserves_storage() {
     });
     world.init_resource::<EditView>();
     put_effect::insert_test_tables(&mut world, &[]);
-    world.insert_resource(tile_rules::empty_zone_table());
+    world.insert_resource(super::layout_rules::empty_zone_table());
 
     // A drag is clamped into the grid (FloorEditState.ClampPosition), so it
     // cannot leave an out-of-bounds candidate; select, drag, rotate, decide.

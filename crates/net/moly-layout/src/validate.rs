@@ -69,10 +69,7 @@
 //! `GetStackedFixtures` collects the stacked fixtures and theirs, depth first.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
-use bevy::prelude::*;
-use moly_assets::json::JsonAsset;
 use moly_law::fixture::areas::{
     adjust_rotate_position, calculate_rotated_position, layout_square_min, rotated_center_grid,
     GridAreaData,
@@ -80,15 +77,124 @@ use moly_law::fixture::areas::{
 use moly_law::fixture::position::{layout_footprint, layout_type};
 use moly_law::fixture::{Direction, GridPosition, Vector3Int};
 
-use super::assets::MetaGrid;
-use crate::fixture::EditableFixture;
-use crate::site::FloorGridLayout;
+use crate::layout::SiteGrid;
+use crate::rules::{BundleMeta, MetaGrid};
+pub use crate::rules::{Rules, Zone};
 
-const ZONES: &str = "moly://mysekai-site-housing-layout-unavailable-zones.json";
+/// The site grid the tile boxes are built from, or a layout row's data the
+/// put rules read. The game's resource types implement these; the crate never
+/// names an engine type.
+pub trait GridLike: Copy {
+    fn site_grid(self) -> SiteGrid;
+}
+
+impl GridLike for SiteGrid {
+    fn site_grid(self) -> SiteGrid {
+        self
+    }
+}
+
+/// Reflect one authored layout through the shared Unity-to-glTF X boundary:
+/// the product frame is the source frame's X mirror.
+pub fn mirror_fixture_layout(
+    source_center: GridPosition,
+    size: Vector3Int,
+    source_direction: Direction,
+    source_layout: u8,
+) -> Result<(GridPosition, Direction, u8), String> {
+    let (source_min, source_max) =
+        layout_footprint(source_center, size, source_direction, source_layout)?;
+    let target_layout = mirror_layout(source_layout);
+    let target_direction = mirror_direction(source_direction);
+    let mirror_cell = |value: i8| -> Result<i8, String> {
+        i8::try_from(-(value as i16) - 1)
+            .map_err(|_| "Mirrored fixture footprint exceeds signed grid domain".to_owned())
+    };
+    let expected_min = GridPosition::new(mirror_cell(source_max.x)?, source_min.y, source_min.z);
+    let expected_max = GridPosition::new(mirror_cell(source_min.x)?, source_max.y, source_max.z);
+    let zero = GridPosition::new(0, source_center.y, 0);
+    let (base_min, _) = layout_footprint(zero, size, target_direction, target_layout)?;
+    let target_center = GridPosition::new(
+        i8::try_from(i16::from(expected_min.x) - i16::from(base_min.x))
+            .map_err(|_| "Mirrored fixture center.x exceeds signed grid domain")?,
+        source_center.y,
+        i8::try_from(i16::from(expected_min.z) - i16::from(base_min.z))
+            .map_err(|_| "Mirrored fixture center.z exceeds signed grid domain")?,
+    );
+    let actual = layout_footprint(target_center, size, target_direction, target_layout)?;
+    if actual != (expected_min, expected_max) {
+        return Err("Mirrored fixture footprint does not round-trip through placement law".into());
+    }
+    Ok((target_center, target_direction, target_layout))
+}
+
+fn mirror_layout(layout: u8) -> u8 {
+    match layout {
+        layout_type::WALL_LEFT => layout_type::WALL_RIGHT,
+        layout_type::WALL_RIGHT => layout_type::WALL_LEFT,
+        _ => layout,
+    }
+}
+
+fn mirror_direction(direction: Direction) -> Direction {
+    match direction {
+        Direction::Front => Direction::Front,
+        Direction::Left => Direction::Right,
+        Direction::Back => Direction::Back,
+        Direction::Right => Direction::Left,
+    }
+}
+
+/// A placed or candidate fixture as the put rules see it.
+pub trait RowLike {
+    fn uid(&self) -> &str;
+    fn package(&self) -> &str;
+    fn fixture_id(&self) -> i32;
+    fn center(&self) -> GridPosition;
+    fn grid_size(&self) -> Vector3Int;
+    fn layout(&self) -> u8;
+    fn direction(&self) -> Direction;
+}
+
+/// A source-frame row, for callers that have no game fixture type.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Fixture {
+    pub uid: String,
+    pub package: String,
+    pub fixture_id: i32,
+    pub center: GridPosition,
+    pub grid_size: Vector3Int,
+    pub layout: u8,
+    pub direction: Direction,
+}
+
+impl RowLike for Fixture {
+    fn uid(&self) -> &str {
+        &self.uid
+    }
+    fn package(&self) -> &str {
+        &self.package
+    }
+    fn fixture_id(&self) -> i32 {
+        self.fixture_id
+    }
+    fn center(&self) -> GridPosition {
+        self.center
+    }
+    fn grid_size(&self) -> Vector3Int {
+        self.grid_size
+    }
+    fn layout(&self) -> u8 {
+        self.layout
+    }
+    fn direction(&self) -> Direction {
+        self.direction
+    }
+}
 
 /// The master-row predicates the rules read.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Traits {
+pub struct Traits {
     pub plant: bool,
     pub rug: bool,
     pub put_target: bool,
@@ -99,7 +205,7 @@ pub(crate) struct Traits {
 impl Traits {
     /// From a fixture row's `fixtureType`, settable `layoutType`, `putType`
     /// and `handleType`.
-    pub(crate) fn from_row(
+    pub fn from_row(
         fixture_type: &str,
         settable_layout: &str,
         put_type: &str,
@@ -115,46 +221,9 @@ impl Traits {
     }
 }
 
-/// The `FixtureBundleMeta` arrays the rules read.
-#[derive(Clone, Default)]
-pub(crate) struct StackMeta {
-    pub stack_enables: Option<MetaGrid>,
-    pub add_using: Option<MetaGrid>,
-}
-
-/// An unavailable zone as its grid bound (source frame).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Zone {
-    pub id: i64,
-    pub min: GridPosition,
-    pub max: GridPosition,
-}
-
-impl Zone {
-    /// `GetUnavailableZone`: each axis spans start ..= start + size - 1, the
-    /// smaller end as Min; the grid position keeps the low byte.
-    fn from_row(id: i64, start: [i64; 3], size: [i64; 3]) -> Self {
-        let axis = |a: usize| {
-            let end = start[a] + size[a] - 1;
-            (start[a].min(end) as i8, start[a].max(end) as i8)
-        };
-        let (x, y, z) = (axis(0), axis(1), axis(2));
-        Self {
-            id,
-            min: GridPosition::new(x.0, y.0, z.0),
-            max: GridPosition::new(x.1, y.1, z.1),
-        }
-    }
-
-    /// `GridBound.IntersectsXZ`.
-    fn intersects_xz(&self, x: i8, z: i8) -> bool {
-        (self.min.x..=self.max.x).contains(&x) && (self.min.z..=self.max.z).contains(&z)
-    }
-}
-
 /// Why a check could not run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Missing {
+pub enum Missing {
     FixtureTable,
     AreaTable,
     ZoneTable,
@@ -165,7 +234,7 @@ pub(crate) enum Missing {
 
 /// Why a cell fails the per-tile check (`CanPutFloor(target)`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CellFail {
+pub enum CellFail {
     /// Not a tile of the layout's grid (`TileData.Null`).
     NotATile,
     /// Another object's tile (`IsExistsObj`).
@@ -176,7 +245,7 @@ pub(crate) enum CellFail {
 
 /// The first check `CanPutFloor` fails, with its cell (source frame).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Refusal {
+pub enum Refusal {
     /// A bottom cell (or, with `add_using`, an add-using cell at y 0).
     Cell {
         layout: u8,
@@ -202,7 +271,32 @@ pub(crate) enum Refusal {
     Missing(Missing),
 }
 
-pub(crate) fn refusal_label(refusal: Refusal) -> String {
+impl Refusal {
+    /// The operation contract's closed code for this detailed refusal. An
+    /// input failure is not a layout refusal (`None`): the caller reports it
+    /// as an internal missing input, not as a rejected operation.
+    pub fn code(&self) -> Option<crate::RefusalCode> {
+        use crate::RefusalCode;
+        match self {
+            Self::Cell { why, .. } => match why {
+                CellFail::NotATile => Some(RefusalCode::OutOfBounds),
+                CellFail::Occupied | CellFail::Joint => Some(RefusalCode::Overlap),
+            },
+            Self::NoHeadroom { .. } => Some(RefusalCode::OutOfBounds),
+            Self::NoBase { .. } | Self::NotStackable { .. } => {
+                Some(RefusalCode::StackNotAllowed)
+            }
+            Self::UnavailableZone { .. } => Some(RefusalCode::UnavailableZone),
+            Self::RugOverRugOrPlant { .. } | Self::StackedChild { .. } => {
+                Some(RefusalCode::Overlap)
+            }
+            Self::Unsupported => Some(RefusalCode::WrongLayer),
+            Self::Missing(_) => None,
+        }
+    }
+}
+
+pub fn refusal_label(refusal: Refusal) -> String {
     let layout = |layout: u8| match layout {
         layout_type::FLOOR => "floor",
         layout_type::RUG => "rug",
@@ -259,7 +353,7 @@ pub(crate) fn refusal_label(refusal: Refusal) -> String {
 /// floor layout's box, or (rug, road) the same width and depth with height 1,
 /// as the site layout rows are. `x / 2` plus one for a positive odd count.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct TileBox {
+pub struct TileBox {
     pub min: [i32; 3],
     pub max: [i32; 3],
     /// `GridData.TileCount` x and z.
@@ -268,7 +362,8 @@ pub(crate) struct TileBox {
 }
 
 impl TileBox {
-    pub(super) fn of(floor: FloorGridLayout, layout: u8) -> Self {
+    pub fn of<G: GridLike>(floor: G, layout: u8) -> Self {
+        let floor = floor.site_grid();
         let half = |n: i32| n / 2 + i32::from(n % 2 == 1);
         let height = if layout == layout_type::FLOOR {
             floor.height
@@ -285,13 +380,13 @@ impl TileBox {
     }
 
     /// `TileDataDictionary.ContainsKey`.
-    pub(super) fn contains(&self, p: GridPosition) -> bool {
+    pub fn contains(&self, p: GridPosition) -> bool {
         let v = [i32::from(p.x), i32::from(p.y), i32::from(p.z)];
         (0..3).all(|axis| (self.min[axis]..=self.max[axis]).contains(&v[axis]))
     }
 
     /// `GridData.TileCount.y`.
-    pub(super) fn height(&self) -> i32 {
+    pub fn height(&self) -> i32 {
         self.max[1] + 1
     }
 }
@@ -301,7 +396,7 @@ impl TileBox {
 /// fixture (`isCenterZero`) and offset by `GetRotatedCenterGrid` (source
 /// frame, at the center's y).
 fn add_using_at(
-    meta: Option<&StackMeta>,
+    meta: Option<&BundleMeta>,
     size: Vector3Int,
     center: GridPosition,
     direction: Direction,
@@ -320,40 +415,28 @@ fn add_using_at(
 }
 
 /// The add-using cells of a draft row (source frame), for the grid's fill.
-pub(crate) fn add_using_cells(
-    item: &EditableFixture,
-    meta: &HashMap<String, StackMeta>,
+pub fn add_using_cells<R: RowLike>(
+    item: &R,
+    meta: &HashMap<String, BundleMeta>,
 ) -> Result<Vec<GridPosition>, Missing> {
-    let (center, direction, _) = moly_assets::player_data::mirror_fixture_layout(
-        item.center,
-        item.grid_size,
-        item.direction,
-        item.layout,
+    let (center, direction, _) = mirror_fixture_layout(
+        item.center(),
+        item.grid_size(),
+        item.direction(),
+        item.layout(),
     )
     .map_err(|_| Missing::Footprint)?;
     Ok(add_using_at(
-        meta.get(&item.package),
-        item.grid_size,
+        meta.get(item.package()),
+        item.grid_size(),
         center,
         direction,
     ))
 }
 
-/// The unavailable zones of one floor layout, or `None` while the table is
-/// not read (or failed to read).
-pub(crate) fn zones_of(world: &World, layout_id: u32) -> Option<Vec<Zone>> {
-    match world
-        .get_resource::<ZoneTable>()
-        .and_then(|table| table.read.as_ref())
-    {
-        Some(Ok(zones)) => Some(zones.get(&layout_id).cloned().unwrap_or_default()),
-        _ => None,
-    }
-}
-
 /// One fixture in the source frame.
 #[derive(Clone, Debug)]
-pub(crate) struct Piece {
+pub struct Piece {
     pub uid: String,
     pub layout: u8,
     pub center: GridPosition,
@@ -370,40 +453,40 @@ pub(crate) struct Piece {
 
 impl Piece {
     /// A draft row, crossed into the source frame.
-    pub(crate) fn new(item: &EditableFixture, rules: &Rules) -> Result<Self, Missing> {
-        let (center, direction, layout) = moly_assets::player_data::mirror_fixture_layout(
-            item.center,
-            item.grid_size,
-            item.direction,
-            item.layout,
+    pub fn new<R: RowLike>(item: &R, rules: &Rules) -> Result<Self, Missing> {
+        let (center, direction, layout) = mirror_fixture_layout(
+            item.center(),
+            item.grid_size(),
+            item.direction(),
+            item.layout(),
         )
         .map_err(|_| Missing::Footprint)?;
         Self::at(item, rules, center, direction, layout)
     }
 
     /// The same fixture at a source-frame center and direction.
-    pub(crate) fn at(
-        item: &EditableFixture,
+    pub fn at<R: RowLike>(
+        item: &R,
         rules: &Rules,
         center: GridPosition,
         direction: Direction,
         layout: u8,
     ) -> Result<Self, Missing> {
-        let (min, max) = layout_footprint(center, item.grid_size, direction, layout)
+        let (min, max) = layout_footprint(center, item.grid_size(), direction, layout)
             .map_err(|_| Missing::Footprint)?;
         let traits = rules
             .traits
-            .get(&item.fixture_id)
+            .get(&item.fixture_id())
             .copied()
             .unwrap_or_default();
-        let meta = rules.meta.get(&item.package);
-        let add_using = add_using_at(meta, item.grid_size, center, direction);
+        let meta = rules.bundles.get(item.package());
+        let add_using = add_using_at(meta, item.grid_size(), center, direction);
         let stack_enables = meta
             .and_then(|meta| meta.stack_enables.as_ref())
-            .map(|grid| stack_enable_cells(grid, center, item.grid_size, direction))
+            .map(|grid| stack_enable_cells(grid, center, item.grid_size(), direction))
             .unwrap_or_default();
         Ok(Self {
-            uid: item.uid.clone(),
+            uid: item.uid().to_owned(),
             layout,
             center,
             direction,
@@ -416,17 +499,17 @@ impl Piece {
     }
 
     /// How many cells take stacking (instrument).
-    pub(crate) fn stack_cell_count(&self) -> usize {
+    pub fn stack_cell_count(&self) -> usize {
         self.stack_enables.len()
     }
 
     /// How many add-using cells it has (instrument).
-    pub(crate) fn add_using_count(&self) -> usize {
+    pub fn add_using_count(&self) -> usize {
         self.add_using.len()
     }
 
     /// `CurrentGridSize` (the box's extent).
-    pub(crate) fn current_size(&self) -> Vector3Int {
+    pub fn current_size(&self) -> Vector3Int {
         Vector3Int::new(
             i32::from(self.max.x) - i32::from(self.min.x) + 1,
             i32::from(self.max.y) - i32::from(self.min.y) + 1,
@@ -478,7 +561,7 @@ fn stack_enable_cells(
 /// `SiteLayoutUtility.CalculateRotatedPosition(tile, center, size,
 /// Direction.Left)` (the four-argument overload): d = tile - center and
 /// m = max(size.x, size.z) - 1 give center + (d.z, d.y, m - d.x).
-pub(crate) fn rotate_right(
+pub fn rotate_right(
     tile: GridPosition,
     center: GridPosition,
     size: Vector3Int,
@@ -486,16 +569,6 @@ pub(crate) fn rotate_right(
     let d = tile - center;
     let m = (size.x as i8).max(size.z as i8).wrapping_sub(1);
     center + GridPosition::new(d.z, d.y, m.wrapping_sub(d.x))
-}
-
-/// The tables the rules read, shared by every check of a frame.
-#[derive(Clone)]
-pub(crate) struct Rules {
-    pub traits: Arc<HashMap<i32, Traits>>,
-    pub meta: Arc<HashMap<String, StackMeta>>,
-    /// The unavailable zones of the current floor layout; `None` while the
-    /// zone table is not read (a floor-grid check is then refused).
-    pub zones: Option<Arc<Vec<Zone>>>,
 }
 
 /// One tile read (`GetTileData`) of an allocated position.
@@ -506,24 +579,25 @@ struct Tile<'a> {
 }
 
 /// The committed rows' tile data, one dictionary per grid.
-pub(crate) struct Board {
+pub struct Board {
     pieces: Vec<Piece>,
-    floor: FloorGridLayout,
-    zones: Option<Arc<Vec<Zone>>>,
+    grid: SiteGrid,
+    zones: Option<Vec<Zone>>,
     occupant: HashMap<(u8, GridPosition), usize>,
     joints: std::collections::HashSet<(u8, GridPosition)>,
 }
 
 impl Board {
     /// The tile data of `rows` (their draft order is the add order).
-    pub(crate) fn new(
-        rows: &[EditableFixture],
-        floor: FloorGridLayout,
+    pub fn new<R: RowLike, G: GridLike>(
+        rows: &[R],
+        grid: G,
         rules: &Rules,
     ) -> Result<Self, Missing> {
+        let grid = grid.site_grid();
         let mut pieces = Vec::with_capacity(rows.len());
         for row in rows {
-            if row.layout & layout_type::FIELD == 0 {
+            if row.layout() & layout_type::FIELD == 0 {
                 continue;
             }
             pieces.push(Piece::new(row, rules)?);
@@ -531,7 +605,7 @@ impl Board {
         let mut occupant = HashMap::new();
         let mut joints = std::collections::HashSet::new();
         for (index, piece) in pieces.iter().enumerate() {
-            let tiles = TileBox::of(floor, piece.layout);
+            let tiles = TileBox::of(grid, piece.layout);
             let mut add = |p: GridPosition| {
                 if tiles.contains(p) {
                     occupant.entry((piece.layout, p)).or_insert(index);
@@ -572,15 +646,15 @@ impl Board {
         }
         Ok(Self {
             pieces,
-            floor,
+            grid,
             zones: rules.zones.clone(),
             occupant,
             joints,
         })
     }
 
-    pub(crate) fn tiles(&self, layout: u8) -> TileBox {
-        TileBox::of(self.floor, layout)
+    pub fn tiles(&self, layout: u8) -> TileBox {
+        TileBox::of(self.grid, layout)
     }
 
     /// `GetTileData`: `None` for `TileData.Null`.
@@ -726,7 +800,7 @@ impl Board {
 
     /// `SiteLayoutUtility.CanPutFloor(layout, fixture)` for a fixture at its
     /// draft place, with the fixtures stacked on it at theirs.
-    pub(crate) fn can_put_floor(&self, fixture: &Piece, stacked: &[Piece]) -> Result<(), Refusal> {
+    pub fn can_put_floor(&self, fixture: &Piece, stacked: &[Piece]) -> Result<(), Refusal> {
         if fixture.traits.plant {
             for layout in [layout_type::FLOOR, layout_type::RUG] {
                 self.grid_size(layout, fixture)?;
@@ -753,7 +827,7 @@ impl Board {
     /// z (`IsStackedFixtureOutsideOfBase`), or an object in the committed
     /// tiles of the layer right above the base that is not stacked directly
     /// on it.
-    pub(crate) fn crossing_multiple_bases(&self, base: &Piece, stacked: &[Piece]) -> bool {
+    pub fn crossing_multiple_bases(&self, base: &Piece, stacked: &[Piece]) -> bool {
         if !base.traits.put_base {
             return false;
         }
@@ -793,19 +867,19 @@ impl Board {
 
     /// `CanSaveJointObject`: the tile at the fixture's center is allocated,
     /// holds an object, and that object is the fixture.
-    pub(crate) fn holds_own_center(&self, piece: &Piece) -> bool {
+    pub fn holds_own_center(&self, piece: &Piece) -> bool {
         self.tile(piece.layout, piece.center)
             .and_then(|tile| tile.occupant)
             .is_some_and(|occupant| occupant.uid == piece.uid)
     }
 
     /// The committed piece of a uid.
-    pub(crate) fn piece(&self, uid: &str) -> Option<&Piece> {
+    pub fn piece(&self, uid: &str) -> Option<&Piece> {
         self.pieces.iter().find(|piece| piece.uid == uid)
     }
 
     /// `SetupStackedFixture`: the object a piece stands on.
-    pub(crate) fn under(&self, piece: &Piece) -> Option<&Piece> {
+    pub fn under(&self, piece: &Piece) -> Option<&Piece> {
         if !piece.traits.put_target || piece.center.y < 1 {
             return None;
         }
@@ -817,7 +891,7 @@ impl Board {
 
     /// `GetStackedFixtures(base)`: the uids stacked on it and on those,
     /// depth first.
-    pub(crate) fn stacked_on(&self, base: &str) -> Vec<String> {
+    pub fn stacked_on(&self, base: &str) -> Vec<String> {
         let mut out = Vec::new();
         self.collect_stacked(base, &mut out);
         out
@@ -837,7 +911,7 @@ impl Board {
 
     /// `FloorEditState.ClampPosition(target)`: the center that keeps the
     /// box inside the grid's bound in x and z; y is the target's.
-    pub(crate) fn clamp(&self, fixture: &Piece, target: GridPosition) -> GridPosition {
+    pub fn clamp(&self, fixture: &Piece, target: GridPosition) -> GridPosition {
         let tiles = self.tiles(fixture.layout);
         let (c, lo, hi) = (fixture.center, fixture.min, fixture.max);
         let axis = |t: i8, low: i32, high: i32| -> i8 {
@@ -866,7 +940,7 @@ impl Board {
     /// `FloorEditState.AdjustSelectTileHeight(min, fixture)`: the lowest y of
     /// the column whose tile holds no other object; 0 when a tile of the
     /// column is not in the grid; the top tile when every one is taken.
-    pub(crate) fn column_height(&self, layout: u8, at: GridPosition, uid: &str) -> i8 {
+    pub fn column_height(&self, layout: u8, at: GridPosition, uid: &str) -> i8 {
         let count = self.tiles(layout).height();
         if count < 1 {
             return 0;
@@ -885,107 +959,6 @@ impl Board {
             y += 1;
         }
     }
-}
-
-/// The zone table's state and the per-layout zones.
-#[derive(Resource, Default)]
-pub(crate) struct ZoneTable {
-    handle: Option<Handle<JsonAsset>>,
-    read: Option<Result<Arc<HashMap<u32, Vec<Zone>>>, String>>,
-}
-
-/// Test hook: a read zone table with no zones.
-#[cfg(test)]
-pub(super) fn empty_zone_table() -> ZoneTable {
-    ZoneTable {
-        handle: None,
-        read: Some(Ok(Arc::new(HashMap::new()))),
-    }
-}
-
-pub(super) fn request_zones(mut commands: Commands, server: Res<AssetServer>) {
-    commands.insert_resource(ZoneTable {
-        handle: Some(server.load(ZONES)),
-        read: None,
-    });
-}
-
-fn parse_zones(value: &serde_json::Value) -> Result<HashMap<u32, Vec<Zone>>, String> {
-    let entries = value["entries"]
-        .as_object()
-        .ok_or("the unavailable zone table has no entries")?;
-    let mut out: HashMap<u32, Vec<Zone>> = HashMap::new();
-    let mut rows: Vec<&serde_json::Value> = entries.values().collect();
-    rows.sort_by_key(|row| row["id"].as_i64());
-    for row in rows {
-        let int = |key: &str| {
-            row[key]
-                .as_i64()
-                .ok_or_else(|| format!("unavailable zone row carries no integer {key}"))
-        };
-        let layout = u32::try_from(int("mysekaiSiteLayoutId")?)
-            .map_err(|_| "unavailable zone site layout id out of range")?;
-        out.entry(layout).or_default().push(Zone::from_row(
-            int("id")?,
-            [int("startX")?, int("startY")?, int("startZ")?],
-            [int("width")?, int("height")?, int("depth")?],
-        ));
-    }
-    Ok(out)
-}
-
-pub(super) fn read_zones(
-    server: Res<AssetServer>,
-    json: Res<Assets<JsonAsset>>,
-    mut table: ResMut<ZoneTable>,
-) {
-    if table.read.is_some() {
-        return;
-    }
-    let Some(handle) = table.handle.clone() else {
-        return;
-    };
-    let read = match server.load_state(&handle) {
-        bevy::asset::LoadState::Loaded => json
-            .get(&handle)
-            .ok_or_else(|| format!("{ZONES}: loaded but not in the assets"))
-            .and_then(|asset| {
-                serde_json::from_str::<serde_json::Value>(&asset.0)
-                    .map_err(|error| format!("{ZONES}: not JSON: {error}"))
-            })
-            .and_then(|value| parse_zones(&value)),
-        bevy::asset::LoadState::Failed(error) => Err(format!("{ZONES} failed to load: {error}")),
-        _ => return,
-    };
-    match &read {
-        Ok(zones) => info!(
-            "[edit-put] unavailable zone table read: {} zones on {} site layouts",
-            zones.values().map(Vec::len).sum::<usize>(),
-            zones.len()
-        ),
-        Err(error) => {
-            warn!("[edit-put] {error}: floor puts are refused until the table is in the root")
-        }
-    }
-    table.read = Some(read.map(Arc::new));
-    table.handle = None;
-}
-
-/// The rules for the current floor layout, or what is missing.
-pub(crate) fn rules(world: &World, floor: Option<FloorGridLayout>) -> Result<Rules, Missing> {
-    let floor = floor.ok_or(Missing::FloorGrid)?;
-    let traits = super::put_effect::traits_table(world).ok_or(Missing::FixtureTable)?;
-    let meta = world
-        .get_resource::<super::assets::FixtureAreas>()
-        .filter(|areas| areas.loaded)
-        .map(|areas| areas.stack.clone())
-        .ok_or(Missing::AreaTable)?;
-    let zones = zones_of(world, floor.layout_id).map(Arc::new);
-    Ok(Rules {
-        traits,
-        meta,
-        zones,
-    })
 }
 
 #[cfg(test)]

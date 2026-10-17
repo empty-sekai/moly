@@ -14,8 +14,10 @@
 pub mod anchor;
 pub mod layout;
 pub mod op;
+pub mod resolve;
 pub mod result;
 pub mod rules;
+pub mod validate;
 
 pub use anchor::{Anchor, Cell, Side, Wall};
 pub use layout::{Layout, PlacedRow, SiteGrid};
@@ -23,4 +25,4 @@ pub use op::{LayoutOp, Layer, Piece, Rot};
 pub use result::{
     Apply, ApplyOutcome, Applied, OpResult, Refusal, RefusalCode, Rejected,
 };
-pub use rules::{BundleMeta, MasterFixture, MetaGrid, OwnedCount, Rules, Zone};
+pub use rules::{BundleMeta, MetaGrid, OwnedCount, Rules, Zone};

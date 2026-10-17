@@ -22,11 +22,10 @@ mod autoplay;
 mod edit_grid;
 mod game_state;
 mod input;
+mod layout_rules;
 mod owned;
-mod placement;
 mod presentation;
 mod put_effect;
-mod tile_rules;
 mod validation;
 
 #[cfg(test)]
@@ -39,6 +38,7 @@ use assets::FixtureAreas;
 use bevy::prelude::*;
 use moly_law::fixture::position::layout_type;
 use moly_law::fixture::{Direction, GridPosition, Vector3Int};
+use moly_layout::{resolve as placement, validate as tile_rules};
 use moly_link::ServerLink;
 use moly_protocol::{Call, Refusal, Reply};
 
@@ -465,7 +465,7 @@ fn census(world: &World, session: &EditSession) {
         .baseline
         .as_ref()
         .and_then(FixturePlacements::floor_grid);
-    let rules = match tile_rules::rules(world, floor) {
+    let rules = match layout_rules::rules(world, floor) {
         Ok(rules) => rules,
         Err(missing) => {
             warn!("[edit-put] census: the put rules miss {missing:?}");
@@ -594,7 +594,7 @@ fn place_new(
     // The look-at relative to the site, in the source frame (X mirrored).
     let relative = look_at - site_origin(world);
     let relative = Vec3::new(-relative.x, relative.y, relative.z);
-    let board = match tile_rules::rules(world, Some(floor))
+    let board = match layout_rules::rules(world, Some(floor))
         .and_then(|rules| Ok((tile_rules::Board::new(&session.rows, floor, &rules)?, rules)))
     {
         Ok(found) => found,
@@ -608,7 +608,7 @@ fn place_new(
     let found = placement::place(
         item,
         source_direction,
-        relative,
+        relative.to_array(),
         &board,
         &rules,
         put_type.as_deref(),
@@ -622,7 +622,7 @@ fn place_new(
         }
     }
     info!(
-        "[edit-put] PutFixture {} (fixture {}, {source}): camera look-at {:.3} (source frame, site-relative) -> grid ({}, {}, {}) -> start tile ({}, {}, {}); camera yaw {yaw:.2} -> direction {:?}; put type {:?} ({}); radius cap {}; {} candidates rejected {:?}",
+        "[edit-put] PutFixture {} (fixture {}, {source}): camera look-at {:?} (source frame, site-relative) -> grid ({}, {}, {}) -> start tile ({}, {}, {}); camera yaw {yaw:.2} -> direction {:?}; put type {:?} ({}); radius cap {}; {} candidates rejected {:?}",
         item.uid,
         item.fixture_id,
         found.look_at,
@@ -679,7 +679,7 @@ fn stacked_rows(
         .baseline
         .as_ref()
         .and_then(FixturePlacements::floor_grid);
-    let rules = tile_rules::rules(world, floor)?;
+    let rules = layout_rules::rules(world, floor)?;
     let board = tile_rules::Board::new(
         &session.rows,
         floor.ok_or(tile_rules::Missing::FloorGrid)?,
@@ -698,7 +698,7 @@ fn put_status(world: &World, session: &EditSession, selection: &Selection) -> Pu
         .baseline
         .as_ref()
         .and_then(FixturePlacements::floor_grid);
-    let rules = tile_rules::rules(world, floor);
+    let rules = layout_rules::rules(world, floor);
     validation::put(
         &selection.item,
         &selection.stacked,
@@ -747,7 +747,7 @@ fn drag(world: &mut World, session: &mut EditSession, target: DragTarget) {
         .baseline
         .as_ref()
         .and_then(FixturePlacements::floor_grid);
-    let prepared = tile_rules::rules(world, floor).and_then(|rules| {
+    let prepared = layout_rules::rules(world, floor).and_then(|rules| {
         let floor = floor.ok_or(tile_rules::Missing::FloorGrid)?;
         let board = tile_rules::Board::new(&session.rows, floor, &rules)?;
         let piece = tile_rules::Piece::new(&selected.item, &rules)?;
@@ -852,7 +852,7 @@ fn rotate(world: &mut World, session: &mut EditSession) {
         .baseline
         .as_ref()
         .and_then(FixturePlacements::floor_grid);
-    let prepared = tile_rules::rules(world, floor).and_then(|rules| {
+    let prepared = layout_rules::rules(world, floor).and_then(|rules| {
         let floor = floor.ok_or(tile_rules::Missing::FloorGrid)?;
         let board = tile_rules::Board::new(&session.rows, floor, &rules)?;
         let piece = tile_rules::Piece::new(&selected.item, &rules)?;
@@ -1250,7 +1250,7 @@ fn save(session: &mut EditSession, world: &mut World, exit_after: bool, validate
     let Some(areas) = world.get_resource::<FixtureAreas>() else {
         return;
     };
-    let rules = tile_rules::rules(world, base.floor_grid());
+    let rules = layout_rules::rules(world, base.floor_grid());
     if let Err((status, error)) = validation::save(
         &session.rows,
         base.floor_grid(),
@@ -1401,7 +1401,7 @@ fn refused_save(
     status: validation::LayoutStatus,
     error: &str,
     floor: Option<crate::site::FloorGridLayout>,
-    rules: Option<&tile_rules::Rules>,
+    rules: Option<&moly_layout::Rules>,
     exit_after: bool,
 ) {
     use crate::common_dialog::Buttons;
@@ -1918,14 +1918,14 @@ impl Plugin for FixtureEditPlugin {
                     assets::load,
                     owned::load,
                     put_effect::request_tables,
-                    tile_rules::request_zones,
+                    layout_rules::request_zones,
                 ),
             )
             .add_systems(
                 Update,
                 (assets::parse_areas, assets::plan_candidates).chain(),
             )
-            .add_systems(Update, tile_rules::read_zones)
+            .add_systems(Update, layout_rules::read_zones)
             .add_systems(Update, owned::parse)
             .add_systems(
                 Update,
