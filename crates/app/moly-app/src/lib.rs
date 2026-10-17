@@ -90,7 +90,10 @@ fn run_app(
         announce_ready(&mut app);
     }
     #[cfg(not(target_arch = "wasm32"))]
-    let StartMode::Library = mode;
+    {
+        let StartMode::Library = mode;
+        install_link(&mut app);
+    }
     app.run();
 }
 
@@ -140,7 +143,60 @@ fn run_native_game() {
     let mut app = moly_game::app(source, site_request::game());
     moly_assets::remote::admit(&mut app, remote);
     moly_game::configure_browser_game(&mut app, seed);
+    install_link(&mut app);
     app.run();
+}
+
+/// The server address a native start uses when `MOLY_SERVER_URL` is unset.
+#[cfg(not(target_arch = "wasm32"))]
+const DEFAULT_SERVER_URL: &str = "ws://127.0.0.1:15800";
+
+/// Gives the game its session with the server named by `MOLY_SERVER_URL`.
+/// A launcher reads the address of the server it started and passes it here;
+/// a native start without one connects to [`DEFAULT_SERVER_URL`].
+#[cfg(not(target_arch = "wasm32"))]
+fn install_link(app: &mut bevy::prelude::App) {
+    let config = link_config().unwrap_or_else(|message| fail_loud(&message));
+    app.add_plugins(moly_link::LinkPlugin(config));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn link_config() -> Result<moly_link::LinkConfig, String> {
+    let address = match std::env::var("MOLY_SERVER_URL") {
+        Ok(value) if value.trim().is_empty() => {
+            return Err("MOLY_SERVER_URL is empty; it names the server's ws:// address".into())
+        }
+        Ok(value) if !is_server_address(value.trim()) => {
+            return Err(format!(
+                "MOLY_SERVER_URL must be a ws://host:port address, not {value:?}"
+            ))
+        }
+        Ok(value) => value.trim().to_owned(),
+        Err(std::env::VarError::NotPresent) => DEFAULT_SERVER_URL.to_owned(),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err("MOLY_SERVER_URL is not valid text".into())
+        }
+    };
+    Ok(moly_link::LinkConfig {
+        address,
+        user: moly_protocol::UserId::local(),
+        client: format!("moly-app {}", moly_game::VERSION),
+        connect_window: moly_link::LinkConfig::CONNECT_WINDOW,
+    })
+}
+
+/// `ws://` or `wss://`, then a host with no credentials and no whitespace.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_server_address(value: &str) -> bool {
+    let authority = value
+        .strip_prefix("ws://")
+        .or_else(|| value.strip_prefix("wss://"))
+        .map(|rest| rest.split(['/', '?', '#']).next().unwrap_or(""));
+    authority.is_some_and(|authority| {
+        !authority.is_empty()
+            && !authority.contains('@')
+            && !value.bytes().any(|byte| byte <= b' ' || byte == 0x7f)
+    })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
