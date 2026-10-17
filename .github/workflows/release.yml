@@ -72,18 +72,21 @@ jobs:
             target: x86_64-pc-windows-msvc
             exe: moly-app.exe
             launcher: moly-launcher.exe
+            server: moly-server.exe
             archive: zip
             publish: true
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             exe: moly-app
             launcher: moly-launcher
+            server: moly-server
             archive: tar.gz
             publish: false
           - os: macos-14
             target: aarch64-apple-darwin
             exe: moly-app
             launcher: moly-launcher
+            server: moly-server
             archive: tar.gz
             publish: false
     runs-on: ${{ matrix.os }}
@@ -108,13 +111,18 @@ jobs:
           key: ${{ matrix.target }}
           cache-on-failure: true
       - name: Build
-        run: cargo build --release --locked -p moly-app -p moly-launcher --target ${{ matrix.target }}
+        run: cargo build --release --locked -p moly-app -p moly-launcher -p moly-server-host --target ${{ matrix.target }}
       - name: Check the reported version
         shell: bash
         run: |
           reported=$("target/${{ matrix.target }}/release/${{ matrix.exe }}" --version)
           if [[ "$reported" != "moly $VERSION" ]]; then
             echo "the program reports \"$reported\", expected \"moly $VERSION\"" >&2
+            exit 1
+          fi
+          served=$("target/${{ matrix.target }}/release/${{ matrix.server }}" --version)
+          if [[ "$served" != "moly-server $VERSION" ]]; then
+            echo "the server reports \"$served\", expected \"moly-server $VERSION\"" >&2
             exit 1
           fi
       - name: Package
@@ -125,6 +133,7 @@ jobs:
           mkdir -p "dist/$name"
           cp "target/${{ matrix.target }}/release/${{ matrix.exe }}" "dist/$name/"
           cp "target/${{ matrix.target }}/release/${{ matrix.launcher }}" "dist/$name/"
+          cp "target/${{ matrix.target }}/release/${{ matrix.server }}" "dist/$name/"
           cp LICENSE README.md THIRD_PARTY_NOTICES.md "dist/$name/"
           cd dist
           if [[ "${{ matrix.archive }}" == zip ]]; then

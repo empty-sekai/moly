@@ -20,10 +20,11 @@
 // （部件层 z 不随根部接线变）。两条臂都跑，全绿才退出 0。
 //
 // 用法：node tools/balloon-order/check.mjs [moly-app.exe]
-//   exe 缺省取仓根的 moly-app-*.exe。每臂的完整日志落在仓根
-//   balloon-order-<run-id>-*.log 及对应 JSON 状态供复查。
+//   exe 缺省取仓根的 moly-app-*.exe。moly-server(.exe) 必须与它同目录，判据
+//   先起服务器、把报出的地址交给游戏，游戏退出后收掉服务器。
+//   每臂的完整日志落在仓根 balloon-order-<run-id>-*.log 及对应 JSON 状态供复查。
 
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -33,6 +34,8 @@ const WINDOW_SECS = '10.0';
 const RUN_TIMEOUT_MS = Number(process.env.MOLY_BALLOON_ORDER_TIMEOUT_MS ?? 90_000);
 if (!Number.isSafeInteger(RUN_TIMEOUT_MS) || RUN_TIMEOUT_MS <= 0) throw new Error('Invalid probe timeout');
 const STRIDE = 4.0;
+const SERVER_START_MS = 10_000;
+const SERVER_FILE = process.platform === 'win32' ? 'moly-server.exe' : 'moly-server';
 
 const READY_RE =
   /\[tweet-order\] probe ready near_tweet=(\d+) near_d=([\d.eE+-]+) far_tweet=(\d+) far_d=([\d.eE+-]+)/;
@@ -55,28 +58,143 @@ function findExe() {
   return path.join(root, hits[hits.length - 1]);
 }
 
-function runArm(exe, armName, extraEnv) {
+// 游戏与服务器是两只进程：先起服务器，从它报出的那一行里读回地址。
+// 服务器自己的输出落在 <arm>-server.log，不混进判据要读的游戏日志。
+function startServer(exe, logPath) {
+  const serverExe = path.join(path.dirname(exe), SERVER_FILE);
+  if (!fs.existsSync(serverExe) || !fs.statSync(serverExe).isFile()) {
+    throw new Error(`找不到 ${SERVER_FILE}：请把它与 ${path.basename(exe)} 放在同一目录（${serverExe}）`);
+  }
+  const fd = fs.openSync(logPath, 'a');
+  // close 之后到达的管道尾巴不再写：'end' 可能比收尾晚一个 tick。
+  let open = true;
+  const append = (text) => {
+    if (!open) return;
+    try {
+      fs.writeSync(fd, text);
+    } catch {
+      // 日志是诊断件：写不动也不能让判据本身崩。
+    }
+  };
+  append(`# ${new Date().toISOString()} server ${serverExe}\n`);
+  const child = spawn(serverExe, [], {
+    cwd: path.dirname(exe),
+    env: { ...process.env, MOLY_SERVER_ADDR: '127.0.0.1:0' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  // 两条管道都读到底：没人读会填满、把服务器堵死。
+  const pipe = (stream, onLine) => {
+    let pending = '';
+    stream.setEncoding('utf8');
+    stream.on('data', (chunk) => {
+      pending += chunk;
+      const lines = pending.split(/\r?\n/);
+      pending = lines.pop();
+      for (const line of lines) {
+        append(`[server] ${line}\n`);
+        onLine(line);
+      }
+    });
+    stream.on('end', () => {
+      if (!pending) return;
+      append(`[server] ${pending}\n`);
+      onLine(pending);
+      pending = '';
+    });
+  };
+  const ready = new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error, url) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve(url);
+    };
+    const timer = setTimeout(
+      () => finish(new Error(`服务器 ${SERVER_START_MS / 1000} s 内没有报出地址；日志 ${logPath}`)),
+      SERVER_START_MS
+    );
+    if (child.stdout && child.stderr) {
+      pipe(child.stdout, (line) => {
+        const match = /listening on (ws:\/\/\S+)/.exec(line);
+        if (match) finish(null, match[1]);
+      });
+      pipe(child.stderr, () => {});
+    }
+    child.once('error', (err) => finish(new Error(`起不了 ${serverExe}：${err.message}`)));
+    child.once('exit', (code, signal) => {
+      finish(new Error(`服务器在报出地址前退出（${code ?? signal}）；日志 ${logPath}`));
+    });
+  });
+  return {
+    child,
+    exe: serverExe,
+    logPath,
+    ready,
+    close() {
+      if (!open) return;
+      open = false;
+      fs.closeSync(fd);
+    },
+  };
+}
+
+// 游戏结束（含超时被杀）后收掉服务器，再关日志。
+async function stopServer(server) {
+  const { child } = server;
+  if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
+    if (process.platform === 'win32') {
+      spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+    } else {
+      child.kill('SIGKILL');
+    }
+    await Promise.race([
+      new Promise((resolve) => child.once('exit', resolve)),
+      new Promise((resolve) => setTimeout(resolve, 5000)),
+    ]);
+  }
+  server.close();
+}
+
+async function runArm(exe, armName, extraEnv) {
   const runId = randomUUID();
   const env = { ...process.env, MOLY_BALLOON_ORDER_SECS: WINDOW_SECS, MOLY_BALLOON_ORDER_RUN_ID: runId };
   env.RUST_LOG = `${process.env.RUST_LOG ?? 'warn'},moly_game::balloon=info`;
   delete env.MOLY_BALLOON_ORDER_NO_LAYER;
   Object.assign(env, extraEnv);
   const executableSha256 = createHash('sha256').update(fs.readFileSync(exe)).digest('hex');
-  const proc = spawnSync(exe, [], {
-    env,
-    cwd: path.dirname(exe),
-    timeout: RUN_TIMEOUT_MS,
-    encoding: 'utf8',
-    maxBuffer: 64 * 1024 * 1024,
-  });
-  const out = `${proc.stdout ?? ''}${proc.stderr ?? ''}`;
   const logPath = path.join(path.dirname(exe), `balloon-order-${runId}-${armName}.log`);
+  const server = startServer(exe, logPath.replace(/\.log$/, '-server.log'));
+  let url;
+  try {
+    url = await server.ready;
+  } catch (error) {
+    await stopServer(server);
+    throw error;
+  }
+  let proc;
+  try {
+    proc = spawnSync(exe, [], {
+      env: { ...env, MOLY_SERVER_URL: url },
+      cwd: path.dirname(exe),
+      timeout: RUN_TIMEOUT_MS,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+    });
+  } finally {
+    await stopServer(server);
+  }
+  const out = `${proc.stdout ?? ''}${proc.stderr ?? ''}`;
   fs.writeFileSync(logPath, out, 'utf8');
-  const result = { runId, armName, executableSha256, logPath,
-    status: proc.status, signal: proc.signal,
+  const result = { runId, armName, executableSha256,
+    serverExecutableSha256: createHash('sha256').update(fs.readFileSync(server.exe)).digest('hex'),
+    serverUrl: url, serverLogPath: server.logPath,
+    logPath, status: proc.status, signal: proc.signal,
     error: proc.error ? { code: proc.error.code, message: proc.error.message } : null };
   fs.writeFileSync(logPath.replace(/\.log$/, '.json'), JSON.stringify(result, null, 2) + '\n');
-  console.log(`[${armName}] log: ${logPath}`);
+  console.log(`[${armName}] log: ${logPath} (server ${url}, ${server.logPath})`);
   if (result.error || result.signal || result.status !== 0) {
     throw new Error(`Probe process failed: ${JSON.stringify(result)}`);
   }
@@ -194,7 +312,7 @@ const failures = [];
 
 // 正向臂：接线在——C1 绿、C2 绿、自检绿。
 {
-  const { out } = runArm(exe, 'a', {});
+  const { out } = await runArm(exe, 'a', {});
   const { ready, parts } = parse(out);
   const { errors, near, far } = checkSelf(parts, ready, '正向臂');
   for (const e of errors) failures.push(`正向臂自检：${e}`);
@@ -218,7 +336,7 @@ const failures = [];
 
 // 反向臂：根部 z 全喂 0（= 接线前恒 0）——C1 必须红，C2 必须仍绿。
 {
-  const { out } = runArm(exe, 'b', { MOLY_BALLOON_ORDER_NO_LAYER: '1' });
+  const { out } = await runArm(exe, 'b', { MOLY_BALLOON_ORDER_NO_LAYER: '1' });
   const { ready, parts } = parse(out);
   const { errors, near, far } = checkSelf(parts, ready, '反向臂');
   for (const e of errors) failures.push(`反向臂自检：${e}`);
