@@ -1,10 +1,12 @@
-//! The acquisition dialogs: `MysekaiGetResourceSubWindowDialog` (DialogType
-//! 332) with its openers, and the views of the delivery's reward dialogs
-//! `CommonRewardSubWindowDialog` (250), `HonorRewardSubWindowDialog` (262)
-//! and `MysekaiRefreshBirthdayPlantSubWindowDialog` (450). Every one of them
-//! opens and closes through the screen manager ([`crate::ui_layers`]).
+//! The acquisition dialogs: the acquisition template
+//! (`DialogType::MysekaiGetResourceSubWindowDialog`) with its openers,
+//! and the views of the delivery's reward dialogs
+//! (`DialogType::CommonRewardSubWindowDialog`,
+//! `DialogType::HonorRewardSubWindowDialog` and
+//! `DialogType::MysekaiRefreshBirthdayPlantSubWindowDialog`). Every one
+//! of them opens and closes through the screen manager ([`crate::ui_layers`]).
 //!
-//! ## The openers of 332 (client code, read in the source)
+//! ## The openers of the template (client code, read in the source)
 //!
 //! `MysekaiResourceUtility.NoticeCollectItem(resourceType, resourceId,
 //! quantity)` ([`GetResourceOpeners::notice_collect_item`]) switches on the
@@ -24,8 +26,9 @@
 //!   blueprint its target row (either missing: nothing happens); a
 //!   blueprint the player already has becomes the surplus blueprint item
 //!   (`mysekai_item`, level 1); the entry is chained on the one shared chain
-//!   player (`ChainSubWindowDialog(null, null, allowCloseExternal true, 332)`,
-//!   `Setup(resource, null)`), which starts playing unless it already plays;
+//!   player (`ChainSubWindowDialog(null, null, allowCloseExternal true, the
+//!   template)`, `Setup(resource, null)`), which starts playing unless it
+//!   already plays;
 //!   its finish only drops the shared player.
 //! - `mysekai_fixture`: the master name; a plant shows the preview
 //!   `mysekai/item_preview/fixture/<bundle>_<id>`, any other fixture the
@@ -46,7 +49,7 @@
 //! cue for them, so a drop's cue plays once.
 //!
 //! `SketchUtility.ShowSketchResultDialog(blueprintId, onClose)`
-//! ([`GetResourceOpeners::show_sketch_result`]): a single 332
+//! ([`GetResourceOpeners::show_sketch_result`]): a single template
 //! (`ShowSubWindowDialog`, not chained) with `UserResource(blueprintId, 40,
 //! level 0, quantity 1)`, whose close is awaited by the sketch sequence.
 //!
@@ -54,7 +57,7 @@
 //! not callers in this product: the mission screen is not built and the
 //! shop is paid content.
 //!
-//! ## 332's Setup, by resource type
+//! ## The template's Setup, by resource type
 //!
 //! - blueprint (40): the blueprint view instead of a thumbnail; body
 //!   `Format(MSG_GET_BLUEPRINT, name)`, the name being
@@ -78,8 +81,8 @@
 //! `SubWindowDialog` closes on its close area (the full-screen area outside
 //! the window, `allowCloseExternal`), on the hardware back key (the manager
 //! sends its `DialogBackKeyEvent`) and never on a tap inside the window.
-//! For 332 this module closes the dialog itself (`CloseProcess` -> `Close`)
-//! and opens the next chained one. 250, 262 and 450 belong to the delivery
+//! For the template this module closes the dialog itself (`CloseProcess` -> `Close`)
+//! and opens the next chained one. The three reward dialogs belong to the delivery
 //! flow, which awaits their close request: their views answer a tap on the
 //! close area with the same close request the back key sends, and the flow
 //! closes them. Their callers hand the message and the Setup argument to
@@ -92,8 +95,8 @@
 //!   no view: each time its caller shows it, it is refused by name and its
 //!   close request goes to the caller at once (an undrawn modal dialog
 //!   would hold the flow with nothing on screen).
-//! - 250: one thumbnail per resource is not built.
-//! - 262: the honor's rarity and its images come from the root's honor
+//! - `CommonRewardSubWindowDialog`: one thumbnail per resource is not built.
+//! - `HonorRewardSubWindowDialog`: the honor's rarity and its images come from the root's honor
 //!   image index (`honor/index.json`: per honor its rarity, background
 //!   bundle and frame bundle; per bundle its textures). A root without it
 //!   (the CN roots carry no honor bundles) refuses the message key and the
@@ -108,7 +111,7 @@
 //!   `frame_degree_level_<1 + rarity>`; the live master parts are hidden. A
 //!   frame the bundle lacks is hidden and named; a root without the prefab
 //!   names it and draws no image. The holder balloon is hidden.
-//! - 450: the party's `icon_refresh.png` is not on the roots: the icon is
+//! - `MysekaiRefreshBirthdayPlantSubWindowDialog`: the party's `icon_refresh.png` is not on the roots: the icon is
 //!   hidden.
 //! - The music master is not on the roots: a record's name balloon stays
 //!   shut (its body is the fixed `MSG_GET_RECORD`).
@@ -127,7 +130,7 @@
 //! `notice_collect_item` once the inputs are ready, after
 //! `MOLY_GET_RESOURCE_NOTICE_SECS`; `MOLY_GET_RESOURCE_SKETCH` = a blueprint
 //! id calls `show_sketch_result` then; `MOLY_GET_RESOURCE_REWARD_DIALOGS` =
-//! `250,262,450` shows those reward dialogs as their delivery caller does
+//! `251,263,452` (their dialog type values) shows those reward dialogs as their delivery caller does
 //! and closes them on their close request; `MOLY_GET_RESOURCE_AUTOCLOSE_SECS`
 //! injects a tap at the top-left corner of the window (the close area) that
 //! many seconds after any of these dialogs shows.
@@ -165,11 +168,11 @@ use crate::ui_layers::{
 // ---------------------------------------------------------------------------
 
 /// `DialogType.CommonRewardSubWindowDialog`.
-const COMMON_REWARD_DIALOG: DialogType = DialogType(250);
+const COMMON_REWARD_DIALOG: DialogType = DialogType::CommonRewardSubWindowDialog;
 /// `DialogType.HonorRewardSubWindowDialog`.
-const HONOR_REWARD_DIALOG: DialogType = DialogType(262);
+const HONOR_REWARD_DIALOG: DialogType = DialogType::HonorRewardSubWindowDialog;
 /// `DialogType.MysekaiRefreshBirthdayPlantSubWindowDialog`.
-const REFRESH_DIALOG: DialogType = DialogType(450);
+const REFRESH_DIALOG: DialogType = DialogType::MysekaiRefreshBirthdayPlantSubWindowDialog;
 
 /// The layout keys of the three prefab documents.
 const KEY_GET_RESOURCE: &str = "GetResource";
@@ -178,7 +181,7 @@ const KEY_HONOR: &str = "HonorReward";
 const KEY_REFRESH: &str = "RefreshBirthdayPlant";
 /// `UIPartsHonorImage`, the honor image prefab (an optional document).
 const KEY_HONOR_IMAGE: &str = "HonorImage";
-/// 262's document with the honor image composed under `imageRoot`.
+/// The honor reward dialog's document with the honor image composed under `imageRoot`.
 const KEY_HONOR_COMPOSED: &str = "HonorRewardComposed";
 /// Where `HonorRewardSubWindowDialog.Setup` has the image created.
 const HONOR_IMAGE_PARENT: &str = "Content/CustomButton/imageRoot";
@@ -512,7 +515,7 @@ fn format_one(format: &str, arg: &str) -> String {
 // Entries
 // ---------------------------------------------------------------------------
 
-/// `UserResource.resourceType`, by the arm of 332's Setup it takes.
+/// `UserResource.resourceType`, by the arm of the template's Setup it takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResourceKind {
     Blueprint,
@@ -520,7 +523,7 @@ enum ResourceKind {
     MusicRecord,
 }
 
-/// One 332 entry (a `UserResource` and its resolved texts).
+/// One acquisition entry (a `UserResource` and its resolved texts).
 #[derive(Debug, Clone)]
 struct ResourceEntry {
     kind: ResourceKind,
@@ -544,7 +547,7 @@ impl ResourceEntry {
     }
 }
 
-/// A 332 entry's opener, for its close.
+/// An acquisition entry's opener, for its close.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Opener {
     /// `NoticeCollectItem`: on the shared chain player.
@@ -553,7 +556,7 @@ enum Opener {
     Sketch(u64),
 }
 
-/// The 332 dialog on screen.
+/// The acquisition dialog on screen.
 struct Shown {
     id: DialogId,
     entry: ResourceEntry,
@@ -589,22 +592,22 @@ enum Call {
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Constructed by the delivery flow's seam.
 pub(crate) enum RewardPayload {
-    /// 250, `DialogUtility.ShowGetResourceDialogAsync(resources, message)`:
+    /// `CommonRewardSubWindowDialog`, `DialogUtility.ShowGetResourceDialogAsync(resources, message)`:
     /// the message's wording key and the number of resources (one
     /// thumbnail each).
     Common {
         message_key: String,
         resources: usize,
     },
-    /// 262, `ChainSubWindowDialog(message)` + `Setup(resource)`: the honor
+    /// `HonorRewardSubWindowDialog`, `ChainSubWindowDialog(message)` + `Setup(resource)`: the honor
     /// and its level (the message key follows from the honor's rarity, read
     /// here from the root's honor image index: see [`honor_message_key`]).
     Honor { honor_id: i32, level: i32 },
-    /// 450, `Setup(party)`: the birthday party.
+    /// `MysekaiRefreshBirthdayPlantSubWindowDialog`, `Setup(party)`: the birthday party.
     Refresh { party_id: i32 },
 }
 
-/// The client calls that open 332 or the collect notice, and the payloads of
+/// The client calls that open the acquisition dialog or the collect notice, and the payloads of
 /// the reward dialogs. Callers push; the module resolves the calls in order
 /// once the masters and the wordings are loaded.
 #[derive(Resource, Default)]
@@ -817,7 +820,7 @@ struct HonorImage {
     level_pip: Option<String>,
 }
 
-/// The honor image's nodes in 262's composed document.
+/// The honor image's nodes in the honor reward dialog's composed document.
 #[derive(Clone, Debug)]
 struct HonorBindings {
     body: String,
@@ -838,10 +841,10 @@ pub(crate) struct GetResourcePlayer {
     /// The shared chain player's queue (`_chainDialogPlayer`); None when no
     /// chain plays.
     chain: Option<VecDeque<ResourceEntry>>,
-    /// Sketch results waiting for the view (one 332 view at a time).
+    /// Sketch results waiting for the view (one acquisition view at a time).
     sketches: VecDeque<(u64, ResourceEntry)>,
     shown: Option<Shown>,
-    /// A close tap on 332 this frame.
+    /// A close tap on the acquisition dialog this frame.
     close_requested: bool,
     /// Sketch results closed or refused this frame, for their tickets.
     pending_sketch_closes: Vec<u64>,
@@ -858,11 +861,11 @@ pub(crate) struct GetResourcePlayer {
     autoclosed: HashSet<DialogId>,
 }
 
-/// The 332 view's root.
+/// The acquisition view's root.
 #[derive(Component)]
 pub(crate) struct GetResourceRoot;
 
-/// The view root of a delivery reward dialog (262 or 450).
+/// The view root of a delivery reward dialog (the honor reward or the birthday plant refresh).
 #[derive(Component)]
 pub(crate) struct RewardDialogRoot {
     dialog: DialogType,
@@ -877,7 +880,7 @@ pub(crate) struct GetResourceSpawned {
     rewards: bool,
     /// Reward documents already named missing.
     reported: HashSet<&'static str>,
-    /// 262's honor image nodes, once composed (None: no image prefab).
+    /// The honor reward dialog's image nodes, once composed (None: no image prefab).
     honor: Option<HonorBindings>,
     honor_composed: bool,
 }
@@ -920,29 +923,29 @@ pub(crate) fn spawn_when_ready(
         ));
         spawned.get_resource = true;
     }
-    // The sources are loaded once the 332 document is there.
+    // The sources are loaded once the acquisition document is there.
     if spawned.rewards || layouts.document(KEY_GET_RESOURCE).is_none() {
         return;
     }
     let mut waiting = false;
-    // 262's image: the honor image prefab composed under `imageRoot` once.
+    // The honor reward dialog's image: the honor image prefab composed under `imageRoot` once.
     if !spawned.honor_composed && layouts.document(KEY_HONOR).is_some() {
         spawned.honor_composed = true;
         if layouts.document(KEY_HONOR_IMAGE).is_some() {
             match compose_honor(&mut layouts, &server) {
                 Ok(bindings) => {
                     info!(
-                        "[get_resource] UIPartsHonorImage composed under 262's {HONOR_IMAGE_PARENT} (scale {HONOR_IMAGE_SCALE})"
+                        "[get_resource] UIPartsHonorImage composed under the honor reward dialog's {HONOR_IMAGE_PARENT} (scale {HONOR_IMAGE_SCALE})"
                     );
                     spawned.honor = Some(bindings);
                 }
                 Err(reason) => error!(
-                    "[get_resource] UIPartsHonorImage could not be composed into 262 ({reason}); the honor image is not drawn"
+                    "[get_resource] UIPartsHonorImage could not be composed into the honor reward dialog ({reason}); the honor image is not drawn"
                 ),
             }
         } else {
             error!(
-                "[get_resource] the UIPartsHonorImage prefab ({KEY_HONOR_IMAGE}) is not in the UI sources; 262 draws no honor image"
+                "[get_resource] the UIPartsHonorImage prefab ({KEY_HONOR_IMAGE}) is not in the UI sources: the honor reward dialog draws no honor image"
             );
         }
     }
@@ -984,8 +987,8 @@ pub(crate) fn spawn_when_ready(
     }
 }
 
-/// `HonorUtility.CreateHonorImage` in 262: instantiate the honor image
-/// prefab under `imageRoot` of a copy of 262's document, set its scale, and
+/// `HonorUtility.CreateHonorImage` in the honor reward dialog: instantiate the honor image
+/// prefab under `imageRoot` of a copy of its document, set its scale, and
 /// install the copy as a runtime document.
 fn compose_honor(
     layouts: &mut crate::ui_layout::UiLayouts,
@@ -993,7 +996,7 @@ fn compose_honor(
 ) -> Result<HonorBindings, String> {
     let mut doc = layouts
         .document(KEY_HONOR)
-        .ok_or("262's document is not loaded")?
+        .ok_or("the honor reward dialog's document is not loaded")?
         .clone();
     let template = layouts
         .document(KEY_HONOR_IMAGE)
@@ -1208,7 +1211,7 @@ fn play_se(se: &mut SeRequests, cue: &str) {
     });
 }
 
-/// 332's Setup texts for an entry.
+/// The acquisition template's Setup texts for an entry.
 fn setup_texts(
     kind: ResourceKind,
     resource_id: i32,
@@ -1247,7 +1250,7 @@ fn setup_texts(
 }
 
 /// Resolve one `NoticeCollectItem` call: the collect notice, or a chained
-/// 332 entry.
+/// An acquisition entry.
 #[allow(clippy::too_many_arguments)]
 fn notice(
     resource_type: &str,
@@ -1278,7 +1281,7 @@ fn notice(
             }),
             Err(reason) => {
                 error!(
-                    "[get_resource] {caller}: NoticeCollectItem({resource_type}, {resource_id}): 332 refused: {reason}"
+                    "[get_resource] {caller}: NoticeCollectItem({resource_type}, {resource_id}): the acquisition dialog refused: {reason}"
                 );
                 None
             }
@@ -1409,7 +1412,7 @@ fn notice(
                     Some(item) => chained(ResourceKind::Item, item, 1),
                     None => {
                         error!(
-                            "[get_resource] {caller}: the items master has no surplus blueprint row; 332 refused"
+                            "[get_resource] {caller}: the items master has no surplus blueprint row; the acquisition dialog refused"
                         );
                         None
                     }
@@ -1452,7 +1455,7 @@ fn notice(
                     Some(item) => chained(ResourceKind::Item, item, 1),
                     None => {
                         error!(
-                            "[get_resource] {caller}: the items master has no surplus record row; 332 refused"
+                            "[get_resource] {caller}: the items master has no surplus record row; the acquisition dialog refused"
                         );
                         None
                     }
@@ -1533,7 +1536,8 @@ fn notice(
 fn enqueue_chain(player: &mut GetResourcePlayer, entry: ResourceEntry, caller: &'static str) {
     let playing = player.chain.is_some();
     info!(
-        "[get_resource] {caller}: NoticeCollectItem -> ChainSubWindowDialog(null, null, true, 332), Setup({} {} level {} x{}); {}",
+        "[get_resource] {caller}: NoticeCollectItem -> ChainSubWindowDialog(null, null, true, {}), Setup({} {} level {} x{}); {}",
+        DialogType::MysekaiGetResourceSubWindowDialog.0,
         entry.wire(),
         entry.resource_id,
         entry.resource_level,
@@ -1597,7 +1601,7 @@ fn code_points(chars: &[char]) -> String {
     points.join(" ")
 }
 
-/// Show the next 332 entry (a sketch result first, then the chain).
+/// Show the next acquisition entry (a sketch result first, then the chain).
 fn show_next(player: &mut GetResourcePlayer, screens: &mut ScreenManager, art: &BalloonArt) {
     loop {
         let (entry, opener) = if let Some((ticket, entry)) = player.sketches.pop_front() {
@@ -1610,7 +1614,7 @@ fn show_next(player: &mut GetResourcePlayer, screens: &mut ScreenManager, art: &
         let missing = undrawable(&entry.body, art);
         if !missing.is_empty() {
             error!(
-                "[get_resource] 332 entry {} {} refused: its body's characters {} are not in the glyph atlas (absent from the charset or from the font)",
+                "[get_resource] acquisition entry {} {} refused: its body's characters {} are not in the glyph atlas (absent from the charset or from the font)",
                 entry.wire(),
                 entry.resource_id,
                 code_points(&missing)
@@ -1632,7 +1636,7 @@ fn show_next(player: &mut GetResourcePlayer, screens: &mut ScreenManager, art: &
                 screens.open_dialog(id);
                 screens.dialog_open_finished(id);
                 info!(
-                    "[get_resource] 332 shown ({caller}): Setup {} {} level {} x{}; OpenAsync: the open animation is not built and passes at once",
+                    "[get_resource] acquisition dialog shown ({caller}): Setup {} {} level {} x{}; OpenAsync: the open animation is not built and passes at once",
                     entry.wire(),
                     entry.resource_id,
                     entry.resource_level,
@@ -1668,7 +1672,7 @@ fn finish(player: &mut GetResourcePlayer, opener: Opener) {
     }
 }
 
-/// Update: resolve the calls, drive 332 through the screen manager, and draw
+/// Update: resolve the calls, drive the acquisition dialog through the screen manager, and draw
 /// the three views.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn place(
@@ -1795,7 +1799,8 @@ pub(crate) fn place(
                 ) {
                     Ok((body, name)) => {
                         info!(
-                            "[get_resource] ShowSketchResultDialog({blueprint_id}): ShowSubWindowDialog(null, onClose, true, 332), await Setup(UserResource({blueprint_id}, 40, 0, 1))"
+                            "[get_resource] ShowSketchResultDialog({blueprint_id}): ShowSubWindowDialog(null, onClose, true, {}), await Setup(UserResource({blueprint_id}, 40, 0, 1))",
+                            DialogType::MysekaiGetResourceSubWindowDialog.0
                         );
                         player.sketches.push_back((
                             ticket,
@@ -1837,7 +1842,7 @@ pub(crate) fn place(
         }
     }
 
-    // Close 332 on its close tap or the back key.
+    // Close the acquisition dialog on its close tap or the back key.
     let back: Vec<DialogBackKeyEvent> = back_keys.read().copied().collect();
     // The instrument's reward dialogs close on their close request, as
     // their caller closes them.
@@ -1863,7 +1868,7 @@ pub(crate) fn place(
         if by_back || player.close_requested {
             let shown = player.shown.take().expect("shown");
             info!(
-                "[get_resource] 332 closes ({}): SubWindowDialog.CloseProcess -> Close: onClose; DialogBase.Close; the close animation is not built: destroyed",
+                "[get_resource] acquisition dialog closes ({}): SubWindowDialog.CloseProcess -> Close: onClose; DialogBase.Close; the close animation is not built: destroyed",
                 if by_back {
                     "the back key"
                 } else {
@@ -2368,13 +2373,14 @@ fn fire_instrument(
             }
         }
     }
-    // `MOLY_GET_RESOURCE_REWARD_DIALOGS` = `250,262,450`: each shown as its
+    // `MOLY_GET_RESOURCE_REWARD_DIALOGS` = `250,262,452` (their 6.8.1 values, the
+    // keys the instrument has always read): each shown as its
     // delivery caller shows it, with a payload of the caller's form; the
     // instrument closes it on its close request, as the caller does.
     if let Some(spec) = rewards {
         for part in spec.split(',') {
             let (dialog, layer, payload) = match part.trim() {
-                "250" => (
+                "251" => (
                     COMMON_REWARD_DIALOG,
                     DisplayLayerType::LayerDialog,
                     RewardPayload::Common {
@@ -2382,7 +2388,7 @@ fn fire_instrument(
                         resources: 2,
                     },
                 ),
-                "262" => (
+                "263" => (
                     HONOR_REWARD_DIALOG,
                     DisplayLayerType::LayerDialog,
                     RewardPayload::Honor {
@@ -2390,14 +2396,14 @@ fn fire_instrument(
                         level: 1,
                     },
                 ),
-                "450" => (
+                "452" => (
                     REFRESH_DIALOG,
                     DisplayLayerType::LayerOverlay,
                     RewardPayload::Refresh { party_id: 0 },
                 ),
                 other => {
                     warn!(
-                        "[get_resource] instrument: reward dialog {:?} is not 250, 262 or 450",
+                        "[get_resource] instrument: reward dialog {:?} is not 251, 263 or 452",
                         ascii_or(other)
                     );
                     continue;
@@ -2496,8 +2502,8 @@ fn on_close_area(
 }
 
 /// Taps while any of these dialogs is drawn: every tap is theirs (the
-/// dialog layer is modal). 332: a tap on the thumbnail toggles the name
-/// balloon, a tap on the close area closes it. 250, 262 and 450: a tap on
+/// dialog layer is modal). The acquisition dialog: a tap on the thumbnail toggles the name
+/// balloon, a tap on the close area closes it. The reward dialogs: a tap on
 /// the close area sends the close request the back key sends, which the
 /// delivery flow answers. A reward dialog without a view is refused: its
 /// close request goes out in the frame it shows.
@@ -2515,7 +2521,7 @@ pub(crate) fn click(
     mut close_requests: MessageWriter<DialogBackKeyEvent>,
     root_canvas: Option<Res<crate::canvas::RootCanvas>>,
 ) {
-    // The sources are read once the 332 document is there.
+    // The sources are read once the acquisition document is there.
     if layouts.document(KEY_GET_RESOURCE).is_some() {
         refused.retain(|id| screens.dialogs().any(|(shown, ..)| shown == *id));
         for (id, dialog, state) in screens.dialogs() {

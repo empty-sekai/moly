@@ -1,5 +1,5 @@
 //! The BGM select screen's two dialogs: the change-vocal sub-window
-//! (`MysekaiBGMSelectChangeVocalDialog`, 320) and the BGM filter
+//! (`MysekaiBGMSelectChangeVocalDialog`, 321) and the BGM filter
 //! (`BGMFilterDialog`, 398).
 //!
 //! Both are `UiPrefabView`s shown through `ScreenManager`, so `moly.ui.views`
@@ -969,7 +969,8 @@ fn open_requests(
             });
             state.dialog_open = true;
             info!(
-                "[bgm-select] change vocal dialog -> ShowSubWindowDialog(MysekaiBGMSelectChangeVocalDialog, 320): {count} vocals of record {record}, selected {selected}"
+                "[bgm-select] change vocal dialog -> ShowSubWindowDialog(MysekaiBGMSelectChangeVocalDialog, {}): {count} vocals of record {record}, selected {selected}",
+                crate::ui_layers::DialogType::MysekaiBGMSelectChangeVocalDialog.0
             );
         }
     }

@@ -1,11 +1,11 @@
-//! 菜单对话框（真源 `MysekaiMenuDialog`，DialogType 312（日服客户端的枚举值），Dialog 槽）——
+//! 菜单对话框（真源 `MysekaiMenuDialog`，`DialogType::MysekaiMenuDialog`——日服 7.0.0 客户端该对话框的枚举值，Dialog 槽）——
 //! 场地屏外壳菜单钮的目标：体力/等级两格 + 12 个可按件的导航中枢。
 //!
 //! ## 入口与身份（Dialog 槽，不是层栈）
 //!
 //! 外壳菜单钮 `ShowMenu` → `DialogUtility.ShowMysekaiMenu(onChangeSite)`：
 //! 先 `TryGetActiveDialog(MysekaiMenuDialog, Layer_Dialog)`（已开 ⇒ 只
-//! 重新 Setup，不重复实例化），否则 `InstantiateDialog(312, Layer_Dialog)`
+//! 重新 Setup，不重复实例化），否则 `InstantiateDialog(DialogType::MysekaiMenuDialog, Layer_Dialog)`
 //! → `Initialize(messageBody=null, onClose=null, allowCloseExternal=true)`
 //! → SetActive(false) → `Setup(ViewData)` → `Open`。**框外点按收框成立**
 //! （allowCloseExternal = true，Initialize 第三参原生核过）。ViewData 的
@@ -42,7 +42,7 @@
 //!
 //! | button (field) | source handler and target | source enabled rule | product |
 //! |---|---|---|---|
-//! | recover stamina (`_recoverStaminaButton`) | `ScreenManager.Show2ButtonDialog<MysekaiRecoverBoostStaminaDialog>` (DialogType 321), its `Setup(onRecoverFinish = UpdateStaminaGateView)`, `Close` | `true` | opens: `crate::stamina_recover_dialog` shows the dialog over this instance, and this dialog's `Close` follows; its `onRecoverFinish` (`RecoverFinished`) rewrites the stamina cell |
+//! | recover stamina (`_recoverStaminaButton`) | `ScreenManager.Show2ButtonDialog<MysekaiRecoverBoostStaminaDialog>` (`DialogType::MysekaiRecoverBoostStaminaDialog`), its `Setup(onRecoverFinish = UpdateStaminaGateView)`, `Close` | `true` | opens: `crate::stamina_recover_dialog` shows the dialog over this instance, and this dialog's `Close` follows; its `onRecoverFinish` (`RecoverFinished`) rewrites the stamina cell |
 //! | chest (`_chestButton`) | unless `IsActiveScreen(MysekaiInventory)`: `PushUIScreen(MysekaiInventory)` (607); `Close` | `ViewData.ShouldEnableInventoryButton` = `!IsVisiting()` | opens: the screen manager's `PushUIScreen` with this caller, no boot argument (the inventory screen, `crate::inventory`); the report to the multiplayer room has no domain here |
 //! | info (`_mysekaiInfoButton`) | `MysekaiInfoUtility.TryMoveScreenLayerMysekaiInfo`: unless `IsActiveScreen(MysekaiInfo)`, `PushUIScreen(MysekaiInfo, ScreenLayerMysekaiInfoBootData)` (622); `Close` | `ViewData.ShouldEnableInfoButton` = `!IsVisiting()` | opens: the screen manager's `PushUIScreen` with this caller |
 //! | avatar change (`_mysekaiAvtarChangeButton`, the source's spelling) | unless active: `PushUIScreen(MysekaiAvatarCostumeSetting)` (629); `Close` | `true` | greyed until a MysekaiAvatarCostumeSetting view exists (registered, no view) |
@@ -172,7 +172,8 @@ use crate::ui_layout::{UiLayouts, UiPrefabView};
 const MENU_SLIDE_DURATION: f32 = 0.2;
 
 /// `OnClickRecoverBoostStaminaButton`, read by
-/// [`crate::stamina_recover_dialog`]: `Show2ButtonDialog(321)`,
+/// [`crate::stamina_recover_dialog`]:
+/// `Show2ButtonDialog(DialogType::MysekaiRecoverBoostStaminaDialog)`,
 /// `Setup(onRecoverFinish = UpdateStaminaGateView)`, then this dialog's
 /// `Close`. The id is the menu instance the recover dialog is shown over.
 #[derive(Message, Clone, Copy, Debug)]
@@ -363,7 +364,7 @@ impl MenuButton {
 }
 
 /// `DialogType.MysekaiRecoverBoostStaminaDialog`.
-const RECOVER_BOOST_STAMINA_DIALOG: DialogType = DialogType(321);
+const RECOVER_BOOST_STAMINA_DIALOG: DialogType = DialogType::MysekaiRecoverBoostStaminaDialog;
 
 /// A source target with no counterpart in this product: the subject of a
 /// greyed button's adaptation.
@@ -977,7 +978,7 @@ fn on_open(
 ) {
     info!(
         "[menu_dialog] 开框：DialogUtility.ShowMysekaiMenu → TryGetActiveDialog(菜单对话框) 未开 \
-         ⇒ InstantiateDialog(312, Dialog 槽) → Initialize(allowCloseExternal=true) → Setup(ViewData)"
+         ⇒ InstantiateDialog(DialogType::MysekaiMenuDialog, Dialog 槽) → Initialize(allowCloseExternal=true) → Setup(ViewData)"
     );
     info!(
         "[menu_dialog] Setup·ViewData 派生：IsOwner()=true（单机恒站主）· \
@@ -1106,8 +1107,9 @@ pub(crate) fn place(
                 if let Some(old) = root.dialog.take() {
                     screens.dialog_destroyed(old);
                 }
-                // DialogUtility.ShowMysekaiMenu: InstantiateDialog(type 312,
-                // Layer_Dialog), Initialize, Setup, Open.
+                // DialogUtility.ShowMysekaiMenu: InstantiateDialog(
+                // DialogType::MysekaiMenuDialog, Layer_Dialog), Initialize,
+                // Setup, Open.
                 match screens.show_dialog(
                     DialogType::MysekaiMenuDialog,
                     DisplayLayerType::LayerDialog,
@@ -1451,12 +1453,14 @@ pub(crate) fn click(
                         MenuButton::RecoverStamina => {
                             // OnClickRecoverBoostStaminaButton:
                             // Show2ButtonDialog<MysekaiRecoverBoostStaminaDialog>
-                            // (321), Setup(onRecoverFinish), then Close. The
+                            // (DialogType::MysekaiRecoverBoostStaminaDialog.0),
+                            // Setup(onRecoverFinish), then Close. The
                             // recover dialog is shown over this instance.
                             let id = root.dialog.expect("the open menu holds its instance");
                             info!(
-                                "[menu_dialog] RecoverStamina ({}) tapped: Show2ButtonDialog<MysekaiRecoverBoostStaminaDialog>(321), Setup(onRecoverFinish); Close",
-                                which.field()
+                                "[menu_dialog] RecoverStamina ({}) tapped: Show2ButtonDialog<MysekaiRecoverBoostStaminaDialog>({}), Setup(onRecoverFinish); Close",
+                                which.field(),
+                                DialogType::MysekaiRecoverBoostStaminaDialog.0
                             );
                             recover_requests.write(RecoverStaminaRequest(id));
                             close_requested = true;

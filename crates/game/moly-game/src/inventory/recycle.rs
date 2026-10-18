@@ -14,7 +14,7 @@
 //! `SetRecycleButtonState`: the button is off for a list with no rows and
 //! for the fixture list; `SetRecycleButtonEnable` enables it for a row whose
 //! quantity is above 0. The source shows the item's icon, name and count
-//! with `MysekaiInventoryScrapFixtureDialog` (dialog type 328); that prefab is
+//! with `MysekaiInventoryScrapFixtureDialog` (dialog type 329); that prefab is
 //! not among the UI documents a runtime root serves here, so the shared
 //! two-button dialog stands in with the item's name and count as its message,
 //! and the missing item dialog is named once.
@@ -42,7 +42,7 @@ use super::view::Bindings;
 use super::{ContentListType, Masters, Row};
 
 /// `DialogType::MysekaiFixtureSearchDialog`.
-const SEARCH_DIALOG: DialogType = DialogType(333);
+const SEARCH_DIALOG: DialogType = DialogType::MysekaiFixtureSearchDialog;
 /// `MysekaiInventoryUtility.SelectedNum`: the count this screen recycles.
 const SELECTED_NUM: i32 = 1;
 

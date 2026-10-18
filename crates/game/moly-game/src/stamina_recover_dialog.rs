@@ -1,17 +1,21 @@
 //! The boost stamina recovery dialog (`MysekaiRecoverBoostStaminaDialog`,
-//! DialogType 321) and its confirmation (`BoostStaminaRecoverConfirmDialog`,
-//! 322): the menu dialog's "recover stamina" button target.
+//! `DialogType::MysekaiRecoverBoostStaminaDialog`) and its confirmation
+//! (`BoostStaminaRecoverConfirmDialog`,
+//! `DialogType::BoostStaminaRecoverConfirmDialog`): the menu dialog's
+//! "recover stamina" button target.
 //!
 //! ## Entry and exit (the dialog slot, not the layer stack)
 //!
 //! `MysekaiMenuDialog.OnClickRecoverBoostStaminaButton` calls
-//! `ScreenManager.Show2ButtonDialog<MysekaiRecoverBoostStaminaDialog>(321,
+//! `ScreenManager.Show2ButtonDialog<MysekaiRecoverBoostStaminaDialog>(
+//! DialogType::MysekaiRecoverBoostStaminaDialog,
 //! Layer_Dialog, allowCloseExternal true)` and `Setup(onRecoverFinish =
 //! UpdateStaminaGateView)`, which this module reads as
 //! [`crate::menu_dialog::RecoverStaminaRequest`], then the menu dialog closes.
 //! A tap outside the recover dialog, its close button, its cancel button, and
 //! the back key close it; its OK opens
-//! `Show2ButtonDialog<BoostStaminaRecoverConfirmDialog>(322, …)`. The
+//! `Show2ButtonDialog<BoostStaminaRecoverConfirmDialog>(
+//! DialogType::BoostStaminaRecoverConfirmDialog, …)`. The
 //! confirmation's OK sends `PostUserMysekaiBoostStaminaRecoveryApi` (the
 //! recovery type and `userMysekaiStaminaRecoveryConsumeResources`), and its
 //! cancel, close button, outside tap or back key return to the recover dialog.
@@ -106,9 +110,9 @@ use crate::userdata::stamina_recover::{self, request};
 use crate::userdata::{Answered, ServerPending};
 
 /// `DialogType.MysekaiRecoverBoostStaminaDialog`.
-const DIALOG: DialogType = DialogType(321);
+const DIALOG: DialogType = DialogType::MysekaiRecoverBoostStaminaDialog;
 /// `DialogType.BoostStaminaRecoverConfirmDialog`.
-const CONFIRM: DialogType = DialogType(322);
+const CONFIRM: DialogType = DialogType::BoostStaminaRecoverConfirmDialog;
 /// The document keys of the two dialogs.
 const DIALOG_KEY: &str = "RecoverBoostStamina";
 const CONFIRM_KEY: &str = "BoostStaminaConfirm";
@@ -647,8 +651,9 @@ fn open(
         recover.content_height = None;
         recover.shown = None;
         info!(
-            "[stamina-recover] {caller} (menu {menu:?}): Show2ButtonDialog(MysekaiRecoverBoostStaminaDialog, 321) + Setup(onRecoverFinish): stamina {stamina:?} over {max:?}, live bonus {live_bonus} (not carried), crystals {crystals} (not carried); consumption 1..{convert_max}, crystal 1..{jewel_max}, {} item rows",
-            items.len()
+            "[stamina-recover] {caller} (menu {menu:?}): Show2ButtonDialog(MysekaiRecoverBoostStaminaDialog, {}) + Setup(onRecoverFinish): stamina {stamina:?} over {max:?}, live bonus {live_bonus} (not carried), crystals {crystals} (not carried); consumption 1..{convert_max}, crystal 1..{jewel_max}, {} item rows",
+            items.len(),
+            DialogType::MysekaiRecoverBoostStaminaDialog.0
         );
         recover.live = Some(Live {
             id,
@@ -959,7 +964,8 @@ fn confirm_answer(
     None
 }
 
-/// `OnClickOk`: `Show2ButtonDialog(BoostStaminaRecoverConfirmDialog, 322)`
+/// `OnClickOk`: `Show2ButtonDialog(BoostStaminaRecoverConfirmDialog,
+/// DialogType::BoostStaminaRecoverConfirmDialog)`
 /// and `Initialize(StaminaData)` with the boost stamina the request restores.
 fn open_confirmation(screens: &mut ScreenManager, recover: &mut Recover, top: Top, method: Method) {
     let Some(live) = recover.live.as_ref() else {
@@ -1017,8 +1023,9 @@ fn open_confirmation(screens: &mut ScreenManager, recover: &mut Recover, top: To
     screens.open_dialog(id);
     screens.dialog_open_finished(id);
     info!(
-        "[stamina-recover] {caller}: Show2ButtonDialog(BoostStaminaRecoverConfirmDialog, 322) Initialize(boost stamina +{restored}) for {} {consumes:?}",
-        recovery_type.word()
+        "[stamina-recover] {caller}: Show2ButtonDialog(BoostStaminaRecoverConfirmDialog, {}) Initialize(boost stamina +{restored}) for {} {consumes:?}",
+        recovery_type.word(),
+        DialogType::BoostStaminaRecoverConfirmDialog.0
     );
     recover.request = Some(request(recovery_type, consumes));
     recover.requested = restored;

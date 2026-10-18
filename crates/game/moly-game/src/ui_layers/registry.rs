@@ -18,8 +18,10 @@
 //! dialogType.ToString()` from Resources; a missing prefab returns null, and
 //! the show wrappers return null with it. The table lists the dialog types the
 //! MySekai code references (87) and the shared generic dialogs it reuses
-//! (20), with their enum values and whether the game's Resources carry the
-//! prefab (101 of the 107 do).
+//! (20), with their 7.0.0 enum values and whether the game's Resources carry
+//! the prefab (101 of the 107 do). Call sites name the dialogs through the
+//! constants below; the test at the end of this file holds each constant to
+//! its row.
 
 use std::collections::{HashMap, HashSet};
 
@@ -472,21 +474,96 @@ impl std::fmt::Debug for DialogType {
     }
 }
 
+/// The `DialogType` values the call sites use, by their enum names, in value order.
 #[allow(non_upper_case_globals, dead_code)]
 impl DialogType {
-    pub(crate) const Common1ButtonDialog: DialogType = DialogType(0);
-    pub(crate) const Common2ButtonDialog: DialogType = DialogType(2);
-    pub(crate) const MysekaiMenuDialog: DialogType = DialogType(312);
-    pub(crate) const MysekaiGetResourceSubWindowDialog: DialogType = DialogType(332);
-    pub(crate) const MysekaiEditSaveConfirmationDialog: DialogType = DialogType(310);
-    pub(crate) const MysekaiWeatherDialog: DialogType = DialogType(369);
-    pub(crate) const LearnPhenomenaSubWindowDialog: DialogType = DialogType(381);
-    pub(crate) const MysekaiBGMSelectChangeVocalDialog: DialogType = DialogType(320);
-    pub(crate) const BGMFilterDialog: DialogType = DialogType(398);
-    pub(crate) const MysekaiLeaveConfirmDialog: DialogType = DialogType(465);
+    /// The one-button common dialog.
+    pub(crate) const Common1ButtonDialog: DialogType = DialogType::named("Common1ButtonDialog");
+
+    /// The two-button common dialog (`common_dialog`'s OK and cancel).
+    pub(crate) const Common2ButtonDialog: DialogType = DialogType::named("Common2ButtonDialog");
+
+    /// The option dialog (`option_dialog`).
+    pub(crate) const OptionDialog: DialogType = DialogType::named("OptionDialog");
+
+    /// The talk window's all-skip confirmation.
+    pub(crate) const ScenarioAllSkipConfirmDialog: DialogType = DialogType::named("ScenarioAllSkipConfirmDialog");
+
+    /// The delivery's reward sub-window (`get_resource`'s view).
+    pub(crate) const CommonRewardSubWindowDialog: DialogType = DialogType::named("CommonRewardSubWindowDialog");
+
+    /// The delivery's honor sub-window (`get_resource`'s view).
+    pub(crate) const HonorRewardSubWindowDialog: DialogType = DialogType::named("HonorRewardSubWindowDialog");
+
+    /// The site edit mode's save confirmation sub-window.
+    pub(crate) const MysekaiEditSaveConfirmationDialog: DialogType = DialogType::named("MysekaiEditSaveConfirmationDialog");
+
+    /// The field HUD's menu dialog.
+    pub(crate) const MysekaiMenuDialog: DialogType = DialogType::named("MysekaiMenuDialog");
+
+    /// The BGM select change-vocal sub-window.
+    pub(crate) const MysekaiBGMSelectChangeVocalDialog: DialogType = DialogType::named("MysekaiBGMSelectChangeVocalDialog");
+
+    /// The menu dialog's boost stamina recovery dialog.
+    pub(crate) const MysekaiRecoverBoostStaminaDialog: DialogType = DialogType::named("MysekaiRecoverBoostStaminaDialog");
+
+    /// The recovery's confirmation dialog.
+    pub(crate) const BoostStaminaRecoverConfirmDialog: DialogType = DialogType::named("BoostStaminaRecoverConfirmDialog");
+
+    /// The acquisition sub-window (`get_resource`).
+    pub(crate) const MysekaiGetResourceSubWindowDialog: DialogType = DialogType::named("MysekaiGetResourceSubWindowDialog");
+
+    /// The inventory's fixture search sub-window.
+    pub(crate) const MysekaiFixtureSearchDialog: DialogType = DialogType::named("MysekaiFixtureSearchDialog");
+
+    /// The rank-up sub-window of the craft's follow-ups.
+    pub(crate) const MysekaiRankUpDialog: DialogType = DialogType::named("MysekaiRankUpDialog");
+
+    /// The rank release's status update sub-window.
+    pub(crate) const MysekaiPlayerStatusUpdateDialog: DialogType = DialogType::named("MysekaiPlayerStatusUpdateDialog");
+
+    /// The info screen's rank list.
+    pub(crate) const MysekaiRankListDialog: DialogType = DialogType::named("MysekaiRankListDialog");
+
+    /// The weather dialog (`weather_dialog`).
+    pub(crate) const MysekaiWeatherDialog: DialogType = DialogType::named("MysekaiWeatherDialog");
+
+    /// The craft's result sub-window.
+    pub(crate) const CraftResultSubWindowDialog: DialogType = DialogType::named("CraftResultSubWindowDialog");
+
+    /// The harvest site's learn-phenomena sub-window.
+    pub(crate) const LearnPhenomenaSubWindowDialog: DialogType = DialogType::named("LearnPhenomenaSubWindowDialog");
+
+    /// The BGM select screen's filter.
+    pub(crate) const BGMFilterDialog: DialogType = DialogType::named("BGMFilterDialog");
+
+    /// The craft's fixture bonus sub-window.
+    pub(crate) const FixtureBonusSubWindowDialog: DialogType = DialogType::named("FixtureBonusSubWindowDialog");
+
+    /// The new harvest site sub-window of a rank release.
+    pub(crate) const MysekaiNewHarvestSiteOpenDialog: DialogType = DialogType::named("MysekaiNewHarvestSiteOpenDialog");
+
+    /// The delivery's birthday plant refresh sub-window.
+    pub(crate) const MysekaiRefreshBirthdayPlantSubWindowDialog: DialogType = DialogType::named("MysekaiRefreshBirthdayPlantSubWindowDialog");
+
+    /// The menu shell's leave confirmation.
+    pub(crate) const MysekaiLeaveConfirmDialog: DialogType = DialogType::named("MysekaiLeaveConfirmDialog");
 }
 
 impl DialogType {
+    /// The value of the `DIALOG_TYPES` row named `name`; a name without a row
+    /// fails the build.
+    const fn named(name: &str) -> DialogType {
+        let mut i = 0;
+        while i < DIALOG_TYPES.len() {
+            if str_eq(DIALOG_TYPES[i].1, name) {
+                return DialogType(DIALOG_TYPES[i].0);
+            }
+            i += 1;
+        }
+        panic!("no DialogType row of that name");
+    }
+
     fn row(self) -> Option<&'static (u16, &'static str, DialogScope, bool)> {
         DIALOG_TYPES.iter().find(|row| row.0 == self.0)
     }
@@ -552,438 +629,453 @@ const DIALOG_TYPES: &[(u16, &str, DialogScope, bool)] = &[
         DialogScope::Shared,
         true,
     ),
-    (242, "SubWindowDialog", DialogScope::Shared, true),
-    (243, "ConnectingSubWindowDialog", DialogScope::Shared, true),
-    (250, "CommonRewardSubWindowDialog", DialogScope::Shared, true),
-    (262, "HonorRewardSubWindowDialog", DialogScope::Shared, true),
+    (243, "SubWindowDialog", DialogScope::Shared, true),
+    (244, "ConnectingSubWindowDialog", DialogScope::Shared, true),
+    (251, "CommonRewardSubWindowDialog", DialogScope::Shared, true),
+    (263, "HonorRewardSubWindowDialog", DialogScope::Shared, true),
     (
-        266,
+        267,
         "CardTotalPowerChangeSubWindowDialog",
         DialogScope::Shared,
         true,
     ),
-    (281, "PresetSubWindowDialog", DialogScope::MySekai, true),
+    (282, "PresetSubWindowDialog", DialogScope::MySekai, true),
     (
-        282,
+        283,
         "MysekaiAlertSubWindowDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        283,
+        284,
         "MysekaiConvertItemDetailDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        309,
+        310,
         "CreateFixtureResultDialog",
         DialogScope::MySekai,
         false,
     ),
     (
-        310,
+        311,
         "MysekaiEditSaveConfirmationDialog",
         DialogScope::MySekai,
         true,
     ),
-    (311, "MysekaiWorldMapDialog", DialogScope::MySekai, false),
-    (312, "MysekaiMenuDialog", DialogScope::MySekai, true),
+    (312, "MysekaiWorldMapDialog", DialogScope::MySekai, false),
+    (313, "MysekaiMenuDialog", DialogScope::MySekai, true),
     (
-        313,
+        314,
         "MysekaiGateLevelUpConfirmDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        314,
+        315,
         "MysekaiGateLevelUpResultDialog",
         DialogScope::MySekai,
         false,
     ),
     (
-        315,
+        316,
         "MysekaiGateSkinReleaseDialog",
         DialogScope::MySekai,
         true,
     ),
-    (316, "MysekaiGateDetailDialog", DialogScope::MySekai, true),
+    (317, "MysekaiGateDetailDialog", DialogScope::MySekai, true),
     (
-        317,
+        318,
         "MysekaiGateInvitationSelectionSubWindowDialog",
         DialogScope::MySekai,
         false,
     ),
     (
-        318,
+        319,
         "MysekaiGateSendInvitationSubWindowDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        319,
+        320,
         "MysekaiGateSendInvitationCompletedDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        320,
+        321,
         "MysekaiBGMSelectChangeVocalDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        321,
+        322,
         "MysekaiRecoverBoostStaminaDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        322,
+        323,
         "BoostStaminaRecoverConfirmDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        323,
+        324,
         "MysekaiConvertStartConfirmDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        324,
+        325,
         "MysekaiConvertFurnitureShortenDialog",
         DialogScope::MySekai,
         true,
     ),
-    (325, "MysekaiKickConfirmDialog", DialogScope::MySekai, true),
+    (326, "MysekaiKickConfirmDialog", DialogScope::MySekai, true),
     (
-        326,
+        327,
         "MysekaiConvertRandomBlueprintSelectSubWindowDialog",
         DialogScope::MySekai,
         false,
     ),
     (
-        327,
+        328,
         "MysekaiConvertRandomRecordSelectSubWindowDialog",
         DialogScope::MySekai,
         false,
     ),
     (
-        328,
+        329,
         "MysekaiInventoryScrapFixtureDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        329,
+        330,
         "MysekaiInventoryRecycleMaterialDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        330,
+        331,
         "MysekaiConvertBlueprintLotterySubWindowDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        331,
+        332,
         "MysekaiConvertRecordLotterySubWindowDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        332,
+        333,
         "MysekaiGetResourceSubWindowDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        333,
+        334,
         "MysekaiFixtureSearchDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        334,
+        335,
         "MysekaiPresetConfirmationDialog",
         DialogScope::MySekai,
         true,
     ),
-    (335, "MysekaiRankUpDialog", DialogScope::MySekai, true),
+    (336, "MysekaiRankUpDialog", DialogScope::MySekai, true),
     (
-        336,
+        337,
         "MysekaiPhotoEffectSelectSubWindowDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        337,
+        338,
         "MysekaiCharaRewardSubWindowDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        338,
+        339,
         "MysekaiMissionDetailDialog",
         DialogScope::MySekai,
         true,
     ),
-    (339, "MysekaiMissionListDialog", DialogScope::MySekai, true),
-    (340, "MysekaiMissionInfoDialog", DialogScope::MySekai, true),
+    (340, "MysekaiMissionListDialog", DialogScope::MySekai, true),
+    (341, "MysekaiMissionInfoDialog", DialogScope::MySekai, true),
     (
-        341,
+        342,
         "MysekaiMissionCompleteDialog",
         DialogScope::MySekai,
         true,
     ),
-    (342, "MysekaiMissionStartDialog", DialogScope::MySekai, true),
+    (343, "MysekaiMissionStartDialog", DialogScope::MySekai, true),
     (
-        343,
+        344,
         "MysekaiPlayerStatusUpdateDialog",
         DialogScope::MySekai,
         true,
     ),
-    (344, "MysekaiVisitListDialog", DialogScope::MySekai, true),
-    (345, "MysekaiRankListDialog", DialogScope::MySekai, true),
+    (345, "MysekaiVisitListDialog", DialogScope::MySekai, true),
+    (346, "MysekaiRankListDialog", DialogScope::MySekai, true),
     (
-        346,
+        347,
         "MysekaiNotEnoughWhiteBluePrintDialog",
         DialogScope::MySekai,
         true,
     ),
-    (347, "DebugFixtureListDialog", DialogScope::MySekai, true),
+    (348, "DebugFixtureListDialog", DialogScope::MySekai, true),
     (
-        348,
+        349,
         "DebugAddedFixtureListDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        349,
+        350,
         "DebugModelRoomFixtureListDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        351,
+        352,
         "DebugModelRoomGateSelectDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        352,
+        353,
         "MysekaiSecretShopPurchaseConfirmDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        353,
+        354,
         "MysekaiSecretShopHasBlueprintConfirmDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        354,
+        355,
         "MysekaiSecretShopNotHavePermissionToLogInDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        355,
+        356,
         "MysekaiSecretShopPurchaseLimitReachedDialog",
         DialogScope::MySekai,
         true,
     ),
-    (356, "MaterialItemDetailDialog", DialogScope::MySekai, true),
+    (358, "MaterialItemDetailDialog", DialogScope::MySekai, true),
     (
-        357,
+        359,
         "MysekaiExpireSiteHousingPresetExtendSlotConfirmDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        358,
+        360,
         "MysekaiHousingCompetitionSubmittedInfoDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        359,
+        361,
         "MysekaiHousingCompetitionScreenshotConfirmDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        360,
+        362,
         "MysekaiHousingCompetitionSubmissionDiscardDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        361,
+        363,
         "MysekaiHousingCompetitionSubmitConfirmDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        362,
+        364,
         "MysekaiHousingCompetitionSearchSubmitDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        363,
+        365,
         "MysekaiHousingCompetitionConfirmVisitSubmitDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        364,
+        366,
         "MysekaiHousingCompetitionConfirmResubmitDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        365,
+        367,
         "MysekaiHousingCompetitionSiteSelectionForSubmissionDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        366,
+        368,
         "MysekaiHousingCompetitionSubmitCompletedDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        367,
+        369,
         "MysekaiHousingCompetitionSubmitIdCopiedDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        368,
+        370,
         "MysekaiHousingCompetitionEntryDetailDialog",
         DialogScope::MySekai,
         true,
     ),
-    (369, "MysekaiWeatherDialog", DialogScope::MySekai, true),
+    (371, "MysekaiWeatherDialog", DialogScope::MySekai, true),
     (
-        370,
+        372,
         "MysekaiBirthdayRewardListDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        377,
+        379,
         "CraftResultSubWindowDialog",
         DialogScope::MySekai,
         true,
     ),
-    (378, "FixtureDescriptionDialog", DialogScope::MySekai, true),
+    (380, "FixtureDescriptionDialog", DialogScope::MySekai, true),
     (
-        379,
+        381,
         "MysekaiCanvasFurnitureEditModeDialog",
         DialogScope::MySekai,
         true,
     ),
-    (380, "MysekaiSketchDialog", DialogScope::MySekai, true),
+    (382, "MysekaiSketchDialog", DialogScope::MySekai, true),
     (
-        381,
+        383,
         "LearnPhenomenaSubWindowDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        392,
+        394,
         "CanvasMemberListFilterDialog",
         DialogScope::MySekai,
         true,
     ),
-    (395, "UnitFilterDialog", DialogScope::Shared, true),
-    (396, "HonorGroupFilterDialog", DialogScope::Shared, true),
-    (398, "BGMFilterDialog", DialogScope::MySekai, true),
+    (397, "UnitFilterDialog", DialogScope::Shared, true),
+    (398, "HonorGroupFilterDialog", DialogScope::Shared, true),
+    (400, "BGMFilterDialog", DialogScope::MySekai, true),
     (
-        405,
+        407,
         "FixtureBonusSubWindowDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        408,
+        410,
         "MysekaiNewHarvestSiteOpenDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        409,
+        411,
         "VisitModelRoomSelectDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        410,
+        412,
         "CharacterArchiveMysekaiTalkFilterDialog",
         DialogScope::MySekai,
         true,
     ),
-    (411, "FixtureListDialog", DialogScope::MySekai, true),
+    (413, "FixtureListDialog", DialogScope::MySekai, true),
     (
-        413,
+        415,
         "CharacterArchiveMysekaiGeneralTalkReleaseConditionDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        414,
+        416,
         "CharacterArchiveMysekaiFixtureTalkReleaseConditionDialog",
         DialogScope::MySekai,
         true,
     ),
-    (415, "FixtureShortageDialog", DialogScope::MySekai, true),
+    (417, "FixtureShortageDialog", DialogScope::MySekai, true),
     (
-        418,
+        420,
         "TakingScreenshotSubWindowDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        419,
+        421,
         "MysekaiHousingCommunityReportDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        420,
+        422,
         "MysekaiHousingCompetitionCommunityReportDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        421,
+        423,
         "InValidLayoutFixtureListDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        450,
+        452,
         "MysekaiRefreshBirthdayPlantSubWindowDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        454,
+        456,
         "MysekaiFixtureShopItemFilterDialog",
         DialogScope::MySekai,
         true,
     ),
     (
-        455,
+        457,
         "SelectMysekaiFixtureDialog",
         DialogScope::MySekai,
         true,
     ),
-    (465, "MysekaiLeaveConfirmDialog", DialogScope::MySekai, true),
+    (467, "MysekaiLeaveConfirmDialog", DialogScope::MySekai, true),
 ];
+
+const fn str_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}

@@ -1,4 +1,5 @@
-//! `ScenarioAllSkipConfirmDialog` (dialog type 176), the confirmation the talk
+//! `ScenarioAllSkipConfirmDialog`
+//! (`DialogType::ScenarioAllSkipConfirmDialog`), the confirmation the talk
 //! window's all-skip button shows: `ScreenLayerMysekaiTalk.OnClickAllSkip`
 //! turns auto off, then calls
 //! `ScreenManager.Show2ButtonDialog<ScenarioAllSkipConfirmDialog>(message,
@@ -22,8 +23,8 @@ use crate::ui_layout::UiLayouts;
 
 use super::*;
 
-/// `Sekai.DialogType.ScenarioAllSkipConfirmDialog` = 176.
-pub(super) const DIALOG_TYPE: DialogType = DialogType(176);
+/// `Sekai.DialogType.ScenarioAllSkipConfirmDialog`.
+pub(super) const DIALOG_TYPE: DialogType = DialogType::ScenarioAllSkipConfirmDialog;
 /// The layer's message wording.
 const MESSAGE_KEY: &str = "MSG_STORY_SKIP_BODY";
 

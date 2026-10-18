@@ -41,13 +41,13 @@
 //!   ([`super::HomeActionRequest::Craft`] with `posted`, so the sequence sends
 //!   no second request).
 //! - After the sequence's hold: `OpenCreateResponseDialogAsync`
-//!   (CraftResultSubWindowDialog, 377: `WORD_FIXTURE_CREATE_RESULT` from the
+//!   (CraftResultSubWindowDialog, 379: `WORD_FIXTURE_CREATE_RESULT` from the
 //!   fixture lists, else `WORD_TOOL_CREATE_RESULT`; awaited to its close,
 //!   whose `OnCloseCreateResponseDialog` sets the preview up again), the
-//!   fixture bonus dialog (405) when the bonus data exists, and
+//!   fixture bonus dialog (407) when the bonus data exists, and
 //!   `MysekaiRankUtility.OpenMysekaiRankDialogIfNeededAsync(before, after)`:
 //!   nothing when the two experiences give one rank, else the rank-up dialog
-//!   (335) and then the rank's release dialogs (the new harvest site 408
+//!   (336) and then the rank's release dialogs (the new harvest site 410
 //!   first, then the player status update 343 for each release row). Each is
 //!   awaited to its close. Then the sequence closes (gate, Idle, fades,
 //!   camera). The follow-up views are [`follow_up`].
@@ -142,7 +142,7 @@ pub(crate) mod result;
 pub(crate) mod view;
 
 /// `DialogType.CraftResultSubWindowDialog`.
-const CRAFT_RESULT_DIALOG: DialogType = DialogType(377);
+const CRAFT_RESULT_DIALOG: DialogType = DialogType::CraftResultSubWindowDialog;
 /// `CraftResultSubWindowDialog.Open`'s cue.
 const SE_CRAFT_RESULT: &str = "se_craft_result";
 /// The dialogs' views sit above the screens' (a screen view is at z 20 and

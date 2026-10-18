@@ -1,6 +1,6 @@
-//! The craft's follow-up dialogs: the fixture bonus (405), the rank-up
-//! (335) and the rank's release dialogs, the player status update (343) and
-//! the new harvest site (408).
+//! The craft's follow-up dialogs: the fixture bonus (407), the rank-up
+//! (336) and the rank's release dialogs, the player status update (344) and
+//! the new harvest site (410).
 //!
 //! The source runs them after the result dialog's close, one at a time:
 //! `ShowFixtureBonusDialog` when the crafted fixture's bonus exists, then
@@ -10,14 +10,14 @@
 //! status update). Every dialog is awaited to its close before the next one.
 //!
 //! What each draws:
-//! - 405: the character icon (not built: the 2D character model and its
+//! - 407: the character icon (not built: the 2D character model and its
 //!   texture are not loaded), and two `FORMAT_ADD_PARAM` texts, the bonus
 //!   rate before and after the craft.
-//! - 335: the rank numbers before and after (the title texture and the
+//! - 336: the rank numbers before and after (the title texture and the
 //!   particle/animation are not loaded).
-//! - 343: the release's icon (not loaded), the release message, and the
+//! - 344: the release's icon (not loaded), the release message, and the
 //!   before/after values (hidden when both are empty).
-//! - 408: the harvest site's banner (not loaded) and
+//! - 410: the harvest site's banner (not loaded) and
 //!   `MSG_MYSEKAI_OPEN_SITE_MESSAGE(siteName)`.
 //!
 //! The close button (and the window base, where the prefab lists it) and the
@@ -47,10 +47,10 @@ const KEY_STATUS: &str = "CraftStatus";
 /// `MysekaiNewHarvestSiteOpenDialog`'s document.
 const KEY_NEW_SITE: &str = "CraftNewSite";
 
-const RANK_UP_DIALOG: DialogType = DialogType(335);
-const FIXTURE_BONUS_DIALOG: DialogType = DialogType(405);
-const STATUS_DIALOG: DialogType = DialogType(343);
-const NEW_SITE_DIALOG: DialogType = DialogType(408);
+const RANK_UP_DIALOG: DialogType = DialogType::MysekaiRankUpDialog;
+const FIXTURE_BONUS_DIALOG: DialogType = DialogType::FixtureBonusSubWindowDialog;
+const STATUS_DIALOG: DialogType = DialogType::MysekaiPlayerStatusUpdateDialog;
+const NEW_SITE_DIALOG: DialogType = DialogType::MysekaiNewHarvestSiteOpenDialog;
 
 /// `MysekaiTopicEnum.HarvestSiteDialogReleased`.
 const TOPIC_HARVEST_SITE_DIALOG: i32 = 3;

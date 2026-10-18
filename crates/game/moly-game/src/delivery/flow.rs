@@ -60,8 +60,9 @@
 //! `crate::userdata::client::birthday_party`) runs `ExecuteHarvestSiteRefresh` after the
 //! reward animation and before state Idle: `ShowSubWindowDialog<
 //! MysekaiRefreshBirthdayPlantSubWindowDialog>(null, onClose,
-//! allowCloseExternal true, DialogType 450, Layer_Overlay)` through the
-//! screen manager, `Setup(party)`, then `WhenAll(WaitUntil(onClose ran),
+//! allowCloseExternal true,
+//! DialogType::MysekaiRefreshBirthdayPlantSubWindowDialog, Layer_Overlay)`
+//! through the screen manager, `Setup(party)`, then `WhenAll(WaitUntil(onClose ran),
 //! HarvestUtility.DestroySiteAllHarvestFixtures())` on the site's enable
 //! token. `DestroySiteAllHarvestFixtures` walks `SiteManager.SiteList.
 //! OfType<HarvestSiteController>()`; `DeliverySiteController` is not a
@@ -109,7 +110,7 @@ use moly_protocol::api::BirthdayPartyDeliveryRequest;
 use moly_protocol::{Call, Refusal, Reply};
 
 /// `DialogType.MysekaiRefreshBirthdayPlantSubWindowDialog`.
-const REFRESH_DIALOG: DialogType = DialogType(450);
+const REFRESH_DIALOG: DialogType = DialogType::MysekaiRefreshBirthdayPlantSubWindowDialog;
 
 /// `MinBirthdayDeliveryCostCountPerSecond` (FloatConfigs 166).
 pub(crate) const KEY_MIN_COST_PER_SECOND: i32 = 166;

@@ -100,7 +100,8 @@
 //!   等级 · 量表比率；the CN client's put-limit count and joint count are
 //!   mock values too.
 //! - **排名详情对话框**（`Show1ButtonDialog<MysekaiRankListDialog>`,
-//!   dialog type 345, shown through the screen manager with the back key
+//!   dialog type `DialogType::MysekaiRankListDialog`, shown through the
+//!   screen manager with the back key
 //!   closing it; 允许框外关）：对话框体 = 主表 `MasterMysekaiRanks` 的逐等级
 //!   解锁条件清单 + 用户态排名 ⇒ 连同走 mock，框内文案具名「面板下发」。
 //! - **访问许可现值**：面板下发 mock（档名用真源枚举名）。
@@ -544,7 +545,7 @@ enum InfoDialog {
 }
 
 /// `Show1ButtonDialog<MysekaiRankListDialog>(DialogType.MysekaiRankListDialog)`.
-const RANK_LIST_DIALOG: DialogType = DialogType(345);
+const RANK_LIST_DIALOG: DialogType = DialogType::MysekaiRankListDialog;
 
 #[derive(Resource, Default)]
 pub(crate) struct InfoDialogState {

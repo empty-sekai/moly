@@ -64,9 +64,9 @@ pub(crate) const KEY_HONOR_DIALOG_SHOW_TIME: i32 = 173;
 /// The honor state's step item.
 const PETAL_TIMELINE: &str = "tl_site_prop_common_petal1";
 /// `DialogType.CommonRewardSubWindowDialog` (the enum's value).
-const COMMON_REWARD_DIALOG: DialogType = DialogType(250);
+const COMMON_REWARD_DIALOG: DialogType = DialogType::CommonRewardSubWindowDialog;
 /// `DialogType.HonorRewardSubWindowDialog`.
-const HONOR_REWARD_DIALOG: DialogType = DialogType(262);
+const HONOR_REWARD_DIALOG: DialogType = DialogType::HonorRewardSubWindowDialog;
 /// `MSG_RECEIVED_DELIVERY_TOTAL_REWARD`, the reward dialog's main text.
 const TOTAL_REWARD_MESSAGE: &str = "MSG_RECEIVED_DELIVERY_TOTAL_REWARD";
 

@@ -91,7 +91,7 @@ use crate::ui_layers::{
 };
 
 /// `Show1ButtonDialog(DialogType.OptionDialog)`.
-const OPTION_DIALOG: DialogType = DialogType(82);
+const OPTION_DIALOG: DialogType = DialogType::OptionDialog;
 
 /// The dialog's layout document.
 const KEY: &str = "Option";
