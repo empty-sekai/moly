@@ -22,6 +22,9 @@ use bevy::gltf::Gltf;
 use bevy::prelude::*;
 use moly_assets::json::JsonAsset;
 use moly_law::path::{angle_between, facing_direction, turn_motion, TurnMotion};
+use moly_link::ServerLink;
+use moly_protocol::api::CharacterTalkReadRequest;
+use moly_protocol::Call;
 use moly_law::talk::{
     advance, condition_type_discriminant, effective_animation_speed, is_finished, FaceSlot,
     StepOp, StreamState, TalkRow, TalkStep, TweetRef, UniformDraw,
@@ -2308,6 +2311,29 @@ pub(crate) fn report_closed_fixture_talks(world: &mut World) {
                 .get_resource_mut::<crate::server_panel::ServerPanel>()
                 .expect("the server panel is installed before any NPC exists")
                 .report_talk_read(pending.talk_id);
+            // `MysekaiPlayerTalkAction.PlayPlayingFixtureTalk`: after the talk
+            // the client sends `PutUserMysekaiCharacterTalkReadApi`. The source
+            // skips it in the tutorial and for a non-owner room; the
+            // `NPCAvatarModel.EnableSendReadAPI` gate is initialized true in the
+            // static constructor and its private setter has no caller, so it is
+            // on in normal play. This product has no tutorial and is the
+            // single-player owner.
+            if let Some(mut link) = world.get_resource_mut::<ServerLink>() {
+                let call = Call::CharacterTalkRead(CharacterTalkReadRequest {
+                    mysekai_character_talk_id: pending.talk_id,
+                });
+                let kind = call.kind();
+                let seq = link.call(call);
+                info!(
+                    "[player-talk] fixture talk {}: PutUserMysekaiCharacterTalkReadApi sent as seq {seq} ({kind:?})",
+                    pending.talk_id
+                );
+            } else {
+                warn!(
+                    "[player-talk] fixture talk {}: no server link; PutUserMysekaiCharacterTalkReadApi not sent",
+                    pending.talk_id
+                );
+            }
             info!("[player-talk] fixture talk {} closed; reported read", pending.talk_id);
         }
         Some(false) => {
@@ -2808,6 +2834,27 @@ pub(crate) fn advance_session(
                     .get_resource_mut::<crate::server_panel::ServerPanel>()
                     .expect("the server panel is installed before any NPC exists")
                     .report_talk_read(talk_id);
+                // `MysekaiPlayerTalkAction.SendAlreadyReadTalkAsync`: the client
+                // sends `PutUserMysekaiCharacterTalkReadApi` for this talk. The
+                // source skips it in the tutorial and for a non-owner room; the
+                // `NPCAvatarModel.EnableSendReadAPI` gate is initialized true in
+                // the static constructor and its private setter has no caller,
+                // so it is on in normal play. This product has no tutorial and
+                // is the single-player owner.
+                if let Some(mut link) = world.get_resource_mut::<ServerLink>() {
+                    let call = Call::CharacterTalkRead(CharacterTalkReadRequest {
+                        mysekai_character_talk_id: talk_id,
+                    });
+                    let kind = call.kind();
+                    let seq = link.call(call);
+                    info!(
+                        "[player-talk] talk {talk_id}: PutUserMysekaiCharacterTalkReadApi sent as seq {seq} ({kind:?})"
+                    );
+                } else {
+                    warn!(
+                        "[player-talk] talk {talk_id}: no server link; PutUserMysekaiCharacterTalkReadApi not sent"
+                    );
+                }
             });
         }
         finish_session(

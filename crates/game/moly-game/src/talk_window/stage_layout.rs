@@ -1,5 +1,8 @@
 //! Read-only geometry of the authored dialogue tree, not a second renderer.
 use super::*;
+// The panel rect is the asset-side layout rect (`try_rect`'s type), not a
+// Bevy UI rect.
+use moly_assets::ui_layout::UiRect;
 
 #[derive(Component)]
 pub(crate) struct ResponsiveDialogueMetrics {
