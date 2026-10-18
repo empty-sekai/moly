@@ -41,7 +41,9 @@ pub(crate) struct HarvestInputs {
 #[derive(Resource)]
 pub(crate) struct HarvestInputsAbsent(pub(crate) Vec<String>);
 
-const STAMINA_RECOVERY: MasterTable<i32> = MasterTable {
+// The shared loader requests this table too (its own request type); this
+// reader keys its request by its own type, as every consumer does.
+const STAMINA_RECOVERY: MasterTable<moly_masters::RecoveryRow> = MasterTable {
     table: "mysekaiStaminaRecovery",
     name: "mysekaiStaminaRecovery (the boost grant of the stamina mock)",
     parse: parse_boost_grant,
@@ -53,7 +55,7 @@ fn master_keys() -> [MasterKey; 1] {
 
 /// The master tables the catalog and the server mock read.
 struct HarvestMasters {
-    boost_grant: Result<i32, MasterError>,
+    boost_grant: Result<moly_masters::RecoveryRow, MasterError>,
 }
 
 impl HarvestMasters {
@@ -143,10 +145,14 @@ fn parse_tools(rows: &[Value]) -> Result<Vec<ToolDef>, String> {
 }
 
 
-/// One boost recovery: the table's single row grants recoveryBoostStamina.
-fn parse_boost_grant(text: &str) -> Result<i32, String> {
+/// One boost recovery: the table's single row (`boostQuantity`,
+/// `recoveryBoostStamina`), which the stamina mock grants once.
+fn parse_boost_grant(text: &str) -> Result<moly_masters::RecoveryRow, String> {
     let row = serde_json::Value::Object(master::object(text)?);
-    master::int32(&row, "recoveryBoostStamina")
+    Ok(moly_masters::RecoveryRow {
+        boost_quantity: master::int32(&row, "boostQuantity")?,
+        recovery_boost_stamina: master::int32(&row, "recoveryBoostStamina")?,
+    })
 }
 
 
@@ -442,7 +448,7 @@ pub(crate) fn build(
     let index: serde_json::Value =
         serde_json::from_str(&asset.0).unwrap_or_else(|error| panic!("{INDEX}: not JSON: {error}"));
     let Some(HarvestMasters {
-        boost_grant: Ok(boost_grant),
+        boost_grant: Ok(recovery),
     }) = inputs.masters.take()
     else {
         return;
@@ -587,7 +593,7 @@ pub(crate) fn build(
         fixtures: mock_fixtures,
         materials: mock_materials,
         max_normal_stamina: max_stamina.normal,
-        boost_grant,
+        boost_grant: recovery.recovery_boost_stamina,
         harvest_sites: harvest_sites.clone(),
         music_records: music_records.by_track_type,
     };

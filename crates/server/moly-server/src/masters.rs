@@ -61,6 +61,11 @@ pub struct Masters {
     pub(crate) cards: Deferred<BTreeMap<i32, moly_masters::craft::CardRow>>,
     /// The tool master (`mysekaiTools`).
     pub(crate) tools: Option<Vec<tools::ToolMaster>>,
+    /// `mysekaiBoostItems`: each boost item's `recoveryValue`.
+    pub(crate) boost_items: Option<Vec<moly_masters::BoostItemRow>>,
+    /// `mysekaiStaminaRecovery`: the live bonus one recovery spends and the
+    /// boost stamina it restores (`boost_grant` is its second column).
+    pub(crate) recovery: Option<moly_masters::RecoveryRow>,
     /// The tables the master layer named missing.
     pub missing: Vec<String>,
     /// The tables still loading, by their names.
@@ -135,6 +140,14 @@ impl Masters {
             },
         ]);
         masters.boost_grant = Some(100);
+        masters.recovery = Some(moly_masters::RecoveryRow {
+            boost_quantity: 1,
+            recovery_boost_stamina: 100,
+        });
+        masters.boost_items = Some(vec![moly_masters::BoostItemRow {
+            id: 1,
+            recovery_value: 1,
+        }]);
         masters.ranks = Some(vec![(1, 0), (2, 48_000), (3, 172_300)]);
         masters.phenomena = Some(vec![(1, "a".into()), (2, "b".into())]);
         masters.ready = true;
@@ -370,6 +383,12 @@ static SERVER_TABLES: &[ServerTable] = &[
         "mysekaiTools (the server's tools: initial tools, durability resets, tool craft)",
         tools::parse_master,
         tools
+    ),
+    server_table!(
+        "mysekaiBoostItems",
+        "mysekaiBoostItems (what a boost item recovers)",
+        parse_boost_items,
+        boost_items
     ),
     // The total reward boxes: the CN master carries their rows as a table of
     // their own; the JP master nests them in each box's `details`.
@@ -816,7 +835,24 @@ fn parse_phenomena(text: &str, masters: &mut Masters) -> Result<(), String> {
 /// `mysekaiStaminaRecovery`: one object.
 fn parse_recovery(text: &str, masters: &mut Masters) -> Result<(), String> {
     let row = Value::Object(master::object(text)?);
-    masters.boost_grant = Some(int32(&row, "recoveryBoostStamina")?);
+    let recovery = moly_masters::RecoveryRow {
+        boost_quantity: int32(&row, "boostQuantity")?,
+        recovery_boost_stamina: int32(&row, "recoveryBoostStamina")?,
+    };
+    masters.boost_grant = Some(recovery.recovery_boost_stamina);
+    masters.recovery = Some(recovery);
+    Ok(())
+}
+
+/// `mysekaiBoostItems`: (id, `recoveryValue`), master order.
+fn parse_boost_items(text: &str, masters: &mut Masters) -> Result<(), String> {
+    let items = master::read_rows(text, |row| {
+        Ok(Some(moly_masters::BoostItemRow {
+            id: int32(row, "id")?,
+            recovery_value: int32(row, "recoveryValue")?,
+        }))
+    })?;
+    masters.boost_items = Some(items);
     Ok(())
 }
 

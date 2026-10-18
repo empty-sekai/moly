@@ -147,6 +147,14 @@ pub(crate) struct ServerDocument {
     /// `userMysekaiTools` ([`super::tools`]); `None` until the server seats
     /// a new user's tools.
     pub(crate) tools: Option<Vec<super::tools::UserMysekaiTool>>,
+    /// The rewards the document states for the inventory screen's recycle
+    /// and disassemble replies, by policy key (`fixturesDisassembleMaterials`,
+    /// `materialsRecycleRewards`, `toolsRecycleRewards`); a key left out
+    /// keeps its named default ([`super::recycle`]).
+    pub(crate) recycle: BTreeMap<String, Vec<moly_protocol::rows::UserResource>>,
+    /// `policies.staminaRecovery` ([`super::stamina_recovery`]): the reply
+    /// the recovery gives and the capital it draws on.
+    pub(crate) stamina_recovery: super::stamina_recovery::RecoveryPolicy,
 }
 
 /// Which migration a schemaVersion 1 slice takes.
@@ -524,6 +532,8 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
         .chain(super::inventory::POLICY_KEYS.iter().copied())
         .chain(std::iter::once(super::music_play::POLICY_KEY))
         .chain(super::system_fixture_action::POLICY_KEYS.iter().copied())
+        .chain(super::recycle::POLICY_KEYS.iter().copied())
+        .chain(std::iter::once(super::stamina_recovery::POLICY_KEY))
         .collect();
     only(policies, &allowed, "policies")?;
     let delivery = super::delivery::DeliveryDoc::parse(doc, policies)?;
@@ -536,6 +546,10 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
     let system_fixture_actions =
         super::system_fixture_action::SystemFixtureActionDoc::parse(doc, policies)?;
     let tools = super::tools::parse(doc)?;
+    let recycle = super::recycle::parse_policies(policies)?;
+    let stamina_recovery = super::stamina_recovery::parse_policies(
+        policies.get(super::stamina_recovery::POLICY_KEY),
+    )?;
     let (gate, gate_characters, talk_histories) = parse_visit(
         field(doc, "userMysekaiGateCharacterVisit", "the server document")?,
         true,
@@ -610,6 +624,8 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
         music_records,
         system_fixture_actions,
         tools,
+        recycle,
+        stamina_recovery,
     };
     document.check_structure()?;
     Ok((document, pending))
@@ -734,6 +750,8 @@ pub(crate) fn migrate_v1(text: &str, migration: Migration) -> Result<ServerDocum
         music_records: Vec::new(),
         system_fixture_actions: Default::default(),
         tools: None,
+        recycle: BTreeMap::new(),
+        stamina_recovery: Default::default(),
     };
     document.check_structure()?;
     Ok(document)
@@ -746,6 +764,7 @@ pub(crate) fn migrate_v1(text: &str, migration: Migration) -> Result<ServerDocum
 impl ServerDocument {
     /// The checks that need no master data.
     pub(crate) fn check_structure(&self) -> Result<(), String> {
+
         if let Some(stamina) = self.stamina {
             for (name, value) in [
                 ("normalStamina", stamina.normal),
@@ -903,6 +922,8 @@ impl ServerDocument {
                 super::tools::SECTION.into(),
                 super::tools::value(&self.tools),
             );
+            super::recycle::write_policies(&self.recycle, &mut policies);
+            super::stamina_recovery::write_policy(&self.stamina_recovery, &mut policies);
             top.insert("policies".into(), Value::Object(policies));
         }
         value

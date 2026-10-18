@@ -440,6 +440,7 @@ pub fn apply(layout: &mut Layout, rules: &Rules, request: &Apply) -> ApplyOutcom
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::{PlacedRow, SiteGrid};
     use std::collections::HashMap;
 
     fn master() -> FixtureMaster {

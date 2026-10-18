@@ -177,6 +177,60 @@ pub struct SystemFixtureActionReply {
     pub obtained_resources: Vec<UserResource>,
 }
 
+/// `UserMysekaiFixtureDisassembleRequest`: the fixture and texture the
+/// player disassembles, and the quantity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FixtureDisassembleRequest {
+    pub mysekai_fixture_id: i32,
+    pub texture_id: i32,
+    pub quantity: i32,
+}
+
+/// `UserMysekaiRecycleMaterialRequest`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecycleMaterialRequest {
+    pub mysekai_material_id: i32,
+    pub quantity: i32,
+}
+
+/// `UserMysekaiRecycleToolRequest`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecycleToolRequest {
+    pub mysekai_tool_id: i32,
+    pub quantity: i32,
+}
+
+/// A request to one of the three recycle and disassemble APIs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MysekaiInventoryDisassemble {
+    /// `PostUserMysekaiDisassembleFixtureApi`.
+    Fixture(FixtureDisassembleRequest),
+    /// `PostUserMysekaiRecycleMaterialApi`.
+    Material(RecycleMaterialRequest),
+    /// `PostUserMysekaiRecycleToolApi`.
+    Tool(RecycleToolRequest),
+}
+
+impl MysekaiInventoryDisassemble {
+    /// The API's name in the source.
+    pub fn api_name(self) -> &'static str {
+        match self {
+            Self::Fixture(_) => "PostUserMysekaiDisassembleFixtureApi",
+            Self::Material(_) => "PostUserMysekaiRecycleMaterialApi",
+            Self::Tool(_) => "PostUserMysekaiRecycleToolApi",
+        }
+    }
+}
+
+/// `UserMysekaiFixtureDisassembleResponse` and `UserMysekaiRecycleResponse`:
+/// the resources the rows gave back and the tables the request changed
+/// (already in the game's copies).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MysekaiInventoryRecycleResponse {
+    pub obtained_resources: Vec<UserResource>,
+    pub updated: SuiteUserSections,
+}
+
 /// `UserMysekaiCharacterTalkReadResponse`, or a refusal the client shows as
 /// the API error.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -330,4 +384,51 @@ pub struct CharacterTalkReadRequest {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SystemFixtureActionRequest {
     pub mysekai_system_fixture_id: i32,
+}
+
+/// `MysekaiBoostStaminaRecoveryType`, spelled the way the client's
+/// `ToString()` sends the enum value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BoostStaminaRecoveryType {
+    /// Live bonus spent on boost stamina (`boost`).
+    Boost,
+    /// Boost items spent (`boost_item`).
+    BoostItem,
+    /// Paid crystals spent (`jewel`).
+    Jewel,
+}
+
+impl BoostStaminaRecoveryType {
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Boost => "boost",
+            Self::BoostItem => "boost_item",
+            Self::Jewel => "jewel",
+        }
+    }
+
+    pub fn parse(word: &str) -> Option<Self> {
+        match word {
+            "boost" => Some(Self::Boost),
+            "boost_item" => Some(Self::BoostItem),
+            "jewel" => Some(Self::Jewel),
+            _ => None,
+        }
+    }
+}
+
+/// `UserMysekaiStaminaRecoveryConsumeResource`: one resource a recovery
+/// spends (the live bonus, the paid crystals, or a boost item) and how much.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StaminaRecoveryConsume {
+    pub resource_id: i32,
+    pub quantity: i32,
+}
+
+/// `UserMysekaiStaminaRequest` (`PostUserMysekaiBoostStaminaRecoveryApi`):
+/// the recovery type and the resources it spends.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserMysekaiStaminaRequest {
+    pub mysekai_boost_stamina_recovery_type: BoostStaminaRecoveryType,
+    pub user_mysekai_stamina_recovery_consume_resources: Vec<StaminaRecoveryConsume>,
 }

@@ -56,6 +56,8 @@ pub(crate) mod housing_layout;
 pub(crate) mod inventory;
 pub(crate) mod music;
 pub(crate) mod music_play;
+pub(crate) mod recycle;
+pub(crate) mod stamina_recovery;
 pub(crate) mod system_fixture_action;
 pub(crate) mod talk_read;
 pub(crate) mod tools;
@@ -205,6 +207,10 @@ pub(crate) enum ResponseKind {
     MusicPlaySet,
     MusicPlayEject,
     SystemFixtureAction,
+    FixtureDisassemble,
+    MaterialRecycle,
+    ToolRecycle,
+    BoostStaminaRecovery,
 }
 
 impl ResponseKind {
@@ -230,6 +236,10 @@ impl ResponseKind {
             Self::MusicPlaySet => "PutUserMysekaiMusicPlaySetApi",
             Self::MusicPlayEject => "PutUserMysekaiMusicPlayEjectApi",
             Self::SystemFixtureAction => "PostUserMysekaiSystemFixtureActionApi",
+            Self::FixtureDisassemble => "PostUserMysekaiDisassembleFixtureApi",
+            Self::MaterialRecycle => "PostUserMysekaiRecycleMaterialApi",
+            Self::ToolRecycle => "PostUserMysekaiRecycleToolApi",
+            Self::BoostStaminaRecovery => "PostUserMysekaiBoostStaminaRecoveryApi",
         }
     }
 }
@@ -684,6 +694,20 @@ impl ServerModel {
         }
         self.respond(ResponseKind::Harvest, false, &carries, masters);
         self.doc.stamina.unwrap_or(sent)
+    }
+
+    /// The inventory screen's recycle and disassemble replies (see
+    /// [`recycle`]): the rewards and the tables the request changed.
+    pub(crate) fn inventory_disassemble(
+        &mut self,
+        request: moly_protocol::api::MysekaiInventoryDisassemble,
+        masters: &Tables<'_>,
+    ) -> Result<moly_protocol::api::MysekaiInventoryRecycleResponse, String> {
+        let (obtained_resources, updated) = self.recycle_reply(request, masters)?;
+        Ok(moly_protocol::api::MysekaiInventoryRecycleResponse {
+            obtained_resources,
+            updated,
+        })
     }
 
     /// The gather reply's stamina, recorded as a response.

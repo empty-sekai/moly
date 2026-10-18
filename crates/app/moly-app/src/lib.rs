@@ -158,6 +158,16 @@ fn run_native_game() {
     moly_assets::remote::admit(&mut app, remote);
     moly_game::configure_browser_game(&mut app, seed);
     install_link(&mut app);
+    // `MOLY_CHECK_SYSTEMS=1` reports every system parameter conflict and
+    // exits instead of starting the game.
+    if std::env::var("MOLY_CHECK_SYSTEMS").as_deref() == Ok("1") {
+        let (checked, rejected) = moly_game::system_access::conflicts(&mut app);
+        for line in &rejected {
+            eprintln!("[system-access] {line}");
+        }
+        eprintln!("[system-access] {checked} systems, {} rejected", rejected.len());
+        std::process::exit(if rejected.is_empty() { 0 } else { 1 });
+    }
     app.run();
 }
 

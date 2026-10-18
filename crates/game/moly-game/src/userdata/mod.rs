@@ -27,6 +27,7 @@
 //! - [`system_fixture_action`]: the `UserMysekaiSystemFixtureAction` rows
 //!   and the system fixture action request.
 //! - [`tools`]: the owned harvest tools.
+//! - [`inventory`]: the inventory screen's recycle and disassemble request.
 
 pub(crate) mod avatar;
 pub(crate) mod birthday_party;
@@ -41,6 +42,7 @@ pub(crate) mod music;
 pub(crate) mod music_play;
 pub(crate) mod snapshot;
 pub(crate) mod stamina;
+pub(crate) mod stamina_recover;
 pub(crate) mod system_fixture_action;
 pub(crate) mod talk_read;
 pub(crate) mod tools;
@@ -55,7 +57,9 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use moly_link::{Arrival, LinkState, ServerArrived, ServerLink};
 use moly_masters::craft::{is_first_craft, CraftMasters, CraftOwned};
-use moly_protocol::api::{MysekaiCraftType, UserMysekaiCraftRequest};
+use moly_protocol::api::{
+    MysekaiCraftType, MysekaiInventoryDisassemble, UserMysekaiCraftRequest,
+};
 use moly_protocol::{AdminCall, Call, CallKind, PushKind, Refusal, Reply, Sections};
 use serde_json::{json, Value};
 
@@ -620,6 +624,9 @@ fn apply_arrivals(
                 if let (Some(Call::Craft(request)), Some(before)) = (&request, before) {
                     emit_craft(outcome, request, before, &copies);
                 }
+                if let (Some(Call::InventoryRecycle(request)), reply) = (&request, outcome) {
+                    emit_recycle(request, reply, &copies);
+                }
                 if let (Some(Call::BirthdayPartyDelivery(request)), Ok(Reply::Delivery(_))) =
                     (&request, outcome)
                 {
@@ -820,6 +827,8 @@ pub(crate) fn call_name(call: CallKind) -> &'static str {
         CallKind::MusicPlaySet => "music play set",
         CallKind::MusicPlayEject => "music play eject",
         CallKind::SystemFixtureAction => "system fixture action",
+        CallKind::InventoryRecycle => "inventory recycle",
+        CallKind::BoostStaminaRecovery => "boost stamina recovery",
         CallKind::Admin => "admin",
     }
 }
@@ -919,6 +928,60 @@ fn craft_before(
             .as_ref()
             .map(|copy| copy.gamedata.total_exp)
             .unwrap_or(0),
+    }
+}
+
+/// The recycle or disassemble reply's domain event: the request, whether the
+/// server carried it out, and the resources it gave back.
+fn emit_recycle(
+    request: &MysekaiInventoryDisassemble,
+    outcome: &Result<Reply, Refusal>,
+    copies: &ClientCopies,
+) {
+    let (api, id, quantity) = match request {
+        MysekaiInventoryDisassemble::Fixture(row) => {
+            ("fixture", row.mysekai_fixture_id, row.quantity)
+        }
+        MysekaiInventoryDisassemble::Material(row) => {
+            ("material", row.mysekai_material_id, row.quantity)
+        }
+        MysekaiInventoryDisassemble::Tool(row) => ("tool", row.mysekai_tool_id, row.quantity),
+    };
+    let resources = |rows: &[moly_protocol::rows::UserResource]| {
+        rows.iter()
+            .map(|row| {
+                json!({
+                    "resource_type": row.resource_type,
+                    "resource_id": row.resource_id,
+                    "quantity": row.quantity,
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    match outcome {
+        Ok(Reply::InventoryRecycle(reply)) => crate::bus::emit(
+            "recycle_done",
+            json!({
+                "api": request.api_name(),
+                "kind": api,
+                "id": id,
+                "quantity": quantity,
+                "obtained": resources(&reply.obtained_resources),
+                "inventory_revision": copies.inventory.revision,
+                "tools_revision": copies.tools.revision,
+            }),
+        ),
+        Ok(_) => {}
+        Err(refusal) => crate::bus::emit(
+            "recycle_refused",
+            json!({
+                "api": request.api_name(),
+                "kind": api,
+                "id": id,
+                "quantity": quantity,
+                "reason": refusal.reason.clone(),
+            }),
+        ),
     }
 }
 

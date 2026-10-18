@@ -2193,8 +2193,7 @@ fn queue_exit(commands: &mut Commands, roots: Vec<Entity>, next: SiteSelection, 
     commands.queue(crate::fixture_gimmick::cancel_for_site_change);
     commands.queue(crate::fixture_scene_inputs::invalidate_for_site_change);
     commands.queue(crate::fixture::clear_for_site_change);
-    commands.queue(crate::harvest::clear_for_site_change);
-    commands.queue(crate::delivery::clear_for_site_change);
+    commands.queue(|world: &mut World| world.run_schedule(SiteChangeTeardown));
     // Before the site ledger is removed: the exit reads which site leaves.
     let next_site = next.site.clone();
     commands.queue(move |world: &mut World| exit_current(world, roots, &next_site, exit));
@@ -2554,12 +2553,20 @@ pub(crate) struct TemporarySiteChangeRequest(pub String);
 #[derive(Resource)]
 pub(crate) struct TemporarySiteActive;
 
+/// The teardown that the features above the world add for a site change
+/// (the layout editor, harvest, delivery). It runs once per change, right
+/// after the furniture layout is cleared and before the leaving site's ledger
+/// is read; the features order their own steps inside it.
+#[derive(bevy::ecs::schedule::ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SiteChangeTeardown;
+
 /// 站点域插件的挂载点：选择资源由入口参数起值。
 pub struct SitePlugin(pub SiteRequest);
 
 impl Plugin for SitePlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(SiteSelection::from(self.0.clone()))
+            .init_schedule(SiteChangeTeardown)
             .init_resource::<ResidentSites>()
             .add_systems(Update, (settle_departures, report_residency))
             .add_observer(on_scene_ready);

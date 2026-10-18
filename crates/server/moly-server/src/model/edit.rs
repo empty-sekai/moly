@@ -191,6 +191,15 @@ fn edit_path(
     if let Some(result) = super::tools::edit_path(&mut doc.tools, &parts, value) {
         return result.map(|()| Delivery::NextResponse(super::tools::SECTION));
     }
+    if let Some(result) = super::recycle::edit_policy(&mut doc.recycle, &parts, value) {
+        return result.map(|stated| {
+            if stated {
+                Delivery::NextResponse(super::inventory::SECTIONS[0])
+            } else {
+                Delivery::Live
+            }
+        });
+    }
     if let Some(result) = super::inventory::edit_path(&mut doc.inventory, &parts, path, value) {
         return result.map(|section| match section {
             Some(section) => Delivery::NextResponse(section),
@@ -749,6 +758,7 @@ fn other_sections(core: Value, delivery: Value) -> Value {
         super::music_play::schema_sections(),
         super::system_fixture_action::schema_sections(),
         super::tools::schema_sections(),
+        super::recycle::schema_sections(),
     ]
     .into_iter()
     .fold(core, concat)
@@ -772,7 +782,7 @@ pub(crate) fn schema(model: &ServerModel, masters: &Tables<'_>) -> Value {
         "command": "server.edit",
         "sections": other_sections(sections(masters), super::delivery::schema_sections(Some(model))),
         "actions": actions(),
-        "policies": concat(concat(concat(policies(), super::delivery::schema_policies()), concat(super::home_action::schema_policies(), super::music_play::schema_policies())), concat(concat(super::inventory::schema_policies(), super::craft::schema_policies()), concat(super::system_fixture_action::schema_policies(), super::tools::schema_policies()))),
+        "policies": concat(concat(concat(policies(), super::delivery::schema_policies()), concat(super::home_action::schema_policies(), super::music_play::schema_policies())), concat(concat(concat(super::inventory::schema_policies(), super::craft::schema_policies()), concat(super::system_fixture_action::schema_policies(), super::tools::schema_policies())), super::recycle::schema_policies())),
         "masters": masters_value(masters),
         "joined": model.joined,
     })
@@ -786,7 +796,7 @@ pub(crate) fn schema_without_model() -> Value {
         "command": "server.edit",
         "sections": other_sections(sections(&tables), super::delivery::schema_sections(None)),
         "actions": actions(),
-        "policies": concat(concat(concat(policies(), super::delivery::schema_policies()), concat(super::home_action::schema_policies(), super::music_play::schema_policies())), concat(concat(super::inventory::schema_policies(), super::craft::schema_policies()), concat(super::system_fixture_action::schema_policies(), super::tools::schema_policies()))),
+        "policies": concat(concat(concat(policies(), super::delivery::schema_policies()), concat(super::home_action::schema_policies(), super::music_play::schema_policies())), concat(concat(concat(super::inventory::schema_policies(), super::craft::schema_policies()), concat(super::system_fixture_action::schema_policies(), super::tools::schema_policies())), super::recycle::schema_policies())),
         "masters": null,
         "joined": false,
     })

@@ -91,6 +91,7 @@ use bevy::window::PrimaryWindow;
 
 use super::action::HarvestPlayerModel;
 use super::law::{self, PointTween, SegmentEase, Stamina};
+use super::HarvestStaminaRefresh;
 use crate::balloon::BALLOON_LAYER;
 use crate::canvas::RootCanvas;
 use crate::menu_dialog::{
@@ -124,6 +125,10 @@ enum Call {
     ActionStart,
     /// A hit: the stamina before and after it.
     Hit(Stamina, Stamina),
+    /// The recover dialog's `UpdateStaminaView`: `SetupStaminaGage` with the
+    /// client's stamina after the reply, then `UpdateStaminaDecreaseGage` at
+    /// the rate `Initialize` gives.
+    Refresh { pass: bool },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -178,6 +183,9 @@ impl HarvestStaminaHud {
     }
     pub(crate) fn hit(&mut self, before: Stamina, after: Stamina) {
         self.calls.push(Call::Hit(before, after));
+    }
+    pub(crate) fn refresh(&mut self, pass: bool) {
+        self.calls.push(Call::Refresh { pass });
     }
 
     fn do_show(&mut self) {
@@ -499,7 +507,16 @@ pub(crate) fn advance(
         &mut Transform,
         &mut UiPrefabView,
     )>,
+    recover_queue: Option<ResMut<HarvestStaminaRefresh>>,
 ) {
+    if let Some(mut queue) = recover_queue {
+        for () in queue.0.drain(..) {
+            let pass = user
+                .as_deref()
+                .is_some_and(|user| user.has_mysekai_colorful_pass(real.elapsed_secs()));
+            hud.refresh(pass);
+        }
+    }
     let now = time.elapsed_secs_f64();
     let harvest_site = site
         .as_deref()
@@ -600,6 +617,28 @@ pub(crate) fn advance(
                 );
                 hud.gauge = Some(state);
                 hud.pending = Some((now + f64::from(wait), after));
+            }
+            Call::Refresh { pass } => {
+                let Some(stamina) = model.as_deref().map(|model| server_stamina(model.stamina)) else {
+                    error!("[harvest-hud] the recover dialog's UpdateStaminaView: the harvest model has no stamina; the gauge keeps its state");
+                    continue;
+                };
+                let Some(max) = max else {
+                    error!("[harvest-hud] the recover dialog's UpdateStaminaView: the stamina masters are not loaded; the gauge keeps its state");
+                    continue;
+                };
+                let (normal, enhance, boost) = stamina_gage_rate(stamina, max);
+                let rate = match (pass, stamina.boost > 0) {
+                    (_, true) => boost,
+                    (true, false) => enhance,
+                    (false, false) => normal,
+                };
+                hud.decrease_fill = Some(rate);
+                hud.gauge = Some(stamina_view_state(stamina, max));
+                info!(
+                    "[harvest-hud] the recover dialog's UpdateStaminaView: SetupStaminaGage({stamina:?}) over maxima {max:?}, stock {}, UpdateStaminaDecreaseGage({rate:.3})",
+                    boost_stamina_stock_count(stamina.boost, max)
+                );
             }
         }
     }

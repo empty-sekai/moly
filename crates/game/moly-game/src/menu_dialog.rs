@@ -42,7 +42,7 @@
 //!
 //! | button (field) | source handler and target | source enabled rule | product |
 //! |---|---|---|---|
-//! | recover stamina (`_recoverStaminaButton`) | `ScreenManager.Show2ButtonDialog<MysekaiRecoverBoostStaminaDialog>` (DialogType 321), its `Setup(onRecoverFinish = UpdateStaminaGateView)`, `Close` | `true` | greyed until the dialog has a view. The game carries its `Dialog/` prefab, so `ShowDialog` would return a dialog, not an error; no view of this product draws it and the UI root carries no layout of it, so `ShowDialog` is not called (an instance nobody draws would take the back key) |
+//! | recover stamina (`_recoverStaminaButton`) | `ScreenManager.Show2ButtonDialog<MysekaiRecoverBoostStaminaDialog>` (DialogType 321), its `Setup(onRecoverFinish = UpdateStaminaGateView)`, `Close` | `true` | opens: `crate::stamina_recover_dialog` shows the dialog over this instance, and this dialog's `Close` follows; its `onRecoverFinish` (`RecoverFinished`) rewrites the stamina cell |
 //! | chest (`_chestButton`) | unless `IsActiveScreen(MysekaiInventory)`: `PushUIScreen(MysekaiInventory)` (607); `Close` | `ViewData.ShouldEnableInventoryButton` = `!IsVisiting()` | opens: the screen manager's `PushUIScreen` with this caller, no boot argument (the inventory screen, `crate::inventory`); the report to the multiplayer room has no domain here |
 //! | info (`_mysekaiInfoButton`) | `MysekaiInfoUtility.TryMoveScreenLayerMysekaiInfo`: unless `IsActiveScreen(MysekaiInfo)`, `PushUIScreen(MysekaiInfo, ScreenLayerMysekaiInfoBootData)` (622); `Close` | `ViewData.ShouldEnableInfoButton` = `!IsVisiting()` | opens: the screen manager's `PushUIScreen` with this caller |
 //! | avatar change (`_mysekaiAvtarChangeButton`, the source's spelling) | unless active: `PushUIScreen(MysekaiAvatarCostumeSetting)` (629); `Close` | `true` | greyed until a MysekaiAvatarCostumeSetting view exists (registered, no view) |
@@ -95,7 +95,8 @@
 //! - ⚠ 「体力视图直接持 `ScreenLayerMysekaiHUD` 引用回写」也查无字段
 //!   （原生 HUD grep = 0）：恢复完成后的体力回写走**回调**——
 //! `Show2ButtonDialog` 时传 `onRecoverFinish = UpdateStaminaGateView`。
-//!   恢复对话框未建 ⇒ 回调对应物具名挂账（建它时接同一条回调律）。
+//!   恢复对话框（`crate::stamina_recover_dialog`）收框后发
+//!   [`RecoverFinished`]，[`on_recover_finish`] 读同一份副本重写本格。
 //!
 //! The open line reports both layers for each button (the source rule and
 //! the adaptation) and does not merge them into one number.
@@ -148,9 +149,8 @@
 //!   window pixels (the tap map for driving the menu with real taps).
 //!
 //! Named gaps (not implemented here):
-//! - The seven greyed targets of the table above, and the title scene behind
-//!   the hidden title button. When the recover dialog lands, its
-//!   `onRecoverFinish` calls [`update_stamina_gate_view`].
+//! - The six greyed targets of the table above, and the title scene behind
+//!   the hidden title button.
 //! - `SE_SUBWINDOW_CLOSE`. `SetupTutorial` (the tutorial is out of scope) and
 //!   `SetupForBirthday` (no birthday context runs in this product).
 
@@ -170,6 +170,18 @@ use crate::ui_layers::{
 use crate::ui_layout::{UiLayouts, UiPrefabView};
 
 const MENU_SLIDE_DURATION: f32 = 0.2;
+
+/// `OnClickRecoverBoostStaminaButton`, read by
+/// [`crate::stamina_recover_dialog`]: `Show2ButtonDialog(321)`,
+/// `Setup(onRecoverFinish = UpdateStaminaGateView)`, then this dialog's
+/// `Close`. The id is the menu instance the recover dialog is shown over.
+#[derive(Message, Clone, Copy, Debug)]
+pub(crate) struct RecoverStaminaRequest(pub(crate) DialogId);
+
+/// The recover dialog's `onRecoverFinish`
+/// ([`on_recover_finish`]), once it closed.
+#[derive(Message, Clone, Copy, Debug)]
+pub(crate) struct RecoverFinished;
 
 // ---------------------------------------------------------------------------
 // 可按件：身份与屏位（我方选值）
@@ -263,8 +275,7 @@ impl MenuButton {
             MenuButton::RecoverStamina => ButtonSetup {
                 rule: "SetupRecoverStaminaButton: enabled = true",
                 source: true,
-                // Adaptation: greyed until the MysekaiRecoverBoostStaminaDialog view exists.
-                greyed_until: Some(Missing::Dialog(RECOVER_BOOST_STAMINA_DIALOG)),
+                greyed_until: None,
             },
             MenuButton::Chest => ButtonSetup {
                 rule: "SetupChestButton: enabled = ViewData.ShouldEnableInventoryButton = !IsVisiting()",
@@ -747,6 +758,41 @@ fn update_stamina_gate_view(
     view.set_fill(&format!("@{}", targets.gauge), state.fill);
     // _recoverStaminaLabel.SetActive(staminaData.IsEmptyStamina).
     view.set_visible(&targets.recover_label, stamina.normal <= 0 && stamina.boost <= 0 && stamina.enhance < 1);
+}
+
+/// The recover dialog's `onRecoverFinish`, read by
+/// [`crate::stamina_recover_dialog`]: `UpdateStaminaGateView` on the open menu
+/// dialog's cell, with the client's stamina as the reply left it.
+pub(crate) fn on_recover_finish(
+    mut finished: MessageReader<RecoverFinished>,
+    user: Option<Res<crate::userdata::client::ClientUserData>>,
+    layouts: Res<UiLayouts>,
+    mut views: Query<(&mut UiPrefabView, &MenuDialogRoot)>,
+) {
+    if finished.read().next().is_none() {
+        return;
+    }
+    // `RecoverFinished` is written in the same frame by the dialog's chain, and
+    // the menu instance the dialog was shown over closes right after it: a
+    // menu that is gone leaves its cell to the next `Setup`.
+    // The fields are read whether or not a view waits, so the system's
+    // parameters do not depend on which query a frame runs.
+    let user = user.as_deref();
+    let layouts = &layouts;
+    let Some(doc) = layouts.document("Menu") else {
+        return;
+    };
+    let mut written = 0;
+    for (mut view, root) in &mut views {
+        if root.dialog.is_none() {
+            continue;
+        }
+        update_stamina_gate_view(&mut view, layouts, doc, user);
+        written += 1;
+    }
+    if written == 0 {
+        warn!("[menu_dialog] onRecoverFinish: no menu dialog instance is open; the stamina cell keeps its state");
+    }
 }
 
 /// A native instrument (game mode reads none).
@@ -1305,6 +1351,7 @@ pub(crate) fn click(
     mut sketch_modes: MessageWriter<crate::home_action::SketchModeRequest>,
     views: Query<(&crate::ui_layout::UiPrefabView, &MenuDialogRoot)>,
     mut sounds: ResMut<crate::audio::SeRequests>,
+    mut recover_requests: MessageWriter<RecoverStaminaRequest>,
     root_canvas: Option<Res<crate::canvas::RootCanvas>>,
 ) {
     let taps: Vec<Vec2> = gestures
@@ -1399,6 +1446,19 @@ pub(crate) fn click(
                                     caller,
                                 );
                             }
+                            close_requested = true;
+                        }
+                        MenuButton::RecoverStamina => {
+                            // OnClickRecoverBoostStaminaButton:
+                            // Show2ButtonDialog<MysekaiRecoverBoostStaminaDialog>
+                            // (321), Setup(onRecoverFinish), then Close. The
+                            // recover dialog is shown over this instance.
+                            let id = root.dialog.expect("the open menu holds its instance");
+                            info!(
+                                "[menu_dialog] RecoverStamina ({}) tapped: Show2ButtonDialog<MysekaiRecoverBoostStaminaDialog>(321), Setup(onRecoverFinish); Close",
+                                which.field()
+                            );
+                            recover_requests.write(RecoverStaminaRequest(id));
                             close_requested = true;
                         }
                         MenuButton::WhiteBlueprintSketch => {

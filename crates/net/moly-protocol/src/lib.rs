@@ -24,8 +24,10 @@ use serde::{Deserialize, Serialize};
 use crate::api::{
     BirthdayPartyDeliveryRequest, BirthdayPartyGatherRequest, CharacterTalkReadRequest,
     GateChangeRequest, GateReserveRequest, HarvestRequest, HomeActionPost, MusicPlayEjectRequest,
-    MusicPlaySetRequest, SystemFixtureActionRequest, UserMysekaiCraftRequest,
+    MusicPlaySetRequest, MysekaiInventoryDisassemble, SystemFixtureActionRequest,
+    UserMysekaiCraftRequest,
     UserMysekaiHousingEditLayoutRequest, UserMysekaiHousingSketchRequest,
+    UserMysekaiStaminaRequest,
 };
 use crate::rows::{
     ColorfulPass, DeliveryUpdate, Gamedata, Gate, MusicPlaySetting, OwnedMusicRecord,
@@ -46,7 +48,9 @@ pub mod rows;
 /// 3: the harvest request carries the hit, the tool the run used and the
 /// stamina that is left.
 /// 4: the sections carry the server panel's NPC slice.
-pub const PROTOCOL_VERSION: u32 = 4;
+/// 5: the inventory screen's recycle and disassemble call and its reply.
+/// 6: the boost stamina recovery call and its reply.
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// The account a session belongs to. The server keeps one document per user.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -170,6 +174,12 @@ pub enum Call {
     MusicPlayEject(MusicPlayEjectRequest),
     /// `PostUserMysekaiSystemFixtureActionApi`.
     SystemFixtureAction(SystemFixtureActionRequest),
+    /// `PostUserMysekaiDisassembleFixtureApi`, `PostUserMysekaiRecycleMaterialApi`
+    /// and `PostUserMysekaiRecycleToolApi`.
+    InventoryRecycle(MysekaiInventoryDisassemble),
+    /// `PostUserMysekaiBoostStaminaRecoveryApi`: the recover dialog's
+    /// confirmation.
+    BoostStaminaRecovery(UserMysekaiStaminaRequest),
     /// The control plane's calls: the document and the schema, an edit, and
     /// the browser game's seed install.
     Admin(AdminCall),
@@ -194,6 +204,8 @@ impl Call {
             Self::MusicPlaySet(_) => CallKind::MusicPlaySet,
             Self::MusicPlayEject(_) => CallKind::MusicPlayEject,
             Self::SystemFixtureAction(_) => CallKind::SystemFixtureAction,
+            Self::InventoryRecycle(_) => CallKind::InventoryRecycle,
+            Self::BoostStaminaRecovery(_) => CallKind::BoostStaminaRecovery,
             Self::Admin(_) => CallKind::Admin,
         }
     }
@@ -216,6 +228,8 @@ impl Call {
             Self::MusicPlaySet(_) => "music play set",
             Self::MusicPlayEject(_) => "music play eject",
             Self::SystemFixtureAction(_) => "system fixture action",
+            Self::InventoryRecycle(_) => "inventory recycle",
+            Self::BoostStaminaRecovery(_) => "boost stamina recovery",
             Self::Admin(_) => "admin",
         }
     }
@@ -240,6 +254,8 @@ pub enum CallKind {
     MusicPlaySet,
     MusicPlayEject,
     SystemFixtureAction,
+    InventoryRecycle,
+    BoostStaminaRecovery,
     Admin,
 }
 
@@ -287,6 +303,11 @@ pub enum Reply {
     MusicPlay(crate::api::MusicPlayReply),
     /// The system fixture action's reply.
     SystemFixtureAction(crate::api::SystemFixtureActionReply),
+    /// The inventory screen's recycle and disassemble reply.
+    InventoryRecycle(crate::api::MysekaiInventoryRecycleResponse),
+    /// The boost stamina recovery reply (a `SuiteUser` answer); the stamina
+    /// it restored is in the reply's sections.
+    BoostStaminaRecovery(crate::api::SuiteUserReply),
     /// An administration answer, as JSON text.
     Admin(String),
 }
@@ -403,6 +424,18 @@ mod tests {
                 call: Call::Admin(AdminCall::Install {
                     server_json: Some("{}".to_owned()),
                     local_json: None,
+                }),
+            },
+            ClientMessage::Call {
+                seq: 10,
+                call: Call::BoostStaminaRecovery(crate::api::UserMysekaiStaminaRequest {
+                    mysekai_boost_stamina_recovery_type: crate::api::BoostStaminaRecoveryType::BoostItem,
+                    user_mysekai_stamina_recovery_consume_resources: vec![
+                        crate::api::StaminaRecoveryConsume {
+                            resource_id: 1201,
+                            quantity: 1,
+                        },
+                    ],
                 }),
             },
         ];
@@ -626,6 +659,19 @@ mod tests {
         assert_eq!(
             Call::Admin(AdminCall::Schema).kind(),
             CallKind::Admin
+        );
+        assert_eq!(
+            Call::BoostStaminaRecovery(crate::api::UserMysekaiStaminaRequest {
+                mysekai_boost_stamina_recovery_type: crate::api::BoostStaminaRecoveryType::Jewel,
+                user_mysekai_stamina_recovery_consume_resources: vec![
+                    crate::api::StaminaRecoveryConsume {
+                        resource_id: 1,
+                        quantity: 30,
+                    },
+                ],
+            })
+            .kind(),
+            CallKind::BoostStaminaRecovery
         );
     }
 

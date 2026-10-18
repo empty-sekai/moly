@@ -84,6 +84,11 @@ pub(crate) use pickup::move_towards;
 pub(crate) use arrival::HarvestViewNodes;
 pub(crate) use ui::{action_button_node, HarvestButton};
 
+/// The recover dialog's `UpdateStaminaView` asks, once per call: the gauge
+/// reads them in the frame they are written.
+#[derive(Resource, Default)]
+pub(crate) struct HarvestStaminaRefresh(pub(crate) Vec<()>);
+
 /// `UserMysekaiSiteHarvestFixtureStatus.harvested`.
 pub(crate) const STATUS_HARVESTED: i32 = server_mock::FIXTURE_HARVESTED;
 
@@ -751,6 +756,7 @@ impl Plugin for HarvestPlugin {
             .init_resource::<action::HarvestAutoplay>()
             .init_resource::<ui::HarvestButton>()
             .init_resource::<stamina_hud::HarvestStaminaHud>()
+            .init_resource::<HarvestStaminaRefresh>()
             .init_resource::<tool_model::HarvestToolModels>()
             .init_resource::<tool_model::ToolModelRequests>()
             .init_resource::<queue::HarvestLogQueue>()

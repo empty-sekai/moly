@@ -1681,7 +1681,6 @@ pub(crate) fn clear_for_site_change(world: &mut World) {
     reload_current_layout(world);
     world.remove_resource::<RetainedFixtureSources>();
     world.insert_resource(FixturePlacements::default());
-    crate::fixture_edit::clear_for_site_change(world);
 }
 
 /// GLB sources of the layout a save replaced, held until the reloaded

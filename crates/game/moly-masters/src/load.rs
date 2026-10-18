@@ -20,6 +20,7 @@ use crate::avatar::AvatarMasters;
 use crate::craft::CraftMasters;
 use crate::delivery::{BonusRow, DeliveryTables, RewardRow, TotalRow};
 use crate::inventory::PossessionMasters;
+use crate::recovery::{BoostItemRow, RecoveryRow};
 use crate::StaminaMax;
 
 /// The five master resources one loader fills, plus the row slices a reader
@@ -38,6 +39,11 @@ pub struct MasterTables {
     pub delivery: Option<DeliveryTables>,
     /// `mysekaiStaminas`.
     pub stamina_max: Option<StaminaMax>,
+    /// `mysekaiStaminaRecovery`: the live bonus one recovery spends and the
+    /// boost stamina it restores.
+    pub stamina_recovery: Option<RecoveryRow>,
+    /// `mysekaiBoostItems` (master order).
+    pub boost_items: Option<Vec<BoostItemRow>>,
     /// The blueprint ids the harvest drop classifier reads, from the same
     /// table the craft reader takes (no second request for it).
     pub blueprint_ids: Option<HashSet<i64>>,
@@ -93,6 +99,11 @@ impl MasterTables {
                 enhance: 1000,
                 boost: 10000,
             }),
+            stamina_recovery: Some(RecoveryRow {
+                boost_quantity: 1,
+                recovery_boost_stamina: 100,
+            }),
+            boost_items: Some(Vec::new()),
             blueprint_ids: Some(HashSet::new()),
             item_ids: Some(HashSet::new()),
             material_rows: Some(Vec::new()),
@@ -141,6 +152,8 @@ impl MasterTables {
                     commands.insert_resource(value);
                     self.stamina_max = Some(value);
                 }
+                self.stamina_recovery = self.parts.stamina_recovery;
+                self.boost_items = self.parts.boost_items.take();
             }
         }
     }
@@ -160,7 +173,7 @@ const CRAFT_TABLES: usize = 6;
 const POSSESSION_TABLES: usize = 2;
 const AVATAR_TABLES: usize = 4;
 const DELIVERY_TABLES: usize = 3;
-const STAMINA_TABLES: usize = 1;
+const STAMINA_TABLES: usize = 3;
 
 /// One table's parse result, before it is seated into its resource.
 #[derive(Default)]
@@ -170,6 +183,8 @@ struct Parts {
     avatar: AvatarMasters,
     delivery: DeliveryParts,
     stamina_max: Option<StaminaMax>,
+    stamina_recovery: Option<RecoveryRow>,
+    boost_items: Option<Vec<BoostItemRow>>,
     blueprint_ids: Option<HashSet<i64>>,
     item_ids: Option<HashSet<i64>>,
     material_rows: Option<Vec<(i64, String, Vec<u32>)>>,
@@ -229,6 +244,20 @@ static TABLES: &[Entry] = &[
         "mysekaiStaminas (the server's pool maxima)",
         parse_staminas,
         stamina_max,
+        Stamina
+    ),
+    root_table!(
+        "mysekaiStaminaRecovery",
+        "mysekaiStaminaRecovery (the recover dialog's rate and yield)",
+        parse_stamina_recovery,
+        stamina_recovery,
+        Stamina
+    ),
+    root_table!(
+        "mysekaiBoostItems",
+        "mysekaiBoostItems (what a boost item recovers)",
+        parse_boost_items,
+        boost_items,
         Stamina
     ),
     Entry {
@@ -570,6 +599,32 @@ fn table_rows(text: &str, table: &str) -> Result<Vec<Value>, String> {
         .clone();
     rows.sort_by_key(|row| row["id"].as_i64().unwrap_or(i64::MAX));
     Ok(rows)
+}
+
+/// `mysekaiStaminaRecovery`: the single row's two columns.
+pub fn parse_stamina_recovery(text: &str, row: &mut Option<RecoveryRow>) -> Result<(), String> {
+    let value = Value::Object(moly_assets::json::master::object(text)?);
+    *row = Some(RecoveryRow {
+        boost_quantity: crate::int32(&value, "boostQuantity")?,
+        recovery_boost_stamina: crate::int32(&value, "recoveryBoostStamina")?,
+    });
+    Ok(())
+}
+
+/// `mysekaiBoostItems`: the id and `recoveryValue` of each row.
+pub fn parse_boost_items(text: &str, items: &mut Option<Vec<BoostItemRow>>) -> Result<(), String> {
+    let rows = table_rows(text, "mysekaiBoostItems")?;
+    *items = Some(
+        rows.iter()
+            .map(|row| {
+                Ok(BoostItemRow {
+                    id: crate::int32(row, "id")?,
+                    recovery_value: crate::int32(row, "recoveryValue")?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?,
+    );
+    Ok(())
 }
 
 /// `mysekaiStaminas`: the normal, enhance and boost rows' `maxStamina`.

@@ -133,6 +133,7 @@ use crate::canvas::{CANVAS_REF_H, CANVAS_REF_W};
 use crate::sitemap_phenomena::{PhenomenaMaster, PhenomenaRow};
 use crate::source_curve::Curve;
 use crate::ui_layers::{LayerCommand, MenuScreenType, ScreenHook, ScreenLayerEvent};
+use crate::ui_layout::{UiLayouts, UiPrefabView};
 
 #[path = "sitemap_tap.rs"]
 mod sitemap_tap;
@@ -374,6 +375,8 @@ struct ScreenLayout {
     spots: Vec<IconSpot>,
     ground: Placed,
     phenomena: PhenomenaLayout,
+    /// `_weatherButton`: the weather forecast dialog's opener.
+    weather_button: Placed,
     prefab: PrefabLayout,
 }
 
@@ -910,6 +913,12 @@ pub(crate) fn parse(
     // 里是布局前的作者位——消费侧按「图标+文本组居中」现算，见
     // spawn_phenomena_icon）。
     let icon_size = parse_node_rect(&format!("{phenomena_root_path}/Text/PhenometaIcon")).size;
+    // The weather button `_weatherButton`: the screen layer's own entry
+    // (`screen.weatherButtonRoot`), laid out in the content root's frame.
+    let weather_button = {
+        let content = frame_of("content").place(canvas_center, canvas_size);
+        frame_of("weatherButtonRoot").place(content.center, content.size)
+    };
     let phenomena = PhenomenaLayout {
         background,
         icon_size,
@@ -962,6 +971,7 @@ pub(crate) fn parse(
         spots,
         ground,
         phenomena,
+        weather_button,
         prefab,
     };
     // join 完整性：每个上地图的站都要有屏层行（缺位是错账不是空缺）。
@@ -1556,6 +1566,9 @@ pub(crate) struct SphereImage;
 #[derive(Resource, Default)]
 pub(crate) struct SiteMapSetup {
     aborted: bool,
+    /// `UpdatePhenomena` ran for a row: the weather button `_weatherButton`
+    /// is enabled.
+    weather_set: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1700,10 +1713,19 @@ pub(crate) fn spawn_when_ready(
         Option<Res<crate::canvas::RootCanvas>>,
         Option<Res<PhenomenaMaster>>,
     ),
+    today: Option<Res<crate::server_panel::TodayPhenomena>>,
 ) {
     if !roots.is_empty() {
         return;
     }
+    // `UpdatePhenomena` enables the weather button when the phenomenon of
+    // the day has a master row. It runs at the first open, before the map's
+    // nodes exist; the button's target is spawned below and follows the
+    // panel afterwards ([`setup_phenomena`]).
+    let weather_set = phenomena
+        .as_deref()
+        .zip(today.as_deref().and_then(|today| today.phenomena_id()))
+        .is_some_and(|(master, id)| master.phenomena(id).is_some());
     let Some(mut data) = data else { return };
     // The phenomenon names are baked with the site names: the atlas waits for
     // the phenomenon master (an absent table bakes none and is named there).
@@ -1796,6 +1818,18 @@ pub(crate) fn spawn_when_ready(
 
     spawn_weather_panel(&mut commands, &data, ui_root);
     sitemap_tap::spawn(&mut commands, &data, &mut layouts, &server);
+    // The weather button's tap target (`_weatherButton`): the panel's button
+    // rect on its own layer, drawn by nothing.
+    let weather_button = sitemap_tap::spawn_weather_button(
+        &mut commands,
+        &data,
+        &mut layouts,
+        &server,
+        weather_set,
+    );
+    if let Some(button) = weather_button {
+        commands.entity(map_root).add_child(button);
+    }
 
     commands.insert_resource(text);
     info!(
@@ -2673,6 +2707,52 @@ pub(crate) struct SitemapTapQueries<'w, 's> {
     runs: Query<'w, 's, (), With<UnlockRun>>,
 }
 
+/// The weather button's tap target (`sitemap_tap::spawn_weather_button`), the
+/// rect the screen layer lays out, and the setup that enabled it
+/// (`UpdatePhenomena`).
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct SitemapWeatherButton<'w, 's> {
+    /// The button's one view, while the map is shown.
+    view: Query<
+        'w,
+        's,
+        (&'static mut Visibility, &'static UiPrefabView),
+        (With<sitemap_tap::WeatherButton>, Without<SitemapRoot>),
+    >,
+    layouts: Res<'w, UiLayouts>,
+    setup: Option<Res<'w, SiteMapSetup>>,
+}
+
+impl SitemapWeatherButton<'_, '_> {
+    /// Whether the panel shows its phenomenon of the day: `UpdatePhenomena`
+    /// enables the weather button with it, and `SetupAsync` aborts before it.
+    fn enabled(&self) -> bool {
+        self.setup
+            .as_deref()
+            .is_some_and(|setup| !setup.aborted && setup.weather_set)
+    }
+
+    /// Whether `canvas` lies on the button while it is enabled; the target
+    /// follows the map's own visibility, and its rect is solved at the
+    /// window's canvas size.
+    fn hit(&mut self, canvas: Vec2, canvas_size: Vec2) -> bool {
+        let enabled = self.enabled();
+        let Ok((mut visibility, view)) = self.view.single_mut() else {
+            return false;
+        };
+        let shown = if enabled {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        visibility.set_if_neq(shown);
+        enabled
+            && view
+                .rect(&self.layouts, sitemap_tap::WEATHER_BUTTON, canvas_size)
+                .is_some_and(|rect| rect.active && rect.contains(canvas))
+    }
+}
+
 /// Update: a tap on the site map (a left click while the map is the current
 /// screen).
 #[allow(clippy::too_many_arguments)]
@@ -2691,6 +2771,10 @@ pub(crate) fn click(
     root_canvas: Option<Res<crate::canvas::RootCanvas>>,
     mut layer_commands: MessageWriter<LayerCommand>,
     manager: Option<Res<crate::ui_layers::ScreenManager>>,
+    (mut weather_requests, mut weather): (
+        MessageWriter<crate::weather_dialog::WeatherDialogRequest>,
+        SitemapWeatherButton<'_, '_>,
+    ),
 ) {
     let taps: Vec<Vec2> = gestures
         .read()
@@ -2735,12 +2819,23 @@ pub(crate) fn click(
         let Ok(window) = targets.windows.single() else { return };
         let Some(root_canvas) = root_canvas.as_deref() else { return };
         let scale = root_canvas.scale(window);
-        for position in taps {
-            consumed.0 = true;
-            let canvas = Vec2::new(
+        let to_canvas = |position: Vec2| -> Vec2 {
+            Vec2::new(
                 position.x - window.width() / 2.0,
                 window.height() / 2.0 - position.y,
-            ) / scale;
+            ) / scale
+        };
+        let canvas_size = root_canvas.size(window);
+        for position in taps {
+            consumed.0 = true;
+            let canvas = to_canvas(position);
+            // The weather button (`_weatherButton.OnClickWeatherButton`):
+            // `UpdatePhenomena` enables it with the panel's phenomenon of the
+            // day, so before that a tap on its rect is no button.
+            if weather.hit(canvas, canvas_size) {
+                weather_requests.write(crate::weather_dialog::WeatherDialogRequest);
+                continue;
+            }
             tap(
                 &mut commands,
                 &data,
@@ -3385,6 +3480,7 @@ pub(crate) fn setup_phenomena(
     setup: Option<ResMut<SiteMapSetup>>,
     mut panels: Query<(Entity, &mut WeatherPanel)>,
     mut spheres: Query<&mut Sprite, With<SphereImage>>,
+    mut buttons: Query<(&mut sitemap_tap::WeatherButton, &mut UiPrefabView)>,
 ) {
     let opened = hooks.read().fold(false, |opened, e| {
         opened
@@ -3404,6 +3500,12 @@ pub(crate) fn setup_phenomena(
         .as_deref()
         .zip(today)
         .and_then(|(master, id)| master.phenomena(id));
+    // `UpdatePhenomena` enables the weather button with the panel's row.
+    for (mut button, mut view) in &mut buttons {
+        button.enabled = row.is_some();
+        view.set_visible(sitemap_tap::WEATHER_BUTTON, row.is_some());
+    }
+    setup.weather_set = row.is_some();
     let Some(row) = row else {
         setup.aborted = true;
         error!(

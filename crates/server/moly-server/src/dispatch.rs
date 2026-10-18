@@ -322,6 +322,24 @@ fn run(call: Call, model: &mut ServerModel, masters: &Tables<'_>) -> Result<Repl
                 obtained_resources: obtained,
             }))
         }
+        Call::InventoryRecycle(request) => {
+            let reply = model.inventory_disassemble(request, masters).map_err(|reason| {
+                Refusal::new(
+                    "recycle_refused",
+                    format!("{}: {reason}", request.api_name()),
+                )
+            })?;
+            Ok(Reply::InventoryRecycle(reply))
+        }
+        Call::BoostStaminaRecovery(request) => {
+            let reply = model.boost_stamina_recovery(&request, masters).map_err(|refusal| {
+                Refusal::new(
+                    format!("stamina_recovery_{}", refusal.code),
+                    format!("PostUserMysekaiBoostStaminaRecoveryApi: {}", refusal.reason),
+                )
+            })?;
+            Ok(Reply::BoostStaminaRecovery(reply))
+        }
         Call::Admin(call) => admin::answer(call, model, masters).map(Reply::Admin),
     }
 }
@@ -381,6 +399,76 @@ mod tests {
             Ok(reply) => reply,
             Err(refusal) => panic!("refused: {refusal:?}"),
         }
+    }
+
+    /// `mysekaiBoostItems` for the recovery test: id 7 recovers 5 boost
+    /// stamina.
+    fn recovery_masters() -> Masters {
+        let mut masters = fixture_masters();
+        masters.boost_items = Some(vec![moly_masters::BoostItemRow {
+            id: 7,
+            recovery_value: 5,
+        }]);
+        masters
+    }
+
+    /// `PostUserMysekaiBoostStaminaRecoveryApi` with the recovery master row
+    /// (1 live bonus per 100 boost stamina): one live bonus restores 100 and
+    /// one boost item row restores 5 · quantity · 100, the pool stops at its
+    /// maximum, and a request that restores nothing is refused.
+    #[test]
+    fn the_boost_stamina_recovery_restores_by_the_recovery_row() {
+        let masters = recovery_masters();
+        let shared = MasterTables::fixture();
+        let masters = Tables::new(&masters, Some(&shared));
+        let mut model = joined_model(&masters);
+        model.doc.stamina = Some(Stamina {
+            normal: 1000,
+            enhance: 0,
+            boost: 100,
+        });
+        let call = |consumes: Vec<(i32, i32)>| {
+            Call::BoostStaminaRecovery(moly_protocol::api::UserMysekaiStaminaRequest {
+                mysekai_boost_stamina_recovery_type: moly_protocol::api::BoostStaminaRecoveryType::Boost,
+                user_mysekai_stamina_recovery_consume_resources: consumes
+                    .into_iter()
+                    .map(|(resource_id, quantity)| moly_protocol::api::StaminaRecoveryConsume {
+                        resource_id,
+                        quantity,
+                    })
+                    .collect(),
+            })
+        };
+        let answered = answer_call(call(vec![(0, 2)]), &mut model, &masters);
+        match ok(answered.clone()) {
+            Reply::BoostStaminaRecovery(reply) => assert!(reply.success),
+            other => panic!("answered {other:?}"),
+        }
+        let sections = answered.sections.expect("the reply carries the stamina");
+        assert_eq!(sections.stamina.map(|stamina| stamina.boost), Some(300));
+        // The pool stops at the master maximum (10000).
+        let answered = answer_call(call(vec![(0, 500)]), &mut model, &masters);
+        let sections = answered.sections.expect("the reply carries the stamina");
+        assert_eq!(sections.stamina.map(|stamina| stamina.boost), Some(10000));
+        // A full pool refuses by name.
+        let answered = answer_call(call(vec![(0, 1)]), &mut model, &masters);
+        assert!(answered.outcome.is_err());
+        let mut items = call(vec![(7, 3)]);
+        if let Call::BoostStaminaRecovery(request) = &mut items {
+            request.mysekai_boost_stamina_recovery_type =
+                moly_protocol::api::BoostStaminaRecoveryType::BoostItem;
+        }
+        model.doc.stamina = Some(Stamina {
+            normal: 1000,
+            enhance: 0,
+            boost: 100,
+        });
+        let answered = answer_call(items, &mut model, &masters);
+        let sections = answered.sections.expect("the reply carries the stamina");
+        assert_eq!(sections.stamina.map(|stamina| stamina.boost), Some(1600));
+        // Nothing spent: refused.
+        let answered = answer_call(call(Vec::new()), &mut model, &masters);
+        assert!(answered.outcome.is_err());
     }
 
     #[test]

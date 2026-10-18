@@ -31,9 +31,9 @@
 //!   (`CreateBGMPlayerViewDataModel`: title, artist, vocal text; playing
 //!   objects while it is the chosen record; the vocal button while the music
 //!   has several vocals) and plays it (`PlaySelectBgm`). The record
-//!   animation's pause (`PlayPauseAsync`, whose end would play the default)
-//!   is cancelled by the resume the same call starts (`SafeCreate` cancels
-//!   the running token), so the highlighted record keeps playing.
+//!   animation's pause (`PlayPauseAsync`) is cancelled by the resume the
+//!   same call starts (`SafeCreate` cancels the running token), so the
+//!   highlighted record keeps playing.
 //! - `OnWillExit`: `ExecuteMysekaiMusicPlaySetApiIfNeeded` (set or eject, see
 //!   [`model::Presenter::exit_request`]); the exit does not wait for it.
 //! - `OnExited` -> `Dispose`: the chosen record plays (`PlaySettingBgm`), else
@@ -41,6 +41,24 @@
 //!
 //! The BGM goes through [`crate::audio::RecordChoice`]; the requests go
 //! through the server link's `Call::MusicPlaySet` / `Call::MusicPlayEject`.
+//!
+//! ## The player view (`MysekaiBGMPlayerView`)
+//!
+//! - `Setup` loads the record's jacket (`LoadJacket`): the package
+//!   `MusicUtility.GetJacketResourceInfo` names (see [`jacket`]) and the
+//!   blurred background (`UIPartsBlurMusicJacket.LoadJacketAsync`). Until it
+//!   arrives the jacket's image and the blurred background are off, as they
+//!   are with no jacket at all; `SetupEmpty` clears the text and the jacket.
+//! - `MusicInfoContent.Setup` writes the three texts and shows each marquee
+//!   with its text; a marquee scrolls a text wider than its mask.
+//! - `MysekaiBGMRecordPlayer` rolls the record in and turns it while it
+//!   plays, and its `play` event starts the music ([`record`]).
+//! - `SetupImages` binds the player view's package images at boot and the
+//!   music-play fixture type's icon ([`fixture`]).
+//! - The cells' jacket thumbnails (`UIPartsThumbnail`) are the same records'
+//!   jackets, fitted to the thumbnail's rect: the loaded image's size is not
+//!   keyed by the shared layout, so the aspect fit `UIPartsThumbnail.OnLoadSuccess`
+//!   applies (which reads it) is not run and the image keeps its rect.
 //!
 //! ## Named gaps (roadmap)
 //!
@@ -50,9 +68,9 @@
 //!   `SetFilterButton`, `MusicSelectChangeViewButton.Setup`); their cells and
 //!   interactivity are not wired: the list stays on tab ALL, sort Default and
 //!   list mode. The tab cell prefab is not in this UI root, so the strip shows
-//!   its frame and arrows only. The filter button and `BGMFilterDialog` are
-//!   built in [`dialogs`], and the change-vocal dialog
-//!   (`MysekaiBGMSelectChangeVocalDialog`) is built there too.
+//!   its frame and arrows only. The filter button is shown and takes taps;
+//!   [`dialogs`] loads `BGMFilterDialog` and the change-vocal dialog
+//!   (`MysekaiBGMSelectChangeVocalDialog`).
 //! - The filter's character checkboxes and its two music toggles are the
 //!   prefab's own controls; OK saves `BGMFilterData` into the local settings
 //!   document and the list re-filters. The grid view and the sort key stay at
@@ -65,19 +83,29 @@
 //!   special-season vocals are omitted too. The remembered vocal of each
 //!   record (`MysekaiRecordSettingDataList`) lives for the session only.
 //! - The list view is not `RepeatListVew`: no looping, snapping or centring,
-//!   no fade materials; cells stack from the content's top, the highlighted
-//!   one at its highlight height, and a tap selects a cell. A pool of
-//!   [`CELL_POOL`] cells is re-bound as the list scrolls.
-//! - The jackets (cells and player view), the blur jacket, the system fixture
-//!   icon, the collaboration label, the record animation, the marquees'
-//!   scrolling and the cells' spectrum analyser animation are not built (the
-//!   spectrum part itself stays visible, as the source shows it).
+//!   no fade materials. Cells stack from the content's top, the highlighted
+//!   one at its highlight height, and a tap selects a cell; the cell whose
+//!   selection changes fades in once (the list's fade tween is its stand-in).
+//!   A pool of [`CELL_POOL`] cells is re-bound as the list scrolls. The
+//!   highlight's size tween is not run: the highlighted row is already laid
+//!   out at the highlight size.
+//! - The cells' spectrum analyser stays visible but is not animated. The
+//!   record player's motion follows the source's states, events and log, but
+//!   its durations and turn speed are the port's own values (the animation
+//!   prefab's clips are not in the public asset root), the bubble its
+//!   greeting raises is the HUD's balloon in place of the prefab's own
+//!   greeting, and the blurred background shows the jacket's texture unblurred
+//!   (the `UIPartsBlurMusicJacket` shader is not in the asset root, and the
+//!   extracted UI carries no material parameters for it).
 //! - The tutorial gate before the push (`IsOpenMusicPlayer`) is out of scope.
 //! - Each push builds a new presenter; `Resume` without `Initialize` (a
 //!   screen above this one closing) does not occur in this product.
 
 mod dialogs;
+mod fixture;
+mod jacket;
 mod model;
+mod record;
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -91,15 +119,16 @@ use moly_assets::ui_layout::{UiComponent, UiInstance, UiPrefab};
 use serde_json::{json, Value};
 
 use crate::action_button::ActionTapConsumed;
+use crate::balloon::{BubbleLayers, Marquee, MarqueeText};
 use crate::fixture::FixturePlacement;
 use crate::fixture_activity_state::FixtureTarget;
 use crate::fixture_colors::FixtureColorChoice;
 use crate::gesture::{GestureEvent, GestureKind, GestureState};
-use crate::userdata::client::music::ClientMusicPlaySettings;
-use crate::userdata::client::music_play::ClientMusicRecords;
 use crate::sitemap::SITEMAP_LAYER;
 use crate::ui_layers::{LayerCommand, LayerId, ScreenHook, ScreenLayerEvent, UiLayerStack};
 use crate::ui_layout::{SpriteLayoutMetrics, UiLayouts, UiPrefabView};
+use crate::userdata::client::music::ClientMusicPlaySettings;
+use crate::userdata::client::music_play::ClientMusicRecords;
 use crate::userdata::{Answered, ServerPending};
 use moly_link::ServerLink;
 use moly_protocol::api::MusicPlayPost;
@@ -112,8 +141,41 @@ const CELL_DOC: &str = "BgmSelectListCell";
 /// The shared header (`ScreenLayerHeader`).
 const HEADER: &str = "EditorHeader";
 const RUNTIME: &str = "BgmSelectRuntime";
-/// The player view's images, by the root's alias prefix.
+/// The player view's images and the records' jackets, by the root's alias
+/// prefix.
 const TEXTURE_PREFIX: &str = "mysekai-bgm-select/";
+/// A music jacket's package on the region's storage host
+/// (`AssetBundleNames.GetMusicJacketName` formats `music/jacket/{0}`); the
+/// jacket is the package's file of the package's name.
+const JACKET_DIRECTORY: &str = "music/jacket";
+/// The record bases' texture (the serialized sprite name of that package).
+const RECORD_BASE_ASSET: &str = "bg_base_circle_h240_wh";
+/// How many jackets beyond the visible ones keep their load open: the
+/// highlighted record's and the pool's are read every frame, so a load
+/// started on a cell is not dropped when the list scrolls on.
+const JACKET_CACHE_BEYOND_VIEW: usize = 4;
+/// A soundtrack jacket's package (`AssetBundleNames` prefixes the soundtrack
+/// category's `assetbundleName` with this directory).
+const SOUNDTRACK_JACKET_PREFIX: &str = "mysekai/music_record_soundtrack/jacket/";
+/// The player view's fixture icon: the `mysekaiSystemFixtureTypeIcons` row of
+/// `MysekaiSystemFixtureType.music_play` (`SystemFixtureIcon` built with 6).
+const MUSIC_PLAY_FIXTURE: &str = "music_play";
+/// The marquees' scroll speed and wait (`UIPartsMarquee`'s serialized `spd`
+/// and `wait_sec`, which the exported prefab does not carry: stand-ins,
+/// named as such).
+const MARQUEE_SPEED: f32 = 60.;
+const MARQUEE_WAIT_SECONDS: f32 = 1.;
+/// The side room a marquee's restart and end positions leave the mask
+/// (`UIPartsMarquee.spd`'s lateral term).
+const MARQUEE_LATERAL: f32 = 40.;
+/// The player view's text size and line spacing (the values
+/// `MusicInfoContent`'s texts carry).
+const INFO_FONT_SIZE: f32 = 32.;
+const INFO_LINE_SPACING: f32 = -80.;
+/// Cell highlights: the list fades a cell's contents back in as it becomes
+/// the highlighted one (`MusicSelectListView.SetActiveInFade`); the fade shows
+/// its first frame's alpha here, a stand-in named as one.
+const CELL_UNHIGHLIGHTED_ALPHA: f32 = 0.35;
 /// Cells kept for the viewport and re-bound as the list scrolls.
 pub(crate) const CELL_POOL: usize = 10;
 /// `ScreenLayerMysekaiBGMSelect.OnFinishStartAnimation`'s one-shot cue.
@@ -173,6 +235,38 @@ pub(crate) struct BgmSelect {
     dialog_request: Option<dialogs::DialogRequest>,
     /// A dialog of this screen is open: the screen takes no taps behind it.
     dialog_open: bool,
+    /// The player view's text (the marquees restart when it changes).
+    player_text: Option<(String, String, String)>,
+    /// The marquees' scroll, one per `MusicInfoContent` marquee.
+    marquees: Vec<Marquee>,
+    /// Records whose selection changed this frame: their cells fade in once.
+    faded_in: BTreeSet<i32>,
+    /// The records the last drawn frame showed (the highlighted one and the
+    /// bound cells'): their jackets, and only theirs, stay asked for.
+    wanted: BTreeSet<i32>,
+    /// The record player (`MysekaiBGMRecordPlayer`).
+    player: record::Player,
+    /// The record player's greeting: its text and its bubble.
+    greeting: Option<String>,
+    greeting_bubble: Option<Entity>,
+}
+
+/// `MysekaiRecordSettingDataList`'s vocal of a record, asked before a jacket
+/// package is resolved (the package follows the remembered vocal).
+fn remembered_vocal(record: i32) -> Option<i32> {
+    REMEMBERED.with(|vocals| vocals.borrow().get(&record).copied())
+}
+
+thread_local! {
+    /// The screen's remembered vocals, filed by the screen and read where a
+    /// record's jacket package is resolved.
+    static REMEMBERED: std::cell::RefCell<HashMap<i32, i32>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Files the remembered vocals for the jacket packages.
+fn file_remembered(state: Res<BgmSelect>) {
+    REMEMBERED.with(|vocals| *vocals.borrow_mut() = state.vocal_choice.clone());
 }
 
 impl BgmSelect {
@@ -180,6 +274,66 @@ impl BgmSelect {
     #[allow(dead_code)] // Read by the director's wait.
     pub(crate) fn server_pending(&self) -> Option<&ServerPending> {
         self.music_call.as_ref()
+    }
+
+    /// `MysekaiBGMRecordPlayer.OnCallback`'s `"play"`: the roll-in ended and
+    /// the record starts playing; the music starts with it (`PlaySelectBgm`).
+    fn on_record_played(&mut self, choice: &mut crate::audio::RecordChoice) {
+        let Some(presenter) = self.presenter.as_mut() else {
+            return;
+        };
+        // The roll-in ends with `SetPlaying`: the player view's callback
+        // (PlaySelectBgm) sets the record playing.
+        presenter.playing_record = true;
+        let Some(model) = presenter.model(presenter.select) else {
+            return;
+        };
+        if !model.has_resource {
+            info!(
+                "[bgm-select] record player callback play: record {} has no BGM resource; no BGM change",
+                model.record_id
+            );
+            return;
+        }
+        choice.play_record(
+            presenter.boot.site_id,
+            model.record_id,
+            model.vocal_id.unwrap_or(0),
+        );
+        info!(
+            "[bgm-select] record player callback play -> PlaySelectBgm: record {}",
+            model.record_id
+        );
+    }
+
+    /// `MysekaiBGMRecordPlayer.OnCallback`'s `"loop"`: every pass after the
+    /// first.
+    fn on_record_looped(&mut self, choice: &mut crate::audio::RecordChoice) {
+        let Some(presenter) = self.presenter.as_mut() else {
+            return;
+        };
+        presenter.playing_record = true;
+        let Some(model) = presenter.model(presenter.select) else {
+            return;
+        };
+        if !model.has_resource {
+            info!(
+                "[bgm-select] record player callback loop: record {} has no BGM resource; no BGM change",
+                model.record_id
+            );
+            return;
+        }
+        choice.play_record(
+            presenter.boot.site_id,
+            model.record_id,
+            model.vocal_id.unwrap_or(0),
+        );
+        info!(
+            "[bgm-select] record player callback loop -> PlayBGMAsync(site {}, record {} vocal {:?})",
+            presenter.boot.site_id,
+            model.record_id,
+            model.vocal_id
+        );
     }
 }
 
@@ -198,6 +352,8 @@ pub(crate) fn load(
         return;
     }
     model::request(&mut masters);
+    jacket::request(&mut masters);
+    fixture::request(&mut masters);
 }
 
 fn words(layouts: &UiLayouts) -> VocalWordings {
@@ -383,6 +539,17 @@ fn cloned(instance: &UiInstance, fields: &Value, name: &str) -> Result<String, S
     instance.selector(pointer(&fields[name])?)
 }
 
+/// A field the prefab names, when it has one and it is not null.
+fn optional(instance: &UiInstance, fields: &Value, name: &str) -> Result<Option<String>, String> {
+    match fields.get(name) {
+        None => Ok(None),
+        Some(value) => match pointer(value)? {
+            0 => Ok(None),
+            id => Ok(Some(instance.selector(id)?)),
+        },
+    }
+}
+
 fn optional_cloned(
     instance: &UiInstance,
     fields: &Value,
@@ -432,6 +599,41 @@ struct CellBinding {
     highlight_setting: String,
     neutral_title: String,
     neutral_setting: String,
+    /// The `UIPartsThumbnail` of the highlighted and of the neutral contents
+    /// (absent when the prefab has none).
+    highlight_jacket: Option<String>,
+    neutral_jacket: Option<String>,
+    /// The `UIPartsThumbnail` image of each of them (its `thumbnailImage`,
+    /// once the pool instance addresses it): the record's jacket is bound
+    /// there while it is loaded, and the image stays off otherwise.
+    jacket_images: [Option<String>; 2],
+}
+
+/// A `UIPartsThumbnail`'s image: the `thumbnailImage` its fields name (a
+/// CustomRawImage). A thumbnail that names none, or one of another prefab,
+/// shows no jacket and is named.
+fn thumbnail_image(node: &moly_assets::ui_layout::UiNode, doc: &UiPrefab) -> Result<i64, String> {
+    let thumbnail = node
+        .components
+        .iter()
+        .find(|component| component.class.ends_with(".UIPartsThumbnail"))
+        .ok_or_else(|| format!("{} is not a UIPartsThumbnail", node.path))?;
+    let id = thumbnail
+        .fields
+        .get("thumbnailImage")
+        .ok_or_else(|| format!("{}: UIPartsThumbnail has no thumbnailImage", node.path))
+        .and_then(pointer)?;
+    if id == 0 {
+        return Err(format!("{}: UIPartsThumbnail names no image", node.path));
+    }
+    doc.find(&format!("@{id}"))?;
+    Ok(id)
+}
+
+/// The selector of component `id` among the pool's instances, when it sits
+/// in one of their subtrees.
+fn instance_selector(instances: &[UiInstance], id: i64) -> Option<String> {
+    instances.iter().find_map(|instance| instance.selector(id).ok())
 }
 
 pub(crate) struct Bindings {
@@ -463,27 +665,42 @@ pub(crate) struct Bindings {
     artist: String,
     vocal: String,
     /// The marquee objects `MusicInfoContent.Setup` shows when their text is
-    /// non-empty: (marquee, which text).
-    marquees: [String; 3],
+    /// non-empty: title, artist, vocal.
+    title_marquee: String,
+    artist_marquee: String,
+    vocal_marquee: String,
+    /// The marquees' masks and texts, measured on the first placed frame.
+    marquees: Vec<MarqueeText>,
     playing: Vec<String>,
     stopped: Vec<String>,
     switch_button: String,
     change_vocal_button: String,
     jacket_shadow: String,
+    /// `_jacketThumbnailImage` (the jacket's image, a CustomRawImage) and
+    /// `_blurJacket` (`UIPartsBlurMusicJacket`'s thumbnail image).
+    jacket: String,
+    blur_jacket: String,
+    /// `_collaborationObj` and the text in it: shown with a record whose
+    /// music belongs to a collaboration, the text being its label.
+    collaboration: String,
+    /// `_systemFixtureIcon`: shown once the type icon master names its
+    /// texture.
+    fixture_icon: String,
+    /// `_recordAnimationTransform`: the record's roll-in and turns.
+    record_animation: String,
     filter_button: String,
     filter_off: String,
     filter_on: String,
 }
 
 /// The contents fields a record cell turns off: the difficulty, clear
-/// status, video-type and lock parts, the check box, the badge (the
+/// status, video-type and lock parts, the check box and the badge (the
 /// Mysekai-record branch of `MusicSelectListCellContentsBase.Setup` turns
-/// off the video-type objects), and the parts without a presenter here.
-/// `MusicSelectListCellHighLightContents.LoadJacket` calls
-/// `UIPartsSpectrumAnalyzer.Show` for a Mysekai record, so `spectrum` stays
-/// visible even though this screen does not drive its bars.
+/// off the video-type objects). `MusicSelectListCellHighLightContents.LoadJacket`
+/// calls `UIPartsSpectrumAnalyzer.Show` for a Mysekai record and both
+/// contents load their jacket, so the spectrum analyser and the jacket
+/// thumbnails stay visible.
 const HIGHLIGHT_OFF: &[&str] = &[
-    "jacketThumbnail",
     "musicDifficultyPlayLevel",
     "uiPartsGroupMusicDifficultyClearStatus",
     "mv3dObj",
@@ -499,7 +716,6 @@ const HIGHLIGHT_OFF: &[&str] = &[
     "vocalLockButton",
 ];
 const NEUTRAL_OFF: &[&str] = &[
-    "jacketThumbnail",
     "musicDifficultyPlayLevel",
     "uiPartsGroupMusicDifficultyClearStatus",
     "mv3dObj",
@@ -590,23 +806,12 @@ fn compose(layouts: &UiLayouts) -> Result<(UiPrefab, Bindings), String> {
     .fields
     .clone();
 
-    let mut hidden = Vec::new();
     // The tab list, sort dropdown, free-word field, filter button and view
     // toggle are composed by `Resume`: `CreateTabData` (CreateFilteringTabDataList
     // -> `MusicSelectUnitTabList.Initialize`), `SetupFilterContent`,
     // `SetSortOptions`, `SetFilterButton`, and `MusicSelectChangeViewButton.Setup`
     // in `MusicSelect.Setup`. None of them is ever deactivated, so they show at
-    // boot with zero records too. Only the player-view images below have no
-    // presenter here.
-    for name in [
-        "_jacketThumbnailImage",
-        "_blurJacket",
-        "_systemFixtureIcon",
-        "_collaborationObj",
-    ] {
-        hidden.push(field(&player, name)?);
-    }
-
+    // boot with zero records too.
     let content = field(&scroll, "m_Content")?;
     let viewport = field(&scroll, "m_Viewport")?;
     let source_content_position =
@@ -636,6 +841,7 @@ fn compose(layouts: &UiLayouts) -> Result<(UiPrefab, Bindings), String> {
         &cell_doc.prefab,
         names.iter().map(String::as_str),
     )?;
+    let mut hidden = Vec::new();
     let mut cells = Vec::new();
     for instance in &instances {
         hidden.extend(optional_cloned(instance, &highlight, HIGHLIGHT_OFF)?);
@@ -657,24 +863,52 @@ fn compose(layouts: &UiLayouts) -> Result<(UiPrefab, Bindings), String> {
             highlight_setting: cloned(instance, &highlight, "mysekaiBGMSettingObj")?,
             neutral_title: cloned(instance, &neutral, "title")?,
             neutral_setting: cloned(instance, &neutral, "mysekaiBGMSettingObj")?,
+            highlight_jacket: optional(instance, &highlight, "jacketThumbnail")?,
+            neutral_jacket: optional(instance, &neutral, "jacketThumbnail")?,
+            jacket_images: [None, None],
         });
     }
+    // The jacket images are looked up in the cell prefab, which the
+    // instances name by the selector of the same node below them.
+    let mut named_gap = false;
+    for cell in &mut cells {
+        for (slot, path) in [&cell.highlight_jacket, &cell.neutral_jacket].into_iter().enumerate()
+        {
+            let image = path.as_deref().and_then(|path| {
+                let node = &doc.nodes[doc.find(path).ok()?];
+                let image = thumbnail_image(node, cell_doc).ok()?;
+                instance_selector(&instances, image)
+            });
+            if image.is_none() && !named_gap {
+                warn!("[bgm-select] the list cells show no jacket: the cell prefab's UIPartsThumbnail names no image in it");
+                named_gap = true;
+            }
+            cell.jacket_images[slot] = image;
+        }
+    }
 
-    // SetupImages: the eight named assets of the player view's package.
+    // SetupImages: the record bases take the package's texture (a RawImage),
+    // the rest are Images (`_recordBaseImageArray`, then the named ones).
     let mut images = Vec::new();
     for node in local_list(&player, "_recordBaseImageArray")? {
-        images.push((node, "bg_base_circle_h240_wh"));
+        images.push((node, RECORD_BASE_ASSET.to_owned()));
     }
-    for (name, asset) in [
-        ("_bgImage", "bg_mysekai_music_player"),
-        ("_bgBottomImage", "bg_mysekai_music_player_bottom"),
-        ("_setOnBgmButtonImage", "btn_bgm_set_on"),
-        ("_setOffBgmButtonImage", "btn_bgm_set_off"),
-        ("_changeVocalButtonImage", "btn_mysekai_vocal_change"),
-        ("_playOffImage", "icon_mysekai_music_prayer_off"),
-        ("_playOnImage", "icon_mysekai_music_prayer_on"),
+    for name in [
+        "_bgImage",
+        "_bgBottomImage",
+        "_setOnBgmButtonImage",
+        "_setOffBgmButtonImage",
+        "_changeVocalButtonImage",
+        "_playOffImage",
+        "_playOnImage",
     ] {
-        images.push((field(&player, name)?, asset));
+        let texture = doc.nodes[doc.find(&field(&player, name)?)?]
+            .components
+            .iter()
+            .find_map(|component| component.sprite.as_ref()?.get("name")?.as_str())
+            .unwrap_or_default()
+            .to_owned();
+        images.push((field(&player, name)?, texture));
     }
     let images = images
         .into_iter()
@@ -724,16 +958,20 @@ fn compose(layouts: &UiLayouts) -> Result<(UiPrefab, Bindings), String> {
         title: field(&info, "musicTitle")?,
         artist: field(&info, "_artistName")?,
         vocal: field(&info, "musicVocalName")?,
-        marquees: [
-            field(&info, "musicTitleMarquee")?,
-            field(&info, "_artistNameMarquee")?,
-            field(&info, "musicVocalNameMarquee")?,
-        ],
+        title_marquee: field(&info, "musicTitleMarquee")?,
+        artist_marquee: field(&info, "_artistNameMarquee")?,
+        vocal_marquee: field(&info, "musicVocalNameMarquee")?,
+        marquees: Vec::new(),
         playing: local_list(&player, "_playingObjects")?,
         stopped: local_list(&player, "_stoppedObjects")?,
         switch_button: field(&player, "_switchPlayStatusButton")?,
         change_vocal_button: field(&player, "_changeVocalButton")?,
         jacket_shadow: field(&player, "_jacketShadow")?,
+        jacket: field(&player, "_jacketThumbnailImage")?,
+        blur_jacket: field(&player, "_blurJacket")?,
+        collaboration: field(&player, "_collaborationObj")?,
+        fixture_icon: field(&player, "_systemFixtureIcon")?,
+        record_animation: field(&player, "_recordAnimationTransform")?,
         filter_button: field(&view, "filterButton")?,
         filter_off: field(&view, "filterOffImage")?,
         filter_on: field(&view, "filterOnImage")?,
@@ -796,7 +1034,9 @@ fn bind_header(doc: &UiPrefab, view: &mut UiPrefabView) -> Result<String, String
     Ok(selector)
 }
 
-/// The two sliced Sprites' authored metrics.
+/// The player images' authored Sprite metrics: a replacement drawn by the
+/// Image rules needs the Sprite's rect, border and pixels per unit, which an
+/// extracted PNG does not carry.
 fn register_sprites(layouts: &mut UiLayouts) -> usize {
     let Some(sprites) = layouts.runtime_sprites().cloned() else {
         return 0;
@@ -922,7 +1162,20 @@ pub(crate) fn spawn_when_ready(
         );
         state.refused_textures.extend(missing);
     }
+    // `SystemFixtureIcon.Setup(MysekaiSystemFixtureType.music_play)`: the
+    // type's icon, once the type icon master and the root's texture name it.
+    match fixture::music_play_alias(&layouts) {
+        Some(alias) => {
+            view.set_visible(&bindings.fixture_icon, true);
+            view.set_texture(&bindings.fixture_icon, &alias);
+        }
+        None => {
+            view.set_visible(&bindings.fixture_icon, false);
+            warn!("[bgm-select] the player view's fixture icon stays off: the fixture type icon master names no icon the UI root carries");
+        }
+    }
     state.bound = vec![None; bindings.cells.len()];
+    state.marquees = vec![Marquee::default(); 3];
     commands.spawn((
         BgmSelectRoot { bindings },
         Visibility::Hidden,
@@ -941,6 +1194,19 @@ pub(crate) fn spawn_when_ready(
         header,
     ));
     commands.insert_resource(BgmSelectSpawned);
+}
+
+/// Reports a missing texture once, by its alias: the first frame would
+/// otherwise name it every frame.
+fn refuse_once(refused: &mut BTreeSet<String>, alias: &str, what: &str) {
+    if refused.insert(alias.to_owned()) {
+        warn!("[bgm-select] {what}: the UI root carries no runtime texture {alias}; it stays off");
+    }
+}
+
+/// The runtime alias of a record's jacket (bound once its load has arrived).
+fn jacket_alias(record: i32) -> String {
+    format!("{TEXTURE_PREFIX}jacket/{record}")
 }
 
 // ---------------------------------------------------------------------------
@@ -992,6 +1258,17 @@ fn setup_player_view(presenter: &Presenter, choice: &mut crate::audio::RecordCho
     );
 }
 
+/// Marks the cells whose selection the next frame changes (they fade in, see
+/// [`CELL_UNHIGHLIGHTED_ALPHA`]).
+fn fade_cells(faded_in: &mut BTreeSet<i32>, previous: Option<i32>, next: Option<i32>) {
+    if let Some(previous) = previous {
+        faded_in.insert(previous);
+    }
+    if let Some(next) = next {
+        faded_in.insert(next);
+    }
+}
+
 /// Update, after the screen manager: the layer's hooks.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn follow_screen(
@@ -1015,6 +1292,10 @@ pub(crate) fn follow_screen(
             ScreenHook::OnBoot => {
                 state.scroll = 0.;
                 state.map_pending = true;
+                state.player = record::Player::default();
+                state.player_text = None;
+                state.greeting = None;
+                state.greeting_bubble = None;
                 let Some(boot) = state.boot.take() else {
                     error!("[bgm-select] OnBoot without ScreenLayerMysekaiBGMSelectBootData (pushed without MoveScreenLayerMysekaiBGMSelect): no presenter");
                     continue;
@@ -1052,6 +1333,12 @@ pub(crate) fn follow_screen(
                     models,
                     site_row.map(|row| row.mysekai_music_record_id),
                 );
+                // Source 3 clears `isPlayingRecord`; `PlaySelectBgm` then makes
+                // the player view call back, which sets it again. The record
+                // that call plays is the highlighted one.
+                if presenter.model(presenter.select).is_some() {
+                    presenter.playing_record = true;
+                }
                 // A saved filter may hide the record the default selection
                 // picked: Resume's rule keeps the highlighted record only
                 // when it is displayed.
@@ -1217,6 +1504,147 @@ fn row_layout(
     (rows, top)
 }
 
+/// The player view's marquees and the record's roll-in origin, read from the
+/// laid-out document on the first frame the root is drawn.
+fn measure(bindings: &mut Bindings, doc: &UiPrefab, layouts: &UiLayouts, view: &UiPrefabView, canvas: Vec2) {
+    if bindings.marquees.is_empty() {
+        let marquees = [
+            bindings.title_marquee.clone(),
+            bindings.artist_marquee.clone(),
+            bindings.vocal_marquee.clone(),
+        ];
+        bindings.marquees = marquees
+            .into_iter()
+            .filter_map(|marquee| {
+                crate::balloon::marquee_text(layouts, doc, view, &marquee, canvas)
+            })
+            .collect();
+    }
+}
+
+/// One marquee frame: `UIPartsMarquee.Init` for a new text, else
+/// `UpdateMarquee`. A text is wider than its mask when its width (measured
+/// with the balloon atlas's advances, the only font metrics available to this
+/// module) passes the mask's width; where the marquee puts the text is
+/// returned for the host to write.
+fn scroll_marquee(
+    spec: &MarqueeText,
+    marquee: &mut Marquee,
+    art: Option<&crate::balloon::BalloonArt>,
+    text: &str,
+    fresh: bool,
+    dt: f32,
+) -> f32 {
+    let width = art
+        .map(|art| crate::balloon::text_extent(art, text, INFO_FONT_SIZE, INFO_LINE_SPACING).width)
+        .unwrap_or(0.);
+    let needed = width > spec.mask_half_width * 2.;
+    // `GetInitPositionX` is the text's centre column times its pivot (it
+    // keeps the text where the layout put it); `GetRestartPositionX` puts the
+    // text's right edge `MARQUEE_LATERAL` past the mask's left edge;
+    // `GetEndPositionX` puts its left edge `MARQUEE_LATERAL` inside the
+    // mask's right edge.
+    let init_x = spec.text_centre * spec.text_pivot;
+    let restart_x = spec.mask_centre - spec.mask_half_width - MARQUEE_LATERAL + width * 0.5;
+    let end_x = spec.mask_centre + spec.mask_half_width + MARQUEE_LATERAL - width * 0.5;
+    crate::balloon::step_marquee(
+        marquee,
+        fresh,
+        needed,
+        dt,
+        MARQUEE_SPEED,
+        MARQUEE_WAIT_SECONDS,
+        init_x,
+        restart_x,
+        end_x,
+    )
+}
+
+/// Raises the record player's greeting: a balloon over the jacket, parented
+/// below the jacket's image so it goes with the screen's view, drawn on the
+/// layer the screen's views draw on. `fx_mysekai_bgm_select_record`'s
+/// greeting event is not in the public asset root; the HUD's balloon is this
+/// port's stand-in for it.
+#[allow(clippy::too_many_arguments)]
+fn raise_greeting(
+    commands: &mut Commands,
+    greeting: &mut Option<String>,
+    greeting_bubble: &mut Option<Entity>,
+    root: Entity,
+    art: Option<&crate::balloon::BalloonArt>,
+    jacket: &str,
+    text: &str,
+    layers: Option<&BubbleLayers>,
+) {
+    let Some(art) = art else {
+        return;
+    };
+    // The bubble hangs below the jacket's image: its place in the player
+    // view, and its life, are the screen view's.
+    let layer = layers.map_or(SITEMAP_LAYER, |layers| layers.0);
+    let bubble = crate::balloon::show_screen_bubble(commands, root, jacket, art, layer, text);
+    *greeting = Some(text.to_owned());
+    *greeting_bubble = Some(bubble);
+}
+
+/// Places the greeting at the jacket's image: the bubble's root sits above
+/// the image's top edge, centred on it (the HUD balloon's arrow points down
+/// at the image).
+fn place_greeting(
+    commands: &mut Commands,
+    view: &UiPrefabView,
+    layouts: &UiLayouts,
+    jacket: &str,
+    bubble: Entity,
+    canvas: Vec2,
+) {
+    let (Some(doc), Some(rects)) = (layouts.document(view.key), view.rects(layouts, canvas)) else {
+        return;
+    };
+    let Ok(index) = doc.find(jacket) else {
+        return;
+    };
+    let rect = &rects[index];
+    let top = rect.center().y + rect.size.y * (1. - rect.pivot.y);
+    commands
+        .entity(bubble)
+        .insert(Transform::from_xyz(rect.center().x, top, 0.));
+}
+
+/// Takes the greeting down.
+fn stop_greeting(commands: &mut Commands, greeting: &mut Option<String>, greeting_bubble: &mut Option<Entity>) {
+    if let Some(bubble) = greeting_bubble.take() {
+        commands.entity(bubble).despawn();
+    }
+    *greeting = None;
+}
+
+/// One cell's jacket images: a record whose jacket has arrived shows it (the
+/// image keeps its rect), and the record without one shows nothing.
+fn jacket_cells(
+    cell: &CellBinding,
+    record: i32,
+    jackets: Option<&jacket::Jackets>,
+    view: &mut UiPrefabView,
+) {
+    let jacket = jackets.and_then(|jackets| jackets.image(record));
+    for image in cell.jacket_images.iter().flatten() {
+        match jacket {
+            Some(jacket) => {
+                // `UIPartsThumbnailOnLoadSuccess`: the image is enabled and
+                // shows the jacket. The fit to the jacket's aspect needs the
+                // loaded image's size, which the UI layout does not key, so
+                // the image keeps its rect.
+                let alias = jacket_alias(record);
+                let _ = jacket;
+                view.set_visible(image, true);
+                view.set_texture(image, &alias);
+            }
+            None => view.set_visible(image, false),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) fn place(
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -1225,7 +1653,8 @@ pub(crate) fn place(
     layouts: Res<UiLayouts>,
     mut roots: Query<
         (
-            &BgmSelectRoot,
+            Entity,
+            &mut BgmSelectRoot,
             &mut UiPrefabView,
             &mut Visibility,
             &mut Transform,
@@ -1243,13 +1672,16 @@ pub(crate) fn place(
     >,
     root_canvas: Option<Res<crate::canvas::RootCanvas>>,
     details: Option<Res<dialogs::Details>>,
+    jackets: Option<Res<jacket::Jackets>>,
+    art: Option<Res<crate::balloon::BalloonArt>>,
+    bubble_layers: Option<Res<BubbleLayers>>,
+    time: Res<Time>,
+    mut commands: Commands,
+    mut choice: ResMut<crate::audio::RecordChoice>,
 ) {
     let open = stack.current() == SCREEN;
     if open != state.was_open {
-        info!(
-            "[bgm-select] screen {}",
-            if open { "shown" } else { "closed" }
-        );
+        info!("[bgm-select] screen {}", if open { "shown" } else { "closed" });
         state.was_open = open;
     }
     let (Ok(window), Some(root_canvas)) = (windows.single(), root_canvas.as_deref()) else {
@@ -1257,21 +1689,14 @@ pub(crate) fn place(
     };
     let scale = root_canvas.scale(window);
     let canvas = root_canvas.size(window);
-    let visibility_of = |open: bool| {
-        if open {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        }
-    };
     for (_, _, mut visibility, mut transform) in &mut headers {
-        visibility.set_if_neq(visibility_of(open));
+        visibility.set_if_neq(if open { Visibility::Inherited } else { Visibility::Hidden });
         crate::canvas::set_scale(&mut transform, scale);
     }
-    let Ok((root, mut view, mut visibility, mut transform)) = roots.single_mut() else {
+    let Ok((roots_entity, root, mut view, mut visibility, mut transform)) = roots.single_mut() else {
         return;
     };
-    visibility.set_if_neq(visibility_of(open));
+    visibility.set_if_neq(if open { Visibility::Inherited } else { Visibility::Hidden });
     crate::canvas::set_scale(&mut transform, scale);
     if !open {
         return;
@@ -1279,19 +1704,21 @@ pub(crate) fn place(
     let Some(doc) = layouts.document(RUNTIME) else {
         return;
     };
+    let dt = time.delta_secs();
+    let (mut root, mut view, mut visibility, mut transform) = (root, view, visibility, transform);
+    measure(&mut root.bindings, doc, &layouts, &view, canvas);
     let bindings = &root.bindings;
+    let greeting_bubble = state.greeting_bubble;
     let state = &mut *state;
-    // The controls `Resume` composes, in the state it composes them:
-    // `SwitchListViewMode(ListViewMode)` with the prefab's serialized
-    // `ListViewMode = 0` (list), `MusicSelectChangeViewButton.Setup(0)`
-    // (`_listModeContents` only), `SetSortOptions` (caption = option 0 =
-    // `WORD_DEFAULT`) and `FreeWordFilterContent` with an empty field (its
-    // clear button off).
     view.set_visible(&bindings.grid_view, false);
     view.set_visible(&bindings.view_grid_contents, false);
     view.set_visible(&bindings.view_list_contents, true);
     view.set_visible(&bindings.clear_text, false);
     view.set_text(&bindings.sort_label, layouts.wording("WORD_DEFAULT"));
+    state.wanted.clear();
+    if let Some(record) = state.presenter.as_ref().and_then(|presenter| presenter.select) {
+        state.wanted.insert(record);
+    }
     let Some(presenter) = state.presenter.as_ref() else {
         for cell in &bindings.cells {
             view.set_visible(&cell.root, false);
@@ -1301,20 +1728,44 @@ pub(crate) fn place(
         return;
     };
     let display = dialogs::display(presenter, &state.filter, details.as_deref());
-
+    // The record animation's play and loop callbacks; they change the
+    // presenter, so they run once this frame's layout has read it.
+    let mut record_event = (false, false);
     // The player view (MysekaiBGMPlayerView.Setup / SetupEmpty).
     match presenter.model(presenter.select) {
         Some(model) => {
             view.set_text(&bindings.title, model.title.clone());
             view.set_text(&bindings.artist, model.artist.clone());
             view.set_text(&bindings.vocal, model.vocal_name.clone());
-            for (marquee, text) in
-                bindings
-                    .marquees
-                    .iter()
-                    .zip([&model.title, &model.artist, &model.vocal_name])
-            {
-                view.set_visible(marquee, !text.is_empty());
+            let text = (
+                model.title.clone(),
+                model.artist.clone(),
+                model.vocal_name.clone(),
+            );
+            let fresh = state.player_text.as_ref() != Some(&text);
+            if fresh {
+                // `MusicInfoContent.Setup`: new text restarts every marquee.
+                state.player_text = Some(text.clone());
+            }
+            for (marquee, empty) in [
+                (&bindings.title_marquee, text.0.is_empty()),
+                (&bindings.artist_marquee, text.1.is_empty()),
+                (&bindings.vocal_marquee, text.2.is_empty()),
+            ] {
+                view.set_visible(marquee, !empty);
+            }
+            let texts = [text.0.as_str(), text.1.as_str(), text.2.as_str()];
+            for (index, text) in texts.into_iter().enumerate() {
+                let (Some(spec), Some(run)) =
+                    (bindings.marquees.get(index), state.marquees.get_mut(index))
+                else {
+                    continue;
+                };
+                if text.is_empty() {
+                    continue;
+                }
+                let x = scroll_marquee(spec, run, art.as_deref(), text, fresh, dt);
+                view.set_anchored_position(&spec.text, Vec2::new(x, 0.));
             }
             let setting = presenter.is_setting_music();
             for node in &bindings.playing {
@@ -1325,18 +1776,65 @@ pub(crate) fn place(
             }
             view.set_visible(&bindings.jacket_shadow, true);
             set_enabled(&mut view, doc, &bindings.switch_button, true);
-            set_enabled(
+            set_enabled(&mut view, doc, &bindings.change_vocal_button, model.multiple_vocals);
+            // `LoadJacket`: the jacket's image and the blurred background;
+            // until the jacket arrives both stay off, as with no jacket.
+            let jacket = jackets
+                .as_deref()
+                .and_then(|jackets| jackets.image(model.record_id));
+            view.set_visible(&bindings.jacket, jacket.is_some());
+            view.set_visible(&bindings.blur_jacket, jacket.is_some());
+            if jacket.is_some() {
+                view.set_texture(&bindings.jacket, &jacket_alias(model.record_id));
+                view.set_texture(&bindings.blur_jacket, &jacket_alias(model.record_id));
+            }
+            // `SetCollaborationText`: `model.MasterMusicCollaboration.Label`,
+            // which the record model does not carry here (a named gap), so
+            // the label and the greeting fall back to the record's title.
+            let label: Option<String> = None;
+            view.set_visible(&bindings.collaboration, label.is_some());
+            if let Some(label) = label.clone() {
+                view.set_text(&bindings.collaboration, label);
+            }
+            let events = record::animate(
+                presenter,
+                &mut state.player,
                 &mut view,
-                doc,
-                &bindings.change_vocal_button,
-                model.multiple_vocals,
+                &bindings.record_animation,
+                dt,
             );
+            let (played, looped) = (events.played, events.looped);
+            let greeting = label.unwrap_or_else(|| model.title.clone());
+            let wanted = jacket.is_some() && presenter.is_setting_music();
+            if !wanted && greeting_bubble.is_some() {
+                stop_greeting(&mut commands, &mut state.greeting, &mut state.greeting_bubble);
+            } else if wanted && (state.greeting.as_deref() != Some(greeting.as_str())) {
+                stop_greeting(&mut commands, &mut state.greeting, &mut state.greeting_bubble);
+                raise_greeting(
+                    &mut commands,
+                    &mut state.greeting,
+                    &mut state.greeting_bubble,
+                    roots_entity,
+                    art.as_deref(),
+                    &bindings.jacket,
+                    &greeting,
+                    bubble_layers.as_deref(),
+                );
+            }
+            record_event = (played, looped);
+            if let Some(bubble) = greeting_bubble {
+                place_greeting(&mut commands, &view, &layouts, &bindings.jacket, bubble, canvas);
+            }
         }
         None => {
             for text in [&bindings.title, &bindings.artist, &bindings.vocal] {
                 view.set_text(text, String::new());
             }
-            for marquee in &bindings.marquees {
+            for marquee in [
+                &bindings.title_marquee,
+                &bindings.artist_marquee,
+                &bindings.vocal_marquee,
+            ] {
                 view.set_visible(marquee, false);
             }
             for node in &bindings.playing {
@@ -1346,23 +1844,29 @@ pub(crate) fn place(
                 view.set_visible(node, true);
             }
             view.set_visible(&bindings.jacket_shadow, false);
+            view.set_visible(&bindings.jacket, false);
+            view.set_visible(&bindings.blur_jacket, false);
+            view.set_visible(&bindings.collaboration, false);
             set_enabled(&mut view, doc, &bindings.switch_button, false);
             set_enabled(&mut view, doc, &bindings.change_vocal_button, false);
+            record::animate(
+                presenter,
+                &mut state.player,
+                &mut view,
+                &bindings.record_animation,
+                dt,
+            );
+            if greeting_bubble.is_some() {
+                stop_greeting(&mut commands, &mut state.greeting, &mut state.greeting_bubble);
+            }
         }
     }
-    // `MusicSelect.SetupListView`/`UpdateMusicDataList`: the list view is
-    // deactivated while the displayed list is empty (its container stays, as
-    // `SwitchListViewMode` left it), and `notFilterResultObject` is active
-    // exactly then.
-    let empty = display.is_empty();
-    view.set_visible(&bindings.list_view, !empty);
-    view.set_visible(&bindings.not_found, empty);
+
+    let (rows, height) = row_layout(presenter, bindings, &display);
+    view.set_visible(&bindings.list_view, !display.is_empty());
+    view.set_visible(&bindings.not_found, display.is_empty());
     view.set_visible(&bindings.filter_on, state.filter.is_filtered());
     view.set_visible(&bindings.filter_off, !state.filter.is_filtered());
-
-    // The list: content height, scroll clamp, the pool bound to the rows the
-    // viewport shows.
-    let (rows, height) = row_layout(presenter, bindings, &display);
     view.set_size_delta(&bindings.content, Vec2::new(0., height));
     let viewport_height = view
         .rect(&layouts, &bindings.viewport, canvas)
@@ -1389,30 +1893,43 @@ pub(crate) fn place(
         }
         let model = &presenter.all[display[row]];
         bound[slot] = Some(model.record_id);
+        state.wanted.insert(model.record_id);
         view.set_visible(&cell.root, true);
         view.set_anchored_position(&cell.root, Vec2::new(0., -top));
         view.set_size_delta(&cell.root, Vec2::new(bindings.cell_size.x, h));
         let selected = presenter.select == Some(model.record_id);
         view.set_visible(&cell.highlight, selected);
         view.set_visible(&cell.neutral, !selected);
+        let fading = state.faded_in.remove(&model.record_id);
+        view.set_alpha(&cell.highlight, if fading { CELL_UNHIGHLIGHTED_ALPHA } else { 1. });
+        view.set_alpha(&cell.neutral, if fading { CELL_UNHIGHLIGHTED_ALPHA } else { 1. });
         view.set_text(&cell.highlight_title, model.title.clone());
         view.set_text(&cell.neutral_title, model.title.clone());
         view.set_text(&cell.highlight_artist, model.artist.clone());
         view.set_text(&cell.highlight_vocal, model.vocal_name.clone());
-        // IsSettingBGM: the chosen record's setting mark.
         let is_setting = presenter.setting == Some(model.record_id);
         view.set_visible(&cell.highlight_setting, is_setting);
         view.set_visible(&cell.neutral_setting, is_setting);
+        jacket_cells(cell, model.record_id, jackets.as_deref(), &mut view);
     }
     if bound.iter().all(Option::is_some) && first + bound.len() < rows.len() {
         let last = first + bound.len() - 1;
         if rows[last].0 + rows[last].1 < state.scroll + viewport_height {
-            warn!(
-                "[bgm-select] the {CELL_POOL}-cell pool does not fill a {viewport_height:.0}-unit viewport"
-            );
+            warn!("[bgm-select] the {CELL_POOL}-cell pool does not fill a {viewport_height:.0}-unit viewport");
         }
     }
     state.bound = bound;
+    match record_event {
+        (true, _) => {
+            info!("[bgm-select] {}", record::callback("play"));
+            state.on_record_played(&mut choice);
+        }
+        (false, true) => {
+            info!("[bgm-select] {}", record::callback("loop"));
+            state.on_record_looped(&mut choice);
+        }
+        _ => {}
+    }
 
     if std::mem::take(&mut state.map_pending) {
         let size = Vec2::new(window.width(), window.height());
@@ -1600,6 +2117,7 @@ pub(crate) fn click(
                 .map(|(cell, _)| cell.button.clone())
                 .unwrap_or_default();
             sounds.source_button(&layouts, view.key, &cell);
+            fade_cells(&mut state.faded_in, presenter.select, Some(record));
             presenter.on_select(record);
             info!("[bgm-select] cell record {record} -> OnSelectMusic");
             setup_player_view(presenter, &mut choice);
@@ -1734,11 +2252,17 @@ pub(crate) fn tap_instrument(
 
 pub(crate) fn install(app: &mut App) {
     app.init_resource::<BgmSelect>()
+        .init_resource::<jacket::Jackets>()
         .add_systems(Startup, load)
         .add_systems(
             Update,
             (
                 parse.before(crate::balloon::bake_atlas),
+                fixture::keep,
+                file_remembered,
+                jacket::advance
+                    .after(file_remembered)
+                    .before(spawn_when_ready),
                 spawn_when_ready,
                 tap_instrument.before(crate::gesture::advance),
                 open.after(crate::action_button::click)

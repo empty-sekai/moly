@@ -249,6 +249,8 @@ const DOCUMENTS: &[(&str, &str)] = &[
 /// it refuses by name. Every other document is required.
 const OPTIONAL_DOCUMENTS: &[(&str, &str)] = &[
     ("CommonReward", "menu/CommonRewardSubWindowDialog.json"),
+    ("RecoverBoostStamina", "menu/MysekaiRecoverBoostStaminaDialog.json"),
+    ("BoostStaminaConfirm", "menu/BoostStaminaRecoverConfirmDialog.json"),
     ("HonorReward", "menu/HonorRewardSubWindowDialog.json"),
     ("RefreshBirthdayPlant", "menu/MysekaiRefreshBirthdayPlantSubWindowDialog.json"),
     ("HonorImage", "menu/UIPartsHonorImage.json"),
@@ -866,6 +868,20 @@ impl UiLayouts {
         image
     }
 
+    /// Binds a texture a host loads itself (an image fetched from a remote
+    /// host) under `alias`, without a path of this UI root: the image is
+    /// already in `Assets<Image>` under `image`. Rebinding an alias is
+    /// refused, as in [`UiLayouts::register_runtime_texture`].
+    pub(crate) fn bind_runtime_texture(&mut self, alias: &str, image: Handle<Image>) {
+        let path = format!("host:{alias}");
+        if let Some(previous) = self.runtime_textures.get(alias) {
+            assert_eq!(previous, &path, "runtime UI texture alias was rebound: {alias}");
+            return;
+        }
+        self.images.entry(path.clone()).or_insert(image);
+        self.runtime_textures.insert(alias.to_owned(), path);
+    }
+
     /// Replace one runtime-composed document, including its asset ownership
     /// and caches. Source templates must be requested before the initial text
     /// atlas bake: this invalidates glyph draw caches, not the atlas repertoire.
@@ -1458,6 +1474,10 @@ struct Override {
     alpha: Option<f32>,
     anchored_position: Option<Vec2>,
     size_delta: Option<Vec2>,
+    /// (anchored position, local rotation), set by code.
+    transform: Option<(Vec2, Quat)>,
+    /// A local rotation set by code on its own.
+    rotation: Option<Quat>,
     /// `Graphic.color` set by code on the Graphic component with this id.
     graphic_color: Option<(i64, [f32; 4])>,
     /// `Behaviour.enabled` set by code on the component with this id (read by
@@ -1540,6 +1560,8 @@ impl UiPrefabView {
                 || value.slider != old.slider
                 || value.anchored_position != old.anchored_position
                 || value.size_delta != old.size_delta
+                || value.transform != old.transform
+                || value.rotation != old.rotation
                 || value.text != old.text
                 || value.texture != old.texture
             {
@@ -1616,6 +1638,31 @@ impl UiPrefabView {
             return;
         }
         self.update(path, |v| v.anchored_position = Some(value));
+    }
+    /// A host's own transform write: node `path`'s anchor offset and its
+    /// local rotation, as the animation would set them (its local scale
+    /// stays the authored one).
+    pub(crate) fn set_transform(&mut self, path: &str, anchored: Vec2, rotation: Quat) {
+        assert!(anchored.is_finite() && rotation.is_finite(), "non-finite UI transform");
+        if self
+            .overrides
+            .get(path)
+            .is_some_and(|v| v.transform == Some((anchored, rotation)))
+        {
+            return;
+        }
+        self.update(path, |v| v.transform = Some((anchored, rotation)));
+    }
+    /// Turns node `path` to `degrees` about the z axis, about its own pivot:
+    /// the turn is a local rotation (`localEulerAngles.z`), and the anchor
+    /// offset stays the authored one.
+    pub(crate) fn set_rotation(&mut self, path: &str, degrees: f32) {
+        assert!(degrees.is_finite(), "non-finite UI rotation");
+        let rotation = Quat::from_rotation_z(degrees.to_radians());
+        if self.overrides.get(path).and_then(|v| v.rotation) == Some(rotation) {
+            return;
+        }
+        self.update(path, |v| v.rotation = Some(rotation));
     }
     /// `Graphic.color = value` on the Image component `graphic` (its node is
     /// the one `@graphic` names).
@@ -1701,6 +1748,21 @@ impl UiPrefabView {
                     .or_insert_with(|| doc.nodes[i].rect.clone())
                     .size_delta = size.to_array();
             }
+            if let Some(rotation) = value.rotation {
+                rect_overrides
+                    .entry(i)
+                    .or_insert_with(|| doc.nodes[i].rect.clone())
+                    .local_rotation = rotation.to_array();
+            }
+            if let Some((anchored, rotation)) = value.transform {
+                // A host's own transform write: the anchor offset it
+                // keeps and the local rotation it turns the node to.
+                let rect = rect_overrides
+                    .entry(i)
+                    .or_insert_with(|| doc.nodes[i].rect.clone());
+                rect.anchored_position = anchored.to_array();
+                rect.local_rotation = rotation.to_array();
+            }
             if let Some(amount) = value.slider {
                 let slider = doc.nodes[i]
                     .components
@@ -1775,6 +1837,12 @@ impl UiPrefabView {
         let doc = layouts.document(self.key)?;
         let index = doc.find(path).unwrap_or_else(|e| panic!("{e}"));
         self.resolved(layouts, canvas).map(|r| r[index].clone())
+    }
+
+    /// The rects of every node of the view, as the next draws and hit tests
+    /// read them, for a host that measures many nodes of one view.
+    pub(crate) fn rects(&self, layouts: &UiLayouts, canvas: Vec2) -> Option<Arc<Vec<UiRect>>> {
+        self.resolved(layouts, canvas)
     }
 
     /// The solved rect of the node at `path` (a unique path suffix or

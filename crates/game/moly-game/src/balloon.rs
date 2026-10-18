@@ -126,6 +126,7 @@ use moly_law::tweet::{
     pick_after_edit_tweet, AfterEditRow, TweetRow, UniformDraw, AFTER_EDIT_REACTION_DELAY_SECONDS,
     TWEET_DISPLAY_SECONDS,
 };
+use serde_json::Value;
 use std::collections::HashMap;
 
 /// 气泡层的渲染层号：主 3D 相机只看默认层 0，覆盖相机只看本层。
@@ -300,6 +301,238 @@ pub(crate) struct BalloonArt {
     /// 40×20、border 0）。
     arrow: Handle<Image>,
 }
+
+/// A text laid out by [`walk_glyphs`], centred vertically: `top` is the
+/// distance from its first line's baseline to the box's top edge (the
+/// ascender share of the largest line size), `bottom` from its last line's
+/// baseline to the bottom edge (the descender share), and `width` the widest
+/// line's pen. The player view's marquees take these numbers from the
+/// balloon atlas so that a scrolling title and a balloon lay their text out
+/// with the same advances.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct TextExtent {
+    pub(crate) top: f32,
+    pub(crate) bottom: f32,
+    pub(crate) width: f32,
+}
+
+/// The extent of `text` at `font_size` in the balloon atlas's glyphs: every
+/// character drawn by a baked glyph puts one more of its advances on the
+/// pen, and the walk's pen is the extent (the law's line widths are its
+/// arithmetic, not the walk's). The share of the font size a balloon's box
+/// adds above and below the walk is kept, so a balloon and this measure
+/// agree on where the text's first and last baselines sit.
+pub(crate) fn text_extent(
+    art: &BalloonArt,
+    text: &str,
+    font_size: f32,
+    line_spacing: f32,
+) -> TextExtent {
+    let metrics = layout_metrics(
+        text,
+        font_size,
+        FONT_FAMILY,
+        line_spacing,
+        BAKE_PPEM,
+        &|ch: char| art.advance(ch),
+    );
+    // The law's widest visible line is the extent of a text written by one
+    // style: its advances are the balloon walk's.
+    let width = metrics
+        .rect_widths
+        .iter()
+        .copied()
+        .fold(0.0, f32::max);
+    let line_count = metrics.rect_widths.len().max(1) as f32;
+    let pitch = (line_count - 1.0) * (font_size - line_spacing) / TEXT_SCALE;
+    TextExtent {
+        top: font_size * ASCENT_RATIO,
+        bottom: font_size * DESCENT_RATIO + pitch,
+        width,
+    }
+}
+
+/// One frame of a text's marquee (`UIPartsMarquee.Init` then
+/// `UpdateMarquee`), as `set_text` writes its x into the view: `init_x` is
+/// `GetInitPositionX` (half the text's width, its pivot 0.5), `restart_x` its
+/// `GetRestartPositionX` (the text's right edge at the mask's left edge, plus
+/// `lateral`), `end_x` its `GetEndPositionX` (the text's left edge at the
+/// mask's right edge, less `lateral`). `needs` is `NeedsMarqueeMoveWidth`;
+/// a text that fits is shown at its start and one that does not scrolls.
+/// A new text (`fresh`) starts over, as `MusicInfoContent.Setup`'s `Init`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn step_marquee(
+    marquee: &mut Marquee,
+    fresh: bool,
+    needs: bool,
+    dt: f32,
+    speed: f32,
+    wait_seconds: f32,
+    init_x: f32,
+    restart_x: f32,
+    end_x: f32,
+) -> f32 {
+    if fresh {
+        marquee.start(needs, init_x, restart_x, wait_seconds);
+    } else {
+        marquee.advance(needs, dt, speed, wait_seconds, restart_x, end_x);
+    }
+    marquee.x
+}
+
+/// A text the player view's marquees scroll: the text object inside a
+/// `UIPartsMarquee`, the mask the marquee clips it to and that mask's
+/// centre column, and the text's own local centre column (the node
+/// `marqueeTarget` is `UIPartsMarquee`'s, found by walking down from the
+/// marquee to the first CustomTextMesh). `text` is a node of the view the
+/// marquee draws; its x position is `UIPartsMarquee.UpdateMarquee`'s
+/// `anchoredPosition.x`.
+#[derive(Debug, Clone)]
+pub(crate) struct MarqueeText {
+    pub(crate) marquee: String,
+    pub(crate) mask: String,
+    pub(crate) text: String,
+    pub(crate) mask_centre: f32,
+    pub(crate) text_centre: f32,
+    pub(crate) mask_half_width: f32,
+    /// The text's pivot column (0 = its left edge, 1 its right edge).
+    pub(crate) text_pivot: f32,
+}
+
+/// `UIPartsMarquee`'s geometry, which is not serialized: the marquee target
+/// is the text in the marquee (the marquee object itself carries no graphic
+/// to hold it), and the mask is `mask2D`, else `softMask`, which every marquee
+/// of the player view has. A marquee with neither, or without a text under
+/// it, places no text here and is named once.
+pub(crate) fn marquee_text(
+    layouts: &crate::ui_layout::UiLayouts,
+    doc: &moly_assets::ui_layout::UiPrefab,
+    view: &crate::ui_layout::UiPrefabView,
+    marquee: &str,
+    canvas: Vec2,
+) -> Option<MarqueeText> {
+    let index = doc.find(marquee).ok()?;
+    let node = &doc.nodes[index];
+    let component = |field: &str| {
+        node.components
+            .iter()
+            .find(|component| component.class == "Sekai.UI.UIPartsMarquee")
+            .and_then(|marquee| marquee.fields[field].as_array())
+            .and_then(|pointer| pointer.get(1))
+            .and_then(Value::as_i64)
+            .filter(|id| *id != 0)
+    };
+    let referenced = |id: i64| doc.find(&format!("@{id}")).ok().map(|index| doc.nodes[index].path.as_str());
+    let mask = component("mask2D")
+        .or_else(|| component("softMask"))
+        .and_then(referenced);
+    let text = doc
+        .nodes
+        .iter()
+        .enumerate()
+        .find(|(other, node)| {
+            *other != index
+                && is_below(doc, *other, index)
+                && node
+                    .components
+                    .iter()
+                    .any(|component| component.class == "Sekai.UI.CustomTextMesh")
+        })
+        .map(|(_, node)| node.path.as_str());
+    let (Some(mask), Some(text)) = (mask, text) else {
+        warn!("[tweet] the marquee {marquee} of {} has no mask or no text target; it places no text", doc.prefab);
+        return None;
+    };
+    let rects = view.rects(layouts, canvas)?;
+    let mask_rect = rects.get(doc.find(mask).ok()?).cloned();
+    let text_rect = rects.get(doc.find(text).ok()?).cloned();
+    let (Some(mask_rect), Some(text_rect)) = (mask_rect, text_rect) else {
+        warn!("[tweet] the marquee {marquee} of {} does not name its mask or its text in the view", doc.prefab);
+        return None;
+    };
+    Some(MarqueeText {
+        marquee: marquee.to_owned(),
+        mask: mask.to_owned(),
+        text: text.to_owned(),
+        mask_centre: mask_rect.center().x,
+        text_centre: text_rect.center().x,
+        mask_half_width: mask_rect.size.x * 0.5,
+        text_pivot: text_rect.pivot.x,
+    })
+}
+
+/// Whether node `index` is a descendant of node `ancestor`.
+fn is_below(doc: &moly_assets::ui_layout::UiPrefab, index: usize, ancestor: usize) -> bool {
+    let mut cursor = doc.parent(index);
+    while let Some(parent) = cursor {
+        if parent == ancestor {
+            return true;
+        }
+        cursor = doc.parent(parent);
+    }
+    false
+}
+
+/// A scrolling text's state (`UIPartsMarquee`'s `isMove`, `isWait`,
+/// `wait_sec_cnt` and the text's x).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct Marquee {
+    moving: bool,
+    waiting: bool,
+    waited: f32,
+    pub(crate) x: f32,
+}
+
+impl Marquee {
+    /// Starts the scroll: `needed` is `UIPartsMarquee.NeedsMarqueeMoveWidth`
+    /// (the text is wider than its mask). A text that fits goes back to the start at once; a wider one
+    /// starts `UIPartsMarquee.GetInitPositionX` (the text's centre column
+    /// times its pivot) to the right of the mask (`GetRestartPositionX`),
+    /// waits `wait_sec`, then moves; `UIPartsMarquee.Init`.
+    pub(crate) fn start(&mut self, needed: bool, init_x: f32, restart_x: f32, wait_seconds: f32) {
+        self.waited = 0.0;
+        if needed {
+            self.moving = true;
+            self.x = restart_x;
+            self.waiting = wait_seconds > 0.0;
+        } else {
+            self.moving = false;
+            self.waiting = false;
+            self.x = init_x;
+        }
+    }
+
+    /// One frame of `UIPartsMarquee.UpdateMarquee`: the wait runs down, then
+    /// the text moves left at `speed`; at `end_x` it goes off and scrolls
+    /// again from `restart_x` (the marquee's end restarts it).
+    pub(crate) fn advance(
+        &mut self,
+        needed: bool,
+        dt: f32,
+        speed: f32,
+        wait_seconds: f32,
+        restart_x: f32,
+        end_x: f32,
+    ) {
+        if !needed || !self.moving {
+            return;
+        }
+        if self.waiting {
+            self.waited += dt;
+            if self.waited < wait_seconds {
+                return;
+            }
+            self.waiting = false;
+        }
+        self.x -= speed * dt;
+        if self.x <= end_x {
+            self.x = end_x;
+            self.start(true, restart_x, restart_x, wait_seconds);
+        }
+    }
+}
+
+
 
 impl BalloonArt {
     /// 取一个字符的字形格（图集图像像素坐标的矩形 + 基准推进）。
@@ -1506,8 +1739,8 @@ fn spawn_balloon(
     npc: Entity,
     unit: u32,
     row: &TweetRow,
-) {
-    spawn_balloon_text(commands, art, npc, unit, row.id, &row.text, None, false);
+) -> Entity {
+    spawn_balloon_text(commands, art, npc, unit, row.id, &row.text, None, false)
 }
 
 /// 铺一只气泡的核（对账 id 与日志由调用侧打）。
@@ -1520,6 +1753,33 @@ fn spawn_balloon_text(
     text: &str,
     probe_root: Option<Vec3>,
     probe: bool,
+) -> Entity {
+    spawn_balloon_on(
+        commands,
+        art,
+        npc,
+        unit,
+        id,
+        text,
+        probe_root,
+        probe,
+        BALLOON_LAYER,
+    )
+}
+
+/// [`spawn_balloon_text`] on a given layer, for a host that draws its bubble
+/// with its own views (the player view's greeting bubble).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_balloon_on(
+    commands: &mut Commands,
+    art: &BalloonArt,
+    npc: Entity,
+    unit: u32,
+    id: i32,
+    text: &str,
+    probe_root: Option<Vec3>,
+    probe: bool,
+    layer: usize,
 ) -> Entity {
     // 对话路径没有 face 四键：tweet 对账日志读 face 的地方全部走
     // row.id/文本侧，face 缺省 None 不进对账。
@@ -1607,7 +1867,7 @@ fn spawn_balloon_text(
             // 与顶边缩放。
             Transform::default(),
             Visibility::default(),
-            RenderLayers::layer(BALLOON_LAYER),
+            RenderLayers::layer(layer),
         ))
         .id();
     // animation 节点：入场/收场 DOScale 的作用点（真源 _animationRoot）。
@@ -1616,7 +1876,7 @@ fn spawn_balloon_text(
         .spawn((
             BalloonAnim,
             Transform::from_xyz(0.0, bg_h / 2.0, 0.0).with_scale(Vec3::ZERO),
-            RenderLayers::layer(BALLOON_LAYER),
+            RenderLayers::layer(layer),
         ))
         .id();
     commands.entity(root).add_child(anim);
@@ -1637,7 +1897,7 @@ fn spawn_balloon_text(
                     base: SHAPE_COLOR,
                     kind: PartKind::Bg,
                 },
-                RenderLayers::layer(BALLOON_LAYER),
+                RenderLayers::layer(layer),
             ))
             .id();
         commands.entity(anim).add_child(piece);
@@ -1687,7 +1947,7 @@ fn spawn_balloon_text(
                         base: color,
                         kind: PartKind::Text,
                     },
-                    RenderLayers::layer(BALLOON_LAYER),
+                    RenderLayers::layer(layer),
                 ))
                 .id();
             commands.entity(anim).add_child(glyph);
@@ -1716,7 +1976,7 @@ fn spawn_balloon_text(
                 base: SHAPE_COLOR,
                 kind: PartKind::Arrow,
             },
-            RenderLayers::layer(BALLOON_LAYER),
+            RenderLayers::layer(layer),
         ))
         .id();
     commands.entity(anim).add_child(arrow);
@@ -1860,6 +2120,9 @@ pub(crate) fn tick(
         Option<&mut HudBalloon>,
     )>,
     mut anims: Query<&mut Transform, With<BalloonAnim>>,
+    children_q: Query<&Children>,
+    mut parts: Query<(&BalloonPart, &mut RenderLayers)>,
+    layer: Option<Res<BubbleLayers>>,
     entities: &bevy::ecs::entity::Entities,
 ) {
     let dt = time.delta_secs();
@@ -1957,6 +2220,33 @@ pub(crate) fn tick(
             if let Ok(mut transform) = anims.get_mut(kid) {
                 crate::canvas::set_scale(&mut transform, scale);
             }
+        }
+        if let Some(layer) = layer.as_deref() {
+            apply_bubble_layer(layer, kids, &children_q, &mut parts);
+        }
+    }
+}
+
+/// Moves every part of a bubble to [`BubbleLayers`]' current layer (the
+/// roster `raise_bubbles` moves the root's bubble to), so a bubble raised
+/// over a screen shows on the HUD camera with all its parts: a shader draws
+/// a sprite only on a layer it renders.
+fn apply_bubble_layer(
+    layer: &BubbleLayers,
+    kids: &[Entity],
+    children_q: &Query<&Children>,
+    parts: &mut Query<(&BalloonPart, &mut RenderLayers)>,
+) {
+    let mut stack: Vec<Entity> = kids.to_vec();
+    while let Some(entity) = stack.pop() {
+        if let Ok((_, mut layers)) = parts.get_mut(entity) {
+            let wanted = RenderLayers::layer(layer.0);
+            if *layers != wanted {
+                *layers = wanted;
+            }
+        }
+        for children in children_q.get(entity) {
+            stack.extend(children.iter().collect::<Vec<_>>());
         }
     }
 }
@@ -2332,9 +2622,31 @@ pub(crate) fn order_smoke(
     );
 }
 
-/// The balloon overlay camera, which also hosts the content library's UI.
+/// The HUD overlay camera: the world's bubbles, the action buttons, the
+/// joystick and the field HUD's own views.
 #[derive(Component)]
 pub(crate) struct HudCamera;
+
+/// A bubble [`raise_bubbles`] moved to [`SCREEN_UI_LAYER`].
+#[derive(Component)]
+pub(crate) struct RaisedBubble;
+
+/// The layer a bubble is drawn on: the HUD's while the field is the current
+/// screen, the screen UI layer above it otherwise. Every part of a bubble
+/// follows it ([`tick`]), so a bubble raised over a screen draws over it.
+#[derive(Resource, Clone, Copy)]
+pub(crate) struct BubbleLayers(pub(crate) usize);
+
+impl Default for BubbleLayers {
+    fn default() -> Self {
+        Self(BALLOON_LAYER)
+    }
+}
+
+/// Whether a bubble on this layer is currently drawn over a screen.
+pub(crate) fn over_screen(layers: &BubbleLayers) -> bool {
+    layers.0 == SCREEN_UI_LAYER
+}
 
 /// Startup：气泡覆盖相机。只画 [`BALLOON_LAYER`]，不清屏——叠在 3D
 /// 画面上；渲染次序在主相机（order 0）之后。
@@ -2352,6 +2664,83 @@ pub(crate) fn overlay_camera(mut commands: Commands) {
         crate::overlay_camera::IdleWhenEmpty,
     ));
 }
+
+/// The layer world bubbles are drawn on while a screen covers the field: a
+/// screen's UI layer sits above the HUD layer, so a bubble left on
+/// [`BALLOON_LAYER`] would draw over the screen.
+pub(crate) const SCREEN_UI_LAYER: usize = 2;
+
+/// PostUpdate: a world bubble (the HUD's own: a character's tweet, a talk
+/// preview, a furniture pre-action's) is drawn on the HUD layer while the
+/// field is the current screen, and on the screen UI layer otherwise, so a
+/// pushed screen always draws over it. The bubble is only re-layered, as
+/// `HudCamera` is the first overlay camera and draws it over the screen's
+/// view; a bubble raised once stays raised until it is gone. Runs before the
+/// render pass reads the layers.
+pub(crate) fn raise_bubbles(
+    mut commands: Commands,
+    stack: Option<Res<crate::ui_layers::UiLayerStack>>,
+    mut layer: ResMut<BubbleLayers>,
+    bubbles: Query<
+        (Entity, &RenderLayers, Option<&RaisedBubble>),
+        Or<(
+            With<BalloonAnchor>,
+            With<ActivityBalloon>,
+            With<TalkPreviewBalloon>,
+        )>,
+    >,
+) {
+    let Some(stack) = stack else {
+        return;
+    };
+    let field = stack.on_field();
+    layer.0 = if field { BALLOON_LAYER } else { SCREEN_UI_LAYER };
+    for (entity, layers, raised) in &bubbles {
+        if field {
+            if raised.is_some() {
+                commands
+                    .entity(entity)
+                    .insert(RenderLayers::layer(BALLOON_LAYER))
+                    .remove::<RaisedBubble>();
+            }
+        } else if layers.intersects(&RenderLayers::layer(BALLOON_LAYER)) {
+            commands
+                .entity(entity)
+                .insert((RenderLayers::layer(SCREEN_UI_LAYER), RaisedBubble));
+        }
+    }
+}
+
+/// A bubble a screen raises for one of its own nodes (the BGM select screen's
+/// record greeting): it hangs below `owner`'s node `anchor` at that node's
+/// place, with no world anchor, and its host takes it down.
+/// `fx_mysekai_bgm_select_record`'s greeting event is not in the public asset
+/// root, so the screen raises the HUD's balloon for it.
+#[derive(Component)]
+pub(crate) struct ScreenBubble {
+    pub(crate) owner: Entity,
+    pub(crate) anchor: String,
+}
+
+/// Raises a screen bubble below the owner's node `anchor`, drawn on `layer`,
+/// and returns its root. The bubble grows with its own timer; the owner
+/// places it every frame.
+pub(crate) fn show_screen_bubble(
+    commands: &mut Commands,
+    owner: Entity,
+    anchor: &str,
+    art: &BalloonArt,
+    layer: usize,
+    text: &str,
+) -> Entity {
+    let root = spawn_balloon_on(commands, art, owner, 0, 0, text, None, false, layer);
+    commands.entity(root).insert(ScreenBubble {
+        owner,
+        anchor: anchor.to_owned(),
+    });
+    root
+}
+
 
 /// A selected furniture pre-action owns its own bubble. Background greetings
 /// stay suppressed in an independent scene; this source-authored bubble does

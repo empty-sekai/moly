@@ -11,7 +11,7 @@ use crate::{
     learn_phenomena_dialog, light, menu_dialog, menu_shell, notice_banner, npc, npc_objective,
     option_dialog, pick, player, player_avatar,
     player_state, player_talk, site, site_sound, sitemap, sky, talk, talk_camera, talk_window,
-    uber_particle, ui_layers, walk_face, weather, weather_fx,
+    uber_particle, ui_layers, walk_face, weather, weather_dialog, weather_fx,
 };
 use bevy::app::{AnimationSystems, App, PostUpdate, PreUpdate, SpawnScene, Startup, Update};
 use bevy::prelude::{ApplyDeferred, IntoScheduleConfigs};
@@ -351,6 +351,17 @@ pub fn install(app: &mut App) {
         .add_message::<joystick::ForceResetJoystick>()
         // 摆设编辑的保存回执沿（保存动作 → tweet 域 after-edit 反应）。
         .add_message::<fixture_edit::LayoutSaved>()
+        // A site change clears the layout editor's session, then harvest's
+        // and delivery's site state, in that order.
+        .add_systems(
+            crate::site::SiteChangeTeardown,
+            (
+                fixture_edit::clear_for_site_change,
+                crate::harvest::clear_for_site_change,
+                crate::delivery::clear_for_site_change,
+            )
+                .chain(),
+        )
         .init_resource::<gesture::GestureLayerState>()
         // 摇杆层状态（手势层与玩家输入都读它；缺资源会在系统参数校验
         // 处 panic，与手势层同款兜底）。
@@ -1120,18 +1131,21 @@ pub fn install(app: &mut App) {
                 .after(info::click),
         );
     // The inventory screen (screen 607): the masters at start-up (their names
-    // join the shell charset before the shared atlas bakes), the view once
-    // its layouts, the fixture thumbnails and the masters are in; taps in the
-    // same chain as the info screen; placement after the screen manager and
-    // before the prefab views draw.
+    // join the shell charset before the shared atlas bakes), the catalogue
+    // and the view once its layouts, the fixture thumbnails and the masters
+    // are in; the recycle reply's answer; taps in the same chain as the info
+    // screen; placement after the screen manager and before the prefab views
+    // draw.
     app.add_systems(Startup, crate::inventory::load)
         .add_systems(
             Update,
             (
+                crate::inventory::poll_catalog,
                 crate::inventory::parse_glyphs.before(menu_shell::parse),
                 crate::inventory::spawn_when_ready,
             ),
         )
+        .add_systems(Update, crate::inventory::read_answer)
         .add_systems(
             Update,
             crate::inventory::click
@@ -1244,6 +1258,11 @@ pub fn install(app: &mut App) {
         )
         // The banner reads the entry's calls in the frame they are made.
         .add_systems(Update, notice_banner::advance.after(crate::entry::advance));
+    // ---- Weather forecast dialog (the site map's weather button) ----
+    // Its requests arrive after the action-button taps, before the map's
+    // taps; its own taps keep the dialog slot's order; it draws after the
+    // shell so its window is not moved by a shell slide.
+    weather_dialog::install(app);
     // ---- 选项对话框（追加段：设置钮的目标，Dialog 槽——音量页） ----
     // 本地档装载与进场施加（SceneMysekai.Start → SetupVolume 同律：读档
     // → 施加系统组 → 环境变量只作进场覆写）。排 Startup 链后（无跨系统

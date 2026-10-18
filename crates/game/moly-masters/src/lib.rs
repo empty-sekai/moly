@@ -15,6 +15,7 @@ pub mod craft;
 pub mod delivery;
 pub mod inventory;
 pub mod load;
+pub mod recovery;
 pub mod tools;
 
 /// The master pools' maxima (`mysekaiStaminas.maxStamina` per type).
@@ -24,6 +25,11 @@ pub struct StaminaMax {
     pub enhance: i32,
     pub boost: i32,
 }
+
+pub use recovery::{
+    boost_item_value, conversion_slider_max, converted_boost, item_select_max, BoostItemRow,
+    ItemRoom, RecoveryRow,
+};
 
 /// An integer field of a master row.
 pub(crate) fn int32(row: &Value, key: &str) -> Result<i32, String> {

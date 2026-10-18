@@ -656,7 +656,9 @@ pub(crate) fn parse(
     }
     chars.extend(birthday_names.iter().copied());
     for wording in ["WORD_LEFT_ROOM", "WORD_CANCEL", "MSG_CONFIRM_LEAVE_MYSEKAI",
-        "WORD_NOT_SAVE_RETURN", "WORD_SAVE_RETURN", "WORD_EDIT_SAVE_CONFIRMATION", "MSG_LEARN_PHENOMENA"]
+        "WORD_NOT_SAVE_RETURN", "WORD_SAVE_RETURN", "WORD_EDIT_SAVE_CONFIRMATION", "MSG_LEARN_PHENOMENA",
+        // The weather forecast dialog's labels.
+        "WORD_TODAY", "WORD_CLOSE"]
         .into_iter().chain(crate::menu_dialog::RANK_GAUGE_WORDINGS) {
         chars.extend(layouts.wording(wording).chars());
     }
@@ -672,6 +674,7 @@ pub(crate) fn parse(
         .chain(crate::delivery::screen::WORDINGS.iter())
         .chain(crate::inventory::WORDINGS)
         .chain(crate::fixture_edit::WORDINGS)
+        .chain(crate::stamina_recover_dialog::WORDINGS)
     {
         if let Some(text) = layouts.wordings.get(*wording) {
             chars.extend(text.chars());
@@ -1062,7 +1065,12 @@ pub(crate) fn click(
     let (Ok(window), Some(root_canvas)) = (windows.single(), root_canvas.as_deref()) else { return; };
     let size = root_canvas.size(window);
     if dialog.menu_open || dialog.menu_closing || dialog.option_open || dialog.get_resource_open
-        || dialog.learn_phenomena_open { return; }
+        || dialog.learn_phenomena_open
+        // The weather forecast dialog holds the dialog slot while it is open.
+        || stack.exists_dialog()
+    {
+        return;
+    }
     if dialog.leave_confirm {
         // Read ownership before closing. A close must not replay against the
         // field controls later in this gesture dispatch.

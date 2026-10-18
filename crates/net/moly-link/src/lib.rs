@@ -264,6 +264,8 @@ fn call_name(call: CallKind) -> &'static str {
         CallKind::MusicPlaySet => "music play set",
         CallKind::MusicPlayEject => "music play eject",
         CallKind::SystemFixtureAction => "system fixture action",
+        CallKind::InventoryRecycle => "inventory recycle",
+        CallKind::BoostStaminaRecovery => "boost stamina recovery",
         CallKind::Admin => "admin",
     }
 }
