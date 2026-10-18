@@ -45,10 +45,14 @@
 //! ## Named gaps (roadmap)
 //!
 //! - The category tabs, the sort dropdown, the free-word search and the grid
-//!   view mode are hidden: the list shows tab ALL in sort key Default. The
-//!   filter button and `BGMFilterDialog` are built in [`dialogs`], and the
-//!   change-vocal dialog (`MysekaiBGMSelectChangeVocalDialog`) is built there
-//!   too.
+//!   view are composed and visible as the source composes them in `Resume`
+//!   (`CreateTabData`, `SetupFilterContent`, `SetSortOptions`,
+//!   `SetFilterButton`, `MusicSelectChangeViewButton.Setup`); their cells and
+//!   interactivity are not wired: the list stays on tab ALL, sort Default and
+//!   list mode. The tab cell prefab is not in this UI root, so the strip shows
+//!   its frame and arrows only. The filter button and `BGMFilterDialog` are
+//!   built in [`dialogs`], and the change-vocal dialog
+//!   (`MysekaiBGMSelectChangeVocalDialog`) is built there too.
 //! - The filter's character checkboxes and its two music toggles are the
 //!   prefab's own controls; OK saves `BGMFilterData` into the local settings
 //!   document and the list re-filters. The grid view and the sort key stay at
@@ -66,7 +70,8 @@
 //!   [`CELL_POOL`] cells is re-bound as the list scrolls.
 //! - The jackets (cells and player view), the blur jacket, the system fixture
 //!   icon, the collaboration label, the record animation, the marquees'
-//!   scrolling and the cells' spectrum analyser are not built.
+//!   scrolling and the cells' spectrum analyser animation are not built (the
+//!   spectrum part itself stays visible, as the source shows it).
 //! - The tutorial gate before the push (`IsOpenMusicPlayer`) is out of scope.
 //! - Each push builds a new presenter; `Resume` without `Initialize` (a
 //!   screen above this one closing) does not occur in this product.
@@ -83,7 +88,7 @@ use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, WindowEvent};
 use moly_assets::json::master::MasterData;
 use moly_assets::ui_layout::{UiComponent, UiInstance, UiPrefab};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::action_button::ActionTapConsumed;
 use crate::fixture::FixturePlacement;
@@ -117,8 +122,18 @@ const START_SE: &str = "se_enter_jukebox";
 const RESUME_FADE_SECONDS: f32 = 0.3;
 const DISPOSE_FADE_SECONDS: f32 = 1.0;
 
-/// The wordings the screen writes.
-pub(crate) const WORDINGS: &[&str] = &["MSG_MUSIC_VOCAL", "WORD_INSTRUMENTLE_VERSION"];
+/// The wordings the screen writes or shows: the vocal texts, the empty-state
+/// label, the sort caption and the two view-toggle labels, plus the search
+/// placeholder.
+pub(crate) const WORDINGS: &[&str] = &[
+    "MSG_MUSIC_VOCAL",
+    "WORD_INSTRUMENTLE_VERSION",
+    "MSG_NOT_TARGET_MUSIC",
+    "WORD_DEFAULT",
+    "WORD_FIND_FROM_SONG_TITLE_CREATOR_NAME",
+    "WORD_JACKET_MUSIC_SELECT",
+    "WORD_LIST_MUSIC_SELECT",
+];
 
 /// The action button's click on a music-play fixture: the head's fixture.
 #[derive(Resource)]
@@ -344,7 +359,7 @@ fn pointer(value: &Value) -> Result<i64, String> {
 }
 
 fn field(fields: &Value, name: &str) -> Result<String, String> {
-    match pointer(&fields[name])? {
+    match pointer(&fields[name]).map_err(|error| format!("{name}: {error}"))? {
         0 => Err(format!("required source reference {name} is null")),
         id => Ok(format!("@{id}")),
     }
@@ -427,6 +442,19 @@ pub(crate) struct Bindings {
     content: String,
     source_content_position: Vec2,
     not_found: String,
+    /// `MusicSelect.listView` (`MusicSelectListView`).
+    list_view: String,
+    /// `MusicSelect.gridView`: `SwitchListViewMode` only shows it in grid mode.
+    grid_view: String,
+    /// `MusicSelectChangeViewButton._gridModeContents` / `_listModeContents`:
+    /// `SetupContents` shows one of the two per view mode.
+    view_grid_contents: String,
+    view_list_contents: String,
+    /// `FreeWordFilterContent._clearTextButton`: shown only while the field has
+    /// text.
+    clear_text: String,
+    /// The sort dropdown's caption; `SetSortOptions` writes the current option.
+    sort_label: String,
     /// Nodes without a presenter here.
     hidden: Vec<String>,
     /// (image node, texture alias) of `MysekaiBGMPlayerView.SetupImages`.
@@ -451,6 +479,9 @@ pub(crate) struct Bindings {
 /// status, video-type and lock parts, the check box, the badge (the
 /// Mysekai-record branch of `MusicSelectListCellContentsBase.Setup` turns
 /// off the video-type objects), and the parts without a presenter here.
+/// `MusicSelectListCellHighLightContents.LoadJacket` calls
+/// `UIPartsSpectrumAnalyzer.Show` for a Mysekai record, so `spectrum` stays
+/// visible even though this screen does not drive its bars.
 const HIGHLIGHT_OFF: &[&str] = &[
     "jacketThumbnail",
     "musicDifficultyPlayLevel",
@@ -463,7 +494,6 @@ const HIGHLIGHT_OFF: &[&str] = &[
     "vocalLockObject",
     "_preliminaryTournamentBadgeObj",
     "checkBox",
-    "spectrum",
     "transitionBalloon",
     "lockButton",
     "vocalLockButton",
@@ -482,8 +512,54 @@ const NEUTRAL_OFF: &[&str] = &[
     "checkBox",
 ];
 
+/// The runtime draws only `Sekai.UI.CustomTextMesh`; the source's empty-state
+/// label `NotFilterResult` is a legacy `Sekai.UI.CustomText` (uGUI Text), which
+/// the layout leaves undrawn. Append a TMP text cloned from this prefab's own
+/// text component, carrying the source label's wording key
+/// (`MSG_NOT_TARGET_MUSIC`), font size and centre alignment, so the empty list
+/// shows the source wording.
+fn adopt_empty_text(doc: &mut UiPrefab) -> Result<(), String> {
+    let target = doc
+        .nodes
+        .iter()
+        .position(|node| node.path.ends_with("/NotFilterResult"))
+        .ok_or("the BGM select prefab has no NotFilterResult")?;
+    let template = doc
+        .nodes
+        .iter()
+        .flat_map(|node| node.components.iter())
+        .find(|component| component.class == "Sekai.UI.CustomTextMesh")
+        .cloned()
+        .ok_or("the BGM select prefab has no CustomTextMesh to clone")?;
+    let source = doc.nodes[target]
+        .components
+        .iter()
+        .find(|component| component.class == "Sekai.UI.CustomText")
+        .ok_or("NotFilterResult is not a source CustomText")?;
+    let size = source.fields["m_FontData"]["m_FontSize"]
+        .as_f64()
+        .unwrap_or(36.0);
+    let color = source.fields["m_Color"].clone();
+    let mut text = template;
+    text.path_id = -1;
+    text.enabled = true;
+    text.fields["m_text"] = json!("");
+    text.fields["useWordingKey"] = json!(true);
+    text.fields["wordingKey"] = json!("MSG_NOT_TARGET_MUSIC");
+    text.fields["m_fontSize"] = json!(size);
+    text.fields["m_fontSizeBase"] = json!(size);
+    text.fields["m_fontColor"] = color.clone();
+    text.fields["m_Color"] = color;
+    text.fields["m_HorizontalAlignment"] = json!(2);
+    text.fields["m_VerticalAlignment"] = json!(512);
+    text.fields["m_enableAutoSizing"] = json!(false);
+    doc.nodes[target].components.push(text);
+    Ok(())
+}
+
 fn compose(layouts: &UiLayouts) -> Result<(UiPrefab, Bindings), String> {
     let mut doc = template(layouts, SCREEN_DOC)?.clone();
+    adopt_empty_text(&mut doc)?;
     let screen = component(&doc, &doc.prefab, ".ScreenLayerMysekaiBGMSelect")?
         .fields
         .clone();
@@ -515,12 +591,13 @@ fn compose(layouts: &UiLayouts) -> Result<(UiPrefab, Bindings), String> {
     .clone();
 
     let mut hidden = Vec::new();
-    for name in ["categoryTabList", "sortDropDown", "freeWordFilterContent"] {
-        hidden.push(field(&view, name)?);
-    }
-    for name in ["gridView", "_changeViewButton"] {
-        hidden.push(field(&select, name)?);
-    }
+    // The tab list, sort dropdown, free-word field, filter button and view
+    // toggle are composed by `Resume`: `CreateTabData` (CreateFilteringTabDataList
+    // -> `MusicSelectUnitTabList.Initialize`), `SetupFilterContent`,
+    // `SetSortOptions`, `SetFilterButton`, and `MusicSelectChangeViewButton.Setup`
+    // in `MusicSelect.Setup`. None of them is ever deactivated, so they show at
+    // boot with zero records too. Only the player-view images below have no
+    // presenter here.
     for name in [
         "_jacketThumbnailImage",
         "_blurJacket",
@@ -604,6 +681,27 @@ fn compose(layouts: &UiLayouts) -> Result<(UiPrefab, Bindings), String> {
         .map(|(node, asset)| (node, format!("{TEXTURE_PREFIX}{asset}")))
         .collect();
 
+    // `SetSortOptions` writes the current option into the dropdown's caption;
+    // the serialized caption is empty. `MusicSelectChangeViewButton.Setup(0)`
+    // shows `_listModeContents` and hides `_gridModeContents`.
+    let dropdown = component(&doc, &field(&view, "sortDropDown")?, ".CustomDropdown")?
+        .fields
+        .clone();
+    let view_button = component(
+        &doc,
+        &field(&select, "_changeViewButton")?,
+        ".MusicSelectChangeViewButton",
+    )?
+    .fields
+    .clone();
+    let filter_content = component(
+        &doc,
+        &field(&view, "freeWordFilterContent")?,
+        ".FreeWordFilterContent",
+    )?
+    .fields
+    .clone();
+
     let bindings = Bindings {
         cells,
         cell_size: Vec2::new(f32_field(&cell, "sizeX")?, f32_field(&cell, "sizeY")?),
@@ -615,6 +713,12 @@ fn compose(layouts: &UiLayouts) -> Result<(UiPrefab, Bindings), String> {
         content,
         source_content_position,
         not_found: field(&select, "notFilterResultObject")?,
+        list_view: field(&select, "listView")?,
+        grid_view: field(&select, "gridView")?,
+        view_grid_contents: field(&view_button, "_gridModeContents")?,
+        view_list_contents: field(&view_button, "_listModeContents")?,
+        clear_text: field(&filter_content, "_clearTextButton")?,
+        sort_label: field(&dropdown, "m_CaptionText")?,
         hidden,
         images,
         title: field(&info, "musicTitle")?,
@@ -1177,10 +1281,22 @@ pub(crate) fn place(
     };
     let bindings = &root.bindings;
     let state = &mut *state;
+    // The controls `Resume` composes, in the state it composes them:
+    // `SwitchListViewMode(ListViewMode)` with the prefab's serialized
+    // `ListViewMode = 0` (list), `MusicSelectChangeViewButton.Setup(0)`
+    // (`_listModeContents` only), `SetSortOptions` (caption = option 0 =
+    // `WORD_DEFAULT`) and `FreeWordFilterContent` with an empty field (its
+    // clear button off).
+    view.set_visible(&bindings.grid_view, false);
+    view.set_visible(&bindings.view_grid_contents, false);
+    view.set_visible(&bindings.view_list_contents, true);
+    view.set_visible(&bindings.clear_text, false);
+    view.set_text(&bindings.sort_label, layouts.wording("WORD_DEFAULT"));
     let Some(presenter) = state.presenter.as_ref() else {
         for cell in &bindings.cells {
             view.set_visible(&cell.root, false);
         }
+        view.set_visible(&bindings.list_view, false);
         view.set_visible(&bindings.not_found, true);
         return;
     };
@@ -1234,7 +1350,13 @@ pub(crate) fn place(
             set_enabled(&mut view, doc, &bindings.change_vocal_button, false);
         }
     }
-    view.set_visible(&bindings.not_found, display.is_empty());
+    // `MusicSelect.SetupListView`/`UpdateMusicDataList`: the list view is
+    // deactivated while the displayed list is empty (its container stays, as
+    // `SwitchListViewMode` left it), and `notFilterResultObject` is active
+    // exactly then.
+    let empty = display.is_empty();
+    view.set_visible(&bindings.list_view, !empty);
+    view.set_visible(&bindings.not_found, empty);
     view.set_visible(&bindings.filter_on, state.filter.is_filtered());
     view.set_visible(&bindings.filter_off, !state.filter.is_filtered());
 

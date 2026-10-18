@@ -648,8 +648,11 @@ fn filter_bindings(doc: &UiPrefab) -> Result<FilterBindings, String> {
         let unit = by_path(doc, &format!("{prefix}/UIPartsCheckBox"))?;
         let mut ids = Vec::new();
         for node in &doc.nodes {
+            // `Other` sits among the VS character toggles but carries no
+            // character icon; it is bound on its own above.
             if !node.path.starts_with(&format!("{prefix}/CheckButtonRoot/"))
                 || !node.path.ends_with("/UIPartsCheckBox")
+                || node.path == other.path
             {
                 continue;
             }
@@ -1090,7 +1093,10 @@ fn click(
     filter: Query<&UiPrefabView, (With<FilterView>, Without<ChangeVocalView>)>,
     root_canvas: Option<Res<crate::canvas::RootCanvas>>,
 ) {
+    // Drain the taps while no dialog is open: the tap that opens a dialog
+    // must not be read again as a tap on it.
     if !host.filter_open && host.open.is_none() {
+        gestures.clear();
         return;
     }
     let (Ok(window), Some(root_canvas)) = (windows.single(), root_canvas.as_deref()) else {
@@ -1324,6 +1330,7 @@ pub(crate) fn install(app: &mut App) {
                 click
                     .run_if(crate::game_settings::scene_input_enabled)
                     .after(super::click)
+                    .before(open_requests)
                     .before(crate::pick::pick)
                     .before(crate::ui_layers::advance),
                 place
