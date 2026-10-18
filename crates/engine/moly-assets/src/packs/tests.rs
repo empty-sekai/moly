@@ -517,3 +517,173 @@ fn transform_field_is_required_even_for_identity_representation() {
     entry.as_object_mut().unwrap().remove("xf");
     assert!(serde_json::from_value::<Entry>(entry).is_err());
 }
+
+/// A directory of its own below the system temporary directory, removed when
+/// dropped; the crate's tests need no test-only dependency for it.
+#[cfg(not(target_arch = "wasm32"))]
+struct Scratch(PathBuf);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Scratch {
+    fn new(name: &str) -> Self {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let directory = std::env::temp_dir().join(format!(
+            "moly-assets-{name}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        Self(directory)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The mutable catalog and anything that is not an immutable store address
+/// stay out of the cache.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn only_content_addressed_store_paths_are_cacheable() {
+    let digest = "ab".repeat(32);
+    assert_eq!(content_address("asset-packs.json"), None);
+    assert_eq!(
+        content_address(&format!("catalogs/{digest}.json")),
+        Some(digest.as_str())
+    );
+    assert_eq!(
+        content_address(&format!("packages/{digest}.json")),
+        Some(digest.as_str())
+    );
+    assert_eq!(
+        content_address(&format!("blobs/ab/{digest}.bin")),
+        Some(digest.as_str())
+    );
+    assert_eq!(
+        content_address(&format!("blobs/ab/{digest}.gzz")),
+        Some(digest.as_str())
+    );
+    for path in [
+        format!("blobs/ab/{digest}.brz"),
+        format!("blobs/cd/{digest}.bin"),
+        format!("catalogs/{digest}.json.extra"),
+        format!("catalogs/{}.json", "AB".repeat(32)),
+        "catalogs/not-a-hash.json".to_owned(),
+        format!("packages/{digest}"),
+        "snapshots/example/assets/asset-packs.json".to_owned(),
+    ] {
+        assert_eq!(content_address(&path), None, "{path}");
+    }
+}
+
+/// A cache hit is returned without asking the source, and a cache file whose
+/// bytes differ from its address is an error rather than a fetch or a value.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn cache_hit_answers_without_a_fetch_and_a_corrupt_entry_is_loud() {
+    block_on(async {
+        let fixture = StoreFixture::new(true, false);
+        let directory = Scratch::new("hit");
+        let cached = fixture
+            .reader(true)
+            .with_cache(Some(directory.path().to_path_buf()));
+        assert_eq!(
+            logical_read(&cached, &fixture.paths[0]).await.unwrap(),
+            fixture.payload
+        );
+        // Every immutable file read on the way is written under its address.
+        for relative in [fixture.package.as_str(), fixture.blob.as_str()] {
+            assert_eq!(
+                std::fs::read(directory.path().join(relative)).unwrap(),
+                fixture.files[relative]
+            );
+        }
+
+        // A store that no longer has those files: the read comes from disk.
+        let absent = PackReader::new(Box::new(MemoryStore(Arc::new(HashMap::new()))))
+            .with_catalog(Some(fixture.catalog_id.clone()))
+            .with_cache(Some(directory.path().to_path_buf()));
+        assert_eq!(
+            logical_read(&absent, &fixture.paths[0]).await.unwrap(),
+            fixture.payload
+        );
+
+        // The mutable catalog is never cached, so a reader whose source has no
+        // catalog fails even though the earlier run read that catalog.
+        assert!(!directory.path().join("asset-packs.json").exists());
+        assert!(
+            logical_read(
+                &PackReader::new(Box::new(MemoryStore(Arc::new(HashMap::new()))))
+                    .with_cache(Some(directory.path().to_path_buf())),
+                &fixture.paths[0]
+            )
+            .await
+            .is_err()
+        );
+
+        // A damaged cached blob names its own file and fails. A fresh reader
+        // verifies the cache again instead of reusing this run's buffers.
+        std::fs::write(directory.path().join(&fixture.blob), b"not the blob").unwrap();
+        let damaged = fixture
+            .reader(true)
+            .with_cache(Some(directory.path().to_path_buf()));
+        let error = logical_read(&damaged, &fixture.paths[0]).await.unwrap_err();
+        let file = Path::new(&fixture.blob)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(format!("{error}").contains(file.as_str()), "{error}");
+    });
+}
+
+/// A fetched file reaches its address through a temporary sibling and a
+/// rename, so the address never names partial bytes.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn cache_write_uses_a_temporary_file_and_rename() {
+    let fixture = StoreFixture::new(true, false);
+    let directory = Scratch::new("rename");
+    block_on(async {
+        let reader = fixture
+            .reader(true)
+            .with_cache(Some(directory.path().to_path_buf()));
+        assert_eq!(
+            logical_read(&reader, &fixture.paths[0]).await.unwrap(),
+            fixture.payload
+        );
+    });
+    let blob = directory.path().join(&fixture.blob);
+    assert!(blob.is_file());
+    assert_eq!(std::fs::read(&blob).unwrap(), fixture.files[&fixture.blob]);
+    let leftovers: Vec<_> = std::fs::read_dir(blob.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| name.to_string_lossy().ends_with(".part"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+/// The temporary name is a sibling of its destination, never the destination.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn temporary_cache_names_stay_next_to_their_file() {
+    let path = Path::new("cache").join("blobs").join("ab").join("blob.bin");
+    let temporary = temporary_path(&path);
+    assert_eq!(temporary.parent(), path.parent());
+    assert_ne!(temporary, path);
+    assert!(temporary
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .starts_with("blob.bin."));
+}

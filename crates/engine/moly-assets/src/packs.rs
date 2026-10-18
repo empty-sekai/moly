@@ -1,4 +1,8 @@
 //! Resolve logical asset paths through versioned manifests without preloading a package.
+//!
+//! A release is read from a local asset root or from the public asset store.
+//! On native the store's immutable documents and blobs can also be kept in a
+//! cache directory, so a later run reads them from disk.
 
 use crate::read_limits::{
     self, Budget, Buffer, SharedReader, MAX_ASSET_BYTES, MAX_BLOB_BYTES, MAX_DOCUMENT_BYTES,
@@ -131,7 +135,7 @@ type InFlight = OnceCell<Arc<Buffer>>;
 
 enum Source {
     Reader(Box<dyn ErasedAssetReader>),
-    #[cfg(target_arch = "wasm32")]
+    /// The public asset store's HTTPS directory, ending in `/`.
     Http(String),
 }
 
@@ -139,6 +143,8 @@ pub(crate) struct PackReader {
     source: Source,
     catalog: OnceCell<Catalog>,
     catalog_path: String,
+    #[cfg(not(target_arch = "wasm32"))]
+    cache: Option<PathBuf>,
     in_flight: Mutex<HashMap<Representation, Weak<InFlight>>>,
     budget: Arc<Budget>,
 }
@@ -182,6 +188,51 @@ fn check_address(path: &str, directory: &str, bytes: &[u8]) -> Result<(), AssetR
         )));
     }
     Ok(())
+}
+
+/// The digest an immutable store path names, or `None` for the mutable
+/// catalog and for any other path. The layouts are the ones `PackReader`
+/// reads: `catalogs/<sha>.json`, `packages/<sha>.json` and
+/// `blobs/<two hex digits>/<sha>.<bin|gzz>`. A cached file is kept below the
+/// cache directory at that same relative path.
+#[cfg(not(target_arch = "wasm32"))]
+fn content_address(path: &str) -> Option<&str> {
+    if let Some(rest) = path.strip_prefix("blobs/") {
+        let (prefix, file) = rest.split_once('/')?;
+        let (digest, suffix) = file.rsplit_once('.')?;
+        if (suffix != "bin" && suffix != "gzz") || !is_sha256(digest) {
+            return None;
+        }
+        return (prefix.len() == 2 && digest.starts_with(prefix)).then_some(digest);
+    }
+    ["catalogs", "packages"]
+        .into_iter()
+        .find_map(|directory| address(path, directory).ok())
+}
+
+/// A cache read or write failure names the file it happened to.
+#[cfg(not(target_arch = "wasm32"))]
+fn cache_error(action: &str, path: &Path, error: std::io::Error) -> AssetReaderError {
+    Error::new(
+        error.kind(),
+        format!("Asset cache {action} of {}: {error}", path.display()),
+    )
+    .into()
+}
+
+/// The temporary sibling an asset is written under before its rename: a name
+/// of its own per write, so two writers of the same asset never share it.
+#[cfg(not(target_arch = "wasm32"))]
+fn temporary_path(path: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(
+        ".{}-{}.part",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    path.with_file_name(name)
 }
 
 // The v2 projection consists of strings, unsigned sizes, null and transform
@@ -264,20 +315,33 @@ impl PackReader {
             source: Source::Reader(inner),
             catalog: OnceCell::new(),
             catalog_path: "asset-packs.json".into(),
+            #[cfg(not(target_arch = "wasm32"))]
+            cache: None,
             in_flight: Mutex::new(HashMap::new()),
             budget: read_limits::shared_budget(),
         }
     }
 
-    #[cfg(target_arch = "wasm32")]
+    /// Read a release from the public asset store at `root`, a canonical
+    /// HTTPS directory ending in `/` that the entry already admitted.
     pub(crate) fn http(root: String) -> Self {
         Self {
             source: Source::Http(root),
             catalog: OnceCell::new(),
             catalog_path: "asset-packs.json".into(),
+            #[cfg(not(target_arch = "wasm32"))]
+            cache: None,
             in_flight: Mutex::new(HashMap::new()),
             budget: read_limits::shared_budget(),
         }
+    }
+
+    /// Keep the immutable documents and blobs that were read in `dir`, and
+    /// serve them from there on later runs. `None` keeps no local copy.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn with_cache(mut self, dir: Option<PathBuf>) -> Self {
+        self.cache = dir;
+        self
     }
 
     /// Select a pinned release under the SAME store; never embed this address
@@ -289,17 +353,52 @@ impl PackReader {
         self
     }
 
-    /// `exact` says that `limit` is the authenticated size of the payload.
-    /// The reader path allocates its whole bound up front either way.
-    async fn bytes(&self, path: &str, limit: usize, exact: bool) -> Result<Vec<u8>, AssetReaderError> {
+    /// `limit` bounds the bytes accepted from the source; `exact` says that
+    /// `limit` is the authenticated size of the payload. The reader path
+    /// allocates its whole bound up front either way.
+    async fn bytes(
+        &self,
+        path: &str,
+        limit: usize,
+        exact: bool,
+    ) -> Result<Vec<u8>, AssetReaderError> {
         let path = key(Path::new(path))?;
-        let inner = match &self.source {
-            Source::Reader(inner) => inner,
-            #[cfg(target_arch = "wasm32")]
-            Source::Http(root) => return crate::http::read_bytes(root, &path, limit, exact).await,
+        // Only an immutable, content-addressed path may be cached: it names
+        // its own bytes, so a cached copy is checked the same way as a fetched
+        // one. `asset-packs.json` is mutable and always read from the source.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(bytes) = self.cached(&path, limit)? {
+                return Ok(bytes);
+            }
+        }
+        let bytes = self.fetch(&path, limit, exact).await?;
+        #[cfg(not(target_arch = "wasm32"))]
+        self.store(&path, &bytes)?;
+        Ok(bytes)
+    }
+
+    /// The bytes of `path` from the source, the mutable catalog included.
+    async fn fetch(
+        &self,
+        path: &str,
+        limit: usize,
+        exact: bool,
+    ) -> Result<Vec<u8>, AssetReaderError> {
+        #[cfg(target_arch = "wasm32")]
+        if let Source::Http(root) = &self.source {
+            return crate::http::read_bytes(root, path, limit, exact).await;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Source::Http(root) = &self.source {
+            return crate::remote::read_store_bytes(root.clone(), path.to_owned(), limit, exact)
+                .await;
+        }
+        let Source::Reader(inner) = &self.source else {
+            unreachable!("the HTTP source returns above")
         };
         let _ = exact;
-        let mut reader = inner.read(Path::new(&path)).await?;
+        let mut reader = inner.read(Path::new(path)).await?;
         let mut bytes = read_limits::buffer(
             limit
                 .checked_add(1)
@@ -323,6 +422,85 @@ impl PackReader {
             }
         }
         Ok(bytes)
+    }
+
+    /// A cached immutable asset, verified against its content address. A miss
+    /// is `None` (including the mutable catalog, which is never read from the
+    /// cache); a file that names other bytes is an error naming that file,
+    /// never a silent fetch or a value.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn cached(&self, relative: &str, limit: usize) -> Result<Option<Vec<u8>>, AssetReaderError> {
+        let Some(directory) = &self.cache else {
+            return Ok(None);
+        };
+        let Some(address) = content_address(relative) else {
+            return Ok(None);
+        };
+        let path = directory.join(relative);
+        let metadata = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(cache_error("read", &path, error)),
+        };
+        if metadata.len() > limit as u64 {
+            return Err(invalid(format!(
+                "Cached asset exceeds its byte limit: {}",
+                path.display()
+            )));
+        }
+        let bytes = std::fs::read(&path).map_err(|error| cache_error("read", &path, error))?;
+        if bytes.len() > limit {
+            return Err(invalid(format!(
+                "Cached asset exceeds its byte limit: {}",
+                path.display()
+            )));
+        }
+        if format!("{:x}", Sha256::digest(&bytes)) != address {
+            return Err(invalid(format!(
+                "Cached asset does not match its content address: {}",
+                path.display()
+            )));
+        }
+        Ok(Some(bytes))
+    }
+
+    /// Write a fetched immutable asset to its content address. Only bytes that
+    /// hash to the address are written; they reach a temporary sibling first
+    /// and are renamed into place, so a crash never leaves a partial file
+    /// under the address. A failed write is an error, not a silent re-fetch on
+    /// every run.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn store(&self, relative: &str, bytes: &[u8]) -> Result<(), AssetReaderError> {
+        let Some(directory) = &self.cache else {
+            return Ok(());
+        };
+        let Some(address) = content_address(relative) else {
+            return Ok(());
+        };
+        if format!("{:x}", Sha256::digest(bytes)) != address {
+            return Err(invalid(format!(
+                "asset does not match its content address: {relative}"
+            )));
+        }
+        let path = directory.join(relative);
+        let parent = path
+            .parent()
+            .ok_or_else(|| invalid(format!("Cache path has no directory: {}", path.display())))?;
+        std::fs::create_dir_all(parent).map_err(|error| cache_error("create", parent, error))?;
+        let temporary = temporary_path(&path);
+        if let Err(error) = std::fs::write(&temporary, bytes)
+            .and_then(|()| std::fs::rename(&temporary, &path))
+        {
+            let _ = std::fs::remove_file(&temporary);
+            // Another writer may have renamed the same content into place
+            // between this read's miss and its write. The bytes are identical
+            // by their address, so that write already succeeded.
+            if std::fs::read(&path).is_ok_and(|existing| existing.as_slice() == bytes) {
+                return Ok(());
+            }
+            return Err(cache_error("write", &path, error));
+        }
+        Ok(())
     }
 
     async fn document_bytes(&self, path: &str) -> Result<Buffer, AssetReaderError> {

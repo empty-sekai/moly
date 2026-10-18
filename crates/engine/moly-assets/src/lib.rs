@@ -61,6 +61,10 @@ pub enum AssetSource {
         url: String,
         /// Same store URL across regions, independently pinned release selection.
         catalog: Option<String>,
+        /// Native: where immutable documents and blobs are kept, so a later
+        /// run reads them from disk. `None` keeps no local copy.
+        #[cfg(not(target_arch = "wasm32"))]
+        cache: Option<std::path::PathBuf>,
     },
 }
 
@@ -83,13 +87,33 @@ pub fn install(app: &mut App, source: AssetSource) {
         return;
     }
     #[cfg(target_arch = "wasm32")]
-    if let AssetSource::HttpPacks { url, catalog } = &source {
+    if let AssetSource::HttpPacks { url, catalog, .. } = &source {
         let root = url.clone();
         let catalog = catalog.clone();
         app.register_asset_source(
             SOURCE,
             AssetSourceBuilder::new(move || {
                 Box::new(packs::PackReader::http(root.clone()).with_catalog(catalog.clone()))
+            }),
+        );
+        app.insert_resource(source);
+        return;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if let AssetSource::HttpPacks { url, catalog, cache } = &source {
+        // The public store is immutable and content addressed, so the reader
+        // keeps what it fetched in the cache directory a later run reuses.
+        let root = url.clone();
+        let catalog = catalog.clone();
+        let cache = cache.clone();
+        app.register_asset_source(
+            SOURCE,
+            AssetSourceBuilder::new(move || {
+                Box::new(
+                    packs::PackReader::http(root.clone())
+                        .with_catalog(catalog.clone())
+                        .with_cache(cache.clone()),
+                )
             }),
         );
         app.insert_resource(source);

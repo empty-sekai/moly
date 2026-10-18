@@ -21,6 +21,10 @@
 //! admission, or of a path that is not a plain relative path, is refused by
 //! name. Remote files carry no Bevy `.meta` files: a meta read answers
 //! "not found" without a request.
+//!
+//! The same native agent also reads the public asset store a packed release
+//! comes from, which has no admitted base: its root is the resolved asset
+//! source, and `read_store_bytes` bounds every body by the caller's limit.
 
 use bevy::app::App;
 #[cfg(target_arch = "wasm32")]
@@ -285,6 +289,11 @@ impl AssetReader for RemoteReader {
     }
 }
 
+/// The bytes of a public asset store path below its HTTPS root, read on
+/// native; the browser store read is `crate::http::read_bytes`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use native::read_store_bytes;
+
 /// Native transfers: one `ureq` agent per bound, so connections are reused
 /// across the reads of a host kind.
 #[cfg(not(target_arch = "wasm32"))]
@@ -315,22 +324,42 @@ mod native {
     });
     static STORAGE: LazyLock<Agent> = LazyLock::new(|| agent(None));
 
+    /// A failed transfer of `url` as an I/O error, `TimedOut` when the
+    /// agent's bound expired.
+    fn failure(url: &str, error: ureq::Error) -> AssetReaderError {
+        transfer_failure("remote read", url, error)
+    }
+
+    /// A failed store transfer of `url`, with the same kinds.
+    fn store_failure(url: &str, error: ureq::Error) -> AssetReaderError {
+        transfer_failure("asset store read", url, error)
+    }
+
+    fn transfer_failure(what: &str, url: &str, error: ureq::Error) -> AssetReaderError {
+        let kind = if matches!(error, ureq::Error::Timeout(_)) {
+            io::ErrorKind::TimedOut
+        } else {
+            io::ErrorKind::Other
+        };
+        AssetReaderError::Io(Arc::new(io::Error::new(
+            kind,
+            format!("{what} of {url}: {error}"),
+        )))
+    }
+
+    /// An oversized asset store body, refused before it is buffered whole.
+    fn oversized(path: &str) -> AssetReaderError {
+        AssetReaderError::Io(Arc::new(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("asset store read of {path}: response exceeds its byte limit"),
+        )))
+    }
+
     /// The body of `url`, read on the blocking thread pool. A 404 is "not
     /// found" and another error status an HTTP error, as Bevy's web reader
     /// answers them; a timeout is `TimedOut`.
     pub(super) async fn read(url: String, master: bool) -> Result<Vec<u8>, AssetReaderError> {
         blocking::unblock(move || {
-            let failure = |error: ureq::Error| {
-                let kind = if matches!(error, ureq::Error::Timeout(_)) {
-                    io::ErrorKind::TimedOut
-                } else {
-                    io::ErrorKind::Other
-                };
-                AssetReaderError::Io(Arc::new(io::Error::new(
-                    kind,
-                    format!("remote read of {url}: {error}"),
-                )))
-            };
             let agent = if master { &*MASTER } else { &*STORAGE };
             let mut response = match agent.get(&url).call() {
                 Ok(response) => response,
@@ -338,12 +367,77 @@ mod native {
                     return Err(AssetReaderError::NotFound(PathBuf::from(&url)));
                 }
                 Err(ureq::Error::StatusCode(code)) => return Err(AssetReaderError::HttpError(code)),
-                Err(error) => return Err(failure(error)),
+                Err(error) => return Err(failure(&url, error)),
             };
             let mut bytes = Vec::new();
             BufReader::new(response.body_mut().with_config().reader())
                 .read_to_end(&mut bytes)
-                .map_err(|error| failure(ureq::Error::from(error)))?;
+                .map_err(|error| failure(&url, error.into()))?;
+            Ok(bytes)
+        })
+        .await
+    }
+
+    /// One request for an asset store path. The body is requested identity
+    /// encoded: the store serves its files as they are, and an identity body
+    /// keeps `Content-Length` an exact body size. A 403 or 404 is "not found",
+    /// as the browser store read answers it.
+    fn store_response(url: &str) -> Result<ureq::http::Response<ureq::Body>, AssetReaderError> {
+        match STORAGE.get(url).header("Accept-Encoding", "identity").call() {
+            Ok(response) => Ok(response),
+            Err(ureq::Error::StatusCode(403 | 404)) => {
+                Err(AssetReaderError::NotFound(PathBuf::from(url)))
+            }
+            Err(ureq::Error::StatusCode(code)) => Err(AssetReaderError::HttpError(code)),
+            Err(error) => Err(store_failure(url, error)),
+        }
+    }
+
+    /// The bytes of the asset store path `path` below the HTTPS `root`, read
+    /// on the blocking thread pool. A body larger than `limit` is refused
+    /// rather than buffered whole. `exact` says that `limit` is the
+    /// authenticated size, so the body buffer is allocated once, as the
+    /// browser allocates it.
+    pub(crate) async fn read_store_bytes(
+        root: String,
+        path: String,
+        limit: usize,
+        exact: bool,
+    ) -> Result<Vec<u8>, AssetReaderError> {
+        blocking::unblock(move || {
+            let url = format!("{root}{path}");
+            // One byte over the limit tells an oversized body apart from one
+            // that is exactly at the limit.
+            let bound = limit.checked_add(1).ok_or_else(|| oversized(&path))?;
+            let mut response = store_response(&url)?;
+            if response
+                .body()
+                .content_length()
+                .is_some_and(|length| length > limit as u64)
+            {
+                return Err(oversized(&path));
+            }
+            let mut bytes = Vec::new();
+            if exact {
+                bytes.try_reserve_exact(limit).map_err(|_| {
+                    AssetReaderError::Io(Arc::new(io::Error::other(format!(
+                        "asset store read of {path}: could not allocate its buffer"
+                    ))))
+                })?;
+            }
+            response
+                .body_mut()
+                .with_config()
+                .limit(bound as u64)
+                .reader()
+                .read_to_end(&mut bytes)
+                .map_err(|error| match ureq::Error::from(error) {
+                    ureq::Error::BodyExceedsLimit(_) => oversized(&path),
+                    error => store_failure(&url, error),
+                })?;
+            if bytes.len() > limit {
+                return Err(oversized(&path));
+            }
             Ok(bytes)
         })
         .await

@@ -2,14 +2,16 @@
 //! bases the product reads at runtime.
 //!
 //! The native game and the server resolve the root here, through one
-//! function: `MOLY_ASSET_ROOT` when it is set, else the resources the
-//! launcher installed. A browser page has no environment; its own resolution
-//! (the `?assets=` prefix and the game seed) stays in the entry crate and
-//! reuses the admission below.
+//! function: `MOLY_ASSET_ROOT` when it is set, else `MOLY_ASSET_STORE_URL`,
+//! else the resources the launcher installed. A browser page has no
+//! environment; its own resolution (the `?assets=` prefix and the game seed)
+//! stays in the entry crate and reuses the admission below.
 //!
 //! Every web path is admitted once, here: a same-origin absolute prefix, or
 //! an HTTPS root this module names. `MOLY_ASSET_CATALOG` (a full lowercase
-//! SHA-256) selects a release of the content-addressed store.
+//! SHA-256) selects a release of the content-addressed store, and
+//! `MOLY_ASSET_CACHE` names the native directory that keeps what a store
+//! read fetched.
 
 use crate::AssetSource;
 
@@ -207,12 +209,32 @@ pub fn resolve_remote() -> Result<crate::remote::RemoteBases, String> {
     })
 }
 
-/// Native: `MOLY_ASSET_ROOT`, else the resources the launcher installed.
+/// Native: `MOLY_ASSET_ROOT`, else `MOLY_ASSET_STORE_URL`, else the
+/// resources the launcher installed.
+///
+/// `MOLY_ASSET_ROOT` is the extracted-asset directory. `MOLY_ASSET_STORE_URL`
+/// is a public asset store directory over HTTPS (`.../moly/asset-store/`),
+/// read from the network as the browser reads it; setting both is an error,
+/// because one run reads one source. `MOLY_ASSET_CATALOG` (a full lowercase
+/// SHA-256) selects a release of either. `MOLY_ASSET_CACHE` is the directory
+/// a store read keeps the immutable documents and blobs it fetched in, and
+/// is created when missing; it applies to `MOLY_ASSET_STORE_URL` only.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn resolve() -> Result<AssetSource, String> {
-    let Ok(raw) = std::env::var("MOLY_ASSET_ROOT") else {
-        return installed_resources();
-    };
+    let root = std::env::var("MOLY_ASSET_ROOT").ok();
+    let store = std::env::var("MOLY_ASSET_STORE_URL").ok();
+    match (root, store) {
+        (Some(_), Some(_)) => Err(
+            "MOLY_ASSET_ROOT and MOLY_ASSET_STORE_URL are both set; keep exactly one".into(),
+        ),
+        (Some(raw), None) => local_root(raw),
+        (None, Some(url)) => public_store(url),
+        (None, None) => installed_resources(),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn local_root(raw: String) -> Result<AssetSource, String> {
     if raw.trim().is_empty() {
         return Err("MOLY_ASSET_ROOT is empty; point it at the extracted-asset directory".into());
     }
@@ -232,8 +254,62 @@ pub fn resolve() -> Result<AssetSource, String> {
     }
 }
 
-/// Without `MOLY_ASSET_ROOT`, the resources the launcher installed: its
-/// resource directory and the selected (or newest) complete snapshot there.
+/// A public asset store directory: a canonical HTTPS directory ending in the
+/// content-addressed `asset-store/`. The URL is admitted against its own
+/// origin with the publication prefix that directory sits in as the resource
+/// root, by the same rule a browser root passes, so
+/// `https://cdn.example/moly/asset-store/` and a CDN publication
+/// (`https://cdn.example/release/asset-store/`) both pass, while a query,
+/// fragment, credentials, an escaped path or another directory is refused.
+#[cfg(not(target_arch = "wasm32"))]
+fn store_root(url: &str) -> Result<(), String> {
+    let (origin, path) = public_asset_parts(url)
+        .filter(|(_, path)| is_canonical_directory(path))
+        .ok_or("MOLY_ASSET_STORE_URL must be a canonical HTTPS asset store directory")?;
+    let publication = path
+        .strip_suffix("asset-store/")
+        .map(|prefix| format!("{origin}{prefix}"))
+        .ok_or("MOLY_ASSET_STORE_URL must be a canonical HTTPS asset store directory")?;
+    validate_asset_selection(url, Some(origin), Some(&publication))
+        .map_err(|error| format!("MOLY_ASSET_STORE_URL: {error}"))
+}
+
+/// The public asset store as an asset source, admitted by [`store_root`].
+/// `MOLY_ASSET_CACHE` names the directory that keeps the immutable files a
+/// run fetched; it is created when missing.
+#[cfg(not(target_arch = "wasm32"))]
+fn public_store(url: String) -> Result<AssetSource, String> {
+    if url.trim().is_empty() {
+        return Err(
+            "MOLY_ASSET_STORE_URL is empty; point it at the public asset store directory".into(),
+        );
+    }
+    store_root(&url)?;
+    let catalog = std::env::var("MOLY_ASSET_CATALOG").ok();
+    validate_catalog_id(&catalog)?;
+    let cache = match std::env::var("MOLY_ASSET_CACHE") {
+        Ok(value) if value.trim().is_empty() => {
+            return Err("MOLY_ASSET_CACHE is empty; point it at a cache directory".into());
+        }
+        Ok(value) => {
+            let path = std::path::PathBuf::from(value);
+            std::fs::create_dir_all(&path).map_err(|error| {
+                format!("MOLY_ASSET_CACHE is not usable: {}: {error}", path.display())
+            })?;
+            Some(path)
+        }
+        Err(_) => None,
+    };
+    Ok(AssetSource::HttpPacks {
+        url,
+        catalog,
+        cache,
+    })
+}
+
+/// Without `MOLY_ASSET_ROOT` or `MOLY_ASSET_STORE_URL`, the resources the
+/// launcher installed: its resource directory and the selected (or newest)
+/// complete snapshot there.
 #[cfg(not(target_arch = "wasm32"))]
 fn installed_resources() -> Result<AssetSource, String> {
     let (path, installed) = moly_store::config::default_selection()?.ok_or_else(|| {
@@ -243,7 +319,8 @@ fn installed_resources() -> Result<AssetSource, String> {
             .unwrap_or_else(|error| error);
         format!(
             "no resources are installed in {dir}; download them with moly-launcher, \
-             or set MOLY_ASSET_ROOT to a resource directory"
+             or set MOLY_ASSET_ROOT to a resource directory, \
+             or MOLY_ASSET_STORE_URL to a public asset store"
         )
     })?;
     let catalog = std::env::var("MOLY_ASSET_CATALOG").ok().or(Some(installed.catalog));
@@ -300,5 +377,36 @@ mod public_resource_tests {
             assert!(validate_asset_selection(&root, Some("https://unselected.example"), None).is_err());
         }
         assert!(validate_asset_selection("/moly/sources/local/", None, None).is_ok());
+    }
+
+    /// A store URL names the publication directory it sits in; anything that
+    /// is not one public asset directory below that publication is refused.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn store_urls_name_one_public_asset_directory_below_a_publication() {
+        use super::store_root;
+        for value in [
+            "https://cdn.example/moly/asset-store/",
+            "https://cdn-two.example:8443/moly/asset-store/",
+            "https://assets.pjsk.moe/sekai-extra-assets/asset-store/",
+        ] {
+            assert!(store_root(value).is_ok(), "{value}");
+        }
+        for value in [
+            "http://cdn.example/moly/asset-store/",
+            "https://user@cdn.example/moly/asset-store/",
+            "https://cdn.example/moly/",
+            "https://cdn.example/moly/sources/private/",
+            "https://cdn.example/moly/asset-store/blobs/",
+            "https://cdn.example/moly/asset-store/?token=private",
+            "https://cdn.example/moly/snapshots/cn-a/assets/",
+            "https://cdn.example/moly/asset-store/%2f",
+            "https://cdn.example/moly/asset-store/#fragment",
+            "https://cdn.example/asset-store/",
+            "https://cdn.example/",
+            "//cdn.example/moly/asset-store/",
+        ] {
+            assert!(store_root(value).is_err(), "{value}");
+        }
     }
 }
