@@ -817,6 +817,16 @@ mod tests {
         moly_masters::load::parse_terms(
             &upstream(json!([
                 {"id": 1, "mysekaiBlueprintId": 844, "startAt": 1_759_330_800_000_i64, "endAt": 1_759_849_199_000_i64},
+                {"id": 2, "mysekaiBlueprintId": 4, "startAt": 1_790_000_000_000_i64, "endAt": 1_790_400_000_000_i64, "mysekaiBlueprintTermTabType": "birthday_anniversary", "mysekaiBlueprintTermMysekaiMaterialCostGroupId": 900, "craftLimit": 2},
+                {"id": 3, "mysekaiBlueprintId": 4, "startAt": 1_700_000_000_000_i64, "endAt": 1_700_100_000_000_i64, "mysekaiBlueprintTermTabType": "limited_term"},
+            ])),
+            craft,
+        )
+        .unwrap();
+        moly_masters::load::parse_term_costs(
+            &upstream(json!([
+                {"id": 900, "groupId": 900, "mysekaiMaterialId": 1, "seq": 1, "quantity": 5},
+                {"id": 901, "groupId": 900, "mysekaiMaterialId": 21, "seq": 2, "quantity": 1},
             ])),
             craft,
         )
@@ -858,6 +868,7 @@ mod tests {
                 card_id: None,
                 is_special_training: None,
                 quantity: 3,
+                mysekai_blueprint_term_id: None,
             }),
             &mut model,
             &masters,
@@ -885,6 +896,214 @@ mod tests {
             }]
         );
         assert_eq!(model.doc.gamedata.total_exp, 1000);
+    }
+
+    /// A craft of blueprint 4 in term 2 (birthday_anniversary, cost group 900,
+    /// craftLimit 2) with the given quantity and term id.
+    fn term_craft_request(quantity: i32, term: Option<i32>) -> Call {
+        Call::Craft(UserMysekaiCraftRequest {
+            blueprint_id: 4,
+            texture_id: None,
+            card_id: None,
+            is_special_training: None,
+            quantity,
+            mysekai_blueprint_term_id: term,
+        })
+    }
+
+    // The server resolves mysekaiBlueprintTermId to a row of the request's
+    // blueprint (spec 4 item 1): an id of another blueprint is refused.
+    #[test]
+    fn a_craft_term_of_another_blueprint_is_refused() {
+        let masters = fixture_masters();
+        let mut shared = MasterTables::fixture();
+        craft_masters(&mut shared);
+        let masters = Tables::new(&masters, Some(&shared));
+        let mut model = joined_model(&masters);
+        model.doc.delivery.mysekai_materials = [(1, 100), (21, 10)].into_iter().collect();
+        // Term 1 belongs to blueprint 844, not 4.
+        let answered = answer_call(term_craft_request(1, Some(1)), &mut model, &masters);
+        match ok(answered) {
+            Reply::SuiteUser(reply) => {
+                assert!(!reply.success);
+                let refusal = reply.refusal.unwrap_or_default();
+                assert!(refusal.contains("not blueprint 4's"), "{refusal}");
+            }
+            other => panic!("not a craft reply: {other:?}"),
+        }
+        // An id that is no master term at all is refused too.
+        let answered = answer_call(term_craft_request(1, Some(404)), &mut model, &masters);
+        match ok(answered) {
+            Reply::SuiteUser(reply) => {
+                assert!(!reply.success);
+                let refusal = reply.refusal.unwrap_or_default();
+                assert!(refusal.contains("is not a master blueprint term"), "{refusal}");
+            }
+            other => panic!("not a craft reply: {other:?}"),
+        }
+    }
+
+    // The term must hold the server clock (spec 4 items 1 and 7): term 3
+    // ended long before the fixed clock, so a request naming it is refused.
+    #[test]
+    fn a_craft_of_an_expired_term_is_refused_at_the_server_clock() {
+        let masters = fixture_masters();
+        let mut shared = MasterTables::fixture();
+        craft_masters(&mut shared);
+        let masters = Tables::new(&masters, Some(&shared));
+        let mut model = joined_model(&masters);
+        model.doc.delivery.mysekai_materials = [(1, 100), (21, 10)].into_iter().collect();
+        let answered = answer_call(term_craft_request(1, Some(3)), &mut model, &masters);
+        match ok(answered) {
+            Reply::SuiteUser(reply) => {
+                assert!(!reply.success);
+                let refusal = reply.refusal.unwrap_or_default();
+                assert!(refusal.contains("outside its session"), "{refusal}");
+                assert!(refusal.contains("MSG_CRAFT_TERM_LIMIT"), "{refusal}");
+            }
+            other => panic!("not a craft reply: {other:?}"),
+        }
+    }
+
+    // A term with a positive cost group charges that group's rows in place of
+    // the blueprint's, and the lend counter gains the quantity and comes back
+    // in the reply (spec 4 items 2 and 4).
+    #[test]
+    fn a_term_craft_charges_the_terms_cost_group_and_counts_the_craft() {
+        let masters = fixture_masters();
+        let mut shared = MasterTables::fixture();
+        craft_masters(&mut shared);
+        let masters = Tables::new(&masters, Some(&shared));
+        let mut model = joined_model(&masters);
+        // Group 900: 5 x material 1 and 1 x material 21 per craft; the
+        // blueprint's own rows (3 x material 1, 3 x 21, 3 x 10) are not
+        // charged.
+        model.doc.delivery.mysekai_materials =
+            [(1, 100), (21, 10), (10, 10)].into_iter().collect();
+        let answered = answer_call(term_craft_request(2, Some(2)), &mut model, &masters);
+        match ok(answered.clone()) {
+            Reply::SuiteUser(reply) => assert!(reply.success, "{reply:?}"),
+            other => panic!("not the craft's reply: {other:?}"),
+        }
+        let left = &model.doc.delivery.mysekai_materials;
+        assert_eq!((left[&1], left[&21], left[&10]), (90, 8, 10));
+        assert_eq!(
+            model.doc.inventory.blueprint_lend_craft_counts,
+            vec![moly_protocol::rows::UserMysekaiBlueprintLendCraftCount {
+                mysekai_blueprint_term_id: 2,
+                craft_count: 2,
+            }]
+        );
+        let sections = answered.sections.expect("the reply carries its sections");
+        assert_eq!(
+            sections.blueprint_lend_craft_counts,
+            Some(vec![moly_protocol::rows::UserMysekaiBlueprintLendCraftCount {
+                mysekai_blueprint_term_id: 2,
+                craft_count: 2,
+            }]),
+            "the term counter comes back with the reply"
+        );
+    }
+
+    // craftLimit is a second, independent cap against the lend counter
+    // (spec 4 items 2 and 3): term 2 allows 2 crafts.
+    #[test]
+    fn a_term_craft_past_its_craft_limit_is_refused() {
+        let masters = fixture_masters();
+        let mut shared = MasterTables::fixture();
+        craft_masters(&mut shared);
+        let masters = Tables::new(&masters, Some(&shared));
+        let mut model = joined_model(&masters);
+        model.doc.delivery.mysekai_materials = [(1, 100), (21, 10)].into_iter().collect();
+        // Two crafts used already; the cap is 2, so the third is refused.
+        model.doc.inventory.blueprint_lend_craft_counts =
+            vec![moly_protocol::rows::UserMysekaiBlueprintLendCraftCount {
+                mysekai_blueprint_term_id: 2,
+                craft_count: 2,
+            }];
+        let answered = answer_call(term_craft_request(1, Some(2)), &mut model, &masters);
+        match ok(answered) {
+            Reply::SuiteUser(reply) => {
+                assert!(!reply.success);
+                let refusal = reply.refusal.unwrap_or_default();
+                assert!(refusal.contains("IsTermCraftCountLimit"), "{refusal}");
+            }
+            other => panic!("not a craft reply: {other:?}"),
+        }
+        // One craft left: a quantity of 2 is above the term-capped selector
+        // maximum, a quantity of 1 goes through.
+        model.doc.inventory.blueprint_lend_craft_counts =
+            vec![moly_protocol::rows::UserMysekaiBlueprintLendCraftCount {
+                mysekai_blueprint_term_id: 2,
+                craft_count: 1,
+            }];
+        let answered = answer_call(term_craft_request(2, Some(2)), &mut model, &masters);
+        match ok(answered) {
+            Reply::SuiteUser(reply) => {
+                assert!(!reply.success);
+                let refusal = reply.refusal.unwrap_or_default();
+                assert!(refusal.contains("count selector's maximum 1"), "{refusal}");
+            }
+            other => panic!("not a craft reply: {other:?}"),
+        }
+        let answered = answer_call(term_craft_request(1, Some(2)), &mut model, &masters);
+        match ok(answered) {
+            Reply::SuiteUser(reply) => {
+                assert!(reply.success, "{reply:?}");
+                assert_eq!(
+                    model.doc.inventory.blueprint_lend_craft_counts,
+                    vec![moly_protocol::rows::UserMysekaiBlueprintLendCraftCount {
+                        mysekai_blueprint_term_id: 2,
+                        craft_count: 2,
+                    }]
+                );
+            }
+            other => panic!("not the craft's reply: {other:?}"),
+        }
+    }
+
+    // A blueprint with a live term is craftable without possession (spec 4
+    // item 5): with the owned rows policy `stated` and no owned row, a craft
+    // of a term blueprint in session is accepted, while a blueprint without a
+    // live term is still refused for not being owned.
+    #[test]
+    fn a_term_craft_needs_no_owned_blueprint() {
+        let masters = fixture_masters();
+        let mut shared = MasterTables::fixture();
+        craft_masters(&mut shared);
+        let masters = Tables::new(&masters, Some(&shared));
+        let mut model = joined_model(&masters);
+        model.doc.inventory.owned_blueprints = crate::model::inventory::OwnedBlueprints::Stated;
+        model.doc.inventory.blueprints.clear();
+        model.doc.delivery.mysekai_materials =
+            [(1, 100), (21, 10), (10, 10)].into_iter().collect();
+        // Blueprint 1 has no term row: not owned.
+        let answered = answer_call(
+            Call::Craft(UserMysekaiCraftRequest {
+                blueprint_id: 1,
+                texture_id: None,
+                card_id: None,
+                is_special_training: None,
+                quantity: 1,
+                mysekai_blueprint_term_id: None,
+            }),
+            &mut model,
+            &masters,
+        );
+        match ok(answered) {
+            Reply::SuiteUser(reply) => {
+                assert!(!reply.success);
+                let refusal = reply.refusal.unwrap_or_default();
+                assert!(refusal.contains("is not owned"), "{refusal}");
+            }
+            other => panic!("not a craft reply: {other:?}"),
+        }
+        // Blueprint 4 has live term 2: accepted, its term counter written.
+        let answered = answer_call(term_craft_request(1, Some(2)), &mut model, &masters);
+        match ok(answered) {
+            Reply::SuiteUser(reply) => assert!(reply.success, "{reply:?}"),
+            other => panic!("not a craft reply: {other:?}"),
+        }
     }
 
     #[test]

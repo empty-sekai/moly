@@ -79,6 +79,9 @@ pub struct UserMysekaiCraftRequest {
     pub card_id: Option<i32>,
     pub is_special_training: Option<bool>,
     pub quantity: i32,
+    /// The blueprint term the craft consumes; `None` when the cell carries no
+    /// term (the blueprint's own costs, no term cap).
+    pub mysekai_blueprint_term_id: Option<i32>,
 }
 
 /// `UserMysekaiHousingSketchRequest`.

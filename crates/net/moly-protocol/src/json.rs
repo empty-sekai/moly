@@ -13,9 +13,9 @@ use serde_json::{json, Map, Value};
 use crate::api::HousingLayoutFixture;
 use crate::rows::{
     BirthdayPartyRow, Gamedata, HonorRow, MusicPlaySetting, OwnedMusicRecord, ScheduleRow, Stamina,
-    UserAvatar, UserMysekaiBlueprint, UserMysekaiCanvas, UserMysekaiCharacterTalk,
-    UserMysekaiFixture, UserMysekaiGamedata, UserMysekaiItem, UserMysekaiMaterial,
-    UserMysekaiSystemFixtureAction, UserMysekaiTool, UserResource,
+    UserAvatar, UserMysekaiBlueprint, UserMysekaiBlueprintLendCraftCount, UserMysekaiCanvas,
+    UserMysekaiCharacterTalk, UserMysekaiFixture, UserMysekaiGamedata, UserMysekaiItem,
+    UserMysekaiMaterial, UserMysekaiSystemFixtureAction, UserMysekaiTool, UserResource,
 };
 
 // ---------------------------------------------------------------------------
@@ -60,6 +60,8 @@ pub const SECTION_MUSIC_RECORDS: &str = "userMysekaiMusicRecords";
 pub const SECTION_SYSTEM_FIXTURE_ACTIONS: &str = "userMysekaiSystemFixtureActions";
 /// `userMysekaiTools`.
 pub const SECTION_TOOLS: &str = "userMysekaiTools";
+/// `userMysekaiBlueprintLendCraftCounts`.
+pub const SECTION_BLUEPRINT_LEND_CRAFT_COUNTS: &str = "userMysekaiBlueprintLendCraftCounts";
 
 /// `UserAvatar`'s field names, in the source's order.
 pub const AVATAR_FIELDS: [&str; 4] = [
@@ -377,6 +379,20 @@ pub fn tools_value(rows: &[UserMysekaiTool]) -> Value {
 /// `userMysekaiTools`'s value in a document (`null` while not seated).
 pub fn tools_section_value(rows: &Option<Vec<UserMysekaiTool>>) -> Value {
     rows.as_deref().map_or(Value::Null, tools_value)
+}
+
+/// `userMysekaiBlueprintLendCraftCounts`.
+pub fn blueprint_lend_craft_counts_value(rows: &[UserMysekaiBlueprintLendCraftCount]) -> Value {
+    Value::Array(
+        rows.iter()
+            .map(|row| {
+                json!({
+                    "mysekaiBlueprintTermId": row.mysekai_blueprint_term_id,
+                    "craftCount": row.craft_count,
+                })
+            })
+            .collect(),
+    )
 }
 
 /// `userMysekaiSiteHousingLayouts`'s `mysekaiFixtures` of one site, in the
@@ -736,6 +752,34 @@ pub fn parse_system_fixture_actions(
             Ok(UserMysekaiSystemFixtureAction {
                 mysekai_system_fixture_id: id,
             })
+        })
+        .collect()
+}
+
+/// `userMysekaiBlueprintLendCraftCounts`: one row per term, a term named once.
+pub fn parse_blueprint_lend_craft_counts(
+    value: &Value,
+) -> Result<Vec<UserMysekaiBlueprintLendCraftCount>, String> {
+    const AT: &str = SECTION_BLUEPRINT_LEND_CRAFT_COUNTS;
+    let rows = rows(value, AT)?;
+    let mut seen = BTreeSet::new();
+    rows.iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let at = format!("{AT}[{i}]");
+            let row = object(row, &at)?;
+            only(row, &["mysekaiBlueprintTermId", "craftCount"], &at)?;
+            let term = UserMysekaiBlueprintLendCraftCount {
+                mysekai_blueprint_term_id: int32(row, "mysekaiBlueprintTermId", &at)?,
+                craft_count: int32(row, "craftCount", &at)?,
+            };
+            if !seen.insert(term.mysekai_blueprint_term_id) {
+                return Err(format!(
+                    "{at} repeats blueprint term {}",
+                    term.mysekai_blueprint_term_id
+                ));
+            }
+            Ok(term)
         })
         .collect()
 }

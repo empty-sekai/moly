@@ -50,7 +50,9 @@ pub mod rows;
 /// 4: the sections carry the server panel's NPC slice.
 /// 5: the inventory screen's recycle and disassemble call and its reply.
 /// 6: the boost stamina recovery call and its reply.
-pub const PROTOCOL_VERSION: u32 = 6;
+/// 7: the craft request carries the blueprint term, and the sections carry
+/// the blueprint terms' craft counters.
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// The account a session belongs to. The server keeps one document per user.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -351,6 +353,10 @@ pub struct Sections {
     pub system_fixture_actions: Option<Vec<UserMysekaiSystemFixtureAction>>,
     /// `userMysekaiTools`.
     pub tools: Option<Vec<UserMysekaiTool>>,
+    /// `userMysekaiBlueprintLendCraftCounts`: the crafts each blueprint term
+    /// has used (the craft screen's remaining-count and term-cap source).
+    pub blueprint_lend_craft_counts:
+        Option<Vec<crate::rows::UserMysekaiBlueprintLendCraftCount>>,
     /// The developer server panel's NPC slice as JSON text: the gate and its
     /// visitors, the schedule, the talk list, the layouts and the controls the
     /// response changed.
@@ -390,9 +396,9 @@ mod tests {
     use super::*;
     use crate::rows::{
         BirthdayPartyRow, CoordinateRow, Gate, HonorRow, MusicPlaySetting, RankReleaseRow, Reward,
-        UserMysekaiBlueprint, UserMysekaiCanvas, UserMysekaiCharacterTalk, UserMysekaiFixture,
-        UserMysekaiGamedata, UserMysekaiItem, UserMysekaiMaterial,
-        UserMysekaiMaterialPossession,
+        UserMysekaiBlueprint, UserMysekaiBlueprintLendCraftCount, UserMysekaiCanvas,
+        UserMysekaiCharacterTalk, UserMysekaiFixture, UserMysekaiGamedata, UserMysekaiItem,
+        UserMysekaiMaterial, UserMysekaiMaterialPossession,
     };
 
     use std::collections::{BTreeMap, BTreeSet};
@@ -417,6 +423,7 @@ mod tests {
                     card_id: None,
                     is_special_training: None,
                     quantity: 3,
+                    mysekai_blueprint_term_id: Some(4),
                 }),
             },
             ClientMessage::Call {
@@ -576,6 +583,10 @@ mod tests {
                 quantity: 42,
                 durability: 43,
                 last_obtained_at: 44,
+            }]),
+            blueprint_lend_craft_counts: Some(vec![UserMysekaiBlueprintLendCraftCount {
+                mysekai_blueprint_term_id: 45,
+                craft_count: 46,
             }]),
             npc_panel: Some("{\"version\":1}".to_owned()),
         }

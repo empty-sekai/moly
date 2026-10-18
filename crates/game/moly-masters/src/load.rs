@@ -169,7 +169,7 @@ enum Group {
     Stamina,
 }
 
-const CRAFT_TABLES: usize = 6;
+const CRAFT_TABLES: usize = 7;
 const POSSESSION_TABLES: usize = 2;
 const AVATAR_TABLES: usize = 4;
 const DELIVERY_TABLES: usize = 3;
@@ -293,6 +293,14 @@ static TABLES: &[Entry] = &[
         parse_terms,
         craft,
         terms,
+        Craft
+    ),
+    table!(
+        "mysekaiBlueprintTermMysekaiMaterialCosts",
+        "mysekaiBlueprintTermMysekaiMaterialCosts (the server's per-term material costs)",
+        parse_term_costs,
+        craft,
+        term_costs,
         Craft
     ),
     table!(
@@ -662,11 +670,19 @@ pub fn parse_costs(text: &str, craft: &mut CraftMasters) -> Result<(), String> {
     Ok(())
 }
 
-/// `mysekaiBlueprintTerms`.
+/// `mysekaiBlueprintTerms`: a row this reader does not take (an unknown
+/// `mysekaiBlueprintTermTabType`) is dropped and reported by
+/// [`crate::craft::read_terms`], not the whole table.
 pub fn parse_terms(text: &str, craft: &mut CraftMasters) -> Result<(), String> {
-    craft.terms = Some(crate::craft::parse_terms(&table_rows(
+    craft.terms = Some(crate::craft::read_terms(text)?);
+    Ok(())
+}
+
+/// `mysekaiBlueprintTermMysekaiMaterialCosts`: the rows per cost group.
+pub fn parse_term_costs(text: &str, craft: &mut CraftMasters) -> Result<(), String> {
+    craft.term_costs = Some(crate::craft::parse_term_costs(&table_rows(
         text,
-        "mysekaiBlueprintTerms",
+        "mysekaiBlueprintTermMysekaiMaterialCosts",
     )?)?);
     Ok(())
 }

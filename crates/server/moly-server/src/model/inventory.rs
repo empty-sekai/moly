@@ -53,14 +53,15 @@ use serde_json::{json, Map, Value};
 
 pub(crate) use moly_masters::craft::MasterBlueprint;
 pub(crate) use moly_protocol::json::{
-    blueprints_value, canvases_value, character_talks_value, fixtures_value, items_value,
-    resources_value, SECTION_BLUEPRINTS, SECTION_CANVASES, SECTION_CHARACTER_TALKS,
+    blueprint_lend_craft_counts_value, blueprints_value, canvases_value, character_talks_value,
+    fixtures_value, items_value, resources_value, SECTION_BLUEPRINTS,
+    SECTION_BLUEPRINT_LEND_CRAFT_COUNTS, SECTION_CANVASES, SECTION_CHARACTER_TALKS,
     SECTION_FIXTURES, SECTION_ITEMS,
 };
 pub(crate) use moly_protocol::rows::{
-    SuiteUserSections, UserMysekaiBlueprint, UserMysekaiCanvas, UserMysekaiCharacterTalk,
-    UserMysekaiFixture, UserMysekaiGamedata, UserMysekaiItem, UserMysekaiMaterial,
-    UserMysekaiMaterialPossession, UserResource,
+    SuiteUserSections, UserMysekaiBlueprint, UserMysekaiBlueprintLendCraftCount, UserMysekaiCanvas,
+    UserMysekaiCharacterTalk, UserMysekaiFixture, UserMysekaiGamedata, UserMysekaiItem,
+    UserMysekaiMaterial, UserMysekaiMaterialPossession, UserResource,
 };
 use super::delivery::SECTION_MYSEKAI_MATERIALS;
 use super::{ServerModel, Tables, SECTION_GAMEDATA};
@@ -73,8 +74,16 @@ pub(crate) const SECTIONS: [&str; 5] = [
     SECTION_ITEMS,
     SECTION_CHARACTER_TALKS,
 ];
-/// The document keys this part reads at the top level.
-pub(crate) const DOCUMENT_KEYS: [&str; 5] = SECTIONS;
+/// The document keys this part reads at the top level, the blueprint terms'
+/// craft counters included (they are stored beside the owned tables).
+pub(crate) const DOCUMENT_KEYS: [&str; 6] = [
+    SECTION_FIXTURES,
+    SECTION_CANVASES,
+    SECTION_BLUEPRINTS,
+    SECTION_ITEMS,
+    SECTION_CHARACTER_TALKS,
+    SECTION_BLUEPRINT_LEND_CRAFT_COUNTS,
+];
 /// The keys this part reads under `userMysekaiGamedata`.
 pub(crate) const GAMEDATA_KEYS: [&str; 2] = [
     "mysekaiMaterialPossessionLevel",
@@ -113,6 +122,9 @@ pub(crate) struct InventoryDoc {
     /// `policies.talkReadObtainedResources`: what every talk read report
     /// grants (none by default).
     pub(crate) talk_read_resources: Vec<UserResource>,
+    /// `userMysekaiBlueprintLendCraftCounts`: the crafts each blueprint term
+    /// has used, one row per term that has been crafted.
+    pub(crate) blueprint_lend_craft_counts: Vec<UserMysekaiBlueprintLendCraftCount>,
 }
 
 impl Default for InventoryDoc {
@@ -127,6 +139,7 @@ impl Default for InventoryDoc {
             owned_blueprints: OwnedBlueprints::EveryBlueprint,
             character_talks: Vec::new(),
             talk_read_resources: Vec::new(),
+            blueprint_lend_craft_counts: Vec::new(),
         }
     }
 }
@@ -155,6 +168,12 @@ pub(crate) fn parse_character_talks(
     value: &Value,
 ) -> Result<Vec<UserMysekaiCharacterTalk>, String> {
     moly_protocol::json::parse_character_talks(value)
+}
+
+pub(crate) fn parse_blueprint_lend_craft_counts(
+    value: &Value,
+) -> Result<Vec<UserMysekaiBlueprintLendCraftCount>, String> {
+    moly_protocol::json::parse_blueprint_lend_craft_counts(value)
 }
 
 /// `policies.talkReadObtainedResources`: `UserResource` rows.
@@ -198,6 +217,9 @@ impl InventoryDoc {
         }
         if let Some(value) = doc.get(SECTION_ITEMS) {
             out.items = parse_items(value)?;
+        }
+        if let Some(value) = doc.get(SECTION_BLUEPRINT_LEND_CRAFT_COUNTS) {
+            out.blueprint_lend_craft_counts = parse_blueprint_lend_craft_counts(value)?;
         }
         if let Some(gamedata) = doc.get(SECTION_GAMEDATA).and_then(Value::as_object) {
             if let Some(value) = gamedata.get(GAMEDATA_KEYS[0]) {
@@ -290,6 +312,28 @@ impl InventoryDoc {
                 ));
             }
         }
+        let mut terms = BTreeSet::new();
+        for (i, row) in self.blueprint_lend_craft_counts.iter().enumerate() {
+            let at = format!("{SECTION_BLUEPRINT_LEND_CRAFT_COUNTS}[{i}]");
+            if row.mysekai_blueprint_term_id < 1 {
+                return Err(format!(
+                    "{at}.mysekaiBlueprintTermId = {} is below 1",
+                    row.mysekai_blueprint_term_id
+                ));
+            }
+            if row.craft_count < 1 {
+                return Err(format!(
+                    "{at}.craftCount = {} is below 1 (a term with no craft has no row)",
+                    row.craft_count
+                ));
+            }
+            if !terms.insert(row.mysekai_blueprint_term_id) {
+                return Err(format!(
+                    "{at} repeats blueprint term {}",
+                    row.mysekai_blueprint_term_id
+                ));
+            }
+        }
         for (key, value) in [
             (GAMEDATA_KEYS[0], self.material_possession_level),
             (GAMEDATA_KEYS[1], self.fixture_possession_level),
@@ -314,6 +358,10 @@ impl InventoryDoc {
         doc.insert(
             SECTION_CHARACTER_TALKS.into(),
             character_talks_value(&self.character_talks),
+        );
+        doc.insert(
+            SECTION_BLUEPRINT_LEND_CRAFT_COUNTS.into(),
+            blueprint_lend_craft_counts_value(&self.blueprint_lend_craft_counts),
         );
         policies.insert(
             POLICY_KEYS[1].into(),
@@ -588,6 +636,12 @@ pub(crate) fn edit_path(
             doc.character_talks = rows;
             Some(SECTION_CHARACTER_TALKS)
         }),
+        [SECTION_BLUEPRINT_LEND_CRAFT_COUNTS] => {
+            parse_blueprint_lend_craft_counts(value).map(|rows| {
+                doc.blueprint_lend_craft_counts = rows;
+                Some(SECTION_BLUEPRINT_LEND_CRAFT_COUNTS)
+            })
+        }
         ["policies", "talkReadObtainedResources"] => parse_resources(value).map(|rows| {
             doc.talk_read_resources = rows;
             None
@@ -624,6 +678,8 @@ pub(crate) fn schema_sections() -> Value {
                     "note": "the birthday-party section's rows; the craft reply spends them"},
                 {"path": SECTION_CHARACTER_TALKS, "type": "rows", "row": {"mysekaiCharacterTalkId": "int", "isRead": "bool"},
                     "note": "the talks' read records (the character archive reads them); the talk read report sets isRead"},
+                {"path": SECTION_BLUEPRINT_LEND_CRAFT_COUNTS, "type": "rows", "row": {"mysekaiBlueprintTermId": "int", "craftCount": "int"},
+                    "note": "one row per blueprint term that has been crafted; the term craft adds its quantity and the craft reply carries the table, so the craft screen's remaining count and term cap follow it"},
             ],
         },
         {
@@ -665,5 +721,6 @@ pub(crate) fn schema_policies() -> Value {
         {"name": "possession levels", "rule": format!("both default to {DEFAULT_POSSESSION_LEVEL}, the first master level; the panel sets them")},
         {"name": "talk read record", "rule": "PutUserMysekaiCharacterTalkReadApi sets the talk's userMysekaiCharacterTalks row to isRead true (the character archive reads these rows); the talk id is taken as stated"},
         {"name": "talk read resources", "key": "policies.talkReadObtainedResources", "rule": "obtainedResources is the policy's rows (none by default: no master names a talk reward); mysekai_material, material and mysekai_item rows join the owned tables, other types are carried in the reply only"},
+        {"name": "blueprint term craft counts", "rule": "a craft whose request names a blueprint term adds its quantity to that term's userMysekaiBlueprintLendCraftCounts row (a new row starts at the quantity); the table is carried whole with the craft reply. The client reads it for the term's remaining crafts (GetTermCraftRemaining) and the server enforces the term's craftLimit against it (the counter is the server's record, not an inference)"},
     ])
 }

@@ -567,6 +567,8 @@ impl ServerModel {
                 system_fixture_actions: has(system_fixture_action::SECTION)
                     .then(|| self.doc.system_fixture_actions.rows.clone()),
                 tools: has(tools::SECTION).then(|| self.doc.tools.clone().unwrap_or_default()),
+                blueprint_lend_craft_counts: has(inventory::SECTION_BLUEPRINT_LEND_CRAFT_COUNTS)
+                    .then(|| self.doc.inventory.blueprint_lend_craft_counts.clone()),
                 npc_panel: self.npc_panel(kind),
             },
         };

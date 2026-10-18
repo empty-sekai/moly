@@ -93,6 +93,14 @@ pub struct UserMysekaiBlueprint {
     pub obtained_at: i64,
 }
 
+/// `UserMysekaiBlueprintLendCraftCount`: how many crafts a blueprint term has
+/// used, the client's only source for a term's remaining count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserMysekaiBlueprintLendCraftCount {
+    pub mysekai_blueprint_term_id: i32,
+    pub craft_count: i32,
+}
+
 /// `UserMysekaiItem`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserMysekaiItem {

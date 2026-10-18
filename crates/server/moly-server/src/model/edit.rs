@@ -24,7 +24,7 @@ use super::{
 };
 
 /// Sections a response carries (the `pending` names).
-pub(crate) const PENDING_SECTIONS: [&str; 19] = [
+pub(crate) const PENDING_SECTIONS: [&str; 20] = [
     super::music::SECTION,
     super::avatar::SECTION,
     SECTION_GAMEDATA,
@@ -41,6 +41,7 @@ pub(crate) const PENDING_SECTIONS: [&str; 19] = [
     super::inventory::SECTION_BLUEPRINTS,
     super::inventory::SECTION_ITEMS,
     super::inventory::SECTION_CHARACTER_TALKS,
+    super::inventory::SECTION_BLUEPRINT_LEND_CRAFT_COUNTS,
     super::music_play::RECORDS_SECTION,
     super::system_fixture_action::SECTION,
     super::tools::SECTION,
@@ -629,6 +630,7 @@ fn masters_value(masters: &Tables<'_>) -> Value {
             "blueprints": masters.craft().blueprints.as_ref().map(|rows| rows.len()),
             "costBlueprints": masters.craft().costs.as_ref().map(|rows| rows.len()),
             "terms": masters.craft().terms.as_ref().map(Vec::len),
+            "termCostGroups": masters.craft().term_costs.as_ref().map(|rows| rows.len()),
             "firstCraftBonus": masters.craft().first_craft_bonus,
             "materials": masters.craft().material_types.as_ref().map(|rows| rows.len()),
             "whiteBlueprintItem": masters.craft().white_blueprint_item,
