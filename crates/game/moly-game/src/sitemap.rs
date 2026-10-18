@@ -136,7 +136,7 @@ use crate::ui_layers::{LayerCommand, MenuScreenType, ScreenHook, ScreenLayerEven
 use crate::ui_layout::{UiLayouts, UiPrefabView};
 
 #[path = "sitemap_tap.rs"]
-mod sitemap_tap;
+pub(crate) mod sitemap_tap;
 
 // ---------------------------------------------------------------------------
 // 常量（真源锚在注释里）
@@ -148,10 +148,7 @@ const DEFAULT_SITE_ID: i32 = 1;
 /// 真源常量：HOME 图标在屏幕层图标列表的序号（`HOME_SITE_ICON_INDEX = 0`）。
 const HOME_SITE_ICON_INDEX: usize = 0;
 
-/// 小地图独占渲染层：与气泡层（1）隔离——各自的相机互不采到对方，
-/// 地图整体显隐只动本层。场地屏外壳的离开确认框借本层相机画（Dialog
-/// 槽要盖过外壳与小地图）。
-pub(crate) const SITEMAP_LAYER: usize = 2;
+pub(crate) use crate::ui_inputs::SITEMAP_LAYER;
 
 // 层内没有再往下的 fit/居中系数：屏幕层被运行时拉伸到 1920×1080 的参照
 // 画布上（ScreenManager.SetUpScreenResolution 的匹配律，见
@@ -1334,93 +1331,7 @@ fn bake_text_atlas(
 // canvas_scale——底图随地图根缩放，天气钮不随地图缩放）
 // ---------------------------------------------------------------------------
 
-/// 覆盖层总根（M 键切显隐的实体）。
-#[derive(Component)]
-pub(crate) struct SitemapRoot;
-
-/// A drawn part's own alpha under the site map's screen root, before the
-/// root's `CanvasGroup` alpha multiplies it. The screen's start and exit
-/// animations (`ScreenAlphaInOut` on the screen root) write that group alpha;
-/// a Sprite has no inherited alpha, so the two passes below apply it.
-#[derive(Component)]
-pub(crate) struct ScreenAlphaBase(f32);
-
-/// PreUpdate: the parts the last frame multiplied get their own alpha back,
-/// so this frame's writers read and write the parts' own values.
-pub(crate) fn screen_alpha_restore(
-    mut sprites: Query<(&mut Sprite, &ScreenAlphaBase)>,
-    mut hosts: Query<(&mut crate::ui_particle::UiParticleHost, &ScreenAlphaBase), Without<Sprite>>,
-) {
-    for (mut sprite, base) in &mut sprites {
-        sprite.color.set_alpha(base.0);
-    }
-    for (mut host, base) in &mut hosts {
-        host.alpha = base.0;
-    }
-}
-
-/// PostUpdate: after this frame's writers, every part under the root keeps
-/// its own alpha and shows it times the site map layer's group alpha
-/// ([`crate::ui_layers::ScreenManager::screen_visual`]; 1 while no animation
-/// wrote it).
-pub(crate) fn screen_alpha_apply(
-    mut commands: Commands,
-    manager: Option<Res<crate::ui_layers::ScreenManager>>,
-    roots: Query<
-        (Entity, &Visibility),
-        (With<SitemapRoot>, Without<sitemap_tap::SitemapTapView>),
-    >,
-    mut taps: Query<&mut Visibility, (With<sitemap_tap::SitemapTapView>, Without<SitemapRoot>)>,
-    children: Query<&Children>,
-    mut sprites: Query<(&mut Sprite, Option<&mut ScreenAlphaBase>)>,
-    mut hosts: Query<
-        (
-            &mut crate::ui_particle::UiParticleHost,
-            Option<&mut ScreenAlphaBase>,
-        ),
-        Without<Sprite>,
-    >,
-) {
-    let map_open = manager
-        .as_deref()
-        .is_some_and(|manager| manager.current_screen() == Some(MenuScreenType::MysekaiSiteMap));
-    let Ok((root, root_visibility)) = roots.single() else {
-        for mut visibility in &mut taps {
-            visibility.set_if_neq(Visibility::Hidden);
-        }
-        return;
-    };
-    let shown = map_open && *root_visibility != Visibility::Hidden;
-    for mut visibility in &mut taps {
-        visibility.set_if_neq(if shown { Visibility::Inherited } else { Visibility::Hidden });
-    }
-    let group = manager
-        .as_deref()
-        .and_then(|manager| manager.screen_visual(MenuScreenType::MysekaiSiteMap).alpha)
-        .unwrap_or(1.0);
-    let parts: Vec<Entity> = children.iter_descendants(root).collect();
-    for entity in parts {
-        if let Ok((mut sprite, base)) = sprites.get_mut(entity) {
-            let own = sprite.color.alpha();
-            match base {
-                Some(mut base) => base.0 = own,
-                None => {
-                    commands.entity(entity).insert(ScreenAlphaBase(own));
-                }
-            }
-            sprite.color.set_alpha(own * group);
-        } else if let Ok((mut host, base)) = hosts.get_mut(entity) {
-            let own = host.alpha;
-            match base {
-                Some(mut base) => base.0 = own,
-                None => {
-                    commands.entity(entity).insert(ScreenAlphaBase(own));
-                }
-            }
-            host.alpha = own * group;
-        }
-    }
-}
+pub(crate) use crate::ui_layers::{screen_alpha_apply, screen_alpha_restore, SitemapRoot, ScreenAlphaBase};
 
 /// 地图根（底图 + 图标列；缩放 = map_fit × canvas_scale）。
 #[derive(Component)]
@@ -3601,4 +3512,30 @@ pub(crate) fn report(
         runs.iter().count(),
         balloons.iter().filter(|b| b.shown).count()
     );
+}
+
+#[cfg(test)]
+mod overlay_sample_tests {
+    use super::*;
+    use crate::camera::MYSEKAI_CAMERA_MSAA;
+
+    #[test]
+    fn source_sprite_overlay_cameras_share_the_field_sample_count() {
+        let mut app = App::new();
+        app.add_systems(
+            Startup,
+            (crate::balloon::overlay_camera, overlay_camera),
+        );
+        app.update();
+        let mut cameras = app
+            .world_mut()
+            .query_filtered::<(&Camera, &Msaa), With<Camera2d>>();
+        let cameras = cameras.iter(app.world()).collect::<Vec<_>>();
+        assert_eq!(cameras.len(), 2);
+        for (camera, msaa) in cameras {
+            assert!(matches!(camera.clear_color, ClearColorConfig::None));
+            assert_eq!(*msaa, MYSEKAI_CAMERA_MSAA);
+            assert_eq!(msaa.samples(), 1);
+        }
+    }
 }

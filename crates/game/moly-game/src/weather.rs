@@ -214,17 +214,7 @@ struct WeatherRun {
     current: usize,
 }
 
-/// 当前现象档名——天气域对外的一面：音频 BGM（按站点 × 档选曲）与小地图
-/// 天气钮（图标与文本）都读它，不进 `WeatherRun` 的私有下标。两侧同挂后
-/// 随真实档走；`audio::install` 另有同型兜底 `init_resource`（幂等）。
-#[derive(Resource)]
-pub struct CurrentPhenomenon(pub String);
-
-impl Default for CurrentPhenomenon {
-    fn default() -> Self {
-        Self(DEFAULT_PHENOMENON.to_string())
-    }
-}
+pub use crate::audio_inputs::CurrentPhenomenon;
 
 /// 默认现象 id：真源现象主表的公开常量（值 1），与 [`DEFAULT_PHENOMENON]
 /// （001_sunny）是同一档——清单里该档的 id 就是 1。
@@ -251,21 +241,7 @@ impl Default for CurrentPhenomenonId {
 #[derive(Message, Debug, Clone, Copy)]
 pub struct WeatherRequest(pub i32);
 
-/// Source identity, display metadata and resolved icon path for product UI.
-#[derive(Clone, Debug)]
-pub struct PhenomenonOption {
-    pub id: i32,
-    pub name: String,
-    pub icon: Option<String>,
-    pub icon_source: Option<moly_assets::weather_icons::WeatherIconArtifact>,
-    pub metadata: Option<moly_assets::weather_index::PhenomenonMetadata>,
-}
-
-/// 现象档清单（id 升序，与现象运行态同序），由 `resolve_all` 在同一次落定
-/// 里写满。浏览器与宿主 UI 只读它来画天气钮——档位表由运行时给出，界面因此
-/// 点不到不存在的档；真送错了也只是被拒绝一次。
-#[derive(Resource, Default)]
-pub struct PhenomenonCatalogue(pub Vec<PhenomenonOption>);
+pub use crate::ui_inputs::{PhenomenonCatalogue, PhenomenonOption};
 
 /// 一帧解出的后处理轴值（淡化权重已折进强度），主世界每帧写、抽取到渲染
 /// 世界。两条轴全关时节点整段旁路。
@@ -825,7 +801,7 @@ fn advance(
     mut phase: ResMut<WeatherTransition>,
     mut current: ResMut<CurrentPhenomenon>,
     mut current_id: ResMut<CurrentPhenomenonId>,
-    environment_hold: Option<Res<crate::site_move::EnvironmentHold>>,
+    environment_hold: Option<Res<crate::field_modes::EnvironmentHold>>,
 ) {
     if run.phenomena.is_empty() { return; }
     let Some(site) = site.as_deref() else { return; };
@@ -960,12 +936,13 @@ fn write_environment(
     phase: Res<WeatherTransition>,
     mut env: ResMut<SiteEnv>,
     mut post: ResMut<WeatherPostParams>,
+    mut bloom: ResMut<crate::render_inputs::PostBloomInput>,
     timeline: Res<WeatherTimelineState>,
     mut character: Option<ResMut<crate::character_material::CharacterEnv>>,
     mut avatar: Option<ResMut<crate::avatar_material::AvatarEnv>>,
     sky_materials: Query<&MeshMaterial3d<SkyGradient>, With<SkyDome>>,
     mut materials: ResMut<Assets<SkyGradient>>,
-    edits: Option<Res<crate::fixture_edit::EditSessionActive>>,
+    edits: Option<Res<crate::field_modes::EditSessionActive>>,
 ) {
     let Some(next) = phase.loaded.as_ref() else { return; };
     let previous = phase.source.as_ref().unwrap_or(next);
@@ -992,7 +969,7 @@ fn write_environment(
     // on exit; the fog pass then switches the fog keyword off and writes both
     // colour alphas as zero. The product's layout-edit session is that state,
     // at home and in the rooms alike.
-    if edits.as_deref().is_some_and(crate::fixture_edit::EditSessionActive::is_active) {
+    if edits.as_deref().is_some_and(crate::field_modes::EditSessionActive::is_active) {
         let mut fog = p.fog;
         fog.enabled = p.fog_on;
         blended.fog = fog.globals(true);
@@ -1041,6 +1018,7 @@ fn write_environment(
     site_changed |= store(&mut site.emission_type, blended.post.emission_type as f32);
     if site_changed { env.set_changed(); }
     if !post.same_bits(&blended.post) { *post = blended.post; }
+    bloom.bloom_on = post.bloom_on;
     if let Ok(handle) = sky_materials.single() {
         // `get_mut` always marks the asset modified, and a modified material is
         // re-prepared with new uniform buffers and a new bind group.
@@ -2239,6 +2217,8 @@ impl Plugin for WeatherPlugin {
             .init_resource::<WeatherTransition>()
             .init_resource::<WeatherTimelineState>()
             .init_resource::<CommittedPhenomenon>()
+            .init_resource::<crate::render_inputs::PostBloomInput>()
+            .add_plugins(ExtractResourcePlugin::<crate::render_inputs::PostBloomInput>::default())
             .init_resource::<CurrentPhenomenon>()
             .init_resource::<CurrentPhenomenonId>()
             .init_resource::<PhenomenonCatalogue>()

@@ -36,6 +36,13 @@ pub(crate) struct FixtureActivityOwner {
     pub generation: u64,
 }
 
+/// The cut-scene holds this object for its director: a cast member (its
+/// animator, root pose and activity) or the fixture a track binds. The world's
+/// character and timeline systems read it to yield the object, so it lives
+/// with the activity owner it carries.
+#[derive(Component, Clone, Copy, Debug)]
+pub(crate) struct CutSceneCastLease(pub(crate) FixtureActivityOwner);
+
 #[derive(Resource, Default)]
 pub(crate) struct FixtureActivityReservations {
     npc_future: HashMap<FixtureTarget, FixtureActivityOwner>,

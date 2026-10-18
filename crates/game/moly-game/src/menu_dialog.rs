@@ -1386,7 +1386,7 @@ pub(crate) fn click(
             .find(|which| hit_test(canvas, *which, &layouts, view, size));
         match hit {
             Some(MenuButton::Close) => {
-                sounds.source_button(&layouts, view.key, MenuButton::Close.source_path());
+                layouts.queue_button_se(&mut sounds, view.key, MenuButton::Close.source_path());
                 info!(
                     "[menu_dialog] 关闭钮按下 → {}——开始窗口滑出",
                     MenuButton::Close.handler()
@@ -1414,7 +1414,7 @@ pub(crate) fn click(
                         which.handler()
                     );
                 } else {
-                    sounds.source_button(&layouts, view.key, which.source_path());
+                    layouts.queue_button_se(&mut sounds, view.key, which.source_path());
                     match which {
                         MenuButton::Chest => {
                             // OnClickChestButton: when IsActiveScreen(607) it

@@ -64,6 +64,8 @@
 
 use bevy::animation::AnimatedBy;
 use bevy::diagnostic::FrameCount;
+pub(crate) use crate::field_modes::LearnSiteEnvironmentActive;
+
 use bevy::prelude::*;
 
 use crate::camera::{
@@ -121,10 +123,6 @@ pub(crate) fn has_today_environment(rows: Option<&[UserPhenomenon]>, today: i32)
     rows.is_some_and(|rows| rows.iter().any(|row| row.phenomena_id - today == 0))
 }
 
-/// GameState LearnSiteEnvironment (6) is current: the joystick is hidden and
-/// the gesture layer is off.
-#[derive(Resource)]
-pub(crate) struct LearnSiteEnvironmentActive;
 
 /// The learn run and the camera state's lookups.
 #[derive(Resource, Default)]
@@ -219,7 +217,7 @@ fn enter_learn_camera(world: &mut World) {
         .map(|site| site.site_type.clone());
     if from == CameraStateType::Normal {
         if let Some(site) = &site {
-            crate::site_move::camera::record_normal_exit(world, site);
+            crate::camera_site_move::record_normal_exit(world, site);
         }
     } else {
         warn!("[harvest-learn] FieldCamera.ChangeState(LearnSiteEnvironment) from {from:?}: no Normal exit snapshot");

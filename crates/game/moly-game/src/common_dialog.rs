@@ -23,10 +23,8 @@ use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
-use crate::action_button::ActionTapConsumed;
+use crate::ui_inputs::{ActionTapConsumed, SITEMAP_LAYER};
 use crate::gesture::{GestureEvent, GestureKind, GestureState};
-use crate::userdata::client::instrument_env;
-use crate::sitemap::SITEMAP_LAYER;
 use crate::ui_layers::{
     DialogBackKey, DialogBackKeyEvent, DialogId, DialogType, DisplayLayerType, ScreenManager,
 };
@@ -364,7 +362,7 @@ pub(crate) fn place(
         }
         let Some(secs) = shown
             .instrument
-            .and_then(instrument_env)
+            .and_then(crate::userdata::instrument_env)
             .and_then(|raw| raw.trim().parse::<f32>().ok())
         else {
             continue;

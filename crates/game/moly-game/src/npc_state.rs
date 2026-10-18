@@ -376,7 +376,7 @@ impl tweet_law::UniformDraw for GreetingDraw<'_> {
 pub(crate) fn on_update(
     clock: Res<crate::npc_clock::NpcClock>,
     frame: Res<FrameCount>,
-    editor: Res<crate::fixture_edit::EditSessionActive>,
+    editor: Res<crate::field_modes::EditSessionActive>,
     selection: Option<Res<crate::site::SiteSelection>>,
     catalog: crate::player_talk::TalkCatalog,
     tables: Option<Res<crate::npc_tweet::TweetTables>>,

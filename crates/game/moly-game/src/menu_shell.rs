@@ -22,7 +22,7 @@ use crate::site::SiteActive;
 use crate::sitemap::SITEMAP_LAYER;
 use crate::ui_layers::{LayerCommand, LayerId, UiLayerStack};
 use crate::cutscene::birthday_party::{BirthdayParty, EndBirthdayPartyClick, PartyUi};
-use crate::ui_layout::{Pointer, UiLayouts, UiPrefabView};
+use crate::ui_layout::{UiLayouts, UiPrefabView};
 
 const SITES_DATA: &str = "moly://site/sites.json";
 const CHROME_MOVE_DURATION: f32 = 0.2;
@@ -302,11 +302,7 @@ impl ShellAction {
     }
 }
 
-/// The existing glyph bake waits for this fixed set of UI characters.
-#[derive(Resource)]
-pub(crate) struct ShellTextCharset {
-    pub(crate) chars: Vec<char>,
-}
+pub(crate) use crate::ui_charsets::ShellTextCharset;
 
 #[derive(Resource)]
 pub(crate) struct ShellNamesHandle(Handle<JsonAsset>);
@@ -316,32 +312,7 @@ pub(crate) struct ShellUiState {
     hidden: bool,
 }
 
-#[derive(Resource, Default)]
-pub(crate) struct ShellDialogState {
-    pub(crate) leave_confirm: bool,
-    pub(crate) menu_open: bool,
-    /// The closing window still occupies the dialog input layer until its slide ends.
-    pub(crate) menu_closing: bool,
-    pub(crate) option_open: bool,
-    pub(crate) get_resource_open: bool,
-    /// The learn-phenomenon dialog, from its request to the end of its close animation.
-    pub(crate) learn_phenomena_open: bool,
-    leave_context: Option<LeaveContext>,
-    /// The screen manager's instance of the leave confirm.
-    leave_dialog: Option<crate::ui_layers::DialogId>,
-}
-
-impl ShellDialogState {
-    pub(crate) fn blocks_field_input(&self) -> bool {
-        self.leave_confirm || self.menu_open || self.menu_closing || self.option_open || self.get_resource_open
-            || self.learn_phenomena_open
-    }
-}
-
-struct LeaveContext {
-    owner_name: String,
-    on_confirm: SystemId,
-}
+pub(crate) use crate::ui_inputs::{LeaveContext, ShellDialogState};
 
 /// A visitor flow must supply both the world owner's name and its actual join
 /// operation. Merely selecting a local site is not a change of world.
@@ -421,6 +392,9 @@ pub(crate) fn settled_host_view(doc: &UiPrefab, key: &str) -> UiPrefabView {
     root.advance_view(false, true, false, None, GAUGE_SLIDE_SECONDS.max(CHROME_MOVE_DURATION), no_clock, doc, &mut view);
     view
 }
+
+#[cfg(test)]
+mod ui_source_compare;
 
 /// The leave confirmation and the addresses of its three buttons.
 #[derive(Component)]
@@ -946,89 +920,15 @@ pub(crate) fn end_party_instrument(
     );
 }
 
+/// A window position (logical pixels, origin top-left) in root canvas units,
+/// the inverse of [`from_canvas`].
 fn to_canvas(position: Vec2, window: &Window, root: &RootCanvas) -> Vec2 {
     Vec2::new(position.x - window.width() / 2., window.height() / 2. - position.y) / root.scale(window)
 }
 
-/// A window position (logical pixels, origin top-left) as the engine's
-/// screen point (physical pixels, origin bottom-left).
-fn to_screen_point(position: Vec2, window: &Window) -> [f32; 2] {
-    let ratio = window.scale_factor();
-    [position.x * ratio, window.physical_height() as f32 - position.y * ratio]
-}
-
-/// The event camera's ray through an engine screen point, as the raycast
-/// pointer; None when the host canvas carries no camera pose. A point the
-/// camera cannot see gets the engine's fallback ray and its error is logged.
-pub(crate) fn screen_pointer(window: &Window, root: &RootCanvas, screen: [f32; 2]) -> Option<Pointer> {
-    let pixels = [window.physical_width() as f32, window.physical_height() as f32];
-    let event = root.event_ray(pixels, screen)?;
-    if let Some(error) = &event.error {
-        warn!("{error}");
-    }
-    Some(Pointer::Ray { ray: event.ray, root: event.root })
-}
-
-/// The raycast pointer of a window position: the event camera's ray, or the
-/// point in canvas units when the host canvas carries no camera pose.
-pub(crate) fn event_pointer(window: &Window, root: &RootCanvas, position: Vec2) -> Pointer {
-    screen_pointer(window, root, to_screen_point(position, window))
-        .unwrap_or_else(|| Pointer::Canvas(to_canvas(position, window, root)))
-}
-
-/// The press chain of the field camera reset button for one pointer: the
-/// pointer, the selectable the source raycast gives a press there to,
-/// whether the button's node is the pointer's enter target or an ancestor
-/// of it, and the button's `IsActive()` and `IsInteractable()`.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct CameraResetHit {
-    // The pointer and the target are read by the research instrument only.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) pointer: Pointer,
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) target: Option<(usize, i64)>,
-    pub(crate) over_button: bool,
-    pub(crate) hovered: bool,
-    pub(crate) active: bool,
-    pub(crate) interactable: bool,
-}
-
-/// The camera reset press chain for a pointer at a window position.
-pub(crate) fn camera_reset_hit(
-    view: &UiPrefabView,
-    layouts: &UiLayouts,
-    window: &Window,
-    root: &RootCanvas,
-    position: Vec2,
-    node: usize,
-    button: i64,
-) -> CameraResetHit {
-    camera_reset_press(view, layouts, root.size(window), event_pointer(window, root, position), node, button)
-}
-
-/// The camera reset press chain for a raycast pointer over a root canvas of
-/// `canvas` units.
-pub(crate) fn camera_reset_press(
-    view: &UiPrefabView,
-    layouts: &UiLayouts,
-    canvas: Vec2,
-    pointer: Pointer,
-    node: usize,
-    button: i64,
-) -> CameraResetHit {
-    let target = view.press_target(layouts, pointer, canvas);
-    let hovered = view.hovers(layouts, pointer, canvas, node);
-    let (active, interactable) = match view.selectable_live(layouts, canvas, node, button) {
-        Some(live) => live,
-        None => {
-            // A canvas without area resolves and raycasts nothing, so the
-            // pointer is over no button and these two are never read.
-            assert!(target.is_none() && !hovered, "a canvas without area produced a raycast target");
-            (false, false)
-        }
-    };
-    CameraResetHit { pointer, target, over_button: target.is_some_and(|(_, id)| id == button), hovered, active, interactable }
-}
+pub(crate) use crate::ui_inputs::{
+    camera_reset_button, camera_reset_hit, camera_reset_press, event_pointer, CameraResetHit,
+};
 
 fn hit(view: &UiPrefabView, layouts: &UiLayouts, path: &str, canvas: Vec2, size: Vec2) -> bool {
     view.rect(layouts, path, size).is_some_and(|rect| rect.active && rect.contains(canvas))
@@ -1104,7 +1004,7 @@ pub(crate) fn click(
                 && hit(view, &layouts, root.bindings.get(action.field()), canvas, size)
         }) {
             consumed.0 = true;
-            sounds.source_button(&layouts, view.key, root.bindings.get(action.field()));
+            layouts.queue_button_se(&mut sounds, view.key, root.bindings.get(action.field()));
             match action {
                 ShellAction::SiteMap => { layer_commands.write(LayerCommand::Push(LayerId::MysekaiSiteMap)); }
                 ShellAction::FixtureEdit => { edit_commands.write(crate::fixture_edit::EditCommand::Enter); }
@@ -1123,25 +1023,6 @@ pub(crate) fn click(
             break;
         }
     }
-}
-
-/// The CustomButton behind `MysekaiMenuUIContent._cameraResetButton`: the
-/// field holds the MySekai button wrapper, whose `_button` is the CustomButton.
-pub(crate) fn camera_reset_button(doc: &UiPrefab) -> Option<i64> {
-    let content = doc.nodes.iter()
-        .flat_map(|node| node.components.iter())
-        .find(|c| c.class == "Sekai.Mysekai.MysekaiMenuUIContent")?;
-    let reference = content.fields["_cameraResetButton"].as_array()?;
-    if reference.first()?.as_i64() != Some(0) {
-        return None;
-    }
-    let id = reference.get(1)?.as_i64()?;
-    let component = doc.nodes.iter().flat_map(|node| node.components.iter()).find(|c| c.path_id == id)?;
-    if component.fields.get("se").is_some() {
-        return Some(id);
-    }
-    let inner = component.fields["_button"].as_array()?;
-    (inner.first()?.as_i64() == Some(0)).then(|| inner.get(1)?.as_i64()).flatten()
 }
 
 /// Whether this layout's CustomButton class serializes `enableHoldRepeat`,
@@ -1179,9 +1060,7 @@ fn button_config(doc: &UiPrefab, fields: &Value) -> Option<button_rule::CustomBu
     })
 }
 
-/// The game's input manager state shared by source buttons.
-#[derive(Resource, Default)]
-pub(crate) struct SourceInputManager(pub(crate) button_rule::InputManager);
+pub(crate) use crate::ui_inputs::SourceInputManager;
 
 /// The camera reset button's CustomButton state, whether the event
 /// system's current press went to it, the held pointer (its id and latest

@@ -15,7 +15,6 @@ use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 use bevy::transform::TransformSystems;
 use moly_law::shading::fieldobject::FieldObjectGlobals;
 
-use crate::camera;
 use crate::light;
 
 /// 晴天现象的全局 toon 阈值与平滑度，照抄源值。
@@ -281,7 +280,7 @@ impl Plugin for SiteEnvPlugin {
                 PostUpdate,
                 write_frame_state
                     .after(TransformSystems::Propagate)
-                    .after(camera::frame_site),
+                    .after(crate::markers::SiteFramed),
             );
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app

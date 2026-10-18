@@ -142,9 +142,9 @@ pub(crate) struct GameSettings {
 pub(crate) struct SettingsPanel {
     pub(crate) open: bool,
     pub(crate) player_data: bool,
-    /// Edge-triggered request consumed by fixture colour/cache ownership.
-    /// The panel never removes an asset directly and never reports RSS.
-    pub(crate) resource_clear_requested: bool,
+    /// The last answer a render cache gave to the clear request, shown on the
+    /// resource-management line. The panel never removes an asset directly and
+    /// never reports RSS.
     pub(crate) resource_status: String,
     release_guard: u8,
     status: String,
@@ -259,7 +259,20 @@ pub(crate) fn install(app: &mut App) {
         .init_resource::<SettingsStore>()
         .init_resource::<SettingsPanel>()
         .init_resource::<SceneSurface>()
-        .add_message::<SettingsPanelRequest>();
+        .init_resource::<crate::render_inputs::RenderCacheClear>()
+        .init_resource::<crate::render_inputs::OpenPlayerDataPanel>()
+        .add_message::<SettingsPanelRequest>()
+        .add_systems(
+            Update,
+            publish_input_claim
+                .before(crate::site::read_switch)
+                .before(crate::gesture::advance),
+        )
+        .add_systems(
+            Update,
+            (take_cache_clear_status, take_player_data_request)
+                .after(crate::fixture_colors::prepare),
+        );
     #[cfg(target_arch = "wasm32")]
     app.add_systems(Startup, pacing::start)
         .add_systems(First, pacing::note_update);
@@ -703,6 +716,48 @@ pub(crate) fn release_input_guard(
     }
 }
 
+/// Takes the renderer's answer to the panel's cache-clear request and shows
+/// it on the resource-management line.
+fn take_cache_clear_status(
+    mut panel: ResMut<SettingsPanel>,
+    mut clear: ResMut<crate::render_inputs::RenderCacheClear>,
+) {
+    if let Some(status) = clear.status.take() {
+        panel.resource_status = status;
+    }
+}
+
+/// A render module that failed to build its material asks for the player-data
+/// page: shows the panel on that page and writes the reason where the import's
+/// own status line shows it.
+fn take_player_data_request(
+    mut panel: ResMut<SettingsPanel>,
+    mut request: ResMut<crate::render_inputs::OpenPlayerDataPanel>,
+    mut import: Option<ResMut<crate::player_data::PlayerDataImport>>,
+) {
+    let Some(status) = request.status.take() else {
+        return;
+    };
+    if let Some(import) = import.as_mut() {
+        import.status = status;
+    }
+    panel.open = true;
+    panel.player_data = true;
+}
+
+/// Publishes the settings modal's claim on the field's input, read from the
+/// panel's own state where the field's input routes consume it.
+fn publish_input_claim(
+    panel: Res<SettingsPanel>,
+    mut claims: ResMut<crate::input_claims::InputClaims>,
+) {
+    crate::input_claims::publish(
+        &mut claims,
+        crate::input_claims::SETTINGS_PANEL,
+        panel.blocks_world_input(),
+    );
+}
+
 pub(crate) fn input(
     keys: Res<ButtonInput<KeyCode>>,
     mut requests: MessageReader<SettingsPanelRequest>,
@@ -718,6 +773,7 @@ pub(crate) fn input(
     ranks: Option<Res<crate::mysekai_rank::MysekaiRanks>>,
     total_exp: Option<Res<crate::mysekai_rank::UserTotalExp>>,
     mut link: Option<ResMut<moly_link::ServerLink>>,
+    mut cache_clear: ResMut<crate::render_inputs::RenderCacheClear>,
 ) {
     let mut queued = Vec::new();
     if keys.just_pressed(KeyCode::F12) {
@@ -830,7 +886,7 @@ pub(crate) fn input(
                 }
             }
             Action::ClearInactiveResources => {
-                panel.resource_clear_requested = true;
+                cache_clear.requested = true;
                 panel.resource_status =
                     "正在检查家具换色句柄…".into();
             }

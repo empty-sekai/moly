@@ -43,6 +43,7 @@ use crate::emoticon::EmoticonArchive;
 use crate::fixture::{FixturePlacement, FixtureRoot};
 use crate::fixture_activity_state::FixtureActivityIdentity;
 use crate::gesture::{GestureEvent, GestureKind, GestureState};
+use crate::markers::{BirthdayContext, BirthdayLua};
 use crate::npc::{CharacterUnitId, MotionPhase, Registry, WalkState};
 use crate::player::PlayerControlled;
 use crate::player_avatar::AvatarDriver;
@@ -1368,7 +1369,7 @@ impl PlayerTalkSession {
 
     /// Exact future NPC voice commands from the authored cursor onward. The
     /// returned rows are load hints only and never advance the script or play.
-    pub(crate) fn voice_prefetches(&self) -> Vec<crate::audio::VoicePrefetch> {
+    pub(crate) fn voice_prefetches(&self) -> Vec<crate::audio_inputs::VoicePrefetch> {
         self.row
             .steps
             .iter()
@@ -1377,7 +1378,7 @@ impl PlayerTalkSession {
                 TalkStep::Voice { cue, who, .. }
                     if matches!(participant_of(self, who), Some(Participant::Npc)) =>
                 {
-                    Some(crate::audio::VoicePrefetch::new(
+                    Some(crate::audio_inputs::VoicePrefetch::new(
                         cue.clone(),
                         Some(VoiceWho::Participant(self.unit as i32)),
                     ))
@@ -1643,8 +1644,8 @@ pub(crate) fn consume_trigger(
     mut window: ResMut<TalkWindowState>,
     groups: Option<Res<crate::npc_fixture_talk::FixtureTalkGroups>>,
     birthday: (
-        Option<Res<crate::cutscene::birthday::BirthdayContext>>,
-        Query<&crate::cutscene::birthday_party::BirthdayLua>,
+        Option<Res<BirthdayContext>>,
+        Query<&BirthdayLua>,
     ),
 ) {
     // 同帧多请求只发起第一个（资源插入是延迟命令，循环内读不到自己
@@ -4043,78 +4044,6 @@ pub(crate) fn smoke_autotap(
     info!(
         "[player-talk-smoke] 合成 TAP @({:.0},{:.0})（投影 unit {unit} 的世界位，事件面注入）",
         position.x, position.y
-    );
-}
-
-/// Host probe of the tap ladder (`MOLY_PLAYER_TALK_STACK_TAP_SECS`, a window
-/// `<until>` or `<from>:<until>` in seconds, with the action-button autowalk bringing the player to each
-/// character): while the action stack's head is the Talk button of a
-/// character and no talk plays, the request the Talk button's dispatch
-/// writes for that character is written: at most every 15 s (so the
-/// characters get back to their own activities between taps), and at once
-/// (2 s after the last tap at the earliest) when the character has entered
-/// a fixture-activity state it was not tapped in (the tweet, the fixture
-/// action idle, the multiple-character timeline states, the communication
-/// wait), so the taps land in the states whose ladder rows differ. It stands in for
-/// the press itself, which a headless run at a few frames per second cannot
-/// make (the injected release lands a frame later, past the long-press
-/// threshold, so the gesture layer reports no tap). The request then takes
-/// the dispatcher's own path: the stack check, the ladder, the session.
-pub(crate) fn probe_stack_taps(
-    button_state: Res<crate::action_button::ActionButtonState>,
-    npcs: Query<(Entity, &CharacterUnitId, &crate::npc::NpcActions), Without<PlayerControlled>>,
-    session: Option<Res<PlayerTalkSession>>,
-    active_talk: Option<Res<crate::talk::ActiveTalk>>,
-    time: Res<Time>,
-    mut requests: MessageWriter<PlayerTalkRequest>,
-    mut last: Local<Option<(f32, u32, crate::npc::NpcAction)>>,
-) {
-    use crate::npc::NpcAction;
-    let now = time.elapsed_secs();
-    if !crate::dev_tools::instrument_open("MOLY_PLAYER_TALK_STACK_TAP_SECS", now) {
-        return;
-    }
-    if session.is_some() || active_talk.is_some() {
-        return;
-    }
-    let Some((
-        moly_law::action_button::ButtonType::Talk,
-        moly_law::action_button::TargetId::Character(unit),
-    )) = button_state.current()
-    else {
-        return;
-    };
-    let Some((entity, _, actions)) = npcs.iter().find(|(_, id, _)| id.0 == unit) else {
-        return;
-    };
-    let action = actions.current;
-    let activity = matches!(
-        action,
-        NpcAction::Tweet
-            | NpcAction::FixtureActionIdle
-            | NpcAction::MainSomeFixtureAction
-            | NpcAction::SomeFixtureAction
-            | NpcAction::Communication
-    );
-    let due = match *last {
-        None => true,
-        Some((at, last_unit, last_action)) => {
-            now >= at + 15.0
-                || (now >= at + 2.0 && activity && (last_unit, last_action) != (unit, action))
-        }
-    };
-    if !due {
-        return;
-    }
-    requests.write(PlayerTalkRequest {
-        entity,
-        unit,
-        exact: None,
-        target_fixture: None,
-    });
-    *last = Some((now, unit, action));
-    info!(
-        "[player-talk-smoke] stack tap: the Talk button's request for unit {unit} at {now:.1}s (state {action:?})"
     );
 }
 

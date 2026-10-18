@@ -16,7 +16,7 @@
 //! Navigation data is supplied by the scene owner. Missing tiles, agent values,
 //! or avatar clips are unfinished preparation, never successful eligibility.
 
-pub(crate) mod walk;
+
 
 use std::{
     collections::{HashMap, HashSet},
@@ -27,7 +27,6 @@ use std::{
 use bevy::{ecs::system::SystemState, prelude::*};
 
 use crate::{
-    action_button::admission::can_move_to_locator_with_fallback,
     fixture_activity_data::{FixtureActivityTables, PlayerTimelineRow},
     fixture_activity_provider::{
         self, FixtureActivityProvider, PlayerTimelinePlan, ProviderPending,
@@ -41,6 +40,7 @@ use crate::{
         TimelineTimeoutBudget, TimelineToken,
     },
     fixture_attach::{AttachPoints, AttachPose},
+    fixture_locator::can_move_to_locator_with_fallback,
     npc::MotionPhase,
     player::{DashMode, PlayerControlled, PlayerInput},
     player_avatar::{
@@ -363,7 +363,7 @@ impl LinearMove {
     }
 }
 
-struct PlayerFixtureSession {
+pub(crate) struct PlayerFixtureSession {
     prepared: PreparedPlayerFixture,
     phase: PlayerFixturePhase,
     /// The seat's resources: the unfinished attempt while loading (it keeps
@@ -387,7 +387,7 @@ struct PlayerFixtureSession {
 #[derive(Resource, Default)]
 pub(crate) struct PlayerFixtureRuntime {
     pending: Vec<PlayerFixtureRequest>,
-    session: Option<PlayerFixtureSession>,
+    pub(crate) session: Option<PlayerFixtureSession>,
     generation: u64,
     availability: HashMap<FixtureTarget, PlayerFixtureAvailability>,
     availability_sweep: AvailabilitySweep,
@@ -441,7 +441,7 @@ impl PlayerFixtureRuntime {
 pub(crate) fn receive_requests(
     mut requests: MessageReader<PlayerFixtureRequest>,
     mut runtime: ResMut<PlayerFixtureRuntime>,
-    editor: Res<crate::fixture_edit::EditSessionActive>,
+    editor: Res<crate::field_modes::EditSessionActive>,
 ) {
     // Entry has already cancelled the old activity owner. Drain requests made
     // earlier in this frame too, so a queued tap cannot reacquire that owner.
@@ -458,7 +458,7 @@ pub(crate) fn receive_requests(
 /// also request an immediate end. Only TAP/END matches the gesture protocol.
 pub(crate) fn request_end_from_input(
     mut gestures: MessageReader<crate::gesture::GestureEvent>,
-    joystick: Res<crate::joystick::JoystickState>,
+    joystick: Res<crate::markers::JoystickState>,
     runtime: Res<PlayerFixtureRuntime>,
     mut requests: MessageWriter<PlayerFixtureRequest>,
 ) {

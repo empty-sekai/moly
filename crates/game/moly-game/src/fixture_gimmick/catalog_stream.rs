@@ -95,7 +95,7 @@ pub(crate) fn advance(
     stream: Option<ResMut<Stream>>,
     catalog: Option<ResMut<Catalog>>,
     tables: Option<Res<FixtureActivityTables>>,
-    homes: Option<Res<crate::entry::house::HomeFixtures>>,
+    homes: Option<Res<crate::house::HomeFixtures>>,
     mut houses: Option<ResMut<HouseCatalog>>,
     fixtures: Query<&FixtureActivityIdentity>,
 ) {

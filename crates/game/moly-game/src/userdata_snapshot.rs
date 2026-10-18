@@ -60,3 +60,13 @@ pub(crate) fn rank_release_rows() -> Vec<Value> {
         })
         .collect()
 }
+
+/// The `mysekaiRankReleases` rows a reader walks: the rows it read itself,
+/// plus the rows the server appends under its site-level release policy
+/// ([`rank_release_rows`]). Every reader of the table takes its rows through
+/// here, so they agree on what the releases are; without a response, and under
+/// the source's own policy, the table's rows are all of them.
+pub(crate) fn rank_release_rows_with_appended(mut rows: Vec<Value>) -> Vec<Value> {
+    rows.extend(rank_release_rows());
+    rows
+}

@@ -84,19 +84,7 @@ use std::sync::Arc;
 
 use super::{InstanceReady, PendingInstance, SiteMoveOwned};
 
-/// `EffectManager`'s `EffectType` values the product plays by name. The
-/// move's three come from the harvest action family, whose packages ship a
-/// prefab glb; the player's two foot effects (played by [`crate::footstep`])
-/// come from the common action family, whose packages hold no mesh and so
-/// ship no glb.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum EffectType {
-    SiteMoveEndPlayer = 4,
-    SiteMoveFailedPlayer = 5,
-    Dash = 14,
-    Flying = 16,
-    WalkWater = 17,
-}
+pub(crate) use crate::render_inputs::EffectType;
 
 const TYPES: [EffectType; 3] = [
     EffectType::Flying,

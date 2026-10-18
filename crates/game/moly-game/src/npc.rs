@@ -65,10 +65,7 @@ pub(crate) const CREATION_POSITION: [f32; 3] = [0.0, 0.0, 0.0];
 /// 地表高度采样半径：取「脚下的地面」，与站点取景同款。
 const SURFACE_RADIUS: f32 = 2.0;
 
-/// 名册成员的身份：真源 `npcRegistry.characterUnitIds` 身份列的一行。
-#[derive(Component, Reflect)]
-#[reflect(Component)]
-pub struct CharacterUnitId(pub u32);
+pub use crate::markers::CharacterUnitId;
 
 /// The unit an entity animates, as the animation-time check names it.
 impl crate::animation_time::UnitId for CharacterUnitId {
@@ -2307,7 +2304,7 @@ pub(crate) fn declare_navigation_action(
 pub fn advance(
     time: Res<Time>,
     clock: Res<crate::npc_clock::NpcClock>,
-    editor: Res<crate::fixture_edit::EditSessionActive>,
+    editor: Res<crate::field_modes::EditSessionActive>,
     walk_face: Option<Res<crate::walk_face::WalkFace>>,
     objective_face: Option<Res<crate::npc_objective::ObjectiveFace>>,
     navigation: Option<Res<residency::SiteNavigation>>,

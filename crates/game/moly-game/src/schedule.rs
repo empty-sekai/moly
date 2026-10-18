@@ -215,12 +215,12 @@ pub fn install(app: &mut App) {
             crate::entry::init,
             crate::entry::cover::spawn,
             crate::entry::indicator::request,
-            crate::entry::house::request,
+            crate::house::request,
         ),
     )
     .add_systems(
         Update,
-        crate::entry::house::build.before(crate::fixture::FixtureLayoutSet),
+        crate::house::build.before(crate::fixture::FixtureLayoutSet),
     )
     // ForceResetJoyStick: a press lets the stick go in the click's frame.
     .add_systems(
@@ -519,7 +519,7 @@ pub fn install(app: &mut App) {
                     (
                         action_button::smoke_autowalk,
                         action_button::smoke_door_walk,
-                        crate::player_fixture_action::walk::smoke_fixture_walk,
+                        crate::fixture_walk::smoke_fixture_walk,
                     )
                         .chain(),
                     joystick::advance,
@@ -532,7 +532,7 @@ pub fn install(app: &mut App) {
                     // 落在按钮上的那一下不该再打一条世界射线。
                     action_button::parse_tables,
                     action_button::spawn_when_ready,
-                    action_button::advance,
+                    action_button::advance.before(crate::markers::ActionButtonOrder),
                     action_button::place_ui,
                     action_button::place_change_ui,
                     action_button::click,
@@ -624,7 +624,7 @@ pub fn install(app: &mut App) {
                         // executor 让推进先跑时读到的是上一帧的输入，起手/收场
                         // 各晚一帧（真源 OnTouchJoyStick 在事件回调里烘好向量，
                         // 同一帧的 UpdateState 就消费它；键盘路同帧同形）。
-                        (player::read_input.after(player::reseed), player::advance).chain(),
+                        (crate::player_input::read_input.after(player::reseed), player::advance).chain(),
                         // The player's body is installed by player_avatar::body
                         // above; it installs the sole AvatarDriver.
                     ),
@@ -733,6 +733,9 @@ pub fn install(app: &mut App) {
                             (
                                 talk::voice_probe,
                                 talk::partvoice_probe,
+                                // The conversation owners publish their future
+                                // voice rows before audio warms their assets.
+                                talk::publish_voice_prefetch,
                                 // Warm exact future authored voice assets without
                                 // creating a player or advancing the script cursor.
                                 audio::prefetch_voice,
@@ -809,7 +812,7 @@ pub fn install(app: &mut App) {
         .configure_sets(
             Update,
             harvest::HarvestActionSet
-                .after(player::read_input)
+                .after(crate::player_input::read_input)
                 .before(player::advance),
         )
         .add_systems(
@@ -820,7 +823,7 @@ pub fn install(app: &mut App) {
             )
                 .chain()
                 .after(harvest::HarvestActionSet)
-                .after(player::read_input),
+                .after(crate::player_input::read_input),
         )
         .add_systems(
             Update,
@@ -886,6 +889,11 @@ pub fn install(app: &mut App) {
             (
                 weather_fx::notify_invisible,
                 weather_fx::expire_retirements,
+                // The collision owner publishes this frame's placed fixtures
+                // before the physics host reads them.
+                crate::fixture_collision::publish
+                    .after(crate::fixture::FixtureLayoutSet)
+                    .before(weather_fx::sync_fixture_colliders),
                 weather_fx::sync_fixture_colliders,
                 weather_fx::watch,
                 weather_fx::parse,
@@ -955,7 +963,9 @@ pub fn install(app: &mut App) {
         .add_systems(
             PostUpdate,
             (
-                camera::frame_site.after(TransformSystems::Propagate),
+                camera::frame_site
+                    .after(TransformSystems::Propagate)
+                    .in_set(crate::markers::SiteFramed),
                 camera::follow_avatar
                     .after(TransformSystems::Propagate)
                     .after(camera::frame_site),

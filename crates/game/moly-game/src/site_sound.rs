@@ -19,7 +19,7 @@
 //! 组件不在任何场景内容里（进世界时代码态创建、跨站点常驻），换站后
 //! 旧声持续、回到站点续更新是源行为，照搬。
 
-use crate::site::{SiteActive, SiteScenesReady, SiteRoot};
+use crate::markers::{SiteActive, SiteScenesReady, SiteRoot};
 use bevy::asset::LoadState;
 use bevy::prelude::*;
 use moly_assets::json::JsonAsset;

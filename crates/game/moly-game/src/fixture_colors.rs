@@ -124,7 +124,7 @@ fn image(
 }
 
 fn apply(world: &mut World, colors: &mut FixtureColors) -> Result<(), String> {
-    let revision = world.resource::<crate::fixture::FixtureLayoutRevision>().0;
+    let revision = world.resource::<crate::render_inputs::FixtureLayoutRevision>().0;
     if revision != colors.revision {
         colors.revision = revision;
         colors.materials.clear();
@@ -135,7 +135,7 @@ fn apply(world: &mut World, colors: &mut FixtureColors) -> Result<(), String> {
         .query_filtered::<(
             Entity,
             &FixtureColorChoice,
-            Option<&crate::fixture::FixtureVisualSceneReady>,
+            Option<&crate::render_inputs::FixtureVisualSceneReady>,
         ), Without<ColorApplied>>()
         .iter(world)
         .map(|(entity, choice, ready)| (entity, choice.clone(), ready.is_some()))
@@ -269,33 +269,25 @@ pub(crate) fn prepare(world: &mut World) {
         return;
     };
     let clear_requested = world
-        .get_resource::<crate::game_settings::SettingsPanel>()
-        .is_some_and(|panel| panel.resource_clear_requested);
+        .get_resource::<crate::render_inputs::RenderCacheClear>()
+        .is_some_and(|clear| clear.requested);
     if clear_requested {
         // Keep the request edge-triggered even if this frame is waiting for a
         // colour asset.  The result is a cache-handle count, not an RSS claim.
         let (materials, images) = clear_inactive_cache_with(&mut colors, world);
-        if let Some(mut panel) = world.get_resource_mut::<crate::game_settings::SettingsPanel>() {
-            panel.resource_clear_requested = false;
-            panel.resource_status = format!(
-                "已释放未使用缓存句柄：材质 {}，纹理 {}（GPU 回收由引擎异步完成）",
-                materials, images
-            );
+        if let Some(mut clear) = world.get_resource_mut::<crate::render_inputs::RenderCacheClear>() {
+            clear.requested = false;
+            clear.released(materials, images);
         }
     }
     if let Err(error) = apply(world, &mut colors) {
         colors.ready = false;
         if colors.error.as_ref() != Some(&error) {
             warn!("[player-data] {error}");
-            if let Some(mut state) =
-                world.get_resource_mut::<crate::player_data::PlayerDataImport>()
+            if let Some(mut request) =
+                world.get_resource_mut::<crate::render_inputs::OpenPlayerDataPanel>()
             {
-                state.status = error.clone();
-            }
-            if let Some(mut panel) = world.get_resource_mut::<crate::game_settings::SettingsPanel>()
-            {
-                panel.open = true;
-                panel.player_data = true;
+                request.status = Some(error.clone());
             }
             colors.error = Some(error);
         }
@@ -342,7 +334,7 @@ fn clear_inactive_cache_with(colors: &mut FixtureColors, world: &mut World) -> (
 
 pub(crate) fn install(app: &mut App) {
     app.init_resource::<FixtureColors>()
-        .add_systems(Update, prepare.after(crate::fixture::FixtureLayoutSet));
+        .add_systems(Update, prepare.after(crate::render_inputs::FixtureLayoutSet));
 }
 
 #[cfg(test)]

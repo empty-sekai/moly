@@ -295,20 +295,7 @@ pub(crate) fn spawn_when_ready(
 /// Shared PointerUi calls this in addition to actual source Button/Toggle/
 /// Slider rectangles. Only the left panel and selected HUD's measured content
 /// are opaque regions. The full-screen editor root is deliberately not one.
-pub(crate) fn captures_background(
-    view: &UiPrefabView,
-    layouts: &UiLayouts,
-    point: Vec2,
-    canvas: Vec2,
-) -> bool {
-    view.key == compose::RUNTIME
-        && [
-            "ContentRoot/ExpansionFixtureSelecter/BaseContent",
-            "ContentRoot/FixtureEditHeadUpDisplay/Content",
-        ]
-        .iter()
-        .any(|path| hit(view, layouts, path, point, canvas))
-}
+pub(crate) use crate::ui_inputs::captures_background;
 
 fn hit(view: &UiPrefabView, layouts: &UiLayouts, path: &str, point: Vec2, canvas: Vec2) -> bool {
     view.rect(layouts, path, canvas)
@@ -388,7 +375,7 @@ pub(crate) fn click(
                 None
             };
             if let Some((button, command)) = choice {
-                sounds.source_button(&layouts, dialog_view.key, button);
+                layouts.queue_button_se(&mut sounds, dialog_view.key, button);
                 actions.write(command);
                 break;
             }
@@ -423,7 +410,7 @@ pub(crate) fn click(
             };
             if let Some((button, command)) = choice {
                 if let Some(button) = button {
-                    sounds.source_button(&layouts, dialog_view.key, button);
+                    layouts.queue_button_se(&mut sounds, dialog_view.key, button);
                 }
                 actions.write(command);
                 break;
@@ -502,7 +489,7 @@ pub(crate) fn click(
         ui.drag = None;
         if ui.hidden {
             if hit(view, &layouts, &bindings.show_ui, point, canvas) {
-                sounds.source_button(&layouts, view.key, &bindings.show_ui);
+                layouts.queue_button_se(&mut sounds, view.key, &bindings.show_ui);
                 ui.hidden = false;
                 if edit.selected.is_none() {
                     ui.motion.target(bindings.panel_width);
@@ -519,12 +506,12 @@ pub(crate) fn click(
                 _ => None,
             });
         if let Some((header, back)) = back {
-            sounds.source_button(&layouts, header.key, back);
+            layouts.queue_button_se(&mut sounds, header.key, back);
             actions.write(EditCommand::RequestExit);
             break;
         }
         if hit(view, &layouts, &bindings.hide_ui, point, canvas) {
-            sounds.source_button(&layouts, view.key, &bindings.hide_ui);
+            layouts.queue_button_se(&mut sounds, view.key, &bindings.hide_ui);
             ui.hidden = true;
             continue;
         }
@@ -540,7 +527,7 @@ pub(crate) fn click(
         if let Some(selected) = edit.selected.as_ref() {
             if hit(view, &layouts, &bindings.info, point, canvas)
                 && library.inspect_fixture(selected.item.fixture_id) {
-                sounds.source_button(&layouts, view.key, &bindings.info);
+                layouts.queue_button_se(&mut sounds, view.key, &bindings.info);
                 break;
             }
         }
@@ -554,12 +541,12 @@ pub(crate) fn click(
             None
         };
         if let Some((button, command)) = camera {
-            sounds.source_button(&layouts, view.key, button);
+            layouts.queue_button_se(&mut sounds, view.key, button);
             actions.write(command);
             break;
         }
         if hit(view, &layouts, &bindings.remove_all, point, canvas) {
-            sounds.source_button(&layouts, view.key, &bindings.remove_all);
+            layouts.queue_button_se(&mut sounds, view.key, &bindings.remove_all);
             actions.write(EditCommand::RequestCleanUp);
             break;
         }
@@ -590,7 +577,7 @@ pub(crate) fn click(
             None
         };
         if let Some((button, command)) = choice {
-            sounds.source_button(&layouts, view.key, button);
+            layouts.queue_button_se(&mut sounds, view.key, button);
             actions.write(command);
             break;
         }
@@ -599,7 +586,7 @@ pub(crate) fn click(
             .iter()
             .find(|cell| cell.choice.editable && hit(view, &layouts, &cell.button, point, canvas))
         {
-            sounds.source_button(&layouts, view.key, &cell.button);
+            layouts.queue_button_se(&mut sounds, view.key, &cell.button);
             actions.write(cell.choice.command());
             break;
         }

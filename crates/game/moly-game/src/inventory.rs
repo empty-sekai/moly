@@ -1491,7 +1491,7 @@ pub(crate) fn click(
             continue;
         }
         if hit(header_view, &layouts, &header.back, point, canvas) {
-            sounds.source_button(&layouts, header_view.key, &header.back);
+            layouts.queue_button_se(&mut sounds, header_view.key, &header.back);
             info!("[inventory] header back button → BackUIScreen");
             layer_commands.write(LayerCommand::Pop);
             continue;
@@ -1502,7 +1502,7 @@ pub(crate) fn click(
             .position(|tab| hit(view, &layouts, &tab.button, point, canvas))
         {
             if index != state.tab {
-                sounds.source_button(&layouts, view.key, &bindings.tabs[index].button);
+                layouts.queue_button_se(&mut sounds, view.key, &bindings.tabs[index].button);
                 info!(
                     "[inventory] type tab {:?} → OnSelectContentType",
                     CONTENT_LIST_TYPES[index]
@@ -1519,7 +1519,7 @@ pub(crate) fn click(
             .position(|tab| hit(view, &layouts, &tab.button, point, canvas))
         {
             if index != state.list(kind).tab {
-                sounds.source_button(&layouts, view.key, &bindings.strip.tabs[index].button);
+                layouts.queue_button_se(&mut sounds, view.key, &bindings.strip.tabs[index].button);
                 info!("[inventory] {kind:?} tab {index} → OnSelectTab");
                 state.list_mut(kind).tab = index;
                 state.selected[kind.index()] = 0;
@@ -1530,7 +1530,7 @@ pub(crate) fn click(
         if hit(view, &layouts, &bindings.strip.sort_button, point, canvas) {
             // `ContentListSortDropDown.OnSortDropDownValueChanged`: the
             // dropdown's next option, the first one after the last.
-            sounds.source_button(&layouts, view.key, &bindings.strip.sort_button);
+            layouts.queue_button_se(&mut sounds, view.key, &bindings.strip.sort_button);
             let sorts = order::sorts(kind);
             let list = state.list_mut(kind);
             let position = sorts.iter().position(|sort| *sort == list.sort).unwrap_or(0);
@@ -1539,7 +1539,7 @@ pub(crate) fn click(
             continue;
         }
         if hit(view, &layouts, &bindings.strip.order[0], point, canvas) {
-            sounds.source_button(&layouts, view.key, &bindings.strip.order[0]);
+            layouts.queue_button_se(&mut sounds, view.key, &bindings.strip.order[0]);
             let list = state.list_mut(kind);
             list.order = list.order.reversed();
             info!("[inventory] {kind:?} order → OnSortOrder: {:?}", list.order);
@@ -1547,7 +1547,7 @@ pub(crate) fn click(
         }
         if let Some(toggle) = bindings.strip.filter_toggle.as_ref() {
             if kind.carries_fixture_tabs() && hit(view, &layouts, toggle, point, canvas) {
-                sounds.source_button(&layouts, view.key, toggle);
+                layouts.queue_button_se(&mut sounds, view.key, toggle);
                 state.fixture_view = match state.fixture_view {
                     FixtureView::Default => FixtureView::InPlaceable,
                     FixtureView::InPlaceable => FixtureView::Default,
@@ -1560,7 +1560,7 @@ pub(crate) fn click(
             }
         }
         if hit(view, &layouts, &bindings.strip.search, point, canvas) {
-            sounds.source_button(&layouts, view.key, &bindings.strip.search);
+            layouts.queue_button_se(&mut sounds, view.key, &bindings.strip.search);
             recycle::open_search(&mut screens);
             continue;
         }
@@ -1569,12 +1569,12 @@ pub(crate) fn click(
             .iter()
             .position(|cell| hit(view, &layouts, &cell.button, point, canvas))
         {
-            sounds.source_button(&layouts, view.key, &bindings.cells[index].button);
+            layouts.queue_button_se(&mut sounds, view.key, &bindings.cells[index].button);
             state.selected[kind.index()] = index;
             continue;
         }
         if hit(view, &layouts, &bindings.recycle_button, point, canvas) {
-            sounds.source_button(&layouts, view.key, &bindings.recycle_button);
+            layouts.queue_button_se(&mut sounds, view.key, &bindings.recycle_button);
             let Some(row) = bindings.rows.get(state.selected[kind.index()]) else {
                 continue;
             };

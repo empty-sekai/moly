@@ -150,12 +150,7 @@ pub(crate) struct BirthdayButton {
     pub(crate) can_show: bool,
 }
 
-/// `GameStateManager.HasContext(MysekaiContextType.Birthday)`: set by
-/// `ExecuteAsync`'s `AddContext`; while it is set the button does not show.
-#[derive(Resource, Clone, Copy, Debug)]
-pub(crate) struct BirthdayContext {
-    pub(crate) party: i64,
-}
+pub(crate) use crate::markers::BirthdayContext;
 
 /// The master tables, read from the region's master hosts.
 const PARTIES: MasterTable<Vec<Party>> = MasterTable {
@@ -948,6 +943,7 @@ fn begin_party(world: &mut World, confirm: BirthdayConfirm) {
         }
     };
     world.insert_resource(BirthdayContext { party: party.id });
+    world.insert_resource(crate::audio_inputs::BirthdayVoice { party: party.id });
     info!("[birthday] MultiplayCore.IsConnected (the server model's own room); GameStateManager.AddContext(Birthday) (MysekaiBirthdayPartyContext.OnEnter: InProgress; ActionButtonRefresh with its disabled types); no other players to hide");
     if let Some(mut screens) = world.get_resource_mut::<crate::ui_layers::ScreenManager>() {
         screens.set_mysekai_back_key_process(
@@ -964,6 +960,7 @@ fn begin_party(world: &mut World, confirm: BirthdayConfirm) {
     else {
         error!("[birthday] PlayCutSceneAsync: GetMasterMysekaiBirthdayCutSceneByExternalId({}) = null; the source dereferences it and throws: nothing plays", party.id);
         world.remove_resource::<BirthdayContext>();
+        world.remove_resource::<crate::audio_inputs::BirthdayVoice>();
         return;
     };
     let play = CastPlay {
@@ -987,6 +984,7 @@ fn begin_party(world: &mut World, confirm: BirthdayConfirm) {
         Err(reason) => {
             error!("[birthday] PlayCutSceneAsync: {reason}; nothing plays");
             world.remove_resource::<BirthdayContext>();
+            world.remove_resource::<crate::audio_inputs::BirthdayVoice>();
         }
     }
 }
@@ -1121,10 +1119,12 @@ pub(super) fn cut_scene_returned(world: &mut World, cast: &Cast) {
         (Ok(()), None) => {
             error!("[birthday] PlayCutSceneAsync returned with no presenter; the party cannot go on");
             world.remove_resource::<BirthdayContext>();
+            world.remove_resource::<crate::audio_inputs::BirthdayVoice>();
         }
         (Err(_), _) => {
             // The cut-scene did not play: nothing of the party is under way.
             world.remove_resource::<BirthdayContext>();
+            world.remove_resource::<crate::audio_inputs::BirthdayVoice>();
         }
     }
 }

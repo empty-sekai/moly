@@ -94,7 +94,7 @@
 //! （宿主换站重置）立即撤。每名成员只有一只 HUD 气泡：新的 Show 替换
 //! 在屏那只（入场从 0 起；真源 HUD 重入的形状未读）。
 //! 摆设编辑链走真源域链——保存回执
-//! （`crate::fixture_edit::LayoutSaved`）→ 反应者抽签（编辑站点上的成员按
+//! （`crate::field_modes::LayoutSaved`）→ 反应者抽签（编辑站点上的成员按
 //! 到玩家距离排序，取最近的 `Random.Range(1, ceil(n/2)+1)` 名）→ 逐名
 //! 放行（取消判定为真才放行，放行后等 `Random.Range(500, 1000)` 毫秒再
 //! 轮下一名）→ 池选取（[`moly_law::tweet::pick_after_edit_tweet`]）→
@@ -129,8 +129,7 @@ use moly_law::tweet::{
 use serde_json::Value;
 use std::collections::HashMap;
 
-/// 气泡层的渲染层号：主 3D 相机只看默认层 0，覆盖相机只看本层。
-pub(crate) const BALLOON_LAYER: usize = 1;
+pub(crate) use crate::ui_inputs::atlas::{BALLOON_LAYER, BAKE_PPEM, SCREEN_UI_LAYER};
 
 /// 排版字号（排版像素）。真值：真源文本件 `m_fontSize` = 32（min/max
 /// 同 32，autoSizing 关）。取与图集烘制字号同值（1:1 显示）。
@@ -143,9 +142,6 @@ const LINE_SPACING: f32 = -80.0;
 /// 排版字族名：进推进律（只影响空格回退推进比）。真源是商业字体的
 /// 常规档；开源自烘字体走默认档（`space_advance_ratio` 的 5/24 支）。
 pub(crate) const FONT_FAMILY: &str = "Sans";
-
-/// 图集的烘制字号（px/em）：与显示字号同值，1:1 上屏。
-pub(crate) const BAKE_PPEM: f32 = 32.0;
 
 /// 单元格内边距（px）：字形墨迹离格边的留白。
 const CELL_PAD: f32 = 2.0;
@@ -227,25 +223,7 @@ pub(crate) const DESCENT_RATIO: f32 = 9.0 / 75.0;
 /// 仓内开源字体（OFL-1.1 授权文本与字体同目录进仓）。
 use crate::ui_font::UI_FONT as FONT_BYTES;
 
-/// Code points TMP synthesizes into a static font asset that lacks them when
-/// it reads the asset: a glyph of index 0 with all-zero metrics, so the
-/// character advances nothing and draws nothing. The game's text components
-/// use the static base font assets (population mode 0), whose character table
-/// holds only the space, so these always resolve to the synthesized glyph in
-/// the source. TMP's list also holds U+0009, U+000A, U+000B, U+000D, U+2028
-/// and U+2029, which its layout handles as tab and line breaks before any
-/// advance; the balloon walk splits lines on U+000A only, so those stay on the
-/// regular path.
-const TMP_ZERO_METRIC: [char; 6] = [
-    '\u{0003}', '\u{061C}', '\u{200B}', '\u{200E}', '\u{200F}', '\u{2060}',
-];
-
-/// Whether TMP lays `ch` out with its synthesized zero-metric glyph (see
-/// [`TMP_ZERO_METRIC`]); the open font's own glyph, if it has one, is not
-/// what the source measures or draws.
-fn tmp_zero_metric(ch: char) -> bool {
-    TMP_ZERO_METRIC.contains(&ch)
-}
+pub(crate) use crate::ui_inputs::atlas::{ascii_or, tmp_zero_metric};
 
 // ---------------------------------------------------------------------------
 // 真源纹源的装载（tweet 主表与问候链三表归 NPC 侧：`crate::npc_tweet`）
@@ -275,32 +253,7 @@ pub(crate) fn load(mut commands: Commands, server: Res<AssetServer>) {
 // 字形图集与真源纹源（UI atlas 裁件）的装载
 // ---------------------------------------------------------------------------
 
-/// 一个字形在图集里的格：格矩形（图像像素坐标，min.y 从图像顶部量）与
-/// 基准字号下的推进。
-pub(crate) struct GlyphCell {
-    rect: Rect,
-    advance: f32,
-    page: usize,
-}
-
-/// 气泡的全部纹源：字形图集 + 背景九宫源图 + 箭头源图。
-#[derive(Resource)]
-pub(crate) struct BalloonArt {
-    /// 字形图集各页（白墨 + 覆盖度 alpha，染色靠 sprite）。至少有一页。
-    images: Vec<Handle<Image>>,
-    cells: HashMap<char, GlyphCell>,
-    /// 格内基线行到格顶的距离与笔点列偏移（摆位换算要它们，与烘制同式）。
-    baseline_from_top: f32,
-    pen_x: f32,
-    /// 格边长（两遍法按实际墨迹定的，见 `bake_atlas`）。
-    cell: f32,
-    /// 背景 9-slice 源图（真源纹源：UI atlas 裁件 `btn_r30_wh`，
-    /// 80×80、border 38 四边；九宫采样几何用上面的常量）。
-    bg: Handle<Image>,
-    /// 箭头源图（真源纹源：UI atlas 裁件 `balloon_direction_triangle_wh`，
-    /// 40×20、border 0）。
-    arrow: Handle<Image>,
-}
+pub(crate) use crate::ui_inputs::atlas::{BalloonArt, GlyphCell};
 
 /// A text laid out by [`walk_glyphs`], centred vertically: `top` is the
 /// distance from its first line's baseline to the box's top edge (the
@@ -532,48 +485,6 @@ impl Marquee {
     }
 }
 
-
-
-impl BalloonArt {
-    /// 取一个字符的字形格（图集图像像素坐标的矩形 + 基准推进）。
-    /// 没烘进的字符返回 `None`（缺字形在烘制时已具名计数）。
-    pub(crate) fn glyph_cell(&self, ch: char) -> Option<(Rect, f32)> {
-        self.cells.get(&ch).map(|c| (c.rect, c.advance))
-    }
-
-    /// The base advance the line measurement reads for `ch`: zero for the
-    /// code points TMP lays out with its synthesized zero-metric glyph, the
-    /// baked glyph's advance otherwise (`None` = missing, the law's fallback).
-    /// Measurement and [`walk_glyphs`] placement read the same rule.
-    pub(crate) fn advance(&self, ch: char) -> Option<f32> {
-        if tmp_zero_metric(ch) {
-            return Some(0.0);
-        }
-        self.cells.get(&ch).map(|c| c.advance)
-    }
-
-    /// 首页面身份供整组图集的缓存失效判断；绘制字符应取 glyph_image_for。
-    pub(crate) fn glyph_image(&self) -> &Handle<Image> {
-        &self.images[0]
-    }
-
-    /// 字符所在页的纹理句柄；须与同字符的 glyph_cell 页内矩形配对。
-    /// 调用者先用 glyph_cell 处理缺字，不能用首页面替代已在后页的字形。
-    pub(crate) fn glyph_image_for(&self, ch: char) -> &Handle<Image> {
-        let cell = self
-            .cells
-            .get(&ch)
-            .expect("glyph_image_for requires a baked glyph");
-        &self.images[cell.page]
-    }
-
-    /// 格几何三件：格边长、格内笔点列偏移、基线到格顶距离。
-    /// 摆位换算与 `tick` 同式（格中心到笔点的偏移那一套）。
-    pub(crate) fn cell_geometry(&self) -> (f32, f32, f32) {
-        (self.cell, self.pen_x, self.baseline_from_top)
-    }
-}
-
 /// The atlas bake's hold: no balloon is drawn until its skin images are in.
 const ATLAS_BAKE: crate::hold::HoldSite = crate::hold::HoldSite {
     tag: "tweet",
@@ -603,13 +514,13 @@ pub(crate) fn bake_atlas(
     player_talk_charset: Option<Res<crate::player_talk::PlayerTalkCharset>>,
     // 场地屏外壳字符集（固定文案 + 站名）：第四个并集成员。与上面三个
     // 同一定格语义：外壳文案全部装载期可枚举（站点主表是根级小表）。
-    shell_charset: Option<Res<crate::menu_shell::ShellTextCharset>>,
+    shell_charset: Option<Res<crate::ui_charsets::ShellTextCharset>>,
     // Collect-item notice characters (the masters' names and the count):
     // the fifth member, same once-baked semantics.
-    collect_charset: Option<Res<crate::collect_notice::CollectNoticeCharset>>,
+    collect_charset: Option<Res<crate::ui_charsets::CollectNoticeCharset>>,
     // The BGM select screen's record titles, artists, vocal texts and
     // wordings: the sixth member, same once-baked semantics.
-    bgm_select_charset: Option<Res<crate::bgm_select::BgmSelectCharset>>,
+    bgm_select_charset: Option<Res<crate::ui_charsets::BgmSelectCharset>>,
     skin: Option<Res<SkinHandle>>,
     art: Option<Res<BalloonArt>>,
     mut hold: Local<crate::hold::HoldReport>,
@@ -1196,7 +1107,7 @@ pub(crate) fn after_edit_reaction(
     clock: Option<Res<crate::npc_clock::NpcClock>>,
     site: Option<Res<crate::site::SiteActive>>,
     tutorial: Option<Res<crate::server_panel::ServerPanel>>,
-    mut saves: MessageReader<crate::fixture_edit::LayoutSaved>,
+    mut saves: MessageReader<crate::field_modes::LayoutSaved>,
     tables: Option<Res<crate::npc_tweet::TweetTables>>,
     art: Option<Res<BalloonArt>>,
     (mut sequence, mut after_edit, mut passes, mut rand): (
@@ -1540,7 +1451,7 @@ fn starts_with(left: &[char], prefix: &[char]) -> bool {
 ///
 /// Characters the open font lacks follow the source's TMP lookup, not a
 /// guess: the code points TMP synthesizes into the game's static base asset
-/// ([`TMP_ZERO_METRIC`]) advance zero and draw nothing. Every other character
+/// ([`crate::ui_inputs::atlas::TMP_ZERO_METRIC`]) advance zero and draw nothing. Every other character
 /// is answered in the source by the base asset's fallback chain (the static
 /// on-demand asset, then the dynamic asset that adds glyphs from the game's
 /// own font file), so TMP's missing-glyph replacement (U+25A1, then U+0020)
@@ -2084,16 +1995,6 @@ fn nine_slice_pieces(bg_w: f32, bg_h: f32) -> Vec<(Rect, Vec2, Vec2)> {
         // 中心。
         (rect(b, b, s - b, s - b), Vec2::new(cw, ch), Vec2::ZERO),
     ]
-}
-
-/// 日志守卫：非 ASCII 内容换成占位符（语言网关令——名字应全 ASCII，
-/// 万一不是也不进日志）。
-pub(crate) fn ascii_or(value: &str) -> &str {
-    if value.is_ascii() {
-        value
-    } else {
-        "<non-ascii>"
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2664,11 +2565,6 @@ pub(crate) fn overlay_camera(mut commands: Commands) {
         crate::overlay_camera::IdleWhenEmpty,
     ));
 }
-
-/// The layer world bubbles are drawn on while a screen covers the field: a
-/// screen's UI layer sits above the HUD layer, so a bubble left on
-/// [`BALLOON_LAYER`] would draw over the screen.
-pub(crate) const SCREEN_UI_LAYER: usize = 2;
 
 /// PostUpdate: a world bubble (the HUD's own: a character's tweet, a talk
 /// preview, a furniture pre-action's) is drawn on the HUD layer while the

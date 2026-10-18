@@ -112,7 +112,7 @@ impl Arrival {
             // first placed fixture whose master is a home system fixture. A
             // `HouseView` record on any other fixture is never read.
             if home.house.is_none() {
-                let Some(homes) = world.get_resource::<crate::entry::house::HomeFixtures>() else {
+                let Some(homes) = world.get_resource::<crate::house::HomeFixtures>() else {
                     return false;
                 };
                 let mut rows = Vec::new();

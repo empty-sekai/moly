@@ -736,7 +736,7 @@ fn hide_fixture_all(world: &mut World) {
             .collect()
     };
     let homes = world
-        .get_resource::<crate::entry::house::HomeFixtures>()
+        .get_resource::<crate::house::HomeFixtures>()
         .map(|homes| {
             placed
                 .iter()

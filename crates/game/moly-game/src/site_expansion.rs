@@ -47,6 +47,8 @@
 
 pub(crate) mod law;
 
+pub(crate) use crate::field_modes::LevelHold;
+
 use bevy::prelude::*;
 use moly_assets::json::master::MasterData;
 
@@ -102,10 +104,6 @@ struct PendingRankChange {
     current: i32,
 }
 
-/// Holds the site loader until the rank change has set the housing
-/// sites' displayed levels.
-#[derive(Resource)]
-pub(crate) struct LevelHold;
 
 /// The browser game's loader hold until the join has delivered the rank.
 #[derive(Resource)]
@@ -554,7 +552,7 @@ pub(crate) fn advance_room(world: &mut World) {
                 crate::site_move::door::destination_blocker(
                     world,
                     &perform.site_type,
-                    crate::site_move::door_law::DoorKind::HomeToRoom,
+                    crate::door_law::DoorKind::HomeToRoom,
                 )
             };
             match blocker {
@@ -626,7 +624,7 @@ pub(crate) fn advance_room(world: &mut World) {
                 // the eye stayed on the room-view pose. NormalGameState.OnEnter
                 // changes the camera back (NormalCameraState.OnEnter).
                 let site_type = perform.site_type.clone();
-                crate::site_move::camera::enter_normal(
+                crate::camera_site_move::enter_normal(
                     world,
                     &site_type,
                     "housing_room",
@@ -654,7 +652,7 @@ fn rank_up(world: &mut World, perform: &mut RoomExpansionPerform, now: f64) {
     // Normal's OnExit writes its model and the transfer data first.
     let state = world.resource::<FieldCameraState>().0;
     if state == CameraStateType::Normal {
-        crate::site_move::camera::record_normal_exit(world, &perform.site_type);
+        crate::camera_site_move::record_normal_exit(world, &perform.site_type);
     }
     world.resource_mut::<FieldCameraState>().0 = CameraStateType::None;
     world.remove_resource::<crate::camera::CameraTween>();

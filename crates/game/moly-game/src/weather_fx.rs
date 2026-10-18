@@ -20,7 +20,6 @@ use std::collections::HashMap;
 use moly_assets::weather_effect::WeatherEffectLifecycle;
 
 use crate::billboard::{self, Alignment};
-use crate::site::SiteActive;
 use crate::source_particle::{SourceParticle, ParticleReadiness};
 use moly_assets::source_shader::SourceShaderCatalogue;
 use crate::weather_transition::{EnvironmentSelection, GlobalEffectIdentity, WeatherTransition, WeatherFxPrepared};
@@ -34,7 +33,7 @@ const RNG_SEED: u64 = 0x7765_6174_0001_0125;
 
 // ---- 资源 ----
 
-/// 当前装载锚点：档位名 + 站点名。与 `(CurrentPhenomenon, SiteActive)`
+/// 当前装载锚点：档位名 + 站点名。与 `(CurrentPhenomenon, SiteView)`
 /// 现值不一致时拆链重装。
 #[derive(Resource, PartialEq)]
 pub(crate) struct WeatherFxAnchor {
@@ -627,101 +626,34 @@ impl WeatherFxRetirements {
     }
 }
 
-/// Whether the active site has placed fixtures (their colliders are in the
-/// physics scene).
-fn fixtures_placed(placements: Option<&crate::fixture::FixturePlacements>, site: Option<&SiteActive>) -> bool {
-    match (placements, site) {
-        (Some(placements), Some(site)) => placements.site_id() == site.site_id && !placements.placed_rows().is_empty(),
+/// Whether the active site has placed fixtures whose colliders belong to it.
+fn fixtures_placed(
+    fixtures: Option<&crate::render_inputs::FixtureCollisionScene>,
+    site: Option<&crate::render_inputs::SiteView>,
+) -> bool {
+    match (fixtures, site) {
+        (Some(fixtures), Some(site)) => fixtures.site_id == site.site_id && fixtures.rows > 0,
         _ => false,
     }
 }
 
-/// The placed fixtures' colliders follow the active site's placements.
+/// The placed fixtures' colliders follow the active site's placements: their
+/// owner publishes the scene it built, this host keeps it in the physics scene.
 pub(crate) fn sync_fixture_colliders(
-    placements: Option<Res<crate::fixture::FixturePlacements>>,
-    site: Option<Res<SiteActive>>,
-    revision: Option<Res<crate::fixture::FixtureLayoutRevision>>,
-    collision: crate::fixture_collision::CollisionInputs,
+    fixtures: Option<Res<crate::render_inputs::FixtureCollisionScene>>,
+    site: Option<Res<crate::render_inputs::SiteView>>,
     mut retiring: ResMut<WeatherFxRetirements>,
 ) {
-    let present = fixtures_placed(placements.as_deref(), site.as_deref());
-    let revision = revision.map_or(0, |revision| revision.0);
+    let present = fixtures_placed(fixtures.as_deref(), site.as_deref());
+    let revision = fixtures.as_deref().map_or(0, |fixtures| fixtures.revision);
     retiring.sync_fixtures(present, revision, || {
-        let placements = placements.as_deref().ok_or_else(|| "no placements".to_owned())?;
-        fixture_parts(&collision, placements).map(crate::particle_runtime::collision_scene::fixture_scene)
-    });
-}
-
-/// A canonical-frame pose (source X reflected) in source axes: the rotation
-/// (x, y, z, w) and the translation.
-fn source_pose(rotation: Quat, translation: Vec3) -> ([f32; 4], [f32; 3]) {
-    ([rotation.x, -rotation.y, -rotation.z, rotation.w], [-translation.x, translation.y, translation.z])
-}
-
-/// A canonical-frame matrix (source X reflected) in source axes.
-fn source_matrix(world: &GlobalTransform) -> [f32; 16] {
-    let m = world.to_matrix().to_cols_array();
-    let sign = |i: usize| if i == 0 { -1.0 } else { 1.0 };
-    std::array::from_fn(|n| sign(n % 4) * sign(n / 4) * m[n])
-}
-
-/// The placed fixtures' colliders in source axes: the colliders of their
-/// collision scenes, and each placed view's touch box at the placement's pose.
-/// The view receives the fixture's own (unturned) grid size for its touch box
-/// and turns its own transform to the direction, so the touch box, a child
-/// at the view's origin, turns with it.
-fn fixture_parts(collision: &crate::fixture_collision::CollisionInputs, placements: &crate::fixture::FixturePlacements)
-    -> Result<Vec<crate::particle_runtime::collision_scene::FixturePart>, String> {
-    use crate::fixture_collision::PhysicsShape;
-    use crate::particle_runtime::collision_scene::{touch_box, FixturePart, FixtureShape, TOUCH_BOX_LAYERS};
-    let reflect = |p: [f32; 3]| [-p[0], p[1], p[2]];
-    let mut parts = Vec::new();
-    // Each row's slot in the site view's fixture list (layout type and the
-    // footprint's minimum y, in the placement mock's row order); a collider
-    // finds its row by its fixture's package when no other row shares it.
-    let rows = placements.editor_rows();
-    let keys: Vec<Option<(u8, i32)>> =
-        rows.iter().map(|row| row.footprint().ok().map(|(min, _)| (row.layout, i32::from(min.y)))).collect();
-    let slots: Vec<Option<usize>> = if keys.iter().all(Option::is_some) {
-        let keys: Vec<(u8, i32)> = keys.iter().flatten().copied().collect();
-        crate::particle_runtime::collision_scene::fixture_slots(&keys).into_iter().map(Some).collect()
-    } else {
-        vec![None; rows.len()]
-    };
-    let slot_of = |package: &str| {
-        let mut found = rows.iter().enumerate().filter(|(_, row)| row.package == package);
-        match (found.next(), found.next()) {
-            (Some((r, _)), None) => slots[r],
-            _ => None,
+        let fixtures = fixtures.as_deref().ok_or_else(|| "no placed fixtures".to_owned())?;
+        match (&fixtures.built, &fixtures.error) {
+            (Some(scene), _) => Ok(scene.clone()),
+            (None, Some(reason)) => Err(reason.clone()),
+            (None, None) => Err("the placed fixtures' colliders are not built yet".to_owned()),
         }
-    };
-    for (i, collider) in collision.physics_colliders(placements.total())?.into_iter().enumerate() {
-        let shape = match collider.shape {
-            PhysicsShape::Mesh { convex, cooking, positions, triangles } => FixtureShape::Mesh {
-                convex, cooking,
-                positions: positions.into_iter().map(reflect).collect(),
-                // The canonical frame reverses the winding.
-                triangles: triangles.into_iter().map(|t| [t[0], t[2], t[1]].map(|v| v as u32)).collect(),
-            },
-            PhysicsShape::Box { center, size } => FixtureShape::Box { center: reflect(center), half: size.map(|v| v * 0.5) },
-            PhysicsShape::Other(kind) => FixtureShape::Unknown(kind),
-        };
-        let (scale, rotation, translation) = collider.world.to_scale_rotation_translation();
-        let pose = (scale == Vec3::ONE).then(|| source_pose(rotation, translation));
-        let slot = collider.package.as_deref().and_then(slot_of);
-        parts.push(FixturePart { what: format!("collider {i}"), layers: 1 << collider.layer,
-            world: source_matrix(&collider.world), pose, shape, slot, touch: false });
-    }
-    for (r, row) in rows.iter().enumerate() {
-        let view = row.pose()?;
-        let world = source_matrix(&GlobalTransform::from(view));
-        let pose = (view.scale == Vec3::ONE).then(|| source_pose(view.rotation, view.translation));
-        let (center, half) = touch_box([row.grid_size.x, row.grid_size.y, row.grid_size.z], row.layout);
-        let shape = FixtureShape::Box { center, half };
-        parts.push(FixturePart { what: format!("{} touch box", row.package), layers: TOUCH_BOX_LAYERS, world, pose,
-            shape, slot: slots[r], touch: true });
-    }
-    Ok(parts)
+    });
 }
 
 /// `IsActiveParticle`: whether any child of the instance is playing.
@@ -790,7 +722,7 @@ pub(crate) fn watch(
     mut commands: Commands,
     server: Res<AssetServer>,
     phase: Option<Res<WeatherTransition>>,
-    site: Option<Res<SiteActive>>,
+    site: Option<Res<crate::render_inputs::SiteView>>,
     anchor: Option<Res<WeatherFxAnchor>>,
     active: Option<Res<WeatherFxState>>,
 ) {
@@ -865,8 +797,8 @@ pub(crate) fn plan(
     json: Res<Assets<JsonAsset>>,
     doc: Option<Res<WeatherFxDoc>>,
     planned: Option<Res<WeatherFxPlan>>,
-    site: Option<Res<SiteActive>>,
-    placements: Option<Res<crate::fixture::FixturePlacements>>,
+    site: Option<Res<crate::render_inputs::SiteView>>,
+    fixtures: Option<Res<crate::render_inputs::FixtureCollisionScene>>,
     // The collider export is the same for every phenomenon: its parse and
     // the scenes built from it stay for the next plan.
     mut collision: Local<Option<(Option<AssetId<JsonAsset>>, crate::particle_runtime::collision_scene::SceneBuilder)>>,
@@ -926,7 +858,10 @@ pub(crate) fn plan(
     let names: Vec<&str> = selected.iter().map(|(name, _, _)| name.as_str()).collect();
     // ... with the site's own colliders, and the placed fixtures' when the
     // site has any at planning time.
-    let fixtures = fixtures_placed(placements.as_deref(), site.as_deref().filter(|site| site.env_site == doc.env_site));
+    let fixtures = fixtures_placed(
+        fixtures.as_deref(),
+        site.as_deref().filter(|site| site.env_site == doc.env_site),
+    );
     scenes.select(crate::particle_runtime::collision_scene::Installation::Together {
         effects: &names, site: Some(&doc.env_site), fixtures });
     let site_colliders = scenes.site_colliders(&doc.env_site);
@@ -3047,12 +2982,12 @@ pub(crate) fn spawn_when_ready(
     anchor: Option<Res<WeatherFxAnchor>>,
     phase: Res<WeatherTransition>,
     time: Res<Time>,
-    site: Option<Res<SiteActive>>,
-    site_ready: Option<Res<crate::site::SiteScenesReady>>,
+    site: Option<Res<crate::render_inputs::SiteView>>,
+    site_ready: Option<Res<crate::markers::SiteScenesReady>>,
     (mut environment_root, frame, cannon): (
         ResMut<EnvironmentRoot>,
         Res<bevy::diagnostic::FrameCount>,
-        Option<Res<crate::site_move::CannonEnvironmentWrite>>,
+        Option<Res<crate::render_inputs::CannonEnvironmentWrite>>,
     ),
     (gltfs, gltf_nodes, gltf_meshes): (Res<Assets<Gltf>>, Res<Assets<GltfNode>>, Res<Assets<GltfMesh>>),
 ) {
@@ -3528,11 +3463,11 @@ pub(crate) fn spawn_when_ready(
 /// and keep their own lifecycle.
 pub(crate) fn refresh_effect_visible(
     state: Option<Res<WeatherFxState>>,
-    site: Option<Res<SiteActive>>,
+    site: Option<Res<crate::render_inputs::SiteView>>,
     mut draws: Query<&mut SourceParticle, With<WeatherFxDraw>>,
 ) {
     let Some(state) = state else { return; };
-    let shown = !site.as_deref().is_some_and(SiteActive::is_indoor);
+    let shown = !site.as_deref().is_some_and(|site| site.indoor);
     for live in &state.live {
         if let Ok(mut particle) = draws.get_mut(live.draw) {
             if particle.enabled != shown { particle.enabled = shown; }
@@ -3809,7 +3744,7 @@ struct CannonFollow {
 impl EnvironmentRoot {
     /// Apply the source's move from the last seen site to `active`, logging
     /// where this host stands in for an arrival point.
-    fn enter(&mut self, active: &SiteActive) {
+    fn enter(&mut self, active: &crate::render_inputs::SiteView) {
         let landed = self.enter_move(active);
         if let Some(landed) = landed {
             self.stand_in = landed;
@@ -3826,7 +3761,7 @@ impl EnvironmentRoot {
     /// source axes seen from the active site (the frame this host draws the
     /// active site and its colliders in). Refused while the root stands in
     /// for an arrival point.
-    fn owner_anchor(&self, active: &SiteActive) -> Result<[f32; 3], String> {
+    fn owner_anchor(&self, active: &crate::render_inputs::SiteView) -> Result<[f32; 3], String> {
         if let Some((missing, stand_in)) = self.stand_in {
             return Err(format!("owner words on the sky chain: {missing} is not supplied (the environment root stands on {stand_in})"));
         }
@@ -3837,7 +3772,7 @@ impl EnvironmentRoot {
     /// root does not land (the same site, a door move, the session's first
     /// site); otherwise the landing, with the missing value and the stand-in
     /// when this host stands in for the arrival point.
-    fn enter_move(&mut self, active: &SiteActive) -> Option<Option<(&'static str, &'static str)>> {
+    fn enter_move(&mut self, active: &crate::render_inputs::SiteView) -> Option<Option<(&'static str, &'static str)>> {
         const HOME: &str = "housing_home";
         const ROOM: &str = "housing_room";
         const HARVEST: &str = "harvest";
@@ -3875,7 +3810,7 @@ impl EnvironmentRoot {
     /// Follow the cannon move's writes: keep the height at the fire, take
     /// each follow point, and set the kept height back at the landing effect.
     /// Idempotent within a frame, so both readers of the root may call it.
-    fn follow_cannon(&mut self, write: Option<&crate::site_move::CannonEnvironmentWrite>) {
+    fn follow_cannon(&mut self, write: Option<&crate::render_inputs::CannonEnvironmentWrite>) {
         let Some(write) = write else {
             self.cannon = None;
             return;
@@ -3914,7 +3849,7 @@ impl EnvironmentRoot {
     /// The sky anchor in this host's frame: the root seen from the active
     /// site, which this host draws at its own origin, in the reflected-X basis
     /// that every scene anchor uses.
-    fn anchor(&self, active: &SiteActive) -> Vec3 {
+    fn anchor(&self, active: &crate::render_inputs::SiteView) -> Vec3 {
         crate::particle_geometry::reflect(self.world - Vec3::from_array(active.position))
     }
 }
@@ -3967,9 +3902,9 @@ pub(crate) fn advance(
     unscaled: Option<Res<crate::particle_runtime::UnscaledFrameClock>>,
     frame: Res<bevy::diagnostic::FrameCount>,
     cameras: Query<(&GlobalTransform, &Projection, &Camera), With<Camera3d>>,
-    site: Option<Res<SiteActive>>,
+    site: Option<Res<crate::render_inputs::SiteView>>,
     mut environment_root: ResMut<EnvironmentRoot>,
-    cannon: Option<Res<crate::site_move::CannonEnvironmentWrite>>,
+    cannon: Option<Res<crate::render_inputs::CannonEnvironmentWrite>>,
     mut camera_speed: Local<billboard::CameraVelocity>,
 ) {
     // Follow every site change, also on frames that draw nothing, so the root
@@ -4044,7 +3979,7 @@ pub(crate) fn advance(
     }
 
     // Indoors the three effect owners are inactive (see refresh_effect_visible).
-    let live_active = !site.as_deref().is_some_and(SiteActive::is_indoor);
+    let live_active = !site.as_deref().is_some_and(|site| site.indoor);
     let mut systems: Vec<(&mut LiveWeatherEmitter, bool)> = state.as_deref_mut().into_iter()
         .filter(|_| live_active)
         .flat_map(|s| s.live.iter_mut()).map(|s| (s, true))

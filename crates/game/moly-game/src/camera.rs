@@ -768,7 +768,7 @@ pub(crate) fn frame_site(
     // A cannon move keeps the camera model it flies with (SiteMoveAction
     // owns it); the new site only contributes its tracking bounds.
     (site_move, mut existing): (
-        Option<Res<crate::site_move::SiteMoveActive>>,
+        Option<Res<crate::field_modes::SiteMoveActive>>,
         Option<ResMut<FieldCameraModel>>,
     ),
 ) {
@@ -984,8 +984,8 @@ fn ratio01(value: f32, from: f32, to: f32) -> f32 {
 #[derive(SystemParam)]
 pub struct FpsTransitionCtx<'w, 's> {
     dialogs: Res<'w, crate::menu_shell::ShellDialogState>,
-    layers: Res<'w, crate::ui_layers::UiLayerStack>,
     library: Res<'w, crate::content_library::ContentLibrary>,
+    layers: Res<'w, crate::ui_layers::UiLayerStack>,
     avatar: Res<'w, crate::player_state::PlayerAvatarStates>,
     talk_camera: Option<Res<'w, crate::talk_camera::TalkCamera>>,
     players: Query<'w, 's, (&'static GlobalTransform, &'static mut Visibility), With<AvatarRoot>>,
@@ -999,7 +999,7 @@ pub(crate) fn apply_input(
     scroll: Res<AccumulatedMouseScroll>,
     time: Res<Time>,
     mut models: Option<ResMut<FieldCameraModel>>,
-    edits: Res<crate::fixture_edit::EditSessionActive>,
+    edits: Res<crate::field_modes::EditSessionActive>,
     configs: Option<Res<crate::client_config::ClientConfigs>>,
     tween: Option<Res<CameraTween>>,
     state: Res<FieldCameraState>,
@@ -1430,12 +1430,7 @@ pub(crate) fn to_rotation(from: f32, to: f32) -> f32 {
     from + wrap180(to - from)
 }
 
-/// OutQuad 缓动（源 `EASE_BASIC = 6`，DG.Tweening.Ease 位序：OutQuad）。
-/// `EaseManager.Evaluate` compiles it as `(t / d - 2) * -(t / d)`; `t` here
-/// is that quotient, already clamped to [0, 1] as the tween's position is.
-pub(crate) fn out_quad(t: f32) -> f32 {
-    (t - 2.0) * -t
-}
+pub(crate) use crate::ui_inputs::out_quad;
 
 /// 读相机本体当前的垂直视场（角度制）。源 `DoTweenCameraSetting` 的
 /// prevFov 从 `Camera.fieldOfView` 取——**相机本体，不是模型字段**；本仓
@@ -2548,23 +2543,4 @@ pub fn report_follow(
         models.look_at_bounds.extents,
         shell.height
     );
-}
-
-#[cfg(test)]
-mod overlay_sample_tests {
-    use super::*;
-    #[test]
-    fn source_sprite_overlay_cameras_share_the_field_sample_count() {
-        let mut app = App::new();
-        app.add_systems(Startup, (crate::balloon::overlay_camera, crate::sitemap::overlay_camera));
-        app.update();
-        let mut cameras = app.world_mut().query_filtered::<(&Camera, &Msaa), With<Camera2d>>();
-        let cameras = cameras.iter(app.world()).collect::<Vec<_>>();
-        assert_eq!(cameras.len(), 2);
-        for (camera, msaa) in cameras {
-            assert!(matches!(camera.clear_color, ClearColorConfig::None));
-            assert_eq!(*msaa, MYSEKAI_CAMERA_MSAA);
-            assert_eq!(msaa.samples(), 1);
-        }
-    }
 }

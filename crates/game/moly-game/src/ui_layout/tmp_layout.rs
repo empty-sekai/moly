@@ -45,7 +45,7 @@ use swash::shape::ShapeContext;
 use swash::text::Codepoint;
 
 use crate::ui_font::UI_FONT as FONT;
-pub(super) const FONT_METRICS_REVISION: &str = "ResourceHanRoundedSC-Medium/metrics-wrap-1-source-face-1-tmp-assets-1";
+pub(crate) const FONT_METRICS_REVISION: &str = "ResourceHanRoundedSC-Medium/metrics-wrap-1-source-face-1-tmp-assets-1";
 const EPSILON: f32 = 0.0001;
 const LARGE: f32 = 32767.0;
 /// The margin a preferred-width query lays the text out in: TMP's
@@ -53,29 +53,29 @@ const LARGE: f32 = 32767.0;
 const LARGE_POSITIVE_VECTOR: f32 = i32::MAX as f32;
 const MAX_ITERATIONS: usize = auto_size::MAX_ITERATION_COUNT as usize;
 
-pub(super) struct TextRules {
-    pub(super) leading: HashSet<char>,
-    pub(super) following: HashSet<char>,
-    pub(super) modern_hangul: bool,
+pub(crate) struct TextRules {
+    pub(crate) leading: HashSet<char>,
+    pub(crate) following: HashSet<char>,
+    pub(crate) modern_hangul: bool,
     /// The root's TMP font assets; None on the shared root, which carries none.
-    pub(super) fonts: Option<Arc<TmpFonts>>,
+    pub(crate) fonts: Option<Arc<TmpFonts>>,
 }
 
-pub(super) struct PlacedGlyph {
-    pub(super) ch: char,
+pub(crate) struct PlacedGlyph {
+    pub(crate) ch: char,
     /// Character index in the input string, not a byte offset or a wrapped string.
-    pub(super) source_index: usize,
-    pub(super) font_size: f32,
-    pub(super) scale: f32,
-    pub(super) width_scale: f32,
+    pub(crate) source_index: usize,
+    pub(crate) font_size: f32,
+    pub(crate) scale: f32,
+    pub(crate) width_scale: f32,
     /// Pen origin / baseline in the text rect's local space (origin at its
     /// pivot), positive Y up.
-    pub(super) pen: Vec2,
-    pub(super) color: Option<[f32; 4]>,
+    pub(crate) pen: Vec2,
+    pub(crate) color: Option<[f32; 4]>,
 }
 
-pub(super) struct TextLayout {
-    pub(super) glyphs: Vec<PlacedGlyph>,
+pub(crate) struct TextLayout {
+    pub(crate) glyphs: Vec<PlacedGlyph>,
 }
 
 /// Reports each (text component, finding) once: layout runs every time a
@@ -523,7 +523,7 @@ fn processing_array(input: &str, rich: bool, controls: bool, input_box: bool) ->
 
 /// The code points of a text component's processing array (its tags still
 /// in it): the characters a layout of it can draw.
-pub(super) fn processing_characters(text: &str, component: &UiComponent, input_box: bool) -> Result<Vec<char>, String> {
+pub(crate) fn processing_characters(text: &str, component: &UiComponent, input_box: bool) -> Result<Vec<char>, String> {
     let f = &component.fields;
     let array = processing_array(text, boolean(f, "m_isRichText")?, boolean(f, "m_parseCtrlCharacters")?, input_box)?;
     Ok(array.into_iter().map(|(ch, _)| ch).collect())
@@ -810,7 +810,7 @@ fn pair_metric(left: char, right: char) -> Result<PairMetric, String> {
 /// no advance), for the research instrument that feeds the same advances to
 /// a transcription of the source layout.
 #[cfg(test)]
-pub(super) fn open_font_advance(ch: char) -> Option<f32> {
+pub(crate) fn open_font_advance(ch: char) -> Option<f32> {
     if zero_advance(ch) {
         return Some(0.0);
     }
@@ -822,7 +822,7 @@ pub(super) fn open_font_advance(ch: char) -> Option<f32> {
 /// The kerning pair `measure` applies between two characters: the advance
 /// added to each of them and the placement offsets, in em units.
 #[cfg(test)]
-pub(super) fn open_font_pair(left: char, right: char) -> Result<([f32; 2], [[f32; 2]; 2]), String> {
+pub(crate) fn open_font_pair(left: char, right: char) -> Result<([f32; 2], [[f32; 2]; 2]), String> {
     pair_metric(left, right).map(|pair| (pair.advance, [pair.offset[0].to_array(), pair.offset[1].to_array()]))
 }
 
@@ -1907,7 +1907,7 @@ fn component_array(text: &str, component: &UiComponent, input_box: bool) -> Resu
 /// for as long as the component lives, starting empty. `input_box`: the
 /// text is the component's serialized text (TMP parses its backslash
 /// escapes), not one code assigned.
-pub(super) fn preferred_axis(
+pub(crate) fn preferred_axis(
     text: &str,
     component: &UiComponent,
     axis: usize,
@@ -1948,7 +1948,7 @@ pub(super) fn preferred_axis(
 
 /// The render layout of a text component; `input_box` as for
 /// [`preferred_axis`].
-pub(super) fn layout(
+pub(crate) fn layout(
     text: &str,
     component: &UiComponent,
     rect_size: Vec2,

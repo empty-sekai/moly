@@ -21,7 +21,7 @@
 //! it only reports. Ignored by default: it reads the input description named
 //! by `MOLY_UI_COMPARE_IN` and writes the report to `MOLY_UI_COMPARE_OUT`.
 
-use super::{group_alphas, image_path, image_rule_mesh_data, serialized_rgba, tmp_layout, ImageDraw, ImageMeshData, Override, Pointer, UiLayouts};
+use crate::ui_layout::{group_alphas, image_path, image_rule_mesh_data, serialized_rgba, tmp_layout, ImageDraw, ImageMeshData, Override, Pointer, UiLayouts, UiPrefabView};
 use crate::canvas::RootCameraFields;
 use bevy::math::{Mat4, Vec2, Vec3};
 use bevy::window::{Window, WindowResolution};
@@ -160,7 +160,7 @@ fn ui_values_for_source_comparison() {
     if let Some(path) = input["tmpFontAssets"].as_str() {
         let region = source_doc.source.region.as_deref().expect("region document");
         let client = source_doc.source.client_version.as_deref().expect("region document client version");
-        let fonts = super::tmp_font::TmpFonts::parse(&read_json(path), region, client).expect("TMP font document");
+        let fonts = crate::ui_layout::tmp_font::TmpFonts::parse(&read_json(path), region, client).expect("TMP font document");
         layouts.set_tmp_fonts(Some(fonts));
     }
     let key: &'static str = match input["hostKey"].as_str().expect("hostKey") {
@@ -171,9 +171,9 @@ fn ui_values_for_source_comparison() {
         other => panic!("{other} is not a field-menu host key"),
     };
     layouts.install_for_measurement(key, source_doc.clone());
-    let view = crate::menu_shell::settled_host_view(&source_doc, key);
+    let view = super::settled_host_view(&source_doc, key);
     let doc = layouts.document(key).expect("installed layout");
-    let button = crate::menu_shell::camera_reset_button(doc).expect("camera reset CustomButton");
+    let button = crate::ui_inputs::camera_reset_button(doc).expect("camera reset CustomButton");
     let button_node = doc.find(&format!("@{button}")).expect("camera reset button node");
     let changes: HashMap<usize, &Override> = view
         .overrides
@@ -278,15 +278,15 @@ fn ui_values_for_source_comparison() {
                 (f64::from(w) / 2. + f64::from(point.x) * f64::from(scale)) as f32,
                 (f64::from(h) / 2. + f64::from(point.y) * f64::from(scale)) as f32,
             ];
-            let pointer = crate::menu_shell::screen_pointer(&window, &root_canvas, engine_screen)
+            let pointer = crate::ui_inputs::screen_pointer(&window, &root_canvas, engine_screen)
                 .expect("the host canvas carries the event camera pose");
             let ray_error = root_canvas.event_ray(pixels, engine_screen).and_then(|event| event.error);
-            let ray_hit = crate::menu_shell::camera_reset_press(&view, &layouts, canvas, pointer, button_node, button);
+            let ray_hit = crate::ui_inputs::camera_reset_press(&view, &layouts, canvas, pointer, button_node, button);
             let screen = Vec2::new(
                 (f64::from(w) / 2. + f64::from(point.x) * f64::from(scale)) as f32,
                 (f64::from(h) / 2. - f64::from(point.y) * f64::from(scale)) as f32,
             );
-            let hit = crate::menu_shell::camera_reset_hit(&view, &layouts, &window, &root_canvas, screen, button_node, button);
+            let hit = crate::ui_inputs::camera_reset_hit(&view, &layouts, &window, &root_canvas, screen, button_node, button);
             presses.push(json!({
                 "canvasTarget": target.map(|(n, id)| json!([n, id])),
                 "engineScreenBits": engine_screen.map(bits),
@@ -406,7 +406,7 @@ fn ui_values_for_source_comparison() {
         planted.nodes[non_finite].rect.local_scale[0] = 3.0e38;
         planted.nodes[negative].rect.size_delta[0] = -1.0e4;
         layouts.install_for_measurement("SolveCheckControl", planted);
-        let view = super::UiPrefabView::new("SolveCheckControl", 0);
+        let view = UiPrefabView::new("SolveCheckControl", 0);
         let window = Window { resolution: WindowResolution::new(1920, 1080), ..Default::default() };
         let check = view.solve_check(&layouts, root_canvas.size(&window)).expect("control solve check");
         json!({
@@ -491,7 +491,7 @@ fn tmp_text_values_for_source_comparison() {
     if let Some(path) = input["tmpFontAssets"].as_str() {
         let region = source_doc.source.region.as_deref().expect("region document");
         let client = source_doc.source.client_version.as_deref().expect("region document client version");
-        let fonts = super::tmp_font::TmpFonts::parse(&read_json(path), region, client).expect("TMP font document");
+        let fonts = crate::ui_layout::tmp_font::TmpFonts::parse(&read_json(path), region, client).expect("TMP font document");
         layouts.set_tmp_fonts(Some(fonts));
     }
     let rules = layouts.text_rules.as_ref().expect("TMP line rules applied");

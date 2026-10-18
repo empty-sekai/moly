@@ -21,7 +21,7 @@ use moly_law::material::{FloatLookup, MaterialSlot};
 
 use crate::{
     env::SiteEnvGpuBuffer,
-    fixture::{FixtureVisualRoot, FixtureVisualSceneReady, FixtureVisualReady, FixtureScenesReady},
+    render_inputs::{FixtureScenesReady, FixtureVisualReady, FixtureVisualRoot, FixtureVisualSceneReady},
     site_material::{resolve_tree_textures, SiteMaterial, SiteMaterialKey},
 };
 use super::{FixtureMaterialSet, WallLayoutShadowCasterOff};
@@ -232,7 +232,7 @@ fn bind_surfaces(
     mut materials: ResMut<Assets<FixtureSurfaceMaterial>>, mut trees: ResMut<Assets<FixtureTreeMaterial>>,
     mut cache: Local<HashMap<AssetId<StandardMaterial>, SurfaceHandle>>,
     mut readiness: ResMut<FixtureSurfaceReadiness>, appearance: Res<TransparentBlockAppearance>,
-    revision: Res<crate::fixture::FixtureLayoutRevision>,
+    revision: Res<crate::render_inputs::FixtureLayoutRevision>,
     mut seen_revision: Local<u64>,
 ) {
     if *seen_revision != revision.0 {
@@ -321,7 +321,7 @@ impl Plugin for FixtureSurfacePlugin {
             .init_resource::<FixtureSurfaceReadiness>()
             .init_resource::<TransparentBlockAppearance>()
             .add_systems(Update, (bind_surfaces, update_block_opacity).chain()
-                .after(crate::fixture::FixtureLayoutSet).after(crate::fixture_colors::prepare)
+                .after(crate::render_inputs::FixtureLayoutSet).after(crate::fixture_colors::prepare)
                 .run_if(crate::fixture_colors::ready).before(FixtureMaterialSet));
         bevy::asset::embedded_asset!(app, "shaders/fixture_surface.wgsl");
     }

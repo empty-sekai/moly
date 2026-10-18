@@ -43,9 +43,8 @@ use moly_law::material::MaterialSlot;
 use moly_law::shading::character as law;
 use moly_law::shading::character::CharacterGlobals;
 
-use crate::character::{CharacterModel, CharacterPack, MotionDriver};
 use crate::light;
-use crate::npc::CharacterUnitId;
+use crate::markers::{CharacterDriver, CharacterModel, CharacterPack, CharacterUnitId};
 use crate::render::gpu::{store_bits, SharedSamplers};
 
 // ---- 现象常量（晴天配置的源值照抄） ----
@@ -885,7 +884,7 @@ pub fn plan_when_wired(
     // 在「没有 StandardMaterial 网格」上响亮误报。
     npcs: Query<
         (Entity, &CharacterUnitId, &CharacterPack),
-        (Or<(With<MotionDriver>, With<crate::player_avatar::AvatarDriver>)>, Without<ToonPlan>, Without<ToonMaterials>),
+        (With<CharacterDriver>, Without<ToonPlan>, Without<ToonMaterials>),
     >,
     children: Query<&Children>,
     names: Query<&Name>,
@@ -1019,7 +1018,7 @@ pub fn update_head(
     npcs: Query<(
         Option<&CharacterUnitId>,
         &ToonMaterials,
-        Has<crate::player::PlayerControlled>,
+        Has<crate::markers::PlayerControlled>,
         Has<PlayerWorn>,
     )>,
     globals: Query<&GlobalTransform>,

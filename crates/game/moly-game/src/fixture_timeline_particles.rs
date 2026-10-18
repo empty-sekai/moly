@@ -9,8 +9,8 @@ use std::{
 };
 
 use crate::{
-    fixture_activity_timeline::{ControlSettings, TimelineFailure},
     particle_runtime::{Context, Runtime, SourceRoute},
+    render_inputs::{ControlSettings, TimelineFailure},
     source_particle::{ParticleReadiness, SourceParticle},
     uber_particle::FixtureParticleLive,
 };
@@ -258,7 +258,7 @@ fn archive(world: &mut World, fixture: Entity, package: Option<&str>) -> Result<
             let package = match package {
                 Some(package) => package.to_owned(),
                 None => world
-                    .get::<crate::fixture::FixtureSource>(fixture)
+                    .get::<crate::render_inputs::FixtureSource>(fixture)
                     .ok_or_else(|| invalid("particle control fixture has no source GLB"))?
                     .0
                     .path()

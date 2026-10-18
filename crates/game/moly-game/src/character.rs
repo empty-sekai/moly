@@ -46,7 +46,7 @@
 //! 过渡中途再次 CrossFade 时引擎的打断语义（引擎本体行为）：本仓按
 //! [`AnimationTransitions`] 把在淡出的段逐层叠放。
 
-use crate::entry::law::UniTaskDelay;
+use crate::ui_inputs::UniTaskDelay;
 use crate::npc::{CharacterUnitId, MotionClips, MotionPhase};
 use bevy::animation::graph::AnimationNodeIndex;
 use bevy::animation::{AnimatedBy, AnimationClip, AnimationTargetId};
@@ -84,25 +84,9 @@ pub struct MotionLibrary {
     pub gltf: Handle<Gltf>,
 }
 
-/// 相机跟随的那名成员。相机域读它的世界变换逐帧取景——真源站点相机追
-/// 的是 avatar 视变换。挂载由玩家域决定（玩家实体持它；名册成员不再
-/// 插——玩家域接管时把「清单首行」的旧默认撤了）。
-#[derive(Component)]
-pub struct AvatarRoot;
+pub use crate::markers::AvatarRoot;
 
-/// 该成员的角色包句柄与包文件名（日志对账用）。骨架档案（材质值来源）
-/// 与 glb 同清单行，一起装载。
-#[derive(Component)]
-pub struct CharacterPack {
-    pub gltf: Handle<Gltf>,
-    pub file: String,
-    pub rig: Handle<JsonAsset>,
-    pub rig_file: String,
-}
-
-/// 模型场景的挂载点子实体（持 [`SceneRoot`]），挂在成员实体下。
-#[derive(Component)]
-pub struct CharacterModel;
+pub use crate::markers::{CharacterModel, CharacterPack};
 
 /// Imported local pose before any locomotion or content clip is evaluated.
 /// Sparse source clips must not inherit transforms left by a previous clip.
@@ -256,7 +240,7 @@ impl MotionDriver {
 /// 源起始段的等待秒数：`TimeSpan.FromSeconds(段长 / 速度)` 取整到毫秒后
 /// 由 `UniTask.Delay` 存成 float。
 fn source_lead_in_seconds(clip_seconds: f32) -> f32 {
-    crate::site_move::timeline::delay_seconds(f64::from(clip_seconds / LOCOMOTION_SPEED))
+    crate::tween_clock::delay_seconds(f64::from(clip_seconds / LOCOMOTION_SPEED))
 }
 
 /// 角色网格外壳（米，装配帧的世界系快照）：相机取景偏移的现算量。
@@ -616,6 +600,7 @@ pub(crate) fn wire_when_ready(
             .expect("段句柄在库的 named_animations 里")
             .duration();
         commands.entity(npc).insert((
+            crate::markers::CharacterDriver,
             MotionDriver {
                 player: root,
                 idle: idle_node,
@@ -690,7 +675,7 @@ pub fn drive(
             Without<crate::npc_fixture_activity::NpcFixtureAnimationOwner>,
             Without<crate::npc::change_site_state::ChangeSiteClip>,
             // A cut-scene's cast member: its director owns the animator.
-            Without<crate::cutscene::CutSceneCastLease>,
+            Without<crate::fixture_activity_state::CutSceneCastLease>,
         ),
     >,
     mut players: Query<&mut AnimationPlayer>,

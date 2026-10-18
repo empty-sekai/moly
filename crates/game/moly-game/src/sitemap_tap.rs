@@ -41,8 +41,7 @@ pub(crate) struct WeatherButton {
 
 /// The component that marks the tap view and lets the map's visibility pass
 /// hide it with the screen.
-#[derive(Component)]
-pub(crate) struct SitemapTapView;
+pub(crate) use crate::markers::SitemapTapView;
 
 /// Register the document and spawn the hidden view. `data` is the parsed map
 /// layout; the icons are the on-map sites in master order.

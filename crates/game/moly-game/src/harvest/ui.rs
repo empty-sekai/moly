@@ -410,7 +410,7 @@ pub(crate) fn read_input(
             GestureState::End if event.kind.is_tap_family() && over_cannot => {
                 consumed.0 = true;
                 button.cannot_presses += 1;
-                se.source_button(&layouts, KEY, CANNOT);
+                layouts.queue_button_se(&mut se, KEY, CANNOT);
                 info!("[harvest-ui] ButtonActionCannot clicked: OnHarvestActionCannot");
             }
             GestureState::End
@@ -421,7 +421,7 @@ pub(crate) fn read_input(
                 consumed.0 = true;
                 button.tools.open_presses += 1;
                 if let Some((marks, _)) = views.iter().next() {
-                    se.source_button(&layouts, KEY, &marks.tools.selected);
+                    layouts.queue_button_se(&mut se, KEY, &marks.tools.selected);
                 }
                 info!("[harvest-ui] selected-tool button clicked: OnOpenToolSelector");
             }

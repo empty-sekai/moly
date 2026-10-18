@@ -69,11 +69,11 @@
 //!
 //! The document is the server panel's NPC slice (schemaVersion 1), carried
 //! as `Sections.npcPanel` and seated in
-//! [`ClientNpcPanel`](crate::userdata::ClientNpcPanel); the panel parses it
+//! [`ClientNpcPanel`](crate::server_panel_data::ClientNpcPanel); the panel parses it
 //! once it arrives, alongside the refresh windows of the phenomena index.
 //!
 //! Gate replies: the gate presenter's `UpdateTalkList` / `SetTalkList` calls
-//! arrive as `crate::userdata::client::ClientTalkListUpdates`; each replaces the talk
+//! arrive as `crate::server_panel_data::ClientTalkListUpdates`; each replaces the talk
 //! list (the reply's stated rows, or the talk-list policy's list) and, with
 //! a change reply, the visitors.
 
@@ -83,6 +83,9 @@ use bevy::asset::LoadState;
 use bevy::prelude::*;
 use moly_assets::json::JsonAsset;
 use serde_json::Value;
+
+use crate::clock::{device_utc_offset_ms, seat_periods};
+use crate::server_panel_data::ClientNpcPanel;
 
 /// The phenomena index carries the refresh windows of the master table.
 const PHENOMENA_INDEX: &str = "moly://phenomena/index.json";
@@ -539,7 +542,7 @@ fn parse_periods(text: &str) -> Result<Vec<RefreshTimePeriod>, String> {
 
 /// Offset of device local time from UTC, in seconds, at an epoch second.
 fn device_utc_offset_seconds(epoch_seconds: i64) -> i64 {
-    crate::userdata::clock::device_utc_offset_ms(epoch_seconds.saturating_mul(1000)) / 1000
+    device_utc_offset_ms(epoch_seconds.saturating_mul(1000)) / 1000
 }
 
 /// What a schedule write selects.
@@ -752,8 +755,8 @@ fn parse(
     server: Res<AssetServer>,
     jsons: Res<Assets<JsonAsset>>,
     requests: Option<Res<PanelRequests>>,
-    npc_panel: Option<Res<crate::userdata::ClientNpcPanel>>,
-    live: Res<crate::userdata::client::LiveSchedule>,
+    npc_panel: Option<Res<ClientNpcPanel>>,
+    live: Res<crate::server_panel_data::LiveSchedule>,
     mut today: ResMut<TodayPhenomena>,
 ) {
     let Some(requests) = requests else {
@@ -771,7 +774,7 @@ fn parse(
     };
     let periods = parse_periods(&index.0)
         .unwrap_or_else(|reason| panic!("phenomena index refresh windows: {reason}"));
-    crate::userdata::clock::seat_periods(
+    seat_periods(
         periods
             .iter()
             .map(|period| moly_masters::clock::RefreshPeriod {
@@ -987,7 +990,7 @@ fn boot_talk_list(
 /// A new schedule or `refreshedAt` from the server model: the schedule is
 /// written again. The panel's own row edits since the last one are replaced.
 fn follow_live_schedule(
-    live: Res<crate::userdata::client::LiveSchedule>,
+    live: Res<crate::server_panel_data::LiveSchedule>,
     panel: Option<ResMut<ServerPanel>>,
     periods: Option<Res<RefreshTimePeriods>>,
     mut today: ResMut<TodayPhenomena>,
@@ -1024,7 +1027,7 @@ fn follow_live_schedule(
 #[allow(clippy::too_many_arguments)]
 fn apply_talk_list_updates(
     mut commands: Commands,
-    mut updates: ResMut<crate::userdata::client::ClientTalkListUpdates>,
+    mut updates: ResMut<crate::server_panel_data::ClientTalkListUpdates>,
     panel: Option<ResMut<ServerPanel>>,
     tables: Option<Res<crate::fixture_activity_data::FixtureActivityTables>>,
     visitors: Option<Res<VisitingCharacters>>,
@@ -1334,7 +1337,7 @@ impl Plugin for ServerPanelPlugin {
             // environment variable).
             .add_systems(
                 Update,
-                crate::player_talk::probe_stack_taps.before(crate::player_talk::consume_trigger),
+                crate::talk_probe::probe_stack_taps.before(crate::player_talk::consume_trigger),
             )
             .add_systems(
                 Update,

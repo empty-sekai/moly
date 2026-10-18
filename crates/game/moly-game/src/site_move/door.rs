@@ -1198,7 +1198,7 @@ impl DoorMove {
                 fov,
             });
         }
-        super::camera::record_normal_exit(world, &site);
+        crate::camera_site_move::record_normal_exit(world, &site);
         info!(
             "[site-move] NormalCameraState.OnExit at {site}: private model {}; transfer data for {site} written",
             if flag {
@@ -1567,15 +1567,7 @@ pub(crate) fn after_states(world: &mut World) {
     world.resource_scope(|world, mut session: Mut<DoorMove>| session.after_states(world));
 }
 
-/// `HouseView.InsideDoorActionPoint` of the placed house, on its fixture
-/// root: the house-entry button's availability reads it. The second field is
-/// `OutsideDoorActionPoint`, which places the house's collision box.
-#[derive(Component, Clone, Copy, Debug)]
-pub(crate) struct HouseEntryPoint(pub(crate) Entity, pub(crate) Option<Entity>);
-
-/// The site generation the house-entry point was looked up for.
-#[derive(Resource)]
-pub(crate) struct HouseEntryTagged(u64);
+pub(crate) use crate::house_doors::{HouseEntryPoint, HouseEntryTagged};
 
 /// Update: tag the placed house with its inside-door point once per site.
 pub(crate) fn tag_house_entry(world: &mut World) {

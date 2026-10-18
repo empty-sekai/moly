@@ -78,7 +78,7 @@
 use super::cue::gain_from_block;
 use super::*;
 use moly_assets::json::master;
-use crate::site::NavMeshSourceRegion;
+use crate::markers::NavMeshSourceRegion;
 use bevy::ecs::system::SystemParam;
 use moly_assets::remote::{self, Remote, RemoteRegion};
 use sha2::{Digest, Sha256};

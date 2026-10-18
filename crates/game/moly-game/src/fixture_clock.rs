@@ -34,6 +34,7 @@ use bevy::{asset::LoadState, prelude::*};
 use moly_assets::{json::JsonAsset, scene_state::SourceInactive, source_navigation::SourceObjectIdentity};
 use serde_json::Value;
 
+use crate::clock::{device_now_ms, device_utc_offset_ms};
 use crate::fixture::{FixtureVisualRoot, FixtureVisualSceneReady};
 use crate::fixture_colors::FixtureColorChoice;
 
@@ -454,8 +455,8 @@ fn local_hour_minute() -> (i32, i32) {
 }
 
 fn device_local_hour_minute() -> (i32, i32) {
-    let now = crate::userdata::clock::device_now_ms();
-    let local = now + crate::userdata::clock::device_utc_offset_ms(now);
+    let now = device_now_ms();
+    let local = now + device_utc_offset_ms(now);
     let minutes = local.div_euclid(60_000);
     (
         minutes.div_euclid(60).rem_euclid(24) as i32,

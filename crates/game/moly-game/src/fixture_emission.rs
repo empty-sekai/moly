@@ -704,8 +704,8 @@ impl<const EARLY: bool> ViewNode for EmissionPassNode<EARLY> {
         // node draws no particles and always follows one of those two
         // attachments, so its own attachment only loads the depth.
         let bloom = world
-            .get_resource::<crate::weather::WeatherPostParams>()
-            .is_none_or(|params| params.bloom_on);
+            .get_resource::<crate::render_inputs::PostBloomInput>()
+            .is_none_or(|input| input.bloom_on);
         let probed = world.get_resource::<WeatherEffectProbes>().is_some_and(|probes| {
             probes.after_opaques.is_some() || probes.after_transparents.is_some()
         });

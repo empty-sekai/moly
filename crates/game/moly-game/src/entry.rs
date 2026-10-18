@@ -64,10 +64,7 @@ use law::{ColorFade, FadeStage, NormalPrivate, UniTaskDelay};
 /// method).
 const REFRESH_CLIP: &str = "c_000_other_house1_003";
 
-/// Movement hold of the join (`NavMeshAgent.enabled = false`,
-/// `updatePosition = false` in `MoveToEntrance`, undone in `Finish`).
-#[derive(Component)]
-pub(crate) struct EntryHold;
+pub(crate) use crate::field_modes::EntryHold;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Mode {
@@ -230,7 +227,14 @@ pub(crate) fn init(
         "[entry] mode {mode:?} (first site {})",
         selection.site_type()
     );
-    commands.insert_resource(EntrySequence::new(mode));
+    let seq = EntrySequence::new(mode);
+    let gates = crate::field_modes::EntryGates {
+        control_open: seq.control_open,
+        hud_open: seq.hud_open,
+        site_input_open: seq.site_input_open,
+    };
+    commands.insert_resource(gates);
+    commands.insert_resource(seq);
     commands.init_resource::<StageSceneReady>();
 }
 
@@ -914,7 +918,7 @@ pub(crate) fn advance(world: &mut World) {
                         crate::site_move::door_state::finish_idle(
                             world,
                             token,
-                            crate::site_move::door_law::STATE_CLIP_FADE,
+                            crate::door_law::STATE_CLIP_FADE,
                         );
                         step(
                             &seq,
@@ -931,5 +935,9 @@ pub(crate) fn advance(world: &mut World) {
         }
         Phase::Ended => {}
     }
+    let mut gates = world.get_resource_or_insert_with(crate::field_modes::EntryGates::default);
+    gates.control_open = seq.control_open;
+    gates.hud_open = seq.hud_open;
+    gates.site_input_open = seq.site_input_open;
     world.insert_resource(seq);
 }

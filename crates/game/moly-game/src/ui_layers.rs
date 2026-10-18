@@ -122,9 +122,6 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use crate::sitemap::SitemapRoot;
-
-pub(crate) mod harvest_summary;
 pub(crate) mod registry;
 pub(crate) mod transition;
 
@@ -137,6 +134,91 @@ use transition::{AnimPhase, Built, ScreenAnim};
 pub(crate) type LayerId = MenuScreenType;
 /// The earlier name of the manager.
 pub(crate) type UiLayerStack = ScreenManager;
+
+pub(crate) use crate::ui_inputs::SitemapRoot;
+
+/// A drawn part's own alpha under the site map's screen root, before the
+/// root's `CanvasGroup` alpha multiplies it. The screen's start and exit
+/// animations (`ScreenAlphaInOut` on the screen root) write that group alpha;
+/// a Sprite has no inherited alpha, so the two passes below apply it.
+#[derive(Component)]
+pub(crate) struct ScreenAlphaBase(f32);
+
+/// PreUpdate: the parts the last frame multiplied get their own alpha back,
+/// so this frame's writers read and write the parts' own values.
+pub(crate) fn screen_alpha_restore(
+    mut sprites: Query<(&mut Sprite, &ScreenAlphaBase)>,
+    mut hosts: Query<(&mut crate::ui_particle::UiParticleHost, &ScreenAlphaBase), Without<Sprite>>,
+) {
+    for (mut sprite, base) in &mut sprites {
+        sprite.color.set_alpha(base.0);
+    }
+    for (mut host, base) in &mut hosts {
+        host.alpha = base.0;
+    }
+}
+
+/// PostUpdate: after this frame's writers, every part under the root keeps
+/// its own alpha and shows it times the site map layer's group alpha
+/// ([`ScreenManager::screen_visual`]; 1 while no animation wrote it).
+pub(crate) fn screen_alpha_apply(
+    mut commands: Commands,
+    manager: Option<Res<ScreenManager>>,
+    roots: Query<
+        (Entity, &Visibility),
+        (With<SitemapRoot>, Without<crate::markers::SitemapTapView>),
+    >,
+    mut taps: Query<&mut Visibility, (With<crate::markers::SitemapTapView>, Without<SitemapRoot>)>,
+    children: Query<&Children>,
+    mut sprites: Query<(&mut Sprite, Option<&mut ScreenAlphaBase>)>,
+    mut hosts: Query<
+        (
+            &mut crate::ui_particle::UiParticleHost,
+            Option<&mut ScreenAlphaBase>,
+        ),
+        Without<Sprite>,
+    >,
+) {
+    let map_open = manager
+        .as_deref()
+        .is_some_and(|manager| manager.current_screen() == Some(MenuScreenType::MysekaiSiteMap));
+    let Ok((root, root_visibility)) = roots.single() else {
+        for mut visibility in &mut taps {
+            visibility.set_if_neq(Visibility::Hidden);
+        }
+        return;
+    };
+    let shown = map_open && *root_visibility != Visibility::Hidden;
+    for mut visibility in &mut taps {
+        visibility.set_if_neq(if shown { Visibility::Inherited } else { Visibility::Hidden });
+    }
+    let group = manager
+        .as_deref()
+        .and_then(|manager| manager.screen_visual(MenuScreenType::MysekaiSiteMap).alpha)
+        .unwrap_or(1.0);
+    let parts: Vec<Entity> = children.iter_descendants(root).collect();
+    for entity in parts {
+        if let Ok((mut sprite, base)) = sprites.get_mut(entity) {
+            let own = sprite.color.alpha();
+            match base {
+                Some(mut base) => base.0 = own,
+                None => {
+                    commands.entity(entity).insert(ScreenAlphaBase(own));
+                }
+            }
+            sprite.color.set_alpha(own * group);
+        } else if let Ok((mut host, base)) = hosts.get_mut(entity) {
+            let own = host.alpha;
+            match base {
+                Some(mut base) => base.0 = own,
+                None => {
+                    commands.entity(entity).insert(ScreenAlphaBase(own));
+                }
+            }
+            host.alpha = own * group;
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Display layers (`Sekai.DisplayLayerType`, `DisplayOrderInLayer`)
@@ -1770,9 +1852,9 @@ pub(crate) fn advance(
     mut stack: ResMut<ScreenManager>,
     mut screen_registry: ResMut<ScreenRegistry>,
     mut sitemap_roots: Query<&mut Visibility, With<SitemapRoot>>,
-    editor: Res<crate::fixture_edit::EditView>,
-    mut editor_commands: MessageWriter<crate::fixture_edit::EditCommand>,
-    site: Option<Res<crate::site::SiteActive>>,
+    editor: Res<crate::ui_inputs::EditView>,
+    mut editor_commands: MessageWriter<crate::ui_inputs::EditCommand>,
+    site: Option<Res<crate::markers::SiteActive>>,
     mut events: MessageWriter<ScreenLayerEvent>,
     time: Res<Time>,
 ) {
@@ -1837,7 +1919,7 @@ pub(crate) fn advance(
                     stack.back_ui_screen(false, "LayerCommand::Pop")
                 {
                     if editor.active {
-                        editor_commands.write(crate::fixture_edit::EditCommand::RequestExit);
+                        editor_commands.write(crate::ui_inputs::EditCommand::RequestExit);
                     }
                 }
             }
@@ -1896,10 +1978,10 @@ pub(crate) fn advance(
 pub(crate) fn back_key(
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time<Real>>,
-    mut input: ResMut<crate::menu_shell::SourceInputManager>,
+    mut input: ResMut<crate::ui_inputs::SourceInputManager>,
     stack: Res<ScreenManager>,
-    editor: Res<crate::fixture_edit::EditView>,
-    player: Option<Res<crate::player_state::PlayerAvatarStates>>,
+    editor: Res<crate::ui_inputs::EditView>,
+    player: Option<Res<crate::ui_inputs::PlayerAvatarStates>>,
     mut dialog_keys: MessageWriter<DialogBackKeyEvent>,
     mut layer_commands: MessageWriter<LayerCommand>,
     mut birthday: MessageWriter<BirthdayBackKey>,
@@ -1957,7 +2039,7 @@ pub(crate) fn back_key(
     {
         let idle = player
             .as_deref()
-            .is_some_and(|player| player.current == crate::player_state::PlayerActionState::Idle);
+            .is_some_and(|player| player.current == crate::ui_inputs::PlayerActionState::Idle);
         if idle {
             info!(
                 "[screen] back key: OnExecuteMysekaiBackKeyProcess -> MysekaiUtility.OnBackKey: the player is idle and owns the room -> TransitionToOutGame: leaving MySekai is not available in this product"
@@ -1984,7 +2066,6 @@ pub(crate) fn install(app: &mut App) {
         )
         .add_systems(Update, registry::load.before(advance))
         .add_systems(Update, back_key.before(advance))
-        .add_systems(PreUpdate, crate::sitemap::screen_alpha_restore)
-        .add_systems(PostUpdate, crate::sitemap::screen_alpha_apply);
-    harvest_summary::install(app);
+        .add_systems(PreUpdate, screen_alpha_restore)
+        .add_systems(PostUpdate, screen_alpha_apply);
 }

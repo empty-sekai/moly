@@ -788,15 +788,7 @@ pub fn browser_command(operation: &str, region: &str, json: &str) -> Result<(), 
     Ok(())
 }
 
-/// Only a successfully validated, explicitly entered transient import lets an
-/// embedded stage restore player layouts. Its absence keeps the safe empty
-/// stage and prevents accidental reads of a different region's saved preset.
-#[derive(Resource)]
-pub(crate) struct TransientExploration;
-
-pub(crate) fn use_empty_stage_layout(temporary: bool, stage: bool, exploring: bool) -> bool {
-    temporary || (stage && !exploring)
-}
+pub(crate) use crate::stage_layout::{use_empty_stage_layout, TransientExploration};
 
 #[cfg(test)]
 mod transient_tests {

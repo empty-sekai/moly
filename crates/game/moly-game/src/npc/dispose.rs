@@ -43,7 +43,7 @@ pub(crate) fn npc_list(world: &mut World) -> Vec<(u32, Entity)> {
         .query_filtered::<(Entity, &CharacterUnitId), (
             With<ObjectiveMind>,
             Without<crate::player::PlayerControlled>,
-            Without<crate::cutscene::CutSceneAvatar>,
+            Without<crate::markers::CutSceneAvatar>,
         )>()
         .iter(world)
         .map(|(entity, unit)| (unit.0, entity))

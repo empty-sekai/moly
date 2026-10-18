@@ -75,9 +75,6 @@ const SUPPORTED: [&str; 9] = [
     "festival_garden",
 ];
 
-/// 房间类站点：真源按 siteType 名切到 MyRoomSiteController 的三行。
-const ROOM_TYPES: [&str; 3] = ["first_floor", "second_floor", "third_floor"];
-
 /// 采集场（主表 siteType 名；场景目录名是 grasslands，多一个 s——
 /// 站点名与目录名不同列）：玩家位移律的采集档按它生效。
 const GRASSLAND: &str = "grassland";
@@ -235,7 +232,7 @@ impl SiteSelection {
         sites: &Sites,
         layouts: &crate::fixture::layouts::SiteFixtureLayouts,
         region: Option<NavMeshSourceRegion>,
-        homes: Option<&crate::entry::house::HomeFixtures>,
+        homes: Option<&crate::house::HomeFixtures>,
     ) -> Result<crate::fixture::FixturePlacements, String> {
         let level = self
             .levels
@@ -700,44 +697,8 @@ impl Sites {
     }
 }
 
-/// 当前站点的账目面：锚行与日志的名字、位点、房间拼装来源都读它。
-#[derive(Clone, Resource)]
-pub struct SiteActive {
-    pub site_id: u32,
-    pub level: u32,
-    pub site_type: String,
-    pub category: String,
-    /// 场景目录名：inactiveNodes 路径以它为前缀（glTF 主根同名）。
-    pub scene: String,
-    /// 环境站名（主表 `assetbundleName` 列）：天气粒子链按它挑现象档案
-    /// 的 `unique__<站>` 变体。
-    pub env_site: String,
-    pub position: [f32; 3],
-    /// 房间类站点的拼装账目；场景包站点为 None。
-    pub room: Option<RoomInfo>,
-    /// 场景包站点的可行走面账目名（锚行报它，面从哪来逐站可对账）；
-    /// 房间站的寻路面账目在 [`RoomInfo`] 里，此列为 None。
-    pub nav_face: Option<String>,
-}
-
-impl SiteActive {
-    /// The source's indoor predicate: `MysekaiSiteModel.IsIndoor` is
-    /// `SiteType - 1 < 3` (first, second and third floor), and the load path
-    /// tests the site name against the same three floors. The environment view
-    /// hides the weather effects and shows the plain background on it.
-    pub fn is_indoor(&self) -> bool {
-        is_room(&self.site_type)
-    }
-}
-
-/// 房间等级与寻路面来源（锚行报它：寻路面从哪来是可对账的）。
-#[derive(Clone)]
-pub struct RoomInfo {
-    pub level: u32,
-    /// Some = 室内导航包按等级落盘的面文件；None = 盘上 authored 无几何，
-    /// 模块地板兼寻路面。
-    pub walkable_file: Option<String>,
-}
+pub(crate) use crate::markers::is_room;
+pub use crate::markers::{RoomInfo, SiteActive};
 
 /// 已请求装载的站点资产族。字段随站点类别而异：房间站多模块与寻路面，
 /// 户外站多 navmesh 面。主 glTF 字段开放给同 crate 的换装系统读
@@ -824,37 +785,14 @@ pub struct GroundMeshes(pub Vec<Handle<Mesh>>);
 #[derive(Resource)]
 pub struct WalkFaceMeshes(pub Vec<Handle<Mesh>>);
 
-/// 站点场景实体标记（场景包站一个；房间站的壳、模块两面、寻路面各一）。
-#[derive(Component, Reflect)]
-#[reflect(Component)]
-pub struct SiteRoot;
-
-/// A renderable scene root is withheld until its source materials are installed.
-/// Navigation-only roots never carry this marker and stay hidden permanently.
-/// Scene instantiation and navigation do not depend on presentation visibility.
-#[derive(Component)]
-pub(crate) struct SiteVisualPending;
-
-/// scene 实例已展开完毕（全部站点 scene 就绪）；由 `on_scene_ready` 计数
-/// 置位。
-#[derive(Resource)]
-pub struct SiteReady;
-
-/// 全部站点 scene 就绪的常驻闩：站点域外按它对齐时机（站点材质换装的
-/// 门）。与 [`SiteReady`] 同时置位，但不被清扫链撤下——换站拆资源时才撤，
-/// 新一代 scene 全就绪再立。
-#[derive(Resource)]
-pub struct SiteScenesReady;
+pub(crate) use crate::markers::SiteVisualPending;
+pub use crate::markers::{SiteReady, SiteRoot, SiteScenesReady};
 
 /// 尚未展开完毕的站点 scene 数。
 #[derive(Resource)]
 pub(crate) struct SiteScenePending(usize);
 
-/// 站点内容定案的代数：每次定案（inactiveNodes 清扫完成）自增，跨站单调。
-/// 换站后的重播种面与锚行以它为门——`SiteSettled` 同帧被取景行撤下，
-/// Update 侧等不到（时机全解在 inactive_nodes 模块注释）。
-#[derive(Clone, Copy, Resource)]
-pub struct GroundEpoch(pub u64);
+pub use crate::markers::GroundEpoch;
 
 /// A scene root that only navigation reads: spawned hidden, never revealed.
 #[derive(Component)]
@@ -1302,7 +1240,7 @@ pub(crate) fn end_departure(world: &mut World) {
 fn settle_departures(
     mut commands: Commands,
     residents: Res<ResidentSites>,
-    moving: Option<Res<crate::site_move::SiteMoveActive>>,
+    moving: Option<Res<crate::field_modes::SiteMoveActive>>,
 ) {
     if moving.is_some()
         || !residents
@@ -1340,14 +1278,7 @@ pub(crate) struct MasterHandles {
     index: Handle<JsonAsset>,
 }
 
-/// Navigation uses the actual loaded snapshot's region, independently from the
-/// page locale, player-save region, fixture catalog, or shared-weather donor.
-/// The offline HOME starter layout reads the same identity: its mock rows must
-/// name packages of this snapshot's own fixture-model index. It is inserted
-/// together with [`Sites`], so every layout consumer that has the site catalog
-/// also has it; a missing or unknown value stops the load here, loudly.
-#[derive(Clone, Copy, Resource)]
-pub(crate) struct NavMeshSourceRegion(pub moly_law::carve::NavMeshRegion);
+pub(crate) use crate::markers::NavMeshSourceRegion;
 
 impl NavMeshSourceRegion {
     fn parse(value: &serde_json::Value) -> Result<Self, String> {
@@ -1420,7 +1351,7 @@ pub(crate) fn plan(
     temporary: Option<Res<TemporarySiteActive>>,
     mut last_input_error: Local<Option<String>>,
     source_region: Option<Res<NavMeshSourceRegion>>,
-    level_hold: Option<Res<crate::site_expansion::LevelHold>>,
+    level_hold: Option<Res<crate::field_modes::LevelHold>>,
     mut residents: ResMut<ResidentSites>,
 ) {
     // A rank change is delivered before the first site: the housing sites'
@@ -1475,6 +1406,10 @@ pub(crate) fn plan(
         commands.insert_resource(SiteReuse(roots));
     }
     let scene = planned.active.scene.clone();
+    commands.insert_resource(crate::render_inputs::SiteSceneGltf {
+        gltf: planned.assets.gltf.clone(),
+    });
+    commands.insert_resource(render_view(&planned.active));
     commands.insert_resource(planned.active);
     commands.insert_resource(planned.assets);
     // 侧车（inactiveNodes 名单、材质表与 A 套声源表）跟着站点走：换站后
@@ -1482,6 +1417,20 @@ pub(crate) fn plan(
     inactive_nodes::request(&mut commands, &server, &scene);
     site_material::request(&mut commands, &server, &scene);
     site_sound::request(&mut commands, &server, &scene);
+}
+
+/// The renderer's view of a site record: what the materials, the sky host and
+/// the particle scene read about the site they are drawing.
+pub(crate) fn render_view(active: &SiteActive) -> crate::render_inputs::SiteView {
+    crate::render_inputs::SiteView {
+        site_id: active.site_id,
+        scene: active.scene.clone(),
+        site_type: active.site_type.clone(),
+        category: active.category.clone(),
+        indoor: active.is_indoor(),
+        position: active.position,
+        env_site: active.env_site.clone(),
+    }
 }
 
 /// One destination's ledger row and asset family. The loader ([`plan`]) and a
@@ -1988,13 +1937,13 @@ pub(crate) fn read_switch(
     // Paired for the same reason as `sites` above.
     (edit, site_move): (
         Option<Res<crate::fixture_edit::EditSession>>,
-        Option<Res<crate::site_move::SiteMoveActive>>,
+        Option<Res<crate::field_modes::SiteMoveActive>>,
     ),
     layouts: Res<crate::fixture::layouts::SiteFixtureLayouts>,
     // Paired: this system is at the parameter-count limit.
     (claims, entry): (
         Res<crate::input_claims::InputClaims>,
-        Option<Res<crate::entry::EntrySequence>>,
+        Option<Res<crate::field_modes::EntryGates>>,
     ),
     // Paired: this system is at the parameter-count limit.
     (library, dev): (
@@ -2015,7 +1964,8 @@ pub(crate) fn read_switch(
     tour.deferred_logged = false;
     // Site-change keys and the tour follow the back key, enabled once the
     // entry's JoinMysekai returns.
-    let manual_input = claims.world_input_free() && crate::entry::site_input_open(entry);
+    let manual_input = claims.world_input_free()
+        && entry.as_deref().is_none_or(crate::field_modes::EntryGates::site_input_open);
     // Tab and the digit keys are developer shortcuts; the tour is not a key.
     let mut requested = (manual_input && dev.is_some())
         .then(|| key_request(&keys, active.as_deref()))
@@ -2091,7 +2041,7 @@ pub(crate) fn read_switch(
         use crate::weather_transition::EnvironmentMove;
         let request = match EnvironmentMove::between(&selection.site, &next.site) {
             EnvironmentMove::Cannon | EnvironmentMove::Door | EnvironmentMove::RoomToRoom => {
-                Some(crate::site_move::SiteMoveRequest {
+                Some(crate::field_modes::SiteMoveRequest {
                     from: selection.site.clone(),
                     next,
                     then: None,
@@ -2103,7 +2053,7 @@ pub(crate) fn read_switch(
             EnvironmentMove::ProductShortcut {
                 last_leg_cannon: true,
             } => via_home(&next, sites, &layouts, source_region.as_deref().copied()).map(
-                |(home, then)| crate::site_move::SiteMoveRequest {
+                |(home, then)| crate::field_modes::SiteMoveRequest {
                     from: selection.site.clone(),
                     next: home,
                     then: Some(then),
@@ -2115,7 +2065,7 @@ pub(crate) fn read_switch(
             EnvironmentMove::ProductShortcut {
                 last_leg_cannon: false,
             } => via_home(&next, sites, &layouts, source_region.as_deref().copied()).map(
-                |(home, then)| crate::site_move::SiteMoveRequest {
+                |(home, then)| crate::field_modes::SiteMoveRequest {
                     from: selection.site.clone(),
                     next: home,
                     then: Some(then),
@@ -2211,6 +2161,9 @@ fn queue_exit(commands: &mut Commands, roots: Vec<Entity>, next: SiteSelection, 
     crate::weather_fx::invalidate_site(commands);
     // GroundEpoch stays monotonic across the transition.
     commands.remove_resource::<SiteActive>();
+    // The renderer's views of that record leave with it.
+    commands.remove_resource::<crate::render_inputs::SiteView>();
+    commands.remove_resource::<crate::render_inputs::SiteSceneGltf>();
     inactive_nodes::teardown(commands);
     commands.insert_resource(next);
 }
@@ -2344,10 +2297,6 @@ impl Default for Tour {
             deferred_logged: false,
         }
     }
-}
-
-fn is_room(site_type: &str) -> bool {
-    ROOM_TYPES.contains(&site_type)
 }
 
 /// Whether a site type is one the loader can switch to.

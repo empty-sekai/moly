@@ -2267,7 +2267,7 @@ struct TapContext<'a> {
 
 impl TapContext<'_> {
     fn sound(&mut self, control: &str) {
-        self.sounds.source_button(self.layouts, KEY, control);
+        self.layouts.queue_button_se(self.sounds, KEY, control);
     }
 }
 
@@ -2526,11 +2526,11 @@ fn dispatch_tap(
     const CLOSE: &str = "WindowRoot/UIPartsCloseButton";
     const OK: &str = "FooterButtons/UIPartsCommonButton";
     if hit(CLOSE) {
-        sounds.source_button(layouts, KEY, CLOSE);
+        layouts.queue_button_se(sounds, KEY, CLOSE);
         return TapOutcome::Close("close button");
     }
     if hit(OK) {
-        sounds.source_button(layouts, KEY, OK);
+        layouts.queue_button_se(sounds, KEY, OK);
         return TapOutcome::SaveAndClose("OK");
     }
     if let Some(tab) = bindings
@@ -2539,7 +2539,7 @@ fn dispatch_tap(
         .find(|tab| tab_shown(tab.page) && hit(&tab.selectable.control))
     {
         if bindings.built(tab.page) {
-            sounds.source_button(layouts, KEY, &tab.selectable.control);
+            layouts.queue_button_se(sounds, KEY, &tab.selectable.control);
             state.select_tab(tab.page, settings, app, bindings);
             // UpdateTabLines runs with the paint.
         } else {

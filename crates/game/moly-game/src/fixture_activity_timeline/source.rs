@@ -75,19 +75,7 @@ pub(crate) struct AnimationPlayableSettings {
     pub loop_mode: u64,
 }
 
-/// Unity ControlPlayableAsset fields. These are capabilities to resolve against
-/// the bound source object, not a reason to silently omit particles/directors.
-#[derive(Clone, Debug)]
-pub(crate) struct ControlSettings {
-    pub exposed_name: String,
-    pub update_particle: bool,
-    pub update_director: bool,
-    pub update_itime_control: bool,
-    pub search_hierarchy: bool,
-    pub active: bool,
-    pub post_playback: u64,
-    pub random_seed: u32,
-}
+pub(crate) use crate::render_inputs::ControlSettings;
 
 #[derive(Clone, Debug)]
 pub(crate) enum TimelinePayload {

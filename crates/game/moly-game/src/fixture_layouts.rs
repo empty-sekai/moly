@@ -232,7 +232,7 @@ impl SiteFixtureLayouts {
     pub(crate) fn begin_edit(
         &self,
         layout: &FixturePlacements,
-        homes: Option<&crate::entry::house::HomeFixtures>,
+        homes: Option<&crate::house::HomeFixtures>,
     ) -> Result<(EditStorageSnapshot, Vec<super::EditableFixture>), String> {
         if layout.site_id == 0 {
             return Err("current site layout is not installed".into());
@@ -363,7 +363,7 @@ impl SiteFixtureLayouts {
         level: u32,
         content: OfflineSceneContent,
         region: Option<NavMeshSourceRegion>,
-        homes: Option<&crate::entry::house::HomeFixtures>,
+        homes: Option<&crate::house::HomeFixtures>,
     ) -> Result<FixturePlacements, String> {
         if let Some(cached) = self.visited.get(&site_id) {
             if cached.site_type != site_type {
@@ -439,7 +439,7 @@ impl SiteFixtureLayouts {
 /// them, and the edit baseline refuses without them.
 fn complete_home_site(
     layout: &mut FixturePlacements,
-    homes: Option<&crate::entry::house::HomeFixtures>,
+    homes: Option<&crate::house::HomeFixtures>,
     origin: &str,
     log: bool,
 ) -> Result<(), String> {
@@ -719,8 +719,8 @@ pub(crate) fn validate_floor_layout(
 /// `userMysekaiSiteHousingLayouts` rows and the starter decoder use.
 pub(crate) fn housing_layout_request(
     layout: &FixturePlacements,
-) -> crate::userdata::client::housing_layout::UserMysekaiHousingEditLayoutRequest {
-    use crate::userdata::client::housing_layout::{
+) -> moly_protocol::api::UserMysekaiHousingEditLayoutRequest {
+    use moly_protocol::api::{
         HousingLayoutCorner, HousingLayoutFixture, UserMysekaiHousingEditLayoutRequest,
     };
     UserMysekaiHousingEditLayoutRequest {

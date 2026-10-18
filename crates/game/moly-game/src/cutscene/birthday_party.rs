@@ -147,11 +147,7 @@ pub(crate) struct Party {
 
 /// `NPCAvatarPresenter.SetBirthdayLua`: the script the character's birthday
 /// wait plays when the player talks to it, with its scenario row.
-#[derive(Component, Clone, Debug)]
-pub(crate) struct BirthdayLua {
-    pub(crate) scenario: i64,
-    pub(crate) lua: String,
-}
+pub(crate) use crate::markers::BirthdayLua;
 
 /// `MysekaiBirthdayPartyContext.BirthdayContextType`, as the screens' last
 /// `UpdateUI` drew it.

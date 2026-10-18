@@ -45,77 +45,12 @@ use moly_protocol::{Call, Refusal, Reply};
 pub(crate) use input::{read_keyboard, read_pointer};
 pub(crate) use put_effect::site_origin;
 
-#[derive(Resource, Default)]
-pub struct EditSessionActive {
-    active: bool,
-}
-
-impl EditSessionActive {
-    pub fn is_active(&self) -> bool {
-        self.active
-    }
-}
-
-#[derive(Debug, Clone, Copy, Message)]
-pub struct LayoutSaved;
+pub(crate) use crate::field_modes::{EditSessionActive, LayoutSaved};
 
 /// UI and platform input may request operations, never mutate draft fields.
-#[derive(Message, Clone, Debug)]
-pub(crate) enum EditCommand {
-    Enter,
-    /// A cell of the owned fixture list (`EditView::catalog`), by its index.
-    SelectCatalog { index: usize },
-    SelectPlaced { uid: String },
-    SelectInventory { uid: String },
-    /// A drag's touched tile (product frame, `GetSelectTile`): the drag puts
-    /// the selection's source center there, clamped into the grid and
-    /// raised by the column.
-    MoveTo { center: GridPosition },
-    /// The desktop arrow keys: one tile from the source center.
-    Nudge { x: i8, z: i8 },
-    Rotate,
-    Decide,
-    Cancel,
-    ReturnToInventory,
-    Save,
-    RequestExit,
-    KeepEditing,
-    SaveAndExit,
-    DiscardAndExit,
-    /// The camera rotate button (`LayoutAction` 13).
-    RotateCamera,
-    /// The change-look button (`LayoutAction` 14).
-    ChangeLookCamera,
-    /// The remove-all button (`SiteEditView.OnRemoveFixtureAll`): opens the
-    /// clean-up confirmation.
-    RequestCleanUp,
-    /// The confirmation's clean-up button (`CleanUpFixture`).
-    CleanUpAll,
-    /// The confirmation's cancel or close button, or a tap outside it.
-    CancelCleanUp,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum EditPhase {
-    #[default]
-    Idle,
-    Browsing,
-    Placing,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct EditItemView {
-    pub uid: String,
-    pub piece: Option<u32>,
-    pub package: String,
-    pub texture_id: u32,
-    pub fixture_id: i32,
-    pub center: GridPosition,
-    pub direction: Direction,
-    pub grid_size: Vector3Int,
-    pub layout: u8,
-    pub editable: bool,
-}
+pub(crate) use crate::ui_inputs::{
+    EditCatalogView, EditCommand, EditItemView, EditPhase, EditSelectionView, EditView, PutStatus,
+};
 
 impl From<&EditableFixture> for EditItemView {
     fn from(item: &EditableFixture) -> Self {
@@ -132,61 +67,6 @@ impl From<&EditableFixture> for EditItemView {
             editable: validation::is_ground(item),
         }
     }
-}
-
-/// `SiteLayoutUtility.CanPutFloor` of the selection at its draft place.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PutStatus {
-    Ok,
-    /// The first check it failed.
-    Refused(tile_rules::Refusal),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct EditSelectionView {
-    pub item: EditItemView,
-    pub from_inventory: bool,
-    /// A new placement of an owned fixture.
-    pub is_new: bool,
-    /// The store (return to inventory) action is offered.
-    pub can_clean_up: bool,
-    pub put_status: PutStatus,
-}
-
-/// One owned fixture row of the list: `GetFixturePlaceableCount` above 0.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct EditCatalogView {
-    pub index: usize,
-    pub package: String,
-    pub fixture_id: i32,
-    pub texture_id: u32,
-    pub grid_size: Vector3Int,
-    /// `GetFixturePlaceableCount(id, texture)`: the owned quantity less the
-    /// layouted count.
-    pub placeable: i32,
-}
-
-#[derive(Resource, Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct EditView {
-    pub revision: u64,
-    pub active: bool,
-    pub phase: EditPhase,
-    pub site_id: u32,
-    pub site_type: String,
-    pub dirty: bool,
-    pub exit_dialog: bool,
-    /// The remove-all confirmation is open.
-    pub clean_up_dialog: bool,
-    /// A save dialog (common dialog) is shown and takes the input.
-    pub save_dialog: bool,
-    pub selected: Option<EditSelectionView>,
-    pub placed_rows: Vec<EditItemView>,
-    pub inventory: Vec<EditItemView>,
-    pub catalog: Vec<EditCatalogView>,
-    /// The owned copy's revision the catalog was built from.
-    pub owned_revision: u64,
-    pub can_save: bool,
-    pub feedback: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -423,7 +303,7 @@ fn begin(world: &mut World, session: &mut EditSession) {
         session.say("场地正在切换，暂时不能开始编辑。");
         return;
     }
-    let homes = world.get_resource::<crate::entry::house::HomeFixtures>();
+    let homes = world.get_resource::<crate::house::HomeFixtures>();
     let entry = world.get_resource::<crate::fixture::layouts::SiteFixtureLayouts>()
         .ok_or_else(|| "布局存档所有者尚未就绪".to_owned())
         .and_then(|layouts| layouts.begin_edit(&layout, homes));
@@ -1002,7 +882,7 @@ fn select(
     session.cancel_selection();
     // A table that did not load answers false (no store action).
     let can_clean_up = world
-        .get_resource::<crate::entry::house::HomeFixtures>()
+        .get_resource::<crate::house::HomeFixtures>()
         .is_some_and(|homes| homes.can_clean_up(&item.package));
     let fixture_id = item.fixture_id;
     let put = (origin != SelectionOrigin::Placed).then(|| item.clone());
@@ -1169,7 +1049,7 @@ fn return_item(session: &mut EditSession) {
 /// fence or road, `CanCleanUp`) goes to storage, with what stands on it.
 fn clean_up_all(world: &World, session: &mut EditSession) {
     let (Some(homes), Some(traits)) = (
-        world.get_resource::<crate::entry::house::HomeFixtures>(),
+        world.get_resource::<crate::house::HomeFixtures>(),
         put_effect::traits_table(world),
     ) else {
         session.say("家具主表仍在加载，未清理家具。");
@@ -1420,7 +1300,7 @@ fn refused_save(
             SaveDialogKind::CutsceneArea,
         ),
         LayoutStatus::ErrorLayout | LayoutStatus::ErrorAnimationSpace => {
-            let homes = world.get_resource::<crate::entry::house::HomeFixtures>();
+            let homes = world.get_resource::<crate::house::HomeFixtures>();
             let listed = match (floor, rules, homes) {
                 (Some(floor), Some(rules), Some(homes)) => validation::invalid_fixtures(
                     &session.rows,
@@ -1442,7 +1322,7 @@ fn refused_save(
                     return;
                 }
             };
-            let homes = world.get_resource::<crate::entry::house::HomeFixtures>();
+            let homes = world.get_resource::<crate::house::HomeFixtures>();
             let house_or_gate = session.rows.iter().any(|row| {
                 listed.contains(&row.uid) && homes.is_some_and(|homes| !homes.can_clean_up(&row.package))
             });

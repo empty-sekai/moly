@@ -16,7 +16,7 @@
 //! Multi-finger pinch gestures remain unimplemented. Mouse wheel zoom is the
 //! separate desktop adaptation in camera; it is not a second gesture engine.
 
-use crate::joystick::{self, JoystickState};
+use crate::markers::{in_zone, JoystickState};
 use bevy::input::touch::TouchPhase;
 use bevy::prelude::*;
 
@@ -208,7 +208,7 @@ pub(crate) fn advance(
     windows: Query<(Entity, &Window), With<bevy::window::PrimaryWindow>>,
     time: Res<Time>,
     real: Res<Time<Real>>,
-    overlays: crate::game_settings::OverlayPanels,
+    claims: Res<crate::input_claims::InputClaims>,
     ui: crate::ui_layout::PointerUi,
 ) {
     use bevy::{input::ButtonState, window::WindowEvent};
@@ -219,7 +219,9 @@ pub(crate) fn advance(
     let input: Vec<WindowEvent> = input.read().cloned().collect();
     let touch_count = layer.frame_touch_count(&input, window_entity);
     let now = real.elapsed_secs();
-    if overlays.block_world_input() {
+    if claims.holds(crate::input_claims::SETTINGS_PANEL)
+        || claims.holds(crate::input_claims::CONTROL_PANEL)
+    {
         drop_pointer(&mut layer, &mut events, &mut pointers, touch_count);
         layer.cursor = window.cursor_position();
         return;
@@ -273,7 +275,7 @@ pub(crate) fn advance(
                 match touch.phase {
                     TouchPhase::Started => {
                         if joystick.captured == Some(touch.id)
-                            || (joystick.enabled && joystick::in_zone(touch.position, size.x, size.y))
+                            || (joystick.enabled && in_zone(touch.position, size.x, size.y))
                         { continue; }
                         let ui_owned = ui.captures(touch.position, window);
                         let accepted = layer.touch.is_none();

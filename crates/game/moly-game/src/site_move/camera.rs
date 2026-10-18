@@ -26,16 +26,7 @@ use crate::camera::{
 };
 use crate::character::AvatarRoot;
 
-/// `SiteMoveActionCameraState` private state: `_groundedTweenTime` and the
-/// avatar's `Step` (rig `Root`) and `Head` bones (`FindDeep` by name on the
-/// avatar view).
-#[derive(Resource, Debug)]
-pub(crate) struct SiteMoveCamera {
-    pub(crate) grounded: f32,
-    step: Option<Entity>,
-    head: Option<Entity>,
-    missing_logged: bool,
-}
+pub(crate) use crate::camera_site_move::SiteMoveCamera;
 
 /// The camera branch `SiteMoveActionCameraState.OnUpdate` takes for the
 /// player's current animation name.
@@ -131,20 +122,13 @@ pub(crate) fn source_yaw(rotation: Quat) -> f32 {
 /// `OnExit` writes its transfer snapshot for the site being left; the
 /// PreSiteMoveAction hooks are empty.
 pub(crate) fn enter_pre_site_move(world: &mut World, site: &str) {
-    if !record_normal_exit(world, site) {
+    if !crate::camera_site_move::record_normal_exit(world, site) {
         warn!("[site-move] camera model not built: Normal exit snapshot skipped");
         world.resource_mut::<FieldCameraState>().0 = CameraStateType::PreSiteMoveAction;
         return;
     }
     world.resource_mut::<FieldCameraState>().0 = CameraStateType::PreSiteMoveAction;
     info!("[site-move] camera Normal -> PreSiteMoveAction (Normal exit snapshot for {site})");
-}
-
-/// `NormalCameraState.OnExit` at `site` ([`crate::camera::normal_on_exit`]),
-/// for the callers that switch the camera state themselves. False without a
-/// camera model.
-pub(crate) fn record_normal_exit(world: &mut World, site: &str) -> bool {
-    crate::camera::normal_on_exit(world, site)
 }
 
 /// `ChangeState(SiteMoveAction)`: `OnEnter` opens the pitch range (0, 360),
@@ -195,22 +179,6 @@ pub(crate) fn enter_site_move(world: &mut World) {
         world.insert_resource(tween);
     }
     world.resource_mut::<FieldCameraState>().0 = CameraStateType::SiteMoveAction;
-}
-
-/// `NormalGameState.OnEnter` -> `ChangeState(Normal)` from the current
-/// camera state, whose own exit the caller has run:
-/// `NormalCameraState.OnEnter` ([`crate::camera::normal_on_enter`]). A cannon
-/// arrival takes the inherit branch (a harvest or delivery destination, or
-/// home after an outdoor site); home after any other site takes
-/// `TransferCameraSettings`, whose case 6 (from SiteMoveAction) tweens 0.6 s
-/// to Normal's private model with its LookAt taken from the live one. The
-/// site, category and previous site type the callers pass are the ones the
-/// entry reads from the world.
-pub(crate) fn enter_normal(world: &mut World, site: &str, _category: &str, _prev_site: &str) {
-    world.remove_resource::<SiteMoveCamera>();
-    let prev = world.resource::<FieldCameraState>().0;
-    crate::camera::normal_on_enter(world, prev, "site-move");
-    debug!("[site-move] camera -> Normal at {site} from {prev:?}");
 }
 
 fn find_bones(world: &mut World) -> (Option<Entity>, Option<Entity>) {

@@ -6,7 +6,7 @@
 //! - **BGM**（BGM 管理器 `MysekaiBGMManager` 的选曲）：按「当前站点 × 当前
 //!   现象」现算。真源 `PlayBGMAsync(site, phenomenon)` 先问用户唱片设定（只在
 //!   住宅类站点查；设定是服务端用户态，由服务端模型的响应写进客户端副本
-//!   [`crate::userdata::client::music::ClientMusicPlaySettings`]，默认为空），再走默认选曲
+//!   [`crate::audio_inputs::ClientMusicPlaySettings`]，默认为空），再走默认选曲
 //!   `PlayDefaultBGMAsync`：现象 id 等于客户端配置的配送现象 id → 站点
 //!   normal 档；现象主表亮度档非 none →
 //!   站点×亮度档行；none → 现象自己的 BGM 行（主数据缓存按 mysekaiPhenomenaId
@@ -96,11 +96,11 @@ use self::cue::{track_volume, CueGain, CueVolume};
 pub(crate) use self::cue::{CuePlayback, CueRngs, Player, RngSlot};
 use self::cue_law::{SequenceKind, NO_REPEAT_HISTORY_FORMAT};
 use crate::audio_sequence::{ShuffleWork, SEQUENCE_TYPE_SHUFFLE};
-use crate::character::AvatarRoot;
+use crate::markers::AvatarRoot;
 use crate::client_config::ClientConfigs;
-use crate::site::SiteActive;
+use crate::markers::SiteActive;
 use crate::voice_pcm::{MeteredVoiceSource, VoiceSource};
-use crate::weather::CurrentPhenomenon;
+use crate::audio_inputs::CurrentPhenomenon;
 use crate::weather_transition::WeatherTransition;
 use bevy::asset::{AssetPath, LoadState};
 use bevy::audio::{
@@ -2092,7 +2092,7 @@ pub(crate) struct BgmChannel {
 // `UserMysekaiMusicPlayFixtureSetting` rows: per site, the record the jukebox
 // plays and the vocal version) are server state: the server model holds them
 // (document section `userMysekaiMusicPlayFixtureSettings`) and its responses
-// write the client copy `crate::userdata::client::music::ClientMusicPlaySettings`.
+// write the client copy `crate::audio_inputs::ClientMusicPlaySettings`.
 // It is empty by default (no site has a record set; the default choice plays).
 // The native instrument `MOLY_AUDIO_MOCK_MUSIC_RECORD` (`site:record:vocal`,
 // comma separated, refused loudly when malformed) writes the native server
@@ -2213,11 +2213,11 @@ pub(crate) fn advance_bgm(
     phenomenon: Res<CurrentPhenomenon>,
     site: Option<Res<SiteActive>>,
     configs: Option<Res<ClientConfigs>>,
-    music: Res<crate::userdata::client::music::ClientMusicPlaySettings>,
+    music: Res<crate::audio_inputs::ClientMusicPlaySettings>,
     routing: Option<Res<Routing>>,
     mut channel: ResMut<BgmChannel>,
     mut sinks: Query<&mut AudioSink>,
-    bgm_hold: Option<Res<crate::site_move::BgmHold>>,
+    bgm_hold: Option<Res<crate::audio_inputs::BgmHold>>,
     mut manager_fade: ResMut<MysekaiBgmFade>,
     mut record: record::RecordParams,
     mut cut_scene: ResMut<cutscene::CutSceneAudio>,
@@ -2923,16 +2923,7 @@ fn play_proximity(
 
 // ---- talk voice 通道 ---------------------------------------------------------
 
-/// 一条 voice 行的说话者指称：voice 步的 `who`（角色变体 id）或
-/// fixture_voice 步的 `fixture`（家具 id）。partvoice 的包随说话者变体
-/// （真源按参与者逐个载包），不随 cue——cue 名里的段不编码变体归属。
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum VoiceWho {
-    /// voice 步：characterUnitId（名册变体 id）。
-    Participant(i32),
-    /// fixture_voice 步：mysekaiFixtureId（家具角色的单参包，不拼 unit）。
-    Fixture(i32),
-}
+pub(crate) use crate::audio_inputs::VoiceWho;
 
 /// Resolved actor instance, independent of the package-routing referent.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2954,20 +2945,7 @@ pub(crate) struct VoiceLine {
     pub speaker: Option<VoiceSpeaker>,
 }
 
-/// A future authored voice command. Preparing one only requests the exact raw
-/// audio asset; it never creates an AudioPlayer, changes the single voice bus,
-/// or advances dialogue timing.
-#[derive(Clone, Debug)]
-pub(crate) struct VoicePrefetch {
-    pub cue: String,
-    pub who: Option<VoiceWho>,
-}
-
-impl VoicePrefetch {
-    pub(crate) fn new(cue: String, who: Option<VoiceWho>) -> Self {
-        Self { cue, who }
-    }
-}
+pub(crate) use crate::audio_inputs::VoicePrefetch;
 
 const VOICE_PREFETCH_CACHE_LIMIT: usize = 24;
 
@@ -3134,21 +3112,14 @@ pub(crate) fn prefetch_voice(
     server: Res<AssetServer>,
     routing: Option<Res<Routing>>,
     partvoice: Option<Res<PartVoiceMap>>,
-    active: Option<Res<crate::talk::ActiveTalk>>,
-    player: Option<Res<crate::player_talk::PlayerTalkSession>>,
-    birthday: Option<Res<crate::cutscene::birthday::BirthdayContext>>,
+    talk: Option<Res<crate::audio_inputs::TalkVoicePrefetch>>,
+    birthday: Option<Res<crate::audio_inputs::BirthdayVoice>>,
     mut cache: ResMut<VoicePrefetchCache>,
 ) {
     let Some(routing) = routing else {
         return;
     };
-    let mut requests = Vec::new();
-    if let Some(active) = active {
-        requests.extend(active.voice_prefetches());
-    }
-    if let Some(player) = player {
-        requests.extend(player.voice_prefetches());
-    }
+    let mut requests = talk.map(|talk| talk.requests.clone()).unwrap_or_default();
     requests.truncate(VOICE_PREFETCH_CACHE_LIMIT);
 
     for request in requests {
@@ -3190,7 +3161,7 @@ pub(crate) fn serve_voice(
     corpus: Option<Res<VoiceCorpus>>,
     routing: Option<Res<Routing>>,
     partvoice: Option<Res<PartVoiceMap>>,
-    birthday: Option<Res<crate::cutscene::birthday::BirthdayContext>>,
+    birthday: Option<Res<crate::audio_inputs::BirthdayVoice>>,
     mut prefetch: ResMut<VoicePrefetchCache>,
     mut channel: ResMut<VoiceChannel>,
     lines: Query<(Entity, &VoiceLine)>,
@@ -3437,18 +3408,6 @@ pub(crate) struct ButtonSe {
 }
 
 impl SeRequests {
-    /// A source button's click sound through its serialized SE fields.
-    pub(crate) fn source_button(
-        &mut self,
-        layouts: &crate::ui_layout::UiLayouts,
-        key: &str,
-        path: &str,
-    ) {
-        if let Some((se, other_se_name)) = layouts.button_se(key, path) {
-            self.button(se, other_se_name);
-        }
-    }
-
     /// Queues a `PlaySE(se, otherSeName)` call.
     pub(crate) fn button(
         &mut self,
@@ -3882,7 +3841,7 @@ pub(crate) fn install(app: &mut App) {
         .init_resource::<AudioGate>()
         .init_resource::<LocalVolumeSettings>()
         .init_resource::<CurrentPhenomenon>()
-        .init_resource::<crate::userdata::client::music::ClientMusicPlaySettings>()
+        .init_resource::<crate::audio_inputs::ClientMusicPlaySettings>()
         .init_resource::<BgmChannel>()
         .init_resource::<record::RecordLibrary>()
         .init_resource::<RecordChoice>()
@@ -3893,6 +3852,7 @@ pub(crate) fn install(app: &mut App) {
         .init_resource::<CueRngs>()
         .init_resource::<ProximityState>()
         .init_resource::<VoicePrefetchCache>()
+        .init_resource::<crate::audio_inputs::TalkVoicePrefetch>()
         .init_resource::<VoiceChannel>()
         .init_resource::<SeRequests>()
         .init_resource::<SeChannel>();

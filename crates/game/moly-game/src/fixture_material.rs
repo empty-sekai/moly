@@ -141,7 +141,8 @@ use moly_law::fixture::family::{basic_fixture_shader_attribute, check_family_sha
 use moly_law::fixture::mip::mip_levels;
 
 use crate::env::{SiteEnv, SiteEnvGpuBuffer};
-use crate::fixture::{FixtureVisualRoot, FixtureVisualSceneReady, FixtureVisualReady, FixtureScenesReady};
+use crate::render_inputs::{FixtureScenesReady, FixtureVisualRoot, FixtureVisualSceneReady};
+use crate::render_inputs::FixtureVisualReady;
 use crate::fixture_emission::FixtureEmission;
 
 /// 本单交付的族键：源 shader 名，与律里族闭集的「Basic」同名。
@@ -1853,7 +1854,7 @@ fn switch_materials(
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<FixtureMaterial>>,
     mut plan: Local<Option<SwapPlan>>,
-    layout: (Res<surfaces::FixtureSurfaceReadiness>, Res<crate::fixture::FixtureLayoutRevision>, Local<u64>, Local<Vec<Entity>>, Local<MaskMeans>,
+    layout: (Res<surfaces::FixtureSurfaceReadiness>, Res<crate::render_inputs::FixtureLayoutRevision>, Local<u64>, Local<Vec<Entity>>, Local<MaskMeans>,
         MessageWriter<crate::gpu_image_release::ImageTextureReplaced>),
 ) {
     let (surfaces_ready, revision, mut seen_revision, mut seen_roots, mut mask_means, mut replaced) = layout;
@@ -2650,7 +2651,7 @@ impl Plugin for FixtureMaterialPlugin {
         app.add_plugins(MaterialPlugin::<FixtureMaterial>::default())
             .add_plugins(surfaces::FixtureSurfacePlugin)
             .add_systems(Update, switch_materials.in_set(FixtureMaterialSet)
-                .after(crate::fixture::FixtureLayoutSet).after(crate::fixture_colors::prepare)
+                .after(crate::render_inputs::FixtureLayoutSet).after(crate::fixture_colors::prepare)
                 .run_if(crate::fixture_colors::ready));
         bevy::asset::embedded_asset!(app, "shaders/fixture_material.wgsl");
     }

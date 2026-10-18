@@ -6,7 +6,7 @@
 //!   `FadeIn(delay, duration)` plays to `fadeInColor`. The two colours are
 //!   the manager's constructor values: `fadeInColor` (0, 0, 0, 0) and
 //!   `fadeOutColor` (0, 0, 0, 1). `Play` is the fader coroutine the entry
-//!   cover also runs ([`crate::entry::law::ColorFade`]); its callback fires
+//!   cover also runs ([`crate::ui_inputs::ColorFade`]); its callback fires
 //!   on the frame the target colour is written.
 //! - The cutscene screen's `_fadeImage` (`ScreenLayerMysekaiMysekaiCutScene`):
 //!   `FadeIn(color, duration)` sets the image to the colour and tweens its
@@ -24,7 +24,7 @@ use bevy::{
     prelude::*,
 };
 
-use crate::entry::law::{ColorFade, FadeStage};
+use crate::ui_inputs::{ColorFade, FadeStage};
 
 const LAYER: usize = 27;
 /// The cutscene cover's layer: each overlay camera draws only its own cover.
@@ -119,7 +119,7 @@ impl AlphaTween {
         } else {
             1.0
         };
-        let k = crate::camera::out_quad(t);
+        let k = crate::ui_inputs::out_quad(t);
         let mut out = [0.0; 4];
         for (channel, value) in out.iter_mut().enumerate() {
             *value = self.from[channel] + (self.to[channel] - self.from[channel]) * k;
@@ -345,7 +345,7 @@ pub(crate) fn spawn(mut commands: Commands) {
     ] {
         commands.spawn((
             Camera2d,
-            crate::camera::MYSEKAI_CAMERA_MSAA,
+            crate::markers::MYSEKAI_CAMERA_MSAA,
             Camera {
                 order,
                 clear_color: ClearColorConfig::None,

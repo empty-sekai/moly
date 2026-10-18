@@ -1532,7 +1532,7 @@ pub(crate) fn click(
         }
         if let Ok((header, header_view)) = headers.single() {
             if hit(header_view, &layouts, &header.back, point, canvas) {
-                sounds.source_button(&layouts, header_view.key, &header.back);
+                layouts.queue_button_se(&mut sounds, header_view.key, &header.back);
                 info!("[craft] header back button: BackUIScreen");
                 layer_commands.write(LayerCommand::Pop);
                 continue;
@@ -1563,14 +1563,14 @@ pub(crate) fn click(
         {
             let index = state.first_row + slot;
             if index < screen.rows.len() {
-                sounds.source_button(&layouts, view.key, &bindings.cells[slot].button);
+                layouts.queue_button_se(&mut sounds, view.key, &bindings.cells[slot].button);
                 screen.requests.push(ViewRequest::Select(index));
             }
             continue;
         }
         if hit(view, &layouts, &bindings.apply_button, point, canvas) {
             if screen.button.is_some_and(|button| button.enabled) {
-                sounds.source_button(&layouts, view.key, &bindings.apply_button);
+                layouts.queue_button_se(&mut sounds, view.key, &bindings.apply_button);
                 screen.requests.push(ViewRequest::Apply);
             } else {
                 info!("[craft] apply button tapped while disabled: nothing");

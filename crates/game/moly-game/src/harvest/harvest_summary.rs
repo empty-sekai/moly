@@ -80,8 +80,8 @@ use moly_assets::ui_layout::UiPrefab;
 use moly_law::ui::dotween::Ease;
 use serde_json::Value;
 
-use super::{MenuScreenType, ScreenManager};
-use crate::balloon::BALLOON_LAYER;
+use crate::ui_inputs::BALLOON_LAYER;
+use crate::ui_layers::{MenuScreenType, ScreenManager};
 use crate::ui_layout::{UiLayouts, UiPrefabView};
 
 /// The layout key of the layer's prefab.
@@ -450,7 +450,7 @@ pub(crate) fn spawn_when_ready(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn advance(
     time: Res<Time>,
-    site: Option<Res<crate::site::SiteActive>>,
+    site: Option<Res<crate::markers::SiteActive>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     root_canvas: Option<Res<crate::canvas::RootCanvas>>,
     layouts: Res<UiLayouts>,
@@ -569,6 +569,8 @@ pub(crate) fn install(app: &mut App) {
         .init_resource::<HarvestSummary>()
         .add_systems(
             Update,
-            (spawn_when_ready, advance).chain().after(super::advance),
+            (spawn_when_ready, advance)
+                .chain()
+                .after(crate::ui_layers::advance),
         );
 }

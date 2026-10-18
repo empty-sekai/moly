@@ -16,6 +16,8 @@ use bevy::prelude::*;
 use moly_assets::json::master::{self, MasterData, MasterTable};
 use moly_law::ui::mysekai_rank::{MasterMysekaiRank, MysekaiRankModel};
 
+pub(crate) use crate::rank_table::{parse_ranks, UserTotalExp};
+
 /// The rank table the rank gauges read.
 const RANKS: MasterTable<Vec<MasterMysekaiRank>> = MasterTable {
     table: "mysekaiRanks",
@@ -26,28 +28,6 @@ const RANKS: MasterTable<Vec<MasterMysekaiRank>> = MasterTable {
 /// The resolved table: its rows in master order, or why the root has none.
 #[derive(Resource)]
 pub(crate) struct MysekaiRanks(Result<Vec<MasterMysekaiRank>, String>);
-
-/// `UserMysekaiGamedata.totalExp`, the server-side user state both rank
-/// models read: the saved player data's value when it carries one, else 0
-/// until the join's answer arrives. Its responses keep it current.
-#[derive(Resource)]
-pub(crate) struct UserTotalExp(pub(crate) i32);
-
-impl UserTotalExp {
-    /// Imported player data's total experience; without one the current
-    /// value stays (the join's answer fills it).
-    pub(crate) fn set(&mut self, imported: Option<i32>) {
-        if let Some(imported) = imported {
-            self.0 = imported;
-        }
-    }
-
-    /// The value the world is seated with: the saved player data's total
-    /// experience, else 0 until the join.
-    fn seated(saved: Option<&crate::player_data::SavedTotalExp>) -> Self {
-        UserTotalExp(saved.and_then(|saved| saved.0).unwrap_or(0))
-    }
-}
 
 /// Startup: request the table and seat the user's total experience.
 pub(crate) fn load(
@@ -80,20 +60,6 @@ pub(crate) fn parse(mut commands: Commands, mut masters: ResMut<MasterData>) {
             commands.insert_resource(MysekaiRanks(Err(error.to_string())));
         }
     }
-}
-
-/// `mysekaiRanks`: the rows in master order.
-pub(crate) fn parse_ranks(text: &str) -> Result<Vec<MasterMysekaiRank>, String> {
-    master::rows(text)?
-        .iter()
-        .map(|row| {
-            Ok(MasterMysekaiRank {
-                id: master::int32(row, "id")?,
-                mysekai_rank: master::int32(row, "mysekaiRank")?,
-                total_exp: master::int32(row, "totalExp")?,
-            })
-        })
-        .collect()
 }
 
 impl MysekaiRanks {

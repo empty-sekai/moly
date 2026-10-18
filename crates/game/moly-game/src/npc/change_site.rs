@@ -141,7 +141,7 @@ const RANK_RELEASES: MasterTable<Vec<(i64, String, i64)>> = MasterTable {
 const RANKS: MasterTable<Vec<MasterMysekaiRank>> = MasterTable {
     table: "mysekaiRanks",
     name: "mysekaiRanks (the change-site cap)",
-    parse: crate::mysekai_rank::parse_ranks,
+    parse: crate::rank_table::parse_ranks,
 };
 
 /// Startup: request the master tables.
@@ -169,7 +169,7 @@ fn parse_site_levels(text: &str) -> Result<Vec<SiteLevelRow>, String> {
 }
 
 fn parse_rank_releases(text: &str) -> Result<Vec<(i64, String, i64)>, String> {
-    let releases = crate::site_expansion::law::rank_release_rows(master::rows(text)?);
+    let releases = crate::userdata_snapshot::rank_release_rows_with_appended(master::rows(text)?);
     releases
         .iter()
         .map(|row| {
@@ -236,7 +236,7 @@ pub(crate) fn run(
     talks: Option<Res<crate::server_panel::TalkDataStore>>,
     tables: Option<Res<crate::fixture_activity_data::FixtureActivityTables>>,
     placements: Res<crate::fixture::FixturePlacements>,
-    total_exp: Option<Res<crate::mysekai_rank::UserTotalExp>>,
+    total_exp: Option<Res<crate::rank_table::UserTotalExp>>,
     npcs: Query<
         (&crate::npc::CharacterUnitId, &crate::npc::NpcActions),
         Without<crate::player::PlayerControlled>,

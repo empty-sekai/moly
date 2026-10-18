@@ -7,14 +7,10 @@
 //! resource instead of each surface, so a surface that moves out of this
 //! module takes its claim with it.
 //!
-//! A claim is published by the system that changes the surface's state, so a
-//! reader ordered before that system sees what it saw before the change and
-//! a reader ordered after it sees the change: the claim and the state it
-//! stands for are always read at the same point of a frame. Two surfaces
-//! keep their gate in systems of their own (the settings modal is also
-//! opened by a failed colour apply, and the content library's gate is its
-//! own state), so [`publish_field_gates`] copies those two into the claims
-//! where the field's own input routes read them.
+//! Each surface publishes its own claim from the system that changes its
+//! state, ordered before the field's input routes, so a route reads one
+//! frame's claims and the state they stand for at the same point of the
+//! frame. A surface that moves out of this module keeps its publisher.
 
 use bevy::prelude::*;
 
@@ -100,38 +96,16 @@ impl InputClaims {
     }
 }
 
-/// Copies the gates of the surfaces that keep their own — the settings modal
-/// and the content library, the two the field's input routes cover — into
-/// the claims, at the point those routes read them. The control panel
-/// publishes its own claim as it changes.
-fn publish_field_gates(
-    settings: Option<Res<crate::game_settings::SettingsPanel>>,
-    library: Option<Res<crate::content_library::ContentLibrary>>,
-    mut claims: ResMut<InputClaims>,
-) {
-    for (holder, held) in [
-        (
-            SETTINGS_PANEL,
-            settings
-                .as_deref()
-                .is_some_and(crate::game_settings::SettingsPanel::blocks_world_input),
-        ),
-        (
-            CONTENT_LIBRARY,
-            library
-                .as_deref()
-                .is_some_and(crate::content_library::ContentLibrary::blocks_world_input),
-        ),
-    ] {
-        if held {
-            claims.claim(holder);
-        } else {
-            claims.release(holder);
-        }
+/// Publishes `holder`'s claim from the state the surface owns. Called by each
+/// surface's own system, at the point its readers of [`InputClaims`] expect.
+pub(crate) fn publish(claims: &mut InputClaims, holder: &'static str, held: bool) {
+    if held {
+        claims.claim(holder);
+    } else {
+        claims.release(holder);
     }
 }
 
 pub(crate) fn install(app: &mut App) {
-    app.init_resource::<InputClaims>()
-        .add_systems(Update, publish_field_gates.before(crate::site::read_switch));
+    app.init_resource::<InputClaims>();
 }

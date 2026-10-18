@@ -64,6 +64,8 @@ use bevy::math::Rect;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
+pub(crate) use crate::joystick_law::{bake, bake_move_vector, handle_input, DEAD_ZONE, HANDLE_SIZE, LIMIT};
+
 /// 触摸区占比（真源触摸层 RectTransform 的 layerSize 序列化值
 /// (0.35, 0.5)）。
 const ZONE_W: f32 = 0.35;
@@ -72,35 +74,10 @@ const ZONE_H: f32 = 0.5;
 /// 底盘 RectTransform 边长（canvas 单位；序列化 sizeDelta 256×256）。
 const BASE_SIZE: f32 = 256.0;
 
-/// 手柄 RectTransform 边长（canvas 单位；序列化 sizeDelta 128×128）。
-/// 也是方向的归一分母（OnDrag 式的分母 = 底盘半边 × handleRange ×
-/// canvas 缩放 = 128 × 1.0 × 缩放）。
-pub(crate) const HANDLE_SIZE: f32 = 128.0;
-
-/// 死区（序列化 deadZone 0——只捕精确 0）。
-const DEAD_ZONE: f32 = 0.0;
-
-/// 方向上限（序列化 Limit 1.0：超限归一 × 1，中段保持原始差值）。
-const LIMIT: f32 = 1.0;
-
 /// The EventSystem's serialized `m_DragThreshold`, in device pixels: the
 /// input module sends OnDrag only once the pointer is this far from where it
 /// was pressed (`(press - position).sqrMagnitude >= threshold²`).
 const DRAG_THRESHOLD_DEVICE_PIXELS: f32 = 10.0;
-
-/// HandleInput's clamp of a raw stick ratio: the dead zone 0 keeps only an
-/// exact zero at zero, above the limit the ratio is normalised times the
-/// limit, in between it is kept.
-pub(crate) fn handle_input(raw: Vec2) -> Vec2 {
-    let magnitude = raw.length();
-    if magnitude <= DEAD_ZONE {
-        Vec2::ZERO
-    } else if magnitude > LIMIT {
-        raw / magnitude * LIMIT
-    } else {
-        raw
-    }
-}
 
 /// 摇杆两件所在页（UI atlas 的 MysekaiAtlas 页）。
 const PAGE: &str =
@@ -120,35 +97,8 @@ const STICK_SRC: Rect = Rect {
     max: Vec2::new(528.0, 456.0),
 };
 
-/// 摇杆区谓词：窗口左下 35% 宽 × 50% 高。Bevy 屏坐标顶原点、y 向下
-/// ⇒ x < 0.35W 且 y ≥ 0.5H。手势层读同一谓词复现射线分流。
-pub(crate) fn in_zone(position: Vec2, width: f32, height: f32) -> bool {
-    position.x < width * ZONE_W && position.y >= height * ZONE_H
-}
-
-/// 摇杆层状态：CustomJoyStick 字段面的移植子集 + presenter 侧的
-/// 活跃沿。单实例。
-#[derive(Resource, Default)]
-pub(crate) struct JoystickState {
-    /// 本帧让位门求值结果（编辑/对话在播 → false）。手势层读它复现
-    /// 区内吞没。
-    pub(crate) enabled: bool,
-    /// 捕获中的手指 id（真源 _handlingPointerId 的 Nullable<int>）。
-    /// 手势层读它跳过捕获指的事件。
-    pub(crate) captured: Option<u64>,
-    /// 底盘心（屏坐标、顶原点——捕获时等于触点）。也是拖动阈值的
-    /// 按下点（PointerEventData.pressPosition）。
-    base: Vec2,
-    /// The captured finger's drag has started (PointerEventData.dragging):
-    /// its moves reach OnDrag.
-    dragging: bool,
-    /// 最近一次 UPDATE 的方向（真源屏坐标语义：y 向上；已按上限夹）。
-    direction: Vec2,
-    /// presenter 的 _isJoyStickInput：收到过 UPDATE 且未收 END。
-    pub(crate) active: bool,
-    /// UPDATE 时刻烘好的世界移动向量（真源 _joyStickMoveDirection）。
-    pub(crate) move_vector: Vec3,
-}
+pub(crate) use crate::markers::JoystickState;
+use crate::markers::in_zone;
 
 /// MysekaiUtility.ForceResetJoyStick -> CustomJoyStick.ForcePointerUp: the
 /// captured finger is let go (the stick hides and publishes END), and that
@@ -186,17 +136,17 @@ pub(crate) fn advance(
     mut touches: MessageReader<TouchInput>,
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<&GlobalTransform, With<Camera3d>>,
-    edits: Res<crate::fixture_edit::EditSessionActive>,
+    edits: Res<crate::field_modes::EditSessionActive>,
     player_talk: Option<Res<crate::player_talk::PlayerTalkSession>>,
     overlays: crate::game_settings::OverlayPanels,
     library: Res<crate::content_library::ContentLibrary>,
     mut last_logged: Local<Vec2>,
     mut no_area: Local<bool>,
-    site_move: Option<Res<crate::site_move::SiteMoveActive>>,
+    site_move: Option<Res<crate::field_modes::SiteMoveActive>>,
     entry: Option<Res<crate::entry::EntrySequence>>,
     root_canvas: Option<Res<RootCanvas>>,
-    learn: Option<Res<crate::harvest::LearnSiteEnvironmentActive>>,
-    held: Option<Res<crate::game_state::HeldGameState>>,
+    learn: Option<Res<crate::field_modes::LearnSiteEnvironmentActive>>,
+    held: Option<Res<crate::field_modes::HeldGameState>>,
     screens: Option<Res<crate::ui_layers::ScreenManager>>,
 ) {
     let Some(window) = windows.single().ok() else {
@@ -386,31 +336,6 @@ pub(crate) fn advance(
     }
 }
 
-/// presenter 的 UPDATE 烘基式（OnTouchJoyStick）：移动向量 =
-/// 相机前（去 y 归一；水平模长近零时**该项**回零，右项保留）×
-/// 方向.y + 相机右 × 方向.x，和向量不归一。相机不在场 → None
-/// （真源整式短路，不置活跃）。
-fn bake_move_vector(
-    direction: Vec2,
-    cameras: &Query<&GlobalTransform, With<Camera3d>>,
-) -> Option<Vec3> {
-    Some(bake(direction, cameras.single().ok()?))
-}
-
-/// OnTouchJoyStick's bake of one direction on one camera: camera forward
-/// with y removed and normalised (that term zero when its horizontal length
-/// is not above 1e-5) times direction.y, plus camera right times
-/// direction.x, the sum not normalised.
-pub(crate) fn bake(direction: Vec2, global: &GlobalTransform) -> Vec3 {
-    let forward = global.forward();
-    let horizontal = (forward.x * forward.x + forward.z * forward.z).sqrt();
-    let forward_flat = if horizontal <= 0.00001 {
-        Vec3::ZERO
-    } else {
-        Vec3::new(forward.x / horizontal, 0.0, forward.z / horizontal)
-    };
-    forward_flat * direction.y + global.right().as_vec3() * direction.x
-}
 
 /// 摇杆 UI 根（两件 sprite 的父；可见性随捕获态，子件沿父链继承）。
 #[derive(Component)]

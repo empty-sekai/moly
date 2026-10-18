@@ -105,11 +105,7 @@ const INPUTS: [&str; 3] = [
     "mysekai-fixtures.json",
 ];
 
-/// The characters a collect-item cell can print: the atlas's fifth member.
-#[derive(Resource, Default)]
-pub(crate) struct CollectNoticeCharset {
-    pub(crate) chars: Vec<char>,
-}
+pub(crate) use crate::ui_charsets::CollectNoticeCharset;
 
 #[derive(Resource)]
 struct Inputs(Vec<(&'static str, Handle<JsonAsset>)>);

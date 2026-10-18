@@ -660,7 +660,7 @@ fn tap(
     };
     let path = format!("@{id}");
     if id == bindings.thumbnail_button {
-        sounds.source_button(layouts, KEY, &path);
+        layouts.queue_button_se(sounds, KEY, &path);
         view.set_text(&b.text, run.name.clone());
         // Hide leaves the balloon object active (alpha 0, no raycasts); the
         // view's visibility stands in for its blocksRaycasts, so the balloon
@@ -677,7 +677,7 @@ fn tap(
         return edited;
     }
     if bindings.close_buttons.contains(&id) {
-        sounds.source_button(layouts, KEY, &path);
+        layouts.queue_button_se(sounds, KEY, &path);
         close(run, ease, now, &format!("close button {path}"), closed, screens);
     }
     false

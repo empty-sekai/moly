@@ -42,7 +42,7 @@ impl ItemIcons {
                 }
                 Some((name, _)) => Err(format!(
                     "the package holds {}, not the requested resource",
-                    crate::balloon::ascii_or(name)
+                    crate::ui_inputs::ascii_or(name)
                 )),
                 None => Err(format!("{DIRECTORY}/index.json does not list this package")),
             },

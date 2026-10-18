@@ -114,7 +114,7 @@ pub(crate) fn enter(world: &mut World) {
             .get_resource::<crate::site::SiteActive>()
             .map(|site| site.site_type.clone());
         if let Some(site) = site {
-            crate::site_move::camera::record_normal_exit(world, &site);
+            crate::camera_site_move::record_normal_exit(world, &site);
         }
     }
     world.remove_resource::<CameraTween>();
@@ -188,7 +188,7 @@ pub(crate) fn exit(world: &mut World) {
             "[cutscene-camera] ChangeState(CutScene -> Normal) at {} after {prev_site}: the inherit branch",
             site.site_type
         );
-        crate::site_move::camera::enter_normal(world, &site.site_type, &site.category, &prev_site);
+        crate::camera_site_move::enter_normal(world, &site.site_type, &site.category, &prev_site);
         return;
     }
     let setting = world.get_resource::<CameraSetting>().copied();

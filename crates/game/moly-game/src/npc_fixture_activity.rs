@@ -332,7 +332,7 @@ impl FactoryIssue {
 
 #[derive(SystemParam)]
 pub(crate) struct Factory<'w, 's> {
-    editor: Res<'w, crate::fixture_edit::EditSessionActive>,
+    editor: Res<'w, crate::field_modes::EditSessionActive>,
     tables: Option<Res<'w, FixtureActivityTables>>,
     scripts: Option<Res<'w, crate::talk::TalkStore>>,
     points: Option<Res<'w, AttachPoints>>,
@@ -1360,7 +1360,7 @@ impl Factory<'_, '_> {
 /// An Arrived result transfers ownership; it is not objective completion.
 pub(crate) fn advance(world: &mut World) {
     if world
-        .get_resource::<crate::fixture_edit::EditSessionActive>()
+        .get_resource::<crate::field_modes::EditSessionActive>()
         .is_some_and(|editor| editor.is_active())
     {
         return;

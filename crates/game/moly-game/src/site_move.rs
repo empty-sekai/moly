@@ -40,7 +40,7 @@ pub(crate) mod arrival;
 pub(crate) mod camera;
 mod cannon;
 pub(crate) mod door;
-pub(crate) mod door_law;
+pub(crate) use crate::door_law;
 pub(crate) mod door_state;
 pub(crate) mod effects;
 pub(crate) mod products;
@@ -71,19 +71,9 @@ use timeline::{
     Step, TweenClock,
 };
 
-/// Queued by `site::read_switch` for a switch between two different sites
-/// (`OnChangeSite`); the executor answers it with `GetActionState`.
-#[derive(Resource)]
-pub(crate) struct SiteMoveRequest {
-    pub(crate) from: String,
-    pub(crate) next: SiteSelection,
-    /// The move admitted when this one ends: the source's nested
-    /// `ChangeSiteEventData`, or the second leg of a product composition.
-    pub(crate) then: Option<SiteSelection>,
-    /// Names the product composition this chain serves (`None` for a source
-    /// move or the source's own nesting).
-    pub(crate) composition: Option<&'static str>,
-}
+pub(crate) use crate::field_modes::{
+    EnvironmentHold, SiteMoveActive, SiteMoveRequest,
+};
 
 /// `SiteMoveActionExecutor.GetActionState` over the two sites' kinds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,40 +102,9 @@ struct NestedOuter {
     kind: door_law::DoorKind,
 }
 
-/// `GameState.SiteMove`: present from the move's admission until the
-/// executor sets Normal. Its readers stop what the source stops in this
-/// state (manual movement and input, the action-button scan, site commands).
-#[derive(Resource)]
-pub struct SiteMoveActive;
+pub(crate) use crate::audio_inputs::BgmHold;
 
-/// The Core's `ChangeEnvironment` has not run yet: the destination
-/// environment is requested but its cross-fade does not start.
-#[derive(Resource)]
-pub(crate) struct EnvironmentHold;
-
-/// `MysekaiBGMManager.PlayBGMAsync` for the destination has not run yet.
-#[derive(Resource)]
-pub(crate) struct BgmHold;
-
-/// The cannon move's writes to the source's environment root, for the sky
-/// host that keeps that root. At the fire the move keeps the root's height
-/// (`envDefaultPositionY`); on every update of the follow (`DOVirtual.Float`
-/// over the flight time) it sets the root to the player view's `Step`
-/// position; at the landing effect it sets the root's height back to the
-/// kept one. Points are in the source world frame. Present from the fire to
-/// the end of the move; door moves do not write the root. The product tweens
-/// the player's root, which the `Step` node sits on.
-#[derive(Resource, Clone, Debug)]
-pub(crate) struct CannonEnvironmentWrite {
-    /// One value per move (its admission frame).
-    pub(crate) move_id: u64,
-    /// The destination's site type.
-    pub(crate) site_type: String,
-    /// The follow's last write; `None` before its first update.
-    pub(crate) point: Option<Vec3>,
-    /// The landing effect has set the kept height back.
-    pub(crate) height_restored: bool,
-}
+pub(crate) use crate::render_inputs::CannonEnvironmentWrite;
 
 /// `SetRenderingEnabled(nextSite, false)` is in force.
 #[derive(Resource)]
@@ -514,7 +473,7 @@ fn admit(world: &mut World, request: SiteMoveRequest, frame: u64) {
             .copied();
         // The loader completes a home layout with the player's house, so the
         // arrival reads the same completed layout.
-        let homes = world.get_resource::<crate::entry::house::HomeFixtures>();
+        let homes = world.get_resource::<crate::house::HomeFixtures>();
         next.restored_layout(sites, layouts, region, homes)
     });
     let arrival =
@@ -539,7 +498,7 @@ fn admit(world: &mut World, request: SiteMoveRequest, frame: u64) {
     );
     crate::footstep::stop_key(world, "cannon pre-action");
     if from_place.category == "housing_home" {
-        crate::ui_layers::harvest_summary::save_harvest_point(world, "MoveSiteUseCannonActionState.OnSiteMovePreAction");
+        crate::harvest::harvest_summary::save_harvest_point(world, "MoveSiteUseCannonActionState.OnSiteMovePreAction");
     }
     world.insert_resource(SiteMove {
         source_clip: None,
@@ -801,7 +760,7 @@ impl SiteMove {
                     }
                     let delay = *delay;
                     self.due_by(delay);
-                    crate::ui_layers::harvest_summary::show_harvest_point_summary(world, "MoveSiteUseCannonActionState.EndAction");
+                    crate::harvest::harvest_summary::show_harvest_point_summary(world, "MoveSiteUseCannonActionState.EndAction");
                     self.normal(world, frame);
                     self.stage = Stage::Done;
                 }
@@ -1088,7 +1047,7 @@ impl SiteMove {
         self.record(Step::Normal, frame);
         world.remove_resource::<SiteMoveActive>();
         let prev = world.resource::<crate::camera::PrevSiteType>().0.clone();
-        camera::enter_normal(world, &self.to, &self.to_category, &prev);
+        crate::camera_site_move::enter_normal(world, &self.to, &self.to_category, &prev);
         if self.to_category == "housing_home" {
             // SetupScreenLayerMysekaiHome: ChangeUIScreen(MysekaiHome).
             world.write_message(LayerCommand::Change(LayerId::HomeField));

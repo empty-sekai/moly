@@ -141,22 +141,7 @@ const SETTLE: f64 = 2.0;
 const NO_TIMEOUT: f64 = f64::MAX;
 const WAITS_FOR_EARLIER: &str = "waits for the earlier gate part";
 
-/// The bundles a gate fixture may show (`MysekaiGateModel.AssetBundleName`
-/// over the gate, unit skin and common skin tables), as fixture packages.
-#[derive(Resource, Default, Debug)]
-pub(crate) struct GateModelPackages(pub(crate) HashSet<String>);
-
-/// The home gate's model as the server document states it
-/// (`userMysekaiGates`: the gate set at the home site and its skin), which
-/// the home site's layout shows on its gate rows. `package` is none when the
-/// server document or the gate tables are not available, or when the
-/// fixture index lacks the model; the layout's own row stands then.
-#[derive(Resource, Clone, Debug, PartialEq, Eq)]
-pub(crate) struct HomeGateModel {
-    pub(crate) package: Option<String>,
-    /// The fixture masters whose type is gate.
-    pub(crate) masters: HashSet<i32>,
-}
+pub(crate) use crate::fixture_gate_model::{GateModelPackages, HomeGateModel};
 
 /// A request of the native instruments (the gate screens' requests).
 #[derive(Clone, Debug)]

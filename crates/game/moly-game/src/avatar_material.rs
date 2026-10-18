@@ -451,7 +451,7 @@ pub fn plan_and_swap(
             commands
                 .entity(entity)
                 .remove::<MeshMaterial3d<StandardMaterial>>()
-                .insert(MeshMaterial3d(handle.clone()));
+                .insert((MeshMaterial3d(handle.clone()), crate::markers::PlayerBodyRenderer));
         }
         commands.entity(player).insert(AvatarToon);
         let stored = materials

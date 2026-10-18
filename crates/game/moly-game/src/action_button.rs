@@ -656,10 +656,7 @@ fn kind_of(button: ButtonType) -> FixtureKind {
     }
 }
 
-/// 本帧点按是否已被按钮吃掉。世界射线拾取读它，读到就不再打射线——
-/// 真源里屏幕按钮在 UI 事件系统里，本来就在世界射线之前拦下点按。
-#[derive(Resource, Default)]
-pub(crate) struct ActionTapConsumed(pub(crate) bool);
+pub(crate) use crate::ui_inputs::ActionTapConsumed;
 
 /// Startup：请求全部图标与两张表。
 ///
@@ -987,7 +984,7 @@ pub(crate) fn advance(
     >,
     server: Res<AssetServer>,
     site_move: Option<Res<crate::site_move::SiteMoveActive>>,
-    homes: Option<Res<crate::entry::house::HomeFixtures>>,
+    homes: Option<Res<crate::house::HomeFixtures>>,
     room_door: Option<Res<crate::site_move::room_door::RoomDoor>>,
     (system_fixtures, birthday): (
         Res<crate::system_fixture::SystemFixtures>,

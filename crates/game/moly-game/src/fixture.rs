@@ -763,7 +763,7 @@ fn full_starter_rows(
 /// The home site always has the player's house (a system fixture the
 /// server always includes). A home site layout, starter or saved, whose rows
 /// hold no home package gets the entry's named mock house row
-/// ([`crate::entry::house`]) appended with its own UID. Its footprint must
+/// ([`crate::house`]) appended with its own UID. Its footprint must
 /// not overlap any ground row of the layout; an overlap (or a UID already in
 /// use) refuses the house with an error naming both, and never moves the
 /// user's fixture: the entry then takes the source's no-house branch.
@@ -771,7 +771,7 @@ fn full_starter_rows(
 /// compare the loaded layout with the saved record.
 fn complete_home_site(
     layout: &mut FixturePlacements,
-    homes: &crate::entry::house::HomeFixtures,
+    homes: &crate::house::HomeFixtures,
     origin: &str,
     log: bool,
 ) -> Result<(), String> {
@@ -786,7 +786,7 @@ fn complete_home_site(
             return Ok(());
         }
     }
-    let house = &crate::entry::house::STARTER_HOUSE;
+    let house = &crate::house::STARTER_HOUSE;
     let row = PlacementMock {
         package: house.package,
         texture_id: house.texture_id,
@@ -797,7 +797,7 @@ fn complete_home_site(
         direction: house.direction,
         fixture_id: house.fixture_id,
     };
-    let uid = crate::entry::house::mock_house_uid(layout.site_id);
+    let uid = crate::house::mock_house_uid(layout.site_id);
     let placed = row.placed();
     let overlapping: Vec<String> = layout
         .rows
@@ -1091,13 +1091,7 @@ pub(crate) fn source_transform(position: [f32; 3], yaw: f32) -> Transform {
         .with_rotation(Quat::from_rotation_y(yaw))
 }
 
-/// All local one-shot binders reset against this generation when a map's
-/// furniture instances are replaced. Source catalogs remain reusable.
-#[derive(Resource, Default)]
-pub(crate) struct FixtureLayoutRevision(pub u64);
-
-#[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct FixtureLayoutSet;
+pub(crate) use crate::render_inputs::{FixtureLayoutRevision, FixtureLayoutSet};
 
 /// Marks a layout owned by a content-library session. It is never remembered
 /// by the saved-layout provider when the temporary site is left.
@@ -1142,7 +1136,7 @@ impl FixturePlacements {
 
     /// The home gate's rows show the gate model the server set at the home
     /// site (a gate model the index lacks leaves the row as it is).
-    pub(crate) fn show_gate_model(&mut self, model: &crate::gate_flow::HomeGateModel) {
+    pub(crate) fn show_gate_model(&mut self, model: &crate::fixture_gate_model::HomeGateModel) {
         let Some(package) = model.package.as_deref() else {
             return;
         };
@@ -1365,9 +1359,7 @@ pub struct OccupancyRow {
     pub direction: Direction,
 }
 
-/// 家具根实体标记（一条摆放一个）。
-#[derive(Component)]
-pub struct FixtureRoot;
+pub use crate::render_inputs::{FixtureRoot, FixtureScenesReady, FixtureSource};
 
 /// 家具根上的摆放行（换装按它判墙布局；对话配对面按 `fixture_id` 认
 /// 锚点——0 是未锚定对话的摆放）。
@@ -1378,11 +1370,6 @@ pub struct FixturePlacement {
     pub(crate) fixture_id: i32,
 }
 
-/// 家具根上的源 glb 句柄（装载期留底）：对话演出的时间轴 op 要按它
-/// 取该包的动画剪辑集（`named_animations`），脸部 ST 写不走它。
-#[derive(Component)]
-pub struct FixtureSource(pub Handle<Gltf>);
-
 #[derive(Component)]
 struct FixtureInstanceSeed {
     uid: String,
@@ -1390,25 +1377,10 @@ struct FixtureInstanceSeed {
     master: i32,
 }
 
-/// Rendering ownership is independent of committed gameplay placement.
-/// Editor previews opt into the same material chain without FixtureRoot,
-/// FixturePlacement, occupancy, inventory or interaction identity.
-#[derive(Component)]
-pub(crate) struct FixtureVisualRoot {
-    pub layout: u8,
-}
+pub(crate) use crate::render_inputs::FixtureVisualRoot;
+pub(crate) use crate::render_inputs::FixtureVisualSceneReady;
 
-impl FixtureVisualRoot {
-    pub(crate) fn is_wall_layout(&self) -> bool {
-        self.layout & WALL_LAYOUT_MASK != 0
-    }
-}
-
-#[derive(Component)]
-pub(crate) struct FixtureVisualSceneReady;
-
-#[derive(Component)]
-pub(crate) struct FixtureVisualReady;
+pub(crate) use crate::render_inputs::FixtureVisualReady;
 
 #[derive(Component)]
 struct FixtureIdentityResolved;
@@ -1436,10 +1408,6 @@ impl FixturePlacement {
         self.layout & WALL_LAYOUT_MASK != 0
     }
 }
-
-/// 全部摆放的 scene 展开完毕（换装的门）；由 [`on_scene_ready`] 计数置位。
-#[derive(Resource)]
-pub struct FixtureScenesReady;
 
 /// 已展开的 scene 实例计数（常驻；全部展开后不再变）。
 #[derive(Resource, Default)]
@@ -1527,10 +1495,10 @@ fn restore_selected_layout(
     mut last_error: Local<Option<String>>,
     temporary: Option<Res<crate::site::TemporarySiteActive>>,
     stage: Option<Res<crate::browser_stage::BrowserStage>>,
-    exploration: Option<Res<crate::player_data::TransientExploration>>,
+    exploration: Option<Res<crate::stage_layout::TransientExploration>>,
     source_region: Option<Res<crate::site::NavMeshSourceRegion>>,
-    homes: Option<Res<crate::entry::house::HomeFixtures>>,
-    gate_model: Option<Res<crate::gate_flow::HomeGateModel>>,
+    homes: Option<Res<crate::house::HomeFixtures>>,
+    gate_model: Option<Res<crate::fixture_gate_model::HomeGateModel>>,
     mut hold: Local<crate::hold::HoldReport>,
 ) {
     let now = time.elapsed_secs();
@@ -1560,7 +1528,7 @@ fn restore_selected_layout(
     // An embedded stage starts with no preset or persisted layout. The same
     // layout owner later installs/restores exact content-scoped fixtures.
     // In particular, never instantiate a CN offline preset in a JP snapshot.
-    let restored = if crate::player_data::use_empty_stage_layout(
+    let restored = if crate::stage_layout::use_empty_stage_layout(
         temporary.is_some(),
         stage.is_some(),
         exploration.is_some(),
@@ -1640,7 +1608,7 @@ pub(crate) fn reload_current_layout(world: &mut World) {
     world.remove_resource::<crate::fixture_attach::AttachWorlds>();
     world.remove_resource::<crate::fixture_talk::TimelinesPlanned>();
     world.remove_resource::<crate::fixture_talk::TimelineAssets>();
-    world.remove_resource::<crate::site_move::door::HouseEntryTagged>();
+    world.remove_resource::<crate::house_doors::HouseEntryTagged>();
     world.insert_resource(FixtureSpawnedCount::default());
     world.insert_resource(FixtureScenesReadyCount::default());
     let mut revision = world.resource_mut::<FixtureLayoutRevision>();
@@ -2255,7 +2223,7 @@ pub struct FixturePlugin;
 fn bind_activity_identities(
     mut commands: Commands,
     tables: Option<Res<crate::fixture_activity_data::FixtureActivityTables>>,
-    gate_models: Option<Res<crate::gate_flow::GateModelPackages>>,
+    gate_models: Option<Res<crate::fixture_gate_model::GateModelPackages>>,
     roots: Query<(Entity, &FixtureInstanceSeed), Without<FixtureIdentityResolved>>,
 ) {
     let Some(tables) = tables else {
@@ -2422,7 +2390,7 @@ impl Plugin for FixturePlugin {
                     .chain()
                     .in_set(FixtureLayoutSet)
                     .after(crate::site::plan)
-                    .after(crate::fixture_edit::FixtureEditSystems::Input)
+                    .after(crate::markers::EditInputOrder)
                     .before(crate::walk_face::build),
             );
     }

@@ -2,14 +2,14 @@
 
 use super::{EditorIcons, ItemChoice};
 use crate::{
-    fixture_edit::EditView,
+    ui_inputs::{EditView, EDITOR_RUNTIME_KEY},
     ui_layout::{UiLayouts, UiPrefabView},
 };
 use bevy::prelude::*;
 use moly_assets::ui_layout::{UiComponent, UiInstance, UiPrefab};
 use serde_json::Value;
 
-pub(super) const RUNTIME: &str = "EditorRuntime";
+pub(super) const RUNTIME: &str = EDITOR_RUNTIME_KEY;
 
 #[derive(Clone)]
 pub(super) struct Cell {

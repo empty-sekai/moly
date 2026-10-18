@@ -35,7 +35,7 @@ use moly_assets::ui_layout::UiPrefab;
 use moly_law::ui::dotween::{Ease, FloatTween};
 use serde_json::Value;
 
-use crate::balloon::BALLOON_LAYER;
+use crate::ui_inputs::BALLOON_LAYER;
 use crate::ui_layout::{SpriteLayoutMetrics, UiLayouts, UiPrefabView};
 
 pub(crate) const KEY: &str = "Notice";
@@ -263,7 +263,7 @@ pub(crate) fn advance(
     time: Res<Time>,
     windows: Query<&Window, With<PrimaryWindow>>,
     root_canvas: Option<Res<crate::canvas::RootCanvas>>,
-    catalogue: Res<crate::weather::PhenomenonCatalogue>,
+    catalogue: Res<crate::ui_inputs::PhenomenonCatalogue>,
     layouts: Res<UiLayouts>,
     mut banner: ResMut<NoticeBanner>,
     mut roots: Query<(&mut Transform, &mut UiPrefabView, &mut Visibility), With<NoticeRoot>>,

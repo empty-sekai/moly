@@ -1,20 +1,18 @@
 //! Shared prefab view: geometry, images and text use the same resolved nodes as hit testing.
 
 mod filled_image;
-mod tmp_font;
-mod tmp_layout;
+pub(crate) mod tmp_font;
+pub(crate) mod tmp_layout;
 mod clip_render;
 mod stencil_mask;
 mod raycast;
 pub(crate) use raycast::Pointer;
-#[cfg(test)]
-mod ui_source_compare;
 
 pub(crate) fn install(app: &mut App) {
     clip_render::install(app);
 }
 
-use crate::balloon::{BalloonArt, BAKE_PPEM};
+use crate::ui_inputs::{BalloonArt, BAKE_PPEM};
 use bevy::asset::RenderAssetUsages;
 use bevy::asset::io::AssetReaderError;
 use bevy::asset::{AssetEvent, AssetId, AssetLoadError, AssetLoadFailedEvent, LoadState};
@@ -159,9 +157,9 @@ fn runtime_region(source: &str) -> Result<String, String> {
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct PointerUi<'w, 's> {
     layouts: Option<Res<'w, UiLayouts>>,
-    dialogs: Res<'w, crate::menu_shell::ShellDialogState>,
+    dialogs: Res<'w, crate::ui_inputs::ShellDialogState>,
     layers: Res<'w, crate::ui_layers::UiLayerStack>,
-    editor: Option<Res<'w, crate::fixture_edit::EditView>>,
+    editor: Option<Res<'w, crate::ui_inputs::EditView>>,
     views: Query<'w, 's, (Entity, &'static UiPrefabView, &'static GlobalTransform)>,
     hierarchy: Query<'w, 's, (Option<&'static Visibility>, Option<&'static ChildOf>)>,
     root: Option<Res<'w, crate::canvas::RootCanvas>>,
@@ -191,14 +189,14 @@ impl PointerUi<'_, '_> {
             let Some(doc) = layouts.document(view.key) else { return false; };
             let Some(rects) = view.resolved(layouts, canvas) else { return false; };
             let local = transform.affine().inverse().transform_point3(screen).truncate();
-            if crate::fixture_edit_ui::captures_background(view, layouts, local, canvas) {
+            if crate::ui_inputs::captures_background(view, layouts, local, canvas) {
                 return true;
             }
             // The field camera reset button: ownership by the source raycast
             // (padded hit graphic, raycast filters, highest depth wins) of the
             // pointer its press chain casts.
-            if let Some(button) = crate::menu_shell::camera_reset_button(doc) {
-                let pointer = crate::menu_shell::event_pointer(window, root, position);
+            if let Some(button) = crate::ui_inputs::camera_reset_button(doc) {
+                let pointer = crate::ui_inputs::event_pointer(window, root, position);
                 if view.press_target(layouts, pointer, canvas).is_some_and(|(_, id)| id == button) {
                     return true;
                 }
@@ -324,7 +322,7 @@ pub(crate) struct UiLayouts {
     loaded_images: Mutex<HashSet<AssetId<Image>>>,
     failed_images: Mutex<HashMap<AssetId<Image>, String>>,
     resolved: Mutex<HashMap<String, ResolvedLayout>>,
-    text_rules: Option<tmp_layout::TextRules>,
+    pub(crate) text_rules: Option<tmp_layout::TextRules>,
     measurement_revision: u64,
     canvas_reference_pixels_per_unit: Option<f32>,
     /// The host root Canvas' serialized pixel-perfect flag.
@@ -833,7 +831,7 @@ impl UiLayouts {
 
     /// The TMP font assets the root's texts are laid out with (None: the
     /// open font's advances). Set after the host sources.
-    fn set_tmp_fonts(&mut self, fonts: Option<tmp_font::TmpFonts>) {
+    pub(crate) fn set_tmp_fonts(&mut self, fonts: Option<tmp_font::TmpFonts>) {
         let rules = self.text_rules.as_mut().expect("UI TMP line rules are loaded before the font assets");
         rules.fonts = fonts.map(Arc::new);
         self.measurement_revision = self.measurement_revision.wrapping_add(1);
@@ -963,6 +961,19 @@ impl UiLayouts {
         Some((se, other))
     }
 
+    /// The clicked control's `PlaySE`: reads the serialized SE fields and
+    /// queues the call on the SE request list the button's own screen writes.
+    pub(crate) fn queue_button_se(
+        &self,
+        requests: &mut crate::audio::SeRequests,
+        key: &str,
+        path: &str,
+    ) {
+        if let Some((se, other_se_name)) = self.button_se(key, path) {
+            requests.button(se, other_se_name);
+        }
+    }
+
     /// Reports, once per document and component, an Image drawn as a plain
     /// stretched sprite instead of by the Image mesh rules.
     fn note_image_fallback(&self, doc: &UiPrefab, component: &UiComponent, reason: &str) {
@@ -1036,7 +1047,7 @@ impl UiLayouts {
 
     /// The RectTransforms the layout controllers (layout groups and content
     /// size fitters) drive, merged over the given overrides.
-    fn layout_overrides(
+    pub(crate) fn layout_overrides(
         &self,
         doc: &UiPrefab,
         canvas: Vec2,
@@ -1076,7 +1087,7 @@ impl UiLayouts {
     /// The nodes of a document whose RectTransform its layout controllers
     /// rewrite at this canvas size, with no host overrides.
     #[cfg(test)]
-    fn layout_driven_nodes(&self, key: &str, canvas: Vec2) -> Option<Vec<usize>> {
+    pub(crate) fn layout_driven_nodes(&self, key: &str, canvas: Vec2) -> Option<Vec<usize>> {
         let doc = self.document(key)?;
         let mut driven: Vec<usize> = self
             .layout_overrides(doc, canvas, &HashMap::new(), &HashMap::new(), &HashMap::new())
@@ -1090,7 +1101,7 @@ impl UiLayouts {
     /// source set, so the research instrument drives the product's own
     /// layout and hit paths on an extracted document.
     #[cfg(test)]
-    fn install_for_measurement(&mut self, key: &str, document: UiPrefab) {
+    pub(crate) fn install_for_measurement(&mut self, key: &str, document: UiPrefab) {
         let revision = self.document_revisions.entry(key.to_owned()).or_default();
         *revision = revision.wrapping_add(1);
         self.docs.insert(key.to_owned(), document);
@@ -1322,7 +1333,7 @@ impl UiLayouts {
             }
         }
     }
-    fn resolved(&self, key: &str, canvas: Vec2) -> Option<Arc<Vec<UiRect>>> {
+    pub(crate) fn resolved(&self, key: &str, canvas: Vec2) -> Option<Arc<Vec<UiRect>>> {
         // A suspended/minimized window has no drawable canvas. Keep the last
         // layout cache intact; the next usable viewport resolves normally.
         if !canvas.is_finite() || canvas.min_element() <= 0. {
@@ -1464,16 +1475,16 @@ impl UiLayouts {
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
-struct Override {
-    visible: Option<bool>,
-    text: Option<String>,
-    text_alignment: Option<i64>,
+pub(crate) struct Override {
+    pub(crate) visible: Option<bool>,
+    pub(crate) text: Option<String>,
+    pub(crate) text_alignment: Option<i64>,
     fill: Option<f32>,
     texture: Option<String>,
     slider: Option<f32>,
     alpha: Option<f32>,
-    anchored_position: Option<Vec2>,
-    size_delta: Option<Vec2>,
+    pub(crate) anchored_position: Option<Vec2>,
+    pub(crate) size_delta: Option<Vec2>,
     /// (anchored position, local rotation), set by code.
     transform: Option<(Vec2, Quat)>,
     /// A local rotation set by code on its own.
@@ -1513,7 +1524,7 @@ pub(crate) struct UiPrefabView {
     revision: u64,
     geometry_revision: u64,
     texture_revision: u64,
-    overrides: BTreeMap<String, Override>,
+    pub(crate) overrides: BTreeMap<String, Override>,
     resolved: Mutex<Option<ViewLayout>>,
 }
 
@@ -1725,7 +1736,7 @@ impl UiPrefabView {
     }
     /// The host's overrides as the layout reads them: visibility and
     /// RectTransform overrides by node, and each overridden node's change.
-    fn host_state<'a>(
+    pub(crate) fn host_state<'a>(
         &'a self,
         doc: &UiPrefab,
     ) -> (HashMap<usize, bool>, HashMap<usize, RectTransform>, HashMap<usize, &'a Override>) {
@@ -1815,7 +1826,7 @@ impl UiPrefabView {
     /// view's drawn state: every node they drive that the host does not
     /// override, and host-overridden nodes whose value they change.
     #[cfg(test)]
-    fn layout_driven(&self, layouts: &UiLayouts, canvas: Vec2) -> Option<Vec<usize>> {
+    pub(crate) fn layout_driven(&self, layouts: &UiLayouts, canvas: Vec2) -> Option<Vec<usize>> {
         let doc = layouts.document(self.key)?;
         let (visibility, rect_overrides, changes) = self.host_state(doc);
         let automatic = layouts.layout_overrides(doc, canvas, &visibility, &rect_overrides, &changes);
@@ -1884,7 +1895,7 @@ impl UiPrefabView {
     /// The drawn rects of this view (host overrides and layout controllers
     /// applied), one per document node.
     #[cfg(test)]
-    fn drawn_rects(&self, layouts: &UiLayouts, canvas: Vec2) -> Option<Arc<Vec<UiRect>>> {
+    pub(crate) fn drawn_rects(&self, layouts: &UiLayouts, canvas: Vec2) -> Option<Arc<Vec<UiRect>>> {
         self.resolved(layouts, canvas)
     }
 
@@ -2070,7 +2081,7 @@ impl NodeCache {
     }
 }
 
-fn group_alphas(doc: &UiPrefab, overrides: &HashMap<usize, &Override>) -> Vec<f32> {
+pub(crate) fn group_alphas(doc: &UiPrefab, overrides: &HashMap<usize, &Override>) -> Vec<f32> {
     let mut alphas = Vec::with_capacity(doc.nodes.len());
     let mut indices = HashMap::new();
     for (index, node) in doc.nodes.iter().enumerate() {
@@ -2121,7 +2132,7 @@ fn root_hidden(root: Entity, hierarchy: &Query<(Option<&Visibility>, Option<&Chi
     false
 }
 
-fn image_path<'a>(
+pub(crate) fn image_path<'a>(
     layouts: &'a UiLayouts,
     comp: &'a moly_assets::ui_layout::UiComponent,
     change: Option<&'a Override>,
@@ -2672,7 +2683,7 @@ fn image_rule_mesh(
 }
 
 #[derive(Clone, Copy, Debug)]
-enum ImageDraw {
+pub(crate) enum ImageDraw {
     /// Drawn by its own path (raw image, Filled).
     OtherPath,
     /// Not drawable by the Image rules; the plain sprite path draws it.
@@ -2687,18 +2698,18 @@ enum ImageDraw {
 /// (the rules' Color32 output) is not uploaded. `crop` (x, y, width, height
 /// in texture texels) and `texture_size` map the UVs back to texture space.
 #[derive(Debug, Clone)]
-struct ImageMeshData {
-    positions: Vec<[f32; 3]>,
-    uvs: Vec<[f32; 2]>,
-    indices: Vec<u32>,
+pub(crate) struct ImageMeshData {
+    pub(crate) positions: Vec<[f32; 3]>,
+    pub(crate) uvs: Vec<[f32; 2]>,
+    pub(crate) indices: Vec<u32>,
     // The rules' colours, the crop and the texture size are read by the
     // research instrument only.
     #[cfg_attr(not(test), allow(dead_code))]
-    rule_colors: Vec<[u8; 4]>,
+    pub(crate) rule_colors: Vec<[u8; 4]>,
     #[cfg_attr(not(test), allow(dead_code))]
-    crop: [f32; 4],
+    pub(crate) crop: [f32; 4],
     #[cfg_attr(not(test), allow(dead_code))]
-    texture_size: [f32; 2],
+    pub(crate) texture_size: [f32; 2],
 }
 
 impl ImageMeshData {
@@ -2721,7 +2732,7 @@ impl ImageMeshData {
 /// border or pixels per unit to give the rules, so the rules do not draw it
 /// (the same case the preferred-size query refuses).
 #[allow(clippy::too_many_arguments)]
-fn image_rule_mesh_data(
+pub(crate) fn image_rule_mesh_data(
     layouts: &UiLayouts,
     doc: &UiPrefab,
     index: usize,
@@ -2883,7 +2894,7 @@ fn serialized_number(fields: &Value, name: &str) -> f32 {
 }
 /// A serialized Color field of a component (four channels); a layout
 /// without it is refused.
-fn serialized_rgba(fields: &Value, name: &str) -> Color {
+pub(crate) fn serialized_rgba(fields: &Value, name: &str) -> Color {
     let channels = fields[name]
         .as_array()
         .filter(|v| v.len() == 4)

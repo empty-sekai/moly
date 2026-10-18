@@ -1710,15 +1710,15 @@ impl PrunerScene {
 #[allow(clippy::type_complexity)]
 pub(crate) fn observe_product(
     retiring: bevy::prelude::Res<crate::weather_fx::WeatherFxRetirements>,
-    ready: Option<bevy::prelude::Res<crate::site::SiteScenesReady>>,
+    ready: Option<bevy::prelude::Res<crate::markers::SiteScenesReady>>,
     players: bevy::prelude::Query<
         (
             &bevy::prelude::Transform,
             &bevy::prelude::GlobalTransform,
             bevy::prelude::Has<bevy::prelude::ChildOf>,
-            bevy::prelude::Has<crate::player_avatar::body::BodyAttached>,
+            bevy::prelude::Has<crate::markers::BodyAttached>,
         ),
-        bevy::prelude::With<crate::player::PlayerControlled>,
+        bevy::prelude::With<crate::markers::PlayerControlled>,
     >,
 ) {
     let found: Vec<_> = players.iter().collect();

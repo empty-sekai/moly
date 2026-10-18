@@ -67,14 +67,9 @@ use crate::fixture_activity_timeline::{
 };
 use crate::npc::{CharacterUnitId, MotionClips, MotionPhase};
 
-/// The cut-scene holds this object for its director: a cast member (its
-/// animator, root pose and activity) or the fixture a track binds.
-#[derive(Component, Clone, Copy, Debug)]
-pub(crate) struct CutSceneCastLease(pub(crate) FixtureActivityOwner);
+pub(crate) use crate::fixture_activity_state::CutSceneCastLease;
 
-/// An avatar the presenter created for a unit that was not present.
-#[derive(Component)]
-pub(crate) struct CutSceneAvatar;
+pub(crate) use crate::markers::CutSceneAvatar;
 
 /// Who called `CutSceneExecutor.PlayAsync` with a cast.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -972,7 +967,7 @@ fn hide_near_fixtures(world: &mut World, cast: &mut Cast, distance: i64) {
             })
             .collect()
     };
-    let homes = world.get_resource::<crate::entry::house::HomeFixtures>();
+    let homes = world.get_resource::<crate::house::HomeFixtures>();
     let homes: Vec<bool> = rows
         .iter()
         .map(|(_, package, _)| homes.is_some_and(|homes| homes.is_home(package).unwrap_or(false)))

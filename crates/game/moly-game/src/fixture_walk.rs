@@ -12,7 +12,8 @@
 //! the session starts, a short joystick push asks the session to end
 //! (`request_end_from_input`). `MOLY_FIXTURE_WALK_VIA=x,z;x,z` first walks
 //! through those points (to go round other furniture). One walk per site
-//! generation.
+//! generation. It lives in the devtools crate: it drives the field through the
+//! joystick and the action button, both of which are above the world.
 
 use bevy::{
     input::touch::{TouchInput, TouchPhase},
@@ -21,13 +22,14 @@ use bevy::{
 };
 use moly_law::action_button::ButtonType;
 
-use super::PlayerFixtureRuntime;
+use crate::player_fixture_action::PlayerFixtureRuntime;
 use crate::{
     action_button::ActionButtonState,
     canvas::RootCanvas,
     fixture::{FixturePlacement, FixtureRoot},
     fixture_activity_data::FixtureActivityTables,
-    joystick::{JoystickState, HANDLE_SIZE},
+    joystick_law::HANDLE_SIZE,
+    markers::JoystickState,
     player::PlayerControlled,
 };
 

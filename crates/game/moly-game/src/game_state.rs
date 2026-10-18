@@ -31,75 +31,7 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
-/// `Sekai.Mysekai.GameStateType`.
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum GameStateType {
-    None = 0,
-    Normal = 1,
-    Edit = 2,
-    Talk = 3,
-    Harvest = 4,
-    CutScene = 5,
-    LearnSiteEnvironment = 6,
-    SomeCharacterTalk = 7,
-    PhotoShot = 8,
-    Sketch = 9,
-    SiteMove = 10,
-    LevelUpMyRoomSite = 11,
-    Delivery = 12,
-}
-
-impl GameStateType {
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            Self::None => "None",
-            Self::Normal => "Normal",
-            Self::Edit => "Edit",
-            Self::Talk => "Talk",
-            Self::Harvest => "Harvest",
-            Self::CutScene => "CutScene",
-            Self::LearnSiteEnvironment => "LearnSiteEnvironment",
-            Self::SomeCharacterTalk => "SomeCharacterTalk",
-            Self::PhotoShot => "PhotoShot",
-            Self::Sketch => "Sketch",
-            Self::SiteMove => "SiteMove",
-            Self::LevelUpMyRoomSite => "LevelUpMyRoomSite",
-            Self::Delivery => "Delivery",
-        }
-    }
-
-    /// The machine has a state object for the value (`GameStateMachine.SetUp`).
-    fn has_state(self) -> bool {
-        self != Self::None
-    }
-
-    /// The UI calls of the state's `OnEnter` / `OnExit`.
-    pub(crate) fn screen_call(self) -> &'static str {
-        match self {
-            Self::Normal | Self::Harvest => {
-                "OnEnter: MysekaiCommon.SetClickDetectorActive(true); OnExit: (false)"
-            }
-            Self::SiteMove => {
-                "OnEnter: MysekaiCommon.EnableGestureLayer(false), ChangeUIScreen(MysekaiSiteMove), DisableTapScreen; OnExit: EnableGestureLayer(true), EnableTapScreen"
-            }
-            Self::LearnSiteEnvironment => {
-                "OnEnter: MysekaiCommon.EnableGestureLayer(false); OnExit: (true)"
-            }
-            Self::CutScene => "OnEnter: PushUIScreen(MysekaiCutScene) unless active",
-            Self::Sketch => "OnEnter: PushUIScreen(MysekaiSketchUI)",
-            Self::PhotoShot => "OnEnter: PushUIScreen(MysekaiPhotoShot, bootArg)",
-            Self::Edit => {
-                "OnEnter: ShowGrid, HideTweets, FieldCamera FloorEdit; OnExit: HideGrid, ShowTweets"
-            }
-            Self::Talk
-            | Self::SomeCharacterTalk
-            | Self::LevelUpMyRoomSite
-            | Self::Delivery
-            | Self::None => "no screen call",
-        }
-    }
-}
+pub(crate) use crate::field_modes::{GameStateType, HeldGameState};
 
 /// `GameStateManager`: the machine's current key.
 #[derive(Resource, Debug, Default)]
@@ -152,10 +84,6 @@ impl GameStateManager {
         true
     }
 }
-
-/// The held state.
-#[derive(Resource, Clone, Copy, Debug)]
-pub(crate) struct HeldGameState(pub(crate) GameStateType);
 
 /// A performance's hold on the field UI: `SetLayerCanvasGroup(UI,
 /// interactable false)` and `RemoveCollisionSensorEvent`, until its
@@ -238,7 +166,7 @@ pub(crate) fn release_level_up(world: &mut World) {
             "ChangeState(10 SiteMove) at the site move's admission",
         ))
     } else if world
-        .get_resource::<crate::fixture_edit::EditSessionActive>()
+        .get_resource::<crate::field_modes::EditSessionActive>()
         .is_some_and(|edit| edit.is_active())
     {
         Some((GameStateType::Edit, "ChangeState(2 Edit)"))

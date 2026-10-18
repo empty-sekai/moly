@@ -45,6 +45,7 @@ mod clips;
 mod damage;
 mod drops;
 mod effects;
+pub(crate) mod harvest_summary;
 pub(crate) mod law;
 mod pickup;
 mod prop_animator;
@@ -74,7 +75,7 @@ use crate::site::GroundMeshes;
 use catalog::HarvestCatalog;
 use server_mock::UserDrop;
 
-pub(crate) use action::HarvestAutoMoveHeld;
+pub(crate) use crate::field_modes::HarvestAutoMoveHeld;
 pub(crate) use arrival::snap_from;
 pub(crate) use drops::HarvestDropAnimation;
 pub(crate) use learn::{
@@ -852,5 +853,6 @@ impl Plugin for HarvestPlugin {
                     learn::advance_learn_camera.after(crate::camera::follow_avatar),
                 ),
             );
+        harvest_summary::install(app);
     }
 }

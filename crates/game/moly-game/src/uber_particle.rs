@@ -21,7 +21,7 @@ use std::marker::PhantomData;
 use crate::billboard::{self, Alignment, SizeClamp};
 use crate::env::SiteEnvGpuBuffer;
 use crate::particle_runtime::{Runtime, Rng, Context, EffectKind, simulate, PREWARM_STEP, clear_drawn, draws_change};
-use crate::site::{SiteActive, SiteRoot, SiteScenesReady};
+use crate::markers::{SiteActive, SiteRoot, SiteScenesReady};
 use crate::site_material::SiteSidecarAsset;
 
 /// 源族的 shader 名。
@@ -1278,7 +1278,7 @@ pub(crate) fn request_fixture_particles(
     server: Res<AssetServer>,
     jsons: Res<Assets<moly_assets::json::JsonAsset>>,
     mut index: Local<Option<Handle<moly_assets::json::JsonAsset>>>,
-    roots: Query<(Entity, &crate::fixture::FixtureSource), (With<crate::fixture::FixtureRoot>, Without<FixtureParticleRequest>, Without<FixtureParticlesResolved>)>,
+    roots: Query<(Entity, &crate::render_inputs::FixtureSource), (With<crate::render_inputs::FixtureRoot>, Without<FixtureParticleRequest>, Without<FixtureParticlesResolved>)>,
 ) {
     let handle = index.get_or_insert_with(|| server.load("moly://fixture-particles-v2/index.json"));
     // The index is only consulted for fixture roots that have not been
@@ -1302,7 +1302,7 @@ pub(crate) fn request_fixture_particles(
 pub(crate) fn plan_fixture_particles(
     mut commands: Commands, server: Res<AssetServer>, jsons: Res<Assets<moly_assets::json::JsonAsset>>,
     mut roots: Query<(Entity, &mut FixtureParticleRequest)>,
-    ready: Option<Res<crate::fixture::FixtureScenesReady>>,
+    ready: Option<Res<crate::render_inputs::FixtureScenesReady>>,
     names: Query<&Name>, children: Query<&Children>, transforms: Query<&Transform>,
 ) {
     if ready.is_none() { return; }

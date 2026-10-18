@@ -162,7 +162,7 @@ fn actual_opaque_depth_and_effect_pass_readbacks() {
         let mut cameras = world.query_filtered::<&RenderTarget, With<ProbeCamera>>();
         let target = cameras.single(world).unwrap().clone();
         world.spawn((Camera2d, Camera { order: 1, clear_color: ClearColorConfig::None, ..default() },
-            target, crate::camera::MYSEKAI_CAMERA_MSAA,
+            target, crate::markers::MYSEKAI_CAMERA_MSAA,
             bevy::camera::visibility::RenderLayers::none()));
         world.resource::<Captures>().0.lock().unwrap().clear();
     }

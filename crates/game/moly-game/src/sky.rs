@@ -520,7 +520,7 @@ pub(crate) fn spawn_when_ready(
 /// 更新阶段写、同帧渲染读，不隔一帧。
 pub(crate) fn follow_player_view(
     mut domes: Query<(&mut Transform, &mut GlobalTransform), With<SkyDome>>,
-    players: Query<&GlobalTransform, (With<crate::character::AvatarRoot>, Without<SkyDome>)>,
+    players: Query<&GlobalTransform, (With<crate::markers::AvatarRoot>, Without<SkyDome>)>,
     mut announced: Local<bool>,
 ) {
     let count = domes.iter().len();

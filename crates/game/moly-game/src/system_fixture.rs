@@ -307,5 +307,5 @@ fn classify(
 pub(crate) fn install(app: &mut App) {
     app.init_resource::<SystemFixtures>()
         .add_systems(Startup, load)
-        .add_systems(Update, resolve.before(crate::action_button::advance));
+        .add_systems(Update, resolve.before(crate::markers::ActionButtonOrder));
 }

@@ -127,7 +127,7 @@ use crate::gesture::{GestureEvent, GestureKind, GestureState};
 use crate::sitemap::SITEMAP_LAYER;
 use crate::ui_layers::{LayerCommand, LayerId, ScreenHook, ScreenLayerEvent, UiLayerStack};
 use crate::ui_layout::{SpriteLayoutMetrics, UiLayouts, UiPrefabView};
-use crate::userdata::client::music::ClientMusicPlaySettings;
+use crate::audio_inputs::ClientMusicPlaySettings;
 use crate::userdata::client::music_play::ClientMusicRecords;
 use crate::userdata::{Answered, ServerPending};
 use moly_link::ServerLink;
@@ -201,12 +201,7 @@ pub(crate) const WORDINGS: &[&str] = &[
 #[derive(Resource)]
 pub(crate) struct BgmSelectOpenRequest(pub(crate) Option<FixtureTarget>);
 
-/// The characters the screen can print (record titles, artists, vocal
-/// texts, its wordings): a member of the shared glyph atlas.
-#[derive(Resource, Default)]
-pub(crate) struct BgmSelectCharset {
-    pub(crate) chars: Vec<char>,
-}
+pub(crate) use crate::ui_charsets::BgmSelectCharset;
 
 #[derive(Resource, Default)]
 pub(crate) struct BgmSelect {
@@ -2063,7 +2058,7 @@ pub(crate) fn click(
             continue;
         }
         if hit(header_view, &layouts, &header.back, point, canvas) {
-            sounds.source_button(&layouts, header_view.key, &header.back);
+            layouts.queue_button_se(&mut sounds, header_view.key, &header.back);
             info!("[bgm-select] header back button -> BackUIScreen");
             layer_commands.write(LayerCommand::Pop);
             continue;
@@ -2073,7 +2068,7 @@ pub(crate) fn click(
         };
         let has_select = presenter.model(presenter.select).is_some();
         if has_select && hit(view, &layouts, &bindings.switch_button, point, canvas) {
-            sounds.source_button(&layouts, view.key, &bindings.switch_button);
+            layouts.queue_button_se(&mut sounds, view.key, &bindings.switch_button);
             presenter.switch_status();
             info!(
                 "[bgm-select] play status button -> OnSwitchPlayStatus: chosen {:?}, playing record {}",
@@ -2086,7 +2081,7 @@ pub(crate) fn click(
         if hit(view, &layouts, &bindings.change_vocal_button, point, canvas) {
             if let Some(model) = presenter.model(presenter.select) {
                 if model.multiple_vocals {
-                    sounds.source_button(&layouts, view.key, &bindings.change_vocal_button);
+                    layouts.queue_button_se(&mut sounds, view.key, &bindings.change_vocal_button);
                     state.dialog_request = Some(dialogs::DialogRequest::ChangeVocal(model.record_id));
                     info!(
                         "[bgm-select] change vocal button -> ShowChangeVocalDialog(record {})",
@@ -2097,7 +2092,7 @@ pub(crate) fn click(
             continue;
         }
         if hit(view, &layouts, &bindings.filter_button, point, canvas) {
-            sounds.source_button(&layouts, view.key, &bindings.filter_button);
+            layouts.queue_button_se(&mut sounds, view.key, &bindings.filter_button);
             state.dialog_request = Some(dialogs::DialogRequest::Filter);
             info!("[bgm-select] filter button -> Show2ButtonDialog(BGMFilterDialog)");
             continue;
@@ -2116,7 +2111,7 @@ pub(crate) fn click(
                 .find(|(_, id)| **id == Some(record))
                 .map(|(cell, _)| cell.button.clone())
                 .unwrap_or_default();
-            sounds.source_button(&layouts, view.key, &cell);
+            layouts.queue_button_se(&mut sounds, view.key, &cell);
             fade_cells(&mut state.faded_in, presenter.select, Some(record));
             presenter.on_select(record);
             info!("[bgm-select] cell record {record} -> OnSelectMusic");

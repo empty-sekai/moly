@@ -26,7 +26,7 @@
 
 use bevy::prelude::*;
 
-use super::timeline::{delay_seconds, TweenClock};
+use crate::tween_clock::{delay_seconds, TweenClock};
 
 /// `SiteWipeController.FadeOut/FadeIn` duration argument.
 pub(crate) const WIPE_DURATION: f32 = 1.0;

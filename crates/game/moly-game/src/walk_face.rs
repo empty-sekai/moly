@@ -4,7 +4,7 @@
 
 use crate::fixture::FixturePlacements;
 use crate::fixture_collision::{CollisionBakeStatus, CollisionInputs};
-use crate::fixture_edit::LayoutSaved;
+use crate::field_modes::LayoutSaved;
 use crate::site::{NavMeshSourceRegion, SiteActive, Sites, WalkFaceMeshes};
 use bevy::ecs::message::MessageReader;
 use bevy::prelude::*;
@@ -399,7 +399,7 @@ pub(crate) fn probe(
             .nearest_walkable(*target, None)
             .map(|p| ((p[0] - target[0]).powi(2) + (p[1] - target[1]).powi(2)).sqrt());
         for (label, origin) in &origins {
-            let reach = crate::site_move::door_law::HOUSE_ENTRY_REACH;
+            let reach = crate::door_law::HOUSE_ENTRY_REACH;
             info!(
                 "[walk-probe] {} generation {}: loc_inside ({:.4}, {:.4}) walkable {} off-field {:?} from {label} ({:.4}, {:.4}): static path end distance {:?}, CanNavmeshMoveTargetPosition({reach}) {}",
                 site.site_type,

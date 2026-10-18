@@ -1105,6 +1105,7 @@ fn send(world: &mut World, screen: &mut CraftScreen) {
         card_id: None,
         is_special_training: None,
         quantity: selection.count,
+        mysekai_blueprint_term_id: None,
     };
     info!("[craft] MysekaiCraftService.Execute: PostUserMysekaiCraftApi {request:?}");
     let call = Call::Craft(request);

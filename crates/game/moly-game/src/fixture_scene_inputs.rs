@@ -315,7 +315,7 @@ impl DiscoverWatch {
         let mut changed = world.is_resource_changed::<SiteActive>()
             || world.is_resource_changed::<SiteSelection>()
             || world.is_resource_changed::<Sites>()
-            || world.is_resource_changed::<crate::fixture_edit::EditSession>();
+            || world.is_resource_changed::<crate::field_modes::EditSessionActive>();
         let mut memo: Vec<(Entity, Ancestry, bool)> = Vec::new();
         let mut origins = Vec::new();
         for entity in queries.origins.iter(world) {
@@ -343,8 +343,8 @@ impl DiscoverWatch {
         }
         let watch = Self {
             editing: world
-                .get_resource::<crate::fixture_edit::EditSessionActive>()
-                .map(crate::fixture_edit::EditSessionActive::is_active),
+                .get_resource::<crate::field_modes::EditSessionActive>()
+                .map(crate::field_modes::EditSessionActive::is_active),
             fixture_scenes_ready: world.contains_resource::<FixtureScenesReady>(),
             site_scenes_ready: world.contains_resource::<SiteScenesReady>(),
             site_ready: world.contains_resource::<SiteReady>(),
@@ -352,7 +352,7 @@ impl DiscoverWatch {
             site_active: world.contains_resource::<SiteActive>(),
             site_selection: world.contains_resource::<SiteSelection>(),
             sites: world.contains_resource::<Sites>(),
-            edit_session: world.contains_resource::<crate::fixture_edit::EditSession>(),
+            edit_session: world.contains_resource::<crate::field_modes::EditSessionActive>(),
             areas_revision: world
                 .get_resource::<FixtureFloorAreas>()
                 .map(|areas| areas.revision),
@@ -416,7 +416,7 @@ fn ancestry(
 
 fn discover(world: &mut World) -> Result<Signature, String> {
     if world
-        .get_resource::<crate::fixture_edit::EditSessionActive>()
+        .get_resource::<crate::field_modes::EditSessionActive>()
         .is_some_and(|editor| editor.is_active())
     {
         return Err(
@@ -497,19 +497,6 @@ fn discover(world: &mut World) -> Result<Signature, String> {
             identity,
             world_matrix: live_matrix(world, entity).map(|matrix| matrix.to_cols_array()),
         });
-    }
-    if let Some(edit) = world.get_resource::<crate::fixture_edit::EditSession>() {
-        for row in crate::fixture_edit::decided_scene_rows(edit, &active.site_type) {
-            // The current editor has data rows but no persistent placed entity.
-            // Keep this identity/revision visible; do not pretend its preview is
-            // a playable fixture instance or a complete geometry installation.
-            observed.push(ObservedRow {
-                entity: None,
-                row,
-                identity: None,
-                world_matrix: None,
-            });
-        }
     }
     observed.sort_by(|a, b| {
         a.row

@@ -15,7 +15,7 @@
 //! Camera/navigation explicitly ignore source-inactive geometry, without
 //! confusing it with an active navigation surface intentionally hidden in colour.
 
-use crate::site::{GroundEpoch, SiteReady, SiteRoot};
+use crate::markers::{GroundEpoch, SiteReady, SiteRoot};
 use bevy::asset::LoadState;
 use bevy::prelude::*;
 use moly_assets::json::JsonAsset;
@@ -63,7 +63,7 @@ pub(crate) fn parse(
     server: Res<AssetServer>,
     jsons: Res<Assets<JsonAsset>>,
     handle: Option<Res<SiteSceneJsonHandle>>,
-    active: Option<Res<crate::site::SiteActive>>,
+    active: Option<Res<crate::markers::SiteActive>>,
 ) {
     let (Some(handle), Some(active)) = (handle, active) else {
         return; // 未请求，或已解析并撤下；请求只出自装载计划，账目必已在
@@ -105,7 +105,7 @@ pub(crate) fn apply(
     mut commands: Commands,
     ready: Option<Res<SiteReady>>,
     list: Option<Res<InactiveList>>,
-    active: Option<Res<crate::site::SiteActive>>,
+    active: Option<Res<crate::markers::SiteActive>>,
     roots: Query<Entity, With<SiteRoot>>,
     epoch: Option<Res<GroundEpoch>>,
     children: Query<&Children>,

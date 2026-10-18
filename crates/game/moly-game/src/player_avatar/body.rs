@@ -57,8 +57,7 @@ pub(crate) struct BodyLoad {
 #[derive(Component)]
 pub(crate) struct BodyModel;
 
-#[derive(Component)]
-pub(crate) struct BodyAttached;
+pub(crate) use crate::markers::BodyAttached;
 
 #[derive(Component)]
 pub(crate) struct BodySceneReady;
@@ -239,6 +238,7 @@ pub(crate) fn wire(
         let proxy = super::oc::capture_proxy(*animator, &children, &names, &transforms);
         commands.entity(player).remove::<BodySceneReady>().insert((
             driver,
+            crate::markers::CharacterDriver,
             clip_names,
             AudienceBody,
             CharacterShell {

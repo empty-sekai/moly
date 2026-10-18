@@ -99,7 +99,8 @@ use moly_law::shading::fieldobject;
 use crate::env::SiteEnvGpuBuffer;
 use crate::render::gpu::SharedSamplers;
 use crate::shadowmap::ShadowMapGpu;
-use crate::site::{SiteAssets, SiteScenesReady, SiteVisualPending};
+use crate::markers::{SiteScenesReady, SiteVisualPending};
+use crate::render_inputs::SiteSceneGltf;
 use crate::site_extension::SiteExtensionGpuBuffer;
 
 /// Ground-Birthday 族名（真源 shader 名）。law 侧只收了四个老族；
@@ -2026,7 +2027,7 @@ fn switch_materials(
     json: Res<Assets<MolyJson>>,
     mut materials: ResMut<Assets<SiteMaterial>>,
     mut fixture_materials: ResMut<Assets<crate::fixture_material::FixtureMaterial>>,
-    site: Option<Res<SiteAssets>>,
+    site: Option<Res<SiteSceneGltf>>,
     parts: Query<(Entity, &Mesh3d, &MeshMaterial3d<StandardMaterial>)>,
     mut plan: Local<Option<(bevy::asset::AssetId<Gltf>, String, SwapPlan)>>,
 ) {
@@ -2236,7 +2237,7 @@ pub(crate) fn reveal_material_ready_roots(
 /// 归类。glb 资产未到时回 `None`（调用方下帧再试）。
 fn build_swap_plan(
     gltfs: &Assets<Gltf>,
-    site: &SiteAssets,
+    site: &SiteSceneGltf,
     sidecar: &SiteSidecar,
     scene: &str,
     server: &AssetServer,

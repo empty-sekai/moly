@@ -6,9 +6,9 @@
 //! ints (null -> 0, sync keys A_CID/A_SCID/A_AID/A_CDID) and `AvatarData.Build`
 //! reads them back (id 0 -> null). Here the server model holds `userAvatar`
 //! in its document and its join response sets the client copy
-//! (`crate::userdata::client::avatar::ClientUserAvatar`); the ids resolve
+//! (`crate::avatar_wear_data::ClientUserAvatar`); the ids resolve
 //! through the avatar masters the server model reads
-//! (`crate::userdata::client::avatar::AvatarMasters`, present once they have
+//! (`crate::avatar_wear_data::AvatarMasters`, present once they have
 //! resolved). An id whose master is absent from the runtime root, or which
 //! names no row, is named and read as null, as a master lookup that finds no
 //! row is null in the source's chain. The chain, sentence by sentence:
@@ -57,7 +57,7 @@ use std::collections::BTreeMap;
 
 use crate::avatar_material::{AvatarMaterial, AvatarParams, AvatarToon};
 use crate::player::PlayerControlled;
-use crate::userdata::client::avatar::{AvatarMasters, ClientUserAvatar};
+use crate::avatar_wear_data::{AvatarMasters, ClientUserAvatar};
 use moly_law::shading::avatar as law;
 
 /// 皮肤包「未设置」的回退值：真源字面量 "default"（皮肤包选择链的兜底臂）。
@@ -342,6 +342,7 @@ pub(crate) fn attach_accessory(
             WearPart,
             Mesh3d(mesh_handle),
             MeshMaterial3d(material),
+            crate::markers::PlayerBodyRenderer,
             Transform::IDENTITY,
         ));
         commands.entity(player).insert(AccessoryWorn);

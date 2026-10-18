@@ -417,7 +417,7 @@ fn prepare(
                 |entity| world.get::<Transform>(entity).map(|t| t.scale),
                 |entity| world.get::<ChildOf>(entity).map(ChildOf::parent)));
             let placement = fixture_placement(candidate.anchor, |entity| world.get::<ChildOf>(entity).map(ChildOf::parent),
-                |entity| world.get::<crate::fixture::FixtureRoot>(entity).and_then(|_| world.get::<Transform>(entity).copied()));
+                |entity| world.get::<crate::render_inputs::FixtureRoot>(entity).and_then(|_| world.get::<Transform>(entity).copied()));
             let trail_owner = plan_trail_owner(&candidate.plan, candidate.prefab.as_deref(), placement)
                 .map_err(|reason| format!("{}: source particle control rejected {reason}", candidate.plan.node))?;
             match stepping {
@@ -1108,7 +1108,7 @@ mod tests {
     #[test]
     #[ignore = "requires MOLY_FIXTURE_PARTICLE_AUDIT_ROOT containing a release root's fixture-particles-v2"]
     fn fixture_host_refusal_census() {
-        use crate::site_move::effects::EffectType;
+        use crate::render_inputs::EffectType;
         let root = std::path::PathBuf::from(std::env::var_os("MOLY_FIXTURE_PARTICLE_AUDIT_ROOT").expect("source directory"));
         let index: Value = serde_json::from_slice(&std::fs::read(root.join("fixture-particles-v2/index.json")).unwrap()).unwrap();
         let packages = index["packages"].as_object().expect("index packages");
@@ -1469,7 +1469,7 @@ pub(crate) fn spawn_when_ready(
     nodes: Res<Assets<GltfNode>>,
     gltf_meshes: Res<Assets<GltfMesh>>,
     ancestry: Query<(Option<&Transform>, Option<&ChildOf>)>,
-    fixture_roots: Query<&Transform, With<crate::fixture::FixtureRoot>>,
+    fixture_roots: Query<&Transform, With<crate::render_inputs::FixtureRoot>>,
 ) {
     for (root, mut request) in &mut requests {
         let mut pending = Vec::new();

@@ -67,7 +67,7 @@ use crate::ui_layers::{
     DialogBackKey, DialogBackKeyEvent, DialogId, DialogType, DisplayLayerType, ScreenManager,
 };
 use crate::ui_layout::{UiLayouts, UiPrefabView};
-use crate::userdata::client::LiveSchedule;
+use crate::server_panel_data::LiveSchedule;
 use crate::userdata::ClientUserData;
 
 /// The runtime document's key and the listed view name.
@@ -844,7 +844,7 @@ pub(crate) fn click(
         {
             // The close button's `CustomSelectableDefine.PlaySE`, then the
             // close.
-            sounds.source_button(&layouts, KEY, &shown.close_node);
+            layouts.queue_button_se(&mut sounds, KEY, &shown.close_node);
             close_by(
                 &mut weather.shown,
                 &mut screens,

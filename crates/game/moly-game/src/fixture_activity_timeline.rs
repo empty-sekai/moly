@@ -42,13 +42,7 @@ use std::{
     sync::Arc,
 };
 
-#[derive(Clone, Debug)]
-pub(crate) struct TimelineFailure {
-    pub message: String,
-    /// True only for a requested asset that is still in flight. Structural,
-    /// source-identity and failed-load errors must not consume a timeout budget.
-    pub retryable: bool,
-}
+pub(crate) use crate::render_inputs::TimelineFailure;
 impl TimelineFailure {
     fn loading(message: impl Into<String>) -> Self {
         Self {
@@ -2029,7 +2023,7 @@ fn validate_cut_scene_actor(
         .iter()
         .find(|track| &track.identity == identity)
         .ok_or_else(|| invalid("actor track is outside the selected source director"))?;
-    match world.get::<crate::cutscene::CutSceneCastLease>(actor) {
+    match world.get::<crate::fixture_activity_state::CutSceneCastLease>(actor) {
         None => return Err(invalid("cut-scene track object holds no cut-scene lease")),
         Some(lease) if lease.0 != request.owner.activity => {
             return Err(invalid(

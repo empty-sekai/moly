@@ -488,7 +488,7 @@ pub(crate) fn find_house(world: &mut World) -> HouseLookup {
     // `GetHomeFixture()`, the first fixture of the placed list whose master
     // is a home system fixture (`MysekaiFixtureUtility.IsHomeFixture`). A
     // `HouseView` record on any other fixture is never read.
-    let Some(homes) = world.get_resource::<crate::entry::house::HomeFixtures>() else {
+    let Some(homes) = world.get_resource::<crate::house::HomeFixtures>() else {
         return HouseLookup::Pending("home fixture tables are loading".into());
     };
     let order: HashMap<String, usize> = world

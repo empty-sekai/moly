@@ -477,7 +477,7 @@ fn slot_of_name(name: &str) -> i32 {
 /// The group pass: after the decisions of the frame.
 pub(crate) fn advance(world: &mut World) {
     if world
-        .get_resource::<crate::fixture_edit::EditSessionActive>()
+        .get_resource::<crate::field_modes::EditSessionActive>()
         .is_some_and(|editor| editor.is_active())
     {
         return;

@@ -80,6 +80,7 @@ use super::{
     STATUS_HARVESTED,
 };
 use crate::audio::SeRequests;
+use crate::field_modes::HarvestAutoMoveHeld;
 use crate::player::{PlayerControlled, PlayerInput};
 use crate::player_avatar::{AvatarDriver, PlayerActionMotion, PlayerActionOwner, PlayerActionToken};
 use crate::player_fixture_action::PlayerFixtureNavigation;
@@ -232,13 +233,6 @@ struct AutoMove {
     held_logged: bool,
 }
 
-/// On the player while the harvest AutoMove holds it: the AutoMove state owns
-/// the agent and a Move request is dropped by the closed intercept gate, so
-/// joystick input moves nothing (`player::advance` skips the player).
-#[derive(Component)]
-pub(crate) struct HarvestAutoMoveHeld {
-    dash: bool,
-}
 
 /// The source clip clock of the current `PlayHarvestMotion`.
 struct Swing {
@@ -1694,11 +1688,11 @@ fn change_camera_mode(commands: &mut Commands, to: crate::camera::CameraStateTyp
         };
         info!("[harvest] ChangeCameraMode {from:?} -> {to:?} at {site}");
         if to == HarvestTone {
-            crate::site_move::camera::record_normal_exit(world, &site);
+            crate::camera_site_move::record_normal_exit(world, &site);
             world.resource_mut::<crate::camera::FieldCameraState>().0 = HarvestTone;
         } else {
             let prev = world.resource::<crate::camera::PrevSiteType>().0.clone();
-            crate::site_move::camera::enter_normal(world, &site, &category, &prev);
+            crate::camera_site_move::enter_normal(world, &site, &category, &prev);
         }
     });
 }

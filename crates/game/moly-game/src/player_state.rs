@@ -49,146 +49,7 @@ use crate::player_fixture_action::PlayerFixtureControlOwner;
 use crate::player_talk::PlayerTalkSession;
 use crate::talk::TalkHold;
 
-/// 玩家行为态：真源 `PlayerActionState` 枚举的**首批子集**（别的域正在
-/// 等读的那几个）。全集 34 值，其余 26 个随各自写者的批次落位——本批
-/// 不造无写者也无读者的值。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PlayerActionState {
-    /// 0：待机。`InitializeStatus` 把状态机从这里起步（构造期的 None
-    /// 占位只存在于装好之前）。
-    #[default]
-    Idle,
-    /// 1：摇杆移动（`MoveTo` 的非 dash 支）。
-    Move,
-    /// 2：自动寻路（`ChangeStateAutoMove` 进）。本仓无写者，值留给
-    /// 收场集合——无输入收场只认 {Move, AutoMove, Dash} 三态。
-    AutoMove,
-    /// 6：对话（`ChangeAvatarsStatusToTalk` 的玩家支）。
-    Talk,
-    /// 7：采集（`HarvestPresenter` 命中臂进、收场臂出）。
-    Harvest,
-    /// 8: the birthday-party delivery (`PlayerAvatarDeliveryState`), entered
-    /// by the delivery pre-action after the approach; the delivery closes
-    /// the intercept gate for it and opens it at its end action.
-    Delivery,
-    /// 9: the honor reward (`PlayerAvatarDeliveryHonorRewardState`); its
-    /// camera state and look-at are the delivery's.
-    DeliveryHonorReward,
-    /// 10: the player's one-second fixture switch interval.
-    SwitchGimmick,
-    /// 11: walking into the house (`PlayerAvatarEnterMoveHouseState`, the
-    /// home-to-room move). Initialize closes the gate; at 2.0 s UpdateState
-    /// opens it, hides the avatar and goes Idle.
-    EnterMoveHouse,
-    /// 13: leaving the house (`PlayerAvatarExitMoveHouseState`, the entry and
-    /// the room-to-home move). Initialize closes the intercept gate; its
-    /// UpdateState only counts time; the move's Finish opens the gate.
-    ExitMoveHouse,
-    /// 14: stepping into a room (`PlayerAvatarEnterMoveMyRoomState`).
-    /// Initialize closes the gate; at 1.0 s UpdateState opens it and goes Idle.
-    EnterMoveMyRoom,
-    /// 15: walking out of a room (`PlayerAvatarExitMoveMyRoomState`).
-    /// Initialize closes the gate; at 1.45 s UpdateState hides the avatar,
-    /// opens the gate and goes Idle.
-    ExitMoveMyRoom,
-    /// 23：冲刺（`MoveTo` 的 dash 支；dash 位由替身键切换）。
-    Dash,
-    /// 24: crafting at a workbench (`PlayerAvatarCraftMotionState`). The
-    /// home action enters it with the gate open and closes the gate; its
-    /// Initialize and Dispose run in `home_action` (the state's clip, facing
-    /// the target fixture, then the idle clip at fade 0 and ClearAvatarItem).
-    Craft,
-    /// 25: painting a canvas (`PlayerAvatarDrawMotionState`), as Craft.
-    Draw,
-    /// 26: sketching (`PlayerAvatarSketchMotionState`): its Initialize also
-    /// plays `se_sketch`; it does not turn the player.
-    Sketch,
-    /// 27: choosing a fixture to sketch (`PlayerAvatarSelectSketchItemState`):
-    /// Initialize only clears the next state; UpdateState and Dispose are
-    /// empty. The gate stays open: input moves the player out of it, and
-    /// without input it stays (the input writer's finish set is {Move,
-    /// AutoMove, Dash}).
-    SelectSketchItem,
-    /// 28：演出家具（`ChangeStateUseTimelineFixture` 进）。家具会话
-    /// 持有该态和截获门，离座或取消释放后才开门回 Idle。
-    UseTimelineFixture,
-    /// 30: leaving a harvest site by cannon. `Initialize` closes the
-    /// intercept gate; `UpdateState` reopens it once 1.0 s has elapsed
-    /// (`ANIMATION_TIME`). The cannon's `OnMoveFinish` (0.817 s after entry
-    /// on a successful landing) is therefore dropped by the closed gate.
-    ExitHarvestSite,
-    /// 31: entering a harvest site by cannon. Its `Initialize` only shows the
-    /// warp effect for other players' avatars; `UpdateState` is empty.
-    EnterHarvestSite,
-    /// 32: leaving the delivery site; same body as 30.
-    ExitDeliverySite,
-    /// 33: entering the delivery site; same body as 31.
-    EnterDeliverySite,
-    /// 34：无。真源 `PlayerAvatarStateBase.ClearNextState` 的哨兵值。
-    None,
-}
-
-/// 玩家 avatar 状态机的常驻等价物（真源字段子集：`currentStatus` 与
-/// `PlayerStateActionData.CanIntercept`；真源 `CurrentState` 读面 = 本
-/// 资源的 `current` 字段）。
-#[derive(Resource, Debug)]
-pub struct PlayerAvatarStates {
-    /// 当前行为态。起步 Idle（真源 `InitializeStatus` 写 0）。
-    pub current: PlayerActionState,
-    /// 截获门：假时 [`Self::change_status`] 静默丢弃（真源
-    /// `ChangeStatus` 第③段）。默认开（真源由状态构造开成）。采集与
-    /// 家具会话的独占流程分别在自己的进出场关闭、恢复这扇门。
-    pub(crate) can_intercept: bool,
-    /// `PlayerAvatarStateBase.ElapsedTime` of the current state, for the
-    /// states whose `UpdateState` reads it (the site exit states).
-    pub(crate) state_elapsed: f32,
-}
-
-impl Default for PlayerAvatarStates {
-    fn default() -> Self {
-        Self {
-            current: PlayerActionState::Idle,
-            can_intercept: true,
-            state_elapsed: 0.0,
-        }
-    }
-}
-
-impl PlayerAvatarStates {
-    /// `ChangeStatus(status)` 的本仓等价（五段中的 ①③⑤；缺段与理由见
-    /// 模块注释）。被门丢弃时不报——真源就是静默 return。
-    pub(crate) fn change_status(&mut self, status: PlayerActionState) {
-        // ① 同态早退：在门之前——真源同态重入连门都不看。
-        if self.current == status {
-            return;
-        }
-        // ③ 截获门：关门期间任何换态请求丢弃。本仓玩家恒本人 avatar
-        // （真源「非本人放行」支按单机范围省略）。
-        if !self.can_intercept {
-            return;
-        }
-        // ⑤ 换态。旧态收场/新态进场的域行为（待机动画、演出启停）不在
-        // 标记上，归各自域。
-        info!(
-            "[player-state] ChangeStatus {:?} -> {:?}",
-            self.current, status
-        );
-        self.current = status;
-        // New state's Initialize.
-        self.state_elapsed = 0.0;
-        if matches!(
-            status,
-            PlayerActionState::ExitHarvestSite
-                | PlayerActionState::ExitDeliverySite
-                | PlayerActionState::EnterMoveHouse
-                | PlayerActionState::ExitMoveHouse
-                | PlayerActionState::EnterMoveMyRoom
-                | PlayerActionState::ExitMoveMyRoom
-        ) {
-            self.can_intercept = false;
-        }
-    }
-}
+pub use crate::ui_inputs::{PlayerActionState, PlayerAvatarStates};
 
 /// Update, after the site-move executor (a state the move enters this frame
 /// counts this frame's delta, as the state machine's Update runs after the
@@ -200,7 +61,7 @@ pub(crate) fn update_house_states(
     mut states: ResMut<PlayerAvatarStates>,
     mut players: Query<&mut Visibility, With<PlayerControlled>>,
 ) {
-    use crate::site_move::door_law::{
+    use crate::door_law::{
         state_timer, ENTER_MOVE_HOUSE_TIME, ENTER_MOVE_MY_ROOM_TIME, EXIT_MOVE_MY_ROOM_TIME,
     };
     let current = states.current;
@@ -288,7 +149,7 @@ pub(crate) fn drive_from_talk(
 /// 家具会话持有控制租约时不消费移动输入，但不清除输入；该会话仍需
 /// 观察点按和摇杆的主动结束请求，实际位移由它自己的生命周期推进。
 pub(crate) fn drive_from_input(
-    edits: Res<crate::fixture_edit::EditSessionActive>,
+    edits: Res<crate::field_modes::EditSessionActive>,
     players: Query<(&PlayerInput, &DashMode, Option<&TalkHold>), With<PlayerControlled>>,
     fixture_owner: Option<Res<PlayerFixtureControlOwner>>,
     mut states: ResMut<PlayerAvatarStates>,

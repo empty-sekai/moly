@@ -1571,7 +1571,7 @@ pub(crate) fn click(
                 // or callbacks. Review additionally locks all access options.
                 continue;
             }
-            if let Some(path) = item_path(item,bindings) { sounds.source_button(&layouts, view.key, path); }
+            if let Some(path) = item_path(item,bindings) { layouts.queue_button_se(&mut sounds, view.key, path); }
             match item {
                 InfoItem::Tab(index) => change_page(&mut page_state, index, "页签"),
                 InfoItem::ArrowPrev if page_state.current > 0 => {

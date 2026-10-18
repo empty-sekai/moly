@@ -600,7 +600,7 @@ struct Prepared {
 
 /// Resolve one real source-backed controller without acquiring player input.
 fn prepare_binding(world: &World, target: &FixtureTarget) -> Result<Prepared, String> {
-    if world.get_resource::<crate::fixture_edit::EditSessionActive>()
+    if world.get_resource::<crate::field_modes::EditSessionActive>()
         .is_some_and(|editor| editor.is_active())
     {
         return Err("the layout editor owns fixture poses; interaction cannot start".into());

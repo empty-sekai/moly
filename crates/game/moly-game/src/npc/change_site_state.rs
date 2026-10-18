@@ -996,7 +996,7 @@ fn player_position(world: &mut World) -> Option<Vec3> {
 /// no room level-up state.
 fn can_show_entry_reaction(world: &World) -> bool {
     let editing = world
-        .get_resource::<crate::fixture_edit::EditSessionActive>()
+        .get_resource::<crate::field_modes::EditSessionActive>()
         .is_some_and(|editor| editor.is_active());
     law::can_show_entry_reaction(if editing { law::STATE_EDIT } else { 0 })
 }

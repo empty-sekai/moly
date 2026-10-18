@@ -69,7 +69,7 @@ use bevy::window::PrimaryWindow;
 use serde_json::Value;
 
 use crate::gesture::{GestureEvent, GestureState};
-use crate::sitemap::SITEMAP_LAYER;
+use crate::ui_inputs::SITEMAP_LAYER;
 use crate::ui_layout::{UiLayouts, UiPrefabView};
 
 pub(crate) mod dialog;

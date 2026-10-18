@@ -83,7 +83,7 @@ pub(crate) fn find_npc(world: &mut World, unit: u32) -> Option<Entity> {
         .query_filtered::<(Entity, &CharacterUnitId), (
             With<ObjectiveMind>,
             Without<crate::player::PlayerControlled>,
-            Without<crate::cutscene::CutSceneAvatar>,
+            Without<crate::markers::CutSceneAvatar>,
         )>()
         .iter(world)
         .find(|(_, id)| id.0 == unit)
@@ -351,7 +351,7 @@ pub(crate) fn on_start_cut_scene(world: &mut World, target_unit: u32) -> Vec<(u3
         .query_filtered::<(Entity, &CharacterUnitId), (
             With<ObjectiveMind>,
             Without<crate::player::PlayerControlled>,
-            Without<crate::cutscene::CutSceneAvatar>,
+            Without<crate::markers::CutSceneAvatar>,
         )>()
         .iter(world)
         .filter(|(_, unit)| unit.0 != target_unit)

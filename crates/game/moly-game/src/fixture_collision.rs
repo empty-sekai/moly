@@ -12,7 +12,7 @@
 //! the door action point.
 
 use bevy::{
-    ecs::system::SystemParam,
+    ecs::system::{SystemParam, SystemState},
     gltf::{Gltf, GltfExtras, GltfNode},
     prelude::*,
 };
@@ -26,7 +26,138 @@ use std::{
 mod documents;
 mod primitives;
 
+/// Publishes the fixture collision scene for the particle host, after the
+/// furniture loader has placed this frame's layout and before the weather host
+/// reads it. A scene is rebuilt only when the layout generation or the site
+/// changes, as the host's own install gate did.
+pub(crate) fn publish(world: &mut World) {
+    let revision = world
+        .get_resource::<crate::render_inputs::FixtureLayoutRevision>()
+        .map_or(0, |revision| revision.0);
+    let Some((site_id, rows)) = world
+        .get_resource::<crate::fixture::FixturePlacements>()
+        .map(|placements| (placements.site_id(), placements.placed_rows().len()))
+    else {
+        world.remove_resource::<crate::render_inputs::FixtureCollisionScene>();
+        return;
+    };
+    if rows == 0 {
+        world.remove_resource::<crate::render_inputs::FixtureCollisionScene>();
+        return;
+    }
+    if world
+        .get_resource::<crate::render_inputs::FixtureCollisionScene>()
+        .is_some_and(|scene| {
+            scene.built.is_some()
+                && scene.site_id == site_id
+                && scene.revision == revision
+                && scene.rows == rows
+        })
+    {
+        return;
+    }
+    let (built, error) = match build_render_scene(world) {
+        Ok(scene) => (Some(scene), None),
+        Err(reason) => (None, Some(reason)),
+    };
+    world.insert_resource(crate::render_inputs::FixtureCollisionScene {
+        site_id,
+        revision,
+        rows,
+        built,
+        error,
+    });
+}
+
 const AGENT: i32 = -1372625422;
+
+/// Builds the placed fixtures' collision scene for the particle physics host,
+/// in source axes: each collider and each placed view's touch box at the
+/// placement's pose. The particle host keeps the scene it gets here.
+fn build_render_scene(world: &mut World)
+    -> Result<std::sync::Arc<crate::particle_runtime::collision_scene::GroundScene>, String>
+{
+    let mut system = SystemState::<CollisionInputs>::new(world);
+    let collision = system.get(world);
+    let placements = world
+        .get_resource::<crate::fixture::FixturePlacements>()
+        .ok_or_else(|| "no placements".to_owned())?;
+    let parts = fixture_parts(&collision, placements)?;
+    Ok(crate::particle_runtime::collision_scene::fixture_scene(parts))
+}
+
+/// The placed fixtures' colliders in source axes: the colliders of their
+/// collision scenes, and each placed view's touch box at the placement's pose.
+/// The view receives the fixture's own (unturned) grid size for its touch box
+/// and turns its own transform to the direction, so the touch box, a child
+/// at the view's origin, turns with it.
+fn fixture_parts(
+    collision: &CollisionInputs,
+    placements: &crate::fixture::FixturePlacements,
+) -> Result<Vec<crate::particle_runtime::collision_scene::FixturePart>, String> {
+    use crate::particle_runtime::collision_scene::{touch_box, FixturePart, FixtureShape, TOUCH_BOX_LAYERS};
+    let reflect = |p: [f32; 3]| [-p[0], p[1], p[2]];
+    let mut parts = Vec::new();
+    // Each row's slot in the site view's fixture list (layout type and the
+    // footprint's minimum y, in the placement mock's row order); a collider
+    // finds its row by its fixture's package when no other row shares it.
+    let rows = placements.editor_rows();
+    let keys: Vec<Option<(u8, i32)>> =
+        rows.iter().map(|row| row.footprint().ok().map(|(min, _)| (row.layout, i32::from(min.y)))).collect();
+    let slots: Vec<Option<usize>> = if keys.iter().all(Option::is_some) {
+        let keys: Vec<(u8, i32)> = keys.iter().flatten().copied().collect();
+        crate::particle_runtime::collision_scene::fixture_slots(&keys).into_iter().map(Some).collect()
+    } else {
+        vec![None; rows.len()]
+    };
+    let slot_of = |package: &str| {
+        let mut found = rows.iter().enumerate().filter(|(_, row)| row.package == package);
+        match (found.next(), found.next()) {
+            (Some((r, _)), None) => slots[r],
+            _ => None,
+        }
+    };
+    for (i, collider) in collision.physics_colliders(placements.total())?.into_iter().enumerate() {
+        let shape = match collider.shape {
+            PhysicsShape::Mesh { convex, cooking, positions, triangles } => FixtureShape::Mesh {
+                convex, cooking,
+                positions: positions.into_iter().map(reflect).collect(),
+                // The canonical frame reverses the winding.
+                triangles: triangles.into_iter().map(|t| [t[0], t[2], t[1]].map(|v| v as u32)).collect(),
+            },
+            PhysicsShape::Box { center, size } => FixtureShape::Box { center: reflect(center), half: size.map(|v| v * 0.5) },
+            PhysicsShape::Other(kind) => FixtureShape::Unknown(kind),
+        };
+        let (scale, rotation, translation) = collider.world.to_scale_rotation_translation();
+        let pose = (scale == Vec3::ONE).then(|| source_pose(rotation, translation));
+        let slot = collider.package.as_deref().and_then(slot_of);
+        parts.push(FixturePart { what: format!("collider {i}"), layers: 1 << collider.layer,
+            world: source_matrix(&collider.world), pose, shape, slot, touch: false });
+    }
+    for (r, row) in rows.iter().enumerate() {
+        let view = row.pose()?;
+        let world = source_matrix(&GlobalTransform::from(view));
+        let pose = (view.scale == Vec3::ONE).then(|| source_pose(view.rotation, view.translation));
+        let (center, half) = touch_box([row.grid_size.x, row.grid_size.y, row.grid_size.z], row.layout);
+        let shape = FixtureShape::Box { center, half };
+        parts.push(FixturePart { what: format!("{} touch box", row.package), layers: TOUCH_BOX_LAYERS, world, pose,
+            shape, slot: slots[r], touch: true });
+    }
+    Ok(parts)
+}
+
+/// A canonical-frame pose (source X reflected) in source axes: the rotation
+/// (x, y, z, w) and the translation.
+fn source_pose(rotation: Quat, translation: Vec3) -> ([f32; 4], [f32; 3]) {
+    ([rotation.x, -rotation.y, -rotation.z, rotation.w], [-translation.x, translation.y, translation.z])
+}
+
+/// A canonical-frame matrix (source X reflected) in source axes.
+fn source_matrix(world: &GlobalTransform) -> [f32; 16] {
+    let m = world.to_matrix().to_cols_array();
+    let sign = |i: usize| if i == 0 { -1.0 } else { 1.0 };
+    std::array::from_fn(|n| sign(n % 4) * sign(n / 4) * m[n])
+}
 
 #[derive(Resource, Clone, Debug, Default)]
 pub(crate) struct CollisionBakeStatus {

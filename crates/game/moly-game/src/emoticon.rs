@@ -121,12 +121,7 @@ impl EmoticonArchive {
     }
 }
 
-/// 一张表情的绘制位：属于哪个实例（报告侧数「活着的有几个绘制实体」用，
-/// 网格/材质句柄在实例自己的 draws 表里）。
-#[derive(Component)]
-pub(crate) struct EmoteDraw {
-    instance: u64,
-}
+pub(crate) use crate::markers::EmoteDraw;
 
 /// Startup：请求表情档案，内联表情着色程序。
 pub(crate) fn load(

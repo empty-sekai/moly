@@ -36,21 +36,21 @@ const IGNORE_SPACING_ADJUSTMENTS: i64 = 0x100;
 
 /// An asset's FaceInfo fields the layout reads.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) struct Face {
-    pub(super) point_size: f32,
-    pub(super) scale: f32,
-    pub(super) line_height: f32,
-    pub(super) ascent_line: f32,
-    pub(super) descent_line: f32,
-    pub(super) baseline: f32,
+pub(crate) struct Face {
+    pub(crate) point_size: f32,
+    pub(crate) scale: f32,
+    pub(crate) line_height: f32,
+    pub(crate) ascent_line: f32,
+    pub(crate) descent_line: f32,
+    pub(crate) baseline: f32,
 }
 
 /// A glyph's horizontal advance and scale (asset units).
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) struct Glyph {
-    pub(super) index: u32,
-    pub(super) horizontal_advance: f32,
-    pub(super) scale: f32,
+pub(crate) struct Glyph {
+    pub(crate) index: u32,
+    pub(crate) horizontal_advance: f32,
+    pub(crate) scale: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -61,23 +61,23 @@ struct Character {
 
 /// One side of a glyph pair adjustment record.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub(super) struct GlyphValue {
-    pub(super) x_placement: f32,
-    pub(super) y_placement: f32,
-    pub(super) x_advance: f32,
+pub(crate) struct GlyphValue {
+    pub(crate) x_placement: f32,
+    pub(crate) y_placement: f32,
+    pub(crate) x_advance: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(super) struct PairRecord {
-    pub(super) first: GlyphValue,
-    pub(super) second: GlyphValue,
-    pub(super) ignore_spacing_adjustments: bool,
+pub(crate) struct PairRecord {
+    pub(crate) first: GlyphValue,
+    pub(crate) second: GlyphValue,
+    pub(crate) ignore_spacing_adjustments: bool,
 }
 
-pub(super) struct FontAsset {
-    pub(super) name: String,
-    pub(super) face: Face,
-    pub(super) normal_spacing_offset: f32,
+pub(crate) struct FontAsset {
+    pub(crate) name: String,
+    pub(crate) face: Face,
+    pub(crate) normal_spacing_offset: f32,
     dynamic: bool,
     characters: HashMap<u32, Character>,
     fallbacks: Vec<usize>,
@@ -86,33 +86,33 @@ pub(super) struct FontAsset {
 }
 
 impl FontAsset {
-    pub(super) fn has_pairs(&self) -> bool {
+    pub(crate) fn has_pairs(&self) -> bool {
         !self.pairs.is_empty()
     }
 
-    pub(super) fn pair(&self, first: u32, second: u32) -> Option<&PairRecord> {
+    pub(crate) fn pair(&self, first: u32, second: u32) -> Option<&PairRecord> {
         self.pairs.get(&(second << 16 | first))
     }
 }
 
 /// What a character resolves to.
 #[derive(Debug, Clone, Copy)]
-pub(super) enum Element {
+pub(crate) enum Element {
     Stored { character_scale: f32, glyph: Glyph },
     /// Added at run time by a dynamic asset from its source font file.
     Dynamic,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(super) struct Resolved {
-    pub(super) asset: usize,
-    pub(super) element: Element,
+pub(crate) struct Resolved {
+    pub(crate) asset: usize,
+    pub(crate) element: Element,
     /// The code point TMP draws: the character itself, or the replacement
     /// its missing-glyph path chose.
-    pub(super) unicode: u32,
+    pub(crate) unicode: u32,
 }
 
-pub(super) struct TmpFonts {
+pub(crate) struct TmpFonts {
     assets: Vec<FontAsset>,
     by_source: HashMap<String, usize>,
     missing_glyph: u32,
@@ -140,7 +140,7 @@ fn glyph_value(record: &Value, what: &str) -> Result<GlyphValue, String> {
 
 impl TmpFonts {
     /// Parse the font document of a region root of `region` / `client_version`.
-    pub(super) fn parse(doc: &Value, region: &str, client_version: &str) -> Result<Self, String> {
+    pub(crate) fn parse(doc: &Value, region: &str, client_version: &str) -> Result<Self, String> {
         if doc["version"].as_u64() != Some(1) {
             return Err("TMP font document version is not 1".into());
         }
@@ -278,13 +278,13 @@ impl TmpFonts {
         })
     }
 
-    pub(super) fn asset(&self, index: usize) -> &FontAsset {
+    pub(crate) fn asset(&self, index: usize) -> &FontAsset {
         &self.assets[index]
     }
 
     /// The asset a text component's `m_fontAsset` names, by the serialized
     /// file and path id the reference resolves to.
-    pub(super) fn primary(&self, file: &str, path_id: i64) -> Result<usize, String> {
+    pub(crate) fn primary(&self, file: &str, path_id: i64) -> Result<usize, String> {
         self.by_source
             .get(&format!("{file}:{path_id}"))
             .copied()
@@ -343,7 +343,7 @@ impl TmpFonts {
 
     /// The element TMP lays one character out with, and whether the
     /// missing-glyph path replaced it.
-    pub(super) fn resolve(&self, unicode: u32, primary: usize) -> Result<(Resolved, bool), String> {
+    pub(crate) fn resolve(&self, unicode: u32, primary: usize) -> Result<(Resolved, bool), String> {
         if let Some(hit) = self.text_element(unicode, primary) {
             return Ok((hit, false));
         }

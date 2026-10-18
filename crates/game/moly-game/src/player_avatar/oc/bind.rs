@@ -435,7 +435,7 @@ pub(crate) fn bind(
             commands
                 .entity(*part)
                 .remove::<MeshMaterial3d<StandardMaterial>>()
-                .insert(MeshMaterial3d(handle));
+                .insert((MeshMaterial3d(handle), crate::markers::PlayerBodyRenderer));
         }
         if !character {
             if let Ok(mut visibility) = visibilities.get_mut(entity) {

@@ -678,13 +678,13 @@ impl ActiveTalk {
     /// Exact future voice commands from the authored cursor onward. This is a
     /// load hint only: command dispatch, StopVoiceAll and playback stay on the
     /// normal line-order path.
-    pub(crate) fn voice_prefetches(&self) -> Vec<crate::audio::VoicePrefetch> {
+    pub(crate) fn voice_prefetches(&self) -> Vec<crate::audio_inputs::VoicePrefetch> {
         self.row
             .steps
             .iter()
             .skip(self.state.cursor)
             .filter_map(|step| match step {
-                FixtureStep::Voice { cue, who, .. } => Some(crate::audio::VoicePrefetch::new(
+                FixtureStep::Voice { cue, who, .. } => Some(crate::audio_inputs::VoicePrefetch::new(
                     cue.clone(),
                     partvoice_who(*who),
                 )),
@@ -693,7 +693,7 @@ impl ActiveTalk {
                         && fixture.fract() == 0.0
                         && *fixture as i32 == self.fixture_id =>
                 {
-                    Some(crate::audio::VoicePrefetch::new(
+                    Some(crate::audio_inputs::VoicePrefetch::new(
                         cue.clone(),
                         Some(VoiceWho::Fixture(*fixture as i32)),
                     ))
@@ -702,6 +702,22 @@ impl ActiveTalk {
             })
             .collect()
     }
+}
+
+/// Update（步进之后）：publish the playing conversation's future voice rows
+/// for audio. One conversation plays at a time: the pair's sessions are
+/// exclusive, so the rows of whichever session is present are the whole list.
+/// Audio only loads their raw assets; the script cursor stays here.
+pub(crate) fn publish_voice_prefetch(
+    active: Option<Res<ActiveTalk>>,
+    player: Option<Res<crate::player_talk::PlayerTalkSession>>,
+    mut published: ResMut<crate::audio_inputs::TalkVoicePrefetch>,
+) {
+    published.requests = active
+        .as_deref()
+        .map(ActiveTalk::voice_prefetches)
+        .or_else(|| player.as_deref().map(crate::player_talk::PlayerTalkSession::voice_prefetches))
+        .unwrap_or_default();
 }
 
 /// 参演者身上的对话运行时：眼/口材质句柄、动作节点缓存、在播动作。

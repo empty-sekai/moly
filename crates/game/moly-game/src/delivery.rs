@@ -114,17 +114,12 @@ pub struct DeliveryProgress {
     pub animation_time: f32,
 }
 
+pub(crate) use crate::field_modes::DeliveryHold;
+
 /// GameState Delivery (12): set by the pre-action of a visit's first press,
 /// gone with the site.
 #[derive(Resource, Debug)]
 pub struct DeliveryGameState;
-
-/// On the player from the press's approach until the end action's Idle, and
-/// again through the honor reward state: the player state machine owns the
-/// avatar (states AutoMove, 8 and 9 with the intercept gate closed), so the
-/// input moves nothing (`player::advance` skips the player).
-#[derive(Component)]
-pub struct DeliveryHold;
 
 /// One drop's model (`MysekaiDropItemModel`: resource type 41, the party's
 /// reward material, its rarity, the site, quantity 1).
@@ -495,7 +490,7 @@ impl Plugin for DeliveryPlugin {
                     screen::advance,
                 )
                     .chain()
-                    .after(crate::player::read_input)
+                    .after(crate::player_input::read_input)
                     .before(crate::player_state::drive_from_input)
                     .before(crate::player::advance)
                     .before(crate::audio::SeDrainSet::Drain),
