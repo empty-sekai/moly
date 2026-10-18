@@ -134,6 +134,9 @@ use crate::sitemap_phenomena::{PhenomenaMaster, PhenomenaRow};
 use crate::source_curve::Curve;
 use crate::ui_layers::{LayerCommand, MenuScreenType, ScreenHook, ScreenLayerEvent};
 
+#[path = "sitemap_tap.rs"]
+mod sitemap_tap;
+
 // ---------------------------------------------------------------------------
 // 常量（真源锚在注释里）
 // ---------------------------------------------------------------------------
@@ -1353,7 +1356,11 @@ pub(crate) fn screen_alpha_restore(
 pub(crate) fn screen_alpha_apply(
     mut commands: Commands,
     manager: Option<Res<crate::ui_layers::ScreenManager>>,
-    roots: Query<Entity, With<SitemapRoot>>,
+    roots: Query<
+        (Entity, &Visibility),
+        (With<SitemapRoot>, Without<sitemap_tap::SitemapTapView>),
+    >,
+    mut taps: Query<&mut Visibility, (With<sitemap_tap::SitemapTapView>, Without<SitemapRoot>)>,
     children: Query<&Children>,
     mut sprites: Query<(&mut Sprite, Option<&mut ScreenAlphaBase>)>,
     mut hosts: Query<
@@ -1364,9 +1371,19 @@ pub(crate) fn screen_alpha_apply(
         Without<Sprite>,
     >,
 ) {
-    let Ok(root) = roots.single() else {
+    let map_open = manager
+        .as_deref()
+        .is_some_and(|manager| manager.current_screen() == Some(MenuScreenType::MysekaiSiteMap));
+    let Ok((root, root_visibility)) = roots.single() else {
+        for mut visibility in &mut taps {
+            visibility.set_if_neq(Visibility::Hidden);
+        }
         return;
     };
+    let shown = map_open && *root_visibility != Visibility::Hidden;
+    for mut visibility in &mut taps {
+        visibility.set_if_neq(if shown { Visibility::Inherited } else { Visibility::Hidden });
+    }
     let group = manager
         .as_deref()
         .and_then(|manager| manager.screen_visual(MenuScreenType::MysekaiSiteMap).alpha)
@@ -1679,7 +1696,7 @@ pub(crate) fn spawn_when_ready(
     mut images: ResMut<Assets<Image>>,
     server: Res<AssetServer>,
     (layouts, root_canvas, phenomena): (
-        Option<Res<crate::ui_layout::UiLayouts>>,
+        Option<ResMut<crate::ui_layout::UiLayouts>>,
         Option<Res<crate::canvas::RootCanvas>>,
         Option<Res<PhenomenaMaster>>,
     ),
@@ -1693,7 +1710,7 @@ pub(crate) fn spawn_when_ready(
     let Some(phenomena) = phenomena else { return };
     // The wordings arrive with the host sources (the root canvas is set in
     // the same step): the balloon's wording is baked with the names.
-    let (Some(layouts), Some(_)) = (layouts, root_canvas) else {
+    let (Some(mut layouts), Some(_)) = (layouts, root_canvas) else {
         return;
     };
     if data.textures_pending {
@@ -1778,6 +1795,7 @@ pub(crate) fn spawn_when_ready(
     );
 
     spawn_weather_panel(&mut commands, &data, ui_root);
+    sitemap_tap::spawn(&mut commands, &data, &mut layouts, &server);
 
     commands.insert_resource(text);
     info!(
@@ -2643,20 +2661,28 @@ fn tap(
     false
 }
 
+/// The site map's tap queries, grouped so `click` stays a Bevy system.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct SitemapTapQueries<'w, 's> {
+    windows: Query<'w, 's, &'static Window>,
+    cameras: Query<'w, 's, (&'static Camera, &'static GlobalTransform), With<SitemapCamera>>,
+    roots: Query<'w, 's, &'static Visibility, With<SitemapRoot>>,
+    icons: Query<'w, 's, (Entity, &'static MapIcon)>,
+    transforms: Query<'w, 's, &'static Transform>,
+    balloons: Query<'w, 's, (Entity, &'static mut ReleaseBalloon)>,
+    runs: Query<'w, 's, (), With<UnlockRun>>,
+}
+
 /// Update: a tap on the site map (a left click while the map is the current
 /// screen).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn click(
     buttons: Res<ButtonInput<MouseButton>>,
-    windows: Query<&Window>,
-    cameras: Query<(&Camera, &GlobalTransform), With<SitemapCamera>>,
+    mut gestures: MessageReader<crate::gesture::GestureEvent>,
+    mut consumed: ResMut<crate::action_button::ActionTapConsumed>,
     mut commands: Commands,
     (data, text): (Option<Res<SitemapData>>, Option<Res<SitemapText>>),
-    roots: Query<&Visibility, With<SitemapRoot>>,
-    icons: Query<(Entity, &MapIcon)>,
-    transforms: Query<&Transform>,
-    mut balloons: Query<(Entity, &mut ReleaseBalloon)>,
-    runs: Query<(), With<UnlockRun>>,
+    mut targets: SitemapTapQueries,
     (active, birthday): (
         Option<Res<crate::site::SiteActive>>,
         Option<Res<crate::birthday::BirthdayParties>>,
@@ -2666,7 +2692,12 @@ pub(crate) fn click(
     mut layer_commands: MessageWriter<LayerCommand>,
     manager: Option<Res<crate::ui_layers::ScreenManager>>,
 ) {
-    if !buttons.just_pressed(MouseButton::Left) {
+    let taps: Vec<Vec2> = gestures
+        .read()
+        .filter(|event| event.kind.is_tap_family() && event.state == crate::gesture::GestureState::End)
+        .map(|event| event.position)
+        .collect();
+    if taps.is_empty() && !buttons.just_pressed(MouseButton::Left) {
         return;
     }
     // The screen's start and exit disable taps on the UI layer
@@ -2689,21 +2720,47 @@ pub(crate) fn click(
     let (Some(data), Some(text)) = (data, text) else {
         return;
     };
-    if !runs.is_empty() {
+    if !targets.runs.is_empty() {
         return;
     }
-    if roots
+    if targets
+        .roots
         .single()
         .map(|v| *v == Visibility::Hidden)
         .unwrap_or(true)
     {
         return;
     }
-    let Ok(window) = windows.single() else { return };
+    if !taps.is_empty() {
+        let Ok(window) = targets.windows.single() else { return };
+        let Some(root_canvas) = root_canvas.as_deref() else { return };
+        let scale = root_canvas.scale(window);
+        for position in taps {
+            consumed.0 = true;
+            let canvas = Vec2::new(
+                position.x - window.width() / 2.0,
+                window.height() / 2.0 - position.y,
+            ) / scale;
+            tap(
+                &mut commands,
+                &data,
+                &text,
+                &targets.icons,
+                &targets.transforms,
+                &mut targets.balloons,
+                active.as_deref(),
+                birthday.as_deref(),
+                &mut layer_commands,
+                canvas,
+            );
+        }
+        return;
+    }
+    let Ok(window) = targets.windows.single() else { return };
     let Some(cursor) = window.cursor_position() else {
         return;
     };
-    let Ok((camera, camera_transform)) = cameras.single() else {
+    let Ok((camera, camera_transform)) = targets.cameras.single() else {
         return;
     };
     let Ok(world) = camera.viewport_to_world_2d(camera_transform, cursor) else {
@@ -2717,9 +2774,9 @@ pub(crate) fn click(
         &mut commands,
         &data,
         &text,
-        &icons,
-        &transforms,
-        &mut balloons,
+        &targets.icons,
+        &targets.transforms,
+        &mut targets.balloons,
         active.as_deref(),
         birthday.as_deref(),
         &mut layer_commands,
