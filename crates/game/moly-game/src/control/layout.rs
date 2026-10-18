@@ -64,6 +64,7 @@ fn grid(position: GridPosition) -> Value {
 fn item(item: &EditItemView) -> Value {
     json!({
         "uid": item.uid,
+        "piece": item.piece,
         "package": item.package,
         "fixture_id": item.fixture_id,
         "texture_id": item.texture_id,
@@ -169,4 +170,221 @@ pub(crate) fn command(params: &Map<String, Value>) -> Result<EditCommand, String
             ))
         }
     })
+}
+fn piece(value: Option<&Value>, what: &str) -> Result<moly_layout::Piece, String> {
+    let raw = value
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .ok_or_else(|| format!("moly.layout.apply: {what} needs a piece number above 0"))?;
+    Ok(moly_layout::Piece(raw))
+}
+
+fn rotation(value: Option<&Value>, what: &str) -> Result<moly_layout::Rot, String> {
+    let raw = value
+        .and_then(Value::as_u64)
+        .and_then(|value| u16::try_from(value).ok())
+        .ok_or_else(|| format!("moly.layout.apply: {what} needs a rotation in degrees"))?;
+    moly_layout::Rot::from_degrees(raw)
+        .ok_or_else(|| format!("moly.layout.apply: {what} rotation must be 0, 90, 180 or 270"))
+}
+
+fn layer(value: Option<&Value>) -> Result<Option<moly_layout::Layer>, String> {
+    match value.and_then(Value::as_str) {
+        None | Some("") => Ok(None),
+        Some("floor") => Ok(Some(moly_layout::Layer::Floor)),
+        Some("rug") => Ok(Some(moly_layout::Layer::Rug)),
+        Some("wall") => Ok(Some(moly_layout::Layer::Wall)),
+        Some("top") => Ok(Some(moly_layout::Layer::Top)),
+        Some(other) => Err(format!(
+            "moly.layout.apply: layer {other:?} is one of floor, rug, wall, top"
+        )),
+    }
+}
+
+fn anchor(value: &Value) -> Result<moly_layout::Anchor, String> {
+    let object = value
+        .as_object()
+        .ok_or("moly.layout.apply: at is an anchor object")?;
+    let kind = object
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or("moly.layout.apply: at needs kind")?;
+    let int = |key: &str| {
+        object
+            .get(key)
+            .and_then(Value::as_i64)
+            .and_then(|value| i8::try_from(value).ok())
+            .ok_or_else(|| format!("moly.layout.apply: anchor {kind} needs integer {key}"))
+    };
+    Ok(match kind {
+        "cell" => moly_layout::Anchor::Cell {
+            x: int("x")?,
+            z: int("z")?,
+            layer: layer(object.get("layer"))?,
+        },
+        "near" => moly_layout::Anchor::Near {
+            of: piece(object.get("of"), "near")?,
+            side: match object.get("side").and_then(Value::as_str) {
+                Some("front") => moly_layout::Side::Front,
+                Some("back") => moly_layout::Side::Back,
+                Some("left") => moly_layout::Side::Left,
+                Some("right") => moly_layout::Side::Right,
+                _ => return Err("moly.layout.apply: near needs side front, back, left or right".into()),
+            },
+            gap: object
+                .get("gap")
+                .and_then(Value::as_u64)
+                .and_then(|value| u8::try_from(value).ok())
+                .unwrap_or(0),
+        },
+        "on_top_of" => moly_layout::Anchor::OnTopOf {
+            of: piece(object.get("of"), "on_top_of")?,
+        },
+        "against" => moly_layout::Anchor::Against {
+            wall: match object.get("wall").and_then(Value::as_str) {
+                Some("north") => moly_layout::Wall::North,
+                Some("east") => moly_layout::Wall::East,
+                Some("south") => moly_layout::Wall::South,
+                Some("west") => moly_layout::Wall::West,
+                Some("nearest") => moly_layout::Wall::Nearest,
+                _ => return Err("moly.layout.apply: against needs wall north, east, south, west or nearest".into()),
+            },
+        },
+        "around" => moly_layout::Anchor::Around {
+            of: piece(object.get("of"), "around")?,
+            index: object
+                .get("index")
+                .and_then(Value::as_u64)
+                .and_then(|value| u8::try_from(value).ok())
+                .ok_or("moly.layout.apply: around needs index 0..255")?,
+        },
+        other => return Err(format!("moly.layout.apply: unknown anchor kind {other:?}")),
+    })
+}
+
+/// Parses the `moly.layout.apply` parameter object into an [`Apply`].
+pub(crate) fn apply_request(params: &Map<String, Value>) -> Result<moly_layout::Apply, String> {
+    let ops = params
+        .get("ops")
+        .and_then(Value::as_array)
+        .ok_or("moly.layout.apply: params need ops")?
+        .iter()
+        .map(|value| {
+            let object = value
+                .as_object()
+                .ok_or("moly.layout.apply: every op is an object")?;
+            let name = object
+                .get("op")
+                .and_then(Value::as_str)
+                .ok_or("moly.layout.apply: every op needs op")?;
+            let texture = |key: &str| -> Result<u32, String> {
+                object
+                    .get(key)
+                    .and_then(Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok())
+                    .ok_or_else(|| format!("moly.layout.apply: {name} needs {key} as a texture id"))
+            };
+            Ok(match name {
+                "place" => moly_layout::LayoutOp::Place {
+                    fixture: object
+                        .get("fixture")
+                        .and_then(Value::as_i64)
+                        .and_then(|value| i32::try_from(value).ok())
+                        .ok_or("moly.layout.apply: place needs fixture")?,
+                    texture: object.get("texture").map(|_| texture("texture")).transpose()?,
+                    at: anchor(
+                        object
+                            .get("at")
+                            .ok_or("moly.layout.apply: place needs at")?,
+                    )?,
+                    rotation: rotation(object.get("rotation"), "place")?,
+                },
+                "move" => moly_layout::LayoutOp::Move {
+                    piece: piece(object.get("piece"), "move")?,
+                    at: anchor(
+                        object
+                            .get("at")
+                            .ok_or("moly.layout.apply: move needs at")?,
+                    )?,
+                    rotation: object
+                        .get("rotation")
+                        .map(|_| rotation(object.get("rotation"), "move"))
+                        .transpose()?,
+                },
+                "rotate" => moly_layout::LayoutOp::Rotate {
+                    piece: piece(object.get("piece"), "rotate")?,
+                    rotation: rotation(object.get("rotation"), "rotate")?,
+                },
+                "remove" => moly_layout::LayoutOp::Remove {
+                    piece: piece(object.get("piece"), "remove")?,
+                },
+                "recolor" => moly_layout::LayoutOp::Recolor {
+                    piece: piece(object.get("piece"), "recolor")?,
+                    texture: texture("texture")?,
+                },
+                other => return Err(format!("moly.layout.apply: unknown op {other:?}")),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(moly_layout::Apply {
+        ops,
+        dry_run: params.get("dry_run").and_then(Value::as_bool).unwrap_or(false),
+        base: params
+            .get("base")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok()),
+        check_paths: params.get("check_paths").and_then(Value::as_bool).unwrap_or(false),
+    })
+}
+
+fn result(value: &moly_layout::OpResult) -> Value {
+    json!({
+        "piece": value.piece.0,
+        "minimum": [value.minimum.x, value.minimum.y, value.minimum.z],
+        "maximum": [value.maximum.x, value.maximum.y, value.maximum.z],
+        "center_y": value.center_y,
+        "rotation": value.rotation.degrees(),
+    })
+}
+
+fn code(value: moly_layout::RefusalCode) -> &'static str {
+    match value {
+        moly_layout::RefusalCode::OutOfBounds => "out_of_bounds",
+        moly_layout::RefusalCode::Overlap => "overlap",
+        moly_layout::RefusalCode::WrongLayer => "wrong_layer",
+        moly_layout::RefusalCode::NotOwned => "not_owned",
+        moly_layout::RefusalCode::UnavailableZone => "unavailable_zone",
+        moly_layout::RefusalCode::StackNotAllowed => "stack_not_allowed",
+        moly_layout::RefusalCode::BlocksPath => "blocks_path",
+        moly_layout::RefusalCode::UnknownPiece => "unknown_piece",
+        moly_layout::RefusalCode::StaleRevision => "stale_revision",
+        moly_layout::RefusalCode::Locked => "locked",
+    }
+}
+
+fn refusal(value: &moly_layout::Refusal) -> Value {
+    json!({
+        "code": code(value.code),
+        "piece": value.piece.map(|piece| piece.0),
+        "nearest": value.nearest.map(|cell| [cell.x, cell.z]),
+        "holder": value.holder,
+    })
+}
+
+/// The `moly.layout.apply` answer.
+pub(crate) fn apply_outcome(outcome: &moly_layout::ApplyOutcome) -> Value {
+    match outcome {
+        Ok(applied) => json!({
+            "status": "applied",
+            "results": applied.results.iter().map(result).collect::<Vec<_>>(),
+            "revision": applied.revision,
+        }),
+        Err(rejected) => json!({
+            "status": "rejected",
+            "index": rejected.index,
+            "refusal": refusal(&rejected.refusal),
+            "results_before": rejected.results_before.iter().map(result).collect::<Vec<_>>(),
+        }),
+    }
 }

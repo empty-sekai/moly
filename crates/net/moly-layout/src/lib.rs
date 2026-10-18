@@ -12,6 +12,7 @@
 //! therefore run the same rules over the same data.
 
 pub mod anchor;
+pub mod apply;
 pub mod layout;
 pub mod op;
 pub mod resolve;
@@ -20,9 +21,10 @@ pub mod rules;
 pub mod validate;
 
 pub use anchor::{Anchor, Cell, Side, Wall};
+pub use apply::apply;
 pub use layout::{Layout, PlacedRow, SiteGrid};
 pub use op::{LayoutOp, Layer, Piece, Rot};
 pub use result::{
     Apply, ApplyOutcome, Applied, OpResult, Refusal, RefusalCode, Rejected,
 };
-pub use rules::{BundleMeta, MetaGrid, OwnedCount, Rules, Zone};
+pub use rules::{BundleMeta, FixtureMaster, MetaGrid, OwnedCount, Rules, Zone};

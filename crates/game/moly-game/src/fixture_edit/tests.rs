@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 fn rules() -> moly_layout::Rules {
     moly_layout::Rules {
         traits: HashMap::new(),
+        masters: HashMap::new(),
         bundles: HashMap::new(),
         zones: Some(Vec::new()),
         owned: HashMap::new(),

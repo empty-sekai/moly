@@ -135,6 +135,7 @@ pub(crate) fn zones_of(world: &World, layout_id: u32) -> Option<Vec<Zone>> {
 pub(crate) fn rules(world: &World, floor: Option<FloorGridLayout>) -> Result<Rules, Missing> {
     let floor = floor.ok_or(Missing::FloorGrid)?;
     let traits = put_effect::traits_table(world).ok_or(Missing::FixtureTable)?;
+    let masters = put_effect::masters_table(world).ok_or(Missing::FixtureTable)?;
     let bundles = world
         .get_resource::<FixtureAreas>()
         .filter(|areas| areas.loaded)
@@ -143,6 +144,7 @@ pub(crate) fn rules(world: &World, floor: Option<FloorGridLayout>) -> Result<Rul
     let zones = zones_of(world, floor.layout_id);
     Ok(Rules {
         traits: (*traits).clone(),
+        masters: (*masters).clone(),
         bundles: (*bundles).clone(),
         zones,
         ..Rules::default()

@@ -106,6 +106,7 @@ pub(crate) enum EditPhase {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct EditItemView {
     pub uid: String,
+    pub piece: Option<u32>,
     pub package: String,
     pub texture_id: u32,
     pub fixture_id: i32,
@@ -120,6 +121,7 @@ impl From<&EditableFixture> for EditItemView {
     fn from(item: &EditableFixture) -> Self {
         Self {
             uid: item.uid.clone(),
+            piece: None,
             package: item.package.clone(),
             texture_id: item.texture_id,
             fixture_id: item.fixture_id,
@@ -1757,6 +1759,206 @@ fn apply_commands(world: &mut World) {
 /// Poll real readiness every frame, even when no input command arrives or a
 /// settings panel is open. No fixed delay and no mutation of the new map are
 /// used as substitutes for a completed rebuild.
+/// One draft row in the served layout's record form.
+fn served_row(item: &EditableFixture) -> Result<moly_protocol::api::HousingLayoutFixture, String> {
+    let (min, max) = item.footprint()?;
+    Ok(moly_protocol::api::HousingLayoutFixture {
+        package: item.package.clone(),
+        mysekai_fixture_id: item.fixture_id,
+        minimum: moly_protocol::api::HousingLayoutCorner {
+            x: min.x,
+            y: min.y,
+            z: min.z,
+        },
+        maximum: moly_protocol::api::HousingLayoutCorner {
+            x: max.x,
+            y: max.y,
+            z: max.z,
+        },
+        center_y: item.center.y,
+        layout_type: item.layout,
+        rotation: item.direction as u8,
+        texture_id: item.texture_id,
+    })
+}
+
+/// The open session's draft as a [`moly_layout::Layout`], with one piece
+/// number per row in row order.
+fn session_layout(session: &EditSession) -> Result<moly_layout::Layout, String> {
+    let baseline = session
+        .baseline
+        .as_ref()
+        .ok_or_else(|| "the editor has no layout".to_owned())?;
+    let floor = baseline
+        .floor_grid()
+        .ok_or_else(|| "the site grid is not loaded".to_owned())?;
+    let grid = moly_layout::SiteGrid::new(
+        floor.level,
+        floor.layout_id,
+        floor.width,
+        floor.height,
+        floor.depth,
+    );
+    let rows = session
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            Ok(moly_layout::PlacedRow {
+                piece: moly_layout::Piece(
+                    u32::try_from(index + 1).map_err(|_| "too many rows".to_owned())?,
+                ),
+                row: served_row(item)?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(moly_layout::Layout::new(
+        baseline.site_id(),
+        baseline.site_type().to_owned(),
+        grid,
+        rows,
+    ))
+}
+
+fn item_from_served(
+    row: &moly_protocol::api::HousingLayoutFixture,
+    uid: String,
+    grid_size: moly_law::fixture::Vector3Int,
+) -> Result<EditableFixture, String> {
+    let min = GridPosition::new(row.minimum.x, row.minimum.y, row.minimum.z);
+    let max = GridPosition::new(row.maximum.x, row.maximum.y, row.maximum.z);
+    let (mut center, derived) =
+        moly_law::fixture::position::footprint_to_center_size(min, max)?;
+    let _ = derived;
+    center.y = row.center_y;
+    Ok(EditableFixture {
+        uid,
+        package: row.package.clone(),
+        texture_id: row.texture_id,
+        fixture_id: row.mysekai_fixture_id,
+        center,
+        grid_size,
+        layout: row.layout_type,
+        direction: moly_layout::Rot::from_row(row.rotation)
+            .map(moly_layout::Rot::direction)
+            .unwrap_or(Direction::Front),
+    })
+}
+
+fn apply_rejected(code: moly_layout::RefusalCode) -> moly_layout::ApplyOutcome {
+    Err(moly_layout::Rejected {
+        index: 0,
+        refusal: moly_layout::Refusal::new(code),
+        results_before: Vec::new(),
+    })
+}
+
+/// Runs one `moly.layout.apply` transaction against the open session. A dry
+/// run returns the results without touching the draft; a successful real run
+/// writes the resulting rows back exactly as the equivalent manual commands
+/// would (selection cleared, phase browsing, draft dirty, removed rows to the
+/// offline inventory). The whole-layout save remains the only uplink.
+pub(crate) fn apply_request(
+    world: &mut World,
+    request: &moly_layout::Apply,
+) -> moly_layout::ApplyOutcome {
+    let Some(mut session) = world.remove_resource::<EditSession>() else {
+        return apply_rejected(moly_layout::RefusalCode::UnknownPiece);
+    };
+    let result = apply_in_session(world, &mut session, request);
+    world.insert_resource(session);
+    result
+}
+
+fn apply_in_session(
+    world: &mut World,
+    session: &mut EditSession,
+    request: &moly_layout::Apply,
+) -> moly_layout::ApplyOutcome {
+    let mut layout = match session_layout(session) {
+        Ok(layout) => layout,
+        Err(_) => return apply_rejected(moly_layout::RefusalCode::OutOfBounds),
+    };
+    let rules = match session
+        .baseline
+        .as_ref()
+        .and_then(FixturePlacements::floor_grid)
+        .map(|floor| layout_rules::rules(world, Some(floor)))
+    {
+        Some(Ok(rules)) => rules,
+        _ => return apply_rejected(moly_layout::RefusalCode::WrongLayer),
+    };
+    let outcome = moly_layout::apply(&mut layout, &rules, request);
+    if outcome.is_err() || request.dry_run {
+        return outcome;
+    }
+
+    let old: Vec<(moly_layout::Piece, String)> = session
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(index, item)| (moly_layout::Piece(index as u32 + 1), item.uid.clone()))
+        .collect();
+    let by_piece: std::collections::HashMap<_, _> = old.iter().cloned().collect();
+    let mut kept = std::collections::HashSet::new();
+    let site_id = session.baseline.as_ref().map_or(0, FixturePlacements::site_id);
+    let mut rows = Vec::with_capacity(layout.rows.len());
+    for placed in &layout.rows {
+        let uid = match by_piece.get(&placed.piece) {
+            Some(uid) => uid.clone(),
+            None => {
+                let serial = session.next_fixture_uid;
+                let Some(next) = serial.checked_add(1) else {
+                    return apply_rejected(moly_layout::RefusalCode::OutOfBounds);
+                };
+                session.next_fixture_uid = next;
+                format!("offline-edit-{site_id}-{serial}")
+            }
+        };
+        kept.insert(placed.piece);
+        let grid_size = rules
+            .masters
+            .get(&placed.row.mysekai_fixture_id)
+            .map_or_else(
+                || {
+                    let min = GridPosition::new(
+                        placed.row.minimum.x,
+                        placed.row.minimum.y,
+                        placed.row.minimum.z,
+                    );
+                    let max = GridPosition::new(
+                        placed.row.maximum.x,
+                        placed.row.maximum.y,
+                        placed.row.maximum.z,
+                    );
+                    moly_law::fixture::position::footprint_to_center_size(min, max)
+                        .map(|(_, size)| size)
+                        .unwrap_or_default()
+                },
+                |master| master.grid_size,
+            );
+        match item_from_served(&placed.row, uid, grid_size) {
+            Ok(item) => rows.push(item),
+            Err(_) => return apply_rejected(moly_layout::RefusalCode::OutOfBounds),
+        }
+    }
+    for (piece, uid) in old {
+        if kept.contains(&piece) {
+            continue;
+        }
+        if let Some(item) = session.rows.iter().find(|row| row.uid == uid) {
+            if !session.inventory.iter().any(|row| row.uid == item.uid) {
+                session.inventory.push(item.clone());
+            }
+        }
+    }
+    session.rows = rows;
+    session.selected = None;
+    session.phase = EditPhase::Browsing;
+    session.say("已应用摆放操作（尚未保存）。");
+    session.changed();
+    outcome
+}
 fn advance_recovery(world: &mut World) {
     actors::maintain(world);
     let Some(mut session) = world.remove_resource::<EditSession>() else { return; };
@@ -1851,7 +2053,16 @@ fn publish_view(world: &mut World) {
         clean_up_dialog: session.clean_up_dialog,
         save_dialog: session.save_dialog.is_some(),
         selected,
-        placed_rows: session.rows.iter().map(&editable).collect(),
+        placed_rows: session
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let mut view = editable(item);
+                view.piece = u32::try_from(index + 1).ok();
+                view
+            })
+            .collect(),
         inventory: session.inventory.iter().map(&editable).collect(),
         catalog,
         owned_revision,

@@ -131,6 +131,11 @@ const METHODS: &[(&str, &str, &str)] = &[
         r#"{"type":"object","properties":{"command":{"type":"string"},"index":{"type":"integer","minimum":0},"uid":{"type":"string"},"center":{"type":"array","items":{"type":"integer"},"minItems":3,"maxItems":3},"x":{"type":"integer"},"z":{"type":"integer"}},"required":["command"]}"#,
     ),
     (
+        "moly.layout.apply",
+        "Runs one atomic layout operation sequence against the open editor session: all operations or none. Operations name the session piece numbers (moly.layout.view placed rows). A dry run returns the results and leaves the draft unchanged; a successful run updates the draft and the original whole-layout save stays the only uplink. Returns status applied with results, or status rejected with index, closed refusal code and results before it.",
+        r#"{"type":"object","properties":{"ops":{"type":"array","minItems":1},"dry_run":{"type":"boolean"},"base":{"type":"integer"},"check_paths":{"type":"boolean"}},"required":["ops"]}"#,
+    ),
+    (
         "moly.perf.snapshot",
         "Frame time percentiles over the last 600 frames and over the newest `frames` frames (120 by default).",
         r#"{"type":"object","properties":{"frames":{"type":"integer","minimum":1}}}"#,
@@ -191,6 +196,7 @@ pub(crate) fn install(app: &mut App) {
         .with_method("moly.library.catalog", library_catalog)
         .with_method("moly.layout.view", layout_view)
         .with_method("moly.layout.command", layout_command)
+        .with_method("moly.layout.apply", layout_apply)
         .with_method("moly.perf.snapshot", perf_snapshot)
         .with_method("moly.camera.free", camera_free)
         .with_method("moly.camera.reset", camera_reset)
@@ -553,6 +559,13 @@ fn layout_command(In(params): In<Option<Value>>, world: &mut World) -> BrpResult
     let queued = format!("{command:?}");
     world.write_message(command);
     Ok(json!({ "queued": queued }))
+}
+
+fn layout_apply(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
+    let params = object(params, "moly.layout.apply")?;
+    let request = layout::apply_request(&params).map_err(refuse)?;
+    let outcome = crate::fixture_edit::apply_request(world, &request);
+    Ok(layout::apply_outcome(&outcome))
 }
 
 fn director_schema(In(_): In<Option<Value>>) -> BrpResult {

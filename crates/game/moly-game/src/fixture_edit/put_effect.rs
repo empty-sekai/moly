@@ -49,6 +49,7 @@ use std::sync::Arc;
 use bevy::gltf::Gltf;
 use bevy::prelude::*;
 use moly_assets::json::JsonAsset;
+use moly_law::fixture::position::layout_type;
 use moly_law::fixture::{Direction, Vector3Int};
 use serde_json::Value;
 
@@ -99,6 +100,7 @@ struct SoundTables {
     put_type_of: HashMap<i32, String>,
     /// The `MysekaiFixtureUtility` predicates of each row (`tile_rules`).
     traits_of: Arc<HashMap<i32, moly_layout::validate::Traits>>,
+    masters_of: Arc<HashMap<i32, moly_layout::FixtureMaster>>,
     cue_of: HashMap<i64, String>,
 }
 
@@ -111,6 +113,7 @@ impl SoundTables {
         let mut handle_of = HashMap::with_capacity(rows.len());
         let mut put_type_of = HashMap::with_capacity(rows.len());
         let mut traits_of = HashMap::with_capacity(rows.len());
+        let mut masters_of = HashMap::with_capacity(rows.len());
         for row in rows {
             let id = row["id"].as_i64().ok_or("a fixture row has no id")?;
             let Some(sound) = row["putSoundId"].as_i64() else {
@@ -130,14 +133,34 @@ impl SoundTables {
             let settable_layout = row["layoutType"]
                 .as_str()
                 .ok_or_else(|| format!("fixture row {id} carries no layoutType"))?;
-            traits_of.insert(
+            let traits = moly_layout::validate::Traits::from_row(
+                fixture_type,
+                settable_layout,
+                put_type,
+                handle,
+            );
+            traits_of.insert(id as i32, traits);
+            let bundle = row["assetbundleName"]
+                .as_str()
+                .ok_or_else(|| format!("fixture row {id} carries no assetbundleName"))?;
+            let int = |key: &str| {
+                row[key]
+                    .as_i64()
+                    .and_then(|value| i32::try_from(value).ok())
+                    .ok_or_else(|| format!("fixture row {id} carries no integer {key}"))
+            };
+            masters_of.insert(
                 id as i32,
-                moly_layout::validate::Traits::from_row(
-                    fixture_type,
-                    settable_layout,
-                    put_type,
-                    handle,
-                ),
+                moly_layout::FixtureMaster {
+                    package: format!("mysekai__fixture__{bundle}"),
+                    grid_size: Vector3Int::new(int("gridWidth")?, int("gridHeight")?, int("gridDepth")?),
+                    layout: match settable_layout {
+                        "floor" => layout_type::FLOOR,
+                        "rug" => layout_type::RUG,
+                        _ => 0,
+                    },
+                    traits,
+                },
             );
             put_sound_of.insert(id as i32, sound);
             handle_of.insert(id as i32, handle.to_owned());
@@ -161,6 +184,7 @@ impl SoundTables {
             handle_of,
             put_type_of,
             traits_of: Arc::new(traits_of),
+            masters_of: Arc::new(masters_of),
             cue_of,
         })
     }
@@ -403,6 +427,18 @@ pub(crate) fn traits_table(world: &World) -> Option<Arc<HashMap<i32, moly_layout
     }
 }
 
+/// The fixture master rows the transactions build pieces from, once the
+/// fixture table is read.
+pub(crate) fn masters_table(
+    world: &World,
+) -> Option<Arc<HashMap<i32, moly_layout::FixtureMaster>>> {
+    let effect = world.get_resource::<FixturePutEffect>()?;
+    match &effect.tables {
+        Tables::Read(Ok(tables)) => Some(tables.masters_of.clone()),
+        _ => None,
+    }
+}
+
 /// Test hook: the fixture table owner with a read table of these rows'
 /// predicates only.
 #[cfg(test)]
@@ -413,6 +449,7 @@ pub(super) fn insert_test_tables(world: &mut World, traits: &[(i32, moly_layout:
             handle_of: HashMap::new(),
             put_type_of: HashMap::new(),
             traits_of: Arc::new(traits.iter().copied().collect()),
+            masters_of: Arc::new(HashMap::new()),
             cue_of: HashMap::new(),
         })),
         instance: Instance::NotCreated,

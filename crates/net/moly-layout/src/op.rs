@@ -33,6 +33,21 @@ impl Rot {
     pub fn degrees(self) -> u16 {
         self as u16
     }
+
+    /// The source direction of this quarter turn.
+    pub fn direction(self) -> moly_law::fixture::Direction {
+        match self {
+            Self::Deg0 => moly_law::fixture::Direction::Front,
+            Self::Deg90 => moly_law::fixture::Direction::Left,
+            Self::Deg180 => moly_law::fixture::Direction::Back,
+            Self::Deg270 => moly_law::fixture::Direction::Right,
+        }
+    }
+
+    /// The operation rotation of a served row's direction index.
+    pub fn from_row(rotation: u8) -> Option<Self> {
+        Self::from_degrees(u16::from(rotation) * 90)
+    }
 }
 
 /// The layer a piece occupies. Floor and rug are the two edited ground grids;

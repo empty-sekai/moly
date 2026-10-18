@@ -8,10 +8,19 @@
 
 use std::collections::{HashMap, HashSet};
 
-use moly_law::fixture::GridPosition;
+use moly_law::fixture::{GridPosition, Vector3Int};
 
 use crate::validate::Traits;
 
+/// A fixture master row the transaction needs to build a new piece: the
+/// bundle, its unrotated extent and the settable layout type.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FixtureMaster {
+    pub package: String,
+    pub grid_size: Vector3Int,
+    pub layout: u8,
+    pub traits: Traits,
+}
 /// A bundle's `stackEnables` / `AddUsingGrid` meta grids.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BundleMeta {
@@ -90,6 +99,8 @@ pub struct OwnedCount {
 pub struct Rules {
     /// The master rows' predicates by `mysekaiFixtureId`.
     pub traits: HashMap<i32, Traits>,
+    /// The full master rows a placement needs, by `mysekaiFixtureId`.
+    pub masters: HashMap<i32, FixtureMaster>,
     /// Bundle meta by the package name the row and layout row carry.
     pub bundles: HashMap<String, BundleMeta>,
     /// The edited site layout's unavailable zones; `None` while the zone
