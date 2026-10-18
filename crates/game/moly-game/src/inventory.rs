@@ -385,6 +385,7 @@ pub(crate) fn load(
     let live = stage.is_none();
     if live {
         catalog::request(&mut data);
+        commands.init_resource::<Catalog>();
     } else {
         commands.insert_resource(Catalog::answered());
         commands.insert_resource(catalog::Filters::default());
