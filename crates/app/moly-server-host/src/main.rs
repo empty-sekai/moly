@@ -11,24 +11,19 @@
 //! variables), so both processes read the same masters. `MOLY_SERVER_DATA`
 //! names the directory the users' documents are kept in; without it the
 //! server keeps them in memory and a run starts fresh.
+//!
+//! The assembly itself lives in the crate's library, so a host can run the
+//! same server inside its own process; this binary keeps the environment
+//! handling, the ready line and the exit codes.
 
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::PathBuf;
-use std::time::Duration;
 
-use bevy::app::ScheduleRunnerPlugin;
-use bevy::asset::AssetPlugin;
-use bevy::log::LogPlugin;
-use bevy::prelude::*;
-use bevy_remote::http::RemoteHttpPlugin;
-
-use moly_server::{ListenAddress, Store};
+use moly_server::Store;
+use moly_server_host::Options;
 
 const DEFAULT_ADDRESS: &str = "127.0.0.1:15800";
 const DEFAULT_CONTROL_PORT: u16 = 15801;
-
-/// The server's frame rate: its clock checks and replies run once a frame.
-const FRAME: Duration = Duration::from_millis(10);
 
 fn main() {
     if std::env::args()
@@ -81,24 +76,18 @@ fn main() {
         Err(std::env::VarError::NotPresent) => Store::memory(),
         Err(std::env::VarError::NotUnicode(_)) => fail("MOLY_SERVER_DATA is not valid text"),
     };
-    let mut app = App::new();
-    // The asset root's sources are registered before `AssetPlugin` builds the
-    // server; the remote bases are admitted once the sources exist.
-    moly_assets::install(&mut app, source);
-    app.add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(FRAME)))
-        .add_plugins(AssetPlugin::default())
-        .add_plugins(LogPlugin::default());
-    moly_assets::json::register(&mut app);
-    moly_assets::remote::admit(&mut app, remote);
-    app.add_plugins(moly_server::remote_plugin())
-        .add_plugins(RemoteHttpPlugin::default().with_address(Ipv4Addr::LOCALHOST).with_port(control_port));
-    app.insert_resource(store).add_plugins((
-        moly_server::MasterLoadPlugin,
-        moly_server::ServerPlugin,
-    ));
-    let bound = moly_server::ws::listen(&address, moly_server::hub(&app))
-        .unwrap_or_else(|error| fail(&format!("cannot listen on {address}: {error}")));
-    app.insert_resource(ListenAddress(bound));
+    let options = Options {
+        address,
+        control_port: Some(control_port),
+        asset_source: source,
+        remote,
+        store,
+        log: true,
+    };
+    let (mut app, bound) = match moly_server_host::build(options) {
+        Ok(built) => built,
+        Err(message) => fail(&message),
+    };
     println!("moly-server ready: control http://{control_address}, listening on ws://{bound}");
     app.run();
 }

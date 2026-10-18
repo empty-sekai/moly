@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "moly_server_host"
+path = "src/lib.rs"
+
 [[bin]]
 name = "moly-server"
 path = "src/main.rs"
