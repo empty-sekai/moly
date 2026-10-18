@@ -889,7 +889,7 @@ pub(crate) struct HudBalloon {
 #[allow(clippy::type_complexity)]
 pub(crate) fn hud_event(
     mut commands: Commands,
-    library: Res<crate::content_library::ContentLibrary>,
+    library: Res<crate::field_modes::LibraryMode>,
     art: Option<Res<BalloonArt>>,
     mut events: MessageReader<crate::npc_state::TweetHudEvent>,
     mut balloons: Query<(Entity, &BalloonAnchor, &Elapsed, &mut HudBalloon)>,
@@ -2009,7 +2009,7 @@ fn nine_slice_pieces(bg_w: f32, bg_h: f32) -> Vec<(Rect, Vec2, Vec2)> {
 /// animation 节点（非根）。
 pub(crate) fn tick(
     mut commands: Commands,
-    library: Res<crate::content_library::ContentLibrary>,
+    library: Res<crate::field_modes::LibraryMode>,
     time: Res<Time>,
     mut balloons: Query<(
         Entity,

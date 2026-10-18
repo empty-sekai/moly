@@ -7,12 +7,12 @@ use moly_law::action_button::{
 };
 
 use crate::{
-    menu_shell::ShellDialogState,
     npc::{CharacterUnitId, NpcAction, NpcActions},
     player::PlayerControlled,
     player_state::{PlayerActionState, PlayerAvatarStates},
     player_talk::PlayerTalkSession,
     talk::{ActiveTalk, TalkHold},
+    ui_inputs::ShellDialogState,
     ui_layers::UiLayerStack,
 };
 
@@ -47,7 +47,7 @@ pub(crate) fn player_box(player: &Transform) -> CollisionBox2D {
         &mut bounds,
         source_point(player.translation),
         [-forward.x, forward.y, forward.z],
-        crate::site_move::camera::source_yaw(player.rotation),
+        crate::fixture::source_yaw(player.rotation),
     );
     bounds
 }
@@ -122,13 +122,13 @@ pub(crate) struct InteractionEligibility<'w, 's> {
     layers: Res<'w, UiLayerStack>,
     dialogs: Res<'w, ShellDialogState>,
     player_state: Res<'w, PlayerAvatarStates>,
-    edits: Res<'w, crate::fixture_edit::EditSessionActive>,
-    overlays: crate::game_settings::OverlayPanels<'w>,
+    edits: Res<'w, crate::field_modes::EditSessionActive>,
+    overlays: crate::ui_inputs::OverlayPanels<'w>,
     player_talk: Option<Res<'w, PlayerTalkSession>>,
     pair_talk: Option<Res<'w, ActiveTalk>>,
-    entry: Option<Res<'w, crate::entry::EntrySequence>>,
-    delivery: Option<Res<'w, crate::delivery::DeliveryGameState>>,
-    holds: crate::game_state::PerformanceHolds<'w>,
+    entry: Option<Res<'w, crate::field_modes::EntryGates>>,
+    delivery: Option<Res<'w, crate::field_modes::DeliveryGameState>>,
+    holds: crate::field_modes::PerformanceHolds<'w>,
     screens: Option<Res<'w, crate::ui_layers::ScreenManager>>,
 }
 
@@ -143,7 +143,7 @@ impl InteractionEligibility<'_, '_> {
     }
 
     pub(crate) fn available(&self) -> bool {
-        crate::entry::control_open(self.entry.as_deref())
+        self.entry.as_deref().is_none_or(crate::field_modes::EntryGates::control_open)
             && self.layers.on_field()
             && !self.overlays.block_world_input()
             && !self.edits.is_active()
@@ -158,7 +158,7 @@ impl InteractionEligibility<'_, '_> {
     /// own state. A conversation between NPCs does not close it; one with
     /// the player does.
     pub(crate) fn field_input_open(&self) -> bool {
-        crate::entry::control_open(self.entry.as_deref())
+        self.entry.as_deref().is_none_or(crate::field_modes::EntryGates::control_open)
             && self.layers.on_field()
             && !self.overlays.block_world_input()
             && !self.edits.is_active()
@@ -195,7 +195,7 @@ impl InteractionEligibility<'_, '_> {
     /// Dialogs are not screens and leave it current.
     pub(crate) fn home_screen_current(&self) -> bool {
         // The home screen becomes current in the entry's OnFinishEnterAsync.
-        crate::entry::hud_open(self.entry.as_deref())
+        self.entry.as_deref().is_none_or(crate::field_modes::EntryGates::hud_open)
             && self.layers.on_field()
             && !self.edits.is_active()
             && !self.player_in_talk()
@@ -452,7 +452,7 @@ mod pose_sample {
             let forward = rotation * Vec3::Z;
             serde_json::json!({"nominalYaw":yaw,
                 "forward":[-forward.x,forward.y,forward.z],
-                "yaw":crate::site_move::camera::source_yaw(rotation)})
+                "yaw":crate::fixture::source_yaw(rotation)})
         }).collect();
         let mut house_offsets = serde_json::Map::new();
         for (name, direction) in [

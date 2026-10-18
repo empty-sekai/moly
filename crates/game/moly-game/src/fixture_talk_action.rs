@@ -358,7 +358,7 @@ fn prepare(world: &mut World, session: &mut Session) -> Result<(), (bool, String
                     Vec3::from(member.locate.start.position),
                     Vec3::from(member.locate.end.unwrap_or(member.locate.start).position),
                 ]).collect();
-                crate::content_library::stage_fixture_talk_observer(
+                crate::field_modes::stage_fixture_talk_observer(
                     world, session.talk, player, anchor, &occupied,
                 ).map_err(|reason| (false, reason))?;
             }

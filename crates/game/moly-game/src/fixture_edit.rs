@@ -1877,6 +1877,15 @@ fn advance_recovery(world: &mut World) {
     world.insert_resource(session);
 }
 
+/// Publishes whether the draft holds unsaved changes
+/// ([`EditSessionActive::unsaved_layout`]).
+fn publish_unsaved(session: Option<Res<EditSession>>, mut active: ResMut<EditSessionActive>) {
+    let unsaved = session.as_deref().is_some_and(has_unsaved_layout);
+    if active.unsaved_layout != unsaved {
+        active.unsaved_layout = unsaved;
+    }
+}
+
 fn publish_view(world: &mut World) {
     let (Some(session), Some(view)) = (
         world.get_resource::<EditSession>(),
@@ -2047,6 +2056,12 @@ impl Plugin for FixtureEditPlugin {
                     .chain()
                     .in_set(FixtureEditSystems::View)
                     .after(FixtureEditSystems::Commands),
+            )
+            .add_systems(
+                Update,
+                publish_unsaved
+                    .after(FixtureEditSystems::Commands)
+                    .before(crate::site::read_switch),
             )
             .add_systems(Update, read_save_answer.after(apply_commands))
             .add_systems(

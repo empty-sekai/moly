@@ -68,29 +68,7 @@ pub(crate) use moly_protocol::rows::{
     ColorfulPass, Gamedata, GateCharacter, ScheduleRow, Stamina,
 };
 
-static GAME_MODE: AtomicBool = AtomicBool::new(false);
-
-/// The page's game mode begins: every native instrument is off from here on.
-pub(crate) fn enter_game_mode() {
-    GAME_MODE.store(true, Ordering::Relaxed);
-}
-
-/// The environment variable of a native instrument. Game mode reads none:
-/// every instrument is off there, and the server document is the only input.
-pub(crate) fn instrument_env(name: &str) -> Option<String> {
-    if GAME_MODE.load(Ordering::Relaxed) {
-        return None;
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = name;
-        None
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        std::env::var(name).ok()
-    }
-}
+pub(crate) use moly_core::dev_tools::{enter_game_mode, instrument_env};
 
 /// The seed's text the game keeps client-side: the local document (the
 /// client-local lists) and the server document a page seed carries. A native

@@ -481,3 +481,54 @@ pub struct PhenomenonOption {
 /// exist; a bad request is only refused once.
 #[derive(Resource, Default)]
 pub struct PhenomenonCatalogue(pub Vec<PhenomenonOption>);
+
+/// The host input routes must consult this gate before processing scene input.
+/// The release guard also consumes the gesture that closes the modal.
+#[derive(Resource, Default)]
+pub(crate) struct SettingsPanel {
+    pub(crate) open: bool,
+    pub(crate) player_data: bool,
+    /// The last answer a render cache gave to the clear request, shown on the
+    /// resource-management line. The panel never removes an asset directly and
+    /// never reports RSS.
+    pub(crate) resource_status: String,
+    pub(crate) release_guard: u8,
+    pub(crate) status: String,
+}
+
+impl SettingsPanel {
+    pub(crate) fn close_after_import(&mut self) {
+        self.open = false;
+        self.release_guard = 2;
+    }
+
+    pub(crate) fn blocks_world_input(&self) -> bool {
+        self.open || self.release_guard != 0
+    }
+}
+
+/// The panels drawn over the field: the settings modal and the control
+/// panel. The host input routes consult them before the field's own input.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct OverlayPanels<'w> {
+    settings: Res<'w, SettingsPanel>,
+    claims: Option<Res<'w, crate::input_claims::InputClaims>>,
+}
+
+impl OverlayPanels<'_> {
+    /// A panel takes the field's input as a whole (a modal, or a drawer
+    /// covering the field).
+    pub(crate) fn block_world_input(&self) -> bool {
+        self.settings.blocks_world_input()
+            || self
+                .claims
+                .as_deref()
+                .is_some_and(|claims| claims.holds(crate::input_claims::CONTROL_PANEL))
+    }
+
+    /// As [`Self::block_world_input`], and also while the pointer is over
+    /// the control panel's drawer beside the field.
+    pub(crate) fn block_pointer(&self) -> bool {
+        self.block_world_input() || self.claims.as_deref().is_some_and(crate::input_claims::InputClaims::holds_pointer)
+    }
+}

@@ -73,6 +73,7 @@ use moly_assets::json::JsonAsset;
 use serde_json::Value;
 
 use super::{InstanceReady, PendingInstance};
+pub(crate) use crate::room_door_port::OpenWait;
 use crate::character_silhouette::{door_part_attribute, SourceStencilAttribute};
 use crate::site_expansion::law::{Masters, FLOOR_BUTTON_TABLES};
 use moly_assets::json::master::MasterData;
@@ -189,7 +190,13 @@ struct DoorPrefab {
 struct RoomDoorRefusals(Option<u64>);
 
 pub(crate) fn install(app: &mut App) {
-    app.init_resource::<RoomDoorRefusals>()
+    app.insert_resource(crate::room_door_port::RoomDoorPort {
+        inside_point,
+        open,
+        close,
+        current_clip_length,
+    })
+    .init_resource::<RoomDoorRefusals>()
         .add_systems(Startup, load_floor_release_masters)
         .add_systems(
             Update,
@@ -868,47 +875,9 @@ pub(crate) fn open(world: &mut World) {
     }
 }
 
-/// An awaited `OpenDoorAsync`, started on the frame of [`open`]: one
-/// `Yield`, then the length of the clip the door's animator is in on that
-/// frame (`GetCurrentAnimatorStateInfo(0).length`, read once), then
-/// `t += deltaTime` each frame until `t` reaches it. A room without a door
-/// animator, or a zero length, ends the wait on the frame after the call.
-/// The wait is the caller's own: a later `Play` on the door (another NPC's
-/// open, the player's move closing it) does not shorten or extend it.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct OpenWait {
-    started: u64,
-    length: Option<f32>,
-    t: f32,
-}
-
-impl OpenWait {
-    pub(crate) fn new(frame: u64) -> Self {
-        Self {
-            started: frame,
-            length: None,
-            t: 0.0,
-        }
-    }
-
-    /// One frame of the wait; true on the frame the await returns.
-    pub(crate) fn tick(&mut self, world: &World, frame: u64, dt: f32) -> bool {
-        if frame == self.started {
-            return false;
-        }
-        let length = *self.length.get_or_insert_with(|| current_clip_length(world));
-        if self.t < length {
-            self.t += dt;
-            false
-        } else {
-            true
-        }
-    }
-}
-
 /// The length of the clip the current room's door animator is in; 0 without
 /// a door animator or a clip played on it.
-fn current_clip_length(world: &World) -> f32 {
+pub(crate) fn current_clip_length(world: &World) -> f32 {
     let Some(door) = current(world) else {
         return 0.0;
     };

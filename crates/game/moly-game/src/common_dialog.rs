@@ -362,7 +362,7 @@ pub(crate) fn place(
         }
         let Some(secs) = shown
             .instrument
-            .and_then(crate::userdata::instrument_env)
+            .and_then(moly_core::dev_tools::instrument_env)
             .and_then(|raw| raw.trim().parse::<f32>().ok())
         else {
             continue;

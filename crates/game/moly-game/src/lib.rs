@@ -147,6 +147,7 @@ mod plain_background;
 mod rank_table;
 mod render;
 mod room_appearance;
+mod room_door_port;
 mod room_shell;
 pub mod schedule;
 pub mod system_access;

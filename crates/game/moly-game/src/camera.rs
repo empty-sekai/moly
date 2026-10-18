@@ -983,8 +983,8 @@ fn ratio01(value: f32, from: f32, to: f32) -> f32 {
 /// 常规路径不走它。
 #[derive(SystemParam)]
 pub struct FpsTransitionCtx<'w, 's> {
-    dialogs: Res<'w, crate::menu_shell::ShellDialogState>,
-    library: Res<'w, crate::content_library::ContentLibrary>,
+    dialogs: Res<'w, crate::ui_inputs::ShellDialogState>,
+    library: Res<'w, crate::field_modes::LibraryMode>,
     layers: Res<'w, crate::ui_layers::UiLayerStack>,
     avatar: Res<'w, crate::player_state::PlayerAvatarStates>,
     talk_camera: Option<Res<'w, crate::talk_camera::TalkCamera>>,

@@ -1936,7 +1936,7 @@ pub(crate) fn read_switch(
     mut exit: MessageWriter<AppExit>,
     // Paired for the same reason as `sites` above.
     (edit, site_move): (
-        Option<Res<crate::fixture_edit::EditSession>>,
+        Res<crate::field_modes::EditSessionActive>,
         Option<Res<crate::field_modes::SiteMoveActive>>,
     ),
     layouts: Res<crate::fixture::layouts::SiteFixtureLayouts>,
@@ -1947,7 +1947,7 @@ pub(crate) fn read_switch(
     ),
     // Paired: this system is at the parameter-count limit.
     (library, dev): (
-        Res<crate::content_library::ContentLibrary>,
+        Res<crate::field_modes::LibraryMode>,
         Option<Res<crate::dev_tools::DevTools>>,
     ),
 ) {
@@ -2002,10 +2002,7 @@ pub(crate) fn read_switch(
         warn!("[site] cannot switch to unknown/not-yet-loaded site {site}");
         return;
     }
-    if edit
-        .as_deref()
-        .is_some_and(crate::fixture_edit::has_unsaved_layout)
-    {
+    if edit.unsaved_layout {
         warn!("[site] layout has unsaved changes; save this map before switching");
         return;
     }

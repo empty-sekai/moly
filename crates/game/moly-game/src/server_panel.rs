@@ -1332,13 +1332,6 @@ impl Plugin for ServerPanelPlugin {
                     .before(crate::npc::sync_rest_lifecycle)
                     .before(crate::npc_state::NpcPresenterSet),
             )
-            // The tap-ladder probe writes its request before the frame's
-            // consumer reads the requests (smoke hook; off without its
-            // environment variable).
-            .add_systems(
-                Update,
-                crate::talk_probe::probe_stack_taps.before(crate::player_talk::consume_trigger),
-            )
             .add_systems(
                 Update,
                 (

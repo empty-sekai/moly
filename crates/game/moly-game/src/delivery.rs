@@ -116,10 +116,7 @@ pub struct DeliveryProgress {
 
 pub(crate) use crate::field_modes::DeliveryHold;
 
-/// GameState Delivery (12): set by the pre-action of a visit's first press,
-/// gone with the site.
-#[derive(Resource, Debug)]
-pub struct DeliveryGameState;
+pub(crate) use crate::field_modes::DeliveryGameState;
 
 /// One drop's model (`MysekaiDropItemModel`: resource type 41, the party's
 /// reward material, its rarity, the site, quantity 1).

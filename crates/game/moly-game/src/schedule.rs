@@ -21,6 +21,12 @@ use bevy::transform::TransformSystems;
 use std::time::Duration;
 
 pub fn install(app: &mut App) {
+    // The tap-ladder probe writes its request before the frame's consumer
+    // reads the requests (smoke hook; off without its environment variable).
+    app.add_systems(
+        Update,
+        crate::talk_probe::probe_stack_taps.before(crate::player_talk::consume_trigger),
+    );
     content_library::install(app);
     app.add_systems(Startup, content_library::load_capabilities);
     app.add_systems(
@@ -33,6 +39,12 @@ pub fn install(app: &mut App) {
     app.add_systems(
         Update,
         content_library::bridge::publish.after(content_library::refresh),
+    );
+    app.add_systems(
+        PreUpdate,
+        content_library::publish_mode
+            .after(content_library::bridge::gate_input)
+            .after(content_library::input),
     );
     app.add_systems(
         Update,

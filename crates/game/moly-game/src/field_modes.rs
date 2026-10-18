@@ -7,6 +7,9 @@ use bevy::prelude::*;
 #[derive(Resource, Default)]
 pub(crate) struct EditSessionActive {
     pub(crate) active: bool,
+    /// The editor holds changes the player has not saved. The editor
+    /// publishes it after its commands and before the site switch reads it.
+    pub(crate) unsaved_layout: bool,
 }
 
 impl EditSessionActive {
@@ -186,5 +189,102 @@ impl EntryGates {
     /// Site-change input is enabled.
     pub(crate) fn site_input_open(&self) -> bool {
         self.site_input_open
+    }
+}
+
+/// The content library's gates on the field. The library publishes them in
+/// `PreUpdate`, after its input systems, so the field's systems see this
+/// frame's input; a change the library's own `Update` systems make reaches
+/// them on the next frame.
+#[derive(Resource, Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LibraryMode {
+    pub(crate) reads_availability: bool,
+    pub(crate) blocks_world_input: bool,
+    pub(crate) owns_scene: bool,
+    pub(crate) playback_camera: bool,
+    /// The ticket of the talk preview the library owns.
+    pub(crate) talk_preview: Option<u64>,
+}
+
+impl LibraryMode {
+    /// The library reads the furniture availability cache.
+    pub(crate) fn reads_availability(&self) -> bool {
+        self.reads_availability
+    }
+
+    /// The library takes the field's world input.
+    pub(crate) fn blocks_world_input(&self) -> bool {
+        self.blocks_world_input
+    }
+
+    /// The library owns the scene until its rollback completes.
+    pub(crate) fn owns_scene(&self) -> bool {
+        self.owns_scene
+    }
+
+    /// The camera may inspect the library's playback.
+    pub(crate) fn playback_camera_active(&self) -> bool {
+        self.playback_camera
+    }
+
+    /// The library owns the talk preview of `ticket`.
+    pub(crate) fn owns_talk_preview(&self, ticket: u64) -> bool {
+        self.talk_preview == Some(ticket)
+    }
+}
+
+/// GameState Delivery (12): set by the pre-action of a visit's first press,
+/// gone with the site.
+#[derive(Resource, Debug)]
+pub(crate) struct DeliveryGameState;
+
+/// A performance's hold on the field UI: `SetLayerCanvasGroup(UI,
+/// interactable false)` and `RemoveCollisionSensorEvent`, until its
+/// `AddCollisionSensorEvent` and `SetLayerCanvasGroup(UI, interactable
+/// true)`. The name is the performance that holds it.
+#[derive(Resource, Clone, Copy, Debug)]
+pub(crate) struct UiHold(pub(crate) &'static str);
+
+/// What the field's input readers see of the performances.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct PerformanceHolds<'w> {
+    held: Option<Res<'w, HeldGameState>>,
+    ui: Option<Res<'w, UiHold>>,
+}
+
+impl PerformanceHolds<'_> {
+    /// `ObjectCollisionManager.IsCanUpdate` holds in Normal, Harvest and
+    /// Sketch only, so a held CutScene or LevelUpMyRoomSite state stops the
+    /// collision scan; a removed collision sensor event stops it as well.
+    pub(crate) fn collision_stopped(&self) -> bool {
+        self.held.is_some() || self.ui.is_some()
+    }
+
+    /// The UI canvas group is not interactable.
+    pub(crate) fn ui_blocked(&self) -> bool {
+        self.ui.is_some()
+    }
+}
+
+/// Stages the content library's observer for an independent fixture talk:
+/// `(world, talk id, player, final anchor, planned cast positions)`, true when
+/// the observer moved. The library fills it; without the library nothing is
+/// staged.
+#[derive(Resource, Clone, Copy)]
+pub(crate) struct FixtureTalkObserverPort(
+    pub(crate) fn(&mut World, i32, Entity, Vec3, &[Vec3]) -> Result<bool, String>,
+);
+
+/// Runs [`FixtureTalkObserverPort`]; `Ok(false)` without one.
+pub(crate) fn stage_fixture_talk_observer(
+    world: &mut World,
+    talk_id: i32,
+    player: Entity,
+    final_anchor: Vec3,
+    planned_cast_positions: &[Vec3],
+) -> Result<bool, String> {
+    match world.get_resource::<FixtureTalkObserverPort>().copied() {
+        Some(port) => (port.0)(world, talk_id, player, final_anchor, planned_cast_positions),
+        None => Ok(false),
     }
 }

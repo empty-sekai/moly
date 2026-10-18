@@ -229,7 +229,7 @@ fn enter_learn_camera(world: &mut World) {
         return;
     };
     let root = global.translation();
-    let yaw = crate::site_move::camera::source_yaw(local.rotation);
+    let yaw = crate::fixture::source_yaw(local.rotation);
     let fov_now = camera_fov(world);
     let tween = world.get_resource_mut::<FieldCameraModel>().map(|mut model| {
         let fov_now = fov_now.unwrap_or(model.fov);

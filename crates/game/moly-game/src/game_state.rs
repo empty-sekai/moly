@@ -85,33 +85,7 @@ impl GameStateManager {
     }
 }
 
-/// A performance's hold on the field UI: `SetLayerCanvasGroup(UI,
-/// interactable false)` and `RemoveCollisionSensorEvent`, until its
-/// `AddCollisionSensorEvent` and `SetLayerCanvasGroup(UI, interactable
-/// true)`. The name is the performance that holds it.
-#[derive(Resource, Clone, Copy, Debug)]
-pub(crate) struct UiHold(pub(crate) &'static str);
-
-/// What the field's input readers see of the performances.
-#[derive(SystemParam)]
-pub(crate) struct PerformanceHolds<'w> {
-    held: Option<Res<'w, HeldGameState>>,
-    ui: Option<Res<'w, UiHold>>,
-}
-
-impl PerformanceHolds<'_> {
-    /// `ObjectCollisionManager.IsCanUpdate` holds in Normal, Harvest and
-    /// Sketch only, so a held CutScene or LevelUpMyRoomSite state stops the
-    /// collision scan; a removed collision sensor event stops it as well.
-    pub(crate) fn collision_stopped(&self) -> bool {
-        self.held.is_some() || self.ui.is_some()
-    }
-
-    /// The UI canvas group is not interactable.
-    pub(crate) fn ui_blocked(&self) -> bool {
-        self.ui.is_some()
-    }
-}
+pub(crate) use crate::field_modes::{PerformanceHolds, UiHold};
 
 /// `GameStateManager.ChangeState(state)` by one of the performances.
 pub(crate) fn enter(world: &mut World, state: GameStateType, caller: &str) {

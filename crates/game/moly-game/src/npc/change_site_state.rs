@@ -134,7 +134,7 @@ enum Stage {
     /// FloorEnter's awaited `OpenDoorAsync`: the room door's open clip runs
     /// (its length in delta time); the show and the entry clip follow.
     DoorOpenWait {
-        wait: crate::site_move::room_door::OpenWait,
+        wait: crate::room_door_port::OpenWait,
     },
     /// The entry clip plays; home shows the NPC one frame after it starts.
     EntryClip {
@@ -462,7 +462,7 @@ fn door_point(world: &mut World, site: Option<i32>) -> Option<(Vec3, Vec3)> {
             crate::fixture_gimmick::house_door::HouseLookup::Found(binding) => binding.inside_door,
             _ => None,
         },
-        1..=3 => crate::site_move::room_door::inside_point(world),
+        1..=3 => crate::room_door_port::inside_point(world),
         _ => None,
     }?;
     let transform = world.get::<GlobalTransform>(point)?;
@@ -477,7 +477,7 @@ fn entry_point(world: &mut World, target: i32) -> Option<(Vec3, Vec3)> {
             crate::fixture_gimmick::house_door::HouseLookup::Found(binding) => binding.outside_door,
             _ => None,
         },
-        _ => crate::site_move::room_door::inside_point(world),
+        _ => crate::room_door_port::inside_point(world),
     }?;
     let transform = world.get::<GlobalTransform>(point)?;
     Some((transform.translation(), transform.rotation() * Vec3::Z))
@@ -789,7 +789,7 @@ fn step(world: &mut World, actor: Entity, frame: u32) {
                 set_stage(world, actor, Stage::SetupDone, frame);
                 return;
             }
-            crate::site_move::room_door::close(world);
+            crate::room_door_port::close(world);
             // OnEntrySite: ShowTweet, which first turns to the player.
             match begin_entry_tweet(world, actor, unit, frame) {
                 None => on_entry_site_end(world, actor, unit, frame),
@@ -948,8 +948,8 @@ fn floor_door(world: &mut World, actor: Entity, unit: u32, frame: u32, on_site: 
     } else {
         info!("[npc-change-site] unit={unit} frame={frame} OpenDoorAsync awaited (off the player's site: no sounds)");
     }
-    crate::site_move::room_door::open(world);
-    let wait = crate::site_move::room_door::OpenWait::new(u64::from(frame));
+    crate::room_door_port::open(world);
+    let wait = crate::room_door_port::OpenWait::new(u64::from(frame));
     set_stage(world, actor, Stage::DoorOpenWait { wait }, frame);
 }
 

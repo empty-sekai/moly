@@ -510,8 +510,8 @@ pub(crate) fn refresh_availability(world: &mut World) {
         return;
     };
     if !world
-        .get_resource::<crate::content_library::ContentLibrary>()
-        .is_some_and(|library| library.reads_availability())
+        .get_resource::<crate::field_modes::LibraryMode>()
+        .is_some_and(crate::field_modes::LibraryMode::reads_availability)
     {
         runtime.availability.clear();
         runtime.availability_sweep = AvailabilitySweep::default();

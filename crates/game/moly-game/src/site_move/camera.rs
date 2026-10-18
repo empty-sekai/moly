@@ -108,15 +108,7 @@ pub(crate) fn step(
     }
 }
 
-/// Unity's euler Y of the avatar root, from the product rotation: assets are
-/// reflected on x, so a product yaw `a` about +Y is the source yaw `-a`.
-/// `MakePositive` and the explicit wrap put it in [0, 360).
-pub(crate) fn source_yaw(rotation: Quat) -> f32 {
-    let forward = rotation * Vec3::Z;
-    let product = forward.x.atan2(forward.z).to_degrees();
-    let yaw = -product;
-    (yaw - (yaw / 360.0).floor() * 360.0).clamp(0.0, 360.0)
-}
+pub(crate) use crate::fixture::source_yaw;
 
 /// `FieldCamera.ChangeState(PreSiteMoveAction)` from Normal: Normal's
 /// `OnExit` writes its transfer snapshot for the site being left; the

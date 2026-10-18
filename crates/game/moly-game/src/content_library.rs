@@ -664,10 +664,35 @@ pub(crate) fn install(app: &mut App) {
     input::install(app);
     capabilities::install(app);
     app.init_resource::<ContentLibrary>()
+        .init_resource::<crate::field_modes::LibraryMode>()
+        .insert_resource(crate::field_modes::FixtureTalkObserverPort(
+            stage_fixture_talk_observer,
+        ))
         .init_resource::<LibraryCatalog>()
         .init_resource::<LibraryContext>()
         .add_message::<TalkCancelRequest>();
 }
+/// Publishes the library's gates on the field ([`crate::field_modes::LibraryMode`]).
+pub(crate) fn publish_mode(
+    library: Res<ContentLibrary>,
+    mut mode: ResMut<crate::field_modes::LibraryMode>,
+) {
+    let next = crate::field_modes::LibraryMode {
+        reads_availability: library.reads_availability(),
+        blocks_world_input: library.blocks_world_input(),
+        owns_scene: library.owns_scene(),
+        playback_camera: library.playback_camera_active(),
+        talk_preview: library
+            .active
+            .as_ref()
+            .filter(|active| !library.stopping && active.choice.preview)
+            .map(|active| active.choice.ticket),
+    };
+    if *mode != next {
+        *mode = next;
+    }
+}
+
 pub(crate) fn load(mut commands: Commands, server: Res<AssetServer>) {
     commands.insert_resource(LibraryAssets {
         characters: server.load::<JsonAsset>(AssetPath::from(CHARACTERS.to_owned())),

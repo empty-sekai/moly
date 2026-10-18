@@ -76,7 +76,7 @@ pub(crate) fn retain_navigation(world: &mut World) {
             crate::fixture_gimmick::house_door::HouseLookup::Found(house) => house.inside_door,
             _ => None,
         },
-        Some(1..=3) => crate::site_move::room_door::inside_point(world),
+        Some(1..=3) => crate::room_door_port::inside_point(world),
         _ => None,
     };
     let door = point.and_then(|point| world.get::<GlobalTransform>(point))

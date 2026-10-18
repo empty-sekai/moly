@@ -1184,8 +1184,8 @@ fn switch_phenomenon(
     mut run: ResMut<WeatherRun>,
     site: Option<Res<SiteActive>>,
     mut requests: MessageReader<WeatherRequest>,
-    overlays: crate::game_settings::OverlayPanels,
-    library: Res<crate::content_library::ContentLibrary>,
+    overlays: crate::ui_inputs::OverlayPanels,
+    library: Res<crate::field_modes::LibraryMode>,
     // 自发光账目（换装完成的收账件；Option——换装未完成时缺件，此切换
     // 无行可打）。
     emission: Option<Res<EmissionAccount>>,
@@ -1199,7 +1199,8 @@ fn switch_phenomenon(
     // 按键只改面板日程（下一档），面板下一帧写出目标档请求。
     let requested = requests.read().last().map(|request| request.0);
     let pressed = dev.is_some()
-        && crate::game_settings::scene_input_enabled(overlays, library)
+        && !overlays.block_pointer()
+        && !library.blocks_world_input()
         && keys.just_pressed(KeyCode::KeyC);
     if pressed {
         schedule_edits.write(crate::server_panel::PhenomenaScheduleEdit::Next);

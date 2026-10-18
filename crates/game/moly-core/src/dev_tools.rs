@@ -60,3 +60,27 @@ pub fn instrument_window(name: &str) -> Option<(f32, f32)> {
 pub fn instrument_open(name: &str, now: f32) -> bool {
     instrument_window(name).is_some_and(|(from, until)| from <= now && now < until)
 }
+
+static GAME_MODE: AtomicBool = AtomicBool::new(false);
+
+/// The page's game mode begins: every native instrument is off from here on.
+pub fn enter_game_mode() {
+    GAME_MODE.store(true, Ordering::Relaxed);
+}
+
+/// The environment variable of a native instrument. Game mode reads none:
+/// every instrument is off there, and the server document is the only input.
+pub fn instrument_env(name: &str) -> Option<String> {
+    if GAME_MODE.load(Ordering::Relaxed) {
+        return None;
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = name;
+        None
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::env::var(name).ok()
+    }
+}
