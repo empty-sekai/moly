@@ -33,9 +33,24 @@ MYSEKAI的还原项目，使用 Rust 与 [Bevy](https://bevyengine.org/) 构建�
 
 ## 本地运行
 
-安装稳定版 Rust 和 Node.js 22，将 `MOLY_ASSET_ROOT` 指向已提取的资源目录，
-运行 `cargo run --release -p moly-app`。构建默认写入仓库的 `target/`；需要共享缓存时，
-自行设置 `CARGO_TARGET_DIR`，增量编译可通过 `CARGO_INCREMENTAL` 配置。
+安装稳定版 Rust 和 Node.js 22，将 `MOLY_ASSET_ROOT` 指向已提取的资源目录。
+原生游戏由两个进程组成：服务端 `moly-server`（crate `moly-server-host`）保存玩家文档并应答
+游戏的请求，游戏 `moly-app` 通过 WebSocket 连接它。先启动服务端，再启动游戏：
+
+```sh
+cargo run --release -p moly-server-host
+cargo run --release -p moly-app
+```
+
+服务端默认监听 `127.0.0.1:15800`（`MOLY_SERVER_ADDR` 可改），控制端口默认 `127.0.0.1:15801`
+（`MOLY_SERVER_CONTROL_PORT`），就绪时打印一行地址；端口被占用时以状态 1 退出。
+`MOLY_SERVER_DATA` 指定玩家文档的保存目录，不设置时文档只在内存中，每次启动从头开始。
+服务端与游戏读取同样的资源根与主表变量，两者读到的主表一致。游戏按 `MOLY_SERVER_URL`
+（`ws://` 或 `wss://` 地址，缺省 `ws://127.0.0.1:15800`）连接服务端，连接不上时给出具名的提示，
+不会退回进程内的替代实现。启动器与 MCP 服务器会先启动服务端、取得它实际绑定的地址，再启动游戏。
+
+构建默认写入仓库的 `target/`；需要共享缓存时，自行设置 `CARGO_TARGET_DIR`，
+增量编译可通过 `CARGO_INCREMENTAL` 配置。
 
 原生程序默认运行与网页相同的游戏：从家园进入，家园等级随服务端文档中的等级，
 不读取其他环境开关。设置、服务端文档和本地列表分别保存在设置文件
@@ -62,6 +77,8 @@ WebGPU 不可用时会选择 WebGL2；启动失败页可重新加载，或用 `?
 每次重试都会重新加载页面。浏览器同时只允许一个页面写入存档，其余页面可浏览；
 关闭可写页面后，重新加载其他页面可申请写入权限。不支持 Web Locks 的环境保持只读。
 
+浏览器版目前没有服务端传输：需要服务端的操作会提示并拒绝。
+
 开发服务器只监听回环地址。资源目录应可信且只读，目录内链接的实际目标必须仍在同一挂载根内。
 分包模式（`?packs=1`）限制目录/清单为 16 MiB、单 blob 为 128 MiB、单个解码资产为
 256 MiB（分包载荷），解压大小最多为 blob 大小的 256 倍加 64 KiB。最多同时读取 8 份资源，传输与解码
@@ -70,6 +87,22 @@ WebGPU 不可用时会选择 WebGL2；启动失败页可重新加载，或用 `?
 暂时的预算不足会按请求顺序等待，取消读取会释放排队和已占用的预算；单个请求超过上限时
 直接拒绝。identity 数据只预留传输缓冲，gzip 同时预留传输与解码缓冲。分包读取器按顺序
 消费，读完或丢弃时释放读取预算；需要 seek 的自定义加载器可使用 Bevy 的 VecReader 回退。
+
+## 主表与区服
+
+主表（master）按表名从远端读取：先读 [Team-Haruki](https://github.com/Team-Haruki) 的各区服
+主表仓库（`haruki-sekai-master`、`haruki-sekai-sc-master`、`haruki-sekai-tc-master`、
+`haruki-sekai-kr-master`、`haruki-sekai-en-master`），再依次读镜像。`MOLY_MASTER_HARUKI_BASE`
+可替换第一个来源，取值是含 `{repo}` 占位的 HTTPS 模板，例如
+`https://raw.githubusercontent.com/Team-Haruki/{repo}/`；`MOLY_MASTER_BASE` 与
+`MOLY_MASTER_MIRROR_BASE` 替换其后的两个来源。
+
+游戏使用的每张表都是合并表：日服的全部行在前、顺序不变，其后是每个已启用的其他区服里
+日服没有的主键所在的行，这些行带有字段 `"moly:region"` 标明来源区服。主键默认为 `id`，
+少数表使用组合主键（如 `resourceBoxes` 为 `resourceBoxPurpose` 与 `id`）；单对象表只取日服。
+两个其他区服加入同一主键时，该表整表拒绝并写明表名、主键与区服。某一行缺少主键，或其他区服的
+表读取失败时，该表只用日服的行，并按表名报告原因。
+当前启用的区服只有日服；其他区服在资源库提供其独占行所引用的资源后加入。
 
 ## 玩家数据导入
 
@@ -122,6 +155,19 @@ Windows 系统盘，则改用剩余空间最大的其他固定磁盘根下的 `m
 不经启动器直接运行 `moly-app` 且未设置 `MOLY_ASSET_ROOT` 时，游戏读取启动器资源目录中
 已安装的版本：`launcher.json` 选中的版本，没有选中时取最近安装的版本。
 
+## Android
+
+`android/` 是 Android 工程。游戏与服务端编进同一个原生库，服务端在同一进程内的线程上运行；
+首次启动时从公开资源库把资源下载到应用的私有缓存。原生库由 `cargo ndk` 构建（crate
+`moly-android`，目标 `arm64-v8a`），再由 Gradle 打包 APK：
+
+```sh
+cargo ndk -t arm64-v8a -o android/app/src/main/jniLibs build -p moly-android --release
+cd android && ./gradlew :app:assembleRelease
+```
+
+所需的 SDK、NDK、JDK 版本与日志查看方式见 [android/README.md](android/README.md)。
+
 ## 更新日志
 
 每个版本的改动见 [CHANGELOG.md](CHANGELOG.md)，由 [git-cliff](https://git-cliff.org/) 按
@@ -160,10 +206,25 @@ Linux 与 macOS 程序只编译并核对版本，不附加。Release 说明是 g
 | `crates/base/moly-store` | 本地资源库：数据目录、CDN 发布清单、资源下载与校验、安装记录 |
 | `crates/engine/moly-assets` | 资源目录、资源包与数据加载 |
 | `crates/engine/moly-perf` | 逐帧性能计数 |
-| `crates/game/moly-game` | 场景、交互、UI 与渲染 |
+| `crates/game/moly-core` | 游戏各层共用的类型、标记与系统排序 |
+| `crates/game/moly-render` | 渲染：材质、着色器与绘制 |
+| `crates/game/moly-audio` | 背景音乐与音效 |
+| `crates/game/moly-masters` | 主表读取与类型化 |
+| `crates/game/moly-world` | 场地、家具、步行面与角色行为 |
+| `crates/game/moly-ui` | 预制体界面、界面管理与通用对话框 |
+| `crates/game/moly-features` | 采集、制作、配送、转换、任务等玩法与界面 |
+| `crates/game/moly-devtools` | 控制端口、导演脚本与开发面板 |
+| `crates/game/moly-game` | 把以上各层组装成游戏 |
+| `crates/net/moly-protocol` | 游戏与服务端之间的请求、应答与推送类型 |
+| `crates/net/moly-link` | 游戏一侧的服务端连接 |
+| `crates/net/moly-layout` | 家具布局文档 |
+| `crates/server/moly-server` | 服务端：玩家文档、规则与请求处理 |
 | `crates/app/moly-app` | 游戏程序：原生与浏览器入口 |
-| `crates/app/moly-launcher` | 启动器：下载资源、设置、启动游戏（Tauri，页面在 `ui/`） |
+| `crates/app/moly-server-host` | 服务端程序 `moly-server` |
+| `crates/app/moly-launcher` | 启动器：下载资源、设置、启动服务端与游戏（Tauri，页面在 `ui/`） |
+| `crates/app/moly-android` | Android 原生库：游戏与进程内服务端 |
 | `crates/vendor/cpal` | 带一处网页音频修正的 CPAL |
+| `android` | Android 工程（Gradle） |
 | `web` | 浏览器页面与构建工具 |
 | `tools` | 仓库边界与渲染顺序检查 |
 | `tools/mcp` | MCP 服务器，启动并驱动原生与浏览器实例 |
