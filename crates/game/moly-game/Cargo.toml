@@ -6,6 +6,12 @@ license.workspace = true
 
 [dependencies]
 moly-core = { path = "../moly-core" }
+moly-render = { path = "../moly-render" }
+moly-audio = { path = "../moly-audio" }
+moly-ui = { path = "../moly-ui" }
+moly-world = { path = "../moly-world" }
+moly-features = { path = "../moly-features" }
+moly-devtools = { path = "../moly-devtools" }
 moly-protocol = { path = "../../net/moly-protocol" }
 moly-link = { path = "../../net/moly-link" }
 moly-layout = { path = "../../net/moly-layout" }
@@ -67,5 +73,12 @@ wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = ["Window", "Storage", "Location", "UrlSearchParams", "Navigator", "Clipboard", "File", "Blob", "FileList", "Document", "HtmlInputElement", "HtmlElement", "Element", "Node", "Event", "EventTarget", "AbortController", "AbortSignal", "ReadableStream", "ReadableStreamDefaultReader", "Request", "RequestInit", "RequestRedirect", "Response", "Headers", "ResizeObserver", "DragEvent", "DataTransfer"] }
 
 [dev-dependencies]
+moly-core = { path = "../moly-core", features = ["test-support"] }
+moly-render = { path = "../moly-render", features = ["test-support"] }
+moly-audio = { path = "../moly-audio", features = ["test-support"] }
+moly-ui = { path = "../moly-ui", features = ["test-support"] }
+moly-world = { path = "../moly-world", features = ["test-support"] }
+moly-features = { path = "../moly-features", features = ["test-support"] }
+moly-devtools = { path = "../moly-devtools", features = ["test-support"] }
 # Compile the actual depth-sampling helper to GLSL ES before a WASM rebuild.
 naga = { version = "27", features = ["wgsl-in", "glsl-out"] }

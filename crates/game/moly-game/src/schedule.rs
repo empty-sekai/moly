@@ -1285,6 +1285,8 @@ pub fn install(app: &mut App) {
     // taps; its own taps keep the dialog slot's order; it draws after the
     // shell so its window is not moved by a shell slide.
     weather_dialog::install(app);
+    // ---- Stamina recovery dialog (the menu dialog's recover button) ----
+    crate::stamina_recover_dialog::install(app);
     // ---- 选项对话框（追加段：设置钮的目标，Dialog 槽——音量页） ----
     // 本地档装载与进场施加（SceneMysekai.Start → SetupVolume 同律：读档
     // → 施加系统组 → 环境变量只作进场覆写）。排 Startup 链后（无跨系统

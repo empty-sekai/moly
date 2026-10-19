@@ -1,0 +1,1733 @@
+//! Product-owned settings UI and graphics application, shared by native/wasm.
+//! The source Option UI and this panel share LocalVolumeSettings and VolumeBus.
+
+use bevy::{
+    anti_alias::fxaa::Fxaa,
+    camera::{visibility::RenderLayers, ImageRenderTarget, RenderTarget},
+    image::ImageSampler,
+    input::touch::Touches,
+    prelude::*,
+    render::render_resource::TextureFormat,
+    ui::{FocusPolicy, UiTargetCamera},
+    window::PrimaryWindow,
+};
+use serde_json::{json, Value};
+
+use crate::{
+    audio::{self, LocalVolumeSettings, VolumeBus, VolumeSettingData},
+    settings_store::SettingsStore,
+};
+
+const COMPOSITE_LAYER: usize = 30;
+const UI_ORDER: isize = 100;
+
+/// What the source `SetImageQuality` writes for one image quality: the target
+/// DPI it passes to `SetTargetDpi` and `IsFXAAEnable`. High is (299, on),
+/// Normal (200, on) and Low (180, off). Only the source image-quality option
+/// (`info`) sets it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ImageQualityPair {
+    pub target_dpi: u16,
+    pub fxaa: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GraphicsSettings {
+    /// Frame limit (`Application.targetFrameRate`): `MysekaiFpsQualityType`
+    /// High is 60 and Normal 30.
+    pub frame_rate: u16,
+    /// Scene camera render scale chosen in the product panel; `None` applies
+    /// the source DPI law ([`source_render_scale`]).
+    pub render_scale: Option<f32>,
+    /// The current image quality's pair. Loading saved settings and Defaults
+    /// keep it, so the scene never runs one quality's target DPI with another
+    /// quality's FXAA.
+    pub image_quality: ImageQualityPair,
+    /// Scene FXAA in effect: the pair's, or the panel toggle's session-only
+    /// override until the image-quality option applies a pair again.
+    pub fxaa: bool,
+}
+
+/// Frame limits the source offers (High, Normal).
+const FRAME_RATES: [u16; 2] = [60, 30];
+
+/// Image quality and frame limit of the no-recommendation path.
+/// `MysekaiOptionSettingData`'s constructor sets image quality Normal and
+/// leaves the fps quality at High. The JP client always starts there, and so
+/// does a CN player who declines the first-run recommendation: the CN
+/// client's `ScreenLayerLiveTop.RecommendSetting` otherwise offers the pair
+/// for the device tier its publisher SDK reports (tier 3 and up High and 60,
+/// tier 2 Normal and 30, tier 1 Low and 30) and saves it when accepted. The
+/// port follows the no-recommendation path because that tier is a device
+/// rating from the publisher SDK, which a browser has no counterpart for.
+const NO_RECOMMENDATION_IMAGE_QUALITY: ImageQualityPair = ImageQualityPair {
+    target_dpi: 200,
+    fxaa: true,
+};
+const NO_RECOMMENDATION_FRAME_RATE: u16 = FRAME_RATES[0];
+
+impl Default for GraphicsSettings {
+    fn default() -> Self {
+        Self {
+            frame_rate: NO_RECOMMENDATION_FRAME_RATE,
+            // The DPI law needs the display density. A page provides it as
+            // devicePixelRatio; the native window keeps its full resolution.
+            render_scale: if cfg!(target_arch = "wasm32") { None } else { Some(1.0) },
+            image_quality: NO_RECOMMENDATION_IMAGE_QUALITY,
+            fxaa: NO_RECOMMENDATION_IMAGE_QUALITY.fxaa,
+        }
+    }
+}
+
+/// Unity's `Screen.dpi` on Android is `DisplayMetrics.densityDpi`, and an
+/// Android browser reports `devicePixelRatio` as `densityDpi / 160`. The
+/// window scale factor (the page's devicePixelRatio) times 160 is therefore
+/// the page's equivalent of the source's screen DPI.
+const SCREEN_DPI_PER_SCALE_FACTOR: f32 = 160.;
+
+/// Render scale of the Mysekai pipeline asset itself. While the DPI law keeps
+/// the scene at full size ResoDynamix is inactive and restores this value to
+/// the asset every frame, so URP renders the scene at it. Open item: the asset
+/// (`MysekaiRenderPipelineAsset`, together with its upscaling filter, which
+/// only matters when this scale is not 1) is not in the extracted client data
+/// yet, and 1 stands in for its value until the extraction reads it.
+const PIPELINE_ASSET_RENDER_SCALE: f32 = 1.;
+
+/// Scene camera render scale of the source for a target DPI and a window
+/// scale factor. `MysekaiQualitySettings.SetTargetDpi` stores
+/// `clamp01(targetDpi / Screen.dpi)` as `MysekaiRenderSettings.RenderScale`
+/// (an unknown density of 0 gives 1). `SceneMysekai.UpdateResolution` hands
+/// it to ResoDynamix as the base camera scale; below 1 ResoDynamix writes it
+/// to the URP asset, otherwise the asset keeps its own scale. The asset's
+/// setter clamps to [0.1, 2], and URP renders at full size when the scale is
+/// within 0.05 of 1.
+pub fn source_render_scale(target_dpi: u16, scale_factor: f32) -> f32 {
+    let screen_dpi = SCREEN_DPI_PER_SCALE_FACTOR * scale_factor;
+    let render_scale = if screen_dpi > 0. {
+        (f32::from(target_dpi) / screen_dpi).clamp(0., 1.)
+    } else {
+        1.
+    };
+    let asset_scale = if render_scale < 1. {
+        render_scale
+    } else {
+        PIPELINE_ASSET_RENDER_SCALE
+    }
+    .clamp(0.1, 2.);
+    if (1. - asset_scale).abs() < 0.05 {
+        1.
+    } else {
+        asset_scale
+    }
+}
+
+fn scene_render_scale(graphics: &GraphicsSettings, window: &Window) -> f32 {
+    match graphics.render_scale {
+        Some(fixed) => fixed.clamp(0.5, 1.),
+        None => source_render_scale(
+            graphics.image_quality.target_dpi,
+            window.resolution.base_scale_factor(),
+        ),
+    }
+}
+
+#[derive(Resource, Default)]
+pub struct GameSettings {
+    pub graphics: GraphicsSettings,
+}
+
+pub use crate::ui_inputs::{OverlayPanels, SettingsPanel};
+
+#[derive(Message)]
+pub enum SettingsPanelRequest {
+    Open,
+    Close,
+    Toggle,
+}
+
+#[derive(Component)]
+pub struct PanelRoot;
+#[derive(Component)]
+pub struct SettingsBody;
+#[derive(Component)]
+struct SettingsUiCamera;
+#[derive(Component)]
+pub struct CompositeCamera;
+#[derive(Component)]
+pub struct CompositeQuad;
+#[derive(Component)]
+pub struct OriginalSceneOutput {
+    target: RenderTarget,
+    order: isize,
+}
+
+#[derive(Resource, Default)]
+pub struct SceneSurface {
+    image: Option<Handle<Image>>,
+    physical_size: UVec2,
+    /// Scene camera render scale applied by the last `apply_graphics`.
+    applied_scale: f32,
+}
+
+#[derive(Debug, Clone, Copy, Component)]
+pub enum Action {
+    Toggle,
+    Close,
+    Volume(usize, f32),
+    Fps(u16),
+    Scale(Option<f32>),
+    Fxaa,
+    AudioOptions,
+    Save,
+    Defaults,
+    Capture,
+    PlayerData,
+    SettingsPage,
+    ClearInactiveResources,
+    MaxHomeSize,
+    OcPick,
+    OcAvatar,
+    OcPreviousCharacter,
+    OcNextCharacter,
+}
+
+#[derive(Component)]
+pub enum ValueLabel {
+    Performance,
+    Volume(usize),
+    Fps,
+    Scale,
+    Fxaa,
+    Status,
+    Residency,
+    OcModel,
+}
+
+/// Register once in the shared app assembly, after DefaultPlugins.
+pub fn install(app: &mut App) {
+    app.add_plugins(bevy::diagnostic::FrameTimeDiagnosticsPlugin::default());
+    app.init_resource::<GameSettings>()
+        .init_resource::<SettingsStore>()
+        .init_resource::<SettingsPanel>()
+        .init_resource::<SceneSurface>()
+        .init_resource::<crate::render_inputs::RenderCacheClear>()
+        .init_resource::<crate::render_inputs::OpenPlayerDataPanel>()
+        .add_message::<SettingsPanelRequest>()
+        .add_systems(
+            Update,
+            publish_input_claim
+                .before(crate::site::read_switch)
+                .before(crate::gesture::advance),
+        )
+        .add_systems(
+            Update,
+            (take_cache_clear_status, take_player_data_request)
+                .after(crate::fixture_colors::prepare),
+        );
+    #[cfg(target_arch = "wasm32")]
+    app.add_systems(Startup, pacing::start)
+        .add_systems(First, pacing::note_update);
+}
+
+/// Per-frame counters for the browser host: engine assets and every game
+/// material type visible to this module. `FixtureSurfaceMaterial`,
+/// `FixtureTreeMaterial` and `UiClipMaterial` are private to their modules
+/// and are not counted.
+pub fn perf_plugin() -> moly_perf::PerfPlugin {
+    moly_perf::PerfPlugin::default()
+        .track::<Mesh>("Mesh")
+        .track::<Image>("Image")
+        .track::<StandardMaterial>("StandardMaterial")
+        .track::<crate::avatar_material::AvatarMaterial>("AvatarMaterial")
+        .track::<crate::character_material::CharacterMaterial>("CharacterMaterial")
+        .track::<crate::emoticon::EmoticonMaterial>("EmoticonMaterial")
+        .track::<crate::fixture_material::FixtureMaterial>("FixtureMaterial")
+        .track::<crate::fixture::road::RoadMaterial>("RoadMaterial")
+        .track::<crate::site_material::SiteMaterial>("SiteMaterial")
+        .track::<crate::sky::SkyGradient>("SkyGradient")
+        .track::<crate::uber_particle::UberParticleMaterial>("UberParticleMaterial")
+}
+
+pub fn scene_input_enabled(
+    overlays: OverlayPanels,
+    library: Res<crate::content_library::ContentLibrary>,
+) -> bool {
+    !overlays.block_pointer() && !library.blocks_world_input()
+}
+
+pub fn camera_input_enabled(
+    overlays: OverlayPanels,
+    library: Res<crate::content_library::ContentLibrary>,
+    entry: Option<Res<crate::entry::EntrySequence>>,
+) -> bool {
+    // Camera drag belongs to the gesture layer the entry enables in Finish.
+    !overlays.block_pointer()
+        && !library.blocks_camera_input()
+        && crate::entry::control_open(entry.as_deref())
+}
+
+pub fn talk_input_enabled(
+    overlays: OverlayPanels,
+    library: Res<crate::content_library::ContentLibrary>,
+) -> bool {
+    !overlays.block_pointer() && !library.blocks_talk_input()
+}
+
+/// Version of the stored `GameSettings` section. Version 2 changed the meaning
+/// or the default of every graphics field it stores: `frameRate` offers the
+/// source's two limits and defaults to 60, `renderScale` may be null for the
+/// source DPI law (the browser default), and `fxaa` is not stored.
+const SETTINGS_VERSION: u64 = 2;
+
+fn graphics_from_document(document: &Value) -> GraphicsSettings {
+    let mut value = GraphicsSettings::default();
+    let section = &document["GameSettings"];
+    // An earlier section's frameRate, renderScale and fxaa meant something
+    // else, and they are its only graphics fields: it loads as the defaults.
+    if section["version"]
+        .as_u64()
+        .is_none_or(|version| version < SETTINGS_VERSION)
+    {
+        return value;
+    }
+    let fields = &section["graphics"];
+    if let Some(rate) = fields["frameRate"].as_u64() {
+        if let Some(&rate) = FRAME_RATES.iter().find(|&&offered| u64::from(offered) == rate) {
+            value.frame_rate = rate;
+        }
+    }
+    // A stored null selects the source DPI law; an absent field keeps the default.
+    match fields.get("renderScale") {
+        Some(Value::Null) => value.render_scale = None,
+        Some(scale) => {
+            if let Some(scale) = scale.as_f64().filter(|scale| scale.is_finite()) {
+                value.render_scale = Some((scale as f32).clamp(0.5, 1.0));
+            }
+        }
+        None => {}
+    }
+    // FXAA is half of the image-quality pair, so a stored `fxaa` is not read.
+    value
+}
+
+pub fn setup(
+    mut commands: Commands,
+    ui_font: Res<crate::ui_font::UiFontAsset>,
+    mut store: ResMut<SettingsStore>,
+    mut settings: ResMut<GameSettings>,
+    mut panel: ResMut<SettingsPanel>,
+    stage: Option<Res<crate::browser_stage::BrowserStage>>,
+    dev: Option<Res<crate::dev_tools::DevTools>>,
+) {
+    if let Some(document) = store.load() {
+        // The source image-quality option applied its pair at startup; the
+        // panel does not store it.
+        let image_quality = settings.graphics.image_quality;
+        settings.graphics = GraphicsSettings {
+            image_quality,
+            fxaa: image_quality.fxaa,
+            ..graphics_from_document(&document)
+        };
+        panel.status = "Changes apply immediately. Save to keep them after restart.".into();
+    } else {
+        panel.status = "Storage unavailable. Changes will apply to this session.".into();
+    }
+    // The saved graphics above apply everywhere. The panel (F10) is part of
+    // the game; an embedded stage's page draws its own controls.
+    if stage.is_some() { return; }
+    let font = ui_font.0.clone();
+    let camera = commands
+        .spawn((
+            Camera2d,
+            crate::camera::MYSEKAI_CAMERA_MSAA,
+            Camera {
+                order: UI_ORDER,
+                clear_color: ClearColorConfig::None,
+                ..default()
+            },
+            RenderLayers::none(),
+            SettingsUiCamera,
+        ))
+        .id();
+
+    let root = commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                width: percent(100),
+                height: percent(100),
+                display: Display::None,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.025, 0.04, 0.08, 0.76)),
+            FocusPolicy::Block,
+            UiTargetCamera(camera),
+            GlobalZIndex(1100),
+            PanelRoot,
+        ))
+        .id();
+    let content = commands
+        .spawn((
+            Node {
+                width: percent(92),
+                max_width: px(660),
+                padding: UiRect::all(px(24)),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(12),
+                border_radius: BorderRadius::all(px(16)),
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.09, 0.12, 0.19)),
+        ))
+        .id();
+    commands.entity(root).add_child(content);
+    let heading = row(&mut commands, content);
+    add_text(
+        &mut commands,
+        heading,
+        &font,
+        &format!("moly v{}", crate::VERSION),
+        23.,
+        None,
+    );
+    add_button(
+        &mut commands,
+        heading,
+        &font,
+        "Audio/video",
+        Action::SettingsPage,
+    );
+    // Player data is developer UI: its systems run only with DevTools.
+    if dev.is_some() {
+        add_button(
+            &mut commands,
+            heading,
+            &font,
+            "Player data",
+            Action::PlayerData,
+        );
+    }
+    add_button(&mut commands, heading, &font, "Close", Action::Close);
+    if dev.is_some() {
+        crate::player_data_ui::spawn(&mut commands, content, &font);
+    }
+    let settings_body = commands
+        .spawn((
+            Node {
+                width: percent(100),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(12),
+                ..default()
+            },
+            SettingsBody,
+        ))
+        .id();
+    commands.entity(content).add_child(settings_body);
+    let content = settings_body;
+    for (index, title) in ["Music", "Sound effects", "Voice"].into_iter().enumerate() {
+        let line = row(&mut commands, content);
+        add_text(&mut commands, line, &font, title, 18., None);
+        add_button(
+            &mut commands,
+            line,
+            &font,
+            "-",
+            Action::Volume(index, -0.05),
+        );
+        add_text(
+            &mut commands,
+            line,
+            &font,
+            "100%",
+            18.,
+            Some(ValueLabel::Volume(index)),
+        );
+        add_button(&mut commands, line, &font, "+", Action::Volume(index, 0.05));
+    }
+    let fps = row(&mut commands, content);
+    add_text(
+        &mut commands,
+        fps,
+        &font,
+        "Frame limit",
+        18.,
+        Some(ValueLabel::Fps),
+    );
+    for rate in [FRAME_RATES[1], FRAME_RATES[0]] {
+        add_button(
+            &mut commands,
+            fps,
+            &font,
+            &rate.to_string(),
+            Action::Fps(rate),
+        );
+    }
+    let scale = row(&mut commands, content);
+    add_text(
+        &mut commands,
+        scale,
+        &font,
+        "Scene resolution",
+        18.,
+        Some(ValueLabel::Scale),
+    );
+    for (label, value) in [
+        ("Auto", None),
+        ("50%", Some(0.5)),
+        ("67%", Some(0.67)),
+        ("75%", Some(0.75)),
+        ("100%", Some(1.)),
+    ] {
+        add_button(&mut commands, scale, &font, label, Action::Scale(value));
+    }
+    let fxaa = row(&mut commands, content);
+    add_text(
+        &mut commands,
+        fxaa,
+        &font,
+        "FXAA",
+        18.,
+        Some(ValueLabel::Fxaa),
+    );
+    add_button(&mut commands, fxaa, &font, "Toggle", Action::Fxaa);
+    let model = row(&mut commands, content);
+    add_text(
+        &mut commands,
+        model,
+        &font,
+        "Player model: avatar",
+        16.,
+        Some(ValueLabel::OcModel),
+    );
+    add_button(&mut commands, model, &font, "Choose model file", Action::OcPick);
+    add_button(&mut commands, model, &font, "Avatar", Action::OcAvatar);
+    let character = row(&mut commands, content);
+    add_button(
+        &mut commands,
+        character,
+        &font,
+        "Previous character",
+        Action::OcPreviousCharacter,
+    );
+    add_button(
+        &mut commands,
+        character,
+        &font,
+        "Next character",
+        Action::OcNextCharacter,
+    );
+    let home = row(&mut commands, content);
+    add_text(&mut commands, home, &font, "Home site", 18., None);
+    add_button(
+        &mut commands,
+        home,
+        &font,
+        "Max home size",
+        Action::MaxHomeSize,
+    );
+    let footer = row(&mut commands, content);
+    add_button(
+        &mut commands,
+        footer,
+        &font,
+        "Audio options",
+        Action::AudioOptions,
+    );
+    add_button(&mut commands, footer, &font, "Reset", Action::Defaults);
+    add_button(&mut commands, footer, &font, "Save", Action::Save);
+    add_button(
+        &mut commands,
+        footer,
+        &font,
+        "Screenshot  F12",
+        Action::Capture,
+    );
+    let residency = row(&mut commands, content);
+    add_text(
+        &mut commands,
+        residency,
+        &font,
+        "资源管理：测量中…",
+        14.,
+        Some(ValueLabel::Residency),
+    );
+    add_button(
+        &mut commands,
+        residency,
+        &font,
+        "清理闲置家具换色缓存",
+        Action::ClearInactiveResources,
+    );
+    add_text(
+        &mut commands,
+        content,
+        &font,
+        "内存数字只覆盖可测的图片与网格；GPU 数字不含驱动与渲染目标。硬盘资源缓存请在网站的资源管理页清理。",
+        13.,
+        None,
+    );
+    add_text(
+        &mut commands,
+        content,
+        &font,
+        "",
+        14.,
+        Some(ValueLabel::Status),
+    );
+    add_text(
+        &mut commands,
+        content,
+        &font,
+        "Measuring frame time...",
+        14.,
+        Some(ValueLabel::Performance),
+    );
+}
+
+fn row(commands: &mut Commands, parent: Entity) -> Entity {
+    let entity = commands
+        .spawn(Node {
+            width: percent(100),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::SpaceBetween,
+            column_gap: px(8),
+            flex_wrap: FlexWrap::Wrap,
+            row_gap: px(5),
+            ..default()
+        })
+        .id();
+    commands.entity(parent).add_child(entity);
+    entity
+}
+
+fn add_text(
+    commands: &mut Commands,
+    parent: Entity,
+    font: &Handle<Font>,
+    text: &str,
+    size: f32,
+    value: Option<ValueLabel>,
+) {
+    let mut entity = commands.spawn((
+        Text::new(text),
+        TextFont {
+            font: font.clone(),
+            font_size: size,
+            ..default()
+        },
+        TextColor(Color::srgb(0.9, 0.94, 1.)),
+    ));
+    if let Some(value) = value {
+        entity.insert(value);
+    }
+    let id = entity.id();
+    commands.entity(parent).add_child(id);
+}
+
+fn add_button(
+    commands: &mut Commands,
+    parent: Entity,
+    font: &Handle<Font>,
+    text: &str,
+    action: Action,
+) {
+    let entity = commands
+        .spawn((
+            Button,
+            action,
+            Node {
+                min_width: px(40),
+                min_height: px(34),
+                padding: UiRect::axes(px(12), px(7)),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                border_radius: BorderRadius::all(px(6)),
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.19, 0.26, 0.38)),
+        ))
+        .id();
+    commands.entity(parent).add_child(entity);
+    add_text(commands, entity, font, text, 16., None);
+}
+
+/// Input ownership must expire even when the embedded host owns the settings UI.
+pub fn release_input_guard(
+    buttons: Res<ButtonInput<MouseButton>>,
+    touches: Res<Touches>,
+    mut panel: ResMut<SettingsPanel>,
+) {
+    if panel.release_guard > 0
+        && !buttons.any_pressed([MouseButton::Left, MouseButton::Right])
+        && touches.iter().next().is_none()
+    {
+        panel.release_guard -= 1;
+    }
+}
+
+/// Takes the renderer's answer to the panel's cache-clear request and shows
+/// it on the resource-management line.
+fn take_cache_clear_status(
+    mut panel: ResMut<SettingsPanel>,
+    mut clear: ResMut<crate::render_inputs::RenderCacheClear>,
+) {
+    if let Some(status) = clear.status.take() {
+        panel.resource_status = status;
+    }
+}
+
+/// A render module that failed to build its material asks for the player-data
+/// page: shows the panel on that page and writes the reason where the import's
+/// own status line shows it.
+fn take_player_data_request(
+    mut panel: ResMut<SettingsPanel>,
+    mut request: ResMut<crate::render_inputs::OpenPlayerDataPanel>,
+    mut import: Option<ResMut<crate::player_data::PlayerDataImport>>,
+) {
+    let Some(status) = request.status.take() else {
+        return;
+    };
+    if let Some(import) = import.as_mut() {
+        import.status = status;
+    }
+    panel.open = true;
+    panel.player_data = true;
+}
+
+/// Publishes the settings modal's claim on the field's input, read from the
+/// panel's own state where the field's input routes consume it.
+fn publish_input_claim(
+    panel: Res<SettingsPanel>,
+    mut claims: ResMut<crate::input_claims::InputClaims>,
+) {
+    crate::input_claims::publish(
+        &mut claims,
+        crate::input_claims::SETTINGS_PANEL,
+        panel.blocks_world_input(),
+    );
+}
+
+pub fn input(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut requests: MessageReader<SettingsPanelRequest>,
+    actions: Query<(&Interaction, &Action), Changed<Interaction>>,
+    mut panel: ResMut<SettingsPanel>,
+    mut settings: ResMut<GameSettings>,
+    mut volumes: ResMut<LocalVolumeSettings>,
+    mut bus: ResMut<VolumeBus>,
+    mut store: ResMut<SettingsStore>,
+    mut captures: MessageWriter<crate::frame_capture::CaptureFrame>,
+    mut dialogs: ResMut<crate::menu_shell::ShellDialogState>,
+    mut oc_requests: MessageWriter<crate::player_avatar::oc::OcRequest>,
+    ranks: Option<Res<crate::mysekai_rank::MysekaiRanks>>,
+    total_exp: Option<Res<crate::mysekai_rank::UserTotalExp>>,
+    mut link: Option<ResMut<moly_link::ServerLink>>,
+    mut cache_clear: ResMut<crate::render_inputs::RenderCacheClear>,
+) {
+    let mut queued = Vec::new();
+    if keys.just_pressed(KeyCode::F12) {
+        queued.push(Action::Capture);
+    }
+    if keys.just_pressed(KeyCode::F10) {
+        queued.push(Action::Toggle);
+    }
+    if panel.open && keys.just_pressed(KeyCode::Escape) {
+        queued.push(Action::Close);
+    }
+    if panel.open
+        && keys.just_pressed(KeyCode::KeyS)
+        && (keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight])
+            || keys.any_just_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]))
+    {
+        queued.push(Action::Save);
+    }
+    for request in requests.read() {
+        match request {
+            SettingsPanelRequest::Open => {
+                panel.open = true;
+            }
+            SettingsPanelRequest::Close => queued.push(Action::Close),
+            SettingsPanelRequest::Toggle => queued.push(Action::Toggle),
+        }
+    }
+    for (interaction, action) in &actions {
+        if *interaction == Interaction::Pressed {
+            queued.push(*action);
+        }
+    }
+    for action in queued {
+        info!("[game-settings] {action:?}");
+        match action {
+            Action::Toggle => {
+                panel.open = !panel.open;
+                panel.release_guard = 2;
+            }
+            Action::Close => {
+                panel.open = false;
+                panel.release_guard = 2;
+            }
+            Action::Capture => {
+                captures.write(crate::frame_capture::CaptureFrame);
+            }
+            _ if !panel.open => continue,
+            Action::PlayerData => panel.player_data = true,
+            Action::OcPick => {
+                oc_requests.write(crate::player_avatar::oc::OcRequest::Pick);
+            }
+            Action::OcAvatar => {
+                oc_requests.write(crate::player_avatar::oc::OcRequest::Avatar);
+            }
+            Action::OcPreviousCharacter => {
+                oc_requests.write(crate::player_avatar::oc::OcRequest::Character(
+                    crate::player_avatar::oc::CharacterChoice::Previous,
+                ));
+            }
+            Action::OcNextCharacter => {
+                oc_requests.write(crate::player_avatar::oc::OcRequest::Character(
+                    crate::player_avatar::oc::CharacterChoice::Next,
+                ));
+            }
+            Action::SettingsPage => panel.player_data = false,
+            Action::MaxHomeSize => {
+                let (Some(ranks), Some(total_exp)) = (ranks.as_deref(), total_exp.as_deref())
+                else {
+                    error!(
+                        "[game-settings] Max home size: the master rank table (mysekaiRanks) or \
+                         the user's total experience is not seated; the rank is not requested"
+                    );
+                    panel.status = "Max home size: the rank table is not loaded.".into();
+                    continue;
+                };
+                match max_mysekai_rank(ranks, total_exp.0) {
+                    Err(reason) => {
+                        error!(
+                            "[game-settings] Max home size: {reason}; the rank is not requested"
+                        );
+                        panel.status = format!("Max home size: {reason}");
+                    }
+                    Ok(rank) => {
+                        let edit = json!({
+                            "type": "server.edit",
+                            "path": "userMysekaiGamedata.mysekaiRank",
+                            "value": rank,
+                        });
+                        let sync = json!({"type": "server.edit", "action": "sync"});
+                        let Some(link) = link.as_deref_mut() else {
+                            error!("[game-settings] Max home size: the game has no server link; nothing is requested");
+                            panel.status = "Max home size: no server link.".into();
+                            continue;
+                        };
+                        let edit_seq = link.call(moly_protocol::Call::Admin(
+                            moly_protocol::AdminCall::Edit {
+                                command_json: edit.to_string(),
+                            },
+                        ));
+                        let sync_seq = link.call(moly_protocol::Call::Admin(
+                            moly_protocol::AdminCall::Edit {
+                                command_json: sync.to_string(),
+                            },
+                        ));
+                        info!("[game-settings] Max home size: userMysekaiGamedata.mysekaiRank = {rank} (the highest master rank) requested as edits {edit_seq} and {sync_seq}");
+                        panel.status = format!(
+                            "Max home size: rank {rank} requested (edits {edit_seq}, {sync_seq}); the housing sites expand through the rank-up path."
+                        );
+                    }
+                }
+            }
+            Action::ClearInactiveResources => {
+                cache_clear.requested = true;
+                panel.resource_status =
+                    "正在检查家具换色句柄…".into();
+            }
+            Action::AudioOptions => {
+                dialogs.menu_open = false;
+                dialogs.option_open = true;
+                panel.open = false;
+                panel.release_guard = 2;
+            }
+            Action::Volume(index, delta) => {
+                let value = match index {
+                    0 => &mut volumes.system.bgm,
+                    1 => &mut volumes.system.se,
+                    _ => &mut volumes.system.voice,
+                };
+                *value = ((*value + delta) * 100.).round().clamp(0., 100.) / 100.;
+                audio::apply_system_volume(&mut bus, &volumes.system, "Game settings");
+                panel.status = "Applied. Save to keep these changes.".into();
+            }
+            Action::Fps(rate) => {
+                settings.graphics.frame_rate = rate;
+                panel.status = "Frame limit applied.".into();
+            }
+            Action::Scale(scale) => {
+                settings.graphics.render_scale = scale;
+                panel.status = "Scene resolution applied; UI stays at display resolution.".into();
+            }
+            Action::Fxaa => {
+                // A session-only override: FXAA belongs to the image-quality
+                // pair, which the next image-quality change, Defaults or a
+                // restart applies again.
+                settings.graphics.fxaa = !settings.graphics.fxaa;
+                panel.status = "Scene FXAA changed for this session.".into();
+            }
+            Action::Defaults => {
+                // The image-quality pair follows the source option, not this panel.
+                let image_quality = settings.graphics.image_quality;
+                settings.graphics = GraphicsSettings {
+                    image_quality,
+                    fxaa: image_quality.fxaa,
+                    ..GraphicsSettings::default()
+                };
+                volumes.system = VolumeSettingData::default();
+                audio::apply_system_volume(&mut bus, &volumes.system, "Reset game settings");
+                panel.status = "Defaults applied. Save to keep these changes.".into();
+            }
+            Action::Save => {
+                let g = settings.graphics;
+                let mut sections = audio::settings_sections(&volumes).to_vec();
+                sections.push(("GameSettings",json!({"version":SETTINGS_VERSION,"graphics":{"frameRate":g.frame_rate,"renderScale":g.render_scale}})));
+                panel.status = if store.save(&sections) {
+                    "Saved.".into()
+                } else {
+                    format!(
+                        "Save failed: {}. Session values are still active.",
+                        store.last_error.as_deref().unwrap_or("storage unavailable")
+                    )
+                };
+                if let Some(error) = &store.last_error {
+                    warn!("[game-settings] {error}");
+                }
+            }
+        }
+    }
+}
+
+/// The highest rank of the client's master rank table, through the rank model
+/// the rank gauges build: `MysekaiRankModel`'s `maxMysekaiRank` is the
+/// maximum `mysekaiRank` over the rows. The housing site's expansion tops out
+/// there, so the panel reads it from the table instead of naming a rank.
+fn max_mysekai_rank(
+    ranks: &crate::mysekai_rank::MysekaiRanks,
+    total_exp: i32,
+) -> Result<i32, String> {
+    ranks
+        .try_model(total_exp)
+        .map(|model| model.max_mysekai_rank)
+}
+
+pub fn refresh_ui(
+    panel: Res<SettingsPanel>,
+    settings: Res<GameSettings>,
+    volumes: Res<LocalVolumeSettings>,
+    mut roots: Query<&mut Node, With<PanelRoot>>,
+    mut bodies: Query<&mut Node, (With<SettingsBody>, Without<PanelRoot>)>,
+    mut labels: Query<(&ValueLabel, &mut Text)>,
+    images: Res<Assets<Image>>,
+    meshes: Res<Assets<Mesh>>,
+    asset_server: Res<AssetServer>,
+    diagnostics: Res<bevy::diagnostic::DiagnosticsStore>,
+    surface: Res<SceneSurface>,
+    time: Res<Time<Real>>,
+    oc: Option<Res<crate::player_avatar::oc::OcSelection>>,
+    mut last_performance: Local<f64>,
+    mut residency_sample: Local<Option<(f64, u64, u64, u64)>>,
+) {
+    for mut node in &mut roots {
+        set_if_neq!(node.display, if panel.open { Display::Flex } else { Display::None });
+    }
+    if !panel.open {
+        return;
+    }
+    for mut body in &mut bodies {
+        set_if_neq!(body.display, if panel.player_data { Display::None } else { Display::Flex });
+    }
+    let refresh_performance = time.elapsed_secs_f64() - *last_performance >= 0.5;
+    if refresh_performance {
+        *last_performance = time.elapsed_secs_f64();
+    }
+    for (label, mut text) in &mut labels {
+        let next = match label {
+            ValueLabel::Performance => {
+                if !refresh_performance {
+                    continue;
+                }
+                use bevy::diagnostic::FrameTimeDiagnosticsPlugin as Frames;
+                match diagnostics
+                    .get(&Frames::FRAME_TIME)
+                    .and_then(|d| d.average())
+                {
+                    Some(ms) if ms > 0. => {
+                        format!("Actual: {:.1} FPS | {:.1} ms/frame", 1000. / ms, ms)
+                    }
+                    _ => "Measuring frame time...".into(),
+                }
+            }
+            ValueLabel::Volume(index) => format!(
+                "{:.0}%",
+                100. * match index {
+                    0 => volumes.system.bgm,
+                    1 => volumes.system.se,
+                    _ => volumes.system.voice,
+                }
+            ),
+            ValueLabel::Fps => format!("Frame limit: {}", settings.graphics.frame_rate),
+            ValueLabel::Scale => match settings.graphics.render_scale {
+                Some(scale) => format!("Scene: {:.0}%", 100. * scale),
+                None => format!("Scene: Auto {:.0}%", 100. * surface.applied_scale),
+            },
+            ValueLabel::Fxaa => format!(
+                "FXAA: {}",
+                if settings.graphics.fxaa { "On" } else { "Off" }
+            ),
+            ValueLabel::Status => panel.status.clone(),
+            ValueLabel::OcModel => oc
+                .as_deref()
+                .map_or_else(|| "Player model: avatar".into(), |oc| oc.status.label()),
+            ValueLabel::Residency => {
+                let now = time.elapsed_secs_f64();
+                if residency_sample.as_ref().is_none_or(|(at, _, _, _)| now - *at >= 1.0) {
+                    let value = crate::content_library::resource_residency_summary(
+                        &images,
+                        &meshes,
+                        &asset_server,
+                    );
+                    *residency_sample = Some((
+                        now,
+                        value["cpuImageBytes"].as_u64().unwrap_or(0)
+                            + value["cpuMeshBufferBytes"].as_u64().unwrap_or(0),
+                        value["estimatedGpuTextureBytes"].as_u64().unwrap_or(0),
+                        value["cpuAndGpuImageCount"].as_u64().unwrap_or(0),
+                    ));
+                }
+                let (_, cpu, gpu, both) = residency_sample.expect("sampled above");
+                let format_bytes = |bytes: u64| {
+                    if bytes >= 1024 * 1024 {
+                        format!("{:.1} MiB", bytes as f64 / (1024. * 1024.))
+                    } else {
+                        format!("{:.0} KiB", bytes as f64 / 1024.)
+                    }
+                };
+                if panel.resource_status.is_empty() {
+                    format!(
+                        "资源管理：CPU 可测 {} · GPU 可测估算 {} · 双份纹理 {}",
+                        format_bytes(cpu),
+                        format_bytes(gpu),
+                        both
+                    )
+                } else {
+                    format!(
+                        "资源管理：CPU 可测 {} · GPU 可测估算 {} · {}",
+                        format_bytes(cpu),
+                        format_bytes(gpu),
+                        panel.resource_status
+                    )
+                }
+            }
+        };
+        if **text != next {
+            **text = next;
+        }
+    }
+}
+
+/// At 100%, retain the original direct-to-window camera target. Reduced
+/// resolutions use a single scene image; source overlay cameras stay native size.
+pub fn apply_graphics(
+    mut commands: Commands,
+    settings: Res<GameSettings>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut cameras: Query<
+        (
+            Entity,
+            &mut Camera,
+            &mut RenderTarget,
+            &mut Projection,
+            Option<&mut Fxaa>,
+            Option<&OriginalSceneOutput>,
+        ),
+        With<Camera3d>,
+    >,
+    mut surface: ResMut<SceneSurface>,
+    mut images: ResMut<Assets<Image>>,
+    composites: Query<Entity, With<CompositeCamera>>,
+    mut quads: Query<(Entity, &mut Sprite), With<CompositeQuad>>,
+    mut last_rate: Local<Option<u16>>,
+) {
+    let graphics = settings.graphics;
+    if *last_rate != Some(graphics.frame_rate) {
+        // Browser: updates paced by animation frames (see `pacing`).
+        #[cfg(target_arch = "wasm32")]
+        {
+            if last_rate.is_none() {
+                commands.insert_resource(pacing::winit_settings());
+            }
+            pacing::set_frame_rate(graphics.frame_rate);
+        }
+        // Native: the engine's reactive wait between updates.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use bevy::winit::{UpdateMode, WinitSettings};
+            let mode = UpdateMode::Reactive {
+                wait: std::time::Duration::from_secs_f64(
+                    1. / f64::from(graphics.frame_rate.max(1)),
+                ),
+                react_to_device_events: false,
+                react_to_user_events: false,
+                react_to_window_events: false,
+            };
+            commands.insert_resource(WinitSettings {
+                focused_mode: mode,
+                unfocused_mode: mode,
+            });
+        }
+        *last_rate = Some(graphics.frame_rate);
+    }
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let scale = scene_render_scale(&graphics, window);
+    if surface.applied_scale != scale {
+        surface.applied_scale = scale;
+    }
+    for (entity, mut camera, mut target, mut projection, fxaa, original) in &mut cameras {
+        if let Some(mut fxaa) = fxaa {
+            if fxaa.enabled != graphics.fxaa {
+                fxaa.enabled = graphics.fxaa;
+            }
+        } else {
+            commands.entity(entity).insert(Fxaa {
+                enabled: graphics.fxaa,
+                ..default()
+            });
+        }
+        if scale >= 1. {
+            if let Some(original) = original {
+                *target = original.target.clone();
+                camera.order = original.order;
+                // Camera target changes do not invalidate Bevy's cached dimensions.
+                // Updating the projection refreshes color/depth sizes together.
+                projection.set_changed();
+                commands.entity(entity).remove::<OriginalSceneOutput>();
+            }
+            continue;
+        }
+        // URP sizes a scaled camera target as (int)(pixel size * scale), at least 1.
+        let size = UVec2::new(
+            ((window.resolution.physical_width() as f32 * scale) as u32).max(1),
+            ((window.resolution.physical_height() as f32 * scale) as u32).max(1),
+        );
+        let factor = size.x as f32 / window.width().max(1.);
+        if surface.image.is_none() || surface.physical_size != size {
+            let mut image =
+                Image::new_target_texture(size.x, size.y, TextureFormat::Rgba8UnormSrgb, None);
+            image.sampler = ImageSampler::linear();
+            if let Some(handle) = &surface.image {
+                if let Some(current) = images.get_mut(handle) {
+                    *current = image;
+                }
+            } else {
+                surface.image = Some(images.add(image));
+            }
+            surface.physical_size = size;
+        }
+        let image = surface
+            .image
+            .as_ref()
+            .expect("scene image created above")
+            .clone();
+        if original.is_none() {
+            commands.entity(entity).insert(OriginalSceneOutput {
+                target: target.clone(),
+                order: camera.order,
+            });
+        }
+        if camera.order != -1 {
+            camera.order = -1;
+        }
+        let unchanged = matches!(&*target, RenderTarget::Image(current) if current.handle == image && current.scale_factor == factor);
+        if !unchanged {
+            *target = RenderTarget::Image(ImageRenderTarget {
+                handle: image.clone(),
+                scale_factor: factor,
+            });
+            projection.set_changed();
+        }
+        if composites.is_empty() {
+            commands.spawn((
+                Camera2d,
+                crate::camera::MYSEKAI_CAMERA_MSAA,
+                Camera {
+                    order: 0,
+                    clear_color: ClearColorConfig::Custom(Color::BLACK),
+                    ..default()
+                },
+                RenderLayers::layer(COMPOSITE_LAYER),
+                CompositeCamera,
+            ));
+            commands.spawn((
+                Sprite {
+                    image,
+                    custom_size: Some(Vec2::new(window.width(), window.height())),
+                    ..default()
+                },
+                Transform::default(),
+                RenderLayers::layer(COMPOSITE_LAYER),
+                CompositeQuad,
+            ));
+        }
+    }
+    if scale >= 1. {
+        for entity in &composites {
+            commands.entity(entity).despawn();
+        }
+        for (entity, _) in &mut quads {
+            commands.entity(entity).despawn();
+        }
+        surface.image = None;
+        surface.physical_size = UVec2::ZERO;
+    } else {
+        let quad_size = Some(Vec2::new(window.width(), window.height()));
+        for (_, mut sprite) in &mut quads {
+            if sprite.custom_size != quad_size {
+                sprite.custom_size = quad_size;
+            }
+        }
+    }
+}
+
+/// Browser frame pacing for the frame limit.
+///
+/// The source sets `Application.targetFrameRate`, and its Android player
+/// (Optimized Frame Pacing off) starts a frame on the first display refresh
+/// that is at least `trunc(refresh rate / limit + 0.5)` refreshes after the
+/// refresh the previous frame started on. A frame that starts late counts from
+/// the refresh it started on, so a stall is never caught up. The spacing is a
+/// whole number of refreshes and the rate follows the display: at a limit of
+/// 60 a 120 Hz display updates on every second refresh, and so does a 144 Hz
+/// one, 72 times a second.
+///
+/// A page sees each display refresh as an animation frame. The pacer counts
+/// refreshes with `refresh_count::RefreshCount` and wakes the engine on the
+/// animation frame that completes the spacing. The page does not report its
+/// refresh rate, so the first wake-up waits until two animation-frame
+/// intervals agree on it, and the rate is then measured over the animation
+/// frames of the latest second.
+///
+/// The engine loop is reactive: its wait is an hour and it ignores window and
+/// device events, so apart from one update each time the hour runs out (and
+/// the page-lifecycle updates) it updates only when this pacer wakes it
+/// through the event-loop proxy; an update the pacer did not ask for restarts
+/// its count like a frame start (see `note_update`). The winit runner handles
+/// a wake-up in a microtask of the same animation frame and updates there only
+/// if winit's own animation frame (its redraw) has run since the previous
+/// update; otherwise it requests that animation frame again and updates in it.
+/// Two rules keep the redraw ahead of the wake-up:
+/// - Every update requests a redraw, so winit's animation frame follows each
+///   update.
+/// - The pacer's next animation frame is registered after the runner's request
+///   for its own, so that in the next frame the redraw runs first. After a
+///   wake-up it is registered from a microtask queued behind the wake-up.
+///   After an update that ran elsewhere (in winit's redraw, or in an event
+///   handler) it is registered again from a microtask queued by that update,
+///   which runs after the runner's request. After a canvas resize, where
+///   winit's resize observer requests its animation frame again once the
+///   frame's animation-frame callbacks have run, it is registered again from
+///   the pacer's resize observer on the canvas: at once, which is behind
+///   winit's request when winit's observer is notified first, and from a task
+///   queued there, which runs after the frame's rendering update and so after
+///   winit's request in either order. Chrome notifies resize observers in the
+///   order they were created, winit's first. Firefox notifies them in the
+///   order they last started observing, and winit observes the canvas again on
+///   every change of the device pixel ratio, so from then on the pacer's
+///   observer is notified first and the task keeps the order. The task runs
+///   before the next frame's animation-frame callbacks when the main thread is
+///   free before that frame starts.
+///
+/// A wake-up that still finds no redraw since the previous update (the order
+/// was changed by something else) has its update run in winit's redraw of the
+/// next animation frame, and the count then restarts from that frame's
+/// refresh, as the source counts from the refresh a late frame starts on.
+#[cfg(target_arch = "wasm32")]
+mod pacing {
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    use bevy::prelude::*;
+    use bevy::window::{PrimaryWindow, RequestRedraw};
+    use bevy::winit::{
+        EventLoopProxy, EventLoopProxyWrapper, UpdateMode, WinitSettings, WinitUserEvent,
+    };
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::JsCast;
+
+    use super::refresh_count::RefreshCount;
+
+    struct Pacer {
+        window: web_sys::Window,
+        proxy: EventLoopProxy<WinitUserEvent>,
+        frame_rate: Cell<u16>,
+        refreshes: RefCell<RefreshCount>,
+        /// A wake-up was sent and no update has run since.
+        pending: Cell<bool>,
+        /// A wake-up was sent and the microtask queued behind it has not run.
+        waking: Cell<bool>,
+        /// The last wake-up found no redraw since the previous update, so its
+        /// update runs in winit's redraw of the next animation frame.
+        late: Cell<bool>,
+        /// An update ran since the pacer's last animation frame.
+        updated: Cell<bool>,
+        /// The pacer's registered animation frame.
+        frame_request: Cell<Option<i32>>,
+        on_frame: RefCell<Option<Closure<dyn FnMut(f64)>>>,
+        after_wake: RefCell<Option<Closure<dyn FnMut()>>>,
+        /// Registers the pacer's next animation frame again, behind every
+        /// animation frame registered so far.
+        request_again: RefCell<Option<Closure<dyn FnMut()>>>,
+        /// The canvas resize observer's callback.
+        on_resize: RefCell<Option<Closure<dyn FnMut()>>>,
+        /// Keeps the canvas resize observer alive.
+        resize_observer: RefCell<Option<web_sys::ResizeObserver>>,
+    }
+
+    thread_local! {
+        static PACER: RefCell<Option<Rc<Pacer>>> = const { RefCell::new(None) };
+    }
+
+    /// The engine loop waits for the pacer's wake-ups only.
+    pub fn winit_settings() -> WinitSettings {
+        let mode = UpdateMode::Reactive {
+            wait: Duration::from_secs(3600),
+            react_to_device_events: false,
+            react_to_user_events: true,
+            react_to_window_events: false,
+        };
+        WinitSettings {
+            focused_mode: mode,
+            unfocused_mode: mode,
+        }
+    }
+
+    pub fn start(
+        proxy: Res<EventLoopProxyWrapper>,
+        windows: Query<&Window, With<PrimaryWindow>>,
+    ) {
+        // Without the pacer the engine loop would never wake again.
+        let window = web_sys::window().expect("frame pacing needs the page window");
+        let pacer = Rc::new(Pacer {
+            window,
+            proxy: (**proxy).clone(),
+            frame_rate: Cell::new(super::NO_RECOMMENDATION_FRAME_RATE),
+            refreshes: RefCell::new(RefreshCount::new()),
+            pending: Cell::new(false),
+            waking: Cell::new(false),
+            late: Cell::new(false),
+            updated: Cell::new(false),
+            frame_request: Cell::new(None),
+            on_frame: RefCell::new(None),
+            after_wake: RefCell::new(None),
+            request_again: RefCell::new(None),
+            on_resize: RefCell::new(None),
+            resize_observer: RefCell::new(None),
+        });
+        // The closures own the pacer for the lifetime of the page.
+        let frame_pacer = pacer.clone();
+        *pacer.on_frame.borrow_mut() =
+            Some(Closure::new(move |now: f64| on_frame(&frame_pacer, now)));
+        let wake_pacer = pacer.clone();
+        *pacer.after_wake.borrow_mut() = Some(Closure::new(move || after_wake(&wake_pacer)));
+        let again_pacer = pacer.clone();
+        *pacer.request_again.borrow_mut() = Some(Closure::new(move || request_frame(&again_pacer)));
+        let resize_pacer = pacer.clone();
+        *pacer.on_resize.borrow_mut() = Some(Closure::new(move || on_resize(&resize_pacer)));
+        observe_canvas(&pacer, &windows);
+        request_frame(&pacer);
+        PACER.with_borrow_mut(|slot| *slot = Some(pacer));
+    }
+
+    /// Registers the pacer again after every observed resize of the primary
+    /// window's canvas (see `on_resize`).
+    fn observe_canvas(pacer: &Pacer, windows: &Query<&Window, With<PrimaryWindow>>) {
+        // The canvas the window was created on, found the way the engine finds it.
+        let canvas = windows
+            .single()
+            .ok()
+            .and_then(|window| window.canvas.clone())
+            .and_then(|selector| {
+                pacer
+                    .window
+                    .document()
+                    .and_then(|document| document.query_selector(&selector).ok().flatten())
+            });
+        let Some(canvas) = canvas else {
+            warn!(
+                "Frame pacing: the primary window has no canvas selector to observe; \
+                 a canvas resize can start one update a refresh late."
+            );
+            return;
+        };
+        let observer = pacer.on_resize.borrow().as_ref().and_then(|callback| {
+            web_sys::ResizeObserver::new(callback.as_ref().unchecked_ref()).ok()
+        });
+        let Some(observer) = observer else {
+            warn!(
+                "Frame pacing: no resize observer; a canvas resize can start one update a \
+                 refresh late."
+            );
+            return;
+        };
+        observer.observe(&canvas);
+        *pacer.resize_observer.borrow_mut() = Some(observer);
+    }
+
+    pub fn set_frame_rate(rate: u16) {
+        PACER.with_borrow(|pacer| {
+            if let Some(pacer) = pacer {
+                pacer.frame_rate.set(rate);
+            }
+        });
+    }
+
+    /// Runs in `First` of every update.
+    pub fn note_update(mut redraw: MessageWriter<RequestRedraw>) {
+        // winit's animation frame follows every update, so the next wake-up
+        // finds a redraw since this update.
+        redraw.write(RequestRedraw);
+        PACER.with_borrow(|pacer| {
+            let Some(pacer) = pacer else {
+                return;
+            };
+            // An update the pacer did not ask for (the engine's hour-long wait
+            // running out, or a page-lifecycle update) starts a frame as well,
+            // so the next wake-up counts the spacing from the latest counted
+            // refresh instead of following it within the same refresh. When
+            // that update runs in winit's redraw ahead of the pacer's
+            // animation frame of its refresh, the count restarts one refresh
+            // early.
+            if !pacer.pending.replace(false) {
+                pacer.refreshes.borrow_mut().start_update();
+            }
+            pacer.updated.set(true);
+            // An update outside a wake-up ran after the pacer's animation
+            // frame of this refresh (in winit's redraw or in an event
+            // handler), and the runner requests its animation frame when the
+            // update returns. A late update runs before the pacer's animation
+            // frame of its refresh, which must stay registered.
+            if !pacer.waking.get() && !pacer.late.get() {
+                if let Some(request_again) = pacer.request_again.borrow().as_ref() {
+                    pacer
+                        .window
+                        .queue_microtask(request_again.as_ref().unchecked_ref());
+                }
+            }
+        });
+    }
+
+    /// Replaces the pacer's registered animation frame with a new
+    /// registration, which runs after every animation frame registered so far.
+    fn request_frame(pacer: &Pacer) {
+        if let Some(handle) = pacer.frame_request.take() {
+            let _ = pacer.window.cancel_animation_frame(handle);
+        }
+        if let Some(callback) = pacer.on_frame.borrow().as_ref() {
+            pacer.frame_request.set(
+                pacer
+                    .window
+                    .request_animation_frame(callback.as_ref().unchecked_ref())
+                    .ok(),
+            );
+        }
+    }
+
+    /// Runs in the resize-observer step of a frame that resized the canvas,
+    /// where winit's resize observer requests its animation frame again.
+    fn on_resize(pacer: &Pacer) {
+        // Behind winit's request when winit's observer was notified first.
+        request_frame(pacer);
+        // Behind it in either order: a task runs after the rendering update.
+        if let Some(request_again) = pacer.request_again.borrow().as_ref() {
+            let _ = pacer
+                .window
+                .set_timeout_with_callback(request_again.as_ref().unchecked_ref());
+        }
+    }
+
+    fn on_frame(pacer: &Pacer, now: f64) {
+        pacer.frame_request.set(None);
+        let wake = {
+            let mut refreshes = pacer.refreshes.borrow_mut();
+            refreshes.frame(now, !pacer.updated.replace(false));
+            if pacer.late.replace(false) || pacer.pending.get() {
+                // The update the last wake-up asked for starts on this
+                // refresh: it ran in winit's redraw just before this callback,
+                // or runs in it after. The runner still holds the wake-up.
+                refreshes.start_update();
+                false
+            } else if refreshes.due(pacer.frame_rate.get()) {
+                refreshes.start_update();
+                pacer.pending.set(true);
+                true
+            } else {
+                false
+            }
+        };
+        if wake {
+            pacer.waking.set(true);
+            let _ = pacer.proxy.send_event(WinitUserEvent::WakeUp);
+            if let Some(after_wake) = pacer.after_wake.borrow().as_ref() {
+                pacer
+                    .window
+                    .queue_microtask(after_wake.as_ref().unchecked_ref());
+            }
+        } else {
+            request_frame(pacer);
+        }
+    }
+
+    /// Runs behind the runner's handling of a wake-up.
+    fn after_wake(pacer: &Pacer) {
+        pacer.waking.set(false);
+        if pacer.pending.get() {
+            pacer.late.set(true);
+        }
+        request_frame(pacer);
+    }
+}
+
+/// Display-refresh counting of the browser pacer; it uses no page API.
+#[cfg(target_arch = "wasm32")]
+mod refresh_count {
+    use std::collections::VecDeque;
+
+    /// Sampled intervals kept for the lowest cluster (about half a second at
+    /// 60 Hz).
+    const SAMPLES: usize = 32;
+    /// Longer intervals (a hidden page, a long stall) still advance the count
+    /// but stay out of the refresh estimate.
+    const MAX_SAMPLE_MS: f64 = 250.;
+    /// Intervals within this ratio of each other count as the same number of
+    /// refreshes.
+    const SPREAD: f64 = 1.25;
+    /// The refresh interval is measured over at least the latest second of
+    /// animation frames.
+    const SPAN_MS: f64 = 1000.;
+    /// Refreshes the measured span covers before it replaces the lowest
+    /// cluster as the estimate.
+    const SPAN_MIN_REFRESHES: u64 = 16;
+    /// Most animation frames the span keeps (a second at 1024 Hz).
+    const SPAN_MAX_FRAMES: usize = 1024;
+
+    /// Counts display refreshes from animation-frame timestamps and applies
+    /// the source's refresh spacing between frame starts.
+    pub struct RefreshCount {
+        samples: [f64; SAMPLES],
+        stored: usize,
+        next: usize,
+        /// Mean of the lowest cluster of sampled intervals, about one refresh;
+        /// none until sampled intervals agree (see `sample`).
+        cluster_ms: Option<f64>,
+        /// Consecutive animation-frame intervals, oldest first, each with the
+        /// refreshes it was counted as.
+        span: VecDeque<(f64, u64)>,
+        /// Total of the intervals in `span`.
+        span_ms: f64,
+        /// Total of the refreshes in `span`.
+        span_refreshes: u64,
+        last_frame_ms: Option<f64>,
+        /// Refreshes counted since the refresh interval was first measured.
+        refreshes: u64,
+        /// Refresh the latest update started on.
+        update_refresh: Option<u64>,
+    }
+
+    impl RefreshCount {
+        pub fn new() -> Self {
+            Self {
+                samples: [0.; SAMPLES],
+                stored: 0,
+                next: 0,
+                cluster_ms: None,
+                span: VecDeque::new(),
+                span_ms: 0.,
+                span_refreshes: 0,
+                last_frame_ms: None,
+                refreshes: 0,
+                update_refresh: None,
+            }
+        }
+
+        /// Advances to the animation frame stamped `now_ms`. The interval
+        /// since the previous animation frame counts as many refreshes as it
+        /// spans; a stray callback within the same refresh counts none.
+        ///
+        /// The refresh interval is the time the consecutive intervals of the
+        /// latest second took, divided by the refreshes they were counted as,
+        /// whether an update held them or not. The timestamps between the
+        /// first and the last cancel out, so the error of timestamp
+        /// coarsening and jitter shrinks with the length of the span instead
+        /// of staying with each interval. Averaging single intervals would not
+        /// do that: under a steady update cadence the intervals that are one
+        /// refresh long sit at the same phase of it, and their errors add up
+        /// instead of cancelling.
+        ///
+        /// Which multiple of a refresh an interval is starts from the lowest
+        /// cluster of sampled intervals (see `sample`), which is the estimate
+        /// until the span covers [`SPAN_MIN_REFRESHES`]. `began_idle` says
+        /// that no update ran since the previous animation frame. An update's
+        /// work can hold the next animation frame past one or more refreshes,
+        /// so an interval that began with an update is sampled only when it is
+        /// no longer than one estimated refresh, and the first estimate comes
+        /// from intervals without an update alone. When the cluster and the
+        /// span no longer count the same interval as one refresh (the display
+        /// changed its rate), the span starts again.
+        ///
+        /// Not handled: when the page's own work between animation frames
+        /// (asset loading at startup) holds most of those first intervals past
+        /// one or more refreshes, the first estimate can form on a multiple of
+        /// the refresh. If every update then holds the next animation frame
+        /// past the following refresh, every interval is that multiple, the
+        /// cluster and the span agree on it, and the spacing stays counted in
+        /// multiples until two intervals of one refresh are stored at the same
+        /// time (updates that finish within a refresh, or animation frames
+        /// without an update). The rate differs from the source only
+        /// where the source's spacing is three refreshes or more and the
+        /// multiple still wakes the engine on every animation frame, for
+        /// example 150 to 179 Hz at a limit of 60 or 75 to 89 Hz at a limit of
+        /// 30 with the estimate at twice the refresh.
+        pub fn frame(&mut self, now_ms: f64, began_idle: bool) {
+            let Some(last_ms) = self.last_frame_ms.replace(now_ms) else {
+                return;
+            };
+            let interval = now_ms - last_ms;
+            if !(interval > 0.) {
+                return;
+            }
+            let sample = match self.refresh_ms() {
+                None => began_idle,
+                Some(refresh_ms) => {
+                    interval < MAX_SAMPLE_MS && (began_idle || interval <= SPREAD * refresh_ms)
+                }
+            };
+            if sample {
+                self.sample(interval);
+            }
+            if let (Some(cluster_ms), Some(span_refresh_ms)) =
+                (self.cluster_ms, self.span_refresh_ms())
+            {
+                if cluster_ms > SPREAD * span_refresh_ms || span_refresh_ms > SPREAD * cluster_ms {
+                    self.span.clear();
+                    self.span_ms = 0.;
+                    self.span_refreshes = 0;
+                }
+            }
+            let Some(refresh_ms) = self.refresh_ms() else {
+                return;
+            };
+            let spanned = (interval / refresh_ms).round() as u64;
+            self.refreshes += spanned;
+            if interval < MAX_SAMPLE_MS {
+                self.span.push_back((interval, spanned));
+                self.span_ms += interval;
+                self.span_refreshes += spanned;
+                while let Some(&(oldest_ms, oldest_refreshes)) = self.span.front() {
+                    if self.span_ms - oldest_ms < SPAN_MS && self.span.len() <= SPAN_MAX_FRAMES {
+                        break;
+                    }
+                    self.span.pop_front();
+                    self.span_ms -= oldest_ms;
+                    self.span_refreshes -= oldest_refreshes;
+                }
+            }
+        }
+
+        /// Whether the source starts a frame on the current refresh. Nothing
+        /// starts before the refresh interval is measured.
+        pub fn due(&self, frame_rate: u16) -> bool {
+            let Some(refresh_ms) = self.refresh_ms() else {
+                return false;
+            };
+            self.update_refresh
+                .is_none_or(|start| self.refreshes - start >= Self::spacing(refresh_ms, frame_rate))
+        }
+
+        /// Records that an update starts on the current refresh. Before the
+        /// refresh interval is measured there is no count to restart.
+        pub fn start_update(&mut self) {
+            if self.cluster_ms.is_some() {
+                self.update_refresh = Some(self.refreshes);
+            }
+        }
+
+        /// The estimated refresh interval: the span's once it covers enough
+        /// refreshes, the lowest cluster's before.
+        fn refresh_ms(&self) -> Option<f64> {
+            let cluster_ms = self.cluster_ms?;
+            Some(self.span_refresh_ms().unwrap_or(cluster_ms))
+        }
+
+        fn span_refresh_ms(&self) -> Option<f64> {
+            (self.span_refreshes >= SPAN_MIN_REFRESHES)
+                .then(|| self.span_ms / self.span_refreshes as f64)
+        }
+
+        /// Refreshes between frame starts, `trunc(refresh rate / limit + 0.5)`
+        /// in single precision as the source computes it, from the estimated
+        /// rate rounded to whole hertz. Where the ratio is exactly half-way
+        /// (90 Hz at a limit of 60) that keeps the spacing of a whole-hertz
+        /// display only while the estimate is within half a hertz of its rate,
+        /// which the span of `frame` is for. The spacing is at least one, since
+        /// a page updates at most once per animation frame.
+        fn spacing(refresh_ms: f64, frame_rate: u16) -> u64 {
+            let refresh_rate = (1000. / refresh_ms).round() as f32;
+            ((refresh_rate / f32::from(frame_rate.max(1)) + 0.5) as u64).max(1)
+        }
+
+        /// The lowest cluster is the mean of the lowest stored intervals that
+        /// agree: the shortest interval that has, itself included, at least a
+        /// quarter of the stored intervals (two at the least) within
+        /// [`SPREAD`] above it, together with those. Longer intervals span
+        /// skipped refreshes, and a shorter one is a stray callback or a
+        /// timestamp displaced within its refresh. Two such short intervals can
+        /// be stored at the same time (a 144 Hz display gives single intervals
+        /// down to 0.7 of a refresh); as the lowest cluster they would count
+        /// as a refresh a fifth shorter than the span's, restart the span and
+        /// be the estimate until it covers [`SPAN_MIN_REFRESHES`] again.
+        ///
+        /// A smaller cluster of two or more below it is the lowest cluster
+        /// instead when the one holding a quarter spans two or more of its
+        /// intervals: then most stored intervals were held past a refresh (by
+        /// updates, or by the page's own work between animation frames), or
+        /// the display refreshes faster than they show. The stray short
+        /// intervals of a 144 Hz display lie less than a third of a refresh
+        /// below it, so it does not span two of theirs.
+        fn sample(&mut self, interval: f64) {
+            self.samples[self.next] = interval;
+            self.next = (self.next + 1) % SAMPLES;
+            self.stored = (self.stored + 1).min(SAMPLES);
+            let mut sorted = self.samples;
+            let sorted = &mut sorted[..self.stored];
+            sorted.sort_unstable_by(f64::total_cmp);
+            let sorted = &*sorted;
+            // The stored intervals that agree with the one at `index`.
+            let cluster = move |index: usize| {
+                let end = sorted.partition_point(|&value| value <= SPREAD * sorted[index]);
+                &sorted[index..end]
+            };
+            let mean = |cluster: &[f64]| cluster.iter().sum::<f64>() / cluster.len() as f64;
+            let agreeing = (self.stored / 4).max(2);
+            let Some(lowest) = (0..sorted.len()).find(|&index| cluster(index).len() >= agreeing)
+            else {
+                return;
+            };
+            let lowest_ms = mean(cluster(lowest));
+            let spanned_ms = (0..lowest)
+                .map(cluster)
+                .filter(|smaller| smaller.len() >= 2)
+                .map(mean)
+                .find(|&smaller_ms| (lowest_ms / smaller_ms).round() >= 2.);
+            self.cluster_ms = Some(spanned_ms.unwrap_or(lowest_ms));
+        }
+    }
+}

@@ -5,10 +5,17 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+moly-law = { path = "../../base/moly-law" }
 moly-assets = { path = "../../engine/moly-assets" }
 moly-store = { path = "../../base/moly-store" }
 bevy = { workspace = true }
 serde_json = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+swash = "0.2.10"
+async-lock = "3"
+futures-util = "0.3"
+futures-channel = "0.3"
 # The world seed draws the platform's random source: OS entropy natively and
 # JS crypto on wasm; already locked, no new download.
 getrandom = { version = "=0.2.17", features = ["js"] }
@@ -16,6 +23,9 @@ getrandom = { version = "=0.2.17", features = ["js"] }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Each settings write is a synced temporary file replaced into place.
 tempfile = "3"
+rfd = "0.15"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "time", "net", "fs", "io-util"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Browser console diagnostics without an unbounded User Timing recording.
@@ -23,6 +33,12 @@ tracing-wasm = "0.2.1"
 # Frame captures are stamped with the page clock (std's SystemTime is a stub
 # on wasm). Already locked, no new download.
 js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
 # The browser side of the settings document and the world seed: localStorage
 # and the page's query string. Same version source as the application.
-web-sys = { version = "0.3", features = ["Window", "Storage", "Location", "UrlSearchParams"] }
+web-sys = { version = "0.3", features = ["Window", "Storage", "Location", "UrlSearchParams", "Navigator", "Clipboard", "File", "Blob", "FileList", "Document", "HtmlInputElement", "HtmlElement", "Element", "Node", "Event", "EventTarget", "AbortController", "AbortSignal", "ReadableStream", "ReadableStreamDefaultReader", "Request", "RequestInit", "RequestRedirect", "Response", "Headers", "ResizeObserver", "DragEvent", "DataTransfer"] }
+
+[features]
+# Test helpers that the higher layers' tests call.
+test-support = []

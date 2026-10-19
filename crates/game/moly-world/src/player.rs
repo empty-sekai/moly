@@ -1,0 +1,639 @@
+//! 玩家域：玩家实体装配与输入驱动的移动。
+//!
+//! 真源里玩家是独立于名册的实体（`AvatarDataStore.Player` 持唯一
+//! `PlayerAvatarPresenter`），移动**不寻路**：`PlayerAvatarMoveState`
+//! 与 `PlayerAvatarDashState` 的 UpdateState 同形——每帧
+//! `NavMeshAgent.Move(输入向量 × 速度 × dt)` 直接位移。速度来自
+//! ClientConfig 面板三键（`MysekaiNormalMoveScale` /
+//! `MysekaiHarvestMoveScale` / `MysekaiDashSpeedRate`，FloatConfigs 键
+//! 77/78/95），**逐帧取值**——真源 UpdateState 每帧调 getter，本仓同形。
+//! 取值序（走/冲两态同构）：
+//! * 站点是采集场（grassland）时步速键换 78、动画乘数取 2.0；否则键
+//!   77 与 1.75（真源按 `SiteManager.CurrentSiteType == 4` 分支，4 即
+//!   grassland——本仓缺省站）。
+//! * 场地相机处 FPS 态（`FieldCamera.CurrentState == 16`）时步速减半
+//!   （减半只落在位移速度上，动画乘数不受它影响）。
+//! * dash 态的 Move 乘数是 rate × scale——减半后的 scale 再乘 rate。
+//!
+//! 输入形态（方法体直读，非推断）：
+//! * 主路是虚拟摇杆（`OnTouchJoyStick`：摇杆向量投到相机的
+//!   forward/right 上，相机相对）——触摸面在 [`crate::joystick`]，活跃
+//!   时优先（真源 `GetMoveDirection` 只读摇杆面）。
+//! * **键盘是非真源的桌面适配**（具名）：真源产品只有触屏摇杆，键盘路
+//!   `GetKeyMoveDirection` 在真源**没有调用点**。适配守摇杆的量纲律：
+//!   WASD 给出摇杆比值 (横, 纵) ∈ {-1,0,1}²，过摇杆 HandleInput 的夹
+//!   （超上限 1 归一），再用摇杆的烘基式投到相机上——与一根拖到同一
+//!   比值的摇杆产出同一个移动向量，斜向不比正向快。
+//! * dash 是**模式开关**不是触发：`PlayerAvatarStateMachine.MoveTo` 按
+//!   玩家 `IsDashMode` 分派 Move/Dash 态，开关本身由 HUD 的 dash 按钮
+//!   驱动（[`crate::action_button`] 的冲刺按钮）。
+//! * 无输入回待机：`UpdateController` 在移动态读到空输入即转 Idle。
+//!
+//! 朝向**直设**：`Quaternion.Euler(0, atan2(输入.x, 输入.z), 0)`，无
+//! 转身动画段——转身衔接是 NPC 巡逻域的事。动画段随 [`MotionPhase`]
+//! 走玩家自己的驱动链（[`crate::player_avatar`]，在走播走姿、dash 模式
+//! 播冲刺、待机播待机段）；播放速率按真源式
+//! `clamp(√(输入x²+输入z²) × 站点档乘数, 0.55, 1.8)`（乘数采集场 2.0、
+//! 其余站 1.75），待机 1.0（`PlayerAvatarIdleState` 起播字面量）。
+//!
+//! 相机契约：玩家实体持 [`AvatarRoot`]（本模块接管，名册侧不再插），
+//! 相机域读它逐帧取景——玩家装配完成帧起相机追玩家。
+//!
+//! 身体是玩家 avatar 自己的模型与动作组（[`crate::player_avatar::body`]：
+//! 观众模型、它自己的骨架、它自己的 172 段剪辑），不借名册成员的外观。
+//! 播放器所有权归 [`crate::player_avatar`]。
+//! * 移动边界：约束面与裁决语义在 [`crate::walk_face`]（真源引擎原生
+//!   层不可读）；推进帧与 NPC 共用侵蚀场，整段位移受约束。
+
+use crate::character::AvatarRoot;
+use crate::npc::MotionPhase;
+use crate::player_fixture_action::PlayerFixtureHeld;
+use crate::site::GroundMeshes;
+use crate::walk_face;
+use bevy::prelude::*;
+use moly_law::path::heading_yaw;
+
+/// Placement for the product's own starts only. In the source the player is
+/// placed by the join (`JoinMysekaiActionState.MoveToEntrance`: the house's
+/// outside door locator, ported in the entry), by the site moves (the cannon
+/// landing, the house and room doors) and by the gate warp; nothing else
+/// positions it. The starts the source never makes (the embedded web stage
+/// without a house, a first site other than home, a site switch outside a
+/// site move) have no source position, so they use this ring: the side of
+/// the site centre opposite the roster's first member, seated on the walk
+/// field. A named adaptation, not a source value.
+const SEED_RADIUS: f32 = 3.0;
+
+/// 地表高度采样半径：取「脚下的地面」，与名册同款。
+const SURFACE_RADIUS: f32 = 2.0;
+
+/// 走姿动画速率乘数·常态档：真源状态类字面量（非采集场站）。
+const ANIM_SPEED_NORMAL: f32 = 1.75;
+
+/// 走姿动画速率乘数·采集场档：真源状态类字面量（站点类型 grassland
+/// 时取代常态档）。相机 FPS 档不减半它——减半只落在位移速度上。
+const ANIM_SPEED_HARVEST: f32 = 2.0;
+
+/// 动画速率下限：真源状态类常量（跑动段动画速率的地板）。
+const MIN_ANIMATION_SPEED: f32 = 0.55;
+
+/// 动画速率上限。版本考证：与资产基线同版的原生反编译里走/冲两态都是
+/// `fminf(v, 1.8)` 后 `v < 0.55 ? 0.55 : 上夹值`——上界在；后一版的伪码
+/// 反编译里这条 fminf 不在（同函数其余钳制照常渲染成比较 ⇒ 是版本差，
+/// 不是反编译噪声）。本仓按资产同版的原生树：上界保留，不许按伪码树
+/// 「顺手删上界」。斜向输入和向量不归一（√2 × 2.0 ≈ 2.83）会超它，
+/// 超出即压回。
+const MAX_ANIMATION_SPEED: f32 = 1.8;
+
+pub use crate::markers::PlayerControlled;
+
+/// dash 模式开关（真源 `PlayerAvatarPresenter.IsDashMode`；切换来源是
+/// HUD 的冲刺按钮）。
+#[derive(Component, Default, Reflect)]
+#[reflect(Component)]
+pub struct DashMode(pub bool);
+
+/// 本帧输入：方向（世界系，相机相对合成）与是否活跃。输入系统写、推进
+/// 系统读。
+#[derive(Component, Default, Reflect)]
+#[reflect(Component)]
+pub struct PlayerInput {
+    pub direction: Vec3,
+    pub active: bool,
+}
+
+/// 玩家的身体输入；spawn 消费后即撤。位移速度不在这儿：速度是
+/// ClientConfig 面板三键的逐帧取值（见 [`move_speed`]），不随装配算定。
+#[derive(Resource)]
+pub struct PlayerSpecs {
+    body: crate::player_avatar::body::PlayerBody,
+}
+
+/// 玩家出生时缓存的地表世界顶点（推进帧的脚下高度采样用）。
+#[derive(Resource)]
+pub struct PlayerGround(Vec<Vec3>);
+
+/// spawn 一次性闩：玩家只铺一次。
+#[derive(Resource)]
+pub struct PlayerSpawned;
+
+/// Startup：玩家的身体输入就位（avatar 模型与动作组；装载由
+/// [`crate::player_avatar::body`] 在玩家铺下后发起）。
+pub fn load(mut commands: Commands) {
+    commands.insert_resource(PlayerSpecs {
+        body: crate::player_avatar::body::PlayerBody::avatar(),
+    });
+}
+
+/// The player's placement hold: the player does not appear until its three
+/// inputs (the body spec, the client configs and the site ground) are in.
+const SPAWN: crate::hold::HoldSite = crate::hold::HoldSite {
+    tag: "player",
+    what: "player spawns",
+    effect: "the player does not appear",
+    quiet: &[],
+};
+
+/// Update：规格、面板与站点地表都就绪后，铺一次玩家。实体形状：移动
+/// 相位、身体输入（avatar 模型与动作组），另加玩家专属件：[`AvatarRoot`]
+/// （相机自此追玩家）、dash 模式、输入。面板门与名册铺装同款：速度律
+/// 的键要读它，面板未立不铺玩家。
+/// 出生相位是待机——真源 `InitializeStatus` 起手就是 Idle。
+#[allow(clippy::type_complexity)]
+pub fn spawn_when_ready(
+    mut commands: Commands,
+    time: Res<Time>,
+    meshes: Res<Assets<Mesh>>,
+    specs: Option<Res<PlayerSpecs>>,
+    configs: Option<Res<crate::client_config::ClientConfigs>>,
+    ground: Option<Res<GroundMeshes>>,
+    face: Option<Res<walk_face::WalkFace>>,
+    spawned: Option<Res<PlayerSpawned>>,
+    parts: Query<(&Mesh3d, &GlobalTransform)>,
+    mut hold: Local<crate::hold::HoldReport>,
+) {
+    if spawned.is_some() {
+        return;
+    }
+    let now = time.elapsed_secs();
+    let Some(specs) = specs else {
+        return hold.hold(&SPAWN, "the player body spec is not loaded", now);
+    };
+    let Some(configs) = configs else {
+        return hold.hold(&SPAWN, "the client configs are not loaded", now);
+    };
+    let Some(ground) = ground else {
+        return hold.hold(&SPAWN, "the ground meshes are not loaded", now);
+    };
+    let verts = crate::npc::ground_verts(&meshes, &ground, &parts);
+    if verts.is_empty() {
+        return hold.hold(&SPAWN, "the site scene has no ground vertices yet", now);
+    }
+    hold.run(&SPAWN, now);
+    let (center, center_y) = crate::npc::center_of(&verts);
+    let scale = crate::npc::ring_scale(&verts);
+    // The adaptation ring (see SEED_RADIUS): opposite the roster's first
+    // member, the radius scaled to room-sized ground, seated on the walk
+    // field. On the home start the entry moves the player to the house door
+    // before the cover lifts, as the source's join does.
+    let radius = SEED_RADIUS * scale;
+    let (mut seed_x, mut seed_z) = (center.x - radius, center.y + radius);
+    if let Some(face) = face.as_deref() {
+        (seed_x, seed_z) = face.seat(seed_x, seed_z);
+    }
+    let surface = face
+        .as_deref()
+        .and_then(|face| face.surface_height([seed_x, seed_z]));
+    let seed = [seed_x, navigation_y(&verts, seed_x, seed_z, center_y, surface), seed_z];
+    commands.spawn((
+        Transform::from_translation(Vec3::from(seed)),
+        // 玩家是渲染层级的节点：模型子实体的可见性沿父链向上查到本实体。
+        Visibility::default(),
+        // 相机跟随契约：玩家实体持 AvatarRoot（真源站点相机追的就是
+        // 玩家 avatar 的视变换）。身体与动作组由 player_avatar::body 装上。
+        AvatarRoot,
+        PlayerControlled,
+        DashMode(false),
+        PlayerInput::default(),
+        MotionPhase::Dwelling { remaining: None },
+        specs.body.clone(),
+    ));
+    commands.insert_resource(PlayerGround(verts));
+    commands.insert_resource(PlayerSpawned);
+    commands.remove_resource::<PlayerSpecs>();
+    info!(
+        "[player] 玩家就位：身体 {}，步速键 {}={:.3} · 采集档 {}={:.3} · 冲刺率 {}={:.3}（逐帧取值），AvatarRoot 移交相机",
+        specs.body.model,
+        crate::client_config::KEY_MYSEKAI_NORMAL_MOVE_SCALE,
+        configs.float(crate::client_config::KEY_MYSEKAI_NORMAL_MOVE_SCALE),
+        crate::client_config::KEY_MYSEKAI_HARVEST_MOVE_SCALE,
+        configs.float(crate::client_config::KEY_MYSEKAI_HARVEST_MOVE_SCALE),
+        crate::client_config::KEY_MYSEKAI_DASH_SPEED_RATE,
+        configs.float(crate::client_config::KEY_MYSEKAI_DASH_SPEED_RATE),
+    );
+}
+
+/// Update：换站后的玩家重播种。吃站点定案代数（见 `site::GroundEpoch`）：
+/// 首代只记录不重排——玩家刚以同式铺位；代数翻新（换站）时实体原样保留
+/// （AvatarRoot 与相机契约不动），位置落到新站出生点（缩放同 spawn），
+/// 脚下地表顶点表换新站的——推进帧的高度采样从此读新地面。
+pub fn reseed(
+    epoch: Option<Res<crate::site::GroundEpoch>>,
+    mut last: Local<u64>,
+    meshes: Res<Assets<Mesh>>,
+    ground: Option<Res<GroundMeshes>>,
+    face: Option<Res<walk_face::WalkFace>>,
+    parts: Query<(&Mesh3d, &GlobalTransform)>,
+    mut players: Query<
+        (
+            &mut Transform,
+            &mut MotionPhase,
+            Option<&mut crate::player_avatar::AvatarDriver>,
+        ),
+        With<PlayerControlled>,
+    >,
+    mut animators: Query<&mut AnimationPlayer>,
+    mut ground_cache: Option<ResMut<PlayerGround>>,
+    site_move: Option<Res<crate::field_modes::SiteMoveActive>>,
+) {
+    let Some(epoch) = epoch else {
+        return;
+    };
+    // Scene readiness advances GroundEpoch only after its roots are settled.
+    // An unchanged generation cannot need a new world-space vertex snapshot.
+    if epoch.0 == *last {
+        return;
+    }
+    let Some(ground) = ground else {
+        return;
+    };
+    let verts = crate::npc::ground_verts(&meshes, &ground, &parts);
+    if verts.is_empty() {
+        return;
+    }
+    let first = *last == 0;
+    *last = epoch.0;
+    if first {
+        return;
+    }
+    if site_move.is_some() {
+        // A cannon move carries the player onto the new site itself (its
+        // flight and re-origin); only the ground snapshot is renewed.
+        if let Some(cache) = &mut ground_cache {
+            **cache = PlayerGround(verts);
+        }
+        info!("[player] ground snapshot renewed during a cannon move; the move places the player");
+        return;
+    }
+    let (center, center_y) = crate::npc::center_of(&verts);
+    let radius = SEED_RADIUS * crate::npc::ring_scale(&verts);
+    let (mut seed_x, mut seed_z) = (center.x - radius, center.y + radius);
+    if let Some(face) = face.as_deref() {
+        (seed_x, seed_z) = face.seat(seed_x, seed_z);
+    }
+    let surface = face
+        .as_deref()
+        .and_then(|face| face.surface_height([seed_x, seed_z]));
+    let seed = [seed_x, navigation_y(&verts, seed_x, seed_z, center_y, surface), seed_z];
+    for (mut transform, mut phase, driver) in &mut players {
+        if let Some(mut driver) = driver {
+            if let Ok(mut animator) = animators.get_mut(driver.player) {
+                driver.cancel_for_site_change(&mut animator);
+            }
+        }
+        transform.translation = Vec3::from(seed);
+        *phase = MotionPhase::Dwelling { remaining: None };
+    }
+    if let Some(cache) = &mut ground_cache {
+        **cache = PlayerGround(verts);
+    }
+    info!(
+        "[player] 换站重播种：落位 ({:.2},{:.2},{:.2})，脚下地表顶点 {} 个",
+        seed[0],
+        seed[1],
+        seed[2],
+        ground_cache.map(|cache| cache.0.len()).unwrap_or(0)
+    );
+}
+
+/// The player domain's systems that the host schedule does not list: the
+/// player avatar's talk-camera dither. Added by the avatar material plugin,
+/// which the host registers. The dash button's own systems are installed by
+/// the action button.
+pub struct PlayerPlugin;
+
+impl Plugin for PlayerPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(
+            PostUpdate,
+            crate::avatar_material::player_dither
+                .after(crate::talk_camera::advance)
+                .after(bevy::transform::TransformSystems::Propagate),
+        );
+    }
+}
+
+/// 界缘裁决的跨帧态（沿触发日志用）：面内自由、刚被回吸、或被拒保持。
+/// pub：schedule 在模块外登记本系统。
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub enum Boundary {
+    #[default]
+    Free,
+    Snapped,
+    Held,
+}
+
+/// 步速律本体（真源走/冲两态 UpdateState 的取值序，逐帧调用）：采集场
+/// 站（grassland）步速吃键 78、其余站吃键 77；场地相机处 FPS 态时步速
+/// 减半（只折位移速度，不碰动画乘数）；dash 态乘键 95——真源乘法序是
+/// `rate × scale`，减半后的 scale 再乘 rate。返回本帧位移速度，米/秒。
+fn move_speed(
+    configs: &crate::client_config::ClientConfigs,
+    site: &crate::site::SiteSelection,
+    camera: crate::camera::CameraStateType,
+    dash: bool,
+) -> f32 {
+    let mut scale = if site.is_grassland() {
+        configs.float(crate::client_config::KEY_MYSEKAI_HARVEST_MOVE_SCALE)
+    } else {
+        configs.float(crate::client_config::KEY_MYSEKAI_NORMAL_MOVE_SCALE)
+    };
+    if camera == crate::camera::CameraStateType::Fps {
+        scale *= 0.5;
+    }
+    if dash {
+        scale *= configs.float(crate::client_config::KEY_MYSEKAI_DASH_SPEED_RATE);
+    }
+    scale
+}
+
+/// 走姿动画速率乘数（真源同函数里与步速并列的那一支）：采集场站 2.0、
+/// 其余站 1.75——相机 FPS 档不减半它。
+fn animation_speed_mul(site: &crate::site::SiteSelection) -> f32 {
+    if site.is_grassland() {
+        ANIM_SPEED_HARVEST
+    } else {
+        ANIM_SPEED_NORMAL
+    }
+}
+
+/// Update：把本帧输入推进成位置与朝向——玩家域自己的位移律（直接运动
+/// 学，真源 `NavMeshAgent.Move` 同形；寻路律归 NPC 巡逻域）。速度按
+/// [`move_speed`] 逐帧取值（面板三键 + 站点档 + 相机档）。位移经可行
+/// 走场约束：逐段取第一处阻挡前的可走前缀，不能跨过薄障碍。
+/// 面未就绪不推
+/// 进——真源 navmesh 自场景装载起就在，玩家不走没有约束面的帧。
+///
+/// 有输入：位置 += 方向 × 速度(dash 档) × dt，脚下高度贴地表采样；朝向
+/// 直设 `atan2(方向.x, 方向.z)`（真源同式，无转身段）；相位进 Walking。
+/// 无输入：相位进 Dwelling（待机段）。相位的读者是动画驱动链与相机。
+/// 玩家 [`Transform`] 的写者：本系统（位移与朝向），与对话域的转身
+/// 插值（参演玩家对话期间，本系统被持留让位跳过）。家具会话从接近、
+/// 贴合到离座都由自己的移动流程持有位置；其动画租约只覆盖播放段，
+/// 不能用播放器占用代替整段位移持留。输入仍由 read_input 采集，供
+/// 会话响应主动结束。内部形参带私有资源，故 pub。
+pub fn advance(
+    time: Res<Time>,
+    configs: Option<Res<crate::client_config::ClientConfigs>>,
+    site: Option<Res<crate::site::SiteSelection>>,
+    camera_state: Res<crate::camera::FieldCameraState>,
+    ground: Option<Res<PlayerGround>>,
+    face: Option<Res<walk_face::WalkFace>>,
+    objective_face: Option<Res<crate::npc_objective::ObjectiveFace>>,
+    epoch: Option<Res<crate::site::GroundEpoch>>,
+    // 对话持留让位：玩家参演对话期间位移推进不跑（相位在开场时已钉
+    // 驻留；转身由对话域插值直写）。
+    mut players: Query<
+        (
+            &mut Transform,
+            &mut MotionPhase,
+            &PlayerInput,
+            &DashMode,
+            Option<&crate::player_avatar::AvatarDriver>,
+        ),
+        (
+            With<PlayerControlled>,
+            Without<crate::talk::TalkHold>,
+            Without<PlayerFixtureHeld>,
+            Without<crate::field_modes::EntryHold>,
+            Without<crate::field_modes::HarvestAutoMoveHeld>,
+            Without<crate::field_modes::DeliveryHold>,
+        ),
+    >,
+    mut boundary: Local<Boundary>,
+    mut relocated: Local<Option<(Option<u64>, u64)>>,
+) {
+    let dt = time.delta_secs();
+    let (Some(configs), Some(site), Some(ground), Some(face)) = (configs, site, ground, face)
+    else {
+        return;
+    };
+    let navigation_y_at = |x: f32, z: f32, raw_fallback: f32| {
+        objective_face
+            .as_deref()
+            .filter(|surface| {
+                surface.navigation_generation() == face.generation()
+                    && epoch.as_deref().is_some_and(|epoch| surface.is_fresh(epoch.0))
+            })
+            .and_then(|surface| surface.navigation_point_at([x, z]))
+            .map(|point| point[1])
+            .or_else(|| face.surface_height([x, z]))
+            .unwrap_or_else(|| surface_y(&ground.0, x, z, raw_fallback))
+    };
+    for (mut transform, mut phase, input, dash, driver) in &mut players {
+        if driver.is_some_and(|driver| driver.blocks_manual_movement()) {
+            continue;
+        }
+        // The fallback for a point with no sampled ground keeps the height the
+        // player already had; surface heights are absolute, so nothing is
+        // added twice.
+        let raw_y = transform.translation.y;
+        // The source's crowd moves an agent only when its navigation polygon
+        // is gone, that is once per build of the navigation cells (site and
+        // generation): to the closest point of the nearest cell in its query
+        // box. A player on a cell, edges included, stays.
+        let build = (epoch.as_deref().map(|epoch| epoch.0), face.generation());
+        if *relocated != Some(build) {
+            *relocated = Some(build);
+            let at = [transform.translation.x, transform.translation.z];
+            let radius =
+                crate::fixture_scene_inputs::PlayerFixtureAgentParameters::default().radius();
+            if let Some([x, z]) = face.relocate(at, radius).filter(|point| *point != at) {
+                transform.translation = Vec3::new(x, navigation_y_at(x, z, raw_y), z);
+            }
+        }
+        // Rebuilds can remove a rug without invalidating x/z. A resting
+        // navigation-owned player must settle onto that new floor as well.
+        transform.translation.y = navigation_y_at(
+            transform.translation.x, transform.translation.z, raw_y);
+        if input.active {
+            let speed = move_speed(&configs, &site, camera_state.0, dash.0);
+            let mut position = transform.translation + input.direction * speed * dt;
+            let requested = position;
+            let start = [transform.translation.x, transform.translation.z];
+            // The source's move state moves the agent by NavMeshAgent.Move,
+            // the engine's corridor move on the navigation cells.
+            let accepted =
+                face.move_position(transform.translation.to_array(), position.to_array());
+            position.x = accepted[0];
+            position.z = accepted[1];
+            let next_boundary = if accepted == [requested.x, requested.z] {
+                Boundary::Free
+            } else if accepted == start {
+                Boundary::Held
+            } else {
+                Boundary::Snapped
+            };
+            if *boundary != next_boundary {
+                debug!(
+                    "[player] 导航线段裁决 {:?}：请求 ({:.2},{:.2}) → ({:.2},{:.2})，代数 {}",
+                    next_boundary,
+                    requested.x,
+                    requested.z,
+                    position.x,
+                    position.z,
+                    face.generation()
+                );
+                *boundary = next_boundary;
+            }
+            let was_walking = matches!(*phase, MotionPhase::Walking);
+            if !was_walking {
+                info!(
+                    "[player] 输入开始：方向 ({:.2},{:.2}) 模式 {} 速度 {:.3} m/s",
+                    input.direction.x,
+                    input.direction.z,
+                    if dash.0 { "dash" } else { "walk" },
+                    speed
+                );
+            }
+            // 朝向直设：真源移动态每帧写 Euler(0, atan2(x, z), 0)。拒进
+            // 帧也朝向推挤方向（真源 agent 每帧照样吃 Move 请求）。
+            transform.rotation = Quat::from_rotation_y(input.direction.x.atan2(input.direction.z));
+            position.y = navigation_y_at(position.x, position.z, raw_y);
+            transform.translation = position;
+            *phase = MotionPhase::Walking;
+        } else if matches!(*phase, MotionPhase::Walking) {
+            let p = transform.translation;
+            info!(
+                "[player] 输入结束：位置 ({:.2},{:.2},{:.2})，回待机",
+                p.x, p.y, p.z
+            );
+            *boundary = Boundary::Free;
+            *phase = MotionPhase::Dwelling { remaining: None };
+        }
+    }
+}
+
+/// Update：按真源速率律调动画播放速率——移动态
+/// `clamp(√(输入x²+输入z²) × 站点档乘数, 0.55, 1.8)`（乘数采集场 2.0、
+/// 其余站 1.75；走/冲两态同式，dash 不加速率），待机 1.0。排在玩家动画
+/// 驱动（换段）之后：换段会以缺省速率起新段，本系统同帧把速率压回
+/// 真源式。
+pub fn tune_animation_speed(
+    site: Option<Res<crate::site::SiteSelection>>,
+    mut last_speed: Local<f32>,
+    // The activity's approach/exit motion owns its speed even while the
+    // locomotion driver still supplies the visible walk/run clip. Raw input
+    // retained for end requests must not retime that movement's animation.
+    players: Query<
+        (
+            &MotionPhase,
+            &PlayerInput,
+            &crate::player_avatar::AvatarDriver,
+        ),
+        (With<PlayerControlled>, Without<PlayerFixtureHeld>),
+    >,
+    mut animators: Query<&mut AnimationPlayer>,
+) {
+    let Some(site) = site else {
+        return;
+    };
+    let anim_mul = animation_speed_mul(&site);
+    for (phase, input, driver) in &players {
+        if !driver.locomotion_owns_animator() {
+            continue;
+        }
+        let speed = match phase {
+            MotionPhase::Walking => {
+                let magnitude = (input.direction.x * input.direction.x
+                    + input.direction.z * input.direction.z)
+                    .sqrt();
+                (magnitude * anim_mul).clamp(MIN_ANIMATION_SPEED, MAX_ANIMATION_SPEED)
+            }
+            _ => 1.0,
+        };
+        let Ok(mut animator) = animators.get_mut(driver.player) else {
+            continue; // 装配未完成，驱动系统尚未起播
+        };
+        for (_, animation) in animator.playing_animations_mut() {
+            animation.set_speed(speed);
+        }
+        // 速率账（变更时一行，本系统单玩家）：速率律的现算观测面——
+        // 站点档乘数与上夹是否生效从这行读（斜向输入的数是它给的）。
+        if speed != *last_speed {
+            debug!("[player] 动画速率 -> {:.3}（乘数 {:.2}）", speed, anim_mul);
+            *last_speed = speed;
+        }
+    }
+}
+
+/// Update（定时）：玩家周期状态行。位置随帧变化是「真的在动」的现算
+/// 证据，相邻行可推出位移与速度；dash 档与输入方向让推进行可对账。
+/// `界=` 列逐行报可行走面裁决（内=在面内或被回吸按在面缘线上，外=面外
+/// ——约束生效时不应出现，?=面未就绪），是移动边界冒烟的逐界验收列。
+pub fn report(
+    time: Res<Time>,
+    face: Option<Res<walk_face::WalkFace>>,
+    configs: Option<Res<crate::client_config::ClientConfigs>>,
+    site: Option<Res<crate::site::SiteSelection>>,
+    camera_state: Res<crate::camera::FieldCameraState>,
+    players: Query<(&Transform, &MotionPhase, &DashMode, &PlayerInput), With<PlayerControlled>>,
+) {
+    let Some((configs, site)) = configs.as_deref().zip(site.as_deref()) else {
+        return; // 面板或站点选择未立：速度律没有取值面，跳过本行
+    };
+    for (transform, phase, dash, input) in &players {
+        let forward = transform.rotation * Vec3::Z;
+        let yaw = heading_yaw([forward.x, forward.y, forward.z]);
+        let phase_word = if matches!(phase, MotionPhase::Walking) {
+            "walk"
+        } else {
+            "dwell"
+        };
+        let speed = move_speed(configs, site, camera_state.0, dash.0);
+        let p = transform.translation;
+        let boundary = match &face {
+            None => "?",
+            Some(face) if face.on_face(p.x, p.z) => "内",
+            Some(_) => "外",
+        };
+        debug!(
+            "[player] t={:.1} pos=({:.3},{:.3},{:.3}) yaw={:.1} phase={} dash={} 输入=({:.2},{:.2}) 速度档 {:.3} m/s 界={}",
+            time.elapsed_secs(),
+            p.x,
+            p.y,
+            p.z,
+            yaw,
+            phase_word,
+            dash.0,
+            input.direction.x,
+            input.direction.z,
+            speed,
+            boundary
+        );
+    }
+}
+
+/// 采样点附近的地表高度：半径内地形顶点的最高者；没有顶点时取 `fallback`
+/// （走出地表时保持原高度——移动边界挂账见模块注释）。
+fn surface_y(verts: &[Vec3], x: f32, z: f32, fallback: f32) -> f32 {
+    verts
+        .iter()
+        .filter(|v| {
+            let dx = v.x - x;
+            let dz = v.z - z;
+            dx * dx + dz * dz <= SURFACE_RADIUS * SURFACE_RADIUS
+        })
+        .map(|v| v.y)
+        .reduce(f32::max)
+        .unwrap_or(fallback)
+}
+
+fn navigation_y(verts: &[Vec3], x: f32, z: f32, raw_fallback: f32, surface: Option<f32>) -> f32 {
+    surface.unwrap_or_else(|| surface_y(verts, x, z, raw_fallback))
+}
+
+#[cfg(test)]
+mod navigation_height_tests {
+    use super::*;
+
+    #[test]
+    fn surface_height_wins_and_only_absent_ground_uses_the_fallback() {
+        let ground = [Vec3::ZERO, Vec3::X];
+        assert_eq!(navigation_y(&ground, 0.0, 0.0, 0.0, Some(0.05)), 0.05);
+        // No surface at the point: the sampled ground vertex answers.
+        assert_eq!(navigation_y(&ground, 1.0, 0.0, 0.05, None), 0.0);
+        // No sampled ground either: the caller's prior height is kept.
+        assert_eq!(navigation_y(&[], 0.0, 0.0, 0.05, None), 0.05);
+    }
+}

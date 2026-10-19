@@ -1,0 +1,597 @@
+//! 摇杆域：虚拟摇杆——真源 CustomJoyStick（浮动摇杆）的触摸面移植。
+//!
+//! 输入模型（方法体直读，非推断；序列化值 APK player data 三实例一致）：
+//! * **触摸区**：窗口左下 35% 宽 × 50% 高（触摸层 RectTransform 的
+//!   layerSize 序列化值）。区内起手的**触摸**归摇杆；区外起手的归
+//!   手势层（`gesture`）。真源里这层分派由 UI 射线完成（摇杆区的
+//!   CanvasGroup blocksRaycasts 挡住射线），此处用同一谓词在两层各
+//!   自复现。**鼠标不进摇杆**——真源是纯触屏产品，宿主桌面鼠标的
+//!   手势面保持全屏（相机拖拽的既有分配不因本域改变）。
+//! * **方向**：首指按下捕获该指、底盘生于触点（浮动式）；方向 =
+//!   (触点 − 底盘心) 翻成真源屏坐标（y 向上）后 / 底盘半径，半径 =
+//!   128 canvas 单位 × canvas 缩放（底盘 RectTransform 256×256 的
+//!   半边）。死区 0（只捕精确 0）、上限 1.0（超限归一 × 1）、中段
+//!   原始比例 ⇒ 实效 = 把比值夹到单位长。handleRange 1.0、轴双向、
+//!   snap 关。
+//! * **事件流**：按下 → 基类 OnPointerDown 先虚调一次 OnDrag，发
+//!   UPDATE（底盘生于触点，差值恰为零 ⇒ 方向零），再发 BEGAN（presenter
+//!   不理 BEGAN）⇒ **按下即活跃、移动向量为零**：玩家进 Move 态、朝向
+//!   atan2(0,0)=0、走姿以速率下限 0.55 原地播；此后引擎输入模块只在
+//!   拖动开始后才派 OnDrag——拖动开始 = 距按下点的平方距离 ≥ 事件系统
+//!   `m_DragThreshold`²（序列化 10，设备像素；预制体与场景两处同值，
+//!   无运行时改写者）；开始后每次移动 → UPDATE（方向 + 相机基烘移动
+//!   向量）；松开/系统取消 → END（清活跃）。按下那一下真源经画布相机
+//!   往返一次浮点，得零或微小噪声；本层没有那次往返，取精确零（具名：
+//!   噪声不复现）。真源 presenter 的 UPDATE 式
+//!   （OnTouchJoyStick）：移动向量 = 相机前（去 y 归一，水平模长
+//!   近零时**该项**回零、右项保留）× 方向.y + 相机右 × 方向.x，
+//!   和向量不归一。烘基取 UPDATE 时刻的相机——按住不动时相机转
+//!   动，移动向量不随动（真源如此，照抄）。
+//! * **让位门**（真源 OnChangeGameState 的 GameStateType 分派，枚举
+//!   直读）：Edit=2 与 Talk=3 → 禁用并 ResetState（正在拖的指以 END
+//!   收场）；LearnSiteEnvironment=6 同禁（harvest 的学习现象态）；
+//!   CutScene=5/SiteMove=10/LevelUpMyRoomSite=11/Delivery=12 同禁但本仓
+//!   无对应态（挂账）；
+//!   **SomeCharacterTalk=7 不在摇杆的分派表里**——环境配对对话
+//!   （NPC×NPC / NPC×家具）不改游戏态，摇杆照常可用；Harvest=4 与
+//!   PhotoShot=8 反而保持可用（PhotoShot 隐 UI）。本仓对应：摆放编辑
+//!   （EditSessionActive）与玩家自己的对话会话（PlayerTalkSession）
+//!   → 禁用；环境配对对话（talk 域的会话资源）**不算**。禁用期间
+//!   触摸区归手势层（真源禁用时摇杆件整个下线，射线穿到全屏手势层）。
+//! * **呈现**：捕获中底盘（256 canvas 单位）显于触点、手柄（128）
+//!   随方向偏移 = 方向 × 128 × 缩放；松开隐藏。两件贴图按 UI atlas
+//!   的 sprite rect 从整页裁（rect 是底原点坐标，消费侧翻成顶原点）。
+//!
+//! 多指：**只跟首指**。已捕获时区内第二根指按下被吞掉（真源
+//! OnPointerDown 对重复捕获早退，射线也归摇杆件——手势层收不到）；
+//! 区外的第二根指照常进手势层（摇杆拖动 + 区外指拖相机并存，
+//! 这是触屏产品的常态操作形）。单指针是手势层的移植边界（真源
+//! 多指族 DUO/PINCH 不迁），本层对第二根**区内**指同样不迁。
+//!
+//! 冒烟口（`MOLY_JOYSTICK_AUTOSMOKE_SECS`）：往 `TouchInput` 消息流
+//! 注入剧本触摸——消息面就是真实输入面（引擎触摸事件落在同一条流
+//! 上），注入即走摇杆层本体。剧本两周期（右拖满偏移、上拖满偏移，
+//! 各含起手/满偏/收场三时刻），段界记玩家位置快照，位移方向逐段
+//! 可对账。
+
+use crate::balloon::BALLOON_LAYER;
+use crate::canvas::RootCanvas;
+use crate::player::PlayerControlled;
+use bevy::asset::{AssetPath, LoadState};
+use bevy::camera::visibility::RenderLayers;
+use bevy::input::touch::{TouchInput, TouchPhase};
+use bevy::math::Rect;
+use bevy::prelude::*;
+use bevy::window::PrimaryWindow;
+
+pub use crate::joystick_law::{bake, bake_move_vector, handle_input, DEAD_ZONE, HANDLE_SIZE, LIMIT};
+
+/// 触摸区占比（真源触摸层 RectTransform 的 layerSize 序列化值
+/// (0.35, 0.5)）。
+const ZONE_W: f32 = 0.35;
+const ZONE_H: f32 = 0.5;
+
+/// 底盘 RectTransform 边长（canvas 单位；序列化 sizeDelta 256×256）。
+const BASE_SIZE: f32 = 256.0;
+
+/// The EventSystem's serialized `m_DragThreshold`, in device pixels: the
+/// input module sends OnDrag only once the pointer is this far from where it
+/// was pressed (`(press - position).sqrMagnitude >= threshold²`).
+const DRAG_THRESHOLD_DEVICE_PIXELS: f32 = 10.0;
+
+/// 摇杆两件所在页（UI atlas 的 MysekaiAtlas 页）。
+const PAGE: &str =
+    "moly://ui/atlas/textures/sactx-0-1024x1024-ASTC 4x4-MysekaiAtlas-0a6c3f39-000001d9.png";
+
+/// 底盘源矩形（页图像坐标、y 从顶量）：sprite textureRect (0,0,272,272)
+/// 底原点 → 顶原点翻成 min=(0, 1024-272)。
+const BASE_SRC: Rect = Rect {
+    min: Vec2::new(0.0, 752.0),
+    max: Vec2::new(272.0, 1024.0),
+};
+
+/// 手柄源矩形：sprite textureRect (416,568,112,112) → 顶原点
+/// min=(416, 1024-568-112)。
+const STICK_SRC: Rect = Rect {
+    min: Vec2::new(416.0, 344.0),
+    max: Vec2::new(528.0, 456.0),
+};
+
+pub use crate::markers::JoystickState;
+use crate::markers::in_zone;
+
+/// MysekaiUtility.ForceResetJoyStick -> CustomJoyStick.ForcePointerUp: the
+/// captured finger is let go (the stick hides and publishes END), and that
+/// finger no longer drives the stick until it is lifted and pressed again.
+#[derive(Message, Clone, Copy, Debug)]
+pub struct ForceResetJoystick {
+    pub reason: &'static str,
+}
+
+/// Update, after the action buttons' click: ForcePointerUp for each reset
+/// request. END is published whether or not a finger was captured.
+pub fn force_reset(
+    mut state: ResMut<JoystickState>,
+    mut resets: MessageReader<ForceResetJoystick>,
+) {
+    for reset in resets.read() {
+        let finger = state.captured.take();
+        let was_active = state.active;
+        state.active = false;
+        state.dragging = false;
+        state.direction = Vec2::ZERO;
+        state.move_vector = Vec3::ZERO;
+        info!(
+            "[joystick] ForcePointerUp ({}): END; finger {finger:?} released (input was {})",
+            reset.reason,
+            if was_active { "on" } else { "off" }
+        );
+    }
+}
+
+/// Update（手势链内、手势层之前）：摇杆层推进。读 `TouchInput` 消息流
+/// ——与手势层同一条流，两层按同一谓词各自分流（见模块注释）。
+pub fn advance(
+    mut state: ResMut<JoystickState>,
+    mut touches: MessageReader<TouchInput>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    cameras: Query<&GlobalTransform, With<Camera3d>>,
+    edits: Res<crate::field_modes::EditSessionActive>,
+    player_talk: Option<Res<crate::player_talk::PlayerTalkSession>>,
+    overlays: crate::game_settings::OverlayPanels,
+    library: Res<crate::content_library::ContentLibrary>,
+    mut last_logged: Local<Vec2>,
+    mut no_area: Local<bool>,
+    site_move: Option<Res<crate::field_modes::SiteMoveActive>>,
+    entry: Option<Res<crate::entry::EntrySequence>>,
+    root_canvas: Option<Res<RootCanvas>>,
+    learn: Option<Res<crate::field_modes::LearnSiteEnvironmentActive>>,
+    held: Option<Res<crate::field_modes::HeldGameState>>,
+    screens: Option<Res<crate::ui_layers::ScreenManager>>,
+) {
+    let Some(window) = windows.single().ok() else {
+        return;
+    };
+    let (width, height) = (window.width(), window.height());
+    // 让位门（GameStateType 分派）：Edit=2 / Talk=3（玩家自己的对话）
+    // → 禁用。环境配对对话不改游戏态（SomeCharacterTalk=7 不在摇杆的
+    // 分派表里），不算禁用源。
+    // MysekaiUtility.EnableJoyStick(true) runs in the entry's Finish.
+    let was_enabled = state.enabled;
+    state.enabled = !edits.is_active()
+        && player_talk.is_none()
+        && !overlays.block_world_input()
+        && !library.blocks_exploration_input()
+        // GameState SiteMove: EnableGestureLayer(false).
+        && site_move.is_none()
+        // GameState LearnSiteEnvironment: the stick resets and hides.
+        && learn.is_none()
+        // GameState CutScene (5) and LevelUpMyRoomSite (11): the stick's
+        // table disables it.
+        && held.is_none()
+        && crate::entry::control_open(entry.as_deref());
+    if let Some(held) = held.as_ref() {
+        if held.is_changed() {
+            info!(
+                "[joystick] OnChangeGameState({} {:?}): disabled",
+                held.0 as i32, held.0
+            );
+        }
+    }
+    if was_enabled != state.enabled {
+        info!(
+            "[joystick] enabled {was_enabled} -> {} (held game state {:?})",
+            state.enabled,
+            held.as_ref().map(|held| held.0)
+        );
+    }
+    if !state.enabled {
+        touches.clear();
+        if state.captured.take().is_some() {
+            // 真源状态切换收场：发布 END（ResetStateByCurrentPos 同拍发
+            // 一条 END 态事件，presenter 清 _isJoyStickInput）。
+            state.active = false;
+            state.dragging = false;
+            state.direction = Vec2::ZERO;
+            state.move_vector = Vec3::ZERO;
+            info!("[joystick] 让位门落下，拖动中的指以 END 收场");
+        }
+        return;
+    }
+    // The joystick is a HUD control of the root canvas; before that canvas
+    // exists there is no joystick to take a touch.
+    let Some(root_canvas) = root_canvas.as_deref() else {
+        touches.clear();
+        return;
+    };
+    let radius = HANDLE_SIZE * root_canvas.scale(window);
+    // A window with no drawable area has no canvas scale, so the stick has no
+    // radius to measure a ratio against and every ratio would be NaN; the
+    // stick is released as a lifted finger is. The refusal is logged once per
+    // entry into the state, not once per frame of it.
+    if !(radius.is_finite() && radius > 0.0) {
+        touches.clear();
+        if state.captured.take().is_some() {
+            state.active = false;
+            state.dragging = false;
+            state.direction = Vec2::ZERO;
+            state.move_vector = Vec3::ZERO;
+        }
+        if !*no_area {
+            *no_area = true;
+            info!(
+                "[joystick] refused: the window has no drawable area (size {width}x{height}); the stick is released"
+            );
+        }
+        return;
+    }
+    *no_area = false;
+    // Touch positions are logical pixels; the threshold is in device pixels.
+    let drag_threshold = DRAG_THRESHOLD_DEVICE_PIXELS / window.scale_factor();
+    // A dialog over the field (ExistsDialog(Layer_Dialog)) takes a new press;
+    // a finger already on the stick keeps dragging it.
+    let dialog = screens
+        .as_deref()
+        .is_some_and(crate::ui_layers::ScreenManager::exists_dialog);
+    for touch in touches.read() {
+        match touch.phase {
+            TouchPhase::Started => {
+                if state.captured.is_none() && dialog && in_zone(touch.position, width, height) {
+                    // A press under a dialog belongs to the dialog layer, as
+                    // the field buttons' taps do (ExistsDialog(Layer_Dialog)).
+                    // The gesture layer skips the same press while the stick
+                    // is enabled, so no layer takes it.
+                    info!(
+                        "[joystick] press {} @({:.0},{:.0}) refused: a dialog is shown on Layer_Dialog",
+                        touch.id, touch.position.x, touch.position.y
+                    );
+                    continue;
+                }
+                if state.captured.is_none() && in_zone(touch.position, width, height) {
+                    // 首指捕获：底盘生于触点（浮动式）。已捕获时区内第二指
+                    // 吞掉（真源早退 + 射线归摇杆件）；区外指不归本层。
+                    state.captured = Some(touch.id);
+                    state.base = touch.position;
+                    state.dragging = false;
+                    state.direction = Vec2::ZERO;
+                    state.active = false;
+                    *last_logged = Vec2::ZERO;
+                    // OnPointerDown -> OnDrag: UPDATE with the press-point
+                    // difference, zero, so the input is on with a zero
+                    // vector (then BEGAN, which the presenter ignores).
+                    if let Some(vector) = bake_move_vector(state.direction, &cameras) {
+                        state.move_vector = vector;
+                        state.active = true;
+                    }
+                    info!(
+                        "[joystick] 捕获指 {} @({:.0},{:.0})，底盘半径 {:.0}px（死区 {} 上限 {}）；按下即 UPDATE 零向量，输入 {}，拖动阈值 {:.2}px",
+                        touch.id, touch.position.x, touch.position.y, radius, DEAD_ZONE, LIMIT,
+                        if state.active { "开" } else { "未开（相机不在场）" },
+                        drag_threshold
+                    );
+                }
+            }
+            TouchPhase::Moved => {
+                if state.captured == Some(touch.id) {
+                    if !state.dragging {
+                        // ProcessDrag: the drag starts once the pointer is
+                        // at least the threshold from the press point.
+                        if (state.base - touch.position).length_squared()
+                            < drag_threshold * drag_threshold
+                        {
+                            continue;
+                        }
+                        state.dragging = true;
+                        info!(
+                            "[joystick] 拖动开始：距按下点 {:.2}px ≥ 阈值 {:.2}px",
+                            (state.base - touch.position).length(),
+                            drag_threshold
+                        );
+                    }
+                    // OnDrag：差值翻成真源屏坐标（y 向上）除以底盘半径，
+                    // 再过 HandleInput 的夹（死区 0 只捕精确 0；超上限
+                    // 归一 × 1；中段保持原始比例）。
+                    let raw = Vec2::new(
+                        touch.position.x - state.base.x,
+                        state.base.y - touch.position.y,
+                    ) / radius;
+                    state.direction = handle_input(raw);
+                    // presenter 的 UPDATE：烘移动向量并置活跃。相机不在
+                    // 场（装载期触摸）真源整式短路——不置活跃，等下一
+                    // 次 UPDATE 重烘。
+                    match bake_move_vector(state.direction, &cameras) {
+                        Some(vector) => {
+                            state.move_vector = vector;
+                            state.active = true;
+                        }
+                        None => {}
+                    }
+                    if (state.direction - *last_logged).length() > 0.2 {
+                        *last_logged = state.direction;
+                        debug!(
+                            "[joystick] 方向 ({:.2},{:.2}) → 世界向量 ({:.2},{:.2},{:.2})",
+                            state.direction.x,
+                            state.direction.y,
+                            state.move_vector.x,
+                            state.move_vector.y,
+                            state.move_vector.z
+                        );
+                    }
+                }
+            }
+            TouchPhase::Ended | TouchPhase::Canceled => {
+                if state.captured == Some(touch.id) {
+                    // 系统取消与正常松开同式收场（真源手势层只认
+                    // OnPointerUp；指被系统收走后跟踪面若不收会僵住，
+                    // 触屏产品的让位路径按松开处理）。
+                    state.captured = None;
+                    state.active = false;
+                    state.dragging = false;
+                    state.direction = Vec2::ZERO;
+                    state.move_vector = Vec3::ZERO;
+                    info!("[joystick] 指收场：END，方向清零，输入停止");
+                }
+            }
+        }
+    }
+}
+
+
+/// 摇杆 UI 根（两件 sprite 的父；可见性随捕获态，子件沿父链继承）。
+#[derive(Component)]
+pub struct JoystickUiRoot;
+
+/// 底盘件。
+#[derive(Component)]
+pub struct JoystickBase;
+
+/// 手柄件。
+#[derive(Component)]
+pub struct JoystickHandle;
+
+/// 纹源：UI atlas 整页。
+#[derive(Resource)]
+pub struct JoystickArt {
+    page: Handle<Image>,
+}
+
+/// Startup：请求整页贴图（两件共用一页，一次装载）。
+pub fn load(mut commands: Commands, server: Res<AssetServer>) {
+    let page = moly_assets::residency::load_image(&server, AssetPath::from(PAGE.to_owned()));
+    commands.insert_resource(JoystickArt { page });
+}
+
+/// Update：页到齐铺两件（隐藏起步，捕获时才显）。子件按源 rect 裁、
+/// custom_size = RectTransform 尺寸（canvas 单位），place_ui 每帧压
+/// canvas 缩放。
+pub fn spawn_when_ready(
+    mut commands: Commands,
+    server: Res<AssetServer>,
+    art: Option<Res<JoystickArt>>,
+    roots: Query<(), With<JoystickUiRoot>>,
+) {
+    if !roots.is_empty() {
+        return;
+    }
+    let Some(art) = art else { return };
+    match server.load_state(&art.page) {
+        LoadState::Loaded => {}
+        LoadState::Failed(err) => panic!("摇杆贴图装载失败（{err:?}）"),
+        _ => return,
+    }
+    let base = commands
+        .spawn((
+            JoystickBase,
+            Sprite {
+                image: art.page.clone(),
+                rect: Some(BASE_SRC),
+                custom_size: Some(Vec2::splat(BASE_SIZE)),
+                ..default()
+            },
+            Transform::from_xyz(0.0, 0.0, 0.2),
+        ))
+        .id();
+    let handle = commands
+        .spawn((
+            JoystickHandle,
+            Sprite {
+                image: art.page.clone(),
+                rect: Some(STICK_SRC),
+                custom_size: Some(Vec2::splat(HANDLE_SIZE)),
+                ..default()
+            },
+            Transform::from_xyz(0.0, 0.0, 0.3),
+        ))
+        .id();
+    commands
+        .spawn((
+            JoystickUiRoot,
+            Visibility::Hidden,
+            Transform::default(),
+            RenderLayers::layer(BALLOON_LAYER),
+        ))
+        .add_children(&[base, handle]);
+    info!("[joystick] 摇杆件铺装：底盘 256 手柄 128 canvas 单位，默认隐藏");
+}
+
+/// Update（advance 之后）：按捕获态摆件。捕获中：底盘心 = 触点
+/// （屏点 → 覆盖相机世界系：原点屏幕中心、y 向上、1 单位 = 1 逻辑
+/// 像素）；手柄心 = 底盘心 + 方向 × 128 × 缩放（方向本就是 y 向上
+/// 语义，与该世界系一致，无需再翻）；两件 custom_size 压当帧 canvas
+/// 缩放。未捕获：整树隐藏。
+pub fn place_ui(
+    state: Res<JoystickState>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut roots: Query<&mut Visibility, With<JoystickUiRoot>>,
+    mut bases: Query<(&mut Transform, &mut Sprite), (With<JoystickBase>, Without<JoystickHandle>)>,
+    mut handles: Query<
+        (&mut Transform, &mut Sprite),
+        (With<JoystickHandle>, Without<JoystickBase>),
+    >,
+    root_canvas: Option<Res<RootCanvas>>,
+) {
+    let (Ok(window), Some(root_canvas)) = (windows.single(), root_canvas.as_deref()) else {
+        return;
+    };
+    let captured = state.captured.is_some();
+    for mut root in &mut roots {
+        set_if_neq!(*root, if captured { Visibility::Visible } else { Visibility::Hidden });
+    }
+    if !captured {
+        return;
+    }
+    let (width, height) = (window.width(), window.height());
+    let scale = root_canvas.scale(window);
+    let base_world = Vec2::new(state.base.x - width / 2.0, height / 2.0 - state.base.y);
+    if let Ok((mut transform, mut sprite)) = bases.single_mut() {
+        set_if_neq!(transform.translation, base_world.extend(0.2));
+        sprite.custom_size = Some(Vec2::splat(BASE_SIZE * scale));
+    }
+    if let Ok((mut transform, mut sprite)) = handles.single_mut() {
+        let handle_world = base_world + state.direction * HANDLE_SIZE * scale;
+        set_if_neq!(transform.translation, handle_world.extend(0.3));
+        sprite.custom_size = Some(Vec2::splat(HANDLE_SIZE * scale));
+    }
+}
+
+/// 冒烟剧本的推进账（[`smoke_autojoystick`] 的 Local）。
+#[derive(Default)]
+pub struct AutojoystickRun {
+    /// 剧本步号：0 未开始，1 周期一拖动中，2 周期一保持，3 周期一收场，
+    /// 4 周期二拖动中，5 周期二保持，6 周期二收场，7 完结。
+    step: usize,
+}
+
+/// Update（手势链首、joystick::advance 之前）：摇杆层的冒烟口
+/// （`MOLY_JOYSTICK_AUTOSMOKE_SECS`）。往 `TouchInput` 消息流注入
+/// 剧本触摸——引擎触摸事件就落在同一条流上，注入即走摇杆层与手势层
+/// 的真实分流，不绕过任何一行。剧本两周期（起手均在区内同一点）：
+///
+/// | 周期 | 时刻 | 段 | 摇杆方向 | 预期位移 |
+/// |---|---|---|---|---|
+/// | 一 | 1.0s 起手，1.6s 满偏，1.8s 松开 | 拖向右 128×缩放 px | (1, 0) | 相机右 × 步速 |
+/// | 二 | 2.4s 起手，3.0s 满偏，3.2s 松开 | 拖向上 128×缩放 px | (0, 1) | 相机前（水平归一）× 步速 |
+///
+/// 段界记玩家位置快照（含方向与时刻），配合玩家域的输入开始/结束行，
+/// 「摇杆方向 → 相机基 → 世界位移」逐段可对账。满偏拖动是线性插值
+/// （时刻决定位置，与帧率无关）。
+pub fn smoke_autojoystick(
+    mut touches: MessageWriter<TouchInput>,
+    windows: Query<(Entity, &Window), With<PrimaryWindow>>,
+    players: Query<&Transform, With<PlayerControlled>>,
+    time: Res<Time>,
+    mut run: Local<AutojoystickRun>,
+    root_canvas: Option<Res<RootCanvas>>,
+) {
+    let armed = env_secs("MOLY_JOYSTICK_AUTOSMOKE_SECS");
+    if armed <= 0.0 || time.elapsed_secs() >= armed {
+        return;
+    }
+    let now = time.elapsed_secs();
+    let Ok((window_entity, window)) = windows.single() else {
+        return;
+    };
+    let (width, height) = (window.width(), window.height());
+    const FINGER: u64 = 99001;
+    // 时刻表：起手 → 拖到满偏 → 保持 → 松开，两周期。
+    const C1_PRESS: f32 = 1.0;
+    const C1_FULL: f32 = 1.6;
+    const C1_RELEASE: f32 = 1.8;
+    const C2_PRESS: f32 = 2.4;
+    const C2_FULL: f32 = 3.0;
+    const C2_RELEASE: f32 = 3.2;
+    let Some(root_canvas) = root_canvas.as_deref() else {
+        return;
+    };
+    let radius = HANDLE_SIZE * root_canvas.scale(window);
+    // 起手点：区内中部（15% 宽、75% 高——顶原点坐标的左下象限）。
+    let start = Vec2::new(width * 0.15, height * 0.75);
+    let write = |touches: &mut MessageWriter<TouchInput>, phase: TouchPhase, position: Vec2| {
+        touches.write(TouchInput {
+            phase,
+            position,
+            window: window_entity,
+            force: None,
+            id: FINGER,
+        });
+    };
+    let snapshot = |label: &str, dir: &str| {
+        if let Ok(transform) = players.single() {
+            let p = transform.translation;
+            info!(
+                "[joystick-smoke] {label} t={:.2} 方向 {dir} 玩家位置 ({:.2},{:.2},{:.2})",
+                now, p.x, p.y, p.z
+            );
+        }
+    };
+    // 拖动位置线性插值：t 从段起到段末，s∈[0,1] 走满偏距离。
+    let progress = |t0: f32, t1: f32| ((now - t0) / (t1 - t0)).clamp(0.0, 1.0);
+    match run.step {
+        0 if now >= C1_PRESS => {
+            write(&mut touches, TouchPhase::Started, start);
+            info!(
+                "[joystick-smoke] 周期一起手 @({:.0},{:.0})（区 = x<{:.0} 且 y≥{:.0}，满偏半径 {:.0}px）",
+                start.x, start.y, width * ZONE_W, height * ZONE_H, radius
+            );
+            snapshot("周期一起手", "(0,0)");
+            run.step = 1;
+        }
+        1 => {
+            let s = progress(C1_PRESS, C1_FULL);
+            write(
+                &mut touches,
+                TouchPhase::Moved,
+                start + Vec2::new(radius * s, 0.0),
+            );
+            if now >= C1_FULL {
+                snapshot("周期一满偏（向右）", "(1,0)");
+                run.step = 2;
+            }
+        }
+        2 if now >= C1_RELEASE => {
+            write(
+                &mut touches,
+                TouchPhase::Ended,
+                start + Vec2::new(radius, 0.0),
+            );
+            snapshot("周期一收场", "(0,0)");
+            run.step = 3;
+        }
+        3 if now >= C2_PRESS => {
+            write(&mut touches, TouchPhase::Started, start);
+            snapshot("周期二起手", "(0,0)");
+            run.step = 4;
+        }
+        4 => {
+            let s = progress(C2_PRESS, C2_FULL);
+            write(
+                &mut touches,
+                TouchPhase::Moved,
+                start + Vec2::new(0.0, -radius * s),
+            );
+            if now >= C2_FULL {
+                snapshot("周期二满偏（向上）", "(0,1)");
+                run.step = 5;
+            }
+        }
+        5 if now >= C2_RELEASE => {
+            write(
+                &mut touches,
+                TouchPhase::Ended,
+                start + Vec2::new(0.0, -radius),
+            );
+            snapshot("周期二收场", "(0,0)");
+            run.step = 6;
+        }
+        _ => {}
+    }
+}
+
+/// 环境变量秒数（缺省 0）：与各域冒烟钩子同款读法。
+fn env_secs(name: &str) -> f32 {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<f64>().ok())
+        .map(|v| v.max(0.0) as f32)
+        .unwrap_or(0.0)
+}

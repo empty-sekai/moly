@@ -15,10 +15,8 @@ moly-assets = { path = "../../engine/moly-assets" }
 moly-game = { path = "../../game/moly-game" }
 moly-perf = { path = "../../engine/moly-perf" }
 moly-store = { path = "../../base/moly-store" }
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-# The native game connects to its server directly. A browser build has no
-# WebSocket transport; its inputs arrive from its host page instead.
+# The native game connects to its server over WebSocket; the browser game
+# installs the same link, which reports itself lost.
 moly-link = { path = "../../net/moly-link" }
 moly-protocol = { path = "../../net/moly-protocol" }
 

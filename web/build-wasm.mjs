@@ -131,11 +131,11 @@ console.log(
 
 // The UI font travels next to the engines instead of inside them. Browser
 // builds check the bytes a page installs against the digest and length that
-// crates/game/moly-game/src/ui_font.rs declares, so both must name this file.
+// crates/game/moly-core/src/ui_font.rs declares, so both must name this file.
 const uiFontBytes = readFileSync(
   path.join(
     workspaceRoot,
-    "crates/game/moly-game/assets/font/ResourceHanRoundedSC-Medium.subset.ttf",
+    "crates/game/moly-core/assets/font/ResourceHanRoundedSC-Medium.subset.ttf",
   ),
 );
 const uiFont = {
@@ -145,7 +145,7 @@ const uiFont = {
 };
 {
   const declaration = readFileSync(
-    path.join(workspaceRoot, "crates/game/moly-game/src/ui_font.rs"),
+    path.join(workspaceRoot, "crates/game/moly-core/src/ui_font.rs"),
     "utf8",
   );
   const digest = /UI_FONT_SHA256:\s*&str\s*=\s*"([a-f0-9]{64})"\s*;/.exec(

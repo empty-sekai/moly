@@ -2,212 +2,198 @@
 //!
 //! 帧次序：0 层输入/决策 → 1 层聚合 → 2 层快照（依据记在 `schedule.rs`）。
 
-/// Assigns `$value` to `$place` only when they differ. A write through `Mut`
-/// marks the component changed even when the value is equal, and the
-/// change-driven systems (UI layout and text measurement, transform and
-/// visibility propagation) then redo their work for it on that frame.
-macro_rules! set_if_neq {
-    ($place:expr, $value:expr) => {{
-        let value = $value;
-        if $place != value {
-            $place = value;
-        }
-    }};
-}
 
-pub mod action_button;
-pub mod alone_action_runtime;
-pub mod audio;
-pub mod audio_inputs;
-mod audio_sequence;
-mod audio_startup;
-pub mod avatar_material;
-mod avatar_wear_data;
-pub mod avatar_wear;
-pub mod balloon;
-pub mod billboard;
-mod bgm_select;
-pub mod birthday;
-mod browser_game;
-mod browser_stage;
-pub use browser_stage::configure_browser_stage;
-mod bus;
-pub mod camera;
-mod camera_site_move;
-pub mod canvas;
-pub mod character;
-pub mod character_material;
-mod character_silhouette;
-pub mod cloth_runtime;
-mod content_library;
-mod control;
-mod control_panel;
-mod cutscene;
-mod cutscene_camera;
-mod delayed_faces;
-pub mod delivery;
-mod delivery_camera;
-pub(crate) mod door_law;
-mod director;
-pub mod emoticon;
-mod entry;
-pub mod clock;
-pub mod env;
-pub mod field_modes;
-pub mod fixture;
-mod fixture_collision;
-mod fixture_activity_data;
-mod fixture_activity_provider;
-mod fixture_activity_state;
-mod fixture_activity_timeline;
-mod fixture_timeline_particles;
-pub mod fixture_attach;
-mod fixture_colors;
-mod fixture_gate_model;
-pub mod fixture_edit;
-mod fixture_edit_ui;
-mod floor_edit_camera;
-pub mod fixture_emission;
-mod fixture_clock;
-mod fixture_gimmick;
-mod fixture_locator;
-pub mod fixture_material;
-mod fixture_player_navigation;
-mod fixture_scene_inputs;
-pub mod fixture_talk;
-mod fixture_tiles;
-mod fixture_walk;
-mod footstep;
-pub mod game_settings;
-mod game_state;
-mod gate_flow;
-pub mod gesture;
-pub mod get_resource;
-pub mod learn_phenomena_dialog;
-mod gpu_image_release;
-pub mod harvest;
-pub mod house;
-mod house_doors;
-pub mod harvest_material;
-mod home_action;
-pub mod inactive_nodes;
-pub mod info;
-mod input_claims;
-mod interaction;
-mod inventory;
-pub mod joystick;
-pub mod joystick_law;
-pub mod light;
-pub mod markers;
-mod material_order;
-mod mesh_buffer_release;
-pub mod menu_dialog;
-pub mod menu_shell;
-pub mod notice_banner;
-pub mod collect_notice;
-pub mod item_icon;
-mod mysekai_rank;
-pub mod npc;
-mod npc_clock;
-mod npc_dither;
-mod npc_fixture_activity;
-mod npc_fixture_talk;
-mod npc_gate;
-mod npc_look_at;
-#[cfg(test)]
-mod npc_harness;
-pub mod npc_objective;
-mod npc_presenter;
-mod npc_state;
-mod npc_talk_lottery;
-mod npc_tweet;
-mod npc_view;
-pub mod option_dialog;
-mod particle_runtime;
-mod particle_geometry;
-pub mod render_inputs;
-mod source_billboard;
-mod system_fixture;
-mod particle_mesh_emission;
-pub mod pick;
-pub mod player;
-pub mod player_input;
-pub mod player_avatar;
-mod overlay_camera;
-pub mod player_data;
+#[macro_use]
+extern crate moly_core;
+
+// The layer crates' modules resolve as `crate::<module>` here as well.
+pub use moly_core::canvas;
+pub use moly_core::env;
+pub use moly_core::inactive_nodes;
+pub use moly_core::input_claims;
+pub use moly_core::light;
+pub use moly_core::markers;
+pub use moly_core::material_order;
+pub use moly_core::mesh_buffer_release;
+pub use moly_core::overlay_camera;
+pub use moly_core::player_data_io;
+pub use moly_core::render;
+pub use moly_core::system_access;
+pub use moly_core::ui_font;
+pub use moly_core::weather_transition;
+pub use moly_render::billboard;
+pub use moly_render::character_material;
+pub use moly_render::fixture_timeline_particles;
+pub use moly_render::fixture_colors;
+pub use moly_render::fixture_emission;
+pub use moly_render::fixture_material;
+pub use moly_render::gpu_image_release;
+pub use moly_render::particle_runtime;
+pub use moly_render::particle_geometry;
+pub use moly_render::render_inputs;
+pub use moly_render::source_billboard;
+pub use moly_render::particle_mesh_emission;
+pub use moly_render::shadowmap;
+pub use moly_render::site_material;
+pub use moly_render::sky;
+pub use moly_render::site_extension;
+pub use moly_render::source_curve;
+pub use moly_render::weather_animation;
+pub use moly_render::uber_particle;
+pub use moly_render::ui_particle;
+pub use moly_render::weather_fx;
+pub use moly_render::weather_depth;
+pub use moly_render::source_render_state;
+pub use moly_render::source_shader;
+pub use moly_render::source_color;
+pub use moly_render::source_camera;
+pub use moly_render::source_particle;
+pub use moly_render::source_particle_streams;
+pub use moly_render::source_particle_render;
+pub use moly_audio::audio;
+pub use moly_audio::audio_inputs;
+pub use moly_audio::audio_sequence;
+pub use moly_audio::audio_startup;
+pub use moly_audio::site_sound;
+pub use moly_audio::voice_pcm;
+pub use moly_ui::browser_stage;
+pub use moly_ui::gesture;
+pub use moly_ui::notice_banner;
+pub use moly_ui::item_icon;
+pub use moly_ui::screen_fade;
+pub use moly_ui::ui_charsets;
+pub use moly_ui::ui_inputs;
+pub use moly_ui::two_button_dialog;
+pub use moly_ui::common_dialog;
+pub use moly_ui::ui_layers;
+pub use moly_ui::ui_layout;
+pub use moly_world::alone_action_runtime;
+pub use moly_world::avatar_material;
+pub use moly_world::avatar_wear_data;
+pub use moly_world::avatar_wear;
+pub use moly_world::balloon;
+pub use moly_world::bus;
+pub use moly_world::camera;
+pub use moly_world::camera_site_move;
+pub use moly_world::character;
+pub use moly_world::character_silhouette;
+pub use moly_world::cloth_runtime;
+pub use moly_world::cutscene_camera;
+pub use moly_world::delayed_faces;
+pub use moly_world::delivery_camera;
+pub use moly_world::door_law;
+pub use moly_world::emoticon;
+pub use moly_world::clock;
+pub use moly_world::field_modes;
+pub use moly_world::fixture;
+pub use moly_world::fixture_collision;
+pub use moly_world::fixture_activity_data;
+pub use moly_world::fixture_activity_provider;
+pub use moly_world::fixture_activity_state;
+pub use moly_world::fixture_activity_timeline;
+pub use moly_world::fixture_attach;
+pub use moly_world::fixture_gate_model;
+pub use moly_world::fixture_clock;
+pub use moly_world::fixture_gimmick;
+pub use moly_world::fixture_locator;
+pub use moly_world::fixture_player_navigation;
+pub use moly_world::fixture_scene_inputs;
+pub use moly_world::fixture_talk;
+pub use moly_world::fixture_tiles;
+pub use moly_world::house;
+pub use moly_world::house_doors;
+pub use moly_world::interaction;
+pub use moly_world::joystick_law;
+pub use moly_world::npc;
+pub use moly_world::npc_clock;
+pub use moly_world::npc_dither;
+pub use moly_world::npc_fixture_activity;
+pub use moly_world::npc_fixture_talk;
+pub use moly_world::npc_gate;
+pub use moly_world::npc_look_at;
+pub use moly_world::npc_objective;
+pub use moly_world::npc_presenter;
+pub use moly_world::npc_state;
+pub use moly_world::npc_talk_lottery;
+pub use moly_world::npc_tweet;
+pub use moly_world::npc_view;
+pub use moly_world::system_fixture;
+pub use moly_world::player;
+pub use moly_world::player_avatar;
+pub use moly_world::player_fixture_action;
+pub use moly_world::player_state;
+pub use moly_world::player_talk;
+pub use moly_world::plain_background;
+pub use moly_world::rank_table;
+pub use moly_world::room_appearance;
+pub use moly_world::room_door_port;
+pub use moly_world::room_shell;
+pub use moly_world::userdata_snapshot;
+pub use moly_world::server_panel;
+pub use moly_world::server_panel_data;
+pub use moly_world::stage_layout;
+pub use moly_world::site;
+pub use moly_world::talk;
+pub use moly_world::talk_camera;
+pub use moly_world::zoom_player_camera;
+pub use moly_world::talk_ingest;
+pub use moly_world::talk_window;
+pub use moly_world::tween_clock;
+pub use moly_world::voice_mouth;
+pub use moly_world::walk_face;
+pub use moly_world::weather;
+pub use moly_world::weather_stock_post;
+pub use moly_features::action_button;
+pub use moly_features::bgm_select;
+pub use moly_features::birthday;
+pub use moly_features::browser_game;
+pub use moly_features::content_library;
+pub use moly_features::cutscene;
+pub use moly_features::delivery;
+pub use moly_features::entry;
+pub use moly_features::fixture_edit;
+pub use moly_features::fixture_edit_ui;
+pub use moly_features::floor_edit_camera;
+pub use moly_features::footstep;
+pub use moly_features::game_settings;
+pub use moly_features::game_state;
+pub use moly_features::gate_flow;
+pub use moly_features::get_resource;
+pub use moly_features::learn_phenomena_dialog;
+pub use moly_features::harvest;
+pub use moly_features::harvest_material;
+pub use moly_features::home_action;
+pub use moly_features::info;
+pub use moly_features::inventory;
+pub use moly_features::joystick;
+pub use moly_features::menu_dialog;
+pub use moly_features::menu_shell;
+pub use moly_features::collect_notice;
+pub use moly_features::mysekai_rank;
+pub use moly_features::option_dialog;
+pub use moly_features::pick;
+pub use moly_features::player_input;
+pub use moly_features::player_data;
+pub use moly_features::player_data_ui;
+pub use moly_features::userdata;
+pub use moly_features::site_expansion;
+pub use moly_features::site_move;
+pub use moly_features::site_object_dither;
+pub use moly_features::sitemap;
+pub use moly_features::sitemap_phenomena;
+pub use moly_features::stamina_recover_dialog;
+pub use moly_features::weather_dialog;
+pub use moly_devtools::control;
+pub use moly_devtools::control_panel;
+pub use moly_devtools::director;
+pub use moly_devtools::fixture_walk;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod portraits;
-mod player_data_io;
-mod player_data_ui;
-mod player_fixture_action;
-pub mod player_state;
-pub mod player_talk;
-mod plain_background;
-mod rank_table;
-mod render;
-mod room_appearance;
-mod room_door_port;
-mod room_shell;
+pub use moly_devtools::portraits;
+pub use moly_devtools::talk_probe;
+pub use browser_stage::configure_browser_stage;
 pub mod schedule;
-pub mod system_access;
-mod screen_fade;
-pub mod ui_charsets;
-pub mod ui_inputs;
-mod userdata_snapshot;
-pub(crate) mod userdata;
 
 
-#[path = "server_panel.rs"]
-pub(crate) mod panel;
-pub(crate) use self::panel as server_panel;
-mod server_panel_data;
-pub mod shadowmap;
-mod stage_layout;
-pub mod site;
-pub mod site_material;
-pub mod site_sound;
-mod site_expansion;
-pub(crate) mod site_move;
-mod site_object_dither;
-pub mod sitemap;
-pub mod sitemap_phenomena;
-pub mod sky;
-pub mod site_extension;
-pub(crate) mod stamina_recover_dialog;
-mod source_curve;
-mod weather_animation;
-#[cfg(test)]
-mod weather_animation_replay;
-pub mod talk;
-pub mod talk_camera;
-mod zoom_player_camera;
-mod talk_ingest;
-mod talk_probe;
-pub mod talk_window;
-mod tween_clock;
-mod two_button_dialog;
-mod common_dialog;
-pub mod ui_font;
-pub mod uber_particle;
-pub mod ui_layers;
-pub mod ui_layout;
-mod ui_particle;
-mod voice_mouth;
-mod voice_pcm;
-pub mod walk_face;
-pub mod weather;
-pub(crate) mod weather_dialog;
-pub mod weather_fx;
-mod weather_stock_post;
-mod weather_depth;
-mod weather_transition;
-mod source_render_state;
-mod source_shader;
-mod source_color;
-mod source_camera;
-mod source_particle;
-mod source_particle_streams;
-mod source_particle_render;
 
 // The shared leaf modules live in `moly-core`; the re-export keeps every
 // `crate::<module>` path in this crate resolving.
@@ -242,7 +228,7 @@ pub use moly_core::dev_tools::{insert_dev_tools, DevTools};
 pub use director::{director_command, director_snapshot};
 
 /// Product version shared by the settings panel and application entry points.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub use moly_core::VERSION;
 
 pub use moly_core::settings_store::set_browser_storage_writable;
 
@@ -288,6 +274,9 @@ pub fn app(
                 ..default()
             });
     app.add_plugins(plugins);
+    // A host that seats no documents leaves the instance a non-game one; the
+    // game's host replaces this before the first frame.
+    app.init_resource::<run_mode::RunMode>();
     // Every Time reader sees the engine's Time.maximumDeltaTime as the longest
     // frame, not the virtual clock's own 250 ms default.
     app.world_mut()
@@ -358,5 +347,3 @@ pub fn app(
     app
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
-mod weather_gpu_tests;

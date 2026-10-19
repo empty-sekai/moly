@@ -161,7 +161,7 @@ async function stopServer(server) {
 async function runArm(exe, armName, extraEnv) {
   const runId = randomUUID();
   const env = { ...process.env, MOLY_BALLOON_ORDER_SECS: WINDOW_SECS, MOLY_BALLOON_ORDER_RUN_ID: runId };
-  env.RUST_LOG = `${process.env.RUST_LOG ?? 'warn'},moly_game::balloon=info`;
+  env.RUST_LOG = `${process.env.RUST_LOG ?? 'warn'},moly_world::balloon=info`;
   delete env.MOLY_BALLOON_ORDER_NO_LAYER;
   Object.assign(env, extraEnv);
   const executableSha256 = createHash('sha256').update(fs.readFileSync(exe)).digest('hex');

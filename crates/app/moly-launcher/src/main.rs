@@ -25,7 +25,7 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 /// The page's font: the game's UI font, served on the `molyfont` scheme.
-static FONT: &[u8] = include_bytes!("../../../game/moly-game/assets/font/ResourceHanRoundedSC-Medium.subset.ttf");
+static FONT: &[u8] = include_bytes!("../../../game/moly-core/assets/font/ResourceHanRoundedSC-Medium.subset.ttf");
 
 #[cfg(windows)]
 const GAME_FILE: &str = "moly-app.exe";
