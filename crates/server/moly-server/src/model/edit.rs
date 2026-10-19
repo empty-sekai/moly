@@ -24,7 +24,7 @@ use super::{
 };
 
 /// Sections a response carries (the `pending` names).
-pub(crate) const PENDING_SECTIONS: [&str; 20] = [
+pub(crate) const PENDING_SECTIONS: [&str; 22] = [
     super::music::SECTION,
     super::avatar::SECTION,
     SECTION_GAMEDATA,
@@ -45,6 +45,8 @@ pub(crate) const PENDING_SECTIONS: [&str; 20] = [
     super::music_play::RECORDS_SECTION,
     super::system_fixture_action::SECTION,
     super::tools::SECTION,
+    super::convert::SECTION_SLOTS,
+    super::convert::SECTION_HISTORIES,
 ];
 
 /// How an accepted edit reaches the client.
@@ -136,6 +138,44 @@ pub(crate) fn check_masters(doc: &ServerDocument, masters: &Tables<'_>) -> Resul
     super::inventory::check_masters(&doc.inventory, masters)?;
     super::tools::check_masters(&doc.tools, masters)?;
     super::music_play::check_owned(&doc.music_records, masters.music_records.as_deref())?;
+    if let (Some(level), Some(convert)) =
+        (doc.gamedata.mysekai_convert_fixture_level, masters.convert.as_ref())
+    {
+        if let Some(levels) = &convert.levels {
+            if !levels.contains(&level) {
+                return Err(format!(
+                    "userMysekaiGamedata.mysekaiConvertFixtureLevel = {level} is not a master convert machine level"
+                ));
+            }
+        }
+    }
+    if let Some(convert) = masters.convert.as_ref() {
+        if let Some(items) = &convert.items {
+            for (i, row) in doc.convert.slots.iter().enumerate() {
+                if row.convert_count > 0
+                    && !items.iter().any(|item| item.id == row.mysekai_convert_item_id)
+                {
+                    return Err(format!(
+                        "userMysekaiConvertSlots[{i}] converts item {}, which the master does not hold",
+                        row.mysekai_convert_item_id
+                    ));
+                }
+            }
+        }
+        if let Some((_, extended)) = convert.slots {
+            if let Some(row) = doc
+                .convert
+                .slots
+                .iter()
+                .find(|row| row.slot_id >= extended && row.convert_count > 0)
+            {
+                return Err(format!(
+                    "userMysekaiConvertSlots slot {} is above the machine's {extended} slots",
+                    row.slot_id
+                ));
+            }
+        }
+    }
     if let Some((gates, skins)) = &masters.gates {
         if !gates.contains(&doc.gate.gate_id) {
             return Err(format!(
@@ -206,6 +246,17 @@ fn edit_path(
             Some(section) => Delivery::NextResponse(section),
             None => Delivery::Live,
         });
+    }
+    if let Some(result) = super::convert::edit_path(&mut doc.convert, &parts, path, value) {
+        return result.map(|sections| match sections.first() {
+            Some(section) => Delivery::NextResponse(section),
+            None => Delivery::Live,
+        });
+    }
+    if parts.as_slice() == [SECTION_GAMEDATA, super::convert::GAMEDATA_LEVEL] {
+        let level = super::convert::parse_level(value, path)?;
+        doc.gamedata.mysekai_convert_fixture_level = Some(level);
+        return Ok(Delivery::NextResponse(SECTION_GAMEDATA));
     }
     match parts.as_slice() {
         ["clock"] => {
@@ -620,6 +671,18 @@ fn masters_value(masters: &Tables<'_>) -> Value {
         "gateSkins": masters.gates.as_ref().map(|(_, skins)| skins.clone()),
         "musicRecords": masters.music_records.as_ref().map(Vec::len),
         "configs": masters.configs.as_ref().map(|configs| configs.len()),
+        "convertItems": masters.convert.as_ref().and_then(|convert| convert.items.as_ref()).map(|items| items.iter().map(|item| json!({
+            "id": item.id,
+            "mysekaiConvertItemTabId": item.tab_id,
+            "requiredConvertFixtureLevel": item.required_level,
+            "convertMinutes": item.convert_minutes,
+            "convertLimit": item.convert_limit,
+            "onceConvertLimit": item.once_convert_limit,
+        })).collect::<Vec<_>>()),
+        "convertSlots": masters.convert.as_ref().and_then(|convert| convert.slots).map(|(plain, extended)| json!({
+            "slotNoUpperLimit": plain, "slotNoUpperLimitForMysekaiColorfulPass": extended,
+        })),
+        "convertLevels": masters.convert.as_ref().and_then(|convert| convert.levels.as_ref()),
         "avatar": {
             "costumes": masters.avatar().costumes.as_ref().map(|rows| rows.len()),
             "accessories": masters.avatar().accessories.as_ref().map(|rows| rows.len()),
@@ -761,6 +824,7 @@ fn other_sections(core: Value, delivery: Value) -> Value {
         super::system_fixture_action::schema_sections(),
         super::tools::schema_sections(),
         super::recycle::schema_sections(),
+        super::convert::schema_sections(),
     ]
     .into_iter()
     .fold(core, concat)
@@ -784,7 +848,7 @@ pub(crate) fn schema(model: &ServerModel, masters: &Tables<'_>) -> Value {
         "command": "server.edit",
         "sections": other_sections(sections(masters), super::delivery::schema_sections(Some(model))),
         "actions": actions(),
-        "policies": concat(concat(concat(policies(), super::delivery::schema_policies()), concat(super::home_action::schema_policies(), super::music_play::schema_policies())), concat(concat(concat(super::inventory::schema_policies(), super::craft::schema_policies()), concat(super::system_fixture_action::schema_policies(), super::tools::schema_policies())), super::recycle::schema_policies())),
+        "policies": concat(concat(concat(concat(policies(), super::delivery::schema_policies()), concat(super::home_action::schema_policies(), super::music_play::schema_policies())), concat(concat(concat(super::inventory::schema_policies(), super::craft::schema_policies()), concat(super::system_fixture_action::schema_policies(), super::tools::schema_policies())), super::recycle::schema_policies())), super::convert::schema_policies()),
         "masters": masters_value(masters),
         "joined": model.joined,
     })
@@ -798,7 +862,7 @@ pub(crate) fn schema_without_model() -> Value {
         "command": "server.edit",
         "sections": other_sections(sections(&tables), super::delivery::schema_sections(None)),
         "actions": actions(),
-        "policies": concat(concat(concat(policies(), super::delivery::schema_policies()), concat(super::home_action::schema_policies(), super::music_play::schema_policies())), concat(concat(concat(super::inventory::schema_policies(), super::craft::schema_policies()), concat(super::system_fixture_action::schema_policies(), super::tools::schema_policies())), super::recycle::schema_policies())),
+        "policies": concat(concat(concat(concat(policies(), super::delivery::schema_policies()), concat(super::home_action::schema_policies(), super::music_play::schema_policies())), concat(concat(concat(super::inventory::schema_policies(), super::craft::schema_policies()), concat(super::system_fixture_action::schema_policies(), super::tools::schema_policies())), super::recycle::schema_policies())), super::convert::schema_policies()),
         "masters": null,
         "joined": false,
     })

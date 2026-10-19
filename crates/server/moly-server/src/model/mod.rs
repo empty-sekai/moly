@@ -4,9 +4,9 @@
 //! **The document.** [`document`] (schemaVersion 2) holds only server-decided
 //! values: the gamedata, the stamina, the pass, the schedules, the home gate
 //! and its characters, the owned MySekai tables, the music settings and
-//! records, the system fixture actions, the tools, the layouts and the named
-//! policies. The game keeps copies of the tables a response carries; this
-//! crate keeps none of them.
+//! records, the system fixture actions, the tools, the convert slots and item
+//! histories, the layouts and the named policies. The game keeps copies of
+//! the tables a response carries; this crate keeps none of them.
 //!
 //! **Responses.** Every request a user makes runs one method here, which
 //! records a [`ServerResponse`] on the model: the sections changed since the
@@ -39,6 +39,9 @@
 //!   `mysekai_site_level` row for every authored level of a housing site that
 //!   lies above the level its release rows name, at one rank each, the
 //!   highest level at the highest master rank.
+//! - *Convert*: [`convert`]. The join seats the machine's level and one slot
+//!   per master slot number; a start, a receive and a shorten answer from the
+//!   convert master tables, the pass and the owned tables.
 //!
 //! **Instruments.** A developer start may overlay a fixed clock, the screen
 //! pools and the avatar/music/harvest instruments onto the document; every
@@ -47,6 +50,7 @@
 
 pub(crate) mod avatar;
 pub(crate) mod clock;
+pub(crate) mod convert;
 pub(crate) mod craft;
 pub(crate) mod delivery;
 pub(crate) mod document;
@@ -211,6 +215,9 @@ pub(crate) enum ResponseKind {
     MaterialRecycle,
     ToolRecycle,
     BoostStaminaRecovery,
+    ConvertStart,
+    ConvertReceive,
+    ConvertShorten,
 }
 
 impl ResponseKind {
@@ -240,6 +247,9 @@ impl ResponseKind {
             Self::MaterialRecycle => "PostUserMysekaiRecycleMaterialApi",
             Self::ToolRecycle => "PostUserMysekaiRecycleToolApi",
             Self::BoostStaminaRecovery => "PostUserMysekaiBoostStaminaRecoveryApi",
+            Self::ConvertStart => "PostUserMysekaiConvertStartApi",
+            Self::ConvertReceive => "PostUserMysekaiConvertReceiveApi",
+            Self::ConvertShorten => "PostUserMysekaiConvertShortenApi",
         }
     }
 }
@@ -275,11 +285,14 @@ impl Origin {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct ServerModel {
     pub(super) doc: ServerDocument,
     pub(super) origin: Origin,
     /// Sections the next response carries.
     pub(super) pending: Vec<String>,
+    /// Sections every response carries (the convert items).
+    pub(super) required: Vec<&'static str>,
     pub(super) joined: bool,
     /// Counts document changes.
     pub(super) revision: u64,
@@ -302,6 +315,9 @@ pub(crate) struct ServerModel {
     pub(super) avatar_instrument: avatar::AvatarInstrument,
     /// Music player requests answered (set, eject).
     pub(super) music_play_replies: [u64; 2],
+    /// The convert request the native instrument makes, once:
+    /// (slot, request).
+    pub(super) convert_instrument: Option<(i32, moly_protocol::api::ConvertPost)>,
 }
 
 impl ServerModel {
@@ -310,6 +326,7 @@ impl ServerModel {
             doc,
             origin,
             pending,
+            required: Vec::new(),
             joined: false,
             revision: 0,
             changed: false,
@@ -322,6 +339,7 @@ impl ServerModel {
             home_action_replies: [0; 3],
             avatar_instrument: avatar::AvatarInstrument::default(),
             music_play_replies: [0; 2],
+            convert_instrument: convert::instrument_request(),
         }
     }
 
@@ -410,6 +428,14 @@ impl ServerModel {
     pub(super) fn mark_pending(&mut self, section: &str) {
         if !self.pending.iter().any(|known| known == section) {
             self.pending.push(section.to_owned());
+        }
+    }
+
+    /// A section the next response carries whatever else it carries (the
+    /// convert items are the masters' own rows, not the document's).
+    fn require_section(&mut self, section: &'static str) {
+        if !self.required.iter().any(|known| *known == section) {
+            self.required.push(section);
         }
     }
 
@@ -525,6 +551,11 @@ impl ServerModel {
     ) {
         let now = self.now_ms();
         let mut sections: Vec<String> = carries.iter().map(|s| (*s).to_owned()).collect();
+        for section in self.required.iter() {
+            if !sections.iter().any(|known| known == section) {
+                sections.push((*section).to_owned());
+            }
+        }
         for section in self.pending.drain(..) {
             if !sections.contains(&section) {
                 sections.push(section);
@@ -569,6 +600,11 @@ impl ServerModel {
                 tools: has(tools::SECTION).then(|| self.doc.tools.clone().unwrap_or_default()),
                 blueprint_lend_craft_counts: has(inventory::SECTION_BLUEPRINT_LEND_CRAFT_COUNTS)
                     .then(|| self.doc.inventory.blueprint_lend_craft_counts.clone()),
+                convert_slots: has(convert::SECTION_SLOTS).then(|| self.doc.convert.slots.clone()),
+                mysekai_convert_items: has(convert::SECTION_ITEMS)
+                    .then(|| self.convert_items(masters)),
+                convert_item_histories: has(convert::SECTION_HISTORIES)
+                    .then(|| self.doc.convert.histories.clone()),
                 npc_panel: self.npc_panel(kind),
             },
         };
@@ -589,6 +625,21 @@ impl ServerModel {
         self.seat(masters);
         if self.seat_tools(masters) {
             self.commit();
+        }
+        // The convert machine's level and its slots.
+        let level = self.seat_convert_level(masters);
+        let slots = self.seat_convert_slots(masters);
+        // The convert items' own master table.
+        self.require_section(convert::SECTION_ITEMS);
+        if level || slots {
+            self.commit();
+        }
+        // A developer start's convert request, answered once the user is in.
+        if let Some((slot, post)) = self.convert_instrument.take() {
+            match self.convert_reply(slot, post, masters) {
+                Ok(_) => info!("[server] native overlay: MOLY_CONVERT_MOCK_REQUEST -> slot {slot} answered"),
+                Err(reason) => info!("[server] native overlay: MOLY_CONVERT_MOCK_REQUEST refused: {reason}"),
+            }
         }
         let refreshed = self.refresh_due(now, masters);
         if refreshed {
@@ -616,6 +667,8 @@ impl ServerModel {
         carries.push(music_play::RECORDS_SECTION);
         carries.push(system_fixture_action::SECTION);
         carries.push(tools::SECTION);
+        carries.push(convert::SECTION_SLOTS);
+        carries.push(convert::SECTION_HISTORIES);
         self.respond(ResponseKind::Join, refreshed, &carries, masters);
     }
 

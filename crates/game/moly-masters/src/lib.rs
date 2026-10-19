@@ -4,7 +4,7 @@
 //! parse from the rows, the pure rules over them and the loader that requests
 //! them live here, so the two sides cannot disagree about a column name, a
 //! rule or which asset holds what. [`load::MasterTables`] is the one request
-//! for the five resources both sides read.
+//! for the resources both sides read.
 
 use bevy::prelude::Resource;
 use serde_json::Value;
@@ -15,6 +15,7 @@ pub mod craft;
 pub mod delivery;
 pub mod inventory;
 pub mod load;
+pub mod mission;
 pub mod recovery;
 pub mod tools;
 
@@ -26,6 +27,9 @@ pub struct StaminaMax {
     pub boost: i32,
 }
 
+pub use mission::{
+    Mission, MissionCategory, MissionMasters, MissionReward, MissionSheet, RankExpRow, RewardType,
+};
 pub use recovery::{
     boost_item_value, conversion_slider_max, converted_boost, item_select_max, BoostItemRow,
     ItemRoom, RecoveryRow,

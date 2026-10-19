@@ -1,4 +1,4 @@
-//! The five typed master tables and the loaders that fill them, plus the row
+//! The typed master tables and the loaders that fill them, plus the row
 //! tables a reader parses for itself.
 //!
 //! Each table is a [`MasterTable`] requested from the asset layer; every
@@ -20,10 +20,11 @@ use crate::avatar::AvatarMasters;
 use crate::craft::CraftMasters;
 use crate::delivery::{BonusRow, DeliveryTables, RewardRow, TotalRow};
 use crate::inventory::PossessionMasters;
+use crate::mission::MissionMasters;
 use crate::recovery::{BoostItemRow, RecoveryRow};
 use crate::StaminaMax;
 
-/// The five master resources one loader fills, plus the row slices a reader
+/// The master resources one loader fills, plus the row slices a reader
 /// parses for itself (the acquisition dialogs' six tables, the harvest drop
 /// classifier's ids and material rows), from the same requested tables.
 #[derive(Resource, Default)]
@@ -37,6 +38,10 @@ pub struct MasterTables {
     pub avatar: Option<AvatarMasters>,
     /// The three `birthdayPartyDelivery*` tables.
     pub delivery: Option<DeliveryTables>,
+    /// The four mission tables (`mysekaiNormalMissionSheets`,
+    /// `mysekaiNormalMissions`, `mysekaiNormalMissionRewards` and the
+    /// mission rank-experience rows), if any are in.
+    pub mission: Option<MissionMasters>,
     /// `mysekaiStaminas`.
     pub stamina_max: Option<StaminaMax>,
     /// `mysekaiStaminaRecovery`: the live bonus one recovery spends and the
@@ -69,7 +74,12 @@ pub struct MasterTables {
     possession_left: usize,
     avatar_left: usize,
     delivery_left: usize,
+    mission_left: usize,
     stamina_left: usize,
+    other_left: usize,
+    /// The convert item rows (`mysekaiConvertItems`): the convert screen's
+    /// own table beside the craft masters. `None` until seated.
+    pub convert_items: Option<Vec<crate::craft::ConvertItemRow>>,
 }
 
 impl MasterTables {
@@ -94,6 +104,7 @@ impl MasterTables {
             possession: Some(PossessionMasters::default()),
             avatar: Some(AvatarMasters::default()),
             delivery: None,
+            mission: None,
             stamina_max: Some(StaminaMax {
                 normal: 1000,
                 enhance: 1000,
@@ -115,10 +126,13 @@ impl MasterTables {
     fn settle(&mut self, group: Group, name: &'static str, commands: &mut Commands) {
         self.pending.retain(|known| *known != name);
         let left = match group {
+            // A table outside the five resources counts toward none of them.
+            Group::Other => return,
             Group::Craft => &mut self.craft_left,
             Group::Possession => &mut self.possession_left,
             Group::Avatar => &mut self.avatar_left,
             Group::Delivery => &mut self.delivery_left,
+            Group::Mission => &mut self.mission_left,
             Group::Stamina => &mut self.stamina_left,
         };
         *left = left.saturating_sub(1);
@@ -147,6 +161,11 @@ impl MasterTables {
                     self.delivery = Some(value);
                 }
             }
+            Group::Mission => {
+                let value = std::mem::take(&mut self.parts.mission);
+                commands.insert_resource(value.clone());
+                self.mission = Some(value);
+            }
             Group::Stamina => {
                 if let Some(value) = self.parts.stamina_max.take() {
                     commands.insert_resource(value);
@@ -155,6 +174,7 @@ impl MasterTables {
                 self.stamina_recovery = self.parts.stamina_recovery;
                 self.boost_items = self.parts.boost_items.take();
             }
+            Group::Other => {}
         }
     }
 }
@@ -166,14 +186,19 @@ enum Group {
     Possession,
     Avatar,
     Delivery,
+    Mission,
     Stamina,
+    /// A table beside the five resources (the convert items).
+    Other,
 }
 
 const CRAFT_TABLES: usize = 7;
 const POSSESSION_TABLES: usize = 2;
 const AVATAR_TABLES: usize = 4;
 const DELIVERY_TABLES: usize = 3;
+const MISSION_TABLES: usize = 4;
 const STAMINA_TABLES: usize = 3;
+const OTHER_TABLES: usize = 1;
 
 /// One table's parse result, before it is seated into its resource.
 #[derive(Default)]
@@ -182,6 +207,7 @@ struct Parts {
     possession: PossessionMasters,
     avatar: AvatarMasters,
     delivery: DeliveryParts,
+    mission: MissionMasters,
     stamina_max: Option<StaminaMax>,
     stamina_recovery: Option<RecoveryRow>,
     boost_items: Option<Vec<BoostItemRow>>,
@@ -189,6 +215,7 @@ struct Parts {
     item_ids: Option<HashSet<i64>>,
     material_rows: Option<Vec<(i64, String, Vec<u32>)>>,
     rows: Vec<(&'static str, Vec<Value>)>,
+    convert_items: Option<Vec<crate::craft::ConvertItemRow>>,
 }
 
 /// One master table the loader requests and where its rows go.
@@ -237,7 +264,7 @@ macro_rules! root_table {
     };
 }
 
-/// The five resources' tables, in request order.
+/// Every resource's tables, in request order.
 static TABLES: &[Entry] = &[
     root_table!(
         "mysekaiStaminas",
@@ -278,6 +305,20 @@ static TABLES: &[Entry] = &[
             tables.blueprint_ids = partial.blueprint_ids;
         },
         group: Group::Craft,
+    },
+    Entry {
+        table: MasterTable {
+            table: "mysekaiConvertItems",
+            name: "mysekaiConvertItems (the server's convert items)",
+            parse: |text| {
+                let mut parts = Parts::default();
+                let rows = moly_assets::json::master::rows(text)?;
+                parts.convert_items = Some(crate::craft::parse_convert_items(&rows)?);
+                Ok(parts)
+            },
+        },
+        seat: |tables, partial| tables.convert_items = partial.convert_items,
+        group: Group::Other,
     },
     table!(
         "mysekaiBlueprintMysekaiMaterialCosts",
@@ -423,9 +464,41 @@ static TABLES: &[Entry] = &[
         totals,
         Delivery
     ),
+    table!(
+        "mysekaiNormalMissionSheets",
+        "mysekaiNormalMissionSheets (the mission sheets)",
+        parse_mission_sheets,
+        mission,
+        sheets,
+        Mission
+    ),
+    table!(
+        "mysekaiNormalMissions",
+        "mysekaiNormalMissions (the mission rows)",
+        parse_missions,
+        mission,
+        missions,
+        Mission
+    ),
+    table!(
+        "mysekaiNormalMissionRewards",
+        "mysekaiNormalMissionRewards (the mission reward rows)",
+        parse_mission_rewards,
+        mission,
+        rewards,
+        Mission
+    ),
+    table!(
+        "mysekaiNormalMissionRewardMysekaiRankObtainedExps",
+        "mysekaiNormalMissionRewardMysekaiRankObtainedExps (the missions' rank-experience rows)",
+        parse_mission_rank_exps,
+        mission,
+        rank_exps,
+        Mission
+    ),
 ];
 
-/// Requests the five resources' tables once, and starts their counters.
+/// Requests every resource's tables once, and starts their counters.
 fn load(mut data: ResMut<MasterData>, mut tables: ResMut<MasterTables>) {
     if tables.started {
         return;
@@ -436,7 +509,9 @@ fn load(mut data: ResMut<MasterData>, mut tables: ResMut<MasterTables>) {
     tables.possession_left = POSSESSION_TABLES;
     tables.avatar_left = AVATAR_TABLES;
     tables.delivery_left = DELIVERY_TABLES;
+    tables.mission_left = MISSION_TABLES;
     tables.stamina_left = STAMINA_TABLES;
+    tables.other_left = OTHER_TABLES;
     for entry in TABLES {
         data.request(&entry.table);
     }
@@ -467,7 +542,7 @@ pub fn resolve_tables(
     }
 }
 
-/// The five resources' loader.
+/// The shared resources' loader.
 pub struct MasterTablesPlugin;
 
 impl Plugin for MasterTablesPlugin {
@@ -795,6 +870,31 @@ pub fn parse_total_rewards(text: &str, parts: &mut DeliveryParts) -> Result<(), 
     parts.totals = Some(crate::delivery::parse_total_rewards(
         &moly_assets::json::master::rows(text)?,
     )?);
+    Ok(())
+}
+
+/// `mysekaiNormalMissionSheets`, master order.
+pub fn parse_mission_sheets(text: &str, parts: &mut MissionMasters) -> Result<(), String> {
+    parts.sheets = crate::mission::parse_sheets(&moly_assets::json::master::rows(text)?)?;
+    Ok(())
+}
+
+/// `mysekaiNormalMissions`, master order.
+pub fn parse_missions(text: &str, parts: &mut MissionMasters) -> Result<(), String> {
+    parts.missions = crate::mission::parse_missions(&moly_assets::json::master::rows(text)?)?;
+    Ok(())
+}
+
+/// `mysekaiNormalMissionRewards`, master order.
+pub fn parse_mission_rewards(text: &str, parts: &mut MissionMasters) -> Result<(), String> {
+    parts.rewards = crate::mission::parse_rewards(&moly_assets::json::master::rows(text)?)?;
+    Ok(())
+}
+
+/// `mysekaiNormalMissionRewardMysekaiRankObtainedExps`, master order.
+pub fn parse_mission_rank_exps(text: &str, parts: &mut MissionMasters) -> Result<(), String> {
+    parts.rank_exps =
+        crate::mission::parse_rank_exps(&moly_assets::json::master::rows(text)?)?;
     Ok(())
 }
 

@@ -258,6 +258,7 @@ fn call_name(call: CallKind) -> &'static str {
         CallKind::BirthdayPartyGather => "birthday party gather",
         CallKind::HomeAction => "home action",
         CallKind::Craft => "craft",
+        CallKind::Convert => "convert",
         CallKind::HousingSketch => "housing sketch",
         CallKind::HousingLayout => "housing layout",
         CallKind::CharacterTalkRead => "character talk read",

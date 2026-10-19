@@ -11,8 +11,10 @@
 //! `userAvatar`, and the owned data's `userMysekaiFixtures`,
 //! `userMysekaiCanvases`, `userMysekaiBlueprints`, `userMysekaiItems` and
 //! the two possession levels in `userMysekaiGamedata`, and the harvest
-//! tools' `userMysekaiTools`). A `masterConfigs` key of an earlier document is read and
-//! ignored: those values are master data. The rest are the mock's own keys and
+//! tools' `userMysekaiTools`, and the convert screen's
+//! `userMysekaiConvertSlots` and `userMysekaiConvertItemHistories`, with the
+//! convert machine's level in `userMysekaiGamedata`). A `masterConfigs` key
+//! of an earlier document is read and ignored: those values are master data. The rest are the mock's own keys and
 //! name themselves as such: `clock` (the one server clock), `policies` (the
 //! server rules this mock stands in for), `phenomenaSchedulePolicy`,
 //! `talkListPolicy` and `controls`.
@@ -155,6 +157,9 @@ pub(crate) struct ServerDocument {
     /// `policies.staminaRecovery` ([`super::stamina_recovery`]): the reply
     /// the recovery gives and the capital it draws on.
     pub(crate) stamina_recovery: super::stamina_recovery::RecoveryPolicy,
+    /// The convert slots, their item histories and the convert policies
+    /// ([`super::convert`]).
+    pub(crate) convert: super::convert::ConvertDoc,
 }
 
 /// Which migration a schemaVersion 1 slice takes.
@@ -477,6 +482,8 @@ fn parse_gamedata(value: &Value) -> Result<Gamedata, String> {
             // Read by the owned-data part (the possession levels).
             "mysekaiMaterialPossessionLevel",
             "mysekaiFixturePossessionLevel",
+            // Read by the convert part (the convert machine's level).
+            super::convert::GAMEDATA_LEVEL,
         ],
         AT,
     )?;
@@ -489,7 +496,31 @@ fn parse_gamedata(value: &Value) -> Result<Gamedata, String> {
         total_exp: int32(gamedata, "totalExp", AT)?,
         refreshed_at: int64(gamedata, "refreshedAt", AT)?,
         is_mysekai_tutorial_end: boolean(gamedata, "isMysekaiTutorialEnd", AT)?,
+        mysekai_convert_fixture_level: convert_level(gamedata)?,
     })
+}
+
+/// `userMysekaiGamedata.mysekaiConvertFixtureLevel`, `None` when the document
+/// states none (the convert part seats it).
+fn convert_level(gamedata: &Map<String, Value>) -> Result<Option<i32>, String> {
+    const AT: &str = "userMysekaiGamedata.mysekaiConvertFixtureLevel";
+    match gamedata.get(super::convert::GAMEDATA_LEVEL) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_i64()
+            .and_then(|raw| i32::try_from(raw).ok())
+            .map(Some)
+            .ok_or_else(|| format!("{AT} is not an integer")),
+    }
+}
+
+/// Writes the convert machine's level into a written `userMysekaiGamedata`
+/// object.
+fn write_convert_level(gamedata: &mut Map<String, Value>, level: Option<i32>) {
+    gamedata.insert(
+        super::convert::GAMEDATA_LEVEL.into(),
+        level.map_or(Value::Null, |level| json!(level)),
+    );
 }
 
 /// A schemaVersion 2 text. `pending` (the sections the next response will
@@ -512,6 +543,7 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
         .chain(std::iter::once(&super::music_play::RECORDS_SECTION))
         .chain(super::system_fixture_action::DOCUMENT_KEYS.iter())
         .chain(std::iter::once(&super::tools::SECTION))
+        .chain(super::convert::DOCUMENT_KEYS.iter())
         .copied()
         .collect();
     only(doc, &allowed, "the server document")?;
@@ -534,6 +566,7 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
         .chain(super::system_fixture_action::POLICY_KEYS.iter().copied())
         .chain(super::recycle::POLICY_KEYS.iter().copied())
         .chain(std::iter::once(super::stamina_recovery::POLICY_KEY))
+        .chain(super::convert::POLICY_KEYS.iter().copied())
         .collect();
     only(policies, &allowed, "policies")?;
     let delivery = super::delivery::DeliveryDoc::parse(doc, policies)?;
@@ -550,6 +583,7 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
     let stamina_recovery = super::stamina_recovery::parse_policies(
         policies.get(super::stamina_recovery::POLICY_KEY),
     )?;
+    let convert = super::convert::ConvertDoc::parse(doc, policies)?;
     let (gate, gate_characters, talk_histories) = parse_visit(
         field(doc, "userMysekaiGateCharacterVisit", "the server document")?,
         true,
@@ -626,6 +660,7 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
         tools,
         recycle,
         stamina_recovery,
+        convert,
     };
     document.check_structure()?;
     Ok((document, pending))
@@ -730,6 +765,7 @@ pub(crate) fn migrate_v1(text: &str, migration: Migration) -> Result<ServerDocum
                 "isMysekaiTutorialEnd",
                 "userMysekaiGamedata",
             )?,
+            mysekai_convert_fixture_level: None,
         },
         stamina: None,
         colorful_pass: None,
@@ -752,6 +788,7 @@ pub(crate) fn migrate_v1(text: &str, migration: Migration) -> Result<ServerDocum
         tools: None,
         recycle: BTreeMap::new(),
         stamina_recovery: Default::default(),
+        convert: Default::default(),
     };
     document.check_structure()?;
     Ok(document)
@@ -830,9 +867,17 @@ impl ServerDocument {
                 ));
             }
         }
+        if let Some(level) = self.gamedata.mysekai_convert_fixture_level {
+            if level < 1 {
+                return Err(format!(
+                    "userMysekaiGamedata.mysekaiConvertFixtureLevel = {level} is below 1"
+                ));
+            }
+        }
         self.delivery.check_structure()?;
         self.inventory.check_structure()?;
-        super::tools::check_structure(&self.tools)
+        super::tools::check_structure(&self.tools)?;
+        self.convert.check_structure()
     }
 
     fn gamedata_value(&self) -> Value {
@@ -924,6 +969,13 @@ impl ServerDocument {
             );
             super::recycle::write_policies(&self.recycle, &mut policies);
             super::stamina_recovery::write_policy(&self.stamina_recovery, &mut policies);
+            self.convert.write(top, &mut policies);
+            if let Some(gamedata) = top
+                .get_mut(moly_protocol::json::SECTION_GAMEDATA)
+                .and_then(Value::as_object_mut)
+            {
+                write_convert_level(gamedata, self.gamedata.mysekai_convert_fixture_level);
+            }
             top.insert("policies".into(), Value::Object(policies));
         }
         value

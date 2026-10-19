@@ -637,6 +637,7 @@ fn apply_sections(
                 total_exp: 0,
                 refreshed_at: 0,
                 is_mysekai_tutorial_end: true,
+                mysekai_convert_fixture_level: None,
             }),
             stamina: sections.stamina,
             colorful_pass: sections.colorful_pass.flatten(),
@@ -765,6 +766,7 @@ pub fn call_name(call: CallKind) -> &'static str {
         CallKind::SystemFixtureAction => "system fixture action",
         CallKind::InventoryRecycle => "inventory recycle",
         CallKind::BoostStaminaRecovery => "boost stamina recovery",
+        CallKind::Convert => "convert",
         CallKind::Admin => "admin",
     }
 }
@@ -1128,6 +1130,7 @@ mod tests {
                 total_exp: 0,
                 refreshed_at: 0,
                 is_mysekai_tutorial_end: true,
+                mysekai_convert_fixture_level: None,
             },
             stamina: None,
             colorful_pass: Some(ColorfulPass {

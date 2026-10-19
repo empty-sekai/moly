@@ -23,16 +23,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::{
     BirthdayPartyDeliveryRequest, BirthdayPartyGatherRequest, CharacterTalkReadRequest,
-    GateChangeRequest, GateReserveRequest, HarvestRequest, HomeActionPost, MusicPlayEjectRequest,
-    MusicPlaySetRequest, MysekaiInventoryDisassemble, SystemFixtureActionRequest,
-    UserMysekaiCraftRequest,
+    ConvertPost, GateChangeRequest, GateReserveRequest, HarvestRequest, HomeActionPost,
+    MusicPlayEjectRequest, MusicPlaySetRequest, MysekaiInventoryDisassemble,
+    SystemFixtureActionRequest, UserMysekaiConvertReceiveResponse, UserMysekaiCraftRequest,
     UserMysekaiHousingEditLayoutRequest, UserMysekaiHousingSketchRequest,
     UserMysekaiStaminaRequest,
 };
 use crate::rows::{
-    ColorfulPass, DeliveryUpdate, Gamedata, Gate, MusicPlaySetting, OwnedMusicRecord,
-    RankReleaseRow, ScheduleRow, Stamina, SuiteUserSections, UserAvatar,
-    UserMysekaiSystemFixtureAction, UserMysekaiTool,
+    ColorfulPass, ConvertItemHistory, ConvertSlot, DeliveryUpdate, Gamedata, Gate,
+    MusicPlaySetting, OwnedMusicRecord, RankReleaseRow, ScheduleRow, Stamina, SuiteUserSections,
+    UserAvatar, UserMysekaiSystemFixtureAction, UserMysekaiTool,
 };
 
 pub mod api;
@@ -52,7 +52,10 @@ pub mod rows;
 /// 6: the boost stamina recovery call and its reply.
 /// 7: the craft request carries the blueprint term, and the sections carry
 /// the blueprint terms' craft counters.
-pub const PROTOCOL_VERSION: u32 = 7;
+/// 8: the convert screen's three calls and their replies, and the sections
+/// that carry the convert slots, the convert item histories and the convert
+/// machine's level.
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// The account a session belongs to. The server keeps one document per user.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -182,6 +185,8 @@ pub enum Call {
     /// `PostUserMysekaiBoostStaminaRecoveryApi`: the recover dialog's
     /// confirmation.
     BoostStaminaRecovery(UserMysekaiStaminaRequest),
+    /// The convert screen's requests, with the slot they name.
+    Convert { slot_id: i32, post: ConvertPost },
     /// The control plane's calls: the document and the schema, an edit, and
     /// the browser game's seed install.
     Admin(AdminCall),
@@ -208,6 +213,7 @@ impl Call {
             Self::SystemFixtureAction(_) => CallKind::SystemFixtureAction,
             Self::InventoryRecycle(_) => CallKind::InventoryRecycle,
             Self::BoostStaminaRecovery(_) => CallKind::BoostStaminaRecovery,
+            Self::Convert { .. } => CallKind::Convert,
             Self::Admin(_) => CallKind::Admin,
         }
     }
@@ -232,6 +238,7 @@ impl Call {
             Self::SystemFixtureAction(_) => "system fixture action",
             Self::InventoryRecycle(_) => "inventory recycle",
             Self::BoostStaminaRecovery(_) => "boost stamina recovery",
+            Self::Convert { .. } => "convert",
             Self::Admin(_) => "admin",
         }
     }
@@ -258,6 +265,7 @@ pub enum CallKind {
     SystemFixtureAction,
     InventoryRecycle,
     BoostStaminaRecovery,
+    Convert,
     Admin,
 }
 
@@ -310,6 +318,11 @@ pub enum Reply {
     /// The boost stamina recovery reply (a `SuiteUser` answer); the stamina
     /// it restored is in the reply's sections.
     BoostStaminaRecovery(crate::api::SuiteUserReply),
+    /// A convert start or shorten reply (a `SuiteUser` answer).
+    Convert(crate::api::SuiteUserReply),
+    /// The convert receive reply: the resources received and the tables the
+    /// request changed.
+    ConvertReceive(UserMysekaiConvertReceiveResponse),
     /// An administration answer, as JSON text.
     Admin(String),
 }
@@ -357,6 +370,15 @@ pub struct Sections {
     /// has used (the craft screen's remaining-count and term-cap source).
     pub blueprint_lend_craft_counts:
         Option<Vec<crate::rows::UserMysekaiBlueprintLendCraftCount>>,
+    /// `userMysekaiConvertSlots`.
+    pub convert_slots: Option<Vec<ConvertSlot>>,
+    /// `userMysekaiConvertItemHistories`.
+    pub convert_item_histories: Option<Vec<ConvertItemHistory>>,
+    /// `mysekaiConvertItems`: the master table the convert screen's item list
+    /// is built from, with the `convertLimit` and `onceConvertLimit` its
+    /// document does not carry.
+    #[serde(rename = "mysekaiConvertItems")]
+    pub mysekai_convert_items: Option<Vec<crate::rows::UserMysekaiConvertItem>>,
     /// The developer server panel's NPC slice as JSON text: the gate and its
     /// visitors, the schedule, the talk list, the layouts and the controls the
     /// response changed.
@@ -395,10 +417,11 @@ pub fn to_json<T: Serialize>(message: &T) -> String {
 mod tests {
     use super::*;
     use crate::rows::{
-        BirthdayPartyRow, CoordinateRow, Gate, HonorRow, MusicPlaySetting, RankReleaseRow, Reward,
-        UserMysekaiBlueprint, UserMysekaiBlueprintLendCraftCount, UserMysekaiCanvas,
-        UserMysekaiCharacterTalk, UserMysekaiFixture, UserMysekaiGamedata, UserMysekaiItem,
-        UserMysekaiMaterial, UserMysekaiMaterialPossession,
+        BirthdayPartyRow, ConvertItemHistory, ConvertObtainResource, ConvertSlot, CoordinateRow,
+        Gate, HonorRow, MusicPlaySetting, RankReleaseRow, Reward, UserMysekaiBlueprint,
+        UserMysekaiBlueprintLendCraftCount, UserMysekaiCanvas, UserMysekaiCharacterTalk,
+        UserMysekaiFixture, UserMysekaiGamedata, UserMysekaiItem, UserMysekaiMaterial,
+        UserMysekaiMaterialPossession,
     };
 
     use std::collections::{BTreeMap, BTreeSet};
@@ -492,6 +515,7 @@ mod tests {
                 total_exp: 2,
                 refreshed_at: 3,
                 is_mysekai_tutorial_end: true,
+                mysekai_convert_fixture_level: Some(1),
             }),
             stamina: Some(Stamina {
                 normal: 4,
@@ -570,6 +594,33 @@ mod tests {
                     mysekai_material_possession_level: 36,
                     mysekai_fixture_possession_level: 37,
                 }),
+                user_mysekai_tools: Some(vec![UserMysekaiTool {
+                    mysekai_tool_id: 41,
+                    quantity: 42,
+                    durability: 43,
+                    last_obtained_at: 44,
+                }]),
+                user_mysekai_music_records: Some(vec![OwnedMusicRecord {
+                    mysekai_music_record_id: 38,
+                    obtained_at: 39,
+                }]),
+                user_mysekai_convert_slots: Some(vec![ConvertSlot {
+                    slot_id: 0,
+                    mysekai_convert_item_id: 47,
+                    choice_id: 0,
+                    convert_start_at: 48,
+                    once_convert_minutes: 49,
+                    convert_count: 50,
+                    received_progress: 0,
+                    mysekai_convert_slot_status: crate::rows::CONVERT_SLOT_PROCESSING.to_owned(),
+                    obtain_resources: Vec::new(),
+                }]),
+                user_mysekai_convert_item_histories: Some(vec![ConvertItemHistory {
+                    mysekai_convert_item_id: 47,
+                    convert_count: 1,
+                    total_convert_count: 1,
+                    last_convert_start_at: 48,
+                }]),
             },
             music_records: Some(vec![OwnedMusicRecord {
                 mysekai_music_record_id: 38,
@@ -587,6 +638,42 @@ mod tests {
             blueprint_lend_craft_counts: Some(vec![UserMysekaiBlueprintLendCraftCount {
                 mysekai_blueprint_term_id: 45,
                 craft_count: 46,
+            }]),
+            convert_slots: Some(vec![ConvertSlot {
+                slot_id: 0,
+                mysekai_convert_item_id: 47,
+                choice_id: 0,
+                convert_start_at: 48,
+                once_convert_minutes: 49,
+                convert_count: 50,
+                received_progress: 0,
+                mysekai_convert_slot_status: crate::rows::CONVERT_SLOT_PROCESSING.to_owned(),
+                obtain_resources: vec![ConvertObtainResource {
+                    slot_id: 0,
+                    progress: 1,
+                    seq: 1,
+                    resource_type: "mysekai_material".to_owned(),
+                    resource_id: 51,
+                    quantity: 52,
+                }],
+            }]),
+            convert_item_histories: Some(vec![ConvertItemHistory {
+                mysekai_convert_item_id: 47,
+                convert_count: 1,
+                total_convert_count: 1,
+                last_convert_start_at: 48,
+            }]),
+            mysekai_convert_items: Some(vec![crate::rows::UserMysekaiConvertItem {
+                mysekai_convert_item_id: 47,
+                obtain_type: "resource_box".to_owned(),
+                external_id: 10047,
+                required_convert_fixture_level: 1,
+                convert_minutes: 49,
+                convert_limit: 0,
+                once_convert_limit: 50,
+                refresh_cycle: "none".to_owned(),
+                start_at: 0,
+                end_at: 0,
             }]),
             npc_panel: Some("{\"version\":1}".to_owned()),
         }
@@ -683,6 +770,34 @@ mod tests {
             })
             .kind(),
             CallKind::BoostStaminaRecovery
+        );
+        // The convert calls: start, receive and shorten, each with its slot.
+        let convert = Call::Convert {
+            slot_id: 1,
+            post: crate::api::ConvertPost::Start(crate::api::UserMysekaiConvertStartRequest {
+                mysekai_convert_item_id: 3,
+                convert_count: 2,
+                choice_id: 0,
+            }),
+        };
+        assert_eq!(convert.kind(), CallKind::Convert);
+        assert_eq!(convert.name(), "convert");
+        assert_eq!(
+            decode::<ClientMessage>(&encode(&ClientMessage::Call { seq: 11, call: convert }))
+                .unwrap(),
+            ClientMessage::Call {
+                seq: 11,
+                call: Call::Convert {
+                    slot_id: 1,
+                    post: crate::api::ConvertPost::Start(
+                        crate::api::UserMysekaiConvertStartRequest {
+                            mysekai_convert_item_id: 3,
+                            convert_count: 2,
+                            choice_id: 0,
+                        }
+                    ),
+                }
+            }
         );
     }
 

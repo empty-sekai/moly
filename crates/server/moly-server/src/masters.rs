@@ -24,6 +24,7 @@ use moly_masters::load::{MasterTables, MasterTablesPlugin};
 use moly_masters::StaminaMax;
 use serde_json::Value;
 
+use crate::model::convert;
 use crate::model::delivery;
 use crate::model::music;
 use crate::model::tools;
@@ -66,6 +67,24 @@ pub struct Masters {
     /// `mysekaiStaminaRecovery`: the live bonus one recovery spends and the
     /// boost stamina it restores (`boost_grant` is its second column).
     pub(crate) recovery: Option<moly_masters::RecoveryRow>,
+    /// The convert screen's tables (see [`convert`]), joined by
+    /// [`Masters::join_parts`] from the fields below once they are in.
+    pub(crate) convert: Option<convert::ConvertMasters>,
+    /// `mysekaiConvertFixtureSlot`: (slotNoUpperLimit,
+    /// slotNoUpperLimitForMysekaiColorfulPass).
+    pub(crate) convert_slots: Option<(i32, i32)>,
+    pub(crate) convert_level_releases: Option<i32>,
+    pub(crate) convert_levels: Option<Vec<i32>>,
+    pub(crate) convert_blueprint_obtains: Option<Vec<convert::BlueprintObtain>>,
+    pub(crate) convert_record_obtains: Option<Vec<convert::RecordObtain>>,
+    pub(crate) convert_record_categories: Option<Vec<convert::RecordCategory>>,
+    pub(crate) convert_pass_rate: Option<f32>,
+    /// The convert items' boxes of `resourceBoxes` (a deferred table).
+    pub(crate) convert_boxes: Option<Vec<convert::ResourceBox>>,
+    /// `mysekaiConvertItems`: the convert screen's items, read here rather
+    /// than from the shared master layer, whose craft resource does not carry
+    /// the `convertLimit` and `onceConvertLimit` columns this server needs.
+    pub(crate) convert_items: Option<Vec<convert::ConvertItemMaster>>,
     /// The tables the master layer named missing.
     pub missing: Vec<String>,
     /// The tables still loading, by their names.
@@ -150,17 +169,69 @@ impl Masters {
         }]);
         masters.ranks = Some(vec![(1, 0), (2, 48_000), (3, 172_300)]);
         masters.phenomena = Some(vec![(1, "a".into()), (2, "b".into())]);
+        // The convert machine: two slots, one pass slot, two machine levels.
+        masters.convert = Some(convert::ConvertMasters {
+            slots: Some((1, 2)),
+            levels: Some(vec![1, 2]),
+            level_releases: Some(1),
+            // The convert items come from `mysekaiConvertItems`, which a
+            // model test that builds the server tables directly does not
+            // read; the tests that need items seat them here.
+            items: Some(Vec::new()),
+            ..convert::ConvertMasters::default()
+        });
         masters.ready = true;
         masters
     }
 
-    /// Joins the tables that resolve apart: the gate and gate skin ids.
-    fn join_parts(&mut self) {
+    /// Joins the tables that resolve apart: the gate and gate skin ids, and
+    /// the convert tables' fields into one [`convert::ConvertMasters`].
+    pub(crate) fn join_parts(&mut self) {
         if self.gates.is_none() {
             if let (Some(gates), Some(skins)) = (&self.gate_ids, &self.gate_skin_ids) {
                 self.gates = Some((gates.clone(), skins.clone()));
             }
         }
+        self.join_convert();
+    }
+
+    /// The convert tables' own fields as one [`convert::ConvertMasters`].
+    fn join_convert(&mut self) {
+        let convert = self.convert.get_or_insert_with(Default::default);
+        if convert.items.is_none() {
+            convert.items = self.convert_items.take();
+        }
+        if convert.slots.is_none() {
+            convert.slots = self.convert_slots.take();
+        }
+        if convert.level_releases.is_none() {
+            convert.level_releases = self.convert_level_releases.take();
+        }
+        if convert.levels.is_none() {
+            convert.levels = self.convert_levels.take();
+        }
+        if convert.blueprint_obtains.is_none() {
+            convert.blueprint_obtains = self.convert_blueprint_obtains.take();
+        }
+        if convert.record_obtains.is_none() {
+            convert.record_obtains = self.convert_record_obtains.take();
+        }
+        if convert.record_categories.is_none() {
+            convert.record_categories = self.convert_record_categories.take();
+        }
+        if convert.pass_rate.is_none() {
+            convert.pass_rate = self.convert_pass_rate.take();
+        }
+        if convert.resource_boxes.is_none() {
+            convert.resource_boxes = self.convert_boxes.take();
+        }
+    }
+
+    /// Seats the boxes the deferred `resourceBoxes` read parsed (the boxes
+    /// are not one of the join's tables), and joins them into `convert`.
+    pub(crate) fn convert_boxes(&mut self, boxes: Vec<convert::ResourceBox>) {
+        self.convert_boxes = Some(boxes);
+        self.join_convert();
     }
 
     /// `MysekaiRankModel`'s rank of a total experience.
@@ -390,19 +461,71 @@ static SERVER_TABLES: &[ServerTable] = &[
         parse_boost_items,
         boost_items
     ),
+    // The convert screen's tables each land in a field of their own and join
+    // into `convert` once the masters are in (`Masters::join_parts`).
+    server_table!(
+        "mysekaiConvertItems",
+        "mysekaiConvertItems (the convert screen's items)",
+        convert::parse_convert_items,
+        convert_items
+    ),
+    server_table!(
+        "mysekaiConvertFixtureSlot",
+        "mysekaiConvertFixtureSlot (the convert machine's slots)",
+        convert::parse_convert_fixture_slot,
+        convert_slots
+    ),
+    server_table!(
+        "mysekaiConvertFixtureLevelReleases",
+        "mysekaiConvertFixtureLevelReleases (the convert machine's levels)",
+        convert::parse_convert_level_releases,
+        convert_level_releases
+    ),
+    server_table!(
+        "mysekaiConvertFixtureLevels",
+        "mysekaiConvertFixtureLevels (the convert machine's levels)",
+        convert::parse_convert_levels,
+        convert_levels
+    ),
+    server_table!(
+        "mysekaiConvertItemObtainMysekaiBlueprints",
+        "mysekaiConvertItemObtainMysekaiBlueprints (the convert blueprint draws)",
+        convert::parse_convert_blueprint_obtains,
+        convert_blueprint_obtains
+    ),
+    server_table!(
+        "mysekaiConvertItemObtainMysekaiMusicRecords",
+        "mysekaiConvertItemObtainMysekaiMusicRecords (the convert record draws)",
+        convert::parse_convert_record_obtains,
+        convert_record_obtains
+    ),
+    server_table!(
+        "mysekaiMusicRecordCategories",
+        "mysekaiMusicRecordCategories (the convert record choices)",
+        convert::parse_convert_record_categories,
+        convert_record_categories
+    ),
+    server_table!(
+        "colorfulPasses",
+        "colorfulPasses (the convert time's pass decrease)",
+        convert::parse_convert_pass_rate,
+        convert_pass_rate
+    ),
     // The total reward boxes: the CN master carries their rows as a table of
-    // their own; the JP master nests them in each box's `details`.
+    // their own; the JP master nests them in each box's `details`. The JP
+    // read also seats the convert items' boxes (the convert resource boxes),
+    // so a root that lacks the delivery's boxes still loads the resource once.
     deferred_table!(
         "resourceBoxDetails",
-        "resourceBoxDetails (the delivery's total reward boxes)",
+        "resourceBoxDetails (the delivery's and the convert boxes)",
         delivery::parse_box_details,
         reward_boxes,
         Some(Region::Cn)
     ),
     deferred_table!(
         "resourceBoxes",
-        "resourceBoxes (the delivery's total reward boxes)",
-        delivery::parse_nested_boxes,
+        "resourceBoxes (the delivery's and the convert boxes)",
+        parse_boxes,
         reward_boxes,
         Some(Region::Jp)
     ),
@@ -414,6 +537,15 @@ static SERVER_TABLES: &[ServerTable] = &[
         None
     ),
 ];
+
+/// `resourceBoxes`: the delivery's total reward boxes and the convert items'
+/// boxes, read from one master file.
+fn parse_boxes(text: &str, masters: &mut Masters) -> Result<(), String> {
+    delivery::parse_nested_boxes(text, masters)?;
+    let boxes = convert::parse_resource_boxes(text)?;
+    masters.convert_boxes(boxes);
+    Ok(())
+}
 
 /// The model's master tables not seated yet, and whether the deferred ones
 /// have been requested.

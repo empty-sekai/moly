@@ -182,6 +182,7 @@ pub mod inventory;
 pub mod joystick;
 pub mod menu_dialog;
 pub mod menu_shell;
+pub mod mission;
 pub mod collect_notice;
 pub mod mysekai_rank;
 pub mod option_dialog;

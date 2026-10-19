@@ -340,6 +340,14 @@ fn run(call: Call, model: &mut ServerModel, masters: &Tables<'_>) -> Result<Repl
             })?;
             Ok(Reply::BoostStaminaRecovery(reply))
         }
+        Call::Convert { slot_id, post } => model
+            .convert_reply(slot_id, post, masters)
+            .map_err(|reason| {
+                Refusal::new(
+                    "convert_refused",
+                    format!("{}: {reason}", post.api_name()),
+                )
+            }),
         Call::Admin(call) => admin::answer(call, model, masters).map(Reply::Admin),
     }
 }

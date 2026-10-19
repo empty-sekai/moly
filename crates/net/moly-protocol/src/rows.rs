@@ -21,6 +21,10 @@ pub struct Gamedata {
     pub total_exp: i32,
     pub refreshed_at: i64,
     pub is_mysekai_tutorial_end: bool,
+    /// `mysekaiConvertFixtureLevel`: the convert machine's level, which the
+    /// convert screen reads to unlock its items and the shorten button.
+    /// `None` until the server seats it.
+    pub mysekai_convert_fixture_level: Option<i32>,
 }
 
 /// `UserMysekaiColorfulPass`.
@@ -143,7 +147,21 @@ pub struct SuiteUserSections {
     pub user_mysekai_canvases: Option<Vec<UserMysekaiCanvas>>,
     pub user_mysekai_blueprints: Option<Vec<UserMysekaiBlueprint>>,
     pub user_mysekai_items: Option<Vec<UserMysekaiItem>>,
+    pub user_mysekai_tools: Option<Vec<UserMysekaiTool>>,
+    pub user_mysekai_music_records: Option<Vec<OwnedMusicRecord>>,
     pub user_mysekai_gamedata: Option<UserMysekaiGamedata>,
+    /// `userMysekaiConvertSlots`.
+    pub user_mysekai_convert_slots: Option<Vec<ConvertSlot>>,
+    /// `userMysekaiConvertItemHistories`.
+    pub user_mysekai_convert_item_histories: Option<Vec<ConvertItemHistory>>,
+}
+
+impl SuiteUserSections {
+    /// The convert slots this section set carries.
+    #[allow(dead_code)] // Read by the convert screen's seam.
+    pub fn convert_slots(&self) -> Option<&Vec<ConvertSlot>> {
+        self.user_mysekai_convert_slots.as_ref()
+    }
 }
 
 impl SuiteUserSections {
@@ -167,6 +185,148 @@ pub struct UserResource {
     pub resource_id: i32,
     pub resource_level: i32,
     pub quantity: i32,
+}
+
+/// `UserMysekaiConvertObtainResource`: one resource a convert slot's draw
+/// produced, at the completion step `progress`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConvertObtainResource {
+    pub slot_id: i32,
+    pub progress: i32,
+    pub seq: i32,
+    pub resource_type: String,
+    pub resource_id: i32,
+    pub quantity: i32,
+}
+
+impl ConvertObtainResource {
+    /// The row as the `UserResource` a receiver receives.
+    pub fn to_resource(&self) -> UserResource {
+        UserResource {
+            resource_type: self.resource_type.clone(),
+            resource_id: self.resource_id,
+            resource_level: 1,
+            quantity: self.quantity,
+        }
+    }
+}
+
+/// One convert item a response carries: the `mysekaiConvertItems` row's
+/// fields the convert screen reads, as a section of its own because the
+/// client builds its item list from them and its document keeps none.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserMysekaiConvertItem {
+    pub mysekai_convert_item_id: i32,
+    /// `mysekaiConvertItemObtainType`.
+    pub obtain_type: String,
+    pub external_id: i32,
+    pub required_convert_fixture_level: i32,
+    pub convert_minutes: i32,
+    /// 0 when the item has no convert limit.
+    pub convert_limit: i32,
+    pub once_convert_limit: i32,
+    /// `refreshCycle`: `none`, `weekly` or `monthly`.
+    pub refresh_cycle: String,
+    pub start_at: i64,
+    pub end_at: i64,
+}
+
+/// `UserMysekaiConvertSlot`: one convert slot's state. `convert_start_at` and
+/// `once_convert_minutes` place the slot's progress on the server clock; the
+/// obtain rows are the slot's draws.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConvertSlot {
+    pub slot_id: i32,
+    /// The `mysekaiConvertItems` row the slot converts.
+    pub mysekai_convert_item_id: i32,
+    /// The draw variant of that row (0 when it has none).
+    pub choice_id: i32,
+    /// Epoch milliseconds the slot started converting.
+    pub convert_start_at: i64,
+    /// The minutes one convert of the item takes, as the server decided them.
+    pub once_convert_minutes: i32,
+    /// How many converts the slot holds.
+    pub convert_count: i32,
+    /// How many completed converts the user has received.
+    pub received_progress: i32,
+    /// `mysekaiConvertSlotStatus`: `processing` or `complete`.
+    pub mysekai_convert_slot_status: String,
+    pub obtain_resources: Vec<ConvertObtainResource>,
+}
+
+/// `MysekaiConvertSlotStatus` words.
+pub const CONVERT_SLOT_PROCESSING: &str = "processing";
+pub const CONVERT_SLOT_COMPLETE: &str = "complete";
+
+impl ConvertSlot {
+    /// Whether the slot is still converting.
+    pub fn is_processing(&self) -> bool {
+        self.mysekai_convert_slot_status == CONVERT_SLOT_PROCESSING
+    }
+
+    /// The epoch millisecond at which the slot's last convert completes
+    /// (`convertStartAt + onceConvertMinutes * convertCount`).
+    pub fn end_at(&self) -> i64 {
+        self.convert_start_at
+            .saturating_add(saturating_minutes_ms(self.once_convert_minutes, self.convert_count))
+    }
+
+    /// How many converts have completed at `now`, at least 1 and at most
+    /// `convert_count`; a slot with nothing started has completed none, and a
+    /// slot the server marked `complete` has completed them all
+    /// (`MysekaiConvertFurnitureSlotModel.SetupInComplete` sets every convert
+    /// complete, a skip included).
+    pub fn completed_count(&self, now: i64) -> i32 {
+        if self.mysekai_convert_slot_status == CONVERT_SLOT_COMPLETE {
+            return self.convert_count.max(0);
+        }
+        if self.convert_start_at <= 0 || self.once_convert_minutes < 1 {
+            return 0;
+        }
+        let each = minutes_ms(self.once_convert_minutes);
+        let elapsed = now.saturating_sub(self.convert_start_at);
+        let completed = (elapsed / each.max(1)) as i64;
+        completed.clamp(0, self.convert_count.max(0) as i64) as i32
+    }
+
+    /// The slot whose converts have all completed, at `end_at`.
+    pub fn completed(&self) -> Self {
+        Self {
+            mysekai_convert_slot_status: CONVERT_SLOT_COMPLETE.to_owned(),
+            convert_start_at: self.end_at(),
+            ..self.clone()
+        }
+    }
+
+    /// The rows drawn at the completion step `progress`, as the resources a
+    /// receiver receives (the source's `GetObtainResources`).
+    pub fn obtain_resources_at(&self, progress: i32) -> Vec<UserResource> {
+        self.obtain_resources
+            .iter()
+            .filter(|row| row.progress == progress)
+            .map(|row| ConvertObtainResource::to_resource(row))
+            .collect()
+    }
+}
+
+/// `UserMysekaiConvertItemHistory`: how often a convert item has been
+/// converted, for the items whose master row carries a convert limit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConvertItemHistory {
+    pub mysekai_convert_item_id: i32,
+    /// The converts since the row's last refresh.
+    pub convert_count: i32,
+    pub total_convert_count: i32,
+    /// Epoch milliseconds of the last convert start.
+    pub last_convert_start_at: i64,
+}
+
+fn minutes_ms(minutes: i32) -> i64 {
+    i64::from(minutes).saturating_mul(60_000)
+}
+
+fn saturating_minutes_ms(minutes: i32, count: i32) -> i64 {
+    i64::from(minutes).saturating_mul(i64::from(count)).saturating_mul(60_000)
 }
 
 /// `UserMysekaiMusicPlayFixtureSetting`.

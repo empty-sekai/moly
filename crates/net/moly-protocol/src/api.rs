@@ -389,6 +389,62 @@ pub struct SystemFixtureActionRequest {
     pub mysekai_system_fixture_id: i32,
 }
 
+/// `UserMysekaiConvertStartRequest` (`PostUserMysekaiConvertStartApi`): the
+/// convert item a slot starts converting, how many, and its draw variant.
+/// The slot is the call's path parameter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserMysekaiConvertStartRequest {
+    pub mysekai_convert_item_id: i32,
+    pub convert_count: i32,
+    pub choice_id: i32,
+}
+
+/// `UserMysekaiConvertReceiveRequest` (`PostUserMysekaiConvertReceiveApi`):
+/// how many of the slot's completed converts to receive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserMysekaiConvertReceiveRequest {
+    pub receive_convert_count: i32,
+}
+
+/// `UserMysekaiConvertReceiveResponse`: the resources the received converts
+/// produced and the tables the request changed (already in the game's
+/// copies).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UserMysekaiConvertReceiveResponse {
+    pub obtained_resources: Vec<UserResource>,
+    pub updated: SuiteUserSections,
+}
+
+/// `UserMysekaiConvertShortenRequest` (`PostUserMysekaiConvertShortenApi`):
+/// the crystals the skip spends, as the slot priced them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserMysekaiConvertShortenRequest {
+    pub consume_jewel_quantity: i32,
+}
+
+/// A request to one of the three convert APIs; the slot is the call's path
+/// parameter in each.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConvertPost {
+    /// `PostUserMysekaiConvertStartApi`.
+    Start(UserMysekaiConvertStartRequest),
+    /// `PostUserMysekaiConvertReceiveApi`.
+    Receive(UserMysekaiConvertReceiveRequest),
+    /// `PostUserMysekaiConvertShortenApi`.
+    Shorten(UserMysekaiConvertShortenRequest),
+}
+
+impl ConvertPost {
+    /// The API's name in the source.
+    pub fn api_name(self) -> &'static str {
+        match self {
+            Self::Start(_) => "PostUserMysekaiConvertStartApi",
+            Self::Receive(_) => "PostUserMysekaiConvertReceiveApi",
+            Self::Shorten(_) => "PostUserMysekaiConvertShortenApi",
+        }
+    }
+}
+
 /// `MysekaiBoostStaminaRecoveryType`, spelled the way the client's
 /// `ToString()` sends the enum value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

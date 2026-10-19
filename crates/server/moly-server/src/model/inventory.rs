@@ -520,6 +520,9 @@ impl ServerModel {
             None
         };
         let inventory = &self.doc.inventory;
+        // The sections the owned tables cover; the others (the tools, the
+        // music records, the convert tables) are left out for their own
+        // readers to fill.
         SuiteUserSections {
             user_mysekai_materials: materials.then(|| self.material_rows()),
             user_mysekai_material_possession: possession,
@@ -530,6 +533,7 @@ impl ServerModel {
             user_mysekai_gamedata: has(SECTION_GAMEDATA).then(|| self.gamedata_row()),
             user_mysekai_character_talks: has(SECTION_CHARACTER_TALKS)
                 .then(|| inventory.character_talks.clone()),
+            ..SuiteUserSections::default()
         }
     }
 }

@@ -12,9 +12,10 @@ use serde_json::{json, Map, Value};
 
 use crate::api::HousingLayoutFixture;
 use crate::rows::{
-    BirthdayPartyRow, Gamedata, HonorRow, MusicPlaySetting, OwnedMusicRecord, ScheduleRow, Stamina,
-    UserAvatar, UserMysekaiBlueprint, UserMysekaiBlueprintLendCraftCount, UserMysekaiCanvas,
-    UserMysekaiCharacterTalk, UserMysekaiFixture, UserMysekaiGamedata, UserMysekaiItem,
+    BirthdayPartyRow, ConvertItemHistory, ConvertObtainResource, ConvertSlot, Gamedata, HonorRow,
+    MusicPlaySetting, OwnedMusicRecord, ScheduleRow, Stamina, UserAvatar, UserMysekaiBlueprint,
+    UserMysekaiBlueprintLendCraftCount, UserMysekaiCanvas, UserMysekaiCharacterTalk,
+    UserMysekaiConvertItem, UserMysekaiFixture, UserMysekaiGamedata, UserMysekaiItem,
     UserMysekaiMaterial, UserMysekaiSystemFixtureAction, UserMysekaiTool, UserResource,
 };
 
@@ -62,6 +63,10 @@ pub const SECTION_SYSTEM_FIXTURE_ACTIONS: &str = "userMysekaiSystemFixtureAction
 pub const SECTION_TOOLS: &str = "userMysekaiTools";
 /// `userMysekaiBlueprintLendCraftCounts`.
 pub const SECTION_BLUEPRINT_LEND_CRAFT_COUNTS: &str = "userMysekaiBlueprintLendCraftCounts";
+/// `userMysekaiConvertSlots`.
+pub const SECTION_CONVERT_SLOTS: &str = "userMysekaiConvertSlots";
+/// `userMysekaiConvertItemHistories`.
+pub const SECTION_CONVERT_ITEM_HISTORIES: &str = "userMysekaiConvertItemHistories";
 
 /// `UserAvatar`'s field names, in the source's order.
 pub const AVATAR_FIELDS: [&str; 4] = [
@@ -150,11 +155,14 @@ pub fn stamina_value(stamina: Stamina) -> Value {
 
 /// `userMysekaiGamedata`.
 pub fn gamedata_value(gamedata: Gamedata) -> Value {
+    // The convert machine's level belongs to this block even when the
+    // convert section is not carried.
     json!({
         "mysekaiRank": gamedata.mysekai_rank,
         "totalExp": gamedata.total_exp,
         "refreshedAt": gamedata.refreshed_at,
         "isMysekaiTutorialEnd": gamedata.is_mysekai_tutorial_end,
+        "mysekaiConvertFixtureLevel": gamedata.mysekai_convert_fixture_level,
     })
 }
 
@@ -393,6 +401,253 @@ pub fn blueprint_lend_craft_counts_value(rows: &[UserMysekaiBlueprintLendCraftCo
             })
             .collect(),
     )
+}
+
+/// `userMysekaiConvertSlots`.
+pub fn convert_slots_value(rows: &[ConvertSlot]) -> Value {
+    Value::Array(
+        rows.iter()
+            .map(|row| {
+                json!({
+                    "slotId": row.slot_id,
+                    "mysekaiConvertItemId": row.mysekai_convert_item_id,
+                    "choiceId": row.choice_id,
+                    "convertStartAt": row.convert_start_at,
+                    "onceConvertMinutes": row.once_convert_minutes,
+                    "convertCount": row.convert_count,
+                    "receivedProgress": row.received_progress,
+                    "mysekaiConvertSlotStatus": row.mysekai_convert_slot_status,
+                    "userMysekaiConvertObtainResources": row.obtain_resources.iter().map(|obtain| json!({
+                        "slotId": obtain.slot_id,
+                        "progress": obtain.progress,
+                        "seq": obtain.seq,
+                        "resourceType": obtain.resource_type,
+                        "resourceId": obtain.resource_id,
+                        "quantity": obtain.quantity,
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// The convert items a response carries (their master table's column names).
+pub fn convert_items_value(rows: &[UserMysekaiConvertItem]) -> Value {
+    Value::Array(
+        rows.iter()
+            .map(|row| {
+                json!({
+                    "id": row.mysekai_convert_item_id,
+                    "mysekaiConvertItemObtainType": row.obtain_type,
+                    "externalId": row.external_id,
+                    "requiredConvertFixtureLevel": row.required_convert_fixture_level,
+                    "convertMinutes": row.convert_minutes,
+                    "convertLimit": row.convert_limit,
+                    "onceConvertLimit": row.once_convert_limit,
+                    "refreshCycle": row.refresh_cycle,
+                    "startAt": row.start_at,
+                    "endAt": row.end_at,
+                })
+            })
+            .collect(),
+    )
+}
+
+/// `userMysekaiConvertItemHistories`.
+pub fn convert_histories_value(rows: &[ConvertItemHistory]) -> Value {
+    Value::Array(
+        rows.iter()
+            .map(|row| {
+                json!({
+                    "mysekaiConvertItemId": row.mysekai_convert_item_id,
+                    "convertCount": row.convert_count,
+                    "totalConvertCount": row.total_convert_count,
+                    "lastConvertStartAt": row.last_convert_start_at,
+                })
+            })
+            .collect(),
+    )
+}
+
+/// `mysekaiConvertItems`: the convert item rows a response carries (the
+/// master's columns), besides the `convertLimit` and `onceConvertLimit` a
+/// classic master document lacks.
+pub fn parse_convert_items(value: &Value) -> Result<Vec<UserMysekaiConvertItem>, String> {
+    const AT: &str = "mysekaiConvertItems";
+    let rows = rows(value, AT)?;
+    let mut seen = BTreeSet::new();
+    rows.iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let at = format!("{AT}[{i}]");
+            let row = object(row, &at)?;
+            only(
+                row,
+                &[
+                    "id",
+                    "mysekaiConvertItemTabId",
+                    "consumeResourceBoxId",
+                    "mysekaiConvertItemObtainType",
+                    "externalId",
+                    "requiredConvertFixtureLevel",
+                    "convertMinutes",
+                    "convertLimit",
+                    "onceConvertLimit",
+                    "refreshCycle",
+                    "startAt",
+                    "endAt",
+                ],
+                &at,
+            )?;
+            let id = int32(row, "id", &at)?;
+            if !seen.insert(id) {
+                return Err(format!("{at} repeats convert item {id}"));
+            }
+            let optional = |key: &str| -> Result<i32, String> {
+                match row.get(key) {
+                    None | Some(Value::Null) => Ok(0),
+                    Some(_) => int32(row, key, &at),
+                }
+            };
+            Ok(UserMysekaiConvertItem {
+                mysekai_convert_item_id: id,
+                obtain_type: row
+                    .get("mysekaiConvertItemObtainType")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| format!("{at}.mysekaiConvertItemObtainType is not a string"))?
+                    .to_owned(),
+                external_id: int32(row, "externalId", &at)?,
+                required_convert_fixture_level: int32(row, "requiredConvertFixtureLevel", &at)?,
+                convert_minutes: int32(row, "convertMinutes", &at)?,
+                convert_limit: optional("convertLimit")?,
+                once_convert_limit: optional("onceConvertLimit")?,
+                refresh_cycle: row
+                    .get("refreshCycle")
+                    .and_then(Value::as_str)
+                    .unwrap_or("none")
+                    .to_owned(),
+                start_at: row.get("startAt").and_then(Value::as_i64).unwrap_or(0),
+                end_at: row.get("endAt").and_then(Value::as_i64).unwrap_or(0),
+            })
+        })
+        .collect()
+}
+
+/// `userMysekaiConvertSlots`.
+pub fn parse_convert_slots(value: &Value) -> Result<Vec<ConvertSlot>, String> {
+    const AT: &str = SECTION_CONVERT_SLOTS;
+    let rows = rows(value, AT)?;
+    let mut seen = BTreeSet::new();
+    rows.iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let at = format!("{AT}[{i}]");
+            let row = object(row, &at)?;
+            only(
+                row,
+                &[
+                    "slotId",
+                    "mysekaiConvertItemId",
+                    "choiceId",
+                    "convertStartAt",
+                    "onceConvertMinutes",
+                    "convertCount",
+                    "receivedProgress",
+                    "mysekaiConvertSlotStatus",
+                    "userMysekaiConvertObtainResources",
+                ],
+                &at,
+            )?;
+            let slot_id = int32(row, "slotId", &at)?;
+            if !seen.insert(slot_id) {
+                return Err(format!("{at} repeats slot {slot_id}"));
+            }
+            let obtains = array(row, "userMysekaiConvertObtainResources", &at)?
+                .iter()
+                .enumerate()
+                .map(|(j, obtain)| {
+                    let at = format!("{at}.userMysekaiConvertObtainResources[{j}]");
+                    let obtain = object(obtain, &at)?;
+                    only(
+                        obtain,
+                        &[
+                            "slotId",
+                            "progress",
+                            "seq",
+                            "resourceType",
+                            "resourceId",
+                            "quantity",
+                        ],
+                        &at,
+                    )?;
+                    Ok(ConvertObtainResource {
+                        slot_id: int32(obtain, "slotId", &at)?,
+                        progress: int32(obtain, "progress", &at)?,
+                        seq: int32(obtain, "seq", &at)?,
+                        resource_type: obtain
+                            .get("resourceType")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| format!("{at}.resourceType is not a string"))?
+                            .to_owned(),
+                        resource_id: int32(obtain, "resourceId", &at)?,
+                        quantity: int32(obtain, "quantity", &at)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(ConvertSlot {
+                slot_id,
+                mysekai_convert_item_id: int32(row, "mysekaiConvertItemId", &at)?,
+                choice_id: int32(row, "choiceId", &at)?,
+                convert_start_at: int64(row, "convertStartAt", &at)?,
+                once_convert_minutes: int32(row, "onceConvertMinutes", &at)?,
+                convert_count: int32(row, "convertCount", &at)?,
+                received_progress: int32(row, "receivedProgress", &at)?,
+                mysekai_convert_slot_status: row
+                    .get("mysekaiConvertSlotStatus")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| format!("{at}.mysekaiConvertSlotStatus is not a string"))?
+                    .to_owned(),
+                obtain_resources: obtains,
+            })
+        })
+        .collect()
+}
+
+/// `userMysekaiConvertItemHistories`.
+pub fn parse_convert_histories(value: &Value) -> Result<Vec<ConvertItemHistory>, String> {
+    const AT: &str = SECTION_CONVERT_ITEM_HISTORIES;
+    let rows = rows(value, AT)?;
+    let mut seen = BTreeSet::new();
+    rows.iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let at = format!("{AT}[{i}]");
+            let row = object(row, &at)?;
+            only(
+                row,
+                &[
+                    "mysekaiConvertItemId",
+                    "convertCount",
+                    "totalConvertCount",
+                    "lastConvertStartAt",
+                ],
+                &at,
+            )?;
+            let history = ConvertItemHistory {
+                mysekai_convert_item_id: int32(row, "mysekaiConvertItemId", &at)?,
+                convert_count: int32(row, "convertCount", &at)?,
+                total_convert_count: int32(row, "totalConvertCount", &at)?,
+                last_convert_start_at: int64(row, "lastConvertStartAt", &at)?,
+            };
+            if !seen.insert(history.mysekai_convert_item_id) {
+                return Err(format!(
+                    "{at} repeats convert item {}",
+                    history.mysekai_convert_item_id
+                ));
+            }
+            Ok(history)
+        })
+        .collect()
 }
 
 /// `userMysekaiSiteHousingLayouts`'s `mysekaiFixtures` of one site, in the

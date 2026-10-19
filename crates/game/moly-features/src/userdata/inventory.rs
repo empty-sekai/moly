@@ -187,6 +187,7 @@ impl ClientMysekaiInventory {
             user_mysekai_blueprints,
             user_mysekai_items,
             user_mysekai_gamedata,
+            ..
         } = sections;
         if let Some(rows) = user_mysekai_materials {
             self.materials = rows;
