@@ -166,6 +166,34 @@ impl MissionMasters {
         self.sheets_by_seq().into_iter().last()
     }
 
+    /// The sheet of the lowest `seq`: the sheet a user without one starts on
+    /// (`MysekaiMissionUtility.GetCurrentMissionSheetId` reads the user's
+    /// sheet, which a new user has none of).
+    pub fn first_sheet(&self) -> Option<&MissionSheet> {
+        self.sheets_by_seq().into_iter().next()
+    }
+
+    /// The sheet after `id` in `seq` order, ties in master order: the sheet a
+    /// receive advances to once the sheet it completes is done and is not the
+    /// last one (`MysekaiMissionUtility.GetLastMissionSheet` bounds it).
+    pub fn next_sheet(&self, id: i32) -> Option<&MissionSheet> {
+        let sheets = self.sheets_by_seq();
+        let at = sheets.iter().position(|sheet| sheet.id == id)?;
+        sheets.get(at + 1).copied()
+    }
+
+    /// Every mission of a sheet, its completion mission and its normal
+    /// missions, in `seq` order, ties in master order.
+    pub fn sheet_missions(&self, sheet_id: i32) -> Vec<&Mission> {
+        let mut missions: Vec<&Mission> = self
+            .missions
+            .iter()
+            .filter(|mission| mission.sheet_id == sheet_id)
+            .collect();
+        missions.sort_by_key(|mission| mission.seq);
+        missions
+    }
+
     /// `MysekaiMissionUtility.GetParentMission`: the sheet's completion
     /// mission.
     pub fn parent_mission(&self, sheet_id: i32) -> Option<&Mission> {

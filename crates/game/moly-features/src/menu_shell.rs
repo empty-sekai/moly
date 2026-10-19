@@ -12,7 +12,7 @@ use bevy::window::PrimaryWindow;
 use moly_assets::{json::JsonAsset, ui_layout::UiPrefab};
 use serde_json::Value;
 
-use crate::balloon::BALLOON_LAYER;
+use crate::balloon::{BalloonArt, BALLOON_LAYER};
 use crate::canvas::RootCanvas;
 use crate::frame_capture::CaptureFrame;
 use crate::gesture::{GestureEvent, GestureState, UiPointerEvent, UiPointerPhase};
@@ -255,6 +255,261 @@ fn local_reference(value: &Value, field: &str) -> Option<i64> {
     (id != 0).then_some(id)
 }
 
+/// The home mission panel (`MysekaiMenuUIContent._sekaiMissionHomePanel`,
+/// type `MysekaiMissionHomePanel`): the current sheet's completion mission,
+/// its gauge, its sentence and progress text, and the button that opens the
+/// mission screen.
+///
+/// - `MysekaiMenuUIContent.RefreshMissionContent` hides the panel when
+///   `IsAllCompleted` and draws `CreateRecommendViewData`
+///   (`MysekaiMissionUtility`), hiding the panel when that is null; whenever
+///   the panel is drawn it runs `MysekaiMissionHomePanel.UpdateContent`
+///   (this [`MissionPanel::refresh`]): the gauge over the completion
+///   mission's counted `current` and `MaxProgress`, the `"{current}/{max}"`
+///   text, the completion mission's `sentence`, `CheckAndShowMissionClear`
+///   (the clear object and child-clear marker, and `se_notice_mission_complete`
+///   the first time the clear object turns on).
+/// - The panel's button runs `MysekaiMenuUIContent.OnClickMission`: the
+///   harvest sync is waited for (`WaitHarvestSync`; this tree keeps no harvest
+///   sync, named) and the mission screen is pushed (`PushUIScreen`).
+/// - The clear effect (`fx_mysekai_mission_clear` under `Content/Effect`)
+///   is an FX prefab outside the UI documents: it is not loaded (named).
+/// - `RefreshMissionContent`'s `MYSEKAI_SECRET_SHOP` slide for a sheet whose
+///   normal missions are all achieved needs a tutorial-slide domain this
+///   tree has none of (named).
+struct MissionPanel {
+    /// `ContentNode/SekaiMission`.
+    root: String,
+    /// `Content/MissionText`.
+    mission_text: String,
+    /// `Content/ProgressText`.
+    progress_text: String,
+    /// `Content/UIPartsGauge/.../GaugeFill`.
+    gauge_fill: String,
+    /// `Content/Icon_base/ChildMissionClear`.
+    child_clear: String,
+    /// The `CustomButton` the tap goes to: its node and component.
+    button: (usize, i64),
+    /// The panel's content as last drawn.
+    shown: Option<PanelContent>,
+    /// The child-clear marker's serialized active state.
+    child_clear_serialized: bool,
+    /// `CheckAndShowMissionClear`'s `se_notice_mission_complete` played once.
+    played_clear_se: bool,
+}
+
+/// What the panel shows for one sheet.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct PanelContent {
+    /// Drawn at all (`RefreshMissionContent`).
+    visible: bool,
+    mission: String,
+    progress: String,
+    fill: f32,
+    /// The completion mission's counted progress reached its requirement.
+    clear: bool,
+    /// `IsChildMissionReceiveAvailable`.
+    child_available: bool,
+}
+
+impl MissionPanel {
+    /// The panel's nodes from the host document. A host whose content has no
+    /// panel, or whose panel lacks a node this view writes, has no panel
+    /// (named once).
+    fn read(
+        doc: &UiPrefab,
+        refs: &std::collections::HashMap<&'static str, String>,
+        seen: &mut std::collections::BTreeSet<String>,
+    ) -> Option<Self> {
+        // The field menu content serializes the field (a null reference puts
+        // no panel on the host).
+        let root = refs.get("_sekaiMissionHomePanel")?.clone();
+        let content = format!("{root}/Content");
+        let gauge = format!("{content}/UIPartsGauge");
+        // `UIPartsGauge.fillImage`.
+        let fill = (|| {
+            let component = decoded_field(doc, &gauge, "fillImage")?;
+            let pair = component.fields.get("fillImage")?.as_array()?;
+            if pair.first().and_then(Value::as_i64) != Some(0) {
+                return None;
+            }
+            let id = pair.get(1).and_then(Value::as_i64)?;
+            let index = doc.find(&format!("@{id}")).ok()?;
+            Some(doc.nodes[index].path.clone())
+        })();
+        let Some(fill) = fill else {
+            note_once_in(
+                seen,
+                format!("the home mission panel {gauge} has no decoded fillImage; the panel is not drawn"),
+            );
+            return None;
+        };
+        let Ok(index) = doc.find(&content) else {
+            note_once_in(seen, format!("the home mission panel {content} is missing; the panel is not drawn"));
+            return None;
+        };
+        let Some(button) = doc.nodes[index]
+            .components
+            .iter()
+            .find(|component| component.class == "Sekai.UI.CustomButton")
+        else {
+            note_once_in(seen, format!("the home mission panel {content} has no button; the panel is not drawn"));
+            return None;
+        };
+        let child_clear = format!("{content}/Icon_base/ChildMissionClear");
+        let child_clear_serialized = doc
+            .find(&child_clear)
+            .map(|index| doc.nodes[index].active)
+            .unwrap_or(true);
+        Some(Self {
+            root,
+            mission_text: format!("{content}/MissionText"),
+            progress_text: format!("{content}/ProgressText"),
+            gauge_fill: fill,
+            child_clear,
+            button: (index, button.path_id),
+            shown: None,
+            child_clear_serialized,
+            played_clear_se: false,
+        })
+    }
+
+    /// `MysekaiMenuUIContent.RefreshMissionContent` and
+    /// `MysekaiMissionHomePanel.UpdateContent` for this frame. `visible` is
+    /// whether the host's screen is drawn at all.
+    fn refresh(
+        &mut self,
+        visible: bool,
+        masters: Option<&moly_masters::mission::MissionMasters>,
+        user: Option<&crate::userdata::mission::ClientMission>,
+        art: Option<&BalloonArt>,
+        view: &mut UiPrefabView,
+        sounds: &mut crate::audio::SeRequests,
+    ) {
+        let mut content = self.content(masters, user, art);
+        content.visible &= visible;
+        if self.shown.as_ref() == Some(&content) {
+            return;
+        }
+        let was_clear = self
+            .shown
+            .as_ref()
+            .is_some_and(|shown| shown.visible && shown.clear);
+        // `RefreshMissionContent`: a panel drawn for the first time, or drawn
+        // again after it hid, runs the whole `UpdateContent`.
+        let updated = content.visible && self.shown.as_ref().is_none_or(|shown| !shown.visible);
+        view.set_visible(&self.root, content.visible);
+        if !content.visible {
+            self.shown = Some(content);
+            return;
+        }
+        view.set_text(&self.mission_text, content.mission.clone());
+        view.set_text(&self.progress_text, content.progress.clone());
+        view.set_fill(&self.gauge_fill, content.fill);
+        // `CheckAndShowMissionClear`: the child-clear marker, and the clear
+        // sound the first time the clear object turns on.
+        view.set_visible(
+            &self.child_clear,
+            self.child_clear_serialized && content.child_available,
+        );
+        if content.clear && !was_clear && !self.played_clear_se {
+            self.played_clear_se = true;
+            sounds.0.push(crate::audio::SeRequest {
+                owner: None,
+                cue: NOTICE_MISSION_COMPLETE.to_owned(),
+                class: crate::audio::SeClass::Ui,
+                source: "menu_shell",
+            });
+            info!(
+                "[menu-shell] MysekaiMissionHomePanel.CheckAndShowMissionClear: the clear object turns on; {NOTICE_MISSION_COMPLETE}"
+            );
+        }
+        if updated {
+            info!(
+                "[menu-shell] MysekaiMissionHomePanel.UpdateContent: the completion mission {:?} at {}, clear {}, a child receive available {}",
+                content.mission, content.progress, content.clear, content.child_available
+            );
+        }
+        self.shown = Some(content);
+    }
+
+    /// What the panel shows now: hidden while `IsAllCompleted`, else the
+    /// completion mission's `sentence`, counted progress text and gauge
+    /// (`CreateRecommendViewData` and `UpdateContent`).
+    fn content(
+        &self,
+        masters: Option<&moly_masters::mission::MissionMasters>,
+        user: Option<&crate::userdata::mission::ClientMission>,
+        art: Option<&BalloonArt>,
+    ) -> PanelContent {
+        let (Some(masters), Some(user)) = (masters, user) else {
+            return PanelContent::default();
+        };
+        let state = user.state();
+        if crate::mission::model::is_all_completed(masters, &state) {
+            return PanelContent::default();
+        }
+        let Some(panel) = crate::mission::model::panel_view(masters, &state) else {
+            return PanelContent::default();
+        };
+        PanelContent {
+            visible: true,
+            mission: readable(&panel.mission.master.sentence, art).unwrap_or_default(),
+            progress: panel.progress_text(),
+            fill: panel.gauge_fill(),
+            clear: panel.is_complete(),
+            child_available: panel.child_receive_available,
+        }
+    }
+
+    /// Whether a tap on node and component `(node, id)` went to the panel's
+    /// button while the panel shows.
+    fn takes(&self, node: usize, id: i64) -> bool {
+        self.shown.as_ref().is_some_and(|shown| shown.visible) && self.button == (node, id)
+    }
+}
+
+/// The home mission panel's per-frame inputs: the mission masters, the
+/// user's missions, the glyph art and the sound queue.
+type MissionInputs<'a> = (
+    Option<&'a moly_masters::mission::MissionMasters>,
+    Option<&'a crate::userdata::mission::ClientMission>,
+    Option<&'a BalloonArt>,
+    &'a mut crate::audio::SeRequests,
+);
+
+/// `MysekaiMissionHomePanel.playClearSe`'s cue.
+const NOTICE_MISSION_COMPLETE: &str = "se_notice_mission_complete";
+
+/// A text the shared glyph atlas can draw, as it is; `None` when a
+/// character has no glyph cell.
+fn readable(text: &str, art: Option<&BalloonArt>) -> Option<String> {
+    let art = art?;
+    text.chars()
+        .all(|ch| ch.is_whitespace() || art.glyph_cell(ch).is_some())
+        .then(|| text.to_owned())
+}
+
+/// Logs one `[menu-shell]` line once per distinct message.
+fn note_once_in(seen: &mut std::collections::BTreeSet<String>, message: String) {
+    if seen.insert(message.clone()) {
+        info!("[menu-shell] {message}");
+    }
+}
+
+/// The component at `path` carrying a decoded `field`.
+fn decoded_field<'a>(
+    doc: &'a UiPrefab,
+    path: &str,
+    field: &str,
+) -> Option<&'a moly_assets::ui_layout::UiComponent> {
+    let node = doc.find(path).ok()?;
+    doc.nodes[node]
+        .components
+        .iter()
+        .find(|component| component.fields.get(field).is_some())
+}
+
 #[derive(Debug, Clone, Copy)]
 enum ShellAction {
     SiteMap,
@@ -338,8 +593,13 @@ pub struct MenuShellRoot {
 }
 
 impl MenuShellRoot {
-    fn new(host: ShellHost, doc: &UiPrefab, view: &mut UiPrefabView) -> Self {
-        let bindings = ShellBindings::from_document(doc, view);
+    fn new(
+        host: ShellHost,
+        doc: &UiPrefab,
+        view: &mut UiPrefabView,
+        seen: &mut std::collections::BTreeSet<String>,
+    ) -> Self {
+        let bindings = ShellBindings::from_document(doc, view, seen);
         let motion = ChromeMotion::new(doc, &bindings);
         Self { host, bindings, motion, active: false }
     }
@@ -347,7 +607,8 @@ impl MenuShellRoot {
     /// One frame of this host's view state. The gauge's tween runs whether or
     /// not the chrome is drawn, and the host's screen setup runs when its site
     /// has just become the active one; while the chrome is drawn, the actions
-    /// visible for this host and the chrome motion are applied.
+    /// visible for this host, the home mission panel and the chrome motion
+    /// are applied.
     #[allow(clippy::too_many_arguments)]
     fn advance_view(
         &mut self,
@@ -360,11 +621,39 @@ impl MenuShellRoot {
         doc: &UiPrefab,
         view: &mut UiPrefabView,
     ) {
+        self.advance_view_with_mission(set_up, drawn, hidden, party, delta, now_ms, doc, view, None);
+    }
+
+    /// [`MenuShellRoot::advance_view`] with the home mission panel's inputs
+    /// ([`MissionInputs`]): `MysekaiMenuUIContent.RefreshMissionContent`
+    /// runs while the host's screen is set up, and the panel hides with the
+    /// chrome.
+    #[allow(clippy::too_many_arguments)]
+    fn advance_view_with_mission<'a>(
+        &mut self,
+        set_up: bool,
+        drawn: bool,
+        hidden: bool,
+        party: Option<PartyUi>,
+        delta: f32,
+        now_ms: impl FnOnce() -> i64,
+        doc: &UiPrefab,
+        view: &mut UiPrefabView,
+        mut mission: Option<MissionInputs<'a>>,
+    ) {
         let host = self.host;
         if let Some(gauge) = self.bindings.gauge.as_mut() {
             gauge.advance(delta, view);
             if set_up {
                 gauge.setup(host, &EVENT_BREAK_TIME_SERVER, now_ms, view);
+            }
+        }
+        if let Some(panel) = self.bindings.mission_panel.as_mut() {
+            match mission.as_mut() {
+                Some(inputs) if set_up => {
+                    panel.refresh(drawn, inputs.0, inputs.1, inputs.2, view, inputs.3)
+                }
+                _ => panel.refresh(false, None, None, None, view, &mut crate::audio::SeRequests::default()),
             }
         }
         if !drawn { return; }
@@ -385,7 +674,7 @@ pub fn settled_host_view(doc: &UiPrefab, key: &str) -> UiPrefabView {
     let host = ShellHost::ALL.into_iter().find(|host| host.key() == key)
         .unwrap_or_else(|| panic!("{key} is not a field-menu host"));
     let mut view = UiPrefabView::new(host.key(), BALLOON_LAYER);
-    let mut root = MenuShellRoot::new(host, doc, &mut view);
+    let mut root = MenuShellRoot::new(host, doc, &mut view, &mut std::collections::BTreeSet::new());
     let no_clock = || unreachable!("no event is in session");
     root.advance_view(true, true, false, None, 0., no_clock, doc, &mut view);
     // Long enough for the gauge slide and the chrome motion to end.
@@ -408,10 +697,17 @@ pub struct ShellDialogRoot {
 struct ShellBindings {
     refs: std::collections::HashMap<&'static str, String>,
     gauge: Option<BreakTimeGauge>,
+    /// `MysekaiMenuUIContent._sekaiMissionHomePanel`, when the host's
+    /// content serializes it.
+    mission_panel: Option<MissionPanel>,
 }
 
 impl ShellBindings {
-    fn from_document(doc: &UiPrefab, view: &mut UiPrefabView) -> Self {
+    fn from_document(
+        doc: &UiPrefab,
+        view: &mut UiPrefabView,
+        seen: &mut std::collections::BTreeSet<String>,
+    ) -> Self {
         let (root, component) = doc.nodes.iter().enumerate().find_map(|(i, node)| {
             node.components.iter()
                 .find(|c| c.class == "Sekai.Mysekai.MysekaiMenuUIContent")
@@ -487,15 +783,18 @@ impl ShellBindings {
                 view.set_visible(&format!("@{}", node.game_object_id), false);
             }
         }
-        let result = Self { refs, gauge: BreakTimeGauge::from_document(doc, component) };
+        let mission_panel = MissionPanel::read(doc, &refs, seen);
+        let result = Self { refs, gauge: BreakTimeGauge::from_document(doc, component), mission_panel };
         // The currently mounted local world is owned by the player. Visitor
         // headers and leave controls require a distinct world context.
         for field in ["_leaveMysekaiButton", "_homeAreaInfo", "_backButton"] {
             view.set_visible(result.get(field), false);
         }
-        // Mission rows have no account producer in this host yet; serialized
-        // preview progress must not become a runtime mission.
-        view.set_visible(result.get("_sekaiMissionHomePanel"), false);
+        // The mission panel is drawn by [`MissionPanel::refresh`] from the
+        // user's missions: it starts hidden, and its own fields drive it.
+        if let Some(panel) = &result.mission_panel {
+            view.set_visible(&panel.root, false);
+        }
         result
     }
 
@@ -667,20 +966,25 @@ pub fn parse(
     commands.remove_resource::<ShellNamesHandle>();
 }
 
+#[derive(Resource, Default)]
+pub struct MissionPanelNotes(std::collections::BTreeSet<String>);
+
 pub fn spawn_when_ready(
     mut commands: Commands,
     layouts: Res<UiLayouts>,
     server: Res<AssetServer>,
     spawned: Option<Res<ShellSpawned>>,
+    mut notes: Option<ResMut<MissionPanelNotes>>,
 ) {
     if spawned.is_some() || !layouts.ready("Common2", &server)
         || ShellHost::ALL.iter().any(|host| !layouts.ready(host.key(), &server)) {
         return;
     }
+    let mut seen = notes.as_deref().map(|notes| notes.0.clone()).unwrap_or_default();
     for host in ShellHost::ALL {
         let doc = layouts.document(host.key()).expect("ready field prefab");
         let mut view = UiPrefabView::new(host.key(), BALLOON_LAYER);
-        let root = MenuShellRoot::new(host, doc, &mut view);
+        let root = MenuShellRoot::new(host, doc, &mut view, &mut seen);
         commands.spawn((
             root, Visibility::Hidden, Transform::default(),
             RenderLayers::layer(BALLOON_LAYER), view,
@@ -701,6 +1005,31 @@ pub fn spawn_when_ready(
     commands.insert_resource(ShellSpawned);
 }
 
+/// The home mission panel's inputs of [`place`] and [`click`]: the bonus
+/// roll's art, the mission masters and the user's missions.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct MissionPanelResources<'w> {
+    pub art: Option<bevy::prelude::Res<'w, BalloonArt>>,
+    pub tables: Option<bevy::prelude::Res<'w, moly_masters::load::MasterTables>>,
+    pub missions: Option<bevy::prelude::Res<'w, crate::userdata::mission::ClientMission>>,
+}
+
+impl MissionPanelResources<'_> {
+    /// The mission masters, when they are in.
+    fn masters(&self) -> Option<&moly_masters::mission::MissionMasters> {
+        self.tables.as_deref().and_then(|tables| tables.mission.as_ref())
+    }
+
+    fn missions(&self) -> Option<&crate::userdata::mission::ClientMission> {
+        self.missions.as_deref()
+    }
+
+    fn inputs<'a>(&'a self, sounds: &'a mut crate::audio::SeRequests) -> MissionInputs<'a> {
+        (self.masters(), self.missions(), self.art.as_deref(), sounds)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn place(
     windows: Query<&Window, With<PrimaryWindow>>,
     time: Res<Time>,
@@ -710,6 +1039,8 @@ pub fn place(
     ui: Res<ShellUiState>,
     dialog: Res<ShellDialogState>,
     entry: Option<Res<crate::entry::EntrySequence>>,
+    panel: MissionPanelResources,
+    mut sounds: ResMut<crate::audio::SeRequests>,
     mut roots: Query<(&mut MenuShellRoot, &mut Visibility, &mut Transform, &mut UiPrefabView), Without<ShellDialogRoot>>,
     mut dialogs: Query<(&mut Visibility, &mut Transform, &mut UiPrefabView), (With<ShellDialogRoot>, Without<MenuShellRoot>)>,
     mut solved: Local<std::collections::HashSet<&'static str>>,
@@ -748,7 +1079,19 @@ pub fn place(
                 .current_timestamp(real.elapsed_secs())
         };
         let party = party.as_deref().and_then(BirthdayParty::ui);
-        root.advance_view(set_up, visible, ui.hidden, party, time.delta_secs(), now_ms, doc, &mut view);
+        // The home mission panel (`MysekaiMissionHomePanel`), with the gauge
+        // and chrome motion of [`MenuShellRoot::advance_view`].
+        root.advance_view_with_mission(
+            set_up,
+            visible,
+            ui.hidden,
+            party,
+            time.delta_secs(),
+            now_ms,
+            doc,
+            &mut view,
+            Some(panel.inputs(&mut sounds)),
+        );
         if !visible { continue; }
         let canvas = root_canvas.size(window);
         if !solved.contains(view.key) {
@@ -996,6 +1339,40 @@ pub fn click(
     let Some(active) = active else { return; };
     let host = ShellHost::for_site(&active);
     let Some((root, view)) = roots.iter().find(|(root, _)| root.host == host) else { return; };
+    let Some(doc) = layouts.document(view.key) else { return; };
+    // The home mission panel's open button (`MysekaiMenuUIContent.
+    // OnClickMission`), while the panel shows: the source raycast names the
+    // button the tap went to.
+    let panel = root
+        .bindings
+        .mission_panel
+        .as_ref()
+        .filter(|panel| panel.shown.as_ref().is_some_and(|shown| shown.visible));
+    if let Some(panel) = panel {
+        for position in &taps {
+            let pointer = event_pointer(window, root_canvas, *position);
+            let Some((node, id)) = view.press_target(&layouts, pointer, size) else {
+                continue;
+            };
+            if !panel.takes(node, id) {
+                continue;
+            }
+            consumed.0 = true;
+            let path = doc.nodes[node].path.clone();
+            layouts.queue_button_se(&mut sounds, view.key, &path);
+            // The harvest sync this tree keeps no harvest sync for is named,
+            // then PushUIScreen(MysekaiMission).
+            info!(
+                "[menu-shell] MysekaiMenuUIContent.OnClickMission: HarvestUserDataManager.WaitHarvestSync (this tree keeps no harvest sync; named); PushUIScreen(MysekaiMission)"
+            );
+            stack.push_ui_screen(
+                crate::ui_layers::MenuScreenType::MysekaiMission,
+                None,
+                "MysekaiMenuUIContent.OnClickMission",
+            );
+            return;
+        }
+    }
     for position in taps {
         let canvas = to_canvas(position, window, root_canvas);
         if let Some(action) = ShellAction::ALL.into_iter().find(|action| {

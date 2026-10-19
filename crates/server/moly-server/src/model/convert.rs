@@ -76,7 +76,10 @@
 //!   inference: the source derives the level from the user's MySekai rank),
 //!   and the receive stops at the first draw it cannot hold, which it still
 //!   reports as obtained; the received progress then moves past every step
-//!   received.
+//!   received. The limits are read before anything is granted: a server
+//!   without `mysekaiMaterialPossessions` or `mysekaiFixturePossessions`
+//!   refuses the whole receive by name instead of reading a missing limit as
+//!   "does not fit".
 //! - *Shorten*: a processing slot's remaining minutes, rounded up, times the
 //!   master config `mysekai_convert_time_shorten_consume_jewel_per_minute`
 //!   are skipped for `consumeJewelQuantity` crystals. The crystals are the
@@ -111,6 +114,7 @@ use moly_protocol::rows::{
     UserMysekaiBlueprint, UserMysekaiFixture, UserMysekaiItem, UserResource,
     CONVERT_SLOT_COMPLETE, CONVERT_SLOT_PROCESSING,
 };
+use moly_masters::clock::{CalendarRefresh, CONFIG_REFRESH_HOUR, CONFIG_WEEKLY_REFERENCE};
 use serde_json::{json, Map, Value};
 
 use super::delivery::SECTION_MYSEKAI_MATERIALS;
@@ -160,6 +164,41 @@ const RELEASE_SHORTEN: &str = "convert_time_shorten";
 /// `configs.mysekai_convert_time_shorten_consume_jewel_per_minute`: the key
 /// the skip price reads.
 const CONFIG_JEWEL_PER_MINUTE: &str = "mysekai_convert_time_shorten_consume_jewel_per_minute";
+
+/// The possession limits one receive grants within, read before it hands
+/// anything out.
+///
+/// `MysekaiUserDataUtility.GetMaterialMaxCount` and `GetFixtureMaxCount` read
+/// the possession masters; a server without them cannot say whether a
+/// resource fits, so the receive refuses by name instead of counting every
+/// grant as over the limit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PossessionLimits {
+    material: i32,
+    fixture: i32,
+}
+
+impl PossessionLimits {
+    /// The limits, or the refusal naming the table that is not seated.
+    fn read(masters: &Tables<'_>) -> Result<Self, String> {
+        let possession = masters.possession();
+        let material = possession
+            .material_max_count(POSSESSION_LEVEL)
+            .ok_or_else(|| missing_master("mysekaiMaterialPossessions", "materials"))?;
+        let fixture = possession
+            .fixture_max_count(POSSESSION_LEVEL)
+            .ok_or_else(|| missing_master("mysekaiFixturePossessions", "fixtures"))?;
+        Ok(Self { material, fixture })
+    }
+}
+
+/// Why a receive refuses when a possession master is not in: the resource it
+/// cannot hold within a limit, and the table it lacks.
+fn missing_master(table: &str, what: &str) -> String {
+    format!(
+        "the {table} master (level {POSSESSION_LEVEL}) is not seated: the receive's {what} cannot be checked against the possession limit, so nothing is granted"
+    )
+}
 
 /// The possession level the material and fixture limits are read at (an
 /// inference: the source derives it from the user's MySekai rank, which this
@@ -535,58 +574,34 @@ pub(crate) fn parse_convert_levels(
 }
 
 /// `resourceBoxes`: each box's details (resourceType, resourceId,
-/// resourceQuantity), id order. The JP master nests the rows in each box's
-/// `details`; the CN master carries each detail as a `resourceBoxDetails`
-/// row instead, which this reader does not join. A detail names no
-/// `resourceLevel` (that is the source's level for the resource type), so
-/// the level reads 0; a detail that names no `resourceId` (a `jewel` one)
-/// reads 0.
+/// resourceQuantity), id order, through the shared reader so the server and
+/// the client read one set of columns (a detail's level reads 0: the shared
+/// reader does not carry it).
 pub(crate) fn parse_resource_boxes(text: &str) -> Result<Vec<ResourceBox>, String> {
-    let rows = table_rows(text, "resourceBoxes")?;
-    let mut boxes = Vec::new();
-    for row in &rows {
-        let purpose = row["resourceBoxPurpose"]
-            .as_str()
-            .ok_or_else(|| {
-                format!(
-                    "resourceBoxes row {:?}: resourceBoxPurpose is not a string",
-                    row.get("id")
-                )
-            })?
-            .to_owned();
-        let id = super::int32(row, "id")?;
-        let Some(details) = row.get("details").and_then(Value::as_array) else {
-            // A row without details is another master's box (the CN master
-            // keeps every detail as a `resourceBoxDetails` row).
-            continue;
-        };
-        // The master's detail columns are `seq`, `resourceType`,
-        // `resourceId` (absent for a type that carries none) and
-        // `resourceQuantity`; the details read in `seq` order, and a detail
-        // that omits the quantity grants one.
-        let mut ordered: Vec<&Value> = details.iter().collect();
-        ordered.sort_by_key(|detail| row_int(detail, "seq"));
-        let details = ordered
-            .into_iter()
-            .map(|detail| {
-                let kind = detail["resourceType"].as_str().ok_or_else(|| {
-                    format!("resourceBoxes {purpose} {id} detail: resourceType is not a string")
-                })?;
-                Ok((
-                    kind.to_owned(),
-                    row_int(detail, "resourceId") as i32,
-                    0,
-                    row_int(detail, "resourceQuantity").max(1) as i32,
-                ))
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        boxes.push(ResourceBox {
-            purpose,
-            id,
-            details,
-        });
-    }
-    Ok(boxes)
+    Ok(moly_masters::convert::parse_boxes(text)?
+        .into_iter()
+        .map(|boxed| ResourceBox {
+            purpose: boxed.purpose,
+            id: boxed.id,
+            details: boxed
+                .details
+                .into_iter()
+                .map(|detail| (detail.resource_type, detail.resource_id, 0, detail.quantity))
+                .collect(),
+        })
+        .collect())
+}
+
+/// `resourceBoxes` as the server's own join table (a `Masters`, not the
+/// shared tables) seats them: into `convert_box_list`, which
+/// `Masters::join_parts` moves into the convert tables before any user
+/// joins.
+pub(crate) fn parse_resource_boxes_only(
+    text: &str,
+    masters: &mut super::Masters,
+) -> Result<(), String> {
+    masters.convert_box_list = Some(parse_resource_boxes(text)?);
+    Ok(())
 }
 
 /// `mysekaiConvertItems`: the convert screen's items, id order. The server
@@ -775,52 +790,50 @@ fn is_pass_slot(convert: &ConvertMasters, slot_id: i32) -> bool {
 /// The completions the item has used since its last refresh (the source's
 /// `SetupConvertibleCount`: a weekly or monthly row whose last start crossed
 /// the refresh reads 0).
-fn used_convert_count(doc: &ConvertDoc, item: &ConvertItemMaster, now: i64) -> i32 {
+fn used_convert_count(
+    doc: &ConvertDoc,
+    item: &ConvertItemMaster,
+    now: i64,
+    masters: &Tables<'_>,
+) -> Result<i32, String> {
     let Some(history) = doc
         .histories
         .iter()
         .find(|row| row.mysekai_convert_item_id == item.id)
     else {
-        return 0;
+        return Ok(0);
     };
-    if is_refreshed(item.refresh, history.last_convert_start_at, now) {
-        return 0;
+    if is_refreshed(item.refresh, history.last_convert_start_at, now, masters)? {
+        return Ok(0);
     }
-    history.convert_count
+    Ok(history.convert_count)
 }
 
-/// `MysekaiUtility.HasCrossedWeeklyRefresh` / `HasCrossedMonthlyRefresh`.
-fn is_refreshed(refresh: ConvertRefresh, last_start_at: i64, now: i64) -> bool {
-    if last_start_at <= 0 {
-        return false;
+/// `MysekaiUtility.HasCrossedWeeklyRefresh` / `HasCrossedMonthlyRefresh`,
+/// on the calendar the master `configs` name and the clock's local offset.
+fn is_refreshed(
+    refresh: ConvertRefresh,
+    last_start_at: i64,
+    now: i64,
+    masters: &Tables<'_>,
+) -> Result<bool, String> {
+    if last_start_at <= 0 || refresh == ConvertRefresh::None {
+        return Ok(false);
     }
-    match refresh {
+    let configs = masters
+        .configs
+        .as_ref()
+        .ok_or("configs is absent: the convert refresh has no calendar")?;
+    let calendar = CalendarRefresh::from_values(
+        configs.get(CONFIG_REFRESH_HOUR).map(String::as_str),
+        configs.get(CONFIG_WEEKLY_REFERENCE).map(String::as_str),
+    )?;
+    let offset = super::clock::device_utc_offset_ms(now);
+    Ok(match refresh {
         ConvertRefresh::None => false,
-        ConvertRefresh::Weekly => {
-            const WEEK_MS: i64 = 7 * 24 * 60 * 60 * 1000;
-            now.div_euclid(WEEK_MS) > last_start_at.div_euclid(WEEK_MS)
-        }
-        ConvertRefresh::Monthly => month_index(now) > month_index(last_start_at),
-    }
-}
-
-/// The calendar month of an epoch millisecond, as `year * 12 + month - 1`.
-fn month_index(ms: i64) -> i64 {
-    let (year, month) = civil_from_days(ms.div_euclid(86_400_000));
-    year * 12 + month - 1
-}
-
-/// The proleptic Gregorian year and month of a day count since the epoch.
-fn civil_from_days(days: i64) -> (i64, i64) {
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    (year, month)
+        ConvertRefresh::Weekly => calendar.has_crossed_weekly(last_start_at, now, offset),
+        ConvertRefresh::Monthly => calendar.has_crossed_monthly(last_start_at, now, offset),
+    })
 }
 
 /// A small deterministic generator for the draws (SplitMix64).
@@ -950,8 +963,12 @@ impl ServerModel {
     }
 
     /// `MysekaiConvertUtility.GetConvertReceivableCount`: the completion
-    /// steps above the received progress that the possession limits hold.
+    /// steps above the received progress that the possession limits hold (0
+    /// when the limits are not in, the count the receive itself refuses).
     fn receivable_steps(&self, slot: &ConvertSlot, now: i64, masters: &Tables<'_>) -> i32 {
+        let Ok(limits) = PossessionLimits::read(masters) else {
+            return 0;
+        };
         let converted = slot.completed_count(now);
         let mut count = 0;
         for progress in (slot.received_progress + 1)..=converted {
@@ -959,7 +976,7 @@ impl ServerModel {
                 .obtain_resources
                 .iter()
                 .filter(|row| row.progress == progress)
-                .all(|row| self.resource_fits(&row.to_resource(), masters));
+                .all(|row| self.resource_fits(&row.to_resource(), &limits, masters));
             if !holds {
                 break;
             }
@@ -968,22 +985,22 @@ impl ServerModel {
         count
     }
 
-    /// Whether one resource fits its possession limit (read only).
-    fn resource_fits(&self, resource: &UserResource, masters: &Tables<'_>) -> bool {
+    /// Whether one resource fits its possession limit (the receivable preview;
+    /// the limits are [`PossessionLimits`]).
+    fn resource_fits(
+        &self,
+        resource: &UserResource,
+        limits: &PossessionLimits,
+        masters: &Tables<'_>,
+    ) -> bool {
         match resource.resource_type.as_str() {
             "mysekai_material" => {
-                let Some(limit) = masters.possession().material_max_count(POSSESSION_LEVEL) else {
-                    return false;
-                };
                 let possession = self.material_possession(masters).map_or(0, |row| row.quantity);
-                possession.saturating_add(resource.quantity) <= limit
+                possession.saturating_add(resource.quantity) <= limits.material
             }
             "mysekai_fixture" => {
-                let Some(limit) = masters.possession().fixture_max_count(POSSESSION_LEVEL) else {
-                    return false;
-                };
                 let total: i32 = self.doc.inventory.fixtures.iter().map(|row| row.quantity).sum();
-                total.saturating_add(resource.quantity) <= limit
+                total.saturating_add(resource.quantity) <= limits.fixture
             }
             // The other tables have no possession limit here.
             _ => true,
@@ -1195,7 +1212,7 @@ impl ServerModel {
     ) -> Result<i32, String> {
         let limited = item.convert_limit > 0;
         let left = if limited {
-            (item.convert_limit - used_convert_count(&self.doc.convert, item, now)).max(0)
+            (item.convert_limit - used_convert_count(&self.doc.convert, item, now, masters)?).max(0)
         } else {
             i32::MAX
         };
@@ -1452,7 +1469,7 @@ impl ServerModel {
         }
         let limited = item.convert_limit > 0;
         let capacity = if limited {
-            let used = used_convert_count(&next.doc.convert, &item, now);
+            let used = used_convert_count(&next.doc.convert, &item, now, masters)?;
             Some((item.convert_limit - used).max(0))
         } else {
             None
@@ -1549,7 +1566,7 @@ impl ServerModel {
             *slot = started;
         }
         if limited {
-            let used = used_convert_count(&next.doc.convert, &item, now);
+            let used = used_convert_count(&next.doc.convert, &item, now, masters)?;
             let histories = &mut next.doc.convert.histories;
             match histories
                 .iter_mut()
@@ -1742,6 +1759,10 @@ impl ServerModel {
                 request.receive_convert_count
             ));
         }
+        // The possession limits a grant reads must be in: without them the
+        // receive would have to guess whether a resource fits, so it refuses
+        // before anything is handed out, naming the table it lacks.
+        let limits = PossessionLimits::read(masters)?;
         let mut obtained = Vec::new();
         let mut changed: Vec<&'static str> = Vec::new();
         let mut received_to = slot.received_progress;
@@ -1752,7 +1773,7 @@ impl ServerModel {
                 .filter(|row| row.progress == progress)
             {
                 let resource = row.to_resource();
-                if !self.grant_resource(&resource, now, masters) {
+                if !self.grant_resource(&resource, now, &limits, masters) {
                     info!(
                         "[server] slot {slot_id}: the {} {} at step {progress} does not fit its possession limit; it is reported but not granted",
                         resource.resource_type, resource.resource_id
@@ -1789,13 +1810,21 @@ impl ServerModel {
     }
 
     /// Grants one resource within its possession limit; false when it does
-    /// not fit (nothing changes then).
-    fn grant_resource(&mut self, resource: &UserResource, now: i64, masters: &Tables<'_>) -> bool {
+    /// not fit (nothing changes then). The limits are read before the
+    /// receive ([`PossessionLimits::read`]), so a missing master refuses the
+    /// whole request by name instead of reading every grant as not fitting.
+    fn grant_resource(
+        &mut self,
+        resource: &UserResource,
+        now: i64,
+        limits: &PossessionLimits,
+        masters: &Tables<'_>,
+    ) -> bool {
         match resource.resource_type.as_str() {
             "mysekai_material" => {
-                let Some(limit) = masters.possession().material_max_count(POSSESSION_LEVEL) else {
-                    return false;
-                };
+                // The limits are in (PossessionLimits::read ran first), so
+                // the possession the client derives is the one to count.
+                let limit = limits.material;
                 let possession = self.material_possession(masters).map_or(0, |row| row.quantity);
                 if possession.saturating_add(resource.quantity) > limit {
                     return false;
@@ -1809,9 +1838,7 @@ impl ServerModel {
                 true
             }
             "mysekai_fixture" => {
-                let Some(limit) = masters.possession().fixture_max_count(POSSESSION_LEVEL) else {
-                    return false;
-                };
+                let limit = limits.fixture;
                 let total: i32 = self.doc.inventory.fixtures.iter().map(|row| row.quantity).sum();
                 if total.saturating_add(resource.quantity) > limit {
                     return false;
@@ -2504,15 +2531,17 @@ mod tests {
         let mut item = stable(3, 1, 0);
         item.once_convert_limit = 2;
         let masters = fixture_convert(vec![item]);
-        // A receive grants within the material possession limit, so the
-        // shared tables carry one limit row at the level the server reads.
+        // A receive grants within the material and fixture possession
+        // limits, so the shared tables carry one limit row of each at the
+        // level the server reads.
+        let limit = moly_masters::inventory::PossessionRow {
+            level: POSSESSION_LEVEL,
+            possession_limit: 1000,
+        };
         let mut shared = moly_masters::load::MasterTables::fixture();
         shared.possession = Some(moly_masters::inventory::PossessionMasters {
-            fixture: None,
-            material: Some(vec![moly_masters::inventory::PossessionRow {
-                level: POSSESSION_LEVEL,
-                possession_limit: 1000,
-            }]),
+            fixture: Some(vec![limit]),
+            material: Some(vec![limit]),
         });
         let tables = Tables::new(&masters, Some(&shared));
         let mut model = joined_model();
@@ -2725,21 +2754,6 @@ mod tests {
         assert_eq!(once_minutes(&item(12), &convert, true), 6);
         assert_eq!(once_minutes(&item(12), &convert, false), 12);
         assert_eq!(once_minutes(&item(2640), &convert, true), 1320);
-    }
-
-    #[test]
-    fn a_month_change_refreshes_a_monthly_row() {
-        // 2026-01-31 23:00 UTC and 2026-02-01 01:00 UTC.
-        let january = 1_769_900_400_000;
-        let february = january + 2 * 3_600_000;
-        assert!(is_refreshed(ConvertRefresh::Monthly, january, february));
-        assert!(!is_refreshed(
-            ConvertRefresh::Monthly,
-            february,
-            february + 3_600_000
-        ));
-        assert!(!is_refreshed(ConvertRefresh::None, january, february));
-        assert!(!is_refreshed(ConvertRefresh::Monthly, 0, february));
     }
 
     #[test]

@@ -76,10 +76,12 @@ pub struct MasterTables {
     delivery_left: usize,
     mission_left: usize,
     stamina_left: usize,
-    other_left: usize,
-    /// The convert item rows (`mysekaiConvertItems`): the convert screen's
-    /// own table beside the craft masters. `None` until seated.
-    pub convert_items: Option<Vec<crate::craft::ConvertItemRow>>,
+    convert_left: usize,
+    /// The convert screen's tables (`mysekaiConvertItems`, the machine's
+    /// slots, levels and releases, `resourceBoxes`, the obtain rows, the
+    /// record categories and the pass's rate), in the convert module's own
+    /// group.
+    pub convert: Option<crate::convert::ConvertMasters>,
 }
 
 impl MasterTables {
@@ -127,7 +129,7 @@ impl MasterTables {
         self.pending.retain(|known| *known != name);
         let left = match group {
             // A table outside the five resources counts toward none of them.
-            Group::Other => return,
+            Group::Convert => &mut self.convert_left,
             Group::Craft => &mut self.craft_left,
             Group::Possession => &mut self.possession_left,
             Group::Avatar => &mut self.avatar_left,
@@ -174,7 +176,11 @@ impl MasterTables {
                 self.stamina_recovery = self.parts.stamina_recovery;
                 self.boost_items = self.parts.boost_items.take();
             }
-            Group::Other => {}
+            Group::Convert => {
+                let value = std::mem::take(&mut self.parts.convert);
+                commands.insert_resource(value.clone());
+                self.convert = Some(value);
+            }
         }
     }
 }
@@ -188,8 +194,8 @@ enum Group {
     Delivery,
     Mission,
     Stamina,
-    /// A table beside the five resources (the convert items).
-    Other,
+    /// The convert screen's tables, which make one resource of their own.
+    Convert,
 }
 
 const CRAFT_TABLES: usize = 7;
@@ -198,7 +204,9 @@ const AVATAR_TABLES: usize = 4;
 const DELIVERY_TABLES: usize = 3;
 const MISSION_TABLES: usize = 4;
 const STAMINA_TABLES: usize = 3;
-const OTHER_TABLES: usize = 1;
+/// The convert module's tables (see `crate::convert`): ten of its own plus
+/// `configs`, whose skip price it reads.
+const CONVERT_TABLES: usize = 11;
 
 /// One table's parse result, before it is seated into its resource.
 #[derive(Default)]
@@ -215,7 +223,7 @@ struct Parts {
     item_ids: Option<HashSet<i64>>,
     material_rows: Option<Vec<(i64, String, Vec<u32>)>>,
     rows: Vec<(&'static str, Vec<Value>)>,
-    convert_items: Option<Vec<crate::craft::ConvertItemRow>>,
+    convert: crate::convert::ConvertMasters,
 }
 
 /// One master table the loader requests and where its rows go.
@@ -224,6 +232,27 @@ struct Entry {
     /// Moves the one field a table fills out of the parse result.
     seat: fn(&mut MasterTables, Parts),
     group: Group,
+}
+
+/// A table whose parser fills one field of its resource.
+macro_rules! field_table {
+    ($table:literal, $name:literal, $parse:path, $resource:ident, $field:ident, $group:ident) => {
+        Entry {
+            table: MasterTable {
+                table: $table,
+                name: $name,
+                parse: |text| {
+                    let mut parts = Parts::default();
+                    $parse(text, &mut parts.$resource.$field)?;
+                    Ok(parts)
+                },
+            },
+            seat: |tables, partial| {
+                tables.parts.$resource.$field = partial.$resource.$field;
+            },
+            group: Group::$group,
+        }
+    };
 }
 
 macro_rules! table {
@@ -306,19 +335,90 @@ static TABLES: &[Entry] = &[
         },
         group: Group::Craft,
     },
+    field_table!(
+        "mysekaiConvertItems",
+        "mysekaiConvertItems (the convert screen's items)",
+        parse_convert_items,
+        convert,
+        items,
+        Convert
+    ),
+    field_table!(
+        "mysekaiConvertItemTabs",
+        "mysekaiConvertItemTabs (the convert screen's item tabs)",
+        parse_convert_tabs,
+        convert,
+        tabs,
+        Convert
+    ),
+    field_table!(
+        "mysekaiConvertFixtureSlot",
+        "mysekaiConvertFixtureSlot (the convert machine's slots)",
+        parse_convert_slots,
+        convert,
+        slots,
+        Convert
+    ),
+    field_table!(
+        "mysekaiConvertFixtureLevels",
+        "mysekaiConvertFixtureLevels (the convert machine's levels)",
+        parse_convert_levels,
+        convert,
+        levels,
+        Convert
+    ),
+    field_table!(
+        "mysekaiConvertFixtureLevelReleases",
+        "mysekaiConvertFixtureLevelReleases (what a convert machine level releases)",
+        parse_convert_level_releases,
+        convert,
+        level_releases,
+        Convert
+    ),
+    field_table!(
+        "mysekaiConvertItemObtainMysekaiBlueprints",
+        "mysekaiConvertItemObtainMysekaiBlueprints (the convert blueprint draws)",
+        parse_convert_blueprint_obtains,
+        convert,
+        blueprint_obtains,
+        Convert
+    ),
+    field_table!(
+        "mysekaiConvertItemObtainMysekaiMusicRecords",
+        "mysekaiConvertItemObtainMysekaiMusicRecords (the convert record draws)",
+        parse_convert_record_obtains,
+        convert,
+        record_obtains,
+        Convert
+    ),
+    field_table!(
+        "mysekaiMusicRecordCategories",
+        "mysekaiMusicRecordCategories (the convert record choices)",
+        parse_convert_record_categories,
+        convert,
+        record_categories,
+        Convert
+    ),
+    field_table!(
+        "colorfulPasses",
+        "colorfulPasses (the convert time's pass decrease)",
+        parse_convert_pass_rate,
+        convert,
+        pass_rate,
+        Convert
+    ),
     Entry {
         table: MasterTable {
-            table: "mysekaiConvertItems",
-            name: "mysekaiConvertItems (the server's convert items)",
+            table: "resourceBoxes",
+            name: "resourceBoxes (the convert items' boxes)",
             parse: |text| {
                 let mut parts = Parts::default();
-                let rows = moly_assets::json::master::rows(text)?;
-                parts.convert_items = Some(crate::craft::parse_convert_items(&rows)?);
+                parts.convert.boxes = Some(crate::convert::parse_boxes(text)?);
                 Ok(parts)
             },
         },
-        seat: |tables, partial| tables.convert_items = partial.convert_items,
-        group: Group::Other,
+        seat: |tables, partial| tables.parts.convert.boxes = partial.convert.boxes,
+        group: Group::Convert,
     },
     table!(
         "mysekaiBlueprintMysekaiMaterialCosts",
@@ -496,6 +596,23 @@ static TABLES: &[Entry] = &[
         rank_exps,
         Mission
     ),
+    Entry {
+        table: MasterTable {
+            table: "configs",
+            name: "configs (the convert skip price and the refresh calendar)",
+            parse: |text| {
+                let mut parts = Parts::default();
+                parse_convert_configs(text, &mut parts.convert)?;
+                Ok(parts)
+            },
+        },
+        seat: |tables, partial| {
+            tables.parts.convert.shorten_jewel_per_minute =
+                partial.convert.shorten_jewel_per_minute;
+            tables.parts.convert.calendar = partial.convert.calendar;
+        },
+        group: Group::Convert,
+    },
 ];
 
 /// Requests every resource's tables once, and starts their counters.
@@ -511,7 +628,7 @@ fn load(mut data: ResMut<MasterData>, mut tables: ResMut<MasterTables>) {
     tables.delivery_left = DELIVERY_TABLES;
     tables.mission_left = MISSION_TABLES;
     tables.stamina_left = STAMINA_TABLES;
-    tables.other_left = OTHER_TABLES;
+    tables.convert_left = CONVERT_TABLES;
     for entry in TABLES {
         data.request(&entry.table);
     }
@@ -672,6 +789,76 @@ fn material_rows(rows: &[Value]) -> Result<Vec<(i64, String, Vec<u32>)>, String>
         .collect()
 }
 
+/// The convert module's tables, each filling its one field (see
+/// [`crate::convert`] for the readers).
+fn parse_convert_items(text: &str, rows: &mut Option<Vec<crate::convert::ConvertItem>>) -> Result<(), String> {
+    *rows = Some(crate::convert::parse_items(text)?);
+    Ok(())
+}
+
+fn parse_convert_tabs(text: &str, rows: &mut Option<Vec<(i32, i32)>>) -> Result<(), String> {
+    *rows = Some(crate::convert::parse_tabs(text)?);
+    Ok(())
+}
+
+fn parse_convert_slots(text: &str, slots: &mut Option<(i32, i32)>) -> Result<(), String> {
+    *slots = Some(crate::convert::parse_slot(text)?);
+    Ok(())
+}
+
+fn parse_convert_levels(text: &str, rows: &mut Option<Vec<i32>>) -> Result<(), String> {
+    *rows = Some(crate::convert::parse_levels(text)?);
+    Ok(())
+}
+
+fn parse_convert_level_releases(
+    text: &str,
+    rows: &mut Option<Vec<crate::convert::LevelRelease>>,
+) -> Result<(), String> {
+    *rows = Some(crate::convert::parse_level_releases(text)?);
+    Ok(())
+}
+
+fn parse_convert_blueprint_obtains(
+    text: &str,
+    rows: &mut Option<Vec<crate::convert::BlueprintObtain>>,
+) -> Result<(), String> {
+    *rows = Some(crate::convert::parse_blueprint_obtains(text)?);
+    Ok(())
+}
+
+fn parse_convert_record_obtains(
+    text: &str,
+    rows: &mut Option<Vec<crate::convert::RecordObtain>>,
+) -> Result<(), String> {
+    *rows = Some(crate::convert::parse_record_obtains(text)?);
+    Ok(())
+}
+
+fn parse_convert_record_categories(
+    text: &str,
+    rows: &mut Option<Vec<crate::convert::RecordCategory>>,
+) -> Result<(), String> {
+    *rows = Some(crate::convert::parse_record_categories(text)?);
+    Ok(())
+}
+
+fn parse_convert_pass_rate(text: &str, rate: &mut Option<f32>) -> Result<(), String> {
+    *rate = Some(crate::convert::parse_pass_rate(text)?);
+    Ok(())
+}
+
+/// `configs`: the convert skip price and the MySekai refresh calendar.
+fn parse_convert_configs(
+    text: &str,
+    convert: &mut crate::convert::ConvertMasters,
+) -> Result<(), String> {
+    convert.shorten_jewel_per_minute = Some(crate::convert::parse_shorten_config(text)?);
+    let rows = table_rows(text, "configs")?;
+    convert.calendar = Some(crate::clock::CalendarRefresh::from_configs(&rows)?);
+    Ok(())
+}
+
 /// An upstream row table, sorted by `id` (a table without ids keeps its
 /// master order).
 fn table_rows(text: &str, table: &str) -> Result<Vec<Value>, String> {
@@ -682,6 +869,11 @@ fn table_rows(text: &str, table: &str) -> Result<Vec<Value>, String> {
         .clone();
     rows.sort_by_key(|row| row["id"].as_i64().unwrap_or(i64::MAX));
     Ok(rows)
+}
+
+/// [`table_rows`] for the readers of other modules of this crate.
+pub(crate) fn master_rows_of(text: &str, table: &str) -> Result<Vec<Value>, String> {
+    table_rows(text, table)
 }
 
 /// `mysekaiStaminaRecovery`: the single row's two columns.

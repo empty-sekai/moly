@@ -13,10 +13,12 @@
 //! the two possession levels in `userMysekaiGamedata`, and the harvest
 //! tools' `userMysekaiTools`, and the convert screen's
 //! `userMysekaiConvertSlots` and `userMysekaiConvertItemHistories`, with the
-//! convert machine's level in `userMysekaiGamedata`). A `masterConfigs` key
-//! of an earlier document is read and ignored: those values are master data. The rest are the mock's own keys and
-//! name themselves as such: `clock` (the one server clock), `policies` (the
-//! server rules this mock stands in for), `phenomenaSchedulePolicy`,
+//! convert machine's level in `userMysekaiGamedata`, and the mission screen's
+//! `userMysekaiNormalMissionSheet` and `userMysekaiNormalMissions`). A
+//! `masterConfigs` key of an earlier document is read and ignored: those
+//! values are master data. The rest are the mock's own keys and name
+//! themselves as such: `clock` (the one server clock), `policies` (the server
+//! rules this mock stands in for), `phenomenaSchedulePolicy`,
 //! `talkListPolicy` and `controls`.
 //!
 //! A schemaVersion 1 document is the NPC slice of the server panel. Two
@@ -160,6 +162,9 @@ pub(crate) struct ServerDocument {
     /// The convert slots, their item histories and the convert policies
     /// ([`super::convert`]).
     pub(crate) convert: super::convert::ConvertDoc,
+    /// `userMysekaiNormalMissionSheet` and `userMysekaiNormalMissions`
+    /// ([`super::normal_mission`]).
+    pub(crate) normal_mission: super::normal_mission::NormalMissionDoc,
 }
 
 /// Which migration a schemaVersion 1 slice takes.
@@ -544,6 +549,7 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
         .chain(super::system_fixture_action::DOCUMENT_KEYS.iter())
         .chain(std::iter::once(&super::tools::SECTION))
         .chain(super::convert::DOCUMENT_KEYS.iter())
+        .chain(super::normal_mission::DOCUMENT_KEYS.iter())
         .copied()
         .collect();
     only(doc, &allowed, "the server document")?;
@@ -584,6 +590,7 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
         policies.get(super::stamina_recovery::POLICY_KEY),
     )?;
     let convert = super::convert::ConvertDoc::parse(doc, policies)?;
+    let normal_mission = super::normal_mission::NormalMissionDoc::parse(doc)?;
     let (gate, gate_characters, talk_histories) = parse_visit(
         field(doc, "userMysekaiGateCharacterVisit", "the server document")?,
         true,
@@ -661,6 +668,7 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
         recycle,
         stamina_recovery,
         convert,
+        normal_mission,
     };
     document.check_structure()?;
     Ok((document, pending))
@@ -789,6 +797,7 @@ pub(crate) fn migrate_v1(text: &str, migration: Migration) -> Result<ServerDocum
         recycle: BTreeMap::new(),
         stamina_recovery: Default::default(),
         convert: Default::default(),
+        normal_mission: Default::default(),
     };
     document.check_structure()?;
     Ok(document)
@@ -877,7 +886,8 @@ impl ServerDocument {
         self.delivery.check_structure()?;
         self.inventory.check_structure()?;
         super::tools::check_structure(&self.tools)?;
-        self.convert.check_structure()
+        self.convert.check_structure()?;
+        self.normal_mission.check_structure()
     }
 
     fn gamedata_value(&self) -> Value {
@@ -970,6 +980,7 @@ impl ServerDocument {
             super::recycle::write_policies(&self.recycle, &mut policies);
             super::stamina_recovery::write_policy(&self.stamina_recovery, &mut policies);
             self.convert.write(top, &mut policies);
+            self.normal_mission.write(top);
             if let Some(gamedata) = top
                 .get_mut(moly_protocol::json::SECTION_GAMEDATA)
                 .and_then(Value::as_object_mut)

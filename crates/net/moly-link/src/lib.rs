@@ -235,7 +235,7 @@ fn pump(
         LinkState::Connecting | LinkState::Open { .. } => return,
     };
     for (seq, call) in std::mem::take(&mut link.waiting) {
-        warn!("[link] {} refused: {reason}", call_name(call));
+        warn!("[link] {} refused: {reason}", call.name());
         arrived.write(ServerArrived {
             seq: Some(seq),
             event: Arrival::Reply {
@@ -244,29 +244,5 @@ fn pump(
                 sections: Sections::default(),
             },
         });
-    }
-}
-
-fn call_name(call: CallKind) -> &'static str {
-    match call {
-        CallKind::Join => "join",
-        CallKind::Harvest => "harvest",
-        CallKind::Gather => "gather",
-        CallKind::GateReserve => "gate reserve",
-        CallKind::GateChange => "gate change",
-        CallKind::BirthdayPartyDelivery => "birthday party delivery",
-        CallKind::BirthdayPartyGather => "birthday party gather",
-        CallKind::HomeAction => "home action",
-        CallKind::Craft => "craft",
-        CallKind::Convert => "convert",
-        CallKind::HousingSketch => "housing sketch",
-        CallKind::HousingLayout => "housing layout",
-        CallKind::CharacterTalkRead => "character talk read",
-        CallKind::MusicPlaySet => "music play set",
-        CallKind::MusicPlayEject => "music play eject",
-        CallKind::SystemFixtureAction => "system fixture action",
-        CallKind::InventoryRecycle => "inventory recycle",
-        CallKind::BoostStaminaRecovery => "boost stamina recovery",
-        CallKind::Admin => "admin",
     }
 }

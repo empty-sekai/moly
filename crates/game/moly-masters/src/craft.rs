@@ -297,58 +297,6 @@ pub fn parse_costs(rows: &[Value]) -> Result<BTreeMap<i32, Vec<MaterialCost>>, S
     Ok(costs)
 }
 
-/// One `mysekaiConvertItems` row: the columns the convert server rules read.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ConvertItemRow {
-    pub id: i32,
-    pub tab_id: i32,
-    pub consume_box_id: i32,
-    /// `mysekaiConvertItemObtainType`.
-    pub obtain_type: String,
-    pub external_id: i32,
-    pub required_level: i32,
-    pub convert_minutes: i32,
-    /// 0 when the row states no `convertLimit`.
-    pub convert_limit: i32,
-    pub once_convert_limit: i32,
-    /// `refreshCycle`: `none`, `weekly` or `monthly`.
-    pub refresh_cycle: String,
-    pub start_at: i64,
-    pub end_at: i64,
-}
-
-/// `mysekaiConvertItems`, id order.
-pub fn parse_convert_items(rows: &[Value]) -> Result<Vec<ConvertItemRow>, String> {
-    rows.iter()
-        .map(|row| {
-            let id = crate::int32(row, "id")?;
-            let obtain_type = row["mysekaiConvertItemObtainType"]
-                .as_str()
-                .ok_or_else(|| format!("mysekaiConvertItems row {id}: mysekaiConvertItemObtainType is not a string"))?;
-            let refresh_cycle = match row.get("refreshCycle") {
-                None | Some(Value::Null) => "none",
-                Some(value) => value
-                    .as_str()
-                    .ok_or_else(|| format!("mysekaiConvertItems row {id}: refreshCycle is not a string"))?,
-            };
-            Ok(ConvertItemRow {
-                id,
-                tab_id: crate::int32(row, "mysekaiConvertItemTabId")?,
-                consume_box_id: crate::int32(row, "consumeResourceBoxId")?,
-                obtain_type: obtain_type.to_owned(),
-                external_id: crate::int32(row, "externalId")?,
-                required_level: crate::int32(row, "requiredConvertFixtureLevel")?,
-                convert_minutes: crate::int32(row, "convertMinutes")?,
-                convert_limit: crate::optional_int32(row, "convertLimit")?,
-                once_convert_limit: crate::int32(row, "onceConvertLimit")?,
-                refresh_cycle: refresh_cycle.to_owned(),
-                start_at: row.get("startAt").and_then(Value::as_i64).unwrap_or(0),
-                end_at: row.get("endAt").and_then(Value::as_i64).unwrap_or(0),
-            })
-        })
-        .collect()
-}
-
 /// One `mysekaiBlueprintTerms` row. A row without a `mysekaiBlueprintTermTabType`
 /// column (or with an empty one) reads as `limited_term`, the enum's zero
 /// value, which is what the source's deserialiser leaves it as; a value this

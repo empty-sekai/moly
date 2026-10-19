@@ -11,6 +11,7 @@ use serde_json::Value;
 
 pub mod avatar;
 pub mod clock;
+pub mod convert;
 pub mod craft;
 pub mod delivery;
 pub mod inventory;
@@ -27,6 +28,7 @@ pub struct StaminaMax {
     pub boost: i32,
 }
 
+pub use convert::ConvertMasters;
 pub use mission::{
     Mission, MissionCategory, MissionMasters, MissionReward, MissionSheet, RankExpRow, RewardType,
 };

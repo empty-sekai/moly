@@ -24,7 +24,7 @@ use super::{
 };
 
 /// Sections a response carries (the `pending` names).
-pub(crate) const PENDING_SECTIONS: [&str; 22] = [
+pub(crate) const PENDING_SECTIONS: [&str; 24] = [
     super::music::SECTION,
     super::avatar::SECTION,
     SECTION_GAMEDATA,
@@ -47,6 +47,8 @@ pub(crate) const PENDING_SECTIONS: [&str; 22] = [
     super::tools::SECTION,
     super::convert::SECTION_SLOTS,
     super::convert::SECTION_HISTORIES,
+    super::normal_mission::SECTION_MISSIONS,
+    super::normal_mission::SECTION_SHEET,
 ];
 
 /// How an accepted edit reaches the client.
@@ -190,6 +192,7 @@ pub(crate) fn check_masters(doc: &ServerDocument, masters: &Tables<'_>) -> Resul
             ));
         }
     }
+    super::normal_mission::check_masters(&doc.normal_mission, masters)?;
     Ok(())
 }
 
@@ -250,6 +253,16 @@ fn edit_path(
     if let Some(result) = super::convert::edit_path(&mut doc.convert, &parts, path, value) {
         return result.map(|sections| match sections.first() {
             Some(section) => Delivery::NextResponse(section),
+            None => Delivery::Live,
+        });
+    }
+    if let Some(result) =
+        super::normal_mission::edit_path(&mut doc.normal_mission, masters, &parts, path, value)
+    {
+        return result.map(|sections| match sections.first() {
+            // The sheet and its rows go to the client as the next response's
+            // sections.
+            Some(_) => Delivery::NextResponse(super::normal_mission::SECTION_MISSIONS),
             None => Delivery::Live,
         });
     }
@@ -812,7 +825,7 @@ fn policies() -> Value {
 
 /// The document's sections: the core ones, the delivery's, the home
 /// actions', the music settings' and the avatar's.
-fn other_sections(core: Value, delivery: Value) -> Value {
+fn other_sections(core: Value, delivery: Value, masters: &Tables<'_>) -> Value {
     [
         delivery,
         super::home_action::schema_sections(),
@@ -825,6 +838,7 @@ fn other_sections(core: Value, delivery: Value) -> Value {
         super::tools::schema_sections(),
         super::recycle::schema_sections(),
         super::convert::schema_sections(),
+        super::normal_mission::schema_sections(masters),
     ]
     .into_iter()
     .fold(core, concat)
@@ -846,9 +860,9 @@ pub(crate) fn schema(model: &ServerModel, masters: &Tables<'_>) -> Value {
     json!({
         "schemaVersion": document::SCHEMA_VERSION,
         "command": "server.edit",
-        "sections": other_sections(sections(masters), super::delivery::schema_sections(Some(model))),
+        "sections": other_sections(sections(masters), super::delivery::schema_sections(Some(model)), masters),
         "actions": actions(),
-        "policies": concat(concat(concat(concat(policies(), super::delivery::schema_policies()), concat(super::home_action::schema_policies(), super::music_play::schema_policies())), concat(concat(concat(super::inventory::schema_policies(), super::craft::schema_policies()), concat(super::system_fixture_action::schema_policies(), super::tools::schema_policies())), super::recycle::schema_policies())), super::convert::schema_policies()),
+        "policies": concat(concat(concat(concat(policies(), super::delivery::schema_policies()), concat(super::home_action::schema_policies(), super::music_play::schema_policies())), concat(concat(concat(super::inventory::schema_policies(), super::craft::schema_policies()), concat(super::system_fixture_action::schema_policies(), super::tools::schema_policies())), super::recycle::schema_policies())), concat(super::convert::schema_policies(), super::normal_mission::schema_policies())),
         "masters": masters_value(masters),
         "joined": model.joined,
     })
@@ -860,9 +874,9 @@ pub(crate) fn schema_without_model() -> Value {
     json!({
         "schemaVersion": document::SCHEMA_VERSION,
         "command": "server.edit",
-        "sections": other_sections(sections(&tables), super::delivery::schema_sections(None)),
+        "sections": other_sections(sections(&tables), super::delivery::schema_sections(None), &tables),
         "actions": actions(),
-        "policies": concat(concat(concat(concat(policies(), super::delivery::schema_policies()), concat(super::home_action::schema_policies(), super::music_play::schema_policies())), concat(concat(concat(super::inventory::schema_policies(), super::craft::schema_policies()), concat(super::system_fixture_action::schema_policies(), super::tools::schema_policies())), super::recycle::schema_policies())), super::convert::schema_policies()),
+        "policies": concat(concat(concat(concat(policies(), super::delivery::schema_policies()), concat(super::home_action::schema_policies(), super::music_play::schema_policies())), concat(concat(concat(super::inventory::schema_policies(), super::craft::schema_policies()), concat(super::system_fixture_action::schema_policies(), super::tools::schema_policies())), super::recycle::schema_policies())), concat(super::convert::schema_policies(), super::normal_mission::schema_policies())),
         "masters": null,
         "joined": false,
     })

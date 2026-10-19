@@ -79,5 +79,6 @@ pub mod ui_charsets;
 pub mod ui_inputs;
 pub mod two_button_dialog;
 pub mod common_dialog;
+pub mod subwindow_dialog;
 pub mod ui_layers;
 pub mod ui_layout;

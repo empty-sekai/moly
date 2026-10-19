@@ -27,12 +27,14 @@ use crate::api::{
     MusicPlayEjectRequest, MusicPlaySetRequest, MysekaiInventoryDisassemble,
     SystemFixtureActionRequest, UserMysekaiConvertReceiveResponse, UserMysekaiCraftRequest,
     UserMysekaiHousingEditLayoutRequest, UserMysekaiHousingSketchRequest,
+    UserMysekaiNormalMissionRewardRequest, UserMysekaiNormalMissionRewardResponse,
     UserMysekaiStaminaRequest,
 };
 use crate::rows::{
     ColorfulPass, ConvertItemHistory, ConvertSlot, DeliveryUpdate, Gamedata, Gate,
     MusicPlaySetting, OwnedMusicRecord, RankReleaseRow, ScheduleRow, Stamina, SuiteUserSections,
-    UserAvatar, UserMysekaiSystemFixtureAction, UserMysekaiTool,
+    UserAvatar, UserMysekaiNormalMission, UserMysekaiNormalMissionSheet,
+    UserMysekaiSystemFixtureAction, UserMysekaiTool,
 };
 
 pub mod api;
@@ -55,7 +57,9 @@ pub mod rows;
 /// 8: the convert screen's three calls and their replies, and the sections
 /// that carry the convert slots, the convert item histories and the convert
 /// machine's level.
-pub const PROTOCOL_VERSION: u32 = 8;
+/// 9: the normal mission reward call and its reply, and the sections that
+/// carry the user's mission rows and the sheet it is on.
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// The account a session belongs to. The server keeps one document per user.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -187,6 +191,9 @@ pub enum Call {
     BoostStaminaRecovery(UserMysekaiStaminaRequest),
     /// The convert screen's requests, with the slot they name.
     Convert { slot_id: i32, post: ConvertPost },
+    /// `PostUserMysekaiNormalMissionRewardApi`: the mission screen's receive,
+    /// one mission's reward or a bulk receive in one call.
+    NormalMissionReward(UserMysekaiNormalMissionRewardRequest),
     /// The control plane's calls: the document and the schema, an edit, and
     /// the browser game's seed install.
     Admin(AdminCall),
@@ -214,33 +221,14 @@ impl Call {
             Self::InventoryRecycle(_) => CallKind::InventoryRecycle,
             Self::BoostStaminaRecovery(_) => CallKind::BoostStaminaRecovery,
             Self::Convert { .. } => CallKind::Convert,
+            Self::NormalMissionReward(_) => CallKind::NormalMissionReward,
             Self::Admin(_) => CallKind::Admin,
         }
     }
 
     /// The call's name, for logs and for a refused link's notice.
     pub fn name(&self) -> &'static str {
-        match self {
-            Self::Join => "join",
-            Self::Harvest(_) => "harvest",
-            Self::Gather => "gather",
-            Self::GateReserve(_) => "gate reserve",
-            Self::GateChange(_) => "gate change",
-            Self::BirthdayPartyDelivery(_) => "birthday party delivery",
-            Self::BirthdayPartyGather(_) => "birthday party gather",
-            Self::HomeAction(_) => "home action",
-            Self::Craft(_) => "craft",
-            Self::HousingSketch(_) => "housing sketch",
-            Self::HousingLayout(_) => "housing layout",
-            Self::CharacterTalkRead(_) => "character talk read",
-            Self::MusicPlaySet(_) => "music play set",
-            Self::MusicPlayEject(_) => "music play eject",
-            Self::SystemFixtureAction(_) => "system fixture action",
-            Self::InventoryRecycle(_) => "inventory recycle",
-            Self::BoostStaminaRecovery(_) => "boost stamina recovery",
-            Self::Convert { .. } => "convert",
-            Self::Admin(_) => "admin",
-        }
+        self.kind().name()
     }
 }
 
@@ -266,7 +254,36 @@ pub enum CallKind {
     InventoryRecycle,
     BoostStaminaRecovery,
     Convert,
+    NormalMissionReward,
     Admin,
+}
+
+impl CallKind {
+    /// The call's name, for logs and for a refused link's notice.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Join => "join",
+            Self::Harvest => "harvest",
+            Self::Gather => "gather",
+            Self::GateReserve => "gate reserve",
+            Self::GateChange => "gate change",
+            Self::BirthdayPartyDelivery => "birthday party delivery",
+            Self::BirthdayPartyGather => "birthday party gather",
+            Self::HomeAction => "home action",
+            Self::Craft => "craft",
+            Self::HousingSketch => "housing sketch",
+            Self::HousingLayout => "housing layout",
+            Self::CharacterTalkRead => "character talk read",
+            Self::MusicPlaySet => "music play set",
+            Self::MusicPlayEject => "music play eject",
+            Self::SystemFixtureAction => "system fixture action",
+            Self::InventoryRecycle => "inventory recycle",
+            Self::BoostStaminaRecovery => "boost stamina recovery",
+            Self::Convert => "convert",
+            Self::NormalMissionReward => "normal mission reward",
+            Self::Admin => "admin",
+        }
+    }
 }
 
 /// The control plane's requests. Their replies carry JSON text, which the
@@ -323,6 +340,9 @@ pub enum Reply {
     /// The convert receive reply: the resources received and the tables the
     /// request changed.
     ConvertReceive(UserMysekaiConvertReceiveResponse),
+    /// The normal mission reward reply: the reward resources and the tables
+    /// the receive changed.
+    NormalMissionReward(UserMysekaiNormalMissionRewardResponse),
     /// An administration answer, as JSON text.
     Admin(String),
 }
@@ -374,6 +394,10 @@ pub struct Sections {
     pub convert_slots: Option<Vec<ConvertSlot>>,
     /// `userMysekaiConvertItemHistories`.
     pub convert_item_histories: Option<Vec<ConvertItemHistory>>,
+    /// `userMysekaiNormalMissions`: the user's mission rows.
+    pub normal_missions: Option<Vec<UserMysekaiNormalMission>>,
+    /// `userMysekaiNormalMissionSheet`: the sheet the user is on.
+    pub normal_mission_sheet: Option<UserMysekaiNormalMissionSheet>,
     /// `mysekaiConvertItems`: the master table the convert screen's item list
     /// is built from, with the `convertLimit` and `onceConvertLimit` its
     /// document does not carry.
@@ -621,6 +645,14 @@ mod tests {
                     total_convert_count: 1,
                     last_convert_start_at: 48,
                 }]),
+                user_mysekai_normal_missions: Some(vec![UserMysekaiNormalMission {
+                    mysekai_normal_mission_id: 53,
+                    progress: 2,
+                    mysekai_mission_status: crate::rows::MISSION_ACHIEVED.to_owned(),
+                }]),
+                user_mysekai_normal_mission_sheet: Some(UserMysekaiNormalMissionSheet {
+                    mysekai_normal_mission_sheet_id: 54,
+                }),
             },
             music_records: Some(vec![OwnedMusicRecord {
                 mysekai_music_record_id: 38,
@@ -676,7 +708,38 @@ mod tests {
                 end_at: 0,
             }]),
             npc_panel: Some("{\"version\":1}".to_owned()),
+            normal_missions: Some(vec![UserMysekaiNormalMission {
+                mysekai_normal_mission_id: 53,
+                progress: 2,
+                mysekai_mission_status: crate::rows::MISSION_ACHIEVED.to_owned(),
+            }]),
+            normal_mission_sheet: Some(UserMysekaiNormalMissionSheet {
+                mysekai_normal_mission_sheet_id: 54,
+            }),
         }
+    }
+
+    /// The mission section set round-trips through a frame, and carries both
+    /// mission tables.
+    #[test]
+    fn the_mission_sections_round_trip() {
+        let sections = SuiteUserSections {
+            user_mysekai_normal_missions: Some(vec![UserMysekaiNormalMission {
+                mysekai_normal_mission_id: 3,
+                progress: 1,
+                mysekai_mission_status: crate::rows::MISSION_RECEIVED.to_owned(),
+            }]),
+            user_mysekai_normal_mission_sheet: Some(UserMysekaiNormalMissionSheet {
+                mysekai_normal_mission_sheet_id: 2,
+            }),
+            ..SuiteUserSections::default()
+        };
+        assert_eq!(
+            decode::<SuiteUserSections>(&encode(&sections)).unwrap(),
+            sections
+        );
+        assert!(!sections.is_empty());
+        assert!(SuiteUserSections::default().is_empty());
     }
 
     #[test]
@@ -799,6 +862,37 @@ mod tests {
                 }
             }
         );
+        // The mission screen's receive: its ids, its kind and its reply.
+        let reward = Call::NormalMissionReward(UserMysekaiNormalMissionRewardRequest {
+            mysekai_normal_mission_ids: vec![100, 101],
+        });
+        assert_eq!(reward.kind(), CallKind::NormalMissionReward);
+        assert_eq!(reward.name(), "normal mission reward");
+        let answered = ServerMessage::Reply {
+            seq: 12,
+            outcome: Ok(Reply::NormalMissionReward(
+                UserMysekaiNormalMissionRewardResponse {
+                    obtained_rewards: vec![crate::rows::UserResource {
+                        resource_type: "mysekai_material".to_owned(),
+                        resource_id: 7,
+                        resource_level: 0,
+                        quantity: 3,
+                    }],
+                    updated_resources: SuiteUserSections {
+                        user_mysekai_normal_missions: Some(vec![
+                            crate::rows::UserMysekaiNormalMission {
+                                mysekai_normal_mission_id: 101,
+                                progress: 2,
+                                mysekai_mission_status: crate::rows::MISSION_RECEIVED.to_owned(),
+                            },
+                        ]),
+                        ..SuiteUserSections::default()
+                    },
+                },
+            )),
+            sections: None,
+        };
+        assert_eq!(decode::<ServerMessage>(&encode(&answered)).unwrap(), answered);
     }
 
     #[test]

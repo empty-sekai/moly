@@ -73,14 +73,20 @@ pub struct Masters {
     /// `mysekaiConvertFixtureSlot`: (slotNoUpperLimit,
     /// slotNoUpperLimitForMysekaiColorfulPass).
     pub(crate) convert_slots: Option<(i32, i32)>,
+    /// The machine level of the `convert_time_shorten` release row.
     pub(crate) convert_level_releases: Option<i32>,
     pub(crate) convert_levels: Option<Vec<i32>>,
     pub(crate) convert_blueprint_obtains: Option<Vec<convert::BlueprintObtain>>,
     pub(crate) convert_record_obtains: Option<Vec<convert::RecordObtain>>,
     pub(crate) convert_record_categories: Option<Vec<convert::RecordCategory>>,
     pub(crate) convert_pass_rate: Option<f32>,
-    /// The convert items' boxes of `resourceBoxes` (a deferred table).
-    pub(crate) convert_boxes: Option<Vec<convert::ResourceBox>>,
+    /// The convert items' and the normal missions' reward boxes of
+    /// `resourceBoxes`, as the join table reads them: joined into `convert`
+    /// by [`Masters::join_parts`].
+    pub(crate) convert_box_list: Option<Vec<convert::ResourceBox>>,
+    /// Whether the boxes of the `resourceBoxes` file are joined into
+    /// `convert` (they are, once: the file is the join's table).
+    pub(crate) convert_boxes_joined: bool,
     /// `mysekaiConvertItems`: the convert screen's items, read here rather
     /// than from the shared master layer, whose craft resource does not carry
     /// the `convertLimit` and `onceConvertLimit` columns this server needs.
@@ -222,16 +228,14 @@ impl Masters {
         if convert.pass_rate.is_none() {
             convert.pass_rate = self.convert_pass_rate.take();
         }
-        if convert.resource_boxes.is_none() {
-            convert.resource_boxes = self.convert_boxes.take();
+        if convert.resource_boxes.is_none() && !self.convert_boxes_joined {
+            if let Some(boxes) = self.convert_box_list.take() {
+                // `resourceBoxes` is one of the join's tables: its boxes are
+                // seated once, before any user joins.
+                convert.resource_boxes = Some(boxes);
+                self.convert_boxes_joined = true;
+            }
         }
-    }
-
-    /// Seats the boxes the deferred `resourceBoxes` read parsed (the boxes
-    /// are not one of the join's tables), and joins them into `convert`.
-    pub(crate) fn convert_boxes(&mut self, boxes: Vec<convert::ResourceBox>) {
-        self.convert_boxes = Some(boxes);
-        self.join_convert();
     }
 
     /// `MysekaiRankModel`'s rank of a total experience.
@@ -304,6 +308,11 @@ impl<'a> Tables<'a> {
 
     pub(crate) fn delivery(&self) -> Option<&'a DeliveryTables> {
         self.shared.and_then(|tables| tables.delivery.as_ref())
+    }
+
+    /// The four normal-mission tables, when the join's tables are in.
+    pub(crate) fn mission(&self) -> Option<&'a moly_masters::mission::MissionMasters> {
+        self.shared.and_then(|tables| tables.mission.as_ref())
     }
 
     pub(crate) fn stamina_max(&self) -> Option<StaminaMax> {
@@ -511,20 +520,30 @@ static SERVER_TABLES: &[ServerTable] = &[
         convert::parse_convert_pass_rate,
         convert_pass_rate
     ),
+    // The JP `resourceBoxes` file is a join's table: a normal mission's
+    // reward box is read from it before any user joins, so the mission
+    // receive needs no deferred table (the shared loader reads the convert
+    // items' boxes from the same file). A root without the file names it
+    // missing like its other tables.
+    server_table!(
+        "resourceBoxes",
+        "resourceBoxes (the convert items' and the normal missions' boxes)",
+        convert::parse_resource_boxes_only,
+        convert_box_list
+    ),
     // The total reward boxes: the CN master carries their rows as a table of
-    // their own; the JP master nests them in each box's `details`. The JP
-    // read also seats the convert items' boxes (the convert resource boxes),
-    // so a root that lacks the delivery's boxes still loads the resource once.
+    // their own; the JP master nests them in each box's `details`, in the
+    // same file the convert's and the missions' boxes are read from.
     deferred_table!(
         "resourceBoxDetails",
-        "resourceBoxDetails (the delivery's and the convert boxes)",
+        "resourceBoxDetails (the delivery's boxes)",
         delivery::parse_box_details,
         reward_boxes,
         Some(Region::Cn)
     ),
     deferred_table!(
         "resourceBoxes",
-        "resourceBoxes (the delivery's and the convert boxes)",
+        "resourceBoxes (the delivery's boxes)",
         parse_boxes,
         reward_boxes,
         Some(Region::Jp)
@@ -538,12 +557,11 @@ static SERVER_TABLES: &[ServerTable] = &[
     ),
 ];
 
-/// `resourceBoxes`: the delivery's total reward boxes and the convert items'
-/// boxes, read from one master file.
+/// `resourceBoxes`: the delivery's total reward boxes (the only table left
+/// for this deferred read; the convert's and the missions' boxes are read by
+/// the same file's join table).
 fn parse_boxes(text: &str, masters: &mut Masters) -> Result<(), String> {
     delivery::parse_nested_boxes(text, masters)?;
-    let boxes = convert::parse_resource_boxes(text)?;
-    masters.convert_boxes(boxes);
     Ok(())
 }
 

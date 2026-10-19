@@ -601,7 +601,7 @@ fn wait_server(world: &World, active: &mut Active, note: String) -> Poll {
             active.server = Some(wait);
             return Poll::Running(format!(
                 "{note} · waiting for the server ({}, seq {seq})",
-                crate::userdata::call_name(wait.call)
+                wait.call.name()
             ));
         }
     }
@@ -617,7 +617,7 @@ fn wait_server(world: &World, active: &mut Active, note: String) -> Poll {
             active.server = Some(wait);
             return Poll::Running(format!(
                 "{note} · waiting for the server ({})",
-                crate::userdata::call_name(wait.call)
+                wait.call.name()
             ));
         }
     }
@@ -642,14 +642,14 @@ fn wait_server(world: &World, active: &mut Active, note: String) -> Poll {
         }
         None => Poll::Running(format!(
             "{note} · waiting for the server's answer ({})",
-            crate::userdata::call_name(wait.call)
+            wait.call.name()
         )),
     }
 }
 
 /// A step's server answer as the run log reports it.
 fn describe_answer(answer: &Answered) -> String {
-    let call = crate::userdata::call_name(answer.call);
+    let call = answer.call.name();
     match &answer.outcome {
         Ok(_) => format!("{{seq: {}, call: {call}, ok}}", answer.seq),
         Err(refusal) => format!(

@@ -27,17 +27,23 @@
 //! - [`system_fixture_action`]: the `UserMysekaiSystemFixtureAction` rows
 //!   and the system fixture action request.
 //! - [`tools`]: the owned harvest tools.
+//! - [`convert`]: the convert slots, their item histories and the convert
+//!   items the convert screen's list is built from.
+//! - [`mission`]: the mission sheet the user is on and the user's mission
+//!   rows, which the mission screen reads.
 //! - [`inventory`]: the inventory screen's recycle and disassemble request.
 
 pub mod avatar;
 pub mod birthday_party;
 pub mod client;
 pub mod clock;
+pub mod convert;
 pub mod craft;
 pub mod home_action;
 pub mod housing_layout;
 pub mod inventory;
 pub mod local;
+pub mod mission;
 pub mod music;
 pub mod music_play;
 pub use crate::userdata_snapshot as snapshot;
@@ -265,6 +271,8 @@ pub struct ClientCopies<'w> {
     pub records: ResMut<'w, music_play::ClientMusicRecords>,
     pub actions: ResMut<'w, system_fixture_action::ClientSystemFixtureActions>,
     pub tools: ResMut<'w, tools::ClientMysekaiTools>,
+    pub convert: ResMut<'w, convert::ClientConvertSlots>,
+    pub mission: ResMut<'w, mission::ClientMission>,
     pub npc_panel: ResMut<'w, ClientNpcPanel>,
     pub cache: ResMut<'w, ServerViewCache>,
     pub answered: MessageWriter<'w, Answered>,
@@ -324,7 +332,7 @@ impl ClientUserData {
 fn emit_link_events(mut link: ResMut<ServerLink>, mut sent: ResMut<SentCalls>) {
     for (seq, call) in link.take_sent() {
         let kind = call.kind();
-        crate::bus::emit("server.call", json!({ "seq": seq, "call": call_name(kind) }));
+        crate::bus::emit("server.call", json!({ "seq": seq, "call": kind.name() }));
         sent.remember(seq, call);
     }
 }
@@ -486,7 +494,7 @@ fn track_join(
 /// PreUpdate: the arrived sections are applied to the copies in the server's
 /// order, then each answer is published to the features.
 #[allow(clippy::too_many_arguments)]
-fn apply_arrivals(
+pub(crate) fn apply_arrivals(
     mut commands: Commands,
     time: Res<Time<Real>>,
     mut arrived: MessageReader<ServerArrived>,
@@ -526,10 +534,10 @@ fn apply_arrivals(
                 crate::bus::emit(
                     "server.reply",
                     match outcome {
-                        Ok(_) => json!({ "seq": seq, "call": call_name(*call), "ok": true }),
+                        Ok(_) => json!({ "seq": seq, "call": call.name(), "ok": true }),
                         Err(refusal) => json!({
                             "seq": seq,
-                            "call": call_name(*call),
+                            "call": call.name(),
                             "ok": false,
                             "refusal": refusal.code,
                         }),
@@ -624,6 +632,20 @@ fn apply_sections(
     if let Some(rows) = sections.tools.take() {
         copies.tools.apply(rows);
     }
+    // The convert screen's three sections: its slots, the items' histories,
+    // and the convert items the response carries beside the user sections.
+    copies.convert.apply(
+        sections.convert_slots.take(),
+        sections.convert_item_histories.take(),
+        sections.mysekai_convert_items.take(),
+    );
+    // The mission screen's two tables: the sheet the user is on and the
+    // user's mission rows (`UpdateMysekaiMissionSheet` / `UpdateMysekaiMission`).
+    {
+        let sheet = sections.normal_mission_sheet.take();
+        let missions = sections.normal_missions.take();
+        copies.mission.apply(mission::MissionSections { sheet, missions });
+    }
     let previous_rank = copies
         .client
         .as_ref()
@@ -665,7 +687,7 @@ fn apply_sections(
                 local.0.topics.push(local::TOPIC_STAMINA_REFRESH);
                 info!(
                     "[server] {}: isRefreshed -> MysekaiTopicsManager.AddTopicIfNeeded adds StaminaRefresh",
-                    kind.map_or("push", call_name)
+                    kind.map_or("push", CallKind::name)
                 );
             }
         }
@@ -680,7 +702,7 @@ fn apply_sections(
         }
         if let Some(current) = gamedata.mysekai_rank {
             let join = kind == Some(CallKind::Join);
-            let response = kind.map_or("push", call_name);
+            let response = kind.map_or("push", CallKind::name);
             if join && mode.game {
                 copies.ranks.write(RankDelivered {
                     previous: None,
@@ -729,6 +751,11 @@ fn apply_sections(
         "mysekaiInventory": copies.inventory.view(),
         "userMysekaiMusicRecords": copies.records.view(),
         "userMysekaiTools": copies.tools.view(),
+        "mysekaiConvert": copies.convert.view(),
+        // The mission copy's sheet name: the mission masters are not among
+        // this reader's parameters, so only the keys and rows are shown
+        // there (the name is null).
+        "userMysekaiMission": copies.mission.view(None),
     });
     copies.cache.client = view;
     match copies.client.as_deref_mut() {
@@ -744,30 +771,6 @@ fn push_name(kind: PushKind) -> &'static str {
         PushKind::Refresh => "refresh",
         PushKind::Sync => "sync",
         PushKind::BirthdayPartySeat => "birthday_party_seat",
-    }
-}
-
-pub fn call_name(call: CallKind) -> &'static str {
-    match call {
-        CallKind::Join => "join",
-        CallKind::Harvest => "harvest",
-        CallKind::Gather => "gather",
-        CallKind::GateReserve => "gate reserve",
-        CallKind::GateChange => "gate change",
-        CallKind::BirthdayPartyDelivery => "birthday party delivery",
-        CallKind::BirthdayPartyGather => "birthday party gather",
-        CallKind::HomeAction => "home action",
-        CallKind::Craft => "craft",
-        CallKind::HousingSketch => "housing sketch",
-        CallKind::HousingLayout => "housing layout",
-        CallKind::CharacterTalkRead => "character talk read",
-        CallKind::MusicPlaySet => "music play set",
-        CallKind::MusicPlayEject => "music play eject",
-        CallKind::SystemFixtureAction => "system fixture action",
-        CallKind::InventoryRecycle => "inventory recycle",
-        CallKind::BoostStaminaRecovery => "boost stamina recovery",
-        CallKind::Convert => "convert",
-        CallKind::Admin => "admin",
     }
 }
 
@@ -1098,6 +1101,8 @@ impl Plugin for UserDataPlugin {
             .init_resource::<system_fixture_action::ClientSystemFixtureActions>()
             .init_resource::<music_play::ClientMusicRecords>()
             .init_resource::<tools::ClientMysekaiTools>()
+            .init_resource::<convert::ClientConvertSlots>()
+            .init_resource::<mission::ClientMission>()
             .add_systems(PreStartup, (seat_seed, seat_local))
             .add_systems(
                 PreUpdate,

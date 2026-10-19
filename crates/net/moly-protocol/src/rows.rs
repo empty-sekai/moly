@@ -136,6 +136,46 @@ pub struct UserMysekaiGamedata {
     pub mysekai_fixture_possession_level: i32,
 }
 
+/// `UserMysekaiNormalMission`: the user's row for one normal mission.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserMysekaiNormalMission {
+    pub mysekai_normal_mission_id: i32,
+    pub progress: i32,
+    /// `mysekaiMissionStatus`: one of [`MISSION_NOT_ACHIEVED`],
+    /// [`MISSION_ACHIEVED`] or [`MISSION_RECEIVED`].
+    pub mysekai_mission_status: String,
+}
+
+/// `MysekaiMissionStatus.not_achieved`.
+pub const MISSION_NOT_ACHIEVED: &str = "not_achieved";
+/// `MysekaiMissionStatus.achieved`.
+pub const MISSION_ACHIEVED: &str = "achieved";
+/// `MysekaiMissionStatus.received`.
+pub const MISSION_RECEIVED: &str = "received";
+
+impl UserMysekaiNormalMission {
+    /// `MysekaiMissionViewData.IsComplete`: a mission that is achieved or
+    /// received.
+    pub fn is_complete(&self) -> bool {
+        self.mysekai_mission_status == MISSION_ACHIEVED
+            || self.mysekai_mission_status == MISSION_RECEIVED
+    }
+
+    /// Whether the status is one of the three words the client knows.
+    pub fn status_is_known(&self) -> bool {
+        matches!(
+            self.mysekai_mission_status.as_str(),
+            MISSION_NOT_ACHIEVED | MISSION_ACHIEVED | MISSION_RECEIVED
+        )
+    }
+}
+
+/// `UserMysekaiNormalMissionSheet`: the sheet the user is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserMysekaiNormalMissionSheet {
+    pub mysekai_normal_mission_sheet_id: i32,
+}
+
 /// The `SuiteUser` tables a response or reply carries; `None` for a table it
 /// does not carry. Applying it replaces each carried table whole.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -154,6 +194,10 @@ pub struct SuiteUserSections {
     pub user_mysekai_convert_slots: Option<Vec<ConvertSlot>>,
     /// `userMysekaiConvertItemHistories`.
     pub user_mysekai_convert_item_histories: Option<Vec<ConvertItemHistory>>,
+    /// `userMysekaiNormalMissions`.
+    pub user_mysekai_normal_missions: Option<Vec<UserMysekaiNormalMission>>,
+    /// `userMysekaiNormalMissionSheet`.
+    pub user_mysekai_normal_mission_sheet: Option<UserMysekaiNormalMissionSheet>,
 }
 
 impl SuiteUserSections {

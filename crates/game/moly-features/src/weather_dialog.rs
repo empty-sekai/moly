@@ -268,7 +268,7 @@ fn install_document(
     json: Res<Assets<JsonAsset>>,
     mut layouts: ResMut<UiLayouts>,
 ) {
-    if weather.installed.is_some() {
+    if weather.installed.is_some() || weather.warned.contains(&"document") {
         return;
     }
     let Some(source) = source else { return };
@@ -301,9 +301,15 @@ fn install_document(
     let source = dialog.source.as_ref().expect("the document request");
     let root = source.root;
     match server.load_state(&source.handle) {
-        LoadState::Failed(error) => panic!(
-            "[weather] {root}{DOCUMENT_PATH}: this UI root does not carry the weather dialog ({error})"
-        ),
+        LoadState::Failed(error) => {
+            // A root published without this document: the weather button
+            // opens nothing, and the rest of the game runs.
+            warn!(
+                "[weather] {root}{DOCUMENT_PATH}: this UI root does not carry the weather                  dialog ({error}); the weather button opens nothing"
+            );
+            dialog.warned.push("document");
+            return;
+        }
         LoadState::Loaded => {}
         _ => return,
     }

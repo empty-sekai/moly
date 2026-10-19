@@ -445,6 +445,27 @@ impl ConvertPost {
     }
 }
 
+/// `UserMysekaiNormalMissionRewardRequest`
+/// (`PostUserMysekaiNormalMissionRewardApi`): the missions whose rewards the
+/// user receives. One id is a mission's own receive; many are the bulk
+/// receive of the screen's button.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserMysekaiNormalMissionRewardRequest {
+    /// `mysekaiNormalMissionIds`.
+    pub mysekai_normal_mission_ids: Vec<i32>,
+}
+
+/// `UserMysekaiNormalMissionRewardResponse`: the resources the receive
+/// produced, and the user tables the request changed (the client applies them
+/// whole as `updatedResources`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct UserMysekaiNormalMissionRewardResponse {
+    /// `obtainedRewards`: the resources the reward popup lists.
+    pub obtained_rewards: Vec<UserResource>,
+    /// `updatedResources`: the tables the request changed.
+    pub updated_resources: SuiteUserSections,
+}
+
 /// `MysekaiBoostStaminaRecoveryType`, spelled the way the client's
 /// `ToString()` sends the enum value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -42,6 +42,11 @@
 //! - *Convert*: [`convert`]. The join seats the machine's level and one slot
 //!   per master slot number; a start, a receive and a shorten answer from the
 //!   convert master tables, the pass and the owned tables.
+//! - *Normal missions*: [`normal_mission`]. The join seats the sheet of the
+//!   lowest `seq` with one `not_achieved` row per mission of it; a receive
+//!   marks the achieved missions `received`, grants their rewards, adds their
+//!   rank experience to `totalExp` (and the rank follows it), and advances to
+//!   the next sheet once the current one is complete.
 //!
 //! **Instruments.** A developer start may overlay a fixed clock, the screen
 //! pools and the avatar/music/harvest instruments onto the document; every
@@ -60,6 +65,7 @@ pub(crate) mod housing_layout;
 pub(crate) mod inventory;
 pub(crate) mod music;
 pub(crate) mod music_play;
+pub(crate) mod normal_mission;
 pub(crate) mod recycle;
 pub(crate) mod stamina_recovery;
 pub(crate) mod system_fixture_action;
@@ -73,7 +79,7 @@ pub(crate) use crate::masters::{int32, master_rows, Deferred, Masters, Tables};
 pub(crate) use document::{ScheduleRow, Stamina};
 pub(crate) use moly_protocol::gate::{GateReply, ReplyTalkList};
 pub(crate) use moly_protocol::json::{SECTION_GAMEDATA, SECTION_PASS, SECTION_STAMINA};
-pub(crate) use moly_protocol::rows::RankReleaseRow;
+pub(crate) use moly_protocol::rows::{RankReleaseRow, UserMysekaiNormalMissionSheet};
 
 use document::{SchedulePolicy, ServerDocument, SiteLevelReleases, StaminaRefresh};
 
@@ -218,6 +224,7 @@ pub(crate) enum ResponseKind {
     ConvertStart,
     ConvertReceive,
     ConvertShorten,
+    NormalMissionReward,
 }
 
 impl ResponseKind {
@@ -250,6 +257,7 @@ impl ResponseKind {
             Self::ConvertStart => "PostUserMysekaiConvertStartApi",
             Self::ConvertReceive => "PostUserMysekaiConvertReceiveApi",
             Self::ConvertShorten => "PostUserMysekaiConvertShortenApi",
+            Self::NormalMissionReward => "PostUserMysekaiNormalMissionRewardApi",
         }
     }
 }
@@ -605,6 +613,13 @@ impl ServerModel {
                     .then(|| self.convert_items(masters)),
                 convert_item_histories: has(convert::SECTION_HISTORIES)
                     .then(|| self.doc.convert.histories.clone()),
+                normal_missions: has(normal_mission::SECTION_MISSIONS)
+                    .then(|| self.doc.normal_mission.rows.clone()),
+                normal_mission_sheet: has(normal_mission::SECTION_SHEET).then_some(
+                    UserMysekaiNormalMissionSheet {
+                        mysekai_normal_mission_sheet_id: self.doc.normal_mission.sheet_id,
+                    },
+                ),
                 npc_panel: self.npc_panel(kind),
             },
         };
@@ -629,10 +644,19 @@ impl ServerModel {
         // The convert machine's level and its slots.
         let level = self.seat_convert_level(masters);
         let slots = self.seat_convert_slots(masters);
+        // The mission sheet a document without one starts on.
+        let missions = self.seat_normal_missions(masters);
         // The convert items' own master table.
         self.require_section(convert::SECTION_ITEMS);
-        if level || slots {
+        if level || slots || missions {
             self.commit();
+        }
+        if missions {
+            // The first sheet's rows are stored, and every response that
+            // followed an unseated document may have been served without
+            // them: the next one carries the sheet and its rows.
+            self.mark_pending(normal_mission::SECTION_SHEET);
+            self.mark_pending(normal_mission::SECTION_MISSIONS);
         }
         // A developer start's convert request, answered once the user is in.
         if let Some((slot, post)) = self.convert_instrument.take() {
@@ -669,6 +693,8 @@ impl ServerModel {
         carries.push(tools::SECTION);
         carries.push(convert::SECTION_SLOTS);
         carries.push(convert::SECTION_HISTORIES);
+        carries.push(normal_mission::SECTION_MISSIONS);
+        carries.push(normal_mission::SECTION_SHEET);
         self.respond(ResponseKind::Join, refreshed, &carries, masters);
     }
 

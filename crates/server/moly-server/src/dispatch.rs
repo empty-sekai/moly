@@ -348,6 +348,15 @@ fn run(call: Call, model: &mut ServerModel, masters: &Tables<'_>) -> Result<Repl
                     format!("{}: {reason}", post.api_name()),
                 )
             }),
+        Call::NormalMissionReward(request) => model
+            .normal_mission_reward(&request.mysekai_normal_mission_ids, masters)
+            .map(Reply::NormalMissionReward)
+            .map_err(|reason| {
+                Refusal::new(
+                    "normal_mission_refused",
+                    format!("PostUserMysekaiNormalMissionRewardApi: {reason}"),
+                )
+            }),
         Call::Admin(call) => admin::answer(call, model, masters).map(Reply::Admin),
     }
 }
@@ -368,7 +377,8 @@ mod tests {
     };
     use moly_protocol::gate::GateReply;
     use moly_protocol::rows::{
-        MusicPlaySetting, OwnedMusicRecord, Stamina, UserMysekaiFixture, UserMysekaiTool,
+        MusicPlaySetting, OwnedMusicRecord, Stamina, UserMysekaiFixture, UserMysekaiNormalMission,
+        UserMysekaiTool, MISSION_ACHIEVED, MISSION_NOT_ACHIEVED, MISSION_RECEIVED,
     };
     use moly_protocol::{AdminCall, UserId};
 
@@ -1433,5 +1443,348 @@ mod tests {
             Ok(Reply::Admin(text)) => assert!(text.contains("\"sections\"")),
             other => panic!("not the loopback's answer: {other:?}"),
         }
+    }
+
+    /// Two sheets: sheet 1 (seq 1) with completion mission 100 (two normal
+    /// missions), missions 101 and 102; sheet 2 (seq 2) with completion
+    /// mission 200, mission 201. Mission 100 rewards box 900 (material 7 x2
+    /// and item 5 x1) and rank experience 1 (7000); mission 101 rewards the
+    /// material possession level 2; mission 102 has no reward row.
+    fn mission_masters() -> moly_masters::mission::MissionMasters {
+        use moly_masters::mission::{
+            Mission, MissionCategory, MissionMasters, MissionReward, RewardType,
+        };
+        let mission =
+            |id: i32, sheet: i32, seq: i32, category: MissionCategory, requirement1: i32| Mission {
+                id,
+                sheet_id: sheet,
+                seq,
+                sentence: format!("mission {id}"),
+                category,
+                requirement1,
+            };
+        let reward = |id: i32, mission: i32, seq: i32, reward_type: RewardType, external: i32| {
+            MissionReward {
+                id,
+                mission_id: mission,
+                seq,
+                reward_type,
+                external_id: external,
+            }
+        };
+        MissionMasters {
+            sheets: vec![
+                moly_masters::mission::MissionSheet {
+                    id: 2,
+                    seq: 2,
+                    name: "second".to_owned(),
+                },
+                moly_masters::mission::MissionSheet {
+                    id: 1,
+                    seq: 1,
+                    name: "first".to_owned(),
+                },
+            ],
+            missions: vec![
+                mission(100, 1, 1, MissionCategory::Complete, 2),
+                mission(101, 1, 2, MissionCategory::Normal, 10),
+                mission(102, 1, 3, MissionCategory::Normal, 3),
+                mission(200, 2, 1, MissionCategory::Complete, 1),
+                mission(201, 2, 2, MissionCategory::Normal, 1),
+            ],
+            rewards: vec![
+                reward(1, 100, 1, RewardType::ResourceBox, 900),
+                reward(2, 100, 2, RewardType::RankObtainedExp, 1),
+                reward(3, 101, 1, RewardType::MaterialPossession, 2),
+            ],
+            rank_exps: vec![moly_masters::mission::RankExpRow {
+                id: 1,
+                quantity: 7000,
+            }],
+        }
+    }
+
+    /// The mission masters seated beside the shared fixture's other tables,
+    /// with the mission box 900: a `mysekai_material` 7 x2 and a
+    /// `mysekai_item` 5 x1. The rank table is the fixture's (rank 2 at
+    /// 48,000, rank 3 at 172,300), and the possession masters hold the
+    /// levels 1 (limit 1000) and 2 (limit 2000).
+    fn mission_tables(masters: &mut Masters, shared: &mut MasterTables) {
+        let missions = mission_masters();
+        shared.mission = Some(missions);
+        let limit = moly_masters::inventory::PossessionRow {
+            level: 1,
+            possession_limit: 1000,
+        };
+        let raised = moly_masters::inventory::PossessionRow {
+            level: 2,
+            possession_limit: 2000,
+        };
+        shared.possession = Some(moly_masters::inventory::PossessionMasters {
+            fixture: Some(vec![limit, raised]),
+            material: Some(vec![limit, raised]),
+        });
+        let mut convert = masters.convert.clone().expect("the fixture's convert tables");
+        convert.resource_boxes = Some(vec![crate::model::convert::ResourceBox {
+            purpose: "mysekai_normal_mission_reward".to_owned(),
+            id: 900,
+            details: vec![
+                ("mysekai_material".to_owned(), 7, 0, 2),
+                ("mysekai_item".to_owned(), 5, 0, 1),
+            ],
+        }]);
+        masters.convert = Some(convert);
+    }
+
+    /// `userMysekaiNormalMissions` of the test document: sheet 1, its
+    /// completion mission at its two normal missions (progress 2, achieved),
+    /// mission 101 (progress 10, achieved) and mission 102 (not achieved).
+    fn mission_rows() -> Vec<UserMysekaiNormalMission> {
+        vec![
+            UserMysekaiNormalMission {
+                mysekai_normal_mission_id: 100,
+                progress: 2,
+                mysekai_mission_status: MISSION_ACHIEVED.to_owned(),
+            },
+            UserMysekaiNormalMission {
+                mysekai_normal_mission_id: 101,
+                progress: 10,
+                mysekai_mission_status: MISSION_ACHIEVED.to_owned(),
+            },
+            UserMysekaiNormalMission {
+                mysekai_normal_mission_id: 102,
+                progress: 0,
+                mysekai_mission_status: MISSION_NOT_ACHIEVED.to_owned(),
+            },
+        ]
+    }
+
+    fn mission_model() -> ServerModel {
+        let mut model = fixture_model();
+        model.doc.normal_mission =
+            crate::model::normal_mission::NormalMissionDoc::new(1, mission_rows());
+        model
+    }
+
+    /// The mission model joined on the given tables; the session's own seating
+    /// is undone so each test states the sheet and rows it reads.
+    fn joined_mission_model(tables: &Tables<'_>) -> ServerModel {
+        let mut model = mission_model();
+        model.join(tables);
+        model.doc.normal_mission =
+            crate::model::normal_mission::NormalMissionDoc::new(1, mission_rows());
+        model.doc.gamedata.total_exp = 0;
+        model.doc.gamedata.mysekai_rank = Some(1);
+        model.responses.clear();
+        model
+    }
+
+    /// One receive of an achieved mission: the row reads received, the
+    /// material reward is granted and reported, the rank experience moves
+    /// totalExp by the rank-exp row's quantity and the rank follows it.
+    /// The cell that sends such a call is a normal mission's
+    /// (`ScreenLayerMysekaiMission.OnClickMysekaiMissionCell` sends the
+    /// completion mission's id through the bulk list only), so the call is
+    /// mission 101's.
+    #[test]
+    fn a_normal_mission_receive_grants_its_reward_and_experience() {
+        let mut masters = fixture_masters();
+        let mut shared = MasterTables::fixture();
+        mission_tables(&mut masters, &mut shared);
+        let tables = Tables::new(&masters, Some(&shared));
+        let mut model = joined_mission_model(&tables);
+        model.doc.delivery.mysekai_materials.clear();
+        let answered = answer_call(
+            Call::NormalMissionReward(moly_protocol::api::UserMysekaiNormalMissionRewardRequest {
+                mysekai_normal_mission_ids: vec![101],
+            }),
+            &mut model,
+            &tables,
+        );
+        let reply = match ok(answered.clone()) {
+            Reply::NormalMissionReward(reply) => reply,
+            other => panic!("answered {other:?}"),
+        };
+        // Mission 101 rewards the material possession level 2 and nothing
+        // else: no resource, no rank experience.
+        assert!(reply.obtained_rewards.is_empty());
+        assert_eq!(model.doc.inventory.material_possession_level, 2);
+        assert_eq!(model.doc.gamedata.total_exp, 0);
+        assert_eq!(model.doc.gamedata.mysekai_rank, Some(1));
+        assert_eq!(model.doc.delivery.mysekai_materials.get(&7), None);
+        let rows = reply
+            .updated_resources
+            .user_mysekai_normal_missions
+            .as_ref()
+            .expect("the rows");
+        assert!(rows.iter().any(|row| row.mysekai_normal_mission_id == 101
+            && row.mysekai_mission_status == MISSION_RECEIVED));
+        // The completion row is not named by the call: its count is 1
+        // (mission 101), below its requirement1 2, so the completion step
+        // reads it not_achieved; its stored progress 2 is above the count
+        // and stays.
+        assert!(rows.iter().any(|row| row.mysekai_normal_mission_id == 100
+            && row.mysekai_mission_status == MISSION_NOT_ACHIEVED
+            && row.progress == 2));
+        // The sheet does not advance: mission 102 is not received.
+        assert_eq!(
+            reply
+                .updated_resources
+                .user_mysekai_normal_mission_sheet
+                .expect("the sheet")
+                .mysekai_normal_mission_sheet_id,
+            1
+        );
+        assert_eq!(model.doc.normal_mission.sheet_id, 1);
+    }
+
+    /// A receive of a mission that is not achieved is refused whole: the
+    /// rows, the experience and the materials do not change.
+    #[test]
+    fn a_normal_mission_receive_of_a_not_achieved_mission_is_refused() {
+        let mut masters = fixture_masters();
+        let mut shared = MasterTables::fixture();
+        mission_tables(&mut masters, &mut shared);
+        let tables = Tables::new(&masters, Some(&shared));
+        let mut model = joined_mission_model(&tables);
+        let before = model.doc.normal_mission.clone();
+        let answered = answer_call(
+            Call::NormalMissionReward(moly_protocol::api::UserMysekaiNormalMissionRewardRequest {
+                // 100 is achieved, 102 is not: one bad id refuses both.
+                mysekai_normal_mission_ids: vec![100, 102],
+            }),
+            &mut model,
+            &tables,
+        );
+        match answered.outcome {
+            Err(refusal) => {
+                assert_eq!(refusal.code, "normal_mission_refused");
+                assert!(refusal.reason.contains("102"), "{}", refusal.reason);
+            }
+            other => panic!("not a refusal: {other:?}"),
+        }
+        assert_eq!(model.doc.normal_mission, before);
+        assert_eq!(model.doc.gamedata.total_exp, 0);
+        assert_eq!(model.doc.delivery.mysekai_materials.get(&7), None);
+        assert!(model.responses.is_empty());
+    }
+
+    /// A bulk receive takes the achieved missions in one call, keeps the
+    /// completion mission's progress at the counted normal missions, and
+    /// advances to the next sheet once the sheet is complete.
+    #[test]
+    fn a_bulk_receive_advances_the_sheet() {
+        let mut masters = fixture_masters();
+        let mut shared = MasterTables::fixture();
+        mission_tables(&mut masters, &mut shared);
+        let tables = Tables::new(&masters, Some(&shared));
+        let mut model = joined_mission_model(&tables);
+        model.doc.delivery.mysekai_materials.clear();
+        // 101 and 102 are the sheet's normal missions; 100 the completion
+        // one. The bulk receive takes the whole receivable set: 102 must
+        // read achieved, as the panel made it before the button.
+        for row in &mut model.doc.normal_mission.rows {
+            if row.mysekai_normal_mission_id == 102 {
+                row.progress = 3;
+                row.mysekai_mission_status = MISSION_ACHIEVED.to_owned();
+            }
+        }
+        let answered = answer_call(
+            Call::NormalMissionReward(moly_protocol::api::UserMysekaiNormalMissionRewardRequest {
+                mysekai_normal_mission_ids: vec![101, 102, 100],
+            }),
+            &mut model,
+            &tables,
+        );
+        let reply = match ok(answered) {
+            Reply::NormalMissionReward(reply) => reply,
+            other => panic!("answered {other:?}"),
+        };
+        // Box 900 once (two details), the rank experience 7000.
+        assert_eq!(reply.obtained_rewards.len(), 2);
+        assert_eq!(model.doc.gamedata.total_exp, 7000);
+        // Mission 102 has no reward row: the box's material is granted once.
+        assert_eq!(model.doc.delivery.mysekai_materials.get(&7), Some(&2));
+        // Mission 101 raises the material possession level to 2; the
+        // possession is not carried (no materials master in the fixture),
+        // but the gamedata the reply carries states the level.
+        assert_eq!(model.doc.inventory.material_possession_level, 2);
+        assert_eq!(
+            reply
+                .updated_resources
+                .user_mysekai_gamedata
+                .expect("the gamedata")
+                .mysekai_material_possession_level,
+            2
+        );
+        assert_eq!(reply.obtained_rewards[1].resource_type, "mysekai_item");
+        assert_eq!(model.doc.inventory.items[0].mysekai_item_id, 5);
+        assert_eq!(model.doc.inventory.items[0].quantity, 1);
+        // The completion step (`MysekaiMissionUtility.CreateRecommendViewData`)
+        // runs after the receive marks its rows, and the completion mission
+        // was named: its row still reads received, at the count (2).
+        let rows = &model.doc.normal_mission.rows;
+        let parent = rows
+            .iter()
+            .find(|row| row.mysekai_normal_mission_id == 100)
+            .expect("the completion mission's row");
+        assert_eq!(parent.progress, 2);
+        assert_eq!(parent.mysekai_mission_status, MISSION_RECEIVED);
+        // The sheet advanced to sheet 2, whose missions were seated.
+        assert_eq!(model.doc.normal_mission.sheet_id, 2);
+        assert!(rows.iter().any(|row| row.mysekai_normal_mission_id == 200
+            && row.mysekai_mission_status == MISSION_NOT_ACHIEVED));
+        assert!(rows.iter().any(|row| row.mysekai_normal_mission_id == 201
+            && row.mysekai_mission_status == MISSION_NOT_ACHIEVED));
+        assert_eq!(
+            reply
+                .updated_resources
+                .user_mysekai_normal_mission_sheet
+                .expect("the sheet")
+                .mysekai_normal_mission_sheet_id,
+            2
+        );
+    }
+
+    /// The experience moves the rank exactly at the master table's threshold:
+    /// 7000 keeps rank 1, another 41,000 reaches rank 2 (48,000). Only the
+    /// completion mission rewards rank experience, so the call names it (as
+    /// the bulk list does).
+    #[test]
+    fn the_normal_mission_experience_recomputes_the_rank() {
+        let mut masters = fixture_masters();
+        let mut shared = MasterTables::fixture();
+        mission_tables(&mut masters, &mut shared);
+        let tables = Tables::new(&masters, Some(&shared));
+        let mut model = joined_mission_model(&tables);
+        model.doc.gamedata.total_exp = 41_000;
+        model.doc.gamedata.mysekai_rank = Some(1);
+        let answered = answer_call(
+            Call::NormalMissionReward(moly_protocol::api::UserMysekaiNormalMissionRewardRequest {
+                mysekai_normal_mission_ids: vec![100],
+            }),
+            &mut model,
+            &tables,
+        );
+        let reply = match ok(answered) {
+            Reply::NormalMissionReward(reply) => reply,
+            other => panic!("answered {other:?}"),
+        };
+        assert_eq!(model.doc.gamedata.total_exp, 48_000);
+        assert_eq!(model.doc.gamedata.mysekai_rank, Some(2));
+        assert_eq!(
+            reply
+                .updated_resources
+                .user_mysekai_gamedata
+                .expect("the gamedata")
+                .mysekai_rank,
+            Some(2)
+        );
+        // The completion step runs after the receive's marks: the row the
+        // call named still reads received.
+        let rows = &model.doc.normal_mission.rows;
+        assert!(rows.iter().any(|row| row.mysekai_normal_mission_id == 100
+            && row.mysekai_mission_status == MISSION_RECEIVED
+            && row.progress == 2));
     }
 }
