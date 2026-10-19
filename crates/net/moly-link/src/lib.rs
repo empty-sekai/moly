@@ -1,27 +1,57 @@
 //! The game's connection to its server.
 //!
-//! [`LinkPlugin`] opens one session for one user and keeps it in
-//! [`ServerLink`]. A system sends a request with [`ServerLink::call`] and
-//! gets its sequence number; the server's answer arrives in a later frame as
-//! a [`ServerArrived`] carrying that number. Everything the server sends —
-//! answers and data it sends on its own — arrives in the server's order on
-//! that one message. Nothing here answers for the server: when the server
-//! cannot be reached, the link says so in [`LinkState`] and every call is
-//! refused by name.
+//! [`LinkPlugin`] keeps one link to one user of a server in [`ServerLink`].
+//! A system sends a request with [`ServerLink::call`] and gets its sequence
+//! number; the server's answer arrives in a later frame as a
+//! [`ServerArrived`] carrying that number. Everything the server sends —
+//! answers and data it sends on its own — arrives in the server's order.
+//! Nothing here answers for the server: when the server cannot be reached,
+//! the link says so in [`LinkState`] and every call is refused by name.
+//!
+//! The link speaks the server's one HTTP endpoint. Each request is the
+//! encoded [`ClientMessage`] list `[Hello, Call]` for a call or `[Hello]`
+//! alone for a poll, and each answer is the encoded [`ServerMessage`] list.
+//! One request is in flight at a time; calls wait in a queue and are sent in
+//! the order they were made. A welcome in an answer opens the link, and a
+//! later answer's welcome opens it again. While no call is queued, the link
+//! polls once no request has been made for [`POLL_INTERVAL`], so the pushes
+//! the server queued for the user arrive.
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
+#[cfg(target_arch = "wasm32")]
+mod web;
+
+mod address;
 
 use bevy::prelude::*;
 use moly_protocol::{
     Call, CallKind, ClientMessage, PushKind, Refusal, Reply, Sections, ServerMessage, UserId,
-    PROTOCOL_VERSION,
+    PROTOCOL_VERSION, RPC_PATH,
 };
+
+pub use address::{is_server_address, DEFAULT_SERVER_URL};
+
+/// How long the link waits for the first welcome: a server started together
+/// with the game may not listen yet.
+pub const CONNECT_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The link polls when no request has been made for this long, so the pushes
+/// the server queued arrive.
+pub const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How long one request may wait for its answer before the link reports the
+/// server lost.
+pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long after a failed request the link tries the server again.
+pub const RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Where the server is and who plays.
 #[derive(Clone, Debug)]
 pub struct LinkConfig {
-    /// `ws://host:port` natively.
+    /// `http://host:port` or `https://host[:port]`, as
+    /// [`is_server_address`] admits.
     pub address: String,
     pub user: UserId,
     /// The game's name and version, for the server's log.
@@ -33,18 +63,18 @@ pub struct LinkConfig {
 
 impl LinkConfig {
     /// The default connect window.
-    pub const CONNECT_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+    pub const CONNECT_WINDOW: std::time::Duration = CONNECT_WINDOW;
 }
 
 /// The connection's state, for the game's notices and the control plane.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LinkState {
     Connecting,
-    /// The server said welcome.
+    /// An answer said welcome.
     Open { server: String },
-    /// The server refused the session.
+    /// An answer refused the session.
     Refused { reason: String },
-    /// The connection could not be made or was lost.
+    /// A request could not be made or answered.
     Lost { reason: String },
 }
 
@@ -57,7 +87,9 @@ impl LinkState {
 /// What the transport hands the game.
 #[derive(Debug)]
 pub(crate) enum LinkEvent {
-    Message(ServerMessage),
+    /// Every message of one answer, in the server's order.
+    Answer(Vec<ServerMessage>),
+    /// The request failed; the string names the address and what happened.
     Lost(String),
 }
 
@@ -85,12 +117,13 @@ pub struct ServerArrived {
     pub event: Arrival,
 }
 
-/// The session.
+/// The link.
 #[derive(Resource)]
 pub struct ServerLink {
     state: LinkState,
     next_seq: u32,
-    outgoing: async_channel::Sender<ClientMessage>,
+    /// The calls for the transport, in the order they were made.
+    outgoing: async_channel::Sender<(u32, Call)>,
     incoming: async_channel::Receiver<LinkEvent>,
     /// Calls sent and not yet answered: (seq, what was asked).
     waiting: Vec<(u32, CallKind)>,
@@ -113,16 +146,12 @@ impl ServerLink {
         let kind = call.kind();
         self.waiting.push((seq, kind));
         self.sent.push((seq, call.clone()));
-        if self.state.is_open() || self.state == LinkState::Connecting {
-            if self
-                .outgoing
-                .try_send(ClientMessage::Call { seq, call })
-                .is_err()
-            {
-                self.state = LinkState::Lost {
-                    reason: "the connection's writer stopped".to_owned(),
-                };
-            }
+        if (self.state.is_open() || self.state == LinkState::Connecting)
+            && self.outgoing.try_send((seq, call)).is_err()
+        {
+            self.state = LinkState::Lost {
+                reason: "the link's transport stopped".to_owned(),
+            };
         }
         seq
     }
@@ -139,33 +168,29 @@ impl ServerLink {
     }
 }
 
-/// Opens the session when the app starts.
+/// Opens the link when the app starts.
 pub struct LinkPlugin(pub LinkConfig);
 
 impl Plugin for LinkPlugin {
     fn build(&self, app: &mut App) {
-        let (outgoing, to_server) = async_channel::unbounded();
+        let (outgoing, calls) = async_channel::unbounded();
         let (to_game, incoming) = async_channel::unbounded();
         let config = self.0.clone();
         info!("[link] connecting to {} as user {}", config.address, config.user);
-        let _ = outgoing.try_send(ClientMessage::Hello {
-            protocol: PROTOCOL_VERSION,
+        let transport = LinkTransport {
+            address: config.address.clone(),
             user: config.user.clone(),
             client: config.client.clone(),
-        });
-        #[cfg(not(target_arch = "wasm32"))]
-        let state = LinkState::Connecting;
-        #[cfg(not(target_arch = "wasm32"))]
-        native::connect(config.address.clone(), config.connect_window, to_server, to_game);
-        #[cfg(target_arch = "wasm32")]
-        let state = {
-            let _ = (to_server, to_game);
-            LinkState::Lost {
-                reason: "no browser transport".to_owned(),
-            }
+            connect_window: config.connect_window,
+            calls,
+            to_game,
         };
+        #[cfg(not(target_arch = "wasm32"))]
+        native::connect(transport);
+        #[cfg(target_arch = "wasm32")]
+        web::connect(transport);
         app.insert_resource(ServerLink {
-            state,
+            state: LinkState::Connecting,
             next_seq: 0,
             outgoing,
             incoming,
@@ -177,52 +202,249 @@ impl Plugin for LinkPlugin {
     }
 }
 
+/// What a transport needs: where the server is, who says hello, how long it
+/// retries before the first welcome, the calls to send and the game's inbox.
+pub(crate) struct LinkTransport {
+    pub(crate) address: String,
+    user: UserId,
+    client: String,
+    pub(crate) connect_window: std::time::Duration,
+    pub(crate) calls: async_channel::Receiver<(u32, Call)>,
+    pub(crate) to_game: async_channel::Sender<LinkEvent>,
+}
+
+impl LinkTransport {
+    /// The endpoint every request goes to.
+    pub(crate) fn url(&self) -> String {
+        format!("{}{RPC_PATH}", self.address)
+    }
+
+    /// The body of one request: the hello, then the call when there is one.
+    pub(crate) fn request(&self, call: Option<(u32, Call)>) -> Vec<u8> {
+        let mut messages = vec![ClientMessage::Hello {
+            protocol: PROTOCOL_VERSION,
+            user: self.user.clone(),
+            client: self.client.clone(),
+        }];
+        if let Some((seq, call)) = call {
+            messages.push(ClientMessage::Call { seq, call });
+        }
+        moly_protocol::encode(&messages)
+    }
+
+    /// Hands one answer, or the failure of its request, to the game. False
+    /// once the game is gone.
+    pub(crate) fn deliver(&self, answer: Result<Vec<ServerMessage>, String>) -> bool {
+        let event = match answer {
+            Ok(messages) => LinkEvent::Answer(messages),
+            Err(reason) => LinkEvent::Lost(format!("{}: {reason}", self.url())),
+        };
+        self.to_game.try_send(event).is_ok()
+    }
+
+    /// Drops the calls queued while the link could not send them: the game
+    /// refuses each by name once it reads the failure.
+    pub(crate) fn drop_queued(&self) {
+        while self.calls.try_recv().is_ok() {}
+    }
+}
+
+/// Whether an answer said welcome.
+pub(crate) fn welcomed(answer: &Result<Vec<ServerMessage>, String>) -> bool {
+    answer.as_ref().is_ok_and(|messages| {
+        messages
+            .iter()
+            .any(|message| matches!(message, ServerMessage::Welcome { .. }))
+    })
+}
+
+/// How long after a failed request an open link tries the server again.
+pub(crate) const RECOVER_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What a transport does next.
+pub(crate) enum Next {
+    /// Send this call.
+    Call((u32, Call)),
+    /// Send a poll.
+    Poll,
+    /// Nothing is due: look again shortly, or wait for a call.
+    Wait,
+    /// A retry is due after this long.
+    Sleep(std::time::Duration),
+    /// The game is gone or the server refused the session.
+    Stop,
+}
+
+/// The order of a transport's requests, the same on every target. Times are
+/// the transport's own clock since it started.
+///
+/// Until the first welcome the transport polls every [`RETRY_INTERVAL`] for
+/// the connect window, keeping the calls made meanwhile; then it sends the
+/// queued calls in order and polls once no request has been made for
+/// [`POLL_INTERVAL`]. After a failed request the game reads the link as lost
+/// and refuses its waiting calls, so the transport drops every call queued
+/// until a later poll is welcomed again, and polls every
+/// [`RECOVER_INTERVAL`].
+pub(crate) struct Schedule {
+    connect_window: std::time::Duration,
+    /// An answer said welcome and no request failed since.
+    open: bool,
+    /// A request failed (or the connect window ran out) and no answer has
+    /// said welcome since.
+    recovering: bool,
+    /// Some answer has said welcome.
+    ever_open: bool,
+    stopped: bool,
+    last_request: std::time::Duration,
+    retry_at: Option<std::time::Duration>,
+}
+
+impl Schedule {
+    pub(crate) fn new(connect_window: std::time::Duration) -> Self {
+        Self {
+            connect_window,
+            open: false,
+            recovering: false,
+            ever_open: false,
+            stopped: false,
+            last_request: std::time::Duration::ZERO,
+            retry_at: None,
+        }
+    }
+
+    /// What to do at `now`.
+    pub(crate) fn next(&mut self, now: std::time::Duration, transport: &LinkTransport) -> Next {
+        if self.stopped || transport.to_game.is_closed() {
+            return Next::Stop;
+        }
+        if self.recovering {
+            transport.drop_queued();
+        }
+        if let Some(at) = self.retry_at {
+            if now < at {
+                return Next::Sleep(at - now);
+            }
+            self.retry_at = None;
+            return Next::Poll;
+        }
+        if !self.open {
+            return Next::Poll;
+        }
+        match transport.calls.try_recv() {
+            Ok(call) => Next::Call(call),
+            Err(async_channel::TryRecvError::Closed) => Next::Stop,
+            Err(async_channel::TryRecvError::Empty) if self.poll_due_in(now).is_zero() => Next::Poll,
+            Err(async_channel::TryRecvError::Empty) => Next::Wait,
+        }
+    }
+
+    /// How long until an idle open link polls.
+    pub(crate) fn poll_due_in(&self, now: std::time::Duration) -> std::time::Duration {
+        (self.last_request + POLL_INTERVAL).saturating_sub(now)
+    }
+
+    /// Records the answer of the request made just before `now` and hands it
+    /// to the game. False once the transport should stop.
+    pub(crate) fn answered(
+        &mut self,
+        now: std::time::Duration,
+        answer: Result<Vec<ServerMessage>, String>,
+        transport: &LinkTransport,
+    ) -> bool {
+        self.last_request = now;
+        match &answer {
+            Ok(messages) => {
+                if messages
+                    .iter()
+                    .any(|message| matches!(message, ServerMessage::Refused { .. }))
+                {
+                    self.stopped = true;
+                } else if welcomed(&answer) {
+                    self.open = true;
+                    self.ever_open = true;
+                    self.recovering = false;
+                }
+            }
+            Err(_) => {
+                self.open = false;
+                if !self.ever_open && !self.recovering && now < self.connect_window {
+                    // A server started together with the game may not listen
+                    // yet: try again without telling the game.
+                    self.retry_at = Some(now + RETRY_INTERVAL);
+                    return true;
+                }
+                self.recovering = true;
+                transport.drop_queued();
+                self.retry_at = Some(now + RECOVER_INTERVAL);
+            }
+        }
+        transport.deliver(answer) && !self.stopped
+    }
+}
+
 /// Turns what the transport received into messages, in arrival order.
-fn pump(
-    mut link: ResMut<ServerLink>,
-    mut arrived: MessageWriter<ServerArrived>,
-) {
+fn pump(mut link: ResMut<ServerLink>, mut arrived: MessageWriter<ServerArrived>) {
     while let Ok(event) = link.incoming.try_recv() {
         match event {
-            LinkEvent::Message(ServerMessage::Welcome { server, user, .. }) => {
-                info!("[link] session open: {server}, user {user}");
-                link.state = LinkState::Open { server };
-            }
-            LinkEvent::Message(ServerMessage::Refused { reason }) => {
-                error!("[link] the server refused the session: {reason}");
-                link.state = LinkState::Refused { reason };
-            }
-            LinkEvent::Message(ServerMessage::Reply {
-                seq,
-                outcome,
-                sections,
-            }) => {
-                let Some(at) = link.waiting.iter().position(|(waiting, _)| *waiting == seq) else {
-                    error!("[link] a reply numbered {seq} answers no call; it is dropped");
-                    continue;
-                };
-                let (_, call) = link.waiting.remove(at);
-                arrived.write(ServerArrived {
-                    seq: Some(seq),
-                    event: Arrival::Reply {
-                        call,
-                        outcome,
-                        sections: sections.map(|sections| *sections).unwrap_or_default(),
-                    },
-                });
-            }
-            LinkEvent::Message(ServerMessage::Push { kind, sections }) => {
-                arrived.write(ServerArrived {
-                    seq: None,
-                    event: Arrival::Push {
-                        kind,
-                        sections: *sections,
-                    },
-                });
+            LinkEvent::Answer(messages) => {
+                for message in messages {
+                    match message {
+                        ServerMessage::Welcome { server, user, .. } => {
+                            // One line when the link opens; the welcome of
+                            // every later answer keeps it open.
+                            if !link.state.is_open() {
+                                info!("[link] session open: {server}, user {user}");
+                            }
+                            link.state = LinkState::Open { server };
+                        }
+                        ServerMessage::Refused { reason } => {
+                            error!("[link] the server refused the session: {reason}");
+                            link.state = LinkState::Refused { reason };
+                        }
+                        ServerMessage::Reply {
+                            seq,
+                            outcome,
+                            sections,
+                        } => {
+                            let Some(at) = link
+                                .waiting
+                                .iter()
+                                .position(|(waiting, _)| *waiting == seq)
+                            else {
+                                error!("[link] a reply numbered {seq} answers no call; it is dropped");
+                                continue;
+                            };
+                            let (_, call) = link.waiting.remove(at);
+                            arrived.write(ServerArrived {
+                                seq: Some(seq),
+                                event: Arrival::Reply {
+                                    call,
+                                    outcome,
+                                    sections: sections
+                                        .map(|sections| *sections)
+                                        .unwrap_or_default(),
+                                },
+                            });
+                        }
+                        ServerMessage::Push { kind, sections } => {
+                            arrived.write(ServerArrived {
+                                seq: None,
+                                event: Arrival::Push {
+                                    kind,
+                                    sections: *sections,
+                                },
+                            });
+                        }
+                    }
+                }
             }
             LinkEvent::Lost(reason) => {
                 if !matches!(link.state, LinkState::Refused { .. }) {
-                    error!("[link] the server connection is lost: {reason}");
+                    // A link that keeps failing the same way says so once.
+                    let known = matches!(&link.state, LinkState::Lost { reason: known } if *known == reason);
+                    if !known {
+                        error!("[link] the server is not reachable: {reason}");
+                    }
                     link.state = LinkState::Lost { reason };
                 }
             }

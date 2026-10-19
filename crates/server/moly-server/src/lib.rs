@@ -1,9 +1,9 @@
 //! The game's server.
 //!
 //! The server keeps one document per user and answers the game's calls
-//! ([`moly_protocol::Call`]). It runs as a headless Bevy app: natively as
-//! its own process behind a WebSocket listener ([`ws`]), and in the browser
-//! inside a worker. Transports reach it only through a [`hub::Hub`].
+//! ([`moly_protocol::Call`]). It runs as a headless Bevy app, natively as
+//! its own process behind the HTTP endpoint ([`http`]). Every request is one
+//! session; the transport reaches the server only through a [`hub::Hub`].
 //!
 //! The model itself ([`model`]) holds every server-decided value and the
 //! rules over them. [`MasterLoadPlugin`] loads the master tables the model
@@ -22,20 +22,20 @@ mod masters;
 mod model;
 mod users;
 
-pub mod store;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod ws;
+pub mod http;
+pub mod store;
 
 pub use control::remote_plugin;
 pub use hub::Hub;
-pub use masters::Masters;
+pub use masters::{Masters, Parties};
 pub use store::{DocumentStore, Store};
 pub use moly_masters::clock::RefreshPeriod;
 pub use moly_masters::StaminaMax;
 
 use bevy::prelude::*;
 
-/// The address the player socket listens on. The host reports it after
+/// The address the HTTP endpoint listens on. The host reports it after
 /// binding; the administration calls are accepted only on a loopback address
 /// (the bundled single-player case), so a server that does not report its
 /// address accepts none.

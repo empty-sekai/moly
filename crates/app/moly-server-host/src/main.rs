@@ -1,7 +1,8 @@
-//! The native server process. The game connects to it over WebSocket; a
-//! control plane reaches it over HTTP JSON-RPC on its own loopback port.
+//! The native server process. The game posts its requests to the HTTP endpoint
+//! at `<address>/rpc`; a control plane reaches it over HTTP JSON-RPC on its
+//! own loopback port.
 //!
-//! `MOLY_SERVER_ADDR` names the player socket's address (default
+//! `MOLY_SERVER_ADDR` names the HTTP endpoint's address (default
 //! `127.0.0.1:15800`). `MOLY_SERVER_CONTROL_PORT` names the control port
 //! (default 15801), always bound to `127.0.0.1`. The process prints one ready
 //! line naming both addresses, and exits with status 1 when it cannot listen.
@@ -12,9 +13,8 @@
 //! names the directory the users' documents are kept in; without it the
 //! server keeps them in memory and a run starts fresh.
 //!
-//! The assembly itself lives in the crate's library, so a host can run the
-//! same server inside its own process; this binary keeps the environment
-//! handling, the ready line and the exit codes.
+//! The assembly itself lives in the crate's library; this binary keeps the
+//! environment handling, the ready line and the exit codes.
 
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::PathBuf;
@@ -88,7 +88,7 @@ fn main() {
         Ok(built) => built,
         Err(message) => fail(&message),
     };
-    println!("moly-server ready: control http://{control_address}, listening on ws://{bound}");
+    println!("moly-server ready: control http://{control_address}, listening on http://{bound}");
     app.run();
 }
 

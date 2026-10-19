@@ -35,7 +35,7 @@ MYSEKAI的还原项目，使用 Rust 与 [Bevy](https://bevyengine.org/) 构建�
 
 安装稳定版 Rust 和 Node.js 22，将 `MOLY_ASSET_ROOT` 指向已提取的资源目录。
 原生游戏由两个进程组成：服务端 `moly-server`（crate `moly-server-host`）保存玩家文档并应答
-游戏的请求，游戏 `moly-app` 通过 WebSocket 连接它。先启动服务端，再启动游戏：
+游戏的请求，游戏 `moly-app` 通过 HTTP 向它发送二进制编码的请求。先启动服务端，再启动游戏：
 
 ```sh
 cargo run --release -p moly-server-host
@@ -46,7 +46,7 @@ cargo run --release -p moly-app
 （`MOLY_SERVER_CONTROL_PORT`），就绪时打印一行地址；端口被占用时以状态 1 退出。
 `MOLY_SERVER_DATA` 指定玩家文档的保存目录，不设置时文档只在内存中，每次启动从头开始。
 服务端与游戏读取同样的资源根与主表变量，两者读到的主表一致。游戏按 `MOLY_SERVER_URL`
-（`ws://` 或 `wss://` 地址，缺省 `ws://127.0.0.1:15800`）连接服务端，连接不上时给出具名的提示，
+（`http://` 或 `https://` 地址，缺省 `http://127.0.0.1:15800`）连接服务端，连接不上时给出具名的提示，
 不会退回进程内的替代实现。启动器与 MCP 服务器会先启动服务端、取得它实际绑定的地址，再启动游戏。
 
 构建默认写入仓库的 `target/`；需要共享缓存时，自行设置 `CARGO_TARGET_DIR`，

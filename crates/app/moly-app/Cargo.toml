@@ -15,8 +15,8 @@ moly-assets = { path = "../../engine/moly-assets" }
 moly-game = { path = "../../game/moly-game" }
 moly-perf = { path = "../../engine/moly-perf" }
 moly-store = { path = "../../base/moly-store" }
-# The native game connects to its server over WebSocket; the browser game
-# installs the same link, which reports itself lost.
+# The game connects to its server over one HTTP endpoint, natively and in the
+# browser.
 moly-link = { path = "../../net/moly-link" }
 moly-protocol = { path = "../../net/moly-protocol" }
 

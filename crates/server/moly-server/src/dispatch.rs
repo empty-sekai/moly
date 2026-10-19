@@ -1417,7 +1417,10 @@ mod tests {
             call: Call::Admin(AdminCall::Schema),
         });
         app.update();
-        let frame = replies.try_recv().expect("the server answered");
+        // The first frame that is not the end of an update.
+        let frame = std::iter::from_fn(|| replies.try_recv().ok())
+            .find(|frame| !frame.is_empty())
+            .expect("the server answered");
         let ServerMessage::Reply { outcome, .. } =
             moly_protocol::decode(&frame).expect("a protocol frame")
         else {

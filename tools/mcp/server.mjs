@@ -187,7 +187,7 @@ function startServer({ gamePath, cwd, logPath, env }) {
     );
     if (child.stdout) {
       pipeServerLog(child.stdout, logPath, (line) => {
-        const match = /listening on (ws:\/\/\S+)/.exec(line);
+        const match = /listening on (https?:\/\/\S+)/.exec(line);
         if (match) {
           const control = /control (http:\/\/[^\s,]+)/.exec(line);
           finish(null, { url: match[1], line: line.trim(), control: control ? control[1] : null });

@@ -87,6 +87,8 @@ pub fn resolve_remote_seed(
         storage_mirror: seed.storage_mirror_base.as_deref(),
         master: seed.master_base.as_deref(),
         master_mirror: seed.master_mirror_base.as_deref(),
+        // The seed names no master repository: the built-in one.
+        master_repository: None,
     })?;
     canonical_bases(bases)
 }

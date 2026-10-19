@@ -185,13 +185,19 @@ pub(crate) fn seat_parties(
     }
 }
 
-/// Sends the responses the server made on its own — a new refresh window, the
-/// seated parties, a synchronised edit — to every session of their user.
+/// Hands the responses the server made on its own — a new refresh window, the
+/// seated parties, a synchronised edit — to every session of their user. A
+/// user with no open session keeps them queued in its model: the push kinds
+/// stay pushed only once a session has taken them, and the next request of
+/// that user sends them under its welcome.
 pub(crate) fn flush_pushes(mut users: ResMut<Users>, sessions: Res<Sessions>) {
     for (user, entry) in &mut users.0 {
         let Some(model) = &mut entry.model else {
             continue;
         };
+        if sessions.sessions_of(user).next().is_none() {
+            continue;
+        }
         let mut kept = Vec::new();
         for response in std::mem::take(&mut model.responses) {
             match push_kind(response.kind) {

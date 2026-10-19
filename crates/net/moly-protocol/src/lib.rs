@@ -1,11 +1,16 @@
 //! The messages the game and its server exchange.
 //!
-//! One connection carries one user's session:
+//! The game sends one HTTP `POST` to [`RPC_PATH`] per request. The request
+//! body is the encoded list of [`ClientMessage`] it carries; every request
+//! opens with a [`ClientMessage::Hello`], naming the protocol version and
+//! the user:
 //!
-//! 1. The game opens with [`ClientMessage::Hello`], naming the protocol
-//!    version and the user.
-//! 2. The server answers [`ServerMessage::Welcome`], or
-//!    [`ServerMessage::Refused`] and closes.
+//! 1. A request that carries a call is `[Hello, Call]`; a request with no
+//!    call is `[Hello]` alone.
+//! 2. The response body is the encoded list of [`ServerMessage`]: the
+//!    [`ServerMessage::Welcome`], or a [`ServerMessage::Refused`], first;
+//!    then the [`ServerMessage::Reply`] to the call, when there was one;
+//!    then every [`ServerMessage::Push`] the server queued for the user.
 //! 3. Each [`ClientMessage::Call`] carries a sequence number that its
 //!    [`ServerMessage::Reply`] repeats. Replies arrive in call order.
 //! 4. [`ServerMessage::Push`] carries user data the server sends on its own,
@@ -15,7 +20,7 @@
 //! game keeps copies of. The game writes its copies from these and from
 //! nothing else.
 //!
-//! Frames are binary ([`encode`] / [`decode`]); [`to_json`] renders any
+//! Messages are binary ([`encode`] / [`decode`]); [`to_json`] renders any
 //! message as JSON for logs and tools.
 
 use serde::de::DeserializeOwned;
@@ -41,6 +46,9 @@ pub mod api;
 pub mod gate;
 pub mod json;
 pub mod rows;
+
+/// The path of the server's one endpoint: every request is a `POST` here.
+pub const RPC_PATH: &str = "/rpc";
 
 /// Raised whenever a message changes shape. A peer with another version is
 /// refused at the handshake.
@@ -81,7 +89,7 @@ impl std::fmt::Display for UserId {
 /// A message from the game to the server.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ClientMessage {
-    /// The first message of a session.
+    /// The first message of every request.
     Hello {
         protocol: u32,
         user: UserId,
@@ -95,14 +103,14 @@ pub enum ClientMessage {
 /// A message from the server to the game.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ServerMessage {
-    /// The session is open.
+    /// The session of this request is open.
     Welcome {
         protocol: u32,
         user: UserId,
         /// The server's name and version, for the game's log.
         server: String,
     },
-    /// The session is refused; the server closes the connection after this.
+    /// The request is refused; nothing follows it in the response.
     Refused { reason: String },
     /// The answer to the call numbered `seq`.
     Reply {

@@ -3,7 +3,9 @@
 // and warms the measured base resources alongside the engine and font download.
 // The engine is initialized only after that source check, with its verified font
 // installed before a start entry is exposed. The page
-// then calls `start(seed)` synchronously inside the user's tap.
+// then calls `start(seed)` synchronously inside the user's tap; the game
+// connects to the server its `?server=` parameter names, else
+// `MOLY_DEFAULT_SERVER`.
 import { warmBaseResources } from "./base-resources.mjs";
 import { preflightCoordinates } from "./coordinate-contract.mjs";
 import {
@@ -21,7 +23,10 @@ import {
 import { audioActivation } from "./stage-audio.mjs";
 
 export { GAME_ABI, GAME_DOCUMENTS, GAME_EXPORTS, GAME_SCHEMA };
+/** The server the page's game connects to when its URL names none. */
+export const MOLY_DEFAULT_SERVER = "http://127.0.0.1:15800";
 const IDENTITY = /^[a-z0-9][a-z0-9._-]{0,95}$/;
+const SERVER_ADDRESS = /^https?:\/\/[A-Za-z0-9._-]+(?::\d+)?$/;
 const CATALOG = /^[a-f0-9]{64}$/;
 const SEED_IDENTITY = [
   "schemaVersion",
@@ -93,6 +98,21 @@ export function gameLocation({
     resourceBase: base,
     resourceOrigin: new URL(base).origin,
   };
+}
+
+/**
+ * The game's server address: the page URL's `server` parameter, which must be
+ * an `http://host:port` or `https://host[:port]` address, else
+ * `MOLY_DEFAULT_SERVER`. A parameter that is not an address is refused.
+ */
+export function serverAddress(pageUrl) {
+  const named = new URL(pageUrl).searchParams.get("server");
+  if (named === null) return MOLY_DEFAULT_SERVER;
+  if (!SERVER_ADDRESS.test(named))
+    throw new Error(
+      `Invalid server address: ${JSON.stringify(named)} is not http://host:port or https://host[:port]`,
+    );
+  return named;
 }
 
 /**
@@ -264,9 +284,12 @@ export async function bootGame({
         )
       )
         throw new Error("Seed does not match the booted release and snapshot");
+      // A server parameter that is not an address is refused before anything
+      // is started.
+      const server = serverAddress(pageUrl);
       started = true;
       mark("gameStart");
-      module.start_game(backend, JSON.stringify(seed));
+      module.start_game(backend, JSON.stringify(seed), server);
       return createGameController({
         wasm: module,
         post,

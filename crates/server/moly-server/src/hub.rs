@@ -1,11 +1,11 @@
-//! Sessions: the frames every transport hands in, the handshake, and the
+//! Sessions: the frames the transport hands in, the handshake, and the
 //! frames going back out.
 //!
-//! A transport (the native WebSocket listener, the browser worker's message
-//! port) owns its connections and talks to the server only through a
-//! [`Hub`]: it reports a session opening with the sender its outgoing
-//! frames go to, each frame received, and the session closing. Everything
-//! after that is the same for every transport.
+//! The HTTP transport owns the connections and talks to the server only
+//! through a [`Hub`]: for one request it opens a session with the sender its
+//! outgoing frames go to, reports each frame it decoded from the request,
+//! and closes the session once the response is sent. Everything after that
+//! is the server's.
 
 use std::collections::HashMap;
 
@@ -14,21 +14,21 @@ use moly_protocol::{
     decode, encode, Call, ClientMessage, ServerMessage, UserId, PROTOCOL_VERSION,
 };
 
-/// One connection, numbered by its transport's hub.
+/// One request's session, numbered by its transport's hub.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SessionId(pub u64);
 
-/// What a transport reports.
+/// What the transport reports.
 #[derive(Debug)]
 pub enum HubEvent {
-    /// A connection opened; frames for it go to `out`.
+    /// A session opened; frames for it go to `out`.
     Open {
         session: SessionId,
         out: async_channel::Sender<Vec<u8>>,
     },
-    /// One frame the connection received.
+    /// One message of the request, encoded as one frame.
     Frame { session: SessionId, bytes: Vec<u8> },
-    /// The connection closed.
+    /// The session closed, or was refused and forgot.
     Close { session: SessionId },
 }
 
@@ -154,11 +154,21 @@ pub(crate) fn install(app: &mut App) -> Hub {
         .init_resource::<Sessions>()
         .add_message::<CallReceived>()
         .add_message::<SessionOpened>()
-        .add_systems(PreUpdate, pump);
+        .add_systems(PreUpdate, pump)
+        .add_systems(PostUpdate, end_frame);
     hub
 }
 
-/// Takes every event the transports reported since the last frame.
+/// Ends every open session's frames of this update with an empty frame, so a
+/// transport that answers one request knows that everything the update sent
+/// the session — the replies and the pushes flushed after them — is in.
+pub(crate) fn end_frame(sessions: Res<Sessions>) {
+    for session in sessions.0.values() {
+        let _ = session.out.try_send(Vec::new());
+    }
+}
+
+/// Takes every event the transport reported since the last frame.
 pub(crate) fn pump(
     inbox: Res<HubInbox>,
     mut sessions: ResMut<Sessions>,
@@ -168,14 +178,15 @@ pub(crate) fn pump(
     while let Ok(event) = inbox.0.try_recv() {
         match event {
             HubEvent::Open { session, out } => {
+                debug!("[server] session {} opened", session.0);
                 sessions.0.insert(session, Session { out, user: None });
             }
             HubEvent::Close { session } => {
                 if let Some(closed) = sessions.0.remove(&session) {
                     let user = closed
                         .user
-                        .map_or_else(|| "before its hello".to_owned(), |user| format!("user {user}"));
-                    info!("[server] session {} closed ({user})", session.0);
+                        .map_or_else(|| "none".to_owned(), |user| format!("user {user}"));
+                    debug!("[server] session {} closed ({user})", session.0);
                 }
             }
             HubEvent::Frame { session, bytes } => {
@@ -211,7 +222,7 @@ pub(crate) fn pump(
                             continue;
                         }
                         open.user = Some(user.clone());
-                        info!("[server] session {} opened: user {user}, {client}", session.0);
+                        debug!("[server] session {} hello: user {user}, {client}", session.0);
                         sessions.send(
                             session,
                             &ServerMessage::Welcome {
@@ -240,8 +251,9 @@ pub(crate) fn pump(
     }
 }
 
-/// Refuses a session and forgets it; its transport closes the connection
-/// when the sender is dropped.
+/// Refuses a session and forgets it, so no later frame of the request is
+/// read; the refusal stays in the session's outgoing frames for the
+/// transport to send.
 fn refuse(sessions: &mut Sessions, session: SessionId, reason: String) {
     warn!("[server] session {} refused: {reason}", session.0);
     sessions.send(session, &ServerMessage::Refused { reason });

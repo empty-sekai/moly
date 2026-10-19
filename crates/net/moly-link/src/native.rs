@@ -1,93 +1,84 @@
-//! The native transport: a WebSocket client on its own thread.
+//! The native transport: one HTTP request at a time on its own thread.
+//!
+//! The order of requests is the order of [`crate::Schedule`]: polls until the
+//! first welcome, then the queued calls in order, and a poll whenever no
+//! request has been made for [`crate::POLL_INTERVAL`].
 
-use futures_util::{SinkExt, StreamExt};
-use moly_protocol::{decode, encode, ClientMessage, ServerMessage};
-use tokio_tungstenite::tungstenite::Message;
+use std::time::{Duration, Instant};
 
-use crate::LinkEvent;
+use bevy::log::error;
+use moly_protocol::{decode, ServerMessage};
 
-const CONNECT_RETRY: std::time::Duration = std::time::Duration::from_millis(200);
+use crate::{LinkTransport, Next, Schedule, REQUEST_TIMEOUT};
 
-pub(crate) fn connect(
-    address: String,
-    window: std::time::Duration,
-    outgoing: async_channel::Receiver<ClientMessage>,
-    incoming: async_channel::Sender<LinkEvent>,
-) {
+/// The largest answer the link reads; the server's lists fit well below it.
+const MAX_ANSWER: u64 = 64 * 1024 * 1024;
+
+/// How often an idle transport looks for a queued call.
+const IDLE_TICK: Duration = Duration::from_millis(5);
+
+/// Starts the transport thread.
+pub(crate) fn connect(transport: LinkTransport) {
     let spawned = std::thread::Builder::new()
         .name("moly-link".to_owned())
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_io()
-                .enable_time()
-                .build()
-                .expect("the link thread builds its runtime");
-            let lost = runtime.block_on(session(&address, window, outgoing, &incoming));
-            let _ = incoming.try_send(LinkEvent::Lost(lost));
-        });
-    if let Err(error) = spawned {
-        bevy::log::error!("[link] the link thread did not start: {error}");
+        .spawn(move || run(transport));
+    if let Err(spawn_error) = spawned {
+        error!("[link] the link thread did not start: {spawn_error}");
     }
 }
 
-/// Runs the session until it ends; returns why it ended.
-async fn session(
-    address: &str,
-    window: std::time::Duration,
-    outgoing: async_channel::Receiver<ClientMessage>,
-    incoming: &async_channel::Sender<LinkEvent>,
-) -> String {
-    // A server started together with the game may not listen yet: retry
-    // until `window` has passed. Each attempt is bounded by what is left of
-    // the window, since a refused connect can itself take seconds.
-    let deadline = tokio::time::Instant::now() + window;
-    let socket = loop {
-        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let error = match tokio::time::timeout(left, tokio_tungstenite::connect_async(address)).await
-        {
-            Ok(Ok((socket, _))) => break socket,
-            Ok(Err(error)) => error.to_string(),
-            Err(_) => format!("no answer within {window:?}"),
+fn run(transport: LinkTransport) {
+    let agent = ureq::Agent::config_builder()
+        // The trust every native HTTPS client of the game uses; a status is
+        // read here rather than failing the request.
+        .tls_config(moly_store::tls::tls_config())
+        .http_status_as_error(false)
+        .max_redirects(0)
+        .timeout_global(Some(REQUEST_TIMEOUT))
+        .user_agent(concat!("moly-link/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .new_agent();
+    let url = transport.url();
+    let started = Instant::now();
+    let mut schedule = Schedule::new(transport.connect_window);
+    loop {
+        let call = match schedule.next(started.elapsed(), &transport) {
+            Next::Stop => return,
+            Next::Wait => {
+                std::thread::sleep(IDLE_TICK);
+                continue;
+            }
+            Next::Sleep(duration) => {
+                std::thread::sleep(duration);
+                continue;
+            }
+            Next::Poll => None,
+            Next::Call(call) => Some(call),
         };
-        if tokio::time::Instant::now() + CONNECT_RETRY >= deadline {
-            return format!("{address}: {error}");
+        let answer = post(&agent, &url, transport.request(call));
+        if !schedule.answered(started.elapsed(), answer, &transport) {
+            return;
         }
-        tokio::time::sleep(CONNECT_RETRY).await;
-    };
-    let (mut sink, mut source) = socket.split();
-    let writer = async {
-        while let Ok(message) = outgoing.recv().await {
-            if let Err(error) = sink.send(Message::Binary(encode(&message).into())).await {
-                return format!("sending failed: {error}");
-            }
-        }
-        "the game closed the link".to_owned()
-    };
-    let reader = async {
-        while let Some(message) = source.next().await {
-            match message {
-                Ok(Message::Binary(bytes)) => match decode::<ServerMessage>(&bytes) {
-                    Ok(message) => {
-                        if incoming.try_send(LinkEvent::Message(message)).is_err() {
-                            return "the game stopped reading".to_owned();
-                        }
-                    }
-                    Err(error) => return format!("{error}"),
-                },
-                Ok(Message::Close(frame)) => {
-                    return frame.map_or_else(
-                        || "the server closed the connection".to_owned(),
-                        |frame| format!("the server closed the connection: {}", frame.reason),
-                    )
-                }
-                Ok(_) => {}
-                Err(error) => return format!("receiving failed: {error}"),
-            }
-        }
-        "the server closed the connection".to_owned()
-    };
-    tokio::select! {
-        reason = writer => reason,
-        reason = reader => reason,
     }
+}
+
+/// Posts one request and reads its answer.
+fn post(agent: &ureq::Agent, url: &str, body: Vec<u8>) -> Result<Vec<ServerMessage>, String> {
+    // The body is sent as it is, with no Content-Type header.
+    let mut response = agent
+        .post(url)
+        .send(&body[..])
+        .map_err(|send_error| format!("{send_error}"))?;
+    let status = response.status().as_u16();
+    let answer = response
+        .body_mut()
+        .with_config()
+        .limit(MAX_ANSWER)
+        .read_to_vec()
+        .map_err(|read_error| format!("the answer was not read: {read_error}"))?;
+    if status != 200 {
+        let reason = String::from_utf8_lossy(&answer);
+        return Err(format!("status {status}: {}", reason.trim()));
+    }
+    decode::<Vec<ServerMessage>>(&answer).map_err(|decode_error| format!("{decode_error}"))
 }

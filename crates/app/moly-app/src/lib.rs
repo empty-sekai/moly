@@ -28,12 +28,14 @@ enum StartMode {
     Game(GameStart),
 }
 
-/// A seed already admitted by `start_game`, with its asset source.
+/// A start already admitted by `start_game`, with its asset source and the
+/// server address it was given.
 #[cfg(target_arch = "wasm32")]
 struct GameStart {
     seed: moly_game::GameSeed,
     source: moly_assets::AssetSource,
     remote: moly_assets::remote::RemoteBases,
+    server: String,
 }
 
 /// 起一次 app。资产源与站点选择在这里解析、经 `moly_game::app` 装上——
@@ -84,9 +86,11 @@ fn run_app(
     }
     #[cfg(target_arch = "wasm32")]
     {
+        // The game returned above: this is the stage, which names no server
+        // and links to the default address.
         moly_game::configure_browser_library(&mut app);
-        if matches!(mode, StartMode::Stage) { moly_game::configure_browser_stage(&mut app); }
-        install_browser_link(&mut app);
+        moly_game::configure_browser_stage(&mut app);
+        install_browser_link(&mut app, moly_link::DEFAULT_SERVER_URL.to_owned());
         attach_canvas(&mut app);
         announce_ready(&mut app);
     }
@@ -105,21 +109,21 @@ fn run_game(web_render_settings: bevy::render::settings::WgpuSettings, start: Ga
     let mut app = moly_game::app(start.source, site_request::game(), web_render_settings);
     moly_assets::remote::admit(&mut app, start.remote);
     moly_game::configure_browser_game(&mut app, start.seed);
-    install_browser_link(&mut app);
+    install_browser_link(&mut app, start.server);
     attach_canvas(&mut app);
     announce_ready(&mut app);
     app.run();
 }
 
-/// The browser game has no server transport yet: the link reports itself lost
-/// and refuses calls by name, so the game's notices say why.
+/// The browser game's link, to the server address the page gave
+/// `start_game`.
 #[cfg(target_arch = "wasm32")]
-fn install_browser_link(app: &mut bevy::prelude::App) {
+fn install_browser_link(app: &mut bevy::prelude::App, address: String) {
     app.add_plugins(moly_link::LinkPlugin(moly_link::LinkConfig {
-        address: String::new(),
+        address,
         user: moly_protocol::UserId::local(),
         client: format!("moly-app {}", moly_game::VERSION),
-        connect_window: std::time::Duration::ZERO,
+        connect_window: moly_link::LinkConfig::CONNECT_WINDOW,
     }));
 }
 
@@ -171,13 +175,29 @@ fn run_native_game() {
     app.run();
 }
 
-/// The server address a native start uses when `MOLY_SERVER_URL` is unset.
+/// The address the server has at `MOLY_SERVER_URL`, else the default.
+///
+/// A start with the variable set refuses an address that is not
+/// `http://host:port` or `https://host[:port]`; a start without it uses
+/// [`moly_link::DEFAULT_SERVER_URL`].
 #[cfg(not(target_arch = "wasm32"))]
-const DEFAULT_SERVER_URL: &str = "ws://127.0.0.1:15800";
+fn server_address_from_env() -> Result<String, String> {
+    match std::env::var("MOLY_SERVER_URL") {
+        Ok(value) if value.trim().is_empty() => {
+            Err("MOLY_SERVER_URL is empty; it names the server's http:// address".into())
+        }
+        Ok(value) if !moly_link::is_server_address(value.trim()) => Err(format!(
+            "MOLY_SERVER_URL must be an http://host:port or https://host address, not {value:?}"
+        )),
+        Ok(value) => Ok(value.trim().to_owned()),
+        Err(std::env::VarError::NotPresent) => Ok(moly_link::DEFAULT_SERVER_URL.to_owned()),
+        Err(std::env::VarError::NotUnicode(_)) => Err("MOLY_SERVER_URL is not valid text".into()),
+    }
+}
 
-/// Gives the game its session with the server named by `MOLY_SERVER_URL`.
+/// Gives the game its link to the server named by `MOLY_SERVER_URL`.
 /// A launcher reads the address of the server it started and passes it here;
-/// a native start without one connects to [`DEFAULT_SERVER_URL`].
+/// a native start without one connects to [`moly_link::DEFAULT_SERVER_URL`].
 #[cfg(not(target_arch = "wasm32"))]
 fn install_link(app: &mut bevy::prelude::App) {
     let config = link_config().unwrap_or_else(|message| fail_loud(&message));
@@ -186,40 +206,11 @@ fn install_link(app: &mut bevy::prelude::App) {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn link_config() -> Result<moly_link::LinkConfig, String> {
-    let address = match std::env::var("MOLY_SERVER_URL") {
-        Ok(value) if value.trim().is_empty() => {
-            return Err("MOLY_SERVER_URL is empty; it names the server's ws:// address".into())
-        }
-        Ok(value) if !is_server_address(value.trim()) => {
-            return Err(format!(
-                "MOLY_SERVER_URL must be a ws://host:port address, not {value:?}"
-            ))
-        }
-        Ok(value) => value.trim().to_owned(),
-        Err(std::env::VarError::NotPresent) => DEFAULT_SERVER_URL.to_owned(),
-        Err(std::env::VarError::NotUnicode(_)) => {
-            return Err("MOLY_SERVER_URL is not valid text".into())
-        }
-    };
     Ok(moly_link::LinkConfig {
-        address,
+        address: server_address_from_env()?,
         user: moly_protocol::UserId::local(),
         client: format!("moly-app {}", moly_game::VERSION),
         connect_window: moly_link::LinkConfig::CONNECT_WINDOW,
-    })
-}
-
-/// `ws://` or `wss://`, then a host with no credentials and no whitespace.
-#[cfg(not(target_arch = "wasm32"))]
-fn is_server_address(value: &str) -> bool {
-    let authority = value
-        .strip_prefix("ws://")
-        .or_else(|| value.strip_prefix("wss://"))
-        .map(|rest| rest.split(['/', '?', '#']).next().unwrap_or(""));
-    authority.is_some_and(|authority| {
-        !authority.is_empty()
-            && !authority.contains('@')
-            && !value.bytes().any(|byte| byte <= b' ' || byte == 0x7f)
     })
 }
 
@@ -295,19 +286,36 @@ pub fn start_stage(backend: &str) -> Result<(), wasm_bindgen::JsValue> {
 }
 
 /// Starts the browser game from its seed, synchronously inside the trusted
-/// click. A seed refusal returns before anything is installed.
+/// click. `server` is the address of the game's server, `http://host:port` or
+/// `https://host[:port]`, which the page reads from its `?server=` parameter.
+/// A seed or an address that is refused returns before anything is installed.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
-pub fn start_game(backend: &str, seed: &str) -> Result<(), wasm_bindgen::JsValue> {
+pub fn start_game(backend: &str, seed: &str, server: &str) -> Result<(), wasm_bindgen::JsValue> {
     let refuse = |error: String| wasm_bindgen::JsValue::from_str(&error);
     moly_game::ui_font::require().map_err(refuse)?;
     let mut seed = moly_game::parse_game_seed(seed).map_err(refuse)?;
     let source = asset_source::resolve_seed(&seed).map_err(refuse)?;
     let remote = asset_source::resolve_remote_seed(&seed).map_err(refuse)?;
     let settings = render_backend::settings(backend).map_err(refuse)?;
+    let server = server.trim();
+    if !moly_link::is_server_address(server) {
+        return Err(refuse(format!(
+            "the server address must be an http://host:port or https://host address, not {server:?}"
+        )));
+    }
+    let server = server.to_owned();
     install_panic_hook();
     moly_game::install_game_storage(&mut seed);
-    run_app(settings, StartMode::Game(GameStart { seed, source, remote }));
+    run_app(
+        settings,
+        StartMode::Game(GameStart {
+            seed,
+            source,
+            remote,
+            server,
+        }),
+    );
     Ok(())
 }
 

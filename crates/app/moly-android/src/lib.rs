@@ -1,12 +1,14 @@
-//! The Android entry point: the game and its server in one process.
+//! The Android entry point: the game, which connects to a server elsewhere.
 //!
 //! The APK carries no game data. The first start reads the public store's
 //! publication document, picks the first resource snapshot the launcher would
 //! install, and points the asset reader at that snapshot's store; the reader
 //! keeps what it fetches in the app-private cache. The player's documents go
-//! to the app's own data directory, and the server runs on a thread inside
-//! this process, on a loopback port the game is told through
-//! `MOLY_SERVER_URL`.
+//! to the app's own data directory. The game reaches its server at the
+//! address `MOLY_SERVER_URL` names in the process environment, else the one
+//! the build names at `MOLY_SERVER_URL`, else
+//! [`DEFAULT_SERVER_URL`]; with `adb reverse tcp:15800 tcp:15800` the default
+//! reaches the developer's machine.
 //!
 //! Every item is behind `target_os = "android"`: elsewhere the crate is an
 //! empty library.
@@ -15,9 +17,9 @@
 /// The tag every message this entry point writes to logcat carries.
 const LOGCAT_TAG: &[u8] = b"moly\0";
 
-/// The player socket asked for when starting the server: the system picks a
-/// free loopback port and the server reports it.
-const SERVER_ADDRESS: &str = "127.0.0.1:0";
+/// The server the game connects to when neither the environment nor the build
+/// names one.
+const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:15800";
 
 /// The entry point. `#[bevy_main]` exports it as the `android_main` symbol
 /// Android's game activity calls, and runs it on the activity's own thread.
@@ -63,23 +65,22 @@ fn main() {
     std::env::set_var("MOLY_ASSET_STORE_URL", &store_url);
     std::env::set_var("MOLY_ASSET_CATALOG", &catalog);
 
-    let source = moly_assets::asset_source::resolve()
-        .unwrap_or_else(|error| panic!("the asset source: {error}"));
-    let remote = moly_assets::asset_source::resolve_remote()
-        .unwrap_or_else(|error| panic!("the remote bases: {error}"));
-    let bound = moly_server_host::spawn(moly_server_host::Options {
-        address: SERVER_ADDRESS.to_owned(),
-        control_port: None,
-        asset_source: source,
-        remote,
-        store: moly_server::Store::file(internal.join("server")),
-        log: false,
-    })
-    .unwrap_or_else(|error| panic!("the server: {error}"));
-    std::env::set_var("MOLY_SERVER_URL", format!("ws://{bound}"));
+    // The game reads the address from the environment; a build that names
+    // one gives it here.
+    if std::env::var_os("MOLY_SERVER_URL").is_none() {
+        std::env::set_var("MOLY_SERVER_URL", built_server_url());
+    }
 
     // The game runs on this thread, as Bevy's own Android examples do.
     moly_app::run();
+}
+
+/// The server address the build named, else the default.
+fn built_server_url() -> &'static str {
+    match option_env!("MOLY_SERVER_URL") {
+        Some(addr) if !addr.trim().is_empty() => addr.trim(),
+        _ => DEFAULT_SERVER_URL,
+    }
 }
 
 /// Writes a panic to logcat before the default hook reports it, so a refusal

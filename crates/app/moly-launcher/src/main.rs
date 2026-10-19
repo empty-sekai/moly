@@ -167,7 +167,7 @@ impl Drop for ServerJob {
 fn announced_address(line: &str) -> Option<String> {
     let (_, address) = line.split_once(" listening on ")?;
     let address = address.trim();
-    address.starts_with("ws://").then(|| address.to_owned())
+    address.starts_with("http://").then(|| address.to_owned())
 }
 
 /// Copies one of the server's streams into the log line by line and reports

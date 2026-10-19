@@ -825,6 +825,23 @@ impl PartyRow {
 }
 
 impl Parties {
+    /// The parties a harness seats from a master table's text: the rows in
+    /// session at the server clock, read as the master layer reads them. The
+    /// server loads the table through the master layer; a harness that drives
+    /// the users' pushes seats it here instead.
+    pub fn fixture(text: &str) -> Self {
+        match parse_parties(text) {
+            Ok(rows) => Self {
+                rows,
+                missing: None,
+            },
+            Err(reason) => Self {
+                rows: Vec::new(),
+                missing: Some(reason),
+            },
+        }
+    }
+
     fn from_result(result: Result<Vec<PartyRow>, master::MasterError>) -> Self {
         match result {
             Ok(rows) => {

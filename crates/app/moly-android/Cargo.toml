@@ -4,11 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# The Android entry point: the game and its server in one process. The APK
-# carries no game data; the assets stream from the public store into an
-# app-private cache, and the player's documents stay in the app's own data
-# directory. Every item is behind `target_os = "android"`, so elsewhere the
-# crate builds an empty library.
+# The Android entry point: the game, which connects to a server elsewhere. The
+# APK carries no game data; the assets stream from the public store into an
+# app-private cache. Every item is behind `target_os = "android"`, so
+# elsewhere the crate builds an empty library.
 [lib]
 name = "moly_android"
 crate-type = ["cdylib"]
@@ -16,9 +15,6 @@ crate-type = ["cdylib"]
 [dependencies]
 bevy = { workspace = true }
 moly-app = { path = "../moly-app" }
-moly-assets = { path = "../../engine/moly-assets" }
-moly-server = { path = "../../server/moly-server" }
-moly-server-host = { path = "../moly-server-host" }
 moly-store = { path = "../../base/moly-store" }
 
 [target.'cfg(target_os = "android")'.dependencies]

@@ -4,17 +4,25 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# The game's connection to its server: one session, calls numbered and
-# answered in order, and the server's pushes, as Bevy messages.
+# The game's connection to its server: calls numbered and answered in order,
+# and the server's pushes, as Bevy messages, over one HTTP endpoint.
 [dependencies]
 moly-protocol = { path = "../moly-protocol" }
 bevy = { version = "0.18.1", default-features = false, features = ["std", "bevy_log"] }
 async-channel = "2.5"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { version = "1", default-features = false, features = ["rt", "net", "macros", "time"] }
-tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect"] }
-futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# HTTPS with the trust store every native HTTPS client of the game uses.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+moly-store = { path = "../../base/moly-store" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# The browser transport: `fetch` of an `ArrayBuffer` body, driven by promises.
+wasm-bindgen = "=0.2.127"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "RequestInit", "RequestMode", "Response"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 moly-server = { path = "../../server/moly-server" }

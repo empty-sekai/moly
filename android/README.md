@@ -1,9 +1,8 @@
 # moly for Android
 
 This directory packages the game as a native Android app: one native library
-holds both the game and its server, the server runs on a thread inside the same
-process, and assets stream from the public store into the app's private cache
-on first run.
+holds the game, which connects over HTTP to a server that runs elsewhere, and
+assets stream from the public store into the app's private cache on first run.
 
 ## Requirements
 
@@ -42,10 +41,42 @@ test, `./gradlew :app:assembleDebug` builds a debug-signed APK that
 The Rust library is not built by Gradle: run the `cargo ndk` command again
 after changing Rust code, before assembling.
 
+## Server
+
+The app connects to a server that speaks the game's HTTP endpoint. By default
+it uses `http://127.0.0.1:15800` on the phone; the network security config
+allows cleartext HTTP only to `127.0.0.1`. To reach a server on the
+development machine, forward the phone's port to it:
+
+```sh
+adb reverse tcp:15800 tcp:15800
+```
+
+Then start the server on the development machine (`cargo run -p
+moly-server-host`, which listens on `127.0.0.1:15800` by default) and launch
+the app. A forwarded connection arrives at the development machine's loopback
+address, so the default server listens where the phone's connection is
+forwarded.
+
+A server at another address over `https://` is given in either of two ways:
+
+- At build time, as `MOLY_SERVER_URL`, which the build records in the app:
+
+  ```sh
+  ANDROID_NDK_HOME=$ANDROID_HOME/ndk/30.0.16248370 MOLY_SERVER_URL=https://server.example.invalid \
+    cargo ndk -t arm64-v8a -o android/app/src/main/jniLibs build -p moly-android --release
+  ```
+
+- At run time, as `MOLY_SERVER_URL` in the app process's environment, which
+  takes precedence over the build's address.
+
+The address is `http://host:port` or `https://host[:port]`, with no path. An
+`https://` address needs no cleartext exception.
+
 ## Logs
 
-A start that refuses (no store, a missing directory, a port that cannot be
-bound) writes its message to logcat under the `moly` tag:
+A start that refuses (no store, a missing directory, a server address that is
+not an HTTP address) writes its message to logcat under the `moly` tag:
 
 ```sh
 adb logcat -s moly

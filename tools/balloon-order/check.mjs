@@ -118,7 +118,7 @@ function startServer(exe, logPath) {
     );
     if (child.stdout && child.stderr) {
       pipe(child.stdout, (line) => {
-        const match = /listening on (ws:\/\/\S+)/.exec(line);
+        const match = /listening on (http:\/\/\S+)/.exec(line);
         if (match) finish(null, match[1]);
       });
       pipe(child.stderr, () => {});

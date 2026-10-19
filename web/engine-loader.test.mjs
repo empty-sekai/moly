@@ -39,7 +39,9 @@ function harness({ prepareError = null, font = true } = {}) {
     default: async ({ module_or_path }) => {
       events.push(["instantiate", module_or_path]);
     },
-    start_game() {},
+    start_game(backend, seed, server) {
+      events.push(["start", backend, seed, server]);
+    },
     install_ui_font(bytes) {
       events.push(["font", new TextDecoder().decode(bytes)]);
     },

@@ -5,8 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 # The game's server: sessions, the users' documents and the API handlers. It
-# runs headless (no window, renderer or UI), natively as its own process and
-# in the browser as a worker.
+# runs headless (no window, renderer or UI), natively as its own process.
 [dependencies]
 moly-protocol = { path = "../../net/moly-protocol" }
 moly-masters = { path = "../../game/moly-masters" }
@@ -15,21 +14,23 @@ moly-law = { path = "../../base/moly-law" }
 bevy = { version = "0.18.1", default-features = false, features = ["std", "bevy_asset", "bevy_log", "async_executor", "multi_threaded"] }
 serde_json = { workspace = true }
 async-channel = "2.5"
-# The control port's JSON-RPC methods; the host adds the HTTP transport.
+# The control port's JSON-RPC methods; the host adds its HTTP transport.
 bevy_remote = { version = "0.18.1", default-features = false }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # The server clock reads the device's local time (localtime_s / localtime_r).
 libc = "0.2"
-# The native host's WebSocket listener runs on its own thread.
-tokio = { version = "1", default-features = false, features = ["rt", "net", "sync", "macros"] }
-tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
-futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# The native transport's HTTP endpoint runs on its own thread: hyper 1 over
+# async-io's reactor, with the request bodies of http-body-util.
+hyper = { version = "1", features = ["server", "http1"] }
+http-body-util = "0.1"
+async-io = "2"
+async-executor = "1"
+futures-lite = "2"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+smol-hyper = "0.1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # The server clock on a browser: the page's wall clock and its time zone.
 js-sys = "0.3"
 wasm-bindgen = "0.2"
-
-[dev-dependencies]
-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
