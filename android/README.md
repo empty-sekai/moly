@@ -9,14 +9,14 @@ on first run.
 
 - Rust with the `aarch64-linux-android` target:
   `rustup target add aarch64-linux-android`.
-- `cargo-ndk`: `cargo install cargo-ndk`.
-- Android SDK with platform 34, build-tools 34 and CMake 3.22, found through
-  `ANDROID_HOME` (or `ANDROID_SDK_ROOT`) or `sdk.dir` in
+- `cargo-ndk` 4: `cargo install cargo-ndk`.
+- Android SDK with platform 37, build-tools 37.0.0 and CMake 4.1.2, found
+  through `ANDROID_HOME` (or `ANDROID_SDK_ROOT`) or `sdk.dir` in
   `android/local.properties`.
-- NDK r27d under the SDK, as `sdkmanager "ndk;27.3.13750724"` installs it:
-  Gradle looks the `ndkVersion` up there, and `cargo ndk` finds it through
-  `ANDROID_NDK_HOME`.
-- A JDK from 17 to 21 (Gradle 8.6 and AGP 8.4).
+- NDK r30 under the SDK (`ndk/30.0.16248370`): Gradle looks the `ndkVersion`
+  up there, and `cargo ndk` must build the Rust library with the same NDK,
+  found through `ANDROID_NDK_HOME`, so both sides share one C++ runtime.
+- A JDK 17 or later (Gradle 9.8 and AGP 9.4).
 
 ## Build
 
@@ -24,7 +24,8 @@ From the repository root, build the native library into the project's
 `jniLibs` directory:
 
 ```sh
-cargo ndk -t arm64-v8a -o android/app/src/main/jniLibs build -p moly-android --release
+ANDROID_NDK_HOME=$ANDROID_HOME/ndk/30.0.16248370 \
+  cargo ndk -t arm64-v8a -o android/app/src/main/jniLibs build -p moly-android --release
 ```
 
 Then package the APK:
@@ -40,9 +41,6 @@ test, `./gradlew :app:assembleDebug` builds a debug-signed APK that
 
 The Rust library is not built by Gradle: run the `cargo ndk` command again
 after changing Rust code, before assembling.
-
-The Kotlin component of `rustls-platform-verifier` is resolved from
-`Cargo.lock`, so the Rust crate and its Android part always share a version.
 
 ## Logs
 

@@ -13,8 +13,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = "0.10"
 
+# HTTPS through rustls with the bundled WebPKI roots (`tls`).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }

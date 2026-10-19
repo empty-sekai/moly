@@ -22,11 +22,10 @@ moly-server-host = { path = "../moly-server-host" }
 moly-store = { path = "../../base/moly-store" }
 
 [target.'cfg(target_os = "android")'.dependencies]
-# The platform certificate verifier: Android's own trust store validates the
-# store's HTTPS requests. `jni` is the version the verifier's Android module
-# is built against.
-rustls-platform-verifier = "0.7"
-jni = "0.22"
 # The panic hook writes to logcat; Bevy's own logger does the same for the
 # game's messages.
 android_log-sys = "0.3"
+# The audio backend links the C++ runtime the APK packages
+# (`libc++_shared.so`) instead of a static copy of its own, so the process has
+# one C++ runtime.
+bevy = { workspace = true, features = ["android_shared_stdcxx"] }

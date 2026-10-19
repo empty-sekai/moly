@@ -14,8 +14,6 @@ render = ["bevy/bevy_gltf", "bevy/bevy_image", "bevy/bevy_scene", "bevy/bevy_sha
 moly-law = { path = "../../base/moly-law" }
 bevy = { version = "0.18.1", default-features = false, features = [
     "std", "bevy_asset", "bevy_log", "async_executor", "multi_threaded",
-    # The remote asset reader (moly-assets/src/remote.rs) on the browser.
-    "https",
 ] }
 gltf = { version = "1.4", default-features = false }
 # 清单类提取产物（manifest.json / characters.json）与站点 sidecar 的解析；
@@ -30,13 +28,15 @@ tokio = { version = "1", default-features = false, features = ["sync"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Native remote reads (`remote`): the whole transfer runs on the blocking
-# thread pool with bounded waits, through the client Bevy's web reader uses.
+# thread pool with bounded waits; the agents take moly-store's TLS settings.
 blocking = "1.6"
 # The native asset root falls back to the resources the launcher installed.
 moly-store = { path = "../../base/moly-store" }
-ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+# The browser's fetch-based web reader (`remote`).
+bevy = { version = "0.18.1", default-features = false, features = ["https"] }
 js-sys = "0.3"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"

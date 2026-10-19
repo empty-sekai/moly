@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Every connection is TLS, except the game's own server: it runs inside this
-     process and the game reaches it over a plain WebSocket on the loopback
-     interface. -->
+<!-- Every connection is TLS except the one to the game's own server: it runs
+     inside this process and the game reaches it over a plain WebSocket on the
+     loopback interface. -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="false" />
     <domain-config cleartextTrafficPermitted="true">

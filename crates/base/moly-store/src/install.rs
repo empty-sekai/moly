@@ -14,7 +14,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use ureq::tls::{RootCerts, TlsConfig};
 use ureq::Agent;
 
 /// Documents are small; anything larger than this is refused.
@@ -99,7 +98,7 @@ impl Progress {
 
 fn agent() -> Agent {
     Agent::config_builder()
-        .tls_config(TlsConfig::builder().root_certs(RootCerts::PlatformVerifier).build())
+        .tls_config(crate::tls::tls_config())
         .timeout_connect(Some(Duration::from_secs(30)))
         .timeout_recv_body(Some(Duration::from_secs(300)))
         .user_agent(concat!("moly-store/", env!("CARGO_PKG_VERSION")))

@@ -19,6 +19,8 @@ pub mod store;
 pub mod install;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod migrate;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod tls;
 
 /// The resource CDN used when none is configured.
 pub const DEFAULT_CDN: &str = "https://assets.pjsk.moe/sekai-extra-assets/";

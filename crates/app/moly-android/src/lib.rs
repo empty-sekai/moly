@@ -12,9 +12,6 @@
 //! empty library.
 #![cfg(target_os = "android")]
 
-use bevy::android::android_activity::AndroidApp;
-use jni::objects::JObject;
-
 /// The tag every message this entry point writes to logcat carries.
 const LOGCAT_TAG: &[u8] = b"moly\0";
 
@@ -31,8 +28,6 @@ fn main() {
         .get()
         .cloned()
         .expect("the Android runtime passes the app before main runs");
-    init_certificate_verifier(&app)
-        .unwrap_or_else(|error| panic!("the certificate verifier: {error}"));
     let internal = app
         .internal_data_path()
         .unwrap_or_else(|| panic!("the app data directory: Android reports none"));
@@ -121,25 +116,4 @@ fn logcat(message: &str) {
             text.as_ptr(),
         );
     }
-}
-
-/// Gives the platform verifier the JVM, this process' activity and its class
-/// loader, before any HTTPS request runs.
-fn init_certificate_verifier(app: &AndroidApp) -> Result<(), String> {
-    let activity = app.activity_as_ptr() as jni::sys::jobject;
-    // SAFETY: the runtime hands out the live VM of this process, and this
-    // crate is the only user of it here.
-    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
-    vm.attach_current_thread(|env| -> jni::errors::Result<()> {
-        // SAFETY: the app owns a JNI global reference to its activity for as
-        // long as the app lives. `JObject` is a transparent wrapper that
-        // frees nothing, so this borrow never deletes the app's reference.
-        let activity = unsafe { JObject::from_raw(env, activity) };
-        // The verifier keeps a global reference of its own; this local one
-        // lives for the rest of the call.
-        let context = env.new_local_ref(activity)?;
-        rustls_platform_verifier::android::init_with_env(env, context)?;
-        Ok(())
-    })
-    .map_err(|error| error.to_string())
 }

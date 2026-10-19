@@ -427,16 +427,11 @@ mod native {
     use std::path::PathBuf;
     use std::sync::{Arc, LazyLock};
     use std::time::Duration;
-    use ureq::tls::{RootCerts, TlsConfig};
     use ureq::Agent;
 
     fn agent(first_byte: Option<Duration>) -> Agent {
         Agent::config_builder()
-            .tls_config(
-                TlsConfig::builder()
-                    .root_certs(RootCerts::PlatformVerifier)
-                    .build(),
-            )
+            .tls_config(moly_store::tls::tls_config())
             .timeout_global(Some(Duration::from_millis(NATIVE_READ_MS)))
             .timeout_recv_response(first_byte)
             .build()

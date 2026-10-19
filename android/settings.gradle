@@ -16,13 +16,6 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
-        // The Kotlin component of `rustls-platform-verifier`, published as a
-        // Maven repository. The Rust crate calls into it through JNI; the
-        // version is taken from the Cargo lock file (see app/build.gradle).
-        maven {
-            url("https://github.com/rustls/rustls-platform-verifier/raw/" +
-                "maven-archive/android-release-support/maven/")
-        }
     }
 }
 
