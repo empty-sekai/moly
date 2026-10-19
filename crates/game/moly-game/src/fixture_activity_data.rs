@@ -802,5 +802,5 @@ pub(crate) fn timeline_asset(
 }
 
 #[cfg(test)]
-#[path = "npc_harness/tables.rs"]
+#[path = "fixture_activity_data_harness.rs"]
 mod harness;

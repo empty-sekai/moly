@@ -1169,5 +1169,5 @@ pub(crate) fn report(
 }
 
 #[cfg(test)]
-#[path = "npc_harness/alone.rs"]
+#[path = "alone_action_runtime_harness.rs"]
 mod harness;

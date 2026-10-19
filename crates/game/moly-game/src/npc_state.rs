@@ -734,5 +734,5 @@ fn update_greeting(
 }
 
 #[cfg(test)]
-#[path = "npc_harness/state.rs"]
+#[path = "npc_state_harness.rs"]
 mod harness;

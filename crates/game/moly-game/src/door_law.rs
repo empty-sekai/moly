@@ -15,7 +15,7 @@
 //!   material colour. On the 6000-unit rect the hole's radius is therefore
 //!   `3000 / _Scale^3` canvas units.
 //! - Every wait is a `UniTask.Delay(TimeSpan.FromSeconds(x))`, so it goes
-//!   through the millisecond rounding of [`super::timeline::delay_seconds`].
+//!   through the millisecond rounding of the site move timeline's `delay_seconds`.
 //! - The four house and room player states: their `Initialize` closes the
 //!   intercept gate and plays the state clip through
 //!   `PlayerAvatarPresenter.PlayAnimation`, which always crossfades 0.25 s;

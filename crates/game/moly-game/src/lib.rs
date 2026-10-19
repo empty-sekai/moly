@@ -47,7 +47,6 @@ mod cutscene_camera;
 mod delayed_faces;
 pub mod delivery;
 mod delivery_camera;
-#[path = "site_move/door_law.rs"]
 pub(crate) mod door_law;
 mod director;
 pub mod emoticon;
