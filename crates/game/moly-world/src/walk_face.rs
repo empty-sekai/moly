@@ -23,6 +23,17 @@ pub struct WalkFace {
 }
 
 impl WalkFace {
+    /// A face over an already built field at `generation`: the objective
+    /// face's own carved field (see [`crate::npc_objective::ObjectiveFace`]),
+    /// which the route machinery starts a walk on.
+    pub fn from_field(field: Arc<WalkField>, generation: u64) -> Self {
+        Self {
+            field,
+            generation,
+            layout_revision: 0,
+        }
+    }
+
     pub fn on_face(&self, x: f32, z: f32) -> bool {
         self.walkable_at([x, z])
     }

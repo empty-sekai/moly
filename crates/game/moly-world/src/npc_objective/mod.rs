@@ -197,6 +197,13 @@ impl ObjectiveFace {
         self.site_height
     }
 
+    /// This face's carved walk field as the route machinery takes it: the
+    /// same field, with the site generation `reenter_navigation` restores on
+    /// the agent.
+    pub fn walk_face(&self) -> crate::walk_face::WalkFace {
+        crate::walk_face::WalkFace::from_field(std::sync::Arc::clone(&self.field), self.generation)
+    }
+
     /// Host reattachment using this existing WalkField and its surface mesh.
     /// Show keeps a valid current point; only an invalid x/z is moved to the
     /// nearest available point. This is not Unity NavMeshAgent reattachment.

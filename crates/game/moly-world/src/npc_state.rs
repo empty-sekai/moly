@@ -127,7 +127,7 @@ pub enum TweetHudEvent {
 pub struct NpcPresenterSet;
 
 /// The controller's per-character machine, read after the objective loop's
-/// decision and before its rest bookkeeping.
+/// decision, after the walk driver and before the presenter's own calls.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NpcHfsmSet;
 
@@ -184,12 +184,16 @@ impl Plugin for NpcStatePlugin {
             );
         // The controller's machine: inserted on every character that has
         // none (the controller's constructor), then one update per frame
-        // after the objective loop's decision. It drives nothing yet.
+        // after the objective loop's decision and after the walk driver it
+        // reads (the update holds each scoped character's route components
+        // for the frame, so the walk driver must not run on them meanwhile).
         app.add_systems(
             Update,
             (
                 crate::npc_objective::controller::insert_missing,
-                crate::npc_objective::controller::on_update.in_set(NpcHfsmSet),
+                crate::npc_objective::controller::on_update
+                    .in_set(NpcHfsmSet)
+                    .after(crate::npc::advance),
             )
                 .chain()
                 .after(crate::npc_objective::decide),

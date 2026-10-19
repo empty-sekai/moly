@@ -12,16 +12,16 @@
 //! The upper states hand over an [`UpperResult`] when they complete;
 //! [`lower_state_for_upper`] is the presenter's result-to-lower choice, and
 //! the controller falls back to [`LowerState::Idle`] when that choice
-//! produces nothing.
-//!
-//! This module holds the shape only; the state bodies arrive with the
-//! controller that runs them.
+//! produces nothing. [`lower_dispatch::create_lower`] is the same switch with
+//! the presenter's fixture-first test.
 
 pub mod decider;
+pub mod lower_dispatch;
 pub mod lower_idle;
 pub mod plan;
 pub mod timing;
 pub mod upper;
+pub mod upper_walk;
 
 use crate::objective::TalkType;
 
@@ -157,7 +157,8 @@ impl UpperState {
         }
     }
 
-    /// `get_CanInterrupt`: every upper state can be interrupted.
+    /// `get_CanInterrupt`: every upper state answers true (`NPCUpperStateBase`
+    /// has no override in any of the eight).
     pub fn can_interrupt(&self) -> bool {
         true
     }
@@ -192,13 +193,13 @@ pub struct UpperBase {
 }
 
 impl UpperBase {
-    /// `Enter()`: a fresh entry, not complete, running when the state has a
-    /// mover.
-    pub fn enter(&mut self, has_mover: bool) -> UpperEntry {
+    /// `Enter()`: a fresh entry, not complete, running while the state's own
+    /// move runs.
+    pub fn enter(&mut self, is_moving: bool) -> UpperEntry {
         UpperEntry {
             is_complete: false,
             elapsed: 0.0,
-            is_moving: has_mover,
+            is_moving,
         }
     }
 }

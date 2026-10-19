@@ -544,11 +544,25 @@ pub fn stop_movement(world: &mut World, actor: Entity) {
         &mut StuckBaseline,
         &mut MotionPhase,
     )>();
-    if let Ok((mut route, mut path, mut walk, mut stuck, mut phase)) = query.get_mut(world, actor) {
-        let generation = route.generation;
-        halt(&mut route, &mut path, &mut walk, &mut stuck, &mut phase);
-        route.generation = generation;
+    if let Ok((mut route, mut path, mut walk, mut stuck, mut phase)) =
+        query.get_mut(world, actor)
+    {
+        stop_movement_components(&mut walk, &mut route, &mut path, &mut stuck, &mut phase);
     }
+}
+
+/// [`stop_movement`] on the components alone, for a caller that already
+/// holds them (the controller's per-character pass).
+pub fn stop_movement_components(
+    walk: &mut WalkState,
+    route: &mut RouteStops,
+    path: &mut PathSlot,
+    stuck: &mut StuckBaseline,
+    phase: &mut MotionPhase,
+) {
+    let generation = route.generation;
+    halt(route, path, walk, stuck, phase);
+    route.generation = generation;
 }
 
 fn halt(
@@ -673,6 +687,12 @@ pub fn cancel_external_approach(world: &mut World, actor: Entity) {
     stop_for_external_activity(world, actor);
 }
 
+/// Whether `actor` is held away from the loaded site (suspended for
+/// residency): its walks do not run on the loaded site.
+pub fn is_away(world: &World, actor: Entity) -> bool {
+    world.get::<residency::Away>(actor).is_some()
+}
+
 pub fn reattach_after_layout_edit(
     world: &mut World,
     actor: Entity,
@@ -718,7 +738,7 @@ pub struct MoveTarget(pub [f32; 3]);
 /// 整条带类型路线：原导航 corners 为 CheckPoint，侧偏候选为 Rest，合并后
 /// 按距起点的三维直线距离稳定排序。`next` 指向当前前往/正在休息的路点；
 /// CheckPoint 到达后推进，Rest 到达且等待结束后推进。两者都不擅自跳过导航。
-#[derive(Component, Default)]
+#[derive(Component, Clone, Default)]
 pub struct RouteStops {
     /// 世界坐标与行为身份。侧偏点保留原候选位置，不替换为采样命中位置。
     stops: Vec<Waypoint>,
@@ -762,7 +782,7 @@ pub struct RouteStops {
 /// A navigation agent's crowd state (see `moly_law::path::crowd`): its
 /// velocity, its corridor for the current leg, the auto braking switch the
 /// move loop writes, and the remaining distance the last crowd step left.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct CrowdMotion {
     velocity: [f32; 3],
     corridor: Option<moly_law::carve::Corridor>,
@@ -865,20 +885,52 @@ impl RouteStops {
     /// leg is submitted.
     fn completed(&self, position: [f32; 3]) -> bool {
         match (self.completion, self.navigation_destination) {
-            (Some(completion), Some(destination)) => is_completed(
+            (Some(completion), Some(destination)) => is_completed_within(
                 position,
                 completion.target,
                 destination,
                 completion.site_height,
+                completion.goal_distance,
             ),
             _ => false,
         }
+    }
+
+    /// The move's target while the completion test still applies.
+    pub fn completion_target(&self) -> Option<[f32; 3]> {
+        self.completion.map(|completion| completion.target)
+    }
+
+    /// The goal distance the move completes at.
+    pub fn goal_distance(&self) -> Option<f32> {
+        self.completion.map(|completion| completion.goal_distance)
+    }
+
+    /// The route's goal (`RouteStops.goal`), while one is set.
+    pub fn route_goal(&self) -> Option<[f32; 3]> {
+        self.goal
+    }
+
+    /// Whether the route ended without arriving.
+    pub fn stopped_without_arriving(&self) -> bool {
+        self.outcome == Some(RouteOutcome::Stopped)
+    }
+
+    /// Take the route's outcome, if one was published.
+    pub fn take_outcome(&mut self) -> Option<RouteOutcome> {
+        self.outcome.take()
+    }
+
+    /// The actor's navigation generation stamps the route: a rebuilt field
+    /// left earlier routes behind.
+    pub fn follows_generation(&self, generation: u64) -> bool {
+        self.generation == generation
     }
 }
 
 /// 卡死基线（源卡死上报的跨帧状态）：上次记下的位置与时刻。`None` = 未立
 /// （行走首帧立、上报后清零——可再触发）。
-#[derive(Component, Default)]
+#[derive(Component, Default, Clone, Copy)]
 pub struct StuckBaseline(Option<([f32; 3], f32)>);
 
 /// 卡死距离阈（源字面量）：位移不小于它即「在动」，基线前移。
@@ -1731,7 +1783,59 @@ pub fn depart(
     } else {
         walk_face.path(start, goal)?
     };
-    route_along(unit, state, slot, route, walk_face, objective_face, corner, fit, rng, polyline)
+    route_along(
+        unit,
+        state,
+        slot,
+        route,
+        walk_face,
+        objective_face,
+        corner,
+        fit,
+        rng,
+        polyline,
+        MOVE_GOAL_DISTANCE,
+    )
+}
+
+/// [`depart`] whose move completes at `goal_distance` from the target: an
+/// upper state tests its arrival against its own stopping distance, so its
+/// walk takes that distance as the move's goal.
+#[allow(clippy::too_many_arguments)]
+pub fn depart_toward(
+    unit: &CharacterUnitId,
+    state: &mut LawWalkState,
+    slot: &mut NpcPathWalkSlot,
+    route: &mut RouteStops,
+    walk_face: &crate::walk_face::WalkFace,
+    objective_face: &crate::npc_objective::ObjectiveFace,
+    corner: [f32; 3],
+    fit: Option<FitCandidate>,
+    rng: &mut crate::npc_objective::MemberRng,
+    goal_distance: f32,
+) -> Option<MotionPhase> {
+    route.outcome = None;
+    let start = reenter_navigation(state, route, walk_face)?;
+    let goal = [corner[0], corner[2]];
+    let polyline = if fit.is_some() {
+        let approach = walk_face.sample(goal, crate::npc_objective::SAMPLE_GATE_TOLERANCE)?;
+        walk_face.path_exact(start, approach)?
+    } else {
+        walk_face.path(start, goal)?
+    };
+    route_along(
+        unit,
+        state,
+        slot,
+        route,
+        walk_face,
+        objective_face,
+        corner,
+        fit,
+        rng,
+        polyline,
+        goal_distance,
+    )
 }
 
 /// Source `IsCompleted` judges against the talk data target itself, instead of
@@ -1740,7 +1844,7 @@ const COMPLETION_DESTINATION_TOLERANCE: f32 = 0.25;
 
 /// Goal distance every objective passes to the source MoveAsync (metres). A
 /// separate literal from [`ARRIVAL_DISTANCE`], the presenter's per-leg test.
-const MOVE_GOAL_DISTANCE: f32 = 0.1;
+pub const MOVE_GOAL_DISTANCE: f32 = 0.1;
 
 /// What one move completes against: the talk data TargetPosition in this
 /// host's site-local coordinates, and SitePosition.y of the active site.
@@ -1751,6 +1855,8 @@ struct MoveCompletion {
     /// this plus its local height; the room floors above the first sit hundreds
     /// of metres up, where the switch always judges against the target.
     site_height: f32,
+    /// The goal distance this move completes at (the source MoveAsync's).
+    goal_distance: f32,
 }
 
 /// Source `NPCAvatarMoveExecutor.IsCompleted` with MoveAsync's goal distance,
@@ -1768,13 +1874,32 @@ struct MoveCompletion {
 /// the presenter is walking, so a move can complete before its waypoints run
 /// out and an NPC standing at the path end may never complete.
 fn is_completed(p: [f32; 3], t: [f32; 3], d: [f32; 3], site_y: f32) -> bool {
+    is_completed_within(p, t, d, site_y, MOVE_GOAL_DISTANCE)
+}
+
+/// [`is_completed`] at a caller's goal distance: an upper state passes the
+/// stopping distance its own walk tests with.
+fn is_completed_within(p: [f32; 3], t: [f32; 3], d: [f32; 3], site_y: f32, goal: f32) -> bool {
     let dx = t[0] - d[0];
     let height = site_y + t[1];
     let dz = t[2] - d[2];
     let switch = ((dx * dx + height * height) + dz * dz).sqrt();
     let point = if switch >= COMPLETION_DESTINATION_TOLERANCE { t } else { d };
     let [px, py, pz] = [p[0] - point[0], p[1] - point[1], p[2] - point[2]];
-    (pz * pz + (px * px + py * py)).sqrt() < MOVE_GOAL_DISTANCE
+    (pz * pz + (px * px + py * py)).sqrt() < goal
+}
+
+/// The distance a move with this completion has left from `p` to its target
+/// `t` (`SitePosition.y` of the site is not part of the distance), or zero
+/// once [`is_completed`] holds: the `remainingDistance` stand-in an upper
+/// state polls its walk with.
+pub fn remaining_distance(p: [f32; 3], t: [f32; 3], site_y: f32, goal: f32) -> f32 {
+    let [px, py, pz] = [p[0] - t[0], p[1] - t[1], p[2] - t[2]];
+    let straight = (pz * pz + (px * px + py * py)).sqrt();
+    if is_completed_within(p, t, t, site_y, goal) {
+        return 0.0;
+    }
+    straight
 }
 
 /// The objective's MoveAsync already passed its source gate and generated the
@@ -1795,7 +1920,53 @@ pub fn depart_along(
     route.outcome = None;
     reenter_navigation(state, route, walk_face)?;
     polyline.last()?;
-    route_along(unit, state, slot, route, walk_face, objective_face, target, fit, rng, polyline)
+    route_along(
+        unit,
+        state,
+        slot,
+        route,
+        walk_face,
+        objective_face,
+        target,
+        fit,
+        rng,
+        polyline,
+        MOVE_GOAL_DISTANCE,
+    )
+}
+
+/// [`depart_along`] whose move completes at `goal_distance` (see
+/// [`depart_toward`]).
+#[allow(clippy::too_many_arguments)]
+pub fn depart_along_to(
+    unit: &CharacterUnitId,
+    state: &mut LawWalkState,
+    slot: &mut NpcPathWalkSlot,
+    route: &mut RouteStops,
+    walk_face: &crate::walk_face::WalkFace,
+    objective_face: &crate::npc_objective::ObjectiveFace,
+    target: [f32; 3],
+    fit: Option<FitCandidate>,
+    rng: &mut crate::npc_objective::MemberRng,
+    polyline: Vec<[f32; 2]>,
+    goal_distance: f32,
+) -> Option<MotionPhase> {
+    route.outcome = None;
+    reenter_navigation(state, route, walk_face)?;
+    polyline.last()?;
+    route_along(
+        unit,
+        state,
+        slot,
+        route,
+        walk_face,
+        objective_face,
+        target,
+        fit,
+        rng,
+        polyline,
+        goal_distance,
+    )
 }
 
 /// 源下次 MoveAsync 先重新开启 NavMeshAgent。这里只恢复已完成局部 Fit 的
@@ -1836,6 +2007,7 @@ fn route_along(
     fit: Option<FitCandidate>,
     rng: &mut crate::npc_objective::MemberRng,
     polyline: Vec<[f32; 2]>,
+    goal_distance: f32,
 ) -> Option<MotionPhase> {
     let corners = lift_navigation_path(unit, objective_face, polyline);
     route.stops = build_waypoints(state.position, &corners, state.forward, rng, |candidate| {
@@ -1852,6 +2024,7 @@ fn route_along(
     route.completion = Some(MoveCompletion {
         target: corner,
         site_height: objective_face.site_height(),
+        goal_distance,
     });
     route.stalling = false;
     route.stalled = false;
