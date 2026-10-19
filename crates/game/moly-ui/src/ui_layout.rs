@@ -272,6 +272,21 @@ const OPTIONAL_DOCUMENTS: &[(&str, &str)] = &[
     ("CraftRankUp", "craft/MysekaiRankUpDialog.json"),
     ("CraftStatus", "craft/MysekaiPlayerStatusUpdateDialog.json"),
     ("CraftNewSite", "craft/MysekaiNewHarvestSiteOpenDialog.json"),
+    ("MissionScreen", "screens/ScreenLayerMysekaiMission.json"),
+    ("MissionList", "dialogs/MysekaiMissionListDialog.json"),
+    ("MissionDetail", "dialogs/MysekaiMissionDetailDialog.json"),
+    ("MissionInfo", "dialogs/MysekaiMissionInfoDialog.json"),
+    ("MissionStart", "dialogs/MysekaiMissionStartDialog.json"),
+    ("MissionComplete", "dialogs/MysekaiMissionCompleteDialog.json"),
+    ("MissionCharaReward", "dialogs/MysekaiCharaRewardSubWindowDialog.json"),
+    // The convert furniture screen (627) and its dialogs.
+    ("ConvertFurniture", "screens/ScreenLayerMysekaiConvertFurniture.json"),
+    ("ConvertItemDetail", "dialogs/MysekaiConvertItemDetailDialog.json"),
+    ("ConvertStartConfirm", "dialogs/MysekaiConvertStartConfirmDialog.json"),
+    ("ConvertShorten", "dialogs/MysekaiConvertFurnitureShortenDialog.json"),
+    ("ConvertLotteryBlueprint", "dialogs/MysekaiConvertBlueprintLotterySubWindowDialog.json"),
+    ("ConvertLotteryRecord", "dialogs/MysekaiConvertRecordLotterySubWindowDialog.json"),
+    ("ConvertSubWindow", "menu/SubWindowDialog.json"),
 ];
 
 /// How a region's `WordingManager.Get` answers a key its dictionary lacks
@@ -303,6 +318,9 @@ pub struct UiLayouts {
     /// The tween defaults, when the root carries them (a region root only).
     tween_defaults: Option<TweenDefaults>,
     docs: HashMap<String, UiPrefab>,
+    /// The UI root the layouts were read from (`moly://ui-jp/` for a region
+    /// root), once the root is chosen.
+    root: String,
     /// Optional documents the root lacks (named once when found missing).
     missing_documents: HashSet<String>,
     /// Wording keys the root lacks that a text has drawn (named once).
@@ -459,8 +477,10 @@ pub fn parse(
             info!("UI sources for region {region}: the shared UI root {ROOT}");
         }
         let stage_only = request.stage_only;
-        request.sources =
-            Some(UiSources::request(&server, &region, own_root.then_some(region.as_str()), stage_only));
+        let sources =
+            UiSources::request(&server, &region, own_root.then_some(region.as_str()), stage_only);
+        layouts.root = sources.root.clone();
+        request.sources = Some(sources);
         request.source = None;
     }
     let stage_only = request.stage_only;
@@ -698,6 +718,17 @@ pub fn parse(
         layouts.sources_ready = true;
         commands.remove_resource::<UiLayoutRequests>();
     }
+}
+
+/// The UI root path of an optional document by its key (`None` for a
+/// document the loader does not know): the path a sub-window that reads its
+/// document for itself loads it from under the same root the layouts come
+/// from.
+pub fn optional_document_path(key: &str) -> Option<&'static str> {
+    OPTIONAL_DOCUMENTS
+        .iter()
+        .find(|(name, _)| *name == key)
+        .map(|(_, path)| *path)
 }
 
 /// `PaletteUtility.GetColor`'s table: the active theme's value of every
@@ -1259,6 +1290,13 @@ impl UiLayouts {
 
     pub fn document(&self, key: &str) -> Option<&UiPrefab> {
         self.sources_ready.then(|| self.docs.get(key)).flatten()
+    }
+
+    /// The UI root the layouts were read from (`moly://ui-jp/` for a region
+    /// root), once the root is chosen: the root a reader that loads a
+    /// document for itself takes it from.
+    pub fn root(&self) -> Option<&str> {
+        self.sources_ready.then_some(self.root.as_str())
     }
     pub fn ready(&self, key: &str, server: &AssetServer) -> bool {
         if self.document(key).is_none() {

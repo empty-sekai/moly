@@ -162,6 +162,7 @@ pub mod bgm_select;
 pub mod birthday;
 pub mod browser_game;
 pub mod content_library;
+pub mod convert;
 pub mod cutscene;
 pub mod delivery;
 pub mod entry;

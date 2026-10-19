@@ -262,6 +262,7 @@ pub fn parse_record_categories(text: &str) -> Result<Vec<RecordCategory>, String
             Ok(RecordCategory {
                 id: crate::int32(row, "id")?,
                 track_type: string_field(row, "mysekaiMusicTrackType")?,
+                seq: crate::int32(row, "seq")?,
             })
         })
         .collect()
@@ -365,6 +366,8 @@ pub struct RecordObtain {
 pub struct RecordCategory {
     pub id: i32,
     pub track_type: String,
+    /// `seq`: `GetValidMusicRecordCategories` orders the categories by it.
+    pub seq: i32,
 }
 
 /// One `mysekaiMusicRecords` row: the record and its category.

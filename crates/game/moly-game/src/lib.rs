@@ -343,8 +343,11 @@ pub fn app(
         harvest_material::HarvestMaterialPlugin,
     ));
     app.add_plugins(delivery::DeliveryPlugin);
+    app.add_plugins(moly_features::convert::ConvertPlugin);
+    app.add_plugins(moly_features::mission::MissionPlugin);
     app.add_plugins(ui_particle::UiParticlePlugin);
     common_dialog::install(&mut app);
+    moly_ui::subwindow_dialog::install(&mut app);
     home_action::install(&mut app);
     app
 }
