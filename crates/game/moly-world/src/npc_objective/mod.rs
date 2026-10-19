@@ -1634,6 +1634,14 @@ pub fn engine_float_draw(rng: &mut MemberRng, total: f32) -> f32 {
     bits as f32 / 8_388_607.0 * total
 }
 
+/// `Random.Range(min, max)` on the member generator: one engine float draw,
+/// scaled onto `[min, max)` by the same 23 bits the range draw spends (one
+/// generator call).
+pub fn uni_draw(rng: &mut MemberRng, min: f32, max: f32) -> f32 {
+    let bits = (rng.next() >> 41) as u32;
+    min + (max - min) * (bits as f32 / 8_388_607.0)
+}
+
 /// 动作点支的面采样门容差（米）：挂点 x/z 上的可行走面采样半径
 /// （源动作点门里采样调用的同值）。
 pub const SAMPLE_GATE_TOLERANCE: f32 = 0.3;

@@ -17,11 +17,16 @@
 //! This module holds the shape only; the state bodies arrive with the
 //! controller that runs them.
 
+pub mod decider;
+pub mod lower_idle;
+pub mod plan;
 pub mod timing;
 pub mod upper;
 
 use crate::objective::TalkType;
 
+pub use lower_idle::IdleLower;
+pub use plan::{NpcPlan, PlanTalkData, PlanUpper};
 pub use timing::{
     ACTION_STATE_TALK, IDLE_DURATION_MIN, INACTIVE_RECOVERY_SECONDS, MAX_TRANSITIONS_PER_FRAME,
     REST_AFTER_UPPER_SECONDS,
@@ -165,6 +170,70 @@ impl UpperState {
             _ => true,
         }
     }
+
+    /// Whether the state completes on a later update or starts one: the two
+    /// markers (`Rest`, `Stay`) have no mover, every walk does.
+    pub fn has_mover(&self) -> bool {
+        !matches!(self, UpperState::Rest | UpperState::Stay)
+    }
+}
+
+/// `NPCUpperStateBase`: the fields every upper state carries beside its own.
+/// `Enter()` zeroes the elapsed time, clears `IsComplete` and calls the
+/// state's `OnEnter`; `Update()` adds `Time.deltaTime` and then calls
+/// `OnUpdate`. The base itself has no mover: each concrete state declares
+/// its own running flag, which starts set and is cleared once the move
+/// stops, and the inherited `OnUpdate` completes the state as soon as the
+/// flag is clear.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct UpperBase {
+    /// The state's own running flag; `OnUpdate` completes once it is clear.
+    pub is_moving: bool,
+}
+
+impl UpperBase {
+    /// `Enter()`: a fresh entry, not complete, running when the state has a
+    /// mover.
+    pub fn enter(&mut self, has_mover: bool) -> UpperEntry {
+        UpperEntry {
+            is_complete: false,
+            elapsed: 0.0,
+            is_moving: has_mover,
+        }
+    }
+}
+
+/// The state while it runs: the base's clock and flags.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct UpperEntry {
+    /// `IsComplete`.
+    pub is_complete: bool,
+    /// `_elapsedTime`: `Time.deltaTime` summed since the entry.
+    pub elapsed: f32,
+    /// The state's running flag.
+    pub is_moving: bool,
+}
+
+impl UpperEntry {
+    /// `Update()`: add this frame's time and run the state's `OnUpdate`. The
+    /// inherited body alone (`is_moving` clear) completes the state; a state
+    /// that is still moving stays incomplete.
+    pub fn update(&mut self, dt: f32) {
+        self.elapsed += dt;
+        if !self.is_moving {
+            self.is_complete = true;
+        }
+    }
+
+    /// `Exit()`: the state leaves; the entry keeps nothing.
+    pub fn exit(&mut self) {
+        self.is_moving = false;
+    }
+
+    /// `get_CanInterrupt`: every upper state answers true.
+    pub fn can_interrupt(&self) -> bool {
+        true
+    }
 }
 
 /// `AvatarMoveStatus`: how an upper state's move ended.
@@ -298,7 +367,8 @@ impl LowerType {
     }
 }
 
-/// The lower state a machine holds.
+/// The lower state a machine holds. The two timed states carry their pause;
+/// the bodies of the others keep their own timers.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LowerState {
     /// The universal fallback: a pause of 5–8 s drawn when it is built.
@@ -432,6 +502,12 @@ impl LowerState {
         }
         flags
     }
+}
+
+/// The fallback idle's pause: `Random.Range(5.0f, 8.0f)`, one engine float
+/// draw taken when the state is constructed (not when it is entered).
+pub fn idle_duration(draw: &mut dyn FnMut(f32, f32) -> f32) -> f32 {
+    draw(5.0, 8.0)
 }
 
 /// The presenter's `CreateLowerState`: the lower state it builds from an
@@ -623,6 +699,21 @@ mod tests {
         assert!(LowerState::HighPriorityFixtureReaction.flags().blocks_photo_shot_capture);
         assert!(LowerState::MultiFixtureAction.flags().is_multi_character_action);
         assert!(!LowerState::SingleFixtureAction.flags().is_multi_character_action);
+    }
+
+    #[test]
+    fn idle_duration_is_one_draw_of_the_source_range() {
+        // Random.Range(5.0f, 8.0f): one float draw over the range.
+        let mut calls = 0;
+        let mut range = (0.0f32, 0.0f32);
+        let duration = idle_duration(&mut |low, high| {
+            calls += 1;
+            range = (low, high);
+            6.31
+        });
+        assert_eq!(calls, 1);
+        assert_eq!(range, (5.0, 8.0));
+        assert_eq!(duration, 6.31);
     }
 
     #[test]

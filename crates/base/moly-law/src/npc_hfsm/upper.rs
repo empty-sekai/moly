@@ -11,8 +11,88 @@
 //! exactly one engine float draw `r` in `[0, total)`, scans a single-
 //! precision running sum and takes the first entry with `r <= acc`; the
 //! trailing fallback (reached only through rounding) is the last entry.
+//!
+//! The two marker upper states (`Rest`, `Stay`) and the base's entry clock
+//! are also here: the markers have no fields, no mover and no timer, so the
+//! inherited base `OnUpdate` completes them on their first update.
 
-use super::UpperType;
+use super::{AvatarMoveStatus, UpperBase, UpperEntry, UpperResult, UpperState, UpperType};
+
+/// `RestUpperState` and `StayUpperState`: no fields, no mover, no timer. The
+/// enter is empty; the inherited `OnUpdate` sees the running flag clear and
+/// completes the state on its first update; the result tags the state type,
+/// the presenter's position and `Success`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RestUpper {
+    kind: UpperType,
+    base: UpperBase,
+    entry: Option<UpperEntry>,
+}
+
+impl RestUpper {
+    /// `Rest` for the controller's rest marker.
+    pub fn rest() -> Self {
+        Self::of(UpperType::Rest)
+    }
+
+    /// `Stay`, the same marker under its own type.
+    pub fn stay() -> Self {
+        Self::of(UpperType::Stay)
+    }
+
+    fn of(kind: UpperType) -> Self {
+        Self {
+            kind,
+            base: UpperBase::default(),
+            entry: None,
+        }
+    }
+
+    /// The upper state object.
+    pub fn state(&self) -> UpperState {
+        match self.kind {
+            UpperType::Stay => UpperState::Stay,
+            _ => UpperState::Rest,
+        }
+    }
+
+    /// `Enter()`: the marker carries no mover, so the entry is not moving.
+    pub fn enter(&mut self) {
+        self.entry = Some(self.base.enter(false));
+    }
+
+    /// `Update()`: one frame of the base; the marker completes on this same
+    /// update.
+    pub fn update(&mut self, dt: f32) {
+        if let Some(entry) = self.entry.as_mut() {
+            entry.update(dt);
+        }
+    }
+
+    /// `IsComplete`.
+    pub fn is_complete(&self) -> bool {
+        self.entry.map_or(false, |entry| entry.is_complete)
+    }
+
+    /// `GetResult()`: the marker's type, the presenter's position, no
+    /// fixture or character target, `Success`.
+    pub fn result(&self, position: [f32; 3]) -> UpperResult {
+        UpperResult {
+            state: self.kind,
+            arrival: position,
+            target_fixture: None,
+            target_npc: None,
+            move_status: AvatarMoveStatus::Success,
+        }
+    }
+
+    /// `Exit()`.
+    pub fn exit(&mut self) {
+        if let Some(entry) = self.entry.as_mut() {
+            entry.exit();
+        }
+    }
+}
 
 /// `UpperStateWeightEntry`: one state type and its weight.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -203,6 +283,53 @@ mod tests {
         assert_eq!(choice.draw, Some(7.5));
         assert_eq!(choice.entry, None);
         assert_eq!(queue.taken, 1);
+    }
+
+    #[test]
+    fn rest_and_stay_need_their_first_update_to_complete() {
+        // The upper base's OnUpdate alone: the running flag never sets, so
+        // the first update completes the marker (the enter leaves it open).
+        for (marker, kind) in [
+            (RestUpper::rest(), UpperType::Rest),
+            (RestUpper::stay(), UpperType::Stay),
+        ] {
+            let mut marker = marker;
+            assert!(!marker.is_complete(), "not complete before the entry");
+            marker.enter();
+            assert!(!marker.is_complete(), "the entry does not complete");
+            marker.update(1.0 / 60.0);
+            assert!(marker.is_complete(), "one update completes");
+            let result = marker.result([1.5, 2.0, 3.5]);
+            assert_eq!(result.state, kind);
+            assert_eq!(result.arrival, [1.5, 2.0, 3.5]);
+            assert_eq!(result.move_status, AvatarMoveStatus::Success);
+            assert_eq!((result.target_fixture, result.target_npc), (None, None));
+            assert!(!result.is_move_failed());
+            marker.exit();
+        }
+        assert_eq!(RestUpper::rest().state(), UpperState::Rest);
+        assert_eq!(RestUpper::stay().state(), UpperState::Stay);
+    }
+
+    #[test]
+    fn the_upper_base_keeps_the_frame_time() {
+        // Update() adds Time.deltaTime before OnUpdate; a state with a mover
+        // stays incomplete while the flag is set.
+        let mut base = UpperBase::default();
+        let mut entry = base.enter(true);
+        assert!(!entry.is_complete);
+        assert!(entry.is_moving);
+        entry.update(0.5);
+        entry.update(0.25);
+        assert_eq!(entry.elapsed, 0.75);
+        assert!(!entry.is_complete);
+        assert!(entry.can_interrupt());
+        entry.is_moving = false;
+        entry.update(0.0);
+        assert!(entry.is_complete);
+        assert!(!UpperState::Rest.has_mover());
+        assert!(!UpperState::Stay.has_mover());
+        assert!(UpperState::MoveToPosition.has_mover());
     }
 
     #[test]
