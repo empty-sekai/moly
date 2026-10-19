@@ -15,6 +15,7 @@ crate-type = ["cdylib"]
 [dependencies]
 bevy = { workspace = true }
 moly-app = { path = "../moly-app" }
+moly-link = { path = "../../net/moly-link" }
 moly-store = { path = "../../base/moly-store" }
 
 [target.'cfg(target_os = "android")'.dependencies]

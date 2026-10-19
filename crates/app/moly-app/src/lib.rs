@@ -87,10 +87,10 @@ fn run_app(
     #[cfg(target_arch = "wasm32")]
     {
         // The game returned above: this is the stage, which names no server
-        // and links to the default address.
+        // and links to the public one.
         moly_game::configure_browser_library(&mut app);
         moly_game::configure_browser_stage(&mut app);
-        install_browser_link(&mut app, moly_link::DEFAULT_SERVER_URL.to_owned());
+        install_browser_link(&mut app, moly_link::PUBLIC_SERVER_URL.to_owned());
         attach_canvas(&mut app);
         announce_ready(&mut app);
     }
@@ -121,10 +121,40 @@ fn run_game(web_render_settings: bevy::render::settings::WgpuSettings, start: Ga
 fn install_browser_link(app: &mut bevy::prelude::App, address: String) {
     app.add_plugins(moly_link::LinkPlugin(moly_link::LinkConfig {
         address,
-        user: moly_protocol::UserId::local(),
+        user: browser_user(),
         client: format!("moly-app {}", moly_game::VERSION),
         connect_window: moly_link::LinkConfig::CONNECT_WINDOW,
     }));
+}
+
+/// The page's local-storage key for the browser's user id.
+#[cfg(target_arch = "wasm32")]
+const USER_KEY: &str = "moly-user";
+
+/// This browser's user id: the one kept in local storage, or a new random
+/// one, which is kept there. Without local storage the id lasts for the page.
+#[cfg(target_arch = "wasm32")]
+fn browser_user() -> moly_protocol::UserId {
+    let window = web_sys::window();
+    let storage = window.as_ref().and_then(|window| window.local_storage().ok().flatten());
+    if let Some(kept) = storage.as_ref().and_then(|storage| storage.get_item(USER_KEY).ok().flatten()) {
+        let user = moly_protocol::UserId(kept);
+        if user.is_valid() {
+            return user;
+        }
+    }
+    let mut bytes = [0u8; 16];
+    let crypto = window.as_ref().and_then(|window| window.crypto().ok());
+    match crypto.map(|crypto| crypto.get_random_values_with_u8_array(&mut bytes)) {
+        Some(Ok(_)) => {}
+        _ => fail_loud("the page has no crypto.getRandomValues for a user id"),
+    }
+    let user = moly_protocol::UserId(bytes.iter().map(|byte| format!("{byte:02x}")).collect());
+    match storage.map(|storage| storage.set_item(USER_KEY, &user.0)) {
+        Some(Ok(())) => {}
+        _ => bevy::log::warn!("local storage is unavailable: this page's user id is not kept"),
+    }
+    user
 }
 
 #[cfg(target_arch = "wasm32")]

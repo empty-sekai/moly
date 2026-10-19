@@ -30,7 +30,7 @@ use moly_protocol::{
     PROTOCOL_VERSION, RPC_PATH,
 };
 
-pub use address::{is_server_address, DEFAULT_SERVER_URL};
+pub use address::{is_server_address, DEFAULT_SERVER_URL, PUBLIC_SERVER_URL};
 
 /// How long the link waits for the first welcome: a server started together
 /// with the game may not listen yet.

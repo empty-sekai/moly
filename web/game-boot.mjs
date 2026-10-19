@@ -24,7 +24,7 @@ import { audioActivation } from "./stage-audio.mjs";
 
 export { GAME_ABI, GAME_DOCUMENTS, GAME_EXPORTS, GAME_SCHEMA };
 /** The server the page's game connects to when its URL names none. */
-export const MOLY_DEFAULT_SERVER = "http://127.0.0.1:15800";
+export const MOLY_DEFAULT_SERVER = "https://server.emptysekai.dev";
 const IDENTITY = /^[a-z0-9][a-z0-9._-]{0,95}$/;
 const SERVER_ADDRESS = /^https?:\/\/[A-Za-z0-9._-]+(?::\d+)?$/;
 const CATALOG = /^[a-f0-9]{64}$/;

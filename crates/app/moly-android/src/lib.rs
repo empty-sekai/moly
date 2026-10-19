@@ -7,8 +7,9 @@
 //! to the app's own data directory. The game reaches its server at the
 //! address `MOLY_SERVER_URL` names in the process environment, else the one
 //! the build names at `MOLY_SERVER_URL`, else
-//! [`DEFAULT_SERVER_URL`]; with `adb reverse tcp:15800 tcp:15800` the default
-//! reaches the developer's machine.
+//! [`moly_link::PUBLIC_SERVER_URL`]. A build that names
+//! `http://127.0.0.1:15800`, with `adb reverse tcp:15800 tcp:15800`, reaches
+//! a server on the developer's machine.
 //!
 //! Every item is behind `target_os = "android"`: elsewhere the crate is an
 //! empty library.
@@ -16,10 +17,6 @@
 
 /// The tag every message this entry point writes to logcat carries.
 const LOGCAT_TAG: &[u8] = b"moly\0";
-
-/// The server the game connects to when neither the environment nor the build
-/// names one.
-const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:15800";
 
 /// The entry point. `#[bevy_main]` exports it as the `android_main` symbol
 /// Android's game activity calls, and runs it on the activity's own thread.
@@ -79,7 +76,7 @@ fn main() {
 fn built_server_url() -> &'static str {
     match option_env!("MOLY_SERVER_URL") {
         Some(addr) if !addr.trim().is_empty() => addr.trim(),
-        _ => DEFAULT_SERVER_URL,
+        _ => moly_link::PUBLIC_SERVER_URL,
     }
 }
 

@@ -4829,6 +4829,7 @@ dependencies = [
  "android_log-sys",
  "bevy",
  "moly-app",
+ "moly-link",
  "moly-store",
 ]
 

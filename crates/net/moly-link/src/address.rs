@@ -3,6 +3,10 @@
 /// The server a native start uses when `MOLY_SERVER_URL` is unset.
 pub const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:15800";
 
+/// The public server a browser page or an Android build uses when neither
+/// names another.
+pub const PUBLIC_SERVER_URL: &str = "https://server.emptysekai.dev";
+
 /// Whether `value` is a server address: `http://` or `https://`, then a host,
 /// an optional port, and no path, no query, no credentials and no
 /// whitespace.
@@ -62,6 +66,7 @@ mod tests {
     #[test]
     fn the_default_server_address_is_admitted() {
         assert!(is_server_address(DEFAULT_SERVER_URL));
+        assert!(is_server_address(PUBLIC_SERVER_URL));
     }
 
     #[test]

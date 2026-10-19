@@ -48,6 +48,8 @@ cargo run --release -p moly-app
 服务端与游戏读取同样的资源根与主表变量，两者读到的主表一致。游戏按 `MOLY_SERVER_URL`
 （`http://` 或 `https://` 地址，缺省 `http://127.0.0.1:15800`）连接服务端，连接不上时给出具名的提示，
 不会退回进程内的替代实现。启动器与 MCP 服务器会先启动服务端、取得它实际绑定的地址，再启动游戏。
+网页版按页面的 `?server=` 参数连接，安卓版按构建时的 `MOLY_SERVER_URL` 连接，两者缺省都连接公共服务端
+`https://server.emptysekai.dev`；每个浏览器在本地存储中保存一个随机的用户 id。
 
 构建默认写入仓库的 `target/`；需要共享缓存时，自行设置 `CARGO_TARGET_DIR`，
 增量编译可通过 `CARGO_INCREMENTAL` 配置。
