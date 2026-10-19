@@ -2059,9 +2059,9 @@ impl Plugin for FixtureEditPlugin {
             )
             .add_systems(
                 Update,
-                publish_unsaved
-                    .after(FixtureEditSystems::Commands)
-                    .before(crate::site::read_switch),
+                // `site::read_switch` runs before the commands, so it reads
+                // the flag the previous frame's commands left.
+                publish_unsaved.after(FixtureEditSystems::Commands),
             )
             .add_systems(Update, read_save_answer.after(apply_commands))
             .add_systems(
