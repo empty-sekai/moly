@@ -41,6 +41,18 @@ fn string_field(row: &Value, key: &str) -> Result<String, String> {
         .ok_or_else(|| format!("{key} of {row} is not a string"))
 }
 
+/// A column some rows of the master lack: `None` when the row has no such
+/// key; a key that is not a string is refused (never defaulted).
+fn string_column(row: &Value, key: &str) -> Result<Option<String>, String> {
+    match row.get(key) {
+        None => Ok(None),
+        Some(value) => value
+            .as_str()
+            .map(|text| Some(text.to_owned()))
+            .ok_or_else(|| format!("{key} of {row} is not a string")),
+    }
+}
+
 /// `mysekaiConvertItemObtainType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ObtainType {
@@ -220,6 +232,8 @@ pub fn parse_boxes(text: &str) -> Result<Vec<ResourceBox>, String> {
             Ok(ResourceBox {
                 id,
                 purpose,
+                name: string_column(row, "name")?,
+                description: string_column(row, "description")?,
                 details,
             })
         })
@@ -337,11 +351,17 @@ pub struct BoxDetail {
     pub quantity: i32,
 }
 
-/// One `resourceBoxes` row: a (purpose, id) pair and its details.
+/// One `resourceBoxes` row: a (purpose, id) pair, its details, and the row's
+/// `name` and `description`. Most rows of the master carry neither column
+/// (e.g. `id` 1 has a description and no name in the 2026-10-18 master), so
+/// both are `None` where the row lacks them; a column that is present must be
+/// a string.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResourceBox {
     pub id: i32,
     pub purpose: String,
+    pub name: Option<String>,
+    pub description: Option<String>,
     pub details: Vec<BoxDetail>,
 }
 
@@ -453,5 +473,37 @@ impl ConvertMasters {
             .iter()
             .find(|row| row.kind == "convert_time_shorten")
             .map(|row| row.level)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `resourceBoxes` rows carry `name` and `description` where the master
+    /// gives them (`id` 1 in the 2026-10-18 master has a description and no
+    /// name): a missing column reads `None`, a present one reads its text,
+    /// and a present column that is not a string is refused, never defaulted.
+    #[test]
+    fn a_box_column_some_rows_lack_is_none_not_defaulted() {
+        let rows = r#"[
+            {"id": 1, "resourceBoxPurpose": "p", "resourceBoxType": "expand",
+             "description": "only a description",
+             "details": [{"seq": 1, "resourceType": "material", "resourceId": 6, "resourceQuantity": 100}]},
+            {"id": 2, "resourceBoxPurpose": "p", "resourceBoxType": "expand",
+             "name": "box name", "description": "box description",
+             "details": [{"seq": 1, "resourceType": "material", "resourceId": 7, "resourceQuantity": 1},
+                         {"seq": 2, "resourceType": "material", "resourceId": 8, "resourceQuantity": 3}]}
+        ]"#;
+        let boxes = parse_boxes(rows).expect("the master's columns");
+        assert_eq!(boxes.len(), 2);
+        assert_eq!(boxes[0].name, None);
+        assert_eq!(boxes[0].description.as_deref(), Some("only a description"));
+        assert_eq!(boxes[1].name.as_deref(), Some("box name"));
+        assert_eq!(boxes[1].description.as_deref(), Some("box description"));
+        assert_eq!(boxes[1].details.len(), 2);
+        let bad = r#"[{"id": 3, "resourceBoxPurpose": "p", "name": 5,
+                      "details": [{"seq": 1, "resourceType": "material", "resourceId": 1, "resourceQuantity": 1}]}]"#;
+        assert!(parse_boxes(bad).is_err());
     }
 }

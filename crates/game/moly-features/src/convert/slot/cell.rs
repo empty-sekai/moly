@@ -61,9 +61,15 @@ pub const MACHINE_LEVEL: &str = "WORD_CONVERT_MACHINE_LEVEL";
 /// The count down background's alpha for a slot that is not processing.
 pub const TIMER_IDLE_ALPHA: f32 = 0.1;
 /// `_receiveAnimationSeconds`: the receive and the shorten wave tween's
-/// duration. Its value lives in the gauge's serialized prefab data, which is
-/// not read here (unverified): the constant is a stand-in and no test pins it.
-pub const RECEIVE_SECONDS: f32 = 0.3;
+/// duration. The gauge's serialized component in
+/// `screens/ScreenLayerMysekaiConvertFurniture.json` (node
+/// `.../MysekaiConvertFurnitureSlotView/Slots/MysekaiConvertFurnitureSlot/Root/GaugeView`,
+/// `Sekai.Mysekai.MysekaiConvertFixtureSlotCellGaugeView`) is `partial` in that
+/// document (`"state": "no decoder (partial; raw length kept)"`, `rawLength`
+/// 256, `fields` empty): the field's name and value are not extracted, and
+/// this product has no reader for partial MonoBehaviour bytes. No duration is
+/// pinned here; the wave is drawn as the slot's progress by the slots' read.
+pub const RECEIVE_SECONDS: Option<f32> = None;
 /// The three effects `SetupEffect` instantiates in the gauge's roots. The
 /// bundle they load from is not part of the public asset root: named, not
 /// loaded.
@@ -549,14 +555,24 @@ impl Cell {
     }
 
     /// `PlayReceiveAsync(from, to)`: the wave from the slot's progress at the
-    /// receive to the fresh model's progress.
+    /// receive to the fresh model's progress. Without
+    /// `_receiveAnimationSeconds` (see [`RECEIVE_SECONDS`]) the wave starts
+    /// at its end (`DOVirtual.Float`'s last value at duration 0).
     pub fn play_receive(&mut self, from: f32, to: f32) {
-        self.tween = Some(WaveTween {
-            from,
-            to,
-            seconds: RECEIVE_SECONDS,
-            elapsed: 0.0,
-        });
+        match RECEIVE_SECONDS {
+            Some(seconds) => {
+                self.tween = Some(WaveTween {
+                    from,
+                    to,
+                    seconds,
+                    elapsed: 0.0,
+                });
+            }
+            None => {
+                self.tween = None;
+                self.view.wave_progress = Some(to);
+            }
+        }
     }
 
     /// `Timer.PlayConvertStart(model)`: the count down's opacity 1, the skip
@@ -616,13 +632,23 @@ impl Cell {
     }
 
     /// `PlayShortenAsync(progress)`: the wave from the slot's progress to 1.
+    /// Without `_receiveAnimationSeconds` it starts at 1, as in
+    /// [`Self::play_receive`].
     pub fn play_shorten(&mut self, progress: f32) {
-        self.tween = Some(WaveTween {
-            from: progress,
-            to: 1.0,
-            seconds: RECEIVE_SECONDS,
-            elapsed: 0.0,
-        });
+        match RECEIVE_SECONDS {
+            Some(seconds) => {
+                self.tween = Some(WaveTween {
+                    from: progress,
+                    to: 1.0,
+                    seconds,
+                    elapsed: 0.0,
+                });
+            }
+            None => {
+                self.tween = None;
+                self.view.wave_progress = Some(1.0);
+            }
+        }
     }
 
     /// `Dispose`: the wave's `Dispose` and the three effects' prefabs

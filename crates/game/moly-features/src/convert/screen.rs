@@ -363,6 +363,9 @@ pub struct ConvertScreen {
     pub shorten_pending: Option<super::start::ShortenIntent>,
     /// The skip sent: its slot and the call's number.
     pub shorten_sent: Option<(i32, u32)>,
+    /// `ShowDetailDialog(model)`'s item, waiting for the item detail dialog
+    /// ([`super::dialogs`]).
+    pub detail_request: Option<i32>,
     pub seen: BTreeSet<String>,
 }
 
@@ -386,6 +389,12 @@ impl ConvertScreen {
     /// `&mut ConvertScreen` and names its own refused lines.
     pub fn seen_mut(&mut self) -> &mut BTreeSet<String> {
         &mut self.seen
+    }
+
+    /// `OnInitComponent` ran (`Presenter.Setup`): the screen's page is up and
+    /// its dialogs may open.
+    pub(crate) fn is_set_up(&self) -> bool {
+        self.set_up
     }
 
     /// `SlotStatusState.PlayConvertStartAsync(slotId)`'s call into the slot
@@ -924,10 +933,7 @@ pub fn advance(
         if let Some(ItemAction::Detail(item)) = long {
             // `ShowDetailDialog` -> `Show1ButtonDialog<
             // MysekaiConvertItemDetailDialog>.Setup(model)`.
-            not_built(
-                screen.seen_mut(),
-                "the item detail dialog (MysekaiConvertItemDetailDialog)",
-            );
+            screen.detail_request = Some(item);
             info!("[convert] ItemSelectListCell.ShowDetailDialog({item})");
         }
         let ConvertScreen {
@@ -1336,10 +1342,8 @@ fn input_item_select(
             super::start::confirm_convert_start(screen, ctx);
         }
         if let Some(item) = detail_dialog {
-            not_built(
-                screen.seen_mut(),
-                "the item detail dialog (MysekaiConvertItemDetailDialog)",
-            );
+            // `ShowDetailDialog` -> the item detail dialog's request.
+            screen.detail_request = Some(item);
             info!("[convert] ItemSelectListCell.ShowDetailDialog({item})");
         }
     }

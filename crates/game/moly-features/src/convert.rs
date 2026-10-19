@@ -19,6 +19,7 @@
 
 pub mod model;
 mod detail;
+pub mod dialogs;
 mod item_select;
 mod screen;
 mod slot;
@@ -44,18 +45,74 @@ impl Plugin for ConvertPlugin {
         app.init_resource::<screen::ConvertScreen>()
             .init_resource::<screen::ConvertPress>()
             .init_resource::<start::MysekaiConvertService>()
+            .init_resource::<dialogs::ConvertDialogs>()
+            // The dialogs' documents install once the root has them: one
+            // system, ordered after nothing that runs after the layer step,
+            // so the dialogs' `open` (before the step) cannot form a cycle
+            // with it.
+            .add_systems(Update, dialogs::spawn_when_ready.before(dialogs::open_start))
+            // The dialogs open only while the layer plays, which is only ever
+            // true after the step (`update`): each `open` needs no order
+            // against `spawn_when_ready` and takes its order from the frame.
+            .add_systems(
+                Update,
+                (
+                    dialogs::open_start,
+                    dialogs::open_shorten,
+                    dialogs::open_detail,
+                ),
+            )
             // The start or the skip a dialog's OK asked for is sent after the
             // screen's own taps wrote the request and after the dialogs that
             // answer them, so a pass dialog the start shows waits for it.
             .add_systems(
                 Update,
-                start::send_pending.after(screen::input),
+                start::send_pending
+                    .after(screen::input)
+                    .after(dialogs::open_start)
+                    .after(dialogs::open_shorten),
             )
             // The requests' answers: after the reader applied the answer's
             // sections to the copies, before the frames that draw them.
             .add_systems(
                 Update,
                 start::answers.after(crate::userdata::apply_arrivals),
+            )
+            // The dialogs' setup each frame: after their open (so the frame
+            // that opens one draws it set up) and before the frame.
+            .add_systems(
+                Update,
+                (dialogs::setup_start, dialogs::setup_shorten, dialogs::setup_detail)
+                    .after(dialogs::open_start)
+                    .after(dialogs::open_shorten)
+                    .after(dialogs::open_detail)
+                    .before(crate::ui_layout::render),
+            )
+            // Their taps: the dialog slot is modal, so they take the pointer
+            // before the shell and the screen's own pages, after the
+            // gesture step.
+            .add_systems(
+                Update,
+                dialogs::click
+                    .run_if(crate::game_settings::scene_input_enabled)
+                    .after(crate::gesture::advance)
+                    .before(crate::menu_shell::click)
+                    .before(screen::input),
+            )
+            // Their back key: after the manager's reader wrote it, and after
+            // the screen's own back key (which the dialog slot already
+            // outranks).
+            .add_systems(
+                Update,
+                dialogs::back_key
+                    .after(crate::ui_layers::back_key)
+                    .after(screen::back_key),
+            )
+            // Their visibility each frame, after whatever opened or closed
+            // them, before the frame.
+            .add_systems(
+                Update,
+                dialogs::place.before(crate::ui_layout::render),
             )
             .add_systems(
                 Update,

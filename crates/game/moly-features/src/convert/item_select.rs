@@ -258,8 +258,10 @@ pub fn compose(layouts: &UiLayouts, tab_count: usize) -> Result<(UiPrefab, PageB
         });
     }
     let detail = super::detail::compose(&mut doc, layouts, &view)?;
+    // The same composed document holds the slot page; the page hides it while
+    // it shows, so its path is required like the nodes above.
     let slot_page = super::screen::class_path(&doc, "MysekaiConvertFurnitureSlotView")
-        .unwrap_or_default();
+        .ok_or_else(|| format!("no MysekaiConvertFurnitureSlotView in the composed screen"))?;
     Ok((
         doc,
         PageBindings {
@@ -305,9 +307,9 @@ pub fn icon_load(
 }
 
 /// `MysekaiConvertItemModelBase.GetItemName`: a normal item's single obtain
-/// resource name, or a blueprint's or record's wording. A box with several
-/// details (or a resource type this reader has no master for) has no name
-/// here; `None` keeps the document's serialized text.
+/// resource name (or, with several details, its obtain box's `name`), or a
+/// blueprint's or record's wording. `None` where the master row it needs
+/// lacks the text; `None` keeps the document's serialized text.
 pub fn item_name(
     layouts: &UiLayouts,
     ctx: ItemContext<'_>,
@@ -319,9 +321,19 @@ pub fn item_name(
         ItemModel::Record { obtain, .. } => Some(layouts.wording(obtain.name_key())),
         ItemModel::Normal { .. } => match ctx.machine().obtain(model.master()).as_slice() {
             [detail] => masters.name(&detail.resource_type, detail.resource_id),
-            _ => None,
+            _ => obtain_box(ctx, model).and_then(|box_| box_.name.clone()),
         },
     }
+}
+
+/// The `mysekai_convert_obtain` box a normal item draws
+/// (`MasterDataManager.GetMasterResourceBox("mysekai_convert_obtain",
+/// externalId)`).
+pub fn obtain_box<'a>(ctx: ItemContext<'a>, model: &ItemModel<'a>) -> Option<&'a moly_masters::convert::ResourceBox> {
+    if !matches!(model, ItemModel::Normal { .. }) {
+        return None;
+    }
+    ctx.masters.box_of(moly_masters::convert::BOX_OBTAIN, model.master().external_id)
 }
 
 /// Every thumbnail the list and the detail panel can show, by its client
