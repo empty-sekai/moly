@@ -4,10 +4,12 @@
 //! AssetServer 通路——native 与 web 同路，装载延迟与失败归同一套判据，不另
 //! 开旁路。schema 的解释归各域模块，这里只管把字节变成字符串。
 //!
-//! Master tables are JSON assets too; [`master`] loads them from the region's
-//! master mirror and names each one it cannot give its consumer.
+//! Master tables are JSON assets too; [`master`] loads them from the regions'
+//! master hosts and names each one it cannot give its consumer, and
+//! [`master_merge`] holds the rows of a table across the regions.
 
 pub mod master;
+mod master_merge;
 
 use bevy::app::App;
 use bevy::asset::io::Reader;

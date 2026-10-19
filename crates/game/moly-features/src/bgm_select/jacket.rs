@@ -30,7 +30,7 @@ use std::collections::{BTreeSet, HashMap};
 use bevy::asset::LoadState;
 use bevy::prelude::*;
 use moly_assets::json::master::{self, MasterData, MasterTable};
-use moly_assets::remote::{self, Remote, RemoteRegion};
+use moly_assets::remote::{self, Remote, Region};
 
 use super::{JACKET_CACHE_BEYOND_VIEW, JACKET_DIRECTORY, SOUNDTRACK_JACKET_PREFIX};
 
@@ -140,7 +140,7 @@ enum Step {
 }
 
 impl RemoteLoad {
-    fn start(server: &AssetServer, region: RemoteRegion, relative: &str) -> Self {
+    fn start(server: &AssetServer, region: Region, relative: &str) -> Self {
         Self {
             handle: server.load(remote::storage_asset(Remote::Storage, region, relative)),
             mirror: false,
@@ -148,7 +148,7 @@ impl RemoteLoad {
         }
     }
 
-    fn step(&mut self, server: &AssetServer, region: RemoteRegion, relative: &str) -> Step {
+    fn step(&mut self, server: &AssetServer, region: Region, relative: &str) -> Step {
         match server.load_state(&self.handle) {
             LoadState::Loaded => Step::Ready,
             LoadState::Failed(error) if !self.mirror => {
@@ -178,7 +178,7 @@ enum Fetched {
 /// Where the jackets are read from, and what has been asked for.
 #[derive(Resource, Default)]
 pub struct Jackets {
-    region: Option<RemoteRegion>,
+    region: Option<Region>,
     categories: Option<Result<HashMap<i32, SoundTrackCategory>, String>>,
     tracks: Option<Result<HashMap<i32, i32>, String>>,
     records: Option<Result<Vec<(i32, i32, bool)>, String>>,
@@ -202,7 +202,11 @@ impl Jackets {
     }
 
     /// The region's jackets are read for.
-    fn region(&mut self, data: &MasterData) -> Option<RemoteRegion> {
+    ///
+    /// The masters it reads are the merged table of every enabled region;
+    /// only the jacket images come from one region's storage, and that is the
+    /// root's region. This is where that region is read.
+    fn region(&mut self, data: &MasterData) -> Option<Region> {
         let region = data.region()?;
         if self.region != Some(region) {
             *self = Jackets {
@@ -300,7 +304,7 @@ impl Jackets {
     /// the ones not asked yet, and advances every load. A load still under
     /// way for a record that just left the view stays among the
     /// [`JACKET_CACHE_BEYOND_VIEW`] most recently asked for.
-    fn keep(&mut self, server: &AssetServer, region: RemoteRegion, needed: &[i32]) {
+    fn keep(&mut self, server: &AssetServer, region: Region, needed: &[i32]) {
         let needed: BTreeSet<i32> = needed.iter().copied().collect();
         for record in &needed {
             self.recent.retain(|known| known != record);

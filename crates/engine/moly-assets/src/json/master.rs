@@ -1,4 +1,4 @@
-//! Master tables: the game's own tables, read at runtime from the region's
+//! Master tables: the game's own tables, read at runtime from the regions'
 //! master hosts ([`crate::remote`]), never from the asset root.
 //!
 //! A consumer declares each table it reads as a [`MasterTable`]: the upstream
@@ -8,10 +8,21 @@
 //!
 //! [`resolve`] is the one system that loads them. Once the root's region is
 //! known (`source.region` of the root's `source.json`), each requested table
-//! is read from the master bases in order ([`MasterBases`]: the master host,
-//! then its mirror), and the region's upstream data version is logged once. A
-//! base whose read timed out (no response headers within the reader's bound)
-//! is demoted for the session: every later table tries it after the others.
+//! is read as the merged table ([`merge_table`]): the JP table, then the same
+//! table of every enabled non-JP region ([`ENABLED`]). Each is read from the master
+//! bases in order ([`MasterBases`]), base by base and JP's table first, and
+//! the root's region's upstream data version is logged once. A base whose
+//! read timed out (no response headers within the reader's bound) is demoted
+//! for the session: every later table tries it after the others.
+//!
+//! The merged text is what the consumer's parser reads, so a consumer sees
+//! all JP rows and, after them, each row an enabled region adds with the
+//! field `"moly:region"` naming the region; a key two non-JP regions both add
+//! refuses the table by name. A non-JP table that no base serves leaves the
+//! table as the JP rows, named once. A table that is not merged (a document
+//! that is not an array of rows, or rows without their key) is read as the JP
+//! table, named once.
+//!
 //! A table that no base serves, or whose text its consumer's parser refuses,
 //! is named once in the log and in the root's missing list
 //! ([`MasterData::missing`]); its consumer takes the named error and applies
@@ -34,10 +45,14 @@ use bevy::prelude::*;
 use serde_json::{Map, Value};
 
 use super::JsonAsset;
-use crate::remote::{self, Remote, RemoteRegion};
+use crate::remote::{self, Region, ENABLED};
 
-/// The root's identity document; its `source.region` selects the region
-/// whose master tables are read.
+pub use super::master_merge::{
+    merge_table, merged_regions, table_key, Collision, Merged, TableText, REGION_FIELD, TABLE_KEYS,
+};
+
+/// The root's identity document; its `source.region` names the root's
+/// region, whose master storage the root's assets are read from.
 const SOURCE_DOCUMENT: &str = "moly://source.json";
 
 /// One master table a consumer reads.
@@ -83,29 +98,26 @@ impl fmt::Display for MasterError {
 pub struct MasterBase {
     /// The base's name in log lines.
     pub name: &'static str,
-    /// The admitted host it reads through (`Remote::Master` or
-    /// `Remote::MasterMirror`).
-    pub host: Remote,
+    /// The admitted host it reads through ([`crate::remote::Remote`]).
+    pub host: remote::Remote,
 }
 
 impl MasterBase {
     /// A region's table, by its upstream name.
-    fn table(self, region: RemoteRegion, table: &str) -> AssetPath<'static> {
+    fn table(self, region: Region, table: &str) -> AssetPath<'static> {
         remote::master_table(self.host, region, table)
     }
 
     /// A region's `versions/current_version.json`.
-    fn version(self, region: RemoteRegion) -> AssetPath<'static> {
-        AssetPath::from(format!(
-            "{}://{}/versions/current_version.json",
-            self.host.source(),
-            region_directory(region)
-        ))
+    fn version(self, region: Region) -> AssetPath<'static> {
+        remote::master_version(self.host, region)
     }
 }
 
 /// The bases every table is read from, tried in order: a table is absent
-/// only when each of them has failed. The app may replace the list.
+/// only when each of them has failed. The first is each region's repository;
+/// the master hosts follow as its mirror, and carry the `jp` and `cn`
+/// directories only. The app may replace the list.
 #[derive(Resource, Clone)]
 pub struct MasterBases(pub Vec<MasterBase>);
 
@@ -113,12 +125,16 @@ impl Default for MasterBases {
     fn default() -> Self {
         MasterBases(vec![
             MasterBase {
+                name: "the region's master repository",
+                host: remote::Remote::MasterRepository,
+            },
+            MasterBase {
                 name: "the master host",
-                host: Remote::Master,
+                host: remote::Remote::Master,
             },
             MasterBase {
                 name: "the master mirror",
-                host: Remote::MasterMirror,
+                host: remote::Remote::MasterMirror,
             },
         ])
     }
@@ -127,24 +143,16 @@ impl Default for MasterBases {
 /// Tables a region's master hosts do not publish. A request for one could
 /// only fail on every base, so it resolves as absent, by name, without one;
 /// its consumer names what it reads instead.
-const UNPUBLISHED: &[(RemoteRegion, &str)] = &[
+const UNPUBLISHED: &[(Region, &str)] = &[
     // Both CN master hosts answer 404 for it.
-    (RemoteRegion::Cn, "configs"),
+    (Region::Cn, "configs"),
 ];
 
-fn unpublished(region: RemoteRegion, table: &str) -> Option<String> {
+fn unpublished(region: Region, table: &str) -> Option<String> {
     UNPUBLISHED
         .iter()
         .any(|(only, name)| *only == region && *name == table)
-        .then(|| format!("the {} master hosts do not publish it", region_directory(region)))
-}
-
-/// The region's directory on a master host, as upstream names it.
-fn region_directory(region: RemoteRegion) -> &'static str {
-    match region {
-        RemoteRegion::Jp => "jp",
-        RemoteRegion::Cn => "cn",
-    }
+        .then(|| format!("the {} master hosts do not publish it", region.directory()))
 }
 
 /// A document the layer reads itself: requested, loading, or read.
@@ -193,20 +201,52 @@ struct Pending {
     table: &'static str,
     name: &'static str,
     parse: Box<dyn Fn(&str) -> Result<Parsed, String> + Send + Sync>,
+    /// The regions of the merged table, JP first: the regions
+    /// [`ENABLED`] names, read in that order.
+    regions: Vec<Region>,
+    /// The region whose table is being read (an index into `regions`).
+    region: usize,
     /// The base being read (an index into [`MasterBases`]).
     base: Option<usize>,
-    /// The bases already tried.
+    /// The bases already tried for the current region.
     tried: Vec<usize>,
     handle: Option<Handle<JsonAsset>>,
-    /// The bases that failed, with their errors.
+    /// The failed reads of the current region, with their errors.
     failures: Vec<String>,
+    /// What each region's read did so far, in `regions` order.
+    outcomes: Vec<TableOutcome>,
+}
+
+/// How one region's table was read.
+#[derive(Clone, Debug)]
+enum TableOutcome {
+    /// The region's table, and whether it was read from the repository host
+    /// (rather than from a master host's region directory).
+    Read(Region, String, bool),
+    /// The region's table could not be read, and why (the bases that failed).
+    Missing(Region, String),
+    /// The region's master hosts do not publish the table.
+    Unpublished(Region),
+}
+
+impl TableOutcome {
+    fn region(&self) -> Region {
+        match self {
+            TableOutcome::Read(region, ..)
+            | TableOutcome::Missing(region, _)
+            | TableOutcome::Unpublished(region) => *region,
+        }
+    }
 }
 
 /// The master tables of the root: requests, results until their consumers
 /// take them, and the tables named missing.
 #[derive(Resource, Default)]
 pub struct MasterData {
-    region: Document<RemoteRegion>,
+    /// The root's region: its master storage, and the region its upstream
+    /// data version is read for. Each table is the merged table of
+    /// [`ENABLED`] whatever the root's region is.
+    region: Document<Region>,
     upstream_version: Document<String>,
     pending: Vec<Pending>,
     resolved: HashMap<MasterKey, Result<Parsed, MasterError>>,
@@ -218,6 +258,49 @@ pub struct MasterData {
     demoted: Vec<usize>,
     /// Rows consumers dropped, one entry per consumer and reason.
     refused_rows: Vec<RefusedRows>,
+    /// What each region gave each table (named once per table).
+    region_rows: Vec<RegionRows>,
+    /// The region tables counted in `region_rows`.
+    counted: Vec<&'static str>,
+    /// Tables read as the JP table, and why (named once per table).
+    unmerged: Vec<Unmerged>,
+}
+
+/// What one region gave one table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RegionRows {
+    pub table: &'static str,
+    pub name: &'static str,
+    pub region: Region,
+    /// Rows only this region has (JP: every row; a region whose table could
+    /// not be read, or that adds no row: none).
+    pub added: usize,
+}
+
+impl fmt::Display for RegionRows {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}: {} rows of the {} table are its own",
+            self.name,
+            self.added,
+            self.region.directory()
+        )
+    }
+}
+
+/// A table that is the JP table rather than the merged one, and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unmerged {
+    pub table: &'static str,
+    pub name: &'static str,
+    pub reason: String,
+}
+
+impl fmt::Display for Unmerged {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} is read as the JP table only: {}", self.name, self.reason)
+    }
 }
 
 /// Rows of one table one consumer dropped for one reason.
@@ -256,10 +339,13 @@ impl MasterData {
             table: table.table,
             name: table.name,
             parse: Box::new(move |text| parse(text).map(|value| Box::new(value) as Parsed)),
+            regions: ENABLED.to_vec(),
+            region: 0,
             base: None,
             tried: Vec::new(),
             handle: None,
             failures: Vec::new(),
+            outcomes: Vec::new(),
         });
     }
 
@@ -301,8 +387,11 @@ impl MasterData {
         &self.missing
     }
 
-    /// The root's region, once its identity document has been read.
-    pub fn region(&self) -> Option<RemoteRegion> {
+    /// The root's region, once its identity document has been read. Every
+    /// table is the merged table of [`ENABLED`] whatever it is; it names the
+    /// master storage the root's own assets are read from, and the region
+    /// whose upstream data version is logged.
+    pub fn region(&self) -> Option<Region> {
         match &self.region {
             Document::Read(Ok(region)) => Some(*region),
             _ => None,
@@ -317,6 +406,51 @@ impl MasterData {
     /// The rows consumers dropped, one entry per consumer and reason.
     pub fn refused_rows(&self) -> &[RefusedRows] {
         &self.refused_rows
+    }
+
+    /// What each enabled region gave the tables read so far.
+    pub fn region_rows(&self) -> &[RegionRows] {
+        &self.region_rows
+    }
+
+    /// The tables read as the JP table rather than the merged one.
+    pub fn unmerged(&self) -> &[Unmerged] {
+        &self.unmerged
+    }
+
+    /// Names a table read as the JP table, and why: once per table.
+    fn name_unmerged(&mut self, table: &'static str, name: &'static str, reason: String) {
+        if self.unmerged.iter().any(|known| known.table == table) {
+            return;
+        }
+        let unmerged = Unmerged {
+            table,
+            name,
+            reason,
+        };
+        warn!("[masters] {unmerged}");
+        self.unmerged.push(unmerged);
+    }
+
+    /// Counts what each region gave a table, once per table.
+    fn count_region_rows(
+        &mut self,
+        table: &'static str,
+        name: &'static str,
+        rows: &[(Region, usize)],
+    ) {
+        if self.counted.contains(&table) {
+            return;
+        }
+        self.counted.push(table);
+        for (region, added) in rows {
+            self.region_rows.push(RegionRows {
+                table,
+                name,
+                region: *region,
+                added: *added,
+            });
+        }
     }
 
     /// Names the rows a consumer's parser dropped: once per consumer and
@@ -400,26 +534,10 @@ pub fn resolve(
             return;
         }
     };
-    let version_unread = !matches!(data.upstream_version, Document::Read(_));
-    if let (true, Some(base)) = (version_unread, bases.0.first()) {
-        let directory = region_directory(region);
-        match data
-            .upstream_version
-            .poll(&server, &jsons, || base.version(region), parse_version)
-        {
-            Some(Ok(version)) => {
-                info!("[masters] {directory}: upstream dataVersion {version} ({})", base.name)
-            }
-            Some(Err(reason)) => warn!(
-                "[masters] {directory}: the upstream dataVersion is missing: {}'s versions/current_version.json {reason}",
-                base.name
-            ),
-            None => {}
-        }
-    }
+    MasterData::read_version(data, &server, &jsons, &bases, region);
     let mut waiting = Vec::new();
     for mut entry in std::mem::take(&mut data.pending) {
-        match entry.advance(data, &server, &jsons, &bases, region) {
+        match entry.advance(data, &server, &jsons, &bases) {
             Some(result) => {
                 data.resolved.insert(entry.key, result);
             }
@@ -427,6 +545,50 @@ pub fn resolve(
         }
     }
     data.pending = waiting;
+}
+
+impl MasterData {
+    /// Logs the root's region's upstream data version once, from the first
+    /// base. The version file is where a server keeps it, so a base that does
+    /// not serve it is left out of the run of the tables.
+    fn read_version(
+        data: &mut MasterData,
+        server: &AssetServer,
+        jsons: &Assets<JsonAsset>,
+        bases: &MasterBases,
+        region: Region,
+    ) {
+        // The base the version was requested from: the first one, until the
+        // request names it.
+        let index = match &data.upstream_version {
+            Document::Read(_) => return,
+            Document::Loading(handle) => bases
+                .0
+                .iter()
+                .position(|base| handle.path() == Some(&base.version(region)))
+                .unwrap_or(0),
+            Document::Unrequested => 0,
+        };
+        let Some(base) = bases.0.get(index) else {
+            return;
+        };
+        match data
+            .upstream_version
+            .poll(server, jsons, || base.version(region), parse_version)
+        {
+            Some(Ok(version)) => info!(
+                "[masters] {}: upstream dataVersion {version} ({})",
+                region.directory(),
+                base.name
+            ),
+            Some(Err(reason)) => warn!(
+                "[masters] {}: the upstream dataVersion is missing: {}'s versions/current_version.json {reason}",
+                region.directory(),
+                base.name
+            ),
+            None => {}
+        }
+    }
 }
 
 impl Pending {
@@ -438,23 +600,28 @@ impl Pending {
         }
     }
 
-    /// One frame of this table; `Some` once it has resolved.
+    /// One frame of this table: its regions' tables read one after another,
+    /// JP first. `Some` once the merged table has resolved, or refused.
     fn advance(
         &mut self,
         data: &mut MasterData,
         server: &AssetServer,
         jsons: &Assets<JsonAsset>,
         bases: &MasterBases,
-        region: RemoteRegion,
     ) -> Option<Result<Parsed, MasterError>> {
-        if let Some(reason) = data.absent.get(self.table) {
-            return Some(Err(self.error(reason.clone())));
+        // JP's table is the table; every later region adds to it.
+        if self.region == 0 {
+            if let Some(reason) = data.absent.get(self.table) {
+                return Some(Err(self.error(reason.clone())));
+            }
         }
-        if let Some(reason) = unpublished(region, self.table) {
-            let error = self.error(reason.clone());
-            data.absent.insert(self.table, reason);
-            data.name_missing(&error, true);
-            return Some(Err(error));
+        let Some(region) = self.regions.get(self.region).copied() else {
+            return Some(self.finish(data));
+        };
+        if unpublished(region, self.table).is_some() {
+            self.outcomes.push(TableOutcome::Unpublished(region));
+            self.next_region();
+            return None;
         }
         // The next base: the first untried one that is not demoted, else the
         // first untried demoted one.
@@ -471,10 +638,15 @@ impl Pending {
             } else {
                 format!("no master base served it ({})", self.failures.join("; "))
             };
-            let error = self.error(reason.clone());
-            data.absent.insert(self.table, reason);
-            data.name_missing(&error, true);
-            return Some(Err(error));
+            if self.region == 0 {
+                let error = self.error(reason.clone());
+                data.absent.insert(self.table, reason);
+                data.name_missing(&error, true);
+                return Some(Err(error));
+            }
+            self.outcomes.push(TableOutcome::Missing(region, reason));
+            self.next_region();
+            return None;
         };
         let base = bases.0[index];
         let handle = self
@@ -493,23 +665,159 @@ impl Pending {
             }
             return None;
         }
-        let text = &jsons.get(&handle)?.0;
+        let text = jsons.get(&handle)?.0.clone();
+        self.outcomes.push(TableOutcome::Read(
+            region,
+            text,
+            base.host == remote::Remote::MasterRepository,
+        ));
+        self.next_region();
+        None
+    }
+
+    /// Moves on to the next region's table.
+    fn next_region(&mut self) {
+        self.region += 1;
+        self.tried.clear();
+        self.base = None;
+        self.handle = None;
+        self.failures.clear();
+    }
+
+    /// The table once every region has been read: its JP text, or its
+    /// refused, merged, or JP-only resolution.
+    fn finish(&mut self, data: &mut MasterData) -> Result<Parsed, MasterError> {
+        let (table, name) = (self.table, self.name);
+        let mut jp = None;
+        let mut others: Vec<TableOutcome> = Vec::new();
+        for outcome in std::mem::take(&mut self.outcomes) {
+            if outcome.region() == Region::Jp {
+                jp = Some(outcome);
+            } else {
+                others.push(outcome);
+            }
+        }
+        let Some(TableOutcome::Read(_, text, _)) = jp else {
+            // JP's read is the table's failure, named once, above.
+            let reason = data
+                .absent
+                .get(table)
+                .cloned()
+                .unwrap_or_else(|| "the JP master base did not serve it".to_owned());
+            return Err(self.error(reason));
+        };
+        let texts: Vec<TableText> = others
+            .iter()
+            .filter_map(|outcome| match outcome {
+                TableOutcome::Read(region, text, _) => Some(TableText::Region(*region, text.as_str())),
+                TableOutcome::Missing(region, reason) => {
+                    Some(TableText::RegionMissing(*region, reason.as_str()))
+                }
+                TableOutcome::Unpublished(region) => {
+                    Some(TableText::RegionMissing(*region, "is not published"))
+                }
+            })
+            .collect();
+        for outcome in &others {
+            if let TableOutcome::Unpublished(region) = outcome {
+                warn!(
+                    "[masters] {name}: the {} master hosts do not publish it; the table is read without it",
+                    region.directory()
+                );
+            }
+        }
+        let (merged, outcome) = match merge_table(table, &text, &texts) {
+            Ok(merged) => merged,
+            Err(reason) => {
+                data.name_unmerged(table, name, reason);
+                (None, Merged::JpOnly)
+            }
+        };
+        for outcome in &others {
+            if let TableOutcome::Missing(region, reason) = outcome {
+                warn!(
+                    "[masters] {name}: the {} table could not be read ({reason}); the table is the JP rows alone",
+                    region.directory()
+                );
+            }
+        }
+        match outcome {
+            Merged::Collision(collision) => {
+                let error = self.error(format!("refused: {collision}"));
+                data.name_missing(&error, true);
+                return Err(error);
+            }
+            Merged::JpOnly => {
+                if merged.is_none() {
+                    count_rows(data, table, name, &text, &others);
+                }
+            }
+            Merged::Merged { .. } => count_rows(data, table, name, &text, &others),
+        }
+        let text = merged.as_deref().unwrap_or(&text);
         // Refusals filed outside a parse of this layer are not this table's.
         take_refused_rows();
         let parsed = (self.parse)(text);
-        data.name_refused_rows(self.table, self.name, take_refused_rows());
+        data.name_refused_rows(table, name, take_refused_rows());
         match parsed {
             Ok(value) => {
-                info!("[masters] {}: read from {}", self.name, base.name);
-                Some(Ok(value))
+                let regions = 1 + others
+                    .iter()
+                    .filter(|outcome| matches!(outcome, TableOutcome::Read(..)))
+                    .count();
+                info!(
+                    "[masters] {name}: {} from the master bases",
+                    match regions {
+                        1 => "the JP table read".to_owned(),
+                        regions => format!("the merged table of {regions} regions read"),
+                    }
+                );
+                Ok(value)
             }
             Err(reason) => {
                 let error = self.error(format!("malformed: {reason}"));
                 data.name_missing(&error, false);
-                Some(Err(error))
+                Err(error)
             }
         }
     }
+}
+
+/// Counts what each region added to a table: JP's rows, and each other
+/// region's exclusive rows. JP is counted even when its text was not merged.
+fn count_rows(
+    data: &mut MasterData,
+    table: &'static str,
+    name: &'static str,
+    jp: &str,
+    others: &[TableOutcome],
+) {
+    let jp_rows = serde_json::from_str::<Value>(jp)
+        .ok()
+        .and_then(|value| match value {
+            Value::Array(rows) => Some(rows.len()),
+            _ => None,
+        })
+        .unwrap_or(0);
+    let mut rows = vec![(Region::Jp, jp_rows)];
+    for outcome in others {
+        match outcome {
+            TableOutcome::Read(region, text, _) => {
+                let (region, added) = merge_table(table, jp, &[TableText::Region(*region, text)])
+                    .ok()
+                    .and_then(|(_, merged)| match merged {
+                        Merged::Merged { mut added } => added.pop(),
+                        _ => None,
+                    })
+                    .unwrap_or((*region, 0));
+                rows.push((region, added));
+            }
+            TableOutcome::Missing(region, _) | TableOutcome::Unpublished(region) => {
+                rows.push((*region, 0))
+            }
+        }
+    }
+    data.count_region_rows(table, name, &rows);
 }
 
 /// Whether a load failed because its read timed out (the remote reader's
@@ -522,17 +830,18 @@ fn timed_out(error: &AssetLoadError) -> bool {
     )
 }
 
-/// `source.region` of the root's identity document.
-fn parse_region(text: &str) -> Result<RemoteRegion, String> {
+/// `source.region` of the root's identity document: one of the region
+/// directories.
+fn parse_region(text: &str) -> Result<Region, String> {
     let value: Value =
         serde_json::from_str(text).map_err(|error| format!("is not JSON ({error})"))?;
     if value["version"].as_u64() != Some(1) {
         return Err("has an unsupported or missing identity version".into());
     }
     match value["source"]["region"].as_str() {
-        Some("jp") => Ok(RemoteRegion::Jp),
-        Some("cn") => Ok(RemoteRegion::Cn),
-        other => Err(format!("names the source region {other:?}, not jp or cn")),
+        Some(name) => Region::from_directory(name)
+            .ok_or_else(|| format!("names the source region {name:?}, not a region directory")),
+        None => Err("names no source region".into()),
     }
 }
 
@@ -778,5 +1087,250 @@ mod row_refusal_tests {
             .map(|group| (group.name, group.count))
             .collect();
         assert_eq!(named, [("t (one)", 2), ("t (two)", 1)]);
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    fn rows(text: &str) -> Vec<Value> {
+        match serde_json::from_str(text).expect("JSON") {
+            Value::Array(rows) => rows,
+            _ => panic!("not an array"),
+        }
+    }
+
+    fn id(row: &Value) -> i64 {
+        row["id"].as_i64().expect("an id")
+    }
+
+    fn region_field<'a>(row: &'a Value) -> Option<&'a str> {
+        row.get(REGION_FIELD).and_then(Value::as_str)
+    }
+
+    /// The merged text and what the merge reported; `JpOnly` gives the JP
+    /// text back, as its caller does.
+    fn merged(table: &str, jp: &str, others: &[TableText<'_>]) -> (Vec<Value>, Merged) {
+        let (text, outcome) = merge_table(table, jp, others).expect("a table of rows");
+        match outcome {
+            Merged::JpOnly => (rows(jp), outcome),
+            other => match text {
+                Some(text) => (rows(&text), other),
+                None => panic!("a merged table without its text"),
+            },
+        }
+    }
+
+    #[test]
+    fn the_jp_rows_come_first_unchanged_and_then_each_regions_exclusive_rows() {
+        let jp = r#"[{"id": 1, "name": "a"}, {"id": 3, "name": "c"}]"#;
+        let cn = r#"[{"id": 4, "name": "d"}, {"id": 3, "name": "other"}, {"id": 2, "name": "b"}]"#;
+        let tw = r#"[{"id": 1, "name": "same"}, {"id": 5, "name": "e"}]"#;
+        let (rows, outcome) = merged(
+            "t",
+            jp,
+            &[
+                TableText::Region(Region::Cn, cn),
+                TableText::Region(Region::Tw, tw),
+            ],
+        );
+        assert_eq!(
+            outcome,
+            Merged::Merged {
+                added: vec![(Region::Cn, 2), (Region::Tw, 1)]
+            }
+        );
+        // Every JP row first, as it was and in order, with no region field.
+        assert_eq!(&rows[..2], &serde_json::from_str::<Vec<Value>>(jp).unwrap()[..]);
+        // Then each region's exclusive rows, regions in the given order and
+        // the rows in theirs.
+        let tagged: Vec<(i64, Option<&str>)> = rows
+            .iter()
+            .map(|row| (id(row), region_field(row)))
+            .collect();
+        assert_eq!(
+            tagged,
+            [(1, None), (3, None), (4, Some("cn")), (2, Some("cn")), (5, Some("tw"))]
+        );
+        // An exclusive row keeps its own fields; a shared key is JP's row.
+        assert_eq!(rows[2]["name"], "d");
+        assert_eq!(rows[3]["name"], "b");
+    }
+
+    #[test]
+    fn an_exclusive_row_is_tagged_with_its_region_and_keeps_key_order_first() {
+        let jp = r#"[{"id": 1}]"#;
+        let cn = r#"[{"name": "n", "id": 7, "seq": 3}]"#;
+        let (rows, outcome) = merged("t", jp, &[TableText::Region(Region::Cn, cn)]);
+        assert_eq!(outcome, Merged::Merged { added: vec![(Region::Cn, 1)] });
+        assert_eq!(rows[1], serde_json::json!({"moly:region": "cn", "id": 7, "name": "n", "seq": 3}));
+    }
+
+    #[test]
+    fn a_key_compares_as_json_text_and_a_null_key_is_absent() {
+        // A string "1" is not the number 1.
+        let jp = r#"[{"id": 1}]"#;
+        let cn = r#"[{"id": "1"}]"#;
+        let (rows, outcome) = merged("t", jp, &[TableText::Region(Region::Cn, cn)]);
+        assert_eq!(outcome, Merged::Merged { added: vec![(Region::Cn, 1)] });
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1], serde_json::json!({"moly:region": "cn", "id": "1"}));
+        // A null key is an absent one: the table does not merge.
+        let cn = r#"[{"id": null}]"#;
+        assert!(merge_table("t", jp, &[TableText::Region(Region::Cn, cn)]).is_err());
+    }
+
+    #[test]
+    fn the_declared_keys_are_the_census_exceptions_and_id_otherwise() {
+        let key = |table: &str| table_key(table).to_vec();
+        assert_eq!(key("musicVocals"), ["id"]);
+        assert_eq!(key("wordings"), ["wordingKey"]);
+        assert_eq!(key("resourceBoxes"), ["resourceBoxPurpose", "id"]);
+        assert_eq!(key("musicTags"), ["musicId", "musicTag"]);
+
+        let wordings_jp = r#"[{"wordingKey": "W", "value": "a"}]"#;
+        let wordings_cn = r#"[{"wordingKey": "W", "value": "b"}, {"wordingKey": "X", "value": "c"}]"#;
+        let (rows, _) = merged(
+            "wordings",
+            wordings_jp,
+            &[TableText::Region(Region::Cn, wordings_cn)],
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["value"], "a");
+        assert_eq!(rows[1]["wordingKey"], "X");
+
+        // A box is its purpose and its id: the same id under another purpose
+        // is another box.
+        let boxes_jp = r#"[{"resourceBoxPurpose": "a", "id": 1, "name": "x"}]"#;
+        let boxes_cn = r#"[
+            {"resourceBoxPurpose": "a", "id": 1, "name": "y"},
+            {"resourceBoxPurpose": "b", "id": 1, "name": "z"}
+        ]"#;
+        let (rows, _) = merged(
+            "resourceBoxes",
+            boxes_jp,
+            &[TableText::Region(Region::Cn, boxes_cn)],
+        );
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row["resourceBoxPurpose"].as_str(), id(row)))
+                .collect::<Vec<_>>(),
+            [(Some("a"), 1), (Some("b"), 1)]
+        );
+        assert_eq!(region_field(&rows[1]), Some("cn"));
+
+        // An id the CN table no longer carries does not make two CN rows
+        // collide under the tags key.
+        let tags_jp = r#"[{"id": 9, "musicId": 1, "musicTag": "a"}]"#;
+        let tags_cn = r#"[{"musicId": 1, "musicTag": "b"}, {"musicId": 1, "musicTag": "c"}]"#;
+        let (rows, outcome) = merged("musicTags", tags_jp, &[TableText::Region(Region::Cn, tags_cn)]);
+        assert_eq!(outcome, Merged::Merged { added: vec![(Region::Cn, 2)] });
+        assert_eq!(rows.len(), 3);
+    }
+
+    #[test]
+    fn two_regions_adding_one_key_refuse_the_table_naming_it() {
+        let jp = r#"[{"id": 1}]"#;
+        let cn = r#"[{"id": 2}, {"id": 3}]"#;
+        let tw = r#"[{"id": 4}, {"id": 2}]"#;
+        let (text, outcome) = merge_table(
+            "mysekaiFixtures",
+            jp,
+            &[
+                TableText::Region(Region::Cn, cn),
+                TableText::Region(Region::Tw, tw),
+            ],
+        )
+        .expect("a table of rows");
+        assert_eq!(text, None);
+        assert_eq!(
+            outcome,
+            Merged::Collision(Collision {
+                table: "mysekaiFixtures".to_owned(),
+                key: "2".to_owned(),
+                regions: vec![Region::Cn, Region::Tw],
+            })
+        );
+        let Merged::Collision(collision) = &outcome else {
+            unreachable!()
+        };
+        let named = collision.to_string();
+        assert!(named.contains("cn"));
+        assert!(named.contains("tw"));
+    }
+
+    #[test]
+    fn a_table_that_is_not_an_array_is_not_merged_and_one_without_keys_is_refused() {
+        // A document that is one object is the region's whole table.
+        let jp = r#"{"boostStamina": 1}"#;
+        let cn = r#"{"boostStamina": 2}"#;
+        let (text, outcome) = merge_table("mysekaiStaminaRecovery", jp, &[TableText::Region(Region::Cn, cn)])
+            .expect("not a table of rows to merge");
+        assert_eq!((text, outcome), (None, Merged::JpOnly));
+
+        // A table whose rows lack their key is not merged.
+        let jp = r#"[{"id": 1}]"#;
+        let cn = r#"[{"name": "no id"}]"#;
+        assert!(merge_table("t", jp, &[TableText::Region(Region::Cn, cn)]).is_err());
+        let jp = r#"[{"name": "no id"}]"#;
+        let cn = r#"[{"id": 1}]"#;
+        assert!(merge_table("t", jp, &[TableText::Region(Region::Cn, cn)]).is_err());
+        // A key only JP has is JP's row.
+        let jp = r#"[{"id": 1}, {"id": 1}]"#;
+        let cn = r#"[{"id": 1}]"#;
+        let (_, outcome) = merge_table("t", jp, &[TableText::Region(Region::Cn, cn)]).expect("rows");
+        assert_eq!(outcome, Merged::JpOnly);
+    }
+
+    #[test]
+    fn an_unread_region_gives_the_jp_rows_alone_and_a_shared_table_merges() {
+        let jp = r#"[{"id": 1}]"#;
+        let cn = r#"[{"id": 2}]"#;
+        // One region could not be read: JP plus whatever else could.
+        let (rows, outcome) = merged(
+            "t",
+            jp,
+            &[
+                TableText::RegionMissing(Region::Cn, "no master base served it"),
+                TableText::Region(Region::Tw, cn),
+            ],
+        );
+        assert_eq!(
+            outcome,
+            Merged::Merged {
+                added: vec![(Region::Cn, 0), (Region::Tw, 1)]
+            }
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(region_field(&rows[1]), Some("tw"));
+
+        // Every region unread: the JP rows alone.
+        let (rows, outcome) = merged("t", jp, &[TableText::RegionMissing(Region::Cn, "no base")]);
+        assert_eq!(outcome, Merged::JpOnly);
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn the_layer_counts_each_regions_rows_and_names_a_table_it_cannot_merge() {
+        let mut data = MasterData::default();
+        let jp = r#"[{"id": 1}, {"id": 2}]"#;
+        let others = vec![
+            TableOutcome::Read(Region::Cn, r#"[{"id": 2}, {"id": 3}]"#.to_owned(), true),
+            TableOutcome::Missing(Region::Tw, "no master base served it".to_owned()),
+        ];
+        count_rows(&mut data, "t", "t (test)", jp, &others);
+        // Counted once per table.
+        count_rows(&mut data, "t", "t (test)", jp, &others);
+        let counted: Vec<(Region, usize)> = data
+            .region_rows()
+            .iter()
+            .map(|entry| (entry.region, entry.added))
+            .collect();
+        assert_eq!(counted, [(Region::Jp, 2), (Region::Cn, 1), (Region::Tw, 0)]);
+
+        data.name_unmerged("t", "t (test)", "is not merged: a JP row lacks its key (id)".into());
+        data.name_unmerged("t", "t (test)", "another reason".into());
+        assert_eq!(data.unmerged().len(), 1);
     }
 }

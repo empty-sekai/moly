@@ -1,11 +1,12 @@
 //! Public remote resources the product reads at runtime instead of carrying
 //! them in its asset root: asset storage (song and soundtrack audio, below
-//! one directory per region) and masters (master tables, below
-//! `<region>/master/`). Each kind has a primary host and a mirror host; every
-//! host is an asset source of its own with one admitted HTTPS base: a path
-//! below the source is joined to that base, and nothing outside the base is
-//! reachable through it. Which host a consumer tries first, and whether it
-//! falls back to the other, is the consumer's rule.
+//! one directory per region) and masters (master tables, from a repository
+//! host that carries one repository per region, and from two master hosts
+//! that carry a directory per region, `jp` and `cn`). Every host is an asset
+//! source of its own with one admitted HTTPS base: a path below the source is
+//! joined to that base, and nothing outside the base is reachable through it.
+//! Which host a consumer tries first, and whether it falls back to the others,
+//! is the consumer's rule.
 //!
 //! On native the whole transfer, request and body, runs on the blocking
 //! thread pool through `ureq`, so a slow or stalled host never holds a thread
@@ -47,29 +48,42 @@ pub const MASTER_FIRST_BYTE_MS: i32 = 10_000;
 pub const NATIVE_READ_MS: u64 = 60_000;
 
 /// The admitted bases, each a canonical HTTPS directory ending in `/`.
+///
+/// `master` names the master host, whose per-region directory is `jp` or `cn`
+/// to match it. `master_repository` names the first master host, whose path
+/// names the region's repository: a table of `cn` there is
+/// `haruki-sekai-sc-master/main/master/<table>.json`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoteBases {
     pub storage: String,
     pub storage_mirror: String,
     pub master: String,
     pub master_mirror: String,
+    pub master_repository: String,
 }
 
-/// One admitted host.
+/// One admitted host, each an asset source of its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Remote {
+    /// The asset storage host.
     Storage,
+    /// The asset storage mirror.
     StorageMirror,
+    /// The master host: a directory per region (`jp`, `cn`).
     Master,
+    /// The master mirror: the same layout as [`Remote::Master`].
     MasterMirror,
+    /// The master host that names the region's repository.
+    MasterRepository,
 }
 
 impl Remote {
-    pub const ALL: [Remote; 4] = [
+    pub const ALL: [Remote; 5] = [
         Remote::Storage,
         Remote::StorageMirror,
         Remote::Master,
         Remote::MasterMirror,
+        Remote::MasterRepository,
     ];
 
     /// The asset source id (`<id>://…`).
@@ -79,7 +93,16 @@ impl Remote {
             Remote::StorageMirror => "moly-storage-mirror",
             Remote::Master => "moly-master",
             Remote::MasterMirror => "moly-master-mirror",
+            Remote::MasterRepository => "moly-master-repository",
         }
+    }
+
+    /// Whether this host serves master tables.
+    pub const fn is_master(self) -> bool {
+        matches!(
+            self,
+            Remote::Master | Remote::MasterMirror | Remote::MasterRepository
+        )
     }
 
     fn base(self, bases: &RemoteBases) -> &str {
@@ -88,39 +111,102 @@ impl Remote {
             Remote::StorageMirror => &bases.storage_mirror,
             Remote::Master => &bases.master,
             Remote::MasterMirror => &bases.master_mirror,
+            Remote::MasterRepository => &bases.master_repository,
         }
     }
 }
 
-/// A region's directory on the storage and master hosts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RemoteRegion {
+/// A region whose content the product reads: the storage directory of its
+/// assets and the repository of its master tables.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Region {
     Jp,
     Cn,
+    Tw,
+    Kr,
+    En,
 }
 
-impl RemoteRegion {
-    /// The region's asset directory on a storage host.
-    fn storage_directory(self) -> &'static str {
+/// A region's `Region::ALL`, in master directory order.
+pub const ALL: [Region; 5] = [Region::Jp, Region::Cn, Region::Tw, Region::Kr, Region::En];
+
+/// The regions the product reads: every master table is the JP rows plus
+/// the exclusive rows of each of these. A region outside it is a known value
+/// that is never requested. Another region joins once the asset store carries
+/// the resources its exclusive rows name; until then the tables are JP's.
+pub const ENABLED: &[Region] = &[Region::Jp];
+
+/// A display language a region's text is written in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Language {
+    Ja,
+    ZhHans,
+    ZhHant,
+    Ko,
+    En,
+}
+
+impl Region {
+    /// The region's directory on a storage host.
+    pub fn storage_directory(self) -> &'static str {
         match self {
             Self::Jp => "sekai-jp-assets",
             Self::Cn => "sekai-cn-assets",
+            Self::Tw => "sekai-tw-assets",
+            Self::Kr => "sekai-kr-assets",
+            Self::En => "sekai-en-assets",
         }
     }
 
     /// The region's directory on a master host.
-    fn master_directory(self) -> &'static str {
+    pub fn directory(self) -> &'static str {
         match self {
             Self::Jp => "jp",
             Self::Cn => "cn",
+            Self::Tw => "tw",
+            Self::Kr => "kr",
+            Self::En => "en",
         }
     }
+
+    /// The region from its directory name (`cn`).
+    pub fn from_directory(name: &str) -> Option<Region> {
+        ALL.into_iter().find(|region| region.directory() == name)
+    }
+
+    /// The region's repository on the repository host: the path's
+    /// repository segment.
+    pub fn repository(self) -> &'static str {
+        match self {
+            Self::Jp => "haruki-sekai-master",
+            Self::Cn => "haruki-sekai-sc-master",
+            Self::Tw => "haruki-sekai-tc-master",
+            Self::Kr => "haruki-sekai-kr-master",
+            Self::En => "haruki-sekai-en-master",
+        }
+    }
+
+    /// The language the region's own text is written in.
+    pub const fn native_language(self) -> Language {
+        match self {
+            Self::Jp => Language::Ja,
+            Self::Cn => Language::ZhHans,
+            Self::Tw => Language::ZhHant,
+            Self::Kr => Language::Ko,
+            Self::En => Language::En,
+        }
+    }
+}
+
+/// Whether `region` is one of [`ENABLED`].
+pub fn enabled(region: Region) -> bool {
+    ENABLED.contains(&region)
 }
 
 /// One asset of a region on a storage host (`Storage` or `StorageMirror`);
 /// `relative` is the asset's path below the region directory
 /// (`music/long/0001_01/0001_01.mp3`).
-pub fn storage_asset(host: Remote, region: RemoteRegion, relative: &str) -> AssetPath<'static> {
+pub fn storage_asset(host: Remote, region: Region, relative: &str) -> AssetPath<'static> {
     debug_assert!(matches!(host, Remote::Storage | Remote::StorageMirror));
     AssetPath::from(format!(
         "{}://{}/{relative}",
@@ -129,15 +215,40 @@ pub fn storage_asset(host: Remote, region: RemoteRegion, relative: &str) -> Asse
     ))
 }
 
-/// One master table of a region on a master host (`Master` or
-/// `MasterMirror`), by its upstream table name (`musicVocals`).
-pub fn master_table(host: Remote, region: RemoteRegion, table: &str) -> AssetPath<'static> {
-    debug_assert!(matches!(host, Remote::Master | Remote::MasterMirror));
-    AssetPath::from(format!(
-        "{}://{}/master/{table}.json",
-        host.source(),
-        region.master_directory()
-    ))
+/// The master path of `table` below the region directory the master hosts
+/// carry (`jp/master/musicVocals.json`).
+pub fn master_directory_table(region: Region, table: &str) -> String {
+    format!("{}/master/{table}.json", region.directory())
+}
+
+/// The master path of `table` below the region's repository
+/// (`haruki-sekai-master/main/master/musicVocals.json`).
+pub fn master_repository_table(region: Region, table: &str) -> String {
+    format!("{}/main/master/{table}.json", region.repository())
+}
+
+/// One master table of a region on a master host, by its upstream table name
+/// (`musicVocals`): below the region directory on the master hosts, below the
+/// region's repository on [`Remote::MasterRepository`].
+pub fn master_table(host: Remote, region: Region, table: &str) -> AssetPath<'static> {
+    debug_assert!(host.is_master());
+    let path = match host {
+        Remote::MasterRepository => master_repository_table(region, table),
+        _ => master_directory_table(region, table),
+    };
+    AssetPath::from(format!("{}://{path}", host.source()))
+}
+
+/// A region's `versions/current_version.json` on a master host.
+pub fn master_version(host: Remote, region: Region) -> AssetPath<'static> {
+    debug_assert!(host.is_master());
+    let path = match host {
+        Remote::MasterRepository => {
+            format!("{}/main/versions/current_version.json", region.repository())
+        }
+        _ => format!("{}/versions/current_version.json", region.directory()),
+    };
+    AssetPath::from(format!("{}://{path}", host.source()))
 }
 
 /// The bases the entry crate admitted; shared by the readers.
@@ -170,11 +281,22 @@ impl RemoteAdmission {
         let remote = Remote::ALL
             .into_iter()
             .find(|remote| remote.source() == source)?;
-        Some(format!("{}{}", self.base(remote)?, path.path().to_str()?))
+        join(&self.base(remote)?, path.path().to_str()?)
     }
 }
 
-/// Registers the four sources; must run before `AssetPlugin` is built.
+/// `base` followed by `relative`. A base that names `{repo}` (the repository
+/// host's template) takes the first segment of `relative` there, and the rest
+/// of `relative` after it.
+fn join(base: &str, relative: &str) -> Option<String> {
+    if !base.contains("{repo}") {
+        return Some(format!("{base}{relative}"));
+    }
+    let (repo, rest) = relative.split_once('/')?;
+    Some(format!("{}{rest}", base.replace("{repo}", repo)))
+}
+
+/// Registers the sources; must run before `AssetPlugin` is built.
 pub(crate) fn register(app: &mut App) {
     let admission = RemoteAdmission::default();
     for remote in Remote::ALL {
@@ -224,7 +346,9 @@ impl RemoteReader {
             .ok_or_else(|| refuse(format!("the admitted base {base} is not HTTPS")))?;
         let relative =
             plain_relative(path).ok_or_else(|| refuse("not a plain relative path".into()))?;
-        Ok(PathBuf::from(format!("{host_and_path}{relative}")))
+        let joined = join(host_and_path, &relative)
+            .ok_or_else(|| refuse(format!("{relative} names no repository")))?;
+        Ok(PathBuf::from(joined))
     }
 }
 
@@ -255,7 +379,7 @@ impl AssetReader for RemoteReader {
         let url = format!("https://{}", target.display());
         // A master host that does not answer within the bound fails the read
         // as `TimedOut`, and the master layer tries its next host.
-        let master = matches!(self.remote, Remote::Master | Remote::MasterMirror);
+        let master = self.remote.is_master();
         #[cfg(not(target_arch = "wasm32"))]
         let bytes = native::read(url, master).await?;
         // Bevy's fetch has no bound: a connect the network drops waits for the

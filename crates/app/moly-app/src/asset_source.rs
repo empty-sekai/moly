@@ -15,7 +15,7 @@ use moly_assets::AssetSource;
 
 pub use moly_assets::asset_source::{
     is_canonical_directory, public_asset_parts, validate_asset_selection, RemoteBaseOverrides,
-    MASTER_BASE, MASTER_MIRROR_BASE, STORAGE_BASE, STORAGE_MIRROR_BASE,
+    MASTER_BASE, MASTER_HARUKI_BASE, MASTER_MIRROR_BASE, STORAGE_BASE, STORAGE_MIRROR_BASE,
 };
 
 /// Native: the resource root, read by the same function the server reads.
@@ -23,17 +23,21 @@ pub use moly_assets::asset_source::{
 pub use moly_assets::asset_source::{resolve, resolve_remote};
 
 /// Pages and the browser game: the same bases the native entry reads, with
-/// each one required to be its canonical URL.
+/// each one required to be its canonical URL. The repository template itself
+/// is checked with a repository substituted for `{repo}`, which the URL of a
+/// `{repo}` segment would otherwise escape.
 #[cfg(target_arch = "wasm32")]
 fn canonical_bases(
     bases: moly_assets::remote::RemoteBases,
 ) -> Result<moly_assets::remote::RemoteBases, String> {
-    for base in [
-        &bases.storage,
-        &bases.storage_mirror,
-        &bases.master,
-        &bases.master_mirror,
-    ] {
+    let checked = [
+        bases.storage.clone(),
+        bases.storage_mirror.clone(),
+        bases.master.clone(),
+        bases.master_mirror.clone(),
+        MASTER_HARUKI_BASE.replace("{repo}", moly_assets::remote::Region::Jp.repository()),
+    ];
+    for base in &checked {
         let url = web_sys::Url::new(base).map_err(|_| format!("Invalid remote base {base}"))?;
         if url.href() != *base || !url.search().is_empty() || !url.hash().is_empty() {
             return Err(format!("remote base {base} must be its canonical HTTPS directory"));
@@ -42,8 +46,9 @@ fn canonical_bases(
     Ok(bases)
 }
 
-/// Pages: `?storage_base=`, `?storage_mirror_base=`, `?master_base=` and
-/// `?master_mirror_base=` replace the hosts.
+/// Pages: `?storage_base=`, `?storage_mirror_base=`, `?master_base=`,
+/// `?master_mirror_base=` and `?master_haruki_base=` (a template naming
+/// `{repo}`) replace the hosts.
 #[cfg(target_arch = "wasm32")]
 pub fn resolve_remote() -> Result<moly_assets::remote::RemoteBases, String> {
     let window =
@@ -54,17 +59,19 @@ pub fn resolve_remote() -> Result<moly_assets::remote::RemoteBases, String> {
         .map_err(|e| format!("could not read the page query string: {e:?}"))?;
     let params = web_sys::UrlSearchParams::new_with_str(&search)
         .map_err(|e| format!("could not parse the query string {search:?}: {e:?}"))?;
-    let (storage, storage_mirror, master, master_mirror) = (
+    let (storage, storage_mirror, master, master_mirror, master_repository) = (
         params.get("storage_base"),
         params.get("storage_mirror_base"),
         params.get("master_base"),
         params.get("master_mirror_base"),
+        params.get("master_haruki_base"),
     );
     let bases = moly_assets::asset_source::remote_bases(RemoteBaseOverrides {
         storage: storage.as_deref(),
         storage_mirror: storage_mirror.as_deref(),
         master: master.as_deref(),
         master_mirror: master_mirror.as_deref(),
+        master_repository: master_repository.as_deref(),
     })?;
     canonical_bases(bases)
 }

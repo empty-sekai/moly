@@ -80,7 +80,7 @@ use super::*;
 use moly_assets::json::master;
 use crate::markers::NavMeshSourceRegion;
 use bevy::ecs::system::SystemParam;
-use moly_assets::remote::{self, Remote, RemoteRegion};
+use moly_assets::remote::{self, Remote, Region};
 use sha2::{Digest, Sha256};
 
 /// The package directory of a song's audio (`AssetBundleNames.GetLiveMusicName`
@@ -386,7 +386,7 @@ enum AudioState {
 /// Loaded inputs and fetched audio of the record path.
 #[derive(Resource, Default)]
 pub struct RecordLibrary {
-    region: Option<RemoteRegion>,
+    region: Option<Region>,
     tables: Vec<RemoteLoad<JsonAsset>>,
     sidecar: Option<Handle<JsonAsset>>,
     masters: Option<Result<RecordMasters, String>>,
@@ -657,9 +657,11 @@ pub(super) fn advance(
     let Some(region) = params.region.as_deref() else {
         return Step::Hold;
     };
+    // The record masters are the merged tables of every enabled region; only
+    // the record audio is read from one region's storage.
     let region = match region.0 {
-        moly_law::carve::NavMeshRegion::Jp => RemoteRegion::Jp,
-        moly_law::carve::NavMeshRegion::Cn => RemoteRegion::Cn,
+        moly_law::carve::NavMeshRegion::Jp => Region::Jp,
+        moly_law::carve::NavMeshRegion::Cn => Region::Cn,
     };
     let library = &mut *params.library;
     if library.region != Some(region) {

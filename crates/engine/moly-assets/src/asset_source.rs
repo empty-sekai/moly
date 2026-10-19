@@ -143,9 +143,15 @@ pub const STORAGE_MIRROR_BASE: &str = "https://storage.exmeaning.com/";
 
 /// The public master host the product reads master tables from
 /// (`<region>/master/<table>.json` below it). [`MASTER_MIRROR_BASE`] serves
-/// the same layout.
+/// the same layout. Both carry the `jp` and `cn` directories only.
 pub const MASTER_BASE: &str = "https://metadata.pjsk.moe/";
 pub const MASTER_MIRROR_BASE: &str = "https://metadata.exmeaning.com/";
+
+/// The first master host: the repositories of the master tables below
+/// `{repo}/main/master/`, one repository per region (a region's repository
+/// is [`crate::remote::Region::repository`]). A region whose table the host
+/// does not serve is refused by name.
+pub const MASTER_HARUKI_BASE: &str = "https://raw.githubusercontent.com/Team-Haruki/{repo}/";
 
 /// One remote base: the named default, or a configured replacement that is a
 /// canonical HTTPS directory like `resource_base`.
@@ -159,21 +165,45 @@ fn remote_base(name: &str, configured: Option<&str>, default: &str) -> Result<St
         .ok_or_else(|| format!("{name} must be a canonical HTTPS directory ending in /"))
 }
 
-/// Configured replacements of the four remote bases (each `None` keeps its
-/// named default). Which host is tried first is the consumer's rule.
+/// A master host whose paths name the region's repository: the configured
+/// template must be a canonical HTTPS directory that names `{repo}` exactly
+/// once, as a whole path segment.
+fn repository_base(name: &str, configured: Option<&str>) -> Result<String, String> {
+    let Some(template) = configured else {
+        return Ok(MASTER_HARUKI_BASE.to_owned());
+    };
+    let (_, path) = public_asset_parts(template)
+        .filter(|(_, path)| is_canonical_directory(path))
+        .ok_or_else(|| {
+            format!("{name} must be a canonical HTTPS directory ending in /, with {{repo}} as a path segment")
+        })?;
+    if path.split('/').filter(|part| *part == "{repo}").count() != 1 {
+        return Err(format!(
+            "{name} must name {{repo}} exactly once, as a whole path segment"
+        ));
+    }
+    Ok(template.to_owned())
+}
+
+/// Configured replacements of the remote bases (each `None` keeps its named
+/// default). Which host is tried first is the consumer's rule.
 #[derive(Default)]
 pub struct RemoteBaseOverrides<'a> {
     pub storage: Option<&'a str>,
     pub storage_mirror: Option<&'a str>,
     pub master: Option<&'a str>,
     pub master_mirror: Option<&'a str>,
+    /// A template naming `{repo}` where the repository host's region
+    /// repository goes.
+    pub master_repository: Option<&'a str>,
 }
 
-/// The four remote bases, each defaulting to its named host. The browser
-/// entry additionally requires each to be its canonical URL.
+/// The remote bases, each defaulting to its named host. The browser entry
+/// additionally requires each to be its canonical URL.
 pub fn remote_bases(
     overrides: RemoteBaseOverrides<'_>,
 ) -> Result<crate::remote::RemoteBases, String> {
+    let master_repository = repository_base("master_haruki_base", overrides.master_repository)?;
     Ok(crate::remote::RemoteBases {
         storage: remote_base("storage_base", overrides.storage, STORAGE_BASE)?,
         storage_mirror: remote_base(
@@ -187,25 +217,29 @@ pub fn remote_bases(
             overrides.master_mirror,
             MASTER_MIRROR_BASE,
         )?,
+        master_repository,
     })
 }
 
-/// Native: `MOLY_STORAGE_BASE`, `MOLY_STORAGE_MIRROR_BASE`,
-/// `MOLY_MASTER_BASE` and `MOLY_MASTER_MIRROR_BASE` replace the hosts.
+/// Native: `MOLY_STORAGE_BASE`, `MOLY_STORAGE_MIRROR_BASE`, `MOLY_MASTER_BASE`,
+/// `MOLY_MASTER_MIRROR_BASE` and `MOLY_MASTER_HARUKI_BASE` (a template naming
+/// `{repo}`) replace the hosts.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn resolve_remote() -> Result<crate::remote::RemoteBases, String> {
     let read = |name: &str| std::env::var(name).ok();
-    let (storage, storage_mirror, master, master_mirror) = (
+    let (storage, storage_mirror, master, master_mirror, master_repository) = (
         read("MOLY_STORAGE_BASE"),
         read("MOLY_STORAGE_MIRROR_BASE"),
         read("MOLY_MASTER_BASE"),
         read("MOLY_MASTER_MIRROR_BASE"),
+        read("MOLY_MASTER_HARUKI_BASE"),
     );
     remote_bases(RemoteBaseOverrides {
         storage: storage.as_deref(),
         storage_mirror: storage_mirror.as_deref(),
         master: master.as_deref(),
         master_mirror: master_mirror.as_deref(),
+        master_repository: master_repository.as_deref(),
     })
 }
 

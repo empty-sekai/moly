@@ -14,7 +14,7 @@ use bevy::asset::{AssetPath, AssetServer};
 use bevy::prelude::*;
 use bevy::tasks::{block_on, futures_lite::future, IoTaskPool, Task};
 use moly_assets::json::master::{self, MasterData, MasterTable};
-use moly_assets::remote::RemoteRegion;
+use moly_assets::remote::Region;
 use moly_masters::avatar::AvatarMasters;
 use moly_masters::clock::RefreshPeriod;
 use moly_masters::craft::CraftMasters;
@@ -270,7 +270,7 @@ struct ServerTable {
     table: MasterTable<Masters>,
     seat: fn(&mut Masters, Masters),
     /// The region whose master carries the table; `None`: every region.
-    region: Option<RemoteRegion>,
+    region: Option<Region>,
     /// A deferred table's field markers; `None`: the join waits for it.
     deferred: Option<DeferredSeat>,
 }
@@ -397,14 +397,14 @@ static SERVER_TABLES: &[ServerTable] = &[
         "resourceBoxDetails (the delivery's total reward boxes)",
         delivery::parse_box_details,
         reward_boxes,
-        Some(RemoteRegion::Cn)
+        Some(Region::Cn)
     ),
     deferred_table!(
         "resourceBoxes",
         "resourceBoxes (the delivery's total reward boxes)",
         delivery::parse_nested_boxes,
         reward_boxes,
-        Some(RemoteRegion::Jp)
+        Some(Region::Jp)
     ),
     deferred_table!(
         "cards",
