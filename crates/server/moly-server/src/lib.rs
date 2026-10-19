@@ -42,6 +42,12 @@ use bevy::prelude::*;
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ListenAddress(pub std::net::SocketAddr);
 
+/// The administration calls are refused whatever the listen address. A
+/// server that sits behind a reverse proxy listens on a loopback address
+/// while its requests come from anywhere, so its host inserts this.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AdminClosed;
+
 /// Loads the master tables through the asset source. The host adds it after
 /// `AssetPlugin` and the `moly://` asset source; a harness that seats a
 /// [`Masters`] resource itself (see [`Masters::fixture`]) does not add it.

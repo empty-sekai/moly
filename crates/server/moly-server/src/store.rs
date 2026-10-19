@@ -66,6 +66,8 @@ struct FileStore {
 
 impl FileStore {
     fn path(&self, user: &UserId) -> PathBuf {
+        // The hub admits only valid ids; a path is never built from another.
+        assert!(user.is_valid(), "a document path for the invalid user id {user:?}");
         self.directory.join(format!("{user}.json"))
     }
 }

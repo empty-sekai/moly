@@ -213,6 +213,17 @@ pub(crate) fn pump(
                             );
                             continue;
                         }
+                        if !user.is_valid() {
+                            refuse(
+                                &mut sessions,
+                                session,
+                                format!(
+                                    "the user id is not 1 to {} letters, digits, _ or -",
+                                    UserId::MAX_LEN
+                                ),
+                            );
+                            continue;
+                        }
                         let Some(open) = sessions.0.get_mut(&session) else {
                             continue;
                         };

@@ -177,6 +177,23 @@ fn a_refusal_is_a_message_with_the_welcome() {
 }
 
 #[test]
+fn a_user_id_that_could_name_another_file_is_refused() {
+    for user in ["../local", "a/b", "", &"x".repeat(UserId::MAX_LEN + 1)] {
+        let (mut app, address) = server();
+        let user = UserId(user.to_owned());
+        let client = std::thread::spawn(move || {
+            let messages = [
+                ClientMessage::Hello { protocol: PROTOCOL_VERSION, user, client: "test".to_owned() },
+                call(1, Call::Join),
+            ];
+            post(address, &messages)
+        });
+        let answer = drive(&mut app, client);
+        assert_eq!(kinds(&answer.messages), ["refused"]);
+    }
+}
+
+#[test]
 fn a_push_made_without_a_session_arrives_with_the_next_request() {
     // A party that started a minute ago on the server clock, with the
     // delivery item stock it seats: written as a reader of the master table

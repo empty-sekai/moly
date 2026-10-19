@@ -38,6 +38,9 @@ pub struct Options {
     /// Whether to add Bevy's [`LogPlugin`]. A host that installs its own
     /// logger passes `false`: one process has one global subscriber.
     pub log: bool,
+    /// Whether the administration calls are accepted on a loopback listen
+    /// address. A server behind a reverse proxy passes `false`.
+    pub admin: bool,
 }
 
 /// Assemble the server app and bind its HTTP endpoint on the calling thread.
@@ -52,6 +55,7 @@ pub fn build(options: Options) -> Result<(App, SocketAddr), String> {
         remote,
         store,
         log,
+        admin,
     } = options;
     let mut app = App::new();
     // The asset root's sources are registered before `AssetPlugin` builds the
@@ -77,5 +81,8 @@ pub fn build(options: Options) -> Result<(App, SocketAddr), String> {
     let bound = moly_server::http::listen(&address, moly_server::hub(&app))
         .map_err(|error| format!("cannot listen on {address}: {error}"))?;
     app.insert_resource(ListenAddress(bound));
+    if !admin {
+        app.insert_resource(moly_server::AdminClosed);
+    }
     Ok((app, bound))
 }

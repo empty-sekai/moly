@@ -78,6 +78,20 @@ impl UserId {
     pub fn local() -> Self {
         Self("local".to_owned())
     }
+
+    /// The longest user id a server accepts.
+    pub const MAX_LEN: usize = 64;
+
+    /// Whether a server accepts this id: 1 to [`Self::MAX_LEN`] ASCII
+    /// letters, digits, `_` or `-`. A server names its stored documents
+    /// after the id, so no other character is admitted.
+    pub fn is_valid(&self) -> bool {
+        (1..=Self::MAX_LEN).contains(&self.0.len())
+            && self
+                .0
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    }
 }
 
 impl std::fmt::Display for UserId {

@@ -20,7 +20,7 @@ use crate::masters::{Masters, Tables};
 use crate::model::{ResponseKind, ServerModel};
 use crate::users::Users;
 use moly_masters::load::MasterTables;
-use crate::ListenAddress;
+use crate::{AdminClosed, ListenAddress};
 
 /// One call's answer.
 #[derive(Clone)]
@@ -39,9 +39,19 @@ impl Answered {
     }
 }
 
-/// Why an administration call cannot run here: the player socket is not a
-/// loopback address, or the server did not report one.
-pub(crate) fn admin_gate(listen: Option<&ListenAddress>) -> Result<(), Refusal> {
+/// Why an administration call cannot run here: the host closed
+/// administration, the player socket is not a loopback address, or the server
+/// did not report one.
+pub(crate) fn admin_gate(
+    closed: Option<&AdminClosed>,
+    listen: Option<&ListenAddress>,
+) -> Result<(), Refusal> {
+    if closed.is_some() {
+        return Err(Refusal::new(
+            "admin_not_allowed",
+            "administration is closed on this server",
+        ));
+    }
     match listen {
         Some(listen) if listen.0.ip().is_loopback() => Ok(()),
         Some(listen) => Err(Refusal::new(
@@ -67,6 +77,7 @@ pub(crate) fn answer_calls(
     sessions: Res<Sessions>,
     defaults: Option<Res<Defaults>>,
     listen: Option<Res<ListenAddress>>,
+    closed: Option<Res<AdminClosed>>,
     shared: Option<Res<MasterTables>>,
 ) {
     let tables = Tables::new(&masters, shared.as_deref());
@@ -75,7 +86,7 @@ pub(crate) fn answer_calls(
         let user = call.user.clone();
         // The administration calls run only on the loopback player socket.
         if matches!(&call.call, Call::Admin(_)) {
-            if let Err(refusal) = admin_gate(listen.as_deref()) {
+            if let Err(refusal) = admin_gate(closed.as_deref(), listen.as_deref()) {
                 sessions.send(
                     session,
                     &ServerMessage::Reply {

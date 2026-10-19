@@ -11,7 +11,9 @@
 //! reads them (`MOLY_ASSET_ROOT`, `MOLY_ASSET_CATALOG`, the four base
 //! variables), so both processes read the same masters. `MOLY_SERVER_DATA`
 //! names the directory the users' documents are kept in; without it the
-//! server keeps them in memory and a run starts fresh.
+//! server keeps them in memory and a run starts fresh. `MOLY_SERVER_ADMIN=off`
+//! refuses the administration calls; a server behind a reverse proxy listens
+//! on a loopback address and sets it.
 //!
 //! The assembly itself lives in the crate's library; this binary keeps the
 //! environment handling, the ready line and the exit codes.
@@ -76,6 +78,13 @@ fn main() {
         Err(std::env::VarError::NotPresent) => Store::memory(),
         Err(std::env::VarError::NotUnicode(_)) => fail("MOLY_SERVER_DATA is not valid text"),
     };
+    let admin = match std::env::var("MOLY_SERVER_ADMIN") {
+        Err(std::env::VarError::NotPresent) => true,
+        Ok(value) if value == "off" => false,
+        Ok(value) if value == "on" => true,
+        Ok(value) => fail(&format!("MOLY_SERVER_ADMIN={value:?} is not on or off")),
+        Err(std::env::VarError::NotUnicode(_)) => fail("MOLY_SERVER_ADMIN is not valid text"),
+    };
     let options = Options {
         address,
         control_port: Some(control_port),
@@ -83,6 +92,7 @@ fn main() {
         remote,
         store,
         log: true,
+        admin,
     };
     let (mut app, bound) = match moly_server_host::build(options) {
         Ok(built) => built,
