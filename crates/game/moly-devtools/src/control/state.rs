@@ -8,6 +8,9 @@ use serde_json::{json, Value};
 
 use crate::camera::{FieldCameraModel, FieldCameraState};
 use crate::npc::{CharacterUnitId, NpcActions};
+use crate::npc_objective::controller::{
+    phase_word, NpcHfsmActor, NpcHfsmPhase, NpcTransitionBudget,
+};
 use crate::npc_objective::ObjectiveMind;
 use crate::player::PlayerControlled;
 
@@ -92,18 +95,27 @@ pub(super) fn characters(world: &mut World) -> Value {
         &ObjectiveMind,
         Has<crate::npc::residency::Away>,
     ), (Without<PlayerControlled>, Without<crate::cutscene::CutSceneAvatar>)>();
-    let mut characters: Vec<(u32, Value)> = roster
+    let world: &World = world;
+    let mut characters: Vec<(u32, Entity, Value)> = roster
         .iter(world)
         .map(|(entity, unit, transform, actions, mind, away)| {
+            let machine = live_machine(world, entity).unwrap_or(Value::Null);
             (
                 unit.0,
+                entity,
                 json!({
                     "unit": unit.0,
                     "entity": entity.to_bits(),
+                    "hfsm": machine["phase"].clone(),
+                    "phase": machine["phase"].clone(),
+                    "hfsm_upper": machine["hfsm_upper"].clone(),
+                    "hfsm_lower": machine["hfsm_lower"].clone(),
+                    "hfsm_transitions": machine["hfsm_transitions"].clone(),
                     "position": vec3(transform.translation()),
                     "away": away,
                     "action": actions.map(|actions| format!("{:?}", actions.current)),
                     "tweeting": actions.map(|actions| actions.is_tweeting),
+                    "rotating": actions.map(|actions| actions.is_rotating),
                     "talking": actions.map(|actions| actions.talk_owner.is_some()),
                     "objective": mind.current.map(|objective| format!("{objective:?}")),
                     "executing": mind.executing,
@@ -111,8 +123,39 @@ pub(super) fn characters(world: &mut World) -> Value {
             )
         })
         .collect();
-    characters.sort_by_key(|(unit, _)| *unit);
-    Value::Array(characters.into_iter().map(|(_, character)| character).collect())
+    characters.sort_by_key(|(unit, ..)| *unit);
+    Value::Array(
+        characters
+            .into_iter()
+            .map(|(_, _, character)| character)
+            .collect(),
+    )
+}
+
+/// One machine as the control surface names it.
+pub(super) fn hfsm_value(
+    phase: NpcHfsmPhase,
+    budget: NpcTransitionBudget,
+    actor: NpcHfsmActor,
+) -> Value {
+    json!({
+        "phase": phase_word(phase.0),
+        "hfsm_upper": actor.upper.map(|upper| format!("{:?}", upper.upper_type())),
+        "hfsm_lower": actor.lower.map(|lower| format!("{:?}", lower.lower_type())),
+        "hfsm_transitions": budget.count,
+    })
+}
+
+/// The machine `unit` runs when it carries one, as the control surface names
+/// it (read on every snapshot, not from the last report).
+pub(super) fn live_machine(world: &World, entity: Entity) -> Option<Value> {
+    let phase = *world.get::<NpcHfsmPhase>(entity)?;
+    let budget = world
+        .get::<NpcTransitionBudget>(entity)
+        .copied()
+        .unwrap_or_default();
+    let actor = world.get::<NpcHfsmActor>(entity).copied().unwrap_or_default();
+    Some(hfsm_value(phase, budget, actor))
 }
 
 fn camera(world: &World) -> Value {

@@ -10,6 +10,7 @@ pub mod fixture;
 pub mod frame_time;
 pub mod facial;
 pub mod material;
+pub mod npc_hfsm;
 pub mod objective;
 pub mod particle;
 pub mod path;

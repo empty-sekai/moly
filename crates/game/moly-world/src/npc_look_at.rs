@@ -11,7 +11,8 @@
 //! angle between the character's forward and the target point itself
 //! (`look_at_turn_motion`), and plays the idle clip (the character's talk
 //! motion idle) when the tween ends: the motion driver plays the turn clip
-//! while the look-at is in flight and the idle clip after it. Not played
+//! while the look-at is in flight and the idle clip after it. The model's
+//! rotation flag follows the tween (see [`step`]). Not played
 //! here: the cloth reset after the idle clip, and the wait on that idle
 //! clip's change (taken as none); the greeting's own clip starts on the
 //! state's first update, and what the idle clip then does to it is not read.
@@ -21,7 +22,7 @@ use bevy::prelude::*;
 use moly_law::path::{look_at, TurnMotion};
 use moly_law::ui::dotween::Ease;
 
-use crate::npc::{CharacterUnitId, MotionPhase, WalkState};
+use crate::npc::{CharacterUnitId, MotionPhase, NpcActions, WalkState};
 
 /// The greeting's look-at duration in seconds.
 pub const GREETING_LOOK_AT_SECONDS: f32 = 1.0;
@@ -68,6 +69,10 @@ impl NpcLookAt {
 }
 
 /// Update (after the agent step): one tween update per look-at in flight.
+/// The model's rotation flag is raised while a tween is in flight: it is
+/// raised on the first update, kept across the turn, and cleared when the
+/// turn ends (the move that ends it leaves the flag to the model's own
+/// state writes).
 pub fn step(
     mut commands: Commands,
     clock: Res<crate::npc_clock::NpcClock>,
@@ -79,11 +84,12 @@ pub fn step(
         &mut Transform,
         &mut WalkState,
         &MotionPhase,
+        &mut NpcActions,
     )>,
 ) {
     let frame = frame.0;
     let dt = clock.delta();
-    for (entity, unit, mut look, mut transform, mut walk, phase) in &mut npcs {
+    for (entity, unit, mut look, mut transform, mut walk, phase, mut actions) in &mut npcs {
         if look.created == frame {
             continue;
         }
@@ -95,6 +101,7 @@ pub fn step(
             );
             continue;
         }
+        actions.is_rotating = true;
         let (start, change) = match look.started {
             Some(started) => started,
             None => {
@@ -132,6 +139,7 @@ pub fn step(
         walk.0.forward = (rotation * Vec3::Z).to_array();
         if done {
             commands.entity(entity).remove::<NpcLookAt>();
+            actions.is_rotating = false;
             info!(
                 "[npc unit={}] frame={frame} DoLookAt done at yaw {yaw:.3}",
                 unit.0

@@ -126,6 +126,11 @@ pub enum TweetHudEvent {
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NpcPresenterSet;
 
+/// The controller's per-character machine, read after the objective loop's
+/// decision and before its rest bookkeeping.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NpcHfsmSet;
+
 /// Registration of the resources and messages these systems use.
 pub struct NpcStatePlugin;
 
@@ -177,6 +182,19 @@ impl Plugin for NpcStatePlugin {
                 )
                     .chain(),
             );
+        // The controller's machine: inserted on every character that has
+        // none (the controller's constructor), then one update per frame
+        // after the objective loop's decision. It drives nothing yet.
+        app.add_systems(
+            Update,
+            (
+                crate::npc_objective::controller::insert_missing,
+                crate::npc_objective::controller::on_update.in_set(NpcHfsmSet),
+            )
+                .chain()
+                .after(crate::npc_objective::decide),
+        );
+        crate::npc_objective::controller::install(app);
         // The presenter's other per-frame calls, in the source order around
         // the state machine update (call 3) and the greeting gate (call 10)
         // that the schedule chains in this set: 1, 2 before call 3; 4 to 9

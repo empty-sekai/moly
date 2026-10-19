@@ -14,7 +14,9 @@
 //!   product's per-objective cancel is `npc_fixture_talk::try_cancel_current`.
 //! - ForceUpdateObjective: that cancel, and when it reported true, the
 //!   model's reset and new talk data (owed to the character's next decision
-//!   pass, see `npc_objective::owe_force_updates`).
+//!   pass, see `npc_objective::owe_force_updates`). The controller's own copy
+//!   of the call is only logged: whether a refused request parks the
+//!   character's machine is not settled yet.
 //! - Hide sets the model's visibility off and hides the view; Show sets it on
 //!   and shows the view. While the model is not visible the AI loop yields
 //!   before its rest and its decision unless the character has no objective
@@ -162,7 +164,23 @@ pub fn force_update_objective(world: &mut World, entity: Entity) -> bool {
             ", nothing updated"
         }
     );
+    // The controller's copy of the request. A refused one would park the
+    // character's machine (the host's cancel is a different call from the
+    // controller's own TryCancel), so the machine only hears it.
+    if !cancelled {
+        controller_request(world, entity, unit, frame, "ForceUpdateObjective refused");
+    }
     cancelled
+}
+
+/// The machine is told about a controller request it does not act on.
+fn controller_request(world: &World, entity: Entity, unit: u32, frame: u32, request: &str) {
+    if let Some(phase) = world.get::<crate::npc_objective::controller::NpcHfsmPhase>(entity) {
+        info!(
+            "[npc-hfsm] unit={unit} frame={frame} {request}: phase={:?} (logged only)",
+            phase.0
+        );
+    }
 }
 
 /// Presenter.Hide: the model's visibility off, the view hidden.

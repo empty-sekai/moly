@@ -11,8 +11,18 @@ use crate::harvest::catalog::HarvestCatalog;
 use crate::harvest::HarvestObject;
 use crate::userdata::client::inventory::{ClientMysekaiInventory, PossessionMasters};
 
-pub(super) const SECTIONS: &[&str] =
-    &["site", "gatherables", "bag", "tools", "recipes", "fixtures", "characters", "weather", "time"];
+pub(super) const SECTIONS: &[&str] = &[
+    "site",
+    "gatherables",
+    "bag",
+    "tools",
+    "recipes",
+    "fixtures",
+    "characters",
+    "npc_ai",
+    "weather",
+    "time",
+];
 
 /// The sections named in `what`, every section when it is empty.
 pub(super) fn observe(world: &mut World, what: &[String]) -> Result<Value, String> {
@@ -43,6 +53,9 @@ pub(super) fn observe(world: &mut World, what: &[String]) -> Result<Value, Strin
     if wanted("characters") {
         out.insert("characters".into(), super::state::characters(world));
     }
+    if wanted("npc_ai") {
+        out.insert("npc_ai".into(), npc_ai(world));
+    }
     if wanted("weather") {
         out.insert("weather".into(), super::state::weather(world));
     }
@@ -53,6 +66,56 @@ pub(super) fn observe(world: &mut World, what: &[String]) -> Result<Value, Strin
         );
     }
     Ok(Value::Object(out))
+}
+
+/// The controller's machine of every character, per unit: its phase, the
+/// upper and lower state it holds, the transitions of the current frame,
+/// the Inactive timer and the start flags.
+fn npc_ai(world: &mut World) -> Value {
+    let rows = world
+        .get_resource::<crate::npc_objective::controller::NpcHfsmReport>()
+        .map(|report| report.to_json())
+        .unwrap_or_else(|| json!([]));
+    let mut units = world.query_filtered::<(
+        Entity,
+        &crate::npc::CharacterUnitId,
+        &crate::npc_objective::controller::NpcHfsmPhase,
+        &crate::npc_objective::controller::NpcTransitionBudget,
+        &crate::npc_objective::controller::NpcRecoveryTimer,
+        &crate::npc_objective::controller::NpcHfsmFlags,
+        &crate::npc_objective::controller::NpcHfsmActor,
+        &crate::npc_objective::controller::NpcUpperWeights,
+        Has<crate::npc_objective::controller::NpcDisplayOnly>,
+    ), (
+        Without<crate::player::PlayerControlled>,
+        Without<crate::cutscene::CutSceneAvatar>,
+    )>();
+    let mut live: Vec<Value> = units
+        .iter(world)
+        .map(|(entity, unit, phase, budget, recovery, flags, actor, weights, display_only)| {
+            let mut row = super::state::hfsm_value(*phase, *budget, *actor);
+            if let Some(fields) = row.as_object_mut() {
+                fields.insert("phase_value".into(), json!(phase.0.value()));
+                fields.insert("unit".into(), json!(unit.0));
+                fields.insert("entity".into(), json!(entity.to_bits()));
+                fields.insert("inactive".into(), json!(recovery.0));
+                fields.insert("started".into(), json!(flags.has_started));
+                fields.insert("suppressed".into(), json!(flags.suppress_recovery));
+                fields.insert("display_only".into(), json!(display_only));
+                fields.insert(
+                    "weights".into(),
+                    json!(weights
+                        .0
+                        .iter()
+                        .map(|entry| json!({ "state": format!("{:?}", entry.state), "weight": entry.weight }))
+                        .collect::<Vec<_>>()),
+                );
+            }
+            row
+        })
+        .collect();
+    live.sort_by_key(|row| row["unit"].as_u64().unwrap_or(0));
+    json!({ "report": rows, "live": live })
 }
 
 /// The site and its layout grid: the floor's size in tiles (rooms) and the

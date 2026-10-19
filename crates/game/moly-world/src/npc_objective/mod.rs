@@ -88,6 +88,15 @@
 //! navmesh 面），但保留高度：目标域的采样要的是面上的三维最近点
 //! （源 SamplePosition 语义），投影面裁不了高度。站点换装后面按代数
 //! 重建；构建端带格桶索引，逐格最近点查询不扫全网格。
+//!
+//! The `controller` submodule sits beside this loop and shares nothing with
+//! it: the per-character machine's phase, its state objects, the transition
+//! budget and the Inactive recovery, advanced by its own per-frame update.
+
+/// The per-character machine of the controller.
+pub mod controller;
+
+pub use controller::NpcController;
 
 use crate::client_config::{
     ClientConfigs, KEY_CHARACTER_FIXTURE_MOVE_OFFSET, KEY_CHARACTER_GATE_ACTION_ELAPSED_TIME,
@@ -1054,6 +1063,17 @@ impl MemberRng {
 
     pub fn calls(&self) -> u64 {
         self.calls
+    }
+
+    /// The generator at a state and call count: a copy a caller takes out of
+    /// the component and writes back after its draws.
+    pub fn from_state(state: u64, calls: u64) -> Self {
+        Self { state, calls }
+    }
+
+    /// The sequence position a copy is taken from and written back to.
+    pub fn state_value(&self) -> u64 {
+        self.state
     }
 }
 

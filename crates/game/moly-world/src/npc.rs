@@ -127,6 +127,18 @@ pub struct NpcActions {
     pub tweet_id: i32,
     /// The model's one-shot first-talk flag, set when a greeting completes.
     pub first_talk_complete: bool,
+    /// Whether a turn towards a target (`DoLookAtAsync` / `DoLookAt`) is in
+    /// flight; every LookingAt phase polls it.
+    pub is_rotating: bool,
+    /// The model's `PendingTalkData`: the fixture talk data a recruitment
+    /// utility planned, consumed by the next fixture action.
+    pub pending_talk_data: Option<i32>,
+    /// The model's `TargetFixture`: the fixture the current action is for.
+    pub target_fixture: Option<Entity>,
+    /// The model's `LastActionFixture`: the fixture of the last action.
+    pub last_action_fixture: Option<Entity>,
+    /// The model's `ReservedMovePosition`: the spot a photo shot reserved.
+    pub reserved_move_position: Option<[f32; 3]>,
     /// Seconds the presenter has updated since it was initialized.
     pub since_initialized: f32,
     pub locals: crate::npc_state::StateLocals,
@@ -148,6 +160,11 @@ impl Default for NpcActions {
             tweet_state: crate::npc_state::TweetState::Valid,
             tweet_id: 0,
             first_talk_complete: false,
+            is_rotating: false,
+            pending_talk_data: None,
+            target_fixture: None,
+            last_action_fixture: None,
+            reserved_move_position: None,
             since_initialized: 0.0,
             locals: Default::default(),
             effects: Vec::new(),
@@ -185,6 +202,9 @@ impl NpcActions {
         self.tweet_state = crate::npc_state::TweetState::Valid;
         self.is_tweeting = false;
         self.talk_owner = None;
+        self.is_rotating = false;
+        self.pending_talk_data = None;
+        self.target_fixture = None;
     }
 
     /// The state machine's change. It refuses a change to the current state
@@ -1159,23 +1179,22 @@ pub fn spawn_when_ready(
         pause_min = pause_min.min(*pause_seconds);
         pause_max = pause_max.max(*pause_seconds);
         let unit = CharacterUnitId(*unit_id);
-        let mut member = commands.spawn((
+        let mut member = commands.spawn(crate::npc_objective::controller::NpcSpawn {
             unit,
             // The identity rotation of the instantiation.
-            Transform::from_translation(Vec3::from(seed)).with_rotation(Quat::IDENTITY),
+            transform: Transform::from_translation(Vec3::from(seed)).with_rotation(Quat::IDENTITY),
             // 成员是渲染层级的节点：模型子实体的可见性沿父链向上查到本实体。
             // 不带它时子实体的可见性只能靠引擎的回退（视为可见）并告警。
-            if away {
+            visibility: if away {
                 Visibility::Hidden
             } else {
                 Visibility::default()
             },
-            PathSlot(NpcPathWalkSlot::from_corners(Vec::new())),
-            WalkSpeed(*walk_speed),
-            (
-                PauseSeconds(*pause_seconds),
-                RestLifecycle::default(),
-                {
+            path: PathSlot(NpcPathWalkSlot::from_corners(Vec::new())),
+            speed: WalkSpeed(*walk_speed),
+            pause: PauseSeconds(*pause_seconds),
+            rest: RestLifecycle::default(),
+            actions: {
                 let mut actions = NpcActions::placed_on(own_site.clone());
                 // `SetupNpcVisitingAsync(hasReturnedFromOtherRoom: true)`
                 // completes every member's first talk.
@@ -1184,12 +1203,11 @@ pub fn spawn_when_ready(
                 }
                 actions
             },
-            ),
-            WalkState(LawWalkState::new(seed, FORWARD_FALLBACK)),
-            MoveTarget(seed),
-            RouteStops::default(),
-            StuckBaseline::default(),
-            MotionClips {
+            walk: WalkState(LawWalkState::new(seed, FORWARD_FALLBACK)),
+            target: MoveTarget(seed),
+            route: RouteStops::default(),
+            stuck: StuckBaseline::default(),
+            clips: MotionClips {
                 idle: idle.clone(),
                 walk: walk.clone(),
             },
@@ -1199,17 +1217,21 @@ pub fn spawn_when_ready(
             // `npc_gate`). A roster created while another site is loaded
             // gets it too and makes that first decision when home is loaded;
             // the embedded stage's cast keeps empty data.
-            if stage.is_some() {
+            talk: if stage.is_some() {
                 crate::npc_objective::TalkSlot::default()
             } else {
                 crate::npc_objective::TalkSlot::entry_site(*unit_id)
             },
             // 出生态：起动旗立起（源起动装配「立即可执行下一目标」的同
             // 形），首判不等停顿。
-            crate::npc_objective::ObjectiveMind::at_spawn(),
-            crate::npc_objective::MemberRng::from_platform(),
-            MotionPhase::Dwelling { remaining: None },
-        ));
+            mind: crate::npc_objective::ObjectiveMind::at_spawn(),
+            rng: crate::npc_objective::MemberRng::from_platform(),
+            motion: MotionPhase::Dwelling { remaining: None },
+            // The controller of the AI model's machine (the `AIModel`
+            // reachable from the presenter): Inactive until the AI's set-up
+            // starts it at the end of this wake-up.
+            controller: crate::npc_objective::NpcController::default(),
+        });
         if away {
             member.insert(residency::Away);
         }
@@ -1223,6 +1245,9 @@ pub fn spawn_when_ready(
         commands.remove_resource::<restore::ReturnedFromOtherRoom>();
         info!("[npc-residency] RestoreNpcAsync: SetupNpcVisitingAsync(visitingFromGate false, hasReturnedFromOtherRoom true): the roster is created again with every member's first talk complete (SetCompleteFirstTalk)");
     }
+    // `InitializeHFSM`'s start for every member of the new roster: the
+    // members' machines begin with their set-up's `Start()`.
+    crate::npc_objective::controller::start_roster(&mut commands, &ids);
     use crate::client_config::{
         KEY_NPC_LOTTERY_ALREADY_READ_FIXTURE_TALK_PERCENT,
         KEY_NPC_LOTTERY_ALREADY_READ_WHEN_HAS_NOT_READ, KEY_NPC_LOTTERY_FIXTURE_TALK_PERCENT,
@@ -1321,6 +1346,7 @@ pub fn spawn_temporary_units(
         let entity = world
             .spawn(ordinary_npc(unit_id, speed, pause, MotionClips { idle, walk }, seed))
             .id();
+        crate::npc_objective::controller::start_in_world(world, entity);
         spawned.push(entity);
     }
     if let Some(mut registry) = world.get_resource_mut::<Registry>() {
@@ -1340,27 +1366,26 @@ fn ordinary_npc(
     clips: MotionClips,
     seed: [f32; 3],
 ) -> impl Bundle {
-    (
-        CharacterUnitId(unit_id),
-        Transform::from_translation(Vec3::from(seed)),
-        Visibility::default(),
-        PathSlot(NpcPathWalkSlot::from_corners(Vec::new())),
-        WalkSpeed(speed),
-        (
-            PauseSeconds(pause),
-            RestLifecycle::default(),
-            NpcActions::default(),
-        ),
-        WalkState(LawWalkState::new(seed, FORWARD_FALLBACK)),
-        MoveTarget(seed),
-        RouteStops::default(),
-        StuckBaseline::default(),
+    crate::npc_objective::controller::NpcSpawn {
+        unit: CharacterUnitId(unit_id),
+        transform: Transform::from_translation(Vec3::from(seed)),
+        visibility: Visibility::default(),
+        path: PathSlot(NpcPathWalkSlot::from_corners(Vec::new())),
+        speed: WalkSpeed(speed),
+        pause: PauseSeconds(pause),
+        rest: RestLifecycle::default(),
+        actions: NpcActions::default(),
+        walk: WalkState(LawWalkState::new(seed, FORWARD_FALLBACK)),
+        target: MoveTarget(seed),
+        route: RouteStops::default(),
+        stuck: StuckBaseline::default(),
         clips,
-        crate::npc_objective::TalkSlot::default(),
-        crate::npc_objective::ObjectiveMind::at_spawn(),
-        crate::npc_objective::MemberRng::from_platform(),
-        MotionPhase::Dwelling { remaining: None },
-    )
+        talk: crate::npc_objective::TalkSlot::default(),
+        mind: crate::npc_objective::ObjectiveMind::at_spawn(),
+        rng: crate::npc_objective::MemberRng::from_platform(),
+        motion: MotionPhase::Dwelling { remaining: None },
+        controller: crate::npc_objective::NpcController::default(),
+    }
 }
 
 /// `AvatarFactory.CreateNPCAvatarForMulti(unit, view, 1)`: a new NPC of the
@@ -1384,6 +1409,7 @@ pub fn create_npc_avatar_for_multi(world: &mut World, unit: u32) -> Result<Entit
     if let Some(mut actions) = world.get_mut::<NpcActions>(entity) {
         actions.site_type = residency::SITE_TYPES[0].to_owned();
     }
+    crate::npc_objective::controller::start_in_world(world, entity);
     if let Some(mut registry) = world.get_resource_mut::<Registry>() {
         if !registry.character_unit_ids.contains(&unit) {
             registry.character_unit_ids.push(unit);
