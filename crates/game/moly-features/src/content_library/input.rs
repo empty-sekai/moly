@@ -621,7 +621,12 @@ fn erase(state: &mut ContentLibrary, backwards: bool) {
     state.select_all = false;
     state.reset_browse();
 }
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(target_os = "android")]
+fn request_paste(state: &mut ContentLibrary, _inbox: &PasteInbox) {
+    state.status = "此平台的剪贴板不可读，仍可直接输入关键词".into();
+    state.changed();
+}
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 fn request_paste(state: &mut ContentLibrary, _inbox: &PasteInbox) {
     match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
         Ok(text) => insert_text(state, &text),

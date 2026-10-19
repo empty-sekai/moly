@@ -23,7 +23,6 @@ getrandom = { version = "=0.2.17", features = ["js"] }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Each settings write is a synced temporary file replaced into place.
 tempfile = "3"
-rfd = "0.15"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "time", "net", "fs", "io-util"] }
 
@@ -42,3 +41,7 @@ web-sys = { version = "0.3", features = ["Window", "Storage", "Location", "UrlSe
 [features]
 # Test helpers that the higher layers' tests call.
 test-support = []
+
+# Desktop file chooser and clipboard; Android and the browser have their own.
+[target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
+rfd = "0.15"

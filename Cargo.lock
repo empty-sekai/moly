@@ -4928,7 +4928,6 @@ dependencies = [
 name = "moly-audio"
 version = "0.0.3"
 dependencies = [
- "arboard",
  "async-channel",
  "async-lock",
  "base64 0.22.1",
@@ -4953,7 +4952,6 @@ dependencies = [
  "parry3d",
  "regex",
  "reqwest 0.12.28",
- "rfd 0.15.4",
  "rodio",
  "serde",
  "serde_json",
@@ -4998,7 +4996,6 @@ dependencies = [
 name = "moly-devtools"
 version = "0.0.3"
 dependencies = [
- "arboard",
  "async-channel",
  "async-lock",
  "base64 0.22.1",
@@ -5028,7 +5025,6 @@ dependencies = [
  "parry3d",
  "regex",
  "reqwest 0.12.28",
- "rfd 0.15.4",
  "rodio",
  "serde",
  "serde_json",
@@ -5075,7 +5071,6 @@ dependencies = [
  "parry3d",
  "regex",
  "reqwest 0.12.28",
- "rfd 0.15.4",
  "rodio",
  "serde",
  "serde_json",
@@ -5093,7 +5088,6 @@ dependencies = [
 name = "moly-game"
 version = "0.0.3"
 dependencies = [
- "arboard",
  "async-channel",
  "async-lock",
  "base64 0.22.1",
@@ -5124,7 +5118,6 @@ dependencies = [
  "parry3d",
  "regex",
  "reqwest 0.12.28",
- "rfd 0.15.4",
  "rodio",
  "serde",
  "serde_json",
@@ -5208,7 +5201,6 @@ dependencies = [
 name = "moly-render"
 version = "0.0.3"
 dependencies = [
- "arboard",
  "async-channel",
  "async-lock",
  "base64 0.22.1",
@@ -5233,7 +5225,6 @@ dependencies = [
  "parry3d",
  "regex",
  "reqwest 0.12.28",
- "rfd 0.15.4",
  "rodio",
  "serde",
  "serde_json",
@@ -5293,7 +5284,6 @@ dependencies = [
 name = "moly-ui"
 version = "0.0.3"
 dependencies = [
- "arboard",
  "async-channel",
  "async-lock",
  "base64 0.22.1",
@@ -5320,7 +5310,6 @@ dependencies = [
  "parry3d",
  "regex",
  "reqwest 0.12.28",
- "rfd 0.15.4",
  "rodio",
  "serde",
  "serde_json",
@@ -5338,7 +5327,6 @@ dependencies = [
 name = "moly-world"
 version = "0.0.3"
 dependencies = [
- "arboard",
  "async-channel",
  "async-lock",
  "base64 0.22.1",
@@ -5366,7 +5354,6 @@ dependencies = [
  "parry3d",
  "regex",
  "reqwest 0.12.28",
- "rfd 0.15.4",
  "rodio",
  "serde",
  "serde_json",

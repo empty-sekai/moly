@@ -230,6 +230,7 @@ mod platform {
     use super::*;
     use tokio::io::AsyncReadExt;
 
+    #[cfg(not(target_os = "android"))]
     pub fn pick_file(
         kind: &FileKind,
     ) -> Result<impl Future<Output = Result<Option<rfd::FileHandle>, String>> + Send, String> {
@@ -239,8 +240,22 @@ mod platform {
         Ok(async move { Ok(selection.await) })
     }
 
+    /// Android has no file chooser here: the request is refused by name.
+    #[cfg(target_os = "android")]
+    pub fn pick_file(
+        kind: &FileKind,
+    ) -> Result<std::future::Ready<Result<Option<std::path::PathBuf>, String>>, String> {
+        Err(format!("Choosing a local {} file is not available on Android", kind.label))
+    }
+
+    #[cfg(not(target_os = "android"))]
     pub fn file_name(file: &rfd::FileHandle) -> String {
         file.file_name()
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn file_name(file: &std::path::Path) -> String {
+        file.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()
     }
 
     pub async fn fetch(url: &str, limit: usize) -> Result<Vec<u8>, String> {
@@ -270,8 +285,14 @@ mod platform {
         Ok(body.bytes)
     }
 
+    #[cfg(not(target_os = "android"))]
     pub async fn file(file: &rfd::FileHandle, limit: usize) -> Result<Vec<u8>, String> {
         read_file(file.path(), limit).await
+    }
+
+    #[cfg(target_os = "android")]
+    pub async fn file(file: &std::path::Path, limit: usize) -> Result<Vec<u8>, String> {
+        read_file(file, limit).await
     }
 
     pub async fn read_file(path: &std::path::Path, limit: usize) -> Result<Vec<u8>, String> {

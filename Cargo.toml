@@ -19,6 +19,7 @@ members = [
     "crates/game/moly-masters",
     "crates/game/moly-game",
     "crates/app/moly-app",
+    "crates/app/moly-android",
     "crates/app/moly-launcher",
     "crates/app/moly-server-host",
 ]

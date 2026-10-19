@@ -685,7 +685,13 @@ pub fn read_json_file(path: &std::path::Path) -> Result<String, String> {
     decode_bytes(bytes)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(target_os = "android")]
+fn paste(inbox: Inbox, ticket: u64) {
+    let result = Err("The clipboard is not readable on Android; type the UID instead".to_owned());
+    deliver(&inbox, ticket, Incoming::Paste(result));
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 fn paste(inbox: Inbox, ticket: u64) {
     let result = arboard::Clipboard::new()
         .and_then(|mut clipboard| clipboard.get_text())
