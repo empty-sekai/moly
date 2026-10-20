@@ -463,9 +463,10 @@ pub fn install(app: &mut App) {
                     // 音频路由档案（index 共用天气那份 + 循环点表）的装载请求。
                     audio::load,
                     balloon::overlay_camera,
-                    // 小地图链的装载请求与覆盖相机（order 2 层，与气泡层平行）。
+                    // 小地图链的装载请求（嵌入舞台不装）与覆盖相机（order 2
+                    // 层，与气泡层平行）。对话窗体也画在这一层，舞台同样要它。
                     sitemap::load.run_if(crate::browser_stage::standalone),
-                    sitemap::overlay_camera.run_if(crate::browser_stage::standalone),
+                    sitemap::overlay_camera,
                 )
                     .chain(),
             )

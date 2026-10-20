@@ -1938,9 +1938,11 @@ pub fn read_switch(
         Option<Res<crate::field_modes::EntryGates>>,
     ),
     // Paired: this system is at the parameter-count limit.
-    (library, dev): (
+    (library, dev, stage, exploration): (
         Res<crate::field_modes::LibraryMode>,
         Option<Res<crate::dev_tools::DevTools>>,
+        Option<Res<crate::browser_stage::BrowserStage>>,
+        Option<Res<crate::stage_layout::TransientExploration>>,
     ),
 ) {
     // GameState SiteMove: the move owns the site until it returns to Normal.
@@ -2006,7 +2008,13 @@ pub fn read_switch(
     let Some(sites) = sites.as_deref() else {
         return;
     };
-    let resolved = if temporary {
+    // The level is resolved as [`plan`] will resolve it: a site that starts
+    // with an empty layout does not read a stored or starter layout.
+    let resolved = if crate::stage_layout::use_empty_stage_layout(
+        temporary,
+        stage.is_some(),
+        exploration.is_some(),
+    ) {
         next.resolve_temporary_level(sites)
     } else {
         next.resolve_level(sites, &layouts, source_region.as_deref().copied())
