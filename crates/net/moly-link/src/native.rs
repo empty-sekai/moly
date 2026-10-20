@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use bevy::log::error;
 use moly_protocol::{decode, ServerMessage};
 
-use crate::{LinkTransport, Next, Schedule, REQUEST_TIMEOUT};
+use crate::{Endpoint, LinkTransport, Next, Schedule, REQUEST_TIMEOUT};
 
 /// The largest answer the link reads; the server's lists fit well below it.
 const MAX_ANSWER: u64 = 64 * 1024 * 1024;
@@ -55,7 +55,15 @@ fn run(transport: LinkTransport) {
             Next::Poll => None,
             Next::Call(call) => Some(call),
         };
-        let answer = post(&agent, &url, transport.request(call));
+        let body = transport.request(call);
+        let answer = match &transport.endpoint {
+            Endpoint::Http(_) => post(&agent, &url, body),
+            // The app hosting the server answers in its own updates; this
+            // thread waits for them.
+            #[cfg(feature = "local")]
+            Endpoint::Local(hub) => bevy::tasks::block_on(hub.exchange(&body))
+                .map_err(|error| error.to_string()),
+        };
         if !schedule.answered(started.elapsed(), answer, &transport) {
             return;
         }

@@ -30,6 +30,8 @@ windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
 wasm-bindgen = "=0.2.127"
 # wasm 的 panic 默认只剩一句 RuntimeError；资产源的拒绝要整句落进控制台。
 console_error_panic_hook = "0.1"
+# The browser stage hosts the server in its own app.
+moly-link = { path = "../../net/moly-link", features = ["local"] }
 # Browser startup events and same-origin page parameters.
 web-sys = { version = "0.3", features = ["Window", "Location", "UrlSearchParams", "Navigator", "Event", "EventTarget", "CustomEvent", "CustomEventInit", "Url", "Storage", "Crypto"] }
 js-sys = "0.3"

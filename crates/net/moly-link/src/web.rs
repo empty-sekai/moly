@@ -14,7 +14,7 @@ use moly_protocol::{decode, ServerMessage};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 
-use crate::{LinkTransport, Next, Schedule, REQUEST_TIMEOUT};
+use crate::{Endpoint, LinkTransport, Next, Schedule, REQUEST_TIMEOUT};
 
 /// The largest answer the link reads; the server's lists fit well below it.
 const MAX_ANSWER: usize = 64 * 1024 * 1024;
@@ -54,13 +54,22 @@ async fn run(transport: LinkTransport) {
             Next::Call(call) => Some(call),
         };
         let body = transport.request(call);
-        let answer = match future::select(Box::pin(post(&url, body)), Box::pin(sleep(REQUEST_TIMEOUT))).await {
+        let answer = match future::select(Box::pin(send(&transport.endpoint, &url, body)), Box::pin(sleep(REQUEST_TIMEOUT))).await {
             Either::Left((answer, _)) => answer,
             Either::Right(_) => Err(format!("no answer within {} s", REQUEST_TIMEOUT.as_secs())),
         };
         if !schedule.answered(elapsed(), answer, &transport) {
             return;
         }
+    }
+}
+
+/// Sends one request to the endpoint and reads its answer.
+async fn send(endpoint: &Endpoint, url: &str, body: Vec<u8>) -> Result<Vec<ServerMessage>, String> {
+    match endpoint {
+        Endpoint::Http(_) => post(url, body).await,
+        #[cfg(feature = "local")]
+        Endpoint::Local(hub) => hub.exchange(&body).await.map_err(|error| error.to_string()),
     }
 }
 

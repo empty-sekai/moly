@@ -16,6 +16,9 @@
 //! later answer's welcome opens it again. While no call is queued, the link
 //! polls once no request has been made for [`POLL_INTERVAL`], so the pushes
 //! the server queued for the user arrive.
+//!
+//! With the `local` feature, `LocalLinkPlugin` hosts the server in the
+//! game's own app and sends the same requests to it in memory.
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
@@ -176,33 +179,80 @@ pub struct LinkPlugin(pub LinkConfig);
 
 impl Plugin for LinkPlugin {
     fn build(&self, app: &mut App) {
-        let (outgoing, calls) = async_channel::unbounded();
-        let (to_game, incoming) = async_channel::unbounded();
         let config = self.0.clone();
         info!("[link] connecting to {} as user {}", config.address, config.user);
-        let transport = LinkTransport {
-            address: config.address.clone(),
-            user: config.user.clone(),
-            client: config.client.clone(),
-            connect_window: config.connect_window,
-            calls,
-            to_game,
-        };
-        #[cfg(not(target_arch = "wasm32"))]
-        native::connect(transport);
-        #[cfg(target_arch = "wasm32")]
-        web::connect(transport);
-        app.insert_resource(ServerLink {
-            state: LinkState::Connecting,
-            next_seq: 0,
-            outgoing,
-            incoming,
-            waiting: Vec::new(),
-            sent: Vec::new(),
-        })
-        .add_message::<ServerArrived>()
-        .add_systems(PreUpdate, pump);
+        install(
+            app,
+            Endpoint::Http(config.address),
+            config.user,
+            config.client,
+            config.connect_window,
+        );
     }
+}
+
+/// Hosts the server in this app and links to it in memory: the server's
+/// plugins are added to the app, read the masters and the default document
+/// through the app's own asset source, and answer the link's requests
+/// through their hub. The requests and answers are those of the HTTP
+/// endpoint.
+#[cfg(feature = "local")]
+pub struct LocalLinkPlugin {
+    pub user: UserId,
+    /// The game's name and version, for the server's log.
+    pub client: String,
+}
+
+#[cfg(feature = "local")]
+impl Plugin for LocalLinkPlugin {
+    fn build(&self, app: &mut App) {
+        if !app.is_plugin_added::<moly_server::MasterLoadPlugin>() {
+            app.add_plugins(moly_server::MasterLoadPlugin);
+        }
+        app.add_plugins(moly_server::ServerPlugin);
+        info!("[link] the server runs in this app; user {}", self.user);
+        install(
+            app,
+            Endpoint::Local(moly_server::hub(app)),
+            self.user.clone(),
+            self.client.clone(),
+            CONNECT_WINDOW,
+        );
+    }
+}
+
+/// Starts a transport to `endpoint` and installs the link.
+fn install(
+    app: &mut App,
+    endpoint: Endpoint,
+    user: UserId,
+    client: String,
+    connect_window: std::time::Duration,
+) {
+    let (outgoing, calls) = async_channel::unbounded();
+    let (to_game, incoming) = async_channel::unbounded();
+    let transport = LinkTransport {
+        endpoint,
+        user,
+        client,
+        connect_window,
+        calls,
+        to_game,
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    native::connect(transport);
+    #[cfg(target_arch = "wasm32")]
+    web::connect(transport);
+    app.insert_resource(ServerLink {
+        state: LinkState::Connecting,
+        next_seq: 0,
+        outgoing,
+        incoming,
+        waiting: Vec::new(),
+        sent: Vec::new(),
+    })
+    .add_message::<ServerArrived>()
+    .add_systems(PreUpdate, pump);
 }
 
 /// A link that never connects: the app plays without a server, and every
@@ -231,10 +281,20 @@ impl Plugin for OfflineLinkPlugin {
     }
 }
 
+/// Where a transport's requests go.
+#[derive(Clone)]
+pub(crate) enum Endpoint {
+    /// The server's HTTP endpoint at this `http://host:port` address.
+    Http(String),
+    /// A server hosted in this app, through its hub.
+    #[cfg(feature = "local")]
+    Local(moly_server::Hub),
+}
+
 /// What a transport needs: where the server is, who says hello, how long it
 /// retries before the first welcome, the calls to send and the game's inbox.
 pub(crate) struct LinkTransport {
-    pub(crate) address: String,
+    pub(crate) endpoint: Endpoint,
     user: UserId,
     client: String,
     pub(crate) connect_window: std::time::Duration,
@@ -243,9 +303,14 @@ pub(crate) struct LinkTransport {
 }
 
 impl LinkTransport {
-    /// The endpoint every request goes to.
+    /// Where every request goes, as the link's messages name it: the HTTP
+    /// endpoint's URL, or the server in this app.
     pub(crate) fn url(&self) -> String {
-        format!("{}{RPC_PATH}", self.address)
+        match &self.endpoint {
+            Endpoint::Http(address) => format!("{address}{RPC_PATH}"),
+            #[cfg(feature = "local")]
+            Endpoint::Local(_) => "the server in this app".to_owned(),
+        }
     }
 
     /// The body of one request: the hello, then the call when there is one.

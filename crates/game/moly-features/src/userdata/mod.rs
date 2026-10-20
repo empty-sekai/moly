@@ -1085,8 +1085,11 @@ pub struct UserDataPlugin;
 
 impl Plugin for UserDataPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(moly_masters::load::MasterTablesPlugin)
-            .add_plugins(moly_masters::load::MasterRowsPlugin)
+        // A server hosted in this app may have added the shared tables.
+        if !app.is_plugin_added::<moly_masters::load::MasterTablesPlugin>() {
+            app.add_plugins(moly_masters::load::MasterTablesPlugin);
+        }
+        app.add_plugins(moly_masters::load::MasterRowsPlugin)
             .add_message::<RankDelivered>()
             .add_message::<Answered>()
             .init_resource::<LiveSchedule>()

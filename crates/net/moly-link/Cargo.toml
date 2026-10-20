@@ -10,6 +10,11 @@ license.workspace = true
 moly-protocol = { path = "../moly-protocol" }
 bevy = { version = "0.18.1", default-features = false, features = ["std", "bevy_log"] }
 async-channel = "2.5"
+# The server the `local` feature hosts in the game's own app.
+moly-server = { path = "../../server/moly-server", optional = true }
+
+[features]
+local = ["dep:moly-server"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # HTTPS with the trust store every native HTTPS client of the game uses.

@@ -86,13 +86,14 @@ fn run_app(
     }
     #[cfg(target_arch = "wasm32")]
     {
-        // The game returned above: this is the stage, which plays an empty
-        // layout and never joins, so it links to no server.
+        // The game returned above: this is the stage. It hosts the server
+        // in its own app, so the page needs no server address.
         moly_game::configure_browser_library(&mut app);
         moly_game::configure_browser_stage(&mut app);
-        app.add_plugins(moly_link::OfflineLinkPlugin(
-            "the browser stage plays without a server".to_owned(),
-        ));
+        app.add_plugins(moly_link::LocalLinkPlugin {
+            user: moly_protocol::UserId::local(),
+            client: format!("moly-app {}", moly_game::VERSION),
+        });
         attach_canvas(&mut app);
         announce_ready(&mut app);
     }
