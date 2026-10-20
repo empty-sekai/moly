@@ -571,6 +571,19 @@ pub fn bake_atlas(
             ARROW_H
         );
     }
+    let missing = [
+        (tables.is_none(), "the tweet tables are not installed"),
+        (talk_charset.is_none(), "the talk charset is not installed"),
+        (player_talk_charset.is_none(), "the player talk charset is not installed"),
+        (shell_charset.is_none(), "the shell charset is not installed"),
+        (collect_charset.is_none(), "the collect notice charset is not installed"),
+        (bgm_select_charset.is_none(), "the bgm select charset is not installed"),
+    ]
+    .into_iter()
+    .find_map(|(missing, reason)| missing.then_some(reason));
+    if let Some(reason) = missing {
+        return hold.hold(&ATLAS_BAKE, reason, now);
+    }
     let (
         Some(tables),
         Some(talk_charset),
@@ -587,7 +600,7 @@ pub fn bake_atlas(
         bgm_select_charset,
     )
     else {
-        return;
+        unreachable!("every input was checked above");
     };
     let font = swash::FontRef::from_index(&FONT_BYTES, 0)
         .unwrap_or_else(|| panic!("仓内字体不是可读的 OpenType 字体"));

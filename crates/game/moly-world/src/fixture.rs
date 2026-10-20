@@ -1514,25 +1514,26 @@ fn restore_selected_layout(
     if placements.site_id == site_id && placements.site_type == selection.site_type() {
         return;
     }
-    // The home site's layout is completed with the player's house, which
-    // needs the fixture tables.
-    if selection.site_type() == "home_site" && homes.is_none() {
-        return hold.hold(&RESTORE, "the player's house fixtures are not installed", now);
-    }
-    // The home gate shows the model of the gate the server set at the home
-    // site (`MysekaiGateModel.AssetBundleName`).
-    if selection.site_type() == "home_site" && gate_model.is_none() {
-        return hold.hold(&RESTORE, "the home gate model is not installed", now);
-    }
-    hold.run(&RESTORE, now);
     // An embedded stage starts with no preset or persisted layout. The same
     // layout owner later installs/restores exact content-scoped fixtures.
     // In particular, never instantiate a CN offline preset in a JP snapshot.
-    let restored = if crate::stage_layout::use_empty_stage_layout(
+    let empty_layout = crate::stage_layout::use_empty_stage_layout(
         temporary.is_some(),
         stage.is_some(),
         exploration.is_some(),
-    ) {
+    );
+    // The home site's layout is completed with the player's house, which
+    // needs the fixture tables. An empty layout has no house.
+    if !empty_layout && selection.site_type() == "home_site" && homes.is_none() {
+        return hold.hold(&RESTORE, "the player's house fixtures are not installed", now);
+    }
+    // The home gate shows the model of the gate the server set at the home
+    // site (`MysekaiGateModel.AssetBundleName`). An empty layout has no gate.
+    if !empty_layout && selection.site_type() == "home_site" && gate_model.is_none() {
+        return hold.hold(&RESTORE, "the home gate model is not installed", now);
+    }
+    hold.run(&RESTORE, now);
+    let restored = if empty_layout {
         // The temporary site is empty from its first frame. Never materialize
         // a saved layout only to delete it, or let it block preview admission.
         commands.insert_resource(TemporaryFixtureLayout);

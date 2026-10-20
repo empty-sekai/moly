@@ -1334,6 +1334,10 @@ pub fn plan(
     source_region: Option<Res<NavMeshSourceRegion>>,
     level_hold: Option<Res<crate::field_modes::LevelHold>>,
     mut residents: ResMut<ResidentSites>,
+    (stage, exploration): (
+        Option<Res<crate::browser_stage::BrowserStage>>,
+        Option<Res<crate::stage_layout::TransientExploration>>,
+    ),
 ) {
     // A rank change is delivered before the first site: the housing sites'
     // displayed levels follow it.
@@ -1343,14 +1347,21 @@ pub fn plan(
     let (Some(sites), Some(mut selection)) = (sites, selection) else {
         return;
     };
+    // A site that starts with an empty layout restores nothing, so its level
+    // does not depend on a stored or starter layout.
+    let empty_layout = crate::stage_layout::use_empty_stage_layout(
+        temporary.is_some(),
+        stage.is_some(),
+        exploration.is_some(),
+    );
     // Resolving the level checks the layout the site will restore; the home
     // starter comes from the server panel, so hold until it is installed.
-    if temporary.is_none()
+    if !empty_layout
         && crate::fixture::waits_for_panel_layout(selection.site_type(), selection.content())
     {
         return;
     }
-    let site_level = match if temporary.is_some() {
+    let site_level = match if empty_layout {
         selection.resolve_temporary_level(&sites)
     } else {
         selection.resolve_level(&sites, &layouts, source_region.as_deref().copied())

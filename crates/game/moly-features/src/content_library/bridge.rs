@@ -734,6 +734,7 @@ pub fn publish(
     catalog: Res<LibraryCatalog>,
     world: Res<LibraryContext>,
     mut previous: Local<String>,
+    mut scene_unmet: Local<Option<&'static str>>,
     site_ready: Option<Res<crate::site::SiteScenesReady>>,
     site_materials: Option<Res<crate::site_material::SiteMaterialsSwapped>>,
     player_visual: Query<
@@ -770,18 +771,31 @@ pub fn publish(
         && layouts
             .as_deref()
             .is_some_and(|layouts| layouts.ready("Talk", &server));
-    let mut scene_ready = site_ready.is_some()
-        && site_materials.is_some()
-        && !player_visual.is_empty()
-        && world.actors.values().all(|ready| *ready)
-        && text_ready;
+    let unmet = [
+        (site_ready.is_none(), "the site scenes are not ready"),
+        (site_materials.is_none(), "the site materials are not swapped"),
+        (player_visual.is_empty(), "the player body is not wired"),
+        (!world.actors.values().all(|ready| *ready), "an NPC is not registered"),
+        (!text_ready, "the balloon art or the Talk layout is not ready"),
+    ]
+    .into_iter()
+    .find_map(|(unmet, reason)| unmet.then_some(reason));
+    let mut scene_ready = unmet.is_none();
+    let mut unmet = unmet;
     if let Some(startup) = audio_startup.as_mut() {
         // A requested independent scene must finish its own real staging before
         // its audio or script starts; readiness of the empty base is not enough.
         startup.prepared = scene_ready && state.pending.as_ref().is_none_or(|choice| {
             preview.as_ref().is_some_and(|preview| preview.ready(choice, &staged))
         });
+        if scene_ready && !startup.released() {
+            unmet = Some("the audio players are not released");
+        }
         scene_ready &= startup.released();
+    }
+    if *scene_unmet != unmet {
+        info!("[content-library] scene readiness: {}", unmet.unwrap_or("ready"));
+        *scene_unmet = unmet;
     }
     // The entry cover lifts on the stage at this same readiness.
     if let Some(mut mirror) = entry_ready {

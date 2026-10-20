@@ -1165,14 +1165,14 @@ pub fn spawn_when_ready(
     if spawned.is_some() {
         return;
     }
-    let (Some(server), Some(visitors), Some(_talk_list), returned) = (
-        panel.0.as_deref(),
-        panel.1.as_deref(),
-        panel.2.as_deref(),
-        panel.3.as_deref(),
-    ) else {
-        return;
+    // The embedded stage plays without a server and spawns no cast here, so
+    // it does not wait for the panel.
+    let visit = match (panel.0.as_deref(), panel.1.as_deref(), panel.2.as_deref()) {
+        (Some(server), Some(visitors), Some(_talk_list)) => Some((server, visitors)),
+        _ if stage.is_some() => None,
+        _ => return,
     };
+    let returned = panel.3.as_deref();
     let Some(catalog) = catalog else {
         return;
     };
@@ -1203,12 +1203,11 @@ pub fn spawn_when_ready(
     // 不在清单里即响亮失败——静默丢一名会让名册悄悄变短。
     // No demonstration cast in the embedded stage: independent playback must
     // obtain every required member through spawn_temporary_units.
-    let requested: Option<&[u32]> = if stage.is_some() {
-        Some(&[])
-    } else if selection.content() == crate::site::OfflineSceneContent::Full {
-        None
-    } else {
-        Some(visitors.units())
+    let requested: Option<&[u32]> = match visit {
+        _ if stage.is_some() => Some(&[]),
+        _ if selection.content() == crate::site::OfflineSceneContent::Full => None,
+        Some((_, visitors)) => Some(visitors.units()),
+        None => unreachable!("only the stage proceeds without the panel"),
     };
     let roster: Vec<&(u32, f32, f32, String, String)> = match requested {
         Some(ids) => ids
@@ -1305,15 +1304,15 @@ pub fn spawn_when_ready(
         KEY_NPC_LOTTERY_ALREADY_READ_WHEN_HAS_NOT_READ, KEY_NPC_LOTTERY_FIXTURE_TALK_PERCENT,
         KEY_NPC_LOTTERY_NONE_TALK_FIXTURE_ACTION_PERCENT,
     };
-    let roster_word = if requested.is_none() {
-        "Full 全员展示，非访客状态".to_owned()
-    } else {
-        format!(
+    let roster_word = match visit {
+        _ if requested.is_none() => "Full 全员展示，非访客状态".to_owned(),
+        Some((server, visitors)) => format!(
             "服务端面板访客，到访次数 {:?}",
             ids.iter()
                 .map(|unit| crate::server_panel::visit_count_of(server, visitors, *unit))
                 .collect::<Vec<_>>()
-        )
+        ),
+        None => "stage: no cast".to_owned(),
     };
     let pause_word = if count == 0 {
         "none".to_owned()
