@@ -27,7 +27,7 @@ pub mod http;
 pub mod store;
 
 pub use control::remote_plugin;
-pub use hub::Hub;
+pub use hub::{ExchangeError, Hub};
 pub use masters::{Masters, Parties};
 pub use store::{DocumentStore, Store};
 pub use moly_masters::clock::RefreshPeriod;

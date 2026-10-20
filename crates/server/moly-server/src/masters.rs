@@ -609,8 +609,12 @@ async fn read_root_document(
 }
 
 pub(crate) fn install(app: &mut App) {
-    app.add_plugins(MasterTablesPlugin)
-        .add_systems(Startup, load)
+    // A game that hosts the server in its own app has added the shared
+    // tables already.
+    if !app.is_plugin_added::<MasterTablesPlugin>() {
+        app.add_plugins(MasterTablesPlugin);
+    }
+    app.add_systems(Startup, load)
         .add_systems(
             PreUpdate,
             resolve_masters

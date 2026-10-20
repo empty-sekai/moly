@@ -1,11 +1,12 @@
 //! Sessions: the frames the transport hands in, the handshake, and the
 //! frames going back out.
 //!
-//! The HTTP transport owns the connections and talks to the server only
-//! through a [`Hub`]: for one request it opens a session with the sender its
-//! outgoing frames go to, reports each frame it decoded from the request,
-//! and closes the session once the response is sent. Everything after that
-//! is the server's.
+//! A transport talks to the server only through a [`Hub`]: for one request
+//! it opens a session with the sender its outgoing frames go to, reports
+//! each frame it decoded from the request, and closes the session once the
+//! response is sent. Everything after that is the server's.
+//! [`Hub::exchange`] does all of that for one encoded request list; the
+//! HTTP transport and an in-process link both use it.
 
 use std::collections::HashMap;
 
@@ -53,6 +54,105 @@ impl Hub {
         self.events
             .try_send(event)
             .map_err(|error| format!("the server is not running: {error}"))
+    }
+
+    /// One request: the encoded [`ClientMessage`] list in, the server's
+    /// answer out. The request's messages are reported as frames of a new
+    /// session, and the session's outgoing frames are read until the
+    /// terminal one arrives — the reply numbered like the request's call,
+    /// the refusal, or the welcome of a request without a call — and then to
+    /// the end of that update, so the pushes the update flushed after it go
+    /// with the answer. The session closes when the exchange ends or is
+    /// dropped. The answer is read as long as the server runs; a caller that
+    /// must not wait longer bounds it with its own timer.
+    pub async fn exchange(&self, body: &[u8]) -> Result<Vec<ServerMessage>, ExchangeError> {
+        let messages = decode::<Vec<ClientMessage>>(body)
+            .map_err(|error| ExchangeError::Request(format!("{error}")))?;
+        // The request's call, if it has one: its number ends the answer.
+        let seq = messages.iter().find_map(|message| match message {
+            ClientMessage::Call { seq, .. } => Some(*seq),
+            ClientMessage::Hello { .. } => None,
+        });
+        let session = self.next_session();
+        let (out, outgoing) = async_channel::unbounded::<Vec<u8>>();
+        self.send(HubEvent::Open { session, out })
+            .map_err(ExchangeError::Server)?;
+        let _open = OpenSession { hub: self, session };
+        for message in messages {
+            self.send(HubEvent::Frame {
+                session,
+                bytes: encode(&message),
+            })
+            .map_err(ExchangeError::Server)?;
+        }
+        terminal(&outgoing, seq).await.map_err(ExchangeError::Server)
+    }
+}
+
+/// Why an exchange gave no answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExchangeError {
+    /// The body is not an encoded request list.
+    Request(String),
+    /// The server stopped, or sent a frame that does not decode.
+    Server(String),
+}
+
+impl std::fmt::Display for ExchangeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Request(reason) | Self::Server(reason) => f.write_str(reason),
+        }
+    }
+}
+
+/// Closes an exchange's session when the exchange ends, answered or not.
+struct OpenSession<'a> {
+    hub: &'a Hub,
+    session: SessionId,
+}
+
+impl Drop for OpenSession<'_> {
+    fn drop(&mut self) {
+        let _ = self.hub.send(HubEvent::Close {
+            session: self.session,
+        });
+    }
+}
+
+/// Reads a session's outgoing frames until its terminal one, and then to the
+/// end of that update (see [`Hub::exchange`]).
+async fn terminal(
+    outgoing: &async_channel::Receiver<Vec<u8>>,
+    seq: Option<u32>,
+) -> Result<Vec<ServerMessage>, String> {
+    let mut messages = Vec::new();
+    let mut answered = false;
+    loop {
+        let frame = outgoing
+            .recv()
+            .await
+            .map_err(|_| "the server closed the session".to_owned())?;
+        if frame.is_empty() {
+            // The end of an update.
+            if answered {
+                return Ok(messages);
+            }
+            continue;
+        }
+        let message = decode::<ServerMessage>(&frame).map_err(|error| format!("{error}"))?;
+        let is_terminal = match &message {
+            ServerMessage::Welcome { .. } => seq.is_none(),
+            ServerMessage::Refused { .. } => {
+                // A refused session is forgotten: no update ends it.
+                messages.push(message);
+                return Ok(messages);
+            }
+            ServerMessage::Reply { seq: replied, .. } => seq == Some(*replied),
+            ServerMessage::Push { .. } => false,
+        };
+        messages.push(message);
+        answered |= is_terminal;
     }
 }
 

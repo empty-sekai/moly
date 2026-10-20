@@ -27,10 +27,10 @@ use hyper::header::{HeaderValue, CONTENT_TYPE};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
-use moly_protocol::{decode, encode, ClientMessage, ServerMessage, RPC_PATH};
+use moly_protocol::{encode, ServerMessage, RPC_PATH};
 use smol_hyper::rt::{FuturesIo, SmolTimer};
 
-use crate::hub::{Hub, HubEvent};
+use crate::hub::{ExchangeError, Hub};
 
 /// How long a request waits for its session's terminal frame.
 pub const ANSWER_TIMEOUT: Duration = Duration::from_secs(30);
@@ -170,36 +170,17 @@ async fn call(request: Request<Incoming>, hub: &Hub) -> Response<Full<Bytes>> {
             );
         }
     };
-    let messages = match decode::<Vec<ClientMessage>>(&body) {
-        Ok(messages) => messages,
-        Err(error) => return plain(StatusCode::BAD_REQUEST, &format!("{error}")),
-    };
-    // The request's call, if it has one: its number ends the answer.
-    let seq = messages.iter().find_map(|message| match message {
-        ClientMessage::Call { seq, .. } => Some(*seq),
-        ClientMessage::Hello { .. } => None,
-    });
-    let session = hub.next_session();
-    let (out, outgoing) = async_channel::unbounded::<Vec<u8>>();
-    if let Err(error) = hub.send(HubEvent::Open { session, out }) {
-        return plain(StatusCode::INTERNAL_SERVER_ERROR, &error);
-    }
-    for message in messages {
-        let bytes = encode(&message);
-        if let Err(error) = hub.send(HubEvent::Frame { session, bytes }) {
-            let _ = hub.send(HubEvent::Close { session });
-            return plain(StatusCode::INTERNAL_SERVER_ERROR, &error);
-        }
-    }
     let answered = future::select(
-        Box::pin(terminal(&outgoing, seq)),
+        Box::pin(hub.exchange(&body)),
         Box::pin(async_io::Timer::after(ANSWER_TIMEOUT)),
     )
     .await;
-    let _ = hub.send(HubEvent::Close { session });
     let messages = match answered {
         Either::Left((Ok(messages), _)) => messages,
-        Either::Left((Err(error), _)) => {
+        Either::Left((Err(ExchangeError::Request(error)), _)) => {
+            return plain(StatusCode::BAD_REQUEST, &error);
+        }
+        Either::Left((Err(ExchangeError::Server(error)), _)) => {
             return plain(StatusCode::INTERNAL_SERVER_ERROR, &error);
         }
         Either::Right(_) => {
@@ -211,42 +192,4 @@ async fn call(request: Request<Incoming>, hub: &Hub) -> Response<Full<Bytes>> {
         }
     };
     protocol(messages)
-}
-
-/// Reads a session's outgoing frames until its terminal one — the reply
-/// numbered `seq` when the request carried a call, the refusal, or the
-/// welcome of a request without a call — and then to the end of that update,
-/// so the pushes the update flushed after it go with the answer.
-async fn terminal(
-    outgoing: &async_channel::Receiver<Vec<u8>>,
-    seq: Option<u32>,
-) -> Result<Vec<ServerMessage>, String> {
-    let mut messages = Vec::new();
-    let mut answered = false;
-    loop {
-        let frame = outgoing
-            .recv()
-            .await
-            .map_err(|_| "the server closed the session".to_owned())?;
-        if frame.is_empty() {
-            // The end of an update.
-            if answered {
-                return Ok(messages);
-            }
-            continue;
-        }
-        let message = decode::<ServerMessage>(&frame).map_err(|error| format!("{error}"))?;
-        let is_terminal = match &message {
-            ServerMessage::Welcome { .. } => seq.is_none(),
-            ServerMessage::Refused { .. } => {
-                // A refused session is forgotten: no update ends it.
-                messages.push(message);
-                return Ok(messages);
-            }
-            ServerMessage::Reply { seq: replied, .. } => seq == Some(*replied),
-            ServerMessage::Push { .. } => false,
-        };
-        messages.push(message);
-        answered |= is_terminal;
-    }
 }
