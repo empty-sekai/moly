@@ -672,7 +672,7 @@ fn first_play_warm_cost(planned: &Planned, seeds: &mut crate::particle_runtime::
     let ctx = crate::particle_runtime::Context {
         sky: GlobalTransform::IDENTITY, camera: GlobalTransform::IDENTITY, site: GlobalTransform::IDENTITY,
     };
-    let started = std::time::Instant::now();
+    let started = bevy::platform::time::Instant::now();
     let result = crate::particle_runtime::prewarm_first_play(&mut system, &ctx);
     let micros = started.elapsed().as_micros() as u64;
     Some(json!({"measured": true, "path": path, "micros": micros, "alive": system.pool.len(),

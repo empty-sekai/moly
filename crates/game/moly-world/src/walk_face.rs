@@ -161,7 +161,7 @@ pub fn build(
     });
     let n_obstacles = sources.colliders;
     let volume = site_volume(&sites, &site);
-    let started = std::time::Instant::now();
+    let started = bevy::platform::time::Instant::now();
     let field = WalkField::bake_colliders_in(&tris, &sources.polygons, voxel, Some(volume));
     let took = started.elapsed();
     let (min, max) =
@@ -288,7 +288,7 @@ fn rebake(
     let n_obstacles = sources.colliders;
     let prior = *face.carve_counts();
     let volume = site_volume(sites, site);
-    let started = std::time::Instant::now();
+    let started = bevy::platform::time::Instant::now();
     let field = WalkField::bake_colliders_in(&tris, &sources.polygons, voxel, Some(volume));
     let took = started.elapsed();
     log_bake("重烘（摆放变化）", &field, n_obstacles, took);
