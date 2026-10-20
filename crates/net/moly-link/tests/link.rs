@@ -186,3 +186,31 @@ fn a_server_that_starts_after_the_game_is_reached() {
         world.resource::<ServerLink>().state().is_open()
     });
 }
+
+#[test]
+fn an_offline_link_refuses_every_call_by_name() {
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .add_plugins(moly_link::OfflineLinkPlugin("a test without a server".to_owned()))
+        .init_resource::<Answers>()
+        .add_systems(Update, collect);
+    let seq = app.world_mut().resource_mut::<ServerLink>().call(Call::Join);
+    app.update();
+    app.update();
+    assert_eq!(
+        app.world().resource::<ServerLink>().state(),
+        &LinkState::Offline { reason: "a test without a server".to_owned() }
+    );
+    let answers = &app.world().resource::<Answers>().0;
+    assert_eq!(answers.len(), 1);
+    assert_eq!(answers[0].seq, Some(seq));
+    match &answers[0].event {
+        Arrival::Reply { call, outcome, .. } => {
+            assert_eq!(*call, CallKind::Join);
+            let refusal = outcome.as_ref().unwrap_err();
+            assert_eq!(refusal.code, "link_lost");
+            assert!(refusal.reason.contains("a test without a server"), "{}", refusal.reason);
+        }
+        other => panic!("not a reply: {other:?}"),
+    }
+}

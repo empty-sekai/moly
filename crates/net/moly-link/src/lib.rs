@@ -76,6 +76,9 @@ pub enum LinkState {
     Refused { reason: String },
     /// A request could not be made or answered.
     Lost { reason: String },
+    /// The app links to no server ([`OfflineLinkPlugin`]); every call is
+    /// refused.
+    Offline { reason: String },
 }
 
 impl LinkState {
@@ -191,6 +194,32 @@ impl Plugin for LinkPlugin {
         web::connect(transport);
         app.insert_resource(ServerLink {
             state: LinkState::Connecting,
+            next_seq: 0,
+            outgoing,
+            incoming,
+            waiting: Vec::new(),
+            sent: Vec::new(),
+        })
+        .add_message::<ServerArrived>()
+        .add_systems(PreUpdate, pump);
+    }
+}
+
+/// A link that never connects: the app plays without a server, and every
+/// call is refused by name in the next frame. The string says why.
+pub struct OfflineLinkPlugin(pub String);
+
+impl Plugin for OfflineLinkPlugin {
+    fn build(&self, app: &mut App) {
+        // No transport takes the calls: the state is never open, so `call`
+        // queues nothing and `pump` refuses what waits.
+        let (outgoing, _) = async_channel::unbounded();
+        let (_, incoming) = async_channel::unbounded();
+        info!("[link] no server: {}", self.0);
+        app.insert_resource(ServerLink {
+            state: LinkState::Offline {
+                reason: self.0.clone(),
+            },
             next_seq: 0,
             outgoing,
             incoming,
@@ -439,7 +468,7 @@ fn pump(mut link: ResMut<ServerLink>, mut arrived: MessageWriter<ServerArrived>)
                 }
             }
             LinkEvent::Lost(reason) => {
-                if !matches!(link.state, LinkState::Refused { .. }) {
+                if !matches!(link.state, LinkState::Refused { .. } | LinkState::Offline { .. }) {
                     // A link that keeps failing the same way says so once.
                     let known = matches!(&link.state, LinkState::Lost { reason: known } if *known == reason);
                     if !known {
@@ -454,6 +483,7 @@ fn pump(mut link: ResMut<ServerLink>, mut arrived: MessageWriter<ServerArrived>)
     let reason = match &link.state {
         LinkState::Refused { reason } => format!("the server refused the session: {reason}"),
         LinkState::Lost { reason } => format!("the server is not reachable: {reason}"),
+        LinkState::Offline { reason } => format!("this app links to no server: {reason}"),
         LinkState::Connecting | LinkState::Open { .. } => return,
     };
     for (seq, call) in std::mem::take(&mut link.waiting) {

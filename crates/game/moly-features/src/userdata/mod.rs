@@ -363,6 +363,10 @@ fn note_link_state(
             crate::bus::emit("server.link", json!({ "state": "refused", "reason": reason }));
             commands.queue(move |world: &mut World| notice(world, &body));
         }
+        LinkState::Offline { reason } => {
+            info!("[link] no server: {reason}");
+            crate::bus::emit("server.link", json!({ "state": "offline", "reason": reason }));
+        }
         LinkState::Lost { reason } => {
             let body = format!("the server is not reachable: {reason}");
             error!("[link] {body}");
