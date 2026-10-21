@@ -46,6 +46,15 @@ pub fn install(app: &mut App) {
             .after(content_library::bridge::gate_input)
             .after(content_library::input),
     );
+    // Preview admission queues the balloon in Update. Flush that command and
+    // publish its exact owner before the balloon's lifetime check runs.
+    app.add_systems(
+        Update,
+        (ApplyDeferred, content_library::publish_mode)
+            .chain()
+            .after(content_library::dispatch)
+            .before(balloon::tick),
+    );
     app.add_systems(
         Update,
         (

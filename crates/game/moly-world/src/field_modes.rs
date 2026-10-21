@@ -193,9 +193,8 @@ impl EntryGates {
 }
 
 /// The content library's gates on the field. The library publishes them in
-/// `PreUpdate`, after its input systems, so the field's systems see this
-/// frame's input; a change the library's own `Update` systems make reaches
-/// them on the next frame.
+/// `PreUpdate`, after its input systems, and again in `Update`, after preview
+/// admission and its deferred writes and before the balloon lifetime check.
 #[derive(Resource, Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LibraryMode {
     pub reads_availability: bool,
@@ -231,6 +230,7 @@ impl LibraryMode {
     pub fn owns_talk_preview(&self, ticket: u64) -> bool {
         self.talk_preview == Some(ticket)
     }
+
 }
 
 /// GameState Delivery (12): set by the pre-action of a visit's first press,
