@@ -363,6 +363,12 @@ pub struct ConvertScreen {
     pub shorten_pending: Option<super::start::ShortenIntent>,
     /// The skip sent: its slot and the call's number.
     pub shorten_sent: Option<(i32, u32)>,
+    /// `ConvertStartProcess`'s pass dialog, waiting to show or shown
+    /// ([`super::start::pass_dialogs`]).
+    pub pass_dialog: Option<super::start::PassDialog>,
+    /// `ConvertReceiveProcessAsync(slot)`'s slot, waiting for the receive
+    /// chain ([`super::receive`]).
+    pub receive_intent: Option<i32>,
     /// `ShowDetailDialog(model)`'s item, waiting for the item detail dialog
     /// ([`super::dialogs`]).
     pub detail_request: Option<i32>,
@@ -415,6 +421,21 @@ impl ConvertScreen {
     pub(crate) fn slot_play_shorten(&mut self, slot_id: i32, progress: f32) {
         if let Some(slot) = self.slot.as_mut() {
             slot.play_shorten(slot_id, progress);
+        }
+    }
+
+    /// `SlotStatusState.PlaySlotReceiveAsync(slotId, from, to)`'s call into
+    /// the slot page ([`SlotCells::play_receive`]).
+    pub(crate) fn slot_play_receive(&mut self, slot_id: i32, from: f32, to: f32) {
+        if let Some(slot) = self.slot.as_mut() {
+            slot.play_receive(slot_id, from, to);
+        }
+    }
+
+    /// `ItemSelectView.Refresh()` of the item select page, when it shows.
+    pub(crate) fn refresh_item_select(&mut self, ctx: ItemContext<'_>) {
+        if let Some(page) = self.item_select.as_mut() {
+            page.refresh(ctx);
         }
     }
 
@@ -1172,6 +1193,16 @@ pub fn input(
                             now,
                         };
                         super::start::on_shorten_slot(screen, ctx, slot_id);
+                    }
+                }
+                SlotAction::Receive(slot_id) => {
+                    // `ConvertReceiveProcessAsync(slot)`: the receive chain
+                    // takes it on its next step.
+                    if screen.receive_intent.replace(slot_id).is_some() {
+                        note_once(
+                            &mut screen.seen,
+                            format!("ConvertReceiveProcessAsync(slot {slot_id}) while another receive waits to start: the later one is kept"),
+                        );
                     }
                 }
             }

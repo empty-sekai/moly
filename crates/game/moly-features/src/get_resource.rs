@@ -53,9 +53,10 @@
 //! (`ShowSubWindowDialog`, not chained) with `UserResource(blueprintId, 40,
 //! level 0, quantity 1)`, whose close is awaited by the sketch sequence.
 //!
-//! `UIUtility.ShowRewardDialog` (the mission screen) and the secret shop are
-//! not callers in this product: the mission screen is not built and the
-//! shop is paid content.
+//! `UIUtility.ShowRewardDialog`'s MySekai rows: [`reward_parts`] sorts them
+//! as the source does and [`chain_reward`] chains one template; the convert
+//! screen's receive drives the order (`crate::convert`). The secret shop is
+//! not a caller in this product: it is paid content.
 //!
 //! ## The template's Setup, by resource type
 //!
@@ -146,6 +147,7 @@ use moly_assets::json::JsonAsset;
 use moly_masters::craft::MasterBlueprint;
 use moly_masters::load::MasterTables;
 use moly_protocol::api::MysekaiCraftType;
+use moly_protocol::rows::UserResource;
 use serde_json::Value;
 
 use crate::action_button::ActionTapConsumed;
@@ -213,6 +215,9 @@ const WORDINGS: &[&str] = &[
     MSG_RECEIVED_REWARD,
     FORMAT_MYSEKAI_BLUEPRINT_NAME,
     WORD_FORMAT_RECORD_NAME,
+    // The convert screen's receive (`ShowGetResourceDialogAsync`).
+    "MSG_RECEIVED_CONVERT_REWARD",
+    "MSG_RECEIVED_PARTIAL_REWARD_DUE_TO_POSSESSION_LIMIT",
 ];
 
 const SE_GET_MATERIAL: &str = "se_get_material";
@@ -696,6 +701,137 @@ pub fn show_common_reward(
         .resource_mut::<GetResourceOpeners>()
         .set_reward_payload(id, payload);
     Ok(id)
+}
+
+/// A reward's rows as `UIUtility.ShowRewardDialog` sorts the MySekai types
+/// into its chain.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct RewardParts {
+    /// The blueprints, then the records: one acquisition template each,
+    /// before the common reward dialog.
+    pub templates: Vec<UserResource>,
+    /// Every other row: the common reward dialog (one thumbnail each), or the
+    /// vertical list dialog when the templates and these come to six or more.
+    pub common: Vec<UserResource>,
+    /// The surplus blueprint items, then the surplus record items: one
+    /// template each, after the common reward dialog.
+    pub surplus: Vec<UserResource>,
+}
+
+/// `UIUtility.ShowRewardDialog`'s sort of the rows by `resourceType`:
+/// `mysekai_blueprint` with the `surplus_blueprint` items, and
+/// `mysekai_music_record` with the `surplus_music_record` items, go to the
+/// acquisition template (the surplus items after the common dialog); any
+/// other item and any other MySekai type go to the common dialog. `Err` names
+/// a row this reader cannot sort: an item without a master row, or a type
+/// outside the MySekai ones (the source sorts those into its unlock and honor
+/// lists, which no MySekai reward reaches).
+pub fn reward_parts(world: &World, resources: &[UserResource]) -> Result<RewardParts, String> {
+    let inputs = world.resource::<GetResourceInputs>();
+    let masters = inputs.masters.as_ref().ok_or(if inputs.absent {
+        "the masters are not served"
+    } else {
+        "the masters are not loaded yet"
+    })?;
+    let mut blueprints = Vec::new();
+    let mut records = Vec::new();
+    let mut surplus_blueprints = Vec::new();
+    let mut surplus_records = Vec::new();
+    let mut common = Vec::new();
+    for row in resources {
+        match row.resource_type.as_str() {
+            RT_MYSEKAI_BLUEPRINT => blueprints.push(row.clone()),
+            RT_MYSEKAI_MUSIC_RECORD => records.push(row.clone()),
+            RT_MYSEKAI_ITEM => {
+                let item = masters.items.get(&row.resource_id).ok_or_else(|| {
+                    format!("item {} is not in the items master", row.resource_id)
+                })?;
+                match item.kind {
+                    ITEM_TYPE_SURPLUS_BLUEPRINT => surplus_blueprints.push(row.clone()),
+                    ITEM_TYPE_SURPLUS_MUSIC_RECORD => surplus_records.push(row.clone()),
+                    _ => common.push(row.clone()),
+                }
+            }
+            RT_MYSEKAI_FIXTURE | RT_MYSEKAI_MATERIAL | RT_MATERIAL => common.push(row.clone()),
+            other => {
+                return Err(format!(
+                    "{other} {} is not a MySekai resource type this reward sorts",
+                    row.resource_id
+                ))
+            }
+        }
+    }
+    blueprints.extend(records);
+    surplus_blueprints.extend(surplus_records);
+    Ok(RewardParts {
+        templates: blueprints,
+        common,
+        surplus: surplus_blueprints,
+    })
+}
+
+/// `UIUtility.ShowMysekaiGetResourceSubWindowDialog(chain, [resource], key)`
+/// for one reward row: the acquisition template is chained on the shared
+/// chain player with `Setup(resource, key)` and plays unless the chain plays
+/// already. A blueprint, record or surplus item's body does not read the key
+/// (see the template's Setup). `Err` names a row with no template arm or
+/// whose texts cannot be built.
+pub fn chain_reward(
+    world: &mut World,
+    resource: &UserResource,
+    caller: &'static str,
+) -> Result<(), String> {
+    let kind = match resource.resource_type.as_str() {
+        RT_MYSEKAI_BLUEPRINT => ResourceKind::Blueprint,
+        RT_MYSEKAI_ITEM => ResourceKind::Item,
+        RT_MYSEKAI_MUSIC_RECORD => ResourceKind::MusicRecord,
+        other => return Err(format!("{other} has no acquisition template arm")),
+    };
+    let (body, name) = {
+        let inputs = world.resource::<GetResourceInputs>();
+        let masters = inputs
+            .masters
+            .as_ref()
+            .ok_or("the masters are not loaded")?;
+        let layouts = world.resource::<crate::ui_layout::UiLayouts>();
+        setup_texts(kind, resource.resource_id, masters, &layouts.wordings)?
+    };
+    let entry = ResourceEntry {
+        kind,
+        resource_id: resource.resource_id,
+        resource_level: resource.resource_level,
+        quantity: resource.quantity,
+        body,
+        name,
+    };
+    let mut player = world.resource_mut::<GetResourcePlayer>();
+    let playing = player.chain.is_some();
+    info!(
+        "[get_resource] {caller}: ChainSubWindowDialog(null, null, true, {}), Setup({} {} level {} x{}); {}",
+        DialogType::MysekaiGetResourceSubWindowDialog.0,
+        entry.wire(),
+        entry.resource_id,
+        entry.resource_level,
+        entry.quantity,
+        if playing {
+            "the chain plays already: queued"
+        } else {
+            "Play(null, onFinish)"
+        }
+    );
+    player.chain.get_or_insert_with(VecDeque::new).push_back(entry);
+    Ok(())
+}
+
+/// The shared chain player has nothing queued or shown: the chain's
+/// `onFinish` has run.
+pub fn chain_idle(world: &World) -> bool {
+    let player = world.resource::<GetResourcePlayer>();
+    player.chain.is_none()
+        && player
+            .shown
+            .as_ref()
+            .is_none_or(|shown| shown.opener != Opener::Chain)
 }
 
 // ---------------------------------------------------------------------------

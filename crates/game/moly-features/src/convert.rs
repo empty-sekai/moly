@@ -2,9 +2,9 @@
 //! convert master tables (`moly_masters::convert::ConvertMasters`) and a
 //! plain user state ([`model`]), and the screen layer 627 itself
 //! ([`screen`], [`slot`], [`item_select`] and [`detail`]). The start and the
-//! skip chains and the one request each sends are [`start`]; the screen's
-//! dialogs (284, 324, 325) and its receive chain are not built yet: each call
-//! site stands as one named line.
+//! skip chains and the one request each sends are [`start`], the screen's
+//! dialogs (284, 324, 325) are [`dialogs`], and the receive chain with its
+//! lottery sub-windows and reward is [`receive`].
 //!
 //! The model decides what the screen shows and what a start asks for; it
 //! holds no Bevy resource, loads nothing and draws nothing. The user data is
@@ -21,6 +21,7 @@ pub mod model;
 mod detail;
 pub mod dialogs;
 mod item_select;
+pub mod receive;
 mod screen;
 mod slot;
 pub mod start;
@@ -45,6 +46,7 @@ impl Plugin for ConvertPlugin {
         app.init_resource::<screen::ConvertScreen>()
             .init_resource::<screen::ConvertPress>()
             .init_resource::<start::MysekaiConvertService>()
+            .init_resource::<receive::ConvertReceive>()
             .init_resource::<dialogs::ConvertDialogs>()
             // The dialogs' documents install once the root has them: one
             // system, ordered after nothing that runs after the layer step,
@@ -77,6 +79,31 @@ impl Plugin for ConvertPlugin {
             .add_systems(
                 Update,
                 start::answers.after(crate::userdata::apply_arrivals),
+            )
+            // The pass dialogs and the receive chain: after the requests and
+            // their answers, before the frames that draw what they show. A
+            // receive a cell's tap asked for starts here.
+            .add_systems(
+                Update,
+                (start::pass_dialogs, receive::advance)
+                    .chain()
+                    .after(start::send_pending)
+                    .after(start::answers)
+                    .after(screen::input)
+                    .before(crate::ui_layout::render),
+            )
+            // The sub-windows' shared fade and taps (the lottery sub-windows
+            // are their caller): the fade after the screen manager steps, the
+            // taps before the shell's.
+            .add_systems(
+                Update,
+                (
+                    moly_ui::subwindow_dialog::fade.after(ui_layers::advance),
+                    moly_ui::subwindow_dialog::click
+                        .after(crate::gesture::advance)
+                        .before(crate::menu_shell::click)
+                        .before(screen::input),
+                ),
             )
             // The dialogs' setup each frame: after their open (so the frame
             // that opens one draws it set up) and before the frame.

@@ -80,12 +80,14 @@ use bevy::prelude::*;
 use moly_link::ServerLink;
 use moly_masters::load::MasterTables;
 use moly_protocol::api::{
-    ConvertPost, UserMysekaiConvertShortenRequest, UserMysekaiConvertStartRequest,
+    ConvertPost, UserMysekaiConvertReceiveRequest, UserMysekaiConvertShortenRequest,
+    UserMysekaiConvertStartRequest,
 };
 use moly_protocol::{Call, CallKind, Reply};
 
 use super::model::{ItemContext, ItemModel, SlotModel, SlotState};
-use super::screen::{note_once, not_built, now_ms, read_user, ConvertScreen, ViewType};
+use super::screen::{note_once, now_ms, read_user, ConvertScreen, ViewType};
+use crate::common_dialog::{self, Buttons};
 use crate::ui_layout::UiLayouts;
 use crate::userdata::client::inventory::ClientMysekaiInventory;
 use crate::userdata::convert::ClientConvertSlots;
@@ -156,6 +158,23 @@ impl ShortenIntent {
     /// onOK: _ => OnClickOkShortenSlot(slot), onCancel: null)`.
     pub fn confirm(self) -> Self {
         self
+    }
+}
+
+/// The wordings the two pass dialogs draw (the shell charset takes them).
+pub const WORDINGS: &[&str] = &[NOT_EXPIRED_PASS, UPPER_LIMIT_PASS, OK];
+
+/// One of `ConvertStartProcess`'s two pass dialogs: waiting to show, then
+/// shown as a common dialog until its OK (or its close) answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PassDialog {
+    pub step: StartStep,
+    pub shown: Option<moly_ui::ui_layers::DialogId>,
+}
+
+impl PassDialog {
+    fn waiting(step: StartStep) -> Self {
+        Self { step, shown: None }
     }
 }
 
@@ -280,10 +299,6 @@ pub fn confirm_convert_start(screen: &mut ConvertScreen, ctx: ItemContext<'_>) {
     info!(
         "[convert] ConfirmConvertStart(slot {slot_id}, item {item_id}, count {count}): Show2ButtonDialog(MysekaiConvertStartConfirmDialog, onOK: _ => ConvertStartProcess, onCancel: null).Setup(new MysekaiConvertStartConfirmViewModel(model))"
     );
-    not_built(
-        seen,
-        "the start confirm dialog (MysekaiConvertStartConfirmDialog)",
-    );
     if waiting {
         note_once(
             seen,
@@ -303,10 +318,6 @@ pub fn on_shorten_slot(screen: &mut ConvertScreen, ctx: ItemContext<'_>, slot_id
     }
     info!(
         "[convert] OnShortenSlot(slot {slot_id}): Show2ButtonDialog(MysekaiConvertFurnitureShortenDialog, onOK: _ => OnClickOkShortenSlot, onCancel: null).Setup(slot)"
-    );
-    not_built(
-        screen.seen_mut(),
-        "the skip dialog (MysekaiConvertFurnitureShortenDialog)",
     );
     if waiting {
         note_once(
@@ -333,11 +344,11 @@ pub fn convert_start_process(screen: &mut ConvertScreen, ctx: ItemContext<'_>, i
     match step {
         StartStep::NotExpired => {
             info!("[convert] ShowConvertNotExpiredPassDialog: Show1ButtonDialog(Common1ButtonDialog, {NOT_EXPIRED_PASS}, {OK}, onOK: _ => ChangeView(ViewType.Slot), Layer_Dialog, {DIALOG_SIZE})");
-            not_built(screen.seen_mut(), "the one-button dialog (Common1ButtonDialog)");
+            screen.pass_dialog = Some(PassDialog::waiting(StartStep::NotExpired));
         }
         StartStep::UpperLimit => {
             info!("[convert] ShowConvertUpperLimitPassDialog: Show1ButtonDialog(Common1ButtonDialog, {UPPER_LIMIT_PASS}, {OK}, onOK: _ => ItemSelectView.Refresh, Layer_Dialog, {DIALOG_SIZE})");
-            not_built(screen.seen_mut(), "the one-button dialog (Common1ButtonDialog)");
+            screen.pass_dialog = Some(PassDialog::waiting(StartStep::UpperLimit));
         }
         StartStep::Send => {
             screen.start_pending = Some(intent);
@@ -413,6 +424,11 @@ pub enum ConvertRequest {
         slot_id: i32,
         request: UserMysekaiConvertShortenRequest,
     },
+    /// `PostUserMysekaiConvertReceiveApi`.
+    Receive {
+        slot_id: i32,
+        request: UserMysekaiConvertReceiveRequest,
+    },
 }
 
 impl ConvertRequest {
@@ -428,12 +444,18 @@ impl ConvertRequest {
                 slot_id: *slot_id,
                 post: ConvertPost::Shorten(*request),
             },
+            Self::Receive { slot_id, request } => Call::Convert {
+                slot_id: *slot_id,
+                post: ConvertPost::Receive(*request),
+            },
         }
     }
 
     pub fn slot_id(&self) -> i32 {
         match self {
-            Self::Start { slot_id, .. } | Self::Shorten { slot_id, .. } => *slot_id,
+            Self::Start { slot_id, .. }
+            | Self::Shorten { slot_id, .. }
+            | Self::Receive { slot_id, .. } => *slot_id,
         }
     }
 
@@ -441,6 +463,7 @@ impl ConvertRequest {
         match self {
             Self::Start { .. } => "PostUserMysekaiConvertStartApi",
             Self::Shorten { .. } => "PostUserMysekaiConvertShortenApi",
+            Self::Receive { .. } => "PostUserMysekaiConvertReceiveApi",
         }
     }
 }
@@ -597,6 +620,79 @@ pub fn send_pending(
     }
 }
 
+/// Update, exclusive, after the start's request step: the pass dialog
+/// `ConvertStartProcess` asked for shows as the one-button common dialog,
+/// and its answer runs the dialog's onOK (the close button, an outside tap
+/// and the back key answer as its OK).
+pub fn pass_dialogs(world: &mut World) {
+    let Some(dialog) = world
+        .get_resource::<ConvertScreen>()
+        .and_then(|screen| screen.pass_dialog)
+    else {
+        return;
+    };
+    let (caller, key) = match dialog.step {
+        StartStep::NotExpired => (
+            "MysekaiConvertFurniturePresenter.ShowConvertNotExpiredPassDialog",
+            NOT_EXPIRED_PASS,
+        ),
+        StartStep::UpperLimit => (
+            "MysekaiConvertFurniturePresenter.ShowConvertUpperLimitPassDialog",
+            UPPER_LIMIT_PASS,
+        ),
+        StartStep::Send => {
+            world.resource_mut::<ConvertScreen>().pass_dialog = None;
+            return;
+        }
+    };
+    let Some(shown) = dialog.shown else {
+        let body = common_dialog::wording(world, caller, key);
+        let shown = common_dialog::open(world, caller, body, Buttons::One { ok: OK }, None);
+        let mut screen = world.resource_mut::<ConvertScreen>();
+        screen.pass_dialog = shown.map(|id| PassDialog {
+            step: dialog.step,
+            shown: Some(id),
+        });
+        if shown.is_none() {
+            note_once(screen.seen_mut(), format!("{caller}: the common dialog did not show; its onOK does not run"));
+        }
+        return;
+    };
+    if common_dialog::answer(world, shown).is_none() {
+        return;
+    }
+    world.resource_scope(|world, mut screen: Mut<ConvertScreen>| {
+        screen.pass_dialog = None;
+        match dialog.step {
+            StartStep::NotExpired => {
+                info!("[convert] {caller}: onOK; ChangeView(ViewType.Slot)");
+                screen.change_view(ViewType::Slot);
+            }
+            _ => {
+                info!("[convert] {caller}: onOK; ItemSelectView.Refresh()");
+                let (Some(masters), Some(user)) = (
+                    world.resource::<MasterTables>().convert.as_ref(),
+                    read_user(
+                        world.get_resource::<ClientUserData>(),
+                        world.get_resource::<ClientConvertSlots>(),
+                        world.get_resource::<ClientMysekaiInventory>(),
+                    ),
+                ) else {
+                    note_once(screen.seen_mut(), format!("{caller}: the user's convert data is not in; the item select page is not refreshed"));
+                    return;
+                };
+                let real = world.resource::<Time<Real>>().elapsed_secs();
+                let ctx = ItemContext {
+                    masters,
+                    user: &user,
+                    now: now_ms(world.get_resource::<ClientUserData>(), real),
+                };
+                screen.refresh_item_select(ctx);
+            }
+        }
+    });
+}
+
 /// Update, after the reader applied the answer's sections: a start's or a
 /// skip's answer runs its callbacks. The reply's tables are in the copies
 /// already (`UpdateAll` of the arrival's sections).
@@ -612,6 +708,7 @@ pub fn answers(
     copies: Option<Res<ClientConvertSlots>>,
     inventory: Option<Res<ClientMysekaiInventory>>,
     real: Res<Time<Real>>,
+    mut receive: ResMut<super::receive::ConvertReceive>,
 ) {
     let Some(mut screen) = screen else {
         return;
@@ -643,10 +740,12 @@ pub fn answers(
         let slot_id = request.request.slot_id();
         // The service's `status == Success` is the API's success state only:
         // any other answer, a reply of another kind included, runs nothing.
+        let receive_request = matches!(request.request, ConvertRequest::Receive { .. });
         let success = match &answer.outcome {
-            Ok(Reply::Convert(_)) => true,
+            Ok(Reply::Convert(_)) if !receive_request => true,
+            Ok(Reply::ConvertReceive(_)) if receive_request => true,
             Ok(other) => {
-                error!("[convert] {api} (slot {slot_id}, seq {:?}): the answer is {other:?}, not the SuiteUser reply; the request's callbacks do not run", answer.seq);
+                error!("[convert] {api} (slot {slot_id}, seq {:?}): the answer is {other:?}, not this API's reply; the request's callbacks do not run", answer.seq);
                 false
             }
             Err(refusal) => {
@@ -700,6 +799,15 @@ pub fn answers(
                     .normalized_progress_time();
                 info!("[convert] {api} (slot {slot_id}, seq {:?}): success; SetNeedsUpdateSlot({slot_id}, false), DisableTapScreen, PlayShortenAsync({slot_id}, {progress}), EnableTapScreen, SetNeedsUpdateSlot({slot_id}, true)", answer.seq);
                 play_shorten(&mut screen, slot_id, progress);
+            }
+            ConvertRequest::Receive { .. } => {
+                // `await ExecuteMysekaiConvertReceiveAPIAsync`: the obtained
+                // resources, or none on any other answer.
+                let obtained = match &answer.outcome {
+                    Ok(Reply::ConvertReceive(reply)) if success => reply.obtained_resources.clone(),
+                    _ => Vec::new(),
+                };
+                receive.answered(slot_id, answer.seq, obtained);
             }
         }
     }

@@ -203,6 +203,8 @@ pub enum SlotAction {
     ShowShortenLockedBalloon,
     /// `OnShortenSlot(slot)` of the cell's slot (`Presenter.OnShortenSlot`).
     Shorten(i32),
+    /// `ConvertReceiveProcessAsync(slot)` of the cell's slot.
+    Receive(i32),
 }
 
 /// The page's buttons, as the source's fields name them.
@@ -434,6 +436,15 @@ impl SlotCells {
         }
     }
 
+    /// `SlotView.PlaySlotReceiveAsync(slotId, from, to)` ->
+    /// `SlotCellView.PlayReceiveAsync(from, to)`: the cell of that slot plays
+    /// its wave from the progress before the receive to the progress after.
+    pub fn play_receive(&mut self, slot_id: i32, from: f32, to: f32) {
+        if let Some(cell) = self.cells.iter_mut().find(|cell| cell.slot_id == slot_id) {
+            cell.play_receive(from, to);
+        }
+    }
+
     /// `SlotStatusState.OnUpdate`'s processing flag; answers the new flag.
     pub fn update_processing(&mut self) -> bool {
         let now = self.any_processing();
@@ -520,10 +531,7 @@ impl SlotCells {
             }
             ButtonRole::Gauge => self.on_selected_slot(index),
             // `ConvertReceiveProcessAsync(slot)` beside the gauge's press.
-            ButtonRole::View => {
-                not_built(&mut self.seen, "the receive process");
-                None
-            }
+            ButtonRole::View => Some(SlotAction::Receive(self.cells.get(index)?.slot_id)),
             ButtonRole::ShortenCover => {
                 if let Some(cell) = self.cells.get_mut(index) {
                     cell.show_shorten_locked_balloon();
@@ -552,11 +560,9 @@ impl SlotCells {
                 self.item_select(slot_id);
                 Some(SlotAction::ChangeView(ViewType::ItemSelect))
             }
-            // `ConvertReceiveProcessAsync(slot)`: the receivable count, the
-            // receive request, the wave and the reward window (U8).
+            // `ConvertReceiveProcessAsync(slot)`.
             SlotState::Processing | SlotState::Complete => {
-                not_built(&mut self.seen, "the receive process");
-                None
+                Some(SlotAction::Receive(self.cells[index].slot_id))
             }
         }
     }
