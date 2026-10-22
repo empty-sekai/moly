@@ -948,8 +948,6 @@ pub fn parse(
         .chain(crate::inventory::WORDINGS)
         .chain(crate::fixture_edit::WORDINGS)
         .chain(crate::stamina_recover_dialog::WORDINGS)
-        .chain(crate::convert::start::WORDINGS)
-        .chain(crate::convert::receive::WORDINGS)
     {
         if let Some(text) = layouts.wordings.get(*wording) {
             chars.extend(text.chars());
