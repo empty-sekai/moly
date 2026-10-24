@@ -45,6 +45,8 @@ All notable changes to this project are listed here. Versions follow [Semantic V
 - **server:** Answer one request through the hub
 - **link:** Host the server inside the browser stage
 - **convert:** Receive converted resources and play reward lotteries
+- **store:** Add locations, relocation, upgrades and program updates
+- **launcher:** Manage folders and update the programs
 
 ### Bug fixes
 
@@ -60,6 +62,7 @@ All notable changes to this project are listed here. Versions follow [Semantic V
 - **stage:** Load the empty stage scene without a server
 - **stage:** Resolve the empty level and draw the talk window
 - **stage:** Publish preview ownership before balloon cleanup
+- **server:** Name the save file when a stored document is refused
 
 ### Performance
 
@@ -86,6 +89,7 @@ All notable changes to this project are listed here. Versions follow [Semantic V
 - **roadmap:** Describe the HTTP transport and the Android status
 - Restructure the README and move details into topic documents
 - Drop the browser deployment link from the quick start
+- Split the README into topic documents and rewrite the roadmap
 
 ### Tests
 
@@ -95,6 +99,10 @@ All notable changes to this project are listed here. Versions follow [Semantic V
 
 - Package and start moly-server wherever the game is shipped or launched
 - **android:** Use Kotlin, NDK r30 and rustls web roots for native HTTPS
+
+### CI
+
+- Cache native builds and add server, linux and macos packages
 
 ### Miscellaneous
 
