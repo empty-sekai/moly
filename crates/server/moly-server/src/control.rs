@@ -20,11 +20,11 @@ use moly_masters::load::MasterTables;
 /// HTTP transport.
 pub fn remote_plugin() -> RemotePlugin {
     RemotePlugin::default()
-        .with_method("moly.server.document", document)
-        .with_method("moly.server.schema", schema)
-        .with_method("moly.server.edit", edit)
-        .with_method("moly.server.install", install)
-        .with_method("moly.server.sessions", sessions)
+        .with_method_main("moly.server.document", document)
+        .with_method_main("moly.server.schema", schema)
+        .with_method_main("moly.server.edit", edit)
+        .with_method_main("moly.server.install", install)
+        .with_method_main("moly.server.sessions", sessions)
 }
 
 /// The user a request names (`params.user`), the local user when it names
