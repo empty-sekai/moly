@@ -541,13 +541,16 @@ pub(crate) fn apply_arrivals(
     ),
 ) {
     let realtime = time.elapsed_secs();
+    // The first copy is inserted through `commands`, which applies after this
+    // system; later arrivals in the same frame build on it from here.
+    let mut fresh: Option<ClientUserData> = None;
     for arrival in arrived.read() {
         match &arrival.event {
             Arrival::Push { kind, sections } => {
                 crate::bus::emit("server.push", json!({ "kind": push_name(*kind) }));
                 apply_sections(
-                    &mut commands,
                     &mut copies,
+                    &mut fresh,
                     None,
                     sections.clone(),
                     realtime,
@@ -588,8 +591,8 @@ pub(crate) fn apply_arrivals(
                 };
                 if carried {
                     apply_sections(
-                        &mut commands,
                         &mut copies,
+                        &mut fresh,
                         Some(*call),
                         sections.clone(),
                         realtime,
@@ -625,13 +628,16 @@ pub(crate) fn apply_arrivals(
             }
         }
     }
+    if let Some(copy) = fresh {
+        commands.insert_resource(copy);
+    }
 }
 
 /// Applies one response's sections, as the in-process reader did.
 #[allow(clippy::too_many_arguments)]
 fn apply_sections(
-    commands: &mut Commands,
     copies: &mut ClientCopies,
+    fresh: &mut Option<ClientUserData>,
     kind: Option<CallKind>,
     mut sections: Sections,
     realtime: f32,
@@ -679,11 +685,9 @@ fn apply_sections(
         let missions = sections.normal_missions.take();
         copies.mission.apply(mission::MissionSections { sheet, missions });
     }
-    let previous_rank = copies
-        .client
-        .as_ref()
-        .and_then(|copy| copy.gamedata.mysekai_rank);
-    let mut copy = copies.client.as_deref().cloned();
+    let current = copies.client.as_deref().or(fresh.as_ref());
+    let previous_rank = current.and_then(|copy| copy.gamedata.mysekai_rank);
+    let mut copy = current.cloned();
     let mut schedule: Option<Vec<ScheduleRow>> = None;
     let next = match copy.take() {
         None => ClientUserData {
@@ -793,9 +797,7 @@ fn apply_sections(
     copies.cache.client = view;
     match copies.client.as_deref_mut() {
         Some(slot) => *slot = copy,
-        None => {
-            commands.insert_resource(copy);
-        }
+        None => *fresh = Some(copy),
     }
 }
 
