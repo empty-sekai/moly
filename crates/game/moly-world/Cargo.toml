@@ -37,7 +37,7 @@ regex = "1"
 # record sidecar, and it is decoded once (the engine's own decoder panics on
 # a file it cannot read) before a player gets it. Both already locked.
 sha2 = "0.10"
-rodio = { version = "0.20.1", default-features = false, features = ["mp3"] }
+rodio = { version = "0.22", default-features = false, features = ["mp3"] }
 # The control surface: Bevy Remote Protocol without a transport on every
 # target (the browser page sends through the mailbox), plus its localhost
 # HTTP endpoint on native. Captured frames are answered as base64 PNG.
@@ -73,7 +73,7 @@ moly-render = { path = "../moly-render", features = ["test-support"] }
 moly-audio = { path = "../moly-audio", features = ["test-support"] }
 moly-ui = { path = "../moly-ui", features = ["test-support"] }
 # Compile the actual depth-sampling helper to GLSL ES before a WASM rebuild.
-naga = { version = "27", features = ["wgsl-in", "glsl-out"] }
+naga = { version = "29", features = ["wgsl-in", "glsl-out"] }
 
 [features]
 # Test helpers that the higher layers' tests call.

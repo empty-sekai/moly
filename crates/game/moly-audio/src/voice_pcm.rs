@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use bevy::asset::{AssetId, LoadState};
 use bevy::audio::{
-    AddAudioSource, AudioPlayer, AudioSink, AudioSinkPlayback, AudioSource, CpalSample, Decodable,
-    SeekError, Source,
+    AddAudioSource, AudioPlayer, AudioSink, AudioSinkPlayback, AudioSource, ChannelCount, Decodable,
+    SampleRate, SeekError, Source,
 };
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
@@ -65,7 +65,6 @@ pub struct MeteredVoiceSource {
 }
 
 impl Decodable for MeteredVoiceSource {
-    type DecoderItem = <AudioSource as Decodable>::DecoderItem;
     type Decoder = MeteredVoiceDecoder;
 
     fn decoder(&self) -> Self::Decoder {
@@ -93,7 +92,7 @@ pub struct MeteredVoiceDecoder {
 }
 
 impl Iterator for MeteredVoiceDecoder {
-    type Item = <AudioSource as Decodable>::DecoderItem;
+    type Item = f32;
 
     fn next(&mut self) -> Option<Self::Item> {
         let sample = self.inner.next()?;
@@ -103,9 +102,9 @@ impl Iterator for MeteredVoiceDecoder {
             // the next buffer, so read the length AFTER obtaining that sample.
             let count = self
                 .inner
-                .current_frame_len()
+                .current_span_len()
                 .expect("the voice Vorbis decoder must expose its buffer length");
-            self.channels = usize::from(self.inner.channels());
+            self.channels = usize::from(self.inner.channels().get());
             assert!(
                 count != 0 && self.channels != 0 && count % self.channels == 0,
                 "the voice Vorbis buffer must contain complete interleaved frames"
@@ -114,8 +113,7 @@ impl Iterator for MeteredVoiceDecoder {
             self.channel = 0;
         }
         if self.channel == 0 {
-            self.channel_zero
-                .push(<f32 as CpalSample>::from_sample(sample));
+            self.channel_zero.push(sample);
         }
         self.channel = (self.channel + 1) % self.channels;
         self.packet_remaining -= 1;
@@ -149,15 +147,15 @@ impl Iterator for MeteredVoiceDecoder {
 }
 
 impl Source for MeteredVoiceDecoder {
-    fn current_frame_len(&self) -> Option<usize> {
-        self.inner.current_frame_len()
+    fn current_span_len(&self) -> Option<usize> {
+        self.inner.current_span_len()
     }
 
-    fn channels(&self) -> u16 {
+    fn channels(&self) -> ChannelCount {
         self.inner.channels()
     }
 
-    fn sample_rate(&self) -> u32 {
+    fn sample_rate(&self) -> SampleRate {
         self.inner.sample_rate()
     }
 

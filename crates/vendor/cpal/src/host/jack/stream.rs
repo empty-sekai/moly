@@ -21,6 +21,10 @@ pub struct Stream {
     output_port_names: Vec<String>,
 }
 
+// Compile-time assertion that Stream is Send and Sync
+crate::assert_stream_send!(Stream);
+crate::assert_stream_sync!(Stream);
+
 impl Stream {
     // TODO: Return error messages
     pub fn new_input<D, E>(
@@ -66,7 +70,7 @@ impl Stream {
         let input_process_handler = LocalProcessHandler::new(
             vec![],
             ports,
-            SampleRate(client.sample_rate() as u32),
+            client.sample_rate() as u32,
             client.buffer_size() as usize,
             Some(Box::new(data_callback)),
             None,
@@ -131,7 +135,7 @@ impl Stream {
         let output_process_handler = LocalProcessHandler::new(
             ports,
             vec![],
-            SampleRate(client.sample_rate() as u32),
+            client.sample_rate() as u32,
             client.buffer_size() as usize,
             None,
             Some(Box::new(data_callback)),
@@ -218,6 +222,9 @@ impl StreamTrait for Stream {
     }
 }
 
+type InputDataCallback = Box<dyn FnMut(&Data, &InputCallbackInfo) + Send + 'static>;
+type OutputDataCallback = Box<dyn FnMut(&mut Data, &OutputCallbackInfo) + Send + 'static>;
+
 struct LocalProcessHandler {
     /// No new ports are allowed to be created after the creation of the LocalProcessHandler as that would invalidate the buffer sizes
     out_ports: Vec<jack::Port<jack::AudioOut>>,
@@ -225,8 +232,8 @@ struct LocalProcessHandler {
 
     sample_rate: SampleRate,
     buffer_size: usize,
-    input_data_callback: Option<Box<dyn FnMut(&Data, &InputCallbackInfo) + Send + 'static>>,
-    output_data_callback: Option<Box<dyn FnMut(&mut Data, &OutputCallbackInfo) + Send + 'static>>,
+    input_data_callback: Option<InputDataCallback>,
+    output_data_callback: Option<OutputDataCallback>,
 
     // JACK audio samples are 32-bit float (unless you do some custom dark magic)
     temp_input_buffer: Vec<f32>,
@@ -238,15 +245,14 @@ struct LocalProcessHandler {
 }
 
 impl LocalProcessHandler {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         out_ports: Vec<jack::Port<jack::AudioOut>>,
         in_ports: Vec<jack::Port<jack::AudioIn>>,
         sample_rate: SampleRate,
         buffer_size: usize,
-        input_data_callback: Option<Box<dyn FnMut(&Data, &InputCallbackInfo) + Send + 'static>>,
-        output_data_callback: Option<
-            Box<dyn FnMut(&mut Data, &OutputCallbackInfo) + Send + 'static>,
-        >,
+        input_data_callback: Option<InputDataCallback>,
+        output_data_callback: Option<OutputDataCallback>,
         playing: Arc<AtomicBool>,
         error_callback_ptr: ErrorCallbackPtr,
     ) -> Self {
@@ -270,12 +276,11 @@ impl LocalProcessHandler {
     }
 }
 
-fn temp_buffer_to_data(temp_input_buffer: &mut Vec<f32>, total_buffer_size: usize) -> Data {
-    let slice = &temp_input_buffer[0..total_buffer_size];
-    let data = slice.as_ptr() as *mut ();
+fn temp_buffer_to_data(temp_input_buffer: &mut [f32], total_buffer_size: usize) -> Data {
+    let slice = &mut temp_input_buffer[0..total_buffer_size];
+    let data: *mut () = slice.as_mut_ptr().cast();
     let len = total_buffer_size;
-    let data = unsafe { Data::from_parts(data, len, JACK_SAMPLE_FORMAT) };
-    data
+    unsafe { Data::from_parts(data, len, JACK_SAMPLE_FORMAT) }
 }
 
 impl jack::ProcessHandler for LocalProcessHandler {
@@ -405,7 +410,7 @@ fn micros_to_stream_instant(micros: u64) -> crate::StreamInstant {
 
 // Convert the given duration in frames at the given sample rate to a `std::time::Duration`.
 fn frames_to_duration(frames: usize, rate: crate::SampleRate) -> std::time::Duration {
-    let secsf = frames as f64 / rate.0 as f64;
+    let secsf = frames as f64 / rate as f64;
     let secs = secsf as u64;
     let nanos = ((secsf - secs as f64) * 1_000_000_000.0) as u32;
     std::time::Duration::new(secs, nanos)
@@ -436,11 +441,11 @@ impl JackNotificationHandler {
 }
 
 impl jack::NotificationHandler for JackNotificationHandler {
-    fn shutdown(&mut self, _status: jack::ClientStatus, reason: &str) {
+    unsafe fn shutdown(&mut self, _status: jack::ClientStatus, reason: &str) {
         self.send_error(format!("JACK was shut down for reason: {}", reason));
     }
 
-    fn sample_rate(&mut self, _: &jack::Client, srate: jack::Frames) -> jack::Control {
+    fn sample_rate(&mut self, _: &jack::Client, _srate: jack::Frames) -> jack::Control {
         match self.init_sample_rate_flag.load(Ordering::SeqCst) {
             false => {
                 // One of these notifications is sent every time a client is started.
@@ -448,16 +453,20 @@ impl jack::NotificationHandler for JackNotificationHandler {
                 jack::Control::Continue
             }
             true => {
-                self.send_error(format!("sample rate changed to: {}", srate));
-                // Since CPAL currently has no way of signaling a sample rate change in order to make
-                // all necessary changes that would bring we choose to quit.
+                // The JACK server has changed the sample rate, invalidating this stream.
+                // The stream configuration must be rebuilt with the new sample rate.
+                if let Ok(mut cb) = self.error_callback_ptr.lock() {
+                    cb(StreamError::StreamInvalidated);
+                }
                 jack::Control::Quit
             }
         }
     }
 
     fn xrun(&mut self, _: &jack::Client) -> jack::Control {
-        self.send_error(String::from("xrun (buffer over or under run)"));
+        if let Ok(mut cb) = self.error_callback_ptr.lock() {
+            cb(StreamError::BufferUnderrun);
+        }
         jack::Control::Continue
     }
 }

@@ -1,8 +1,10 @@
-extern crate coreaudio;
+//! CoreAudio backend implementation.
+//!
+//! Default backend on macOS and iOS.
 
-use self::coreaudio::sys::{
-    kAudioFormatFlagIsFloat, kAudioFormatFlagIsPacked, kAudioFormatLinearPCM,
-    AudioStreamBasicDescription, OSStatus,
+use objc2_core_audio_types::{
+    kAudioFormatFlagIsFloat, kAudioFormatFlagIsPacked, kAudioFormatFlagIsSignedInteger,
+    kAudioFormatLinearPCM, AudioStreamBasicDescription,
 };
 
 use crate::DefaultStreamConfigError;
@@ -16,18 +18,16 @@ mod ios;
 mod macos;
 
 #[cfg(target_os = "ios")]
+#[allow(unused_imports)]
 pub use self::ios::{
     enumerate::{Devices, SupportedInputConfigs, SupportedOutputConfigs},
     Device, Host, Stream,
 };
 
 #[cfg(target_os = "macos")]
-pub use self::macos::{
-    enumerate::{Devices, SupportedInputConfigs, SupportedOutputConfigs},
-    Device, Host, Stream,
-};
+pub use self::macos::{Host, Stream};
 
-/// Common helper methods used by both macOS and iOS
+// Common helper methods used by both macOS and iOS
 
 fn check_os_status(os_status: OSStatus) -> Result<(), BackendSpecificError> {
     match coreaudio::Error::from_os_status(os_status) {
@@ -45,14 +45,19 @@ fn asbd_from_config(
     sample_format: SampleFormat,
 ) -> AudioStreamBasicDescription {
     let n_channels = config.channels as usize;
-    let sample_rate = config.sample_rate.0;
+    let sample_rate = config.sample_rate;
     let bytes_per_channel = sample_format.sample_size();
     let bits_per_channel = bytes_per_channel * 8;
     let bytes_per_frame = n_channels * bytes_per_channel;
     let frames_per_packet = 1;
     let bytes_per_packet = frames_per_packet * bytes_per_frame;
     let format_flags = match sample_format {
-        SampleFormat::F32 => kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+        SampleFormat::F32 | SampleFormat::F64 => kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+        SampleFormat::I8
+        | SampleFormat::I16
+        | SampleFormat::I24
+        | SampleFormat::I32
+        | SampleFormat::I64 => kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
         _ => kAudioFormatFlagIsPacked,
     };
     AudioStreamBasicDescription {
@@ -64,10 +69,11 @@ fn asbd_from_config(
         mFormatFlags: format_flags,
         mFormatID: kAudioFormatLinearPCM,
         mSampleRate: sample_rate as _,
-        ..Default::default()
+        mReserved: 0,
     }
 }
 
+#[inline]
 fn host_time_to_stream_instant(
     m_host_time: u64,
 ) -> Result<crate::StreamInstant, BackendSpecificError> {
@@ -81,8 +87,9 @@ fn host_time_to_stream_instant(
 }
 
 // Convert the given duration in frames at the given sample rate to a `std::time::Duration`.
+#[inline]
 fn frames_to_duration(frames: usize, rate: crate::SampleRate) -> std::time::Duration {
-    let secsf = frames as f64 / rate.0 as f64;
+    let secsf = frames as f64 / rate as f64;
     let secs = secsf as u64;
     let nanos = ((secsf - secs as f64) * 1_000_000_000.0) as u32;
     std::time::Duration::new(secs, nanos)
@@ -104,7 +111,7 @@ impl From<coreaudio::Error> for BuildStreamError {
 
 impl From<coreaudio::Error> for SupportedStreamConfigsError {
     fn from(err: coreaudio::Error) -> SupportedStreamConfigsError {
-        let description = format!("{}", err);
+        let description = format!("{err}");
         let err = BackendSpecificError { description };
         // Check for possible DeviceNotAvailable variant
         SupportedStreamConfigsError::BackendSpecific { err }
@@ -113,9 +120,15 @@ impl From<coreaudio::Error> for SupportedStreamConfigsError {
 
 impl From<coreaudio::Error> for DefaultStreamConfigError {
     fn from(err: coreaudio::Error) -> DefaultStreamConfigError {
-        let description = format!("{}", err);
+        let description = format!("{err}");
         let err = BackendSpecificError { description };
         // Check for possible DeviceNotAvailable variant
         DefaultStreamConfigError::BackendSpecific { err }
     }
 }
+
+pub(crate) type OSStatus = i32;
+
+// Compile-time assertion that Stream is Send and Sync
+crate::assert_stream_send!(Stream);
+crate::assert_stream_sync!(Stream);

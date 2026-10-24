@@ -1,6 +1,5 @@
 //! Music, sound effects, voices and the site's ambient sound.
 
-#[macro_use]
 extern crate moly_core;
 
 // Every lower layer's modules resolve as `crate::<module>`.

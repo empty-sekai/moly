@@ -8,18 +8,21 @@
 
 use clap::Parser;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use ringbuf::HeapRb;
+use ringbuf::{
+    traits::{Consumer, Producer, Split},
+    HeapRb,
+};
 
 #[derive(Parser, Debug)]
 #[command(version, about = "CPAL feedback example", long_about = None)]
 struct Opt {
     /// The input audio device to use
-    #[arg(short, long, value_name = "IN", default_value_t = String::from("default"))]
-    input_device: String,
+    #[arg(short, long, value_name = "IN")]
+    input_device: Option<String>,
 
     /// The output audio device to use
-    #[arg(short, long, value_name = "OUT", default_value_t = String::from("default"))]
-    output_device: String,
+    #[arg(short, long, value_name = "OUT")]
+    output_device: Option<String>,
 
     /// Specify the delay between input and output
     #[arg(short, long, value_name = "DELAY_MS", default_value_t = 150.0)]
@@ -78,30 +81,30 @@ fn main() -> anyhow::Result<()> {
     let host = cpal::default_host();
 
     // Find devices.
-    let input_device = if opt.input_device == "default" {
-        host.default_input_device()
+    let input_device = if let Some(device) = opt.input_device {
+        let id = &device.parse().expect("failed to parse input device id");
+        host.device_by_id(id)
     } else {
-        host.input_devices()?
-            .find(|x| x.name().map(|y| y == opt.input_device).unwrap_or(false))
+        host.default_input_device()
     }
     .expect("failed to find input device");
 
-    let output_device = if opt.output_device == "default" {
-        host.default_output_device()
+    let output_device = if let Some(device) = opt.output_device {
+        let id = &device.parse().expect("failed to parse output device id");
+        host.device_by_id(id)
     } else {
-        host.output_devices()?
-            .find(|x| x.name().map(|y| y == opt.output_device).unwrap_or(false))
+        host.default_output_device()
     }
     .expect("failed to find output device");
 
-    println!("Using input device: \"{}\"", input_device.name()?);
-    println!("Using output device: \"{}\"", output_device.name()?);
+    println!("Using input device: \"{}\"", input_device.id()?);
+    println!("Using output device: \"{}\"", output_device.id()?);
 
     // We'll try and use the same configuration between streams to keep it simple.
     let config: cpal::StreamConfig = input_device.default_input_config()?.into();
 
     // Create a delay in case the input and output devices aren't synced.
-    let latency_frames = (opt.latency / 1_000.0) * config.sample_rate.0 as f32;
+    let latency_frames = (opt.latency / 1_000.0) * config.sample_rate as f32;
     let latency_samples = latency_frames as usize * config.channels as usize;
 
     // The buffer to share samples
@@ -112,13 +115,13 @@ fn main() -> anyhow::Result<()> {
     for _ in 0..latency_samples {
         // The ring buffer has twice as much space as necessary to add latency here,
         // so this should never fail
-        producer.push(0.0).unwrap();
+        producer.try_push(0.0).unwrap();
     }
 
     let input_data_fn = move |data: &[f32], _: &cpal::InputCallbackInfo| {
         let mut output_fell_behind = false;
         for &sample in data {
-            if producer.push(sample).is_err() {
+            if producer.try_push(sample).is_err() {
                 output_fell_behind = true;
             }
         }
@@ -130,7 +133,7 @@ fn main() -> anyhow::Result<()> {
     let output_data_fn = move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
         let mut input_fell_behind = false;
         for sample in data {
-            *sample = match consumer.pop() {
+            *sample = match consumer.try_pop() {
                 Some(s) => s,
                 None => {
                     input_fell_behind = true;
@@ -144,10 +147,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     // Build streams.
-    println!(
-        "Attempting to build both streams with f32 samples and `{:?}`.",
-        config
-    );
+    println!("Attempting to build both streams with f32 samples and `{config:?}`.");
     let input_stream = input_device.build_input_stream(&config, input_data_fn, err_fn, None)?;
     let output_stream = output_device.build_output_stream(&config, output_data_fn, err_fn, None)?;
     println!("Successfully built streams.");
@@ -170,5 +170,5 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn err_fn(err: cpal::StreamError) {
-    eprintln!("an error occurred on stream: {}", err);
+    eprintln!("an error occurred on stream: {err}");
 }
