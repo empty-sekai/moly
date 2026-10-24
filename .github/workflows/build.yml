@@ -1,0 +1,174 @@
+name: Build
+
+# Builds the native programs and the browser renderers. The release workflow
+# calls it to make the packages; the build-cache workflow calls it on master to
+# keep the compiler caches warm.
+#
+# Caches: every rustc invocation goes through sccache, whose entries are stored
+# in the GitHub Actions cache, so unchanged crates (dependencies and workspace
+# crates alike) are not compiled again. Swatinem/rust-cache keeps the Cargo
+# registry and installed tools. GitHub lets a run read the caches of its own
+# ref and of the default branch, so only master runs save them and every other
+# ref, release tags included, reads what master saved.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: The workspace version the programs must report.
+        required: true
+        type: string
+      package:
+        description: Package the programs and upload them as artifacts.
+        required: true
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  RUST_TOOLCHAIN: '1.98.1'
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: '0'
+  SCCACHE_GHA_ENABLED: 'true'
+  RUSTC_WRAPPER: sccache
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            exe: moly-app.exe
+            launcher: moly-launcher.exe
+            server: moly-server.exe
+            archive: zip
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            exe: moly-app
+            launcher: moly-launcher
+            server: moly-server
+            archive: tar.gz
+          - os: macos-14
+            target: aarch64-apple-darwin
+            exe: moly-app
+            launcher: moly-launcher
+            server: moly-server
+            archive: tar.gz
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 240
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target ${{ matrix.target }}
+          rustup default "$RUST_TOOLCHAIN"
+      - name: Install system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+          cache-targets: false
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - name: Build
+        run: cargo build --release --locked -p moly-app -p moly-launcher -p moly-server-host --target ${{ matrix.target }}
+      - name: Compiler cache statistics
+        if: always()
+        run: sccache --show-stats
+      - name: Check the reported version
+        shell: bash
+        run: |
+          reported=$("target/${{ matrix.target }}/release/${{ matrix.exe }}" --version)
+          if [[ "$reported" != "moly $VERSION" ]]; then
+            echo "the program reports \"$reported\", expected \"moly $VERSION\"" >&2
+            exit 1
+          fi
+          served=$("target/${{ matrix.target }}/release/${{ matrix.server }}" --version)
+          if [[ "$served" != "moly-server $VERSION" ]]; then
+            echo "the server reports \"$served\", expected \"moly-server $VERSION\"" >&2
+            exit 1
+          fi
+      - name: Package
+        if: inputs.package
+        shell: bash
+        run: |
+          release="target/${{ matrix.target }}/release"
+          game="moly-$VERSION-${{ matrix.target }}"
+          server="moly-server-$VERSION-${{ matrix.target }}"
+          mkdir -p "dist/$game" "dist/$server" dist/out
+          cp "$release/${{ matrix.exe }}" "$release/${{ matrix.launcher }}" "$release/${{ matrix.server }}" "dist/$game/"
+          cp "$release/${{ matrix.server }}" "dist/$server/"
+          for name in "$game" "$server"; do
+            cp LICENSE THIRD_PARTY_NOTICES.md "dist/$name/"
+            cp docs/release-package.md "dist/$name/README.md"
+          done
+          cd dist
+          for name in "$game" "$server"; do
+            if [[ "${{ matrix.archive }}" == zip ]]; then
+              7z a -tzip "out/$name.zip" "$name" > /dev/null
+            else
+              tar -czf "out/$name.tar.gz" "$name"
+            fi
+          done
+          ls -l out
+      - uses: actions/upload-artifact@v4
+        if: inputs.package
+        with:
+          name: native-${{ matrix.target }}
+          path: dist/out/*
+          if-no-files-found: error
+  browser:
+    strategy:
+      fail-fast: false
+      matrix:
+        renderer: [webgpu, webgl2]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target wasm32-unknown-unknown
+          rustup default "$RUST_TOOLCHAIN"
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm32-${{ matrix.renderer }}
+          cache-targets: false
+          cache-bin: true
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - name: Install the wasm-bindgen CLI named by Cargo.lock
+        shell: bash
+        run: |
+          version=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)
+          if ! wasm-bindgen --version 2>/dev/null | grep -qx "wasm-bindgen $version"; then
+            cargo install wasm-bindgen-cli --version "$version" --locked --force
+          fi
+          wasm-bindgen --version
+      - name: Build the ${{ matrix.renderer }} package
+        env:
+          CARGO_BUILD_JOBS: '4'
+        run: node web/build-wasm.mjs --renderer ${{ matrix.renderer }}
+      - name: Compiler cache statistics
+        if: always()
+        run: sccache --show-stats
+      - uses: actions/upload-artifact@v4
+        if: inputs.package
+        with:
+          name: browser-${{ matrix.renderer }}
+          path: web/pkg
+          if-no-files-found: error

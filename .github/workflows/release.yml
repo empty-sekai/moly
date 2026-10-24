@@ -2,14 +2,15 @@ name: Release
 
 # A version tag (v<workspace version>) builds the native programs and the
 # browser package, and attaches the published targets to a draft release.
+# Each native target ships two archives: the game package (game, launcher
+# and server) and a server-only package for running the server on its own.
 # The release notes are the tag's CHANGELOG section as git-cliff writes it
 # from cliff.toml, or release-notes/<tag>.md when that file exists.
-# Publishing the draft is a manual step. Targets marked `publish: false` are
-# built and version-checked but not attached. A manual run builds the same
-# files as workflow artifacts and creates no release.
+# Publishing the draft is a manual step. A manual run builds the same files
+# as workflow artifacts and creates no release.
 #
-# Only third-party dependencies are cached (one cache per target); the
-# workspace crates are compiled on every run.
+# The programs are built by build.yml, which reads the compiler caches that
+# master runs of the build-cache workflow keep warm.
 
 on:
   push:
@@ -62,136 +63,15 @@ jobs:
             exit 1
           fi
 
-  native:
+  build:
     needs: [checks, version]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            exe: moly-app.exe
-            launcher: moly-launcher.exe
-            server: moly-server.exe
-            archive: zip
-            publish: true
-          - os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            exe: moly-app
-            launcher: moly-launcher
-            server: moly-server
-            archive: tar.gz
-            publish: false
-          - os: macos-14
-            target: aarch64-apple-darwin
-            exe: moly-app
-            launcher: moly-launcher
-            server: moly-server
-            archive: tar.gz
-            publish: false
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 240
-    env:
-      VERSION: ${{ needs.version.outputs.version }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install the Rust toolchain
-        shell: bash
-        run: |
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target ${{ matrix.target }}
-          rustup default "$RUST_TOOLCHAIN"
-      - name: Install system libraries
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev             libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-          cache-on-failure: true
-      - name: Build
-        run: cargo build --release --locked -p moly-app -p moly-launcher -p moly-server-host --target ${{ matrix.target }}
-      - name: Check the reported version
-        shell: bash
-        run: |
-          reported=$("target/${{ matrix.target }}/release/${{ matrix.exe }}" --version)
-          if [[ "$reported" != "moly $VERSION" ]]; then
-            echo "the program reports \"$reported\", expected \"moly $VERSION\"" >&2
-            exit 1
-          fi
-          served=$("target/${{ matrix.target }}/release/${{ matrix.server }}" --version)
-          if [[ "$served" != "moly-server $VERSION" ]]; then
-            echo "the server reports \"$served\", expected \"moly-server $VERSION\"" >&2
-            exit 1
-          fi
-      - name: Package
-        id: package
-        shell: bash
-        run: |
-          name="moly-$VERSION-${{ matrix.target }}"
-          mkdir -p "dist/$name"
-          cp "target/${{ matrix.target }}/release/${{ matrix.exe }}" "dist/$name/"
-          cp "target/${{ matrix.target }}/release/${{ matrix.launcher }}" "dist/$name/"
-          cp "target/${{ matrix.target }}/release/${{ matrix.server }}" "dist/$name/"
-          cp LICENSE README.md THIRD_PARTY_NOTICES.md "dist/$name/"
-          cd dist
-          if [[ "${{ matrix.archive }}" == zip ]]; then
-            7z a -tzip "$name.zip" "$name" > /dev/null
-            echo "file=dist/$name.zip" >> "$GITHUB_OUTPUT"
-          else
-            tar -czf "$name.tar.gz" "$name"
-            echo "file=dist/$name.tar.gz" >> "$GITHUB_OUTPUT"
-          fi
-      - uses: actions/upload-artifact@v4
-        if: matrix.publish
-        with:
-          name: native-${{ matrix.target }}
-          path: ${{ steps.package.outputs.file }}
-          if-no-files-found: error
-
-  browser:
-    needs: [checks, version]
-    strategy:
-      fail-fast: false
-      matrix:
-        renderer: [webgpu, webgl2]
-    runs-on: ubuntu-22.04
-    timeout-minutes: 240
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - name: Install the Rust toolchain
-        run: |
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target wasm32-unknown-unknown
-          rustup default "$RUST_TOOLCHAIN"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: wasm32-${{ matrix.renderer }}
-          cache-on-failure: true
-          cache-bin: true
-      - name: Install the wasm-bindgen CLI named by Cargo.lock
-        shell: bash
-        run: |
-          version=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)
-          if ! wasm-bindgen --version 2>/dev/null | grep -qx "wasm-bindgen $version"; then
-            cargo install wasm-bindgen-cli --version "$version" --locked --force
-          fi
-          wasm-bindgen --version
-      - name: Build the ${{ matrix.renderer }} package
-        env:
-          CARGO_BUILD_JOBS: '4'
-        run: node web/build-wasm.mjs --renderer ${{ matrix.renderer }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: browser-${{ matrix.renderer }}
-          path: web/pkg
-          if-no-files-found: error
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+      package: true
 
   browser-package:
-    needs: [version, browser]
+    needs: [version, build]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -219,7 +99,7 @@ jobs:
 
   release:
     if: github.ref_type == 'tag'
-    needs: [version, native, browser-package]
+    needs: [version, build, browser-package]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
