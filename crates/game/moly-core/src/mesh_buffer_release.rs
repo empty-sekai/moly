@@ -32,7 +32,7 @@ use bevy::{
     prelude::*,
     render::{
         mesh::{
-            allocator::{allocate_and_free_meshes, MeshAllocator, SlabId},
+            allocator::{allocate_and_free_meshes, MeshAllocator, MeshSlabId, MeshSlabs},
             RenderMesh,
         },
         render_asset::{prepare_assets, ExtractedAssets},
@@ -67,10 +67,10 @@ impl Plugin for MeshBufferReleasePlugin {
 struct AllocatedMeshBuffers {
     /// The slabs of the vertex and index slices of every allocated mesh, as
     /// the allocator placed them.
-    meshes: HashMap<AssetId<Mesh>, [Option<SlabId>; 2]>,
+    meshes: HashMap<AssetId<Mesh>, [Option<MeshSlabId>; 2]>,
     /// Every slab holding a slice of an allocated mesh: its current buffer and
     /// the number of mesh slices in it.
-    slabs: HashMap<SlabId, (Buffer, u32)>,
+    slabs: HashMap<MeshSlabId, (Buffer, u32)>,
 }
 
 /// The vertex and index slices of a mesh: the slab and buffer each lies in.
@@ -78,15 +78,23 @@ struct AllocatedMeshBuffers {
 fn slices<'a>(
     allocator: &'a MeshAllocator,
     id: &AssetId<Mesh>,
-) -> [Option<(SlabId, &'a Buffer)>; 2] {
-    let (vertex_slab, index_slab) = allocator.mesh_slabs(id);
+) -> [Option<(MeshSlabId, &'a Buffer)>; 2] {
+    let mesh_slabs = allocator.mesh_slabs(id);
     [
-        vertex_slab
-            .zip(allocator.mesh_vertex_slice(id))
-            .map(|(slab, slice)| (slab, slice.buffer)),
-        index_slab
-            .zip(allocator.mesh_index_slice(id))
-            .map(|(slab, slice)| (slab, slice.buffer)),
+        mesh_slabs
+            .and_then(|slabs| {
+                allocator
+                    .mesh_vertex_slice(id)
+                    .map(|slice| (slabs.vertex_slab_id, slice.buffer))
+            }),
+        mesh_slabs
+            .and_then(|slabs| {
+                slabs.index_slab_id.and_then(|slab_id| {
+                    allocator
+                        .mesh_index_slice(id)
+                        .map(|slice| (slab_id, slice.buffer))
+                })
+            }),
     ]
 }
 
@@ -105,7 +113,7 @@ impl AllocatedMeshBuffers {
             .chain(&extracted.modified)
             .chain(extracted_ids.clone());
         // The buffer each touched slab had before this frame's allocation.
-        let mut before: HashMap<SlabId, Buffer> = HashMap::default();
+        let mut before: HashMap<MeshSlabId, Buffer> = HashMap::default();
         for id in changed {
             let Some(slabs) = self.meshes.remove(id) else {
                 continue;

@@ -53,7 +53,7 @@ pub fn add_asset(
     mut commands: bevy::prelude::Commands,
     mut fonts: bevy::prelude::ResMut<bevy::prelude::Assets<bevy::prelude::Font>>,
 ) {
-    let font = bevy::prelude::Font::try_from_bytes(UI_FONT.to_vec()).expect("the UI font is valid");
+    let font = bevy::prelude::Font::from_bytes(UI_FONT.to_vec());
     commands.insert_resource(UiFontAsset(fonts.add(font)));
 }
 

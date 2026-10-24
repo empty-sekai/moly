@@ -12,8 +12,8 @@ use bevy::diagnostic::FrameCount;
 use bevy::prelude::*;
 use bevy::render::render_resource::{
     AddressMode, BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutId, BindingResource,
-    Buffer, BufferBinding, BufferId, FilterMode, Sampler, SamplerDescriptor, SamplerId, TextureView,
-    TextureViewId,
+    Buffer, BufferBinding, BufferId, FilterMode, MipmapFilterMode, Sampler, SamplerDescriptor,
+    SamplerId, TextureView, TextureViewId,
 };
 use bevy::render::renderer::RenderDevice;
 use bevy::render::{Extract, ExtractSchedule, RenderApp, RenderStartup};
@@ -47,7 +47,7 @@ fn create_shared_samplers(mut commands: Commands, device: Res<RenderDevice>) {
         address_mode_w: mode,
         mag_filter: FilterMode::Linear,
         min_filter: FilterMode::Linear,
-        mipmap_filter: FilterMode::Linear,
+        mipmap_filter: MipmapFilterMode::Linear,
         ..Default::default()
     };
     commands.insert_resource(SharedSamplers {
