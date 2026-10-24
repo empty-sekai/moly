@@ -1034,7 +1034,7 @@ mod tests {
         world.init_resource::<crate::audio::AudioGate>();
         let mut system = SystemState::<input::LibraryInput>::new(&mut world);
         {
-            let mut io = system.get_mut(&mut world);
+            let mut io = system.get_mut(&mut world).expect("system params");
             apply_command(command, state, catalog, &LibraryContext::default(), &mut io);
         }
         system.apply(&mut world);

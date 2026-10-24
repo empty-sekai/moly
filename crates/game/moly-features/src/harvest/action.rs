@@ -2312,7 +2312,7 @@ pub fn cancel_for_site_change(world: &mut World) {
             Query<&mut AvatarDriver, With<PlayerControlled>>,
             Query<&mut AnimationPlayer>,
         )>::new(world);
-        let (mut drivers, mut animators) = state.get_mut(world);
+        let (mut drivers, mut animators) = state.get_mut(world).expect("system params");
         if let Ok(mut driver) = drivers.single_mut() {
             let player = driver.player;
             if let Ok(mut animator) = animators.get_mut(player) {

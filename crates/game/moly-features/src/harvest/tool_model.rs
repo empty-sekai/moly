@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use bevy::asset::LoadState;
 use bevy::gltf::Gltf;
 use bevy::prelude::*;
-use bevy::scene::SceneRoot;
+use bevy::world_serialization::WorldAssetRoot;
 use moly_assets::json::JsonAsset;
 
 use crate::harvest_material::{HarvestToolMaterial, AVATAR_TOOL_SHADER_NAME};
@@ -229,7 +229,7 @@ pub fn apply(
         });
     let entity = commands
         .spawn((
-            SceneRoot(scene_handle),
+            WorldAssetRoot(scene_handle),
             Transform::IDENTITY,
             Visibility::Inherited,
             ChildOf(mount),

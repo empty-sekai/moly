@@ -78,7 +78,7 @@
 use bevy::diagnostic::FrameCount;
 use bevy::gltf::Gltf;
 use bevy::prelude::*;
-use bevy::scene::SceneRoot;
+use bevy::world_serialization::WorldAssetRoot;
 use moly_law::action_button::inside_circle;
 use moly_law::delivery as law;
 
@@ -433,7 +433,7 @@ pub fn spawn(
         };
         let entity = commands
             .spawn((
-                SceneRoot(scene),
+                WorldAssetRoot(scene),
                 DeliveryDropItem {
                     model: model.clone(),
                     radius,

@@ -553,7 +553,7 @@ impl FixturePutEffect {
                 let loaded_after = now - *since;
                 let root = world
                     .spawn((
-                        SceneRoot(scene),
+                        WorldAssetRoot(scene),
                         Transform::IDENTITY,
                         // Hidden until its source nodes are held inactive.
                         Visibility::Hidden,

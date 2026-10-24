@@ -253,7 +253,7 @@ fn sync_previews(world: &mut World, rows: &[EditableFixture]) -> bool {
         // The material owner reveals this root after the scene is expanded and
         // all source replacements are ready, exactly as for saved furniture.
         world.spawn((
-            SceneRoot(scene),
+            WorldAssetRoot(scene),
             crate::fixture::FixtureVisualRoot { layout: row.layout },
             crate::fixture_colors::FixtureColorChoice { package: row.package.clone(), texture_id: row.texture_id },
             DraftPreview {

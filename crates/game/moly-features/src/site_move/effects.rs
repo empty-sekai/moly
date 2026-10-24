@@ -518,7 +518,7 @@ impl EffectPools {
                     );
                     continue;
                 };
-                entity.insert((SceneRoot(scene.clone()), PendingInstance));
+                entity.insert((WorldAssetRoot(scene.clone()), PendingInstance));
                 if !played {
                     entity.insert(Visibility::Hidden);
                 }

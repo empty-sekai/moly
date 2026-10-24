@@ -467,7 +467,7 @@ impl TopMaterials<'_, '_> {
     /// now holds (its pipeline key's dither flag and `_DitherAlpha`).
     fn set_dither(&mut self, copies: &[Handle<SiteMaterial>], value: f32) -> Option<(bool, f32)> {
         for handle in copies {
-            if let Some(material) = self.materials.get_mut(handle) {
+            if let Some(material) = self.materials.get_mut(handle).map(|asset| asset.into_inner()) {
                 material.key.tree_dither = dither_variant_on(value);
                 material.params.dither_alpha = value;
             }

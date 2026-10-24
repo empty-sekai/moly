@@ -625,7 +625,7 @@ pub fn step(
                         instance.kind, system.node
                     );
                     system.pool.clear();
-                    if let Some(mesh) = meshes.get_mut(&system.mesh) {
+                    if let Some(mesh) = meshes.get_mut(&system.mesh).map(|asset| asset.into_inner()) {
                         crate::billboard::clear(mesh);
                     }
                     commands.entity(*draw).remove::<FootParticle>();
@@ -639,7 +639,7 @@ pub fn step(
             };
             // An idle system over an empty mesh leaves the mesh untouched.
             if crate::particle_runtime::draws_change(&meshes, &system.mesh, system) {
-                if let Some(mesh) = meshes.get_mut(&system.mesh) {
+                if let Some(mesh) = meshes.get_mut(&system.mesh).map(|asset| asset.into_inner()) {
                     crate::particle_runtime::write_geometry(
                         mesh,
                         system,

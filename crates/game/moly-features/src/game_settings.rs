@@ -8,6 +8,7 @@ use bevy::{
     input::touch::Touches,
     prelude::*,
     render::render_resource::TextureFormat,
+    text::FontSize,
     ui::{FocusPolicy, UiTargetCamera},
     window::PrimaryWindow,
 };
@@ -613,8 +614,8 @@ fn add_text(
     let mut entity = commands.spawn((
         Text::new(text),
         TextFont {
-            font: font.clone(),
-            font_size: size,
+            font: font.clone().into(),
+            font_size: FontSize::Px(size),
             ..default()
         },
         TextColor(Color::srgb(0.9, 0.94, 1.)),
@@ -1124,7 +1125,7 @@ pub fn apply_graphics(
                 Image::new_target_texture(size.x, size.y, TextureFormat::Rgba8UnormSrgb, None);
             image.sampler = ImageSampler::linear();
             if let Some(handle) = &surface.image {
-                if let Some(current) = images.get_mut(handle) {
+                if let Some(current) = images.get_mut(handle).map(|asset| asset.into_inner()) {
                     *current = image;
                 }
             } else {

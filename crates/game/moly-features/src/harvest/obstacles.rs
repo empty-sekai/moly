@@ -266,7 +266,7 @@ pub fn switch(
         Query<&SourceNavMeshObstacles>,
         Query<&mut RuntimeObstacles>,
     )> = bevy::ecs::system::SystemState::new(world);
-    let (objects, children, identities, views, sources, mut runtime) = state.get_mut(world);
+    let (objects, children, identities, views, sources, mut runtime) = state.get_mut(world).expect("system params");
     let Ok(object) = objects.get(root) else {
         return;
     };

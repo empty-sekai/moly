@@ -454,7 +454,7 @@ pub fn advance(
             if let Some(scene) = scene.clone() {
                 run.root = Some(
                     commands
-                        .spawn((SceneRoot(scene), Transform::default(), Visibility::Hidden))
+                        .spawn((WorldAssetRoot(scene), Transform::default(), Visibility::Hidden))
                         .id(),
                 );
             }

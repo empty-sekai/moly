@@ -53,7 +53,7 @@ use bevy::diagnostic::FrameCount;
 use bevy::ecs::observer::On;
 use bevy::ecs::system::SystemState;
 use bevy::prelude::*;
-use bevy::scene::SceneInstanceReady;
+use bevy::world_serialization::WorldInstanceReady;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -243,8 +243,8 @@ pub fn install(app: &mut App) {
                     .after(crate::npc::DoorAnswerSet)
                     .run_if(
                         resource_exists::<SiteMove>
-                            .or(resource_exists::<SiteMoveRequest>)
-                            .or(resource_exists::<door::DoorMove>),
+                            .or_else(resource_exists::<SiteMoveRequest>)
+                            .or_else(resource_exists::<door::DoorMove>),
                     ),
                 advance_effects.run_if(resource_exists::<SiteMoveEffects>),
                 crate::player_state::update_site_exit_states.before(advance),
@@ -279,7 +279,7 @@ pub fn install(app: &mut App) {
 pub struct SiteMoveEffects(effects::Effects);
 
 fn on_instance_ready(
-    trigger: On<SceneInstanceReady>,
+    trigger: On<WorldInstanceReady>,
     pending: Query<(), With<PendingInstance>>,
     mut commands: Commands,
 ) {
@@ -296,7 +296,7 @@ fn on_instance_ready(
 /// shape of the particle documents' node paths.
 pub fn node_paths(world: &mut World, root: Entity) -> HashMap<String, Vec<Entity>> {
     let mut state = SystemState::<(Query<&Name>, Query<&Children>)>::new(world);
-    let (names, children) = state.get(world);
+    let (names, children) = state.get(world).expect("system params");
     let mut out = HashMap::new();
     if let Ok(kids) = children.get(root) {
         for kid in kids {
@@ -1296,7 +1296,7 @@ impl SiteMove {
             Query<&mut AvatarDriver, With<PlayerControlled>>,
             Query<(&mut AnimationPlayer, &mut AnimationTransitions)>,
         )>::new(world);
-        let (mut graphs, mut drivers, mut animators) = state.get_mut(world);
+        let (mut graphs, mut drivers, mut animators) = state.get_mut(world).expect("system params");
         let Some(mut driver) = drivers.iter_mut().next() else {
             error!("[site-move] no player driver for {clip}");
             return;

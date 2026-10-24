@@ -1,6 +1,7 @@
 //! Retained, responsive chrome. Only a visible page and the selected transcript
 //! are materialized; scrolling never reconstructs the whole catalog.
 use super::*;
+use bevy::text::FontSize;
 const INK: Color = Color::srgb(0.91, 0.95, 0.98);
 const MUTED: Color = Color::srgb(0.57, 0.67, 0.76);
 const ACCENT: Color = Color::srgb(0.33, 0.84, 0.88);
@@ -51,8 +52,8 @@ fn text(
         .spawn((
             Text::new(value),
             TextFont {
-                font: font.clone(),
-                font_size: size,
+                font: font.clone().into(),
+                font_size: FontSize::Px(size),
                 ..default()
             },
             TextColor(color),
@@ -77,7 +78,7 @@ fn label(
     let id = text(c, parent, font, "", size, color);
     c.entity(id).insert(kind);
     if matches!(kind, UiLabel::TransportTitle | UiLabel::Search) {
-        c.entity(id).insert(TextLayout::new_with_no_wrap());
+        c.entity(id).insert(TextLayout::no_wrap());
     }
     id
 }
@@ -1115,7 +1116,7 @@ fn populate_list(
         });
         let title = text(c, copy, font, excerpt(&title, 25), 15., INK);
         c.entity(title).insert((
-            TextLayout::new_with_no_wrap(),
+            TextLayout::no_wrap(),
             Node {
                 height: px(22),
                 overflow: Overflow::clip(),
@@ -1124,7 +1125,7 @@ fn populate_list(
         ));
         let meta = text(c, copy, font, excerpt(&meta, 40), 12., MUTED);
         c.entity(meta).insert((
-            TextLayout::new_with_no_wrap(),
+            TextLayout::no_wrap(),
             Node {
                 height: px(18),
                 overflow: Overflow::clip(),
@@ -1489,12 +1490,12 @@ pub fn refresh(
             }
             Region::HeaderTitle => {
                 if let Some(mut font) = text_font {
-                    set_if_neq!(font.font_size, if short { 21. } else { 27. });
+                    set_if_neq!(font.font_size, FontSize::Px(if short { 21. } else { 27. }));
                 }
             }
             Region::ModeDescription => {
                 if let Some(mut text_font) = text_font {
-                    set_if_neq!(text_font.font_size, if narrow { 11. } else { 12. });
+                    set_if_neq!(text_font.font_size, FontSize::Px(if narrow { 11. } else { 12. }));
                 }
             }
             Region::SearchBox => {

@@ -14,7 +14,7 @@
 
 use bevy::gltf::Gltf;
 use bevy::prelude::*;
-use bevy::scene::SceneRoot;
+use bevy::world_serialization::WorldAssetRoot;
 
 use super::{
     drop_scatter_params, DropPrefab, HarvestDocs, HarvestDropBatches, HarvestDropItem,
@@ -169,7 +169,7 @@ pub fn spawn(
             };
             let entity = commands
                 .spawn((
-                    SceneRoot(scene),
+                    WorldAssetRoot(scene),
                     HarvestDropItem {
                         uid,
                         package: package.clone(),

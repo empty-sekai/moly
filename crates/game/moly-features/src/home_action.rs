@@ -421,7 +421,7 @@ type BodyState<'w, 's> = SystemState<(
 /// `PlayAnimation(clip, 0)` on the player's body for the home action.
 fn play_clip(world: &mut World, clip: &str) -> Result<PlayerActionToken, PlayerMotionError> {
     let mut state: BodyState = SystemState::new(world);
-    let (mut drivers, mut animators, mut graphs) = state.get_mut(world);
+    let (mut drivers, mut animators, mut graphs) = state.get_mut(world).expect("system params");
     let Ok(mut driver) = drivers.single_mut() else {
         return Err(PlayerMotionError::MissingGraph);
     };
@@ -446,7 +446,7 @@ fn play_clip(world: &mut World, clip: &str) -> Result<PlayerActionToken, PlayerM
 /// fade 0; the animator goes back to locomotion.
 fn play_idle(world: &mut World, token: Option<PlayerActionToken>) {
     let mut state: BodyState = SystemState::new(world);
-    let (mut drivers, mut animators, mut graphs) = state.get_mut(world);
+    let (mut drivers, mut animators, mut graphs) = state.get_mut(world).expect("system params");
     let Ok(mut driver) = drivers.single_mut() else {
         return;
     };

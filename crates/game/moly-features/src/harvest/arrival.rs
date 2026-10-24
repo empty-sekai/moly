@@ -29,7 +29,7 @@ use bevy::asset::{LoadState, RecursiveDependencyLoadState};
 use bevy::ecs::system::SystemParam;
 use bevy::gltf::Gltf;
 use bevy::prelude::*;
-use bevy::scene::SceneRoot;
+use bevy::world_serialization::WorldAssetRoot;
 use moly_assets::source_navigation::{SourceHarvestView, SourceObjectIdentity};
 
 use super::catalog::{HarvestCatalog, HarvestUserData};
@@ -374,7 +374,7 @@ pub fn place(
     }
     let entity = commands
         .spawn((
-            SceneRoot(scene),
+            WorldAssetRoot(scene),
             HarvestRoot,
             HarvestObject {
                 uid,

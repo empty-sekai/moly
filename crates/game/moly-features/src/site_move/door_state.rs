@@ -127,7 +127,7 @@ fn play(
         Query<&mut AvatarDriver, With<PlayerControlled>>,
         Query<(&mut AnimationPlayer, &mut AnimationTransitions)>,
     )>::new(world);
-    let (mut graphs, mut drivers, mut animators) = params.get_mut(world);
+    let (mut graphs, mut drivers, mut animators) = params.get_mut(world).expect("system params");
     let Some(mut driver) = drivers.iter_mut().next() else {
         error!("[site-move] no player driver for {clip}");
         return token;
@@ -188,7 +188,7 @@ pub fn finish_idle(world: &mut World, token: Option<PlayerActionToken>, fade: f3
         Query<&mut AvatarDriver, With<PlayerControlled>>,
         Query<(&mut AnimationPlayer, &mut AnimationTransitions)>,
     )>::new(world);
-    let (mut graphs, mut drivers, mut animators) = params.get_mut(world);
+    let (mut graphs, mut drivers, mut animators) = params.get_mut(world).expect("system params");
     if let Some(mut driver) = drivers.iter_mut().next() {
         if let Ok((mut animator, mut transitions)) = animators.get_mut(driver.player) {
             driver.play_idle(

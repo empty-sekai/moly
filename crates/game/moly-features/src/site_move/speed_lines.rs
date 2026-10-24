@@ -258,7 +258,7 @@ fn set_enabled(world: &mut World, enabled: bool) {
     let material = material.clone();
     if let Some(asset) = world
         .resource_mut::<Assets<ConcentrationLineMaterial>>()
-        .get_mut(&material)
+        .get_mut(&material).map(|asset| asset.into_inner())
     {
         asset.value.b.z = if enabled { 1.0 } else { 0.0 };
     }
@@ -294,7 +294,7 @@ fn advance_time(
         return;
     }
     let t = time.elapsed_secs();
-    if let Some(asset) = materials.get_mut(material) {
+    if let Some(asset) = materials.get_mut(material).map(|asset| asset.into_inner()) {
         asset.value.time_parameters = Vec4::new(t, t.sin(), t.cos(), 0.0);
     }
 }

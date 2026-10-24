@@ -1283,7 +1283,7 @@ fn draw_page(commands: &mut Commands, recover: &mut Recover, view: &mut UiPrefab
                 Text::new(String::new()),
                 TextFont::from_font_size(26.0),
                 TextColor(Color::WHITE),
-                TextLayout::new_with_justify(Justify::Left),
+                TextLayout::justify(Justify::Left),
                 Node {
                     position_type: PositionType::Absolute,
                     left: Val::Px(24.0),

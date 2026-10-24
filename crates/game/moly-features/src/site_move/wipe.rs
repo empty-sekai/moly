@@ -320,6 +320,7 @@ pub fn advance(world: &mut World) {
         if let Some(asset) = world
             .resource_mut::<Assets<WipeCircleMaterial>>()
             .get_mut(&material)
+            .map(|asset| asset.into_inner())
         {
             asset.value.params = params;
             if let Some(half_extent) = half_extent {

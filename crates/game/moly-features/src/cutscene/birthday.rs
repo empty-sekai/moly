@@ -691,6 +691,7 @@ fn instrument_tap(world: &mut World, master: i32, at: f64, head_since: Option<f6
     let mut screen: SystemState<crate::action_button::ActionButtonScreen> = SystemState::new(world);
     let position = screen
         .get(world)
+        .expect("system params")
         .button_position(&window, ButtonType::BirthdayCutScene);
     let Some(position) = position else {
         error!("[birthday] {INSTRUMENT}: the birthday cut-scene button has no screen position (its view is not laid out); no press");

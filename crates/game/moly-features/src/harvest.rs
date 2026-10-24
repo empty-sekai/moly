@@ -69,7 +69,7 @@ use std::collections::HashMap;
 use bevy::ecs::observer::On;
 use bevy::gltf::Gltf;
 use bevy::prelude::*;
-use bevy::scene::SceneInstanceReady;
+use bevy::world_serialization::WorldInstanceReady;
 
 use crate::site::GroundMeshes;
 use catalog::HarvestCatalog;
@@ -639,7 +639,7 @@ pub fn prefab_scene_index(document: &str, leaf: &str) -> usize {
 /// Global observer: count the arrival's expanded scenes; all expanded opens
 /// the material swap.
 fn on_scene_ready(
-    trigger: On<SceneInstanceReady>,
+    trigger: On<WorldInstanceReady>,
     roots: Query<&HarvestRoot>,
     arrival: Res<arrival::HarvestArrival>,
     spawned: Res<HarvestSpawnedCount>,

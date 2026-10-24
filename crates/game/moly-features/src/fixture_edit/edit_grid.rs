@@ -1633,6 +1633,7 @@ fn refresh(world: &mut World, grid: &mut EditGrid) {
     if let Some(material) = world
         .resource_mut::<Assets<GridFaceMaterial>>()
         .get_mut(&shown.face_material)
+        .map(|asset| asset.into_inner())
     {
         material.state = image;
         material.value = colours.face;
@@ -1641,6 +1642,7 @@ fn refresh(world: &mut World, grid: &mut EditGrid) {
         if let Some(material) = world
             .resource_mut::<Assets<GridLineMaterial>>()
             .get_mut(handle)
+            .map(|asset| asset.into_inner())
         {
             material.value.color1 = if *dotted {
                 colours.dotted

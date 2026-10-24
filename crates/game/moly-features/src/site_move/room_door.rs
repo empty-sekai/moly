@@ -478,7 +478,7 @@ impl RoomDoor {
         // Instantiate(prefab, Loc_door): local pose as authored (identity).
         let root = world
             .spawn((
-                SceneRoot(scene),
+                WorldAssetRoot(scene),
                 Transform::IDENTITY,
                 Visibility::Inherited,
                 PendingInstance,
@@ -669,7 +669,7 @@ impl RoomDoor {
                 continue;
             };
             let mut meshes = world.resource_mut::<Assets<Mesh>>();
-            if let Some(mesh) = meshes.get_mut(&mesh) {
+            if let Some(mesh) = meshes.get_mut(&mesh).map(|asset| asset.into_inner()) {
                 if mesh.remove_attribute(Mesh::ATTRIBUTE_COLOR).is_some() {
                     uncoloured += 1;
                 }

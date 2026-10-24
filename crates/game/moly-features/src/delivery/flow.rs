@@ -927,7 +927,7 @@ pub fn release_auto_move(world: &mut World) {
         Query<&mut crate::player_avatar::AvatarDriver, With<PlayerControlled>>,
         Query<&mut AnimationPlayer>,
     )>::new(world);
-    let (mut drivers, mut animators) = params.get_mut(world);
+    let (mut drivers, mut animators) = params.get_mut(world).expect("system params");
     let Some(mut driver) = drivers.iter_mut().next() else {
         return;
     };

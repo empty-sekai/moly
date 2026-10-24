@@ -587,7 +587,7 @@ fn finish(
         Query<&mut AvatarDriver>,
         Query<(&mut AnimationPlayer, &mut AnimationTransitions)>,
     )>::new(world);
-    let (mut graphs, mut drivers, mut animators) = params.get_mut(world);
+    let (mut graphs, mut drivers, mut animators) = params.get_mut(world).expect("system params");
     if let Ok(mut driver) = drivers.get_mut(player) {
         if let Ok((mut animator, mut transitions)) = animators.get_mut(driver.player) {
             let blend = Duration::from_secs_f32(law::FINISH_IDLE_CROSSFADE);

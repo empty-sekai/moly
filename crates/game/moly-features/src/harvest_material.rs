@@ -43,6 +43,7 @@ use bevy::render::render_resource::*;
 use bevy::render::renderer::RenderDevice;
 use bevy::render::texture::GpuImage;
 use bevy::shader::ShaderRef;
+use moly_assets::gltf_material::derives;
 use moly_assets::sidecar::{parse_site_sidecar, SiteSidecar};
 use moly_law::shading::fieldobject;
 
@@ -333,7 +334,7 @@ fn build_swap_plan(
             .by_key
             .get(package)
             .and_then(|glb| gltfs.get(glb))
-            .and_then(|gltf| gltf.materials.iter().position(|candidate| candidate == handle));
+            .and_then(|gltf| gltf.materials.iter().position(|candidate| derives(candidate, handle)));
         let by_index = glb_index
             .and_then(|index| sidecar.materials.get(index))
             .filter(|source| source.name == *name);
@@ -600,7 +601,7 @@ pub fn switch_drop_materials(
                 continue;
             }
             let glb_index = gltf
-                .and_then(|gltf| gltf.materials.iter().position(|candidate| *candidate == material.0));
+                .and_then(|gltf| gltf.materials.iter().position(|candidate| derives(candidate, &material.0)));
             let by_index = glb_index
                 .and_then(|index| sidecar.materials.get(index))
                 .filter(|source| source.name == name.0);

@@ -159,7 +159,7 @@ pub fn spawn(world: &mut World, assets: &CannonAssets, pose: Transform) -> Optio
     };
     let root = world
         .spawn((
-            SceneRoot(scene),
+            WorldAssetRoot(scene),
             pose.with_scale(Vec3::ONE),
             Visibility::Inherited,
             CannonRoot,
