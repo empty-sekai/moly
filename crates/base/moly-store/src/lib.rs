@@ -7,7 +7,9 @@
 //! same layout, verifying every file against its SHA-256, and [`record`]
 //! notes what a directory holds. [`location`] fixes where the files live by
 //! default, so a game started without configuration reads what the launcher
-//! downloaded.
+//! downloaded. [`upgrade`] carries an earlier install's settings and saves over
+//! to a new data directory, and [`relocate`] moves a folder tree to another place.
+//! [`update`] installs the newest published program release into a versions folder.
 
 pub mod config;
 pub mod location;
@@ -20,7 +22,13 @@ pub mod install;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod migrate;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod relocate;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod tls;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod update;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod upgrade;
 
 /// The resource CDN used when none is configured.
 pub const DEFAULT_CDN: &str = "https://assets.pjsk.moe/sekai-extra-assets/";

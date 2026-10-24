@@ -22,6 +22,9 @@ pub struct LauncherConfig {
     pub developer: bool,
     /// The game program; the one beside the launcher when absent.
     pub game: Option<PathBuf>,
+    /// The GitHub API address of the repository that publishes program releases;
+    /// the default repository (`update::DEFAULT_SOURCE`) when absent.
+    pub update_source: Option<String>,
 }
 
 impl Default for LauncherConfig {
@@ -34,6 +37,7 @@ impl Default for LauncherConfig {
             jobs: 16,
             developer: false,
             game: None,
+            update_source: None,
         }
     }
 }
