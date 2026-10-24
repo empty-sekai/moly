@@ -42,14 +42,14 @@ must stay within the same mount root.
 
 In pack mode (`?packs=1`) the loader applies these limits:
 
-| Limit | Value |
-|---|---|
-| Catalog or manifest | 16 MiB |
-| One blob | 128 MiB |
-| One decoded asset (pack payload) | 256 MiB |
-| Decompressed size | at most 256 × the blob size + 64 KiB |
-| Concurrent reads | 8 |
-| Transfer and decode buffers, combined | 512 MiB |
+| Limit                                 | Value                                |
+| ------------------------------------- | ------------------------------------ |
+| Catalog or manifest                   | 16 MiB                               |
+| One blob                              | 128 MiB                              |
+| One decoded asset (pack payload)      | 256 MiB                              |
+| Decompressed size                     | at most 256 × the blob size + 64 KiB |
+| Concurrent reads                      | 8                                    |
+| Transfer and decode buffers, combined | 512 MiB                              |
 
 Pack responses are read chunk by chunk and aborted when a limit or a timeout is hit. The budget
 does not cover data the loader has already received, the parsed catalog, resources and scene
