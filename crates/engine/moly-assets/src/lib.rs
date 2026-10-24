@@ -20,6 +20,8 @@ pub mod particle_geometry;
 pub mod particle_source;
 pub mod weather_timeline;
 #[cfg(feature = "render")]
+pub mod gltf_material;
+#[cfg(feature = "render")]
 pub mod material_textures;
 mod packs;
 pub mod player_data;

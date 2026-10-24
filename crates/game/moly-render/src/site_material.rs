@@ -2355,15 +2355,12 @@ fn build_swap_plan(
 }
 
 /// The `StandardMaterial` the glTF loader derived from one glTF material and
-/// put on the mesh entities that use it. The loader stores it next to the
-/// glTF material under the same label with a `/std` suffix.
+/// put on the mesh entities that use it.
 pub(crate) fn standard_material_of(
     server: &AssetServer,
     material: &Handle<GltfMaterial>,
 ) -> Option<Handle<StandardMaterial>> {
-    let path = material.path()?;
-    let label = path.label()?;
-    server.get_handle(path.clone().with_label(format!("{label}/std")))
+    server.get_handle(moly_assets::gltf_material::derived_mesh_material_path(material)?)
 }
 
 /// 站点材质插件：全局量桥 + 材质管线 + sidecar 装载与换装。
