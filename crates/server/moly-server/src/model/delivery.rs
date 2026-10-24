@@ -861,27 +861,17 @@ impl ServerModel {
         ))
     }
 
-    /// A delivery-site reply: the document changed, a response is recorded
-    /// (its other sections reach the client copies through the response
-    /// queue), and the delivery sections it carries are returned for the
-    /// caller to merge at once, as the API executor does.
+    /// A delivery-site reply: the document changed and a response is
+    /// recorded that carries the changed delivery sections with the pending
+    /// ones, so the client copies take the new party rows and quantities
+    /// with the API's answer.
     pub(crate) fn delivery_reply(
         &mut self,
         kind: ResponseKind,
         changed: &[&'static str],
         masters: &Tables<'_>,
-    ) -> DeliveryUpdate {
-        let mut sections: Vec<String> = changed.iter().map(|s| (*s).to_owned()).collect();
-        for section in &self.pending {
-            if SECTIONS.contains(&section.as_str()) && !sections.contains(section) {
-                sections.push(section.clone());
-            }
-        }
-        self.pending
-            .retain(|section| !SECTIONS.contains(&section.as_str()));
-        let update = self.delivery_update(&sections, masters);
-        self.respond(kind, false, &[], masters);
-        update
+    ) {
+        self.respond(kind, false, changed, masters);
     }
 }
 
