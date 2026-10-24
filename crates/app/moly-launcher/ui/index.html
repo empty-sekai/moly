@@ -15,6 +15,8 @@
     <div class="brand" data-tauri-drag-region>
       <span class="name" data-tauri-drag-region>moly</span>
       <span class="version" id="version" data-tauri-drag-region></span>
+      <span class="muted" id="installed-versions" hidden></span>
+      <button class="ghost small" id="update-error" hidden>检查更新失败，点击重试</button>
     </div>
     <div class="window-buttons">
       <button class="icon-button" id="open-settings" title="设置" aria-label="设置">
@@ -28,6 +30,17 @@
   </header>
 
   <main class="layout">
+    <section class="card update" id="update" hidden>
+      <p class="update-text" id="update-text"></p>
+      <div class="update-actions">
+        <button class="primary" id="update-start">更新</button>
+        <button class="ghost small" id="update-notes">更新说明</button>
+        <button class="ghost small danger" id="update-cancel" hidden>取消</button>
+        <button class="ghost small" id="update-restart" hidden>重启启动器</button>
+        <button class="ghost small" id="update-close">关闭</button>
+      </div>
+      <div class="bar" id="update-track" hidden><span id="update-bar"></span></div>
+    </section>
     <section class="column">
       <div class="card start">
         <div class="play-area">
@@ -84,11 +97,20 @@
       <div class="card places" id="places">
         <h2>位置</h2>
         <ul class="place-list">
-          <li class="place"><span>游戏程序</span><code id="place-game">—</code><button data-open="game">打开</button></li>
-          <li class="place"><span>资源</span><code id="place-resources">—</code><button data-open="resources">打开</button></li>
-          <li class="place"><span>存档与设置</span><code id="place-data">—</code><button data-open="data">打开</button></li>
-          <li class="place"><span>日志</span><code id="place-logs">—</code><button data-open="logs">打开</button></li>
+          <li class="place"><span>主目录</span><code id="place-home">—</code><span><button data-change="home" disabled>更改…</button> <button data-open="home">打开</button></span></li>
+          <li class="place"><span>数据</span><code id="place-data">—</code><span><button data-change="data" disabled>更改…</button> <button data-open="data">打开</button></span></li>
+          <li class="place"><span>日志</span><code id="place-logs">—</code><span><button data-change="logs" disabled>更改…</button> <button data-open="logs">打开</button></span></li>
+          <li class="place"><span>程序版本</span><code id="place-versions">—</code><span><button data-change="versions" disabled>更改…</button> <button data-open="versions">打开</button></span></li>
+          <li class="place"><span>资源</span><code id="place-resources">—</code><span><button data-change="resources" disabled>更改…</button> <button data-open="resources">打开</button></span></li>
         </ul>
+        <div class="move-confirm" id="place-confirm" hidden>
+          <p id="place-confirm-text"></p>
+          <div class="row-actions">
+            <button type="button" class="primary" id="place-confirm-yes">移动</button>
+            <button type="button" class="ghost small" id="place-confirm-switch" hidden>不迁移，直接切换</button>
+            <button type="button" class="ghost small" id="place-confirm-no">取消</button>
+          </div>
+        </div>
       </div>
     </section>
   </main>

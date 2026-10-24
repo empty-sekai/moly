@@ -14,6 +14,8 @@ const KINDS = {
   weather: ["天气", "#43c6ac"],
   common: ["通用", "#b0a8d8"],
 };
+const FOLDER_LABELS = { home: "主目录", data: "数据", logs: "日志", versions: "程序版本", resources: "资源" };
+const UPDATE_STAGES = { checking: "检查版本", downloading: "下载", extracting: "解压", done: "完成", cancelled: "已取消" };
 
 const state = {
   overview: null,
@@ -26,6 +28,11 @@ const state = {
   lastSample: null,
   dismissed: null,
   testedCdn: null,
+  update: null,
+  updateError: null,
+  updateStatus: null,
+  updateHidden: false,
+  updateWatch: false,
 };
 
 function regionName(region) {
@@ -70,6 +77,10 @@ function downloading() {
   return state.download && !state.download.finished;
 }
 
+function updating() {
+  return Boolean(state.updateStatus && !state.updateStatus.finished);
+}
+
 /* ---------- rendering ---------- */
 
 function renderPlay() {
@@ -84,9 +95,14 @@ function renderPlay() {
     play.disabled = true;
     title.textContent = "游戏运行中";
     sub.textContent = selected ? `${regionName(selected.region)} ${selected.version}` : "";
+  } else if (updating()) {
+    play.disabled = true;
+    title.textContent = "正在更新…";
+    sub.textContent = "完成后即可开始";
   } else if (downloading()) {
     play.disabled = true;
-    title.textContent = "下载中…";
+    const kind = state.download.kind;
+    title.textContent = kind === "relocate" ? "正在移动…" : kind === "migrate" ? "正在迁移…" : "下载中…";
     sub.textContent = "完成后即可开始";
   } else if (selected) {
     play.disabled = !state.overview.game_found;
@@ -192,11 +208,15 @@ function renderDownload() {
   const visible = Boolean(d) && !(d.finished && state.dismissed === d.snapshot + d.elapsed_ms);
   card.hidden = !visible;
   if (!visible) return;
-  const moving = d.kind === "migrate";
+  const moving = d.kind === "migrate" || d.kind === "relocate";
   const snapshot = state.snapshots.find((item) => item.id === d.snapshot);
-  $("download-title").textContent = moving
-    ? "迁移资源"
-    : snapshot ? `${regionName(snapshot.region)} ${snapshot.version}` : d.snapshot;
+  if (d.kind === "relocate") {
+    $("download-title").textContent = `移动${FOLDER_LABELS[d.snapshot] ?? "文件夹"}`;
+  } else if (d.kind === "migrate") {
+    $("download-title").textContent = "迁移资源";
+  } else {
+    $("download-title").textContent = snapshot ? `${regionName(snapshot.region)} ${snapshot.version}` : d.snapshot;
+  }
   // A move within one drive renames folders and has no byte count.
   const blobs = d.phase === "blobs" || d.phase === "done" || (d.phase === "moving" && d.bytes_total > 0);
   // The ring follows the current phase; the bar follows the whole download.
@@ -228,6 +248,8 @@ function renderDownload() {
   const action = $("cancel");
   action.textContent = d.finished ? "关闭" : "取消";
   action.classList.toggle("danger", !d.finished);
+  // Moves of a folder cannot be cancelled from the launcher.
+  action.hidden = !d.finished && d.kind === "relocate";
 }
 
 function renderGame() {
@@ -246,20 +268,70 @@ function renderGame() {
   }
 }
 
+function renderUpdate() {
+  const s = state.updateStatus;
+  const check = state.update;
+  const running = updating();
+  const mode = running ? "running" : s ? "done" : check?.newer ? "offer" : null;
+  $("update").hidden = !mode || (mode !== "running" && state.updateHidden);
+  const versions = state.overview?.versions ?? [];
+  $("installed-versions").hidden = !versions.length;
+  $("installed-versions").textContent = `程序版本 ${versions.join("、")}`;
+  $("update-error").hidden = !state.updateError;
+  $("update-error").title = state.updateError ?? "";
+  if (!mode) return;
+  const text = $("update-text");
+  text.className = "update-text";
+  $("update-track").hidden = mode !== "running";
+  $("update-start").hidden = mode !== "offer";
+  $("update-start").disabled = downloading() || state.game.running;
+  $("update-notes").hidden = mode !== "offer" || !check.page;
+  $("update-cancel").hidden = mode !== "running";
+  $("update-close").hidden = mode === "running";
+  $("update-restart").hidden = !(mode === "done" && s.launcher_replaced);
+  if (mode === "running") {
+    const version = s.version || check?.latest || "";
+    const count = s.bytes_total ? ` · ${bytes(s.bytes_done)} / ${bytes(s.bytes_total)}` : "";
+    text.textContent = `正在更新到 v${version}：${UPDATE_STAGES[s.stage] ?? s.stage}${count}`;
+    $("update-bar").style.width = s.bytes_total ? `${((s.bytes_done / s.bytes_total) * 100).toFixed(2)}%` : "0%";
+  } else if (mode === "done") {
+    if (s.error) {
+      text.className = "update-text bad";
+      text.textContent = `更新失败：${s.error}`;
+    } else if (s.stage === "cancelled") {
+      text.textContent = "更新已取消";
+    } else {
+      text.textContent = `已更新到 v${s.version}，${s.launcher_replaced ? "重启启动器后生效" : "下次启动游戏时使用新版本"}`;
+    }
+  } else {
+    text.textContent = `发现新版本 v${check.latest}（约 ${bytes(check.download_bytes)}），当前为 v${check.current}`;
+  }
+}
+
 function placeDirs() {
   const ov = state.overview;
-  const game = ov.game.replace(/[\\/][^\\/]*$/, "");
-  return { game, resources: ov.resource_dir, data: ov.data_dir, logs: ov.logs_dir };
+  return {
+    home: ov.home_dir,
+    data: ov.data_dir,
+    logs: ov.logs_dir,
+    versions: ov.versions_dir,
+    resources: ov.resource_dir,
+  };
 }
 
 function renderPlaces() {
   if (!state.overview) return;
   const dirs = placeDirs();
-  $("place-game").textContent = state.overview.game;
-  $("place-game").title = state.overview.game;
-  for (const key of ["resources", "data", "logs"]) {
-    $(`place-${key}`).textContent = dirs[key];
-    $(`place-${key}`).title = dirs[key];
+  for (const [key, dir] of Object.entries(dirs)) {
+    $(`place-${key}`).textContent = dir;
+    $(`place-${key}`).title = dir;
+  }
+  // A folder cannot change while a download, a move, an update or the game uses it.
+  const busy = state.game.running || downloading() || updating();
+  for (const button of document.querySelectorAll("[data-change]")) {
+    const locked = button.dataset.change === "data" && state.overview.data_dir_locked;
+    button.disabled = busy || locked;
+    button.title = locked ? "MOLY_DATA_DIR 指定了数据目录，不能在这里更改" : busy ? "下载、移动、更新或游戏运行时不能更改" : "";
   }
 }
 
@@ -270,6 +342,7 @@ function renderAll() {
   renderSnapshots();
   renderDownload();
   renderGame();
+  renderUpdate();
 }
 
 /* ---------- actions ---------- */
@@ -277,6 +350,13 @@ function renderAll() {
 async function loadOverview() {
   state.overview = await invoke("overview");
   fillSettings();
+}
+
+function importedMessage(imported) {
+  const taken = [imported.settings && "设置", imported.saves && "存档"].filter(Boolean);
+  let message = `已沿用上一个版本的${taken.length ? taken.join("与") : "启动器配置"}：${imported.from}`;
+  if (imported.resource_dir) message += `，资源目录：${imported.resource_dir}`;
+  return message;
 }
 
 async function loadSnapshots(cdn = state.overview.config.cdn) {
@@ -335,6 +415,18 @@ async function pollDownload() {
   } else if (d) {
     await loadOverview();
     renderAll();
+    if (d.kind === "relocate") {
+      const label = FOLDER_LABELS[d.snapshot] ?? "文件夹";
+      if (d.phase === "done") toast(`${label}已移动到新位置`);
+      else if (d.phase === "cancelled") toast(`${label}的移动已取消`);
+      else if (d.error) toast(`移动失败：${d.error}`, true);
+      // The resources may have moved with the home directory, so their sizes are read again.
+      if (d.phase === "done" && d.snapshot === "home") {
+        state.sizes.clear();
+        loadSnapshots();
+      }
+      return;
+    }
     const moving = d.kind === "migrate";
     if (moving && d.phase === "done") {
       state.sizes.clear();
@@ -370,6 +462,146 @@ async function play() {
   } catch (error) {
     toast(String(error), true);
   }
+}
+
+/* ---------- folders ---------- */
+
+/** The folder picked for a change and waiting for the confirmation. */
+let placePending = null;
+
+/** Picks a new folder for `kind`, then asks for the confirmation of the change. */
+async function changePlace(kind) {
+  let picked;
+  try {
+    picked = await invoke(kind === "resources" ? "pick_folder" : "pick_any_folder");
+  } catch (error) {
+    toast(String(error), true);
+    return;
+  }
+  if (!picked) return;
+  if (sameDir(picked, placeDirs()[kind])) {
+    toast(`${FOLDER_LABELS[kind]}已经在这个位置`);
+    return;
+  }
+  const installed = state.overview.installed;
+  if (kind === "resources" && !installed.length) {
+    await switchResources(picked);
+    return;
+  }
+  placePending = { kind, to: picked };
+  if (kind === "resources") {
+    const total = installed.reduce((sum, item) => sum + item.bytes, 0);
+    $("place-confirm-text").textContent = `原来的位置有已下载的资源（${bytes(total)}）。要把它们迁移到 ${picked} 吗？`;
+    $("place-confirm-yes").textContent = "迁移";
+    $("place-confirm-switch").hidden = false;
+  } else {
+    $("place-confirm-text").textContent = kind === "home"
+      ? `把主目录移到 ${picked}？位于主目录里的数据、日志、程序版本与资源会一起移动。目标文件夹须为空或不存在。`
+      : `把${FOLDER_LABELS[kind]}移到 ${picked}？目标文件夹须为空或不存在。`;
+    $("place-confirm-yes").textContent = "移动";
+    $("place-confirm-switch").hidden = true;
+  }
+  $("place-confirm").hidden = false;
+}
+
+/** Points the resource directory at `to`; the resources in the old directory stay there. */
+async function switchResources(to) {
+  try {
+    state.overview = await invoke("save_config", { config: { ...state.overview.config, resource_dir: to } });
+  } catch (error) {
+    toast(String(error), true);
+    return;
+  }
+  state.sizes.clear();
+  renderAll();
+  loadSnapshots();
+  toast(`资源目录已切换到 ${to}`);
+}
+
+/** Carries out the pending change. `switchOnly` changes only the resource directory. */
+async function applyPlace(switchOnly) {
+  const pending = placePending;
+  cancelPlace();
+  if (!pending) return;
+  if (pending.kind === "resources" && switchOnly) {
+    await switchResources(pending.to);
+    return;
+  }
+  try {
+    if (pending.kind === "resources") {
+      await invoke("start_migrate", { to: pending.to });
+    } else {
+      await invoke("set_location", { kind: pending.kind, to: pending.to });
+    }
+  } catch (error) {
+    toast(String(error), true);
+    return;
+  }
+  state.lastSample = null;
+  state.speed = 0;
+  state.fileRate = 0;
+  pollDownload();
+}
+
+function cancelPlace() {
+  placePending = null;
+  $("place-confirm").hidden = true;
+}
+
+/* ---------- program updates ---------- */
+
+/** Reads the newest release; the offer is shown when it is newer than this launcher. */
+async function checkUpdate() {
+  try {
+    state.update = await invoke("check_update");
+    state.updateError = null;
+  } catch (error) {
+    state.update = null;
+    state.updateError = String(error);
+  }
+  renderAll();
+}
+
+async function startUpdate() {
+  try {
+    await invoke("start_update");
+  } catch (error) {
+    toast(String(error), true);
+    return;
+  }
+  state.updateHidden = false;
+  pollUpdate();
+}
+
+let updateTimer = 0;
+async function pollUpdate() {
+  clearTimeout(updateTimer);
+  const s = await invoke("update_status");
+  state.updateStatus = s;
+  if (s && !s.finished) {
+    state.updateWatch = true;
+    renderAll();
+    updateTimer = setTimeout(pollUpdate, 500);
+    return;
+  }
+  if (state.updateWatch && s) {
+    state.updateWatch = false;
+    try {
+      // The installed versions and the game program may have changed.
+      state.overview = await invoke("overview");
+    } catch (error) {
+      toast(String(error), true);
+    }
+    if (s.error) {
+      toast(`更新失败：${s.error}`, true);
+    } else if (s.stage === "cancelled") {
+      toast("更新已取消");
+    } else {
+      if (state.update) state.update = { ...state.update, newer: false };
+      toast(`已更新到 v${s.version}`);
+    }
+  }
+  renderAll();
 }
 
 /* ---------- settings ---------- */
@@ -520,6 +752,27 @@ $("dir-pick").addEventListener("click", async () => {
     $("dir").textContent = picked;
   }
 });
+for (const button of document.querySelectorAll("[data-change]")) {
+  button.addEventListener("click", () => changePlace(button.dataset.change));
+}
+$("place-confirm-yes").addEventListener("click", () => applyPlace(false));
+$("place-confirm-switch").addEventListener("click", () => applyPlace(true));
+$("place-confirm-no").addEventListener("click", cancelPlace);
+$("update-start").addEventListener("click", startUpdate);
+$("update-notes").addEventListener("click", () => {
+  if (state.update?.page) {
+    invoke("open_url", { url: state.update.page }).catch((error) => toast(String(error), true));
+  }
+});
+$("update-cancel").addEventListener("click", () => invoke("cancel_update"));
+$("update-restart").addEventListener("click", () =>
+  invoke("restart_launcher").catch((error) => toast(String(error), true)),
+);
+$("update-close").addEventListener("click", () => {
+  state.updateHidden = true;
+  renderUpdate();
+});
+$("update-error").addEventListener("click", checkUpdate);
 $("dir-default").addEventListener("click", () => {
   draftDir = state.overview.default_resource_dir;
   $("dir").textContent = draftDir;
@@ -546,8 +799,11 @@ for (const button of document.querySelectorAll("[data-open]")) {
   } catch (error) {
     toast(`读取设置失败：${error}`, true);
   }
+  if (state.overview?.imported) toast(importedMessage(state.overview.imported));
   renderAll();
   appWindow.show();
+  checkUpdate();
+  await pollUpdate();
   await pollDownload();
   await pollGame();
   if (state.overview) await loadSnapshots();
