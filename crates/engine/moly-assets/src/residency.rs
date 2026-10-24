@@ -55,10 +55,12 @@ pub fn load_image_with<'a>(
     path: impl Into<AssetPath<'a>>,
     configure: impl Fn(&mut ImageLoaderSettings) + Send + Sync + 'static,
 ) -> Handle<Image> {
-    server.load_with_settings(path, move |settings: &mut ImageLoaderSettings| {
-        configure(settings);
-        settings.asset_usage = GPU_ONLY;
-    })
+    server.load_builder()
+        .with_settings(move |settings: &mut ImageLoaderSettings| {
+            configure(settings);
+            settings.asset_usage = GPU_ONLY;
+        })
+        .load(path)
 }
 
 /// Loads a glTF package with the residency its family needs.
@@ -70,22 +72,28 @@ pub fn load_gltf<'a>(
     match residency {
         GltfResidency::CpuTextures => server.load(path),
         GltfResidency::GpuTextures => {
-            server.load_with_settings(path, |settings: &mut GltfLoaderSettings| {
-                settings.load_materials = GPU_ONLY;
-            })
+            server.load_builder()
+                .with_settings(|settings: &mut GltfLoaderSettings| {
+                    settings.load_materials = GPU_ONLY;
+                })
+                .load(path)
         }
         GltfResidency::RoomModule => {
-            server.load_with_settings(path, |settings: &mut GltfLoaderSettings| {
-                settings.load_materials = GPU_ONLY;
-                settings.include_source = true;
-            })
+            server.load_builder()
+                .with_settings(|settings: &mut GltfLoaderSettings| {
+                    settings.load_materials = GPU_ONLY;
+                    settings.include_source = true;
+                })
+                .load(path)
         }
         GltfResidency::Character => {
-            server.load_with_settings(path, |settings: &mut GltfLoaderSettings| {
-                settings.load_materials = GPU_ONLY;
-                settings.load_cameras = false;
-                settings.load_lights = false;
-            })
+            server.load_builder()
+                .with_settings(|settings: &mut GltfLoaderSettings| {
+                    settings.load_materials = GPU_ONLY;
+                    settings.load_cameras = false;
+                    settings.load_lights = false;
+                })
+                .load(path)
         }
     }
 }

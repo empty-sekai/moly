@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use bevy::{
     asset::LoadContext,
-    gltf::extensions::{GltfExtensionHandler, GltfExtensionHandlers},
+    gltf::extensions::{ErasedGltfExtensionHandler, GltfExtensionHandler, GltfExtensionHandlers},
     prelude::*,
 };
 
@@ -28,7 +28,7 @@ struct SourceTextureLoader {
 }
 
 impl GltfExtensionHandler for SourceTextureLoader {
-    fn dyn_clone(&self) -> Box<dyn GltfExtensionHandler> {
+    fn dyn_clone(&self) -> Box<dyn ErasedGltfExtensionHandler> {
         // Every GLB owns its own texture indices and handle lifetime.
         Box::new(Self::default())
     }
@@ -44,6 +44,7 @@ impl GltfExtensionHandler for SourceTextureLoader {
         _mesh: &gltf::Mesh,
         material: &gltf::Material,
         entity: &mut EntityWorldMut,
+        _material_label: &str,
     ) {
         entity.insert(SourcePrimitiveIndex(primitive.index()));
         let Some(extras) = material.extras().as_ref() else {
@@ -81,7 +82,7 @@ pub fn register(app: &mut App) {
         .try_write()
         .expect("glTF handlers are registered before asset loading")
         .extend([
-            Box::<SourceTextureLoader>::default() as Box<dyn GltfExtensionHandler>,
+            Box::<SourceTextureLoader>::default() as Box<dyn ErasedGltfExtensionHandler>,
             Box::<crate::scene_state::SceneStateLoader>::default(),
         ]);
 }

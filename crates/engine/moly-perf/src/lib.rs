@@ -25,7 +25,7 @@ use bevy::asset::{Asset, AssetEvent};
 use bevy::diagnostic::FrameCount;
 use bevy::ecs::archetype::Archetypes;
 use bevy::ecs::message::{MessageCursor, Messages};
-use bevy::ecs::schedule::{ExecutorKind, InternedScheduleLabel, ScheduleLabel};
+use bevy::ecs::schedule::{InternedScheduleLabel, ScheduleLabel, SingleThreadedExecutor};
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy::render::{Render, RenderApp};
@@ -332,7 +332,7 @@ impl Plugin for PerfPlugin {
 
 fn single_threaded(label: impl ScheduleLabel) -> Schedule {
     let mut schedule = Schedule::new(label);
-    schedule.set_executor_kind(ExecutorKind::SingleThreaded);
+    schedule.set_executor(SingleThreadedExecutor::new());
     schedule
 }
 

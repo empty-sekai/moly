@@ -5,7 +5,11 @@
 //! contribute geometry, sound or particle simulation. Deactivation retains the
 //! hierarchy and its bindings so subsequent activation can use the same entity.
 
-use bevy::{asset::LoadContext, gltf::extensions::GltfExtensionHandler, prelude::*};
+use bevy::{
+    asset::LoadContext,
+    gltf::extensions::{ErasedGltfExtensionHandler, GltfExtensionHandler},
+    prelude::*,
+};
 
 #[derive(Component, Reflect, Clone, Copy, Debug)]
 #[reflect(Component)]
@@ -84,6 +88,7 @@ impl SourceRenderer {
 pub struct RefreshSourceActivity(pub Entity);
 
 impl Command for RefreshSourceActivity {
+    type Out = ();
     fn apply(self, world: &mut World) {
         if world.get_entity(self.0).is_ok() {
             propagate_activity(world, self.0);
@@ -99,6 +104,7 @@ pub struct SetSourceActive {
 }
 
 impl Command for SetSourceActive {
+    type Out = ();
     fn apply(self, world: &mut World) {
         let Some(current) = world.get::<SourceNodeActivity>(self.entity) else {
             return;
@@ -125,6 +131,7 @@ pub struct SetSourceRendererEnabled {
 }
 
 impl Command for SetSourceRendererEnabled {
+    type Out = ();
     fn apply(self, world: &mut World) {
         let Some(mut renderer) = world.get::<SourceRenderer>(self.node).copied() else {
             return;
@@ -142,6 +149,7 @@ pub struct SetSourceShadowCastingMode {
 }
 
 impl Command for SetSourceShadowCastingMode {
+    type Out = ();
     fn apply(self, world: &mut World) {
         let Some(mut renderer) = world.get::<SourceRenderer>(self.node).copied() else {
             return;
@@ -204,7 +212,7 @@ fn apply_renderer(world: &mut World, node: Entity, renderer: SourceRenderer) {
 pub(crate) struct SceneStateLoader;
 
 impl GltfExtensionHandler for SceneStateLoader {
-    fn dyn_clone(&self) -> Box<dyn GltfExtensionHandler> {
+    fn dyn_clone(&self) -> Box<dyn ErasedGltfExtensionHandler> {
         Box::new(Self)
     }
 
@@ -275,7 +283,7 @@ pub(crate) fn register_types(app: &mut App) {
         .register_type::<SourceRenderer>()
         .register_type::<SourceShadowCastingMode>()
         .add_observer(
-            |event: On<bevy::scene::SceneInstanceReady>, mut commands: Commands| {
+            |event: On<bevy::world_serialization::WorldInstanceReady>, mut commands: Commands| {
                 // The asset's isolated Scene world cannot know whether its eventual
                 // instance is attached beneath an inactive object in the game.
                 commands.queue(RefreshSourceActivity(event.event().entity));

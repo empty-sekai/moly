@@ -93,7 +93,7 @@ async fn dependency(
 ) -> Result<Vec<u8>> {
     reference.validate()?;
     let path = root
-        .resolve(&reference.file)
+        .resolve_str(&reference.file)
         .map_err(|e| SourceShaderError(e.to_string()))?;
     let bytes = context
         .read_asset_bytes(path)
@@ -154,14 +154,14 @@ impl AssetLoader for SourceProgramLoader {
         let vertex_bytes = dependency(context, &root, &receipt.stages.vertex.shader).await?;
         let fragment = dependency(context, &root, &receipt.stages.fragment.shader).await?;
         let vertex = context.add_labeled_asset(
-            "Vertex".into(),
+            "Vertex",
             Shader::from_wgsl(
                 String::from_utf8(vertex_bytes).map_err(|e| SourceShaderError(e.to_string()))?,
                 receipt.stages.vertex.shader.file.clone(),
             ),
         );
         let fragment = context.add_labeled_asset(
-            "Fragment".into(),
+            "Fragment",
             Shader::from_wgsl(
                 String::from_utf8(fragment).map_err(|e| SourceShaderError(e.to_string()))?,
                 receipt.stages.fragment.shader.file.clone(),
@@ -238,7 +238,7 @@ mod tests {
         .unwrap();
         assert_eq!(root.to_string(), "pack://phenomena");
         assert_eq!(
-            root.resolve("shader-textures/t.rgba8").unwrap().path(),
+            root.resolve_str("shader-textures/t.rgba8").unwrap().path(),
             &std::path::Path::new("phenomena")
                 .join("shader-textures")
                 .join("t.rgba8")
