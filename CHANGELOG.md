@@ -63,6 +63,9 @@ All notable changes to this project are listed here. Versions follow [Semantic V
 - **stage:** Resolve the empty level and draw the talk window
 - **stage:** Publish preview ownership before balloon cleanup
 - **server:** Name the save file when a stored document is refused
+- **userdata:** Keep the rank when two replies arrive in the same frame
+- **player:** Map the auto-move destination with the agent query box
+- **server:** Send the party rows and materials with the delivery reply
 
 ### Performance
 
