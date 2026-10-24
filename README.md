@@ -57,10 +57,6 @@ MYSEKAI 的还原项目，使用 Rust 与 [Bevy](https://bevyengine.org/) 构建
 
 启动器的数据目录、资源目录与迁移规则见 [启动器说明](crates/app/moly-launcher/README.md)。
 
-### 浏览器
-
-浏览器版部署在 <https://emptysekai.dev>，缺省连接公共服务端 `https://server.emptysekai.dev`。
-
 ## 从源码构建
 
 ### 环境要求
