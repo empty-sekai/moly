@@ -78,9 +78,13 @@ fn seat_users(
                     entry.model = Some(model);
                 }
                 Err(reason) => {
-                    error!("[server] user {user}: the stored document is refused: {reason}");
+                    let place = match store.0.location(user) {
+                        Some(path) => format!(" ({})", path.display()),
+                        None => String::new(),
+                    };
+                    error!("[server] user {user}: the stored document{place} is refused: {reason}");
                     entry.load_error = Some(format!(
-                        "the stored document of user {user} is refused: {reason}"
+                        "the stored document of user {user}{place} is refused: {reason}"
                     ));
                 }
             },

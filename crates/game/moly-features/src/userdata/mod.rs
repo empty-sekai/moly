@@ -189,6 +189,10 @@ pub enum ServerJoin {
 #[derive(Resource, Default)]
 pub struct LinkNoticed(pub Option<LinkState>);
 
+/// Notices raised before the UI could show a dialog; shown once it can.
+#[derive(Resource, Default)]
+pub struct DeferredNotices(pub Vec<String>);
+
 /// The control plane's cached answers, filled from the administrative calls'
 /// replies.
 #[derive(Resource, Default, Debug)]
@@ -382,13 +386,32 @@ fn notice(world: &mut World, body: &str) {
     if let Some(mut errors) = world.get_resource_mut::<crate::browser_game::GameErrors>() {
         errors.push(body.to_owned());
     }
-    if world
-        .get_resource::<crate::ui_layers::ScreenManager>()
-        .is_none()
-        || world.get_resource::<crate::ui_layout::UiLayouts>().is_none()
+    if !ui_ready(world) {
+        world.get_resource_or_init::<DeferredNotices>().0.push(body.to_owned());
+        return;
+    }
+    show_notice(world, body);
+}
+
+fn ui_ready(world: &World) -> bool {
+    world.get_resource::<crate::ui_layers::ScreenManager>().is_some()
+        && world.get_resource::<crate::ui_layout::UiLayouts>().is_some()
+}
+
+/// Update: the notices raised before the UI existed, once it does.
+fn show_deferred_notices(world: &mut World) {
+    if world.get_resource::<DeferredNotices>().is_none_or(|notices| notices.0.is_empty())
+        || !ui_ready(world)
     {
         return;
     }
+    let bodies = std::mem::take(&mut world.resource_mut::<DeferredNotices>().0);
+    for body in bodies {
+        show_notice(world, &body);
+    }
+}
+
+fn show_notice(world: &mut World, body: &str) {
     crate::common_dialog::open_detached(
         world,
         "ServerLink",
@@ -443,8 +466,10 @@ fn drive_join(
     }
 }
 
-/// PreUpdate, after the reader: the join's answer moves the phase on.
+/// PreUpdate, after the reader: the join's answer moves the phase on. A
+/// refused install or join is named on screen.
 fn track_join(
+    mut commands: Commands,
     mut link: ResMut<ServerLink>,
     mut phase: ResMut<ServerJoin>,
     mut answered: MessageReader<Answered>,
@@ -466,6 +491,8 @@ fn track_join(
                     error!(
                         "[link] the seed install was refused ({refusal}); the game is not joined"
                     );
+                    let body = format!("the server refused the saved data: {refusal}");
+                    commands.queue(move |world: &mut World| notice(world, &body));
                     *phase = ServerJoin::Failed(refusal.to_string());
                 }
             },
@@ -487,6 +514,8 @@ fn track_join(
                 }
                 Err(refusal) => {
                     error!("[link] the join was refused ({refusal}); the game is not joined");
+                    let body = format!("the server refused the saved data: {refusal}");
+                    commands.queue(move |world: &mut World| notice(world, &body));
                     *phase = ServerJoin::Failed(refusal.to_string());
                 }
             },
@@ -1099,6 +1128,7 @@ impl Plugin for UserDataPlugin {
             .init_resource::<AnsweredLog>()
             .init_resource::<ServerJoin>()
             .init_resource::<LinkNoticed>()
+            .init_resource::<DeferredNotices>()
             .init_resource::<ServerViewCache>()
             .init_resource::<SentCalls>()
             .init_resource::<birthday_party::ClientBirthdayPartyData>()
@@ -1126,6 +1156,7 @@ impl Plugin for UserDataPlugin {
                 PreUpdate,
                 inventory::mirror_materials.after(apply_arrivals),
             )
+            .add_systems(Update, show_deferred_notices)
             .add_systems(Last, persist_local);
     }
 }

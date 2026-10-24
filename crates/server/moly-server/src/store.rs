@@ -20,6 +20,10 @@ pub trait DocumentStore: Send + Sync + 'static {
     /// failure in the server's log; the call that changed the document is
     /// still answered.
     fn save(&self, user: &UserId, text: &str);
+    /// Where the user's document is kept, when it is a file.
+    fn location(&self, _user: &UserId) -> Option<PathBuf> {
+        None
+    }
 }
 
 /// The installed store.
@@ -73,6 +77,10 @@ impl FileStore {
 }
 
 impl DocumentStore for FileStore {
+    fn location(&self, user: &UserId) -> Option<PathBuf> {
+        Some(self.path(user))
+    }
+
     fn load(&self, user: &UserId) -> Option<String> {
         match std::fs::read_to_string(self.path(user)) {
             Ok(text) => Some(text),
@@ -137,6 +145,7 @@ mod tests {
         store.save(&user, "{\"schemaVersion\":2}");
         assert_eq!(store.load(&user).as_deref(), Some("{\"schemaVersion\":2}"));
         assert!(directory.join("local.json").is_file());
+        assert_eq!(store.location(&user), Some(directory.join("local.json")));
         let _ = std::fs::remove_dir_all(&directory);
     }
 }
