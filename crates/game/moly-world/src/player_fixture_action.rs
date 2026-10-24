@@ -216,6 +216,16 @@ pub trait PlayerFixtureNavWorld: Send + Sync {
         from: Vec3,
         to: Vec3,
     ) -> Result<PlayerFixturePath, PlayerFixturePreparationError>;
+    /// The agent's destination query (`NavMeshAgent.SetDestination`): the
+    /// ends map in the agent type's query box, and a disconnected target
+    /// gives a partial path. The player's AutoMove state steers along it.
+    fn agent_path(
+        &self,
+        from: Vec3,
+        to: Vec3,
+    ) -> Result<PlayerFixturePath, PlayerFixturePreparationError> {
+        self.path(from, to)
+    }
     fn tile_at(&self, position: Vec3) -> FixtureTileKnowledge;
     fn constrain_move(&self, from: Vec3, to: Vec3) -> Option<Vec3>;
 }

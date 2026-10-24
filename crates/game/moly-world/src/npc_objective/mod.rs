@@ -325,6 +325,27 @@ impl ObjectiveFace {
             .collect()
     }
 
+    /// The agent's destination query (`NavMeshAgent.SetDestination`): both
+    /// ends map to the nearest navigation cell in the agent type's query box,
+    /// and a disconnected target gives the partial path toward it. The flag
+    /// is whether the path is complete; `None` when an end maps to nothing.
+    pub fn agent_destination_path(&self, from: Vec3, to: Vec3) -> Option<(Vec<Vec3>, bool)> {
+        if !from.is_finite() || !to.is_finite() {
+            return None;
+        }
+        let path = self.field.calculate_path(
+            [from.x, from.z],
+            [to.x, to.z],
+            moly_law::carve::AGENT_QUERY_HALF_EXTENT,
+        )?;
+        let corners = path
+            .corners
+            .into_iter()
+            .map(|point| self.navigation_point_at(point).map(Vec3::from))
+            .collect::<Option<Vec<_>>>()?;
+        Some((corners, path.complete))
+    }
+
     /// One agent move on the navigation cells (the engine's corridor move,
     /// see `WalkField::move_position`), the cells `fixture_path` corners come
     /// from; the height is the navigation surface's at the answer.

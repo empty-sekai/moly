@@ -840,6 +840,14 @@ pub trait FixtureNavigationGeometry: Send + Sync {
         from: Vec3,
         to: Vec3,
     ) -> Result<PlayerFixturePath, PlayerFixturePreparationError>;
+    /// The agent's destination query; see [`PlayerFixtureNavWorld::agent_path`].
+    fn agent_path(
+        &self,
+        from: Vec3,
+        to: Vec3,
+    ) -> Result<PlayerFixturePath, PlayerFixturePreparationError> {
+        self.path(from, to)
+    }
     fn constrain_move(&self, from: Vec3, to: Vec3) -> Option<Vec3>;
 }
 
@@ -858,6 +866,13 @@ impl PlayerFixtureNavWorld for BoundNavigation {
         to: Vec3,
     ) -> Result<PlayerFixturePath, PlayerFixturePreparationError> {
         self.geometry.path(from, to)
+    }
+    fn agent_path(
+        &self,
+        from: Vec3,
+        to: Vec3,
+    ) -> Result<PlayerFixturePath, PlayerFixturePreparationError> {
+        self.geometry.agent_path(from, to)
     }
     fn constrain_move(&self, from: Vec3, to: Vec3) -> Option<Vec3> {
         self.geometry.constrain_move(from, to)

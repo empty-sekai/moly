@@ -1258,7 +1258,7 @@ fn start_pre_motion(
     world.states.change_status(PlayerActionState::AutoMove);
     world.states.can_intercept = false;
     let (corners, speed, path_note) = match world.navigation.as_deref() {
-        Some(navigation) => match navigation.world.path(player.translation, stand_off) {
+        Some(navigation) => match navigation.world.agent_path(player.translation, stand_off) {
             Ok(path) => (
                 path.corners,
                 navigation.agent_speed,

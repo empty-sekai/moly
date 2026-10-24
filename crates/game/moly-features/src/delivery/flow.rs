@@ -788,7 +788,7 @@ fn execute_delivery(
     world.states.change_status(PlayerActionState::AutoMove);
     world.states.can_intercept = false;
     let (corners, speed, note) = match world.navigation.as_deref() {
-        Some(navigation) => match navigation.world.path(player, target) {
+        Some(navigation) => match navigation.world.agent_path(player, target) {
             Ok(path) => (
                 path.corners,
                 navigation.agent_speed,

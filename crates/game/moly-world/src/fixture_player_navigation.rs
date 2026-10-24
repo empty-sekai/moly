@@ -30,6 +30,19 @@ impl FixtureNavigationGeometry for ObjectiveFace {
             None => PlayerFixturePath { query_succeeded: false, corners: Vec::new(), status: Some(PlayerFixturePathStatus::Invalid) },
         })
     }
+    fn agent_path(&self, from: Vec3, to: Vec3) -> Result<PlayerFixturePath, PlayerFixturePreparationError> {
+        if !from.is_finite() || !to.is_finite() {
+            return Err(PlayerFixturePreparationError::Invalid("nonfinite navigation endpoint".into()));
+        }
+        Ok(match self.agent_destination_path(from, to) {
+            Some((corners, complete)) => PlayerFixturePath {
+                query_succeeded: true,
+                corners,
+                status: Some(if complete { PlayerFixturePathStatus::Complete } else { PlayerFixturePathStatus::Partial }),
+            },
+            None => PlayerFixturePath { query_succeeded: false, corners: Vec::new(), status: Some(PlayerFixturePathStatus::Invalid) },
+        })
+    }
     fn constrain_move(&self, from: Vec3, to: Vec3) -> Option<Vec3> { self.fixture_move(from, to) }
 }
 
