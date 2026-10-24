@@ -114,8 +114,8 @@ pub(super) fn text(
         .spawn((
             Text::new(value),
             TextFont {
-                font: font.clone(),
-                font_size: size,
+                font: font.clone().into(),
+                font_size: FontSize::Px(size),
                 ..default()
             },
             TextColor(color),

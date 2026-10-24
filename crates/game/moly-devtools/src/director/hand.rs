@@ -166,7 +166,13 @@ pub fn drag_touch(world: &mut World, phase: TouchPhase, position: Vec2) -> Resul
 /// A wheel turn of `pixels` (up positive), as a touchpad scrolls.
 pub fn wheel(world: &mut World, pixels: f32) -> Result<(), &'static str> {
     let (entity, _) = window(world).ok_or("no primary window")?;
-    world.write_message(MouseWheel { unit: MouseScrollUnit::Pixel, x: 0.0, y: pixels, window: entity });
+    world.write_message(MouseWheel {
+        unit: MouseScrollUnit::Pixel,
+        x: 0.0,
+        y: pixels,
+        window: entity,
+        phase: TouchPhase::Moved,
+    });
     Ok(())
 }
 
@@ -336,7 +342,7 @@ pub fn button_position(
     let (_, window) = window(world)?;
     let mut screen: bevy::ecs::system::SystemState<crate::action_button::ActionButtonScreen> =
         bevy::ecs::system::SystemState::new(world);
-    screen.get(world).button_position(&window, button)
+    screen.get(world).expect("system params").button_position(&window, button)
 }
 
 /// The screen position of the change-target button beside `shown`.
@@ -347,7 +353,7 @@ pub fn change_position(
     let (_, window) = window(world)?;
     let mut screen: bevy::ecs::system::SystemState<crate::action_button::ActionButtonScreen> =
         bevy::ecs::system::SystemState::new(world);
-    screen.get(world).change_position(&window, shown)
+    screen.get(world).expect("system params").change_position(&window, shown)
 }
 
 fn touch(world: &mut World, window: Entity, id: u64, phase: TouchPhase, position: Vec2) {

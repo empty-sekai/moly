@@ -154,7 +154,7 @@ pub fn walk(world: &mut World, entity: Entity, goal: Vec2, rests: bool) -> Resul
         return Err("take the character before walking it (npc.take)".into());
     }
     let mut params = SystemState::<WalkParams>::new(world);
-    let (face, objective, origins, mut actors) = params.get_mut(world);
+    let (face, objective, origins, mut actors) = params.get_mut(world).expect("system params");
     let face = face.ok_or("the walk face is not built")?;
     let objective = objective.ok_or("the objective face is not built")?;
     let site_y = origins

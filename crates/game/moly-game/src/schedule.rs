@@ -15,7 +15,7 @@ use crate::{
 };
 use bevy::app::{AnimationSystems, App, PostUpdate, PreUpdate, SpawnScene, Startup, Update};
 use bevy::prelude::{ApplyDeferred, IntoScheduleConfigs};
-use bevy::scene::SceneSpawnerSystems;
+use bevy::app::SceneSpawnerSystems;
 use bevy::time::common_conditions;
 use bevy::transform::TransformSystems;
 use std::time::Duration;
@@ -387,7 +387,7 @@ pub fn install(app: &mut App) {
         // 摇杆层状态（手势层与玩家输入都读它；缺资源会在系统参数校验
         // 处 panic，与手势层同款兜底）。
         .init_resource::<joystick::JoystickState>()
-        // SitePlugin owns the site SceneInstanceReady observer. Registering it
+        // SitePlugin owns the site WorldInstanceReady observer. Registering it
         // again here would decrement SiteScenePending twice for one scene root.
         .add_observer(character::on_model_scene_ready)
         .add_observer(player_avatar::body::on_scene_ready)
@@ -871,12 +871,12 @@ pub fn install(app: &mut App) {
                 .before(player_avatar::drive)
                 .before(audio::advance_se),
         )
-        // 清扫排引擎场景展开之后：SceneInstanceReady 在 Update 之后才触发，
+        // 清扫排引擎场景展开之后：WorldInstanceReady 在 Update 之后才触发，
         // SiteReady 同帧就会被取景行吃掉，Update 侧的清扫等不到它（时机
         // 全解在 inactive_nodes 模块注释）。
         .add_systems(
             SpawnScene,
-            inactive_nodes::apply.after(SceneSpawnerSystems::Spawn),
+            inactive_nodes::apply.after(SceneSpawnerSystems::WorldInstanceSpawn),
         )
         // 天空链：认壳包 → 认材质 → 网格与渐变条齐了铺实体；渐变条独立成行。
         .add_systems(
