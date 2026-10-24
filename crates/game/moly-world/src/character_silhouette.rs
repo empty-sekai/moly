@@ -93,10 +93,10 @@ use std::sync::Mutex;
 
 use bevy::asset::uuid::Uuid;
 use bevy::asset::RenderAssetUsages;
-use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
+use bevy::core_pipeline::core_3d::{main_opaque_pass_3d, main_transparent_pass_3d};
+use bevy::core_pipeline::{Core3d, Core3dSystems};
 use bevy::core_pipeline::core_3d::CORE_3D_DEPTH_FORMAT;
 use bevy::diagnostic::FrameCount;
-use bevy::ecs::query::QueryItem;
 use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
 use bevy::mesh::{Mesh, MeshVertexBufferLayoutRef};
 use bevy::prelude::*;
@@ -105,13 +105,10 @@ use bevy::render::mesh::allocator::MeshAllocator;
 use bevy::render::mesh::{RenderMesh, RenderMeshBufferInfo};
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::render_asset::RenderAssets;
-use bevy::render::render_graph::{
-    NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, RenderSubGraph, ViewNode,
-    ViewNodeRunner,
-};
+use bevy::ecs::schedule::ScheduleLabel;
 use bevy::render::render_resource::binding_types::uniform_buffer_sized;
 use bevy::render::render_resource::*;
-use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
+use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
 use bevy::render::texture::{CachedTexture, GpuImage, TextureCache};
 use bevy::render::view::{ExtractedView, ViewDepthTexture, ViewTarget};
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems};
@@ -272,7 +269,7 @@ fn size_clip_mask(
     if size == mask.size || size.min_element() == 0 {
         return;
     }
-    let Some(image) = images.get_mut(&mask.image) else {
+    let Some(image) = images.get_mut(&mask.image).map(|asset| asset.into_inner()) else {
         return;
     };
     image.resize(extent(size));
@@ -1263,8 +1260,8 @@ fn queue_clip_pipeline(
         primitive: PrimitiveState::default(),
         depth_stencil: Some(DepthStencilState {
             format: DEPTH_STENCIL_FORMAT,
-            depth_write_enabled: false,
-            depth_compare: CompareFunction::Always,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(CompareFunction::Always),
             stencil: StencilState {
                 front: face,
                 back: face,
@@ -1333,8 +1330,8 @@ fn queue_pipeline(
             None,
             DepthStencilState {
                 format: DEPTH_STENCIL_FORMAT,
-                depth_write_enabled: state.depth_write,
-                depth_compare: state.depth_compare,
+                depth_write_enabled: Some(state.depth_write),
+                depth_compare: Some(state.depth_compare),
                 stencil: stencil_state(state.stencil),
                 bias: DepthBiasState::default(),
             },
@@ -1354,8 +1351,8 @@ fn queue_pipeline(
             }),
             DepthStencilState {
                 format: DEPTH_STENCIL_FORMAT,
-                depth_write_enabled: false,
-                depth_compare: CompareFunction::Always,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(CompareFunction::Always),
                 stencil: StencilState {
                     front: SILHOUETTE_STENCIL,
                     back: SILHOUETTE_STENCIL,
@@ -1425,7 +1422,7 @@ fn prepare_silhouette(
     let mut view_bytes = Vec::new();
     let mut format = None;
     for (entity, camera, view, target, depth, had) in &views {
-        if !list.active || camera.render_graph != Core3d.intern() {
+        if !list.active || camera.schedule != Core3d.intern() {
             if had {
                 commands.entity(entity).remove::<SilhouetteTarget>();
             }
@@ -1611,9 +1608,6 @@ struct AccountInner {
 #[derive(Resource, Default)]
 struct SilhouetteAccount(Mutex<AccountInner>);
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-struct CharacterSilhouetteLabel;
-
 struct CharacterSilhouetteNode {
     bind_groups: SharedBindGroupCache,
 }
@@ -1660,172 +1654,165 @@ macro_rules! draw_mesh {
     }};
 }
 
-impl ViewNode for CharacterSilhouetteNode {
-    type ViewQuery = (
-        &'static ViewTarget,
-        &'static ViewDepthTexture,
-        Option<&'static SilhouetteTarget>,
+/// Core3d：剪影合成，排在主透明 pass 之后。
+fn character_silhouette(
+    world: &World,
+    view: ViewQuery<(&ViewTarget, &ViewDepthTexture, Option<&SilhouetteTarget>)>,
+    node: Local<CharacterSilhouetteNode>,
+    mut render_context: RenderContext,
+) {
+    let (view_target, depth, target) = view.into_inner();
+    #[cfg(not(target_arch = "wasm32"))]
+    finish_pending_probe(world, &mut render_context);
+    let Some(target) = target else {
+        return;
+    };
+    let list = world.resource::<SilhouetteDrawList>();
+    let account = world.resource::<SilhouetteAccount>();
+    let frame = world.resource::<FrameCount>().0;
+    // The pass tests the stencil the replay left in this frame.
+    let replayed = account.0.lock().unwrap().replayed;
+    let Some(replayed) =
+        replayed.and_then(|(at, recorded)| (at == frame).then_some(recorded))
+    else {
+        return;
+    };
+    let cache = world.resource::<PipelineCache>();
+    let mut silhouette_pipelines = Vec::with_capacity(list.silhouette.len());
+    for draw in &list.silhouette {
+        if draw.pipeline == CachedRenderPipelineId::INVALID {
+            silhouette_pipelines.push(None);
+            continue;
+        }
+        match cache.get_render_pipeline(draw.pipeline) {
+            Some(pipeline) => silhouette_pipelines.push(Some(pipeline)),
+            None => {
+                account.0.lock().unwrap().silhouette_not_ready += 1;
+                silhouette_pipelines.clear();
+                break;
+            }
+        }
+    }
+    let run_silhouette = silhouette_pipelines.iter().any(Option::is_some);
+
+    let gpu = world.resource::<SilhouetteGpu>();
+    let meshes = world.resource::<RenderAssets<RenderMesh>>();
+    let allocator = world.resource::<MeshAllocator>();
+    let (view_group, rigid_group, skin_group) = space_groups(
+        &node.bind_groups,
+        render_context.render_device(),
+        cache,
+        gpu,
+        frame,
+    );
+    let composite_group = node.bind_groups.lock().get(
+        render_context.render_device(),
+        "character_silhouette_composite",
+        &cache.get_bind_group_layout(&gpu.composite_layout),
+        &[
+            (0, Bound::View(&target.scratch.default_view)),
+            (1, Bound::View(depth.view())),
+            (2, Bound::whole(&gpu.colour)),
+            (3, Bound::Sampler(&gpu.depth_sampler)),
+        ],
+        frame,
     );
 
-    fn run(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext,
-        (view_target, depth, target): QueryItem<Self::ViewQuery>,
-        world: &World,
-    ) -> Result<(), NodeRunError> {
-        #[cfg(not(target_arch = "wasm32"))]
-        finish_pending_probe(world, render_context);
-        let Some(target) = target else {
-            return Ok(());
-        };
-        let list = world.resource::<SilhouetteDrawList>();
-        let account = world.resource::<SilhouetteAccount>();
-        let frame = world.resource::<FrameCount>().0;
-        // The pass tests the stencil the replay left in this frame.
-        let replayed = account.0.lock().unwrap().replayed;
-        let Some(replayed) =
-            replayed.and_then(|(at, recorded)| (at == frame).then_some(recorded))
-        else {
-            return Ok(());
-        };
-        let cache = world.resource::<PipelineCache>();
-        let mut silhouette_pipelines = Vec::with_capacity(list.silhouette.len());
-        for draw in &list.silhouette {
-            if draw.pipeline == CachedRenderPipelineId::INVALID {
-                silhouette_pipelines.push(None);
-                continue;
-            }
-            match cache.get_render_pipeline(draw.pipeline) {
-                Some(pipeline) => silhouette_pipelines.push(Some(pipeline)),
-                None => {
-                    account.0.lock().unwrap().silhouette_not_ready += 1;
-                    silhouette_pipelines.clear();
-                    break;
-                }
-            }
+    let probe_due = {
+        let mut inner = account.0.lock().unwrap();
+        inner.frames_drawn += 1;
+        if inner.next_probe == 0 {
+            inner.next_probe = PROBE_FIRST_FRAME;
         }
-        let run_silhouette = silhouette_pipelines.iter().any(Option::is_some);
-
-        let gpu = world.resource::<SilhouetteGpu>();
-        let meshes = world.resource::<RenderAssets<RenderMesh>>();
-        let allocator = world.resource::<MeshAllocator>();
-        let (view_group, rigid_group, skin_group) = space_groups(
-            &self.bind_groups,
-            render_context.render_device(),
-            cache,
-            gpu,
-            frame,
-        );
-        let composite_group = self.bind_groups.lock().get(
-            render_context.render_device(),
-            "character_silhouette_composite",
-            &cache.get_bind_group_layout(&gpu.composite_layout),
-            &[
-                (0, Bound::View(&target.scratch.default_view)),
-                (1, Bound::View(depth.view())),
-                (2, Bound::whole(&gpu.colour)),
-                (3, Bound::Sampler(&gpu.depth_sampler)),
-            ],
-            frame,
-        );
-
-        let probe_due = {
-            let mut inner = account.0.lock().unwrap();
-            inner.frames_drawn += 1;
-            if inner.next_probe == 0 {
-                inner.next_probe = PROBE_FIRST_FRAME;
-            }
-            let due = inner.frames_drawn >= inner.next_probe;
-            if due {
-                inner.next_probe = inner.frames_drawn + probe_interval();
-            }
-            due
-        };
-        #[cfg(not(target_arch = "wasm32"))]
-        let probe = probe_due.then(|| begin_probe(world, render_context, target));
-        #[cfg(target_arch = "wasm32")]
-        if probe_due {
-            log_counter_line(world);
+        let due = inner.frames_drawn >= inner.next_probe;
+        if due {
+            inner.next_probe = inner.frames_drawn + probe_interval();
         }
-
-        // The stencil-shadow pass: the scene colour under it is copied first,
-        // since the pass blends with it in encoded values.
-        let mut silhouette_drawn = 0usize;
-        if run_silhouette {
-            let size = target.scratch.texture.size();
-            render_context.command_encoder().copy_texture_to_texture(
-                view_target.main_texture().as_image_copy(),
-                target.scratch.texture.as_image_copy(),
-                size,
-            );
-            let mut pass =
-                render_context
-                    .command_encoder()
-                    .begin_render_pass(&RenderPassDescriptor {
-                        label: Some("character_silhouette"),
-                        color_attachments: &[Some(view_target.get_color_attachment())],
-                        depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
-                            view: &target.depth_stencil.default_view,
-                            depth_ops: Some(Operations {
-                                load: LoadOp::Load,
-                                store: StoreOp::Store,
-                            }),
-                            stencil_ops: Some(Operations {
-                                load: LoadOp::Load,
-                                store: StoreOp::Store,
-                            }),
-                        }),
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                    });
-            pass.set_stencil_reference(SILHOUETTE_REFERENCE);
-            for (draw, pipeline) in list.silhouette.iter().zip(&silhouette_pipelines) {
-                let Some(pipeline) = pipeline else {
-                    continue;
-                };
-                pass.set_pipeline(pipeline);
-                pass.set_bind_group(0, &view_group, &[target.view_offset]);
-                match draw.space {
-                    Space::Rigid(offset) => pass.set_bind_group(1, &rigid_group, &[offset]),
-                    Space::Skinned(offset) => pass.set_bind_group(1, &skin_group, &[offset]),
-                }
-                pass.set_bind_group(2, &composite_group, &[]);
-                if draw_mesh!(pass, &draw.mesh, meshes, allocator) {
-                    silhouette_drawn += 1;
-                }
-            }
-        }
-
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(Some((after, width, height, row))) = probe {
-            copy_stencil(
-                render_context,
-                &target.depth_stencil.texture,
-                &after,
-                width,
-                height,
-                row,
-            );
-            let mut inner = account.0.lock().unwrap();
-            let pending = PendingProbe {
-                width,
-                height,
-                row,
-                frame: inner.frames_drawn,
-                tally: inner.tally.clone(),
-                replay_draws: inner.replay_draws,
-                replay_invalid: inner.replay_invalid,
-                replay_recorded: replayed,
-                silhouette_draws: inner.silhouette_draws,
-                silhouette_recorded: silhouette_drawn,
-            };
-            inner.probe = Some(pending);
-        }
-        #[cfg(target_arch = "wasm32")]
-        let _ = (replayed, silhouette_drawn);
-        Ok(())
+        due
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let probe = probe_due.then(|| begin_probe(world, &mut render_context, target));
+    #[cfg(target_arch = "wasm32")]
+    if probe_due {
+        log_counter_line(world);
     }
+
+    // The stencil-shadow pass: the scene colour under it is copied first,
+    // since the pass blends with it in encoded values.
+    let mut silhouette_drawn = 0usize;
+    if run_silhouette {
+        let size = target.scratch.texture.size();
+        render_context.command_encoder().copy_texture_to_texture(
+            view_target.main_texture().as_image_copy(),
+            target.scratch.texture.as_image_copy(),
+            size,
+        );
+        let mut pass =
+            render_context
+                .command_encoder()
+                .begin_render_pass(&RenderPassDescriptor {
+                    label: Some("character_silhouette"),
+                    multiview_mask: None,
+                    color_attachments: &[Some(view_target.get_color_attachment())],
+                    depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                        view: &target.depth_stencil.default_view,
+                        depth_ops: Some(Operations {
+                            load: LoadOp::Load,
+                            store: StoreOp::Store,
+                        }),
+                        stencil_ops: Some(Operations {
+                            load: LoadOp::Load,
+                            store: StoreOp::Store,
+                        }),
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+        pass.set_stencil_reference(SILHOUETTE_REFERENCE);
+        for (draw, pipeline) in list.silhouette.iter().zip(&silhouette_pipelines) {
+            let Some(pipeline) = pipeline else {
+                continue;
+            };
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &view_group, &[target.view_offset]);
+            match draw.space {
+                Space::Rigid(offset) => pass.set_bind_group(1, &rigid_group, &[offset]),
+                Space::Skinned(offset) => pass.set_bind_group(1, &skin_group, &[offset]),
+            }
+            pass.set_bind_group(2, &composite_group, &[]);
+            if draw_mesh!(pass, &draw.mesh, meshes, allocator) {
+                silhouette_drawn += 1;
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(Some((after, width, height, row))) = probe {
+        copy_stencil(
+            &mut render_context,
+            &target.depth_stencil.texture,
+            &after,
+            width,
+            height,
+            row,
+        );
+        let mut inner = account.0.lock().unwrap();
+        let pending = PendingProbe {
+            width,
+            height,
+            row,
+            frame: inner.frames_drawn,
+            tally: inner.tally.clone(),
+            replay_draws: inner.replay_draws,
+            replay_invalid: inner.replay_invalid,
+            replay_recorded: replayed,
+            silhouette_draws: inner.silhouette_draws,
+            silhouette_recorded: silhouette_drawn,
+        };
+        inner.probe = Some(pending);
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = (replayed, silhouette_drawn);
 }
 
 /// The groups every replayed and silhouette draw binds: the view window and
@@ -1871,9 +1858,6 @@ fn space_groups(
     (view, rigid, skin)
 }
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-struct StencilReplayLabel;
-
 /// The replay and the clip mask, before the main opaque pass.
 struct StencilReplayNode {
     bind_groups: SharedBindGroupCache,
@@ -1891,33 +1875,29 @@ impl FromWorld for StencilReplayNode {
     }
 }
 
-impl ViewNode for StencilReplayNode {
-    type ViewQuery = Option<&'static SilhouetteTarget>;
-
-    fn run(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext,
-        target: QueryItem<Self::ViewQuery>,
-        world: &World,
-    ) -> Result<(), NodeRunError> {
-        let list = world.resource::<SilhouetteDrawList>();
-        let Some(mask) = world
-            .get_resource::<StencilClipMask>()
-            .and_then(|mask| world.resource::<RenderAssets<GpuImage>>().get(&mask.image))
-        else {
-            return Ok(());
-        };
-        let replayed = match target {
-            Some(target) if list.active => self.replay(render_context, world, list, target, mask),
-            _ => false,
-        };
-        if replayed {
-            *self.mask_rest.lock().unwrap() = None;
-        } else {
-            self.rest_mask(render_context, mask, list.clip_rest);
-        }
-        Ok(())
+/// Core3d：模板重放与裁剪遮罩，排在主不透明 pass 之前。
+fn stencil_replay(
+    world: &World,
+    view: ViewQuery<Option<&SilhouetteTarget>>,
+    node: Local<StencilReplayNode>,
+    mut render_context: RenderContext,
+) {
+    let target = view.into_inner();
+    let list = world.resource::<SilhouetteDrawList>();
+    let Some(mask) = world
+        .get_resource::<StencilClipMask>()
+        .and_then(|mask| world.resource::<RenderAssets<GpuImage>>().get(&mask.image))
+    else {
+        return;
+    };
+    let replayed = match target {
+        Some(target) if list.active => node.replay(&mut render_context, world, list, target, mask),
+        _ => false,
+    };
+    if replayed {
+        *node.mask_rest.lock().unwrap() = None;
+    } else {
+        node.rest_mask(&mut render_context, mask, list.clip_rest);
     }
 }
 
@@ -1936,7 +1916,7 @@ impl StencilReplayNode {
         mask: &GpuImage,
     ) -> bool {
         let account = world.resource::<SilhouetteAccount>();
-        if target.depth_stencil.texture.size() != mask.size {
+        if target.depth_stencil.texture.size() != mask.texture_descriptor.size {
             account.0.lock().unwrap().mask_mismatch += 1;
             return false;
         }
@@ -1991,6 +1971,7 @@ impl StencilReplayNode {
                         .command_encoder()
                         .begin_render_pass(&RenderPassDescriptor {
                             label: Some("character_silhouette_replay"),
+                            multiview_mask: None,
                             color_attachments: &[],
                             depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
                                 view: &target.depth_stencil.default_view,
@@ -2031,6 +2012,7 @@ impl StencilReplayNode {
                         .command_encoder()
                         .begin_render_pass(&RenderPassDescriptor {
                             label: Some("stencil_clip_mask"),
+                            multiview_mask: None,
                             color_attachments: &[Some(RenderPassColorAttachment {
                                 view: &mask.texture_view,
                                 depth_slice: None,
@@ -2080,6 +2062,7 @@ impl StencilReplayNode {
             .command_encoder()
             .begin_render_pass(&RenderPassDescriptor {
                 label: Some("stencil_clip_mask_rest"),
+                multiview_mask: None,
                 color_attachments: &[Some(RenderPassColorAttachment {
                     view: &mask.texture_view,
                     depth_slice: None,
@@ -2327,26 +2310,13 @@ impl Plugin for CharacterSilhouettePlugin {
                 Render,
                 prepare_silhouette.in_set(RenderSystems::PrepareBindGroups),
             )
-            .add_render_graph_node::<ViewNodeRunner<StencilReplayNode>>(Core3d, StencilReplayLabel)
-            .add_render_graph_edges(
+            .add_systems(
                 Core3d,
                 (
-                    Node3d::StartMainPass,
-                    StencilReplayLabel,
-                    Node3d::MainOpaquePass,
-                ),
-            )
-            .add_render_graph_node::<ViewNodeRunner<CharacterSilhouetteNode>>(
-                Core3d,
-                CharacterSilhouetteLabel,
-            )
-            .add_render_graph_edges(
-                Core3d,
-                (
-                    Node3d::MainTransparentPass,
-                    CharacterSilhouetteLabel,
-                    Node3d::EndMainPass,
-                ),
+                    stencil_replay.before(main_opaque_pass_3d),
+                    character_silhouette.after(main_transparent_pass_3d),
+                )
+                    .in_set(Core3dSystems::MainPass),
             );
     }
 }

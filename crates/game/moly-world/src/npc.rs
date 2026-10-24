@@ -654,7 +654,7 @@ pub fn begin_external_approach(
             &mut crate::npc_objective::MemberRng,
         )>,
     )>::new(world);
-    let (face, objective, origins, mut actors) = params.get_mut(world);
+    let (face, objective, origins, mut actors) = params.get_mut(world).expect("system params");
     let site_y = origins
         .single()
         .map_err(|_| "one active site origin is required")?

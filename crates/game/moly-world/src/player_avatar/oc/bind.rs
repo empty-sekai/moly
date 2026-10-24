@@ -28,7 +28,7 @@ use bevy::ecs::observer::On;
 use bevy::gltf::Gltf;
 use bevy::mesh::skinning::SkinnedMesh;
 use bevy::prelude::*;
-use bevy::scene::{SceneInstanceReady, SceneRoot};
+use bevy::world_serialization::{WorldInstanceReady, WorldAssetRoot};
 use std::collections::{BTreeMap, HashMap};
 
 /// The avatar skeleton's rest: every node below its animator, parent-first,
@@ -148,7 +148,7 @@ pub struct OcBinding {
 
 /// Observer: the OC's scene has spawned.
 pub fn on_scene_ready(
-    trigger: On<SceneInstanceReady>,
+    trigger: On<WorldInstanceReady>,
     models: Query<(), With<OcModel>>,
     mut commands: Commands,
 ) {
@@ -222,7 +222,7 @@ pub fn attach(
                 gltf: load.gltf.clone(),
                 character: load.character.clone(),
             },
-            SceneRoot(scene.clone()),
+            WorldAssetRoot(scene.clone()),
             // Hidden until bound: the file's rest is neither fitted nor posed.
             Transform::IDENTITY,
             Visibility::Hidden,

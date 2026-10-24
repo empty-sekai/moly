@@ -531,7 +531,7 @@ impl AsBindGroup for RoomShellMaterial {
         // texture of an earlier size would read the wrong pixels.
         let clip_mask = clip_mask
             .as_ref()
-            .and_then(|mask| images.get(&mask.image).filter(|image| mask.fits(image.size)))
+            .and_then(|mask| images.get(&mask.image).filter(|image| mask.fits(image.texture_descriptor.size)))
             .ok_or(AsBindGroupError::RetryNextUpdate)?;
         let mut bytes = Vec::with_capacity(PARAM_SLOTS * 16);
         for slot in &self.params {

@@ -406,7 +406,7 @@ pub fn plan_when_wired(
             if let Ok(pose) = imported.get(entity) {
                 pose.0
             } else {
-                // SceneRoot wrappers have no animation targets or imported
+                // WorldAssetRoot wrappers have no animation targets or imported
                 // node pose; their local transform is the stable identity.
                 assert!(names.get(entity).is_err(), "named character node lacks imported rest pose");
                 *transforms.get(entity).expect("character wrapper lacks Transform")

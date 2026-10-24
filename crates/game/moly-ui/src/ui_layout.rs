@@ -2106,12 +2106,12 @@ impl NodeCache {
             }
         }
         for (handle, &color) in self.materials.iter().zip(&self.material_colors) {
-            if let Some(material) = materials.get_mut(handle) {
+            if let Some(mut material) = materials.get_mut(handle) {
                 material.color = color.with_alpha(color.alpha() * alpha);
             }
         }
         for (handle, &color) in self.clip_materials.iter().zip(&self.clip_material_colors) {
-            if let Some(material) = clip_materials.get_mut(handle) {
+            if let Some(mut material) = clip_materials.get_mut(handle) {
                 material.set_color(color.with_alpha(color.alpha() * alpha));
             }
         }

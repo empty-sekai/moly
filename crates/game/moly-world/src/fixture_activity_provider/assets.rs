@@ -11,7 +11,7 @@ use bevy::{
     ecs::change_detection::Tick,
     gltf::Gltf,
     prelude::*,
-    scene::{SceneInstance, SceneSpawner},
+    world_serialization::{WorldInstance, WorldInstanceSpawner},
 };
 use moly_assets::{json::JsonAsset, scene_state::SourceInactive};
 use serde_json::Value;
@@ -629,11 +629,11 @@ pub(super) fn require_live_fixture(
             "placed model GLTF is loading",
         ));
     }
-    let instance = world.get::<SceneInstance>(target.entity).ok_or_else(|| {
+    let instance = world.get::<WorldInstance>(target.entity).ok_or_else(|| {
         ProviderPending::new("fixture-instance", "placed scene has not been instanced")
     })?;
     if !world
-        .get_resource::<SceneSpawner>()
+        .get_resource::<WorldInstanceSpawner>()
         .is_some_and(|spawner| spawner.instance_is_ready(**instance))
     {
         return Err(ProviderPending::new(

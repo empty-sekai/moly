@@ -2669,7 +2669,7 @@ pub fn show_activity_balloon(
     cancel_activity_balloon(world, owner);
     let mut state =
         bevy::ecs::system::SystemState::<(Commands, Option<Res<BalloonArt>>)>::new(world);
-    let (mut commands, art) = state.get_mut(world);
+    let (mut commands, art) = state.get_mut(world).expect("system params");
     if let Some(art) = art {
         let root = spawn_balloon_text(
             &mut commands,
@@ -2725,7 +2725,7 @@ pub fn show_talk_preview(world: &mut World, actor: Entity, unit: u32,
     tweet: &moly_law::talk::TweetRef, ticket: u64) {
     if tweet.id <= 0 || tweet.text.trim().is_empty() || world.get_entity(actor).is_err() { return; }
     let mut params = bevy::ecs::system::SystemState::<(Commands, Option<Res<BalloonArt>>)>::new(world);
-    let (mut commands, art) = params.get_mut(world);
+    let (mut commands, art) = params.get_mut(world).expect("system params");
     if let Some(art) = art {
         let root = spawn_balloon_text(&mut commands, &art, actor, unit, tweet.id, &tweet.text, None, false);
         commands.entity(root).insert(TalkPreviewBalloon { ticket });

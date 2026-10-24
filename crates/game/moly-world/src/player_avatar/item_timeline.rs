@@ -50,7 +50,7 @@ use bevy::{
     ecs::system::SystemState,
     gltf::Gltf,
     prelude::*,
-    scene::{SceneInstance, SceneRoot, SceneSpawner},
+    world_serialization::{WorldInstance, WorldAssetRoot, WorldInstanceSpawner},
 };
 use moly_assets::{coordinates::CanonicalCoordinates, json::JsonAsset};
 use serde_json::Value;
@@ -338,7 +338,7 @@ fn step(
         let scene = scene.ok_or("step item model has no default scene")?;
         let root = step_bone(world)?;
         let object = world
-            .spawn((SceneRoot(scene), Transform::IDENTITY, Visibility::default()))
+            .spawn((WorldAssetRoot(scene), Transform::IDENTITY, Visibility::default()))
             .insert(ChildOf(root))
             .id();
         item.object = ObjectState::Spawned(object);
@@ -373,11 +373,11 @@ fn step(
     if !item.set_up {
         return Err("Play before Setup: the view has not bound the avatar".into());
     }
-    let Some(instance) = world.get::<SceneInstance>(object) else {
+    let Some(instance) = world.get::<WorldInstance>(object) else {
         return Ok(());
     };
     if !world
-        .resource::<SceneSpawner>()
+        .resource::<WorldInstanceSpawner>()
         .instance_is_ready(**instance)
     {
         return Ok(());
@@ -999,7 +999,7 @@ fn release_director(world: &mut World, director: Director) {
         Query<&mut AvatarDriver, With<PlayerControlled>>,
         Query<&mut AnimationPlayer>,
     )>::new(world);
-    let (mut drivers, mut animators) = params.get_mut(world);
+    let (mut drivers, mut animators) = params.get_mut(world).expect("system params");
     let Ok(mut driver) = drivers.single_mut() else {
         return;
     };

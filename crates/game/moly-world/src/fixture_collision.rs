@@ -78,7 +78,7 @@ fn build_render_scene(world: &mut World)
     -> Result<std::sync::Arc<crate::particle_runtime::collision_scene::GroundScene>, String>
 {
     let mut system = SystemState::<CollisionInputs>::new(world);
-    let collision = system.get(world);
+    let collision = system.get(world).expect("system params");
     let placements = world
         .get_resource::<crate::fixture::FixturePlacements>()
         .ok_or_else(|| "no placements".to_owned())?;
@@ -912,7 +912,7 @@ mod tests {
         world.spawn((ChildOf(scene), Transform::from_xyz(2.0,0.0,0.0), GlobalTransform::IDENTITY,
             GltfExtras { value: serde_json::json!({"sourceCollision":node_record(serde_json::json!([collider]))}).to_string() }));
         let mut system = SystemState::<CollisionInputs>::new(&mut world);
-        let result = system.get(&world).collect(1).unwrap();
+        let result = system.get(&world).expect("system params").collect(1).unwrap();
         assert_eq!(result.colliders, 1);
         assert_eq!(result.polygons.len(), 1);
         assert!(
@@ -932,7 +932,7 @@ mod tests {
         world.insert_resource(crate::fixture::FixtureScenesReady);
         world.spawn((crate::fixture::FixtureRoot, Transform::IDENTITY));
         let mut system = SystemState::<CollisionInputs>::new(&mut world);
-        let error = system.get(&world).collect(1).err().unwrap();
+        let error = system.get(&world).expect("system params").collect(1).err().unwrap();
         assert!(error.contains("re-export"));
     }
 

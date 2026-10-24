@@ -56,7 +56,7 @@ use bevy::ecs::observer::On;
 use bevy::gltf::{Gltf, GltfNode};
 use bevy::mesh::skinning::SkinnedMesh;
 use bevy::prelude::*;
-use bevy::scene::{SceneInstanceReady, SceneRoot};
+use bevy::world_serialization::{WorldInstanceReady, WorldAssetRoot};
 use moly_assets::character as schema;
 use moly_assets::json::JsonAsset;
 use moly_law::path::TurnMotion;
@@ -364,7 +364,7 @@ pub fn attach_when_ready(
         };
         commands
             .entity(npc)
-            .with_child((SceneRoot(scene), CharacterModel));
+            .with_child((WorldAssetRoot(scene), CharacterModel));
         commands.entity(npc).insert(ModelAttached);
         info!("[npc unit={}] 角色包挂载 {}", unit.0, pack.file);
     }
@@ -372,9 +372,9 @@ pub fn attach_when_ready(
 
 /// 全局观察者：角色模型的场景展开完毕，在成员实体上置位
 /// [`ModelSceneReady`]（站点同款闩，装配消费后即撤）。事件实体是挂
-/// [`SceneRoot`] 的子实体，沿父链一步回到成员。
+/// [`WorldAssetRoot`] 的子实体，沿父链一步回到成员。
 pub fn on_model_scene_ready(
-    trigger: On<SceneInstanceReady>,
+    trigger: On<WorldInstanceReady>,
     models: Query<&CharacterModel>,
     parents: Query<&ChildOf>,
     mut commands: Commands,
@@ -793,20 +793,21 @@ mod visibility_regressions {
     #[test]
     fn animated_face_is_not_rejected_by_its_offscreen_bind_pose() {
         use bevy::camera::{
-            primitives::{Aabb, Frustum, HalfSpace},
-            visibility::{check_visibility, VisibleEntities},
+            primitives::{Aabb, Frustum},
+            visibility::{check_visibility_cpu_culling, VisibleEntities},
         };
+        use bevy::math::primitives::{HalfSpace, ViewFrustum};
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
-            .add_systems(Update, check_visibility);
+            .add_systems(Update, check_visibility_cpu_culling);
         // Screen edge at x=0: the bind-pose face is entirely outside, but its
         // animated joint has moved the face across the edge into the view.
         app.world_mut().spawn((
             Camera::default(),
             VisibleEntities::default(),
-            Frustum {
+            Frustum(ViewFrustum {
                 half_spaces: [HalfSpace::new(Vec4::new(1.0, 0.0, 0.0, 0.0)); 6],
-            },
+            }),
         ));
         let mut spawn = || {
             app.world_mut()

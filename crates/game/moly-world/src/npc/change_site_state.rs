@@ -1052,7 +1052,7 @@ fn start_clip(world: &mut World, actor: Entity, unit: u32, clip: &str, frame: u3
         Query<&mut crate::character::MotionDriver>,
         Query<(&mut AnimationPlayer, &mut AnimationTransitions)>,
     )>::new(world);
-    let (library, gltfs, mut graphs, mut drivers, mut players) = params.get_mut(world);
+    let (library, gltfs, mut graphs, mut drivers, mut players) = params.get_mut(world).expect("system params");
     let node = (|| {
         let lib = gltfs.get(&library.gltf)?;
         let mut driver = drivers.get_mut(actor).ok()?;
@@ -1109,7 +1109,7 @@ fn end_clip(world: &mut World, actor: Entity, unit: u32) {
         Query<&mut AnimationPlayer>,
         Query<&mut AnimationTransitions>,
     )>::new(world);
-    let (mut drivers, mut players, mut transitions) = params.get_mut(world);
+    let (mut drivers, mut players, mut transitions) = params.get_mut(world).expect("system params");
     if let Ok(mut driver) = drivers.get_mut(actor) {
         crate::alone_action_runtime::play_idle(&mut driver, &mut players, &mut transitions, unit);
     }

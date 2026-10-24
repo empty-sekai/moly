@@ -1706,7 +1706,7 @@ fn update_one(world: &mut World, entity: Entity, unit: u32, frame: u32, dt: f32)
             Query<(&crate::npc::PauseSeconds, &Transform)>,
             Query<(&mut crate::npc::NpcActions, &mut crate::npc::RestLifecycle)>,
         )>::new(world);
-        let (mut machines, rows, mut action_rows) = state.get_mut(world);
+        let (mut machines, rows, mut action_rows) = state.get_mut(world).expect("system params");
         let Ok((
             mut phase,
             mut budget,

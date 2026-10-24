@@ -36,7 +36,7 @@ pub fn show(
 ) -> Result<EmoteLease, String> {
     let mut state = SystemState::<Presentation>::new(world);
     let lease = {
-        let mut p = state.get_mut(world);
+        let mut p = state.get_mut(world).expect("system params");
         if !p.archive.has(name) {
             return Err(format!("source emoticon {name} is unavailable"));
         }
@@ -80,7 +80,7 @@ pub fn hide(world: &mut World, lease: EmoteLease, immediate: bool) {
     }
     let mut state = SystemState::<Presentation>::new(world);
     {
-        let mut p = state.get_mut(world);
+        let mut p = state.get_mut(world).expect("system params");
         if let Some(index) = p
             .emotes
             .instances

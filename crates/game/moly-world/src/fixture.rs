@@ -36,7 +36,7 @@ use bevy::asset::{LoadState, RecursiveDependencyLoadState};
 use bevy::ecs::observer::On;
 use bevy::gltf::Gltf;
 use bevy::prelude::*;
-use bevy::scene::{SceneInstanceReady, SceneRoot};
+use bevy::world_serialization::{WorldInstanceReady, WorldAssetRoot};
 use moly_law::fixture::position::{
     direction_yaw_degrees, field_position, layout_type, WALL_LAYOUT_MASK,
 };
@@ -1910,13 +1910,13 @@ fn spawn_instance(
     occupancy: &[OccupancyRow],
     index: usize,
     handle: Handle<Gltf>,
-    scene: Handle<Scene>,
+    scene: Handle<WorldAsset>,
 ) -> Entity {
     let row = &placements.rows[index];
     let placed = row.placed();
     commands
         .spawn((
-            SceneRoot(scene),
+            WorldAssetRoot(scene),
             FixtureRoot,
             FixtureVisualRoot { layout: row.layout },
             crate::fixture_colors::FixtureColorChoice {
@@ -2079,7 +2079,7 @@ fn spawn_replaced_models(
 
 /// （`FixtureScenesReady`，换装系统只看它）。
 fn on_scene_ready(
-    trigger: On<SceneInstanceReady>,
+    trigger: On<WorldInstanceReady>,
     roots: Query<&FixtureRoot>,
     visuals: Query<(), With<FixtureVisualRoot>>,
     children: Query<&Children>,

@@ -234,7 +234,7 @@ pub struct CharacterPack {
     pub rig_file: String,
 }
 
-/// 模型场景的挂载点子实体（持 [`SceneRoot`]），挂在成员实体下。
+/// 模型场景的挂载点子实体（持 [`WorldAssetRoot`]），挂在成员实体下。
 #[derive(Component)]
 pub struct CharacterModel;
 

@@ -192,7 +192,7 @@ fn cleanup_talk_effects(world: &mut World, fixture: Entity, talk_id: i32) {
     }
     if let Some(mut materials) = world.get_resource_mut::<Assets<FixtureMaterial>>() {
         for (handle, offset) in face_offsets {
-            if let Some(material) = materials.get_mut(&handle) {
+            if let Some(material) = materials.get_mut(&handle).map(|asset| asset.into_inner()) {
                 material.params.main_tex_offset = offset;
             }
         }
@@ -240,7 +240,7 @@ pub fn apply_face(
     let (col, row) = (index % 4, index / 4);
     let offset = [col as f32 * cell[0], -(row as f32 * cell[1])];
     for handle in handles {
-        if let Some(material) = materials.get_mut(handle) {
+        if let Some(material) = materials.get_mut(handle).map(|asset| asset.into_inner()) {
             material.params.main_tex_offset = offset;
         }
     }
@@ -811,6 +811,7 @@ pub fn fixture_node_for(
     }
     let graph = graphs
         .get_mut(&animation.graph)
+        .map(|asset| asset.into_inner())
         .expect("家具动画图资产在集合里（装载期自建）");
     let node = graph.add_clip(clip.clone(), 1.0, graph.root);
     animation.nodes.insert(clip_name.to_owned(), node);

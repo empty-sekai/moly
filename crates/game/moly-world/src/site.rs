@@ -51,7 +51,7 @@ use bevy::ecs::message::MessageWriter;
 use bevy::ecs::observer::On;
 use bevy::gltf::{Gltf, GltfMesh};
 use bevy::prelude::*;
-use bevy::scene::{SceneInstanceReady, SceneRoot};
+use bevy::world_serialization::{WorldInstanceReady, WorldAssetRoot};
 use moly_assets::json::JsonAsset;
 use moly_assets::residency::{load_gltf, GltfResidency};
 use std::collections::HashMap;
@@ -1157,9 +1157,9 @@ fn detach(world: &mut World, roots: &[Entity], site: &str, hide: bool) {
 fn hide_site(world: &mut World, roots: &[Entity]) {
     let mut attached = Vec::new();
     {
-        let spawner = world.resource::<bevy::scene::SceneSpawner>();
+        let spawner = world.resource::<bevy::world_serialization::WorldInstanceSpawner>();
         for &root in roots {
-            let Some(instance) = world.get::<bevy::scene::SceneInstance>(root) else {
+            let Some(instance) = world.get::<bevy::world_serialization::WorldInstance>(root) else {
                 continue;
             };
             let own: std::collections::HashSet<Entity> =
@@ -1765,7 +1765,7 @@ pub fn spawn_when_ready(
             );
             commands.insert_resource(GroundMeshes(ground));
             commands.insert_resource(WalkFaceMeshes(face));
-            // No `SceneInstanceReady` comes for an instance that exists.
+            // No `WorldInstanceReady` comes for an instance that exists.
             commands.insert_resource(SiteReady);
             commands.insert_resource(SiteScenesReady);
             return;
@@ -1779,7 +1779,7 @@ pub fn spawn_when_ready(
     }
     let pending = scenes.len();
     for (scene_index, (scene, hidden)) in scenes.into_iter().enumerate() {
-        let mut root = commands.spawn((SceneRoot(scene), SiteRoot, Visibility::Hidden));
+        let mut root = commands.spawn((WorldAssetRoot(scene), SiteRoot, Visibility::Hidden));
         if scene_index == 0 {
             root.insert(crate::fixture_scene_inputs::SiteCoordinateOrigin);
         }
@@ -1885,7 +1885,7 @@ fn ready(server: &Res<AssetServer>, handle: &Handle<Gltf>, label: &str) -> bool 
 /// 事件是全球触发的，用根实体标记认出本站的实例；计数资源在场的世代才
 /// 计数——拆站后的迟到事件实体已撤，查不到根自然落空。
 pub fn on_scene_ready(
-    trigger: On<SceneInstanceReady>,
+    trigger: On<WorldInstanceReady>,
     roots: Query<(), With<SiteRoot>>,
     pending: Option<ResMut<SiteScenePending>>,
     mut commands: Commands,

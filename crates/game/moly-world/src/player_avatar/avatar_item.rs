@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use bevy::asset::LoadState;
 use bevy::gltf::Gltf;
 use bevy::prelude::*;
-use bevy::scene::SceneRoot;
+use bevy::world_serialization::WorldAssetRoot;
 use moly_assets::json::JsonAsset;
 
 use crate::player::PlayerControlled;
@@ -284,7 +284,7 @@ fn create(
     };
     let entity = commands
         .spawn((
-            SceneRoot(scene),
+            WorldAssetRoot(scene),
             Transform::IDENTITY,
             Visibility::Inherited,
             ChildOf(arm),

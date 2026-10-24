@@ -322,6 +322,7 @@ impl AvatarDriver {
         let handle = clip.handle.clone();
         let graph = graphs
             .get_mut(&self.graph)
+            .map(|asset| asset.into_inner())
             .ok_or(PlayerMotionError::MissingGraph)?;
         let node = graph.add_clip(handle, 1.0, graph.root);
         self.nodes.insert(key, node);

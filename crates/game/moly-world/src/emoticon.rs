@@ -3565,7 +3565,7 @@ fn build_and_write(
                 fill_emitter_buffer(item, inst, emitter_idx, cam, &mut buffer)
             }
         }
-        if let Some(mesh) = meshes.get_mut(&mesh_handle) {
+        if let Some(mesh) = meshes.get_mut(&mesh_handle).map(|asset| asset.into_inner()) {
             mesh.insert_attribute(
                 Mesh::ATTRIBUTE_POSITION,
                 std::mem::take(&mut buffer.positions),

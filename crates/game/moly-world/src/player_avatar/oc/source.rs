@@ -260,12 +260,15 @@ impl OcSelection {
         let bytes = model.bytes.len();
         files.0.insert_asset(&path, model.bytes);
         let asset_path = AssetPath::from(format!("{SOURCE}://model-{generation}.{}", model.extension));
-        let gltf = server.load_with_settings(asset_path, |settings: &mut GltfLoaderSettings| {
-            settings.load_materials = moly_assets::residency::GPU_ONLY;
-            settings.load_cameras = false;
-            settings.load_lights = false;
-            settings.load_animations = false;
-        });
+        let gltf = server
+            .load_builder()
+            .with_settings(|settings: &mut GltfLoaderSettings| {
+                settings.load_materials = moly_assets::residency::GPU_ONLY;
+                settings.load_cameras = false;
+                settings.load_lights = false;
+                settings.load_animations = false;
+            })
+            .load(asset_path);
         let mapped: Vec<String> = model
             .original_names
             .iter()

@@ -209,7 +209,7 @@ pub fn appear(
     hide_entry_site_starts(world, frame);
     let state = std::mem::take(&mut world.resource_mut::<GateAppearance>().state);
     let cells = match state {
-        State::Waiting | State::Running(_) => walkable.get_mut(world).cells(),
+        State::Waiting | State::Running(_) => walkable.get_mut(world).expect("system params").cells(),
         _ => Ok(Vec::new()),
     };
     let state = match (state, cells) {

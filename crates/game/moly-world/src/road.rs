@@ -129,8 +129,8 @@ impl Material for RoadMaterial {
         crate::material_order::set_queue(descriptor, 2006);
         descriptor.primitive.cull_mode = Some(Face::Back);
         if let Some(depth) = descriptor.depth_stencil.as_mut() {
-            depth.depth_write_enabled = false;
-            depth.depth_compare = CompareFunction::Always;
+            depth.depth_write_enabled = Some(false);
+            depth.depth_compare = Some(CompareFunction::Always);
         }
         Ok(())
     }
@@ -289,7 +289,7 @@ fn update_materials(
             let chained = match images.get(&surface.texture).map(mip_chain_plan) {
                 Some(Ok(_)) => images
                     .get_mut(&surface.texture)
-                    .map_or(Err(MipSkip::NoData), generate_mip_chain),
+                    .map_or(Err(MipSkip::NoData), |image| generate_mip_chain(image.into_inner())),
                 Some(Err(reason)) => Err(reason),
                 None => Ok(0),
             };

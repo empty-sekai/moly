@@ -341,7 +341,7 @@ fn read_talk_unported(world: &mut World, unit: u32, talk: i32) -> Option<String>
         crate::npc_fixture_activity::Factory<'_, '_>,
         Option<Res<crate::npc_talk_lottery::TalkExtraTables>>,
     )>::new(world);
-    let (factory, extras) = params.get_mut(world);
+    let (factory, extras) = params.get_mut(world).expect("system params");
     let tables = factory.tables()?;
     let master = tables.talk_master(talk)?;
     // Which data builder runs is the some-character table's to say.
@@ -497,7 +497,7 @@ fn start_loc(world: &mut World, uid: &str, index: usize) -> Option<[f32; 3]> {
         crate::npc_fixture_activity::Factory<'_, '_>,
         Res<crate::fixture::FixturePlacements>,
     )>::new(world);
-    let (factory, placements) = params.get_mut(world);
+    let (factory, placements) = params.get_mut(world).expect("system params");
     let geometry = factory.talk_fixture_geometry(uid, &placements).ok()?;
     geometry.locators.get(index).map(|(_, pair)| pair.start.position)
 }
@@ -514,7 +514,7 @@ fn fixture_ai_data(
         Res<crate::fixture::FixturePlacements>,
         crate::player_talk::TalkCatalog<'_>,
     )>::new(world);
-    let (factory, placements, catalog) = params.get_mut(world);
+    let (factory, placements, catalog) = params.get_mut(world).expect("system params");
     let resolved = catalog.resolve(data.talk_id)?;
     let geometry = factory.talk_fixture_geometry(&data.fixture, &placements).ok()?;
     let is_general = factory
@@ -569,7 +569,7 @@ fn build_read_talk(
         ResMut<crate::npc_objective::SequencePickSeeder>,
     )>::new(world);
     let (factory, placements, face, catalog, configs, talk_list, selection, extras, npcs, mut seeder) =
-        params.get_mut(world);
+        params.get_mut(world).expect("system params");
     let face = face.ok_or("the objective face is not built")?;
     let config = configs.ok_or("the client configs are not loaded")?;
     let talk_list = talk_list.ok_or("the talk list is not set")?;
@@ -735,7 +735,7 @@ fn candidates(world: &mut World, actor: Entity, unit: u32) -> Result<Candidates,
         Option<Res<crate::npc_talk_lottery::TalkExtraTables>>,
     )>::new(world);
     let (factory, placements, face, catalog, configs, talk_list, epoch, selection, npcs, store, extras) =
-        params.get_mut(world);
+        params.get_mut(world).expect("system params");
     let face = face.ok_or("the objective face is not built")?;
     let config = configs.ok_or("the client configs are not loaded")?;
     let talk_list = talk_list.ok_or("the talk list is not set")?;
@@ -967,7 +967,7 @@ fn select_row(
         Option<Res<crate::site::GroundEpoch>>,
         Query<(Entity, &TalkSlot, &ObjectiveMind, &NpcActions, &WalkState), Without<Away>>,
     )>::new(world);
-    let (factory, placements, face, epoch, npcs) = params.get_mut(world);
+    let (factory, placements, face, epoch, npcs) = params.get_mut(world).expect("system params");
     let face = face.ok_or("the objective face is not built")?;
     let epoch = epoch.ok_or("no site generation is set")?.0;
     let (_, _, mind, actions, walk) = npcs

@@ -517,6 +517,15 @@ fn build(
             .named_materials
             .get(name)
             .ok_or_else(|| format!("房间模块 glb 没有材质 {name}"))?;
+        // Meshes carry the StandardMaterial the glTF loader derived from this
+        // material, stored next to it under the same label with a "/std" suffix.
+        let original = original
+            .path()
+            .and_then(|path| {
+                let label = path.label()?;
+                server.get_handle::<StandardMaterial>(path.clone().with_label(format!("{label}/std")))
+            })
+            .ok_or_else(|| format!("房间模块 glb 材质 {name} 没有装载器派生的 StandardMaterial"))?;
         let (uv, path) = match name {
             WALL_SLOT => (
                 Some(wall_uv),

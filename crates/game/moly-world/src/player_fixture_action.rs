@@ -1276,7 +1276,7 @@ fn play_avatar_motion(
         Query<&mut AvatarDriver>,
         Query<(&mut AnimationPlayer, &mut AnimationTransitions)>,
     )>::new(world);
-    let (mut graphs, mut drivers, mut animators) = params.get_mut(world);
+    let (mut graphs, mut drivers, mut animators) = params.get_mut(world).expect("system params");
     let Ok(mut driver) = drivers.get_mut(actor) else {
         error!("[player-fixture] ChangeAnimation({clip}): the player has no avatar driver");
         return Err(());
@@ -1339,7 +1339,7 @@ fn play_finally_idle(world: &mut World, actor: Entity, lease: Option<PlayerActio
         Query<&mut AvatarDriver>,
         Query<(&mut AnimationPlayer, &mut AnimationTransitions)>,
     )>::new(world);
-    let (mut graphs, mut drivers, mut animators) = params.get_mut(world);
+    let (mut graphs, mut drivers, mut animators) = params.get_mut(world).expect("system params");
     if let Ok(mut driver) = drivers.get_mut(actor) {
         if let Ok((mut animator, mut transitions)) = animators.get_mut(driver.player) {
             driver.play_idle(

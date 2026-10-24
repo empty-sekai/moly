@@ -2205,6 +2205,7 @@ fn initialize(
                 let mut graphs = world.resource_mut::<Assets<AnimationGraph>>();
                 let graph = graphs
                     .get_mut(&binding.graph)
+                    .map(|asset| asset.into_inner())
                     .ok_or_else(|| invalid("animation graph disappeared"))?;
                 let node = cache.get(&cache_key).copied().filter(|node| graph.graph.node_weight(*node)
                     .is_some_and(|n| matches!(&n.node_type,AnimationNodeType::Clip(handle) if *handle == binding.clip)));
@@ -3076,6 +3077,7 @@ fn cleanup(world: &mut World, token: TimelineToken, session: &mut Session) {
             if let Some(graph) = world
                 .resource_mut::<Assets<AnimationGraph>>()
                 .get_mut(&binding.graph)
+                .map(|asset| asset.into_inner())
             {
                 if let Some(slot) = graph.graph.node_weight_mut(node.node) {
                     slot.node_type = AnimationNodeType::Blend;

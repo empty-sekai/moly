@@ -25,7 +25,7 @@ pub fn start(world: &mut World, actor: Entity) -> Result<Lease, String> {
         Query<&mut AvatarDriver>,
         Query<(&mut AnimationPlayer, &mut AnimationTransitions)>,
     )>::new(world);
-    let (mut graphs, mut drivers, mut animators) = params.get_mut(world);
+    let (mut graphs, mut drivers, mut animators) = params.get_mut(world).expect("system params");
     let mut driver = drivers
         .get_mut(actor)
         .map_err(|_| "the player's driver is not installed")?;
@@ -67,7 +67,7 @@ pub fn is_alive(world: &World, actor: Entity, lease: Lease) -> bool {
 pub fn release(world: &mut World, actor: Entity, lease: Lease) {
     let mut params =
         SystemState::<(Query<&mut AvatarDriver>, Query<&mut AnimationPlayer>)>::new(world);
-    let (mut drivers, mut animators) = params.get_mut(world);
+    let (mut drivers, mut animators) = params.get_mut(world).expect("system params");
     let Ok(mut driver) = drivers.get_mut(actor) else {
         return;
     };

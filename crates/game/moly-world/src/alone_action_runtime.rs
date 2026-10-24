@@ -804,7 +804,7 @@ pub fn apply_eye(
     let index = open.copied().unwrap_or(1);
     let (col, row) = cell_of(index);
     let st = [1.0, 1.0, col as f32 * EYE_CELL[0], row as f32 * EYE_CELL[1]];
-    if let Some(material) = materials.get_mut(handle) {
+    if let Some(material) = materials.get_mut(handle).map(|asset| asset.into_inner()) {
         material.params.main_tex_st = st;
     }
     (col, row)
@@ -818,7 +818,7 @@ pub fn apply_eye_pattern(
     pattern: Option<EyePattern>,
 ) -> (i32, i32) {
     let pattern = crate::npc_view::pattern_or_zero(pattern);
-    if let Some(material) = materials.get_mut(handle) {
+    if let Some(material) = materials.get_mut(handle).map(|asset| asset.into_inner()) {
         material.eye_pattern = Some(pattern);
     }
     apply_eye(materials, handle, Some(&pattern.open))
@@ -845,7 +845,7 @@ pub fn apply_mouth(
         .get(handle)
         .is_some_and(|material| material.params.main_tex_st != st)
     {
-        if let Some(material) = materials.get_mut(handle) {
+        if let Some(material) = materials.get_mut(handle).map(|asset| asset.into_inner()) {
             material.params.main_tex_st = st;
         }
     }
@@ -861,7 +861,7 @@ pub fn apply_mouth_pattern(
     handle: &Handle<CharacterMaterial>,
     pattern: LipPattern,
 ) -> (i32, i32) {
-    if let Some(material) = materials.get_mut(handle) {
+    if let Some(material) = materials.get_mut(handle).map(|asset| asset.into_inner()) {
         material.lip_pattern = Some(pattern);
         material.lip_pattern_revision = material.lip_pattern_revision.wrapping_add(1);
     }
@@ -1132,6 +1132,7 @@ pub fn node_for(
         .unwrap_or_else(|| panic!("共享动作库没有段 {clip_name}（unit {unit} 的待机步要点播它）"));
     let graph = graphs
         .get_mut(graph_handle)
+        .map(|asset| asset.into_inner())
         .unwrap_or_else(|| panic!("unit {unit} 的动画图资产不在（装配时已建）"));
     // Talk sessions have short-lived name maps but share the character's
     // graph. Reopening the same conversation must not append its clips again.

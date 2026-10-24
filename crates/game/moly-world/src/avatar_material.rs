@@ -166,7 +166,7 @@ impl AsBindGroup for AvatarMaterial {
             address_mode_w: AddressMode::ClampToEdge,
             mag_filter: FilterMode::Linear,
             min_filter: FilterMode::Linear,
-            mipmap_filter: FilterMode::Linear,
+            mipmap_filter: MipmapFilterMode::Linear,
             ..Default::default()
         });
         let tex = |binding: u32, view: &bevy::render::texture::GpuImage| {
@@ -710,7 +710,7 @@ pub fn player_dither(
             .get(id)
             .is_some_and(|material| material.params.alpha_dither_gate[1] != value);
         if stale {
-            if let Some(material) = materials.get_mut(id) {
+            if let Some(material) = materials.get_mut(id).map(|asset| asset.into_inner()) {
                 material.params.alpha_dither_gate[1] = value;
             }
         }
@@ -725,7 +725,7 @@ pub fn player_dither(
             .get(id)
             .is_some_and(|material| material.params.cutoff_dither[1] != value);
         if stale {
-            if let Some(material) = oc_materials.get_mut(id) {
+            if let Some(material) = oc_materials.get_mut(id).map(|asset| asset.into_inner()) {
                 material.params.cutoff_dither[1] = value;
             }
         }

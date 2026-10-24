@@ -26,17 +26,14 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use bevy::asset::uuid::Uuid;
-use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
+use bevy::core_pipeline::tonemapping::tonemapping;
+use bevy::core_pipeline::{Core3d, Core3dSystems};
+use bevy::ecs::schedule::ScheduleLabel;
 use bevy::core_pipeline::FullscreenShader;
 use bevy::diagnostic::FrameCount;
-use bevy::ecs::query::QueryItem;
 use bevy::prelude::*;
 use bevy::render::camera::ExtractedCamera;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
-use bevy::render::render_graph::{
-    NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, RenderSubGraph, ViewNode,
-    ViewNodeRunner,
-};
 use bevy::render::render_resource::binding_types::{sampler, texture_2d, uniform_buffer};
 use bevy::render::render_resource::{
     AddressMode, BindGroupLayoutDescriptor, BindGroupLayoutEntries, Buffer, BufferInitDescriptor,
@@ -47,7 +44,7 @@ use bevy::render::render_resource::{
     Texture, TextureAspect, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType,
     TextureUsages, TextureView,
 };
-use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
+use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
 use bevy::render::texture::{CachedTexture, TextureCache};
 use bevy::render::view::ViewTarget;
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
@@ -55,7 +52,7 @@ use moly_law::weather::lut::{self, LdrLutInputs, LutStack};
 use moly_law::weather::StockBloomParams;
 
 use crate::render::gpu::{Bound, SharedBindGroupCache};
-use crate::weather::{TransparentCapture, WeatherPostLabel, WeatherPostParams};
+use crate::weather::{weather_post, TransparentCapture, WeatherPostParams};
 
 const STOCK_SHADER: Handle<Shader> = Handle::Uuid(
     Uuid::from_u128(0x3e0b_71c4_92d5_4f18_a6c7_58e2_0d91_b4f3),
@@ -183,13 +180,10 @@ struct StockPostPipelines {
 /// 一个视图的引擎泛光金字塔：`downs[i]` 与 `ups[i]` 同尺寸（真源每级两张：
 /// 降采样结果与上采样结果，后者在降采样阶段兼作横向模糊的临时目标）。
 #[derive(Component)]
-struct StockBloomPyramid {
+pub(crate) struct StockBloomPyramid {
     downs: Vec<CachedTexture>,
     ups: Vec<CachedTexture>,
 }
-
-#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-struct StockPostLabel;
 
 fn init_stock_post(
     mut commands: Commands,
@@ -265,7 +259,7 @@ fn init_stock_post(
     let blur_v = pipeline("stock_bloom_blur_v", PYRAMID_FORMAT, &blur_layout);
     let upsample = pipeline("stock_bloom_upsample", PYRAMID_FORMAT, &upsample_layout);
     // 相机是 LDR：主纹理即引擎默认格式（与天气链合成 pass 同一目标格式）。
-    let uber = pipeline("stock_uber", TextureFormat::bevy_default(), &uber_layout);
+    let uber = pipeline("stock_uber", TextureFormat::Rgba8UnormSrgb, &uber_layout);
 
     let sampler = render_device.create_sampler(&SamplerDescriptor {
         label: Some("stock_post_linear_clamp"),
@@ -434,7 +428,7 @@ fn prepare_stock_bloom_pyramid(
         let bloom = state.bloom.filter(|_| state.bloom_on);
         let viewport = camera.physical_viewport_size;
         let (Some(bloom), Some(viewport), true) =
-            (bloom, viewport, camera.render_graph == Core3d.intern())
+            (bloom, viewport, camera.schedule == Core3d.intern())
         else {
             if previous.is_some() {
                 commands.entity(entity).remove::<StockBloomPyramid>();
@@ -481,188 +475,169 @@ fn prepare_stock_bloom_pyramid(
     }
 }
 
-struct StockPostNode {
-    bind_groups: SharedBindGroupCache,
-}
-
-impl FromWorld for StockPostNode {
-    fn from_world(world: &mut World) -> Self {
-        Self {
-            bind_groups: SharedBindGroupCache::from_world(world),
-        }
+/// Core3d：引擎原生后处理（bloom 金字塔 + uber），排在色调映射之后、天气后处理之前。
+pub(crate) fn stock_post(
+    world: &World,
+    view: ViewQuery<(&ViewTarget, Option<&StockBloomPyramid>, Option<&TransparentCapture>)>,
+    bind_groups: Local<SharedBindGroupCache>,
+    mut render_context: RenderContext,
+) {
+    let (view_target, pyramid, transparent_capture) = view.into_inner();
+    if transparent_capture.is_some() {
+        return;
     }
-}
+    let gpu = world.resource::<StockPostGpu>();
+    if gpu.uploaded == 0 {
+        // 档案还没解出：没有表可查。
+        return;
+    }
+    let state = world.resource::<StockPostState>();
+    let pipelines = world.resource::<StockPostPipelines>();
+    let cache_p = world.resource::<PipelineCache>();
+    let (Some(prefilter), Some(blur_h), Some(blur_v), Some(upsample), Some(uber)) = (
+        cache_p.get_render_pipeline(pipelines.prefilter),
+        cache_p.get_render_pipeline(pipelines.blur_h),
+        cache_p.get_render_pipeline(pipelines.blur_v),
+        cache_p.get_render_pipeline(pipelines.upsample),
+        cache_p.get_render_pipeline(pipelines.uber),
+    ) else {
+        return;
+    };
+    let post_process = view_target.post_process_write();
+    let frame = world.resource::<FrameCount>().0;
+    let n = match pyramid {
+        Some(p) if state.bloom_on && p.downs.len() >= 2 => p.downs.len(),
+        _ => 0,
+    };
+    let bloom_view: &TextureView = match pyramid {
+        Some(p) if n > 0 => &p.ups[0].default_view,
+        _ => &pipelines.black.default_view,
+    };
 
-impl ViewNode for StockPostNode {
-    type ViewQuery = (
-        &'static ViewTarget,
-        Option<&'static StockBloomPyramid>,
-        Option<&'static TransparentCapture>,
-    );
-
-    fn run(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext,
-        (view_target, pyramid, transparent_capture): QueryItem<Self::ViewQuery>,
-        world: &World,
-    ) -> Result<(), NodeRunError> {
-        if transparent_capture.is_some() {
-            return Ok(());
+    let mut cache = bind_groups.lock();
+    let device = render_context.render_device();
+    let sampler_ = &pipelines.sampler;
+    let prefilter_layout = cache_p.get_bind_group_layout(&pipelines.prefilter_layout);
+    let blur_layout = cache_p.get_bind_group_layout(&pipelines.blur_layout);
+    let upsample_layout = cache_p.get_bind_group_layout(&pipelines.upsample_layout);
+    let uber_layout = cache_p.get_bind_group_layout(&pipelines.uber_layout);
+    // (管线, bind group, 目标, 标签)，先全部取好再跑（跑 pass 要可变借用）。
+    let mut passes: Vec<(
+        &RenderPipeline,
+        bevy::render::render_resource::BindGroup,
+        &TextureView,
+        &'static str,
+    )> = Vec::new();
+    if let (Some(p), true) = (pyramid, n > 0) {
+        let group = cache.get(
+            device,
+            "stock_bloom_prefilter",
+            &prefilter_layout,
+            &[
+                (0, Bound::View(post_process.source)),
+                (3, Bound::whole(&gpu.uniform)),
+            ],
+            frame,
+        );
+        passes.push((
+            prefilter,
+            group,
+            &p.downs[0].default_view,
+            "stock_bloom_prefilter",
+        ));
+        for i in 1..n {
+            let h_group = cache.get(
+                device,
+                "stock_bloom_blur",
+                &blur_layout,
+                &[
+                    (0, Bound::View(&p.downs[i - 1].default_view)),
+                    (2, Bound::Sampler(sampler_)),
+                ],
+                frame,
+            );
+            passes.push((
+                blur_h,
+                h_group,
+                &p.ups[i].default_view,
+                "stock_bloom_blur_h",
+            ));
+            let v_group = cache.get(
+                device,
+                "stock_bloom_blur",
+                &blur_layout,
+                &[
+                    (0, Bound::View(&p.ups[i].default_view)),
+                    (2, Bound::Sampler(sampler_)),
+                ],
+                frame,
+            );
+            passes.push((
+                blur_v,
+                v_group,
+                &p.downs[i].default_view,
+                "stock_bloom_blur_v",
+            ));
         }
-        let gpu = world.resource::<StockPostGpu>();
-        if gpu.uploaded == 0 {
-            // 档案还没解出：没有表可查。
-            return Ok(());
-        }
-        let state = world.resource::<StockPostState>();
-        let pipelines = world.resource::<StockPostPipelines>();
-        let cache_p = world.resource::<PipelineCache>();
-        let (Some(prefilter), Some(blur_h), Some(blur_v), Some(upsample), Some(uber)) = (
-            cache_p.get_render_pipeline(pipelines.prefilter),
-            cache_p.get_render_pipeline(pipelines.blur_h),
-            cache_p.get_render_pipeline(pipelines.blur_v),
-            cache_p.get_render_pipeline(pipelines.upsample),
-            cache_p.get_render_pipeline(pipelines.uber),
-        ) else {
-            return Ok(());
-        };
-        let post_process = view_target.post_process_write();
-        let frame = world.resource::<FrameCount>().0;
-        let n = match pyramid {
-            Some(p) if state.bloom_on && p.downs.len() >= 2 => p.downs.len(),
-            _ => 0,
-        };
-        let bloom_view: &TextureView = match pyramid {
-            Some(p) if n > 0 => &p.ups[0].default_view,
-            _ => &pipelines.black.default_view,
-        };
-
-        let mut cache = self.bind_groups.lock();
-        let device = render_context.render_device();
-        let sampler_ = &pipelines.sampler;
-        let prefilter_layout = cache_p.get_bind_group_layout(&pipelines.prefilter_layout);
-        let blur_layout = cache_p.get_bind_group_layout(&pipelines.blur_layout);
-        let upsample_layout = cache_p.get_bind_group_layout(&pipelines.upsample_layout);
-        let uber_layout = cache_p.get_bind_group_layout(&pipelines.uber_layout);
-        // (管线, bind group, 目标, 标签)，先全部取好再跑（跑 pass 要可变借用）。
-        let mut passes: Vec<(
-            &RenderPipeline,
-            bevy::render::render_resource::BindGroup,
-            &TextureView,
-            &'static str,
-        )> = Vec::new();
-        if let (Some(p), true) = (pyramid, n > 0) {
+        for i in (0..n - 1).rev() {
+            let low = if i == n - 2 {
+                &p.downs[i + 1].default_view
+            } else {
+                &p.ups[i + 1].default_view
+            };
             let group = cache.get(
                 device,
-                "stock_bloom_prefilter",
-                &prefilter_layout,
+                "stock_bloom_upsample",
+                &upsample_layout,
                 &[
-                    (0, Bound::View(post_process.source)),
+                    (0, Bound::View(&p.downs[i].default_view)),
+                    (1, Bound::View(low)),
+                    (2, Bound::Sampler(sampler_)),
                     (3, Bound::whole(&gpu.uniform)),
                 ],
                 frame,
             );
             passes.push((
-                prefilter,
+                upsample,
                 group,
-                &p.downs[0].default_view,
-                "stock_bloom_prefilter",
+                &p.ups[i].default_view,
+                "stock_bloom_upsample",
             ));
-            for i in 1..n {
-                let h_group = cache.get(
-                    device,
-                    "stock_bloom_blur",
-                    &blur_layout,
-                    &[
-                        (0, Bound::View(&p.downs[i - 1].default_view)),
-                        (2, Bound::Sampler(sampler_)),
-                    ],
-                    frame,
-                );
-                passes.push((
-                    blur_h,
-                    h_group,
-                    &p.ups[i].default_view,
-                    "stock_bloom_blur_h",
-                ));
-                let v_group = cache.get(
-                    device,
-                    "stock_bloom_blur",
-                    &blur_layout,
-                    &[
-                        (0, Bound::View(&p.ups[i].default_view)),
-                        (2, Bound::Sampler(sampler_)),
-                    ],
-                    frame,
-                );
-                passes.push((
-                    blur_v,
-                    v_group,
-                    &p.downs[i].default_view,
-                    "stock_bloom_blur_v",
-                ));
-            }
-            for i in (0..n - 1).rev() {
-                let low = if i == n - 2 {
-                    &p.downs[i + 1].default_view
-                } else {
-                    &p.ups[i + 1].default_view
-                };
-                let group = cache.get(
-                    device,
-                    "stock_bloom_upsample",
-                    &upsample_layout,
-                    &[
-                        (0, Bound::View(&p.downs[i].default_view)),
-                        (1, Bound::View(low)),
-                        (2, Bound::Sampler(sampler_)),
-                        (3, Bound::whole(&gpu.uniform)),
-                    ],
-                    frame,
-                );
-                passes.push((
-                    upsample,
-                    group,
-                    &p.ups[i].default_view,
-                    "stock_bloom_upsample",
-                ));
-            }
         }
-        let uber_group = cache.get(
-            device,
-            "stock_uber",
-            &uber_layout,
-            &[
-                (0, Bound::View(post_process.source)),
-                (1, Bound::View(bloom_view)),
-                (2, Bound::Sampler(sampler_)),
-                (3, Bound::whole(&gpu.uniform)),
-                (4, Bound::View(&gpu.lut_view)),
-            ],
-            frame,
-        );
-        passes.push((uber, uber_group, post_process.destination, "stock_uber"));
-        drop(cache);
+    }
+    let uber_group = cache.get(
+        device,
+        "stock_uber",
+        &uber_layout,
+        &[
+            (0, Bound::View(post_process.source)),
+            (1, Bound::View(bloom_view)),
+            (2, Bound::Sampler(sampler_)),
+            (3, Bound::whole(&gpu.uniform)),
+            (4, Bound::View(&gpu.lut_view)),
+        ],
+        frame,
+    );
+    passes.push((uber, uber_group, post_process.destination, "stock_uber"));
+    drop(cache);
 
-        for (pipeline, group, target, label) in &passes {
-            let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
-                label: Some(label),
-                color_attachments: &[Some(RenderPassColorAttachment {
-                    view: target,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: Operations::default(),
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            pass.set_render_pipeline(pipeline);
-            pass.set_bind_group(0, group, &[]);
-            pass.draw(0..3, 0..1);
-        }
-        Ok(())
+    for (pipeline, group, target, label) in &passes {
+        let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
+            label: Some(label),
+            color_attachments: &[Some(RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: Operations::default(),
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_render_pipeline(pipeline);
+        pass.set_bind_group(0, group, &[]);
+        pass.draw(0..3, 0..1);
     }
 }
 
@@ -697,10 +672,12 @@ impl Plugin for StockPostPlugin {
                     prepare_stock_bloom_pyramid.in_set(RenderSystems::PrepareResources),
                 ),
             )
-            .add_render_graph_node::<ViewNodeRunner<StockPostNode>>(Core3d, StockPostLabel)
-            .add_render_graph_edges(
+            .add_systems(
                 Core3d,
-                (Node3d::Tonemapping, StockPostLabel, WeatherPostLabel),
+                stock_post
+                    .after(tonemapping)
+                    .before(weather_post)
+                    .in_set(Core3dSystems::PostProcess),
             );
     }
 }

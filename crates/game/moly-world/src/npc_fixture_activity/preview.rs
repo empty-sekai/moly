@@ -144,7 +144,7 @@ fn admit(
     }
     let mut params = SystemState::<Admission>::new(world);
     let result = {
-        let mut p = params.get_mut(world);
+        let mut p = params.get_mut(world).expect("system params");
         let spec = p
             .factory
             .tables

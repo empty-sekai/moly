@@ -2277,7 +2277,7 @@ pub fn follow_avatar(
         let current = state.0;
         commands.queue(move |world: &mut World| {
             let mut system_state: SystemState<(Commands, CameraReset)> = SystemState::new(world);
-            let (mut commands, mut reset) = system_state.get_mut(world);
+            let (mut commands, mut reset) = system_state.get_mut(world).expect("system params");
             info!("[camera] instrument MOLY_CAMERA_AUTORESET: the camera reset pressed in {current:?}");
             reset.reset_camera_setting(&mut commands);
             system_state.apply(world);

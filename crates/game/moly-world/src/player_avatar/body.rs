@@ -19,7 +19,7 @@ use bevy::ecs::observer::On;
 use bevy::gltf::Gltf;
 use bevy::mesh::skinning::SkinnedMesh;
 use bevy::prelude::*;
-use bevy::scene::{SceneInstanceReady, SceneRoot};
+use bevy::world_serialization::{WorldInstanceReady, WorldAssetRoot};
 use moly_assets::json::JsonAsset;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -113,7 +113,7 @@ pub fn attach(
         };
         commands
             .entity(player)
-            .with_child((SceneRoot(scene), BodyModel))
+            .with_child((WorldAssetRoot(scene), BodyModel))
             .insert(BodyAttached);
         info!("[player] body attached: {}", body.model);
     }
@@ -121,7 +121,7 @@ pub fn attach(
 
 /// Observer: the body's scene has spawned.
 pub fn on_scene_ready(
-    trigger: On<SceneInstanceReady>,
+    trigger: On<WorldInstanceReady>,
     models: Query<&BodyModel>,
     parents: Query<&ChildOf>,
     mut commands: Commands,

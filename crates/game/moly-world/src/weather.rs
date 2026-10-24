@@ -25,17 +25,14 @@ use bevy::asset::uuid::Uuid;
 use crate::weather_transition::{EnvironmentSelection, GlobalEffectIdentity, WeatherTransition, WeatherFxPrepared, WeatherEnvironmentUpdate};
 use moly_law::weather::color_lerp::{color_lerp, PLAYER_COLOR_SPACE};
 use bevy::asset::{AssetPath, LoadState};
-use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
+use bevy::core_pipeline::tonemapping::tonemapping;
+use bevy::core_pipeline::{Core3d, Core3dSystems};
 use bevy::core_pipeline::FullscreenShader;
-use bevy::ecs::query::QueryItem;
 use bevy::image::ImageLoaderSettings;
 use bevy::prelude::*;
 use bevy::render::camera::ExtractedCamera;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
-use bevy::render::render_graph::{
-    NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, RenderSubGraph, ViewNode,
-    ViewNodeRunner,
-};
+use bevy::ecs::schedule::ScheduleLabel;
 use bevy::render::render_resource::binding_types::{sampler, texture_2d, uniform_buffer};
 use bevy::render::render_resource::{
     BindGroup, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
@@ -46,7 +43,7 @@ use bevy::render::render_resource::{
     TexelCopyBufferLayout, TexelCopyTextureInfo, TextureAspect, TextureDescriptor,
     TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureView,
 };
-use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
+use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
 use bevy::render::texture::{CachedTexture, TextureCache};
 use bevy::render::view::ViewTarget;
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
@@ -473,10 +470,10 @@ fn parse_index(
         AssetPath::from(format!("moly://phenomena/{file}")));
     let mut pending = Vec::with_capacity(entries.len());
     for (name, entry) in entries {
-        let ramp = server.load_with_settings::<Image, _>(
-            AssetPath::from(format!("moly://phenomena/{}", entry.ramp.file)),
-            |settings: &mut ImageLoaderSettings| settings.is_srgb = false,
-        );
+        let ramp = server
+            .load_builder()
+            .with_settings(|settings: &mut ImageLoaderSettings| settings.is_srgb = false)
+            .load::<Image>(AssetPath::from(format!("moly://phenomena/{}", entry.ramp.file)));
         let overrides = entry.overrides.into_iter().map(|(site, files)| {
             (site, OverridePair {
                 config: files.config.as_deref().map(&load),
@@ -1026,7 +1023,7 @@ fn write_environment(
             material.differs_from(&a.ramp, &b.ramp, phase.progress, values.sky_color, values.sky_intensity)
         });
         if stale {
-            if let Some(material) = materials.get_mut(&handle.0) {
+            if let Some(material) = materials.get_mut(&handle.0).map(|asset| asset.into_inner()) {
                 material.set_ramps(a.ramp.clone(),b.ramp.clone(),phase.progress);
                 material.set_timeline_additive(values.sky_color, values.sky_intensity);
             }
@@ -1410,15 +1407,12 @@ struct WeatherPipelines {
 /// 本帧一个视图的两座金字塔（Prepare 侧现算；对应轴关着时为空，节点跳过
 /// 那一段）。
 #[derive(Component, Default)]
-struct WeatherPyramid {
+pub(crate) struct WeatherPyramid {
     downs: Vec<CachedTexture>,
     ups: Vec<CachedTexture>,
     bloom_downs: Vec<CachedTexture>,
     bloom_uploads: Vec<CachedTexture>,
 }
-
-#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-pub struct WeatherPostLabel;
 
 /// 扩散金字塔的层级布局，逐项照源 pass：**高取档案的 `bufferHeight`
 /// 原值**（不钳视口——源侧的描述符里根本没有视口，只有宽高比进得来），
@@ -1605,7 +1599,7 @@ fn init_weather_pipelines(
     let up = pipeline("weather_up_fragment", PYRAMID_FORMAT, &up_layout);
     let composite = pipeline(
         "weather_composite_fragment",
-        TextureFormat::bevy_default(),
+        TextureFormat::Rgba8UnormSrgb,
         &composite_layout,
     );
     let bloom_prefilter = pipeline(
@@ -1747,7 +1741,7 @@ fn write_sun_flare_axis(
     let exponent = params.sun.exponent.max(FLARE_EXPONENT_FLOOR);
     let mut slot = [0.0f32, 0.0, 0.0, exponent];
     if params.sun_on {
-        let mut weather_views = views.iter().filter(|(_, camera)| camera.render_graph == Core3d.intern());
+        let mut weather_views = views.iter().filter(|(_, camera)| camera.schedule == Core3d.intern());
         match (weather_views.next(), weather_views.next()) {
             (Some((view, _)), None) => {
                 let reflect = Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0));
@@ -1788,7 +1782,7 @@ fn prepare_weather_pyramid(
         // WeatherPostNode is installed only in Core3d. Overlay/composite 2D
         // cameras never consume these textures; allocating for them duplicates
         // the scene's pyramids. Drop an old component if a view changes graph.
-        if camera.render_graph != Core3d.intern() {
+        if camera.schedule != Core3d.intern() {
             if previous.is_some() {
                 commands.entity(entity).remove::<WeatherPyramid>();
             }
@@ -1864,317 +1858,302 @@ fn prepare_weather_pyramid(
 /// levels stay the same textures while the viewport and axis values hold, and
 /// the ping-pong source alternates between two views, so steady frames reuse
 /// every group instead of creating the whole set again.
-struct WeatherPostNode {
-    bind_groups: SharedBindGroupCache,
-}
-
-impl FromWorld for WeatherPostNode {
-    fn from_world(world: &mut World) -> Self {
-        Self { bind_groups: SharedBindGroupCache::from_world(world) }
-    }
-}
-
-impl ViewNode for WeatherPostNode {
+pub(crate) fn weather_post(
+    world: &World,
     // 只在带金字塔组件的视图上跑（Prepare 只给 Core3d 视图插）。自发光
     // 目标是 Option：换装未完成或自发光 pass 未建目标时缺件——扩散/
     // 耀斑照跑，泛光段跳过、合成按黑图（零贡献，fail-closed 不吃上一
     // 帧余像）。
-    type ViewQuery = (
-        &'static ViewTarget,
-        &'static WeatherPyramid,
-        Option<&'static ViewEmissionTarget>,
-        Option<&'static TransparentCapture>,
-    );
+    view: ViewQuery<(
+        &ViewTarget,
+        &WeatherPyramid,
+        Option<&ViewEmissionTarget>,
+        Option<&TransparentCapture>,
+    )>,
+    bind_groups: Local<SharedBindGroupCache>,
+    mut render_context: RenderContext,
+) {
+    let (view_target, pyramid, emission_target, transparent_capture) = view.into_inner();
+    if transparent_capture.is_some() { return; }
+    let params = world.resource::<WeatherPostParams>();
+    if !params.diff_on && !params.flare_on && !params.bloom_on && !params.sun_on {
+        return;
+    }
+    let pipelines = world.resource::<WeatherPipelines>();
+    let pipeline_cache = world.resource::<PipelineCache>();
+    let gpu = world.resource::<WeatherPostGpu>();
+    let (
+        Some(copy_pipeline),
+        Some(down_pipeline),
+        Some(up_pipeline),
+        Some(composite_pipeline),
+        Some(bloom_prefilter_pipeline),
+        Some(bloom_down_pipeline),
+        Some(bloom_up_pipeline),
+    ) = (
+        pipeline_cache.get_render_pipeline(pipelines.copy),
+        pipeline_cache.get_render_pipeline(pipelines.down),
+        pipeline_cache.get_render_pipeline(pipelines.up),
+        pipeline_cache.get_render_pipeline(pipelines.composite),
+        pipeline_cache.get_render_pipeline(pipelines.bloom_prefilter),
+        pipeline_cache.get_render_pipeline(pipelines.bloom_down),
+        pipeline_cache.get_render_pipeline(pipelines.bloom_up),
+    ) else {
+        // 着色器还在编（首几帧），这一帧跳过。
+        return;
+    };
 
-    fn run(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext,
-        (view_target, pyramid, emission_target, transparent_capture): QueryItem<Self::ViewQuery>,
-        world: &World,
-    ) -> Result<(), NodeRunError> {
-        if transparent_capture.is_some() { return Ok(()); }
-        let params = world.resource::<WeatherPostParams>();
-        if !params.diff_on && !params.flare_on && !params.bloom_on && !params.sun_on {
-            return Ok(());
-        }
-        let pipelines = world.resource::<WeatherPipelines>();
-        let pipeline_cache = world.resource::<PipelineCache>();
-        let gpu = world.resource::<WeatherPostGpu>();
-        let (
-            Some(copy_pipeline),
-            Some(down_pipeline),
-            Some(up_pipeline),
-            Some(composite_pipeline),
-            Some(bloom_prefilter_pipeline),
-            Some(bloom_down_pipeline),
-            Some(bloom_up_pipeline),
-        ) = (
-            pipeline_cache.get_render_pipeline(pipelines.copy),
-            pipeline_cache.get_render_pipeline(pipelines.down),
-            pipeline_cache.get_render_pipeline(pipelines.up),
-            pipeline_cache.get_render_pipeline(pipelines.composite),
-            pipeline_cache.get_render_pipeline(pipelines.bloom_prefilter),
-            pipeline_cache.get_render_pipeline(pipelines.bloom_down),
-            pipeline_cache.get_render_pipeline(pipelines.bloom_up),
-        ) else {
-            // 着色器还在编（首几帧），这一帧跳过。
-            return Ok(());
-        };
+    // 源/目的每帧轮换，bind group 只能在这里取（按所绑资源缓存）。全部
+    // **先取后跑**：设备句柄借 render_context 的不可变引用，跑 pass 要可
+    // 变借用，交叠即撞。
+    let post_process = view_target.post_process_write();
+    let frame = world.resource::<FrameCount>().0;
+    let mut cache = bind_groups.lock();
+    // 扩散金字塔的级数（扩散关着时为 0）。
+    let n = if params.diff_on { pyramid.downs.len() } else { 0 };
+    // 合成里的扩散层：单级金字塔直取直拷结果，多级取上采样链顶；扩散
+    // 关着时用占位黑图（全黑 ⇒ 零贡献），着色器里门也不开。
+    let diff_view: &TextureView = if n == 0 {
+        &pipelines.black.default_view
+    } else if n == 1 {
+        &pyramid.downs[0].default_view
+    } else {
+        &pyramid.ups[0].default_view
+    };
+    // 泛光金字塔的级数：泛光开着且自发光目标在手才跑（目标缺件时整段
+    // 跳过，合成按黑图——自发光缓冲没有「上一帧可用」的余像可吃）。
+    let bloom_n = if params.bloom_on && emission_target.is_some() {
+        pyramid.bloom_downs.len()
+    } else {
+        0
+    };
+    // 合成里的泛光层：与扩散同构——单级直取预滤波结果，多级取上采样
+    // 链顶；关闭/缺件时占位黑图。
+    let bloom_view: &TextureView = if bloom_n == 0 {
+        &pipelines.black.default_view
+    } else if bloom_n == 1 {
+        &pyramid.bloom_downs[0].default_view
+    } else {
+        &pyramid.bloom_uploads[0].default_view
+    };
 
-        // 源/目的每帧轮换，bind group 只能在这里取（按所绑资源缓存）。全部
-        // **先取后跑**：设备句柄借 render_context 的不可变引用，跑 pass 要可
-        // 变借用，交叠即撞。
-        let post_process = view_target.post_process_write();
-        let frame = world.resource::<FrameCount>().0;
-        let mut cache = self.bind_groups.lock();
-        // 扩散金字塔的级数（扩散关着时为 0）。
-        let n = if params.diff_on { pyramid.downs.len() } else { 0 };
-        // 合成里的扩散层：单级金字塔直取直拷结果，多级取上采样链顶；扩散
-        // 关着时用占位黑图（全黑 ⇒ 零贡献），着色器里门也不开。
-        let diff_view: &TextureView = if n == 0 {
-            &pipelines.black.default_view
-        } else if n == 1 {
-            &pyramid.downs[0].default_view
-        } else {
-            &pyramid.ups[0].default_view
-        };
-        // 泛光金字塔的级数：泛光开着且自发光目标在手才跑（目标缺件时整段
-        // 跳过，合成按黑图——自发光缓冲没有「上一帧可用」的余像可吃）。
-        let bloom_n = if params.bloom_on && emission_target.is_some() {
-            pyramid.bloom_downs.len()
-        } else {
-            0
-        };
-        // 合成里的泛光层：与扩散同构——单级直取预滤波结果，多级取上采样
-        // 链顶；关闭/缺件时占位黑图。
-        let bloom_view: &TextureView = if bloom_n == 0 {
-            &pipelines.black.default_view
-        } else if bloom_n == 1 {
-            &pyramid.bloom_downs[0].default_view
-        } else {
-            &pyramid.bloom_uploads[0].default_view
-        };
+    let copy_bind_group: Option<BindGroup>;
+    let down_bind_groups: Vec<BindGroup>;
+    let up_bind_groups: Vec<BindGroup>;
+    let bloom_prefilter_bind_group: Option<BindGroup>;
+    let bloom_down_bind_groups: Vec<BindGroup>;
+    let bloom_up_bind_groups: Vec<BindGroup>;
+    let composite_bind_group: BindGroup;
+    {
+        let device = render_context.render_device();
+        let sampler = &pipelines.sampler;
+        let copy_layout = pipeline_cache.get_bind_group_layout(&pipelines.copy_layout);
+        let up_layout = pipeline_cache.get_bind_group_layout(&pipelines.up_layout);
+        let composite_layout =
+            pipeline_cache.get_bind_group_layout(&pipelines.composite_layout);
+        let bloom_prefilter_layout =
+            pipeline_cache.get_bind_group_layout(&pipelines.bloom_prefilter_layout);
+        let bloom_up_layout = pipeline_cache.get_bind_group_layout(&pipelines.bloom_up_layout);
 
-        let copy_bind_group: Option<BindGroup>;
-        let down_bind_groups: Vec<BindGroup>;
-        let up_bind_groups: Vec<BindGroup>;
-        let bloom_prefilter_bind_group: Option<BindGroup>;
-        let bloom_down_bind_groups: Vec<BindGroup>;
-        let bloom_up_bind_groups: Vec<BindGroup>;
-        let composite_bind_group: BindGroup;
-        {
-            let device = render_context.render_device();
-            let sampler = &pipelines.sampler;
-            let copy_layout = pipeline_cache.get_bind_group_layout(&pipelines.copy_layout);
-            let up_layout = pipeline_cache.get_bind_group_layout(&pipelines.up_layout);
-            let composite_layout =
-                pipeline_cache.get_bind_group_layout(&pipelines.composite_layout);
-            let bloom_prefilter_layout =
-                pipeline_cache.get_bind_group_layout(&pipelines.bloom_prefilter_layout);
-            let bloom_up_layout = pipeline_cache.get_bind_group_layout(&pipelines.bloom_up_layout);
-
-            if n > 0 {
-                // 直拷预过滤：源（引擎后处理之后的编码域画面）→ 金字塔第一级。
-                copy_bind_group = Some(cache.get(
-                    device,
-                    "weather_copy_bind_group",
-                    &copy_layout,
-                    &[
-                        (0, Bound::View(post_process.source)),
-                        (2, Bound::Sampler(sampler)),
-                        (3, Bound::whole(&gpu.buffer)),
-                    ],
-                    frame,
-                ));
-                // 逐级降采样：上一级 → 下一级。建组顺序无所谓，跑序才要紧。
-                down_bind_groups = (1..n)
-                    .map(|i| {
-                        cache.get(
-                            device,
-                            "weather_down_bind_group",
-                            &copy_layout,
-                            &[
-                                (0, Bound::View(&pyramid.downs[i - 1].default_view)),
-                                (2, Bound::Sampler(sampler)),
-                                (3, Bound::whole(&gpu.buffer)),
-                            ],
-                            frame,
-                        )
-                    })
-                    .collect();
-                // 逐级上采样：高级别 + 低一级（最深处取降采样链尾，其余取上
-                // 一轮上采样）按散射权重混。建组按索引正序，跑序倒序。
-                // 散射权重绑独立小块 buffer 的整段（见 WeatherPostGpu::scatter
-                // 的注释——按偏移绑会撞 uniform 对齐限制）。
-                up_bind_groups = (0..n - 1)
-                    .map(|i| {
-                        let low = if i == n - 2 {
-                            &pyramid.downs[i + 1].default_view
-                        } else {
-                            &pyramid.ups[i + 1].default_view
-                        };
-                        cache.get(
-                            device,
-                            "weather_up_bind_group",
-                            &up_layout,
-                            &[
-                                (0, Bound::View(&pyramid.downs[i].default_view)),
-                                (1, Bound::View(low)),
-                                (2, Bound::Sampler(sampler)),
-                                (4, Bound::whole(&gpu.scatter)),
-                            ],
-                            frame,
-                        )
-                    })
-                    .collect();
-            } else {
-                copy_bind_group = None;
-                down_bind_groups = Vec::new();
-                up_bind_groups = Vec::new();
-            }
-
-            if bloom_n > 0 {
-                // 泛光预滤波：自发光缓冲（已 resolve 的单采样视图）→ 金字塔
-                // 第一级。阈值软膝在着色器里；参数整块绑（预滤波与上采样
-                // 共用同一份打包）。
-                bloom_prefilter_bind_group = Some(cache.get(
-                    device,
-                    "bloom_prefilter_bind_group",
-                    &bloom_prefilter_layout,
-                    &[
-                        (0, Bound::View(&emission_target.unwrap().resolved)),
-                        (2, Bound::Sampler(sampler)),
-                        (5, Bound::whole(&gpu.bloom_params)),
-                    ],
-                    frame,
-                ));
-                bloom_down_bind_groups = (1..bloom_n)
-                    .map(|i| {
-                        cache.get(
-                            device,
-                            "bloom_down_bind_group",
-                            &copy_layout,
-                            &[
-                                (0, Bound::View(&pyramid.bloom_downs[i - 1].default_view)),
-                                (2, Bound::Sampler(sampler)),
-                                (3, Bound::whole(&gpu.buffer)),
-                            ],
-                            frame,
-                        )
-                    })
-                    .collect();
-                // 泛光上采样：与扩散同构（本级 + 低一级），参数块换成泛光
-                // 自己的（散射权重同值，无扩散侧的 lerp 折算）。
-                bloom_up_bind_groups = (0..bloom_n - 1)
-                    .map(|i| {
-                        let low = if i == bloom_n - 2 {
-                            &pyramid.bloom_downs[i + 1].default_view
-                        } else {
-                            &pyramid.bloom_uploads[i + 1].default_view
-                        };
-                        cache.get(
-                            device,
-                            "bloom_up_bind_group",
-                            &bloom_up_layout,
-                            &[
-                                (0, Bound::View(&pyramid.bloom_downs[i].default_view)),
-                                (1, Bound::View(low)),
-                                (2, Bound::Sampler(sampler)),
-                                (5, Bound::whole(&gpu.bloom_params)),
-                            ],
-                            frame,
-                        )
-                    })
-                    .collect();
-            } else {
-                bloom_prefilter_bind_group = None;
-                bloom_down_bind_groups = Vec::new();
-                bloom_up_bind_groups = Vec::new();
-            }
-
-            // 合成：源 + 扩散层 + 泛光层 → 目的。写目的是 post_process_write
-            // 的约定——主纹理已被翻到目的侧，不写就丢帧。
-            composite_bind_group = cache.get(
+        if n > 0 {
+            // 直拷预过滤：源（引擎后处理之后的编码域画面）→ 金字塔第一级。
+            copy_bind_group = Some(cache.get(
                 device,
-                "weather_composite_bind_group",
-                &composite_layout,
+                "weather_copy_bind_group",
+                &copy_layout,
                 &[
                     (0, Bound::View(post_process.source)),
-                    (1, Bound::View(diff_view)),
                     (2, Bound::Sampler(sampler)),
                     (3, Bound::whole(&gpu.buffer)),
-                    (6, Bound::View(bloom_view)),
                 ],
                 frame,
-            );
+            ));
+            // 逐级降采样：上一级 → 下一级。建组顺序无所谓，跑序才要紧。
+            down_bind_groups = (1..n)
+                .map(|i| {
+                    cache.get(
+                        device,
+                        "weather_down_bind_group",
+                        &copy_layout,
+                        &[
+                            (0, Bound::View(&pyramid.downs[i - 1].default_view)),
+                            (2, Bound::Sampler(sampler)),
+                            (3, Bound::whole(&gpu.buffer)),
+                        ],
+                        frame,
+                    )
+                })
+                .collect();
+            // 逐级上采样：高级别 + 低一级（最深处取降采样链尾，其余取上
+            // 一轮上采样）按散射权重混。建组按索引正序，跑序倒序。
+            // 散射权重绑独立小块 buffer 的整段（见 WeatherPostGpu::scatter
+            // 的注释——按偏移绑会撞 uniform 对齐限制）。
+            up_bind_groups = (0..n - 1)
+                .map(|i| {
+                    let low = if i == n - 2 {
+                        &pyramid.downs[i + 1].default_view
+                    } else {
+                        &pyramid.ups[i + 1].default_view
+                    };
+                    cache.get(
+                        device,
+                        "weather_up_bind_group",
+                        &up_layout,
+                        &[
+                            (0, Bound::View(&pyramid.downs[i].default_view)),
+                            (1, Bound::View(low)),
+                            (2, Bound::Sampler(sampler)),
+                            (4, Bound::whole(&gpu.scatter)),
+                        ],
+                        frame,
+                    )
+                })
+                .collect();
+        } else {
+            copy_bind_group = None;
+            down_bind_groups = Vec::new();
+            up_bind_groups = Vec::new();
         }
-        drop(cache);
 
-        // 跑 pass：直拷 → 降采样链 → 上采样链（倒序）→ 泛光三连 → 合成。
-        if let Some(bind_group) = copy_bind_group.as_ref() {
-            fullscreen_pass(
-                render_context,
-                copy_pipeline,
-                bind_group,
-                &pyramid.downs[0].default_view,
-                "weather_copy_pass",
-            );
-            for i in 1..n {
-                fullscreen_pass(
-                    render_context,
-                    down_pipeline,
-                    &down_bind_groups[i - 1],
-                    &pyramid.downs[i].default_view,
-                    "weather_down_pass",
-                );
-            }
-            for i in (0..n - 1).rev() {
-                fullscreen_pass(
-                    render_context,
-                    up_pipeline,
-                    &up_bind_groups[i],
-                    &pyramid.ups[i].default_view,
-                    "weather_up_pass",
-                );
-            }
+        if bloom_n > 0 {
+            // 泛光预滤波：自发光缓冲（已 resolve 的单采样视图）→ 金字塔
+            // 第一级。阈值软膝在着色器里；参数整块绑（预滤波与上采样
+            // 共用同一份打包）。
+            bloom_prefilter_bind_group = Some(cache.get(
+                device,
+                "bloom_prefilter_bind_group",
+                &bloom_prefilter_layout,
+                &[
+                    (0, Bound::View(&emission_target.unwrap().resolved)),
+                    (2, Bound::Sampler(sampler)),
+                    (5, Bound::whole(&gpu.bloom_params)),
+                ],
+                frame,
+            ));
+            bloom_down_bind_groups = (1..bloom_n)
+                .map(|i| {
+                    cache.get(
+                        device,
+                        "bloom_down_bind_group",
+                        &copy_layout,
+                        &[
+                            (0, Bound::View(&pyramid.bloom_downs[i - 1].default_view)),
+                            (2, Bound::Sampler(sampler)),
+                            (3, Bound::whole(&gpu.buffer)),
+                        ],
+                        frame,
+                    )
+                })
+                .collect();
+            // 泛光上采样：与扩散同构（本级 + 低一级），参数块换成泛光
+            // 自己的（散射权重同值，无扩散侧的 lerp 折算）。
+            bloom_up_bind_groups = (0..bloom_n - 1)
+                .map(|i| {
+                    let low = if i == bloom_n - 2 {
+                        &pyramid.bloom_downs[i + 1].default_view
+                    } else {
+                        &pyramid.bloom_uploads[i + 1].default_view
+                    };
+                    cache.get(
+                        device,
+                        "bloom_up_bind_group",
+                        &bloom_up_layout,
+                        &[
+                            (0, Bound::View(&pyramid.bloom_downs[i].default_view)),
+                            (1, Bound::View(low)),
+                            (2, Bound::Sampler(sampler)),
+                            (5, Bound::whole(&gpu.bloom_params)),
+                        ],
+                        frame,
+                    )
+                })
+                .collect();
+        } else {
+            bloom_prefilter_bind_group = None;
+            bloom_down_bind_groups = Vec::new();
+            bloom_up_bind_groups = Vec::new();
         }
-        if let Some(bind_group) = bloom_prefilter_bind_group.as_ref() {
-            fullscreen_pass(
-                render_context,
-                bloom_prefilter_pipeline,
-                bind_group,
-                &pyramid.bloom_downs[0].default_view,
-                "bloom_prefilter_pass",
-            );
-            for i in 1..bloom_n {
-                fullscreen_pass(
-                    render_context,
-                    bloom_down_pipeline,
-                    &bloom_down_bind_groups[i - 1],
-                    &pyramid.bloom_downs[i].default_view,
-                    "bloom_down_pass",
-                );
-            }
-            for i in (0..bloom_n - 1).rev() {
-                fullscreen_pass(
-                    render_context,
-                    bloom_up_pipeline,
-                    &bloom_up_bind_groups[i],
-                    &pyramid.bloom_uploads[i].default_view,
-                    "bloom_up_pass",
-                );
-            }
-        }
-        fullscreen_pass(
-            render_context,
-            composite_pipeline,
-            &composite_bind_group,
-            post_process.destination,
-            "weather_composite_pass",
+
+        // 合成：源 + 扩散层 + 泛光层 → 目的。写目的是 post_process_write
+        // 的约定——主纹理已被翻到目的侧，不写就丢帧。
+        composite_bind_group = cache.get(
+            device,
+            "weather_composite_bind_group",
+            &composite_layout,
+            &[
+                (0, Bound::View(post_process.source)),
+                (1, Bound::View(diff_view)),
+                (2, Bound::Sampler(sampler)),
+                (3, Bound::whole(&gpu.buffer)),
+                (6, Bound::View(bloom_view)),
+            ],
+            frame,
         );
-        Ok(())
     }
+    drop(cache);
+
+    // 跑 pass：直拷 → 降采样链 → 上采样链（倒序）→ 泛光三连 → 合成。
+    if let Some(bind_group) = copy_bind_group.as_ref() {
+        fullscreen_pass(
+            &mut render_context,
+            copy_pipeline,
+            bind_group,
+            &pyramid.downs[0].default_view,
+            "weather_copy_pass",
+        );
+        for i in 1..n {
+            fullscreen_pass(
+                &mut render_context,
+                down_pipeline,
+                &down_bind_groups[i - 1],
+                &pyramid.downs[i].default_view,
+                "weather_down_pass",
+            );
+        }
+        for i in (0..n - 1).rev() {
+            fullscreen_pass(
+                &mut render_context,
+                up_pipeline,
+                &up_bind_groups[i],
+                &pyramid.ups[i].default_view,
+                "weather_up_pass",
+            );
+        }
+    }
+    if let Some(bind_group) = bloom_prefilter_bind_group.as_ref() {
+        fullscreen_pass(
+            &mut render_context,
+            bloom_prefilter_pipeline,
+            bind_group,
+            &pyramid.bloom_downs[0].default_view,
+            "bloom_prefilter_pass",
+        );
+        for i in 1..bloom_n {
+            fullscreen_pass(
+                &mut render_context,
+                bloom_down_pipeline,
+                &bloom_down_bind_groups[i - 1],
+                &pyramid.bloom_downs[i].default_view,
+                "bloom_down_pass",
+            );
+        }
+        for i in (0..bloom_n - 1).rev() {
+            fullscreen_pass(
+                &mut render_context,
+                bloom_up_pipeline,
+                &bloom_up_bind_groups[i],
+                &pyramid.bloom_uploads[i].default_view,
+                "bloom_up_pass",
+            );
+        }
+    }
+    fullscreen_pass(
+        &mut render_context,
+        composite_pipeline,
+        &composite_bind_group,
+        post_process.destination,
+        "weather_composite_pass",
+    );
 }
 
 /// 一个全屏三角形 pass：设管线、设 bind group、画 3 顶点。
@@ -2197,6 +2176,7 @@ fn fullscreen_pass(
         depth_stencil_attachment: None,
         timestamp_writes: None,
         occlusion_query_set: None,
+        multiview_mask: None,
     });
     pass.set_render_pipeline(pipeline);
     pass.set_bind_group(0, bind_group, &[]);
@@ -2204,7 +2184,7 @@ fn fullscreen_pass(
 }
 
 /// 天气系统插件：主世界装载/切换/逐帧写出，渲染世界 uniform + 金字塔 +
-/// render graph 节点（挂在色调映射之后、主后处理收尾之前）。
+/// Core3d 后处理系统（排在色调映射之后）。
 #[derive(Component, Clone, bevy::render::extract_component::ExtractComponent)]
 pub struct TransparentCapture;
 
@@ -2247,17 +2227,10 @@ impl Plugin for WeatherPlugin {
                     prepare_weather_pyramid.in_set(RenderSystems::PrepareResources),
                 ),
             )
-            .add_render_graph_node::<ViewNodeRunner<WeatherPostNode>>(Core3d, WeatherPostLabel)
-            .add_render_graph_edges(
+            .add_systems(
                 Core3d,
-                (
-                    Node3d::Tonemapping,
-                    WeatherPostLabel,
-                    Node3d::EndMainPassPostProcessing,
-                ),
+                weather_post.after(tonemapping).in_set(Core3dSystems::PostProcess),
             );
-        // The engine's own post node is ordered before this chain's node, so
-        // it is installed after that node exists.
         app.add_plugins(crate::weather_stock_post::StockPostPlugin);
     }
 }

@@ -8,8 +8,8 @@
 //! the ready epoch, and provides the shared path collector. It does not delete
 //! entities by a package-wide list or interpret uninstantiated prefabs as errors.
 //!
-//! 时机在 [`bevy::scene::SceneSpawnerSystems::Spawn`] 之后（SpawnScene
-//! 集）：`SceneInstanceReady` 在 Update 之后才触发，`SiteReady` 同帧就被
+//! 时机在 [`bevy::app::SceneSpawnerSystems::WorldInstanceSpawn`] 之后（SpawnScene
+//! 集）：`WorldInstanceReady` 在 Update 之后才触发，`SiteReady` 同帧就被
 //! 取景行吃掉——在 Update 里门在 `SiteReady` 上的清扫永远轮空。这里在
 //! 展开完成的当帧立 [`SiteSettled`]；源休眠标记和显隐已经随 Scene 克隆。
 //! Camera/navigation explicitly ignore source-inactive geometry, without

@@ -461,7 +461,7 @@ mod playback_gesture_tests {
         let mut writer = SystemState::<MessageWriter<GestureEvent>>::new(&mut world);
         let mut layer = GestureLayerState::default();
         {
-            let mut events = writer.get_mut(&mut world);
+            let mut events = writer.get_mut(&mut world).expect("gesture message writer");
             press_pointer(&mut layer, &mut events, PointerSource::Mouse, Vec2::ZERO, 1., ui_owned);
             if drag {
                 move_pointer(&mut layer, &mut events, PointerSource::Mouse, Vec2::new(40., 0.), 6.);
