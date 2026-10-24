@@ -89,7 +89,7 @@ use std::marker::PhantomData;
 use std::sync::Mutex;
 
 use bevy::asset::uuid::Uuid;
-use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
+use bevy::core_pipeline::{Core3d, Core3dSystems};
 use bevy::math::bounding::Aabb3d;
 use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
 use bevy::mesh::{Mesh, MeshVertexBufferLayoutRef};
@@ -97,7 +97,6 @@ use bevy::prelude::*;
 use bevy::render::mesh::allocator::MeshAllocator;
 use bevy::render::mesh::{RenderMesh, RenderMeshBufferInfo};
 use bevy::render::render_asset::{ExtractedAssets, RenderAssets};
-use bevy::render::render_graph::{Node, NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel};
 use bevy::render::render_resource::binding_types::{uniform_buffer, uniform_buffer_sized};
 use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
@@ -984,8 +983,8 @@ fn queue_depth_pipeline(
             },
             depth_stencil: Some(DepthStencilState {
                 format: TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: CompareFunction::Less,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(CompareFunction::Less),
                 stencil: StencilState::default(),
                 bias: SHADOW_SLICE_RASTER_BIAS,
             }),
@@ -1029,9 +1028,9 @@ fn queue_depth_pipeline(
             },
             depth_stencil: Some(DepthStencilState {
                 format: TextureFormat::Depth32Float,
-                depth_write_enabled: true,
+                depth_write_enabled: Some(true),
                 // normal-Z：保留离光最近（深度最小）的面。
-                depth_compare: CompareFunction::Less,
+                depth_compare: Some(CompareFunction::Less),
                 stencil: StencilState::default(),
                 bias: SHADOW_SLICE_RASTER_BIAS,
             }),
@@ -1428,178 +1427,113 @@ struct BoundState {
     index: Option<(BufferId, IndexFormat)>,
 }
 
-/// 深度 pass 节点：一次成图，跨视图共享（站点场景只有一台 3D 相机；
+/// 深度 pass：一次成图，跨视图共享（站点场景只有一台 3D 相机；
 /// 光源深度本就不依赖取景，多相机也不需要每视图一份）。
 ///
 /// Its one bind group binds the frame and object buffers, which are replaced
 /// only when they grow, so it is cached by those buffer ids.
-struct ShadowDepthNode {
-    bind_groups: SharedBindGroupCache,
-}
+fn shadow_depth_pass(
+    world: &World,
+    bind_groups: Local<SharedBindGroupCache>,
+    mut render_context: RenderContext,
+) {
+    // 上一帧的深度图读回先处理（native 诊断；wasm 无阻塞 poll 不做，
+    // 模块注释「阴影账目」）：拷贝已随上一帧提交，poll 等完成即 map。
+    #[cfg(not(target_arch = "wasm32"))]
+    finish_pending_probe(world, &render_context);
 
-impl FromWorld for ShadowDepthNode {
-    fn from_world(world: &mut World) -> Self {
-        Self { bind_groups: SharedBindGroupCache::from_world(world) }
+    let draws = world.resource::<ShadowDrawList>();
+    if draws.draws.is_empty() {
+        return;
     }
-}
+    let gpu = world.resource::<ShadowMapGpu>();
+    let pipeline_cache = world.resource::<PipelineCache>();
+    let meshes = world.resource::<RenderAssets<RenderMesh>>();
+    let allocator = world.resource::<MeshAllocator>();
 
-impl Node for ShadowDepthNode {
-    fn run(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext,
-        world: &World,
-    ) -> Result<(), NodeRunError> {
-        // 上一帧的深度图读回先处理（native 诊断；wasm 无阻塞 poll 不做，
-        // 模块注释「阴影账目」）：拷贝已随上一帧提交，poll 等完成即 map。
-        #[cfg(not(target_arch = "wasm32"))]
-        finish_pending_probe(world, render_context);
-
-        let draws = world.resource::<ShadowDrawList>();
-        if draws.draws.is_empty() {
-            return Ok(());
+    // 汇总用到的管线：任一没编完就整帧跳过（weather 同款——首几帧空过）。
+    let mut ready: Vec<(CachedRenderPipelineId, &RenderPipeline)> = Vec::new();
+    for item in &draws.draws {
+        if item.pipeline == CachedRenderPipelineId::INVALID
+            || ready.iter().any(|(id, _)| *id == item.pipeline)
+        {
+            continue;
         }
-        let gpu = world.resource::<ShadowMapGpu>();
-        let pipeline_cache = world.resource::<PipelineCache>();
-        let meshes = world.resource::<RenderAssets<RenderMesh>>();
-        let allocator = world.resource::<MeshAllocator>();
-
-        // 汇总用到的管线：任一没编完就整帧跳过（weather 同款——首几帧空过）。
-        let mut ready: Vec<(CachedRenderPipelineId, &RenderPipeline)> = Vec::new();
-        for item in &draws.draws {
-            if item.pipeline == CachedRenderPipelineId::INVALID
-                || ready.iter().any(|(id, _)| *id == item.pipeline)
-            {
-                continue;
-            }
-            let Some(pipeline) = pipeline_cache.get_render_pipeline(item.pipeline) else {
-                world
-                    .resource::<ShadowAccount>()
-                    .0
-                    .lock()
-                    .unwrap()
-                    .frames_skipped_not_ready += 1;
-                return Ok(());
-            };
-            ready.push((item.pipeline, pipeline));
-        }
-        let resolve = |id: CachedRenderPipelineId| -> Option<&RenderPipeline> {
-            ready
-                .iter()
-                .find(|(candidate, _)| *candidate == id)
-                .map(|(_, pipeline)| *pipeline)
+        let Some(pipeline) = pipeline_cache.get_render_pipeline(item.pipeline) else {
+            world
+                .resource::<ShadowAccount>()
+                .0
+                .lock()
+                .unwrap()
+                .frames_skipped_not_ready += 1;
+            return;
         };
+        ready.push((item.pipeline, pipeline));
+    }
+    let resolve = |id: CachedRenderPipelineId| -> Option<&RenderPipeline> {
+        ready
+            .iter()
+            .find(|(candidate, _)| *candidate == id)
+            .map(|(_, pipeline)| *pipeline)
+    };
 
-        // 帧块 + 矩阵池一个 bind group；逐 draw 用动态 offset 换窗。
-        let bind_group = {
-            let frame = world.resource::<bevy::diagnostic::FrameCount>().0;
-            let mut groups = self.bind_groups.lock();
-            groups.get(
-                render_context.render_device(),
-                "site_shadow_depth_bind_group",
-                &pipeline_cache.get_bind_group_layout(&gpu.depth_layout),
-                &[
-                    (0, Bound::Buffer(&gpu.frame_buffer, 0, None)),
-                    (
-                        1,
-                        Bound::Buffer(
-                            &gpu.object_buffer,
-                            0,
-                            Some(std::num::NonZeroU64::new(gpu.object_binding_size).unwrap()),
-                        ),
+    // 帧块 + 矩阵池一个 bind group；逐 draw 用动态 offset 换窗。
+    let bind_group = {
+        let frame = world.resource::<bevy::diagnostic::FrameCount>().0;
+        let mut groups = bind_groups.lock();
+        groups.get(
+            render_context.render_device(),
+            "site_shadow_depth_bind_group",
+            &pipeline_cache.get_bind_group_layout(&gpu.depth_layout),
+            &[
+                (0, Bound::Buffer(&gpu.frame_buffer, 0, None)),
+                (
+                    1,
+                    Bound::Buffer(
+                        &gpu.object_buffer,
+                        0,
+                        Some(std::num::NonZeroU64::new(gpu.object_binding_size).unwrap()),
                     ),
-                ],
-                frame,
-            )
-        };
-        // The palette window of the skinned casters, bound at each draw's
-        // palette offset.
-        let skin_group = (!draws.skinned.is_empty()).then(|| {
-            let palette = world.resource::<ShadowPaletteGpu>();
-            let frame = world.resource::<bevy::diagnostic::FrameCount>().0;
-            self.bind_groups.lock().get(
-                render_context.render_device(),
-                "site_shadow_skin_bind_group",
-                &pipeline_cache.get_bind_group_layout(&gpu.skin_layout),
-                &[(
-                    0,
-                    Bound::Buffer(&palette.buffer, 0, std::num::NonZeroU64::new(PALETTE_WINDOW)),
-                )],
-                frame,
-            )
-        });
+                ),
+            ],
+            frame,
+        )
+    };
+    // The palette window of the skinned casters, bound at each draw's
+    // palette offset.
+    let skin_group = (!draws.skinned.is_empty()).then(|| {
+        let palette = world.resource::<ShadowPaletteGpu>();
+        let frame = world.resource::<bevy::diagnostic::FrameCount>().0;
+        bind_groups.lock().get(
+            render_context.render_device(),
+            "site_shadow_skin_bind_group",
+            &pipeline_cache.get_bind_group_layout(&gpu.skin_layout),
+            &[(
+                0,
+                Bound::Buffer(&palette.buffer, 0, std::num::NonZeroU64::new(PALETTE_WINDOW)),
+            )],
+            frame,
+        )
+    });
 
-        // The static map (module comment, "Static map"): drawn again when a
-        // bake is requested that no run has answered yet, and copied into the
-        // frame's map when it holds draws. Until the copy pipeline exists,
-        // every rigid draw goes to the frame's map.
-        let copy_pipeline = pipeline_cache.get_render_pipeline(gpu.copy_pipeline);
-        let mut answer = world.resource::<StaticBake>().0.lock().unwrap();
-        let bake_now = copy_pipeline.is_some()
-            && draws.static_request.is_some()
-            && answer.answered != draws.static_request;
-        let use_static = copy_pipeline.is_some() && draws.baked_count > 0;
-        if bake_now {
-            let mut pass = render_context
-                .command_encoder()
-                .begin_render_pass(&RenderPassDescriptor {
-                    label: Some("site_shadow_static_pass"),
-                    color_attachments: &[],
-                    depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
-                        view: &gpu.static_view,
-                        depth_ops: Some(Operations {
-                            load: LoadOp::Clear(1.0),
-                            store: StoreOp::Store,
-                        }),
-                        stencil_ops: None,
-                    }),
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-            let mut bound = BoundState::default();
-            let mut recorded = 0;
-            let mut skipped = Vec::new();
-            for (index, item) in draws.draws.iter().enumerate() {
-                if !item.baked {
-                    continue;
-                }
-                if record_rigid!(pass, &mut bound, resolve, item, index, &bind_group,
-                    gpu.object_stride, meshes, allocator)
-                {
-                    recorded += 1;
-                } else {
-                    skipped.push(index);
-                }
-            }
-            drop(pass);
-            answer.answered = draws.static_request;
-            answer.recorded = recorded;
-            answer.skipped = skipped;
-            world.resource::<ShadowAccount>().0.lock().unwrap().static_bakes += 1;
-        }
-        let static_recorded = if use_static { answer.recorded } else { 0 };
-        drop(answer);
-        let copy_group = use_static.then(|| {
-            let frame = world.resource::<bevy::diagnostic::FrameCount>().0;
-            self.bind_groups.lock().get(
-                render_context.render_device(),
-                "site_shadow_static_copy_bind_group",
-                &pipeline_cache.get_bind_group_layout(&gpu.copy_layout),
-                &[
-                    (0, Bound::View(&gpu.static_view)),
-                    (1, Bound::Sampler(&gpu.copy_sampler)),
-                ],
-                frame,
-            )
-        });
-
+    // The static map (module comment, "Static map"): drawn again when a
+    // bake is requested that no run has answered yet, and copied into the
+    // frame's map when it holds draws. Until the copy pipeline exists,
+    // every rigid draw goes to the frame's map.
+    let copy_pipeline = pipeline_cache.get_render_pipeline(gpu.copy_pipeline);
+    let mut answer = world.resource::<StaticBake>().0.lock().unwrap();
+    let bake_now = copy_pipeline.is_some()
+        && draws.static_request.is_some()
+        && answer.answered != draws.static_request;
+    let use_static = copy_pipeline.is_some() && draws.baked_count > 0;
+    if bake_now {
         let mut pass = render_context
             .command_encoder()
             .begin_render_pass(&RenderPassDescriptor {
-                label: Some("site_shadow_depth_pass"),
+                label: Some("site_shadow_static_pass"),
                 color_attachments: &[],
                 depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
-                    view: &gpu.depth_view,
+                    view: &gpu.static_view,
                     depth_ops: Some(Operations {
                         load: LoadOp::Clear(1.0),
                         store: StoreOp::Store,
@@ -1608,106 +1542,159 @@ impl Node for ShadowDepthNode {
                 }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
-
-        // Pipeline, vertex buffer and index buffer stay bound across draws of
-        // one pass; a set that would bind the same object again is skipped, so
-        // every draw still runs with exactly the state it set before.
         let mut bound = BoundState::default();
-        if let (Some(copy_pipeline), Some(copy_group)) = (copy_pipeline, &copy_group) {
-            pass.set_pipeline(copy_pipeline);
-            bound.pipeline = Some(gpu.copy_pipeline);
-            pass.set_bind_group(0, copy_group, &[]);
-            pass.draw(0..3, 0..1);
-        }
-        let mut per_frame: usize = 0;
+        let mut recorded = 0;
+        let mut skipped = Vec::new();
         for (index, item) in draws.draws.iter().enumerate() {
-            if use_static && item.baked {
+            if !item.baked {
                 continue;
             }
             if record_rigid!(pass, &mut bound, resolve, item, index, &bind_group,
                 gpu.object_stride, meshes, allocator)
             {
-                per_frame += 1;
-            }
-        }
-        let drawn = static_recorded + per_frame;
-
-        // The skinned character casters, after the rigid ones (the depth test
-        // makes the order irrelevant). A skinned pipeline still compiling
-        // leaves only its own draws out, not the frame.
-        let mut skinned_drawn: usize = 0;
-        if let Some(skin_group) = &skin_group {
-            for item in &draws.skinned {
-                if item.pipeline == CachedRenderPipelineId::INVALID {
-                    continue;
-                }
-                let (Some(pipeline), Some(render_mesh)) = (
-                    pipeline_cache.get_render_pipeline(item.pipeline),
-                    meshes.get(item.mesh),
-                ) else {
-                    continue;
-                };
-                let Some(vertex_slice) = allocator.mesh_vertex_slice(&item.mesh) else {
-                    continue;
-                };
-                if bound.pipeline != Some(item.pipeline) {
-                    pass.set_pipeline(pipeline);
-                    bound.pipeline = Some(item.pipeline);
-                }
-                // The rigid object window is not read by the skinned entry
-                // point; offset 0 is a valid window of the pool.
-                pass.set_bind_group(0, &bind_group, &[0]);
-                pass.set_bind_group(1, skin_group, &[item.palette_offset]);
-                if bound.vertex != Some(vertex_slice.buffer.id()) {
-                    pass.set_vertex_buffer(0, *vertex_slice.buffer.slice(..));
-                    bound.vertex = Some(vertex_slice.buffer.id());
-                }
-                match &render_mesh.buffer_info {
-                    RenderMeshBufferInfo::Indexed { index_format, count } => {
-                        let Some(index_slice) = allocator.mesh_index_slice(&item.mesh) else {
-                            continue;
-                        };
-                        if bound.index != Some((index_slice.buffer.id(), *index_format)) {
-                            pass.set_index_buffer(*index_slice.buffer.slice(..), *index_format);
-                            bound.index = Some((index_slice.buffer.id(), *index_format));
-                        }
-                        pass.draw_indexed(
-                            index_slice.range.start..(index_slice.range.start + *count),
-                            vertex_slice.range.start as i32,
-                            0..1,
-                        );
-                    }
-                    RenderMeshBufferInfo::NonIndexed => {
-                        pass.draw(vertex_slice.range, 0..1);
-                    }
-                }
-                skinned_drawn += 1;
+                recorded += 1;
+            } else {
+                skipped.push(index);
             }
         }
         drop(pass);
+        answer.answered = draws.static_request;
+        answer.recorded = recorded;
+        answer.skipped = skipped;
+        world.resource::<ShadowAccount>().0.lock().unwrap().static_bakes += 1;
+    }
+    let static_recorded = if use_static { answer.recorded } else { 0 };
+    drop(answer);
+    let copy_group = use_static.then(|| {
+        let frame = world.resource::<bevy::diagnostic::FrameCount>().0;
+        bind_groups.lock().get(
+            render_context.render_device(),
+            "site_shadow_static_copy_bind_group",
+            &pipeline_cache.get_bind_group_layout(&gpu.copy_layout),
+            &[
+                (0, Bound::View(&gpu.static_view)),
+                (1, Bound::Sampler(&gpu.copy_sampler)),
+            ],
+            frame,
+        )
+    });
 
-        // 阴影账目（节点侧）：帧数与实录 draw 数；到档的帧顺手录一次深度
-        // 图拷贝，下一帧节点头读回落账（native；wasm 只落计数行）。
-        let probe_due = {
-            let mut inner = world.resource::<ShadowAccount>().0.lock().unwrap();
-            inner.frames_drawn += 1;
-            inner.draws_recorded = drawn;
-            inner.static_recorded = static_recorded;
-            inner.per_frame_rigid = per_frame;
-            inner.skinned_recorded = skinned_drawn;
-            if drawn == 0 {
-                inner.frames_empty_pass += 1;
-            }
-            frames_drawn_due(&mut inner)
-        };
-        if probe_due && drawn > 0 {
-            #[cfg(not(target_arch = "wasm32"))]
-            record_depth_probe(world, render_context);
-            #[cfg(target_arch = "wasm32")]
-            log_counter_line(world);
+    let mut pass = render_context
+        .command_encoder()
+        .begin_render_pass(&RenderPassDescriptor {
+            label: Some("site_shadow_depth_pass"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                view: &gpu.depth_view,
+                depth_ops: Some(Operations {
+                    load: LoadOp::Clear(1.0),
+                    store: StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+
+    // Pipeline, vertex buffer and index buffer stay bound across draws of
+    // one pass; a set that would bind the same object again is skipped, so
+    // every draw still runs with exactly the state it set before.
+    let mut bound = BoundState::default();
+    if let (Some(copy_pipeline), Some(copy_group)) = (copy_pipeline, &copy_group) {
+        pass.set_pipeline(copy_pipeline);
+        bound.pipeline = Some(gpu.copy_pipeline);
+        pass.set_bind_group(0, copy_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+    let mut per_frame: usize = 0;
+    for (index, item) in draws.draws.iter().enumerate() {
+        if use_static && item.baked {
+            continue;
         }
-        Ok(())
+        if record_rigid!(pass, &mut bound, resolve, item, index, &bind_group,
+            gpu.object_stride, meshes, allocator)
+        {
+            per_frame += 1;
+        }
+    }
+    let drawn = static_recorded + per_frame;
+
+    // The skinned character casters, after the rigid ones (the depth test
+    // makes the order irrelevant). A skinned pipeline still compiling
+    // leaves only its own draws out, not the frame.
+    let mut skinned_drawn: usize = 0;
+    if let Some(skin_group) = &skin_group {
+        for item in &draws.skinned {
+            if item.pipeline == CachedRenderPipelineId::INVALID {
+                continue;
+            }
+            let (Some(pipeline), Some(render_mesh)) = (
+                pipeline_cache.get_render_pipeline(item.pipeline),
+                meshes.get(item.mesh),
+            ) else {
+                continue;
+            };
+            let Some(vertex_slice) = allocator.mesh_vertex_slice(&item.mesh) else {
+                continue;
+            };
+            if bound.pipeline != Some(item.pipeline) {
+                pass.set_pipeline(pipeline);
+                bound.pipeline = Some(item.pipeline);
+            }
+            // The rigid object window is not read by the skinned entry
+            // point; offset 0 is a valid window of the pool.
+            pass.set_bind_group(0, &bind_group, &[0]);
+            pass.set_bind_group(1, skin_group, &[item.palette_offset]);
+            if bound.vertex != Some(vertex_slice.buffer.id()) {
+                pass.set_vertex_buffer(0, *vertex_slice.buffer.slice(..));
+                bound.vertex = Some(vertex_slice.buffer.id());
+            }
+            match &render_mesh.buffer_info {
+                RenderMeshBufferInfo::Indexed { index_format, count } => {
+                    let Some(index_slice) = allocator.mesh_index_slice(&item.mesh) else {
+                        continue;
+                    };
+                    if bound.index != Some((index_slice.buffer.id(), *index_format)) {
+                        pass.set_index_buffer(*index_slice.buffer.slice(..), *index_format);
+                        bound.index = Some((index_slice.buffer.id(), *index_format));
+                    }
+                    pass.draw_indexed(
+                        index_slice.range.start..(index_slice.range.start + *count),
+                        vertex_slice.range.start as i32,
+                        0..1,
+                    );
+                }
+                RenderMeshBufferInfo::NonIndexed => {
+                    pass.draw(vertex_slice.range, 0..1);
+                }
+            }
+            skinned_drawn += 1;
+        }
+    }
+    drop(pass);
+
+    // 阴影账目（节点侧）：帧数与实录 draw 数；到档的帧顺手录一次深度
+    // 图拷贝，下一帧节点头读回落账（native；wasm 只落计数行）。
+    let probe_due = {
+        let mut inner = world.resource::<ShadowAccount>().0.lock().unwrap();
+        inner.frames_drawn += 1;
+        inner.draws_recorded = drawn;
+        inner.static_recorded = static_recorded;
+        inner.per_frame_rigid = per_frame;
+        inner.skinned_recorded = skinned_drawn;
+        if drawn == 0 {
+            inner.frames_empty_pass += 1;
+        }
+        frames_drawn_due(&mut inner)
+    };
+    if probe_due && drawn > 0 {
+        #[cfg(not(target_arch = "wasm32"))]
+        record_depth_probe(world, &mut render_context);
+        #[cfg(target_arch = "wasm32")]
+        log_counter_line(world);
     }
 }
 
@@ -1727,9 +1714,6 @@ fn frames_drawn_due(inner: &mut AccountInner) -> bool {
         false
     }
 }
-
-#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-struct ShadowDepthLabel;
 
 /// 录一次深度图读回（native 账目）：深度 pass 之后在同一 encoder 上把
 /// 整张图拷进复用 buffer，标记 pending，下一帧节点头 [`finish_pending_probe`]
@@ -2110,8 +2094,8 @@ fn init_shadow_resources(
         },
         depth_stencil: Some(DepthStencilState {
             format: TextureFormat::Depth32Float,
-            depth_write_enabled: true,
-            depth_compare: CompareFunction::Always,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(CompareFunction::Always),
             stencil: StencilState::default(),
             bias: DepthBiasState::default(),
         }),
@@ -2123,7 +2107,7 @@ fn init_shadow_resources(
         address_mode_v: AddressMode::ClampToEdge,
         mag_filter: FilterMode::Nearest,
         min_filter: FilterMode::Nearest,
-        mipmap_filter: FilterMode::Nearest,
+        mipmap_filter: MipmapFilterMode::Nearest,
         compare: Some(CompareFunction::LessEqual),
         ..Default::default()
     });
@@ -2236,14 +2220,11 @@ impl Plugin for ShadowmapPlugin {
                     .chain()
                     .in_set(RenderSystems::PrepareResources),
             )
-            .add_render_graph_node::<ShadowDepthNode>(Core3d, ShadowDepthLabel)
-            .add_render_graph_edges(
+            .add_systems(
                 Core3d,
-                (
-                    Node3d::EndPrepasses,
-                    ShadowDepthLabel,
-                    Node3d::StartMainPass,
-                ),
+                shadow_depth_pass
+                    .after(Core3dSystems::Prepass)
+                    .before(Core3dSystems::MainPass),
             );
     }
 }

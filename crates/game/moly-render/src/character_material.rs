@@ -807,9 +807,11 @@ pub fn plan_body(
 ) -> Result<ToonPlan, String> {
     let rig = parse_rig(rig_raw, rig_file).map_err(|reason| format!("骨架档案解析失败：{reason}"))?;
     // glb 材质句柄 → 名：换装按名 join 档案。
-    let mut name_by_handle: HashMap<&Handle<StandardMaterial>, String> = HashMap::new();
+    let mut name_by_handle: HashMap<Handle<StandardMaterial>, String> = HashMap::new();
     for (name, handle) in &gltf.named_materials {
-        name_by_handle.insert(handle, name.to_string());
+        let standard = crate::site_material::standard_material_of(server, handle)
+            .ok_or_else(|| format!("glb 命名材质 {name} 没有装载器派生的 StandardMaterial"))?;
+        name_by_handle.insert(standard, name.to_string());
     }
     // 模型子实体 → 整树走一遍：收网格实体的材质与头骨节点。
     let mut stack = vec![model];

@@ -315,10 +315,10 @@ pub fn sampler_descriptor(
         0 => (
             FilterMode::Nearest,
             FilterMode::Nearest,
-            FilterMode::Nearest,
+            MipmapFilterMode::Nearest,
         ),
-        1 => (FilterMode::Linear, FilterMode::Linear, FilterMode::Nearest),
-        2 => (FilterMode::Linear, FilterMode::Linear, FilterMode::Linear),
+        1 => (FilterMode::Linear, FilterMode::Linear, MipmapFilterMode::Nearest),
+        2 => (FilterMode::Linear, FilterMode::Linear, MipmapFilterMode::Linear),
         _ => return Err(SourceShaderError("unknown source filter mode".into())),
     };
     let wrap = |value| match value {
@@ -679,8 +679,8 @@ pub fn pipeline_descriptor(
         },
         depth_stencil: Some(DepthStencilState {
             format: target.depth,
-            depth_write_enabled: false,
-            depth_compare: CompareFunction::Never,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(CompareFunction::Never),
             stencil: StencilState::default(),
             bias: DepthBiasState::default(),
         }),

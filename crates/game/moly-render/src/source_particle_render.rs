@@ -2,27 +2,22 @@
 //! transparent phase; the independent effect program writes the bloom source.
 use crate::source_particle::SourceParticle;
 use crate::source_shader::*;
-use bevy::core_pipeline::core_3d::{
-    graph::{Core3d, Node3d},
-    Transparent3d, CORE_3D_DEPTH_FORMAT,
-};
+use bevy::core_pipeline::core_3d::{Transparent3d, TransparentSortingInfo3d, CORE_3D_DEPTH_FORMAT};
+use bevy::core_pipeline::{Core3d, Core3dSystems};
 use bevy::ecs::{
-    query::{QueryItem, ROQueryItem},
+    query::ROQueryItem,
     system::{lifetimeless::SRes, SystemParamItem},
 };
 use bevy::mesh::VertexBufferLayout;
 use bevy::prelude::*;
 use bevy::render::{
     render_asset::RenderAssets,
-    render_graph::{
-        NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
-    },
     render_phase::{
         sort_phase_system, AddRenderCommand, DrawFunctions, PhaseItem, PhaseItemExtraIndex,
         RenderCommand, RenderCommandResult, SetItemPipeline, TrackedRenderPass,
         ViewSortedRenderPhases,
     },
-    renderer::RenderContext,
+    renderer::{RenderContext, ViewQuery},
     sync_world::{MainEntity, RenderEntity},
     view::{ExtractedView, Msaa, ViewDepthTexture, ViewTarget},
     Extract, ExtractSchedule, Render, RenderApp, RenderSystems,
@@ -745,7 +740,13 @@ fn queue(
                 gpu.queued
                     .insert((view_entity, item.entity, pass.effect), pipeline);
                 if !pass.effect && item.source.enabled {
-                    phase.add(Transparent3d {
+                    // The phase recomputes `distance` from `sorting_info` before
+                    // sorting, so the fudge rides there as a depth bias.
+                    phase.add_transient(Transparent3d {
+                        sorting_info: TransparentSortingInfo3d::Sorted {
+                            mesh_center: item.center,
+                            depth_bias: -item.source.sorting_fudge,
+                        },
                         entity: (item.entity, item.main),
                         draw_function: function,
                         pipeline,
@@ -768,7 +769,7 @@ fn sort_source_particles(
     let order = |entity| frame.order.get(&entity).copied().unwrap_or((0, 3000));
     let rank = |entity| frame.rank.get(&entity).copied().unwrap_or(0);
     for phase in phases.values_mut() {
-        phase.items.sort_by(|a, b| {
+        phase.items.sort_by(|_, a, _, b| {
             order(a.entity())
                 .cmp(&order(b.entity()))
                 .then_with(|| a.distance.total_cmp(&b.distance))
@@ -915,7 +916,7 @@ fn prepare(
             address_mode_v: AddressMode::ClampToEdge,
             mag_filter: FilterMode::Nearest,
             min_filter: FilterMode::Nearest,
-            mipmap_filter: FilterMode::Nearest,
+            mipmap_filter: MipmapFilterMode::Nearest,
             ..default()
         }));
     }
@@ -1302,100 +1303,97 @@ impl RenderCommand<Transparent3d> for DrawPacket {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, RenderLabel)]
-struct SourceEffect;
-#[derive(Default)]
-struct EffectNode;
-impl ViewNode for EffectNode {
-    type ViewQuery = (
+fn source_effect_pass(
+    world: &World,
+    view: ViewQuery<(
         Entity,
-        &'static crate::fixture_emission::ViewEmissionTarget,
-        &'static ViewDepthTexture,
-        &'static ExtractedView,
-        &'static crate::weather_depth::WeatherCameraRole,
-    );
-    fn run(
-        &self,
-        _: &mut RenderGraphContext,
-        context: &mut RenderContext,
-        (entity, target, depth, view, role): QueryItem<Self::ViewQuery>,
-        world: &World,
-    ) -> std::result::Result<(), NodeRunError> {
-        if !crate::weather_depth::effect_attachment_compatible(
-            Some(*role),
-            depth.texture.sample_count(),
-        ) {
-            return Ok(());
-        }
-        let gpu = world.resource::<ParticleGpu>();
-        let Some(arena) = &gpu.arena else {
-            return Ok(());
-        };
-        let cache = world.resource::<PipelineCache>();
-        let frame = world.resource::<ParticleFrame>();
-        // Only packets that draw: an empty pass loads and stores the targets
-        // unchanged, so none is begun.
-        let mut packets = gpu
-            .packets
-            .iter()
-            .filter(|((view, draw, effect), _)| {
-                *view == entity && *effect && frame.enabled.contains(draw)
-            })
-            .filter(|(_, p)| p.count > 0 && !p.vertices.is_empty())
-            .filter_map(|(_, p)| Some((p, cache.get_render_pipeline(p.pipeline)?)))
-            .collect::<Vec<_>>();
-        if packets.is_empty() {
-            return Ok(());
-        }
-        packets.sort_by(|(a, _), (b, _)| {
-            a.sorting_order
-                .cmp(&b.sorting_order)
-                .then_with(|| a.render_queue.cmp(&b.render_queue))
-                .then_with(|| a.distance.total_cmp(&b.distance))
-                .then_with(|| a.rank.cmp(&b.rank))
-        });
-        let attachments = [Some(RenderPassColorAttachment {
-            view: &target.resolved,
-            resolve_target: None,
-            ops: Operations {
-                load: LoadOp::Load,
-                store: StoreOp::Store,
-            },
-            depth_slice: None,
-        })];
-        let mut pass = context
-            .command_encoder()
-            .begin_render_pass(&RenderPassDescriptor {
-                label: Some("source particle effect programs"),
-                color_attachments: &attachments,
-                depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
-                    view: depth.view(),
-                    depth_ops: Some(Operations {
-                        load: LoadOp::Load,
-                        store: StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-        pass.set_viewport(
-            view.viewport.x as f32,
-            view.viewport.y as f32,
-            view.viewport.z as f32,
-            view.viewport.w as f32,
-            0.0,
-            1.0,
-        );
-        for (packet, pipeline) in packets {
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &packet.binding.group, &[]);
-            pass.set_vertex_buffer(0, *arena.slice(packet.vertices.clone()));
-            pass.set_index_buffer(*packet.index.slice(..), IndexFormat::Uint32);
-            pass.draw_indexed(0..packet.count, 0, 0..1);
-        }
-        Ok(())
+        &crate::fixture_emission::ViewEmissionTarget,
+        &ViewDepthTexture,
+        &ExtractedView,
+        &crate::weather_depth::WeatherCameraRole,
+    )>,
+    mut context: RenderContext,
+) {
+    let (entity, target, depth, view, role) = view.into_inner();
+    if !crate::weather_depth::effect_attachment_compatible(
+        Some(*role),
+        depth.texture.sample_count(),
+    ) {
+        return;
     }
+    let gpu = world.resource::<ParticleGpu>();
+    let Some(arena) = &gpu.arena else {
+        return;
+    };
+    let cache = world.resource::<PipelineCache>();
+    let frame = world.resource::<ParticleFrame>();
+    // Only packets that draw: an empty pass loads and stores the targets
+    // unchanged, so none is begun.
+    let mut packets = gpu
+        .packets
+        .iter()
+        .filter(|((view, draw, effect), _)| {
+            *view == entity && *effect && frame.enabled.contains(draw)
+        })
+        .filter(|(_, p)| p.count > 0 && !p.vertices.is_empty())
+        .filter_map(|(_, p)| Some((p, cache.get_render_pipeline(p.pipeline)?)))
+        .collect::<Vec<_>>();
+    if packets.is_empty() {
+        return;
+    }
+    packets.sort_by(|(a, _), (b, _)| {
+        a.sorting_order
+            .cmp(&b.sorting_order)
+            .then_with(|| a.render_queue.cmp(&b.render_queue))
+            .then_with(|| a.distance.total_cmp(&b.distance))
+            .then_with(|| a.rank.cmp(&b.rank))
+    });
+    let attachments = [Some(RenderPassColorAttachment {
+        view: &target.resolved,
+        resolve_target: None,
+        ops: Operations {
+            load: LoadOp::Load,
+            store: StoreOp::Store,
+        },
+        depth_slice: None,
+    })];
+    let mut pass = context
+        .command_encoder()
+        .begin_render_pass(&RenderPassDescriptor {
+            label: Some("source particle effect programs"),
+            color_attachments: &attachments,
+            depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                view: depth.view(),
+                depth_ops: Some(Operations {
+                    load: LoadOp::Load,
+                    store: StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+    pass.set_viewport(
+        view.viewport.x as f32,
+        view.viewport.y as f32,
+        view.viewport.z as f32,
+        view.viewport.w as f32,
+        0.0,
+        1.0,
+    );
+    for (packet, pipeline) in packets {
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &packet.binding.group, &[]);
+        pass.set_vertex_buffer(0, *arena.slice(packet.vertices.clone()));
+        pass.set_index_buffer(*packet.index.slice(..), IndexFormat::Uint32);
+        pass.draw_indexed(0..packet.count, 0, 0..1);
+    }
+}
+
+// The render world holds no particle component, so removal has nothing to strip.
+impl bevy::render::sync_component::SyncComponent for SourceParticle {
+    type Target = ();
 }
 
 pub struct SourceParticlePlugin;
@@ -1423,7 +1421,7 @@ impl Plugin for SourceParticlePlugin {
             .add_systems(ExtractSchedule, extract)
             .add_systems(
                 Render,
-                prepare_source_cameras.in_set(RenderSystems::ManageViews),
+                prepare_source_cameras.in_set(RenderSystems::CreateViews),
             )
             .add_systems(Render, queue.in_set(RenderSystems::QueueMeshes))
             .add_systems(
@@ -1438,14 +1436,12 @@ impl Plugin for SourceParticlePlugin {
                     .in_set(RenderSystems::PrepareBindGroups)
                     .after(crate::weather_depth::prepare_raw_depth),
             )
-            .add_render_graph_node::<ViewNodeRunner<EffectNode>>(Core3d, SourceEffect)
-            .add_render_graph_edges(
+            .add_systems(
                 Core3d,
-                (
-                    crate::fixture_emission::EmissionPassLabel,
-                    SourceEffect,
-                    Node3d::MainTransmissivePass,
-                ),
+                source_effect_pass
+                    .after(crate::fixture_emission::emission_pass::<true>)
+                    .before(bevy::pbr::main_transmissive_pass_3d)
+                    .in_set(Core3dSystems::MainPass),
             );
     }
 }

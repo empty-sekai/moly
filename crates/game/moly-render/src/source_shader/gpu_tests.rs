@@ -341,6 +341,7 @@ fn actual_source_program_binding_pixels() {
             })];
             let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some("current source material selected pass"),
+                multiview_mask: None,
                 color_attachments: &attachments,
                 depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
                     view: &depth_view,

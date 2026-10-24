@@ -8,15 +8,10 @@
 //! Effect and forward particles sample this stable per-view snapshot, while
 //! Effect depth testing still uses the actual ViewDepthTexture attachment.
 use bevy::render::texture::{CachedTexture, TextureCache};
-use bevy::ecs::query::QueryItem;
 use bevy::prelude::*;
-use bevy::render::render_graph::{NodeRunError, RenderGraphContext, RenderLabel, ViewNode};
-use bevy::render::renderer::RenderContext;
+use bevy::render::renderer::{RenderContext, ViewQuery};
 use bevy::render::view::ViewDepthTexture;
 use bevy::render::render_resource::*;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, RenderLabel)]
-pub struct WeatherOpaqueDepth;
 
 /// Explicit request for a post-opaque snapshot, independent of engine prepasses.
 #[derive(Component, Clone, Copy, Default, bevy::render::extract_component::ExtractComponent)]
@@ -55,64 +50,59 @@ fn extract_depth_readers(
     readers.source = !particles.is_empty();
 }
 
-#[derive(Default)]
-pub struct WeatherOpaqueDepthNode;
-
-impl ViewNode for WeatherOpaqueDepthNode {
-    type ViewQuery = &'static PreparedDepthSnapshot;
-    fn run(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext,
-        snapshot: QueryItem<Self::ViewQuery>,
-        world: &World,
-    ) -> Result<(), NodeRunError> {
-        let gpu = world.resource::<RawDepthGpu>();
-        let cache = world.resource::<PipelineCache>();
-        let Some(pipeline) = cache.get_render_pipeline(gpu.copy_pipeline) else { return Ok(()); };
-        let Some(source_pipeline) = cache.get_render_pipeline(gpu.source_copy_pipeline) else { return Ok(()); };
-        // The unflipped copy is read by routed uber particles and by the
-        // particle draws of the emission pass; the flipped copy only by source
-        // particles.
-        let readers = world.get_resource::<DepthSnapshotReaders>();
-        let unflipped_read = readers.is_none_or(|readers| readers.uber)
-            || crate::fixture_emission::has_particle_emission_draws(world);
-        let source_read = readers.is_none_or(|readers| readers.source);
-        if unflipped_read {
-            let mut pass = render_context.command_encoder().begin_render_pass(&RenderPassDescriptor {
-                label: Some("weather_copy_actual_opaque_depth"),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
-                    view: &snapshot.texture.default_view,
-                    depth_ops: Some(Operations { load: LoadOp::Clear(0.0), store: StoreOp::Store }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &snapshot.source, &[]);
-            // No viewport/scissor subset: every texel, including the camera clear
-            // outside a viewport, must be copied before the valid binding is read.
-            pass.draw(0..3, 0..1);
-        }
-        if source_read {
-            let mut pass = render_context.command_encoder().begin_render_pass(&RenderPassDescriptor {
-                label: Some("source_opaque_depth_flipped_rows"),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
-                    view: &snapshot.source_texture.default_view,
-                    depth_ops: Some(Operations { load: LoadOp::Clear(0.0), store: StoreOp::Store }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            pass.set_pipeline(source_pipeline);
-            pass.set_bind_group(0, &snapshot.source, &[]);
-            pass.draw(0..3, 0..1);
-        }
-        Ok(())
+/// Copies the completed opaque depth of the current view into its snapshots.
+pub fn weather_opaque_depth(
+    world: &World,
+    view: ViewQuery<&PreparedDepthSnapshot>,
+    mut render_context: RenderContext,
+) {
+    let snapshot = view.into_inner();
+    let gpu = world.resource::<RawDepthGpu>();
+    let cache = world.resource::<PipelineCache>();
+    let Some(pipeline) = cache.get_render_pipeline(gpu.copy_pipeline) else { return; };
+    let Some(source_pipeline) = cache.get_render_pipeline(gpu.source_copy_pipeline) else { return; };
+    // The unflipped copy is read by routed uber particles and by the
+    // particle draws of the emission pass; the flipped copy only by source
+    // particles.
+    let readers = world.get_resource::<DepthSnapshotReaders>();
+    let unflipped_read = readers.is_none_or(|readers| readers.uber)
+        || crate::fixture_emission::has_particle_emission_draws(world);
+    let source_read = readers.is_none_or(|readers| readers.source);
+    if unflipped_read {
+        let mut pass = render_context.command_encoder().begin_render_pass(&RenderPassDescriptor {
+            label: Some("weather_copy_actual_opaque_depth"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                view: &snapshot.texture.default_view,
+                depth_ops: Some(Operations { load: LoadOp::Clear(0.0), store: StoreOp::Store }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &snapshot.source, &[]);
+        // No viewport/scissor subset: every texel, including the camera clear
+        // outside a viewport, must be copied before the valid binding is read.
+        pass.draw(0..3, 0..1);
+    }
+    if source_read {
+        let mut pass = render_context.command_encoder().begin_render_pass(&RenderPassDescriptor {
+            label: Some("source_opaque_depth_flipped_rows"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                view: &snapshot.source_texture.default_view,
+                depth_ops: Some(Operations { load: LoadOp::Clear(0.0), store: StoreOp::Store }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(source_pipeline);
+        pass.set_bind_group(0, &snapshot.source, &[]);
+        pass.draw(0..3, 0..1);
     }
 }
 
@@ -175,7 +165,7 @@ pub fn raw_depth_sampler(device: &bevy::render::renderer::RenderDevice) -> Sampl
         address_mode_v: AddressMode::ClampToEdge,
         mag_filter: FilterMode::Nearest,
         min_filter: FilterMode::Nearest,
-        mipmap_filter: FilterMode::Nearest,
+        mipmap_filter: MipmapFilterMode::Nearest,
         ..default()
     })
 }
@@ -238,8 +228,8 @@ fn init_raw_depth(mut commands:Commands, device:Res<bevy::render::renderer::Rend
         primitive: PrimitiveState { cull_mode: None, ..Default::default() },
         depth_stencil: Some(DepthStencilState {
             format: TextureFormat::Depth32Float,
-            depth_write_enabled: true,
-            depth_compare: CompareFunction::Always,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(CompareFunction::Always),
             stencil: StencilState::default(), bias: DepthBiasState::default(),
         }),
         multisample: MultisampleState::default(),
@@ -344,7 +334,7 @@ fn route_raw_depth_particles(mut phases:ResMut<ViewSortedRenderPhases<Transparen
     let draw=functions.read().id::<DrawWeatherParticle>();
     let mut routed=false;
     for phase in phases.0.values_mut() {
-        for item in &mut phase.items {
+        for item in phase.items.values_mut() {
             if instances.instances.get(&item.main_entity()).is_some_and(|instance|
                 instance.asset_id.type_id()==std::any::TypeId::of::<crate::uber_particle::UberParticleMaterial>()) {
                 item.draw_function=draw;

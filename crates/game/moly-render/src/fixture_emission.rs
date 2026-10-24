@@ -44,9 +44,11 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 
 use bevy::asset::uuid::Uuid;
-use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
-use bevy::core_pipeline::core_3d::{AlphaMask3d, Opaque3d};
-use bevy::ecs::query::QueryItem;
+use bevy::core_pipeline::core_3d::{
+    main_opaque_pass_3d, main_transparent_pass_3d, AlphaMask3d, Opaque3d,
+};
+use bevy::core_pipeline::{Core3d, Core3dSystems};
+use bevy::ecs::schedule::ScheduleLabel;
 use bevy::mesh::{Mesh, MeshVertexBufferLayoutRef};
 use bevy::mesh::skinning::SkinnedMesh;
 use bevy::pbr::{skins_use_uniform_buffers, SkinUniforms, MAX_JOINTS};
@@ -55,14 +57,10 @@ use bevy::render::camera::ExtractedCamera;
 use bevy::render::mesh::allocator::MeshAllocator;
 use bevy::render::mesh::{RenderMesh, RenderMeshBufferInfo};
 use bevy::render::render_asset::RenderAssets;
-use bevy::render::render_graph::{
-    NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, RenderSubGraph, ViewNode,
-    ViewNodeRunner,
-};
 use bevy::render::render_phase::ViewBinnedRenderPhases;
 use bevy::render::render_resource::binding_types::{sampler, texture_2d, uniform_buffer};
 use bevy::render::render_resource::*;
-use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
+use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
 use bevy::render::texture::{GpuImage, TextureCache};
 use bevy::render::sync_world::MainEntity;
 use bevy::render::view::{
@@ -484,7 +482,7 @@ fn prepare_emission(
     // this contract. Every allocated target is still cleared for that camera.
     let sample_count = 1u32;
     for (entity, camera, _) in &views {
-        if camera.render_graph != Core3d.intern() { continue; }
+        if camera.schedule != Core3d.intern() { continue; }
         let Some(viewport) = camera.physical_target_size else { continue; };
         let texture = texture_cache.get(&render_device,
             emission_texture_descriptor(viewport.x, viewport.y, 1, false, "mysekai_effect_argb32_single_sample"));
@@ -619,8 +617,8 @@ fn prepare_emission(
                         // 主 pass 之后只读：reverse-Z 的 GreaterEqual 比较、
                         // 不写、不偏置（偏置属于写深度的 pass，这里没有
                         // 可偏置的写）。
-                        depth_write_enabled: false,
-                        depth_compare: CompareFunction::GreaterEqual,
+                        depth_write_enabled: Some(false),
+                        depth_compare: Some(CompareFunction::GreaterEqual),
                         stencil: StencilState::default(),
                         bias: DepthBiasState::default(),
                     }),
@@ -663,290 +661,278 @@ impl FromWorld for EmissionBindGroups {
     }
 }
 
-/// 自发光节点：主 pass 之后跑。每个 3D 视图一份；ViewQuery 缺件
-/// （无深度图或无本 pass 组件）的视图直接不匹配，节点不跑。
-#[derive(Default)]
-struct EmissionPassNode<const EARLY: bool>;
-
-impl<const EARLY: bool> ViewNode for EmissionPassNode<EARLY> {
-    type ViewQuery = (
-        &'static ViewEmissionTarget,
-        &'static ViewDepthTexture,
-        &'static ViewUniformOffset,
-        Option<&'static crate::weather_depth::RawDepthBinding>,
-        Option<&'static crate::weather_depth::WeatherCameraRole>,
+/// 自发光 pass：主 pass 之后跑。每个 3D 视图一份；ViewQuery 缺件
+/// （无深度图或无本 pass 组件）的视图直接不匹配，pass 不跑。
+#[allow(clippy::type_complexity)]
+pub(crate) fn emission_pass<const EARLY: bool>(
+    world: &World,
+    view: ViewQuery<(
+        &ViewEmissionTarget,
+        &ViewDepthTexture,
+        &ViewUniformOffset,
+        Option<&crate::weather_depth::RawDepthBinding>,
+        Option<&crate::weather_depth::WeatherCameraRole>,
         // Only read to tell whether the main opaque pass ran for this view;
-        // they never decide which views this node runs for.
+        // they never decide which views this pass runs for.
         Has<ExtractedCamera>,
-        Option<&'static ExtractedView>,
+        Option<&ExtractedView>,
         Has<ViewTarget>,
-    );
-
-    #[allow(clippy::type_complexity)]
-    fn run(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext,
-        (target, depth, view_offset, depth_binding, role, has_camera, view, has_view_target): QueryItem<Self::ViewQuery>,
-        world: &World,
-    ) -> Result<(), NodeRunError> {
-        let attachment_compatible = crate::weather_depth::effect_attachment_compatible(
-            role.copied(), depth.texture.sample_count());
-        let draws = world.resource::<EmissionDrawList>();
-        // The emission target is read only by the weather post node's bloom
-        // path and by diagnostic probe copies, and the opaque node clears it
-        // again before any later reader. With bloom off and no probe, neither
-        // node's colour output is observable. Two depth effects keep the opaque
-        // node running: its particle draws, whose source pass state may write
-        // the camera depth, and its depth attachment when the main opaque pass
-        // did not attach this view's depth first, because the first attachment
-        // with StoreOp::Store performs the camera's depth clear. The transparent
-        // node draws no particles and always follows one of those two
-        // attachments, so its own attachment only loads the depth.
-        let bloom = world
-            .get_resource::<crate::render_inputs::PostBloomInput>()
-            .is_none_or(|input| input.bloom_on);
-        let probed = world.get_resource::<WeatherEffectProbes>().is_some_and(|probes| {
-            probes.after_opaques.is_some() || probes.after_transparents.is_some()
+    )>,
+    mut render_context: RenderContext,
+) {
+    let (target, depth, view_offset, depth_binding, role, has_camera, view, has_view_target) =
+        view.into_inner();
+    let attachment_compatible = crate::weather_depth::effect_attachment_compatible(
+        role.copied(), depth.texture.sample_count());
+    let draws = world.resource::<EmissionDrawList>();
+    // The emission target is read only by the weather post node's bloom
+    // path and by diagnostic probe copies, and the opaque node clears it
+    // again before any later reader. With bloom off and no probe, neither
+    // node's colour output is observable. Two depth effects keep the opaque
+    // node running: its particle draws, whose source pass state may write
+    // the camera depth, and its depth attachment when the main opaque pass
+    // did not attach this view's depth first, because the first attachment
+    // with StoreOp::Store performs the camera's depth clear. The transparent
+    // node draws no particles and always follows one of those two
+    // attachments, so its own attachment only loads the depth.
+    let bloom = world
+        .get_resource::<crate::render_inputs::PostBloomInput>()
+        .is_none_or(|input| input.bloom_on);
+    let probed = world.get_resource::<WeatherEffectProbes>().is_some_and(|probes| {
+        probes.after_opaques.is_some() || probes.after_transparents.is_some()
+    });
+    // The main opaque pass runs for a view with its view query (camera,
+    // view, target, depth, view uniform) and both opaque phases, and then
+    // attaches the depth before returning; the graph orders it before this
+    // node.
+    let depth_attached = has_camera
+        && has_view_target
+        && view.is_some_and(|view| {
+            let phases = &view.retained_view_entity;
+            world
+                .get_resource::<ViewBinnedRenderPhases<Opaque3d>>()
+                .is_some_and(|opaque| opaque.contains_key(phases))
+                && world
+                    .get_resource::<ViewBinnedRenderPhases<AlphaMask3d>>()
+                    .is_some_and(|alpha_mask| alpha_mask.contains_key(phases))
         });
-        // The main opaque pass runs for a view with its view query (camera,
-        // view, target, depth, view uniform) and both opaque phases, and then
-        // attaches the depth before returning; the graph orders it before this
-        // node.
-        let depth_attached = has_camera
-            && has_view_target
-            && view.is_some_and(|view| {
-                let phases = &view.retained_view_entity;
-                world
-                    .get_resource::<ViewBinnedRenderPhases<Opaque3d>>()
-                    .is_some_and(|opaque| opaque.contains_key(phases))
-                    && world
-                        .get_resource::<ViewBinnedRenderPhases<AlphaMask3d>>()
-                        .is_some_and(|alpha_mask| alpha_mask.contains_key(phases))
-            });
-        if !bloom && !probed && (!EARLY || (!draws.has_particle_draws() && depth_attached)) {
-            return Ok(());
-        }
-        let gpu = world.resource::<EmissionGpu>();
-        let pipeline_cache = world.resource::<PipelineCache>();
-        let meshes = world.resource::<RenderAssets<RenderMesh>>();
-        let images = world.resource::<RenderAssets<GpuImage>>();
-        let allocator = world.resource::<MeshAllocator>();
-        let env = world.resource::<SiteEnvGpuBuffer>();
-        let view_uniforms = world.resource::<ViewUniforms>();
-        let skins = world.resource::<SkinUniforms>();
-        // A ViewUniformOffset is inserted by prepare_view_uniforms only after
-        // writing that view's uniform. This is the exact buffer read by the
-        // main fixture vertex shader, including any adjusted projection. It is
-        // bound as that uniform buffer's own binding: offset 0, one ViewUniform.
-        let view_buffer = view_uniforms.uniforms.buffer()
-            .expect("main view uniforms are prepared before the emission pass");
-        let frame = world.resource::<bevy::diagnostic::FrameCount>().0;
-        let mut groups = world.resource::<EmissionBindGroups>().0.lock();
+    if !bloom && !probed && (!EARLY || (!draws.has_particle_draws() && depth_attached)) {
+        return;
+    }
+    let gpu = world.resource::<EmissionGpu>();
+    let pipeline_cache = world.resource::<PipelineCache>();
+    let meshes = world.resource::<RenderAssets<RenderMesh>>();
+    let images = world.resource::<RenderAssets<GpuImage>>();
+    let allocator = world.resource::<MeshAllocator>();
+    let env = world.resource::<SiteEnvGpuBuffer>();
+    let view_uniforms = world.resource::<ViewUniforms>();
+    let skins = world.resource::<SkinUniforms>();
+    // A ViewUniformOffset is inserted by prepare_view_uniforms only after
+    // writing that view's uniform. This is the exact buffer read by the
+    // main fixture vertex shader, including any adjusted projection. It is
+    // bound as that uniform buffer's own binding: offset 0, one ViewUniform.
+    let view_buffer = view_uniforms.uniforms.buffer()
+        .expect("main view uniforms are prepared before the emission pass");
+    let frame = world.resource::<bevy::diagnostic::FrameCount>().0;
+    let mut groups = world.resource::<EmissionBindGroups>().0.lock();
 
-        // 管线就绪表（去重）；没编完的只跳过那条 draw，pass 照常清缓冲。
-        let mut ready: Vec<(CachedRenderPipelineId, &RenderPipeline)> = Vec::new();
-        for item in &draws.draws {
-            if item.pipeline == CachedRenderPipelineId::INVALID
-                || ready.iter().any(|(id, _)| *id == item.pipeline)
-            {
-                continue;
-            }
-            if let Some(pipeline) = pipeline_cache.get_render_pipeline(item.pipeline) {
-                ready.push((item.pipeline, pipeline));
-            }
+    // 管线就绪表（去重）；没编完的只跳过那条 draw，pass 照常清缓冲。
+    let mut ready: Vec<(CachedRenderPipelineId, &RenderPipeline)> = Vec::new();
+    for item in &draws.draws {
+        if item.pipeline == CachedRenderPipelineId::INVALID
+            || ready.iter().any(|(id, _)| *id == item.pipeline)
+        {
+            continue;
         }
-        let resolve = |id: CachedRenderPipelineId| -> Option<&RenderPipeline> {
-            ready
-                .iter()
-                .find(|(candidate, _)| *candidate == id)
-                .map(|(_, pipeline)| *pipeline)
-        };
+        if let Some(pipeline) = pipeline_cache.get_render_pipeline(item.pipeline) {
+            ready.push((item.pipeline, pipeline));
+        }
+    }
+    let resolve = |id: CachedRenderPipelineId| -> Option<&RenderPipeline> {
+        ready
+            .iter()
+            .find(|(candidate, _)| *candidate == id)
+            .map(|(_, pipeline)| *pipeline)
+    };
 
-        // bind group 全部先建后跑：设备句柄借 render_context 的不可变引用，
-        // 跑 pass 要可变借用，交叠即撞（阴影链同注）。
-        let device = render_context.render_device();
-        // group 0：对象池、主视图与主 pass 同帧的蒙皮 buffer。统一按
-        // binding 顺序传动态 offset；storage 蒙皮分支无第三个动态 offset。
-        let object_bind_group = groups.get(
-            device,
-            "fixture_emission_object_bind_group",
-            &pipeline_cache.get_bind_group_layout(&gpu.object_layout),
-            &[
-                (
+    // bind group 全部先建后跑：设备句柄借 render_context 的不可变引用，
+    // 跑 pass 要可变借用，交叠即撞（阴影链同注）。
+    let device = render_context.render_device();
+    // group 0：对象池、主视图与主 pass 同帧的蒙皮 buffer。统一按
+    // binding 顺序传动态 offset；storage 蒙皮分支无第三个动态 offset。
+    let object_bind_group = groups.get(
+        device,
+        "fixture_emission_object_bind_group",
+        &pipeline_cache.get_bind_group_layout(&gpu.object_layout),
+        &[
+            (
+                0,
+                Bound::Buffer(
+                    &gpu.object_buffer,
                     0,
-                    Bound::Buffer(
-                        &gpu.object_buffer,
-                        0,
-                        Some(std::num::NonZeroU64::new(gpu.object_binding_size).unwrap()),
-                    ),
+                    Some(std::num::NonZeroU64::new(gpu.object_binding_size).unwrap()),
                 ),
-                (1, Bound::Buffer(view_buffer, 0, Some(ViewUniform::min_size()))),
-                (
-                    2,
-                    Bound::Buffer(
-                        &skins.current_buffer,
-                        0,
-                        gpu.skin_uniforms
-                            .then(|| std::num::NonZeroU64::new((MAX_JOINTS * 64) as u64).unwrap()),
-                    ),
+            ),
+            (1, Bound::Buffer(view_buffer, 0, Some(ViewUniform::min_size()))),
+            (
+                2,
+                Bound::Buffer(
+                    &skins.current_buffer,
+                    0,
+                    gpu.skin_uniforms
+                        .then(|| std::num::NonZeroU64::new((MAX_JOINTS * 64) as u64).unwrap()),
                 ),
-            ],
-            frame,
+            ),
+        ],
+        frame,
+    );
+    // group 1：按 (遮罩, 主贴图) 对去重；缺 GPU 侧资源的对不建组，对应
+    // draw 跳过（fail-closed，下一帧再试）。
+    let texture_layout = pipeline_cache.get_bind_group_layout(&gpu.texture_layout);
+    let fallback = world.resource::<bevy::render::texture::FallbackImage>();
+    let mut texture_groups: HashMap<(AssetId<Image>, AssetId<Image>, Option<AssetId<Image>>), BindGroup> =
+        HashMap::new();
+    // group 1 的建组也必须在 begin pass 之前（设备句柄借 render_context
+    // 的不可变引用，pass 要可变借用——见上）。缺 GPU 侧资源的对不建组，
+    // 对应 draw 在 pass 里跳过（fail-closed，下一帧再试）。
+    for item in &draws.draws {
+        if texture_groups.contains_key(&(item.mask, item.main, item.normal_map)) {
+            continue;
+        }
+        let (Some(mask_image), Some(main_image)) =
+            (images.get(item.mask), images.get(item.main))
+        else {
+            continue;
+        };
+        // Only the normal-map variant reads bindings 5/6; every other
+        // draw binds the engine fallback (the layout is shared).
+        let normal_image = match item.normal_map {
+            Some(id) => match images.get(id) {
+                Some(image) => image,
+                None => continue,
+            },
+            None => &fallback.d2,
+        };
+        texture_groups.insert(
+            (item.mask, item.main, item.normal_map),
+            groups.get(
+                device,
+                "fixture_emission_texture_bind_group",
+                &texture_layout,
+                &[
+                    (0, Bound::whole(&env.buffer)),
+                    (1, Bound::View(&mask_image.texture_view)),
+                    (2, Bound::View(&main_image.texture_view)),
+                    (3, Bound::Sampler(&main_image.sampler)),
+                    (4, Bound::Sampler(&mask_image.sampler)),
+                    (5, Bound::View(&normal_image.texture_view)),
+                    (6, Bound::Sampler(&normal_image.sampler)),
+                ],
+                frame,
+            ),
         );
-        // group 1：按 (遮罩, 主贴图) 对去重；缺 GPU 侧资源的对不建组，对应
-        // draw 跳过（fail-closed，下一帧再试）。
-        let texture_layout = pipeline_cache.get_bind_group_layout(&gpu.texture_layout);
-        let fallback = world.resource::<bevy::render::texture::FallbackImage>();
-        let mut texture_groups: HashMap<(AssetId<Image>, AssetId<Image>, Option<AssetId<Image>>), BindGroup> =
-            HashMap::new();
-        // group 1 的建组也必须在 begin pass 之前（设备句柄借 render_context
-        // 的不可变引用，pass 要可变借用——见上）。缺 GPU 侧资源的对不建组，
-        // 对应 draw 在 pass 里跳过（fail-closed，下一帧再试）。
-        for item in &draws.draws {
-            if texture_groups.contains_key(&(item.mask, item.main, item.normal_map)) {
-                continue;
-            }
-            let (Some(mask_image), Some(main_image)) =
-                (images.get(item.mask), images.get(item.main))
+    }
+    drop(groups);
+
+    // The forward and Effect paths use the same per-view alias of the
+    // copied camera depth. The alias changes binding type, not its bytes.
+    // Even a refused camera clears its target: no stale contribution reaches
+    // post-processing. Such a clear has no mismatched depth attachment.
+    // The late pass only adds blended draws onto the loaded target; with
+    // none it would leave the target unchanged and is not begun.
+    let begin = EARLY
+        || (attachment_compatible
+            && draws.draws.iter().any(|item| item.particle.is_none() && item.blend));
+    if begin {
+        let mut pass = render_context
+            .command_encoder()
+            .begin_render_pass(&RenderPassDescriptor {
+                label: Some(if EARLY { "mysekai_effect_after_opaques" } else { "transparent_fixture_emission" }),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &target.resolved,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: if EARLY { LoadOp::Clear(LinearRgba::NONE.into()) } else { LoadOp::Load },
+                        store: StoreOp::Store,
+                    },
+                })],
+                // The camera depth is still required by forward transparents and
+                // later consumers. A read-only draw does NOT authorize Discard.
+                depth_stencil_attachment: attachment_compatible.then(|| depth.get_attachment(StoreOp::Store)),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+
+        for (index, item) in draws.draws.iter().enumerate().filter(|_| attachment_compatible) {
+            let belongs_early = item.particle.is_some() || !item.blend;
+            if EARLY != belongs_early { continue; }
+            if item.particle.is_some() && depth_binding.is_none() { continue; }
+            let (Some(pipeline), Some(render_mesh)) =
+                (resolve(item.pipeline), meshes.get(item.mesh))
             else {
                 continue;
             };
-            // Only the normal-map variant reads bindings 5/6; every other
-            // draw binds the engine fallback (the layout is shared).
-            let normal_image = match item.normal_map {
-                Some(id) => match images.get(id) {
-                    Some(image) => image,
-                    None => continue,
-                },
-                None => &fallback.d2,
+            let Some(vertex_slice) = allocator.mesh_vertex_slice(&item.mesh) else {
+                continue;
             };
-            texture_groups.insert(
-                (item.mask, item.main, item.normal_map),
-                groups.get(
-                    device,
-                    "fixture_emission_texture_bind_group",
-                    &texture_layout,
-                    &[
-                        (0, Bound::whole(&env.buffer)),
-                        (1, Bound::View(&mask_image.texture_view)),
-                        (2, Bound::View(&main_image.texture_view)),
-                        (3, Bound::Sampler(&main_image.sampler)),
-                        (4, Bound::Sampler(&mask_image.sampler)),
-                        (5, Bound::View(&normal_image.texture_view)),
-                        (6, Bound::Sampler(&normal_image.sampler)),
-                    ],
-                    frame,
-                ),
-            );
-        }
-        drop(groups);
-
-        // The forward and Effect paths use the same per-view alias of the
-        // copied camera depth. The alias changes binding type, not its bytes.
-        // Even a refused camera clears its target: no stale contribution reaches
-        // post-processing. Such a clear has no mismatched depth attachment.
-        // The late pass only adds blended draws onto the loaded target; with
-        // none it would leave the target unchanged and is not begun.
-        let begin = EARLY
-            || (attachment_compatible
-                && draws.draws.iter().any(|item| item.particle.is_none() && item.blend));
-        if begin {
-            let mut pass = render_context
-                .command_encoder()
-                .begin_render_pass(&RenderPassDescriptor {
-                    label: Some(if EARLY { "mysekai_effect_after_opaques" } else { "transparent_fixture_emission" }),
-                    color_attachments: &[Some(RenderPassColorAttachment {
-                        view: &target.resolved,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: Operations {
-                            load: if EARLY { LoadOp::Clear(LinearRgba::NONE.into()) } else { LoadOp::Load },
-                            store: StoreOp::Store,
-                        },
-                    })],
-                    // The camera depth is still required by forward transparents and
-                    // later consumers. A read-only draw does NOT authorize Discard.
-                    depth_stencil_attachment: attachment_compatible.then(|| depth.get_attachment(StoreOp::Store)),
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-
-            for (index, item) in draws.draws.iter().enumerate().filter(|_| attachment_compatible) {
-                let belongs_early = item.particle.is_some() || !item.blend;
-                if EARLY != belongs_early { continue; }
-                if item.particle.is_some() && depth_binding.is_none() { continue; }
-                let (Some(pipeline), Some(render_mesh)) =
-                    (resolve(item.pipeline), meshes.get(item.mesh))
-                else {
-                    continue;
-                };
-                let Some(vertex_slice) = allocator.mesh_vertex_slice(&item.mesh) else {
-                    continue;
-                };
-                let texture_key = (item.mask, item.main, item.normal_map);
-                if !texture_groups.contains_key(&texture_key) {
-                    // 缺件的对在 pass 前建组时已被跳过——这里同样跳过 draw。
-                    continue;
+            let texture_key = (item.mask, item.main, item.normal_map);
+            if !texture_groups.contains_key(&texture_key) {
+                // 缺件的对在 pass 前建组时已被跳过——这里同样跳过 draw。
+                continue;
+            }
+            let texture_bind_group = &texture_groups[&texture_key];
+            pass.set_pipeline(pipeline);
+            let object_offsets = [
+                (index as u32) * gpu.object_stride,
+                view_offset.offset,
+                item.skin_byte_offset.unwrap_or(0),
+            ];
+            pass.set_bind_group(0, &object_bind_group, if gpu.skin_uniforms {
+                &object_offsets[..]
+            } else {
+                &object_offsets[..2]
+            });
+            pass.set_bind_group(1, texture_bind_group, &[]);
+            if item.particle.is_some() {
+                pass.set_bind_group(2, &depth_binding.unwrap().group, &[]);
+            }
+            pass.set_vertex_buffer(0, *vertex_slice.buffer.slice(..));
+            match &render_mesh.buffer_info {
+                RenderMeshBufferInfo::Indexed {
+                    index_format,
+                    count,
+                } => {
+                    let Some(index_slice) = allocator.mesh_index_slice(&item.mesh) else {
+                        continue;
+                    };
+                    pass.set_index_buffer(*index_slice.buffer.slice(..), *index_format);
+                    pass.draw_indexed(
+                        index_slice.range.start..(index_slice.range.start + *count),
+                        vertex_slice.range.start as i32,
+                        0..1,
+                    );
                 }
-                let texture_bind_group = &texture_groups[&texture_key];
-                pass.set_pipeline(pipeline);
-                let object_offsets = [
-                    (index as u32) * gpu.object_stride,
-                    view_offset.offset,
-                    item.skin_byte_offset.unwrap_or(0),
-                ];
-                pass.set_bind_group(0, &object_bind_group, if gpu.skin_uniforms {
-                    &object_offsets[..]
-                } else {
-                    &object_offsets[..2]
-                });
-                pass.set_bind_group(1, texture_bind_group, &[]);
-                if item.particle.is_some() {
-                    pass.set_bind_group(2, &depth_binding.unwrap().group, &[]);
-                }
-                pass.set_vertex_buffer(0, *vertex_slice.buffer.slice(..));
-                match &render_mesh.buffer_info {
-                    RenderMeshBufferInfo::Indexed {
-                        index_format,
-                        count,
-                    } => {
-                        let Some(index_slice) = allocator.mesh_index_slice(&item.mesh) else {
-                            continue;
-                        };
-                        pass.set_index_buffer(*index_slice.buffer.slice(..), *index_format);
-                        pass.draw_indexed(
-                            index_slice.range.start..(index_slice.range.start + *count),
-                            vertex_slice.range.start as i32,
-                            0..1,
-                        );
-                    }
-                    RenderMeshBufferInfo::NonIndexed => {
-                        pass.draw(vertex_slice.range, 0..1);
-                    }
+                RenderMeshBufferInfo::NonIndexed => {
+                    pass.draw(vertex_slice.range, 0..1);
                 }
             }
         }
-        let probe = world.get_resource::<WeatherEffectProbes>().and_then(|probes| {
-            if EARLY { probes.after_opaques.as_ref() } else { probes.after_transparents.as_ref() }
-        }).and_then(|handle| images.get(handle));
-        if let Some(probe) = probe {
-            // A probe must use the native target's exact representation. Do not
-            // hide HDR clipping or domain errors behind a display conversion.
-            if probe.texture_format == EMISSION_FORMAT && probe.size == target.resolved_texture.size() {
-                render_context.command_encoder().copy_texture_to_texture(
-                    target.resolved_texture.as_image_copy(), probe.texture.as_image_copy(), probe.size);
-            }
+    }
+    let probe = world.get_resource::<WeatherEffectProbes>().and_then(|probes| {
+        if EARLY { probes.after_opaques.as_ref() } else { probes.after_transparents.as_ref() }
+    }).and_then(|handle| images.get(handle));
+    if let Some(probe) = probe {
+        // A probe must use the native target's exact representation. Do not
+        // hide HDR clipping or domain errors behind a display conversion.
+        let probe_size = probe.texture_descriptor.size;
+        if probe.texture_descriptor.format == EMISSION_FORMAT && probe_size == target.resolved_texture.size() {
+            render_context.command_encoder().copy_texture_to_texture(
+                target.resolved_texture.as_image_copy(), probe.texture.as_image_copy(), probe_size);
         }
-        Ok(())
     }
 }
-
-#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-pub struct EmissionPassLabel;
-
-#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-struct TransparentFixtureEmissionLabel;
 
 /// RenderStartup：对象池 buffer、两个 bind group 布局、采样器。
 fn init_emission_resources(mut commands: Commands, render_device: Res<RenderDevice>) {
@@ -1037,7 +1023,7 @@ fn init_emission_resources(mut commands: Commands, render_device: Res<RenderDevi
         address_mode_w: AddressMode::ClampToEdge,
         mag_filter: FilterMode::Linear,
         min_filter: FilterMode::Linear,
-        mipmap_filter: FilterMode::Linear,
+        mipmap_filter: MipmapFilterMode::Linear,
         ..Default::default()
     });
     commands.insert_resource(EmissionGpu {
@@ -1086,23 +1072,20 @@ impl Plugin for FixtureEmissionPlugin {
                 Render,
                 prepare_emission.in_set(RenderSystems::PrepareResources),
             )
-            .add_render_graph_node::<ViewNodeRunner<crate::weather_depth::WeatherOpaqueDepthNode>>(Core3d, crate::weather_depth::WeatherOpaqueDepth)
-            .add_render_graph_node::<ViewNodeRunner<EmissionPassNode<true>>>(Core3d, EmissionPassLabel)
-            .add_render_graph_node::<ViewNodeRunner<EmissionPassNode<false>>>(Core3d, TransparentFixtureEmissionLabel)
             // Source event 300: effect participants are drawn before transparents.
             // Opaque fixture MRT replay shares this earlier point; transparent
             // fixture replay must stay after its main transparent source stage.
             // Replay vs true MRT equivalence remains a separate proof obligation.
-            .add_render_graph_edges(Core3d, (
-                Node3d::MainOpaquePass,
-                crate::weather_depth::WeatherOpaqueDepth,
-                EmissionPassLabel,
-                Node3d::MainTransmissivePass,
-            ))
-            .add_render_graph_edges(Core3d, (
-                Node3d::MainTransparentPass,
-                TransparentFixtureEmissionLabel,
-                Node3d::EndMainPass,
-            ));
+            .add_systems(
+                Core3d,
+                (
+                    (crate::weather_depth::weather_opaque_depth, emission_pass::<true>)
+                        .chain()
+                        .after(main_opaque_pass_3d)
+                        .before(bevy::pbr::main_transmissive_pass_3d),
+                    emission_pass::<false>.after(main_transparent_pass_3d),
+                )
+                    .in_set(Core3dSystems::MainPass),
+            );
     }
 }

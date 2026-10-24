@@ -7,19 +7,16 @@
 //! into an UNorm attachment. Point-copy the accumulated scene on each domain
 //! boundary. This also retains ordering against existing linear-output draws.
 use bevy::camera::{MainPassResolutionOverride, Viewport};
-use bevy::core_pipeline::core_3d::{
-    graph::{Core3d, Node3d},
-    Transparent3d,
-};
-use bevy::ecs::query::QueryItem;
+use bevy::core_pipeline::core_3d::{main_transparent_pass_3d, Transparent3d};
+use bevy::core_pipeline::Core3d;
+use bevy::ecs::schedule::{Schedules, SystemWithAccess};
 use bevy::prelude::*;
 use bevy::render::{
     camera::ExtractedCamera,
     extract_component::{ExtractComponent, ExtractComponentPlugin},
-    render_graph::{NodeRunError, RenderGraph, RenderGraphContext, ViewNode, ViewNodeRunner},
     render_phase::{PhaseItem, ViewSortedRenderPhases},
     render_resource::*,
-    renderer::{RenderContext, RenderDevice},
+    renderer::{RenderContext, RenderDevice, ViewQuery},
     texture::{CachedTexture, TextureCache},
     view::{ExtractedView, ViewDepthTexture, ViewTarget},
     Render, RenderApp, RenderSystems,
@@ -214,6 +211,7 @@ fn point_copy(
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
     pass.set_pipeline(pipeline);
     pass.set_bind_group(0, &group, &[]);
@@ -223,146 +221,136 @@ fn point_copy(
 /// The point-copy bind groups bind only the copy source view, which is one of
 /// the view target's two main textures or the encoded attachment, so they are
 /// cached by that view instead of being created for every span.
-struct SourceTransparentNode {
-    bind_groups: SharedBindGroupCache,
-}
-
-impl FromWorld for SourceTransparentNode {
-    fn from_world(world: &mut World) -> Self {
-        Self { bind_groups: SharedBindGroupCache::from_world(world) }
-    }
-}
-impl ViewNode for SourceTransparentNode {
-    type ViewQuery = (
-        &'static ExtractedCamera,
-        &'static ExtractedView,
-        &'static ViewTarget,
-        &'static ViewDepthTexture,
-        Option<&'static MainPassResolutionOverride>,
-        Option<&'static SourceColorView>,
-    );
-
-    fn run(
-        &self,
-        graph: &mut RenderGraphContext,
-        context: &mut RenderContext,
-        (camera, view, target, depth, resolution, color): QueryItem<Self::ViewQuery>,
-        world: &World,
-    ) -> Result<(), NodeRunError> {
-        let Some(phases) = world.get_resource::<ViewSortedRenderPhases<Transparent3d>>() else {
-            return Ok(());
-        };
-        let Some(phase) = phases.get(&view.retained_view_entity) else {
-            return Ok(());
-        };
-        let cache = world.resource::<PipelineCache>();
-        let frame = world.resource::<bevy::diagnostic::FrameCount>().0;
-        let mut groups = self.bind_groups.lock();
-        let mut start = 0;
-        while start < phase.items.len() {
-            let encoded = world
-                .get::<EncodedColorOutput>(phase.items[start].entity())
-                .is_some();
-            let mut end = start;
-            // Advance across complete batches: render_range itself skips the
-            // other items covered by a batch leader. Never cut one in half.
-            loop {
-                end += phase.items[end].batch_range().len().max(1);
-                if end >= phase.items.len()
-                    || world
-                        .get::<EncodedColorOutput>(phase.items[end].entity())
-                        .is_some()
-                        != encoded
-                {
-                    break;
-                }
-            }
-            end = end.min(phase.items.len());
-            let raw = if encoded {
-                match color.filter(|color| color.ready(cache) == Ok(true)) {
-                    Some(color) => Some(color),
-                    None => {
-                        // Source preflight remains pending/failed, not ready,
-                        // until this route is usable. Do not draw into sRGB.
-                        error!("encoded transparent draw has no ready colour-domain attachment");
-                        start = end;
-                        continue;
-                    }
-                }
-            } else {
-                None
-            };
-            if let Some(raw) = raw {
-                point_copy(
-                    context,
-                    world,
-                    &mut groups,
-                    frame,
-                    raw.to_encoded,
-                    target.main_texture_view(),
-                    &raw.texture.default_view,
-                );
-            }
+fn source_transparent_pass(
+    world: &World,
+    view: ViewQuery<(
+        &ExtractedCamera,
+        &ExtractedView,
+        &ViewTarget,
+        &ViewDepthTexture,
+        Option<&MainPassResolutionOverride>,
+        Option<&SourceColorView>,
+    )>,
+    bind_groups: Local<SharedBindGroupCache>,
+    mut render_context: RenderContext,
+) {
+    let view_entity = view.entity();
+    let (camera, view, target, depth, resolution, color) = view.into_inner();
+    let context = &mut render_context;
+    let Some(phases) = world.get_resource::<ViewSortedRenderPhases<Transparent3d>>() else {
+        return;
+    };
+    let Some(phase) = phases.get(&view.retained_view_entity) else {
+        return;
+    };
+    let cache = world.resource::<PipelineCache>();
+    let frame = world.resource::<bevy::diagnostic::FrameCount>().0;
+    let mut groups = bind_groups.lock();
+    let mut start = 0;
+    while start < phase.items.len() {
+        let encoded = world
+            .get::<EncodedColorOutput>(phase.items[start].entity())
+            .is_some();
+        let mut end = start;
+        // Advance across complete batches: render_range itself skips the
+        // other items covered by a batch leader. Never cut one in half.
+        loop {
+            end += phase.items[end].batch_range().len().max(1);
+            if end >= phase.items.len()
+                || world
+                    .get::<EncodedColorOutput>(phase.items[end].entity())
+                    .is_some()
+                    != encoded
             {
-                let attachment = match raw {
-                    Some(raw) => RenderPassColorAttachment {
-                        view: &raw.texture.default_view,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: Operations {
-                            load: LoadOp::Load,
-                            store: StoreOp::Store,
-                        },
+                break;
+            }
+        }
+        end = end.min(phase.items.len());
+        let raw = if encoded {
+            match color.filter(|color| color.ready(cache) == Ok(true)) {
+                Some(color) => Some(color),
+                None => {
+                    // Source preflight remains pending/failed, not ready,
+                    // until this route is usable. Do not draw into sRGB.
+                    error!("encoded transparent draw has no ready colour-domain attachment");
+                    start = end;
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(raw) = raw {
+            point_copy(
+                context,
+                world,
+                &mut groups,
+                frame,
+                raw.to_encoded,
+                target.main_texture_view(),
+                &raw.texture.default_view,
+            );
+        }
+        {
+            let attachment = match raw {
+                Some(raw) => RenderPassColorAttachment {
+                    view: &raw.texture.default_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: Operations {
+                        load: LoadOp::Load,
+                        store: StoreOp::Store,
                     },
-                    None => target.get_color_attachment(),
-                };
-                let attachments = [Some(attachment)];
-                let mut pass = context.begin_tracked_render_pass(RenderPassDescriptor {
-                    label: Some("sorted transparent colour-domain span"),
-                    color_attachments: &attachments,
-                    depth_stencil_attachment: Some(depth.get_attachment(StoreOp::Store)),
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-                if let Some(viewport) =
-                    Viewport::from_viewport_and_override(camera.viewport.as_ref(), resolution)
-                {
-                    pass.set_camera_viewport(&viewport);
-                }
-                if let Err(error) =
-                    phase.render_range(&mut pass, world, graph.view_entity(), start..end)
-                {
-                    error!(?error, "transparent phase draw failed");
-                }
+                },
+                None => target.get_color_attachment(),
+            };
+            let attachments = [Some(attachment)];
+            let mut pass = context.begin_tracked_render_pass(RenderPassDescriptor {
+                label: Some("sorted transparent colour-domain span"),
+                color_attachments: &attachments,
+                depth_stencil_attachment: Some(depth.get_attachment(StoreOp::Store)),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            if let Some(viewport) =
+                Viewport::from_viewport_and_override(camera.viewport.as_ref(), resolution)
+            {
+                pass.set_camera_viewport(&viewport);
             }
-            if let Some(raw) = raw {
-                point_copy(
-                    context,
-                    world,
-                    &mut groups,
-                    frame,
-                    raw.to_linear,
-                    &raw.texture.default_view,
-                    target.main_texture_view(),
-                );
+            if let Err(error) =
+                phase.render_range(&mut pass, world, view_entity, start..end)
+            {
+                error!(?error, "transparent phase draw failed");
             }
-            start = end;
         }
-        // A WebGL pass can leave a custom viewport in effect for the next node.
-        // Retain the core pipeline's reset even when the last span is linear.
-        if camera.viewport.is_some() || resolution.is_some() {
-            let attachments = [Some(target.get_color_attachment())];
-            let _pass = context
-                .command_encoder()
-                .begin_render_pass(&RenderPassDescriptor {
-                    label: Some("transparent viewport reset"),
-                    color_attachments: &attachments,
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
+        if let Some(raw) = raw {
+            point_copy(
+                context,
+                world,
+                &mut groups,
+                frame,
+                raw.to_linear,
+                &raw.texture.default_view,
+                target.main_texture_view(),
+            );
         }
-        Ok(())
+        start = end;
+    }
+    // A WebGL pass can leave a custom viewport in effect for the next node.
+    // Retain the core pipeline's reset even when the last span is linear.
+    if camera.viewport.is_some() || resolution.is_some() {
+        let attachments = [Some(target.get_color_attachment())];
+        let _pass = context
+            .command_encoder()
+            .begin_render_pass(&RenderPassDescriptor {
+                label: Some("transparent viewport reset"),
+                color_attachments: &attachments,
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
     }
 }
 
@@ -384,16 +372,22 @@ impl Plugin for SourceColorPlugin {
                 .in_set(RenderSystems::PrepareResources)
                 .after(bevy::core_pipeline::core_3d::prepare_core_3d_depth_textures),
         );
-        // Replace only the runner, retaining every incoming/outgoing graph edge
-        // and the existing phase. add_node would discard the node's own edges.
-        let node = SourceTransparentNode::from_world(render.world_mut());
-        let runner = ViewNodeRunner::new(node, render.world_mut());
-        let mut graph = render.world_mut().resource_mut::<RenderGraph>();
-        let state = graph
-            .sub_graph_mut(Core3d)
-            .get_node_state_mut(Node3d::MainTransparentPass)
-            .expect("core transparent phase is installed before source colour adaptation");
-        state.node = Box::new(runner);
-        state.type_name = std::any::type_name::<ViewNodeRunner<SourceTransparentNode>>();
+        // Replace only the system in the core transparent pass's schedule node,
+        // retaining every ordering against it and the existing phase. Removing
+        // the core system and adding this one would drop those orderings.
+        let core = IntoSystem::into_system(main_transparent_pass_3d).system_type();
+        let mut schedules = render.world_mut().resource_mut::<Schedules>();
+        let graph = schedules
+            .get_mut(Core3d)
+            .expect("the core 3D schedule is installed before source colour adaptation")
+            .graph_mut();
+        let key = graph
+            .systems
+            .iter()
+            .find(|(_, system, _)| system.system_type() == core)
+            .map(|(key, _, _)| key)
+            .expect("core transparent pass is installed before source colour adaptation");
+        *graph.systems.get_mut(key).expect("the key was just found") =
+            SystemWithAccess::new(Box::new(IntoSystem::into_system(source_transparent_pass)));
     }
 }

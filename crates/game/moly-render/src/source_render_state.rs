@@ -10,9 +10,9 @@ pub fn apply(pipeline: &mut RenderPipelineDescriptor, state: SourceRenderState) 
         _ => unreachable!("validated source CullMode"),
     };
     if let Some(depth) = &mut pipeline.depth_stencil {
-        depth.depth_compare = reversed_compare(state.depth_test);
+        depth.depth_compare = Some(reversed_compare(state.depth_test));
         // Disabled depth testing disables depth writes on the source graphics path.
-        depth.depth_write_enabled = state.depth_write && state.depth_test != 0;
+        depth.depth_write_enabled = Some(state.depth_write && state.depth_test != 0);
     }
     if let Some(fragment) = &mut pipeline.fragment {
         for target in fragment.targets.iter_mut().flatten() {

@@ -124,16 +124,16 @@ fn operation(value: u8) -> BlendOperation {
 fn apply_state(descriptor: &mut RenderPipelineDescriptor, state: SourceRenderState) {
     descriptor.primitive.cull_mode = match state.cull { 0 => None, 1 => Some(Face::Front), _ => Some(Face::Back) };
     if let Some(depth) = descriptor.depth_stencil.as_mut() {
-        depth.depth_write_enabled = state.depth_write;
+        depth.depth_write_enabled = Some(state.depth_write);
         // Bevy's camera depth is reverse-Z. Equality and disabled/always tests
         // stay unchanged; ordered comparisons reverse, not the source values.
-        depth.depth_compare = match state.depth_test {
+        depth.depth_compare = Some(match state.depth_test {
             0 | 8 => CompareFunction::Always, 1 => CompareFunction::Never,
             2 => CompareFunction::Greater, 3 => CompareFunction::Equal,
             4 => CompareFunction::GreaterEqual, 5 => CompareFunction::Less,
             6 => CompareFunction::NotEqual, 7 => CompareFunction::LessEqual,
             _ => unreachable!("source depth comparison validated on import"),
-        };
+        });
     }
     if let Some(target) = descriptor.fragment.as_mut().and_then(|f| f.targets.first_mut()).and_then(Option::as_mut) {
         target.blend = blending(state).then_some(BlendState {

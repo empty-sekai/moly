@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use bevy::asset::{AssetApp, LoadState};
 use bevy::ecs::system::lifetimeless::SRes;
 use bevy::ecs::system::SystemParamItem;
-use bevy::gltf::Gltf;
+use bevy::gltf::{Gltf, GltfMaterial};
 use bevy::image::Image;
 use bevy::pbr::{Material, MaterialPipeline, MaterialPipelineKey, MaterialPlugin, StandardMaterial};
 use bevy::prelude::*;
@@ -2248,7 +2248,7 @@ fn build_swap_plan(
     let mut tally = SwapTally::default();
     let load = |uri: &str| load_site_texture(server, sidecar, scene, uri);
     // glb 材质名反查（下标 join 的日志名用；无名材质按下标记）。
-    let mut name_by_handle: HashMap<&Handle<StandardMaterial>, &str> = HashMap::new();
+    let mut name_by_handle: HashMap<&Handle<GltfMaterial>, &str> = HashMap::new();
     for (name, handle) in &gltf.named_materials {
         name_by_handle.entry(handle).or_insert(name);
     }
@@ -2336,7 +2336,10 @@ fn build_swap_plan(
                 }
             }
         };
-        classes.insert(glb_material.clone(), ClassifiedMaterial {
+        let standard = standard_material_of(server, glb_material).unwrap_or_else(|| {
+            panic!("站点 glb 材质（下标 {index}）没有装载器派生的 StandardMaterial")
+        });
+        classes.insert(standard, ClassifiedMaterial {
             colour: class,
             passes: sidecar.materials.get(index).and_then(|source| source.passes.clone()),
         });
@@ -2349,6 +2352,18 @@ fn build_swap_plan(
         classes,
         tally,
     })
+}
+
+/// The `StandardMaterial` the glTF loader derived from one glTF material and
+/// put on the mesh entities that use it. The loader stores it next to the
+/// glTF material under the same label with a `/std` suffix.
+pub(crate) fn standard_material_of(
+    server: &AssetServer,
+    material: &Handle<GltfMaterial>,
+) -> Option<Handle<StandardMaterial>> {
+    let path = material.path()?;
+    let label = path.label()?;
+    server.get_handle(path.clone().with_label(format!("{label}/std")))
 }
 
 /// 站点材质插件：全局量桥 + 材质管线 + sidecar 装载与换装。

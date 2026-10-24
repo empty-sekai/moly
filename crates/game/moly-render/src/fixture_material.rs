@@ -588,8 +588,8 @@ impl Material for FixtureMaterial {
         if let Some(blended) = base.rug {
             defs.push("FIXTURE_RUG");
             if let Some(depth) = descriptor.depth_stencil.as_mut() {
-                depth.depth_write_enabled = false;
-                depth.depth_compare = CompareFunction::Always;
+                depth.depth_write_enabled = Some(false);
+                depth.depth_compare = Some(CompareFunction::Always);
             }
             if let Some(target) = descriptor.fragment.as_mut()
                 .and_then(|f| f.targets.get_mut(0)).and_then(Option::as_mut) {
@@ -1668,9 +1668,9 @@ fn chain_and_release(
     handle: &Handle<Image>,
 ) -> Result<u32, MipSkip> {
     mip_chain_plan(images.get(handle).ok_or(MipSkip::NoData)?)?;
-    let image = images.get_mut(handle).ok_or(MipSkip::NoData)?;
-    let levels = generate_mip_chain(image)?;
-    moly_assets::residency::release_to_render_world(image);
+    let mut image = images.get_mut(handle).ok_or(MipSkip::NoData)?;
+    let levels = generate_mip_chain(&mut image)?;
+    moly_assets::residency::release_to_render_world(&mut image);
     replaced.write(crate::gpu_image_release::ImageTextureReplaced(handle.id()));
     Ok(levels)
 }

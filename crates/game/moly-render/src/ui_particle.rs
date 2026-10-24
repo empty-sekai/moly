@@ -1309,7 +1309,7 @@ fn bake_frame(
             if system.runtime.pool.is_empty() && meshes.get(&mesh.0).is_some_and(|mesh| mesh.count_vertices() == 0) {
                 continue;
             }
-            let Some(mesh) = meshes.get_mut(&mesh.0) else {
+            let Some(mesh) = meshes.get_mut(&mesh.0).map(|mesh| mesh.into_inner()) else {
                 continue;
             };
             let render_scale = system.local_scale.unwrap_or_else(|| node.lossy_scale());

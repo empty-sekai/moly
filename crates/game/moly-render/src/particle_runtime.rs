@@ -2441,7 +2441,7 @@ fn source_view(camera: &GlobalTransform) -> [f32; 16] {
 /// extracts and prepares the mesh again although nothing changed.
 pub fn clear_drawn(meshes: &mut Assets<Mesh>, mesh: &Handle<Mesh>) {
     if meshes.get(mesh).is_some_and(holds_vertices) {
-        if let Some(mesh) = meshes.get_mut(mesh) { crate::billboard::clear(mesh); }
+        if let Some(mut mesh) = meshes.get_mut(mesh) { crate::billboard::clear(&mut mesh); }
     }
 }
 

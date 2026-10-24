@@ -16,7 +16,7 @@ fn explicit_sampler_preserves_axis_modes_and_mip_filter() {
     assert_eq!(descriptor.address_mode_v, AddressMode::ClampToEdge);
     assert_eq!(descriptor.address_mode_w, AddressMode::MirrorRepeat);
     assert_eq!(descriptor.mag_filter, FilterMode::Linear);
-    assert_eq!(descriptor.mipmap_filter, FilterMode::Nearest);
+    assert_eq!(descriptor.mipmap_filter, MipmapFilterMode::Nearest);
     assert_eq!(
         (descriptor.lod_min_clamp, descriptor.lod_max_clamp),
         (0.0, 3.0)
@@ -31,7 +31,7 @@ fn explicit_sampler_preserves_axis_modes_and_mip_filter() {
     trilinear.filter = 2;
     assert_eq!(
         sampler_descriptor(&trilinear, 2).unwrap().mipmap_filter,
-        FilterMode::Linear
+        MipmapFilterMode::Linear
     );
 }
 #[test]

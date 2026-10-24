@@ -1163,7 +1163,7 @@ pub fn advance(
         if !draws_change(&meshes, &system.mesh, system) {
             continue;
         }
-        let Some(mesh) = meshes.get_mut(&system.mesh) else {
+        let Some(mesh) = meshes.get_mut(&system.mesh).map(|mesh| mesh.into_inner()) else {
             continue;
         };
         crate::particle_runtime::write_geometry(mesh, system, &to_world, &ctx.site, camera_transform, basis);
@@ -1515,7 +1515,7 @@ pub fn advance_fixture_particles(
                     "native particle step refused: the system is retired and draws nothing");
                 system.pool.clear();
                 system.side.clear();
-                if let Some(mesh) = meshes.get_mut(&system.mesh) { billboard::clear(mesh); }
+                if let Some(mesh) = meshes.get_mut(&system.mesh).map(|mesh| mesh.into_inner()) { billboard::clear(mesh); }
                 clear_trail_mesh(&mut meshes, trail);
                 commands.entity(entity).remove::<(FixtureParticleLive, crate::weather_fx::fixture::Played)>();
                 continue;
@@ -1542,14 +1542,14 @@ pub fn advance_fixture_particles(
         }
         let transform = if system.emitter.simulation_space == SimulationSpace::World { GlobalTransform::IDENTITY } else { anchor };
         if draws_change(&meshes, &system.mesh, system) {
-            if let Some(mesh) = meshes.get_mut(&system.mesh) {
+            if let Some(mesh) = meshes.get_mut(&system.mesh).map(|mesh| mesh.into_inner()) {
                 crate::particle_runtime::write_geometry(mesh, system, &transform, &anchor, camera_transform, basis);
             }
         }
         // The renderer's second draw: the trail strip from this frame's
         // recorded points.
         if let Some(trail) = trail.filter(|trail| draws_change(&meshes, &trail.0, system)) {
-            if let Some(mesh) = meshes.get_mut(&trail.0) {
+            if let Some(mesh) = meshes.get_mut(&trail.0).map(|mesh| mesh.into_inner()) {
                 crate::particle_runtime::write_trail_mesh(mesh, system, &anchor, camera_transform);
             }
         }
@@ -1570,14 +1570,14 @@ pub fn advance_fixture_particles(
         let system = &mut particle.0;
         let transform = if system.emitter.simulation_space == SimulationSpace::World { GlobalTransform::IDENTITY } else { anchor };
         if draws_change(&meshes, &system.mesh, system) {
-            if let Some(mesh) = meshes.get_mut(&system.mesh) {
+            if let Some(mesh) = meshes.get_mut(&system.mesh).map(|mesh| mesh.into_inner()) {
                 crate::particle_runtime::write_geometry(mesh, system, &transform, &anchor, camera_transform, basis);
             }
         }
         // The renderer's second draw: the trail strip from this frame's
         // recorded points.
         if let Some(trail) = trail.filter(|trail| draws_change(&meshes, &trail.0, system)) {
-            if let Some(mesh) = meshes.get_mut(&trail.0) {
+            if let Some(mesh) = meshes.get_mut(&trail.0).map(|mesh| mesh.into_inner()) {
                 crate::particle_runtime::write_trail_mesh(mesh, system, &anchor, camera_transform);
             }
         }

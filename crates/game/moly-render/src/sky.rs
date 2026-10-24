@@ -378,10 +378,10 @@ pub fn parse_phenomena(
         warn!("现象清单里没有 {DEFAULT_PHENOMENON} 的 ramp 文件：不画天空（fail-closed）");
         return;
     };
-    let handle = server.load_with_settings::<Image, _>(
-        AssetPath::from(format!("moly://phenomena/{file}")),
-        |settings: &mut ImageLoaderSettings| settings.is_srgb = false,
-    );
+    let handle = server
+        .load_builder()
+        .with_settings(|settings: &mut ImageLoaderSettings| settings.is_srgb = false)
+        .load::<Image>(AssetPath::from(format!("moly://phenomena/{file}")));
     commands.insert_resource(RampSlot { handle, file });
 }
 

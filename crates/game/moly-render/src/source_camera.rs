@@ -74,7 +74,6 @@ pub fn z_buffer_params(camera: &Projection) -> Result<[f32; 4]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy::camera::CameraProjection;
 
     #[test]
     fn finite_source_planes_keep_the_framing() {
