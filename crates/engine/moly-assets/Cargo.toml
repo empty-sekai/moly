@@ -12,7 +12,7 @@ render = ["bevy/bevy_gltf", "bevy/bevy_image", "bevy/bevy_scene", "bevy/bevy_sha
 
 [dependencies]
 moly-law = { path = "../../base/moly-law" }
-bevy = { version = "0.18.1", default-features = false, features = [
+bevy = { version = "0.19.1", default-features = false, features = [
     "std", "bevy_asset", "bevy_log", "async_executor", "multi_threaded",
 ] }
 gltf = { version = "1.4", default-features = false }
@@ -36,7 +36,7 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # The browser's fetch-based web reader (`remote`).
-bevy = { version = "0.18.1", default-features = false, features = ["https"] }
+bevy = { version = "0.19.1", default-features = false, features = ["https"] }
 js-sys = "0.3"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"

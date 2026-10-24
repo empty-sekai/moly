@@ -41,10 +41,10 @@ license = "AGPL-3.0-only"
 # Explicit expansion of Bevy 0.18's default 2d/3d/ui feature groups. Keep the
 # existing renderer, audio, animation, UI, codecs and native platform support;
 # omit only engine gizmos and picking. Moly owns its gesture/raycast UI routes.
-bevy = { version = "0.18.1", default-features = false, features = [
+bevy = { version = "0.19.1", default-features = false, features = [
     "async_executor", "bevy_asset", "bevy_input_focus", "bevy_log",
     "bevy_state", "bevy_window", "custom_cursor", "reflect_auto_register",
-    "std", "android-game-activity", "android_shared_stdcxx", "bevy_gilrs",
+    "std", "android-game-activity", "bevy_gilrs",
     "bevy_winit", "default_font", "multi_threaded", "x11",
     "wayland", "sysinfo_plugin",
     "bevy_animation", "bevy_camera", "bevy_color", "bevy_image", "bevy_mesh",
@@ -53,7 +53,7 @@ bevy = { version = "0.18.1", default-features = false, features = [
     "bevy_light", "bevy_mikktspace", "ktx2", "morph_animation", "morph",
     "smaa_luts", "tonemapping_luts", "zstd_rust", "bevy_anti_alias",
     "bevy_gltf", "bevy_pbr", "bevy_post_process", "gltf_animation",
-    "bevy_ui", "bevy_ui_render", "bevy_scene", "bevy_audio", "vorbis", "debug",
+    "bevy_ui", "bevy_ui_render", "bevy_scene", "bevy_world_serialization", "bevy_audio", "vorbis", "debug",
     # The MP3 decoder the storage mirror's audio needs.
     "mp3",
 ] }

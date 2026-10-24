@@ -25,4 +25,4 @@ android_log-sys = "0.3"
 # The audio backend links the C++ runtime the APK packages
 # (`libc++_shared.so`) instead of a static copy of its own, so the process has
 # one C++ runtime.
-bevy = { workspace = true, features = ["android_shared_stdcxx"] }
+bevy = { workspace = true }
