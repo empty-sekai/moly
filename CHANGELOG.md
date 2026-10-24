@@ -2,6 +2,108 @@
 
 All notable changes to this project are listed here. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.0.4](https://github.com/empty-sekai/moly/compare/v0.0.3...v0.0.4) - 2026-10-24
+
+### Features
+
+- **control:** Add moly.camera.free and moly.camera.reset
+- **mcp:** Add the layout_place_many tool
+- **net:** Add the protocol, server session and client link crates
+- **server:** Add the moly-server native host
+- **link:** Keep trying to reach a server that is still starting
+- **launcher:** Start the game's server before the game
+- **app:** Connect the native game to its server
+- **server:** Run the server model in moly-server and answer protocol calls
+- **link:** Answer every feature call through the server process
+- **mcp:** Expose the server control port and server_rpc
+- **server:** Share the master table loader and serve the npc panel
+- **director:** Wait for entry control and refuse unreachable walk goals
+- **layout:** Add the moly-layout crate skeleton
+- **craft:** Show the fixture bonus, rank-up, new site and status dialogs
+- **bgm:** Add the change-vocal and filter dialogs to the record screen
+- **layout:** Apply batched placement ops over moly.layout.apply
+- **sitemap:** Expose site icons as tap targets in ui views
+- **bgm-select:** Show the search, sort, view toggle and empty state
+- **ui:** Add stamina, weather and bgm dialogs; report system errors at startup
+- **assets:** Read asset packs over HTTP on native targets with a local cache
+- **server-host:** Expose the server as a library that binds and serves
+- **craft:** Carry the blueprint term on craft requests and in user data
+- **ui:** Number dialog types as the 7.0.0 client does and name them at call sites
+- **assets:** Read master tables as the JP set plus each enabled region's own rows
+- **android:** Package the game and its server as a native Android app
+- **npc:** Add the 7.0.0 NPC controller phases beside the current decision loop
+- **npc:** Add the controller's upper and lower bases, plans and decider rows
+- **server:** Serve the convert machine and model the mission sheets
+- **npc:** Run the controller's upper states and lower dispatch
+- **server:** Normal mission rewards, convert and the home mission panel
+- **net:** Send the binary protocol over HTTP requests
+- **features:** Add the mission and convert furniture screens
+- **server:** Close administration and validate user ids
+- **convert:** Add the convert dialogs
+- **link:** Connect browsers and Android to the public server
+- **link:** Let the browser stage play without a server
+- **server:** Answer one request through the hub
+- **link:** Host the server inside the browser stage
+- **convert:** Receive converted resources and play reward lotteries
+
+### Bug fixes
+
+- **site-expansion:** Return the room to the normal state and camera after a level release
+- **server-panel:** Clamp invalid starter texture ids and log a refused starter layout
+- **assets:** Read HTTP assets and remote tables inside a web worker
+- **walk:** Bake collider surfaces as height spans so raised decks are walkable
+- **director:** Reach the craft apply button and close follow-up dialogs
+- **server:** Face the starter gate toward the site
+- **inventory:** Create the catalogue state when the screen loads
+- **game:** Order the unsaved-layout flag after the editor commands only
+- **web:** Time the walk-face bake with the platform clock
+- **stage:** Load the empty stage scene without a server
+- **stage:** Resolve the empty level and draw the talk window
+- **stage:** Publish preview ownership before balloon cleanup
+
+### Performance
+
+- **walk:** Skip full-grid passes the span bake does not need
+
+### Refactoring
+
+- **protocol:** Move the user data rows, requests and replies into moly-protocol
+- **game:** Keep the game's copies of user data in a userdata module
+- Share the server's wire types and master tables through their own crates
+- **game:** Read every server value through the link
+- **masters:** Load harvest catalog tables through the shared loader
+- **masters:** Serve fixture, tool and record rows from the shared loader
+- **layout:** Move the tile rules and the put resolver into moly-layout
+- **talk:** Draw the talk window as a prefab view
+- **game:** Move shared types into vocabulary modules
+- **game:** Invert the remaining world-to-feature references
+- **game:** Keep each module's files beside the module
+- **game:** Split moly-game into one crate per layer
+
+### Documentation
+
+- Describe the server process, android, master sources and crates
+- **roadmap:** Describe the HTTP transport and the Android status
+- Restructure the README and move details into topic documents
+- Drop the browser deployment link from the quick start
+
+### Tests
+
+- **game:** Census of every fixture's walkable area
+
+### Build
+
+- Package and start moly-server wherever the game is shipped or launched
+- **android:** Use Kotlin, NDK r30 and rustls web roots for native HTTPS
+
+### Miscellaneous
+
+- **web:** Align the runtime limits table
+
+### Reverts
+
+- Restore conversion resource handling
+
 ## [0.0.3](https://github.com/empty-sekai/moly/compare/v0.0.2...v0.0.3) - 2026-10-17
 
 ### Features
