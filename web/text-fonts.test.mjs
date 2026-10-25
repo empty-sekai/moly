@@ -132,6 +132,41 @@ test("font catalogue refuses overlapping coverage, escaped paths, and missing li
   }
 });
 
+test("font selection follows Rust whitespace precedence and rejects unsupported winning BOM text", async () => {
+  const previous = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify(catalog), {
+      headers: { "content-type": "application/json" },
+    });
+  try {
+    const options = {
+      catalogUrl: "https://whitespace.fonts.test/fonts/latest.json",
+      baseFontSha256: base,
+    };
+    const bom = validateTextSession(session("\uFEFF", "丂"));
+    assert.deepEqual(displayCodepoints(bom), [0xfeff]);
+    await assert.rejects(selectTextFonts(bom, options), /U\+FEFF/);
+
+    const whitespace = " \n\u00A0\u1680\u2000\u2028\u2029\u202F\u205F\u3000";
+    const human = validateTextSession(session(whitespace, "丂"));
+    assert.deepEqual(displayCodepoints(human), [0x4e02]);
+    assert.equal((await selectTextFonts(human, options))[0].sha256, fontHash);
+    assert.deepEqual(
+      await selectTextFonts(
+        validateTextSession(session(whitespace, whitespace)),
+        options,
+      ),
+      [],
+    );
+    assert.throws(
+      () => validateTextSession(session("\u0085", "丂")),
+      /Invalid/,
+    );
+  } finally {
+    globalThis.fetch = previous;
+  }
+});
+
 test("font references admit loopback development only and refuse credentials or query", () => {
   const value = session("Shown");
   const font = {

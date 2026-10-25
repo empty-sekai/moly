@@ -152,6 +152,22 @@ test("a pinned source survives translation publication changes and rejects chang
       "Original",
     );
     assert.equal(entry.lines[0].text, "Original");
+    // Match Rust/Go: BOM is not Unicode White_Space, while ordinary Unicode
+    // whitespace does not override the source. Reading and search must agree.
+    for (const [text, displayed] of [
+      ["\uFEFF", "\uFEFF"],
+      [" \n\u00A0\u1680\u2000\u2028\u2029\u202F\u205F\u3000", "Original"],
+    ]) {
+      publish(text);
+      assert.equal(
+        localizeEntry(entry, await loadTextSession(options)).lines[0].text,
+        displayed,
+      );
+      assert.equal(
+        (await loadTextIndex(options)).sample.search,
+        `${displayed} Original`,
+      );
+    }
     publish("Still official");
     const fetchPublication = globalThis.fetch;
     globalThis.fetch = async (url, init) => {

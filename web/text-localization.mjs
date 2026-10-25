@@ -1,6 +1,6 @@
 // Resource snapshots and translation publications have separate identities.
 // This module is shared by the host's reading view and the stage adapter.
-import { selectTextFonts } from "./text-fonts.mjs";
+import { hasDisplayText, selectTextFonts } from "./text-fonts.mjs";
 const HASH = /^[a-f0-9]{64}$/;
 const LIMIT = 2 * 1024 * 1024;
 const encoder = new TextEncoder();
@@ -406,7 +406,7 @@ export async function loadTextIndex(
     const resolved = lines.map((line) => {
       for (const [rows, kind] of overrides) {
         const row = rows.get(line[0]);
-        if (row?.[1] === line[1] && row[3] === kind && row[2].trim())
+        if (row?.[1] === line[1] && row[3] === kind && hasDisplayText(row[2]))
           return row[2];
       }
       return line[3].replace(/<[^>]*>/g, "");
@@ -633,7 +633,7 @@ export function localizeEntry(entry, session) {
       if (
         translated?.sourceHash === line.sourceHash &&
         translated.source === origin &&
-        translated.text.trim()
+        hasDisplayText(translated.text)
       )
         return translated.text;
     }

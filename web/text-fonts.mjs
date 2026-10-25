@@ -172,6 +172,11 @@ export async function loadFontCatalog(url, signal) {
   return value;
 }
 
+/** Rust str::trim and Go strings.TrimSpace use Unicode White_Space. */
+export function hasDisplayText(text) {
+  return /[^\p{White_Space}]/u.test(text);
+}
+
 /** Matches TextSession::characters: only winning display strings count. */
 export function displayCodepoints(session) {
   if (!session) return [];
@@ -199,7 +204,7 @@ export function displayCodepoints(session) {
         if (
           translated?.sourceHash === line.sourceHash &&
           translated.source === origin &&
-          translated.text.trim()
+          hasDisplayText(translated.text)
         ) {
           text = translated.text;
           break;
