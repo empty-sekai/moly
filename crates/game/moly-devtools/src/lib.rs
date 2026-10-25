@@ -34,6 +34,9 @@ pub use moly_core::render;
 pub use moly_core::system_access;
 pub use moly_core::ui_font;
 pub use moly_core::weather_transition;
+// The TOML parser the plugin manifests are read with, under the name the
+// tables the plugin runtime holds are written with.
+pub(crate) use moly_plugin::toml;
 pub use moly_render::billboard;
 pub use moly_render::character_material;
 pub use moly_render::fixture_timeline_particles;
@@ -90,6 +93,7 @@ pub use moly_world::camera;
 pub use moly_world::camera_site_move;
 pub use moly_world::character;
 pub use moly_world::character_silhouette;
+pub use moly_world::companion;
 pub use moly_world::cloth_runtime;
 pub use moly_world::cutscene_camera;
 pub use moly_world::delayed_faces;
@@ -203,6 +207,10 @@ pub mod director;
 pub mod fixture_walk;
 #[cfg(test)]
 pub mod npc_harness;
+/// The plugin host: the Luau plugins the profile enables, run against the
+/// game.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod plugin_host;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod portraits;
 pub mod talk_probe;

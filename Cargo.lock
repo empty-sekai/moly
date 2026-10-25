@@ -2619,9 +2619,9 @@ dependencies = [
 
 [[package]]
 name = "crc32fast"
-version = "1.5.1"
+version = "1.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8498c871161e1742aaa9d52551b2d6ebdd4c3d45a3be423e3728f33b955be550"
+checksum = "0ba106e844045ddc02c20768ac4b0b7cb45f2cc2ecbd833ac9f5dacb183c2055"
 dependencies = [
  "cfg-if",
 ]
@@ -3211,6 +3211,16 @@ checksum = "38e2275cc4e4fc009b0669731a1e5ab7ebf11f469eaede2bab9309a5b4d6057f"
 dependencies = [
  "memoffset",
  "rustc_version",
+]
+
+[[package]]
+name = "filetime"
+version = "0.2.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
+dependencies = [
+ "cfg-if",
+ "libc",
 ]
 
 [[package]]
@@ -4995,7 +5005,7 @@ dependencies = [
 
 [[package]]
 name = "moly-android"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "android_log-sys",
  "bevy",
@@ -5006,7 +5016,7 @@ dependencies = [
 
 [[package]]
 name = "moly-app"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "bevy",
  "console_error_panic_hook",
@@ -5026,7 +5036,7 @@ dependencies = [
 
 [[package]]
 name = "moly-assets"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "async-lock",
  "bevy",
@@ -5049,7 +5059,7 @@ dependencies = [
 
 [[package]]
 name = "moly-audio"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -5090,7 +5100,7 @@ dependencies = [
 
 [[package]]
 name = "moly-core"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "async-lock",
  "bevy",
@@ -5117,7 +5127,7 @@ dependencies = [
 
 [[package]]
 name = "moly-devtools"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -5139,6 +5149,7 @@ dependencies = [
  "moly-link",
  "moly-masters",
  "moly-perf",
+ "moly-plugin",
  "moly-protocol",
  "moly-render",
  "moly-store",
@@ -5163,7 +5174,7 @@ dependencies = [
 
 [[package]]
 name = "moly-features"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "arboard",
  "async-channel",
@@ -5209,7 +5220,7 @@ dependencies = [
 
 [[package]]
 name = "moly-game"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -5256,7 +5267,7 @@ dependencies = [
 
 [[package]]
 name = "moly-launcher"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "moly-store",
  "serde",
@@ -5270,11 +5281,11 @@ dependencies = [
 
 [[package]]
 name = "moly-law"
-version = "0.0.3"
+version = "0.0.4"
 
 [[package]]
 name = "moly-layout"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "moly-law",
  "moly-protocol",
@@ -5282,7 +5293,7 @@ dependencies = [
 
 [[package]]
 name = "moly-link"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "async-channel",
  "bevy",
@@ -5299,7 +5310,7 @@ dependencies = [
 
 [[package]]
 name = "moly-masters"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "bevy",
  "moly-assets",
@@ -5310,14 +5321,14 @@ dependencies = [
 
 [[package]]
 name = "moly-perf"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "bevy",
 ]
 
 [[package]]
 name = "moly-plugin"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "luau0-src",
  "mlua",
@@ -5329,7 +5340,7 @@ dependencies = [
 
 [[package]]
 name = "moly-protocol"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "bitcode",
  "serde",
@@ -5338,7 +5349,7 @@ dependencies = [
 
 [[package]]
 name = "moly-render"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -5379,7 +5390,7 @@ dependencies = [
 
 [[package]]
 name = "moly-server"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "async-channel",
  "async-executor",
@@ -5403,7 +5414,7 @@ dependencies = [
 
 [[package]]
 name = "moly-server-host"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "bevy",
  "bevy_remote",
@@ -5413,18 +5424,23 @@ dependencies = [
 
 [[package]]
 name = "moly-store"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
+ "flate2",
+ "self-replace",
+ "semver",
  "serde",
  "serde_json",
  "sha2",
+ "tar",
  "ureq",
  "windows-sys 0.61.2",
+ "zip",
 ]
 
 [[package]]
 name = "moly-ui"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -5467,7 +5483,7 @@ dependencies = [
 
 [[package]]
 name = "moly-world"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -7553,6 +7569,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "self-replace"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03ec815b5eab420ab893f63393878d89c90fdd94c0bcc44c07abb8ad95552fb7"
+dependencies = [
+ "fastrand",
+ "tempfile",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8294,6 +8321,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+ "xattr",
+]
+
+[[package]]
 name = "target-lexicon"
 version = "0.12.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8599,7 +8637,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
@@ -9065,6 +9103,12 @@ name = "twox-hash"
 version = "2.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5283634e518fe9e82c7b20520bb4bc209009fd16c82077c802f8111ecbb0117a"
+
+[[package]]
+name = "typed-path"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ce898823d8cd0f028662d2f349694b1af0a5cc9be83f1d213a00d3147445e1e"
 
 [[package]]
 name = "typeid"
@@ -10402,6 +10446,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
 
 [[package]]
+name = "xattr"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
+dependencies = [
+ "libc",
+ "rustix 1.1.4",
+]
+
+[[package]]
 name = "xcursor"
 version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10620,6 +10674,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "zip"
+version = "9.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2886b00003a72c4ccee3f42cfc34908d33b2508a74d827dc2a4244706475c704"
+dependencies = [
+ "crc32fast",
+ "flate2",
+ "getrandom 0.4.3",
+ "indexmap 2.14.2",
+ "memchr",
+ "nix",
+ "typed-path",
+ "windows-sys 0.61.2",
+ "zopfli",
+]
+
+[[package]]
 name = "zlib-rs"
 version = "0.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10630,6 +10701,18 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+
+[[package]]
+name = "zopfli"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aaf7fc5d30c28483d93805c4a5e12b05bbb52407fa67c5f8bd552374cd01fb11"
+dependencies = [
+ "bumpalo",
+ "crc32fast",
+ "log",
+ "simd-adler32",
+]
 
 [[package]]
 name = "zvariant"

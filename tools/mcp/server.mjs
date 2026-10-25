@@ -1217,7 +1217,7 @@ server.registerTool(
   'observe',
   {
     description:
-      'Read the world as structured data: the moly.observe sections named in what (default all): site (tiles, grid size and occupied cells), gatherables, bag (materials, items and limits), tools, recipes (blueprints with costs and whether they can be crafted now), fixtures (owned and placed), characters (position, site, action, objective), weather, time.',
+      'Read the world as structured data: the moly.observe sections named in what (default all): site (tiles, grid size and occupied cells), player (position and state), gatherables, bag (materials, items and limits), tools, recipes (blueprints with costs and whether they can be crafted now), fixtures (owned and placed), characters (position, site, action, objective), weather, time.',
     inputSchema: {
       id: z.string(),
       what: z.array(z.string()).optional().describe('Sections to read, default all'),

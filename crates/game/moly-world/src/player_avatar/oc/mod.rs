@@ -23,6 +23,7 @@
 //! drawn as before.
 
 pub mod bind;
+pub mod choice;
 pub mod constraint;
 pub mod dress;
 pub mod humanoid;
@@ -33,6 +34,7 @@ pub mod source;
 pub mod vrm;
 
 pub use bind::{capture_proxy, OcModel};
+pub use choice::{OcChoice, OcChoiceLoad};
 pub use material::OcMaterial;
 pub use source::{CharacterChoice, OcRequest, OcSelection};
 
@@ -45,6 +47,7 @@ use bevy::transform::TransformSystems;
 pub fn install(app: &mut App) {
     material::install(app);
     app.init_resource::<OcSelection>()
+        .init_resource::<choice::OcChoiceBodies>()
         .add_message::<OcRequest>()
         .add_observer(bind::on_scene_ready)
         .add_systems(
@@ -54,6 +57,7 @@ pub fn install(app: &mut App) {
                 source::choose_character,
                 source::receive,
                 source::poll_load,
+                choice::request,
                 bind::attach,
                 bind::bind,
                 dress::dress,

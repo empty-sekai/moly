@@ -15,6 +15,7 @@
 //! shown once [`super::dress`] has given it the character material, and the
 //! avatar body stays until then.
 
+use super::choice::{OcChoice, OcChoiceBodies, OcChoiceLoad};
 use super::constraint::{self, BoundConstraint, NodeConstraint};
 use super::humanoid::{self, Slot, SLOT_COUNT};
 use super::material::OcMaterial;
@@ -28,7 +29,7 @@ use bevy::ecs::observer::On;
 use bevy::gltf::Gltf;
 use bevy::mesh::skinning::SkinnedMesh;
 use bevy::prelude::*;
-use bevy::world_serialization::{WorldInstanceReady, WorldAssetRoot};
+use bevy::world_serialization::{WorldAsset, WorldAssetRoot, WorldInstanceReady};
 use std::collections::{BTreeMap, HashMap};
 
 /// The avatar skeleton's rest: every node below its animator, parent-first,
@@ -168,22 +169,55 @@ fn reveal(binding: &OcBinding, visibilities: &mut Query<&mut Visibility>) {
 }
 
 /// Update: the chosen model's scene under each player's animator; models of
-/// an older choice are removed.
+/// an older choice are removed. A skeleton whose holder carries its own
+/// choice ([`super::OcChoice`]) wears that body instead of the global one.
 pub fn attach(
     mut commands: Commands,
+    server: Res<AssetServer>,
+    bodies: Res<OcChoiceBodies>,
     mut selection: ResMut<OcSelection>,
     gltfs: Res<Assets<Gltf>>,
-    players: Query<(Entity, &ProxyRest)>,
+    players: Query<(Entity, &ProxyRest, Option<&OcChoice>, Option<&OcChoiceLoad>)>,
     models: Query<(Entity, &OcModel, Option<&OcBinding>)>,
     mut visibilities: Query<&mut Visibility>,
 ) {
-    let wanted = selection
+    let global = selection
         .model
         .as_ref()
         .filter(|model| model.ready)
         .map(|model| model.generation);
+    // A holder's own body wins over the global choice; while its file loads
+    // the avatar body is shown. Per holder: (generation, source, body, model
+    // file, scene).
+    let mut scenes: HashMap<Entity, (u64, MapSource, CharacterBody, Handle<Gltf>, Handle<WorldAsset>)> =
+        HashMap::new();
+    for (player, _, choice, load) in &players {
+        let (Some(choice), Some(_)) = (choice, load) else {
+            continue;
+        };
+        let Some(chosen) = bodies.ready(&server, choice.0) else {
+            continue;
+        };
+        let Some(scene) = gltfs
+            .get(&chosen.gltf)
+            .and_then(|gltf| gltf.default_scene.clone().or_else(|| gltf.scenes.first().cloned()))
+        else {
+            continue;
+        };
+        scenes.insert(
+            player,
+            (
+                choice.0 as u64,
+                MapSource::Character,
+                chosen.body.clone(),
+                chosen.gltf.clone(),
+                scene,
+            ),
+        );
+    }
     for (entity, model, binding) in &models {
-        if Some(model.generation) != wanted {
+        let own = scenes.get(&model.player).map(|(generation, ..)| *generation);
+        if Some(model.generation) != own.or(global) {
             if let Some(binding) = binding {
                 reveal(binding, &mut visibilities);
             }
@@ -191,10 +225,44 @@ pub fn attach(
             info!("[oc] {} removed; the avatar body is shown", model.name);
         }
     }
-    let Some(generation) = wanted else {
+    let own_models: HashMap<Entity, Entity> = models
+        .iter()
+        .filter_map(|(entity, model, _)| {
+            scenes
+                .get(&model.player)
+                .filter(|(generation, ..)| *generation == model.generation)
+                .map(|_| (model.player, entity))
+        })
+        .collect();
+    for (player, (generation, source, character, gltf, scene)) in &scenes {
+        if own_models.contains_key(player) {
+            continue;
+        }
+        let Ok((_, proxy, _, _)) = players.get(*player) else {
+            continue;
+        };
+        commands.spawn((
+            Name::new("oc_model"),
+            OcModel {
+                generation: *generation,
+                player: *player,
+                name: character.rig_file.clone(),
+                source: *source,
+                constraints: Vec::new(),
+                gltf: gltf.clone(),
+                character: Some(character.clone()),
+            },
+            WorldAssetRoot(scene.clone()),
+            // Hidden until bound: the file's rest is neither fitted nor posed.
+            Transform::IDENTITY,
+            Visibility::Hidden,
+            ChildOf(proxy.animator),
+        ));
+    }
+    let Some(generation) = global else {
         return;
     };
-    let load = selection.model.as_ref().expect("wanted comes from it");
+    let load = selection.model.as_ref().expect("global comes from it");
     let Some(gltf) = gltfs.get(&load.gltf) else {
         return;
     };
@@ -204,7 +272,11 @@ pub fn attach(
         selection.refuse(&name, "the file has no scene");
         return;
     };
-    for (player, proxy) in &players {
+    for (player, proxy, choice, _) in &players {
+        // A holder with its own choice does not wear the global one.
+        if choice.is_some() {
+            continue;
+        }
         if models
             .iter()
             .any(|(_, model, _)| model.player == player && model.generation == generation)

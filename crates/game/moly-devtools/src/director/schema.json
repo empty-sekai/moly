@@ -24,6 +24,9 @@
      "npc.take",
      "npc.walk_to",
      "npc.release",
+     "companion.spawn",
+     "companion.walk_to",
+     "companion.despawn",
      "npc.face",
      "npc.emote",
      "npc.use",
@@ -696,6 +699,91 @@
    }
   },
   {
+   "name": "companion.spawn",
+   "description": "Puts the companion of unit at a world point [x, y, z]. The step ends once its body is in and it stands, or has walked from its seat to the point; it fails with the status reason when the companion refuses the spawn.",
+   "macro": false,
+   "timeout_default": 60,
+   "params": {
+    "type": "object",
+    "properties": {
+     "unit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+     },
+     "at": {
+      "type": "array",
+      "items": {
+       "type": "number"
+      },
+      "minItems": 3,
+      "maxItems": 3,
+      "description": "[x, y, z] world point."
+     }
+    },
+    "required": [
+     "unit",
+     "at"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "companion.walk_to",
+   "description": "Walks the companion of unit to a world point [x, y, z], finishing within within metres of it; the step ends when the walk does and fails with the status reason when it cannot be walked.",
+   "macro": false,
+   "timeout_default": 60,
+   "params": {
+    "type": "object",
+    "properties": {
+     "unit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+     },
+     "to": {
+      "type": "array",
+      "items": {
+       "type": "number"
+      },
+      "minItems": 3,
+      "maxItems": 3,
+      "description": "[x, y, z] world point."
+     },
+     "within": {
+      "type": "number",
+      "minimum": 0,
+      "default": 0.3,
+      "description": "Metres; the walk accepts at most 5."
+     }
+    },
+    "required": [
+     "unit",
+     "to"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "companion.despawn",
+   "description": "Removes the companion of unit; the step ends once it is gone.",
+   "macro": false,
+   "timeout_default": 10,
+   "params": {
+    "type": "object",
+    "properties": {
+     "unit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+     }
+    },
+    "required": [
+     "unit"
+    ],
+    "additionalProperties": false
+   }
+  },  {
    "name": "camera.drag",
    "description": "Drags with one finger by by logical pixels over secs seconds, starting at from (window fractions).",
    "macro": false,
@@ -1861,56 +1949,96 @@
       "$ref": "#/steps/24/params"
      }
     },
-    {
+  {
+   "name": "companion.spawn",
+   "description": "Puts the companion of unit at a world point [x, y, z]. The step ends once its body is in and it stands, or has walked from its seat to the point; it fails with the status reason when the companion refuses the spawn.",
+   "macro": false,
+   "timeout_default": 60,
+   "params": {
+    "type": "object",
+    "properties": {
+     "unit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+     },
+     "at": {
+      "type": "array",
+      "items": {
+       "type": "number"
+      },
+      "minItems": 3,
+      "maxItems": 3,
+      "description": "[x, y, z] world point."
+     }
+    },
+    "required": [
+     "unit",
+     "at"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "companion.walk_to",
+   "description": "Walks the companion of unit to a world point [x, y, z], finishing within within metres of it; the step ends when the walk does and fails with the status reason when it cannot be walked.",
+   "macro": false,
+   "timeout_default": 60,
+   "params": {
+    "type": "object",
+    "properties": {
+     "unit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+     },
+     "to": {
+      "type": "array",
+      "items": {
+       "type": "number"
+      },
+      "minItems": 3,
+      "maxItems": 3,
+      "description": "[x, y, z] world point."
+     },
+     "within": {
+      "type": "number",
+      "minimum": 0,
+      "default": 0.3,
+      "description": "Metres; the walk accepts at most 5."
+     }
+    },
+    "required": [
+     "unit",
+     "to"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "companion.despawn",
+   "description": "Removes the companion of unit; the step ends once it is gone.",
+   "macro": false,
+   "timeout_default": 10,
+   "params": {
+    "type": "object",
+    "properties": {
+     "unit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+     }
+    },
+    "required": [
+     "unit"
+    ],
+    "additionalProperties": false
+   }
+  },    {
      "if": {
       "properties": {
        "do": {
         "const": "camera.drag"
-       }
-      },
-      "required": [
-       "do"
-      ]
-     },
-     "then": {
-      "$ref": "#/steps/25/params"
-     }
-    },
-    {
-     "if": {
-      "properties": {
-       "do": {
-        "const": "camera.zoom"
-       }
-      },
-      "required": [
-       "do"
-      ]
-     },
-     "then": {
-      "$ref": "#/steps/26/params"
-     }
-    },
-    {
-     "if": {
-      "properties": {
-       "do": {
-        "const": "server.edit"
-       }
-      },
-      "required": [
-       "do"
-      ]
-     },
-     "then": {
-      "$ref": "#/steps/27/params"
-     }
-    },
-    {
-     "if": {
-      "properties": {
-       "do": {
-        "const": "weather.set"
        }
       },
       "required": [
@@ -1925,7 +2053,7 @@
      "if": {
       "properties": {
        "do": {
-        "const": "site.switch"
+        "const": "camera.zoom"
        }
       },
       "required": [
@@ -1940,7 +2068,7 @@
      "if": {
       "properties": {
        "do": {
-        "const": "site.enter_room"
+        "const": "server.edit"
        }
       },
       "required": [
@@ -1955,7 +2083,7 @@
      "if": {
       "properties": {
        "do": {
-        "const": "site.go_home"
+        "const": "weather.set"
        }
       },
       "required": [
@@ -1970,7 +2098,7 @@
      "if": {
       "properties": {
        "do": {
-        "const": "player.gather"
+        "const": "site.switch"
        }
       },
       "required": [
@@ -1985,7 +2113,7 @@
      "if": {
       "properties": {
        "do": {
-        "const": "player.craft"
+        "const": "site.enter_room"
        }
       },
       "required": [
@@ -2000,7 +2128,7 @@
      "if": {
       "properties": {
        "do": {
-        "const": "layout.place"
+        "const": "site.go_home"
        }
       },
       "required": [
@@ -2015,7 +2143,7 @@
      "if": {
       "properties": {
        "do": {
-        "const": "player.deliver"
+        "const": "player.gather"
        }
       },
       "required": [
@@ -2030,7 +2158,7 @@
      "if": {
       "properties": {
        "do": {
-        "const": "dialog.answer"
+        "const": "player.craft"
        }
       },
       "required": [
@@ -2045,7 +2173,7 @@
      "if": {
       "properties": {
        "do": {
-        "const": "key.back"
+        "const": "layout.place"
        }
       },
       "required": [
@@ -2054,6 +2182,51 @@
      },
      "then": {
       "$ref": "#/steps/37/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "player.deliver"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/38/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "dialog.answer"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/39/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "key.back"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/40/params"
      }
     }
    ],

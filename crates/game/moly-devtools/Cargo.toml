@@ -54,6 +54,9 @@ bevy_remote = { version = "0.19.1", default-features = false, features = ["http"
 # already locked, no new download.
 libc = "0.2"
 tempfile = "3"
+# The plugin manifests, profile, startup resolution and the sandboxed Luau
+# runtime the plugin host runs; Luau plugins are native only.
+moly-plugin = { path = "../../base/moly-plugin" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "time", "net", "fs", "io-util"] }
 

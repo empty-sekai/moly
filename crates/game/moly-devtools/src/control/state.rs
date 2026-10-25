@@ -71,7 +71,7 @@ pub(super) fn weather(world: &World) -> Value {
     json!({ "phenomenon": current.0, "name": name })
 }
 
-fn player(world: &mut World) -> Value {
+pub(super) fn player(world: &mut World) -> Value {
     let state = world
         .get_resource::<crate::player_state::PlayerAvatarStates>()
         .map(|states| format!("{:?}", states.current));

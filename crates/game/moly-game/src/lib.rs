@@ -78,6 +78,7 @@ pub use moly_world::camera_site_move;
 pub use moly_world::character;
 pub use moly_world::character_silhouette;
 pub use moly_world::cloth_runtime;
+pub use moly_world::companion;
 pub use moly_world::cutscene_camera;
 pub use moly_world::delayed_faces;
 pub use moly_world::delivery_camera;
@@ -187,6 +188,8 @@ pub use moly_devtools::control;
 pub use moly_devtools::control_panel;
 pub use moly_devtools::director;
 pub use moly_devtools::fixture_walk;
+#[cfg(not(target_arch = "wasm32"))]
+pub use moly_devtools::plugin_host;
 #[cfg(not(target_arch = "wasm32"))]
 pub use moly_devtools::portraits;
 pub use moly_devtools::talk_probe;

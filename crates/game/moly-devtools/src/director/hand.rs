@@ -37,12 +37,15 @@ fn window(world: &mut World) -> Option<(Entity, Window)> {
 #[derive(Default)]
 pub struct Hand {
     pressing: bool,
+    /// The run whose step put the joystick finger down.
+    owner: Option<u64>,
 }
 
 impl Hand {
-    /// Holds the stick toward world direction `toward` (x, z). The finger
-    /// goes down at the stick's base on the first frame and leans the next.
-    pub fn steer(&mut self, world: &mut World, toward: Vec2) -> Result<(), &'static str> {
+    /// Holds the stick toward world direction `toward` (x, z) for the run
+    /// with `ticket`. The finger goes down at the stick's base on the first
+    /// frame and leans the next.
+    pub fn steer(&mut self, world: &mut World, ticket: u64, toward: Vec2) -> Result<(), &'static str> {
         let camera = world
             .query_filtered::<&GlobalTransform, With<Camera3d>>()
             .single(world)
@@ -53,14 +56,15 @@ impl Hand {
         // camera-relative direction is `toward`.
         let forward_flat = Vec2::new(forward.x, forward.z).normalize_or_zero();
         let stick = Vec2::new(toward.dot(Vec2::new(right.x, right.z)), toward.dot(forward_flat));
-        self.lean(world, stick)
+        self.lean(world, ticket, stick)
     }
 
-    /// Holds the stick at ratio `stick` (x right, y up). The finger goes down
-    /// at the stick's base on the first frame and leans the next; a press the
-    /// joystick did not capture is lifted and pressed again once no dialog
-    /// holds the field.
-    pub fn lean(&mut self, world: &mut World, stick: Vec2) -> Result<(), &'static str> {
+    /// Holds the stick at ratio `stick` (x right, y up) for the run with
+    /// `ticket`. The finger goes down at the stick's base on the first frame
+    /// and leans the next; a press the joystick did not capture is lifted and
+    /// pressed again once no dialog holds the field. A finger another run put
+    /// down is lifted: a run leans only on its own.
+    pub fn lean(&mut self, world: &mut World, ticket: u64, stick: Vec2) -> Result<(), &'static str> {
         let (entity, window) = window(world).ok_or("no primary window")?;
         let base = stick_base(&window);
         // A press the joystick did not capture (a dialog over the field
@@ -72,6 +76,10 @@ impl Hand {
             .map(|state| state.captured == Some(STICK_FINGER));
         if self.pressing && captured == Some(false) {
             self.pressing = false;
+            self.owner = None;
+        }
+        if self.pressing && self.owner != Some(ticket) {
+            self.release(world);
         }
         if !self.pressing {
             if world
@@ -82,6 +90,7 @@ impl Hand {
             }
             touch(world, entity, STICK_FINGER, TouchPhase::Started, base);
             self.pressing = true;
+            self.owner = Some(ticket);
             return Ok(());
         }
         let scale = world
@@ -105,13 +114,15 @@ impl Hand {
             return;
         }
         self.pressing = false;
+        self.owner = None;
         if let Some((entity, window)) = window(world) {
             touch(world, entity, STICK_FINGER, TouchPhase::Ended, stick_base(&window));
         }
     }
 
-    pub fn pressing(&self) -> bool {
-        self.pressing
+    /// Whether `ticket`'s run has the joystick finger down.
+    pub fn pressing(&self, ticket: u64) -> bool {
+        self.pressing && self.owner == Some(ticket)
     }
 }
 

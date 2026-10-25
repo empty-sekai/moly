@@ -177,7 +177,19 @@ function moly.log(...)
     for i = 1, parts.n do
         parts[i] = tostring(parts[i])
     end
-    host().log(table.concat(parts, " ", 1, parts.n))
+    local line = table.concat(parts, " ", 1, parts.n)
+    local h = rawget(hostref, "h")
+    if h == nil then
+        -- While the script loads, the line waits for the first frame.
+        local pending = rawget(hostref, "pending")
+        if pending == nil then
+            pending = {}
+            rawset(hostref, "pending", pending)
+        end
+        table.insert(pending, line)
+        return
+    end
+    h.log(line)
 end
 
 moly.store = {
@@ -430,6 +442,13 @@ impl Plugin {
                 })?,
             )?;
             hostref.set("h", h)?;
+            // Lines logged while the script loaded come out on its first frame.
+            if let Some(pending) = hostref.get::<Option<Table>>("pending")? {
+                hostref.set("pending", Value::Nil)?;
+                for line in pending.sequence_values::<String>() {
+                    host.borrow_mut().log(id, &line?);
+                }
+            }
             let run = run_frame(lua, handlers, spawned, tasks, budget, dt, events);
             hostref.set("h", Value::Nil)?;
             run

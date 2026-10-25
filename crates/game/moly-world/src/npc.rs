@@ -23,6 +23,7 @@
 
 pub mod change_site;
 pub mod change_site_state;
+pub mod companion;
 pub mod dispose;
 pub mod entry_probe;
 pub mod gate_entries;
@@ -833,7 +834,7 @@ impl RouteStops {
         before - self.stops.len()
     }
 
-    fn stop(&mut self) {
+    pub(crate) fn stop(&mut self) {
         let generation = self.generation;
         self.cancel();
         self.generation = generation;

@@ -19,6 +19,11 @@ use super::cond::{self, flat};
 use super::hand::{self, Hand};
 use super::script::{GatherRef, Join, Node, Step, Target, TargetKind};
 
+/// The ticket offset the steps asked for outside a script advance with:
+/// their own ticket, that high in the range, so the director's run (ticket
+/// `0`) and theirs never meet.
+pub const ACTED_TICKET: u64 = 1 << 32;
+
 /// Steps one track may start on one frame.
 const STEPS_PER_FRAME: usize = 64;
 /// Records the log keeps.
@@ -51,17 +56,25 @@ enum Poll {
 /// State shared by every track of a run.
 #[derive(Default)]
 pub struct Shared {
-    pub hand: Hand,
+    /// The joystick finger: the director's hand.
+    hand: Hand,
+    /// The ticket of the run that owns the hand: the director's script, or a
+    /// step asked for outside a script as [`ACTED_TICKET`] plus its number.
+    hand_ticket: Option<u64>,
     /// The step whose walk holds the joystick finger.
-    hand_owner: Option<String>,
-    /// Characters taken by this run, released when it ends.
-    pub owned: Vec<(u32, Entity)>,
+    hand_owner: Option<(u64, String)>,
+    /// Characters taken, with the ticket of the run that took them; a run
+    /// releases its own when it ends.
+    taken: Vec<(u64, u32, Entity)>,
     pub log: VecDeque<Record>,
     pub now: f32,
     /// Bumped on every record, so the snapshot is republished only on change.
     pub revision: u64,
-    /// Fixture activities started by this run.
-    activities: u64,
+    /// Fixture activities started by this run, by ticket.
+    activities: Vec<(u64, u64)>,
+    /// The last steps that ended (at most [`RECORDS`]) with their tickets, for
+    /// a step asked for outside a script to report its result.
+    results: VecDeque<(u64, Record)>,
 }
 
 impl Shared {
@@ -78,19 +91,140 @@ impl Shared {
         self.revision += 1;
     }
 
-    fn release_hand_of(&mut self, world: &mut World, path: &str) {
-        if self.hand_owner.as_deref() == Some(path) {
+    /// Lifts the joystick finger when the step at `path` of `ticket`'s run
+    /// holds it; `path` empty lifts it whatever step holds it.
+    fn release_hand_of(&mut self, world: &mut World, ticket: u64, path: &str) {
+        let owns = self.hand_owner.as_ref().is_some_and(|(owner, owner_path)| *owner == ticket && owner_path == path);
+        if owns {
             self.hand.release(world);
             self.hand_owner = None;
         }
     }
 
-    pub fn release_all(&mut self, world: &mut World) {
+    /// Takes the hand for `ticket`. The caller refuses a step when another
+    /// run holds it.
+    pub fn take_hand(&mut self, ticket: u64) {
+        self.hand_ticket = Some(ticket);
+    }
+
+    /// Whether another run than `ticket` holds the hand.
+    pub fn hand_held_by_other(&self, ticket: u64) -> bool {
+        self.hand_ticket.is_some_and(|holder| holder != ticket)
+    }
+
+    /// Lets the hand go: the joystick finger is lifted when `ticket`'s run
+    /// was the one leaning on it.
+    pub fn release_hand(&mut self, world: &mut World, ticket: u64) {
+        if self.release_hand_of_step(world, ticket) && self.hand_ticket == Some(ticket) {
+            self.hand_ticket = None;
+            self.hand_owner = None;
+        }
+    }
+
+    /// Lifts the joystick finger when `ticket`'s run has it down. Answers
+    /// whether the finger was lifted.
+    fn release_hand_of_step(&mut self, world: &mut World, ticket: u64) -> bool {
+        if !self.hand.pressing(ticket) {
+            return false;
+        }
         self.hand.release(world);
         self.hand_owner = None;
-        for (_, entity) in std::mem::take(&mut self.owned) {
+        true
+    }
+
+    /// What the director's script took, by unit.
+    pub fn owned(&self) -> impl Iterator<Item = (u32, Entity)> + '_ {
+        self.taken.iter().filter(|(ticket, ..)| *ticket == 0).map(|(_, unit, entity)| (*unit, *entity))
+    }
+
+    /// Ends the director's script: it lets the hand go and releases the
+    /// characters it took.
+    pub fn release_all(&mut self, world: &mut World) {
+        self.hand.release(world);
+        self.hand_ticket = None;
+        self.hand_owner = None;
+        self.release_taken(world, 0);
+    }
+
+    /// Ends the run with `ticket`: it lets the hand go, lifting the joystick
+    /// finger when it was the one leaning on it, and releases the characters
+    /// it took.
+    pub fn release(&mut self, world: &mut World, ticket: u64) {
+        self.hand.release(world);
+        if self.hand_ticket == Some(ticket) {
+            self.hand_ticket = None;
+            self.hand_owner = None;
+        }
+        self.release_taken(world, ticket);
+    }
+
+    fn release_taken(&mut self, world: &mut World, ticket: u64) {
+        let (mine, theirs): (Vec<(u64, u32, Entity)>, Vec<(u64, u32, Entity)>) =
+            std::mem::take(&mut self.taken).into_iter().partition(|(owner, ..)| *owner == ticket);
+        self.taken = theirs;
+        self.activities.retain(|(owner, _)| *owner != ticket);
+        for (.., entity) in mine {
             super::npc::release(world, entity);
         }
+    }
+
+    /// Takes the character `unit` for `ticket`'s run.
+    fn take_npc(&mut self, world: &mut World, ticket: u64, unit: u32) -> Result<Entity, String> {
+        let entity = super::npc::take(world, unit)?;
+        if !self.taken.iter().any(|(.., taken)| *taken == entity) {
+            self.taken.push((ticket, unit, entity));
+        }
+        Ok(entity)
+    }
+
+    /// The character `unit` `ticket`'s run took.
+    fn taken(&self, ticket: u64, unit: u32) -> Option<Entity> {
+        self.taken.iter().find(|(owner, taken, _)| *owner == ticket && *taken == unit).map(|(.., entity)| *entity)
+    }
+
+    /// Gives the character `unit` back to its AI.
+    fn untake(&mut self, world: &mut World, unit: u32) -> bool {
+        let Some(index) = self.taken.iter().position(|(_, taken, _)| *taken == unit) else {
+            return false;
+        };
+        let (.., entity) = self.taken.remove(index);
+        super::npc::release(world, entity);
+        true
+    }
+
+    /// The ticket for a fixture activity `ticket`'s run starts: a plugin's
+    /// steps number their own from the high half, so the director's and a
+    /// plugin's do not meet.
+    fn activity_ticket(&mut self, ticket: u64) -> u64 {
+        let next = self.activities.iter().filter(|(owner, _)| *owner == ticket).count() as u64 + 1;
+        let activity = if ticket == 0 { next } else { ACTED_TICKET | next };
+        self.activities.push((ticket, activity));
+        crate::npc_fixture_activity::preview::DIRECTOR_TICKET | activity
+    }
+
+    /// Notes a step of `ticket`'s run that ended, with its event and note, for
+    /// a step asked for outside a script to report as its result.
+    fn note_ended(&mut self, ticket: u64, event: &'static str, note: String) {
+        if self.results.len() == RECORDS {
+            self.results.pop_front();
+        }
+        self.results.push_back((ticket, Record { t: self.now, step: String::new(), event, note }));
+        self.revision += 1;
+    }
+
+    /// How many steps ended so far, every run's together.
+    pub fn ended(&self) -> usize {
+        self.results.len()
+    }
+
+    /// The notes of the steps `ticket`'s run ended since `from`, in order.
+    pub fn ended_after(&self, ticket: u64, from: usize) -> Vec<&str> {
+        self.results
+            .iter()
+            .skip(from)
+            .filter(|(owner, _)| *owner == ticket)
+            .map(|(_, record)| record.note.as_str())
+            .collect::<Vec<&str>>()
     }
 }
 
@@ -182,6 +316,13 @@ enum Kind {
     SiteSwitch { site: String, moved: bool },
     /// One `server.edit`, until the server answers the call numbered `seq`.
     ServerEdit { seq: u32 },
+    /// A companion's body, from the spawn command until it is shown;
+    /// `polls` counts the frames since the command was written.
+    CompanionSpawn { unit: u32, at: Vec3, written: bool, polls: u8 },
+    /// A companion's walk, from its command until its status reaches the
+    /// number the command gets (`seq`).
+    CompanionWalk { unit: u32, to: Vec3, within: f32, seq: u64, written: bool },
+    CompanionDespawn { unit: u32, written: bool },
 }
 
 impl Kind {
@@ -189,6 +330,11 @@ impl Kind {
     /// or timed out).
     fn stop(&self, world: &mut World) {
         match self {
+            // A command never written is never sent: the companion is left as
+            // it stood.
+            Kind::CompanionSpawn { written: false, .. }
+            | Kind::CompanionWalk { written: false, .. }
+            | Kind::CompanionDespawn { written: false, .. } => {}
             Kind::NpcWalk { entity, .. } => crate::npc::stop_for_external_activity(world, *entity),
             Kind::Emote { lease, .. } => crate::emoticon::timeline::hide(world, *lease, true),
             Kind::NpcUse { ticket } => super::npc::end_activity(world, *ticket, true),
@@ -229,6 +375,11 @@ impl Track {
         Self { frames: vec![Frame { block, next: 0, repeats_left: 0, path }], active: None }
     }
 
+    /// The steps the track was built with.
+    pub fn steps(&self) -> &[Step] {
+        &self.frames[0].block
+    }
+
     /// The paths of the steps running now, innermost last.
     pub fn current(&self, out: &mut Vec<String>) {
         if let Some(active) = &self.active {
@@ -243,33 +394,36 @@ impl Track {
 
     /// Ends the running step without finishing it (a stop, or another track
     /// of a `join: any` block finished first).
-    pub fn abort(&mut self, world: &mut World, shared: &mut Shared) {
+    pub fn abort(&mut self, world: &mut World, shared: &mut Shared, ticket: u64) {
         if let Some(mut active) = self.active.take() {
             if let Kind::Parallel { tracks, .. } = &mut active.kind {
                 for track in tracks {
-                    track.abort(world, shared);
+                    track.abort(world, shared, ticket);
                 }
             }
             active.kind.stop(world);
-            shared.release_hand_of(world, &active.path);
+            shared.release_hand_of(world, ticket, &active.path);
             shared.record(&active.path, "stopped", String::new());
         }
         self.frames.clear();
     }
 
-    pub fn tick(&mut self, world: &mut World, shared: &mut Shared) -> TrackState {
+    /// Runs the track's steps for this frame as the run with `ticket`.
+    pub fn tick(&mut self, world: &mut World, shared: &mut Shared, ticket: u64) -> TrackState {
         for _ in 0..STEPS_PER_FRAME {
             if self.active.is_none() {
                 let Some((step, path)) = self.next_step() else {
                     return TrackState::Done;
                 };
-                match start(world, shared, step, path) {
+                match start(world, shared, ticket, step, path) {
                     Started::Ended(path, Ok(note)) => {
-                        shared.record(&path, "done", note);
+                        shared.record(&path, "done", note.clone());
+                        shared.note_ended(ticket, "done", note);
                         continue;
                     }
                     Started::Ended(path, Err((optional, note))) => {
                         shared.record(&path, "failed", note.clone());
+                        shared.note_ended(ticket, "failed", note.clone());
                         if optional {
                             continue;
                         }
@@ -285,7 +439,7 @@ impl Track {
                     active.step.timeout.unwrap_or_default(),
                     active.note
                 )),
-                _ => poll(world, shared, active),
+                _ => poll(world, shared, active, ticket),
             };
             let poll = match poll {
                 Poll::Done(note) => wait_server(world, active, note),
@@ -298,24 +452,26 @@ impl Track {
                 }
                 Poll::Done(note) => {
                     let mut active = self.active.take().expect("polled above");
-                    shared.release_hand_of(world, &active.path);
+                    shared.release_hand_of(world, ticket, &active.path);
                     if let Kind::Parallel { tracks, .. } = &mut active.kind {
                         for track in tracks {
-                            track.abort(world, shared);
+                            track.abort(world, shared, ticket);
                         }
                     }
-                    shared.record(&active.path, "done", note);
+                    shared.record(&active.path, "done", note.clone());
+                    shared.note_ended(ticket, "done", note);
                 }
                 Poll::Failed(note) => {
                     let mut active = self.active.take().expect("polled above");
                     if let Kind::Parallel { tracks, .. } = &mut active.kind {
                         for track in tracks {
-                            track.abort(world, shared);
+                            track.abort(world, shared, ticket);
                         }
                     }
                     active.kind.stop(world);
-                    shared.release_hand_of(world, &active.path);
+                    shared.release_hand_of(world, ticket, &active.path);
                     shared.record(&active.path, "failed", note.clone());
+                    shared.note_ended(ticket, "failed", note.clone());
                     if !active.step.optional {
                         return TrackState::Failed(format!("{}: {note}", active.path));
                     }
@@ -356,7 +512,7 @@ enum Started {
     Running(Active),
 }
 
-fn start(world: &mut World, shared: &mut Shared, step: Step, path: String) -> Started {
+fn start(world: &mut World, shared: &mut Shared, ticket: u64, step: Step, path: String) -> Started {
     shared.record(&path, "start", String::new());
     let ended = |path: String, result: Result<String, String>, optional: bool| {
         Started::Ended(path, result.map_err(|note| (optional, note)))
@@ -388,8 +544,7 @@ fn start(world: &mut World, shared: &mut Shared, step: Step, path: String) -> St
             return ended(path, Ok("frame capture requested".into()), optional);
         }
         Node::Release => {
-            shared.hand.release(world);
-            shared.hand_owner = None;
+            shared.release_hand(world, ticket);
             return ended(path, Ok(String::new()), optional);
         }
         Node::Wear { unit } => {
@@ -424,20 +579,13 @@ fn start(world: &mut World, shared: &mut Shared, step: Step, path: String) -> St
             return ended(path, result, optional);
         }
         Node::NpcTake { unit } => {
-            let result = super::npc::take(world, *unit).map(|entity| {
-                if !shared.owned.iter().any(|(_, owned)| *owned == entity) {
-                    shared.owned.push((*unit, entity));
-                }
-                format!("character {unit} taken")
-            });
+            let result = shared.take_npc(world, ticket, *unit).map(|_| format!("character {unit} taken"));
             return ended(path, result, optional);
         }
         Node::NpcRelease { unit } => {
-            let Some(index) = shared.owned.iter().position(|(owned, _)| owned == unit) else {
+            if !shared.untake(world, *unit) {
                 return ended(path, Err(format!("character {unit} is not taken by this script")), optional);
-            };
-            let (_, entity) = shared.owned.remove(index);
-            super::npc::release(world, entity);
+            }
             return ended(path, Ok(format!("character {unit} released")), optional);
         }
         Node::Weather { phenomenon } => {
@@ -485,7 +633,7 @@ fn start(world: &mut World, shared: &mut Shared, step: Step, path: String) -> St
             last_change: f32::NEG_INFINITY,
         }),
         Node::NpcWalkTo { unit, to, within, rests } => {
-            let Some(&(_, entity)) = shared.owned.iter().find(|(owned, _)| owned == unit) else {
+            let Some(entity) = shared.taken(ticket, *unit) else {
                 return ended(path, Err(format!("character {unit} is not taken by this script (npc.take first)")), optional);
             };
             let goal = match cond::resolve(world, to) {
@@ -498,7 +646,7 @@ fn start(world: &mut World, shared: &mut Shared, step: Step, path: String) -> St
             Kind::NpcWalk { entity, unit: *unit, goal, within: *within }
         }
         Node::NpcFace { unit, to, secs } => {
-            let Some(&(_, entity)) = shared.owned.iter().find(|(owned, _)| owned == unit) else {
+            let Some(entity) = shared.taken(ticket, *unit) else {
                 return ended(path, Err(format!("character {unit} is not taken by this script (npc.take first)")), optional);
             };
             let towards = match cond::resolve(world, to) {
@@ -518,16 +666,15 @@ fn start(world: &mut World, shared: &mut Shared, step: Step, path: String) -> St
             }
         }
         Node::NpcUse { unit, fixture, activity, variant, rests } => {
-            let Some(&(_, entity)) = shared.owned.iter().find(|(owned, _)| owned == unit) else {
+            let Some(entity) = shared.taken(ticket, *unit) else {
                 return ended(path, Err(format!("character {unit} is not taken by this script (npc.take first)")), optional);
             };
-            shared.activities += 1;
-            let ticket = crate::npc_fixture_activity::preview::DIRECTOR_TICKET | shared.activities;
-            match super::npc::begin_activity(world, entity, fixture, *activity, *variant, *rests, ticket) {
+            let activity_ticket = shared.activity_ticket(ticket);
+            match super::npc::begin_activity(world, entity, fixture, *activity, *variant, *rests, activity_ticket) {
                 Ok(note) => shared.record(&path, "begun", note),
                 Err(error) => return ended(path, Err(error), optional),
             }
-            Kind::NpcUse { ticket }
+            Kind::NpcUse { ticket: activity_ticket }
         }
         Node::NpcTalk { unit, talk } => {
             let entity = match super::npc::open_talk(world, *unit, *talk) {
@@ -535,11 +682,11 @@ fn start(world: &mut World, shared: &mut Shared, step: Step, path: String) -> St
                 Err(error) => return ended(path, Err(error), optional),
             };
             // The character is its AI's again; the AI plays the talk.
-            shared.owned.retain(|(_, owned)| *owned != entity);
+            shared.taken.retain(|(.., taken)| *taken != entity);
             Kind::NpcTalk { entity }
         }
         Node::NpcTweet { unit, tweet, secs } => {
-            let Some(&(_, entity)) = shared.owned.iter().find(|(owned, _)| owned == unit) else {
+            let Some(entity) = shared.taken(ticket, *unit) else {
                 return ended(path, Err(format!("character {unit} is not taken by this script (npc.take first)")), optional);
             };
             match super::npc::show_tweet(world, entity, *tweet) {
@@ -547,6 +694,25 @@ fn start(world: &mut World, shared: &mut Shared, step: Step, path: String) -> St
                 Err(error) => return ended(path, Err(error), optional),
             }
             Kind::Tweet { entity, until: shared.now + secs }
+        }
+        Node::CompanionSpawn { unit, at } => {
+            if let Err(reason) = companion_absent(world, *unit) {
+                return ended(path, Err(reason), optional);
+            }
+            Kind::CompanionSpawn { unit: *unit, at: Vec3::from(*at), written: false, polls: 0 }
+        }
+        Node::CompanionWalkTo { unit, to, within } => {
+            let Some(seq) = companion_seq(world, *unit) else {
+                return ended(path, Err(format!("no companion of unit {unit} is spawned")), optional);
+            };
+            // The command takes the next number.
+            Kind::CompanionWalk { unit: *unit, to: Vec3::from(*to), within: *within, seq: seq + 1, written: false }
+        }
+        Node::CompanionDespawn { unit } => {
+            if companion_seq(world, *unit).is_none() {
+                return ended(path, Err(format!("no companion of unit {unit} is spawned")), optional);
+            }
+            Kind::CompanionDespawn { unit: *unit, written: false }
         }
         Node::CameraDrag { by, secs, from } => {
             let Some(size) = hand::window_size(world) else {
@@ -659,7 +825,7 @@ fn describe_answer(answer: &Answered) -> String {
     }
 }
 
-fn poll(world: &mut World, shared: &mut Shared, active: &mut Active) -> Poll {
+fn poll(world: &mut World, shared: &mut Shared, active: &mut Active, ticket: u64) -> Poll {
     let path = active.path.clone();
     match &mut active.kind {
         Kind::Wait { until } => {
@@ -673,23 +839,24 @@ fn poll(world: &mut World, shared: &mut Shared, active: &mut Active) -> Poll {
             let (holds, note) = cond::eval(world, until);
             if holds { Poll::Done(note) } else { Poll::Running(note) }
         }
-        Kind::Walk(walk) => walk.poll(world, shared, &path),
+        Kind::Walk(walk) => walk.poll(world, shared, &path, ticket),
         Kind::Stick { stick, until } => {
             if shared.now >= *until {
-                shared.release_hand_of(world, &path);
+                shared.release_hand_of(world, ticket, &path);
                 return Poll::Done(String::new());
             }
-            if let Some(owner) = shared.hand_owner.as_deref().filter(|owner| *owner != path) {
+            if let Some((_, owner)) = shared.hand_owner.as_ref().filter(|(owner, _)| *owner != ticket) {
                 return Poll::Failed(format!("the joystick finger is walking for {owner}"));
             }
-            shared.hand_owner = Some(path.clone());
-            match shared.hand.lean(world, *stick) {
+            shared.hand_owner = Some((ticket, path.clone()));
+            shared.take_hand(ticket);
+            match shared.hand.lean(world, ticket, *stick) {
                 Ok(()) => Poll::Running(format!("{:.1} s left", *until - shared.now)),
                 Err(error) => Poll::Running(error.to_owned()),
             }
         }
-        Kind::Interact(interact) => interact.poll(world, shared, &path),
-        Kind::Gather(gather) => gather.poll(world, shared, &path),
+        Kind::Interact(interact) => interact.poll(world, shared, &path, ticket),
+        Kind::Gather(gather) => gather.poll(world, shared, &path, ticket),
         Kind::Craft(craft) => craft.poll(world, shared),
         Kind::LayoutPlace(place) => place.poll(world, shared),
         Kind::Deliver(deliver) => deliver.poll(world, shared),
@@ -795,6 +962,50 @@ fn poll(world: &mut World, shared: &mut Shared, active: &mut Active) -> Poll {
                 Poll::Running(format!("{:.1} s left", *until - shared.now))
             }
         }
+        Kind::CompanionSpawn { unit, at, written, polls } => {
+            if !*written {
+                *written = true;
+                world.write_message(crate::companion::CompanionCommand::Spawn { unit: *unit, at: *at });
+                return Poll::Running(format!("spawning companion {unit}"));
+            }
+            if let Some(state) = companion_state(world, *unit) {
+                return companion_spawned(state, *unit);
+            }
+            // The spawn waits for its character body before it is a companion.
+            if world.query::<&crate::companion::CompanionSpawn>().iter(world).any(|spawn| spawn.unit == *unit) {
+                return Poll::Running(format!("companion {unit}: its character body is loading"));
+            }
+            // The command is read and its spawn entity inserted a frame or
+            // two after it is written; nothing there after that is a refusal.
+            *polls += 1;
+            if *polls < 3 {
+                return Poll::Running(format!("spawning companion {unit}"));
+            }
+            Poll::Failed(format!("companion {unit} was not spawned; see the [companion] log line"))
+        }
+        Kind::CompanionWalk { unit, to, within, seq, written } => {
+            if !*written {
+                *written = true;
+                world.write_message(crate::companion::CompanionCommand::WalkTo { unit: *unit, to: *to, within: *within });
+                return Poll::Running(format!("companion {unit} is walking"));
+            }
+            match companion_state(world, *unit) {
+                Some(state) => companion_walked(state, *seq, *unit),
+                // Gone after the command: the walk cannot end.
+                None => Poll::Failed(format!("companion {unit} was removed while walking")),
+            }
+        }
+        Kind::CompanionDespawn { unit, written } => {
+            if !*written {
+                *written = true;
+                world.write_message(crate::companion::CompanionCommand::Despawn { unit: *unit });
+            }
+            if companion_seq(world, *unit).is_some() {
+                Poll::Running(format!("removing companion {unit}"))
+            } else {
+                Poll::Done(format!("companion {unit} removed"))
+            }
+        }
         Kind::CameraDrag { from, by, start, secs, down } => {
             if !*down {
                 if let Err(error) = hand::drag_touch(world, TouchPhase::Started, *from) {
@@ -841,7 +1052,7 @@ fn poll(world: &mut World, shared: &mut Shared, active: &mut Active) -> Poll {
         Kind::Parallel { tracks, join } => {
             let mut running = 0;
             for track in tracks.iter_mut() {
-                match track.tick(world, shared) {
+                match track.tick(world, shared, ticket) {
                     TrackState::Running => running += 1,
                     TrackState::Done if *join == Join::Any => return Poll::Done("one track ended".into()),
                     TrackState::Done => {}
@@ -863,6 +1074,69 @@ fn poll(world: &mut World, shared: &mut Shared, active: &mut Active) -> Poll {
                 Poll::Running(format!("site {current:?}, moving {moving}"))
             }
         }
+    }
+}
+
+/// Whether no companion of `unit` is spawned, or is being spawned: the
+/// reason to refuse a spawn, as the world's companion commands do. `None`
+/// when one is there.
+fn companion_absent(world: &mut World, unit: u32) -> Result<(), String> {
+    if world.query::<&crate::companion::Companion>().iter(world).any(|companion| companion.unit == unit) {
+        return Err(format!("a companion of unit {unit} is already spawned"));
+    }
+    if world.query::<&crate::companion::CompanionSpawn>().iter(world).any(|spawn| spawn.unit == unit) {
+        return Err(format!("a companion of unit {unit} is already being spawned"));
+    }
+    Ok(())
+}
+
+/// The command number of `unit`'s companion: its spawn is the first.
+fn companion_seq(world: &mut World, unit: u32) -> Option<u64> {
+    companion_state(world, unit).map(|(_, status)| status.seq)
+}
+
+/// The state of `unit`'s companion, with its command number.
+fn companion_state(world: &mut World, unit: u32) -> Option<(crate::companion::CompanionState, crate::companion::CompanionStatus)> {
+    let mut companions = world.query::<(&crate::companion::Companion, &crate::companion::CompanionStatus)>();
+    companions
+        .iter(world)
+        .find(|(companion, _)| companion.unit == unit)
+        .map(|(_, status)| (status.state.clone(), status.clone()))
+}
+
+/// The end of a spawn: shown and standing, or walking to a spawn point off
+/// its seat.
+fn companion_spawned(state: (crate::companion::CompanionState, crate::companion::CompanionStatus), unit: u32) -> Poll {
+    use crate::companion::CompanionState;
+    let (state, _) = state;
+    match state {
+        CompanionState::Spawned => Poll::Running(format!("companion {unit}: its body is loading")),
+        CompanionState::Idle => Poll::Done(format!("companion {unit} spawned")),
+        CompanionState::Walking => Poll::Running(format!("companion {unit} walks to its spawn point")),
+        CompanionState::Done => Poll::Done(format!("companion {unit} spawned at its spawn point")),
+        // The body is shown from its seat on: a walk-in that stops short
+        // leaves the companion standing where it stopped.
+        CompanionState::Failed(reason) => Poll::Done(format!("companion {unit} spawned short of its spawn point: {reason}")),
+    }
+}
+
+/// The end of a walk: the status at or past the command's number, done or
+/// failed.
+fn companion_walked(state: (crate::companion::CompanionState, crate::companion::CompanionStatus), seq: u64, unit: u32) -> Poll {
+    use crate::companion::CompanionState;
+    let (state, status) = state;
+    if status.seq < seq {
+        return Poll::Running(format!("companion {unit} walk {seq}: the command is queued"));
+    }
+    match state {
+        CompanionState::Idle | CompanionState::Walking => Poll::Running(format!("companion {unit} walk {seq}: {}", state.label())),
+        CompanionState::Spawned => Poll::Running(format!("companion {unit}: its body is loading")),
+        CompanionState::Done if status.seq > seq => Poll::Failed(format!(
+            "companion {unit} walk {seq} was never accepted: command {} came first",
+            status.seq
+        )),
+        CompanionState::Done => Poll::Done(format!("companion {unit} walk {seq} arrived")),
+        CompanionState::Failed(reason) => Poll::Failed(format!("companion {unit} walk {seq} failed: {reason}")),
     }
 }
 
@@ -906,11 +1180,11 @@ impl Walk {
         }
     }
 
-    fn poll(&mut self, world: &mut World, shared: &mut Shared, path: &str) -> Poll {
+    fn poll(&mut self, world: &mut World, shared: &mut Shared, path: &str, ticket: u64) -> Poll {
         let goal = match cond::resolve(world, &self.to) {
             Ok(goal) => goal,
             Err(error) => {
-                shared.release_hand_of(world, path);
+                shared.release_hand_of(world, ticket, path);
                 return Poll::Running(error);
             }
         };
@@ -920,17 +1194,17 @@ impl Walk {
         };
         let distance = flat(player, goal);
         if distance <= self.within {
-            shared.release_hand_of(world, path);
+            shared.release_hand_of(world, ticket, path);
             return Poll::Done(format!("arrived at {distance:.2} m"));
         }
         // The stick takes no press while it is disabled (the entry before
         // its finish, a dialog, an edit, a site move): stand and wait.
         let enabled = world.get_resource::<crate::joystick::JoystickState>().is_some_and(|stick| stick.enabled);
         if !enabled {
-            shared.release_hand_of(world, path);
+            shared.release_hand_of(world, ticket, path);
             return Poll::Running(format!("the joystick is disabled; {distance:.2} m to go"));
         }
-        if let Some(owner) = shared.hand_owner.as_deref().filter(|owner| *owner != path) {
+        if let Some((_, owner)) = shared.hand_owner.as_ref().filter(|(owner, _)| *owner != ticket) {
             return Poll::Failed(format!("the joystick finger is walking for {owner}"));
         }
         let goal_xz = Vec2::new(goal.x, goal.z);
@@ -960,7 +1234,7 @@ impl Walk {
                         let reached = corners.last().copied().unwrap_or(goal_xz);
                         let off = reached.distance(goal_xz);
                         if off > self.within {
-                            shared.release_hand_of(world, path);
+                            shared.release_hand_of(world, ticket, path);
                             return Poll::Failed(format!(
                                 "the goal ({:.2}, {:.2}) is not reachable on the walk field: the nearest reachable point is ({:.2}, {:.2}), {off:.2} m away, more than within {:.2}",
                                 goal_xz.x, goal_xz.y, reached.x, reached.y, self.within
@@ -971,7 +1245,7 @@ impl Walk {
                 }
                 Some(None) => {
                     if self.refuse_unreachable {
-                        shared.release_hand_of(world, path);
+                        shared.release_hand_of(world, ticket, path);
                         let nearest = world
                             .get_resource::<crate::walk_face::WalkFace>()
                             .and_then(|face| face.sample(goal_xz.into(), 1.0e4))
@@ -995,8 +1269,9 @@ impl Walk {
             self.next += 1;
         }
         let aim = self.corners.get(self.next).copied().unwrap_or(goal_xz);
-        shared.hand_owner = Some(path.to_owned());
-        if let Err(error) = shared.hand.steer(world, aim - player_xz) {
+        shared.hand_owner = Some((ticket, path.to_owned()));
+        shared.take_hand(ticket);
+        if let Err(error) = shared.hand.steer(world, ticket, aim - player_xz) {
             return Poll::Running(error.to_owned());
         }
         Poll::Running(format!(
@@ -1108,7 +1383,7 @@ impl Gather {
         }
     }
 
-    fn poll(&mut self, world: &mut World, shared: &mut Shared, path: &str) -> Poll {
+    fn poll(&mut self, world: &mut World, shared: &mut Shared, path: &str, ticket: u64) -> Poll {
         let (entity, uid, origin) = match self.object {
             Some(object) => object,
             None => match self.find(world) {
@@ -1120,13 +1395,13 @@ impl Gather {
                     (entity, uid, at)
                 }
                 Err(error) => {
-                    shared.release_hand_of(world, path);
+                    shared.release_hand_of(world, ticket, path);
                     return Poll::Failed(error);
                 }
             },
         };
         let Some(object) = world.get::<crate::harvest::HarvestObject>(entity) else {
-            shared.release_hand_of(world, path);
+            shared.release_hand_of(world, ticket, path);
             return Poll::Failed(format!("gatherable {uid} left the site"));
         };
         let (hp, kind, harvested) =
@@ -1149,7 +1424,7 @@ impl Gather {
                     return Poll::Running(format!("gatherable {uid} is the target"));
                 }
                 let walk = self.walk.as_mut().expect("the walk is planned with the object");
-                match walk.poll(world, shared, path) {
+                match walk.poll(world, shared, path, ticket) {
                     // In reach while another object is the target: walk on
                     // into this one, which the player then faces.
                     Poll::Done(note) => {
@@ -1179,8 +1454,8 @@ impl Gather {
                     return Poll::Running(format!("gatherable {uid} is no longer the target ({targeted:?})"));
                 }
                 // Lift the joystick finger first and press on a later frame.
-                if shared.hand.pressing() || self.lifted_at.is_none() {
-                    shared.release_hand_of(world, path);
+                if shared.hand.pressing(ticket) || self.lifted_at.is_none() {
+                    shared.release_hand_of(world, ticket, path);
                     self.lifted_at = Some(now);
                     return Poll::Running("standing for the presses".into());
                 }
@@ -1228,11 +1503,20 @@ impl Gather {
                     Err(error) => Poll::Running(error.to_owned()),
                 }
             }
-            GatherPhase::Collect => self.collect(world, shared, path, uid, origin, hp),
+            GatherPhase::Collect => self.collect(world, shared, path, ticket, uid, origin, hp),
         }
     }
 
-    fn collect(&mut self, world: &mut World, shared: &mut Shared, path: &str, uid: u64, origin: Vec3, hp: i32) -> Poll {
+    fn collect(
+        &mut self,
+        world: &mut World,
+        shared: &mut Shared,
+        path: &str,
+        ticket: u64,
+        uid: u64,
+        origin: Vec3,
+        hp: i32,
+    ) -> Poll {
         let mut landed = Vec::new();
         let mut falling = 0;
         let mut drops = world.query::<(&crate::harvest::HarvestDropItem, &GlobalTransform)>();
@@ -1264,7 +1548,7 @@ impl Gather {
                 if falling > 0 {
                     return Poll::Running(format!("{falling} drops still falling"));
                 }
-                shared.release_hand_of(world, path);
+                shared.release_hand_of(world, ticket, path);
                 return Poll::Done(self.summary(uid, hp));
             };
             // Pickups happen only while the player moves, so the walk aims
@@ -1280,7 +1564,7 @@ impl Gather {
             ));
         }
         let walk = self.walk.as_mut().expect("the walk is planned with the drop");
-        let polled = walk.poll(world, shared, path);
+        let polled = walk.poll(world, shared, path, ticket);
         let (at, since) = self.drop.as_mut().expect("a drop is chosen above");
         match polled {
             Poll::Done(_) => {
@@ -1297,7 +1581,7 @@ impl Gather {
                             .and_then(|masters| inventory.material_max_count(masters));
                         (inventory.total_material_possession(), limit)
                     });
-                shared.release_hand_of(world, path);
+                shared.release_hand_of(world, ticket, path);
                 Poll::Failed(format!(
                     "the drop at ({:.2}, {:.2}) is not taken after {DROP_REFUSED_SECS} s on it (bag held and limit {bag:?})",
                     at.x, at.z
@@ -2058,7 +2342,7 @@ impl Interact {
         }
     }
 
-    fn poll(&mut self, world: &mut World, shared: &mut Shared, path: &str) -> Poll {
+    fn poll(&mut self, world: &mut World, shared: &mut Shared, path: &str, ticket: u64) -> Poll {
         let wanted = self.wanted(world);
         let Some(state) = world.get_resource::<crate::action_button::ActionButtonState>() else {
             return Poll::Running("the action buttons are not set up".into());
@@ -2077,8 +2361,8 @@ impl Interact {
         if head.is_some_and(ours) && now - self.last_change >= ACTION_BUTTON_INPUT_INTERVAL + 0.05 {
             // Lift the joystick finger first and tap on a later frame, once
             // the player stands, if the button still heads the stack.
-            if shared.hand.pressing() || self.lifted_at.is_none() {
-                shared.release_hand_of(world, path);
+            if shared.hand.pressing(ticket) || self.lifted_at.is_none() {
+                shared.release_hand_of(world, ticket, path);
                 self.lifted_at = Some(now);
                 return Poll::Running(format!("{:?} heads the stack; standing", self.button));
             }
@@ -2094,7 +2378,7 @@ impl Interact {
         if let Some((shown, _)) = head.filter(|head| !ours(*head)) {
             if stacked && change_shown && now - self.last_change >= 1.0 {
                 if let Some(position) = hand::change_position(world, shown) {
-                    shared.release_hand_of(world, path);
+                    shared.release_hand_of(world, ticket, path);
                     if hand::tap(world, position).is_ok() {
                         self.last_change = now;
                         return Poll::Running(format!("{:?} is stacked behind {shown:?}; tapped the change-target button", self.button));
@@ -2102,7 +2386,7 @@ impl Interact {
                 }
             }
         }
-        match self.walk.poll(world, shared, path) {
+        match self.walk.poll(world, shared, path, ticket) {
             Poll::Done(note) => Poll::Running(format!("{note}; waiting for {:?} to head the stack (head {head:?})", self.button)),
             Poll::Running(note) => Poll::Running(format!("{note}; head {head:?}")),
             failed => failed,

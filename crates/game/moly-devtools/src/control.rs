@@ -9,6 +9,8 @@
 
 pub mod layout;
 mod observe;
+/// The observation the `moly.observe` method answers, for the plugin host.
+pub(crate) use observe::observe;
 mod state;
 mod ui;
 
@@ -57,6 +59,12 @@ const METHODS: &[(&str, &str, &str)] = &[
         "moly.observe",
         "The world as structured data, by section (what; every section when it is absent): site (with the layout grid's floor size and the tiles each placed fixture covers), gatherables (harvest objects with position, hit points, the tool type they need and whether the player targets one; and the drops on the ground), bag (materials, items, held total and limit), tools (gathering tools and stamina), recipes (the craft lists with costs and whether the apply button is on, else its balloon key), fixtures (owned and placed), characters, weather and time.",
         r#"{"type":"object","properties":{"what":{"type":"array","items":{"enum":["site","gatherables","bag","tools","recipes","fixtures","characters","weather","time"]}}},"additionalProperties":false}"#,
+    ),
+    #[cfg(not(target_arch = "wasm32"))]
+    (
+        "moly.plugins",
+        "The plugins loaded at start: each with its directory, version, kind and settings; the plugins the runtime stopped, with their reasons; the configured but not loaded ones with what stopped them; and the seam table, whose exclusive entries name the provider of the seam (or of one target) and whose multi entries list their providers.",
+        NONE,
     ),
     (
         "moly.events",
@@ -202,13 +210,17 @@ pub fn install(app: &mut App) {
         .with_method_main("moly.camera.reset", camera_reset)
         .with_method_main("moly.capture", capture)
         .with_method_main("moly.capture.take", capture_take);
+    // The plugins' report is read where the plugin host lives, in native runs.
+    #[cfg(not(target_arch = "wasm32"))]
+    let remote = remote.with_method_main("moly.plugins", plugins);
     app.add_plugins(remote)
         .init_resource::<Captures>()
+        .init_resource::<PluginsAnswer>()
         .init_resource::<crate::camera::FreeCameraPose>()
         .init_resource::<TimeStep>()
         .add_systems(Startup, share_sender)
         .add_systems(First, crate::bus::stamp)
-        .add_systems(Last, (crate::bus::watch, end_step))
+        .add_systems(Last, (crate::bus::watch, end_step, publish_report))
         .add_systems(Last, crate::camera::apply_free_camera);
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(port) = native_port() {
@@ -229,6 +241,25 @@ fn native_port() -> Option<u16> {
 
 fn share_sender(sender: Res<BrpSender>) {
     let _ = SENDER.set(async_channel::Sender::clone(&sender));
+}
+
+/// Last: the plugins' report, as the control surface read this frame. The
+/// report is kept apart from the world it reports on, and is read by the
+/// page from any thread.
+#[derive(Resource, Default)]
+pub(crate) struct PluginsAnswer(pub(crate) Option<Value>);
+
+/// Last: takes the plugins' report for the control surface to answer from.
+/// The plugin host's frame runs before this one.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn publish_report(mut answer: ResMut<PluginsAnswer>) {
+    answer.0 = Some(crate::plugin_host::report());
+}
+
+/// Last: the browser engine runs no Luau plugins, so there is no report.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn publish_report(mut answer: ResMut<PluginsAnswer>) {
+    answer.0 = None;
 }
 
 /// One JSON-RPC 2.0 request, answered with its JSON-RPC 2.0 response. A
@@ -500,7 +531,12 @@ fn observe_world(In(params): In<Option<Value>>, world: &mut World) -> BrpResult 
             .ok_or_else(|| refuse("moly.observe: what must be section names"))?,
         Some(_) => return Err(refuse("moly.observe: what must be an array of section names")),
     };
-    observe::observe(world, &what).map_err(refuse)
+    observe(world, &what).map_err(refuse)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn plugins(In(_): In<Option<Value>>, answer: Res<PluginsAnswer>) -> BrpResult {
+    answer.0.clone().ok_or_else(|| refusal("moly.plugins: the plugins' report is not ready yet"))
 }
 
 fn read_events(In(params): In<Option<Value>>) -> BrpResult {

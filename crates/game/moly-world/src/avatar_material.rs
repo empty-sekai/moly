@@ -741,6 +741,7 @@ impl Plugin for AvatarMaterialPlugin {
         crate::gpu_image_release::prepare_after_images::<AvatarMaterial>(app);
         // The player domain's own systems ride on this registration.
         app.add_plugins(crate::player::PlayerPlugin);
+        app.add_plugins(crate::companion::CompanionPlugin);
         app.add_plugins((
             MaterialPlugin::<AvatarMaterial>::default(),
             ExtractResourcePlugin::<AvatarEnv>::default(),

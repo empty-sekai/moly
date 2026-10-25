@@ -23,6 +23,8 @@ pub struct Step {
     pub node: Node,
     /// The step's name in the log: its `label`, or its action.
     pub label: String,
+    /// The step's action (`player.walk_to`, `log`, ...), whatever its label.
+    pub action: String,
     /// Seconds the step may run before it fails.
     pub timeout: Option<f32>,
     /// A failure is logged and the script goes on.
@@ -97,6 +99,14 @@ pub enum Node {
     NpcTweet { unit: u32, tweet: i32, secs: f32 },
     /// Hands a character to its AI with a talk to open on its next decision.
     NpcTalk { unit: u32, talk: i32 },
+    /// Puts the companion of `unit` at a world point; the step ends once its
+    /// body is in and it stands, or has walked to the point.
+    CompanionSpawn { unit: u32, at: [f32; 3] },
+    /// Walks the companion of `unit` to a world point, ending within `within`
+    /// metres of it.
+    CompanionWalkTo { unit: u32, to: [f32; 3], within: f32 },
+    /// Removes the companion of `unit`.
+    CompanionDespawn { unit: u32 },
     /// A one-finger drag of `by` logical pixels (x right, y down) over
     /// `secs`, starting at `from` (fractions of the window).
     CameraDrag { by: [f32; 2], secs: f32, from: [f32; 2] },
@@ -202,6 +212,7 @@ pub(super) const ACTIONS: &[&str] = &[
     "player.walk_to", "player.interact", "player.gather", "player.craft", "player.stick", "player.release", "player.talk_to", "player.wear",
     "player.wear_avatar", "player.deliver", "tap", "ui.tap", "dialog.answer", "key.back", "layout.place",
     "npc.take", "npc.walk_to", "npc.face", "npc.emote", "npc.use", "npc.tweet", "npc.talk", "npc.release",
+    "companion.spawn", "companion.walk_to", "companion.despawn",
     "camera.drag", "camera.zoom", "server.edit", "weather.set", "site.switch", "site.enter_room", "site.go_home",
 ];
 
@@ -216,6 +227,12 @@ pub fn parse(document: &Value) -> Result<Script, String> {
         return Err("script: steps is empty".into());
     }
     Ok(Script { name, steps, exit })
+}
+
+/// Parses one step object, checked as a script's step is; a macro expands
+/// into the several steps it stands for.
+pub fn parse_step(value: &Value) -> Result<Arc<[Step]>, String> {
+    step(value, "step").map(Arc::from)
 }
 
 fn steps(value: &Value, at: &str) -> Result<Arc<[Step]>, String> {
@@ -238,6 +255,7 @@ fn step(value: &Value, at: &str) -> Result<Vec<Step>, String> {
     let one = |node: Node, default_timeout: Option<f32>| Step {
         node,
         label: label.clone().unwrap_or_else(|| action.clone()),
+        action: action.clone(),
         timeout: timeout.or(default_timeout),
         optional,
     };
@@ -438,6 +456,22 @@ fn step(value: &Value, at: &str) -> Result<Vec<Step>, String> {
             let talk = fields.req_i32("talk")?;
             vec![one(Node::NpcTalk { unit, talk }, Some(60.0))]
         }
+        "companion.spawn" => {
+            let unit = fields.req_u32("unit")?;
+            let at = triple(fields.req("at")?, &format!("{at}.at"))?;
+            vec![one(Node::CompanionSpawn { unit, at }, Some(60.0))]
+        }
+        "companion.walk_to" => {
+            let unit = fields.req_u32("unit")?;
+            let to = triple(fields.req("to")?, &format!("{at}.to"))?;
+            // The walk law caps the distance a walk may finish within.
+            let within = fields
+                .opt_f32("within")?
+                .unwrap_or(0.3)
+                .min(crate::companion::WITHIN_LIMIT);
+            vec![one(Node::CompanionWalkTo { unit, to, within }, Some(60.0))]
+        }
+        "companion.despawn" => vec![one(Node::CompanionDespawn { unit: fields.req_u32("unit")? }, Some(10.0))],
         "camera.drag" => {
             let by = pair(fields.req("by")?, &format!("{at}.by"))?;
             let secs = fields.opt_f32("secs")?.unwrap_or(0.5);
@@ -651,6 +685,17 @@ fn pair(value: &Value, at: &str) -> Result<[f32; 2], String> {
             _ => Err(format!("{at}: expected two numbers")),
         },
         _ => Err(format!("{at}: expected [x, z]")),
+    }
+}
+
+/// A world point: `[x, y, z]`.
+fn triple(value: &Value, at: &str) -> Result<[f32; 3], String> {
+    match value.as_array().map(Vec::as_slice) {
+        Some([x, y, z]) => match (x.as_f64(), y.as_f64(), z.as_f64()) {
+            (Some(x), Some(y), Some(z)) if x.is_finite() && y.is_finite() && z.is_finite() => Ok([x as f32, y as f32, z as f32]),
+            _ => Err(format!("{at}: expected three numbers")),
+        },
+        _ => Err(format!("{at}: expected [x, y, z]")),
     }
 }
 

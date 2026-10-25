@@ -103,12 +103,16 @@
 
 mod cond;
 mod hand;
+mod npc;
+pub mod run;
+mod script;
 
 /// The touch the director's steps write, for the control surface's own steps.
 pub use hand::{tap, ui_point, window_size};
-mod npc;
-mod run;
-mod script;
+/// The steps a program outside the director's scripts runs, by the ticket
+/// they advance with ([`run::ACTED_TICKET`] plus the program's number).
+pub use run::ACTED_TICKET;
+pub use script::{parse_step, Step};
 
 use std::sync::Mutex;
 
@@ -116,6 +120,10 @@ use bevy::diagnostic::FrameCount;
 use bevy::prelude::*;
 use bevy::render::view::screenshot::Screenshot;
 use serde_json::{json, Value};
+
+/// The ticket of the director's own script: the run that takes the hand
+/// before any other.
+const DIRECTOR_TICKET: u64 = 0;
 
 /// How long a finished script with `exit` waits for its captures to save.
 #[cfg(not(target_arch = "wasm32"))]
@@ -230,6 +238,18 @@ pub fn director_snapshot() -> String {
     snapshot.to_string()
 }
 
+/// The status of the director's run: `idle`, `running`, `paused`, `done`,
+/// `failed` or `stopped`.
+pub fn status(world: &World) -> &'static str {
+    world.get_resource::<Director>().map_or("idle", |director| director.status.word())
+}
+
+/// Whether a director script runs or waits for its next frame: it holds the
+/// hand through both.
+pub fn script_running(world: &World) -> bool {
+    matches!(status(world), "running" | "paused" | "queued")
+}
+
 /// Whether a condition holds now, and what was read.
 pub fn check(world: &mut World, condition: &Value) -> Result<(bool, String), String> {
     let condition = script::condition(condition)?;
@@ -256,7 +276,8 @@ pub fn install(app: &mut App) {
         .add_systems(Startup, load_native_script)
         .add_systems(
             Update,
-            tick.before(crate::joystick::advance)
+            director_tick
+                .before(crate::joystick::advance)
                 .before(crate::gesture::advance)
                 .before(crate::action_button::click),
         );
@@ -280,7 +301,10 @@ fn load_native_script() {
     }
 }
 
-fn tick(world: &mut World) {
+/// The director's frame: the queued commands, the running script's steps and
+/// the published snapshot. Systems that run after the director's frame
+/// order themselves after this one.
+pub fn director_tick(world: &mut World) {
     let commands: Vec<Command> = COMMANDS.lock().map(|mut queue| std::mem::take(&mut *queue)).unwrap_or_default();
     world.resource_scope(|world, mut director: Mut<Director>| {
         let director = &mut *director;
@@ -291,7 +315,7 @@ fn tick(world: &mut World) {
         release_exit(world, director);
         if director.status == Status::Running {
             let track = director.track.as_mut().expect("a running director has a track");
-            match track.tick(world, &mut director.shared) {
+            match track.tick(world, &mut director.shared, DIRECTOR_TICKET) {
                 run::TrackState::Running => {}
                 run::TrackState::Done => finish(world, director, Status::Done, None),
                 run::TrackState::Failed(error) => finish(world, director, Status::Failed, Some(error)),
@@ -311,6 +335,7 @@ fn apply(world: &mut World, director: &mut Director, command: Command) {
             director.track = Some(run::Track::new(script.steps.clone(), script.name.clone()));
             director.script = Some(script);
             director.shared.log.clear();
+            director.shared.take_hand(DIRECTOR_TICKET);
             director.shared.revision += 1;
             director.started = director.shared.now;
             director.error = None;
@@ -323,7 +348,7 @@ fn apply(world: &mut World, director: &mut Director, command: Command) {
         }
         Command::Pause => {
             if director.status == Status::Running {
-                director.shared.hand.release(world);
+                director.shared.release_hand(world, DIRECTOR_TICKET);
                 director.status = Status::Paused;
                 director.shared.revision += 1;
                 info!("[director] paused");
@@ -341,7 +366,7 @@ fn apply(world: &mut World, director: &mut Director, command: Command) {
 
 fn stop(world: &mut World, director: &mut Director, why: &str) {
     if let Some(track) = director.track.as_mut() {
-        track.abort(world, &mut director.shared);
+        track.abort(world, &mut director.shared, DIRECTOR_TICKET);
     }
     finish(world, director, Status::Stopped, Some(why.to_owned()));
 }
@@ -407,7 +432,7 @@ fn publish(director: &mut Director) {
         "script": director.script.as_ref().map(|script| script.name.clone()),
         "elapsed": director.shared.now - director.started,
         "current": current,
-        "owned": director.shared.owned.iter().map(|(unit, _)| unit).collect::<Vec<_>>(),
+        "owned": director.shared.owned().map(|(unit, _)| unit).collect::<Vec<_>>(),
         "error": director.error,
         "log": director.shared.log,
     });

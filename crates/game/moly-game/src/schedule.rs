@@ -263,6 +263,9 @@ pub fn install(app: &mut App) {
     );
     crate::game_settings::install(app);
     crate::director::install(app);
+    // Native only: the browser engine runs no Luau plugins.
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::plugin_host::install(app);
     crate::control::install(app);
     crate::control_panel::install(app);
     crate::player_data::install(app);

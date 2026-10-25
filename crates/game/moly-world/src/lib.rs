@@ -92,6 +92,7 @@ pub mod camera_site_move;
 pub mod character;
 pub mod character_silhouette;
 pub mod cloth_runtime;
+pub mod companion;
 pub mod cutscene_camera;
 pub mod delayed_faces;
 pub mod delivery_camera;

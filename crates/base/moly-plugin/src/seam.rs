@@ -37,6 +37,16 @@ pub enum Provider {
     Plugin(PluginId),
 }
 
+impl Provider {
+    /// The provider's name: the game's, or the plugin's id.
+    pub fn name(&self) -> String {
+        match self {
+            Self::Game => "game".to_owned(),
+            Self::Plugin(plugin) => plugin.to_string(),
+        }
+    }
+}
+
 /// The resolved providers. For an exclusive seam, `whole` is the provider of
 /// the seam and `targets` the per-target overrides; for a multi seam,
 /// `multi` lists the plugin providers in load order.

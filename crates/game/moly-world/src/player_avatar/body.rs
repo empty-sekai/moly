@@ -131,6 +131,7 @@ pub fn on_scene_ready(
         return;
     }
     let player = parents.get(model).expect("body model has a parent").0;
+    debug!("[player] body scene ready under {player:?}");
     commands.entity(player).insert(BodySceneReady);
 }
 

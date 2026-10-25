@@ -13,6 +13,7 @@ use crate::userdata::client::inventory::{ClientMysekaiInventory, PossessionMaste
 
 pub(super) const SECTIONS: &[&str] = &[
     "site",
+    "player",
     "gatherables",
     "bag",
     "tools",
@@ -25,7 +26,7 @@ pub(super) const SECTIONS: &[&str] = &[
 ];
 
 /// The sections named in `what`, every section when it is empty.
-pub(super) fn observe(world: &mut World, what: &[String]) -> Result<Value, String> {
+pub(crate) fn observe(world: &mut World, what: &[String]) -> Result<Value, String> {
     if let Some(unknown) = what.iter().find(|name| !SECTIONS.contains(&name.as_str())) {
         return Err(format!("moly.observe: unknown section {unknown:?}; the sections are {}", SECTIONS.join(", ")));
     }
@@ -34,6 +35,9 @@ pub(super) fn observe(world: &mut World, what: &[String]) -> Result<Value, Strin
     out.insert("frame".into(), json!(world.get_resource::<bevy::diagnostic::FrameCount>().map(|frame| frame.0)));
     if wanted("site") {
         out.insert("site".into(), site(world));
+    }
+    if wanted("player") {
+        out.insert("player".into(), super::state::player(world));
     }
     if wanted("gatherables") {
         out.insert("gatherables".into(), gatherables(world));

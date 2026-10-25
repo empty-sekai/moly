@@ -20,3 +20,6 @@ pub use manifest::{Manifest, ManifestError, PluginId, PluginKind};
 pub use profile::Profile;
 pub use resolve::{resolve, Resolved, ResolveError};
 pub use seam::{SeamDecl, SeamKind, SeamTable};
+/// The TOML parser the manifests and profiles are read with, for a caller
+/// that works with the settings tables it returns.
+pub use toml;

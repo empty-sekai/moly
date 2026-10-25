@@ -1,0 +1,11 @@
+[plugin]
+id = "moly.example"
+name = "Example plugin"
+version = "0.1.0"
+moly = ">=0.0.4"
+kind = "luau"
+entry = "main.luau"
+description = "Logs a greeting, waits two seconds, logs a line through a director step and logs its outcome."
+
+[config]
+greeting = "hello from the example plugin"

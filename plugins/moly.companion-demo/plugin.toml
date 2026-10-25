@@ -1,0 +1,11 @@
+[plugin]
+id = "moly.companion-demo"
+name = "Companion demo plugin"
+version = "0.1.0"
+moly = ">=0.0.4"
+kind = "luau"
+entry = "main.luau"
+description = "Spawns unit 14's companion (Emu) in front of the player, walks it between two points near the player three times and leaves it standing."
+
+[config]
+unit = 14
