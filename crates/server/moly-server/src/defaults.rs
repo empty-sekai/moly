@@ -9,7 +9,7 @@ use bevy::tasks::{block_on, futures_lite::future, IoTaskPool, Task};
 use crate::instrument::instrument_env;
 use crate::model::avatar;
 use crate::model::document::{self, Clock, Migration, ServerDocument, Stamina};
-use crate::model::{inventory, music_play, tools, Origin};
+use crate::model::{inventory, music_play, phenomena, tools, Origin};
 use crate::model::music;
 
 /// Asset source and path of a slice that replaces the checked-in one.
@@ -189,6 +189,7 @@ fn native_overlay(doc: &mut ServerDocument) -> avatar::AvatarInstrument {
     inventory::native_overlay(doc);
     music_play::native_overlay(doc);
     tools::native_overlay(doc);
+    phenomena::native_overlay(doc);
     let text = |name: &str| {
         instrument_env(name)
             .map(|raw| raw.trim().to_owned())

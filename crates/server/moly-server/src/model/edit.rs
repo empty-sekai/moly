@@ -27,7 +27,7 @@ use super::{
 };
 
 /// Sections a response carries (the `pending` names).
-pub(crate) const PENDING_SECTIONS: [&str; 24] = [
+pub(crate) const PENDING_SECTIONS: [&str; 25] = [
     super::music::SECTION,
     super::avatar::SECTION,
     SECTION_GAMEDATA,
@@ -48,6 +48,7 @@ pub(crate) const PENDING_SECTIONS: [&str; 24] = [
     super::music_play::RECORDS_SECTION,
     super::system_fixture_action::SECTION,
     super::tools::SECTION,
+    super::phenomena::SECTION,
     super::convert::SECTION_SLOTS,
     super::convert::SECTION_HISTORIES,
     super::normal_mission::SECTION_MISSIONS,
@@ -237,6 +238,9 @@ fn edit_path(
     }
     if let Some(result) = super::tools::edit_path(&mut doc.tools, &parts, value) {
         return result.map(|()| Delivery::NextResponse(super::tools::SECTION));
+    }
+    if let Some(result) = super::phenomena::edit_path(&mut doc.phenomena, &parts, value) {
+        return result.map(|()| Delivery::NextResponse(super::phenomena::SECTION));
     }
     if let Some(result) = super::recycle::edit_policy(&mut doc.recycle, &parts, value) {
         return result.map(|stated| {
@@ -887,6 +891,7 @@ fn other_sections(core: Value, delivery: Value, masters: &Tables<'_>) -> Value {
         super::music_play::schema_sections(),
         super::system_fixture_action::schema_sections(),
         super::tools::schema_sections(),
+        super::phenomena::schema_sections(),
         super::recycle::schema_sections(),
         super::convert::schema_sections(),
         super::normal_mission::schema_sections(masters),
@@ -913,7 +918,7 @@ pub(crate) fn schema(model: &ServerModel, masters: &Tables<'_>) -> Value {
         "command": "server.edit",
         "sections": other_sections(sections(masters), super::delivery::schema_sections(Some(model)), masters),
         "actions": actions(),
-        "policies": concat(concat(concat(concat(policies(), super::delivery::schema_policies()), concat(super::home_action::schema_policies(), super::music_play::schema_policies())), concat(concat(concat(super::inventory::schema_policies(), super::craft::schema_policies()), concat(super::system_fixture_action::schema_policies(), super::tools::schema_policies())), super::recycle::schema_policies())), concat(super::convert::schema_policies(), super::normal_mission::schema_policies())),
+        "policies": concat(concat(concat(concat(policies(), super::delivery::schema_policies()), concat(super::home_action::schema_policies(), super::music_play::schema_policies())), concat(concat(concat(super::inventory::schema_policies(), super::craft::schema_policies()), concat(super::system_fixture_action::schema_policies(), super::tools::schema_policies())), super::recycle::schema_policies())), concat(concat(super::phenomena::schema_policies(), super::convert::schema_policies()), super::normal_mission::schema_policies())),
         "masters": masters_value(masters),
         "joined": model.joined,
     })
@@ -927,7 +932,7 @@ pub(crate) fn schema_without_model() -> Value {
         "command": "server.edit",
         "sections": other_sections(sections(&tables), super::delivery::schema_sections(None), &tables),
         "actions": actions(),
-        "policies": concat(concat(concat(concat(policies(), super::delivery::schema_policies()), concat(super::home_action::schema_policies(), super::music_play::schema_policies())), concat(concat(concat(super::inventory::schema_policies(), super::craft::schema_policies()), concat(super::system_fixture_action::schema_policies(), super::tools::schema_policies())), super::recycle::schema_policies())), concat(super::convert::schema_policies(), super::normal_mission::schema_policies())),
+        "policies": concat(concat(concat(concat(policies(), super::delivery::schema_policies()), concat(super::home_action::schema_policies(), super::music_play::schema_policies())), concat(concat(concat(super::inventory::schema_policies(), super::craft::schema_policies()), concat(super::system_fixture_action::schema_policies(), super::tools::schema_policies())), super::recycle::schema_policies())), concat(concat(super::phenomena::schema_policies(), super::convert::schema_policies()), super::normal_mission::schema_policies())),
         "masters": null,
         "joined": false,
     })

@@ -259,8 +259,6 @@ pub struct HarvestUserData {
     pub materials: std::collections::BTreeMap<i64, i64>,
     /// `userMysekaiTreasureBoxes`.
     pub boxes: Vec<super::server_mock::UserTreasureBox>,
-    /// `userMysekaiPhenomena`.
-    pub phenomena: Vec<super::learn::UserPhenomenon>,
 }
 
 /// Master fixture type words (`MysekaiSiteHarvestFixtureType`).
@@ -650,7 +648,6 @@ pub fn build(
         stamina,
         materials: Default::default(),
         boxes: mock.treasure_boxes(),
-        phenomena: mock.phenomena(),
     });
     commands.insert_resource(mock);
     commands.insert_resource(HarvestCatalog {

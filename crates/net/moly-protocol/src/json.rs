@@ -16,7 +16,8 @@ use crate::rows::{
     MusicPlaySetting, OwnedMusicRecord, ScheduleRow, Stamina, UserAvatar, UserMysekaiBlueprint,
     UserMysekaiBlueprintLendCraftCount, UserMysekaiCanvas, UserMysekaiCharacterTalk,
     UserMysekaiConvertItem, UserMysekaiFixture, UserMysekaiGamedata, UserMysekaiItem,
-    UserMysekaiMaterial, UserMysekaiSystemFixtureAction, UserMysekaiTool, UserResource,
+    UserMysekaiMaterial, UserMysekaiPhenomena, UserMysekaiSystemFixtureAction, UserMysekaiTool,
+    UserResource,
 };
 
 // ---------------------------------------------------------------------------
@@ -61,6 +62,8 @@ pub const SECTION_MUSIC_RECORDS: &str = "userMysekaiMusicRecords";
 pub const SECTION_SYSTEM_FIXTURE_ACTIONS: &str = "userMysekaiSystemFixtureActions";
 /// `userMysekaiTools`.
 pub const SECTION_TOOLS: &str = "userMysekaiTools";
+/// `userMysekaiPhenomenas`.
+pub const SECTION_PHENOMENA: &str = "userMysekaiPhenomenas";
 /// `userMysekaiBlueprintLendCraftCounts`.
 pub const SECTION_BLUEPRINT_LEND_CRAFT_COUNTS: &str = "userMysekaiBlueprintLendCraftCounts";
 /// `userMysekaiConvertSlots`.
@@ -387,6 +390,20 @@ pub fn tools_value(rows: &[UserMysekaiTool]) -> Value {
 /// `userMysekaiTools`'s value in a document (`null` while not seated).
 pub fn tools_section_value(rows: &Option<Vec<UserMysekaiTool>>) -> Value {
     rows.as_deref().map_or(Value::Null, tools_value)
+}
+
+/// `userMysekaiPhenomenas`.
+pub fn phenomena_value(rows: &[UserMysekaiPhenomena]) -> Value {
+    Value::Array(
+        rows.iter()
+            .map(|row| {
+                json!({
+                    "mysekaiPhenomenaId": row.mysekai_phenomena_id,
+                    "obtainedAt": row.obtained_at,
+                })
+            })
+            .collect(),
+    )
 }
 
 /// `userMysekaiBlueprintLendCraftCounts`.
@@ -1035,6 +1052,31 @@ pub fn parse_blueprint_lend_craft_counts(
                 ));
             }
             Ok(term)
+        })
+        .collect()
+}
+
+/// `userMysekaiPhenomenas`: one row per learned phenomenon.
+pub fn parse_phenomena(value: &Value) -> Result<Vec<UserMysekaiPhenomena>, String> {
+    let rows = rows(value, SECTION_PHENOMENA)?;
+    let mut seen = BTreeSet::new();
+    rows.iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let at = format!("{SECTION_PHENOMENA}[{i}]");
+            let row = object(row, &at)?;
+            only(row, &["mysekaiPhenomenaId", "obtainedAt"], &at)?;
+            let learned = UserMysekaiPhenomena {
+                mysekai_phenomena_id: int32(row, "mysekaiPhenomenaId", &at)?,
+                obtained_at: int64(row, "obtainedAt", &at)?,
+            };
+            if !seen.insert(learned.mysekai_phenomena_id) {
+                return Err(format!(
+                    "{at} repeats phenomenon {}",
+                    learned.mysekai_phenomena_id
+                ));
+            }
+            Ok(learned)
         })
         .collect()
 }

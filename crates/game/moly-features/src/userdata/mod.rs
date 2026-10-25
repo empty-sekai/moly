@@ -27,6 +27,7 @@
 //! - [`system_fixture_action`]: the `UserMysekaiSystemFixtureAction` rows
 //!   and the system fixture action request.
 //! - [`tools`]: the owned harvest tools.
+//! - [`phenomena`]: the phenomena the user has learned.
 //! - [`convert`]: the convert slots, their item histories and the convert
 //!   items the convert screen's list is built from.
 //! - [`mission`]: the mission sheet the user is on and the user's mission
@@ -46,6 +47,7 @@ pub mod local;
 pub mod mission;
 pub mod music;
 pub mod music_play;
+pub mod phenomena;
 pub use crate::userdata_snapshot as snapshot;
 pub mod stamina;
 pub mod stamina_recover;
@@ -275,6 +277,7 @@ pub struct ClientCopies<'w> {
     pub records: ResMut<'w, music_play::ClientMusicRecords>,
     pub actions: ResMut<'w, system_fixture_action::ClientSystemFixtureActions>,
     pub tools: ResMut<'w, tools::ClientMysekaiTools>,
+    pub phenomena: ResMut<'w, phenomena::ClientMysekaiPhenomena>,
     pub convert: ResMut<'w, convert::ClientConvertSlots>,
     pub mission: ResMut<'w, mission::ClientMission>,
     pub npc_panel: ResMut<'w, ClientNpcPanel>,
@@ -671,6 +674,9 @@ fn apply_sections(
     if let Some(rows) = sections.tools.take() {
         copies.tools.apply(rows);
     }
+    if let Some(rows) = sections.phenomena.take() {
+        copies.phenomena.apply(rows);
+    }
     // The convert screen's three sections: its slots, the items' histories,
     // and the convert items the response carries beside the user sections.
     copies.convert.apply(
@@ -788,6 +794,7 @@ fn apply_sections(
         "mysekaiInventory": copies.inventory.view(),
         "userMysekaiMusicRecords": copies.records.view(),
         "userMysekaiTools": copies.tools.view(),
+        "userMysekaiPhenomenas": copies.phenomena.view(),
         "mysekaiConvert": copies.convert.view(),
         // The mission copy's sheet name: the mission masters are not among
         // this reader's parameters, so only the keys and rows are shown
@@ -1140,6 +1147,7 @@ impl Plugin for UserDataPlugin {
             .init_resource::<system_fixture_action::ClientSystemFixtureActions>()
             .init_resource::<music_play::ClientMusicRecords>()
             .init_resource::<tools::ClientMysekaiTools>()
+            .init_resource::<phenomena::ClientMysekaiPhenomena>()
             .init_resource::<convert::ClientConvertSlots>()
             .init_resource::<mission::ClientMission>()
             .add_systems(PreStartup, (seat_seed, seat_local))

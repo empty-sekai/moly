@@ -389,6 +389,13 @@ pub struct SystemFixtureActionRequest {
     pub mysekai_system_fixture_id: i32,
 }
 
+/// `PostUserMysekaiReleaseApi`: the harvest site whose phenomenon the user
+/// learns. The phenomenon is the server's (its schedule), not the request's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseRequest {
+    pub mysekai_site_id: i32,
+}
+
 /// `UserMysekaiConvertStartRequest` (`PostUserMysekaiConvertStartApi`): the
 /// convert item a slot starts converting, how many, and its draw variant.
 /// The slot is the call's path parameter.

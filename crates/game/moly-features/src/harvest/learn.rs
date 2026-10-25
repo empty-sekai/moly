@@ -5,7 +5,7 @@
 //! - `HarvestSiteController.OnFinishEnterAsync`, outside the tutorial: when
 //!   `SiteEnvironmentUtility.HasTodayEnvironment()` is false,
 //!   `GameStateManager.ChangeState(LearnSiteEnvironment)`. The predicate is
-//!   an `Any` over the user's `userMysekaiPhenomena` rows whose
+//!   an `Any` over the user's `userMysekaiPhenomenas` rows whose
 //!   `mysekaiPhenomenaId` equals `UserDataManager.TodayMysekaiPhenomenaId`
 //!   (false when the list is null); it has no site argument.
 //! - `LearnSiteEnvironmentGameState.OnEnter` publishes `ChangeGameState(6)`
@@ -13,9 +13,11 @@
 //!   resets the stick and hides it on state 6 (its dispatch table), and
 //!   shows it again on state 1. `OnExit` turns the gesture layer back on.
 //! - `HarvestPresenter.OnChangeGameState`, on state 6 outside the tutorial:
-//!   `SiteEnvironmentUtility.ExecuteReleaseAPI(siteId)` (the server records
-//!   the phenomenon; the reply's `SuiteUser` is merged with `UpdateAll`), the
-//!   phenomenon master row of today's id, then `PlayLearnEnvironment`:
+//!   `SiteEnvironmentUtility.ExecuteReleaseAPI(siteId)` (`Call::Release` on
+//!   the server link; the server appends today's phenomenon to the user's
+//!   `userMysekaiPhenomenas` and the reply's `SuiteUser` carries the rows,
+//!   which the client merges with `UpdateAll`), the phenomenon master row of
+//!   today's id, then `PlayLearnEnvironment`:
 //!   `LearnSiteEnvironmentEffectPlayer.Play` and, when it returns,
 //!   `GameStateManager.ChangeState(Normal)`.
 //! - `Play`: `FieldCamera.ChangeState(LearnSiteEnvironment)`, a 1.3 s
@@ -46,6 +48,14 @@
 //! today's phenomenon); the tutorial is out of scope, so its branches are
 //! never taken.
 //!
+//! The rows `HasTodayEnvironment` reads are the user data the server sends in
+//! `userMysekaiPhenomenas`: the join carries them and the release reply
+//! replaces them, so a phenomenon learned once stays learned after a site
+//! switch and after a relaunch (the server keeps the rows in its document).
+//! The learn flow continues on the release's reply, as the source's
+//! `ExecuteAsync` continuation does, and a refused request opens no dialog
+//! (the source's API error).
+//!
 //! The dialog is the UI lane's: this module sends
 //! [`LearnPhenomenaDialogRequest`] where `ShowLearnPhenomenaDialog` opens it
 //! and waits for [`LearnPhenomenaDialogClosed`] (its onClose).
@@ -59,14 +69,17 @@
 //! state; while the dialog is open its full-screen close area takes the
 //! taps, which here is the dialog slot's field-input block.
 //!
-//! Named gaps: the release reply lands in the same frame (the source's API
-//! call is asynchronous).
+//! Named gaps: the release request is sent when the game state changes, but
+//! the entry tween does not wait for its reply (the source starts the API
+//! call and the tween together).
 
 use bevy::animation::AnimatedBy;
 use bevy::diagnostic::FrameCount;
 pub use crate::field_modes::LearnSiteEnvironmentActive;
 
 use bevy::prelude::*;
+use moly_link::ServerLink;
+use moly_protocol::{Call, Reply};
 
 use crate::camera::{
     perspective_fov_deg, view_dir, CameraSetting, CameraStateType, CameraTween, FieldCameraModel,
@@ -74,6 +87,10 @@ use crate::camera::{
 };
 use crate::character::AvatarRoot;
 use crate::site_move::timeline::Delay;
+use crate::userdata::client::phenomena::{
+    ClientMysekaiPhenomena, UserMysekaiPhenomena, UserMysekaiReleaseRequest,
+};
+use crate::userdata::{Answered, ServerPending};
 
 /// `LearnSiteEnvironmentCameraState.OnEnter`: the tween's pitch, distance
 /// and duration (1.3f; the native constant is the single-precision value).
@@ -110,20 +127,6 @@ pub struct LearnPhenomenaDialogRequest {
 #[derive(Message, Clone, Copy, Debug)]
 pub struct LearnPhenomenaDialogClosed;
 
-/// One `UserMysekaiPhenomena` row.
-#[derive(Clone, Debug, PartialEq)]
-pub struct UserPhenomenon {
-    pub phenomena_id: i32,
-    pub obtained_at: i64,
-}
-
-/// `SiteEnvironmentUtility.HasTodayEnvironment`: the list is non-null and
-/// some row's id minus today's id is 0.
-pub fn has_today_environment(rows: Option<&[UserPhenomenon]>, today: i32) -> bool {
-    rows.is_some_and(|rows| rows.iter().any(|row| row.phenomena_id - today == 0))
-}
-
-
 /// The learn run and the camera state's lookups.
 #[derive(Resource, Default)]
 pub struct LearnEnvironment {
@@ -140,7 +143,19 @@ struct LearnRun {
     stage: Stage,
 }
 
+impl LearnEnvironment {
+    /// The release request the run waits for, if one is out.
+    pub fn server_pending(&self) -> Option<ServerPending> {
+        match &self.run.as_ref()?.stage {
+            Stage::Release(pending) => Some(*pending),
+            _ => None,
+        }
+    }
+}
+
 enum Stage {
+    /// `ExecuteReleaseAPI` is out: the run waits for its reply.
+    Release(ServerPending),
     /// `Delay(1.3 s)` after the camera change.
     Delay(Delay),
     /// The dialog is open until its onClose. The close is a tap, handled in
@@ -288,6 +303,70 @@ fn leave_learn_camera(world: &mut World) {
     }
 }
 
+/// The rows the release reply (or the login) gave the copy, in the log.
+fn log_rows(rows: &[UserMysekaiPhenomena]) -> Vec<(i32, i64)> {
+    rows.iter()
+        .map(|row| (row.mysekai_phenomena_id, row.obtained_at))
+        .collect()
+}
+
+/// `HasTodayEnvironment` false on a harvest site: GameState
+/// `LearnSiteEnvironment` (`ChangeGameState(6)`), then
+/// `ExecuteReleaseAPI`, whose reply the run waits for.
+#[allow(clippy::too_many_arguments)]
+fn start_learn(
+    commands: &mut Commands,
+    learn: &mut LearnEnvironment,
+    site: &crate::site::SiteActive,
+    link: Option<&mut ServerLink>,
+    today: i32,
+    has: bool,
+    master: Option<&crate::sitemap_phenomena::PhenomenaMaster>,
+) {
+    if has || learn.run.is_some() {
+        return;
+    }
+    commands.insert_resource(LearnSiteEnvironmentActive);
+    info!("[harvest-learn] GameState LearnSiteEnvironment: ChangeGameState(6) published, gesture layer off, joystick reset and hidden");
+    // HarvestPresenter.OnChangeGameState(6): ExecuteReleaseAPI. The server
+    // decides today's phenomenon; the request names the site.
+    let Some(link) = link else {
+        error!("[harvest-learn] ExecuteReleaseAPI: the server link is absent; no request is sent and the run does not start");
+        return;
+    };
+    let Ok(site_id) = i32::try_from(site.site_id) else {
+        error!(
+            "[harvest-learn] ExecuteReleaseAPI: site {} does not fit the request's int; no request is sent and the run does not start",
+            site.site_id
+        );
+        return;
+    };
+    let call = Call::Release(UserMysekaiReleaseRequest {
+        mysekai_site_id: site_id,
+    });
+    let kind = call.kind();
+    let seq = link.call(call);
+    info!("[harvest-learn] SiteEnvironmentUtility.ExecuteReleaseAPI(site {site_id}): PostUserMysekaiReleaseApi sent as seq {seq}; the learn flow continues on its reply");
+    // GetMysekaiPhenomena(today), then PlayLearnEnvironment -> Play.
+    match master.and_then(|master| master.phenomena(today)) {
+        Some(row) => info!(
+            "[harvest-learn] PlayLearnEnvironment: phenomenon master row {} ({}, {})",
+            row.id, row.asset, row.en
+        ),
+        None => error!("[harvest-learn] PlayLearnEnvironment: no phenomenon master row {today}"),
+    }
+    commands.queue(enter_learn_camera);
+    learn.camera_elapsed = 0.0;
+    learn.camera_logged = -1.0;
+    learn.run = Some(LearnRun {
+        phenomena_id: today,
+        stage: Stage::Release(ServerPending {
+            seq: Some(seq),
+            call: kind,
+        }),
+    });
+}
+
 /// Update: the trigger, the release, the delay, the dialog point and the
 /// return.
 #[allow(clippy::too_many_arguments)]
@@ -299,8 +378,9 @@ pub fn advance(
     site: Option<Res<crate::site::SiteActive>>,
     site_move: Option<Res<crate::site_move::SiteMoveActive>>,
     phenomenon: Option<Res<crate::weather::CurrentPhenomenonId>>,
-    mut user: Option<ResMut<super::catalog::HarvestUserData>>,
-    mut mock: Option<ResMut<super::server_mock::HarvestServerMock>>,
+    known: Option<Res<ClientMysekaiPhenomena>>,
+    mut link: Option<ResMut<ServerLink>>,
+    mut answers: MessageReader<Answered>,
     (mut dialog_open, mut dialog_closed): (
         MessageWriter<LearnPhenomenaDialogRequest>,
         MessageReader<LearnPhenomenaDialogClosed>,
@@ -322,57 +402,79 @@ pub fn advance(
     let Some(site) = site.as_deref() else {
         return;
     };
+    // UserDataManager.UserMysekaiPhenomenas, as the server last served it.
+    let Some(known) = known.as_deref() else {
+        return;
+    };
     if finished_enter && site.category == "harvest" {
-        let Some(today) = phenomenon.as_deref().map(|id| id.0) else {
-            error!("[harvest-learn] OnFinishEnterAsync: no current phenomenon id; HasTodayEnvironment is not evaluated");
-            return;
-        };
-        // The user phenomena rows and the release reply are the server
-        // panel's: with it absent (harvest inputs missing) the check is not
-        // evaluated and the flow does not start.
-        let (Some(mock), Some(user)) = (mock.as_deref_mut(), user.as_deref_mut()) else {
-            error!("[harvest-learn] OnFinishEnterAsync: the harvest server panel is not built (its inputs are absent); HasTodayEnvironment is not evaluated and the learn flow does not start");
-            return;
-        };
-        let known = Some(user.phenomena.as_slice());
-        let has = has_today_environment(known, today);
-        info!(
-            "[harvest-learn] HarvestSiteController.OnFinishEnterAsync on {} (site {}): HasTodayEnvironment({today}) = {has} over {} user phenomena rows",
-            site.site_type,
-            site.site_id,
-            known.map_or(0, <[UserPhenomenon]>::len)
-        );
-        if !has && learn.run.is_none() {
-            // GameStateManager.ChangeState(LearnSiteEnvironment).
-            commands.insert_resource(LearnSiteEnvironmentActive);
-            info!("[harvest-learn] GameState LearnSiteEnvironment: ChangeGameState(6) published, gesture layer off, joystick reset and hidden");
-            // HarvestPresenter.OnChangeGameState(6): ExecuteReleaseAPI.
-            let rows = mock.release(site.site_id, today);
+        if let Some(today) = phenomenon.as_deref().map(|id| id.0) {
+            let has = known.has_today_environment(today);
             info!(
-                "[harvest-learn] PostUserMysekaiReleaseApi(site {}) -> ReleaseApiMock reply: userMysekaiPhenomena (id, obtainedAt) {:?} (UpdateAll)",
+                "[harvest-learn] HarvestSiteController.OnFinishEnterAsync on {} (site {}): HasTodayEnvironment({today}) = {has} over {} userMysekaiPhenomenas rows {:?}",
+                site.site_type,
                 site.site_id,
-                rows.iter()
-                    .map(|row| (row.phenomena_id, row.obtained_at))
-                    .collect::<Vec<_>>()
+                known.rows().len(),
+                log_rows(known.rows())
             );
-            user.phenomena = rows;
-            // GetMysekaiPhenomena(today), then PlayLearnEnvironment -> Play.
-            match master.as_deref().and_then(|master| master.phenomena(today)) {
-                Some(row) => info!(
-                    "[harvest-learn] PlayLearnEnvironment: phenomenon master row {} ({}, {})",
-                    row.id, row.asset, row.en
-                ),
-                None => {
-                    error!("[harvest-learn] PlayLearnEnvironment: no phenomenon master row {today}")
+            start_learn(
+                &mut commands,
+                &mut learn,
+                site,
+                link.as_deref_mut(),
+                today,
+                has,
+                master.as_deref(),
+            );
+        } else {
+            error!("[harvest-learn] OnFinishEnterAsync: no current phenomenon id; HasTodayEnvironment is not evaluated");
+        }
+    }
+    // The release reply: a `SuiteUser` answer whose sections the copy
+    // received; GetMysekaiPhenomena(today), then PlayLearnEnvironment -> Play.
+    let mut released = None;
+    for answer in answers.read() {
+        if learn
+            .server_pending()
+            .is_some_and(|pending| pending.seq == Some(answer.seq))
+        {
+            released = Some(answer.outcome.clone());
+        }
+    }
+    if let Some(outcome) = released {
+        let today = learn.run.as_ref().map_or(0, |run| run.phenomena_id);
+        match outcome {
+            Ok(Reply::Release) => {
+                let rows = known.rows();
+                info!(
+                    "[harvest-learn] PostUserMysekaiReleaseApi reply -> userMysekaiPhenomenas (id, obtainedAt) {:?} (UpdateAll); phenomenon {today} learned: {}",
+                    log_rows(rows),
+                    known.has_today_environment(today)
+                );
+                match master.as_deref().and_then(|master| master.phenomena(today)) {
+                    Some(row) => info!(
+                        "[harvest-learn] PlayLearnEnvironment: phenomenon master row {} ({}, {})",
+                        row.id, row.asset, row.en
+                    ),
+                    None => {
+                        error!("[harvest-learn] PlayLearnEnvironment: no phenomenon master row {today}")
+                    }
+                }
+                if let Some(run) = learn.run.as_mut() {
+                    run.stage = Stage::Delay(Delay::new(DIALOG_DELAY_SECONDS, frame));
                 }
             }
-            commands.queue(enter_learn_camera);
-            learn.camera_elapsed = 0.0;
-            learn.camera_logged = -1.0;
-            learn.run = Some(LearnRun {
-                phenomena_id: today,
-                stage: Stage::Delay(Delay::new(DIALOG_DELAY_SECONDS, frame)),
-            });
+            Ok(other) => {
+                error!("[harvest-learn] PostUserMysekaiReleaseApi answered an unexpected {other:?}: no dialog plays; GameState Normal");
+                commands.queue(leave_learn_camera);
+                commands.remove_resource::<LearnSiteEnvironmentActive>();
+                learn.run = None;
+            }
+            Err(refusal) => {
+                error!("[harvest-learn] PostUserMysekaiReleaseApi refused ({}: {}): the API error, no dialog plays; GameState Normal", refusal.code, refusal.reason);
+                commands.queue(leave_learn_camera);
+                commands.remove_resource::<LearnSiteEnvironmentActive>();
+                learn.run = None;
+            }
         }
     }
     let dt = time.delta_secs();
@@ -381,6 +483,7 @@ pub fn advance(
         return;
     };
     match &mut run.stage {
+        Stage::Release(_) => {}
         Stage::Delay(delay) => {
             if delay.tick(frame, dt) {
                 match master
@@ -428,7 +531,7 @@ pub fn advance_learn_camera(
     state: Res<FieldCameraState>,
     mut learn: ResMut<LearnEnvironment>,
     models: Option<ResMut<FieldCameraModel>>,
-    drivers: Query<&crate::player_avatar::AvatarDriver>,
+    drivers: Query<&crate::player_avatar::AvatarDriver, With<crate::markers::PlayerControlled>>,
     bones: Query<(Entity, &Name, &AnimatedBy)>,
     globals: Query<&GlobalTransform, Without<Camera3d>>,
     avatars: Query<Entity, With<AvatarRoot>>,
@@ -489,18 +592,18 @@ mod value_checks {
     //! source routine named above it.
     use super::*;
 
-    /// HasTodayEnvironment: null is false, an empty list is false, another
+    /// HasTodayEnvironment: an empty list (no rows served) is false, another
     /// id is false, today's id is true.
     #[test]
     fn has_today_environment_rule() {
-        let rows = [UserPhenomenon {
-            phenomena_id: 3,
+        let mut copy = ClientMysekaiPhenomena::default();
+        assert!(!copy.has_today_environment(3));
+        copy.apply(vec![UserMysekaiPhenomena {
+            mysekai_phenomena_id: 3,
             obtained_at: 0,
-        }];
-        assert!(!has_today_environment(None, 3));
-        assert!(!has_today_environment(Some(&[]), 3));
-        assert!(!has_today_environment(Some(&rows), 4));
-        assert!(has_today_environment(Some(&rows), 3));
+        }]);
+        assert!(!copy.has_today_environment(4));
+        assert!(copy.has_today_environment(3));
     }
 
     fn model() -> FieldCameraModel {

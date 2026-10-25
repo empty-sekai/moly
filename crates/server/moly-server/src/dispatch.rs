@@ -333,6 +333,20 @@ fn run(call: Call, model: &mut ServerModel, masters: &Tables<'_>) -> Result<Repl
                 obtained_resources: obtained,
             }))
         }
+        Call::Release(request) => {
+            model
+                .release(request.mysekai_site_id, masters)
+                .map_err(|reason| {
+                    Refusal::new(
+                        "release_refused",
+                        format!(
+                            "{}: {reason}",
+                            crate::model::phenomena::API
+                        ),
+                    )
+                })?;
+            Ok(Reply::Release)
+        }
         Call::InventoryRecycle(request) => {
             let reply = model.inventory_disassemble(request, masters).map_err(|reason| {
                 Refusal::new(

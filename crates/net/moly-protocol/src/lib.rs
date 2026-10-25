@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use crate::api::{
     BirthdayPartyDeliveryRequest, BirthdayPartyGatherRequest, CharacterTalkReadRequest,
     ConvertPost, GateChangeRequest, GateReserveRequest, HarvestRequest, HomeActionPost,
-    MusicPlayEjectRequest, MusicPlaySetRequest, MysekaiInventoryDisassemble,
+    MusicPlayEjectRequest, MusicPlaySetRequest, MysekaiInventoryDisassemble, ReleaseRequest,
     SystemFixtureActionRequest, UserMysekaiConvertReceiveResponse, UserMysekaiCraftRequest,
     UserMysekaiHousingEditLayoutRequest, UserMysekaiHousingSketchRequest,
     UserMysekaiNormalMissionRewardRequest, UserMysekaiNormalMissionRewardResponse,
@@ -39,7 +39,7 @@ use crate::rows::{
     ColorfulPass, ConvertItemHistory, ConvertSlot, DeliveryUpdate, Gamedata, Gate,
     MusicPlaySetting, OwnedMusicRecord, RankReleaseRow, ScheduleRow, Stamina, SuiteUserSections,
     UserAvatar, UserMysekaiNormalMission, UserMysekaiNormalMissionSheet,
-    UserMysekaiSystemFixtureAction, UserMysekaiTool,
+    UserMysekaiPhenomena, UserMysekaiSystemFixtureAction, UserMysekaiTool,
 };
 
 pub mod api;
@@ -67,7 +67,9 @@ pub const RPC_PATH: &str = "/rpc";
 /// machine's level.
 /// 9: the normal mission reward call and its reply, and the sections that
 /// carry the user's mission rows and the sheet it is on.
-pub const PROTOCOL_VERSION: u32 = 9;
+/// 10: the release call, and the section that carries the phenomena the user
+/// has learned.
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// The account a session belongs to. The server keeps one document per user.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -205,6 +207,8 @@ pub enum Call {
     MusicPlayEject(MusicPlayEjectRequest),
     /// `PostUserMysekaiSystemFixtureActionApi`.
     SystemFixtureAction(SystemFixtureActionRequest),
+    /// `PostUserMysekaiReleaseApi`: a site's phenomenon is learned.
+    Release(ReleaseRequest),
     /// `PostUserMysekaiDisassembleFixtureApi`, `PostUserMysekaiRecycleMaterialApi`
     /// and `PostUserMysekaiRecycleToolApi`.
     InventoryRecycle(MysekaiInventoryDisassemble),
@@ -240,6 +244,7 @@ impl Call {
             Self::MusicPlaySet(_) => CallKind::MusicPlaySet,
             Self::MusicPlayEject(_) => CallKind::MusicPlayEject,
             Self::SystemFixtureAction(_) => CallKind::SystemFixtureAction,
+            Self::Release(_) => CallKind::Release,
             Self::InventoryRecycle(_) => CallKind::InventoryRecycle,
             Self::BoostStaminaRecovery(_) => CallKind::BoostStaminaRecovery,
             Self::Convert { .. } => CallKind::Convert,
@@ -273,6 +278,7 @@ pub enum CallKind {
     MusicPlaySet,
     MusicPlayEject,
     SystemFixtureAction,
+    Release,
     InventoryRecycle,
     BoostStaminaRecovery,
     Convert,
@@ -299,6 +305,7 @@ impl CallKind {
             Self::MusicPlaySet => "music play set",
             Self::MusicPlayEject => "music play eject",
             Self::SystemFixtureAction => "system fixture action",
+            Self::Release => "release",
             Self::InventoryRecycle => "inventory recycle",
             Self::BoostStaminaRecovery => "boost stamina recovery",
             Self::Convert => "convert",
@@ -352,6 +359,9 @@ pub enum Reply {
     MusicPlay(crate::api::MusicPlayReply),
     /// The system fixture action's reply.
     SystemFixtureAction(crate::api::SystemFixtureActionReply),
+    /// The release reply is a `SuiteUser` answer: the phenomenon it learned
+    /// is in the reply's sections.
+    Release,
     /// The inventory screen's recycle and disassemble reply.
     InventoryRecycle(crate::api::MysekaiInventoryRecycleResponse),
     /// The boost stamina recovery reply (a `SuiteUser` answer); the stamina
@@ -408,6 +418,8 @@ pub struct Sections {
     pub system_fixture_actions: Option<Vec<UserMysekaiSystemFixtureAction>>,
     /// `userMysekaiTools`.
     pub tools: Option<Vec<UserMysekaiTool>>,
+    /// `userMysekaiPhenomenas`.
+    pub phenomena: Option<Vec<UserMysekaiPhenomena>>,
     /// `userMysekaiBlueprintLendCraftCounts`: the crafts each blueprint term
     /// has used (the craft screen's remaining-count and term-cap source).
     pub blueprint_lend_craft_counts:
@@ -524,6 +536,10 @@ mod tests {
             sections: Some(Box::new(Sections {
                 server_date_ms: 1_760_000_000_000,
                 is_refreshed: true,
+                phenomena: Some(vec![UserMysekaiPhenomena {
+                    mysekai_phenomena_id: 1,
+                    obtained_at: 1_760_000_000_000,
+                }]),
                 ..Sections::default()
             })),
         };
@@ -682,6 +698,10 @@ mod tests {
             }]),
             system_fixture_actions: Some(vec![UserMysekaiSystemFixtureAction {
                 mysekai_system_fixture_id: 40,
+            }]),
+            phenomena: Some(vec![UserMysekaiPhenomena {
+                mysekai_phenomena_id: 2,
+                obtained_at: 55,
             }]),
             tools: Some(vec![UserMysekaiTool {
                 mysekai_tool_id: 41,
@@ -915,6 +935,17 @@ mod tests {
             sections: None,
         };
         assert_eq!(decode::<ServerMessage>(&encode(&answered)).unwrap(), answered);
+    }
+
+    /// The release call round-trips through a frame and names itself; the
+    /// learned phenomena it replies with are in `full_sections`.
+    #[test]
+    fn the_release_call_round_trips() {
+        let call = Call::Release(crate::api::ReleaseRequest { mysekai_site_id: 5 });
+        assert_eq!(call.kind(), CallKind::Release);
+        assert_eq!(call.name(), "release");
+        let message = ClientMessage::Call { seq: 13, call };
+        assert_eq!(decode::<ClientMessage>(&encode(&message)).unwrap(), message);
     }
 
     #[test]

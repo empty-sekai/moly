@@ -4,8 +4,9 @@
 //! **The document.** [`document`] (schemaVersion 2) holds only server-decided
 //! values: the gamedata, the stamina, the pass, the schedules, the home gate
 //! and its characters, the owned MySekai tables, the music settings and
-//! records, the system fixture actions, the tools, the convert slots and item
-//! histories, the layouts and the named policies. The game keeps copies of
+//! records, the system fixture actions, the tools, the learned phenomena, the
+//! convert slots and item histories, the layouts and the named policies. The
+//! game keeps copies of
 //! the tables a response carries; this crate keeps none of them.
 //!
 //! **Responses.** Every request a user makes runs one method here, which
@@ -42,6 +43,9 @@
 //! - *Convert*: [`convert`]. The join seats the machine's level and one slot
 //!   per master slot number; a start, a receive and a shorten answer from the
 //!   convert master tables, the pass and the owned tables.
+//! - *Release*: [`phenomena`]. A harvest site's arrival asks the server to
+//!   learn its environment; today's phenomenon joins `userMysekaiPhenomenas`
+//!   unless it is learned already, and the reply carries the rows.
 //! - *Normal missions*: [`normal_mission`]. The join seats the sheet of the
 //!   lowest `seq` with one `not_achieved` row per mission of it; a receive
 //!   marks the achieved missions `received`, grants their rewards, adds their
@@ -66,6 +70,7 @@ pub(crate) mod inventory;
 pub(crate) mod music;
 pub(crate) mod music_play;
 pub(crate) mod normal_mission;
+pub(crate) mod phenomena;
 pub(crate) mod recycle;
 pub(crate) mod stamina_recovery;
 pub(crate) mod system_fixture_action;
@@ -217,6 +222,7 @@ pub(crate) enum ResponseKind {
     MusicPlaySet,
     MusicPlayEject,
     SystemFixtureAction,
+    Release,
     FixtureDisassemble,
     MaterialRecycle,
     ToolRecycle,
@@ -250,6 +256,7 @@ impl ResponseKind {
             Self::MusicPlaySet => "PutUserMysekaiMusicPlaySetApi",
             Self::MusicPlayEject => "PutUserMysekaiMusicPlayEjectApi",
             Self::SystemFixtureAction => "PostUserMysekaiSystemFixtureActionApi",
+            Self::Release => phenomena::API,
             Self::FixtureDisassemble => "PostUserMysekaiDisassembleFixtureApi",
             Self::MaterialRecycle => "PostUserMysekaiRecycleMaterialApi",
             Self::ToolRecycle => "PostUserMysekaiRecycleToolApi",
@@ -606,6 +613,7 @@ impl ServerModel {
                 system_fixture_actions: has(system_fixture_action::SECTION)
                     .then(|| self.doc.system_fixture_actions.rows.clone()),
                 tools: has(tools::SECTION).then(|| self.doc.tools.clone().unwrap_or_default()),
+                phenomena: has(phenomena::SECTION).then(|| self.doc.phenomena.view()),
                 blueprint_lend_craft_counts: has(inventory::SECTION_BLUEPRINT_LEND_CRAFT_COUNTS)
                     .then(|| self.doc.inventory.blueprint_lend_craft_counts.clone()),
                 convert_slots: has(convert::SECTION_SLOTS).then(|| self.doc.convert.slots.clone()),
@@ -691,6 +699,7 @@ impl ServerModel {
         carries.push(music_play::RECORDS_SECTION);
         carries.push(system_fixture_action::SECTION);
         carries.push(tools::SECTION);
+        carries.push(phenomena::SECTION);
         carries.push(convert::SECTION_SLOTS);
         carries.push(convert::SECTION_HISTORIES);
         carries.push(normal_mission::SECTION_MISSIONS);

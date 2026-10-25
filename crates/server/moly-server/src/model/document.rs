@@ -11,7 +11,8 @@
 //! `userAvatar`, and the owned data's `userMysekaiFixtures`,
 //! `userMysekaiCanvases`, `userMysekaiBlueprints`, `userMysekaiItems` and
 //! the two possession levels in `userMysekaiGamedata`, and the harvest
-//! tools' `userMysekaiTools`, and the convert screen's
+//! tools' `userMysekaiTools`, and the learned phenomena's
+//! `userMysekaiPhenomenas`, and the convert screen's
 //! `userMysekaiConvertSlots` and `userMysekaiConvertItemHistories`, with the
 //! convert machine's level in `userMysekaiGamedata`, and the mission screen's
 //! `userMysekaiNormalMissionSheet` and `userMysekaiNormalMissions`). A
@@ -32,6 +33,8 @@
 //!
 //! Parsing is strict: an unknown key, a missing key, a wrong type, or a
 //! schemaVersion other than 2 is refused by name. Nothing is reset silently.
+//! A key a part offers a named default for (such as `userMysekaiPhenomenas`
+//! is absent when no phenomenon is learned) is not one of the required keys.
 
 use std::collections::BTreeMap;
 
@@ -153,6 +156,9 @@ pub(crate) struct ServerDocument {
     /// `userMysekaiTools` ([`super::tools`]); `None` until the server seats
     /// a new user's tools.
     pub(crate) tools: Option<Vec<super::tools::UserMysekaiTool>>,
+    /// `userMysekaiPhenomenas` ([`super::phenomena`]); empty when the
+    /// document does not state the key.
+    pub(crate) phenomena: super::phenomena::PhenomenaDoc,
     /// The rewards the document states for the inventory screen's recycle
     /// and disassemble replies, by policy key (`fixturesDisassembleMaterials`,
     /// `materialsRecycleRewards`, `toolsRecycleRewards`); a key left out
@@ -550,6 +556,7 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
         .chain(std::iter::once(&super::music_play::RECORDS_SECTION))
         .chain(super::system_fixture_action::DOCUMENT_KEYS.iter())
         .chain(std::iter::once(&super::tools::SECTION))
+        .chain(std::iter::once(&super::phenomena::SECTION))
         .chain(super::convert::DOCUMENT_KEYS.iter())
         .chain(super::normal_mission::DOCUMENT_KEYS.iter())
         .copied()
@@ -587,6 +594,7 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
     let system_fixture_actions =
         super::system_fixture_action::SystemFixtureActionDoc::parse(doc, policies)?;
     let tools = super::tools::parse(doc)?;
+    let phenomena = super::phenomena::PhenomenaDoc::parse(doc)?;
     let recycle = super::recycle::parse_policies(policies)?;
     let stamina_recovery = super::stamina_recovery::parse_policies(
         policies.get(super::stamina_recovery::POLICY_KEY),
@@ -667,6 +675,7 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
         music_records,
         system_fixture_actions,
         tools,
+        phenomena,
         recycle,
         stamina_recovery,
         convert,
@@ -805,6 +814,7 @@ pub(crate) fn migrate_v1(text: &str, migration: Migration) -> Result<ServerDocum
         music_records: Vec::new(),
         system_fixture_actions: Default::default(),
         tools: None,
+        phenomena: Default::default(),
         recycle: BTreeMap::new(),
         stamina_recovery: Default::default(),
         convert: Default::default(),
@@ -897,6 +907,7 @@ impl ServerDocument {
         self.delivery.check_structure()?;
         self.inventory.check_structure()?;
         super::tools::check_structure(&self.tools)?;
+        self.phenomena.check_structure()?;
         self.convert.check_structure()?;
         self.normal_mission.check_structure()
     }
@@ -988,6 +999,7 @@ impl ServerDocument {
                 super::tools::SECTION.into(),
                 super::tools::value(&self.tools),
             );
+            self.phenomena.write(top);
             super::recycle::write_policies(&self.recycle, &mut policies);
             super::stamina_recovery::write_policy(&self.stamina_recovery, &mut policies);
             self.convert.write(top, &mut policies);

@@ -28,7 +28,7 @@
 //!   box (`TreasureBoxListMock` / `TreasureBoxSpawnMock` in the mock panel).
 //! - `tone`: the HarvestTone camera (state 14) and the tone view's SE.
 //! - `learn`: learning today's phenomenon on arrival (GameState 6, camera
-//!   state 17, `ReleaseApiMock`).
+//!   state 17, the release request whose reply appends the learned row).
 //! - `obstacles`: what the views write to their NavMeshObstacles (the Setup
 //!   radius, the driftage and treasure switches); the obstacles carve through
 //!   the walk field's runtime carving.
@@ -800,8 +800,11 @@ impl Plugin for HarvestPlugin {
                     prop_animator::bind,
                     airplane::advance,
                     // The learn flow's dialog request is read the frame it
-                    // is written.
-                    learn::advance.before(crate::learn_phenomena_dialog::open),
+                    // is written; the release reply's sections are applied
+                    // before the flow reads its rows.
+                    learn::advance
+                        .after(crate::userdata::apply_arrivals)
+                        .before(crate::learn_phenomena_dialog::open),
                 )
                     .chain(),
             )

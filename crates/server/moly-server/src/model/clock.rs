@@ -88,7 +88,11 @@ fn local_midnight(epoch_ms: i64, offset: &impl Fn(i64) -> i64) -> i64 {
     midnight_local - offset(midnight_local - offset(epoch_ms))
 }
 
-/// The start of the refresh window holding `now_ms`: the latest window
+/// The local midnight (an epoch millisecond) of the local day holding
+/// `now_ms`: the `scheduleDate` of the schedule rows of that day.
+pub(crate) fn local_today(now_ms: i64, offset: impl Fn(i64) -> i64) -> Option<i64> {
+    Some(local_midnight(now_ms, &offset))
+}
 /// start at or before it among the windows of the local day before and the
 /// day of `now_ms`. `None` when no window holds it.
 pub(crate) fn window_start(

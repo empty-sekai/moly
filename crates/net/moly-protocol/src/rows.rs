@@ -404,6 +404,15 @@ pub struct UserMysekaiSystemFixtureAction {
     pub mysekai_system_fixture_id: i32,
 }
 
+/// `UserMysekaiPhenomena`: a phenomenon the user has learned (the user id is
+/// the session's).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserMysekaiPhenomena {
+    pub mysekai_phenomena_id: i32,
+    /// Epoch milliseconds the phenomenon was learned at.
+    pub obtained_at: i64,
+}
+
 /// `UserMysekaiTool`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserMysekaiTool {

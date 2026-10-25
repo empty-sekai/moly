@@ -32,12 +32,11 @@
 //!   gains a `treasure_box_transport`
 //!   fixture row there (hp 0, spawned) with one drop row of a type-3
 //!   material listing the site.
-//! - `ReleaseApiMock`: the user phenomena rows. The mock's choices: the list
-//!   is empty at login (a user who has learned no phenomenon, so the first
-//!   harvest arrival learns today's); the reply to the release request
-//!   appends today's phenomenon once (`obtainedAt` 0: no client reader in
-//!   this flow). The client's today stands in for the server's (the weather
-//!   chain's current phenomenon id on the harvest site).
+//!
+//! Not this panel's: `userMysekaiPhenomenas` is the server document's,
+//! carried by the login and appended by the release request
+//! (`PostUserMysekaiReleaseApi`); the client reads its copy
+//! ([`crate::userdata::client::phenomena`]).
 //!
 //! The map rules (`map_rules.json`) are statistics of the server's harvest
 //! map replies, aggregated per site; they hold no user data. The server
@@ -332,8 +331,6 @@ pub struct HarvestServerMock {
     stamina: Stamina,
     materials: BTreeMap<i64, i64>,
     others: BTreeMap<(i32, i64), i64>,
-    /// `userMysekaiPhenomena` (ReleaseApiMock).
-    phenomena: Vec<super::learn::UserPhenomenon>,
 }
 
 /// A request of `PostUserMysekaiHarvestApi` (one merged run of stacks).
@@ -433,7 +430,6 @@ impl HarvestServerMock {
             },
             materials: BTreeMap::new(),
             others: BTreeMap::new(),
-            phenomena: Vec::new(),
             inputs,
             rules,
             window,
@@ -463,28 +459,6 @@ impl HarvestServerMock {
                 .join(", ")
         );
         Some(self.maps.clone())
-    }
-
-    /// The user phenomena rows at login.
-    pub fn phenomena(&self) -> Vec<super::learn::UserPhenomenon> {
-        self.phenomena.clone()
-    }
-
-    /// `ReleaseApiMock` (`PostUserMysekaiReleaseApi(userId, mysekaiSiteId)`):
-    /// today's phenomenon is recorded once; the reply carries the whole list.
-    /// The site does not enter the row (the rows have no site field).
-    pub fn release(
-        &mut self,
-        _site_id: u32,
-        today: i32,
-    ) -> Vec<super::learn::UserPhenomenon> {
-        if !self.phenomena.iter().any(|row| row.phenomena_id == today) {
-            self.phenomena.push(super::learn::UserPhenomenon {
-                phenomena_id: today,
-                obtained_at: 0,
-            });
-        }
-        self.phenomena.clone()
     }
 
     /// `TreasureBoxListMock`: the user treasure box rows at login.
