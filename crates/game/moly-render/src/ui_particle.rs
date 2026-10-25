@@ -70,8 +70,9 @@
 //! orders it after the graphics drawn before it and before the ones drawn
 //! after it; its scale must be one, because the source drives the UIParticle
 //! node's own scale (`ModifyScale`; the serialized scale is zero). The
-//! systems play when the host becomes visible (every packaged system plays on
-//! awake) and are cleared when it is hidden or despawned; `alpha` is the
+//! systems play when the host becomes visible if authored playOnAwake is set,
+//! or if the caller supplies [`UiParticlePlay`]. They are cleared when it is
+//! hidden or despawned; `alpha` is the
 //! node's inherited CanvasGroup alpha, written by the screen. The draws are
 //! spawned under the canvas entity, `(k + 1) * DRAW_STEP` above the host in
 //! canvas z for the k-th system.
@@ -156,6 +157,33 @@ pub struct UiParticleOverlayCanvas;
 /// `ParticleSystem.Pause(withChildren: true)` on a host's systems.
 #[derive(Component, Clone, Copy, Debug)]
 pub struct UiParticlePaused;
+
+/// This host was created by an explicit `UIParticle.Play` call. It starts
+/// even the listed systems whose authored `playOnAwake` is false.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct UiParticlePlay;
+
+/// A screen's `UIParticle.PlayAsync` waits for every listed ParticleSystem's
+/// actual `isPlaying` state. Loading and renderer refusal are not completion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UiParticlePlayback { Loading, Playing, Complete, Refused }
+
+pub fn playback(world: &World, host: Entity) -> UiParticlePlayback {
+    let Some(state)=world.get::<HostState>(host) else { return UiParticlePlayback::Loading; };
+    let installed=match state {
+        HostState::AwaitingScene(_)=>return UiParticlePlayback::Loading,
+        HostState::Refused=>return UiParticlePlayback::Refused,
+        HostState::Installed(installed)=>installed,
+    };
+    let now=world.resource::<Time>().elapsed_secs_f64();
+    let mut playing=false;
+    for draw in &installed.draws {
+        let Some(system)=world.get::<UiParticleSystem>(*draw) else { return UiParticlePlayback::Loading; };
+        if system.retired { return UiParticlePlayback::Refused; }
+        playing |= system.played.playing(&system.runtime,now);
+    }
+    if playing { UiParticlePlayback::Playing } else { UiParticlePlayback::Complete }
+}
 
 /// The simulated time a host's systems ran before it was installed, stepped
 /// on its first baked frame in frames of `frame` seconds.
@@ -644,6 +672,7 @@ fn install(
         &InheritedVisibility,
         Option<&mut HostState>,
         Has<UiParticleOverlayCanvas>,
+        Has<UiParticlePlay>,
     )>,
     live: Query<(), With<UiParticleHost>>,
     systems: Query<(Entity, &UiParticleSystem)>,
@@ -661,7 +690,7 @@ fn install(
             commands.entity(entity).try_despawn();
         }
     }
-    for (entity, host, visible, host_state, overlay) in &mut hosts {
+    for (entity, host, visible, host_state, overlay, explicit_play) in &mut hosts {
         let gui_ztest = if overlay {
             admission::GUI_ZTEST_OVERLAY
         } else {
@@ -717,6 +746,7 @@ fn install(
                     &doc,
                     &plain,
                     gui_ztest,
+                    explicit_play,
                     &server,
                     &mut meshes,
                     &mut materials,
@@ -761,6 +791,7 @@ fn install(
                     &doc,
                     &plain,
                     gui_ztest,
+                    explicit_play,
                     &server,
                     &mut meshes,
                     &mut materials,
@@ -833,6 +864,7 @@ fn install_host(
     doc: &Value,
     plain_trs: &HashMap<String, Trs>,
     gui_ztest: u8,
+    explicit_play: bool,
     server: &AssetServer,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<UiParticleMaterial>,
@@ -1005,6 +1037,7 @@ fn install_host(
             local_scale,
             has_rigidbody,
             gui_ztest,
+            explicit_play,
             mesh.clone(),
             entity,
             *ordinal,

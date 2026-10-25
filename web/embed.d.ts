@@ -3,7 +3,7 @@ export type MolyLocale = "zh-CN" | "zh-TW" | "en-US" | "ja-JP" | "ko-KR";
 export type MolyTab =
   "conversations" | "furniture" | "performances" | "activities";
 export type MolyKey =
-  | `talk:${"general" | "fixture"}:${number}`
+  | `talk:${"general" | "fixture" | "common"}:${number}`
   | `fixture:${number}`
   | `activity:${"notalk" | "preaction"}:${number}:${number}`;
 export type MolyTheme =
@@ -21,6 +21,7 @@ export interface MolyFixture {
   image: string | null;
 }
 export interface MolyEntry {
+  scriptKey?: string;
   preview?: {
     available: boolean;
     tweetId?: number;
@@ -59,7 +60,12 @@ export interface MolyEntry {
     textMode: "none" | "bubble" | "transcript";
   };
   description?: string;
-  lines?: { speaker: string; text: string }[];
+  lines?: {
+    speaker: string;
+    text: string;
+    speakerStep?: number;
+    textStep?: number;
+  }[];
   fixtures?: MolyFixture[];
   related?: { tab: MolyTab; fixtureId: number; label: string; count: number }[];
   variant?: { index: number; count: number };
@@ -163,6 +169,8 @@ export interface MolyBoot {
   timings: Record<string, number>;
 }
 export interface MolyError {
+  /** The document cannot accept more commands; retry creates a new realm. */
+  fatal?: boolean;
   code: string;
   key?: MolyKey;
 }
@@ -199,6 +207,7 @@ export interface MountOptions {
   onError?: (error: MolyError) => void;
 }
 export interface MolyMount {
+  setTextSession(value: MolyTextSession | null): void;
   playerData(value: MolyPlayerDataCommand): void;
   readonly frame: HTMLIFrameElement;
   readonly disposed: boolean;
@@ -220,6 +229,46 @@ export interface MolyMount {
   close(): Promise<boolean>;
   dispose(): void;
 }
+export interface MolyTextSession {
+  fonts?: { url: string; sha256: string; bytes: number }[];
+  source: string;
+  official: string;
+  community: string;
+  locale: MolyLocale;
+  revisions?: {
+    source: string;
+    official: string | null;
+    community: string | null;
+  };
+}
+export function loadTextSession(
+  options: {
+    source: { url: string; sha256: string; bytes: number };
+    official?: string;
+    community?: string;
+    region: MolyRegion;
+    locale: MolyLocale;
+    scriptKey: string;
+  },
+  signal?: AbortSignal,
+): Promise<MolyTextSession | null>;
+export function localizeEntry(
+  entry: MolyEntry,
+  session: MolyTextSession | null,
+): MolyEntry;
+export function validateTextSession(
+  session: MolyTextSession | null,
+): MolyTextSession | null;
+export function loadTextIndex(
+  options: {
+    source: { url: string; sha256: string; bytes: number };
+    official?: string;
+    community?: string;
+    region: MolyRegion;
+    locale: MolyLocale;
+  },
+  signal?: AbortSignal,
+): Promise<Record<string, { title: string; search: string }>>;
 export function mountMoly(
   container: HTMLElement,
   options: MountOptions & {

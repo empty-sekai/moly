@@ -23,7 +23,7 @@ export function contentKey(value) {
   const parts = value.split(":");
   const numbers =
     value.startsWith("talk:") &&
-    ["general", "fixture"].includes(parts[1]) &&
+    ["general", "fixture", "common"].includes(parts[1]) &&
     parts.length === 3
       ? parts.slice(2)
       : parts[0] === "fixture" && parts.length === 2

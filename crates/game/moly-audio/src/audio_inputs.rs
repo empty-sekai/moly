@@ -50,6 +50,11 @@ pub struct BirthdayVoice {
     pub party: i64,
 }
 
+/// The tutorial manager's active flag. The world publishes it; voice-bank
+/// selection gives this priority over the birthday context.
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct TutorialVoice;
+
 /// `MysekaiBGMManager.PlayBGMAsync` for the destination has not run yet: the
 /// current music keeps playing across a site move.
 #[derive(Resource)]

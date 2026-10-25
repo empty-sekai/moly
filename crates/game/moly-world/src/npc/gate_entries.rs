@@ -277,6 +277,10 @@ pub fn force_update_cut_scene_objective(world: &mut World, entity: Entity) {
 /// builds the birthday wait objective (20). The data's
 /// `IsImmediatelyPlayTimeline` has no reader in this host.
 pub fn force_update_birthday_wait_talk(world: &mut World, entity: Entity) {
+    if crate::npc_objective::events::enrolled(world, entity) {
+        crate::npc_objective::events::begin_birthday(world, entity);
+        return;
+    }
     model_reset(world, entity);
     let unit = unit_of(world, entity).unwrap_or(0);
     if let Some(mut slot) = world.get_mut::<TalkSlot>(entity) {

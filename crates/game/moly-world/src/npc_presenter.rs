@@ -178,7 +178,8 @@ pub fn try_greeting(
     ) in &mut npcs
     {
         let unit = unit.0;
-        if !actions.ready() || mind.ai_stopped.is_some() || mind.greeting_halt.is_some() {
+        if !actions.ready() || mind.ai_stopped.is_some() || mind.greeting_halt.is_some()
+            || slot.kind() == Some(TalkType::CommonSomeCharacter) {
             continue;
         }
         if mind.overlap_cancel_frame == Some(frame) {
@@ -457,7 +458,7 @@ pub fn write_avoidance() {}
 
 /// Presenter call 6: `UpdateIK` (the free look-on timers and the IK target
 /// choice). Not in this host yet; until then no IK target is chosen.
-pub fn update_ik() {}
+pub fn update_ik(world: &mut World) { crate::npc_ik::update(world); }
 
 /// Presenter call 7: `TryResetNavMesh`. When the agent's destination x is
 /// infinite (an agent that is not bound to the navigation mesh, which is the
@@ -469,10 +470,11 @@ pub fn update_ik() {}
 /// nothing observable here.
 pub fn try_reset_navmesh() {}
 
-/// Presenter call 9: `TrySomeCharacterCommunication`. Not in this host; until
-/// then it never starts a communication (the source's result 1 would end the
-/// update before the greeting gate).
-pub fn try_some_character_communication() {}
+/// Presenter call 9: common conversation recruitment and the shared plan's
+/// continuation, before the same character can greet the player.
+pub fn try_some_character_communication(world: &mut World) {
+    crate::npc_objective::common::update(world);
+}
 
 /// Presenter call 8: `TryCancelIfCharacterOverlap`, per NPC in the avatar
 /// list order. The timer rule is [`moly_law::objective::overlap::overlap_frame`];

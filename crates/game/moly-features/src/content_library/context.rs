@@ -298,6 +298,7 @@ mod tests {
     use super::*;
     fn row() -> LibraryTalk {
         LibraryTalk {
+            script_key: "sample".into(),
             preview_tweet: None,
             content: TalkContent {
                 master_id: 6998,

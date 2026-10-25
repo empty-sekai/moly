@@ -48,7 +48,7 @@
 //! | avatar change (`_mysekaiAvtarChangeButton`, the source's spelling) | unless active: `PushUIScreen(MysekaiAvatarCostumeSetting)` (629); `Close` | `true` | greyed until a MysekaiAvatarCostumeSetting view exists (registered, no view) |
 //! | back to title (`_transitionToTitleButton`, `TitleCell`) | `MysekaiUtility.TransitionToTitle`: `Disconnect`, then `SceneManager.RequestScene(Title)` | no write (the serialized `true`) | hidden, as in the source: `TitleCell` is inactive in the prefab and nothing activates it |
 //! | leave MySekai (`_exitMysekaiButton`, `Home`) | `TransitionToOutGame`: once (`_isTransitionOutGame`), tap off, BGM stop and fade out, then `MysekaiUtility.TransitionToOutGame`: `Disconnect`, then `RequestScene(OutGame)` | `true` | greyed until an out-game scene exists (this product has only the MySekai scene) |
-//! | photo (`_photoShotButton`) | unless in it: `GameStateManager.ChangeState(PhotoShot)`, whose `OnEnter` pushes MysekaiPhotoShot (632); `Close` | `MysekaiPhotoShotUtility.IsAllowedToPhotoShotInCurrentSite()` = `CurrentSiteType < grassland`, read from the active site | greyed until a MysekaiPhotoShot view exists (registered, no view) |
+//! | photo (`_photoShotButton`) | unless in it: `GameStateManager.ChangeState(PhotoShot)`, whose `OnEnter` pushes MysekaiPhotoShot (632); `Close` | `MysekaiPhotoShotUtility.IsAllowedToPhotoShotInCurrentSite()` = `CurrentSiteType < grassland`, read from the active site | source-bound full-game view, camera, character call, local capture and Back; enabled when the source layout and textures are available |
 //! | album (`_photoAlbumButton`) | `MysekaiPhotoAlbumUtility.TryShowPhotoAlbumScreen`: unless active, `PushUIScreen(MysekaiPhotoAlbum)` (642); `Close` | no write (the serialized `true`) | greyed until a MysekaiPhotoAlbum view exists (registered, no view) |
 //! | crystal shop (`_crystalShopButton`) | active: `Close`; else `BootArgObject`, `PushUIScreen(CrystalShop)` (89), `Close` | `MysekaiUtility.IsAllowedToOpenCrystalShop()` = not visiting a housing competition entry, and the room owner or an offline boot | greyed until a CrystalShop screen exists (outside this product's screen table) |
 //! | sketch (`_whiteBlueprintSketchButton`) | unless in it: `Player.ChangeState(SelectSketchItem)`, `ChangeState(Sketch)`; `Close` (the owner-editing warning needs another player) | `SketchUtility.IsSketchAvailable()` | enters the sketch state (unchanged) |
@@ -149,7 +149,7 @@
 //!   window pixels (the tap map for driving the menu with real taps).
 //!
 //! Named gaps (not implemented here):
-//! - The six greyed targets of the table above, and the title scene behind
+//! - The remaining greyed targets of the table above, and the title scene behind
 //!   the hidden title button.
 //! - `SE_SUBWINDOW_CLOSE`. `SetupTutorial` (the tutorial is out of scope) and
 //!   `SetupForBirthday` (no birthday context runs in this product).
@@ -310,8 +310,7 @@ impl MenuButton {
             MenuButton::PhotoShot => ButtonSetup {
                 rule: "SetupMysekaiPhotoShotButton: enabled = IsAllowedToPhotoShotInCurrentSite() = CurrentSiteType < grassland",
                 source: inputs.photo_shot_allowed,
-                // Adaptation: greyed until the MysekaiPhotoShot view exists.
-                greyed_until: Some(Missing::Screen(MenuScreenType::MysekaiPhotoShot)),
+                greyed_until: None,
             },
             MenuButton::PhotoAlbum => ButtonSetup {
                 rule: "SetupMysekaiPhotoAlbumButton: no enabled write (the serialized true)",
@@ -372,6 +371,8 @@ const RECOVER_BOOST_STAMINA_DIALOG: DialogType = DialogType::MysekaiRecoverBoost
 enum Missing {
     /// A MySekai screen id that no view of this product draws.
     Screen(MenuScreenType),
+    /// A supported screen whose required source document or images are absent.
+    ScreenSource(MenuScreenType),
     /// A `MenuScreenType` outside the MySekai block (its source name and
     /// value); the product's screen table holds the MySekai block only.
     OutGameScreen(&'static str, u16),
@@ -393,6 +394,7 @@ impl Missing {
         };
         match self {
             Missing::Screen(screen) => format!("{screen:?} is {}", table(screen)),
+            Missing::ScreenSource(screen) => format!("{screen:?}: the current source lacks its required layout bindings or textures"),
             Missing::OutGameScreen(name, id) => format!("{name}({id}) is {}", table(MenuScreenType(id))),
             Missing::Dialog(dialog) => match dialog.prefab() {
                 Some(prefab) => format!(
@@ -1121,7 +1123,13 @@ pub fn place(
                         root.dialog = Some(id);
                         // Setup's enabled writes, once per open.
                         let inputs = SetupInputs::read(&mock, site.as_deref());
-                        root.setup = Some(ALL_BUTTONS.map(|which| which.setup(&inputs)));
+                        root.setup = Some(ALL_BUTTONS.map(|which| {
+                            let mut setup=which.setup(&inputs);
+                            if which == MenuButton::PhotoShot && !crate::photo_shot::source_available(&layouts) {
+                                setup.greyed_until=Some(Missing::ScreenSource(MenuScreenType::MysekaiPhotoShot));
+                            }
+                            setup
+                        }));
                     }
                     Err(error) => {
                         error!("[menu_dialog] {error}: the menu does not open");
@@ -1354,6 +1362,7 @@ pub fn click(
     views: Query<(&crate::ui_layout::UiPrefabView, &MenuDialogRoot)>,
     mut sounds: ResMut<crate::audio::SeRequests>,
     mut recover_requests: MessageWriter<RecoverStaminaRequest>,
+    mut photo_requests: MessageWriter<crate::photo_shot::OpenPhoto>,
     root_canvas: Option<Res<crate::canvas::RootCanvas>>,
 ) {
     let taps: Vec<Vec2> = gestures
@@ -1418,6 +1427,10 @@ pub fn click(
                 } else {
                     layouts.queue_button_se(&mut sounds, view.key, which.source_path());
                     match which {
+                        MenuButton::PhotoShot => {
+                            photo_requests.write(crate::photo_shot::OpenPhoto);
+                            close_requested = true;
+                        }
                         MenuButton::Chest => {
                             // OnClickChestButton: when IsActiveScreen(607) it
                             // only closes; else it reports a state to the

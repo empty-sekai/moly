@@ -46,6 +46,20 @@ The build script generates `web/pkg/webgpu/` and `web/pkg/webgl2/` separately. T
 - Resource sources: [web/RESOURCE-SOURCES.md](../web/RESOURCE-SOURCES.md)
 - Browser checks: [web/TESTING.md](../web/TESTING.md)
 
+The default browser build is the independent `moly-stage` application for
+embedded content. It installs field, conversation, fixture, weather, audio and
+player-layout exploration systems without the full game's progression screens
+or developer console. Build the full browser game with
+`node web/build-wasm.mjs --product game`; its output goes to `web/pkg-game/`.
+Use `--out-dir` to select an explicit package directory and `--renderer webgpu`
+or `--renderer webgl2` to build one backend. Publish each product with its
+matching release profile and package directory.
+
+Both products retain the public `moly-app.js` / `moly-app_bg.wasm` filenames so
+existing immutable release URLs and cache rules remain valid. `build.json`
+records the Rust crate and product, and publication checks the matching ABI.
+The stage deliberately exports no game persistence or developer-control API.
+
 ## Android
 
 > The Android version currently crashes shortly after it starts rendering frames on a physical device, so it is not yet usable. See [#2](https://github.com/empty-sekai/moly/issues/2).

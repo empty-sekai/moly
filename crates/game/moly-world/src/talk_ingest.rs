@@ -46,6 +46,35 @@ const FIXTURE_OPS: &[&str] = &[
 ];
 
 pub fn general_row(row: &Value) -> Result<(), String> {
+    ordinary_row(row, true)
+}
+
+/// Ordinary multi-character scripts have the ordinary operation vocabulary,
+/// nullable pre-action motion names, and no fixture anchor.
+pub fn common_row(row: &Value) -> Result<(), String> {
+    ordinary_row(row, false)?;
+    let units = array(row, "unitIds")?;
+    if !(2..=5).contains(&units.len()) {
+        return Err("common talk requires two to five characters".into());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for unit in units {
+        positive_i32_value(unit)?;
+        if !seen.insert(unit.as_i64()) {
+            return Err("common talk has duplicate characters".into());
+        }
+    }
+    if array(row, "conditions")?.iter().any(|kind| kind.as_str() == Some("mysekai_fixture_id")) {
+        return Err("common talk cannot have a fixture anchor".into());
+    }
+    if array(row, "someCharacterTalks")?.is_empty() {
+        return Err("common talk has no character association".into());
+    }
+    i32_integer(row, "conditionGroupId")?;
+    Ok(())
+}
+
+fn ordinary_row(row: &Value, strict_tweet: bool) -> Result<(), String> {
     let id = i32_integer(row, "talkId")?;
     for field in ["lua"] {
         string(row, field)?;
@@ -80,7 +109,7 @@ pub fn general_row(row: &Value) -> Result<(), String> {
             _ => return Err(format!("talk {id}: condition {index} has an invalid value")),
         }
     }
-    tweet(row, id, true)?;
+    tweet(row, id, strict_tweet)?;
     voices(row, id)?;
     let steps = array(row, "steps")?;
     for (index, step) in steps.iter().enumerate() {

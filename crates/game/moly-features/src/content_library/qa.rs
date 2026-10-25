@@ -11,6 +11,11 @@ use std::sync::{
 static BROWSER_DIAGNOSTICS: AtomicBool = AtomicBool::new(false);
 static DIAGNOSTICS: OnceLock<Mutex<String>> = OnceLock::new();
 
+/// The read-only browser export can enable telemetry without developer tools.
+pub fn diagnostics_requested() -> bool {
+    BROWSER_DIAGNOSTICS.load(Ordering::Relaxed)
+}
+
 /// Opt-in read-only telemetry from the same native QA projection. No command
 /// is accepted and no simulation data, actor or fixture is created or changed.
 /// Normal embeds never call this export; they retain the compact UI snapshot.

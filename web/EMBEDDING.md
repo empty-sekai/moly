@@ -178,3 +178,13 @@ Each engine has decoded `.wasm`, lossless `.gz` and `.br` representations.
 `brotliBytes` remain separate. Servers must negotiate `Accept-Encoding`, respect
 explicit `q=0`, use representation-specific lengths/ETags, and preserve WASM MIME.
 The default browser build uses the `wasm-size` profile.
+
+Browser console output defaults to warnings and errors. For a diagnostic session,
+add `log=info`, `log=debug`, or `log=trace` to the stage document URL; this setting
+does not persist. Per-frame loading-indicator values require `log=trace`.
+
+An `onError` value with `fatal: true` means the document can no longer accept
+runtime commands. Its last playback snapshot is reported as `error`, and `close()`
+disposes the iframe immediately with `false` (restoration was not acknowledged).
+Retry must create a fresh document. Recoverable content errors still use the
+runtime's ordinary restore path.

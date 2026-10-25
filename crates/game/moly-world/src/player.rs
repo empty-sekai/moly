@@ -412,6 +412,7 @@ pub fn advance(
             Without<crate::talk::TalkHold>,
             Without<PlayerFixtureHeld>,
             Without<crate::field_modes::EntryHold>,
+            Without<crate::npc_objective::events::tutorial::TutorialMovementHold>,
             Without<crate::field_modes::HarvestAutoMoveHeld>,
             Without<crate::field_modes::DeliveryHold>,
         ),

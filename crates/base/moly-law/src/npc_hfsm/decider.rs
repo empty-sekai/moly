@@ -12,7 +12,7 @@
 //! roulette.
 //!
 //! The already-read entry's `CreateFixtureTalkSubTreePlan` draws `r1` in
-//! `[0, 100)` and takes the none-talk branch when `P143 <= r1` (a high roll);
+//! `[0, 100)` and takes the none-talk branch when `r1 < P143`;
 //! the other branch draws `r2` and takes the common-fixture plan when
 //! `P148 <= r2`, the already-read fixture plan otherwise. Every branch that
 //! yields no plan answers no plan from `Decide` as well.
@@ -63,7 +63,7 @@ pub enum EntryPlan {
 /// The already-read entry's sub-tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubTree {
-    /// `P143 <= r1`: the none-talk branch.
+    /// `r1 < P143`: the none-talk branch.
     NoneTalk,
     /// `P148 <= r2`: the common-fixture plan.
     CommonFixtureTalk,
@@ -117,7 +117,7 @@ impl DeciderOutcome {
 /// `CreateFixtureTalkSubTreePlan`: `r1` always, `r2` only on the low `r1`.
 pub fn fixture_talk_subtree(percents: &LotteryPercents, rand: &mut (impl PercentDraw + ?Sized)) -> (SubTree, Option<u32>, Option<u32>) {
     let r1 = rand.draw_percent();
-    if percents.none_talk_fixture_action <= r1 as f32 {
+    if (r1 as f32) < percents.none_talk_fixture_action {
         return (SubTree::NoneTalk, Some(r1), None);
     }
     let r2 = rand.draw_percent();
@@ -168,6 +168,25 @@ pub fn decide(
         break;
     }
     outcome
+}
+
+/// The plan factory reached by the controller's objective decider.
+/// A failed fixture entry falls back to the general factory. The first
+/// entry uses the same subtree when the client has no unread talk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanFactory { UnreadFixture, NoneTalk, CommonFixture, ReadFixture, General }
+
+pub fn select_plan(percents: &LotteryPercents, unread: bool, rand: &mut impl PercentDraw) -> PlanFactory {
+    let draw = rand.draw_percent() as f32;
+    if percents.fixture_talk > draw && unread { return PlanFactory::UnreadFixture; }
+    if percents.fixture_talk + percents.already_read_fixture_talk <= draw {
+        return PlanFactory::General;
+    }
+    match fixture_talk_subtree(percents, rand).0 {
+        SubTree::NoneTalk => PlanFactory::NoneTalk,
+        SubTree::CommonFixtureTalk => PlanFactory::CommonFixture,
+        SubTree::AlreadyReadTalk => PlanFactory::ReadFixture,
+    }
 }
 
 #[cfg(test)]
@@ -247,13 +266,13 @@ mod tests {
         ] {
             let (outcome, queue) = match want_entry {
                 Some(DeciderEntry::FixtureTalk) => run(&percents, &[r], EntryPlan::FixtureTalk, [EntryPlan::NoneTalk, EntryPlan::CommonFixtureTalk]),
-                _ => run(&percents, &[r, 90, 10], EntryPlan::FixtureTalk, [EntryPlan::NoneTalk, EntryPlan::CommonFixtureTalk]),
+                _ => run(&percents, &[r, 10, 90], EntryPlan::FixtureTalk, [EntryPlan::NoneTalk, EntryPlan::CommonFixtureTalk]),
             };
             assert_eq!(outcome.entry.map(|(entry, _)| entry), want_entry, "r={r}");
             if let Some(plan) = want_plan {
                 assert_eq!(outcome.plan(), Some(plan), "r={r}");
             }
-            // The turnstile always; the already-read entry adds its `r1` (90,
+            // The turnstile always; the already-read entry adds its `r1` (10,
             // the none-talk branch, so no `r2`); the fixture entry and a walk
             // that reaches no entry spend the turnstile alone.
             let expected = match want_entry {
@@ -268,17 +287,17 @@ mod tests {
     #[test]
     fn the_subtree_branches_on_its_two_draws() {
         let percents = percents();
-        // Already-read entry (turnstile 60 enters it): `P143 <= r1` (25) is the
-        // none-talk branch — one draw, no `r2`; below it the code draws `r2`
+        // Already-read entry (turnstile 60 enters it): `r1 < P143` (25) is the
+        // none-talk branch — one draw, no `r2`; at or above it the code draws `r2`
         // and takes the common plan when `P148 <= r2` (50), the already-read
         // plan otherwise.
         let plans = [EntryPlan::NoneTalk, EntryPlan::CommonFixtureTalk];
         let cases = [
-            (25, 90, SubTree::NoneTalk, Some(2)),
-            (0, 50, SubTree::CommonFixtureTalk, Some(3)),
-            (24, 50, SubTree::CommonFixtureTalk, Some(3)),
-            (24, 49, SubTree::AlreadyReadTalk, Some(3)),
-            (10, 0, SubTree::AlreadyReadTalk, Some(3)),
+            (24, 90, SubTree::NoneTalk, Some(2)),
+            (0, 50, SubTree::NoneTalk, Some(2)),
+            (25, 50, SubTree::CommonFixtureTalk, Some(3)),
+            (25, 49, SubTree::AlreadyReadTalk, Some(3)),
+            (99, 0, SubTree::AlreadyReadTalk, Some(3)),
         ];
         for (r1, r2, want_sub, want_taken) in cases {
             let mut queue = Queue::at(&[60, r1, r2]);
@@ -310,7 +329,7 @@ mod tests {
             let mut sub = subtree([EntryPlan::NoPlan, EntryPlan::NoPlan]);
             let outcome = decide(&percents(), &mut queue, &mut || EntryPlan::FixtureTalk, &mut sub);
             assert_eq!(outcome.plan(), None);
-            assert_eq!(queue.taken, if r1 >= 25 { 2 } else { 3 });
+            assert_eq!(queue.taken, if r1 < 25 { 2 } else { 3 });
         }
     }
 

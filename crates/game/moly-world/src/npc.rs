@@ -46,9 +46,9 @@ use moly_assets::json::JsonAsset;
 use moly_law::objective::rest_delay_milliseconds;
 use moly_law::path::WalkState as LawWalkState;
 use moly_law::path::{
-    angle_between, build_waypoints, heading_yaw, rotate_time, turn_angle, turn_motion,
-    NpcPathWalkSlot, TurnMotion, WalkVerdict, Waypoint, WaypointKind, ARRIVAL_DISTANCE,
-    FORWARD_FALLBACK, WAYPOINT_SAMPLE_DISTANCE,
+    ARRIVAL_DISTANCE, FORWARD_FALLBACK, NpcPathWalkSlot, TurnMotion, WAYPOINT_SAMPLE_DISTANCE,
+    WalkVerdict, Waypoint, WaypointKind, angle_between, build_waypoints, heading_yaw, rotate_time,
+    turn_angle, turn_motion,
 };
 
 /// The player's spawn ring radius, a stand-in owned by the player domain
@@ -93,7 +93,9 @@ pub enum NpcAction {
     Greeting = 10,
     FixtureAction = 11,
     FixtureActionIdle = 12,
+    CutScene = 13,
     ChangeSite = 14,
+    PhotoShot = 15,
     /// MainNPCAvatarSomeNpcFixtureActionState: the main of a
     /// multiple-character fixture timeline.
     MainSomeFixtureAction = 16,
@@ -545,9 +547,7 @@ pub fn stop_movement(world: &mut World, actor: Entity) {
         &mut StuckBaseline,
         &mut MotionPhase,
     )>();
-    if let Ok((mut route, mut path, mut walk, mut stuck, mut phase)) =
-        query.get_mut(world, actor)
-    {
+    if let Ok((mut route, mut path, mut walk, mut stuck, mut phase)) = query.get_mut(world, actor) {
         stop_movement_components(&mut walk, &mut route, &mut path, &mut stuck, &mut phase);
     }
 }
@@ -694,12 +694,7 @@ pub fn is_away(world: &World, actor: Entity) -> bool {
     world.get::<residency::Away>(actor).is_some()
 }
 
-pub fn reattach_after_layout_edit(
-    world: &mut World,
-    actor: Entity,
-    point: Vec3,
-    generation: u64,
-) {
+pub fn reattach_after_layout_edit(world: &mut World, actor: Entity, point: Vec3, generation: u64) {
     let mut query = world.query::<(
         &mut Transform,
         &mut WalkState,
@@ -981,7 +976,11 @@ pub enum MotionPhase {
     /// 贴合支的直线插值（关代理后的唯一位移）：位置从 `leg.start` 线性
     /// 到 `leg.target`（匀速 0.3 m/s，末帧精确落位），然后才转向
     /// final_rotation。移动期间朝向跟随本帧位移（t·1.5，yaw-only）。
-    FitWalking { leg: FitLeg, elapsed: f32, final_rotation: Quat },
+    FitWalking {
+        leg: FitLeg,
+        elapsed: f32,
+        final_rotation: Quat,
+    },
 }
 
 /// 贴合腿的常量（起步一次算定，两相位随身携带）。
@@ -1295,7 +1294,9 @@ pub fn spawn_when_ready(
     commands.insert_resource(Spawned);
     if returned.is_some() {
         commands.remove_resource::<restore::ReturnedFromOtherRoom>();
-        info!("[npc-residency] RestoreNpcAsync: SetupNpcVisitingAsync(visitingFromGate false, hasReturnedFromOtherRoom true): the roster is created again with every member's first talk complete (SetCompleteFirstTalk)");
+        info!(
+            "[npc-residency] RestoreNpcAsync: SetupNpcVisitingAsync(visitingFromGate false, hasReturnedFromOtherRoom true): the roster is created again with every member's first talk complete (SetCompleteFirstTalk)"
+        );
     }
     // `InitializeHFSM`'s start for every member of the new roster: the
     // members' machines begin with their set-up's `Start()`.
@@ -1326,7 +1327,11 @@ pub fn spawn_when_ready(
         "[npc-residency] roster created on {own_site} (site type {:?}) while {} is loaded{}",
         residency::site_type_value(&own_site),
         site.site_type,
-        if away { ": suspended until its site is loaded" } else { "" },
+        if away {
+            ": suspended until its site is loaded"
+        } else {
+            ""
+        },
     );
     info!(
         "npc 名册就绪：{count} 名（unit {ids:?}，{roster_word}），目标驱动：目标层抽签门[{}]={:.0} [{}]={:.0} [{}]={:.0} [{}]={:.0}（面板 FloatConfigs），停顿 {pause_word}，锚定对话家具 {} 件，可行走 {} 格，出生即首判",
@@ -1346,10 +1351,7 @@ pub fn spawn_when_ready(
 /// Add exact cast members for a scoped independent experience. These are
 /// ordinary NPC entities, so character assembly, animation, facial, talk and
 /// cleanup remain owned by their existing systems.
-pub fn spawn_temporary_units(
-    world: &mut World,
-    requested: &[u32],
-) -> Result<Vec<Entity>, String> {
+pub fn spawn_temporary_units(world: &mut World, requested: &[u32]) -> Result<Vec<Entity>, String> {
     let existing: std::collections::HashSet<u32> = world
         // The player avatar may share a unit id with a requested independent
         // cast member. It is not an NPC and has no NpcActions readiness state;
@@ -1396,7 +1398,13 @@ pub fn spawn_temporary_units(
     let mut spawned = Vec::with_capacity(blueprints.len());
     for (unit_id, speed, pause, idle, walk, seed) in blueprints {
         let entity = world
-            .spawn(ordinary_npc(unit_id, speed, pause, MotionClips { idle, walk }, seed))
+            .spawn(ordinary_npc(
+                unit_id,
+                speed,
+                pause,
+                MotionClips { idle, walk },
+                seed,
+            ))
             .id();
         crate::npc_objective::controller::start_in_world(world, entity);
         spawned.push(entity);
@@ -1455,7 +1463,13 @@ pub fn create_npc_avatar_for_multi(world: &mut World, unit: u32) -> Result<Entit
         .cloned()
         .ok_or_else(|| format!("unit {unit} is not in the character list"))?;
     let entity = world
-        .spawn(ordinary_npc(unit, speed, pause, MotionClips { idle, walk }, CREATION_POSITION))
+        .spawn(ordinary_npc(
+            unit,
+            speed,
+            pause,
+            MotionClips { idle, walk },
+            CREATION_POSITION,
+        ))
         .insert(Visibility::Hidden)
         .id();
     if let Some(mut actions) = world.get_mut::<NpcActions>(entity) {
@@ -1468,6 +1482,20 @@ pub fn create_npc_avatar_for_multi(world: &mut World, unit: u32) -> Result<Entit
             registry.character_unit_ids.sort_unstable();
         }
     }
+    Ok(entity)
+}
+
+pub fn find_or_create_tutorial(world: &mut World, unit: u32) -> Result<Entity, String> {
+    let existing = world
+        .query_filtered::<(Entity, &CharacterUnitId), Without<crate::player::PlayerControlled>>()
+        .iter(world)
+        .find(|(_, id)| id.0 == unit)
+        .map(|(e, _)| e);
+    let entity = match existing {
+        Some(entity) => entity,
+        None => create_npc_avatar_for_multi(world, unit)?,
+    };
+    gate_entries::show(world, entity);
     Ok(entity)
 }
 
@@ -1626,7 +1654,11 @@ pub fn reseed(
                 moly_law::objective::TILE_SCALE,
             );
             let at = kept.unwrap_or_else(|| {
-                crate::npc_objective::seed_position(face, resumed % resident.max(1), resident.max(1))
+                crate::npc_objective::seed_position(
+                    face,
+                    resumed % resident.max(1),
+                    resident.max(1),
+                )
             });
             *slot = PathSlot(NpcPathWalkSlot::from_corners(Vec::new()));
             let forward = state.0.forward;
@@ -1884,7 +1916,11 @@ fn is_completed_within(p: [f32; 3], t: [f32; 3], d: [f32; 3], site_y: f32, goal:
     let height = site_y + t[1];
     let dz = t[2] - d[2];
     let switch = ((dx * dx + height * height) + dz * dz).sqrt();
-    let point = if switch >= COMPLETION_DESTINATION_TOLERANCE { t } else { d };
+    let point = if switch >= COMPLETION_DESTINATION_TOLERANCE {
+        t
+    } else {
+        d
+    };
     let [px, py, pz] = [p[0] - point[0], p[1] - point[1], p[2] - point[2]];
     (pz * pz + (px * px + py * py)).sqrt() < goal
 }
@@ -2057,7 +2093,10 @@ fn lift_navigation_path(
         .into_iter()
         .map(|point| {
             let surface = face
-                .navigation_surface_sample([point[0], face.ref_y(), point[1]], WAYPOINT_SAMPLE_DISTANCE)
+                .navigation_surface_sample(
+                    [point[0], face.ref_y(), point[1]],
+                    WAYPOINT_SAMPLE_DISTANCE,
+                )
                 .unwrap_or_else(|| {
                     panic!(
                         "[npc unit={}] 路点 ({:.2},{:.2}) 在目标面上无采样（两份面数据不一致）",
@@ -2141,7 +2180,9 @@ fn start_waypoint(
         .as_ref()
         .filter(|corridor| corridor.position == state.position)
         .and_then(|corridor| corridor.cells.first().copied());
-    let corridor = walk_face.field.corridor(state.position, from_cell, target)?;
+    let corridor = walk_face
+        .field
+        .corridor(state.position, from_cell, target)?;
     let corners =
         if Vec3::from(waypoint.position).distance(Vec3::from(state.position)) < ARRIVAL_DISTANCE {
             // Even a coincident CheckPoint is an execution leg; the next update
@@ -2265,7 +2306,11 @@ fn fit_depart(
     );
 
     if leg.travel > 0.0 {
-        return Some(MotionPhase::FitWalking { leg, elapsed: 0.0, final_rotation: fit.rotation });
+        return Some(MotionPhase::FitWalking {
+            leg,
+            elapsed: 0.0,
+            final_rotation: fit.rotation,
+        });
     }
     state.position = leg.target;
     let from = Quat::from_rotation_arc(Vec3::Z, Vec3::from(state.forward));
@@ -2282,17 +2327,36 @@ fn begin_fit_turn(state: &mut LawWalkState, leg: FitLeg, from: Quat, mut to: Qua
         state.forward = (to * Vec3::Z).to_array();
         return MotionPhase::Dwelling { remaining: None };
     }
-    let motion = turn_motion(turn_angle(heading_yaw(forward), heading_yaw((to * Vec3::Z).to_array())));
+    let motion = turn_motion(turn_angle(
+        heading_yaw(forward),
+        heading_yaw((to * Vec3::Z).to_array()),
+    ));
     if from.dot(to) < 0.0 {
         to = Quat::from_xyzw(-to.x, -to.y, -to.z, -to.w);
     }
-    MotionPhase::FitTurning { motion, from, to, duration, elapsed: 0.0, leg }
+    MotionPhase::FitTurning {
+        motion,
+        from,
+        to,
+        duration,
+        elapsed: 0.0,
+        leg,
+    }
 }
 
 /// Returns true only after the final rotation, not on the position-only frame.
-fn step_fit(state: &mut LawWalkState, phase: MotionPhase, current: Quat, dt: f32) -> (MotionPhase, Quat, bool) {
+fn step_fit(
+    state: &mut LawWalkState,
+    phase: MotionPhase,
+    current: Quat,
+    dt: f32,
+) -> (MotionPhase, Quat, bool) {
     match phase {
-        MotionPhase::FitWalking { mut leg, elapsed, final_rotation } => {
+        MotionPhase::FitWalking {
+            mut leg,
+            elapsed,
+            final_rotation,
+        } => {
             let elapsed = elapsed + dt;
             if elapsed < leg.travel {
                 let position = leg.sample_position(elapsed);
@@ -2304,7 +2368,15 @@ fn step_fit(state: &mut LawWalkState, phase: MotionPhase, current: Quat, dt: f32
                 }
                 state.position = position.to_array();
                 state.forward = (rotation * Vec3::Z).to_array();
-                return (MotionPhase::FitWalking { leg, elapsed, final_rotation }, rotation, false);
+                return (
+                    MotionPhase::FitWalking {
+                        leg,
+                        elapsed,
+                        final_rotation,
+                    },
+                    rotation,
+                    false,
+                );
             }
             // The source last move frame only sets position. Do not force a
             // movement-facing quaternion or spend the same dt on the new turn.
@@ -2313,14 +2385,34 @@ fn step_fit(state: &mut LawWalkState, phase: MotionPhase, current: Quat, dt: f32
             let done = matches!(next, MotionPhase::Dwelling { remaining: None });
             (next, if done { final_rotation } else { current }, done)
         }
-        MotionPhase::FitTurning { motion, from, to, duration, elapsed, leg } => {
+        MotionPhase::FitTurning {
+            motion,
+            from,
+            to,
+            duration,
+            elapsed,
+            leg,
+        } => {
             let elapsed = elapsed + dt;
             let done = elapsed >= duration;
-            let rotation = if done { to } else { sample_turn_rotation(from, to, elapsed / duration) };
+            let rotation = if done {
+                to
+            } else {
+                sample_turn_rotation(from, to, elapsed / duration)
+            };
             state.position = leg.target;
             state.forward = (rotation * Vec3::Z).to_array();
-            let next = if done { MotionPhase::Dwelling { remaining: None } } else {
-                MotionPhase::FitTurning { motion, from, to, duration, elapsed, leg }
+            let next = if done {
+                MotionPhase::Dwelling { remaining: None }
+            } else {
+                MotionPhase::FitTurning {
+                    motion,
+                    from,
+                    to,
+                    duration,
+                    elapsed,
+                    leg,
+                }
             };
             (next, rotation, done)
         }
@@ -2374,7 +2466,10 @@ fn crowd_step(
     use moly_law::path::crowd;
     let height = |p: [f32; 2], fallback: f32| {
         objective_face
-            .navigation_surface_sample([p[0], objective_face.ref_y(), p[1]], WAYPOINT_SAMPLE_DISTANCE)
+            .navigation_surface_sample(
+                [p[0], objective_face.ref_y(), p[1]],
+                WAYPOINT_SAMPLE_DISTANCE,
+            )
             .map_or(fallback, |surface| surface[1])
     };
     let corridor = crowd.corridor.as_mut()?;
@@ -2500,6 +2595,7 @@ pub fn advance(
     walk_face: Option<Res<crate::walk_face::WalkFace>>,
     objective_face: Option<Res<crate::npc_objective::ObjectiveFace>>,
     navigation: Option<Res<residency::SiteNavigation>>,
+    exact_motion: crate::npc_fixture_activity::ActionPointMotionOwners,
     mut npcs: Query<
         (
             &CharacterUnitId,
@@ -2516,7 +2612,11 @@ pub fn advance(
             &mut NpcActions,
             &mut RestLifecycle,
             Option<&crate::talk::fixture_action::TalkFixtureActorLease>,
-            (Has<residency::Away>, Has<change_site_state::ChangeSiteWalking>),
+            (
+                Entity,
+                Has<residency::Away>,
+                Has<change_site_state::ChangeSiteWalking>,
+            ),
         ),
         Without<crate::npc_fixture_activity::NpcFixtureMotionOwner>,
     >,
@@ -2543,15 +2643,20 @@ pub fn advance(
         mut actions,
         mut rest,
         talk_lease,
-        (away, change_site_walk),
+        (entity, away, change_site_walk),
     ) in &mut npcs
     {
-        if away && !change_site_walk {
+        if exact_motion.contains(entity) || (away && !change_site_walk) {
             continue;
         }
-        let retained = away.then(|| navigation.as_deref()?.get(&actions.site_type)).flatten();
+        let retained = away
+            .then(|| navigation.as_deref()?.get(&actions.site_type))
+            .flatten();
         let (walk_face, objective_face) = if away {
-            (retained.map(|nav| &nav.walk), retained.map(|nav| &nav.objective))
+            (
+                retained.map(|nav| &nav.walk),
+                retained.map(|nav| &nav.objective),
+            )
         } else {
             (walk_face.as_deref(), objective_face.as_deref())
         };
@@ -2761,9 +2866,17 @@ pub fn advance(
         // The rotation the agent's transform update left this frame.
         let mut agent_rotation: Option<Quat> = None;
         if let Some(distance) = leg_arrival {
-            if route.stops.get(route.next).is_some_and(|point| point.kind == WaypointKind::CheckPoint) {
-                debug!("[npc unit={}] t={now:.1} 路点 {}/{} CheckPoint 通过，距 {distance:.3}m",
-                    unit.0, route.next + 1, route.stops.len());
+            if route
+                .stops
+                .get(route.next)
+                .is_some_and(|point| point.kind == WaypointKind::CheckPoint)
+            {
+                debug!(
+                    "[npc unit={}] t={now:.1} 路点 {}/{} CheckPoint 通过，距 {distance:.3}m",
+                    unit.0,
+                    route.next + 1,
+                    route.stops.len()
+                );
                 slot.0 = NpcPathWalkSlot::from_corners(Vec::new());
                 state.0.next_corner = 0;
                 stuck.0 = None;
@@ -2900,7 +3013,10 @@ pub fn advance(
             // A reached Rest entry: CheckPoints were handed on above.
             WalkVerdict::Arrived(distance) => {
                 assert!(
-                    route.stops.get(route.next).is_some_and(|point| point.kind == WaypointKind::Rest),
+                    route
+                        .stops
+                        .get(route.next)
+                        .is_some_and(|point| point.kind == WaypointKind::Rest),
                     "a navigation arrival left after the CheckPoint step is a Rest entry"
                 );
                 slot.0 = NpcPathWalkSlot::from_corners(Vec::new());
@@ -2911,8 +3027,12 @@ pub fn advance(
                     remaining: Some(dwell),
                 };
                 actions.begin_waypoint_rest(&mut rest, &route);
-                info!("[npc unit={}] t={now:.1} 路点 {}/{} Rest 到站，距 {distance:.3}m，驻留 {dwell:.1}s",
-                    unit.0, route.next + 1, route.stops.len());
+                info!(
+                    "[npc unit={}] t={now:.1} 路点 {}/{} Rest 到站，距 {distance:.3}m，驻留 {dwell:.1}s",
+                    unit.0,
+                    route.next + 1,
+                    route.stops.len()
+                );
             }
             WalkVerdict::Idle => match &mut *phase {
                 MotionPhase::Turning {
@@ -2959,11 +3079,14 @@ pub fn advance(
                     }
                 }
                 MotionPhase::FitTurning { .. } | MotionPhase::FitWalking { .. } => {
-                    let (next, rotation, done) = step_fit(&mut state.0, *phase, transform.rotation, dt);
+                    let (next, rotation, done) =
+                        step_fit(&mut state.0, *phase, transform.rotation, dt);
                     *phase = next;
                     finished_turn = Some(rotation);
                     stuck.0 = None;
-                    if done { route.outcome = Some(RouteOutcome::Arrived); }
+                    if done {
+                        route.outcome = Some(RouteOutcome::Arrived);
+                    }
                     declare_navigation_action(&mut actions, &mut rest, &phase, &route);
                 }
                 // 收场位：路线已尽或未起步，站定的成员由目标机收场与再出发。
@@ -3134,10 +3257,19 @@ pub fn report(
             Some(_) => "other",
         };
         if let Some(current) = &slot.current {
-            debug!("[npc unit={}] action={:?} before={:?} enabled={} current={:?} previous={:?} main={} members={:?} preAction={:?} pending={:?}",
-                unit.0, actions.current, actions.before, actions.enable_talk,
-                current.content.as_ref().map(|content| content.master_id), slot.previous_id(),
-                current.main_character, current.characters, current.pre_action.as_ref().map(|row| row.id), current.pending_factory);
+            debug!(
+                "[npc unit={}] action={:?} before={:?} enabled={} current={:?} previous={:?} main={} members={:?} preAction={:?} pending={:?}",
+                unit.0,
+                actions.current,
+                actions.before,
+                actions.enable_talk,
+                current.content.as_ref().map(|content| content.master_id),
+                slot.previous_id(),
+                current.main_character,
+                current.characters,
+                current.pre_action.as_ref().map(|row| row.id),
+                current.pending_factory
+            );
         }
         debug!(
             "npc unit={} t={:.1} pos=({:.3},{:.3},{:.3}) yaw={:.1} speed={:.3} phase={phase_word}{route_word} obj={obj_word} slot={slot_word} rest={:.1} dest=({:.1},{:.1})",
@@ -3176,11 +3308,26 @@ mod fixture_approach_tests {
     #[test]
     fn completed_move_takes_the_fit_and_drops_the_remaining_route() {
         let goal = [1., 0., 0.];
-        let mut route = RouteStops { stops: vec![
-                Waypoint { position: goal, kind: WaypointKind::CheckPoint },
-                Waypoint { position: [2., 0., 2.], kind: WaypointKind::CheckPoint },
-            ], next: 0, goal: Some(goal), navigation_destination: Some(goal),
-            fit: Some(FitCandidate { position: goal, rotation: Quat::IDENTITY }), ..default() };
+        let mut route = RouteStops {
+            stops: vec![
+                Waypoint {
+                    position: goal,
+                    kind: WaypointKind::CheckPoint,
+                },
+                Waypoint {
+                    position: [2., 0., 2.],
+                    kind: WaypointKind::CheckPoint,
+                },
+            ],
+            next: 0,
+            goal: Some(goal),
+            navigation_destination: Some(goal),
+            fit: Some(FitCandidate {
+                position: goal,
+                rotation: Quat::IDENTITY,
+            }),
+            ..default()
+        };
         let mut state = LawWalkState::new(goal, [0., 0., 1.]);
         let mut slot = NpcPathWalkSlot::from_corners(vec![goal]);
         complete_move(&CharacterUnitId(11), &mut state, &mut slot, &mut route);
@@ -3194,8 +3341,17 @@ mod fixture_approach_tests {
         let mut route = RouteStops::default();
         let mut slot = NpcPathWalkSlot::from_corners(Vec::new());
         let rotation = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
-        let phase = fit_depart(&CharacterUnitId(11), &mut state, &mut slot, &mut route,
-            FitCandidate { position: [0.; 3], rotation }).unwrap();
+        let phase = fit_depart(
+            &CharacterUnitId(11),
+            &mut state,
+            &mut slot,
+            &mut route,
+            FitCandidate {
+                position: [0.; 3],
+                rotation,
+            },
+        )
+        .unwrap();
         assert!(matches!(phase, MotionPhase::FitTurning { .. }));
         assert_eq!(state.position, [0.; 3]);
     }

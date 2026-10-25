@@ -111,6 +111,12 @@ pub enum TalkSession<'a> {
 }
 
 impl TalkSession<'_> {
+    fn text_script(&self) -> &str {
+        match self {
+            Self::Player(session) => session.text_script(),
+            Self::Pair(session) => session.text_script(),
+        }
+    }
     /// Which chain and talk this is (for logs).
     pub fn chain_word(&self) -> String {
         match self {
@@ -190,6 +196,11 @@ const SKIP_KEY: KeyCode = KeyCode::Space;
 /// layer object outlives a talk and show/hide only change visibility.
 #[derive(Resource)]
 pub struct TalkWindowState {
+    /// Display-only locale and revision pinned when this owner starts.
+    text_session: Option<moly_text::TextSession>,
+    text_session_pinned: bool,
+    text_translated: bool,
+    label_translated: bool,
     /// The window is present (opened at the talk's start, closed at its end).
     present: bool,
     /// CanvasGroup alpha.
@@ -239,6 +250,10 @@ pub struct TalkWindowState {
 impl Default for TalkWindowState {
     fn default() -> Self {
         Self {
+            text_session: None,
+            text_session_pinned: false,
+            text_translated: false,
+            label_translated: false,
             present: false,
             alpha: 1.0,
             fade: None,
@@ -285,12 +300,18 @@ impl TalkWindowState {
     /// the first show is instantaneous) and both texts are cleared.
     pub fn open(&mut self, _owner: TalkSession<'_>) {
         self.reset_for_admission(true);
+        if !self.text_session_pinned {
+            self.text_session = crate::text_localization::snapshot();
+            self.text_session_pinned = true;
+        }
     }
 
     /// A fixture pre-action owns its cast but has not entered the talk body
     /// yet: clear the previous prompt without showing an empty panel.
     pub fn prepare(&mut self, _owner: TalkSession<'_>) {
         self.reset_for_admission(false);
+        self.text_session = crate::text_localization::snapshot();
+        self.text_session_pinned = true;
     }
 
     fn reset_for_admission(&mut self, present: bool) {
@@ -299,6 +320,8 @@ impl TalkWindowState {
         self.fade = None;
         self.label.clear();
         self.text.clear();
+        self.label_translated = false;
+        self.text_translated = false;
         self.shown = 0;
         self.typing_clock = 0.0;
         self.playing = false;
@@ -322,6 +345,8 @@ impl TalkWindowState {
     /// The talk ends: the window is withdrawn with no fade.
     pub fn close(&mut self, _owner: TalkSession<'_>) {
         self.reset_for_admission(false);
+        self.text_session = None;
+        self.text_session_pinned = false;
     }
 
     /// `ShowTalkWindow`: alpha 1 short-circuits, else a 0.3 s fade-in. The
@@ -350,6 +375,7 @@ impl TalkWindowState {
         self.auto_release = false;
         self.auto_wait = 0.0;
         self.skip_text = false;
+        self.text_translated = false;
         self.text.clear();
         self.text.push_str(text);
         self.playing = true;
@@ -362,8 +388,27 @@ impl TalkWindowState {
 
     /// The name plate step.
     pub fn set_label(&mut self, _owner: TalkSession<'_>, name: &str) {
+        self.label_translated = false;
         self.label.clear();
         self.label.push_str(name);
+    }
+
+    pub fn set_label_at(&mut self, owner: TalkSession<'_>, step: usize, original: &str) {
+        let (display, translated) = self.text_session.as_ref().map_or_else(|| (original.to_owned(), false), |session| {
+            let display = session.resolve(owner.text_script(), Some(step), moly_text::TextKind::Speaker, original);
+            (display.text.to_owned(), display.origin != moly_text::TextOrigin::Original)
+        });
+        self.set_label(owner, &display);
+        self.label_translated = translated;
+    }
+
+    pub fn show_text_at(&mut self, owner: TalkSession<'_>, step: usize, original: &str) {
+        let (display, translated) = self.text_session.as_ref().map_or_else(|| (original.to_owned(), false), |session| {
+            let display = session.resolve(owner.text_script(), Some(step), moly_text::TextKind::Text, original);
+            (display.text.to_owned(), display.origin != moly_text::TextOrigin::Original)
+        });
+        self.show_text(owner, &display);
+        self.text_translated = translated;
     }
 
     /// `IsWaitClick`: a click (manual, or `IsNextTalkIntervalEnd`'s automatic
@@ -973,14 +1018,14 @@ pub fn tick_window(
     crate::canvas::set_scale(&mut transform, scale);
     visibility.set_if_neq(Visibility::Inherited);
     view.set_alpha(WINDOW_NODE, state.alpha);
-    view.set_text(LABEL_NODE, state.label.clone());
+    view.set_display_text(LABEL_NODE, state.label.clone(), state.label_translated);
     // `ShowTextAsync` writes the typed prefix, except the empty line's "\n",
     // whose typed form is "", and a reveal (Skip) writes the whole line.
     if state.shown == 0 || state.shown >= state.text.chars().count() {
-        view.set_text(CONTENT_NODE, state.text.clone());
+        view.set_display_text(CONTENT_NODE, state.text.clone(), state.text_translated);
     } else {
         let revealed: String = state.text.chars().take(state.shown).collect();
-        view.set_text(CONTENT_NODE, revealed);
+        view.set_display_text(CONTENT_NODE, revealed, state.text_translated);
     }
     view.set_visible(END_SIGN_NODE, state.end_icon);
     // `EndSign`'s animator plays the star: its own prefab tweens loop (the

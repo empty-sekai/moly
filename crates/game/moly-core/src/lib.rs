@@ -55,3 +55,8 @@ pub mod weather_transition;
 
 /// Product version shared by the settings panel and application entry points.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[cfg(target_arch = "wasm32")]
+pub mod render_backend;
+#[cfg(all(target_arch = "wasm32", feature = "browser-heap"))]
+mod wasm_heap;

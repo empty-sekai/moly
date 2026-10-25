@@ -13,6 +13,7 @@
 //! control plane's document and schema views, an edit, and the seed install.
 
 mod admin;
+#[cfg(feature = "control")]
 mod control;
 mod defaults;
 mod dispatch;
@@ -26,6 +27,7 @@ mod users;
 pub mod http;
 pub mod store;
 
+#[cfg(feature = "control")]
 pub use control::remote_plugin;
 pub use hub::{ExchangeError, Hub};
 pub use masters::{Masters, Parties};

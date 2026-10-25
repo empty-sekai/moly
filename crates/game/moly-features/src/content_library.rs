@@ -44,6 +44,7 @@ mod input;
 mod playback;
 mod qa;
 pub use qa::library_diagnostics;
+pub use qa::diagnostics_requested;
 pub use qa::resource_residency_summary;
 mod stage_framing;
 mod staging;
@@ -103,10 +104,13 @@ pub enum EntryKey {
 struct DialogueLine {
     speaker: String,
     text: String,
+    text_step: Option<usize>,
+    speaker_step: Option<usize>,
 }
 #[derive(Clone)]
 struct LibraryTalk {
     content: TalkContent,
+    script_key: String,
     preview_tweet: Option<moly_law::talk::TweetRef>,
     units: Vec<u32>,
     fixture_ids: Vec<i32>,

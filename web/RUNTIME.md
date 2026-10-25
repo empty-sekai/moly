@@ -9,6 +9,13 @@ the resource loader applies.
 a page downloads only the module of the renderer it selects. The font is written once to
 `web/pkg/fonts/<sha256>.ttf`, and each renderer's `build.json` records its length and hash.
 
+This builds `moly-stage`, with its own application and field schedule. It excludes
+the full game's progression screens and developer control exports. Build the
+full game with `--product game` (default output `web/pkg-game/`). A package's
+`build.json` records `product` and `crate`; publication requires its matching
+`stage` or `game` profile. The public engine filenames stay `moly-app.js` and
+`moly-app_bg.wasm` for both products, inside their separate immutable releases.
+
 Deploy the whole `pkg/` directory. Before starting, the page verifies and installs the font, and it
 refuses to start when the font is missing or does not match.
 

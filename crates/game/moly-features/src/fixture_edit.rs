@@ -1272,6 +1272,12 @@ fn commit_saved_layout(
     {
         layouts.did_save(&next, receipt);
     }
+    let previous = session.baseline.as_ref().map(|layout|layout.editor_rows()).unwrap_or_default();
+    let updated: Vec<String> = next.editor_rows().into_iter()
+        .filter(|row| previous.iter().find(|before| before.uid == row.uid) != Some(row))
+        .map(|row|row.uid).collect();
+    world.init_resource::<crate::npc_objective::events::LayoutReactionFixtures>();
+    world.resource_mut::<crate::npc_objective::events::LayoutReactionFixtures>().pending.push(updated);
     session.baseline = Some(next);
     session.storage_baseline = Some(next_storage_baseline);
     session.initial_inventory = session.inventory.clone();

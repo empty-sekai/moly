@@ -497,7 +497,8 @@ fn admit(world: &mut World, request: SiteMoveRequest, frame: u64) {
         "[site-move] admitted {from} -> {to} (cannon): offset {delta:.1}, GameState SiteMove; pre-action: PlayerFootEffect stop, CleanupCurrentSite, AddSite preload"
     );
     crate::footstep::stop_key(world, "cannon pre-action");
-    if from_place.category == "housing_home" {
+    if from_place.category == "housing_home"
+        && !world.contains_resource::<crate::browser_stage::BrowserStage>() {
         crate::harvest::harvest_summary::save_harvest_point(world, "MoveSiteUseCannonActionState.OnSiteMovePreAction");
     }
     world.insert_resource(SiteMove {
@@ -760,7 +761,9 @@ impl SiteMove {
                     }
                     let delay = *delay;
                     self.due_by(delay);
-                    crate::harvest::harvest_summary::show_harvest_point_summary(world, "MoveSiteUseCannonActionState.EndAction");
+                    if !world.contains_resource::<crate::browser_stage::BrowserStage>() {
+                        crate::harvest::harvest_summary::show_harvest_point_summary(world, "MoveSiteUseCannonActionState.EndAction");
+                    }
                     self.normal(world, frame);
                     self.stage = Stage::Done;
                 }

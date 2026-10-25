@@ -14,6 +14,7 @@ import {
 import { loadEngine, releaseEnginePath } from "./engine-loader.mjs";
 import { audioActivation } from "./stage-audio.mjs";
 import { createStageController } from "./stage-controller.mjs";
+import { validateTextSession, prepareTextFonts } from "./text-localization.mjs";
 import { stageMessages } from "./stage-locale.mjs";
 import { presentWeather } from "./weather-presentation.mjs";
 import { createWeatherArtwork } from "./weather-artwork.mjs";
@@ -33,7 +34,107 @@ let configuration = null,
   controller = null,
   backend = null;
 let configuredResourceBase = null;
+let baseFontSha256 = null;
 let lastPlayerData = "";
+let pendingTextSession;
+let textApplied = true;
+let installingText = false;
+let installedTextSession;
+let fontAbort;
+let textGeneration = 0;
+let textClosed = false;
+function queueText(session) {
+  if (textClosed) return;
+  const validated = validateTextSession(session);
+  const desired =
+    pendingTextSession === undefined
+      ? installedTextSession
+      : pendingTextSession;
+  if (JSON.stringify(validated) === JSON.stringify(desired)) return;
+  fontAbort?.abort();
+  textGeneration++;
+  textCommands.length = 0;
+  pendingTextSession = validated;
+  textApplied = false;
+}
+const textCommands = [];
+function dispatchWithText(command) {
+  if (["stop", "restore", "close"].includes(command.type)) {
+    textCommands.length = 0;
+    if (command.type === "close") {
+      textClosed = true;
+      textGeneration++;
+      fontAbort?.abort();
+      pendingTextSession = undefined;
+      textApplied = true;
+    }
+  }
+  if (
+    ["play", "preview"].includes(command.type) &&
+    (!textApplied || (wasm?.text_ready && !wasm.text_ready()))
+  ) {
+    if (controller.getSnapshot()?.status.canStop) controller.dispatch("stop");
+    textCommands.length = 0;
+    textCommands.push(command);
+    return;
+  }
+  controller.dispatch(command.type, command.value);
+}
+async function applyPendingText() {
+  if (
+    textClosed ||
+    !wasm ||
+    installingText ||
+    !controller?.getSnapshot()?.ready ||
+    pendingTextSession === undefined
+  )
+    return;
+  const status = controller.getSnapshot().status;
+  if (
+    status.canStop ||
+    ["preparing", "playing", "restoring"].includes(status.phase)
+  )
+    return;
+  const session = pendingTextSession;
+  const generation = textGeneration;
+  installingText = true;
+  const abort = new AbortController();
+  fontAbort = abort;
+  const deadline = setTimeout(() => abort.abort(), 15000);
+  try {
+    const fonts = await prepareTextFonts(session, abort.signal, {
+      baseFontSha256,
+      catalogUrl: new URL(
+        "fonts/latest.json",
+        configuredResourceBase || new URL("/moly/", location.href),
+      ).href,
+    });
+    abort.signal.throwIfAborted();
+    if (generation !== textGeneration || textClosed) return;
+    wasm.configure_text_session(
+      session?.source ?? "",
+      session?.official ?? "",
+      session?.community ?? "",
+      session?.locale ?? ui.locale,
+      fonts.bytes,
+      fonts.refs,
+    );
+    pendingTextSession = undefined;
+    installedTextSession = session;
+    textApplied = true;
+  } catch (error) {
+    if (generation === textGeneration && !textClosed) {
+      pendingTextSession = undefined;
+      textCommands.length = 0;
+      textApplied = true;
+      send("error", { code: "text_unavailable" });
+    }
+  } finally {
+    clearTimeout(deadline);
+    if (fontAbort === abort) fontAbort = undefined;
+    installingText = false;
+  }
+}
 let weatherArtwork = null;
 const weatherIconUrls = new Map();
 const weatherIconRequests = new Set();
@@ -101,6 +202,7 @@ function mark(name) {
   }
 }
 function report(next = phase) {
+  if (failed && next !== phase) return;
   if (next !== phase && (next === "base" || next === "resources"))
     lastProgress = performance.now();
   phase = next;
@@ -170,9 +272,19 @@ function fail(code, error) {
   loading = false;
   phase = code;
   clearInterval(timer);
+  // A panic can leave Rust borrows held. Recovery must replace this realm;
+  // even a focus or close command must never re-enter its WASM exports.
+  controller = null;
+  wasm = null;
+  pending.length = 0;
+  textClosed = true;
+  textGeneration++;
+  fontAbort?.abort();
+  textCommands.length = 0;
+  pendingTextSession = undefined;
   console.error(`[moly-stage:${code}]`, error);
   $("stage-boot").hidden = false;
-  send("error", { code });
+  send("error", { code, fatal: true });
   report(code);
 }
 function reload(renderer) {
@@ -258,25 +370,33 @@ async function loadStageEngine() {
           packs: params.get("packs") === "1",
           assetCatalog: params.get("asset_catalog"),
         });
-        const basePreparation = warmBaseResources(
-          {
-            region,
-            version,
-            assets: new URL(params.get("assets"), location.href).href,
-            resourceBase: configuredBase,
-            packs: params.get("packs") === "1",
-            assetCatalog: params.get("asset_catalog") ?? undefined,
-          },
-          {
-            signal,
-            onProgress({ completed, total }) {
-              baseCompleted = completed;
-              baseTotal = total;
-              lastProgress = performance.now();
-              if (phase === "base") render();
-            },
-          },
-        );
+        // The local acceptance harness can enable one trace run before a
+        // new source has a measured base descriptor. Deployed pages still
+        // require prewarming; the harness injects this marker only locally.
+        const measureBase =
+          document.documentElement.dataset.molyMeasureBase === "1" &&
+          ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
+        const basePreparation = measureBase
+          ? Promise.resolve()
+          : warmBaseResources(
+              {
+                region,
+                version,
+                assets: new URL(params.get("assets"), location.href).href,
+                resourceBase: configuredBase,
+                packs: params.get("packs") === "1",
+                assetCatalog: params.get("asset_catalog") ?? undefined,
+              },
+              {
+                signal,
+                onProgress({ completed, total }) {
+                  baseCompleted = completed;
+                  baseTotal = total;
+                  lastProgress = performance.now();
+                  if (phase === "base") render();
+                },
+              },
+            );
         // The original promise remains rejectable at the join below.
         void basePreparation.catch(() => {});
         return { ready: basePreparation };
@@ -302,7 +422,9 @@ async function loadStageEngine() {
         if (phase === "base") render();
       },
     });
+    if (failed) return;
     wasm = loaded.module;
+    baseFontSha256 = loaded.uiFontSha256;
     loading = false;
   } catch (error) {
     fail(backend ? "engine_failed" : "unsupported", error);
@@ -332,8 +454,7 @@ function enter() {
     controller.configure(
       configuration || { initial, content: params.get("content") },
     );
-    for (const command of pending.splice(0))
-      controller.dispatch(command.type, command.value);
+    for (const command of pending.splice(0)) dispatchWithText(command);
     // The engine opens its only audio output here; a browser that is still
     // holding audio back lets `resumeAudio` start it on the next activation.
     wasm.start_stage(backend);
@@ -351,8 +472,16 @@ window.addEventListener("message", (event) => {
   )
     return;
   const { type, value } = event.data;
+  if (failed) {
+    if (type === "intent" && value?.type === "close")
+      send("closed", { restored: false });
+    return;
+  }
   try {
     if (type === "configure") {
+      if (Object.hasOwn(value, "textSession")) {
+        queueText(value.textSession);
+      }
       ui = {
         locale: validateLocale(value.locale),
         theme: validateTheme(value.theme),
@@ -369,6 +498,8 @@ window.addEventListener("message", (event) => {
       // the same projection instead of caching a stale translation.
       const snapshot = controller?.getSnapshot();
       if (snapshot) send("snapshot", decorateWeather(snapshot));
+    } else if (type === "text-session") {
+      queueText(value);
     } else if (type === "player-data") {
       if (
         !wasm ||
@@ -390,8 +521,13 @@ window.addEventListener("message", (event) => {
       wasm.player_data_command(value.operation, region, json);
     } else if (type === "intent") {
       const command = intent(value?.type, value?.value);
-      if (controller) controller.dispatch(command.type, command.value);
+      if (controller) dispatchWithText(command);
       else if (command.type === "close") {
+        textClosed = true;
+        textGeneration++;
+        fontAbort?.abort();
+        pendingTextSession = undefined;
+        textCommands.length = 0;
         pending.length = 0;
         send("closed", { restored: true });
       } else {
@@ -408,6 +544,7 @@ window.addEventListener("moly-ready", () => {
   mark("rendererReady");
   report("resources");
   timer = setInterval(() => {
+    if (failed) return;
     try {
       const playerData = wasm?.player_data_snapshot?.();
       if (playerData && playerData !== lastPlayerData) {
@@ -416,6 +553,11 @@ window.addEventListener("moly-ready", () => {
       }
       const state = controller?.poll();
       if (!state) return;
+      void applyPendingText();
+      if (textApplied && (!wasm.text_ready || wasm.text_ready())) {
+        for (const command of textCommands.splice(0))
+          controller.dispatch(command.type, command.value);
+      }
       if (state.ready) mark("catalogReady");
       if (state.scene?.ready) {
         mark("sceneReady");

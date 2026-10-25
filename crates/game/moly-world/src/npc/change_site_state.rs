@@ -40,10 +40,10 @@
 //! Host shape. This host holds one site at a time, and every order targets
 //! the site the player has just entered, so the walk to the door and the
 //! leaving leg always run on a site that is not loaded; the NPC is suspended
-//! there (see `npc::residency`, which keeps the navigation of the site the
-//! player has left, and [`door_walk`]). Named gaps:
-//! - the leaving leg (the house or room exit clip) is not run: it is a clip
-//!   on the unseen site, with nothing to show;
+//! there (see `npc::residency`, which keeps the navigation and authored
+//! house exit program of the previous site, and [`door_walk`]). The exit
+//! turn, character clip and house program wait advance before destination
+//! placement even when the old view is hidden. Named gaps:
 //! - the other-NPC wait compares the NPCs on the loaded site only (an NPC on
 //!   another site stands on that site's ground, away from this door in the
 //!   source's world); the zero start position of a first change is this
@@ -101,12 +101,15 @@ enum AfterTurn {
     FloorKnock,
     /// ShowTweet: the tweet after the turn to the player.
     EntryTweet,
+    ExitClip,
 }
 
 /// The floor entry clip.
 const FLOOR_ENTER_CLIP: &str = "mov_cw_all_house_in_outside_O";
 /// The home entry clip.
 const HOME_ENTER_CLIP: &str = "mov_cw_all_house_open_011_O";
+const HOME_EXIT_CLIP: &str = "mov_cw_all_house_open_013_O";
+const FLOOR_EXIT_CLIP: &str = "mov_cw_all_house_out_inside_O";
 
 /// The wait or step one run is at. Every wait is created on `since` and first
 /// tested on a later frame.
@@ -124,10 +127,18 @@ enum Stage {
     WaitPlayerLeaveDoor,
     WaitOtherNpcLeaveDoor,
     WaitNotMoveMode,
+    ExitMove,
+    ExitStart,
+    ExitClip {
+        node: AnimationNodeIndex,
+    },
+    PlaceAtTarget,
     /// FloorEnter's second wait, after the placement.
     WaitNotMoveModeAfterPlace,
     /// An awaited entry turn (the look-at tween) is running.
-    Turning { next: AfterTurn },
+    Turning {
+        next: AfterTurn,
+    },
     /// FloorEnter on the player's site: the knock sound's playback runs;
     /// the state goes on once it is over.
     KnockWait,
@@ -155,7 +166,11 @@ struct Run {
     stage: Stage,
     since: u32,
     door_forward: Vec3,
+    house_exit: Option<crate::fixture_gimmick::house_door::NpcExitPlayback>,
 }
+
+#[derive(Component)]
+struct ExitMove(crate::npc_fixture_activity::LocalMove);
 
 /// The runs in flight and each NPC's kept start position.
 #[derive(Resource, Default)]
@@ -169,6 +184,11 @@ pub struct ChangeSiteRuns {
 }
 
 impl ChangeSiteRuns {
+    /// Navigation and the doorway performance share one change-site order.
+    /// Other objective drivers yield while either part is in flight.
+    pub fn owns(&self, actor: Entity) -> bool {
+        self.runs.contains_key(&actor)
+    }
     /// The NPC's decision built a change-site objective (row 8, or the
     /// change-site interrupt): its body runs from the next step on, towards
     /// the kept target site (-1 when no order ever wrote one).
@@ -182,6 +202,7 @@ impl ChangeSiteRuns {
                 stage: Stage::Objective,
                 since: frame,
                 door_forward: Vec3::Z,
+                house_exit: None,
             },
         );
     }
@@ -231,21 +252,29 @@ fn door_walk(world: &mut World, actor: Entity, unit: u32, frame: u32) -> DoorWal
     if world.get::<ChangeSiteWalking>(actor).is_none() {
         return begin_door_walk(world, actor, unit, frame);
     }
-    let outcome = world.get::<RouteStops>(actor).and_then(|route| route.outcome);
+    let outcome = world
+        .get::<RouteStops>(actor)
+        .and_then(|route| route.outcome);
     let arrived = match outcome {
         Some(crate::npc::RouteOutcome::Arrived) => {
             info!("[npc-change-site] unit={unit} frame={frame} MoveAsync(own door): arrived");
             true
         }
         Some(crate::npc::RouteOutcome::Stopped) => {
-            warn!("[npc-change-site] unit={unit} frame={frame} MoveAsync(own door): the route stopped without arriving");
+            warn!(
+                "[npc-change-site] unit={unit} frame={frame} MoveAsync(own door): the route stopped without arriving"
+            );
             false
         }
         None => return DoorWalk::Running,
     };
     crate::npc::stop_movement(world, actor);
     world.entity_mut(actor).remove::<ChangeSiteWalking>();
-    if arrived { DoorWalk::Arrived } else { DoorWalk::Failed }
+    if arrived {
+        DoorWalk::Arrived
+    } else {
+        DoorWalk::Failed
+    }
 }
 
 /// Starts the door walk on the retained navigation of the NPC's own site.
@@ -355,13 +384,7 @@ fn begin_door_walk(world: &mut World, actor: Entity, unit: u32, frame: u32) -> D
 }
 
 /// `MoveNPC(npc, target)`. Returns whether the order took.
-pub fn move_npc(
-    world: &mut World,
-    actor: Entity,
-    unit: u32,
-    target: i32,
-    frame: u32,
-) -> bool {
+pub fn move_npc(world: &mut World, actor: Entity, unit: u32, target: i32, frame: u32) -> bool {
     let (cancelled, owed) = world.resource_scope(
         |world, mut groups: Mut<crate::npc_fixture_talk::FixtureTalkGroups>| {
             crate::npc_fixture_talk::try_cancel_current(world, &mut groups, actor, frame)
@@ -416,6 +439,7 @@ pub fn move_npc(
             stage: Stage::Ordered,
             since: frame,
             door_forward: Vec3::Z,
+            house_exit: None,
         },
     );
     info!(
@@ -426,7 +450,8 @@ pub fn move_npc(
             String::new()
         },
         match door {
-            Some((position, _)) => format!("({:.2},{:.2},{:.2})", position.x, position.y, position.z),
+            Some((position, _)) =>
+                format!("({:.2},{:.2},{:.2})", position.x, position.y, position.z),
             None => "that site is not loaded here".to_owned(),
         }
     );
@@ -454,8 +479,12 @@ fn door_point(world: &mut World, site: Option<i32>) -> Option<(Vec3, Vec3)> {
     let loaded = world
         .get_resource::<crate::site::SiteActive>()
         .and_then(|site| residency::site_type_value(&site.site_type));
-    if site.is_none() || site != loaded {
-        return None;
+    if site != loaded {
+        let name = *residency::SITE_TYPES.get(site? as usize)?;
+        return world
+            .get_resource::<residency::SiteNavigation>()?
+            .get(name)?
+            .door;
     }
     let point = match site? {
         0 => match crate::fixture_gimmick::house_door::find_house(world) {
@@ -517,10 +546,15 @@ fn end_run(world: &mut World, actor: Entity) {
     world.resource_mut::<ChangeSiteRuns>().runs.remove(&actor);
     world.entity_mut(actor).remove::<ChangeSiteClip>();
     world.entity_mut(actor).remove::<ChangeSiteWalking>();
+    world.entity_mut(actor).remove::<ExitMove>();
 }
 
 /// `ForceUpdateObjective` from inside the objective, which then ends.
 fn force_update_objective(world: &mut World, actor: Entity, frame: u32) {
+    if crate::npc_objective::events::enrolled(world, actor) {
+        crate::npc_objective::events::complete(world, actor);
+        return;
+    }
     if let Some(mut mind) = world.get_mut::<ObjectiveMind>(actor) {
         crate::npc_fixture_talk::model_force_update(&mut mind, frame);
     }
@@ -552,9 +586,9 @@ fn step(world: &mut World, actor: Entity, frame: u32) {
     // Another owner cancelled the objective (a draft, a forced action): the
     // change-site objective has ended; the state's steps stop with it.
     if !matches!(stage, Stage::Ordered) {
-        let running = world.get::<ObjectiveMind>(actor).is_some_and(|mind| {
-            mind.current == Some(ObjectiveType::ChangeSite) && !mind.cancelled
-        });
+        let running = world
+            .get::<ObjectiveMind>(actor)
+            .is_some_and(|mind| mind.current == Some(ObjectiveType::ChangeSite) && !mind.cancelled);
         if !running {
             if world.get::<ChangeSiteClip>(actor).is_some() {
                 end_clip(world, actor, unit);
@@ -562,7 +596,9 @@ fn step(world: &mut World, actor: Entity, frame: u32) {
             if let Some(mut visibility) = world.get_mut::<Visibility>(actor) {
                 visibility.set_if_neq(Visibility::Inherited);
             }
-            info!("[npc-change-site] unit={unit} frame={frame} the change-site objective was cancelled by another owner: its state steps stop");
+            info!(
+                "[npc-change-site] unit={unit} frame={frame} the change-site objective was cancelled by another owner: its state steps stop"
+            );
             world.entity_mut(actor).remove::<ChangeSiteWalking>();
             world.resource_mut::<ChangeSiteRuns>().runs.remove(&actor);
             return;
@@ -617,6 +653,11 @@ fn step(world: &mut World, actor: Entity, frame: u32) {
                 }
                 DoorWalk::Arrived => {}
             }
+            if crate::npc_objective::events::enrolled(world, actor)
+                && !crate::npc_objective::events::begin_change_site(world, actor)
+            {
+                return;
+            }
             change_state(world, actor, NpcAction::ChangeSite);
             let start = if target == 0 {
                 // HomeSiteEnter takes its start position before the waits.
@@ -647,8 +688,17 @@ fn step(world: &mut World, actor: Entity, frame: u32) {
             };
             info!(
                 "[npc-change-site] unit={unit} frame={frame} change-site objective on target {target} ({target_name}): MoveAsync(own door) over, ChangeStatus(ChangeSite); {} starts, start position {:?}",
-                if target == 0 { "HomeSiteEnter" } else { "FloorEnter" },
-                start.or_else(|| world.resource::<ChangeSiteRuns>().start_positions.get(&actor).copied())
+                if target == 0 {
+                    "HomeSiteEnter"
+                } else {
+                    "FloorEnter"
+                },
+                start
+                    .or_else(|| world
+                        .resource::<ChangeSiteRuns>()
+                        .start_positions
+                        .get(&actor)
+                        .copied())
                     .unwrap_or(Vec3::ZERO),
             );
             set_stage(world, actor, Stage::WaitPlayerLeaveDoor, frame);
@@ -656,7 +706,8 @@ fn step(world: &mut World, actor: Entity, frame: u32) {
         Stage::WaitPlayerLeaveDoor => {
             let start = start_position(world, actor);
             let player = player_position(world);
-            if player.is_some_and(|player| law::clear_of_door(player.to_array(), start.to_array())) {
+            if player.is_some_and(|player| law::clear_of_door(player.to_array(), start.to_array()))
+            {
                 set_stage(world, actor, Stage::WaitOtherNpcLeaveDoor, frame);
             }
         }
@@ -681,7 +732,51 @@ fn step(world: &mut World, actor: Entity, frame: u32) {
             if !can_show_entry_reaction(world) {
                 return;
             }
-            // The leaving leg runs on the site it leaves (not run here).
+            begin_exit(world, actor, unit, frame);
+        }
+        Stage::ExitMove => {
+            let Some(mut movement) = world.entity_mut(actor).take::<ExitMove>() else {
+                return;
+            };
+            let dt = world.resource::<crate::npc_clock::NpcClock>().delta();
+            let (pose, phase, done) = movement.0.step(dt);
+            if crate::npc_fixture_activity::set_pose(world, actor, pose).is_err() {
+                return;
+            }
+            if let Some(mut current) = world.get_mut::<crate::npc::MotionPhase>(actor) {
+                *current = phase;
+            }
+            if done {
+                begin_exit_turn(world, actor, unit, frame);
+            } else {
+                world.entity_mut(actor).insert(movement);
+            }
+        }
+        Stage::ExitStart => exit_clip(world, actor, unit, frame),
+        Stage::ExitClip { node } => {
+            let dt = world.resource::<crate::npc_clock::NpcClock>().delta();
+            let mut door = world
+                .resource_mut::<ChangeSiteRuns>()
+                .runs
+                .get_mut(&actor)
+                .and_then(|r| r.house_exit.take());
+            let door_done = door.as_mut().is_none_or(|p| p.tick(world, frame, dt));
+            if let Some(run) = world.resource_mut::<ChangeSiteRuns>().runs.get_mut(&actor) {
+                run.house_exit = door;
+            }
+            if !clip_finished(world, actor, node) || !door_done {
+                return;
+            }
+            let own = world
+                .get::<NpcActions>(actor)
+                .and_then(|a| residency::site_type_value(&a.site_type));
+            if own != Some(0) && own == player_site(world) {
+                crate::room_door_port::close(world);
+            }
+            end_clip(world, actor, unit);
+            set_stage(world, actor, Stage::PlaceAtTarget, frame);
+        }
+        Stage::PlaceAtTarget => {
             let entry = entry_point(world, target);
             let Some((position, forward)) = entry else {
                 warn!(
@@ -709,7 +804,14 @@ fn step(world: &mut World, actor: Entity, frame: u32) {
                 // * 0.01, rotate time, out-quart), awaited.
                 let towards = position + forward * DOOR_LOOK_OFFSET;
                 if begin_turn(world, actor, unit, towards, None, frame) {
-                    set_stage(world, actor, Stage::Turning { next: AfterTurn::HomeClip }, frame);
+                    set_stage(
+                        world,
+                        actor,
+                        Stage::Turning {
+                            next: AfterTurn::HomeClip,
+                        },
+                        frame,
+                    );
                 } else {
                     home_clip(world, actor, unit, frame);
                 }
@@ -734,7 +836,14 @@ fn step(world: &mut World, actor: Entity, frame: u32) {
                 .unwrap_or(Vec3::Z);
             let towards = position + forward * DOOR_LOOK_OFFSET;
             if begin_turn(world, actor, unit, towards, Some(0.0), frame) {
-                set_stage(world, actor, Stage::Turning { next: AfterTurn::FloorKnock }, frame);
+                set_stage(
+                    world,
+                    actor,
+                    Stage::Turning {
+                        next: AfterTurn::FloorKnock,
+                    },
+                    frame,
+                );
             } else {
                 floor_knock(world, actor, unit, frame);
             }
@@ -743,11 +852,14 @@ fn step(world: &mut World, actor: Entity, frame: u32) {
             if world.get::<crate::npc_look_at::NpcLookAt>(actor).is_some() {
                 return;
             }
-            info!("[npc-change-site] unit={unit} frame={frame} entry turn done (the idle clip after it is the motion driver's; its wait is taken as none)");
+            info!(
+                "[npc-change-site] unit={unit} frame={frame} entry turn done (the idle clip after it is the motion driver's; its wait is taken as none)"
+            );
             match next {
                 AfterTurn::HomeClip => home_clip(world, actor, unit, frame),
                 AfterTurn::FloorKnock => floor_knock(world, actor, unit, frame),
                 AfterTurn::EntryTweet => entry_tweet(world, actor, unit, frame),
+                AfterTurn::ExitClip => exit_clip(world, actor, unit, frame),
             }
         }
         Stage::KnockWait => {
@@ -767,7 +879,9 @@ fn step(world: &mut World, actor: Entity, frame: u32) {
                 }
                 return;
             }
-            info!("[npc-change-site] unit={unit} frame={frame} OpenDoorAsync done (the open clip's length has passed)");
+            info!(
+                "[npc-change-site] unit={unit} frame={frame} OpenDoorAsync done (the open clip's length has passed)"
+            );
             floor_enter_after_door(world, actor, unit, frame);
         }
         Stage::EntryClip { node, shown } => {
@@ -785,7 +899,9 @@ fn step(world: &mut World, actor: Entity, frame: u32) {
             }
             end_clip(world, actor, unit);
             if target == 0 {
-                info!("[npc-change-site] unit={unit} frame={frame} HomeSiteEnter done (no entry tweet on home)");
+                info!(
+                    "[npc-change-site] unit={unit} frame={frame} HomeSiteEnter done (no entry tweet on home)"
+                );
                 set_stage(world, actor, Stage::SetupDone, frame);
                 return;
             }
@@ -827,10 +943,142 @@ fn step(world: &mut World, actor: Entity, frame: u32) {
             // TryWaitForFirstVisitRoom saw the site change end:
             // ForceUpdateObjective, and the objective ends.
             force_update_objective(world, actor, frame);
-            info!("[npc-change-site] unit={unit} frame={frame} change-site objective ends: ForceUpdateObjective");
+            info!(
+                "[npc-change-site] unit={unit} frame={frame} change-site objective ends: ForceUpdateObjective"
+            );
             end_run(world, actor);
         }
     }
+}
+
+fn begin_exit(world: &mut World, actor: Entity, unit: u32, frame: u32) {
+    let own = world
+        .get::<NpcActions>(actor)
+        .and_then(|a| residency::site_type_value(&a.site_type));
+    let Some((door, forward)) = door_point(world, own) else {
+        return;
+    };
+    if let Some(run) = world.resource_mut::<ChangeSiteRuns>().runs.get_mut(&actor) {
+        run.door_forward = forward;
+    }
+    if own == Some(0) {
+        let Some(pose) = world.get::<Transform>(actor).copied() else {
+            return;
+        };
+        if pose.translation.distance(door) > moly_law::objective::TILE_SCALE {
+            let Some(speed) = world.get::<crate::npc::WalkSpeed>(actor).map(|s| s.0) else {
+                return;
+            };
+            let rotation = Quat::from_rotation_y(forward.x.atan2(forward.z));
+            let Ok(movement) =
+                crate::npc_fixture_activity::LocalMove::new(pose, door, rotation, speed)
+            else {
+                return;
+            };
+            world.entity_mut(actor).insert(ExitMove(movement));
+            set_stage(world, actor, Stage::ExitMove, frame);
+            return;
+        }
+    }
+    begin_exit_turn(world, actor, unit, frame);
+}
+
+fn begin_exit_turn(world: &mut World, actor: Entity, unit: u32, frame: u32) {
+    crate::npc::stop_movement(world, actor);
+    let Some(position) = world.get::<Transform>(actor).map(|t| t.translation) else {
+        return;
+    };
+    let home = world
+        .get::<NpcActions>(actor)
+        .is_some_and(|a| residency::site_type_value(&a.site_type) == Some(0));
+    let forward = world.resource::<ChangeSiteRuns>().runs[&actor].door_forward;
+    let towards = position
+        + forward
+            * if home {
+                DOOR_LOOK_OFFSET
+            } else {
+                -DOOR_LOOK_OFFSET
+            };
+    if begin_turn(world, actor, unit, towards, None, frame) {
+        set_stage(
+            world,
+            actor,
+            Stage::Turning {
+                next: AfterTurn::ExitClip,
+            },
+            frame,
+        );
+    } else {
+        exit_clip(world, actor, unit, frame);
+    }
+}
+
+fn exit_clip(world: &mut World, actor: Entity, unit: u32, frame: u32) {
+    let own = world
+        .get::<NpcActions>(actor)
+        .and_then(|a| residency::site_type_value(&a.site_type));
+    let on_site = own == player_site(world);
+    let home = own == Some(0);
+    let house = if home && on_site {
+        match crate::fixture_gimmick::house_door::find_house(world) {
+            crate::fixture_gimmick::house_door::HouseLookup::Found(house) => Some(house),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let program = if home {
+        house
+            .as_ref()
+            .and_then(|h| h.npc_exit_program().ok())
+            .or_else(|| {
+                world
+                    .get_resource::<residency::SiteNavigation>()?
+                    .get(residency::SITE_TYPES[0])?
+                    .house_exit
+                    .clone()
+            })
+    } else {
+        None
+    };
+    if home && program.is_none() {
+        set_stage(world, actor, Stage::ExitStart, frame);
+        return;
+    }
+    start_clip(
+        world,
+        actor,
+        unit,
+        if home {
+            HOME_EXIT_CLIP
+        } else {
+            FLOOR_EXIT_CLIP
+        },
+        frame,
+        true,
+    );
+    let node = match world.resource::<ChangeSiteRuns>().runs[&actor].stage {
+        Stage::EntryClip { node, .. } => node,
+        _ => {
+            set_stage(world, actor, Stage::ExitStart, frame);
+            return;
+        }
+    };
+    if let Some(program) = program {
+        let playback = crate::fixture_gimmick::house_door::NpcExitPlayback::start(
+            world,
+            program,
+            house.as_ref(),
+            frame,
+        );
+        if let Some(run) = world.resource_mut::<ChangeSiteRuns>().runs.get_mut(&actor) {
+            run.house_exit = Some(playback);
+        }
+    } else if on_site {
+        push_se(world, "se_door_open");
+        crate::room_door_port::open(world);
+    }
+    set_stage(world, actor, Stage::ExitClip { node }, frame);
 }
 
 /// Starts an awaited entry turn: the look-at tween towards `towards` over
@@ -884,13 +1132,23 @@ fn begin_turn(
 fn home_clip(world: &mut World, actor: Entity, unit: u32, frame: u32) {
     use crate::fixture_gimmick::house_door::{self, HouseLookup, HouseTrigger};
     match house_door::find_house(world) {
-        HouseLookup::Found(house) => match house_door::set_trigger(world, &house, HouseTrigger::NpcOn) {
-            Ok(()) => info!("[npc-change-site] unit={unit} frame={frame} house SetAnimationTrigger(NPCOn)"),
-            Err(reason) => warn!("[npc-change-site] unit={unit} frame={frame} house SetAnimationTrigger(NPCOn) refused: {reason}"),
-        },
-        HouseLookup::Absent => info!("[npc-change-site] unit={unit} frame={frame} house SetAnimationTrigger(NPCOn): no house placed"),
+        HouseLookup::Found(house) => {
+            match house_door::set_trigger(world, &house, HouseTrigger::NpcOn) {
+                Ok(()) => info!(
+                    "[npc-change-site] unit={unit} frame={frame} house SetAnimationTrigger(NPCOn)"
+                ),
+                Err(reason) => warn!(
+                    "[npc-change-site] unit={unit} frame={frame} house SetAnimationTrigger(NPCOn) refused: {reason}"
+                ),
+            }
+        }
+        HouseLookup::Absent => info!(
+            "[npc-change-site] unit={unit} frame={frame} house SetAnimationTrigger(NPCOn): no house placed"
+        ),
         HouseLookup::Pending(reason) | HouseLookup::Failed(reason) => {
-            warn!("[npc-change-site] unit={unit} frame={frame} house SetAnimationTrigger(NPCOn) not set: {reason}")
+            warn!(
+                "[npc-change-site] unit={unit} frame={frame} house SetAnimationTrigger(NPCOn) not set: {reason}"
+            )
         }
     }
     start_clip(world, actor, unit, HOME_ENTER_CLIP, frame, false);
@@ -906,7 +1164,9 @@ fn floor_knock(world: &mut World, actor: Entity, unit: u32, frame: u32) {
         .and_then(|actions| residency::site_type_value(&actions.site_type));
     if own == player_site(world) {
         push_owned_se(world, actor, "se_knock_door");
-        info!("[npc-change-site] unit={unit} frame={frame} se_knock_door, awaited until its playback is over");
+        info!(
+            "[npc-change-site] unit={unit} frame={frame} se_knock_door, awaited until its playback is over"
+        );
         set_stage(world, actor, Stage::KnockWait, frame);
     } else {
         floor_door(world, actor, unit, frame, false);
@@ -946,7 +1206,9 @@ fn floor_door(world: &mut World, actor: Entity, unit: u32, frame: u32, on_site: 
             "[npc-change-site] unit={unit} frame={frame} se_door_open (not awaited), OpenDoorAsync awaited"
         );
     } else {
-        info!("[npc-change-site] unit={unit} frame={frame} OpenDoorAsync awaited (off the player's site: no sounds)");
+        info!(
+            "[npc-change-site] unit={unit} frame={frame} OpenDoorAsync awaited (off the player's site: no sounds)"
+        );
     }
     crate::room_door_port::open(world);
     let wait = crate::room_door_port::OpenWait::new(u64::from(frame));
@@ -968,7 +1230,9 @@ fn on_entry_site_end(world: &mut World, actor: Entity, unit: u32, frame: u32) {
     if let Some(mut mind) = world.get_mut::<ObjectiveMind>(actor) {
         mind.skip_next_rest = true;
     }
-    info!("[npc-change-site] unit={unit} frame={frame} OnEntrySite done: ImmediatelyExecuteNextObjective");
+    info!(
+        "[npc-change-site] unit={unit} frame={frame} OnEntrySite done: ImmediatelyExecuteNextObjective"
+    );
     set_stage(world, actor, Stage::SetupDone, frame);
 }
 
@@ -1079,7 +1343,9 @@ fn start_clip(world: &mut World, actor: Entity, unit: u32, clip: &str, frame: u3
             set_stage(world, actor, Stage::EntryClip { node, shown }, frame);
         }
         None => {
-            warn!("[npc-change-site] unit={unit} frame={frame} PlayAnimation({clip}): the motion library or the NPC's player is not ready; the clip is skipped");
+            warn!(
+                "[npc-change-site] unit={unit} frame={frame} PlayAnimation({clip}): the motion library or the NPC's player is not ready; the clip is skipped"
+            );
             if let Some(mut visibility) = world.get_mut::<Visibility>(actor) {
                 visibility.set_if_neq(Visibility::Inherited);
             }
@@ -1163,7 +1429,9 @@ fn show_entry_tweet(
         .map(|row| (row.id, row.tweet_id))
         .collect();
     if rows.is_empty() {
-        info!("[npc-change-site] unit={unit} frame={frame} ShowTweet: no site-entry tweet of this character");
+        info!(
+            "[npc-change-site] unit={unit} frame={frame} ShowTweet: no site-entry tweet of this character"
+        );
         return None;
     }
     let len = rows.len();
@@ -1174,7 +1442,9 @@ fn show_entry_tweet(
     let (row_id, tweet_id) = rows[index];
     let tables = world.get_resource::<crate::npc_tweet::TweetTables>()?;
     let Some(tweet) = tables.tweet(tweet_id) else {
-        info!("[npc-change-site] unit={unit} frame={frame} ShowTweet: tweet {tweet_id} has no master row");
+        info!(
+            "[npc-change-site] unit={unit} frame={frame} ShowTweet: tweet {tweet_id} has no master row"
+        );
         return None;
     };
     let text = tweet.text.clone();
@@ -1231,6 +1501,8 @@ pub fn cancel_on_site_change(world: &mut World, mut last: Local<Option<String>>)
             end_clip(world, actor, unit);
         }
         world.resource_mut::<ChangeSiteRuns>().runs.remove(&actor);
-        info!("[npc-change-site] unit={unit} frame={frame} the loaded site changed: the change-site objective is cancelled (OnCancel: Idle)");
+        info!(
+            "[npc-change-site] unit={unit} frame={frame} the loaded site changed: the change-site objective is cancelled (OnCancel: Idle)"
+        );
     }
 }

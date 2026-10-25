@@ -40,6 +40,7 @@ pub struct Navigation {
     pub walk: crate::walk_face::WalkFace,
     pub objective: crate::npc_objective::ObjectiveFace,
     pub door: Option<(Vec3, Vec3)>,
+    pub house_exit: Option<crate::fixture_gimmick::house_door::NpcExitProgram>,
 }
 
 impl SiteNavigation {
@@ -64,24 +65,39 @@ pub fn retain_navigation(world: &mut World) {
     }
     let (Some(walk), Some(objective)) = (
         world.get_resource::<crate::walk_face::WalkFace>().cloned(),
-        world.get_resource::<crate::npc_objective::ObjectiveFace>().cloned(),
+        world
+            .get_resource::<crate::npc_objective::ObjectiveFace>()
+            .cloned(),
     ) else {
         return;
     };
     if walk.generation() != objective.navigation_generation() {
         return;
     }
+    let mut house_exit = None;
     let point = match site_type_value(&name) {
         Some(0) => match crate::fixture_gimmick::house_door::find_house(world) {
-            crate::fixture_gimmick::house_door::HouseLookup::Found(house) => house.inside_door,
+            crate::fixture_gimmick::house_door::HouseLookup::Found(house) => {
+                house_exit = house.npc_exit_program().ok();
+                house.inside_door
+            }
             _ => None,
         },
         Some(1..=3) => crate::room_door_port::inside_point(world),
         _ => None,
     };
-    let door = point.and_then(|point| world.get::<GlobalTransform>(point))
+    let door = point
+        .and_then(|point| world.get::<GlobalTransform>(point))
         .map(|transform| (transform.translation(), transform.rotation() * Vec3::Z));
-    world.resource_mut::<SiteNavigation>().0.insert(name.clone(), Navigation { walk, objective, door });
+    world.resource_mut::<SiteNavigation>().0.insert(
+        name.clone(),
+        Navigation {
+            walk,
+            objective,
+            door,
+            house_exit,
+        },
+    );
     info!("[npc-residency] retained navigation of {name}, door {door:?}");
 }
 
@@ -177,7 +193,11 @@ pub fn mark_away(
             site_type_value(&actions.site_type),
             site.site_type,
             site_type_value(&site.site_type),
-            if npc_update_runs(&site.site_type) { "runs" } else { "off" },
+            if npc_update_runs(&site.site_type) {
+                "runs"
+            } else {
+                "off"
+            },
         );
     }
 }

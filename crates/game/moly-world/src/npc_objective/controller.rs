@@ -52,16 +52,16 @@ use moly_law::npc_hfsm::lower_idle::IdleLower;
 use moly_law::npc_hfsm::plan::NpcPlan;
 use moly_law::npc_hfsm::timing::{ACTION_STATE_TALK, AVOID_NEAR_MAX, MAX_TRANSITIONS_PER_FRAME};
 use moly_law::npc_hfsm::upper::{
-    decide_upper, ChangeSiteUpper, MoveToFixtureUpper, MoveToPositionUpper, MoveToTargetUpper,
-    RandomWalkUpper, RestUpper, UpperChoice, WalkPoll, WalkStart,
+    ChangeSiteUpper, MoveToFixtureUpper, MoveToPositionUpper, MoveToTargetUpper, RandomWalkUpper,
+    RestUpper, UpperChoice, WalkPoll, WalkStart, decide_upper,
 };
 use moly_law::npc_hfsm::upper_walk::{self, RandomWalkDraw};
 use moly_law::npc_hfsm::{
-    lower_state_for_upper, LowerState, NpcPhase, UpperResult, UpperState, UpperStateWeight,
-    UpperType, INACTIVE_RECOVERY_SECONDS,
+    INACTIVE_RECOVERY_SECONDS, LowerState, NpcPhase, UpperResult, UpperState, UpperStateWeight,
+    UpperType, lower_state_for_upper,
 };
 
-use super::{engine_float_draw, MemberRng};
+use super::{MemberRng, engine_float_draw};
 
 /// One machine line, written only under the trace switch: `debug!` when the
 /// build's filter keeps its level, and the same text as an `info!` line when
@@ -110,6 +110,8 @@ pub struct NpcRecoveryTimer(pub f32);
 pub struct NpcHfsmFlags {
     pub has_started: bool,
     pub suppress_recovery: bool,
+    /// The data/geometry factory owes this actor one decision.
+    pub needs_plan: bool,
 }
 
 /// `_isDisplayOnly`: a character owned by another player runs no decisions
@@ -129,6 +131,10 @@ pub struct NpcHfsmActor {
 /// tutorial branch does).
 #[derive(Component, Debug, Clone, Default, PartialEq)]
 pub struct NpcUpperWeights(pub Vec<UpperStateWeight>);
+
+/// InitializeHFSM in tutorial installs weighted factories instead of a decider.
+#[derive(Component)]
+pub struct NpcWeightedDecisions;
 
 /// The upper state object the machine holds, built by the presenter's
 /// `CreateUpperState`. It carries the base's entry fields (`IsComplete`,
@@ -186,9 +192,7 @@ impl UpperStart {
     /// A walk whose route the host started, completing at that distance.
     pub fn walking(stopping_distance: f32) -> Self {
         Self {
-            walk: WalkStart::Running {
-                stopping_distance,
-            },
+            walk: WalkStart::Running { stopping_distance },
             approach: None,
         }
     }
@@ -240,9 +244,7 @@ impl UpperBody {
         let body = match state {
             UpperState::Rest => UpperBody::Marker(RestUpper::rest()),
             UpperState::Stay => UpperBody::Marker(RestUpper::stay()),
-            UpperState::RandomWalk => {
-                UpperBody::RandomWalk(RandomWalkUpper::enter(goal, walk))
-            }
+            UpperState::RandomWalk => UpperBody::RandomWalk(RandomWalkUpper::enter(goal, walk)),
             UpperState::MoveToPosition => {
                 // `CreateUpperState(6)`: a move that does not tolerate a
                 // missing route.
@@ -566,12 +568,10 @@ impl Navigator {
 }
 
 /// The five components of `entity` the walk writer runs on, copied out.
-fn mover_parts(world: &World, entity: Entity) -> Option<Navigator> {
+pub(super) fn mover_parts(world: &World, entity: Entity) -> Option<Navigator> {
     Some(Navigator {
         route: world.get::<crate::npc::RouteStops>(entity)?.clone(),
-        path: crate::npc::PathSlot(
-            world.get::<crate::npc::PathSlot>(entity)?.0.clone(),
-        ),
+        path: crate::npc::PathSlot(world.get::<crate::npc::PathSlot>(entity)?.0.clone()),
         walk: crate::npc::WalkState(world.get::<crate::npc::WalkState>(entity)?.0.clone()),
         stuck: *world.get::<crate::npc::StuckBaseline>(entity)?,
         motion: *world.get::<crate::npc::MotionPhase>(entity)?,
@@ -579,7 +579,7 @@ fn mover_parts(world: &World, entity: Entity) -> Option<Navigator> {
 }
 
 /// The navigator back on the character.
-fn put_mover(world: &mut World, entity: Entity, navigator: Navigator) {
+pub(super) fn put_mover(world: &mut World, entity: Entity, navigator: Navigator) {
     if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
         entity_mut.insert((
             navigator.route,
@@ -602,7 +602,11 @@ fn start_walk(machine: &mut Machine<'_>, state: UpperState, rng: &mut MemberRng)
     let Some(face) = machine.face else {
         return UpperWalk::unstarted(machine.position);
     };
-    let Some(from) = machine.navigator.as_ref().map(|navigator| navigator.walk.0.position) else {
+    let Some(from) = machine
+        .navigator
+        .as_ref()
+        .map(|navigator| navigator.walk.0.position)
+    else {
         return UpperWalk::unstarted(machine.position);
     };
     let unit = machine.unit;
@@ -761,8 +765,10 @@ pub fn trace_enabled() -> bool {
 /// One `OnUpdate` of one machine (`OnUpdate` of the controller): the budget
 /// of the frame is zeroed, then the phase's body runs.
 fn advance(machine: &mut Machine<'_>, frame: u32, dt: f32, rng: &mut MemberRng) {
-    machine.budget.frame = frame;
-    machine.budget.count = 0;
+    if machine.budget.frame != frame {
+        machine.budget.frame = frame;
+        machine.budget.count = 0;
+    }
     if machine.action_state == ACTION_STATE_TALK {
         // The talk short-circuit: the machine does not advance. TryCancel is
         // asked only from the Upper phase, and it answers only in the Lower or
@@ -916,9 +922,19 @@ pub fn report_snapshot(
 ) {
     let mut rows: Vec<NpcHfsmRow> = npcs
         .iter()
-        .map(|(unit, phase, budget, recovery, flags, actor, display_only)| {
-            NpcHfsmRow::of(unit.0, *phase, *budget, *recovery, *flags, *actor, display_only)
-        })
+        .map(
+            |(unit, phase, budget, recovery, flags, actor, display_only)| {
+                NpcHfsmRow::of(
+                    unit.0,
+                    *phase,
+                    *budget,
+                    *recovery,
+                    *flags,
+                    *actor,
+                    display_only,
+                )
+            },
+        )
         .collect();
     rows.sort_by_key(|row| row.unit);
     if report.0 == rows {
@@ -991,6 +1007,14 @@ fn enter_transition(budget: &mut NpcTransitionBudget) -> bool {
 /// `DecideAndTransitionToNext` with no decider plan: `DecideUpperState`,
 /// then `TransitionToUpper`.
 fn decide_and_transition(machine: &mut Machine<'_>, rng: &mut MemberRng) {
+    if machine.face.is_some() {
+        machine.flags.needs_plan = true;
+        machine.actor.upper = None;
+        machine.actor.lower = None;
+        *machine.lower_clock = None;
+        machine.phase.0 = NpcPhase::Inactive;
+        return;
+    }
     // `DecideUpperState`'s one draw is `Random.Range(0.0f, total)` on the
     // character's generator.
     let mut draw = |total: f32| super::engine_float_draw(rng, total);
@@ -998,7 +1022,9 @@ fn decide_and_transition(machine: &mut Machine<'_>, rng: &mut MemberRng) {
     match choice.draw {
         Some(drawn) => hfsm_trace!(
             "[npc-hfsm] unit={} DecideUpperState: {:?} (rand={drawn:.2}/{:.1})",
-            machine.unit, choice.state, choice.total
+            machine.unit,
+            choice.state,
+            choice.total
         ),
         None if machine.weights.0.is_empty() => hfsm_trace!(
             "[npc-hfsm] unit={} DecideUpperState: weights empty → RandomWalk",
@@ -1027,9 +1053,9 @@ fn create_upper(state: UpperType) -> UpperState {
         UpperType::MoveToPlayer => UpperState::MoveToPlayer,
         UpperType::MoveToNPC => UpperState::MoveToNpc { npc: 0 },
         UpperType::Rest => UpperState::Rest,
-        UpperType::ChangeSite => UpperState::ChangeSite,
+        UpperType::ChangeSite => UpperState::RandomWalk,
         UpperType::MoveToPosition => UpperState::MoveToPosition,
-        UpperType::Stay => UpperState::Stay,
+        UpperType::Stay => UpperState::RandomWalk,
     }
 }
 
@@ -1039,7 +1065,8 @@ fn transition_to_upper(machine: &mut Machine<'_>, choice: &UpperChoice, rng: &mu
     if !enter_transition(machine.budget) {
         hfsm_trace!(
             "[npc-hfsm] unit={} *** transition cap exceeded! transitions={} → Inactive ***",
-            machine.unit, machine.budget.count
+            machine.unit,
+            machine.budget.count
         );
         park_inactive(machine);
         return;
@@ -1196,7 +1223,7 @@ fn complete_upper(machine: &mut Machine<'_>, result: &UpperResult, rng: &mut Mem
             result.move_status
         );
         machine.actor.lower_override = None;
-        enter_rest_or_decide_next(machine, rng);
+        enter_rest_or_decide_next(machine);
         return;
     }
     let overridden = machine.actor.lower_override.take();
@@ -1211,8 +1238,7 @@ fn complete_upper(machine: &mut Machine<'_>, result: &UpperResult, rng: &mut Mem
                 // `IdleLowerState..ctor` draws one `UnityEngine.Random.Range(5.0f,
                 // 8.0f)` before the base constructor; the presenter's factory
                 // hands the drawn pause to the no-draw constructor.
-                let idle =
-                    IdleLower::with_draw(&mut |low, high| super::uni_draw(rng, low, high));
+                let idle = IdleLower::with_draw(&mut |low, high| super::uni_draw(rng, low, high));
                 hfsm_trace!(
                     "[npc-hfsm] unit={} idle duration={:.2}s drawn",
                     machine.unit,
@@ -1229,7 +1255,10 @@ fn complete_upper(machine: &mut Machine<'_>, result: &UpperResult, rng: &mut Mem
     *machine.lower_clock = Some(LowerClock::default());
     machine.phase.0 = NpcPhase::Lower;
     if from_override {
-        hfsm_trace!("[npc-hfsm] unit={} Lower generated (override): {kind:?}", machine.unit);
+        hfsm_trace!(
+            "[npc-hfsm] unit={} Lower generated (override): {kind:?}",
+            machine.unit
+        );
     } else {
         hfsm_trace!("[npc-hfsm] unit={} Lower generated: {kind:?}", machine.unit);
     }
@@ -1248,14 +1277,23 @@ fn enter_lower(machine: &mut Machine<'_>) {
             let enter = idle.enter();
             (enter.stop, enter.action_state)
         }
-        // The other lowers' enters (and their action state writes through the
-        // host's `npc_state` change) arrive with their bodies.
+        LowerState::Rest { .. } => {
+            machine
+                .actions
+                .begin_objective_rest(machine.rest, u64::from(machine.budget.frame));
+            (true, None)
+        }
         _ => (false, None),
     };
     if stop {
         machine.stop_walk();
     }
     if let Some(state) = action_state {
+        if state == 0 {
+            machine
+                .actions
+                .change(crate::npc::NpcAction::Idle, machine.rest);
+        }
         hfsm_trace!(
             "[npc-hfsm] unit={} ChangeStateTypeOnly({state})",
             machine.unit
@@ -1293,33 +1331,39 @@ fn update_lower_phase(machine: &mut Machine<'_>, dt: f32, rng: &mut MemberRng) {
     );
     machine.actor.lower = None;
     *machine.lower_clock = None;
+    if matches!(lower, LowerState::Rest { .. }) {
+        machine
+            .actions
+            .change(crate::npc::NpcAction::Idle, machine.rest);
+    }
     if machine.phase.0 == NpcPhase::Rest {
         // The rest phase goes straight back to the decision.
         decide_and_transition(machine, rng);
         return;
     }
-    enter_rest_or_decide_next(machine, rng);
+    enter_rest_or_decide_next(machine);
 }
 
 /// `EnterRestOrDecideNext`: a character that only displays parks; otherwise
-/// it rests for `max(PauseTime, 0)`, and a zero pause decides at once.
-fn enter_rest_or_decide_next(machine: &mut Machine<'_>, rng: &mut MemberRng) {
+/// it constructs Rest for `max(PauseTime, 0)`, including zero duration.
+fn enter_rest_or_decide_next(machine: &mut Machine<'_>) {
     if machine.display_only {
         park_inactive(machine);
         return;
     }
     let pause = machine.pause.max(0.0);
-    if pause <= 0.0 {
-        hfsm_trace!("[npc-hfsm] unit={} Rest start: duration=0, deciding at once", machine.unit);
-        decide_and_transition(machine, rng);
-        return;
-    }
     machine.phase.0 = NpcPhase::Rest;
     machine.actor.lower = Some(LowerState::Rest { duration: pause });
     *machine.lower_clock = Some(LowerClock::default());
     // `RestLowerState.OnEnter`: `Stop()`.
     machine.stop_walk();
-    hfsm_trace!("[npc-hfsm] unit={} Rest start: duration={pause:.1}s", machine.unit);
+    machine
+        .actions
+        .begin_objective_rest(machine.rest, u64::from(machine.budget.frame));
+    hfsm_trace!(
+        "[npc-hfsm] unit={} Rest start: duration={pause:.1}s",
+        machine.unit
+    );
 }
 
 /// `TransitionToPlan`: the budget pays first; the plan's `CreateUpper`
@@ -1335,7 +1379,8 @@ pub fn transition_to_plan(machine: &mut Machine<'_>, plan: &NpcPlan) {
     if !enter_transition(machine.budget) {
         hfsm_trace!(
             "[npc-hfsm] unit={} *** transition cap exceeded! transitions={} → Inactive ***",
-            machine.unit, machine.budget.count
+            machine.unit,
+            machine.budget.count
         );
         park_inactive(machine);
         return;
@@ -1367,14 +1412,19 @@ pub fn transition_to_plan(machine: &mut Machine<'_>, plan: &NpcPlan) {
 /// `UpdateInactivePhase`: the timer counts, and at 3.0 s the budget of the
 /// frame is zeroed and the character decides again.
 fn update_inactive_phase(machine: &mut Machine<'_>, frame: u32, dt: f32, rng: &mut MemberRng) {
-    if machine.display_only || !machine.flags.has_started || machine.flags.suppress_recovery {
+    if machine.display_only
+        || !machine.flags.has_started
+        || machine.flags.suppress_recovery
+        || machine.flags.needs_plan
+    {
         return;
     }
     machine.recovery.0 += dt;
     if machine.recovery.0 >= INACTIVE_RECOVERY_SECONDS {
         hfsm_trace!(
             "[npc-hfsm] unit={} Inactive auto-recovery: {:.1}s",
-            machine.unit, machine.recovery.0
+            machine.unit,
+            machine.recovery.0
         );
         machine.budget.frame = frame;
         machine.budget.count = 0;
@@ -1484,17 +1534,59 @@ fn machine_of(world: &World, entity: Entity) -> Option<MachineParts> {
 /// presenter pushed (empty outside the tutorial) and leaves the state it
 /// starts on the character; its walk needs the site's navigation, which the
 /// set-up does not hold here, so the walk starts unstarted.
+fn initialize_tutorial(world: &mut World, entity: Entity) -> bool {
+    if !world
+        .get_resource::<crate::server_panel::ServerPanel>()
+        .is_some_and(|p| p.is_tutorial())
+    {
+        return false;
+    }
+    let mut weights = NpcUpperWeights::default();
+    set_upper_weight(&mut weights, UpperType::RandomWalk, 5.0);
+    set_upper_weight(&mut weights, UpperType::MoveToFixture, 5.0);
+    set_upper_weight(&mut weights, UpperType::Rest, 2.0);
+    world
+        .entity_mut(entity)
+        .insert((NpcWeightedDecisions, weights));
+    if let Some(mut flags) = world.get_mut::<NpcHfsmFlags>(entity) {
+        flags.has_started = false;
+        flags.suppress_recovery = false;
+        flags.needs_plan = false;
+    }
+    super::events::tutorial::begin_waiting(world, entity, 0, None, true).is_ok()
+}
+
 pub fn start_in_world(world: &mut World, entity: Entity) {
-    let Some(unit) = world.get::<crate::npc::CharacterUnitId>(entity).map(|unit| unit.0) else {
+    let Some(unit) = world
+        .get::<crate::npc::CharacterUnitId>(entity)
+        .map(|unit| unit.0)
+    else {
         return;
     };
     if world.get::<NpcHfsmPhase>(entity).is_none() {
-        if let Some(walk) = world.get::<crate::npc::WalkState>(entity).map(|walk| walk.0.position) {
+        if let Some(walk) = world
+            .get::<crate::npc::WalkState>(entity)
+            .map(|walk| walk.0.position)
+        {
             log_constructed(unit, walk);
         }
         if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
             entity_mut.insert(NpcController::default());
         }
+    }
+    if world
+        .get_resource::<NpcHfsmScopeResource>()
+        .is_some_and(|s| s.0.enrols(unit))
+    {
+        if initialize_tutorial(world, entity) {
+            return;
+        }
+        if let Some(mut flags) = world.get_mut::<NpcHfsmFlags>(entity) {
+            flags.has_started = true;
+            flags.suppress_recovery = false;
+            flags.needs_plan = true;
+        }
+        return;
     }
     // The start's decision runs on the weights the presenter pushed (empty
     // outside the tutorial, so it draws nothing); the state it starts and its
@@ -1513,7 +1605,8 @@ pub fn start_in_world(world: &mut World, entity: Entity) {
     let position = world
         .get::<Transform>(entity)
         .map_or([0.0; 3], |transform| transform.translation.to_array());
-    let Some((mut phase, mut budget, mut recovery, mut flags, mut actor)) = machine_of(world, entity)
+    let Some((mut phase, mut budget, mut recovery, mut flags, mut actor)) =
+        machine_of(world, entity)
     else {
         return;
     };
@@ -1575,6 +1668,545 @@ pub fn start_in_world(world: &mut World, entity: Entity) {
     if let Some(navigator) = navigator {
         put_mover(world, entity, navigator);
     }
+}
+
+/// A fully selected objective, with its real navigation destination. The
+/// factory installs the route and presentation session before handing this
+/// ownership record to the controller.
+#[derive(Clone, Copy)]
+pub struct PreparedPlan {
+    pub upper: UpperState,
+    pub lower: LowerState,
+    pub destination: [f32; 3],
+    pub fixture_position: Option<[f32; 3]>,
+    pub preselected_general: bool,
+}
+
+impl PreparedPlan {
+    pub fn no_talk(position: [f32; 3]) -> Self {
+        Self {
+            upper: UpperState::Stay,
+            lower: LowerState::GeneralTalk,
+            destination: position,
+            fixture_position: None,
+            preselected_general: false,
+        }
+    }
+}
+
+pub fn force_interrupt_in_world(world: &mut World, entity: Entity, state: UpperType) -> bool {
+    if world.get::<NpcHfsmActor>(entity).is_none() {
+        return false;
+    }
+    super::events::exit(world, entity);
+    super::lower::exit(world, entity);
+    crate::npc::stop_movement(world, entity);
+    let frame = world.resource::<FrameCount>().0;
+    if let Some(mut flags) = world.get_mut::<NpcHfsmFlags>(entity) {
+        flags.has_started = true;
+        flags.suppress_recovery = false;
+        flags.needs_plan = false;
+    }
+    world.entity_mut(entity).insert((
+        NpcTransitionBudget { frame, count: 0 },
+        NpcRecoveryTimer(0.0),
+        NpcUpperBody(None),
+        NpcLowerClock(None),
+    ));
+    // start_weighted_upper must bypass ShouldReturnToTutorialWaiting for this
+    // explicit transition: its caller is not DecideAndTransitionToNext.
+    start_weighted_upper(world, entity, state, frame);
+    true
+}
+
+fn start_weighted_upper(world: &mut World, entity: Entity, requested: UpperType, frame: u32) {
+    let Some(position) = world
+        .get::<Transform>(entity)
+        .map(|t| t.translation.to_array())
+    else {
+        return;
+    };
+    let Some(mut rng) = world.get::<MemberRng>(entity).cloned() else {
+        return;
+    };
+    let target_actor = match requested {
+        UpperType::MoveToPlayer => world
+            .query_filtered::<Entity, With<crate::player::PlayerControlled>>()
+            .iter(world)
+            .next(),
+        UpperType::MoveToNPC => {
+            let mut selected = None;
+            let mut n = 0;
+            for other in world
+                .query_filtered::<Entity, With<crate::npc::CharacterUnitId>>()
+                .iter(world)
+                .filter(|other| *other != entity)
+            {
+                n += 1;
+                if super::engine_int_draw(&mut rng, n) == 0 {
+                    selected = Some(other);
+                }
+            }
+            selected
+        }
+        _ => None,
+    };
+    let upper = match requested {
+        UpperType::MoveToPlayer if target_actor.is_some() => UpperState::MoveToPlayer,
+        UpperType::MoveToNPC if target_actor.is_some() => UpperState::MoveToNpc {
+            npc: world
+                .get::<crate::npc::CharacterUnitId>(target_actor.unwrap())
+                .map_or(0, |u| u.0),
+        },
+        UpperType::Rest => UpperState::Rest,
+        UpperType::MoveToPosition => UpperState::MoveToPosition,
+        _ => UpperState::RandomWalk,
+    };
+    let target = if upper == UpperState::RandomWalk {
+        let others: Vec<_> = world
+            .query::<(Entity, &crate::npc::CharacterUnitId, &Transform)>()
+            .iter(world)
+            .filter(|(e, _, _)| *e != entity)
+            .map(|(_, _, t)| t.translation.to_array())
+            .collect();
+        let face = world.get_resource::<super::ObjectiveFace>();
+        upper_walk::pick_target(
+            &mut HostWalkDraw { rng: &mut rng },
+            position,
+            &others,
+            &mut |point, tolerance| face.and_then(|f| f.sample(point, tolerance)),
+        )
+    } else {
+        target_actor
+            .and_then(|e| world.get::<Transform>(e))
+            .map(|t| t.translation.to_array())
+            .unwrap_or(position)
+    };
+    world.entity_mut(entity).insert(rng);
+    if upper.has_mover() {
+        navigate_lower(world, entity, target, crate::npc::MOVE_GOAL_DISTANCE);
+    }
+    let lower = match upper {
+        UpperState::Rest => LowerState::Rest { duration: 5.0 },
+        UpperState::MoveToPlayer => LowerState::Greeting,
+        _ => LowerState::GeneralTalk,
+    };
+    apply_prepared(
+        world,
+        entity,
+        PreparedPlan {
+            upper,
+            lower,
+            destination: target,
+            fixture_position: None,
+            preselected_general: false,
+        },
+        frame,
+    );
+    if let Some(mut actor) = world.get_mut::<NpcHfsmActor>(entity) {
+        actor.lower_override = None;
+    }
+    if let Some(target) = target_actor {
+        world
+            .entity_mut(entity)
+            .insert(super::lower::ArrivalNpc(target));
+    }
+}
+
+#[derive(Resource, Default)]
+pub struct PreparedPlans {
+    pub plans: std::collections::HashMap<Entity, PreparedPlan>,
+    pub common: std::collections::HashMap<Entity, i32>,
+    pub weighted: std::collections::HashMap<Entity, UpperType>,
+    pub reactions: Vec<(Entity, i32, String)>,
+    pub reaction_members: std::collections::HashSet<u32>,
+    pub while_doing: Vec<(
+        Entity,
+        moly_law::talk::FixtureTalkRow,
+        Vec<(Entity, super::AiTalkData)>,
+    )>,
+}
+
+/// Direct presenter factory's short reservation, released at upper exit. It is
+/// distinct from a lower timeline's longer-lived future/slot reservations.
+#[derive(Resource, Default)]
+pub struct UpperFixtureReservations(
+    std::collections::HashMap<Entity, crate::fixture_activity_state::FixtureTarget>,
+);
+impl UpperFixtureReservations {
+    pub(crate) fn in_use(
+        &self,
+        target: &crate::fixture_activity_state::FixtureTarget,
+        actor: Entity,
+    ) -> bool {
+        self.0
+            .iter()
+            .any(|(owner, held)| *owner != actor && held == target)
+    }
+    pub(crate) fn reserve(
+        &mut self,
+        actor: Entity,
+        target: crate::fixture_activity_state::FixtureTarget,
+    ) {
+        self.0.insert(actor, target);
+    }
+}
+
+fn apply_prepared(world: &mut World, entity: Entity, plan: PreparedPlan, frame: u32) {
+    if super::events::owns(world, entity)
+        || world.get::<super::common::CommonMember>(entity).is_some()
+    {
+        return;
+    }
+    let Some(mut budget) = world.get_mut::<NpcTransitionBudget>(entity) else {
+        return;
+    };
+    if budget.frame != frame {
+        budget.frame = frame;
+        budget.count = 0;
+    }
+    if !enter_transition(&mut budget) {
+        if let Some(mut flags) = world.get_mut::<NpcHfsmFlags>(entity) {
+            flags.needs_plan = false;
+        }
+        world
+            .entity_mut(entity)
+            .insert((NpcHfsmPhase(NpcPhase::Inactive), NpcRecoveryTimer(0.0)));
+        return;
+    }
+    let position = world
+        .get::<Transform>(entity)
+        .map(|t| t.translation.to_array())
+        .unwrap_or(plan.destination);
+    world
+        .entity_mut(entity)
+        .remove::<super::lower::PreselectedGeneral>();
+    if plan.preselected_general {
+        world
+            .entity_mut(entity)
+            .insert(super::lower::PreselectedGeneral);
+    }
+    let route = world.get::<crate::npc::RouteStops>(entity);
+    let start = UpperStart {
+        walk: if matches!(plan.upper, UpperState::Stay | UpperState::Rest) {
+            WalkStart::NoRoute
+        } else if route.is_none() || world.get_resource::<super::ObjectiveFace>().is_none() {
+            WalkStart::NoAgent
+        } else if route.is_some_and(|r| r.outcome == Some(crate::npc::RouteOutcome::Stopped)) {
+            WalkStart::NoRoute
+        } else {
+            WalkStart::Running {
+                stopping_distance: route
+                    .and_then(|r| r.goal_distance())
+                    .unwrap_or(crate::npc::MOVE_GOAL_DISTANCE),
+            }
+        },
+        approach: plan.fixture_position.map(|at| FixtureApproach {
+            fixture_position: Some(at),
+            stopping_before: crate::npc::MOVE_GOAL_DISTANCE,
+        }),
+    };
+    world.entity_mut(entity).insert((
+        NpcHfsmPhase(NpcPhase::Upper),
+        NpcHfsmActor {
+            upper: Some(plan.upper),
+            lower: None,
+            lower_override: Some(plan.lower),
+        },
+        NpcUpperBody(Some(UpperBody::enter(
+            plan.upper,
+            start,
+            Some(plan.destination),
+            position,
+        ))),
+        NpcLowerClock(None),
+    ));
+    if let Some(mut flags) = world.get_mut::<NpcHfsmFlags>(entity) {
+        flags.needs_plan = false;
+    }
+}
+
+/// Complete an owned lower object and run the controller's pause boundary.
+/// Used by timeline, entry, communication and scene-event owners.
+pub fn finish_lower(world: &mut World, entity: Entity) {
+    super::events::exit(world, entity);
+    world
+        .resource_mut::<UpperFixtureReservations>()
+        .0
+        .remove(&entity);
+    let skip_rest = world
+        .get::<super::ObjectiveMind>(entity)
+        .is_some_and(|mind| mind.skip_next_rest)
+        || super::common::reserved(world, entity);
+    if let Some(mut mind) = world.get_mut::<super::ObjectiveMind>(entity) {
+        mind.skip_next_rest = false;
+    }
+    super::lower::exit(world, entity);
+    let pause = if skip_rest {
+        0.0
+    } else {
+        world
+            .get::<crate::npc::PauseSeconds>(entity)
+            .map_or(0.0, |p| p.0.max(0.0))
+    };
+    let display = world.get::<NpcDisplayOnly>(entity).is_some();
+    let stopped = world
+        .get::<NpcHfsmFlags>(entity)
+        .is_some_and(|f| f.suppress_recovery);
+    if !skip_rest && !display && !stopped {
+        world.entity_mut(entity).insert((
+            NpcHfsmPhase(NpcPhase::Rest),
+            NpcHfsmActor {
+                upper: None,
+                lower: Some(LowerState::Rest { duration: pause }),
+                lower_override: None,
+            },
+            NpcUpperBody(None),
+            NpcLowerClock(Some(LowerClock::default())),
+        ));
+        let frame = world.resource::<FrameCount>().0;
+        let mut q = world.query::<(&mut crate::npc::NpcActions, &mut crate::npc::RestLifecycle)>();
+        if let Ok((mut actions, mut rest)) = q.get_mut(world, entity) {
+            actions.begin_objective_rest(&mut rest, u64::from(frame));
+        }
+    } else {
+        world.entity_mut(entity).insert((
+            NpcHfsmPhase(NpcPhase::Inactive),
+            NpcHfsmActor::default(),
+            NpcUpperBody(None),
+            NpcLowerClock(None),
+        ));
+        if let Some(mut flags) = world.get_mut::<NpcHfsmFlags>(entity) {
+            flags.needs_plan = !display && !stopped;
+        }
+    }
+}
+
+/// A product event interrupts the current interruptible object and enters
+/// its lower state through the same frame transition budget.
+pub fn transition_event_lower(world: &mut World, entity: Entity, lower: LowerState) -> bool {
+    if world
+        .get::<NpcHfsmActor>(entity)
+        .is_some_and(|a| a.lower.is_some_and(|l| !l.flags().can_interrupt))
+        || world
+            .get::<crate::npc_fixture_activity::NpcFixtureAnimationOwner>(entity)
+            .is_some()
+    {
+        return false;
+    }
+    force_event_lower(world, entity, lower)
+}
+
+/// Appearance/cutscene producers use the native forced transition entry.
+pub fn force_event_lower(world: &mut World, entity: Entity, lower: LowerState) -> bool {
+    let frame = world.resource::<FrameCount>().0;
+    let Some(mut budget) = world.get_mut::<NpcTransitionBudget>(entity) else {
+        return false;
+    };
+    if budget.frame != frame {
+        budget.frame = frame;
+        budget.count = 0;
+    }
+    if !enter_transition(&mut budget) {
+        return false;
+    }
+    super::events::exit(world, entity);
+    super::lower::exit(world, entity);
+    world.resource_mut::<PreparedPlans>().plans.remove(&entity);
+    crate::npc::stop_movement(world, entity);
+    world.entity_mut(entity).insert((
+        NpcHfsmPhase(NpcPhase::Lower),
+        NpcHfsmActor {
+            upper: None,
+            lower: Some(lower),
+            lower_override: None,
+        },
+        NpcUpperBody(None),
+        NpcLowerClock(None),
+    ));
+    if let Some(mut flags) = world.get_mut::<NpcHfsmFlags>(entity) {
+        flags.needs_plan = false;
+    }
+    true
+}
+
+/// Starts the current lower's next navigation leg without exiting that lower
+/// or clearing its shared fixture/talk data.
+pub(crate) fn navigate_lower(
+    world: &mut World,
+    entity: Entity,
+    target: [f32; 3],
+    stopping: f32,
+) -> bool {
+    let Some(from) = world
+        .get::<Transform>(entity)
+        .map(|t| t.translation.to_array())
+    else {
+        return false;
+    };
+    let Some(face) = world.get_resource::<super::ObjectiveFace>() else {
+        return false;
+    };
+    let path = face
+        .field
+        .generate_path([from[0], from[2]], [target[0], target[2]]);
+    let Some(mut mover) = mover_parts(world, entity) else {
+        return false;
+    };
+    let Some(mut rng) = world.get::<MemberRng>(entity).cloned() else {
+        return false;
+    };
+    let Some(unit) = world
+        .get::<crate::npc::CharacterUnitId>(entity)
+        .map(|u| crate::npc::CharacterUnitId(u.0))
+    else {
+        return false;
+    };
+    let phase = crate::npc::depart_along_to(
+        &unit,
+        &mut mover.walk.0,
+        &mut mover.path.0,
+        &mut mover.route,
+        &face.walk_face(),
+        face,
+        target,
+        None,
+        &mut rng,
+        path,
+        stopping,
+    );
+    let Some(phase) = phase else {
+        return false;
+    };
+    mover.motion = phase;
+    put_mover(world, entity, mover);
+    world.entity_mut(entity).insert(rng);
+    true
+}
+
+pub fn try_cancel_in_world(world: &mut World, entity: Entity) -> bool {
+    if world
+        .get::<crate::npc::NpcActions>(entity)
+        .is_some_and(|a| a.current == crate::npc::NpcAction::Talk)
+    {
+        return false;
+    }
+    let Some(actor) = world.get::<NpcHfsmActor>(entity).copied() else {
+        return false;
+    };
+    if actor.lower.is_some_and(|l| !l.flags().can_interrupt)
+        || world
+            .get::<crate::npc_fixture_activity::NpcFixtureAnimationOwner>(entity)
+            .is_some()
+    {
+        return false;
+    }
+    super::events::exit(world, entity);
+    super::lower::exit(world, entity);
+    crate::npc::stop_for_external_activity(world, entity);
+    world.entity_mut(entity).insert((
+        NpcHfsmPhase(NpcPhase::Inactive),
+        NpcHfsmActor::default(),
+        NpcUpperBody(None),
+        NpcLowerClock(None),
+        NpcRecoveryTimer(0.0),
+    ));
+    if let Some(mut flags) = world.get_mut::<NpcHfsmFlags>(entity) {
+        flags.needs_plan = true;
+    }
+    true
+}
+
+pub(super) fn request_fixture_plan(
+    world: &mut World,
+    entity: Entity,
+    talk: i32,
+    fixture: Entity,
+) -> bool {
+    let Some(identity) =
+        world.get::<crate::fixture_activity_state::FixtureActivityIdentity>(fixture)
+    else {
+        return false;
+    };
+    let uid = identity.uid.clone();
+    super::events::exit(world, entity);
+    super::lower::exit(world, entity);
+    world.init_resource::<super::DirectedTalks>();
+    let mut directed = world.resource_mut::<super::DirectedTalks>();
+    directed.requests.insert(entity, talk);
+    directed.fixtures.insert(entity, uid);
+    world.entity_mut(entity).insert((
+        NpcHfsmPhase(NpcPhase::Inactive),
+        NpcHfsmActor::default(),
+        NpcUpperBody(None),
+        NpcLowerClock(None),
+    ));
+    if let Some(mut flags) = world.get_mut::<NpcHfsmFlags>(entity) {
+        flags.needs_plan = true;
+    }
+    true
+}
+
+pub fn request_decision(world: &mut World, entity: Entity) {
+    finish_lower(world, entity);
+}
+
+#[derive(Resource)]
+struct SourceIdentity(Handle<moly_assets::json::JsonAsset>);
+
+fn load_source(mut commands: Commands, server: Res<AssetServer>) {
+    commands.insert_resource(SourceIdentity(server.load("moly://source.json")));
+}
+
+fn select_source_version(
+    mut commands: Commands,
+    assets: Res<Assets<moly_assets::json::JsonAsset>>,
+    source: Option<Res<SourceIdentity>>,
+    mut scope: ResMut<NpcHfsmScopeResource>,
+) {
+    let Some(source) = source else {
+        return;
+    };
+    let Some(asset) = assets.get(&source.0) else {
+        return;
+    };
+    let value: serde_json::Value =
+        serde_json::from_str(&asset.0).expect("source identity must be valid JSON");
+    let version = value["source"]["appVersion"].as_str().unwrap_or("");
+    let major = version
+        .split('.')
+        .next()
+        .and_then(|v| v.parse::<u32>().ok());
+    let automatic = {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            std::env::var_os("MOLY_NPC_HFSM_SCOPE").is_none()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            true
+        }
+    };
+    if automatic
+        && value["source"]["region"].as_str() == Some("jp")
+        && major.is_some_and(|v| v >= 7)
+    {
+        scope.0 = NpcHfsmScope::parse("all");
+        commands.queue(|world: &mut World| {
+            let actors: Vec<Entity> = world
+                .query_filtered::<Entity, With<crate::npc::CharacterUnitId>>()
+                .iter(world)
+                .collect();
+            for entity in actors {
+                if let Some(mut flags) = world.get_mut::<NpcHfsmFlags>(entity) {
+                    flags.has_started = true;
+                    flags.needs_plan = true;
+                }
+            }
+        });
+        info!("[npc-hfsm] source jp/{version}: autonomous HFSM enabled");
+    }
+    commands.remove_resource::<SourceIdentity>();
 }
 
 /// The controller's scope: the units whose machine it drives. Every other
@@ -1655,6 +2287,81 @@ pub fn on_update(world: &mut World) {
         return;
     };
     let frame = world.resource::<FrameCount>().0;
+    if world
+        .get_resource::<crate::server_panel::ServerPanel>()
+        .is_some_and(|p| p.is_tutorial())
+    {
+        let entrants: Vec<_> = world
+            .query_filtered::<Entity, (With<NpcHfsmPhase>, Without<NpcWeightedDecisions>)>()
+            .iter(world)
+            .collect();
+        for entity in entrants {
+            if world
+                .get::<NpcHfsmFlags>(entity)
+                .is_some_and(|f| !f.has_started)
+            {
+                let mut weights = NpcUpperWeights::default();
+                set_upper_weight(&mut weights, UpperType::RandomWalk, 5.0);
+                set_upper_weight(&mut weights, UpperType::MoveToFixture, 5.0);
+                set_upper_weight(&mut weights, UpperType::Rest, 2.0);
+                world
+                    .entity_mut(entity)
+                    .insert((NpcWeightedDecisions, weights));
+            }
+        }
+    }
+    super::events::update(world);
+    let reactions = std::mem::take(&mut world.resource_mut::<PreparedPlans>().reactions);
+    for (entity, talk, uid) in reactions {
+        let fixture = world
+            .query::<(
+                Entity,
+                &crate::fixture_activity_state::FixtureActivityIdentity,
+            )>()
+            .iter(world)
+            .find(|(_, identity)| identity.uid == uid)
+            .map(|(entity, _)| entity);
+        if let Some(fixture) = fixture {
+            super::events::begin_high_priority(world, entity, talk, fixture);
+        }
+    }
+    let waiting = std::mem::take(&mut world.resource_mut::<PreparedPlans>().while_doing);
+    for (main, talk, members) in waiting {
+        if super::common::start_while_doing(world, main, talk, members).is_err() {
+            finish_lower(world, main);
+        }
+    }
+    let commons = std::mem::take(&mut world.resource_mut::<PreparedPlans>().common);
+    for (entity, id) in commons {
+        if super::common::start(world, entity, id).is_err() {
+            finish_lower(world, entity);
+        }
+    }
+    let pending = std::mem::take(&mut world.resource_mut::<PreparedPlans>().plans);
+    for (entity, plan) in pending {
+        apply_prepared(world, entity, plan, frame);
+    }
+    let release: Vec<_> = world
+        .resource::<UpperFixtureReservations>()
+        .0
+        .keys()
+        .copied()
+        .filter(|e| {
+            world
+                .get::<NpcHfsmActor>(*e)
+                .is_none_or(|a| !matches!(a.upper, Some(UpperState::MoveToFixture { .. })))
+        })
+        .collect();
+    for entity in release {
+        world
+            .resource_mut::<UpperFixtureReservations>()
+            .0
+            .remove(&entity);
+    }
+    let weighted = std::mem::take(&mut world.resource_mut::<PreparedPlans>().weighted);
+    for (entity, state) in weighted {
+        start_weighted_upper(world, entity, state, frame);
+    }
     let mut units: Vec<(u32, Entity)> = world
         .query_filtered::<(Entity, &crate::npc::CharacterUnitId), With<NpcHfsmPhase>>()
         .iter(world)
@@ -1664,11 +2371,57 @@ pub fn on_update(world: &mut World) {
     units.sort_unstable();
     for (unit, entity) in units {
         update_one(world, entity, unit, frame, dt);
+        if world
+            .get::<NpcHfsmFlags>(entity)
+            .is_some_and(|flags| flags.needs_plan)
+        {
+            super::events::return_to_tutorial_waiting(world, entity);
+        }
     }
 }
 
 /// One character's `OnUpdate`.
 fn update_one(world: &mut World, entity: Entity, unit: u32, frame: u32, dt: f32) {
+    if world.get::<super::common::CommonMember>(entity).is_some()
+        || super::events::owns(world, entity)
+        || crate::npc_fixture_talk::hfsm_owns(world, entity)
+    {
+        return;
+    }
+    if world.get::<super::TalkSlot>(entity).and_then(|s| s.kind())
+        == Some(moly_law::objective::TalkType::Greeting)
+        && world
+            .get::<NpcHfsmActor>(entity)
+            .is_some_and(|a| a.lower != Some(LowerState::Greeting))
+    {
+        let data = world
+            .get::<super::TalkSlot>(entity)
+            .and_then(|s| s.current.clone());
+        if transition_event_lower(world, entity, LowerState::Greeting) {
+            if let (Some(data), Some(mut slot)) = (data, world.get_mut::<super::TalkSlot>(entity)) {
+                slot.set_current(data);
+            }
+        }
+    }
+    if super::lower::update(world, entity, dt) {
+        return;
+    }
+    if crate::npc::is_away(world, entity)
+        || world
+            .get_resource::<crate::field_modes::EditSessionActive>()
+            .is_some_and(|e| e.is_active())
+    {
+        return;
+    }
+    if world
+        .get::<NpcHfsmFlags>(entity)
+        .is_some_and(|f| f.needs_plan)
+    {
+        return;
+    }
+    if world.get_resource::<super::ObjectiveFace>().is_none() {
+        return;
+    }
     // The walk reads the other presenters' positions (the random walk's
     // avoidance direction) and the character's own suspension.
     let mut others_query = world.query::<(Entity, &Transform)>();
@@ -1690,6 +2443,7 @@ fn update_one(world: &mut World, entity: Entity, unit: u32, frame: u32, dt: f32)
     let Some(mut rng) = world.get::<MemberRng>(entity).cloned() else {
         return;
     };
+    let before = world.get::<NpcHfsmActor>(entity).copied();
     world.resource_scope(|world, face: Mut<super::ObjectiveFace>| {
         let mut state = SystemState::<(
             Query<(
@@ -1758,18 +2512,34 @@ fn update_one(world: &mut World, entity: Entity, unit: u32, frame: u32, dt: f32)
     if let Some(navigator) = navigator {
         put_mover(world, entity, navigator);
     }
+    if before.is_some_and(|a| a.upper.is_some() && a.lower_override.is_none())
+        && world
+            .get::<NpcHfsmActor>(entity)
+            .is_some_and(|a| a.lower.is_some())
+    {
+        if let Err(reason) = super::events::tutorial::refresh_default_freewalk(world, entity) {
+            warn!("[npc-hfsm] tutorial default: {reason}");
+        }
+    }
 }
 
 /// The plugin's share: the report resource and its line every two seconds,
 /// after the machine's update, and the controller's scope.
 pub fn install(app: &mut App) {
+    app.init_resource::<super::common::CommonPlans>()
+        .init_resource::<PreparedPlans>()
+        .init_resource::<UpperFixtureReservations>();
     app.insert_resource(NpcHfsmScopeResource(NpcHfsmScope::from_env()))
         .init_resource::<NpcHfsmReport>()
+        .add_systems(Startup, load_source)
+        .add_systems(Update, select_source_version.before(super::decide))
         .add_systems(
             Update,
             report_snapshot
                 .after(on_update)
-                .run_if(bevy::time::common_conditions::on_timer(std::time::Duration::from_secs(2))),
+                .run_if(bevy::time::common_conditions::on_timer(
+                    std::time::Duration::from_secs(2),
+                )),
         );
     // The per-decision lines are written only through the trace switch (see
     // `trace_enabled`); one line at start-up says so.
@@ -1849,7 +2619,11 @@ mod tests {
     impl Rig {
         fn started(self) -> Self {
             Self {
-                flags: NpcHfsmFlags { has_started: true, suppress_recovery: false },
+                flags: NpcHfsmFlags {
+                    has_started: true,
+                    suppress_recovery: false,
+                    needs_plan: false,
+                },
                 ..self
             }
         }
@@ -2034,13 +2808,24 @@ mod tests {
     #[test]
     fn not_started_or_suppressed_never_counts() {
         let rigs = [
-            Rig { recovery: NpcRecoveryTimer(10.0), ..Rig::default() },
             Rig {
                 recovery: NpcRecoveryTimer(10.0),
-                flags: NpcHfsmFlags { has_started: true, suppress_recovery: true },
                 ..Rig::default()
             },
-            Rig { recovery: NpcRecoveryTimer(10.0), display_only: true, ..Rig::default().started() },
+            Rig {
+                recovery: NpcRecoveryTimer(10.0),
+                flags: NpcHfsmFlags {
+                    has_started: true,
+                    suppress_recovery: true,
+                    needs_plan: false,
+                },
+                ..Rig::default()
+            },
+            Rig {
+                recovery: NpcRecoveryTimer(10.0),
+                display_only: true,
+                ..Rig::default().started()
+            },
         ];
         for mut rig in rigs {
             rig.frame(6, 1.0);
@@ -2128,12 +2913,22 @@ mod tests {
             NpcHfsmPhase(NpcPhase::Lower),
             NpcTransitionBudget { frame: 3, count: 1 },
             NpcRecoveryTimer(0.5),
-            NpcHfsmFlags { has_started: true, suppress_recovery: false },
-            NpcHfsmActor { lower: Some(LowerState::Idle { duration: 6.0 }), ..Default::default() },
+            NpcHfsmFlags {
+                has_started: true,
+                suppress_recovery: false,
+                needs_plan: false,
+            },
+            NpcHfsmActor {
+                lower: Some(LowerState::Idle { duration: 6.0 }),
+                ..Default::default()
+            },
             false,
         );
         assert_eq!(row.phase, NpcPhase::Lower);
-        assert_eq!(row.lower, Some(LowerState::Idle { duration: 6.0 }.lower_type()));
+        assert_eq!(
+            row.lower,
+            Some(LowerState::Idle { duration: 6.0 }.lower_type())
+        );
         assert_eq!(row.upper, None);
         assert!(row.started);
         assert_eq!(phase_word(NpcPhase::Rest), "Rest");
@@ -2141,7 +2936,10 @@ mod tests {
 
     #[test]
     fn start_sets_the_flags_and_decides_without_weights() {
-        let mut rig = Rig { recovery: NpcRecoveryTimer(2.0), ..Rig::default() };
+        let mut rig = Rig {
+            recovery: NpcRecoveryTimer(2.0),
+            ..Rig::default()
+        };
         rig.start();
         assert!(rig.flags.has_started);
         assert!(!rig.flags.suppress_recovery);
@@ -2178,7 +2976,10 @@ mod tests {
         // builds `RestLowerState(presenter, model, result, 5.0)` for a `Rest`
         // result (case 4), so the lower rests 5 s and draws nothing; the idle
         // draw belongs to the factory's default arm only.
-        let mut rig = Rig { pause: 4.0, ..Rig::default().started() };
+        let mut rig = Rig {
+            pause: 4.0,
+            ..Rig::default().started()
+        };
         rig.weights = NpcUpperWeights(vec![entry(UpperType::Rest, 1.0)]);
         rig.phase = NpcHfsmPhase(NpcPhase::Inactive);
         rig.recovery = NpcRecoveryTimer(3.0);
@@ -2235,7 +3036,10 @@ mod tests {
             let mut machine = rig.machine();
             transition_to_plan(&mut machine, &plan);
         }
-        assert_eq!(rig.actor.lower_override, Some(LowerState::Rest { duration: 2.0 }));
+        assert_eq!(
+            rig.actor.lower_override,
+            Some(LowerState::Rest { duration: 2.0 })
+        );
         rig.frame(21, 1.0 / 60.0);
         assert_eq!(rig.phase.0, NpcPhase::Lower);
         assert_eq!(rig.actor.lower, Some(LowerState::Rest { duration: 2.0 }));
@@ -2243,14 +3047,16 @@ mod tests {
     }
 
     #[test]
-    fn a_zero_pause_decides_at_once_from_the_rest() {
-        // EnterRestOrDecideNext with PauseTime 0: the rest is skipped, and the
-        // decision runs at once (here: no route, so the walk is unstarted).
+    fn a_zero_pause_enters_rest_before_the_next_decision() {
+        // EnterRestOrDecideNext always constructs Rest, including zero pause.
         let mut rig = Rig::default().started();
         rig.actor.lower = Some(LowerState::Idle { duration: 0.0 });
         rig.lower_clock = Some(LowerClock::default());
         rig.phase = NpcHfsmPhase(NpcPhase::Lower);
         rig.frame(22, 0.5);
+        assert_eq!(rig.actor.lower, Some(LowerState::Rest { duration: 0.0 }));
+        assert_eq!(rig.phase.0, NpcPhase::Rest);
+        rig.frame(23, 0.5);
         assert_eq!(rig.actor.lower, None);
         assert_eq!(rig.phase.0, NpcPhase::Upper);
         assert_eq!(rig.actor.upper, Some(UpperState::RandomWalk));
@@ -2292,9 +3098,9 @@ mod tests {
         };
         rig.phase = NpcHfsmPhase(NpcPhase::Inactive);
         rig.recovery = NpcRecoveryTimer(3.0);
-        rig.weights = NpcUpperWeights(vec![entry(UpperType::ChangeSite, 1.0)]);
+        rig.weights = NpcUpperWeights(vec![entry(UpperType::MoveToPlayer, 1.0)]);
         rig.frame(25, 0.1);
-        assert_eq!(rig.actor.upper, Some(UpperState::ChangeSite));
+        assert_eq!(rig.actor.upper, Some(UpperState::MoveToPlayer));
         assert_eq!(rig.rng.calls(), 1);
         rig.frame(26, 0.1);
         assert_eq!(rig.phase.0, NpcPhase::Rest);
@@ -2302,7 +3108,7 @@ mod tests {
         assert_eq!(rig.actor.upper, None);
         rig.frame(27, 2.1);
         assert_eq!(rig.phase.0, NpcPhase::Upper);
-        assert_eq!(rig.actor.upper, Some(UpperState::ChangeSite));
+        assert_eq!(rig.actor.upper, Some(UpperState::MoveToPlayer));
         assert_eq!(rig.rng.calls(), 2);
     }
 
@@ -2335,7 +3141,9 @@ mod tests {
                 other => other.upper_type(),
             };
             let want_state = match state {
-                UpperType::MoveToNPC => UpperType::RandomWalk,
+                UpperType::MoveToNPC | UpperType::ChangeSite | UpperType::Stay => {
+                    UpperType::RandomWalk
+                }
                 other => other,
             };
             assert_eq!(built, want_state, "{state:?} keeps its type");
@@ -2356,7 +3164,7 @@ mod tests {
                 // `MoveToNPC` fell back to the random walk above, whose result
                 // is always `Success`. The player and the change-site walks
                 // report the missing route.
-                UpperType::MoveToPlayer | UpperType::ChangeSite => AvatarMoveStatus::NoneRoute,
+                UpperType::MoveToPlayer => AvatarMoveStatus::NoneRoute,
                 _ => AvatarMoveStatus::Success,
             };
             assert_eq!(result.move_status, want, "{state:?} unstarted");

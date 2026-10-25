@@ -21,6 +21,7 @@ use bevy::transform::TransformSystems;
 use std::time::Duration;
 
 pub fn install(app: &mut App) {
+    crate::photo_shot::install(app);
     // The tap-ladder probe writes its request before the frame's consumer
     // reads the requests (smoke hook; off without its environment variable).
     app.add_systems(

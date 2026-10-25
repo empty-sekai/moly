@@ -177,16 +177,36 @@ pub struct Driver {
 /// Commands already selected by the one Rest script cursor. Keeping one FIFO
 /// preserves show/hide order; this is not a second script scheduler.
 #[derive(Resource, Default)]
-pub struct RestEmoteRequests(Vec<RestEmoteCommand>);
+pub struct RestEmoteRequests(Vec<RestEmoteCommand>, u64, HashMap<EmoteTicket, EmoteReceipt>);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct EmoteTicket(u64);
+
+enum EmoteReceipt { Pending, Shown(Option<u64>) }
+
+pub fn show_completed(world: &World, ticket: EmoteTicket) -> bool {
+    world.get_resource::<RestEmoteRequests>().is_some_and(|requests|matches!(requests.2.get(&ticket), Some(EmoteReceipt::Shown(_))))
+}
+
+pub fn hide_completed(world: &World, ticket: EmoteTicket) -> bool {
+    let Some(requests) = world.get_resource::<RestEmoteRequests>() else { return false; };
+    match requests.2.get(&ticket) {
+        Some(EmoteReceipt::Shown(Some(key))) => world.get_resource::<Emotes>().is_none_or(|emotes|!emotes.instances.iter().any(|instance|instance.key == *key)),
+        Some(EmoteReceipt::Shown(None)) => true,
+        _ => false,
+    }
+}
 
 enum RestEmoteCommand {
     Show {
         npc: Entity,
         name: String,
         not_play_se: bool,
+        ticket: Option<EmoteTicket>,
     },
     Hide {
         npc: Entity,
+        key: Option<u64>,
     },
 }
 
@@ -196,10 +216,27 @@ impl RestEmoteRequests {
             npc,
             name,
             not_play_se,
+            ticket: None,
         });
     }
     pub fn hide(&mut self, npc: Entity) {
-        self.0.push(RestEmoteCommand::Hide { npc });
+        self.0.push(RestEmoteCommand::Hide { npc, key: None });
+    }
+    pub fn show_owned(&mut self, npc: Entity, name: String, not_play_se: bool) -> EmoteTicket {
+        self.1 = self.1.wrapping_add(1);
+        let ticket = EmoteTicket(self.1);
+        self.2.insert(ticket, EmoteReceipt::Pending);
+        self.0.push(RestEmoteCommand::Show { npc, name, not_play_se, ticket: Some(ticket) });
+        ticket
+    }
+    pub fn hide_owned(&mut self, npc: Entity, ticket: EmoteTicket) {
+        if let Some(EmoteReceipt::Shown(Some(key))) = self.2.get(&ticket) {
+            self.0.push(RestEmoteCommand::Hide { npc, key: Some(*key) });
+        }
+    }
+    pub fn forget(&mut self, ticket: EmoteTicket) {
+        self.2.remove(&ticket);
+        self.0.retain(|command|!matches!(command, RestEmoteCommand::Show { ticket: Some(pending), .. } if *pending == ticket));
     }
 }
 
@@ -3719,16 +3756,18 @@ pub fn serve_rest(
     let (Some(mut emotes), Some(archive)) = (emotes, archive) else {
         return;
     };
-    for request in requests.0.drain(..) {
+    for request in std::mem::take(&mut requests.0) {
         match request {
             RestEmoteCommand::Show {
                 npc,
                 name,
                 not_play_se,
+                ticket,
             } => {
                 if !not_play_se {
                     warn!("[emoticon] Rest 表情请求音效：当前表情 soundInput 播放器尚未供给");
                 }
+                let previous = emotes.next_key;
                 show_emote(
                     &mut commands,
                     &mut meshes,
@@ -3743,12 +3782,16 @@ pub fn serve_rest(
                     npc,
                     0.0,
                 );
+                if let Some(ticket) = ticket {
+                    let key = emotes.instances.iter().find(|instance|instance.npc == npc && instance.key >= previous).map(|instance|instance.key);
+                    requests.2.insert(ticket, EmoteReceipt::Shown(key));
+                }
             }
-            RestEmoteCommand::Hide { npc } => {
+            RestEmoteCommand::Hide { npc, key } => {
                 if let Some(index) = emotes
                     .instances
                     .iter()
-                    .position(|instance| instance.npc == npc)
+                    .position(|instance| instance.npc == npc && key.is_none_or(|key|instance.key == key))
                 {
                     let clips = archive.archive.items[emotes.instances[index].item]
                         .clips

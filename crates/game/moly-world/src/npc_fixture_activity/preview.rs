@@ -259,7 +259,11 @@ pub(super) fn record_progress(world: &mut World, session: &mut Session) {
     };
     let phase = match session.phase {
         Phase::Approaching => PreviewPhase::Approaching,
-        Phase::TalkWindow(_) | Phase::Preparing => PreviewPhase::Preparing,
+        Phase::TalkWindow(_)
+        | Phase::HfsmLooking
+        | Phase::HfsmNoneLooking
+        | Phase::HfsmApproach(_)
+        | Phase::Preparing => PreviewPhase::Preparing,
         Phase::Playing | Phase::TalkHeld => PreviewPhase::Playing,
         Phase::Exiting(_) => PreviewPhase::Exiting,
     };
@@ -344,9 +348,7 @@ pub fn reap(world: &mut World, retained_ticket: Option<u64>) {
         .filter_map(|(actor, session)| {
             session
                 .preview_ticket
-                .filter(|ticket| {
-                    *ticket & DIRECTOR_TICKET == 0 && Some(*ticket) != retained_ticket
-                })
+                .filter(|ticket| *ticket & DIRECTOR_TICKET == 0 && Some(*ticket) != retained_ticket)
                 .map(|_| *actor)
         })
         .collect();

@@ -268,6 +268,7 @@ pub fn admit(
     local_scale: Vec3,
     has_rigidbody: bool,
     gui_ztest: u8,
+    explicit_play: bool,
     mesh: Handle<Mesh>,
     host: Entity,
     ordinal: u64,
@@ -389,9 +390,9 @@ pub fn admit(
             Ok(())
         },
     );
-    if !emitter.play_on_awake {
+    if !emitter.play_on_awake && !explicit_play {
         return Err(
-            "a system without playOnAwake waits for an explicit Play, which no host sends yet"
+            "a system without playOnAwake requires an explicit UIParticle.Play"
                 .into(),
         );
     }

@@ -133,6 +133,7 @@ jobs:
       fail-fast: false
       matrix:
         renderer: [webgpu, webgl2]
+        product: [stage, game]
     runs-on: ubuntu-22.04
     timeout-minutes: 240
     steps:
@@ -147,7 +148,7 @@ jobs:
       - uses: mozilla-actions/sccache-action@v0.0.11
       - uses: Swatinem/rust-cache@v2
         with:
-          key: wasm32-${{ matrix.renderer }}
+          key: wasm32-${{ matrix.product }}-${{ matrix.renderer }}
           cache-targets: false
           cache-bin: true
           save-if: ${{ github.ref == 'refs/heads/master' }}
@@ -159,16 +160,16 @@ jobs:
             cargo install wasm-bindgen-cli --version "$version" --locked --force
           fi
           wasm-bindgen --version
-      - name: Build the ${{ matrix.renderer }} package
+      - name: Build the ${{ matrix.product }} ${{ matrix.renderer }} package
         env:
           CARGO_BUILD_JOBS: '4'
-        run: node web/build-wasm.mjs --renderer ${{ matrix.renderer }}
+        run: node web/build-wasm.mjs --product ${{ matrix.product }} --renderer ${{ matrix.renderer }} --out-dir web/pkg
       - name: Compiler cache statistics
         if: always()
         run: sccache --show-stats
       - uses: actions/upload-artifact@v4
         if: inputs.package
         with:
-          name: browser-${{ matrix.renderer }}
+          name: browser-${{ matrix.product }}-${{ matrix.renderer }}
           path: web/pkg
           if-no-files-found: error

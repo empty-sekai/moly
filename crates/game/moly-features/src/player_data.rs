@@ -597,10 +597,11 @@ pub fn update(world: &mut World) {
     state.receive();
     let result = match state.action.take() {
         Some(ImportAction::Fetch) => {
-            if let Some(mut panel) = world.get_resource_mut::<crate::game_settings::SettingsPanel>()
-            {
-                panel.open = true;
-                panel.player_data = true;
+            if !world.contains_resource::<crate::browser_stage::BrowserStage>() {
+                if let Some(mut panel) = world.get_resource_mut::<crate::game_settings::SettingsPanel>() {
+                    panel.open = true;
+                    panel.player_data = true;
+                }
             }
             state.fetch()
         }
@@ -741,11 +742,15 @@ pub fn drop_files(
     }
 }
 
-pub fn install(app: &mut App) {
+pub fn install_stage(app: &mut App) {
     app.init_resource::<PlayerDataImport>();
     app.init_resource::<SavedTotalExp>()
         .add_systems(PreStartup, seat_saved_total_exp);
     app.add_systems(Update, update.before(crate::fixture::FixtureLayoutSet));
+}
+
+pub fn install(app: &mut App) {
+    install_stage(app);
     app.add_systems(
         PreUpdate,
         crate::player_data_ui::input

@@ -140,7 +140,7 @@ impl ObjectiveType {
     }
 }
 
-/// 对话槽位类型（源 `NPCAvatarAITalkType`，19 值闭集）——梯子的槽位输入。
+/// 对话槽位类型（源 `NPCAvatarAITalkType`）——梯子的槽位输入。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum TalkType {
@@ -163,11 +163,12 @@ pub enum TalkType {
     EntrySite = 16,
     CutScene = 17,
     BirthdayParty = 18,
+    CommonSomeCharacter = 19,
 }
 
 impl TalkType {
     /// 全值域（源闭集，下标即判别值）。
-    pub const ALL: [TalkType; 19] = [
+    pub const ALL: [TalkType; 20] = [
         TalkType::None,
         TalkType::Common,
         TalkType::SingleCharacterFixture,
@@ -187,6 +188,7 @@ impl TalkType {
         TalkType::EntrySite,
         TalkType::CutScene,
         TalkType::BirthdayParty,
+        TalkType::CommonSomeCharacter,
     ];
 
     /// 判别值到成员的闭集还原；域外一律 `None`。
@@ -226,11 +228,11 @@ mod tests {
 
     #[test]
     fn talk_type_covers_source_closed_set() {
-        // 19 值闭集：判别值 0..=18 全部可还原，19 起域外
+        // 判别值 0..=19 全部可还原，20 起域外。
         for (index, member) in TalkType::ALL.iter().enumerate() {
             assert_eq!(TalkType::from_discriminant(index as u8), Some(*member));
         }
-        assert_eq!(TalkType::from_discriminant(19), None);
+        assert_eq!(TalkType::from_discriminant(20), None);
     }
 
     #[test]

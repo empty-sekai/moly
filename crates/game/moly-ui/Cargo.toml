@@ -37,16 +37,9 @@ regex = "1"
 # a file it cannot read) before a player gets it. Both already locked.
 sha2 = "0.10"
 rodio = { version = "0.22", default-features = false, features = ["mp3"] }
-# The control surface: Bevy Remote Protocol without a transport on every
-# target (the browser page sends through the mailbox), plus its localhost
-# HTTP endpoint on native. Captured frames are answered as base64 PNG.
-bevy_remote = { version = "0.19.1", default-features = false }
-async-channel = "2"
 image = { version = "0.25", default-features = false, features = ["png"] }
-base64 = "0.22"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-bevy_remote = { version = "0.19.1", default-features = false, features = ["http"] }
 # Fixture clocks read the device's local clock (localtime_r / localtime_s);
 # already locked, no new download.
 libc = "0.2"

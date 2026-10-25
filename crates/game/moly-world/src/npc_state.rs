@@ -136,6 +136,7 @@ pub struct NpcStatePlugin;
 
 impl Plugin for NpcStatePlugin {
     fn build(&self, app: &mut App) {
+        crate::npc_ik::install(app);
         app.add_message::<TweetHudEvent>()
             .init_resource::<SequencePickSeeder>()
             .init_resource::<crate::npc_gate::GateAppearance>()
@@ -199,6 +200,7 @@ impl Plugin for NpcStatePlugin {
                 .after(crate::npc_objective::decide),
         );
         crate::npc_objective::controller::install(app);
+        crate::communication_runtime::install(app);
         // The presenter's other per-frame calls, in the source order around
         // the state machine update (call 3) and the greeting gate (call 10)
         // that the schedule chains in this set: 1, 2 before call 3; 4 to 9

@@ -252,8 +252,9 @@ pub fn perf_plugin() -> moly_perf::PerfPlugin {
 pub fn scene_input_enabled(
     overlays: OverlayPanels,
     library: Res<crate::content_library::ContentLibrary>,
+    tutorial: Option<Res<crate::tutorial::TutorialInput>>,
 ) -> bool {
-    !overlays.block_pointer() && !library.blocks_world_input()
+    !tutorial.is_some_and(|input|input.taps_blocked) && !overlays.block_pointer() && !library.blocks_world_input()
 }
 
 pub fn camera_input_enabled(
@@ -270,8 +271,9 @@ pub fn camera_input_enabled(
 pub fn talk_input_enabled(
     overlays: OverlayPanels,
     library: Res<crate::content_library::ContentLibrary>,
+    tutorial: Option<Res<crate::tutorial::TutorialInput>>,
 ) -> bool {
-    !overlays.block_pointer() && !library.blocks_talk_input()
+    !tutorial.is_some_and(|input|input.taps_blocked) && !overlays.block_pointer() && !library.blocks_talk_input()
 }
 
 /// Version of the stored `GameSettings` section. Version 2 changed the meaning
@@ -309,6 +311,16 @@ fn graphics_from_document(document: &Value) -> GraphicsSettings {
     }
     // FXAA is half of the image-quality pair, so a stored `fxaa` is not read.
     value
+}
+
+/// Graphics state for a host-owned stage; no settings controls are created.
+pub fn setup_stage(mut store: ResMut<SettingsStore>, mut settings: ResMut<GameSettings>) {
+    if let Some(document) = store.load() {
+        let image_quality = settings.graphics.image_quality;
+        settings.graphics = GraphicsSettings {
+            image_quality, fxaa: image_quality.fxaa, ..graphics_from_document(&document)
+        };
+    }
 }
 
 pub fn setup(
@@ -686,6 +698,7 @@ fn take_player_data_request(
     mut panel: ResMut<SettingsPanel>,
     mut request: ResMut<crate::render_inputs::OpenPlayerDataPanel>,
     mut import: Option<ResMut<crate::player_data::PlayerDataImport>>,
+    stage: Option<Res<crate::browser_stage::BrowserStage>>,
 ) {
     let Some(status) = request.status.take() else {
         return;
@@ -693,8 +706,10 @@ fn take_player_data_request(
     if let Some(import) = import.as_mut() {
         import.status = status;
     }
-    panel.open = true;
-    panel.player_data = true;
+    if stage.is_none() {
+        panel.open = true;
+        panel.player_data = true;
+    }
 }
 
 /// Publishes the settings modal's claim on the field's input, read from the

@@ -1,4 +1,5 @@
 import { verifyPublishedStore } from "./asset-pack-store.mjs";
+import { textSourceClosure } from "./text-publication.mjs";
 import { resolveResourceSource } from "./resource-sources.mjs";
 import {
   existsSync,
@@ -33,6 +34,8 @@ export const STAGE_FILES = [
   "embed.mjs",
   "embed-stage.mjs",
   "embed-contract.mjs",
+  "text-localization.mjs",
+  "text-fonts.mjs",
   "embed.d.ts",
   "stage.html",
   "stage.mjs",
@@ -119,6 +122,8 @@ export function toLogicalResourceManifest(manifest) {
         snapshot.assets = logicalPath(snapshot.assets);
       if (snapshot.catalog !== undefined)
         snapshot.catalog = logicalPath(snapshot.catalog);
+      if (snapshot.textSource?.url !== undefined)
+        snapshot.textSource.url = logicalPath(snapshot.textSource.url);
     }
   }
   return logical;
@@ -733,6 +738,16 @@ export async function publish({
     )
       throw new Error(`Changed ${backend} build record`);
     const build = JSON.parse(buildBytes);
+    // Legacy releases have no product field and can still be reused. New
+    // modules declare which independent Rust application produced them.
+    if (
+      build.product !== undefined &&
+      (!Object.hasOwn(PROFILES, build.product) ||
+        profiles.some((profile) => profile !== build.product))
+    )
+      throw new Error(
+        `The ${backend} ${build.product} engine cannot publish profiles ${profiles.join(", ")}`,
+      );
     if (
       build.schemaVersion !== 1 ||
       build.backend !== backend ||
@@ -766,6 +781,31 @@ export async function publish({
         const exports = WebAssembly.Module.exports(after).map(
           (value) => value.name,
         );
+        if (build.product === "stage") {
+          for (const entry of [
+            "start_game",
+            "game_command",
+            "game_snapshot",
+            "game_take_persist",
+            "game_server_schema",
+            "game_server_document",
+            "director_command",
+            "director_snapshot",
+            "control",
+          ])
+            if (exports.includes(entry))
+              throw new Error(`Stage engine includes unrelated ABI: ${entry}`);
+          for (const entry of [
+            "player_data_command",
+            "player_data_snapshot",
+            "configure_text",
+            "configure_text_session",
+            "clear_text",
+            "text_ready",
+          ])
+            if (!exports.includes(entry))
+              throw new Error(`Missing stage ABI: ${entry}`);
+        }
         for (const profile of profiles)
           for (const entry of PROFILES[profile].abi)
             if (!exports.includes(entry))
@@ -1099,9 +1139,13 @@ export async function publish({
           ]),
         )
       : "";
-    const id = `${source.region}-${version}-${sha256(Buffer.concat([catalogBytes, fixtureBytes, controllerIndexBytes, baseBytes, Buffer.from(JSON.stringify(provenance)), Buffer.from(JSON.stringify({ provider: source.provider, resourceIndexSha256: source.resourceIndexSha256, resourceOrigin: source.resourceOrigin, portraitDigest, coordinateEvidence, ...(packed ? { assetCatalog: packed.catalogId } : {}) }))])).slice(0, 20)}`;
+    const textSource = stage ? textSourceClosure(assets, source.region) : null;
+    const id = `${source.region}-${version}-${sha256(Buffer.concat([catalogBytes, fixtureBytes, controllerIndexBytes, baseBytes, Buffer.from(JSON.stringify(provenance)), Buffer.from(JSON.stringify({ provider: source.provider, resourceIndexSha256: source.resourceIndexSha256, resourceOrigin: source.resourceOrigin, portraitDigest, coordinateEvidence, ...(textSource ? { textSource: textSource.sha256 } : {}), ...(packed ? { assetCatalog: packed.catalogId } : {}) }))])).slice(0, 20)}`;
     const directory = path.join(output, "snapshots", id);
     mkdirSync(directory, { recursive: true });
+    if (textSource)
+      for (const [name, bytes] of textSource.files)
+        compressedPut(path.join(directory, "text", name), bytes);
     if (stage) {
       const { files: catalogFiles, details } = splitCatalog(
         catalog,
@@ -1172,6 +1216,15 @@ export async function publish({
           }
         : {}),
       ...(stage ? { catalog: `${root}catalog/index.json` } : {}),
+      ...(textSource
+        ? {
+            textSource: {
+              url: `${root}text/index.json`,
+              sha256: textSource.sha256,
+              bytes: textSource.bytes,
+            },
+          }
+        : {}),
       provenance: {
         ...coordinateEvidence,
         resourceProvider: source.provider,

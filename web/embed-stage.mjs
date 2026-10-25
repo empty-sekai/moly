@@ -1,5 +1,6 @@
 import { applyPackSelection } from "./asset-pack-client.mjs";
 import { forwardActivation } from "./stage-activation.mjs";
+import { validateTextSession } from "./text-localization.mjs";
 import {
   EMBED_VERSION,
   filters,
@@ -112,6 +113,7 @@ export function mountStage(container, options = {}) {
   frame.style.cssText =
     "display:block;width:100%;height:100%;border:0;min-height:240px";
   let disposed = false,
+    failed = false,
     connected = false,
     lastSnapshot = null,
     closeResolve = null,
@@ -124,16 +126,17 @@ export function mountStage(container, options = {}) {
     requestedSite = null;
   let currentFilters = { ...initial },
     currentSelection = selected;
+  let textSession = null;
   const owner = {};
   const post = (type, value) => {
-    if (!disposed)
+    if (!disposed && !failed)
       frame.contentWindow?.postMessage(
         { source: "moly-host", schemaVersion: EMBED_VERSION, type, value },
         url.origin,
       );
   };
   const dispatch = (type, value) => {
-    if (disposed) return;
+    if (disposed || failed) return;
     const command = intent(type, value);
     if (type === "browse")
       currentFilters = { ...currentFilters, ...command.value };
@@ -156,6 +159,7 @@ export function mountStage(container, options = {}) {
       ...ui,
       initial: currentFilters,
       content: currentSelection,
+      textSession,
     });
   const receive = (event) => {
     if (
@@ -172,6 +176,7 @@ export function mountStage(container, options = {}) {
       if (instance === documentInstance) return;
       const reloaded = documentInstance !== null;
       documentInstance = instance;
+      failed = false;
       connected = true;
       lastSnapshot = null;
       configure();
@@ -196,6 +201,8 @@ export function mountStage(container, options = {}) {
         !queued.has("preview")
       )
         post("intent", requestedPlay);
+    } else if (failed) {
+      return;
     } else if (
       type === "player-data" &&
       value?.schemaVersion === 1 &&
@@ -227,8 +234,36 @@ export function mountStage(container, options = {}) {
       options.onBoot?.(value);
     else if (type === "closed" && typeof value?.restored === "boolean")
       closeResolve?.(value.restored);
-    else if (type === "error" && typeof value?.code === "string")
+    else if (type === "error" && typeof value?.code === "string") {
+      if (value.fatal === true) {
+        failed = true;
+        pending = [];
+        // No restoration acknowledgment can arrive from a panicked owner.
+        clearTimeout(closeTimer);
+        closeResolve?.(false);
+        closeResolve = null;
+        if (lastSnapshot) {
+          lastSnapshot = {
+            ...lastSnapshot,
+            ready: false,
+            loading: false,
+            ...(lastSnapshot.scene
+              ? { scene: { ...lastSnapshot.scene, ready: false } }
+              : {}),
+            status: {
+              ...lastSnapshot.status,
+              phase: "error",
+              error: value.code,
+              canStop: false,
+              preview: false,
+            },
+          };
+          options.onSnapshot?.(lastSnapshot);
+          options.onStatus?.(lastSnapshot.status);
+        }
+      }
       options.onError?.(value);
+    }
   };
   window.addEventListener("message", receive);
   window[ACTIVE_MOUNT] = owner;
@@ -251,8 +286,12 @@ export function mountStage(container, options = {}) {
       frame.title = TITLES[ui.locale];
       if (connected) configure();
     },
+    setTextSession(value) {
+      textSession = validateTextSession(value);
+      if (connected) post("text-session", textSession);
+    },
     playerData(value) {
-      if (disposed || !connected || !lastSnapshot?.ready)
+      if (disposed || failed || !connected || !lastSnapshot?.ready)
         throw new Error("The stage is not ready");
       if (
         !value ||
@@ -293,11 +332,11 @@ export function mountStage(container, options = {}) {
     },
     play(value) {
       dispatch("play", value);
-      forwardActivation(frame);
+      if (!disposed && !failed) forwardActivation(frame);
     },
     preview(value) {
       dispatch("preview", value);
-      forwardActivation(frame);
+      if (!disposed && !failed) forwardActivation(frame);
     },
     stop() {
       dispatch("stop");
@@ -313,8 +352,8 @@ export function mountStage(container, options = {}) {
       // Multiple route/user close callers share one restore acknowledgment.
       // Never overwrite the first waiter or leave an orphan timeout behind.
       closePromise = (async () => {
-        let restored = !lastSnapshot?.status.canStop;
-        if (connected && !restored) {
+        let restored = !failed && !lastSnapshot?.status.canStop;
+        if (connected && !failed && !restored) {
           restored = await new Promise((resolve) => {
             closeResolve = resolve;
             closeTimer = setTimeout(() => resolve(false), 8000);

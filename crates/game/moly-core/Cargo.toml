@@ -27,6 +27,8 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "time", "net", "fs", "io-util"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+# Shared optional browser allocator for application crates.
+dlmalloc = { version = "0.2", optional = true }
 # Browser console diagnostics without an unbounded User Timing recording.
 tracing-wasm = "0.2.1"
 # Frame captures are stamped with the page clock (std's SystemTime is a stub
@@ -39,6 +41,7 @@ wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = ["Window", "Storage", "Location", "UrlSearchParams", "Navigator", "Clipboard", "File", "Blob", "FileList", "Document", "HtmlInputElement", "HtmlElement", "Element", "Node", "Event", "EventTarget", "AbortController", "AbortSignal", "ReadableStream", "ReadableStreamDefaultReader", "Request", "RequestInit", "RequestRedirect", "Response", "Headers", "ResizeObserver", "DragEvent", "DataTransfer"] }
 
 [features]
+browser-heap = ["dep:dlmalloc"]
 # Test helpers that the higher layers' tests call.
 test-support = []
 

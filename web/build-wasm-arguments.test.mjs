@@ -4,6 +4,7 @@ import { parseWasmBuildArguments } from "./build-wasm-arguments.mjs";
 
 test("explicit isolated output works with equals or separate arguments", () => {
   const expected = {
+    product: "stage",
     profile: "wasm-size",
     renderer: null,
     outDir: "X:\\fixture folder\\wasm=one",
@@ -33,12 +34,13 @@ test("backend-specific and diagnostic profiles are preserved", () => {
           `--renderer=${renderer}`,
           `--profile=${profile}`,
         ]),
-        { renderer, profile, outDir: null },
+        { product: "stage", renderer, profile, outDir: null },
       );
     }
 });
 test("default publication is possible only with intentionally omitted output arguments", () => {
   assert.deepEqual(parseWasmBuildArguments([]), {
+    product: "stage",
     profile: "wasm-size",
     renderer: null,
     outDir: null,

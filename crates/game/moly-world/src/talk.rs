@@ -260,7 +260,7 @@ fn parse_row(row: &serde_json::Value) -> Result<FixtureTalkRow, String> {
 /// 0 条空值（律按非空镜像），而本表 4768 行实测 motion 空 17 条。
 /// 空引用折成空串：键不匹配任何动作段/图样，与源里「无引用＝不播」
 /// 同效，不发明替代动作。
-fn parse_tweet_ref(value: Option<&serde_json::Value>, talk_id: i32) -> TweetRef {
+pub(crate) fn parse_tweet_ref(value: Option<&serde_json::Value>, talk_id: i32) -> TweetRef {
     let row = value.unwrap_or_else(|| panic!("段 {talk_id} 缺 tweet 引用"));
     let s_or_empty = |name: &str| -> String {
         row.get(name)
@@ -285,7 +285,7 @@ fn parse_tweet_ref(value: Option<&serde_json::Value>, talk_id: i32) -> TweetRef 
 /// 入口：剧本库的 `play_animation`（转到引擎 `PlayAnimation`，参数是
 /// 角色、动作、延迟、速度、混合）——日服 6919 个对话脚本里共 2 次调用，
 /// 两份导出语料里 0 次；律的步枚举与入口核验都没有这个 op，未建模。
-fn parse_step(step: &serde_json::Value) -> Result<FixtureStep, String> {
+pub(crate) fn parse_step(step: &serde_json::Value) -> Result<FixtureStep, String> {
     let op = step
         .get("op")
         .and_then(|v| v.as_str())
@@ -673,6 +673,10 @@ impl ActiveTalk {
 
     pub fn talk_id(&self) -> i32 {
         self.talk_id
+    }
+
+    pub fn text_script(&self) -> &str {
+        self.row.lua.trim_end_matches(".lua")
     }
 
     /// Exact future voice commands from the authored cursor onward. This is a
@@ -1898,7 +1902,7 @@ fn dispatch_step(
         FixtureStep::Label { name } => {
             // 名字栏 SetText（真源 Label → 名字栏文本组件）——窗体开在这条
             // 链上。语料里锚点跳转的 label 步 0 出现，此支防御记账。
-            window.set_label(TalkSession::Pair(&mut *active), name);
+            window.set_label_at(TalkSession::Pair(&mut *active), index, name);
             info!(
                 "[talk] 段 {} 步 {} label：名字栏 SetText（{} 字，名字不进日志）",
                 talk_id,
@@ -1985,7 +1989,7 @@ fn dispatch_step(
             // 窗（真源窗体引擎服务全部引擎播的对话）；说话人指称不参与
             // 摆位（窗体是固定窗，正文只进打字机）。
             active.texts += 1;
-            window.show_text(TalkSession::Pair(&mut *active), text);
+            window.show_text_at(TalkSession::Pair(&mut *active), index, text);
             let speaker_word = match active.speaker {
                 Some(unit) => format!("npc({unit})"),
                 None => "悬空".to_owned(),

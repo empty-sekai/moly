@@ -108,17 +108,16 @@ use moly_assets::json::master::{self, MasterData, MasterTable};
 
 use moly_law::objective::random_fixture_action as fixture_action;
 use moly_law::objective::{ObjectiveType, TalkType};
+use moly_law::talk::EnumerablePick;
 use moly_law::talk::select::{
     self as law, Candidate, GeneralPick, LotteryFault, LotteryWeights, UniformDraw, WeightedDraw,
 };
-use moly_law::talk::EnumerablePick;
 use moly_law::talk::{
-    condition_type_discriminant, CONDITION_AFTER_SET_FIXTURE,
-    CONDITION_MYSEKAI_CHARACTER_VISIT_COUNT, CONDITION_MYSEKAI_FIXTURE_ID,
-    CONDITION_MYSEKAI_FIXTURE_TAG_ID, CONDITION_MYSEKAI_PHENOMENA_ID,
-    CONDITION_READ_EVENT_STORY_EPISODE_ID,
+    CONDITION_AFTER_SET_FIXTURE, CONDITION_MYSEKAI_CHARACTER_VISIT_COUNT,
+    CONDITION_MYSEKAI_FIXTURE_ID, CONDITION_MYSEKAI_FIXTURE_TAG_ID, CONDITION_MYSEKAI_PHENOMENA_ID,
+    CONDITION_READ_EVENT_STORY_EPISODE_ID, condition_type_discriminant,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::fixture_activity_data::FixtureActivityTables;
 use crate::server_panel::TalkWithReadHistory;
@@ -273,7 +272,10 @@ pub fn parse_talk_extras(mut commands: Commands, mut masters: ResMut<MasterData>
         fixture_tags: tags.map_err(reason),
     };
     let counts = [
-        (FIXTURE_COMMONS.name, tables.fixture_commons.as_ref().ok().map(Vec::len)),
+        (
+            FIXTURE_COMMONS.name,
+            tables.fixture_commons.as_ref().ok().map(Vec::len),
+        ),
         (
             FIXTURE_COMMON_GROUPS.name,
             tables
@@ -288,7 +290,11 @@ pub fn parse_talk_extras(mut commands: Commands, mut masters: ResMut<MasterData>
         ),
         (
             FIXTURE_TAG_GROUPS.name,
-            tables.fixture_tags.as_ref().ok().map(|tags| tags.group_of_fixture.len()),
+            tables
+                .fixture_tags
+                .as_ref()
+                .ok()
+                .map(|tags| tags.group_of_fixture.len()),
         ),
     ];
     for (name, count) in counts {
@@ -444,6 +450,117 @@ pub struct Draws<'a> {
     pub record: Vec<Value>,
 }
 
+/// Presenter fallback factory: partition, shuffle, reach, then the fixture's
+/// priority lottery. The data is built only after the target was selected.
+pub fn weighted_fixture_plan(
+    scene: &LotteryScene<'_>,
+    seeker: &NpcView,
+    draws: &mut Draws<'_>,
+    available: &dyn Fn(&PlacedFixture) -> Result<bool, String>,
+    reachable: &dyn Fn(&PlacedFixture, bool) -> Result<bool, String>,
+) -> Result<Option<(String, Option<TalkPlan>)>, Halt> {
+    let mut timeline = Vec::new();
+    let mut normal = Vec::new();
+    for fixture in scene.fixtures {
+        if !available(fixture).map_err(Halt::gap)? {
+            continue;
+        }
+        let mut has_timeline = false;
+        for row in scene.talk_list {
+            if scene.conditions(row.talk_id)?.iter().any(|(kind, id)| {
+                condition_kind(kind) == Some(CONDITION_MYSEKAI_FIXTURE_ID)
+                    && *id == fixture.fixture_id
+            }) && scene
+                .tables
+                .pre_action_of(row.talk_id)
+                .is_some_and(|p| p.timeline_group_id.is_some_and(|g| g != 0))
+            {
+                has_timeline = true;
+                break;
+            }
+        }
+        if has_timeline {
+            timeline.push(fixture);
+        } else {
+            normal.push(fixture);
+        }
+    }
+    let first = !timeline.is_empty() && (normal.is_empty() || (draws.engine_float)(1.0) < 0.85);
+    let mut target = None;
+    for is_timeline in [first, !first] {
+        let pool = if is_timeline {
+            &mut timeline
+        } else {
+            &mut normal
+        };
+        for n in (2..=pool.len()).rev() {
+            let pick = (draws.engine_int)(n);
+            pool.swap(n - 1, pick);
+        }
+        for fixture in pool.iter() {
+            if reachable(fixture, is_timeline).map_err(Halt::gap)? {
+                target = Some(*fixture);
+                break;
+            }
+        }
+        if target.is_some() {
+            break;
+        }
+    }
+    let Some(target) = target else {
+        return Ok(None);
+    };
+    let mut all = Vec::new();
+    for row in scene.talk_list {
+        if !scene.conditions(row.talk_id)?.iter().any(|(kind, id)| {
+            condition_kind(kind) == Some(CONDITION_MYSEKAI_FIXTURE_ID) && *id == target.fixture_id
+        }) {
+            continue;
+        }
+        if matches_lottery_conditions(scene, seeker, row.talk_id, None)? {
+            all.push(row);
+        }
+    }
+    if all.is_empty() {
+        return Ok(Some((target.uid.clone(), None)));
+    }
+    let unread: Vec<_> = all.iter().copied().filter(|r| !r.is_read).collect();
+    let both: Vec<_> = all
+        .iter()
+        .copied()
+        .filter(|r| {
+            scene
+                .tables
+                .pre_action_of(r.talk_id)
+                .is_some_and(|p| p.tweet_id != 0 && p.timeline_group_id.is_some_and(|g| g != 0))
+        })
+        .collect();
+    let tweet: Vec<_> = all
+        .iter()
+        .copied()
+        .filter(|r| {
+            scene
+                .tables
+                .pre_action_of(r.talk_id)
+                .is_some_and(|p| p.tweet_id != 0)
+        })
+        .collect();
+    let pool = if !unread.is_empty() {
+        unread
+    } else if !both.is_empty() {
+        both
+    } else if !tweet.is_empty() {
+        tweet
+    } else {
+        all
+    };
+    let talk = pool[(draws.engine_int)(pool.len())].talk_id;
+    let mut steps = Vec::new();
+    let plan = run_fixture_factories(scene, seeker, talk, Some(&target.uid), draws, &mut steps)?
+        .map(TalkPlan::Fixture);
+    Ok(Some((target.uid.clone(), plan)))
+}
+
 /// The engine's integer range, max exclusive.
 pub const SOURCE_ENGINE_INT: &str = "UnityEngine.Random.Range(int,int)";
 /// The engine's float range, both ends included.
@@ -565,7 +682,11 @@ pub trait FixtureTalkHost {
     /// GetLittleFarPosition(position, fixture, 2): the surface hit of the
     /// first ring cell that samples, `None` when none does (or the site has
     /// no floor grid).
-    fn little_far_position(&self, position: [f32; 3], fixture: &str) -> Result<Option<[f32; 3]>, Halt>;
+    fn little_far_position(
+        &self,
+        position: [f32; 3],
+        fixture: &str,
+    ) -> Result<Option<[f32; 3]>, Halt>;
     /// NavMesh.SamplePosition(point, radius, all areas).hit.
     fn sample_hit(&self, point: [f32; 3], radius: f32) -> bool;
 }
@@ -633,17 +754,23 @@ impl LotteryScene<'_> {
             .tables
             .talk_master(talk_id)
             .ok_or_else(|| Halt::fault(format!("talk {talk_id} has no master row")))?;
-        let sites = self.tables.site_group_sites(master.site_group_id).ok_or_else(|| {
-            Halt::gap(format!(
-                "site group {} of talk {talk_id} is absent from the host tables",
-                master.site_group_id
-            ))
-        })?;
+        let sites = self
+            .tables
+            .site_group_sites(master.site_group_id)
+            .ok_or_else(|| {
+                Halt::gap(format!(
+                    "site group {} of talk {talk_id} is absent from the host tables",
+                    master.site_group_id
+                ))
+            })?;
         let site_type = site_type
             .ok_or_else(|| Halt::gap("the character's site type is not in the site table"))?;
         for site in sites {
             let kind = (self.site_type_of_site)(*site).ok_or_else(|| {
-                Halt::fault(format!("site {site} of group {} has no master site row", master.site_group_id))
+                Halt::fault(format!(
+                    "site {site} of group {} has no master site row",
+                    master.site_group_id
+                ))
             })?;
             if kind == site_type {
                 return Ok(true);
@@ -653,7 +780,9 @@ impl LotteryScene<'_> {
     }
 
     fn placed_of(&self, fixture_id: i32) -> impl Iterator<Item = &PlacedFixture> {
-        self.fixtures.iter().filter(move |f| f.fixture_id == fixture_id)
+        self.fixtures
+            .iter()
+            .filter(move |f| f.fixture_id == fixture_id)
     }
 
     fn fixture_gates(&self) -> &FixtureGateInputs<'_> {
@@ -699,14 +828,14 @@ pub fn lottery_general_talk_id(
         let mut matched = false;
         for (kind, value) in &conditions {
             match condition_kind(kind) {
-                Some(CONDITION_READ_EVENT_STORY_EPISODE_ID | CONDITION_MYSEKAI_CHARACTER_VISIT_COUNT) => {
-                    matched = true
-                }
+                Some(
+                    CONDITION_READ_EVENT_STORY_EPISODE_ID | CONDITION_MYSEKAI_CHARACTER_VISIT_COUNT,
+                ) => matched = true,
                 Some(CONDITION_MYSEKAI_PHENOMENA_ID) => matched |= *value == scene.phenomena_id,
                 _ => {
                     return Err(Halt::fault(format!(
                         "general condition of talk {talk} has row type {kind} (argument out of range)"
-                    )))
+                    )));
                 }
             }
         }
@@ -809,7 +938,9 @@ fn matches_lottery_conditions(
     let mut pending_gap: Option<String> = None;
     let mut gates: Vec<Box<dyn Fn() -> Result<bool, Halt> + '_>> = Vec::with_capacity(9);
     // 1: the talk's first speaker is this character.
-    gates.push(Box::new(move || Ok(scene.first_member(talk) == seeker.unit as i32)));
+    gates.push(Box::new(move || {
+        Ok(scene.first_member(talk) == seeker.unit as i32)
+    }));
     // 2: not this character's previous talk.
     gates.push(Box::new(move || {
         Ok(!(seeker.previous_talk_id != 0 && seeker.previous_talk_id == talk))
@@ -820,17 +951,17 @@ fn matches_lottery_conditions(
         let mut matched = false;
         for (kind, value) in &rows {
             match condition_kind(kind) {
-                Some(CONDITION_READ_EVENT_STORY_EPISODE_ID | CONDITION_MYSEKAI_CHARACTER_VISIT_COUNT) => {
-                    matched = true
-                }
+                Some(
+                    CONDITION_READ_EVENT_STORY_EPISODE_ID | CONDITION_MYSEKAI_CHARACTER_VISIT_COUNT,
+                ) => matched = true,
                 Some(CONDITION_MYSEKAI_PHENOMENA_ID) => matched |= *value == scene.phenomena_id,
                 Some(CONDITION_MYSEKAI_FIXTURE_ID) => {
                     // The talk's first fixture row names the fixture id;
                     // true when one of those fixtures stands on this site.
                     matched |= fixture_value.is_some_and(|id| {
-                        scene
-                            .placed_of(id)
-                            .any(|f| f.located_site_type.is_some() && f.located_site_type == seeker_site)
+                        scene.placed_of(id).any(|f| {
+                            f.located_site_type.is_some() && f.located_site_type == seeker_site
+                        })
                     });
                 }
                 Some(CONDITION_MYSEKAI_FIXTURE_TAG_ID) => {
@@ -840,7 +971,7 @@ fn matches_lottery_conditions(
                 _ => {
                     return Err(Halt::fault(format!(
                         "condition of talk {talk} has row type {kind} (argument out of range)"
-                    )))
+                    )));
                 }
             }
         }
@@ -867,7 +998,7 @@ fn matches_lottery_conditions(
                     return Err(Halt::gap(format!(
                         "motion area of {} cannot be evaluated: {reason}",
                         fixture.uid
-                    )))
+                    )));
                 }
             }
         }
@@ -914,7 +1045,8 @@ fn matches_lottery_conditions(
                 return Ok(true);
             }
             // The configured delay is an integer compared as a float.
-            Ok((scene.fixture_gates().gate_action_elapsed_seconds as f32) < seeker.since_initialized)
+            Ok((scene.fixture_gates().gate_action_elapsed_seconds as f32)
+                < seeker.since_initialized)
         })),
         Some(store) => {
             // IsUseTimeline: the talk's pre-action exists and names a
@@ -995,11 +1127,18 @@ pub fn lottery_fixture_talk_id(
             passes_gates,
         });
     }
+    pick_candidates(candidates, scene.weights, lottery.word(), draws)
+}
+
+fn pick_candidates(
+    candidates: Vec<Candidate>,
+    weights: LotteryWeights,
+    word: &str,
+    draws: &mut Draws<'_>,
+) -> Result<i32, Halt> {
     if !candidates.iter().any(|c| c.passes_gates) {
         return Ok(0);
     }
-    let word = lottery.word();
-    let weights = scene.weights;
     // The weighted draw and the pick are recorded in order.
     let mut float_values = Vec::new();
     let mut pick_values = Vec::new();
@@ -1057,6 +1196,52 @@ pub fn lottery_fixture_talk_id(
     Ok(outcome?.talk_id)
 }
 
+/// The post-edit candidate list is limited to changed instances and the
+/// requested read-history branch, then uses the ordinary eight gates and
+/// member-count lottery. No row or instance is substituted on failure.
+pub(crate) fn reaction_talk(
+    scene: &LotteryScene<'_>,
+    seeker: &NpcView,
+    changed: &[String],
+    read: bool,
+    draws: &mut Draws<'_>,
+) -> Result<Option<(i32, String, Vec<u32>)>, Halt> {
+    let mut candidates = Vec::new();
+    let mut targets = std::collections::HashMap::new();
+    for row in scene.talk_list.iter().filter(|row| row.is_read == read) {
+        let Some(id) = first_fixture_row(&scene.conditions(row.talk_id)?) else {
+            continue;
+        };
+        let mut target = None;
+        for fixture in scene
+            .fixtures
+            .iter()
+            .filter(|f| f.fixture_id == id && changed.contains(&f.uid))
+        {
+            if fixture_admissible(scene, row.talk_id, fixture)? {
+                target = Some(fixture.uid.clone());
+                break;
+            }
+        }
+        let Some(target) = target else {
+            continue;
+        };
+        if !matches_lottery_conditions(scene, seeker, row.talk_id, None)? {
+            continue;
+        }
+        targets.insert(row.talk_id, target);
+        candidates.push(Candidate {
+            talk_id: row.talk_id,
+            member_count: scene.members(row.talk_id)?.len() as i32,
+            passes_gates: true,
+        });
+    }
+    let talk = pick_candidates(candidates, scene.weights, "after_edit_reaction", draws)?;
+    Ok(targets
+        .remove(&talk)
+        .map(|fixture| (talk, fixture, scene.members(talk).unwrap_or_default())))
+}
+
 /// `GetUnReadFixtureActionTalkId` for `seeker`: the unread rows of the talk
 /// list, in list order, that pass the fixture-action filters (see
 /// [`matches_lottery_conditions`]; `store` is every NPC of the avatar store
@@ -1089,7 +1274,11 @@ pub fn fixture_action_talk_ids(
 }
 
 /// The admissibility pair of one placed fixture for the deciding character.
-fn fixture_admissible(scene: &LotteryScene<'_>, talk: i32, fixture: &PlacedFixture) -> Result<bool, Halt> {
+fn fixture_admissible(
+    scene: &LotteryScene<'_>,
+    talk: i32,
+    fixture: &PlacedFixture,
+) -> Result<bool, Halt> {
     (scene.fixture_gates().admissible)(talk, fixture).map_err(|reason| {
         Halt::gap(format!(
             "talk {talk}: the fixture admissibility pair of {} cannot be evaluated: {reason}",
@@ -1164,7 +1353,9 @@ fn random_character_talk_fixture(
     };
     let mut admissible: Vec<&PlacedFixture> = Vec::new();
     for fixture in scene.placed_of(fixture_id) {
-        if fixture_admissible(scene, talk, fixture)? && !admissible.iter().any(|kept| kept.uid == fixture.uid) {
+        if fixture_admissible(scene, talk, fixture)?
+            && !admissible.iter().any(|kept| kept.uid == fixture.uid)
+        {
             admissible.push(fixture);
         }
     }
@@ -1172,8 +1363,8 @@ fn random_character_talk_fixture(
         return Err(no_admissible_fixture(talk, fixture_id));
     }
     let count = admissible.len();
-    let index = (draws.sequence_pick)(count)
-        .expect("a sequence pick over a non-empty set yields an index");
+    let index =
+        (draws.sequence_pick)(count).expect("a sequence pick over a non-empty set yields an index");
     draws.record.push(json!({
         "use": "row1_fixture_pick", "value": index, "range": [0, count],
         "source": SOURCE_SEQUENCE_PICK,
@@ -1432,7 +1623,9 @@ impl LotteryScene<'_> {
         let Some(pre) = pre else {
             return little_far([0.0; 3], "no_pre_action", steps);
         };
-        let waits = pre.fixture_together_communication_id.is_some_and(|id| id > 0);
+        let waits = pre
+            .fixture_together_communication_id
+            .is_some_and(|id| id > 0);
         if pre.timeline_group_id.unwrap_or(0) == 0 && !waits {
             return little_far(npc_position, "little_far", steps);
         }
@@ -1459,7 +1652,11 @@ impl LotteryScene<'_> {
             "target_arm": "start_loc", "index": index, "start": start, "site_y": site_y,
             "sample_hit": hit,
         }));
-        Ok(if hit { (true, point) } else { (false, npc_position) })
+        Ok(if hit {
+            (true, point)
+        } else {
+            (false, npc_position)
+        })
     }
 }
 
@@ -1514,7 +1711,9 @@ pub fn force_update_read_talk_fixture_talk(
         .pre_action_of(talk)
         .ok_or_else(|| Halt::fault(format!("talk {talk} has no pre-action (the source throws)")))?;
     let fixture = random_character_talk_fixture(scene, talk, draws)?.ok_or_else(|| {
-        Halt::fault(format!("talk {talk} has no target fixture (the source throws)"))
+        Halt::fault(format!(
+            "talk {talk} has no target fixture (the source throws)"
+        ))
     })?;
     // The locate list's timeline: the first row of the pre-action's group.
     let first_timeline = pre
@@ -1523,7 +1722,11 @@ pub fn force_update_read_talk_fixture_talk(
     let locate = scene.locate_list(Some(&fixture), master.unit_group_id, first_timeline)?;
     // CreateFixtureAITalkData: RandomPick over the group's timelines.
     let group = pre.timeline_group_id.unwrap_or(0);
-    let timelines: Vec<i32> = scene.tables.timeline_rows(group).map(|row| row.id).collect();
+    let timelines: Vec<i32> = scene
+        .tables
+        .timeline_rows(group)
+        .map(|row| row.id)
+        .collect();
     let index = (draws.sequence_pick)(timelines.len());
     draws.record.push(json!({
         "use": "fixture_timeline_pick:read_talk", "value": index, "range": [0, timelines.len()],
@@ -1539,7 +1742,10 @@ pub fn force_update_read_talk_fixture_talk(
         return Ok(ReadTalkPlan::General { talk_id: talk });
     }
     let position = host.npc_position(seeker.unit).ok_or_else(|| {
-        Halt::fault(format!("unit {} has no presenter (null dereference)", seeker.unit))
+        Halt::fault(format!(
+            "unit {} has no presenter (null dereference)",
+            seeker.unit
+        ))
     })?;
     let locate = locate.ok_or_else(|| {
         Halt::fault(format!(
@@ -1549,12 +1755,15 @@ pub fn force_update_read_talk_fixture_talk(
     let own = own_index(&locate, seeker.unit);
     let mut steps = Vec::new();
     let (found, target) = scene.target_position(position, talk, &fixture, own, &mut steps)?;
-    let slots = scene.tables.unit_group_slots(master.unit_group_id).ok_or_else(|| {
-        Halt::fault(format!(
-            "talk {talk}: unit group {} is absent (null dereference)",
-            master.unit_group_id
-        ))
-    })?;
+    let slots = scene
+        .tables
+        .unit_group_slots(master.unit_group_id)
+        .ok_or_else(|| {
+            Halt::fault(format!(
+                "talk {talk}: unit group {} is absent (null dereference)",
+                master.unit_group_id
+            ))
+        })?;
     let members: Vec<u32> = slots
         .iter()
         .map(|unit| unit.unwrap_or(0))
@@ -1629,7 +1838,10 @@ fn try_some_character_fixture(
     }
     let fixture = fixture.expect("a locate list is only built for a fixture");
     let position = scene.host().npc_position(seeker.unit).ok_or_else(|| {
-        Halt::fault(format!("unit {} has no presenter (null dereference)", seeker.unit))
+        Halt::fault(format!(
+            "unit {} has no presenter (null dereference)",
+            seeker.unit
+        ))
     })?;
     let index = own_index(&locate, seeker.unit);
     // The bool is dropped: a target that is not found still builds.
@@ -1680,13 +1892,18 @@ pub fn some_character_data_for_member(
         }));
         return Ok((None, steps));
     };
-    let timeline = scene.pick_timeline(main.talk_id, draws, "fixture_timeline_pick:some_character_member")?;
+    let timeline = scene.pick_timeline(
+        main.talk_id,
+        draws,
+        "fixture_timeline_pick:some_character_member",
+    )?;
     let host = scene.host();
     let Some(position) = host.npc_position(member) else {
         steps.push(json!({ "factory": "some_character_member", "result": "no_presenter" }));
         return Ok((None, steps));
     };
-    let (found, target) = scene.target_position(position, main.talk_id, &main.fixture, row.index, &mut steps)?;
+    let (found, target) =
+        scene.target_position(position, main.talk_id, &main.fixture, row.index, &mut steps)?;
     if !found {
         steps.push(json!({ "factory": "some_character_member", "result": "target_not_found", "index": row.index }));
         return Ok((None, steps));
@@ -1721,10 +1938,10 @@ fn try_waiting_with_communication(
     fixture: Option<&str>,
     steps: &mut Vec<Value>,
 ) -> Result<Option<FixtureTalkData>, Halt> {
-    let waits = scene
-        .tables
-        .pre_action_of(talk)
-        .is_some_and(|pre| pre.fixture_together_communication_id.is_some_and(|id| id > 0));
+    let waits = scene.tables.pre_action_of(talk).is_some_and(|pre| {
+        pre.fixture_together_communication_id
+            .is_some_and(|id| id > 0)
+    });
     if !waits {
         return Ok(None);
     }
@@ -1763,12 +1980,15 @@ fn waiting_with_communication(
         .tables
         .talk_master(talk)
         .ok_or_else(|| Halt::fault(format!("talk {talk} has no master row")))?;
-    let slots = scene.tables.unit_group_slots(master.unit_group_id).ok_or_else(|| {
-        Halt::fault(format!(
-            "talk {talk}: unit group {} is absent (null dereference)",
-            master.unit_group_id
-        ))
-    })?;
+    let slots = scene
+        .tables
+        .unit_group_slots(master.unit_group_id)
+        .ok_or_else(|| {
+            Halt::fault(format!(
+                "talk {talk}: unit group {} is absent (null dereference)",
+                master.unit_group_id
+            ))
+        })?;
     let locate = scene.locate_list_while_doing(talk, fixture)?;
     if locate.is_empty() {
         steps.push(json!({ "factory": "waiting_with_communication", "result": "locate_empty" }));
@@ -1783,9 +2003,10 @@ fn waiting_with_communication(
         )));
     }
     let (start, rotation) = scene.host().start_loc(fixture, index)?;
-    let site_y = scene.host().site_height(fixture)?.ok_or_else(|| {
-        Halt::fault(format!("{fixture} stands on no site (null dereference)"))
-    })?;
+    let site_y = scene
+        .host()
+        .site_height(fixture)?
+        .ok_or_else(|| Halt::fault(format!("{fixture} stands on no site (null dereference)")))?;
     let target = [start[0], site_y, start[2]];
     let members: Vec<u32> = slots
         .iter()
@@ -1830,7 +2051,11 @@ fn try_fixture_action(
     let (locate, index) = match timeline {
         None => (None, 0),
         Some(picked) => {
-            if scene.tables.unit_group_slots(master.unit_group_id).is_none() {
+            if scene
+                .tables
+                .unit_group_slots(master.unit_group_id)
+                .is_none()
+            {
                 return Err(Halt::fault(format!(
                     "talk {talk}: unit group {} is absent (null dereference)",
                     master.unit_group_id
@@ -1854,7 +2079,10 @@ fn try_fixture_action(
         }
     };
     let position = scene.host().npc_position(seeker.unit).ok_or_else(|| {
-        Halt::fault(format!("unit {} has no presenter (null dereference)", seeker.unit))
+        Halt::fault(format!(
+            "unit {} has no presenter (null dereference)",
+            seeker.unit
+        ))
     })?;
     let (found, target) = scene.target_position(position, talk, fixture, index, steps)?;
     steps.push(json!({
@@ -1959,13 +2187,22 @@ fn build_director_talk(
     }
     let Some(fixture_id) = first_fixture_row(&scene.conditions(talk)?) else {
         if members.len() == 1 {
-            return Ok(TalkPlan::General { talk_id: talk, interrupt: false });
+            return Ok(TalkPlan::General {
+                talk_id: talk,
+                interrupt: false,
+            });
         }
-        return Err(Halt::gap(format!("talk {talk} has speakers {members:?} and no fixture row")));
+        return Err(Halt::gap(format!(
+            "talk {talk} has speakers {members:?} and no fixture row"
+        )));
     };
     for &member in &members[1..] {
         match scene.npc(member) {
-            None => return Err(Halt::gap(format!("talk {talk}: speaker {member} is not on this site"))),
+            None => {
+                return Err(Halt::gap(format!(
+                    "talk {talk}: speaker {member} is not on this site"
+                )));
+            }
             Some(npc) if !can_play_multi_character_fixture_action(npc) => {
                 return Err(Halt::gap(format!(
                     "talk {talk}: speaker {member} is not free (state {}, objective {:?}, talk type {:?})",
@@ -1980,7 +2217,13 @@ fn build_director_talk(
     let built = run_fixture_factories(scene, seeker, talk, fixture.as_deref(), draws, &mut steps)?;
     let results = steps
         .iter()
-        .map(|step| format!("{} {}", step["factory"].as_str().unwrap_or("?"), step["result"].as_str().unwrap_or("?")))
+        .map(|step| {
+            format!(
+                "{} {}",
+                step["factory"].as_str().unwrap_or("?"),
+                step["result"].as_str().unwrap_or("?")
+            )
+        })
         .collect::<Vec<_>>();
     draws.record.push(json!({
         "use": "director_talk_steps", "talk_id": talk, "fixture": fixture, "steps": steps,
@@ -2012,6 +2255,86 @@ fn lottery_and_create_general_talk_data(
         talk_id: talk,
         interrupt: false,
     })
+}
+
+/// The HFSM selects content before constructing the movement/lower pair.
+/// General selection is deferred because its destination consumes random
+/// values before the general-content lottery.
+pub enum HfsmTalkPlan {
+    General,
+    Common(i32),
+    Prepared(TalkPlan),
+}
+
+pub(crate) fn hfsm_fixture_plan(
+    scene: &LotteryScene<'_>,
+    seeker: &NpcView,
+    lane: crate::npc_objective::HfsmFixtureLane,
+    is_common: &dyn Fn(i32) -> bool,
+    draws: &mut Draws<'_>,
+) -> Result<HfsmTalkPlan, Halt> {
+    use crate::npc_objective::HfsmFixtureLane as Lane;
+    if lane == Lane::Common {
+        return match change_fixture_common_talk_objective(scene, seeker, draws)? {
+            TalkPlan::Null { .. } => Ok(HfsmTalkPlan::General),
+            plan => Ok(HfsmTalkPlan::Prepared(plan)),
+        };
+    }
+    let mut talk = lottery_fixture_talk_id(
+        scene,
+        seeker,
+        if lane == Lane::Unread {
+            FixtureLottery::NotYetRead
+        } else {
+            FixtureLottery::AlreadyRead
+        },
+        draws,
+    )?;
+    if talk == 0 && lane == Lane::Unread {
+        talk = lottery_fixture_talk_id(scene, seeker, FixtureLottery::Read, draws)?;
+    }
+    if talk == 0 || scene.tables.talk_master(talk).is_none() {
+        return Ok(HfsmTalkPlan::General);
+    }
+    if is_common(talk) {
+        return Ok(HfsmTalkPlan::Common(talk));
+    }
+    let fixture = if lane == Lane::Unread {
+        match first_fixture_row(&scene.conditions(talk)?) {
+            Some(id) => target_character_talk_fixture_by_condition(scene, talk, id)?,
+            None => None,
+        }
+    } else {
+        target_character_talk_fixture(scene, talk)?
+    };
+    let Some(fixture) = fixture else {
+        return Ok(HfsmTalkPlan::General);
+    };
+    let mut steps = Vec::new();
+    let data = run_fixture_factories(scene, seeker, talk, Some(&fixture), draws, &mut steps)?;
+    draws
+        .record
+        .push(json!({"use":"hfsm_fixture_factory", "talk_id":talk, "steps":steps}));
+    Ok(match data {
+        Some(data) => HfsmTalkPlan::Prepared(TalkPlan::Fixture(data)),
+        None => HfsmTalkPlan::General,
+    })
+}
+
+pub(crate) fn hfsm_directed_fixture(
+    scene: &LotteryScene<'_>,
+    seeker: &NpcView,
+    talk: i32,
+    fixture: &str,
+    draws: &mut Draws<'_>,
+) -> Result<TalkPlan, Halt> {
+    let mut steps = Vec::new();
+    let data = run_fixture_factories(scene, seeker, talk, Some(fixture), draws, &mut steps)?;
+    draws
+        .record
+        .push(json!({"use":"event_fixture_factory", "talk_id":talk, "steps":steps}));
+    data.map(TalkPlan::Fixture)
+        .ok_or_else(|| Halt::gap("selected event fixture cannot construct the requested talk"))
 }
 
 /// Row 1 (empty AI talk data): unread fixture talk, then read talk, then a
@@ -2121,7 +2444,9 @@ pub fn change_fixture_common_talk_objective(
 ) -> Result<TalkPlan, Halt> {
     let talk = lottery_general_talk_id(scene, seeker, draws, "general_talk_pick")?.talk_id();
     if scene.tables.talk_master(talk).is_none() {
-        return Err(Halt::fault(format!("general talk {talk} has no master row")));
+        return Err(Halt::fault(format!(
+            "general talk {talk} has no master row"
+        )));
     }
     let Some(uid) = target_character_talk_fixture(scene, talk)? else {
         return Ok(TalkPlan::Null {
@@ -2136,7 +2461,9 @@ pub fn change_fixture_common_talk_objective(
         .expect("the chooser returns a placed fixture")
         .fixture_id;
     let extras = scene.fixture_gates().extras;
-    let (commons, groups) = match extras.map(|extras| (&extras.fixture_commons, &extras.fixture_common_groups)) {
+    let (commons, groups) = match extras
+        .map(|extras| (&extras.fixture_commons, &extras.fixture_common_groups))
+    {
         Some((Ok(commons), Ok(groups))) => (commons, groups),
         Some((Err(reason), _)) | Some((_, Err(reason))) => return Err(Halt::gap(reason.clone())),
         None => return Err(Halt::gap("the fixture-common tables are not loaded")),
@@ -2169,7 +2496,10 @@ pub fn change_fixture_common_talk_objective(
     }));
     let common = kept[index];
     let position = scene.host().npc_position(seeker.unit).ok_or_else(|| {
-        Halt::fault(format!("unit {} has no presenter (null dereference)", seeker.unit))
+        Halt::fault(format!(
+            "unit {} has no presenter (null dereference)",
+            seeker.unit
+        ))
     })?;
     let mut steps = Vec::new();
     let (found, target) = scene.target_position(position, talk, &uid, 0, &mut steps)?;

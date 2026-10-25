@@ -819,6 +819,7 @@ const TALK_VOICE_PACKAGE_PREFIX: &str = "mysekai__talk__voice__";
 /// The talk voice bank under the Birthday context
 /// (`mysekai/talk/birthday/voice/{0}`), flattened like the plain one.
 const BIRTHDAY_TALK_VOICE_PACKAGE_PREFIX: &str = "mysekai__talk__birthday__voice__";
+const TUTORIAL_TALK_VOICE_PACKAGE_PREFIX: &str = "mysekai__talk__tutorial__voice__";
 
 impl Routing {
     fn phenomenon(&self, name: &str) -> &PhenomenonAudio {
@@ -1939,12 +1940,18 @@ fn parse_corpus(corpus: &serde_json::Value) -> VoiceCorpus {
 /// loads `mysekai/talk/birthday/voice/<lua>`, otherwise
 /// `mysekai/talk/voice/<lua>`.
 pub fn voice_package(cue: &str, birthday: bool) -> Option<String> {
+    contextual_voice_package(cue, false, birthday)
+}
+
+fn contextual_voice_package(cue: &str, tutorial: bool, birthday: bool) -> Option<String> {
     let body = cue.strip_prefix("voice_")?;
     let stem = body.rsplit_once('_')?.0.rsplit_once('_')?.0;
     if stem.is_empty() {
         return None;
     }
-    let prefix = if birthday {
+    let prefix = if tutorial {
+        TUTORIAL_TALK_VOICE_PACKAGE_PREFIX
+    } else if birthday {
         BIRTHDAY_TALK_VOICE_PACKAGE_PREFIX
     } else {
         TALK_VOICE_PACKAGE_PREFIX
@@ -3039,8 +3046,9 @@ fn route_voice(
     partvoice: Option<&PartVoiceMap>,
     streams: &Streams,
     birthday: bool,
+    tutorial: bool,
 ) -> VoiceRoute {
-    if let Some(package) = voice_package(&line.cue, birthday) {
+    if let Some(package) = contextual_voice_package(&line.cue, tutorial, birthday) {
         return if streams.0.contains_key(&(line.cue.clone(), package.clone())) {
             VoiceRoute::Play {
                 package,
@@ -3113,7 +3121,7 @@ pub fn prefetch_voice(
     routing: Option<Res<Routing>>,
     partvoice: Option<Res<PartVoiceMap>>,
     talk: Option<Res<crate::audio_inputs::TalkVoicePrefetch>>,
-    birthday: Option<Res<crate::audio_inputs::BirthdayVoice>>,
+    birthday: (Option<Res<crate::audio_inputs::BirthdayVoice>>, Option<Res<crate::audio_inputs::TutorialVoice>>),
     mut cache: ResMut<VoicePrefetchCache>,
 ) {
     let Some(routing) = routing else {
@@ -3131,7 +3139,7 @@ pub fn prefetch_voice(
             speaker: None,
         };
         let VoiceRoute::Play { package, .. } =
-            route_voice(&line, partvoice.as_deref(), &routing.streams, birthday.is_some())
+            route_voice(&line, partvoice.as_deref(), &routing.streams, birthday.0.is_some(), birthday.1.is_some())
         else {
             continue;
         };
@@ -3161,7 +3169,7 @@ pub fn serve_voice(
     corpus: Option<Res<VoiceCorpus>>,
     routing: Option<Res<Routing>>,
     partvoice: Option<Res<PartVoiceMap>>,
-    birthday: Option<Res<crate::audio_inputs::BirthdayVoice>>,
+    birthday: (Option<Res<crate::audio_inputs::BirthdayVoice>>, Option<Res<crate::audio_inputs::TutorialVoice>>),
     mut prefetch: ResMut<VoicePrefetchCache>,
     mut channel: ResMut<VoiceChannel>,
     lines: Query<(Entity, &VoiceLine)>,
@@ -3198,7 +3206,7 @@ pub fn serve_voice(
                 entity_commands.despawn();
             }
         }
-        match route_voice(&line, partvoice.as_deref(), &routing.streams, birthday.is_some()) {
+        match route_voice(&line, partvoice.as_deref(), &routing.streams, birthday.0.is_some(), birthday.1.is_some()) {
             VoiceRoute::Play { package, partvoice } => {
                 let Some(stream) = routing.streams.0.get(&(line.cue.clone(), package.clone()))
                 else {

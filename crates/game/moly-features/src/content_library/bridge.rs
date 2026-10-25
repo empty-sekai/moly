@@ -270,6 +270,7 @@ fn parse_key(value: &str) -> Result<EntryKey, String> {
     Ok(match parts.as_slice() {
         ["talk", "general", id] => EntryKey::Talk(TalkBackend::General, positive_id(id)?),
         ["talk", "fixture", id] => EntryKey::Talk(TalkBackend::Fixture, positive_id(id)?),
+        ["talk", "common", id] => EntryKey::Talk(TalkBackend::CommonSomeCharacter, positive_id(id)?),
         ["fixture", id] => EntryKey::Fixture(positive_id(id)?),
         ["activity", origin, id, timeline] => EntryKey::Activity(ActivityKey {
             origin: match *origin {
@@ -286,6 +287,7 @@ fn key(value: EntryKey) -> String {
     match value {
         EntryKey::Talk(TalkBackend::General, id) => format!("talk:general:{id}"),
         EntryKey::Talk(TalkBackend::Fixture, id) => format!("talk:fixture:{id}"),
+        EntryKey::Talk(TalkBackend::CommonSomeCharacter, id) => format!("talk:common:{id}"),
         EntryKey::Fixture(id) => format!("fixture:{id}"),
         EntryKey::Activity(activity) => format!(
             "activity:{}:{}:{}",
@@ -610,7 +612,7 @@ fn project_row(
                 if detail {
                     row.lines
                         .iter()
-                        .map(|line| json!({"speaker":line.speaker,"text":line.text}))
+                        .map(|line| json!({"speaker":line.speaker,"text":line.text,"textStep":line.text_step,"speakerStep":line.speaker_step}))
                         .collect()
                 } else {
                     vec![]
@@ -629,6 +631,9 @@ fn project_row(
     };
     let mut row = json!({"key":key(key_value),"title":title,"subtitle":subtitle,"image":fixture_ids.first().and_then(|id|image(catalog,*id)),
         "characters":units.iter().map(|id|character(catalog,*id)).collect::<Vec<_>>(),"kind":kind,"available":reason.is_none(),"reason":reason});
+    if let Some(talk) = catalog.talk(key_value) {
+        row["scriptKey"] = json!(talk.script_key);
+    }
     if detail {
         let mut related = Vec::new();
         for id in &fixture_ids {
@@ -944,6 +949,7 @@ mod tests {
     }
     fn talk(id: i32, backend: TalkBackend) -> LibraryTalk {
         LibraryTalk {
+            script_key: "sample".into(),
             preview_tweet: None,
             content: TalkContent {
                 master_id: id,
@@ -957,6 +963,7 @@ mod tests {
             lines: vec![DialogueLine {
                 speaker: "一歌".into(),
                 text: "第一句\n长台词".into(),
+                text_step: Some(1), speaker_step: Some(0),
             }],
             search: format!("对话 {id}"),
             furniture_related: false,

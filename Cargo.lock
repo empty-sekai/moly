@@ -5020,9 +5020,10 @@ version = "0.0.4"
 dependencies = [
  "bevy",
  "console_error_panic_hook",
- "dlmalloc",
  "js-sys",
  "moly-assets",
+ "moly-core",
+ "moly-features",
  "moly-game",
  "moly-link",
  "moly-perf",
@@ -5061,11 +5062,8 @@ dependencies = [
 name = "moly-audio"
 version = "0.0.4"
 dependencies = [
- "async-channel",
  "async-lock",
- "base64 0.22.1",
  "bevy",
- "bevy_remote",
  "futures-channel",
  "futures-util",
  "getrandom 0.2.17",
@@ -5104,6 +5102,7 @@ version = "0.0.4"
 dependencies = [
  "async-lock",
  "bevy",
+ "dlmalloc",
  "futures-channel",
  "futures-util",
  "getrandom 0.2.17",
@@ -5177,11 +5176,8 @@ name = "moly-features"
 version = "0.0.4"
 dependencies = [
  "arboard",
- "async-channel",
  "async-lock",
- "base64 0.22.1",
  "bevy",
- "bevy_remote",
  "futures-channel",
  "futures-util",
  "getrandom 0.2.17",
@@ -5222,11 +5218,8 @@ dependencies = [
 name = "moly-game"
 version = "0.0.4"
 dependencies = [
- "async-channel",
  "async-lock",
- "base64 0.22.1",
  "bevy",
- "bevy_remote",
  "futures-channel",
  "futures-util",
  "getrandom 0.2.17",
@@ -5351,11 +5344,8 @@ dependencies = [
 name = "moly-render"
 version = "0.0.4"
 dependencies = [
- "async-channel",
  "async-lock",
- "base64 0.22.1",
  "bevy",
- "bevy_remote",
  "futures-channel",
  "futures-util",
  "getrandom 0.2.17",
@@ -5423,6 +5413,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "moly-stage"
+version = "0.0.4"
+dependencies = [
+ "bevy",
+ "console_error_panic_hook",
+ "moly-assets",
+ "moly-audio",
+ "moly-core",
+ "moly-features",
+ "moly-link",
+ "moly-perf",
+ "moly-protocol",
+ "moly-render",
+ "moly-ui",
+ "moly-world",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "moly-store"
 version = "0.0.4"
 dependencies = [
@@ -5439,14 +5449,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "moly-text"
+version = "0.0.4"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "moly-ui"
 version = "0.0.4"
 dependencies = [
- "async-channel",
  "async-lock",
- "base64 0.22.1",
  "bevy",
- "bevy_remote",
  "futures-channel",
  "futures-util",
  "getrandom 0.2.17",
@@ -5485,11 +5500,8 @@ dependencies = [
 name = "moly-world"
 version = "0.0.4"
 dependencies = [
- "async-channel",
  "async-lock",
- "base64 0.22.1",
  "bevy",
- "bevy_remote",
  "futures-channel",
  "futures-util",
  "getrandom 0.2.17",
@@ -5507,6 +5519,7 @@ dependencies = [
  "moly-protocol",
  "moly-render",
  "moly-store",
+ "moly-text",
  "moly-ui",
  "naga",
  "parry3d",

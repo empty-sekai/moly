@@ -266,7 +266,11 @@ export async function createResourceIndex(root, region, version) {
     });
     entries.sort((a, b) => a.name.localeCompare(b.name, "en"));
     for (const entry of entries) {
-      if (entry.name.startsWith(".") || entry.name === "runtime-source.json")
+      if (
+        entry.name.startsWith(".") ||
+        entry.name === "runtime-source.json" ||
+        (!relative && entry.name === "translations")
+      )
         continue;
       const name = relative ? `${relative}/${entry.name}` : entry.name;
       if (entry.isSymbolicLink() || !safeResourcePath(name))

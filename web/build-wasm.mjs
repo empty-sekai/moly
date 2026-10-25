@@ -19,9 +19,11 @@ const here = path.dirname(fileURLToPath(import.meta.url)); // .../web
 const workspaceRoot = path.resolve(here, "..");
 const buildArguments = parseWasmBuildArguments(process.argv.slice(2));
 const profileName = buildArguments.profile;
+const product = buildArguments.product;
+const crate = product === "stage" ? "moly-stage" : "moly-app";
 const outDir = buildArguments.outDir
   ? path.resolve(buildArguments.outDir)
-  : path.join(here, "pkg");
+  : path.join(here, product === "stage" ? "pkg" : "pkg-game");
 const lockPath = path.join(workspaceRoot, "Cargo.lock");
 const requestedBackend = buildArguments.renderer;
 // Keep local builds responsive; callers can explicitly raise this limit.
@@ -97,7 +99,7 @@ const cargoWasmPath = path.join(
   JSON.parse(metadata.stdout).target_directory,
   "wasm32-unknown-unknown",
   profileName,
-  "moly-app.wasm",
+  `${crate}.wasm`,
 );
 
 // wasm-bindgen CLI 只吃与自己 schema 版本精确一致的输入，不一致时报的是
@@ -178,7 +180,7 @@ for (const [backend, features] of [
     "--target",
     "wasm32-unknown-unknown",
     "-p",
-    "moly-app",
+    crate,
     ...features,
     "--manifest-path",
     path.join(workspaceRoot, "Cargo.toml"),
@@ -190,6 +192,10 @@ for (const [backend, features] of [
   run(WASM_BINDGEN, [
     "--target",
     "web",
+    // Preserve immutable release paths and the loader ABI while the Rust
+    // product is selected independently above.
+    "--out-name",
+    "moly-app",
     "--out-dir",
     backendDir,
     cargoWasmPath,
@@ -209,6 +215,8 @@ for (const [backend, features] of [
     JSON.stringify(
       {
         schemaVersion: 1,
+        product,
+        crate,
         backend,
         profile: profileName,
         sourceFingerprint,

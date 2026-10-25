@@ -246,6 +246,7 @@ const DOCUMENTS: &[(&str, &str)] = &[
 /// region root's manifest) is named once and left out; the view that draws
 /// it refuses by name. Every other document is required.
 const OPTIONAL_DOCUMENTS: &[(&str, &str)] = &[
+    ("PhotoShot", "screens/ScreenLayerMysekaiPhotoShot.json"),
     ("CommonReward", "menu/CommonRewardSubWindowDialog.json"),
     ("RecoverBoostStamina", "menu/MysekaiRecoverBoostStaminaDialog.json"),
     ("BoostStaminaConfirm", "menu/BoostStaminaRecoverConfirmDialog.json"),
@@ -1178,6 +1179,9 @@ impl UiLayouts {
                     .text_rules
                     .as_ref()
                     .ok_or("TMP line rules are not loaded")?;
+                let translated = change.filter(|value| value.translated_text)
+                    .map(|_| tmp_layout::translated_inputs(comp, rules));
+                let (comp, rules) = translated.as_ref().map_or((comp, rules), |(comp, rules)| (comp, rules));
                 Some(tmp_layout::preferred_axis(
                     &text,
                     comp,
@@ -1517,6 +1521,7 @@ pub struct Override {
     pub visible: Option<bool>,
     pub text: Option<String>,
     pub text_alignment: Option<i64>,
+    pub translated_text: bool,
     fill: Option<f32>,
     texture: Option<String>,
     slider: Option<f32>,
@@ -1539,6 +1544,7 @@ impl Override {
         match other {
             Some(other) => {
                 self.text == other.text
+                    && self.translated_text == other.translated_text
                     && self.text_alignment == other.text_alignment
                     && self.fill == other.fill
                     && self.texture == other.texture
@@ -1546,6 +1552,7 @@ impl Override {
                     && self.behaviour_enabled == other.behaviour_enabled
             }
             None => self.text.is_none()
+                && !self.translated_text
                 && self.text_alignment.is_none()
                 && self.fill.is_none()
                 && self.texture.is_none()
@@ -1612,6 +1619,7 @@ impl UiPrefabView {
                 || value.transform != old.transform
                 || value.rotation != old.rotation
                 || value.text != old.text
+                || value.translated_text != old.translated_text
                 || value.texture != old.texture
             {
                 self.geometry_revision = self.geometry_revision.wrapping_add(1);
@@ -1632,10 +1640,14 @@ impl UiPrefabView {
         self.update(path, |v| v.visible = Some(value));
     }
     pub fn set_text(&mut self, path: &str, value: String) {
-        if self.overrides.get(path).and_then(|v| v.text.as_ref()) == Some(&value) {
+        self.set_display_text(path, value, false);
+    }
+    /// A translated field is literal text and uses the publication font chain.
+    pub fn set_display_text(&mut self, path: &str, value: String, translated: bool) {
+        if self.overrides.get(path).is_some_and(|v| v.text.as_ref() == Some(&value) && v.translated_text == translated) {
             return;
         }
-        self.update(path, |v| v.text = Some(value));
+        self.update(path, |v| { v.text = Some(value); v.translated_text = translated; });
     }
     /// Runtime TMP.alignment on this text instance; do not alter the source
     /// RectTransform or its preferred size to simulate text alignment.
@@ -2647,6 +2659,7 @@ pub fn render(
                         &text,
                         input_box,
                         comp,
+                        change.is_some_and(|v| v.translated_text),
                         change.and_then(|v| v.text_alignment),
                         rect,
                         layouts
@@ -2950,6 +2963,7 @@ fn spawn_text(
     text: &str,
     input_box: bool,
     component: &moly_assets::ui_layout::UiComponent,
+    translated: bool,
     alignment: Option<i64>,
     rect: &UiRect,
     rules: &tmp_layout::TextRules,
@@ -2963,6 +2977,8 @@ fn spawn_text(
     clip_materials: &mut Assets<clip_render::UiClipMaterial>,
     clip_pixel_size: Vec2,
 ) {
+    let translated = translated.then(|| tmp_layout::translated_inputs(component, rules));
+    let (component, rules) = translated.as_ref().map_or((component, rules), |(component, rules)| (component, rules));
     let fields = &component.fields;
     let layout = tmp_layout::layout(text, component, rect.size, rect.pivot, rules, alignment, input_box)
         .unwrap_or_else(|error| panic!("UI TMP layout failed: {error}"));

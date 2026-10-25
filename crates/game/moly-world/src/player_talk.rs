@@ -106,9 +106,36 @@ pub struct PlayerTalkDataHandle {
 #[derive(Resource)]
 pub struct PlayerTalkStore {
     pub units: Vec<(u32, Vec<TalkRow>)>,
+    /// The shared multi-actor interpreter reads these without fixture bindings.
+    pub common: Vec<moly_law::talk::FixtureTalkRow>,
     pub names: HashMap<String, u32>,
     /// The birthday party's scripts, or why the document has none.
     pub birthday: Result<BirthdayScripts, String>,
+    pub tutorial: Result<TutorialScripts, String>,
+}
+
+pub struct TutorialScripts {
+    masters: Vec<crate::npc_objective::events::tutorial::TutorialMaster>,
+    scripts: HashMap<String, BirthdayScript>,
+}
+
+impl TutorialScripts {
+    fn row(&self, id: i32) -> Option<TalkRow> {
+        let master = self.masters.iter().find(|row| row.id == id)?;
+        let script = self.scripts.get(&master.lua)?;
+        Some(TalkRow {
+            talk_id: id, lua: master.lua.clone(), site_group_id: 0, term_id: 0,
+            conditions: Vec::new(), condition_values: Vec::new(),
+            tweet: TweetRef { id: master.mysekai_character_talk_tweet_id, text: String::new(), motion: String::new(), eye: String::new(), mouth: String::new() },
+            voices: script.voices.clone(), steps: script.steps.clone(),
+        })
+    }
+}
+
+pub fn tutorial_master(world: &World, id: i32) -> Result<crate::npc_objective::events::tutorial::TutorialMaster, String> {
+    let store = world.get_resource::<PlayerTalkStore>().ok_or("tutorial talk document is loading")?;
+    store.tutorial.as_ref().map_err(Clone::clone)?.masters.iter().find(|row| row.id == id)
+        .cloned().ok_or_else(|| format!("tutorial talk master {id} is absent"))
 }
 
 /// One `birthdayPartyScenarios` row.
@@ -185,6 +212,7 @@ pub fn birthday_scenario(
 pub enum ResolvedTalk {
     General { unit: u32, row: TalkRow },
     Fixture(moly_law::talk::FixtureTalkRow),
+    CommonSomeCharacter(moly_law::talk::FixtureTalkRow),
 }
 
 impl ResolvedTalk {
@@ -203,20 +231,25 @@ impl ResolvedTalk {
                 backend: TalkBackend::Fixture,
                 is_general: None,
             },
+            Self::CommonSomeCharacter(row) => TalkContent {
+                master_id: row.talk_id,
+                backend: TalkBackend::CommonSomeCharacter,
+                is_general: Some(true),
+            },
         }
     }
 
     pub fn pre_action(&self) -> TweetRef {
         match self {
             Self::General { row, .. } => row.tweet.clone(),
-            Self::Fixture(row) => row.tweet.clone(),
+            Self::Fixture(row) | Self::CommonSomeCharacter(row) => row.tweet.clone(),
         }
     }
 
     fn units(&self) -> Vec<u32> {
         match self {
             Self::General { unit, .. } => vec![*unit],
-            Self::Fixture(row) => row.unit_ids.iter().map(|unit| *unit as u32).collect(),
+            Self::Fixture(row) | Self::CommonSomeCharacter(row) => row.unit_ids.iter().map(|unit| *unit as u32).collect(),
         }
     }
 }
@@ -253,6 +286,10 @@ pub fn is_general_row(row: &TalkRow) -> bool {
 }
 
 impl TalkCatalog<'_> {
+    pub fn is_common(&self, master_id: i32) -> bool {
+        self.store.as_deref().is_some_and(|store| store.common.iter().any(|row| row.talk_id == master_id))
+    }
+
     /// The talk content, the site table and the phenomenon of the day are
     /// in: the panel's first schedule write has run.
     pub fn ready(&self) -> bool {
@@ -311,11 +348,17 @@ impl TalkCatalog<'_> {
                 .row(content.master_id)
                 .cloned()
                 .map(ResolvedTalk::Fixture),
+            crate::npc_objective::TalkBackend::CommonSomeCharacter => self.store.as_deref()?
+                .common.iter().find(|row| row.talk_id == content.master_id)
+                .cloned().map(ResolvedTalk::CommonSomeCharacter),
         }
     }
 
     pub fn resolve(&self, master_id: i32) -> Option<ResolvedTalk> {
         if let Some(store) = self.store.as_deref() {
+            if let Some(row) = store.common.iter().find(|row| row.talk_id == master_id) {
+                return Some(ResolvedTalk::CommonSomeCharacter(row.clone()));
+            }
             for (unit, rows) in &store.units {
                 if let Some(row) = rows.iter().find(|row| row.talk_id == master_id) {
                     return Some(ResolvedTalk::General {
@@ -544,8 +587,10 @@ pub fn parse(
             warn!("[talk-ingest] player conversation asset unavailable: {err:?}");
             commands.insert_resource(PlayerTalkStore {
                 units: Vec::new(),
+                common: Vec::new(),
                 names: HashMap::new(),
                 birthday: Err("the talk document is unavailable".into()),
+                tutorial: Err("the talk document is unavailable".into()),
             });
             commands.insert_resource(PlayerTalkCharset { chars: Vec::new() });
             commands.insert_resource(PlayerTalkSites {
@@ -639,8 +684,10 @@ fn parse_talks(text: &str) -> (PlayerTalkStore, PlayerTalkCharset, Vec<String>) 
             return (
                 PlayerTalkStore {
                     units: Vec::new(),
+                    common: Vec::new(),
                     names: HashMap::new(),
                     birthday: Err("the talk document is not valid JSON".into()),
+                    tutorial: Err("the talk document is not valid JSON".into()),
                 },
                 PlayerTalkCharset { chars: Vec::new() },
                 issues,
@@ -652,8 +699,10 @@ fn parse_talks(text: &str) -> (PlayerTalkStore, PlayerTalkCharset, Vec<String>) 
         return (
             PlayerTalkStore {
                 units: Vec::new(),
+                common: Vec::new(),
                 names: HashMap::new(),
                 birthday: Err("the talk document has no units object".into()),
+                tutorial: Err("the talk document has no units object".into()),
             },
             PlayerTalkCharset { chars: Vec::new() },
             issues,
@@ -709,23 +758,106 @@ fn parse_talks(text: &str) -> (PlayerTalkStore, PlayerTalkCharset, Vec<String>) 
         }
         buckets.push((unit, talks));
     }
+    let mut common = Vec::new();
+    if let Some(rows) = value.pointer("/commonSomeCharacter/talks").and_then(serde_json::Value::as_array) {
+        let mut seen = HashSet::new();
+        for row in rows {
+            match parse_common_row(row) {
+                Ok(parsed) if seen.insert(parsed.talk_id) => {
+                    collect_chars(&parsed.tweet.text, &mut chars);
+                    for step in &parsed.steps {
+                        match step {
+                            moly_law::talk::FixtureStep::Text { text } => collect_chars(text, &mut chars),
+                            moly_law::talk::FixtureStep::Label { name } => collect_chars(name, &mut chars),
+                            _ => {}
+                        }
+                    }
+                    common.push(parsed);
+                }
+                Ok(parsed) => issues.push(format!("common talk {} occurs more than once", parsed.talk_id)),
+                Err(reason) => issues.push(reason),
+            }
+        }
+    }
     let birthday = parse_birthday(value.get("birthdayParty"), &mut chars);
+    let tutorial = parse_tutorial(value.get("tutorial"), &mut chars);
     buckets.sort_by_key(|(unit, _)| *unit);
     chars.sort_unstable();
     (
         PlayerTalkStore {
             units: buckets,
+            common,
             names,
             birthday,
+            tutorial,
         },
         PlayerTalkCharset { chars },
         issues,
     )
 }
 
+fn parse_common_row(row: &serde_json::Value) -> Result<moly_law::talk::FixtureTalkRow, String> {
+    crate::talk_ingest::common_row(row)?;
+    let id = row["talkId"].as_i64().unwrap() as i32;
+    Ok(moly_law::talk::FixtureTalkRow {
+        talk_id: id,
+        lua: row["lua"].as_str().unwrap().to_owned(),
+        form: 0,
+        site_group_id: row["siteGroupId"].as_i64().unwrap() as i32,
+        term_id: row["termId"].as_i64().unwrap() as i32,
+        condition_group_id: row["conditionGroupId"].as_i64().unwrap() as i32,
+        unit_ids: row["unitIds"].as_array().unwrap().iter().map(|v| v.as_i64().unwrap() as i32).collect(),
+        fixture_ids: Vec::new(),
+        pairs: Vec::new(),
+        tweet: crate::talk::parse_tweet_ref(row.get("tweet"), id),
+        voices: row["voices"].as_array().map(|rows| rows.iter().map(|v| v.as_str().unwrap().to_owned()).collect()).unwrap_or_default(),
+        steps: row["steps"].as_array().unwrap().iter().map(crate::talk::parse_step).collect::<Result<_, _>>()?,
+    })
+}
+
 /// The `birthdayParty` block: the `birthdayPartyScenarios` rows and the
 /// scripts they name. A document without the block, or one whose
 /// extraction master had no such table, has no party scripts.
+fn parse_tutorial(block: Option<&serde_json::Value>, chars: &mut Vec<char>) -> Result<TutorialScripts, String> {
+    let block = block.ok_or("the talk document has no tutorial block")?;
+    if block.get("status").and_then(|v|v.as_str()) != Some("complete") { return Err("the tutorial script block is not complete".into()); }
+    let masters: Vec<crate::npc_objective::events::tutorial::TutorialMaster> = serde_json::from_value(
+        block.get("rows").ok_or("tutorial block has no master rows")?.clone()).map_err(|error|error.to_string())?;
+    let talks = block.get("talks").and_then(|v|v.as_object()).ok_or("tutorial block has no talks object")?;
+    let mut scripts = HashMap::new();
+    for (lua, entry) in talks {
+        let voices: Vec<String> = serde_json::from_value(entry.get("voices").ok_or("tutorial script has no voices")?.clone()).map_err(|error|error.to_string())?;
+        let mut raw_steps = entry.get("steps").and_then(|v|v.as_array()).ok_or("tutorial script has no steps")?.clone();
+        for step in &mut raw_steps {
+            // Both engine commands call PlayerAvatarPresenter.PlayAnimation
+            // for character zero, with the same lower-casing and speed rule.
+            // The NPC branch uses a different one-shot animation operation.
+            if step.get("op").and_then(|value|value.as_str()) == Some("play_animation") {
+                if step.get("who").and_then(|value|value.as_i64()) != Some(0) {
+                    return Err(format!("tutorial {lua}: NPC one-shot PlayAnimation is not implemented"));
+                }
+                step["op"] = serde_json::json!("change_animation");
+            }
+        }
+        crate::talk_ingest::general_row(&serde_json::json!({
+            "talkId": 0, "lua": lua, "siteGroupId": 0, "termId": 0,
+            "conditions": [], "conditionValues": [], "voices": voices,
+            "tweet": { "id": 0, "text": "", "motion": "", "eye": "", "mouth": "" },
+            "steps": raw_steps,
+        })).map_err(|error|format!("tutorial {lua}: {error}"))?;
+        let steps: Vec<TalkStep> = raw_steps.iter().map(parse_step).collect();
+        for step in &steps {
+            match step { TalkStep::Text { text } => collect_chars(text, chars), TalkStep::Label { name } => collect_chars(name, chars), _ => {} }
+        }
+        scripts.insert(lua.clone(), BirthdayScript { voices, steps });
+    }
+    for master in &masters {
+        if master.assetbundle_name != "mysekai/talk/scenario/talk" { return Err(format!("tutorial master {} requests an unprepared script bundle", master.id)); }
+        if !scripts.contains_key(&master.lua) { return Err(format!("tutorial master {} has no script {}", master.id, master.lua)); }
+    }
+    Ok(TutorialScripts { masters, scripts })
+}
+
 fn parse_birthday(
     block: Option<&serde_json::Value>,
     chars: &mut Vec<char>,
@@ -1327,6 +1459,7 @@ pub struct PlayerTalkSession {
     /// The character's state at the end: `None` is ChangeIdleState; the
     /// playing-fixture talk ends its first character in FixtureActionIdle.
     end_state: Option<crate::npc::NpcAction>,
+    tutorial_rotation: Option<Quat>,
     /// 玩家位与朝向的会话内账：开场时快照（玩家参演期间位移推进被持
     /// 留跳过，位不变——快照即现值）；朝向只被本模块的转身件改写，
     /// 每次玩家转身把账同步到该步的目标朝向。
@@ -1358,6 +1491,10 @@ impl PlayerTalkSession {
     /// 会话的段 id（窗体日志的链名读取点用）。
     pub fn talk_id(&self) -> i32 {
         self.talk_id
+    }
+
+    pub fn text_script(&self) -> &str {
+        self.row.lua.trim_end_matches(".lua")
     }
 
     /// NPC 参演者实体（对话相机的取位面读它——真源取位表由出场角色的
@@ -1489,6 +1626,7 @@ pub fn turn_player_to_point(
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TalkRoute {
+    Tutorial,
     /// PlayGeneralTalk.
     General,
     /// PlaySetTalk(presenter, true): the character's own current master.
@@ -1505,7 +1643,7 @@ enum TalkRoute {
 }
 
 /// OnClickPlayerTalkAction's ladder, first row that holds:
-/// 1 tutorial talk (out of scope); 2 after-edit-layout talk and 3 random-walk
+/// 1 tutorial override/default talk; 2 after-edit-layout talk and 3 random-walk
 /// talk -> the general talk; 4 IsCommunicationWhileDoingWait (type 6 and
 /// every member with a locate row within 0.1 of its own data target) -> the
 /// set talk; 5 IsPlayingSomeCharacterTalkFixture (a registered NPC timeline
@@ -1536,12 +1674,12 @@ fn route_for(
         data.kind,
         TalkType::TutorialFreeWalking | TalkType::TutorialWaiting
     ) {
-        return Err("tutorial override/default/next-state context is not supplied");
+        return Ok(TalkRoute::Tutorial);
     }
     if matches!(data.kind, TalkType::AfterEditLayout | TalkType::RandomWalk) {
         return Ok(TalkRoute::General);
     }
-    if data.kind == TalkType::CommunicationWhileDoingWait && communication_arrived(data) {
+    if matches!(data.kind, TalkType::CommunicationWhileDoingWait | TalkType::CommonSomeCharacter) && communication_arrived(data) {
         if data.content.is_none() {
             return Err("while-doing-wait talk: the current talk data has no master talk (the source raises)");
         }
@@ -1582,6 +1720,12 @@ fn communication_arrived(
     data: &crate::npc_objective::AiTalkData,
     members: &[(u32, [f32; 3], Option<[f32; 3]>)],
 ) -> bool {
+    if data.kind == moly_law::objective::TalkType::CommonSomeCharacter {
+        return !data.characters.is_empty() && data.characters.iter().all(|unit| {
+            members.iter().any(|(member, position, target)| member == unit && target.is_some_and(|target|
+                moly_law::npc_hfsm::common::distance(*position, target) < 0.1))
+        });
+    }
     let Some(locate) = data.locate.as_ref() else {
         return false;
     };
@@ -1646,6 +1790,7 @@ pub fn consume_trigger(
     birthday: (
         Option<Res<BirthdayContext>>,
         Query<&BirthdayLua>,
+        Query<(&crate::npc_objective::events::tutorial::TutorialTalkData, &Transform)>,
     ),
 ) {
     // 同帧多请求只发起第一个（资源插入是延迟命令，循环内读不到自己
@@ -1740,6 +1885,19 @@ pub fn consume_trigger(
             }
         };
         // Row 5 plays its main's current data (the multiple-character talk).
+        let tutorial = if route == TalkRoute::Tutorial {
+            let Ok((data, pose)) = birthday.2.get(request.entity) else {
+                ledger.reject(request, "tutorial current/default talk context is absent"); continue;
+            };
+            if data.on_overwrite.is_some() {
+                let actor = request.entity;
+                commands.queue(move |world: &mut World| { crate::npc_objective::events::tutorial::invoke_overwrite(world, actor); });
+                ledger.last_request_at = Some(now);
+                session_started = true;
+                continue;
+            }
+            Some((data.clone(), pose.rotation))
+        } else { None };
         let main_data = match route {
             TalkRoute::SomeCharacterFixture(main) => {
                 match npcs.get(main).ok().and_then(|(_, _, _, _, _, slot)| slot.current.clone()) {
@@ -1762,7 +1920,12 @@ pub fn consume_trigger(
             some_main.is_some(),
         );
         // Row 6 under the Birthday context plays the character's birthday lua.
-        let birthday_row = if route == TalkRoute::BirthdayWait {
+        let birthday_row = if let Some((data, _)) = &tutorial {
+            let found = catalog.store.as_ref().ok_or("talk document is loading".to_owned())
+                .and_then(|store|store.tutorial.as_ref().map_err(Clone::clone))
+                .and_then(|scripts|scripts.row(data.master.id).ok_or_else(||format!("tutorial script {} is unavailable", data.master.id)));
+            match found { Ok(row) => Some(row), Err(reason) => { ledger.reject(request, reason); continue; } }
+        } else if route == TalkRoute::BirthdayWait {
             let found = birthday
                 .1
                 .get(request.entity)
@@ -1859,7 +2022,7 @@ pub fn consume_trigger(
                     pool_len: 0,
                     replayed: true,
                 },
-                TalkRoute::BirthdayWait => GeneralSelection {
+                TalkRoute::BirthdayWait | TalkRoute::Tutorial => GeneralSelection {
                     master_id: birthday_row.as_ref().map_or(0, |row| row.talk_id),
                     pool_len: 0,
                     replayed: false,
@@ -1877,7 +2040,7 @@ pub fn consume_trigger(
                 TalkRoute::SomeCharacterFixture(_) => {
                     main_data.as_ref().and_then(|data| data.content.as_ref())
                 }
-                TalkRoute::BirthdayWait => None,
+                TalkRoute::BirthdayWait | TalkRoute::Tutorial => None,
                 TalkRoute::General | TalkRoute::PlayingFixture => binding
                     .current
                     .as_ref()
@@ -1962,7 +2125,7 @@ pub fn consume_trigger(
             request.target_fixture
         } else {
             match route {
-                TalkRoute::General | TalkRoute::BirthdayWait => None,
+                TalkRoute::General | TalkRoute::BirthdayWait | TalkRoute::Tutorial => None,
                 // PlaySetTalk and PlayPlayingFixtureTalk pass the data's
                 // TargetFixture to PlayAsync.
                 TalkRoute::CurrentSet | TalkRoute::PlayingFixture => binding
@@ -1975,7 +2138,7 @@ pub fn consume_trigger(
             }
         };
         let fixture_bindings = match &resolved {
-            ResolvedTalk::General { .. } => Vec::new(),
+            ResolvedTalk::General { .. } | ResolvedTalk::CommonSomeCharacter(_) => Vec::new(),
             ResolvedTalk::Fixture(row) => {
                 match validate_fixture_context(row, target_fixture, &actors, &npcs, &fixtures) {
                     Ok(bindings) => bindings,
@@ -2016,10 +2179,10 @@ pub fn consume_trigger(
                 | TalkRoute::PlayingFixture
                 | TalkRoute::SomeCharacterFixture(_) => true,
                 TalkRoute::General => binding.current.is_some(),
-                TalkRoute::BirthdayWait => false,
+                TalkRoute::BirthdayWait | TalkRoute::Tutorial => false,
             };
         let (final_unit, row) = match resolved {
-            ResolvedTalk::Fixture(row) => {
+            ResolvedTalk::Fixture(row) | ResolvedTalk::CommonSomeCharacter(row) => {
                 if read_report {
                     commands.insert_resource(PendingFixtureRead {
                         talk_id: row.talk_id,
@@ -2064,8 +2227,9 @@ pub fn consume_trigger(
                 pool_len: selection.pool_len,
                 replayed: selection.replayed,
                 read_report,
-                end_state: (request.exact.is_none() && route == TalkRoute::PlayingFixture)
-                    .then_some(crate::npc::NpcAction::FixtureActionIdle),
+                end_state: tutorial.as_ref().map(|(data, _)|data.next_action).or_else(||(request.exact.is_none() && route == TalkRoute::PlayingFixture)
+                    .then_some(crate::npc::NpcAction::FixtureActionIdle)),
+                tutorial_rotation: tutorial.as_ref().and_then(|(data, rotation)|data.restore_rotation.then_some(*rotation)),
             },
         );
     }
@@ -2101,6 +2265,7 @@ struct GeneralStart {
     replayed: bool,
     read_report: Option<i32>,
     end_state: Option<crate::npc::NpcAction>,
+    tutorial_rotation: Option<Quat>,
 }
 
 /// The ordinary-script session's opening: the holds on both characters, the
@@ -2127,6 +2292,7 @@ fn open_general(
         replayed,
         read_report,
         end_state,
+        tutorial_rotation,
     } = start;
     let needs_named_referent = row.steps.iter().any(|step| {
         [referent_of_general_step(step), target_of_general_step(step)]
@@ -2194,6 +2360,7 @@ fn open_general(
         replayed,
         read_report,
         end_state,
+        tutorial_rotation,
         player_position,
         player_rotation,
         first_tick: true,
@@ -2222,8 +2389,24 @@ pub struct ScriptTalk {
     pub lua: String,
 }
 
+enum ForcedScript {
+    Birthday(ScriptTalk),
+    Tutorial { npc: Entity, id: i32 },
+}
+
+#[derive(Component)]
+struct ForcedTutorialPending(i32);
+
+#[derive(Component)]
+struct ForcedTutorialResult { id: i32, completed: bool }
+
+/// Completion of the exact forced tutorial session, including cancellation.
+pub fn forced_tutorial_result(world: &World, npc: Entity, id: i32) -> Option<bool> {
+    world.get::<ForcedTutorialResult>(npc).filter(|result|result.id == id).map(|result|result.completed)
+}
+
 fn open_script_session(
-    In(talk): In<ScriptTalk>,
+    In(talk): In<ForcedScript>,
     time: Res<Time>,
     mut commands: Commands,
     session: Option<Res<PlayerTalkSession>>,
@@ -2240,10 +2423,19 @@ fn open_script_session(
     if session.is_some() || active_talk.is_some() {
         return Err("another talk session is active".into());
     }
-    let row = catalog.birthday_row(talk.scenario, &talk.lua)?;
+    let (npc, row, end_state) = match talk {
+        ForcedScript::Birthday(talk) => (talk.npc, catalog.birthday_row(talk.scenario, &talk.lua)?, None),
+        ForcedScript::Tutorial { npc, id } => {
+            let row = catalog.store.as_ref().ok_or("tutorial talk document is loading")?
+                .tutorial.as_ref().map_err(Clone::clone)?.row(id)
+                .ok_or_else(||format!("tutorial script {id} is absent"))?;
+            (npc, row, Some(crate::npc::NpcAction::Idle))
+        }
+    };
+    let lua = row.lua.clone();
     let (member, toon, state) = npcs
-        .get(talk.npc)
-        .map_err(|_| format!("{:?} is not a character in the scene", talk.npc))?;
+        .get(npc)
+        .map_err(|_| format!("{:?} is not a character in the scene", npc))?;
     if !state.ready() {
         return Err(format!("unit {} is not registered yet", member.0));
     }
@@ -2253,18 +2445,18 @@ fn open_script_session(
     let (player_entity, player_transform) = player
         .single()
         .map_err(|_| "exactly one real player is required".to_owned())?;
-    enter_talk(&mut commands, player_entity, std::iter::once(talk.npc));
+    enter_talk(&mut commands, player_entity, std::iter::once(npc));
     let talk_id = row.talk_id;
     open_general(
         &mut commands,
         &mut window,
         &mut ledger,
         time.elapsed_secs(),
-        &format!("PlayAsync({})", talk.lua),
+        &format!("PlayAsync({})", lua),
         GeneralStart {
             unit: member.0,
             npc_name: catalog.name(member.0),
-            npc: talk.npc,
+            npc,
             eye: eye.clone(),
             mouth: mouth.clone(),
             player: player_entity,
@@ -2274,7 +2466,8 @@ fn open_script_session(
             pool_len: 0,
             replayed: false,
             read_report: None,
-            end_state: None,
+            end_state,
+            tutorial_rotation: None,
         },
     );
     Ok(talk_id)
@@ -2285,8 +2478,17 @@ fn open_script_session(
 /// exists. Returns the session's talk id.
 pub fn play_script(world: &mut World, talk: ScriptTalk) -> Result<i32, String> {
     world
-        .run_system_cached_with(open_script_session, talk)
+        .run_system_cached_with(open_script_session, ForcedScript::Birthday(talk))
         .map_err(|error| format!("the talk system could not run: {error:?}"))?
+}
+
+/// ForcePlayTutorialTalk uses the exact tutorial master/script, changes the
+/// player to Normal and the NPC to Idle on return, and does not restore yaw.
+pub fn force_play_tutorial(world: &mut World, npc: Entity, id: i32) -> Result<i32, String> {
+    let talk_id = world.run_system_cached_with(open_script_session, ForcedScript::Tutorial { npc, id })
+        .map_err(|error|format!("the tutorial talk system could not run: {error:?}"))??;
+    world.entity_mut(npc).remove::<ForcedTutorialResult>().insert(ForcedTutorialPending(talk_id));
+    Ok(talk_id)
 }
 
 /// A fixture-backend player talk that reports itself read once its dialogue
@@ -2604,6 +2806,7 @@ pub fn advance_session(
             &mut motion,
             &mut ledger,
             time.elapsed_secs(),
+            false,
         );
         return;
     }
@@ -2869,6 +3072,7 @@ pub fn advance_session(
             &mut motion,
             &mut ledger,
             now,
+            true,
         );
         ledger.completed += 1;
     }
@@ -3061,7 +3265,7 @@ fn dispatch_step(
         TalkStep::Label { name } => {
             // 名字栏 SetText：锚点跳转的语料零出现，此 op 在窗体侧是
             // 名字栏写（真源 Label → 名字栏文本组件）。
-            window.set_label(TalkSession::Player(&mut *session), name);
+            window.set_label_at(TalkSession::Player(&mut *session), index, name);
             info!(
                 "[player-talk] 段 {} 步 {} label：名字栏 SetText（{} 字，名字不进日志）",
                 talk_id,
@@ -3173,7 +3377,7 @@ fn dispatch_step(
         }
         TalkStep::Text { text } => {
             session.texts += 1;
-            window.show_text(TalkSession::Player(&mut *session), text);
+            window.show_text_at(TalkSession::Player(&mut *session), index, text);
             let speaker_word = match session.speaker {
                 Some(Speaker::Npc(unit)) => format!("npc({unit})"),
                 Some(Speaker::Player) => "player".to_owned(),
@@ -3794,6 +3998,7 @@ fn finish_session(
     motion: &mut PlayerTalkMotion,
     _ledger: &mut PlayerTalkLedger,
     now: f32,
+    completed: bool,
 ) {
     crate::delayed_faces::stop_loop(commands);
     motion.queue.stop_loop();
@@ -3834,6 +4039,10 @@ fn finish_session(
         entity.remove::<TalkHold>().remove::<PlayerTalkRuntime>();
         drop(entity);
         crate::npc::leave_player_talk_to(commands, session.npc, session.end_state);
+        if let Some(rotation) = session.tutorial_rotation.filter(|_|completed) {
+            let actor = session.npc;
+            commands.queue(move |world: &mut World| crate::npc_objective::events::tutorial::restore_rotation(world, actor, rotation));
+        }
     }
     // 玩家：撤持留与转身件（相位已是驻留；朝向保持当前值——玩家域
     // 朝向直设，下一次移动自会重设朝向，无律状态要同步）。
@@ -3864,6 +4073,13 @@ fn finish_session(
         session.click_releases,
         now - session.started_at,
     );
+    let npc = session.npc;
+    let id = session.talk_id;
+    commands.queue(move |world: &mut World| {
+        if world.get::<ForcedTutorialPending>(npc).is_some_and(|pending|pending.0 == id) {
+            world.entity_mut(npc).remove::<ForcedTutorialPending>().insert(ForcedTutorialResult { id, completed });
+        }
+    });
     commands.remove_resource::<PlayerTalkSession>();
 }
 
