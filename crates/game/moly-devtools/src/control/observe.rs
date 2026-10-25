@@ -20,6 +20,7 @@ pub(super) const SECTIONS: &[&str] = &[
     "recipes",
     "fixtures",
     "characters",
+    "companions",
     "npc_ai",
     "weather",
     "time",
@@ -57,6 +58,9 @@ pub(crate) fn observe(world: &mut World, what: &[String]) -> Result<Value, Strin
     if wanted("characters") {
         out.insert("characters".into(), super::state::characters(world));
     }
+    if wanted("companions") {
+        out.insert("companions".into(), companions(world));
+    }
     if wanted("npc_ai") {
         out.insert("npc_ai".into(), npc_ai(world));
     }
@@ -70,6 +74,91 @@ pub(crate) fn observe(world: &mut World, what: &[String]) -> Result<Value, Strin
         );
     }
     Ok(Value::Object(out))
+}
+
+/// The companions on the site, by unit: each one's position, the yaw it
+/// faces (radians, from +z towards +x), its state and command number, the
+/// face its body shows, and while its last command is a build, the position
+/// of the fixture it builds. Each row also carries `after_edit_tweets`: the
+/// tweets of the unit's after-edit pool (the ones a character tweets when
+/// the player finishes editing the layout), each with its id, text, motion,
+/// eye, mouth and emoticon.
+fn companions(world: &mut World) -> Value {
+    // A build in flight names the fixture it builds.
+    let mut builds = world.query::<(&crate::companion::Companion, &crate::companion::build::BuildPlan)>();
+    let builds: Vec<(u32, Vec3)> = builds
+        .iter(world)
+        .map(|(companion, plan)| (companion.unit, plan.at))
+        .collect();
+    let faces: Vec<(u32, Option<crate::companion::CompanionFace>)> = world
+        .query::<(&crate::companion::Companion, Option<&crate::companion::CompanionFace>)>()
+        .iter(world)
+        .map(|(companion, face)| (companion.unit, face.cloned()))
+        .collect();
+    let turned: Vec<_> = crate::companion::face::turned(world).collect();
+    let mut rows: Vec<(u32, Value)> = turned
+        .into_iter()
+        .map(|(unit, entity, yaw, status)| {
+            let at = world.get::<GlobalTransform>(entity).map_or(Vec3::ZERO, GlobalTransform::translation);
+            let mut row = json!({
+                "unit": unit,
+                "entity": entity.to_bits(),
+                "position": [at.x, at.y, at.z],
+                "yaw": yaw,
+                "state": status_label(&status),
+                "seq": status.seq,
+                "after_edit_tweets": after_edit_tweets(world, unit),
+            });
+            let face = faces
+                .iter()
+                .find(|(other, _)| *other == unit)
+                .and_then(|(_, face)| face.as_ref());
+            if let Some(face) = face {
+                row["eye"] = json!(face.eye);
+                row["mouth"] = json!(face.mouth);
+            }
+            let fixture = builds.iter().find(|(built, _)| *built == unit).map(|(_, at)| *at);
+            if let Some(at) = fixture {
+                row["fixture_at"] = json!([at.x, at.y, at.z]);
+            }
+            (unit, row)
+        })
+        .collect();
+    rows.sort_by_key(|(unit, _)| *unit);
+    Value::Array(rows.into_iter().map(|(_, row)| row).collect())
+}
+
+/// The after-edit tweets of the character `unit`, as full rows; empty when
+/// the tweet master is not loaded or its pools have no such unit.
+fn after_edit_tweets(world: &World, unit: u32) -> Value {
+    let Some(tables) = world.get_resource::<crate::npc_tweet::TweetTables>() else {
+        return json!([]);
+    };
+    let rows: Vec<Value> = tables
+        .after_edit_pool(unit)
+        .iter()
+        .filter_map(|id| tables.tweet(*id))
+        .map(|row| {
+            json!({
+                "id": row.id,
+                "text": row.text,
+                "motion": row.motion_name,
+                "eye": row.eye_name,
+                "mouth": row.mouth_name,
+                "emoticon": row.emoticon_name,
+            })
+        })
+        .collect();
+    Value::Array(rows)
+}
+
+/// A companion's state as the control surface names it: its label, or the
+/// reason it failed with.
+fn status_label(status: &crate::companion::CompanionStatus) -> String {
+    match &status.state {
+        crate::companion::CompanionState::Failed(reason) => format!("failed: {reason}"),
+        state => state.label().to_owned(),
+    }
 }
 
 /// The controller's machine of every character, per unit: its phase, the

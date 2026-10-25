@@ -1371,10 +1371,17 @@ pub struct FixturePlacement {
 }
 
 #[derive(Component)]
-struct FixtureInstanceSeed {
+pub struct FixtureInstanceSeed {
     uid: String,
     package: String,
     master: i32,
+}
+
+impl FixtureInstanceSeed {
+    /// The layout row's uid this instance draws.
+    pub fn uid(&self) -> &str {
+        &self.uid
+    }
 }
 
 pub use crate::render_inputs::FixtureVisualRoot;

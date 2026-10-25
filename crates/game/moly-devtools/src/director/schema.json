@@ -24,14 +24,22 @@
      "npc.take",
      "npc.walk_to",
      "npc.release",
-     "companion.spawn",
-     "companion.walk_to",
-     "companion.despawn",
      "npc.face",
      "npc.emote",
      "npc.use",
      "npc.tweet",
      "npc.talk",
+     "companion.spawn",
+     "companion.walk_to",
+     "companion.face",
+     "companion.emote",
+     "companion.motion",
+     "companion.expression",
+     "companion.balloon",
+     "companion.despawn",
+     "companion.build",
+     "companion.use",
+     "effect.play",
      "camera.drag",
      "camera.zoom",
      "server.edit",
@@ -765,6 +773,177 @@
    }
   },
   {
+   "name": "companion.face",
+   "description": "Turns the companion of unit to face a world point [x, y, z], or the player (\"player\": the position the player stands at when the step starts), over secs seconds linearly; secs 0 turns it at once. The step ends when the turn is done and fails with the status reason when the companion refuses it (it is not spawned, its body is still loading, or a build or a walk is in flight).",
+   "macro": false,
+   "timeout_default": null,
+   "timeout_rule": "secs + 5 (computed from secs when the step is parsed)",
+   "params": {
+    "type": "object",
+    "properties": {
+     "unit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+     },
+     "to": {
+      "oneOf": [
+       {
+        "type": "array",
+        "items": {
+         "type": "number"
+        },
+        "minItems": 3,
+        "maxItems": 3,
+        "description": "[x, y, z] world point."
+       },
+       {
+        "type": "string",
+        "enum": [
+         "player"
+        ],
+        "description": "The player's position when the step starts."
+       }
+      ]
+     },
+     "secs": {
+      "type": "number",
+      "minimum": 0,
+      "default": 0.4
+     }
+    },
+    "required": [
+     "unit",
+     "to"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "companion.emote",
+   "description": "Shows the named emoticon (a key of moly://emoticons/emoticons.json, such as fx_emote_001) over the companion of unit for secs seconds; the step ends once the emote has gone.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {
+     "unit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+     },
+     "name": {
+      "type": "string"
+     },
+     "secs": {
+      "type": "number",
+      "minimum": 0,
+      "default": 2.0
+     },
+     "use_root": {
+      "type": "boolean",
+      "default": false
+     }
+    },
+    "required": [
+     "unit",
+     "name"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "companion.motion",
+   "description": "Plays the motion-library motion motion (a motion of the shared motion library, such as mov_cw_happy_01joy001, as a tweet row names it) on the companion of unit's own body: its start segment motion_S, then its loop segment motion_L once when the library has one, then its end segment motion_E when it has one, then the body's idle. The step ends when the chain has played. It fails with the reason when the body has no own motion, the motion library is not loaded, the library has no start segment motion_S, or a build, turn or another motion is in flight; a walk in flight is stopped where it is.",
+   "macro": false,
+   "timeout_default": 60,
+   "params": {
+    "type": "object",
+    "properties": {
+     "unit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+     },
+     "motion": {
+      "type": "string",
+      "description": "The motion family name, such as mov_cw_happy_01joy001 (the suffix segments are found by it)."
+     }
+    },
+    "required": [
+     "unit",
+     "motion"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "companion.expression",
+   "description": "Sets the eye pattern (eye) and/or the mouth pattern (mouth) of the companion of unit's body, as a tweet row's eye and mouth do (a pattern name of moly://facial-tables.json, such as smile, normal, smile01 or smile02); reset true returns the body to the default face of its unit instead. The step ends at once and fails with the reason when the facial tables are not loaded or its unit has no default face.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {
+     "unit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+     },
+     "eye": {
+      "type": "string",
+      "description": "Eye pattern name."
+     },
+     "mouth": {
+      "type": "string",
+      "description": "Mouth (lip) pattern name."
+     },
+     "reset": {
+      "type": "boolean",
+      "default": false,
+      "description": "Return to the unit's default face; takes neither eye nor mouth."
+     }
+    },
+    "required": [
+     "unit"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "companion.balloon",
+   "description": "Shows a tweet balloon over the companion of unit for secs seconds: the text of the tweet master's row tweet (with their line breaks), or text as given (one of the two). The balloon hangs over the companion's head as the roster's balloons do, and is hidden when the step ends.",
+   "macro": false,
+   "timeout_default": 8,
+   "params": {
+    "type": "object",
+    "properties": {
+     "unit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+     },
+     "text": {
+      "type": "string",
+      "description": "The balloon's text."
+     },
+     "tweet": {
+      "type": "integer",
+      "description": "Tweet master row id whose text the balloon shows."
+     },
+     "secs": {
+      "type": "number",
+      "minimum": 0,
+      "default": 3.0
+     }
+    },
+    "required": [
+     "unit"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
    "name": "companion.despawn",
    "description": "Removes the companion of unit; the step ends once it is gone.",
    "macro": false,
@@ -783,7 +962,126 @@
     ],
     "additionalProperties": false
    }
-  },  {
+  },
+  {
+   "name": "companion.build",
+   "description": "Has the companion of unit build an owned fixture. The fixture is put on the tile the editor's own put search finds nearest near (a world point; by default 1.5 m in front of the companion) and saved to the layout, and stands as a ghost; the companion walks beside it and hammers it, and each of swings hits makes it more solid until it is solid. The step ends when the fixture is built and fails with the reason when the put, the save or the build is refused.",
+   "macro": false,
+   "timeout_default": 120,
+   "params": {
+    "type": "object",
+    "properties": {
+     "unit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+     },
+     "fixture": {
+      "type": "integer",
+      "description": "Master id of an owned fixture with a placeable copy."
+     },
+     "texture": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295,
+      "description": "Texture id; any owned texture when absent."
+     },
+     "near": {
+      "type": "array",
+      "items": {
+       "type": "number"
+      },
+      "minItems": 3,
+      "maxItems": 3,
+      "description": "[x, y, z] world point the put search starts from."
+     },
+     "swings": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 12,
+      "default": 4.0,
+      "description": "Hammer hits from ghost to solid."
+     }
+    },
+    "required": [
+     "unit",
+     "fixture"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "companion.use",
+   "description": "Has the companion of unit use a placed fixture: the nearest placed copy of the master id fixture, or the fixture uid. The action is its character's own action at that fixture, a no-talk action or the pre-action one of its talks holds there (the one activity and variant name, or the first, no-talk actions before pre-actions): the companion walks to the action's point, plays the action's timeline on its own body standing on the action's start locator, and ends on its end locator. The step ends when the action has ended and fails with the reason when the fixture is not placed, the character has no action there, no action point is reachable and free, the walk stops short, or a build or another use is in flight.",
+   "macro": false,
+   "timeout_default": 120,
+   "params": {
+    "type": "object",
+    "properties": {
+     "unit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+     },
+     "fixture": {
+      "type": "integer",
+      "description": "Master id of a placed fixture; its copy nearest the companion is used."
+     },
+     "uid": {
+      "type": "string",
+      "description": "Uid of a placed fixture."
+     },
+     "activity": {
+      "type": "integer",
+      "description": "Id of the no-talk action row or of the pre-action row; the first row at the fixture when absent."
+     },
+     "variant": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295,
+      "description": "Index of the row's action; the first when absent."
+     }
+    },
+    "required": [
+     "unit"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "effect.play",
+   "description": "Shows an emoticon (a particle or a sprite one, such as fx_emote_018_single) at a world point [x, y, z] for secs seconds, on an anchor entity of its own; the step ends once the emote has gone.",
+   "macro": false,
+   "timeout_default": null,
+   "params": {
+    "type": "object",
+    "properties": {
+     "name": {
+      "type": "string"
+     },
+     "at": {
+      "type": "array",
+      "items": {
+       "type": "number"
+      },
+      "minItems": 3,
+      "maxItems": 3,
+      "description": "[x, y, z] world point."
+     },
+     "secs": {
+      "type": "number",
+      "minimum": 0,
+      "default": 2.0
+     }
+    },
+    "required": [
+     "name",
+     "at"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
    "name": "camera.drag",
    "description": "Drags with one finger by by logical pixels over secs seconds, starting at from (window fractions).",
    "macro": false,
@@ -1079,7 +1377,7 @@
       "type": "integer",
       "minimum": 0,
       "maximum": 3,
-      "default": 0,
+      "default": 0.0,
       "description": "Quarter turns before the move."
      },
      "decide": {
@@ -1120,7 +1418,7 @@
      },
      "hold": {
       "type": "number",
-      "exclusiveMinimum": 0,
+      "exclusiveMinimum": 0.0,
       "description": "Seconds to hold the button; the whole delivery when absent."
      }
     },
@@ -1949,96 +2247,56 @@
       "$ref": "#/steps/24/params"
      }
     },
-  {
-   "name": "companion.spawn",
-   "description": "Puts the companion of unit at a world point [x, y, z]. The step ends once its body is in and it stands, or has walked from its seat to the point; it fails with the status reason when the companion refuses the spawn.",
-   "macro": false,
-   "timeout_default": 60,
-   "params": {
-    "type": "object",
-    "properties": {
-     "unit": {
-      "type": "integer",
-      "minimum": 0,
-      "maximum": 4294967295
-     },
-     "at": {
-      "type": "array",
-      "items": {
-       "type": "number"
-      },
-      "minItems": 3,
-      "maxItems": 3,
-      "description": "[x, y, z] world point."
-     }
-    },
-    "required": [
-     "unit",
-     "at"
-    ],
-    "additionalProperties": false
-   }
-  },
-  {
-   "name": "companion.walk_to",
-   "description": "Walks the companion of unit to a world point [x, y, z], finishing within within metres of it; the step ends when the walk does and fails with the status reason when it cannot be walked.",
-   "macro": false,
-   "timeout_default": 60,
-   "params": {
-    "type": "object",
-    "properties": {
-     "unit": {
-      "type": "integer",
-      "minimum": 0,
-      "maximum": 4294967295
-     },
-     "to": {
-      "type": "array",
-      "items": {
-       "type": "number"
-      },
-      "minItems": 3,
-      "maxItems": 3,
-      "description": "[x, y, z] world point."
-     },
-     "within": {
-      "type": "number",
-      "minimum": 0,
-      "default": 0.3,
-      "description": "Metres; the walk accepts at most 5."
-     }
-    },
-    "required": [
-     "unit",
-     "to"
-    ],
-    "additionalProperties": false
-   }
-  },
-  {
-   "name": "companion.despawn",
-   "description": "Removes the companion of unit; the step ends once it is gone.",
-   "macro": false,
-   "timeout_default": 10,
-   "params": {
-    "type": "object",
-    "properties": {
-     "unit": {
-      "type": "integer",
-      "minimum": 0,
-      "maximum": 4294967295
-     }
-    },
-    "required": [
-     "unit"
-    ],
-    "additionalProperties": false
-   }
-  },    {
+    {
      "if": {
       "properties": {
        "do": {
-        "const": "camera.drag"
+        "const": "companion.spawn"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/25/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "companion.walk_to"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/26/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "companion.face"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/27/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "companion.emote"
        }
       },
       "required": [
@@ -2053,52 +2311,7 @@
      "if": {
       "properties": {
        "do": {
-        "const": "camera.zoom"
-       }
-      },
-      "required": [
-       "do"
-      ]
-     },
-     "then": {
-      "$ref": "#/steps/29/params"
-     }
-    },
-    {
-     "if": {
-      "properties": {
-       "do": {
-        "const": "server.edit"
-       }
-      },
-      "required": [
-       "do"
-      ]
-     },
-     "then": {
-      "$ref": "#/steps/30/params"
-     }
-    },
-    {
-     "if": {
-      "properties": {
-       "do": {
-        "const": "weather.set"
-       }
-      },
-      "required": [
-       "do"
-      ]
-     },
-     "then": {
-      "$ref": "#/steps/31/params"
-     }
-    },
-    {
-     "if": {
-      "properties": {
-       "do": {
-        "const": "site.switch"
+        "const": "companion.despawn"
        }
       },
       "required": [
@@ -2113,7 +2326,7 @@
      "if": {
       "properties": {
        "do": {
-        "const": "site.enter_room"
+        "const": "companion.build"
        }
       },
       "required": [
@@ -2128,7 +2341,7 @@
      "if": {
       "properties": {
        "do": {
-        "const": "site.go_home"
+        "const": "effect.play"
        }
       },
       "required": [
@@ -2143,7 +2356,7 @@
      "if": {
       "properties": {
        "do": {
-        "const": "player.gather"
+        "const": "camera.drag"
        }
       },
       "required": [
@@ -2158,7 +2371,7 @@
      "if": {
       "properties": {
        "do": {
-        "const": "player.craft"
+        "const": "camera.zoom"
        }
       },
       "required": [
@@ -2173,7 +2386,7 @@
      "if": {
       "properties": {
        "do": {
-        "const": "layout.place"
+        "const": "server.edit"
        }
       },
       "required": [
@@ -2188,7 +2401,7 @@
      "if": {
       "properties": {
        "do": {
-        "const": "player.deliver"
+        "const": "weather.set"
        }
       },
       "required": [
@@ -2203,7 +2416,7 @@
      "if": {
       "properties": {
        "do": {
-        "const": "dialog.answer"
+        "const": "site.switch"
        }
       },
       "required": [
@@ -2218,7 +2431,7 @@
      "if": {
       "properties": {
        "do": {
-        "const": "key.back"
+        "const": "site.enter_room"
        }
       },
       "required": [
@@ -2227,6 +2440,111 @@
      },
      "then": {
       "$ref": "#/steps/40/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "site.go_home"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/41/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "player.gather"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/42/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "player.craft"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/43/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "layout.place"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/44/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "player.deliver"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/45/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "dialog.answer"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/46/params"
+     }
+    },
+    {
+     "if": {
+      "properties": {
+       "do": {
+        "const": "key.back"
+       }
+      },
+      "required": [
+       "do"
+      ]
+     },
+     "then": {
+      "$ref": "#/steps/47/params"
      }
     }
    ],

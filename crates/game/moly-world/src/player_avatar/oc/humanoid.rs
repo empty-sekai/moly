@@ -259,6 +259,62 @@ impl Slot {
             other => other.driven_bone(),
         }
     }
+
+    /// The humanoid bone a body's own clips animate for this joint
+    /// ([`motion_bones`], [`own_bone`]).
+    pub fn motion_bone(self) -> Option<&'static str> {
+        match self {
+            Slot::Root => None,
+            _ => self.socket_bone(),
+        }
+    }
+
+    /// The humanoid bone the source's rest pose solves for this joint: the
+    /// hips, spine, arms and legs' segments, and the feet.
+    pub fn rest_bone(self) -> Option<&'static str> {
+        match self {
+            Slot::Root => None,
+            _ => self.driven_bone(),
+        }
+    }
+}
+
+/// The humanoid bones an OC's own clips are mapped by: each slot's
+/// [`Slot::motion_bone`], in slot order. A character body's clips carry
+/// these nodes in place of the reference skeleton's and animate no ancestor
+/// of them beyond the ones listed, so no other node of the body takes a clip
+/// target.
+pub fn motion_bones() -> Vec<&'static str> {
+    Slot::ALL.iter().filter_map(|slot| slot.motion_bone()).collect()
+}
+
+/// The humanoid bone an OC node stands for by its name: the node's own name
+/// first, then the name without a side's `_L`/`_R` marker (a character body
+/// names the side in the name and joins the bone with an underscore).
+pub fn own_bone(name: &str) -> Option<&'static str> {
+    bone_from_node_name(name).or_else(|| {
+        let (stem, side) = name
+            .strip_suffix("_L")
+            .map(|stem| (stem, Some(Side::Left)))
+            .or_else(|| name.strip_suffix("_R").map(|stem| (stem, Some(Side::Right))))?;
+        let bone = bone_from_node_name(stem)?;
+        let sided = |left: &'static str, right: &'static str| match side {
+            Some(Side::Left) => Some(left),
+            Some(Side::Right) => Some(right),
+            _ => None,
+        };
+        Some(match bone {
+            "leftShoulder" | "rightShoulder" => sided("leftShoulder", "rightShoulder")?,
+            "leftUpperArm" | "rightUpperArm" => sided("leftUpperArm", "rightUpperArm")?,
+            "leftLowerArm" | "rightLowerArm" => sided("leftLowerArm", "rightLowerArm")?,
+            "leftHand" | "rightHand" => sided("leftHand", "rightHand")?,
+            "leftUpperLeg" | "rightUpperLeg" => sided("leftUpperLeg", "rightUpperLeg")?,
+            "leftLowerLeg" | "rightLowerLeg" => sided("leftLowerLeg", "rightLowerLeg")?,
+            "leftFoot" | "rightFoot" => sided("leftFoot", "rightFoot")?,
+            "leftToes" | "rightToes" => sided("leftToes", "rightToes")?,
+            _ => bone,
+        })
+    })
 }
 
 /// Lower-case alphanumerics of a node name.
@@ -445,6 +501,27 @@ mod tests {
         assert_eq!(canonical("leftThumbIntermediate", true), Some("leftThumbProximal"));
         assert_eq!(canonical("leftThumbProximal", false), Some("leftThumbProximal"));
         assert_eq!(canonical("leftThumbIntermediate", false), None);
+    }
+
+    #[test]
+    fn own_bones_read_the_side_marker_of_a_character_body() {
+        assert_eq!(own_bone("Root"), None);
+        assert_eq!(own_bone("Arm_L"), Some("leftUpperArm"));
+        assert_eq!(own_bone("UpLeg_R"), Some("rightUpperLeg"));
+        assert_eq!(own_bone("Foot_R"), Some("rightFoot"));
+        // A VRM node name keeps its meaning, marker or not.
+        assert_eq!(own_bone("Hips"), Some("hips"));
+        assert_eq!(own_bone("J_Bip_L_UpperArm"), Some("leftUpperArm"));
+        assert_eq!(own_bone("LeftHand"), Some("leftHand"));
+        assert_eq!(own_bone("foot01_L"), None);
+    }
+
+    #[test]
+    fn motion_bones_cover_every_slot_that_faces_a_clip() {
+        let bones = motion_bones();
+        assert_eq!(bones.len(), SLOT_COUNT - 1);
+        assert_eq!(bones[0], "hips");
+        assert!(bones.contains(&"leftHand") && bones.contains(&"rightFoot"));
     }
 
     #[test]

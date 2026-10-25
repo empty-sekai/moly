@@ -25,7 +25,6 @@ use super::vrm::MapSource;
 use crate::avatar_wear::WearPart;
 use crate::player_avatar::AvatarDriver;
 use bevy::camera::visibility::NoFrustumCulling;
-use bevy::ecs::observer::On;
 use bevy::gltf::Gltf;
 use bevy::mesh::skinning::SkinnedMesh;
 use bevy::prelude::*;
@@ -145,6 +144,10 @@ pub struct OcBinding {
     /// Avatar meshes hidden while the OC is worn, with their prior visibility.
     pub hidden: Vec<(Entity, Visibility)>,
     pub warned: bool,
+    /// The body's own clips animate its skeleton: the pose pass writes no
+    /// driven bone, and [`super::pose::blend`] brings the retarget pose back
+    /// when the ownership ends.
+    pub own: bool,
 }
 
 /// Observer: the OC's scene has spawned.
@@ -419,6 +422,7 @@ pub fn bind(
     standard_materials: Res<Assets<StandardMaterial>>,
     mut oc_materials: ResMut<Assets<OcMaterial>>,
     mut visibilities: Query<&mut Visibility>,
+    profiles: Option<Res<super::own::CharacterProfiles>>,
 ) {
     for (entity, model) in &models {
         let Ok(proxy) = players.get(model.player) else {
@@ -546,6 +550,19 @@ pub fn bind(
             written: Vec::new(),
             hidden: Vec::new(),
             warned: false,
+            own: false,
+        });
+        // The offer of the body's own motion: its own animator with its
+        // unit's idle and walk segments (see [`super::own`]). A body without
+        // them keeps the avatar's motion, and its owner says so.
+        let unit = model.character.as_ref().map(|character| character.unit);
+        let families = unit
+            .zip(profiles.as_ref())
+            .and_then(|(unit, profiles)| profiles.get(unit))
+            .map(|profile| (profile.idle.clone(), profile.walk.clone()));
+        commands.entity(entity).insert(super::own::OwnOffer {
+            unit,
+            families,
         });
     }
 }

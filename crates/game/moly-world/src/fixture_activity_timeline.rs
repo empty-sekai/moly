@@ -957,8 +957,10 @@ pub enum TimelineStatus {
     Failed(TimelineFailure),
 }
 
+/// The timeline holding an animator: its clips are the only ones it plays
+/// until the timeline is released.
 #[derive(Component)]
-struct TimelinePlaybackOwner(TimelineToken);
+pub(crate) struct TimelinePlaybackOwner(TimelineToken);
 
 /// Authored facial gates are exposed separately from the current open/closed
 /// atlas cell. Mouth control consumes the source enable/analyzer assignment;

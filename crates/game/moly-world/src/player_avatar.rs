@@ -304,7 +304,7 @@ impl AvatarDriver {
 
     /// The graph node of a clip, registering it on first use (the first
     /// `ChangeMotion` of a name registers its clip).
-    fn node(
+    pub(crate) fn node(
         &mut self,
         literal: &str,
         graphs: &mut Assets<AnimationGraph>,

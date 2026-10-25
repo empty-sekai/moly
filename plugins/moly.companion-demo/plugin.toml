@@ -5,7 +5,11 @@ version = "0.1.0"
 moly = ">=0.0.4"
 kind = "luau"
 entry = "main.luau"
-description = "Spawns unit 14's companion (Emu) in front of the player, walks it between two points near the player three times and leaves it standing."
+description = "Spawns unit 14's companion (Emu) in front of the player, walks it between two points near the player three times, then has it hammer a fixture from a ghost to solid, turns it to the player for a random emote and effect, and has it use the fixture it built."
 
 [config]
 unit = 14
+build = { fixture = 727, texture = 1, swings = 4 }
+face_player_within = 6
+finale_emotes = ["fx_emote_001", "fx_emote_003", "fx_emote_005_single", "fx_emote_014_single", "fx_emote_016_single", "fx_emote_017_single"]
+finale_effects = ["fx_emote_018_single", "fx_emote_010"]

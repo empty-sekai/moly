@@ -387,6 +387,65 @@ pub fn on_model_scene_ready(
     commands.entity(npc).insert(ModelSceneReady);
 }
 
+/// The animation root of a character scene spawned at `scene`: the first
+/// named node down the scene's single chain of loader entities (the loader's
+/// scene entities carry no name). The player goes on it, as the glTF loader
+/// puts the player of a file with animations on its animation root.
+pub fn animation_root(
+    scene: Entity,
+    names: &Query<&Name>,
+    children: &Query<&Children>,
+) -> Result<Entity, String> {
+    let mut cursor = scene;
+    loop {
+        if cursor != scene && names.get(cursor).is_ok() {
+            return Ok(cursor);
+        }
+        let kids = children
+            .get(cursor)
+            .map_err(|_| "the character scene has no named node".to_owned())?;
+        if kids.len() != 1 {
+            return Err(format!(
+                "the character scene should be one chain of nodes down to its root, it has {} at a node",
+                kids.len()
+            ));
+        }
+        cursor = kids[0];
+    }
+}
+
+/// The animation target of every named node at and below `root`: the node's
+/// chain of names from `root`, with `root`'s own name replaced by
+/// `reference`, the motion library's reference root (see the module
+/// comment). Unnamed entities are the loader's helpers (a primitive's mesh),
+/// not glTF nodes: they take no target and add no name to the chain.
+pub fn animation_targets(
+    root: Entity,
+    reference: &Name,
+    names: &Query<&Name>,
+    children: &Query<&Children>,
+) -> Vec<(Entity, AnimationTargetId)> {
+    let mut targets = Vec::new();
+    let mut chain: Vec<Name> = Vec::new();
+    // (entity, the chain's length with the entity's own name)
+    let mut stack: Vec<(Entity, usize)> = vec![(root, 1)];
+    while let Some((entity, depth)) = stack.pop() {
+        if let Ok(name) = names.get(entity) {
+            chain.truncate(depth - 1);
+            chain.push(if depth == 1 { reference.clone() } else { name.clone() });
+            targets.push((entity, AnimationTargetId::from_names(chain.iter())));
+        } else {
+            chain.truncate(depth);
+        }
+        if let Ok(kids) = children.get(entity) {
+            for kid in kids.iter() {
+                stack.push((kid, depth + usize::from(names.get(kid).is_ok())));
+            }
+        }
+    }
+    targets
+}
+
 /// Update：模型场景展开后补动画目标、装播放器、把两段挂进动画图。
 ///
 /// 逐名装配，每人一份动画图与播放器（图与播放器都是实体局部状态，
@@ -449,50 +508,23 @@ pub fn wire_when_ready(
         }
         let model = model.expect("ModelSceneReady 的置位者必有 CharacterModel 子实体");
         // 动画根：装载器建的场景实体不带名字，沿链下探到第一个带名字的节点。
-        let mut cursor = model;
-        let root = loop {
-            if names.get(cursor).is_ok() {
-                break cursor;
-            }
-            let kids = children
-                .get(cursor)
-                .expect("角色场景链断裂：实体无子且无名");
-            if kids.len() != 1 {
-                panic!("角色场景根应恰一条节点链，实际 {} 条", kids.len());
-            }
-            cursor = kids[0];
-        };
-        // 沿骨名链装配目标；栈存 (实体, 链长)，链长含该节点自己的名字。
-        // 链首（depth 1）替换成库参考根名，其余照实——见模块注释。
-        let mut chain: Vec<Name> = Vec::new();
-        let mut stack: Vec<(Entity, usize)> = vec![(root, 1)];
+        let root = animation_root(model, &names, &children).unwrap_or_else(|reason| panic!("{reason}"));
+        // 沿骨名链装配目标，链首替换成库参考根名——见模块注释。
         let mut targets = 0usize;
+        for (entity, target) in animation_targets(root, &reference_root, &names, &children) {
+            commands.entity(entity).insert((target, AnimatedBy(root)));
+            if let Ok(pose) = locals.get(entity) {
+                commands
+                    .entity(entity)
+                    .insert(CharacterRestTransform(*pose));
+            }
+            targets += 1;
+        }
         let mut mesh_entities = 0usize;
         let mut min = Vec3::splat(f32::MAX);
         let mut max = Vec3::splat(-f32::MAX);
-        while let Some((entity, depth)) = stack.pop() {
-            // 只有带名实体装目标：无名实体是装载器派生的辅助件（如 primitive
-            // 网格），不是 glTF 节点，装载器装配时也不会给它们目标。
-            if let Ok(name) = names.get(entity) {
-                chain.truncate(depth - 1);
-                if depth == 1 {
-                    chain.push(reference_root.clone());
-                } else {
-                    chain.push(name.clone());
-                }
-                commands.entity(entity).insert((
-                    AnimationTargetId::from_names(chain.iter()),
-                    AnimatedBy(root),
-                ));
-                if let Ok(pose) = locals.get(entity) {
-                    commands
-                        .entity(entity)
-                        .insert(CharacterRestTransform(*pose));
-                }
-                targets += 1;
-            } else {
-                chain.truncate(depth);
-            }
+        let mut stack = vec![root];
+        while let Some(entity) = stack.pop() {
             if let Ok(mesh3d) = meshes_3d.get(entity) {
                 mesh_entities += 1;
                 // glTF stores a bind-pose AABB. Skinned face/hair meshes can
@@ -517,10 +549,7 @@ pub fn wire_when_ready(
                 }
             }
             if let Ok(kids) = children.get(entity) {
-                for kid in kids.iter() {
-                    let kid_depth = depth + usize::from(names.get(kid).is_ok());
-                    stack.push((kid, kid_depth));
-                }
+                stack.extend(kids.iter());
             }
         }
         if mesh_entities == 0 {

@@ -163,6 +163,8 @@ pub use moly_features::get_resource;
 pub use moly_features::learn_phenomena_dialog;
 pub use moly_features::harvest;
 pub use moly_features::harvest_material;
+pub use moly_features::companion_cues;
+pub use moly_features::effect_show;
 pub use moly_features::home_action;
 pub use moly_features::info;
 pub use moly_features::inventory;
@@ -344,6 +346,7 @@ pub fn app(
     app.add_plugins((
         harvest::HarvestPlugin,
         harvest_material::HarvestMaterialPlugin,
+        companion_cues::CompanionCuePlugin,
     ));
     app.add_plugins(delivery::DeliveryPlugin);
     app.add_plugins(moly_features::convert::ConvertPlugin);

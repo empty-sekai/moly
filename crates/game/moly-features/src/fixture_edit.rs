@@ -20,6 +20,7 @@ mod actors;
 mod assets;
 mod autoplay;
 mod edit_grid;
+pub mod field_build;
 mod game_state;
 mod input;
 mod layout_rules;
@@ -44,6 +45,7 @@ use moly_protocol::{Call, Refusal, Reply};
 
 pub use input::{read_keyboard, read_pointer};
 pub use put_effect::site_origin;
+pub(crate) use put_effect::{play_put_sound, show as show_put_effect};
 
 pub use crate::field_modes::{EditSessionActive, LayoutSaved};
 
@@ -451,14 +453,6 @@ fn place_new(
         session.say("地图等级尺寸尚未就绪，暂时不能摆放新家具。");
         return false;
     };
-    let put_type = match put_effect::put_type(world, item.fixture_id) {
-        Ok(put_type) => put_type,
-        Err(error) => {
-            warn!("[edit-put] PutFixture {} ({source}): {error}; not put", item.uid);
-            session.say("家具主表仍在加载，暂时不能摆放新家具。");
-            return false;
-        }
-    };
     let Some(camera) = world
         .get_resource::<crate::camera::FieldCameraModel>()
         .map(|model| (model.look_at, model.yaw))
@@ -467,22 +461,49 @@ fn place_new(
         return false;
     };
     let (look_at, yaw) = camera;
+    match put_search(world, &session.rows, floor, item, look_at, yaw, source) {
+        Ok(()) => true,
+        Err(message) => {
+            session.say(message);
+            false
+        }
+    }
+}
+
+/// The put search of a new fixture (`PutFixture`): its direction from
+/// `yaw` and its tile from the spiral around `look_at` (a world point) on
+/// the tile data of `rows`. `Err` is the message the editor shows; `item`
+/// is unchanged then.
+fn put_search(
+    world: &mut World,
+    rows: &[EditableFixture],
+    floor: crate::site::FloorGridLayout,
+    item: &mut EditableFixture,
+    look_at: Vec3,
+    yaw: f32,
+    source: &'static str,
+) -> Result<(), String> {
+    let put_type = match put_effect::put_type(world, item.fixture_id) {
+        Ok(put_type) => put_type,
+        Err(error) => {
+            warn!("[edit-put] PutFixture {} ({source}): {error}; not put", item.uid);
+            return Err("家具主表仍在加载，暂时不能摆放新家具。".into());
+        }
+    };
     let Some(source_direction) = placement::rotation_to_direction(yaw) else {
         warn!("[edit-put] PutFixture {} ({source}): camera yaw {yaw} names no direction; not put", item.uid);
-        session.say("相机朝向无效，暂时不能摆放新家具。");
-        return false;
+        return Err("相机朝向无效，暂时不能摆放新家具。".into());
     };
     // The look-at relative to the site, in the source frame (X mirrored).
     let relative = look_at - site_origin(world);
     let relative = Vec3::new(-relative.x, relative.y, relative.z);
     let board = match layout_rules::rules(world, Some(floor))
-        .and_then(|rules| Ok((tile_rules::Board::new(&session.rows, floor, &rules)?, rules)))
+        .and_then(|rules| Ok((tile_rules::Board::new(rows, floor, &rules)?, rules)))
     {
         Ok(found) => found,
         Err(missing) => {
             warn!("[edit-put] PutFixture {} ({source}): the put check's input {missing:?} is missing; not put", item.uid);
-            session.say(format!("摆放检查的输入尚未就绪（{missing:?}），暂时不能摆放新家具。"));
-            return false;
+            return Err(format!("摆放检查的输入尚未就绪（{missing:?}），暂时不能摆放新家具。"));
         }
     };
     let (board, rules) = board;
@@ -533,8 +554,7 @@ fn place_new(
     }
     let Some((tile, center, direction)) = found.chosen else {
         warn!("[edit-put] PutFixture {} ({source}): no placeable tile within the radius cap; CantPutFixture", item.uid);
-        session.say("附近没有可以摆放的空间。");
-        return false;
+        return Err("附近没有可以摆放的空间。".into());
     };
     item.center = center;
     item.direction = direction;
@@ -546,7 +566,7 @@ fn place_new(
         ),
         Err(error) => warn!("[edit-put] PutFixture {} ({source}): chosen tile has no footprint ({error})", item.uid),
     }
-    true
+    Ok(())
 }
 
 /// The committed rows stacked on `uid` (`GetStackedFixtures`), in the
@@ -2007,6 +2027,7 @@ impl Plugin for FixtureEditPlugin {
     fn build(&self, app: &mut App) {
         edit_grid::install(app);
         app.init_resource::<EditSession>()
+            .init_resource::<field_build::FieldBuilds>()
             .init_resource::<EditSessionActive>()
             .init_resource::<EditView>()
             .init_resource::<PendingCommands>()
@@ -2063,6 +2084,7 @@ impl Plugin for FixtureEditPlugin {
                 publish_unsaved.after(FixtureEditSystems::Commands),
             )
             .add_systems(Update, read_save_answer.after(apply_commands))
+            .add_systems(Update, (field_build::read_answers, field_build::advance).chain().after(apply_commands))
             .add_systems(
                 Update,
                 autoplay::autoplay

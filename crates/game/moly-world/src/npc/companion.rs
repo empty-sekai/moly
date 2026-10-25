@@ -85,9 +85,18 @@ pub fn depart(
     corner: [f32; 3],
     goal_distance: f32,
 ) -> Result<MotionPhase, &'static str> {
-    let at = [state.0.position[0], state.0.position[2]];
+    let mut at = [state.0.position[0], state.0.position[2]];
+    // The source's agent stands on its navigation mesh at every frame; the
+    // agent step can end a walk just beside the walk cells, and the walk
+    // starts from the nearest cell, as the agent would.
     if !walk_face.on_face(at[0], at[1]) {
-        return Err("the companion stands off the walk cells");
+        let (x, z) = walk_face.seat(at[0], at[1]);
+        if !walk_face.on_face(x, z) {
+            return Err("the companion stands off the walk cells");
+        }
+        at = [x, z];
+        state.0.position[0] = x;
+        state.0.position[2] = z;
     }
     if objective_face.navigation_point_at([corner[0], corner[2]]).is_none() {
         return Err("the target is off the navigation cells");

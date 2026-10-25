@@ -356,9 +356,29 @@ pub fn hide_tweet(world: &mut World, entity: Entity) {
         world.write_message(crate::npc_state::TweetHudEvent::Retire { npc: entity });
         return;
     }
-    let unit = world.get::<CharacterUnitId>(entity).map_or(0, |unit| unit.0);
+    let unit = match world.get::<CharacterUnitId>(entity) {
+        Some(unit) => unit.0,
+        None => world
+            .get::<crate::companion::Companion>(entity)
+            .map_or(0, |companion| companion.unit),
+    };
     let site_type = site_type(world, entity);
     world.write_message(crate::npc_state::TweetHudEvent::Hide { npc: entity, unit, site_type });
+}
+
+/// Shows the tweet balloon of the text `text` over the entity `entity`,
+/// with the tweet id `id` for the balloon's log. The balloon hangs over the
+/// head of the body at `entity` ([`crate::balloon::head_root`]) in place of
+/// an NPC avatar view's root, so it hangs where the roster's balloons do.
+pub fn show_balloon(world: &mut World, entity: Entity, text: String, id: i32) {
+    let unit = match world.get::<CharacterUnitId>(entity) {
+        Some(unit) => unit.0,
+        None => world
+            .get::<crate::companion::Companion>(entity)
+            .map_or(0, |companion| companion.unit),
+    };
+    let site_type = site_type(world, entity);
+    world.write_message(crate::npc_state::TweetHudEvent::Show { npc: entity, unit, tweet_id: id, text, site_type });
 }
 
 fn site_type(world: &World, entity: Entity) -> Option<i32> {

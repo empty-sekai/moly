@@ -174,8 +174,12 @@ pub fn enter_site_move(world: &mut World) {
 }
 
 fn find_bones(world: &mut World) -> (Option<Entity>, Option<Entity>) {
+    // The player's animator: a companion's body has a driver of its own.
     let animator = {
-        let mut drivers = world.query::<&crate::player_avatar::AvatarDriver>();
+        let mut drivers = world.query_filtered::<
+            &crate::player_avatar::AvatarDriver,
+            With<crate::markers::PlayerControlled>,
+        >();
         drivers.iter(world).next().map(|driver| driver.player)
     };
     let Some(animator) = animator else {

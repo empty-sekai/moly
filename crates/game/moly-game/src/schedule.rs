@@ -27,6 +27,13 @@ pub fn install(app: &mut App) {
         Update,
         crate::talk_probe::probe_stack_taps.before(crate::player_talk::consume_trigger),
     );
+    // A world-point effect's anchor gains its place with its draws, made in
+    // the director's frame step (before Update), and loses it with them; both
+    // land before the transforms propagate them this frame.
+    app.add_systems(
+        Update,
+        crate::effect_show::anchor_places.before(TransformSystems::Propagate),
+    );
     content_library::install(app);
     app.add_systems(Startup, content_library::load_capabilities);
     app.add_systems(

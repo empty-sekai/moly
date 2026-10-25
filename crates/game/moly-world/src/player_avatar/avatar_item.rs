@@ -231,14 +231,14 @@ fn find_arm(
     })
 }
 
-enum Created {
+pub(crate) enum Created {
     Done(Entity),
     Wait(&'static str),
     Refused(String),
 }
 
 #[allow(clippy::too_many_arguments)]
-fn create(
+pub(crate) fn create(
     view: &AvatarItemView,
     hand: Hand,
     item: AvatarItem,

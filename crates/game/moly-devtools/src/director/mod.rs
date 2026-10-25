@@ -53,6 +53,35 @@
 //! it back to its AI. A script's taken characters
 //! are released when it ends.
 //!
+//! The companion: `companion.spawn {unit, at}` puts a companion of a unit's
+//! character at a world point; `companion.walk_to {unit, to, within}` walks
+//! it there; `companion.face {unit, to, secs}` turns it to face `to` (a
+//! world point, or `"player"` for where the player stands as the step
+//! starts) over `secs`; `companion.emote {unit, name, secs, use_root}` shows
+//! an emoticon over it; `companion.motion {unit, motion}` plays one motion of
+//! the shared motion library on the companion's own body once (its start,
+//! loop and end segments, then its idle); `companion.expression {unit, eye,
+//! mouth, reset}` sets the eye and/or mouth pattern of its body, or returns
+//! it to the unit's default face; `companion.balloon {unit, text | tweet,
+//! secs}` shows a tweet balloon over its head and hides it when the step
+//! ends; `companion.build {unit, fixture, texture, near, swings}` puts an
+//! owned fixture near the companion and has it hammer the fixture from a
+//! ghost to solid, with the original's hit and put cues;
+//! `companion.use {unit, fixture | uid, activity, variant}` has it walk to a
+//! placed fixture and play its character's own action there (the
+//! nearest placed copy of the master id `fixture`, or the fixture `uid`);
+//! and `companion.despawn {unit}` removes it. Each step ends when its command's
+//! status is done, and fails with the companion's named refusal. The
+//! companions section of `moly.observe` lists each companion's after-edit
+//! tweets (the tweets its unit tweets when the player finishes editing the
+//! layout: id, text, motion, eye, mouth and emoticon), so a script can play
+//! one as a set of these steps.
+//!
+//! World-point effects: `effect.play {name, at: [x, y, z], secs}` shows an
+//! emoticon (a particle or a sprite one, such as `fx_emote_018_single`) at a
+//! world point on an anchor entity of its own, and takes it away after
+//! `secs`.
+//!
 //! Camera: `camera.drag {by: [dx, dy], secs, from: [fx, fy]}` drags one
 //! finger by logical pixels from a point given as fractions of the window
 //! (the field above the player by default); `camera.zoom {by, secs}` turns
@@ -280,7 +309,10 @@ pub fn install(app: &mut App) {
                 .before(crate::joystick::advance)
                 .before(crate::gesture::advance)
                 .before(crate::action_button::click),
-        );
+        )
+        // A world-point effect's anchor outlives its step until the emote's
+        // last draws are gone.
+        .add_systems(Update, run::retire);
 }
 
 /// A native run's script file, from `MOLY_DIRECTOR_SCRIPT`.

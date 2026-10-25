@@ -335,7 +335,7 @@ impl FixturePutEffect {
 
 /// `FixtureController.ShowPutEffect` for a ground fixture at its decided
 /// pose. The effect and its sound follow once the instance is ready.
-pub(super) fn show(world: &mut World, item: &EditableFixture, source: &'static str) {
+pub(crate) fn show(world: &mut World, item: &EditableFixture, source: &'static str) {
     let pose = match item.pose() {
         Ok(pose) => pose,
         Err(error) => {
@@ -460,7 +460,7 @@ pub(super) fn insert_test_tables(world: &mut World, traits: &[(i32, moly_layout:
 }
 
 /// `FixtureController.PlayPutSound`: the put sound alone.
-pub(super) fn play_put_sound(world: &mut World, fixture_id: i32, source: &'static str) {
+pub(crate) fn play_put_sound(world: &mut World, fixture_id: i32, source: &'static str) {
     if !world.contains_resource::<FixturePutEffect>() {
         warn!("[fixture-put] PlayPutSound for fixture {fixture_id} ({source}): the put effect owner is not installed; no sound");
         return;

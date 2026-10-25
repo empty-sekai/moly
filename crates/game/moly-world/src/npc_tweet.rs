@@ -36,12 +36,23 @@ pub struct TweetTables {
     /// master order: the change-site state's room-entry tweets.
     pub site_entries: Vec<i32>,
     /// The after-edit pools as extracted: character unit -> tweet ids (read
-    /// by the balloon's after-edit reaction through its seam).
-    #[allow(dead_code, reason = "read by the balloon through its seam")]
+    /// by the balloon's after-edit reaction through its seam, and by the
+    /// control surface for the companions' units).
     pub after_edit_pools: Vec<(i32, Vec<i32>)>,
 }
 
 impl TweetTables {
+    /// The after-edit tweet ids of a character unit: the tweets it tweets
+    /// when the player finishes editing the layout. Empty when the pools
+    /// have no such unit.
+    pub fn after_edit_pool(&self, unit: u32) -> &[i32] {
+        let unit = i32::try_from(unit).ok();
+        self.after_edit_pools
+            .iter()
+            .find(|(key, _)| Some(*key) == unit)
+            .map_or(&[], |(_, ids)| ids.as_slice())
+    }
+
     /// The tweet row of `id` (the master lookup by id).
     pub fn tweet(&self, id: i32) -> Option<&TweetRow> {
         self.tweets

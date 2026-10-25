@@ -304,6 +304,9 @@ enum Kind {
     NpcWalk { entity: Entity, unit: u32, goal: Vec3, within: f32 },
     NpcFace { entity: Entity, unit: u32, towards: Vec3, secs: f32, started: bool },
     Emote { lease: crate::emoticon::timeline::EmoteLease, until: f32 },
+    /// An emoticon at a world point, shown on an anchor of the step's own;
+    /// the anchor is kept hidden until it is placed.
+    PointEmote { anchor: Entity, lease: crate::emoticon::timeline::EmoteLease, until: f32 },
     NpcUse { ticket: u64 },
     Tweet { entity: Entity, until: f32 },
     /// A talk requested of a character, until its decision builds it.
@@ -322,7 +325,31 @@ enum Kind {
     /// A companion's walk, from its command until its status reaches the
     /// number the command gets (`seq`).
     CompanionWalk { unit: u32, to: Vec3, within: f32, seq: u64, written: bool },
+    /// A companion's turn, from its command until its status reaches the
+    /// number the command gets (`seq`).
+    CompanionFace { unit: u32, to: Vec3, secs: f32, seq: u64, written: bool },
+    /// A companion's motion, from its command until its status reaches the
+    /// number the command gets (`seq`).
+    CompanionMotion { unit: u32, motion: String, seq: u64, written: bool },
+    /// A companion's use of the placed fixture `uid`, from its command until
+    /// its status reaches the number the command gets (`seq`).
+    CompanionUse { unit: u32, uid: String, activity: Option<i32>, variant: Option<u32>, seq: u64, written: bool },
+    /// A tweet balloon over a companion, until `until`.
+    CompanionBalloon { unit: u32, entity: Entity, until: f32 },
     CompanionDespawn { unit: u32, written: bool },
+    /// A companion's build: the fixture's put and save, its reload, then the
+    /// companion's build command.
+    CompanionBuild { unit: u32, fixture: i32, texture: Option<u32>, near: Option<Vec3>, swings: u32, phase: BuildStep },
+}
+
+/// Where a `companion.build` step stands.
+pub(crate) enum BuildStep {
+    /// The fixture is not put yet.
+    Put,
+    /// The layout with the fixture is saving and reloading.
+    Saving { ticket: u64, uid: String },
+    /// The companion's build command, by its number, of the fixture `uid`.
+    Building { seq: u64, uid: String },
 }
 
 impl Kind {
@@ -334,9 +361,24 @@ impl Kind {
             // it stood.
             Kind::CompanionSpawn { written: false, .. }
             | Kind::CompanionWalk { written: false, .. }
+            | Kind::CompanionFace { written: false, .. }
+            | Kind::CompanionMotion { written: false, .. }
+            | Kind::CompanionUse { written: false, .. }
             | Kind::CompanionDespawn { written: false, .. } => {}
+            // A motion whose command was written plays on: its body is the
+            // companion's.
+            Kind::CompanionMotion { .. } => {}
+            // A use whose command was written ends on the companion's own
+            // terms: its action is the companion's.
+            Kind::CompanionUse { .. } => {}
+            Kind::CompanionBalloon { entity, .. } => super::npc::hide_tweet(world, *entity),
             Kind::NpcWalk { entity, .. } => crate::npc::stop_for_external_activity(world, *entity),
             Kind::Emote { lease, .. } => crate::emoticon::timeline::hide(world, *lease, true),
+            // The emote goes at once and its anchor with it.
+            Kind::PointEmote { anchor, lease, .. } => {
+                crate::emoticon::timeline::hide(world, *lease, true);
+                deactivate(world, *anchor);
+            }
             Kind::NpcUse { ticket } => super::npc::end_activity(world, *ticket, true),
             Kind::Tweet { entity, .. } => super::npc::hide_tweet(world, *entity),
             Kind::NpcTalk { entity } => super::npc::drop_talk(world, *entity),
@@ -351,6 +393,11 @@ impl Kind {
             }
             Kind::CameraDrag { from, by, down: true, .. } => {
                 let _ = hand::drag_touch(world, TouchPhase::Ended, *from + *by);
+            }
+            // A fixture saved for a build no companion was asked to make is
+            // drawn solid.
+            Kind::CompanionBuild { phase: BuildStep::Saving { uid, .. }, .. } => {
+                world.resource_mut::<crate::companion::FixtureGhosts>().clear(uid);
             }
             _ => {}
         }
@@ -708,11 +755,128 @@ fn start(world: &mut World, shared: &mut Shared, ticket: u64, step: Step, path: 
             // The command takes the next number.
             Kind::CompanionWalk { unit: *unit, to: Vec3::from(*to), within: *within, seq: seq + 1, written: false }
         }
+        Node::CompanionFace { unit, to, secs } => {
+            let Some(seq) = companion_seq(world, *unit) else {
+                return ended(path, Err(format!("no companion of unit {unit} is spawned")), optional);
+            };
+            // `player` is where the player stands as the step starts.
+            let to = match to {
+                crate::director::script::FaceTo::Point(point) => Vec3::from(*point),
+                crate::director::script::FaceTo::Player => match cond::player(world) {
+                    Ok(at) => at,
+                    Err(error) => return ended(path, Err(error), optional),
+                },
+            };
+            // The command takes the next number.
+            Kind::CompanionFace { unit: *unit, to, secs: *secs, seq: seq + 1, written: false }
+        }
+        Node::CompanionEmote { unit, name, secs, use_root } => {
+            let entity = match companion_entity(world, *unit) {
+                Some(entity) => entity,
+                None => return ended(path, Err(format!("no companion of unit {unit} is spawned")), optional),
+            };
+            // The emote rides the body the companion wears, whose bones its
+            // own motion moves; an undressed companion carries it itself.
+            let actor = worn_body(world, entity).unwrap_or(entity);
+            match crate::emoticon::timeline::show(world, actor, name, *use_root) {
+                Ok(lease) => Kind::Emote { lease, until: shared.now + secs },
+                Err(error) => return ended(path, Err(error), optional),
+            }
+        }
+        Node::CompanionMotion { unit, motion } => {
+            let Some(seq) = companion_seq(world, *unit) else {
+                return ended(path, Err(format!("no companion of unit {unit} is spawned")), optional);
+            };
+            // The command takes the next number.
+            Kind::CompanionMotion { unit: *unit, motion: motion.clone(), seq: seq + 1, written: false }
+        }
+        Node::CompanionUse { unit, target, activity, variant } => {
+            let Some(seq) = companion_seq(world, *unit) else {
+                return ended(path, Err(format!("no companion of unit {unit} is spawned")), optional);
+            };
+            let uid = match use_target(world, *unit, target) {
+                Ok(uid) => uid,
+                Err(error) => return ended(path, Err(error), optional),
+            };
+            // The command takes the next number.
+            Kind::CompanionUse { unit: *unit, uid, activity: *activity, variant: *variant, seq: seq + 1, written: false }
+        }
+        Node::CompanionExpression { unit, eye, mouth, reset } => {
+            let Some(entity) = companion_entity(world, *unit) else {
+                return ended(path, Err(format!("no companion of unit {unit} is spawned")), optional);
+            };
+            let applied = if *reset {
+                crate::companion::expression::reset(world, entity)
+            } else {
+                crate::companion::expression::set(world, entity, eye.as_deref(), mouth.as_deref())
+            };
+            let note = match applied {
+                Ok(()) if *reset => format!("companion {unit}: the default face"),
+                Ok(()) => "companion face set".to_owned(),
+                Err(error) => return ended(path, Err(error), optional),
+            };
+            return ended(path, Ok(note), optional);
+        }
+        Node::CompanionBalloon { unit, text, tweet, secs } => {
+            let Some(entity) = companion_entity(world, *unit) else {
+                return ended(path, Err(format!("no companion of unit {unit} is spawned")), optional);
+            };
+            let text = match (text, tweet) {
+                (Some(text), _) => text.clone(),
+                (None, Some(tweet)) => match world
+                    .get_resource::<crate::npc_tweet::TweetTables>()
+                    .ok_or_else(|| "the tweet master is not loaded".to_owned())
+                    .and_then(|tables| {
+                        tables
+                            .tweet(*tweet)
+                            .map(|row| row.text.clone())
+                            .ok_or_else(|| format!("the tweet master has no row {tweet}"))
+                    }) {
+                    Ok(text) => text,
+                    Err(error) => return ended(path, Err(error), optional),
+                },
+                (None, None) => return ended(path, Err("a balloon has no text".into()), optional),
+            };
+            super::npc::show_balloon(world, entity, text, tweet.unwrap_or(0));
+            Kind::CompanionBalloon { unit: *unit, entity, until: shared.now + secs }
+        }
+        Node::EffectPlay { name, at, secs } => {
+            // The anchor stands for the point; the emoticon is shown on it,
+            // and the anchor is hidden until it is placed with its draws.
+            let anchor = world
+                .spawn((
+                    Transform::from_translation(Vec3::from(*at)),
+                    Visibility::Hidden,
+                    crate::effect_show::PointAnchor,
+                    Name::new(format!("effect {name}")),
+                ))
+                .id();
+            match crate::emoticon::timeline::show(world, anchor, name, false) {
+                Ok(lease) => Kind::PointEmote { anchor, lease, until: shared.now + secs },
+                Err(error) => {
+                    world.despawn(anchor);
+                    return ended(path, Err(error), optional);
+                }
+            }
+        }
         Node::CompanionDespawn { unit } => {
             if companion_seq(world, *unit).is_none() {
                 return ended(path, Err(format!("no companion of unit {unit} is spawned")), optional);
             }
             Kind::CompanionDespawn { unit: *unit, written: false }
+        }
+        Node::CompanionBuild { unit, fixture, texture, near, swings } => {
+            if companion_seq(world, *unit).is_none() {
+                return ended(path, Err(format!("no companion of unit {unit} is spawned")), optional);
+            }
+            Kind::CompanionBuild {
+                unit: *unit,
+                fixture: *fixture,
+                texture: *texture,
+                near: near.map(Vec3::from),
+                swings: *swings,
+                phase: BuildStep::Put,
+            }
         }
         Node::CameraDrag { by, secs, from } => {
             let Some(size) = hand::window_size(world) else {
@@ -929,6 +1093,21 @@ fn poll(world: &mut World, shared: &mut Shared, active: &mut Active, ticket: u64
                 Poll::Running(format!("{:.1} s left", *until - shared.now))
             }
         }
+        Kind::PointEmote { anchor, lease, until } => {
+            if shared.now >= *until {
+                let at = world.get::<Transform>(*anchor).map_or(Vec3::ZERO, |transform| transform.translation);
+                crate::emoticon::timeline::hide(world, *lease, false);
+                // The anchor goes once the emote's last draws have: a child
+                // is not removed with its parent.
+                let anchor = *anchor;
+                world
+                    .commands()
+                    .queue(move |world: &mut World| deactivate(world, anchor));
+                Poll::Done(format!("shown at ({:.2}, {:.2}, {:.2})", at.x, at.y, at.z))
+            } else {
+                Poll::Running(format!("{:.1} s left", *until - shared.now))
+            }
+        }
         Kind::NpcUse { ticket } => {
             use crate::npc_fixture_activity::preview::PreviewPhase;
             let ticket = *ticket;
@@ -962,6 +1141,53 @@ fn poll(world: &mut World, shared: &mut Shared, active: &mut Active, ticket: u64
                 Poll::Running(format!("{:.1} s left", *until - shared.now))
             }
         }
+        Kind::CompanionFace { unit, to, secs, seq, written } => {
+            if !*written {
+                *written = true;
+                world.write_message(crate::companion::CompanionCommand::Face { unit: *unit, to: *to, secs: *secs });
+                return Poll::Running(format!("companion {unit} turns to ({:.2}, {:.2}, {:.2})", to.x, to.y, to.z));
+            }
+            match companion_state(world, *unit) {
+                Some(state) => companion_turned(state, *seq, *unit),
+                // Gone after the command: the turn cannot end.
+                None => Poll::Failed(format!("companion {unit} was removed while turning")),
+            }
+        }
+        Kind::CompanionMotion { unit, motion, seq, written } => {
+            if !*written {
+                *written = true;
+                world.write_message(crate::companion::CompanionCommand::Motion { unit: *unit, motion: motion.clone() });
+                return Poll::Running(format!("companion {unit} plays {motion}"));
+            }
+            match companion_state(world, *unit) {
+                Some(state) => companion_moved(state, *seq, *unit, motion),
+                None => Poll::Failed(format!("companion {unit} was removed while playing {motion}")),
+            }
+        }
+        Kind::CompanionUse { unit, uid, activity, variant, seq, written } => {
+            if !*written {
+                *written = true;
+                world.write_message(crate::companion::CompanionCommand::Use {
+                    unit: *unit,
+                    uid: uid.clone(),
+                    activity: *activity,
+                    variant: *variant,
+                });
+                return Poll::Running(format!("companion {unit} uses fixture {uid}"));
+            }
+            match companion_state(world, *unit) {
+                Some(state) => companion_used(state, *seq, *unit, uid),
+                None => Poll::Failed(format!("companion {unit} was removed while using fixture {uid}")),
+            }
+        }
+        Kind::CompanionBalloon { unit, entity, until } => {
+            if shared.now >= *until {
+                super::npc::hide_tweet(world, *entity);
+                Poll::Done(String::new())
+            } else {
+                Poll::Running(format!("companion {unit} balloon: {:.1} s left", *until - shared.now))
+            }
+        }
         Kind::CompanionSpawn { unit, at, written, polls } => {
             if !*written {
                 *written = true;
@@ -972,7 +1198,7 @@ fn poll(world: &mut World, shared: &mut Shared, active: &mut Active, ticket: u64
                 return companion_spawned(state, *unit);
             }
             // The spawn waits for its character body before it is a companion.
-            if world.query::<&crate::companion::CompanionSpawn>().iter(world).any(|spawn| spawn.unit == *unit) {
+            if crate::companion::is_spawning(world, *unit) {
                 return Poll::Running(format!("companion {unit}: its character body is loading"));
             }
             // The command is read and its spawn entity inserted a frame or
@@ -995,6 +1221,7 @@ fn poll(world: &mut World, shared: &mut Shared, active: &mut Active, ticket: u64
                 None => Poll::Failed(format!("companion {unit} was removed while walking")),
             }
         }
+        Kind::CompanionBuild { unit, fixture, texture, near, swings, phase } => companion_build(world, *unit, *fixture, *texture, *near, *swings, phase),
         Kind::CompanionDespawn { unit, written } => {
             if !*written {
                 *written = true;
@@ -1084,10 +1311,98 @@ fn companion_absent(world: &mut World, unit: u32) -> Result<(), String> {
     if world.query::<&crate::companion::Companion>().iter(world).any(|companion| companion.unit == unit) {
         return Err(format!("a companion of unit {unit} is already spawned"));
     }
-    if world.query::<&crate::companion::CompanionSpawn>().iter(world).any(|spawn| spawn.unit == unit) {
+    if crate::companion::is_spawning(world, unit) {
         return Err(format!("a companion of unit {unit} is already being spawned"));
     }
     Ok(())
+}
+
+/// Retires the anchor of a world-point effect once the step is over: its
+/// emote's draws may still be in the presenter's commands, so it is hidden
+/// at once (what is left under it draws next frame and not), and it is
+/// despawned once its draws are gone.
+fn deactivate(world: &mut World, anchor: Entity) {
+    let since = world.resource::<Time>().elapsed_secs();
+    let Ok(mut entity) = world.get_entity_mut(anchor) else {
+        return;
+    };
+    if let Some(mut visibility) = entity.get_mut::<Visibility>() {
+        *visibility = Visibility::Hidden;
+    }
+    entity.insert(Retire { since });
+}
+
+/// Seconds an anchor that has no draws yet waits before it goes.
+const RETIRE_LONELY_SECS: f32 = 0.25;
+
+/// An effect's anchor whose emote has gone, and when that was found.
+#[derive(Component, Clone, Copy)]
+pub(crate) struct Retire {
+    since: f32,
+}
+
+/// Update: each retired anchor goes once no draw of an emote hangs under it
+/// any more.
+pub(crate) fn retire(
+    mut commands: Commands,
+    time: Res<Time>,
+    anchors: Query<(Entity, &Retire)>,
+    draws: Query<&ChildOf, With<crate::emoticon::EmoteDraw>>,
+) {
+    let held: std::collections::HashSet<Entity> = draws.iter().map(ChildOf::parent).collect();
+    let now = time.elapsed_secs();
+    for (entity, retire) in &anchors {
+        if !held.contains(&entity) && now - retire.since >= RETIRE_LONELY_SECS {
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
+/// The entity of `unit`'s companion.
+fn companion_entity(world: &mut World, unit: u32) -> Option<Entity> {
+    world
+        .query::<(Entity, &crate::companion::Companion)>()
+        .iter(world)
+        .find(|(_, companion)| companion.unit == unit)
+        .map(|(entity, _)| entity)
+}
+
+/// The body `companion` wears, when it is dressed.
+fn worn_body(world: &mut World, companion: Entity) -> Option<Entity> {
+    world
+        .query::<(Entity, &crate::player_avatar::oc::OcModel)>()
+        .iter(world)
+        .find(|(_, model)| model.player == companion)
+        .map(|(entity, _)| entity)
+}
+
+/// The transform of `unit`'s companion: its place and the yaw it faces.
+fn companion_place(world: &mut World, unit: u32) -> Option<Transform> {
+    world
+        .query::<(&crate::companion::Companion, &Transform)>()
+        .iter(world)
+        .find(|(companion, _)| companion.unit == unit)
+        .map(|(_, transform)| *transform)
+}
+
+/// Where the placed fixture `uid` of the layout stands: at the root of its
+/// instance when that exists, else at the pose its placement row puts it
+/// at, on the site's own origin.
+pub(crate) fn companion_fixture(world: &mut World, uid: &str) -> Option<Vec3> {
+    let instance = world
+        .query::<(&crate::fixture::FixtureInstanceSeed, &GlobalTransform)>()
+        .iter(world)
+        .find(|(seed, _)| seed.uid() == uid)
+        .map(|(_, transform)| transform.translation());
+    if instance.is_some() {
+        return instance;
+    }
+    let placements = world.get_resource::<crate::fixture::FixturePlacements>()?;
+    let row = placements.editor_rows().into_iter().find(|row| row.uid == uid)?;
+    let pose = row.pose().ok()?;
+    // `ShowPutEffect`'s view position: the site's own origin plus the pose.
+    let origin = crate::fixture_edit::site_origin(world);
+    Some(origin + pose.translation)
 }
 
 /// The command number of `unit`'s companion: its spawn is the first.
@@ -1112,11 +1427,199 @@ fn companion_spawned(state: (crate::companion::CompanionState, crate::companion:
     match state {
         CompanionState::Spawned => Poll::Running(format!("companion {unit}: its body is loading")),
         CompanionState::Idle => Poll::Done(format!("companion {unit} spawned")),
-        CompanionState::Walking => Poll::Running(format!("companion {unit} walks to its spawn point")),
+        CompanionState::Walking | CompanionState::Turning | CompanionState::Building | CompanionState::Acting | CompanionState::Using => {
+            Poll::Running(format!("companion {unit} walks to its spawn point"))
+        }
         CompanionState::Done => Poll::Done(format!("companion {unit} spawned at its spawn point")),
         // The body is shown from its seat on: a walk-in that stops short
         // leaves the companion standing where it stopped.
         CompanionState::Failed(reason) => Poll::Done(format!("companion {unit} spawned short of its spawn point: {reason}")),
+    }
+}
+
+/// One frame of a `companion.build` step.
+fn companion_build(
+    world: &mut World,
+    unit: u32,
+    fixture: i32,
+    texture: Option<u32>,
+    near: Option<Vec3>,
+    swings: u32,
+    phase: &mut BuildStep,
+) -> Poll {
+    use crate::companion::{build::GHOST_ALPHA, CompanionCommand, FixtureGhosts};
+    use crate::fixture_edit::field_build::{self, FieldBuildState, FieldBuilds};
+    match phase {
+        BuildStep::Put => {
+            let Some(stand) = companion_place(world, unit) else {
+                return Poll::Failed(format!("no companion of unit {unit} is spawned"));
+            };
+            // In front of the companion: its body faces its local +Z.
+            let near = near.unwrap_or(stand.translation + stand.rotation * Vec3::Z * BUILD_AHEAD);
+            match field_build::start(world, fixture, texture, near) {
+                Err(reason) => Poll::Failed(format!("fixture {fixture} was not put: {reason}")),
+                Ok((ticket, uid)) => {
+                    // Drawn as a ghost from its first frame.
+                    world.resource_mut::<FixtureGhosts>().set(&uid, GHOST_ALPHA);
+                    let note = format!("fixture {fixture} put as {uid} near {near:?}; saving");
+                    *phase = BuildStep::Saving { ticket, uid };
+                    Poll::Running(note)
+                }
+            }
+        }
+        BuildStep::Saving { ticket, uid } => {
+            let state = world.resource::<FieldBuilds>().state(*ticket).cloned();
+            match state {
+                None | Some(FieldBuildState::Saving) => Poll::Running(format!("fixture {uid}: saving the layout")),
+                Some(FieldBuildState::Reloading) => Poll::Running(format!("fixture {uid}: the layout is reloading")),
+                Some(FieldBuildState::Refused(reason)) => {
+                    world.resource_mut::<FixtureGhosts>().clear(uid);
+                    Poll::Failed(format!("fixture {uid}: {reason}"))
+                }
+                Some(FieldBuildState::Placed { .. }) => {
+                    let mut instances = world.query::<(&crate::fixture::FixtureInstanceSeed, &GlobalTransform)>();
+                    let Some(at) = instances
+                        .iter(world)
+                        .find(|(seed, _)| seed.uid() == uid.as_str())
+                        .map(|(_, transform)| transform.translation())
+                    else {
+                        return Poll::Running(format!("fixture {uid}: waiting for its instance"));
+                    };
+                    let Some(seq) = companion_seq(world, unit) else {
+                        world.resource_mut::<FixtureGhosts>().clear(uid);
+                        return Poll::Failed(format!("companion {unit} was removed before its build"));
+                    };
+                    world.write_message(CompanionCommand::Build { unit, uid: uid.clone(), at, swings });
+                    let note = format!("fixture {uid} stands at {at:?}; companion {unit} builds it");
+                    // The command takes the next number.
+                    *phase = BuildStep::Building { seq: seq + 1, uid: uid.clone() };
+                    Poll::Running(note)
+                }
+            }
+        }
+        BuildStep::Building { seq, uid } => match companion_state(world, unit) {
+            Some(state) => companion_built(world, state, *seq, unit, uid),
+            None => Poll::Failed(format!("companion {unit} was removed while building")),
+        },
+    }
+}
+
+/// How far in front of the companion a build's put search starts, metres.
+const BUILD_AHEAD: f32 = 1.5;
+
+/// The end of a build: the status at or past the command's number, done or
+/// failed; a build that is done names where its fixture stands.
+fn companion_built(
+    world: &mut World,
+    state: (crate::companion::CompanionState, crate::companion::CompanionStatus),
+    seq: u64,
+    unit: u32,
+    uid: &str,
+) -> Poll {
+    use crate::companion::CompanionState;
+    let (state, status) = state;
+    if status.seq < seq {
+        return Poll::Running(format!("companion {unit} build {seq}: the command is queued"));
+    }
+    match state {
+        CompanionState::Idle
+        | CompanionState::Walking
+        | CompanionState::Turning
+        | CompanionState::Building
+        | CompanionState::Acting
+        | CompanionState::Using => Poll::Running(format!("companion {unit} build {seq}: {}", state.label())),
+        CompanionState::Spawned => Poll::Running(format!("companion {unit}: its body is loading")),
+        CompanionState::Done if status.seq > seq => Poll::Failed(format!(
+            "companion {unit} build {seq} was never accepted: command {} came first",
+            status.seq
+        )),
+        CompanionState::Done => {
+            let note = format!("companion {unit} build {seq} done");
+            match companion_fixture(world, uid) {
+                Some(at) => Poll::Done(format!("{note}; fixture {uid} at ({:.2}, {:.2}, {:.2})", at.x, at.y, at.z)),
+                None => Poll::Done(note),
+            }
+        }
+        CompanionState::Failed(reason) => Poll::Failed(format!("companion {unit} build {seq} failed: {reason}")),
+    }
+}
+
+/// The uid of the fixture a `companion.use` step names: the placed copy of
+/// a master id nearest the companion, or a placed uid as given.
+fn use_target(world: &mut World, unit: u32, target: &super::script::UseTarget) -> Result<String, String> {
+    use super::script::UseTarget;
+    let mut placed = world.query::<(&crate::fixture_activity_state::FixtureActivityIdentity, &GlobalTransform)>();
+    match target {
+        UseTarget::Uid(uid) => placed
+            .iter(world)
+            .any(|(identity, _)| identity.uid == *uid)
+            .then(|| uid.clone())
+            .ok_or_else(|| format!("no placed fixture {uid} on this site")),
+        UseTarget::Nearest(fixture) => {
+            let entity = companion_entity(world, unit).ok_or_else(|| format!("no companion of unit {unit} is spawned"))?;
+            let from = world
+                .get::<GlobalTransform>(entity)
+                .map(GlobalTransform::translation)
+                .ok_or_else(|| format!("companion {unit} has no place yet"))?;
+            placed
+                .iter(world)
+                .filter(|(identity, _)| identity.master_id == *fixture)
+                .min_by(|(_, a), (_, b)| {
+                    a.translation().distance_squared(from).total_cmp(&b.translation().distance_squared(from))
+                })
+                .map(|(identity, _)| identity.uid.clone())
+                .ok_or_else(|| format!("no placed fixture {fixture} on this site"))
+        }
+    }
+}
+
+/// The end of a use: the status at or past the command's number, done or
+/// failed.
+fn companion_used(
+    state: (crate::companion::CompanionState, crate::companion::CompanionStatus),
+    seq: u64,
+    unit: u32,
+    uid: &str,
+) -> Poll {
+    use crate::companion::CompanionState;
+    let (state, status) = state;
+    if status.seq < seq {
+        return Poll::Running(format!("companion {unit} use {seq}: the command is queued"));
+    }
+    match state {
+        CompanionState::Spawned => Poll::Running(format!("companion {unit}: its body is loading")),
+        CompanionState::Done if status.seq > seq => Poll::Failed(format!(
+            "companion {unit} use {seq} was never accepted: command {} came first",
+            status.seq
+        )),
+        CompanionState::Done => Poll::Done(format!("companion {unit} used fixture {uid}")),
+        CompanionState::Failed(reason) => Poll::Failed(format!("companion {unit} use {seq} failed: {reason}")),
+        state => Poll::Running(format!("companion {unit} use {seq}: {}", state.label())),
+    }
+}
+
+/// The end of a motion: the status at or past the command's number, done or
+/// failed.
+fn companion_moved(
+    state: (crate::companion::CompanionState, crate::companion::CompanionStatus),
+    seq: u64,
+    unit: u32,
+    motion: &str,
+) -> Poll {
+    use crate::companion::CompanionState;
+    let (state, status) = state;
+    if status.seq < seq {
+        return Poll::Running(format!("companion {unit} motion {seq}: the command is queued"));
+    }
+    match state {
+        CompanionState::Spawned => Poll::Running(format!("companion {unit}: its body is loading")),
+        CompanionState::Done if status.seq > seq => Poll::Failed(format!(
+            "companion {unit} motion {seq} was never accepted: command {} came first",
+            status.seq
+        )),
+        CompanionState::Done => Poll::Done(format!("companion {unit} played {motion}")),
+        CompanionState::Failed(reason) => Poll::Failed(format!("companion {unit} motion {seq} failed: {reason}")),
+        state => Poll::Running(format!("companion {unit} motion {seq}: {}", state.label())),
     }
 }
 
@@ -1129,7 +1632,12 @@ fn companion_walked(state: (crate::companion::CompanionState, crate::companion::
         return Poll::Running(format!("companion {unit} walk {seq}: the command is queued"));
     }
     match state {
-        CompanionState::Idle | CompanionState::Walking => Poll::Running(format!("companion {unit} walk {seq}: {}", state.label())),
+        CompanionState::Idle
+        | CompanionState::Walking
+        | CompanionState::Turning
+        | CompanionState::Building
+        | CompanionState::Acting
+        | CompanionState::Using => Poll::Running(format!("companion {unit} walk {seq}: {}", state.label())),
         CompanionState::Spawned => Poll::Running(format!("companion {unit}: its body is loading")),
         CompanionState::Done if status.seq > seq => Poll::Failed(format!(
             "companion {unit} walk {seq} was never accepted: command {} came first",
@@ -1137,6 +1645,29 @@ fn companion_walked(state: (crate::companion::CompanionState, crate::companion::
         )),
         CompanionState::Done => Poll::Done(format!("companion {unit} walk {seq} arrived")),
         CompanionState::Failed(reason) => Poll::Failed(format!("companion {unit} walk {seq} failed: {reason}")),
+    }
+}
+
+/// The end of a turn: the status at or past the command's number, done or
+/// failed.
+fn companion_turned(state: (crate::companion::CompanionState, crate::companion::CompanionStatus), seq: u64, unit: u32) -> Poll {
+    use crate::companion::CompanionState;
+    let (state, status) = state;
+    if status.seq < seq {
+        return Poll::Running(format!("companion {unit} face {seq}: the command is queued"));
+    }
+    match state {
+        CompanionState::Idle | CompanionState::Walking | CompanionState::Building | CompanionState::Acting | CompanionState::Using => {
+            Poll::Running(format!("companion {unit} face {seq}: {}", state.label()))
+        }
+        CompanionState::Turning => Poll::Running(format!("companion {unit} face {seq}: turning")),
+        CompanionState::Spawned => Poll::Running(format!("companion {unit}: its body is loading")),
+        CompanionState::Done if status.seq > seq => Poll::Failed(format!(
+            "companion {unit} face {seq} was never accepted: command {} came first",
+            status.seq
+        )),
+        CompanionState::Done => Poll::Done(format!("companion {unit} face {seq} done")),
+        CompanionState::Failed(reason) => Poll::Failed(format!("companion {unit} face {seq} failed: {reason}")),
     }
 }
 

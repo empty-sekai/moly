@@ -357,6 +357,22 @@ fn animation_speed_mul(site: &crate::site::SiteSelection) -> f32 {
     }
 }
 
+/// The pace of a body walking on the Move state's law with the stick at
+/// `magnitude` and the field camera in its normal state: its speed in metres
+/// per second and its walk clip's animation speed. Both grow with the stick
+/// until the animation speed meets its clamp, so a pace inside the clamp
+/// keeps the stride on the ground.
+pub fn move_pace(
+    configs: &crate::client_config::ClientConfigs,
+    site: &crate::site::SiteSelection,
+    magnitude: f32,
+) -> (f32, f32) {
+    let speed = magnitude * move_speed(configs, site, crate::camera::CameraStateType::Normal, false);
+    let animation =
+        (magnitude * animation_speed_mul(site)).clamp(MIN_ANIMATION_SPEED, MAX_ANIMATION_SPEED);
+    (speed, animation)
+}
+
 /// Update：把本帧输入推进成位置与朝向——玩家域自己的位移律（直接运动
 /// 学，真源 `NavMeshAgent.Move` 同形；寻路律归 NPC 巡逻域）。速度按
 /// [`move_speed`] 逐帧取值（面板三键 + 站点档 + 相机档）。位移经可行

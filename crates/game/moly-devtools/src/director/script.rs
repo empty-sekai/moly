@@ -105,8 +105,31 @@ pub enum Node {
     /// Walks the companion of `unit` to a world point, ending within `within`
     /// metres of it.
     CompanionWalkTo { unit: u32, to: [f32; 3], within: f32 },
+    /// Turns the companion of `unit` to face a world point over `secs`
+    /// seconds; `player` is the player's position when the step starts.
+    CompanionFace { unit: u32, to: FaceTo, secs: f32 },
+    /// Shows an emoticon over the companion of `unit` for `secs`.
+    CompanionEmote { unit: u32, name: String, secs: f32, use_root: bool },
+    /// Plays the motion-library motion `motion` on the companion of `unit`'s
+    /// own body once: its start, loop and end segments, then its idle.
+    CompanionMotion { unit: u32, motion: String },
+    /// Sets the eye and the mouth pattern of the companion of `unit`, or
+    /// returns its face to the unit's default (`reset`).
+    CompanionExpression { unit: u32, eye: Option<String>, mouth: Option<String>, reset: bool },
+    /// Shows a tweet balloon over the companion of `unit` for `secs`: the
+    /// tweet master's text of `tweet`, or `text` as given.
+    CompanionBalloon { unit: u32, text: Option<String>, tweet: Option<i32>, secs: f32 },
     /// Removes the companion of `unit`.
     CompanionDespawn { unit: u32 },
+    /// Puts an owned fixture near a world point (by default in front of the
+    /// companion) and has the companion of `unit` hammer it from a ghost to
+    /// solid in `swings` hits.
+    CompanionBuild { unit: u32, fixture: i32, texture: Option<u32>, near: Option<[f32; 3]>, swings: u32 },
+    /// Has the companion of `unit` use a placed fixture: walk to the action
+    /// point of its character's action there and play it.
+    CompanionUse { unit: u32, target: UseTarget, activity: Option<i32>, variant: Option<u32> },
+    /// Shows the emoticon `name` at a world point for `secs`.
+    EffectPlay { name: String, at: [f32; 3], secs: f32 },
     /// A one-finger drag of `by` logical pixels (x right, y down) over
     /// `secs`, starting at `from` (fractions of the window).
     CameraDrag { by: [f32; 2], secs: f32, from: [f32; 2] },
@@ -118,6 +141,23 @@ pub enum Node {
     /// the answer.
     ServerEdit { command: Map<String, Value> },
     SiteSwitch { site: String },
+}
+
+/// The point a companion turns to.
+/// The fixture a `companion.use` step uses.
+#[derive(Clone, Debug, PartialEq)]
+pub enum UseTarget {
+    /// The placed copy of this master id nearest the companion.
+    Nearest(i32),
+    /// The placed fixture with this uid.
+    Uid(String),
+}
+
+#[derive(Clone, Debug)]
+pub enum FaceTo {
+    Point([f32; 3]),
+    /// The player's position when the step starts.
+    Player,
 }
 
 /// A placed fixture: by placement UID, or the instance of a master id
@@ -212,7 +252,10 @@ pub(super) const ACTIONS: &[&str] = &[
     "player.walk_to", "player.interact", "player.gather", "player.craft", "player.stick", "player.release", "player.talk_to", "player.wear",
     "player.wear_avatar", "player.deliver", "tap", "ui.tap", "dialog.answer", "key.back", "layout.place",
     "npc.take", "npc.walk_to", "npc.face", "npc.emote", "npc.use", "npc.tweet", "npc.talk", "npc.release",
-    "companion.spawn", "companion.walk_to", "companion.despawn",
+    "companion.spawn", "companion.walk_to", "companion.face", "companion.emote", "companion.motion",
+    "companion.expression", "companion.balloon", "companion.despawn", "companion.build",
+    "companion.use",
+    "effect.play",
     "camera.drag", "camera.zoom", "server.edit", "weather.set", "site.switch", "site.enter_room", "site.go_home",
 ];
 
@@ -471,7 +514,76 @@ fn step(value: &Value, at: &str) -> Result<Vec<Step>, String> {
                 .min(crate::companion::WITHIN_LIMIT);
             vec![one(Node::CompanionWalkTo { unit, to, within }, Some(60.0))]
         }
+        "companion.face" => {
+            let unit = fields.req_u32("unit")?;
+            let to = face_to(fields.req("to")?, &format!("{at}.to"))?;
+            let secs = fields.opt_f32("secs")?.unwrap_or(0.4);
+            vec![one(Node::CompanionFace { unit, to, secs }, Some(secs + 5.0))]
+        }
+        "companion.emote" => {
+            let unit = fields.req_u32("unit")?;
+            let name = fields.req_str("name")?.to_owned();
+            let secs = fields.opt_f32("secs")?.unwrap_or(2.0);
+            let use_root = fields.opt_bool("use_root")?.unwrap_or(false);
+            vec![one(Node::CompanionEmote { unit, name, secs, use_root }, None)]
+        }
+        "companion.motion" => {
+            let unit = fields.req_u32("unit")?;
+            let motion = fields.req_str("motion")?.to_owned();
+            vec![one(Node::CompanionMotion { unit, motion }, Some(60.0))]
+        }
+        "companion.expression" => {
+            let unit = fields.req_u32("unit")?;
+            let eye = fields.opt_str("eye")?.map(str::to_owned);
+            let mouth = fields.opt_str("mouth")?.map(str::to_owned);
+            let reset = fields.opt_bool("reset")?.unwrap_or(false);
+            if reset && (eye.is_some() || mouth.is_some()) {
+                return Err(format!("{at}: reset takes neither eye nor mouth"));
+            }
+            if !reset && eye.is_none() && mouth.is_none() {
+                return Err(format!("{at}: give eye, mouth or reset"));
+            }
+            vec![one(Node::CompanionExpression { unit, eye, mouth, reset }, None)]
+        }
+        "companion.balloon" => {
+            let unit = fields.req_u32("unit")?;
+            let text = fields.opt_str("text")?.map(str::to_owned);
+            let tweet = fields.opt_i32("tweet")?;
+            if text.is_some() == tweet.is_some() {
+                return Err(format!("{at}: give exactly one of text or tweet"));
+            }
+            let secs = fields.opt_f32("secs")?.unwrap_or(3.0);
+            vec![one(Node::CompanionBalloon { unit, text, tweet, secs }, Some(secs + 5.0))]
+        }
         "companion.despawn" => vec![one(Node::CompanionDespawn { unit: fields.req_u32("unit")? }, Some(10.0))],
+        "companion.build" => {
+            let unit = fields.req_u32("unit")?;
+            let fixture = fields.req_i32("fixture")?;
+            let texture = fields.opt_u32("texture")?;
+            let near = fields.opt("near").map(|near| triple(near, &format!("{at}.near"))).transpose()?;
+            let swings = fields
+                .opt_u32("swings")?
+                .unwrap_or(crate::companion::build::DEFAULT_SWINGS)
+                .clamp(1, crate::companion::build::MAX_SWINGS);
+            vec![one(Node::CompanionBuild { unit, fixture, texture, near, swings }, Some(120.0))]
+        }
+        "companion.use" => {
+            let unit = fields.req_u32("unit")?;
+            let target = match (fields.opt_i32("fixture")?, fields.opt_str("uid")?) {
+                (Some(fixture), None) => UseTarget::Nearest(fixture),
+                (None, Some(uid)) => UseTarget::Uid(uid.to_owned()),
+                _ => return Err(format!("{at}: takes one of fixture and uid")),
+            };
+            let activity = fields.opt_i32("activity")?;
+            let variant = fields.opt_u32("variant")?;
+            vec![one(Node::CompanionUse { unit, target, activity, variant }, Some(120.0))]
+        }
+        "effect.play" => {
+            let name = fields.req_str("name")?.to_owned();
+            let at = triple(fields.req("at")?, &format!("{at}.at"))?;
+            let secs = fields.opt_f32("secs")?.unwrap_or(2.0);
+            vec![one(Node::EffectPlay { name, at, secs }, None)]
+        }
         "camera.drag" => {
             let by = pair(fields.req("by")?, &format!("{at}.by"))?;
             let secs = fields.opt_f32("secs")?.unwrap_or(0.5);
@@ -668,6 +780,14 @@ fn target(value: &Value, at: &str) -> Result<Target, String> {
     };
     fields.finish()?;
     Ok(Target { what, offset })
+}
+
+/// The point a companion turns to: a world point `[x, y, z]`, or `player`.
+fn face_to(value: &Value, at: &str) -> Result<FaceTo, String> {
+    match value {
+        Value::String(word) if word == "player" => Ok(FaceTo::Player),
+        value => triple(value, at).map(FaceTo::Point),
+    }
 }
 
 fn fixture_ref(value: &Value, at: &str) -> Result<FixtureRef, String> {

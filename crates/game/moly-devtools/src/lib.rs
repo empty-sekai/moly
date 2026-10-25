@@ -167,6 +167,7 @@ pub use moly_features::browser_game;
 pub use moly_features::content_library;
 pub use moly_features::cutscene;
 pub use moly_features::delivery;
+pub use moly_features::effect_show;
 pub use moly_features::entry;
 pub use moly_features::fixture_edit;
 pub use moly_features::fixture_edit_ui;

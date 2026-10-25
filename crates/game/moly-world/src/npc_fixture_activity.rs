@@ -11,6 +11,7 @@
 //! use the existing, explicitly approximate WalkField/ObjectiveFace host.
 
 mod areas;
+pub mod companion;
 pub mod preview;
 pub use areas::NpcFixtureAreas;
 

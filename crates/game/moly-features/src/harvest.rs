@@ -42,7 +42,7 @@ mod airplane;
 mod arrival;
 pub mod catalog;
 mod clips;
-mod damage;
+pub(crate) mod damage;
 mod drops;
 mod effects;
 pub mod harvest_summary;

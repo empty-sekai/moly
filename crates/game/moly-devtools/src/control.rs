@@ -57,8 +57,8 @@ const METHODS: &[(&str, &str, &str)] = &[
     ),
     (
         "moly.observe",
-        "The world as structured data, by section (what; every section when it is absent): site (with the layout grid's floor size and the tiles each placed fixture covers), gatherables (harvest objects with position, hit points, the tool type they need and whether the player targets one; and the drops on the ground), bag (materials, items, held total and limit), tools (gathering tools and stamina), recipes (the craft lists with costs and whether the apply button is on, else its balloon key), fixtures (owned and placed), characters, weather and time.",
-        r#"{"type":"object","properties":{"what":{"type":"array","items":{"enum":["site","gatherables","bag","tools","recipes","fixtures","characters","weather","time"]}}},"additionalProperties":false}"#,
+        "The world as structured data, by section (what; every section when it is absent): site (with the layout grid's floor size and the tiles each placed fixture covers), gatherables (harvest objects with position, hit points, the tool type they need and whether the player targets one; and the drops on the ground), bag (materials, items, held total and limit), tools (gathering tools and stamina), recipes (the craft lists with costs and whether the apply button is on, else its balloon key), fixtures (owned and placed), characters, companions (each companion's position, the yaw it faces in radians, its command status and number, and while a build is its last command, the position of the fixture it builds as fixture_at), weather and time.",
+        r#"{"type":"object","properties":{"what":{"type":"array","items":{"enum":["site","gatherables","bag","tools","recipes","fixtures","characters","companions","weather","time"]}}},"additionalProperties":false}"#,
     ),
     #[cfg(not(target_arch = "wasm32"))]
     (

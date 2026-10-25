@@ -1073,6 +1073,12 @@ server.registerTool(
           'player.stick, player.release, player.wear, player.wear_avatar, tap, ui.tap, dialog.answer, key.back, ' +
           'layout.place (one owned fixture through the editor commands layout_place sends: enter, select_catalog, rotate, move_to, decide, save); ' +
           'npc.take, npc.walk_to, npc.release, npc.face, npc.emote, npc.use, npc.tweet, npc.talk; ' +
+          'companion.spawn, companion.walk_to, companion.face, companion.emote, ' +
+          'companion.motion (a motion of the shared motion library played once on the companion\'s own body), ' +
+          'companion.expression (the eye and/or mouth pattern of its face, or reset to the unit\'s default), ' +
+          'companion.balloon (a tweet balloon over its head, of text or of a tweet master row), ' +
+          'companion.build, companion.despawn; ' +
+          'effect.play (an emoticon at a world point); ' +
           'camera.drag, camera.zoom, server.edit, weather.set, site.switch, site.enter_room, site.go_home.',
       ),
       timeout: z.number().positive().optional().describe('Seconds to wait, default 60'),
@@ -1217,7 +1223,7 @@ server.registerTool(
   'observe',
   {
     description:
-      'Read the world as structured data: the moly.observe sections named in what (default all): site (tiles, grid size and occupied cells), player (position and state), gatherables, bag (materials, items and limits), tools, recipes (blueprints with costs and whether they can be crafted now), fixtures (owned and placed), characters (position, site, action, objective), weather, time.',
+      'Read the world as structured data: the moly.observe sections named in what (default all): site (tiles, grid size and occupied cells), player (position and state), gatherables, bag (materials, items and limits), tools, recipes (blueprints with costs and whether they can be crafted now), fixtures (owned and placed), characters (position, site, action, objective), companions (position, the yaw faced in radians, state, command number, the eye and mouth patterns of the face, the after_edit_tweets of its unit — id, text, motion, eye, mouth, emoticon — and the fixture a build is making), weather, time.',
     inputSchema: {
       id: z.string(),
       what: z.array(z.string()).optional().describe('Sections to read, default all'),

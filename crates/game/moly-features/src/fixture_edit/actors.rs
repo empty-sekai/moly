@@ -137,6 +137,7 @@ pub(super) fn maintain_detached_views(world: &mut World) {
 
 /// Private continuation evidence, sampled from the actual layout reload.
 /// No clock/debounce delay can satisfy this condition.
+#[derive(Clone)]
 pub(super) struct PendingReload {
     site_id: u32,
     epoch: Option<u64>,

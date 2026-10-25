@@ -14,6 +14,7 @@
 //! | `moly.act(step)` | run one action step and wait for it (tasks only); returns `{ ok = true, ... }` or `{ ok = false, reason = "..." }` |
 //! | `moly.wait(seconds)` | wait inside a task |
 //! | `moly.now()` | seconds of game time since the plugin started |
+//! | `moly.random()` | a random number in [0, 1), drawn from the machine at each call (the sandboxed `math.random` repeats a run's seed) |
 //! | `moly.log(...)` | write a line to the game log |
 //! | `moly.store.get(key)`, `moly.store.set(key, value)` | the plugin's own saved data |
 //!
@@ -172,6 +173,10 @@ function moly.now()
     return rawget(hostref, "now")
 end
 
+function moly.random()
+    return host().random()
+end
+
 function moly.log(...)
     local parts = table.pack(...)
     for i = 1, parts.n do
@@ -223,6 +228,25 @@ struct Plugin {
     budget: Rc<Budget>,
     now: f64,
     strikes: u32,
+}
+
+/// A random number in [0, 1) from the machine's own source (`moly.random`):
+/// the top 53 bits of a scrambled clock reading, divided by 2^53.
+struct UnitRandom;
+
+impl UnitRandom {
+    fn draw() -> f64 {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos() as u64);
+        let mut mix = nanos ^ (nanos >> 17) ^ 0x9E37_79B9_7F4A_7C15;
+        let mut value = 0u64;
+        for _ in 0..53 {
+            mix = mix.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            value = (value << 1) | (mix >> 63);
+        }
+        value as f64 / 9_007_199_254_740_992.0
+    }
 }
 
 #[derive(Default)]
@@ -440,6 +464,12 @@ impl Plugin {
                     host.borrow_mut().store_set(id, &key, value);
                     Ok(())
                 })?,
+            )?;
+            // Drawn whenever it is called: the machine's own random source,
+            // so a run's seed does not repeat the script's choices.
+            h.set(
+                "random",
+                scope.create_function(|_, ()| Ok(UnitRandom::draw()))?,
             )?;
             hostref.set("h", h)?;
             // Lines logged while the script loaded come out on its first frame.
