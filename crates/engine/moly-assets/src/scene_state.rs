@@ -271,6 +271,10 @@ impl GltfExtensionHandler for SceneStateLoader {
         world_root_id: Entity,
         scene_world: &mut World,
     ) {
+        // The scene's world root is a wrapper around the glTF root nodes, not
+        // a glTF node. Name paths and animation target chains start at the
+        // first glTF node, so the wrapper carries no name.
+        scene_world.entity_mut(world_root_id).remove::<Name>();
         propagate_activity(scene_world, world_root_id);
     }
 }
