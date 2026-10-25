@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/base/moly-law",
     "crates/base/moly-store",
+    "crates/base/moly-plugin",
     "crates/engine/moly-assets",
     "crates/engine/moly-perf",
     "crates/net/moly-protocol",

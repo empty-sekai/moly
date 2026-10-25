@@ -1,0 +1,23 @@
+[package]
+name = "moly-plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Plugin manifests, the per-profile enable list, startup resolution and the
+# Luau runtime that runs plugin scripts. No engine dependency: the game wires
+# the resolved plugin set into its schedule, and the launcher reads the same
+# manifests and profile.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { workspace = true }
+semver = "1"
+toml = "1"
+
+# Plugins run in native builds only.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+mlua = { version = "0.12", features = ["luau", "vendored", "serde"] }
+# mlua-sys 0.13.0 loads Luau bytecode up to version 11; luau0-src 0.22.1
+# emits version 13, which makes every new Luau state fail. Keep 0.22.0 until
+# an mlua-sys release accepts the newer bytecode.
+luau0-src = "=0.22.0"
