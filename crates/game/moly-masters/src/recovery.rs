@@ -4,7 +4,7 @@
 //! - `mysekaiStaminaRecovery`: one row, `boostQuantity` (the live bonus one
 //!   recovery unit spends) and `recoveryBoostStamina` (the boost stamina it
 //!   restores).
-//! - `mysekaiBoostItems`: each boost item's `recoveryValue`.
+//! - `boostItems`: each boost item's `recoveryValue`.
 //!
 //! The rules are the dialogs' own, with the client's `int` arithmetic:
 //! `ConvertLiveBonusToBoostStamina` (one count restores `⌊recoveryBoostStamina

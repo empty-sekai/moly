@@ -47,7 +47,7 @@ pub struct MasterTables {
     /// `mysekaiStaminaRecovery`: the live bonus one recovery spends and the
     /// boost stamina it restores.
     pub stamina_recovery: Option<RecoveryRow>,
-    /// `mysekaiBoostItems` (master order).
+    /// `boostItems` (master order).
     pub boost_items: Option<Vec<BoostItemRow>>,
     /// The blueprint ids the harvest drop classifier reads, from the same
     /// table the craft reader takes (no second request for it).
@@ -310,8 +310,8 @@ static TABLES: &[Entry] = &[
         Stamina
     ),
     root_table!(
-        "mysekaiBoostItems",
-        "mysekaiBoostItems (what a boost item recovers)",
+        "boostItems",
+        "boostItems (what a boost item recovers)",
         parse_boost_items,
         boost_items,
         Stamina
@@ -886,9 +886,9 @@ pub fn parse_stamina_recovery(text: &str, row: &mut Option<RecoveryRow>) -> Resu
     Ok(())
 }
 
-/// `mysekaiBoostItems`: the id and `recoveryValue` of each row.
+/// `boostItems`: the id and `recoveryValue` of each row.
 pub fn parse_boost_items(text: &str, items: &mut Option<Vec<BoostItemRow>>) -> Result<(), String> {
-    let rows = table_rows(text, "mysekaiBoostItems")?;
+    let rows = table_rows(text, "boostItems")?;
     *items = Some(
         rows.iter()
             .map(|row| {

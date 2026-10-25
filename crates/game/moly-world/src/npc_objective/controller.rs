@@ -1698,6 +1698,8 @@ pub fn force_interrupt_in_world(world: &mut World, entity: Entity, state: UpperT
     if world.get::<NpcHfsmActor>(entity).is_none() {
         return false;
     }
+    world.resource_mut::<PreparedPlans>().fixture_arrivals.remove(&entity);
+    world.resource_mut::<UpperFixtureReservations>().0.remove(&entity);
     super::events::exit(world, entity);
     super::lower::exit(world, entity);
     crate::npc::stop_movement(world, entity);
@@ -1818,6 +1820,7 @@ pub struct PreparedPlans {
     pub plans: std::collections::HashMap<Entity, PreparedPlan>,
     pub common: std::collections::HashMap<Entity, i32>,
     pub weighted: std::collections::HashMap<Entity, UpperType>,
+    pub fixture_arrivals:std::collections::HashMap<Entity,crate::fixture_activity_state::FixtureTarget>,
     pub reactions: Vec<(Entity, i32, String)>,
     pub reaction_members: std::collections::HashSet<u32>,
     pub while_doing: Vec<(
@@ -1929,11 +1932,9 @@ fn apply_prepared(world: &mut World, entity: Entity, plan: PreparedPlan, frame: 
 /// Complete an owned lower object and run the controller's pause boundary.
 /// Used by timeline, entry, communication and scene-event owners.
 pub fn finish_lower(world: &mut World, entity: Entity) {
+    world.resource_mut::<PreparedPlans>().fixture_arrivals.remove(&entity);
+    world.resource_mut::<UpperFixtureReservations>().0.remove(&entity);
     super::events::exit(world, entity);
-    world
-        .resource_mut::<UpperFixtureReservations>()
-        .0
-        .remove(&entity);
     let skip_rest = world
         .get::<super::ObjectiveMind>(entity)
         .is_some_and(|mind| mind.skip_next_rest)
@@ -2010,6 +2011,8 @@ pub fn force_event_lower(world: &mut World, entity: Entity, lower: LowerState) -
     if !enter_transition(&mut budget) {
         return false;
     }
+    world.resource_mut::<PreparedPlans>().fixture_arrivals.remove(&entity);
+    world.resource_mut::<UpperFixtureReservations>().0.remove(&entity);
     super::events::exit(world, entity);
     super::lower::exit(world, entity);
     world.resource_mut::<PreparedPlans>().plans.remove(&entity);
@@ -2353,10 +2356,11 @@ pub fn on_update(world: &mut World) {
         })
         .collect();
     for entity in release {
-        world
-            .resource_mut::<UpperFixtureReservations>()
-            .0
-            .remove(&entity);
+        let target=world.resource_mut::<UpperFixtureReservations>().0.remove(&entity);
+        if let Some(target)=target.filter(|_|world.get::<NpcHfsmActor>(entity).is_some_and(|a|a.lower==Some(LowerState::GeneralTalk))) {
+            world.resource_mut::<PreparedPlans>().fixture_arrivals.insert(entity,target);
+            if let Some(mut flags)=world.get_mut::<NpcHfsmFlags>(entity) {flags.needs_plan=true;}
+        }
     }
     let weighted = std::mem::take(&mut world.resource_mut::<PreparedPlans>().weighted);
     for (entity, state) in weighted {
@@ -2382,13 +2386,29 @@ pub fn on_update(world: &mut World) {
 
 /// One character's `OnUpdate`.
 fn update_one(world: &mut World, entity: Entity, unit: u32, frame: u32, dt: f32) {
+    if world.resource::<PreparedPlans>().fixture_arrivals.contains_key(&entity) {return;}
+    if world.get_resource::<crate::field_modes::EditSessionActive>().is_some_and(|e|e.is_active()) {return;}
+    let away = crate::npc::is_away(world, entity);
+    if away {
+        if !crate::npc::residency::loaded_site_runs(world.get_resource::<crate::site::SiteActive>()) {
+            return;
+        }
+        // Only retained upper/clock state can progress without the site's live
+        // fixture instances. Its lower factories still need a retained site
+        // context; never run them against the player's current site.
+        if world.get::<NpcHfsmActor>(entity).is_some_and(|actor| actor.lower.is_some_and(|lower|
+            !matches!(lower, LowerState::Idle { .. } | LowerState::Rest { .. }))) {
+            return;
+        }
+    }
+
     if world.get::<super::common::CommonMember>(entity).is_some()
         || super::events::owns(world, entity)
         || crate::npc_fixture_talk::hfsm_owns(world, entity)
     {
         return;
     }
-    if world.get::<super::TalkSlot>(entity).and_then(|s| s.kind())
+    if !away && world.get::<super::TalkSlot>(entity).and_then(|s| s.kind())
         == Some(moly_law::objective::TalkType::Greeting)
         && world
             .get::<NpcHfsmActor>(entity)
@@ -2403,14 +2423,7 @@ fn update_one(world: &mut World, entity: Entity, unit: u32, frame: u32, dt: f32)
             }
         }
     }
-    if super::lower::update(world, entity, dt) {
-        return;
-    }
-    if crate::npc::is_away(world, entity)
-        || world
-            .get_resource::<crate::field_modes::EditSessionActive>()
-            .is_some_and(|e| e.is_active())
-    {
+    if !away && super::lower::update(world, entity, dt) {
         return;
     }
     if world
@@ -2419,9 +2432,15 @@ fn update_one(world: &mut World, entity: Entity, unit: u32, frame: u32, dt: f32)
     {
         return;
     }
-    if world.get_resource::<super::ObjectiveFace>().is_none() {
-        return;
-    }
+    let face = if away {
+        world.get::<crate::npc::NpcActions>(entity)
+            .and_then(|actions| world.get_resource::<crate::npc::residency::SiteNavigation>()
+                .and_then(|navigation| navigation.get(&actions.site_type)))
+            .map(|site| site.objective.clone())
+    } else {
+        world.get_resource::<super::ObjectiveFace>().cloned()
+    };
+    let Some(face) = face else { return; };
     // The walk reads the other presenters' positions (the random walk's
     // avoidance direction) and the character's own suspension.
     let mut others_query = world.query::<(Entity, &Transform)>();
@@ -2430,7 +2449,6 @@ fn update_one(world: &mut World, entity: Entity, unit: u32, frame: u32, dt: f32)
         .filter(|(other, _)| *other != entity)
         .map(|(_, transform)| transform.translation.to_array())
         .collect();
-    let away = crate::npc::is_away(world, entity);
     if world.get::<MemberRng>(entity).is_none() {
         return;
     }
@@ -2444,7 +2462,7 @@ fn update_one(world: &mut World, entity: Entity, unit: u32, frame: u32, dt: f32)
         return;
     };
     let before = world.get::<NpcHfsmActor>(entity).copied();
-    world.resource_scope(|world, face: Mut<super::ObjectiveFace>| {
+    {
         let mut state = SystemState::<(
             Query<(
                 &mut NpcHfsmPhase,
@@ -2505,14 +2523,14 @@ fn update_one(world: &mut World, entity: Entity, unit: u32, frame: u32, dt: f32)
         };
         advance(&mut machine, frame, dt, &mut rng);
         *navigator_slot = machine.navigator.take();
-    });
+    }
     if let Some(mut stored) = world.get_mut::<MemberRng>(entity) {
         *stored = rng;
     }
     if let Some(navigator) = navigator {
         put_mover(world, entity, navigator);
     }
-    if before.is_some_and(|a| a.upper.is_some() && a.lower_override.is_none())
+    if !away && before.is_some_and(|a| a.upper.is_some() && a.lower_override.is_none())
         && world
             .get::<NpcHfsmActor>(entity)
             .is_some_and(|a| a.lower.is_some())

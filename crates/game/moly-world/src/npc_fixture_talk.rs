@@ -760,7 +760,9 @@ fn end_group(
         }
     }
     let main = group.start.main;
-    crate::npc_fixture_activity::ActionPointApproach::cancel(world, main);
+    if let Stage::HfsmGather { approach: Some(approach), .. } = &group.stage {
+        approach.cancel(world, main);
+    }
     for draft in &group.start.drafts {
         if world
             .get::<HfsmFixtureMember>(draft.entity)
@@ -956,9 +958,9 @@ fn step_group(
                 return Ok(false);
             }
             if approach.is_none() {
-                let point = group_action_point(world, &group.start, group.start.main_unit)?;
-                *approach = Some(crate::npc_fixture_activity::ActionPointApproach::start(
-                    world, main, point,
+                let index = group.start.locate.iter().find(|row|row.unit as u32==group.start.main_unit).map_or(0,|row|row.index);
+                *approach = Some(crate::npc_fixture_activity::ActionPointApproach::start_fixture(
+                    world, main, group.start.fixture, index,
                 )?);
                 return Ok(false);
             }
@@ -1297,10 +1299,6 @@ fn step_group(
 /// StartLoc rotation) while its OnArrive turn's time runs (in the source the
 /// later of the two rotation tweens kills the other); the frame on which a
 /// turn of time 0 completes.
-fn group_action_point(world: &World, start: &GroupStart, unit: u32) -> Result<Vec3, String> {
-    Ok(group_action_pose(world, start, unit)?.translation)
-}
-
 fn group_action_pose(world: &World, start: &GroupStart, unit: u32) -> Result<Transform, String> {
     let identity = world
         .get::<crate::fixture_activity_state::FixtureActivityIdentity>(start.fixture)
@@ -1318,7 +1316,7 @@ fn group_action_pose(world: &World, start: &GroupStart, unit: u32) -> Result<Tra
         .find(|row| row.unit as u32 == unit)
         .map_or(0, |row| row.index);
     points
-        .get(index)
+        .get(index).or_else(||points.first())
         .map(|(_, pair)| {
             Transform::from_translation(Vec3::from(pair.start.position))
                 .with_rotation(pair.start.rotation)
@@ -1367,7 +1365,7 @@ fn on_arrive_some_character(
             continue;
         };
         let to = pair.start.rotation.normalize();
-        let (z, x, y) = to.to_euler(EulerRot::ZXY);
+        let (y, x, z) = to.to_euler(EulerRot::YXZ);
         let end_value = Vec3::new(
             moly_law::path::make_positive_yaw(x.to_degrees()),
             moly_law::path::make_positive_yaw(y.to_degrees()),

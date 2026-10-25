@@ -62,7 +62,7 @@ pub struct Masters {
     pub(crate) cards: Deferred<BTreeMap<i32, moly_masters::craft::CardRow>>,
     /// The tool master (`mysekaiTools`).
     pub(crate) tools: Option<Vec<tools::ToolMaster>>,
-    /// `mysekaiBoostItems`: each boost item's `recoveryValue`.
+    /// `boostItems`: each boost item's `recoveryValue`.
     pub(crate) boost_items: Option<Vec<moly_masters::BoostItemRow>>,
     /// `mysekaiStaminaRecovery`: the live bonus one recovery spends and the
     /// boost stamina it restores (`boost_grant` is its second column).
@@ -465,8 +465,8 @@ static SERVER_TABLES: &[ServerTable] = &[
         tools
     ),
     server_table!(
-        "mysekaiBoostItems",
-        "mysekaiBoostItems (what a boost item recovers)",
+        "boostItems",
+        "boostItems (what a boost item recovers)",
         parse_boost_items,
         boost_items
     ),
@@ -1015,7 +1015,7 @@ fn parse_recovery(text: &str, masters: &mut Masters) -> Result<(), String> {
     Ok(())
 }
 
-/// `mysekaiBoostItems`: (id, `recoveryValue`), master order.
+/// `boostItems`: (id, `recoveryValue`), master order.
 fn parse_boost_items(text: &str, masters: &mut Masters) -> Result<(), String> {
     let items = master::read_rows(text, |row| {
         Ok(Some(moly_masters::BoostItemRow {

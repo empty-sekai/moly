@@ -510,10 +510,17 @@ pub fn weighted_fixture_plan(
     let Some(target) = target else {
         return Ok(None);
     };
+    let plan=fixture_arrival_plan(scene,seeker,&target.uid,target.fixture_id,draws)?;
+    Ok(Some((target.uid.clone(),plan)))
+}
+
+/// CreateFixtureLowerState retries the priority lottery for the SAME fixture
+/// when the upper carried no pending master. It does not select a new fixture.
+pub fn fixture_arrival_plan(scene:&LotteryScene<'_>,seeker:&NpcView,uid:&str,fixture_id:i32,draws:&mut Draws<'_>)->Result<Option<TalkPlan>,Halt> {
     let mut all = Vec::new();
     for row in scene.talk_list {
         if !scene.conditions(row.talk_id)?.iter().any(|(kind, id)| {
-            condition_kind(kind) == Some(CONDITION_MYSEKAI_FIXTURE_ID) && *id == target.fixture_id
+            condition_kind(kind) == Some(CONDITION_MYSEKAI_FIXTURE_ID) && *id == fixture_id
         }) {
             continue;
         }
@@ -522,7 +529,7 @@ pub fn weighted_fixture_plan(
         }
     }
     if all.is_empty() {
-        return Ok(Some((target.uid.clone(), None)));
+        return Ok(None);
     }
     let unread: Vec<_> = all.iter().copied().filter(|r| !r.is_read).collect();
     let both: Vec<_> = all
@@ -556,9 +563,9 @@ pub fn weighted_fixture_plan(
     };
     let talk = pool[(draws.engine_int)(pool.len())].talk_id;
     let mut steps = Vec::new();
-    let plan = run_fixture_factories(scene, seeker, talk, Some(&target.uid), draws, &mut steps)?
+    let plan = run_fixture_factories(scene, seeker, talk, Some(uid), draws, &mut steps)?
         .map(TalkPlan::Fixture);
-    Ok(Some((target.uid.clone(), plan)))
+    Ok(plan)
 }
 
 /// The engine's integer range, max exclusive.

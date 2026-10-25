@@ -119,10 +119,14 @@ enum Op {
     WaitTalk(u32, i32, f32, i32, bool),
     Freewalk(u32, i32, bool),
     Show(u32),
+    EnableJoystick(bool),
+    WaitingOverwrite(u32,i32),
     MissionChildren,
     IntroPrepare,
     IntroCutscene,
     IntroAfterTalk,
+    ChangeSite(u32, i32),
+    HideNpc(u32, i32),
     AwaitTalks,
     Boundary(&'static str),
 }
@@ -131,7 +135,10 @@ struct Run {
     input: ProcessInput,
     ops: VecDeque<Op>,
     forced: Option<(Entity, i32)>,
+    hide: Option<HideRun>,
 }
+struct HideRun { actor: Entity, delay: crate::tween_clock::Delay, phase: u8 }
+
 struct WaitingTalk {
     run: String,
     actor: Entity,
@@ -217,6 +224,13 @@ fn plan(input: &ProcessInput) -> Result<VecDeque<Op>, String> {
                 ),
             ]);
         }
+        ("24_3", "waiting")=> {ops.extend([Op::Existing(21),Op::WaitingOverwrite(21,99),Op::Boundary("SeqNext then ExecuteProcess(24,4) callback")]);}
+        (_, "enableJoyStick")=>{ops.push_back(Op::EnableJoystick(true));}
+        ("1_2", "start") => {
+            ops.extend([Op::Existing(21), Op::Show(21), Op::ChangeSite(21,1),
+                Op::Placement("tutorial_1_2",false), Op::Screen(MenuScreenType::MysekaiMyRoom),
+                Op::Boundary("SeqNext then ExecuteProcess(1,3)")]);
+        }
         ("1_2", "afterChangeSite") => {
             ops.extend([
                 Op::Existing(21),
@@ -273,14 +287,18 @@ fn plan(input: &ProcessInput) -> Result<VecDeque<Op>, String> {
             ops.extend([
                 Op::Existing(21),
                 Op::ForceTalk(21, 11),
-                Op::Boundary("HideNPC warp presentation then ChangeSiteNPC(0)"),
+                Op::HideNpc(21,500),
+                Op::EnableJoystick(true),
+                Op::Boundary("homebutton configuration and SectionNext before home transition"),
             ]);
         }
         ("6_1", "waiting") => {
             ops.extend([
                 Op::Existing(21),
                 Op::WaitTalk(21, 12, 0.0, 0, true),
-                Op::Boundary("onTalk callback then HideNPC and tutorial cut-scene 1"),
+                Op::AwaitTalks,
+                Op::HideNpc(21,500),
+                Op::Boundary("tutorial cut-scene 1 producer"),
             ]);
         }
         ("6_2", "afterPlacement") => {
@@ -526,6 +544,63 @@ fn apply_pose(world: &mut World, entity: Entity, pose: &Pose) -> Result<(), Stri
     }
     Ok(())
 }
+fn change_site_npc(world: &mut World, entity: Entity, target: i32) -> Result<(), String> {
+    let name = *crate::npc::residency::SITE_TYPES.get(target as usize)
+        .ok_or("tutorial target site is outside home/floors")?;
+    let position = if target == 0 {
+        let house = match crate::fixture_gimmick::house_door::find_house(world) {
+            crate::fixture_gimmick::house_door::HouseLookup::Found(house) => house,
+            _ => return Err("tutorial home fixture has not been bound".into()),
+        };
+        let pose = world.get::<GlobalTransform>(house.root).ok_or("home fixture world pose missing")?;
+        let points = world.get_resource::<crate::fixture_attach::AttachPoints>()
+            .ok_or("home fixture attach points loading")?.source_array(&house.package, pose)?;
+        points.first().map_or(pose.translation().to_array(), |(_, point)| point.start.position)
+    } else {
+        let loaded = world.get_resource::<crate::site::SiteActive>()
+            .and_then(|site| crate::npc::residency::site_type_value(&site.site_type));
+        if loaded == Some(target) {
+            let point = crate::room_door_port::inside_point(world).ok_or("target room door action point loading")?;
+            world.get::<GlobalTransform>(point).ok_or("target room door pose loading")?.translation().to_array()
+        } else {
+            world.get_resource::<crate::npc::residency::SiteNavigation>()
+                .and_then(|sites| sites.get(name)).and_then(|site| site.door)
+                .ok_or("target room has no retained door action point")?.0.to_array()
+        }
+    };
+    world.get_mut::<NpcActions>(entity).ok_or("tutorial actor state missing")?.site_type = name.into();
+    if !crate::npc::force_set_position(world, entity, position) {
+        return Err("tutorial actor movement not ready".into());
+    }
+    Ok(())
+}
+
+fn hide_npc(world: &mut World, run: &mut Run, unit: u32, milliseconds: i32) -> Result<bool, String> {
+    let frame = world.get_resource::<bevy::diagnostic::FrameCount>().map_or(0, |f| u64::from(f.0));
+    let dt = world.resource::<Time>().delta_secs();
+    if run.hide.is_none() {
+        let actor = actor(world, unit)?;
+        run.hide = Some(HideRun { actor, delay: crate::tween_clock::Delay::new(milliseconds as f32 / 1000.0, frame), phase: 0 });
+    }
+    let hide = run.hide.as_mut().unwrap();
+    if hide.phase == 0 {
+        if !hide.delay.tick(frame, dt) { return Ok(false); }
+        let at = world.get::<Transform>(hide.actor).ok_or("tutorial hide actor pose missing")?.translation;
+        if !world.contains_resource::<crate::site_move::effects::EffectPools>() { return Err("effect pools are not installed".into()); }
+        world.resource_scope(|world, mut pools: Mut<crate::site_move::effects::EffectPools>| {
+            pools.emit(world, 12, Transform::from_translation(at))
+        })?;
+        hide.delay = crate::tween_clock::Delay::new(0.2, frame);
+        hide.phase = 1;
+    }
+    if !hide.delay.tick(frame, dt) { return Ok(false); }
+    let at = processor_data(world)?.initial_offstage;
+    crate::npc::gate_entries::hide(world, hide.actor);
+    if !crate::npc::force_set_position(world, hide.actor, at) { return Err("tutorial hide actor movement missing".into()); }
+    run.hide = None;
+    Ok(true)
+}
+
 fn processor_data(world: &World) -> Result<ProcessorDocument, String> {
     world
         .resource::<TutorialAssets>()
@@ -623,6 +698,13 @@ fn tick_waits(world: &mut World) {
                 .get::<lower::TutorialTalkData>(wait.actor)
                 .is_some_and(|data| data.master.id == wait.id);
             if same {
+                if wait.material>0 {
+                    let Some(mut openers)=world.get_resource_mut::<crate::get_resource::GetResourceOpeners>() else {
+                        world.resource_mut::<TutorialStatus>().error=Some("tutorial material notice owner is not installed".into());
+                        world.resource_mut::<Processor>().waits.push(wait);continue;
+                    };
+                    openers.notice_collect_item("mysekai_material",wait.material,1,"MysekaiTutorialProcessor.WaitToWaitingTalk");
+                }
                 event(
                     world,
                     serde_json::json!({"id":wait.run,"unit":wait.unit,"talk":wait.id,"event":"onTalk","noticeCollectItem":(wait.material>0).then_some(wait.material),"amount":(wait.material>0).then_some(1)}),
@@ -646,6 +728,22 @@ fn step(world: &mut World, run: &mut Run, op: &Op) -> Result<bool, String> {
         Op::Existing(unit) => {
             let entity = actor(world, *unit)?;
             Ok(ready(world, entity))
+        }
+        Op::EnableJoystick(enabled)=> {
+            let actor=player(world)?;
+            if *enabled {world.entity_mut(actor).remove::<lower::TutorialMovementHold>();}
+            else {world.entity_mut(actor).insert(lower::TutorialMovementHold);}
+            Ok(true)
+        }
+        Op::WaitingOverwrite(unit,id)=> {
+            let actor=actor(world,*unit)?;
+            let run_id=run.input.id.clone();
+            let callback:lower::OverwriteTalk=std::sync::Arc::new(move |world,actor| {
+                crate::npc::gate_entries::set_talk_enabled(world,actor,false);
+                event(world,serde_json::json!({"id":run_id,"event":"SeqNext","section":24,"nextSeq":4,"executeProcess":true}));
+            });
+            lower::begin_waiting(world,actor,*id,Some(callback),true)?;
+            Ok(true)
         }
         Op::Show(unit) => {
             let entity = actor(world, *unit)?;
@@ -829,6 +927,8 @@ fn step(world: &mut World, run: &mut Run, op: &Op) -> Result<bool, String> {
             );
             Ok(true)
         }
+        Op::ChangeSite(unit, target) => { let entity = actor(world, *unit)?; change_site_npc(world, entity, *target)?; Ok(true) },
+        Op::HideNpc(unit, delay) => hide_npc(world, run, *unit, *delay),
         Op::AwaitTalks => Ok(!world
             .resource::<Processor>()
             .waits
@@ -931,6 +1031,7 @@ fn update(world: &mut World) {
                         input,
                         ops,
                         forced: None,
+                        hide: None,
                     });
                 }
                 Err(reason) => world.resource_mut::<TutorialStatus>().error = Some(reason),
@@ -952,10 +1053,14 @@ fn update(world: &mut World) {
             Op::WaitTalk(..) => "WaitToWaitingTalk",
             Op::Freewalk(..) => "ForceUpdateFreeWalkTutorialObjective",
             Op::Show(_) => "Show",
+            Op::EnableJoystick(_)=>"EnableJoyStick",
+            Op::WaitingOverwrite(..)=>"WaitToWaitingOverwriteTalk",
             Op::MissionChildren => "IsChildMissionAllAchieved",
             Op::IntroPrepare => "intro poses",
             Op::IntroCutscene => "PlayTutorialCutSceneAsync",
             Op::IntroAfterTalk => "after introductory talk",
+            Op::ChangeSite(..) => "ChangeSiteNPC",
+            Op::HideNpc(..) => "HideNPC",
             Op::AwaitTalks => "await all waiting talks",
             Op::Boundary(_) => "producer boundary",
         };

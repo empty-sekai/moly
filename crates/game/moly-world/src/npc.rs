@@ -30,6 +30,7 @@ pub mod gate_entries;
 pub mod random_fixture_action;
 pub mod residency;
 pub mod restore;
+pub mod navigation;
 pub mod walkable;
 
 // The door move inserts the pending resource and orders itself after the
@@ -735,6 +736,7 @@ pub struct MoveTarget(pub [f32; 3]);
 /// 按距起点的三维直线距离稳定排序。`next` 指向当前前往/正在休息的路点；
 /// CheckPoint 到达后推进，Rest 到达且等待结束后推进。两者都不擅自跳过导航。
 #[derive(Component, Clone, Default)]
+#[require(navigation::NavigationAgent)]
 pub struct RouteStops {
     /// 世界坐标与行为身份。侧偏点保留原候选位置，不替换为采样命中位置。
     stops: Vec<Waypoint>,
@@ -2458,6 +2460,7 @@ fn crowd_step(
     state: &mut LawWalkState,
     crowd: &mut CrowdMotion,
     speed: f32,
+    stopping_distance: f32,
     walk_face: &crate::walk_face::WalkFace,
     objective_face: &crate::npc_objective::ObjectiveFace,
     rotation: &mut Quat,
@@ -2491,7 +2494,7 @@ fn crowd_step(
         radius: crowd::NPC_AGENT_RADIUS,
         max_speed: speed,
         acceleration: crowd::NPC_MOVE_ACCELERATION,
-        stopping_distance: crowd::NPC_STOPPING_DISTANCE,
+        stopping_distance,
         auto_braking: crowd.auto_braking,
         halted: false,
     };
@@ -2596,6 +2599,8 @@ pub fn advance(
     objective_face: Option<Res<crate::npc_objective::ObjectiveFace>>,
     navigation: Option<Res<residency::SiteNavigation>>,
     exact_motion: crate::npc_fixture_activity::ActionPointMotionOwners,
+    mut navigation_agents: navigation::NavigationAgents,
+    tutorial_rotation: crate::npc_objective::events::tutorial::TutorialRotationOwners,
     mut npcs: Query<
         (
             &CharacterUnitId,
@@ -2646,9 +2651,10 @@ pub fn advance(
         (entity, away, change_site_walk),
     ) in &mut npcs
     {
-        if exact_motion.contains(entity) || (away && !change_site_walk) {
+        if exact_motion.contains(entity) || tutorial_rotation.owns(entity) || (away && !change_site_walk && !navigation.as_deref().is_some_and(|n|n.get(&actions.site_type).is_some())) {
             continue;
         }
+        if !navigation_agents.enabled(entity) && matches!(*phase, MotionPhase::Walking | MotionPhase::Dwelling { remaining: None }) { continue; }
         let retained = away
             .then(|| navigation.as_deref()?.get(&actions.site_type))
             .flatten();
@@ -2747,6 +2753,10 @@ pub fn advance(
         };
         if objective_face.navigation_generation() != walk_face.generation() {
             continue;
+        }
+        if let Some(at) = navigation_agents.reconnect(entity, objective_face, state.0.position) {
+            state.0.position = at;
+            transform.translation = Vec3::from(at);
         }
         if route.generation != walk_face.generation() {
             // The rebuilt field has none of the agent's cells: the crowd's
@@ -2920,6 +2930,7 @@ pub fn advance(
                     &mut state.0,
                     &mut route.crowd,
                     speed.0,
+                    navigation_agents.stopping_distance(entity),
                     walk_face,
                     objective_face,
                     &mut turned,

@@ -71,7 +71,7 @@ fn initialize(world: &mut World, actor: Entity) -> bool {
     let (Some(head_pose),Some(hip_pose))=(global(world,head),global(world,hip)) else { return false; };
     let mut start=hip_pose.translation()+hip_pose.rotation()*Vec3::Z;
     start.y=head_pose.translation().y+0.2;
-    world.entity_mut(actor).insert(NpcIk { target:None, enabled:false,current:Vec3::ZERO,last:Vec3::ZERO,
+    world.entity_mut(actor).insert(NpcIk { target:None, enabled:false,current:start,last:Vec3::ZERO,
         next:start,queue:VecDeque::new(),weight_time:0.0,wait:None,wait_result:None,head,hip });
     true
 }
@@ -242,11 +242,10 @@ fn solve_heads(world:&mut World) {
         }
         for _ in 0..3 {rotation=(look_delta(origin,origin,rotation*post,target,weight*weight)*rotation).normalize();}
         let parent=world.get::<ChildOf>(head).and_then(|p|global(world,p.parent())).map_or(Quat::IDENTITY,|t|t.rotation());
-        let result=parent.inverse()*rotation;
-        let (z,x,y)=result.to_euler(EulerRot::ZXY);
-        let _=z;
-        // Limits live in the imported rig's canonical handedness.
-        let after=Quat::from_euler(EulerRot::ZXY,0.0,x.clamp(-45_f32.to_radians(),45_f32.to_radians()),y.clamp(-60.5_f32.to_radians(),30_f32.to_radians()));
+        // The humanoid workspace delivers this solved pose. A scene-only
+        // Transform write in OnAnimatorIK is overwritten by the later IK
+        // output; adding an Euler clamp here would constrain a different pose.
+        let after=parent.inverse()*rotation;
         world.entity_mut(head).insert(AppliedHead {before:local.rotation,after});
         world.get_mut::<Transform>(head).unwrap().rotation=after;
     }

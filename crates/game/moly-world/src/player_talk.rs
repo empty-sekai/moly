@@ -1459,6 +1459,7 @@ pub struct PlayerTalkSession {
     /// The character's state at the end: `None` is ChangeIdleState; the
     /// playing-fixture talk ends its first character in FixtureActionIdle.
     end_state: Option<crate::npc::NpcAction>,
+    default_tutorial: bool,
     tutorial_rotation: Option<Quat>,
     /// 玩家位与朝向的会话内账：开场时快照（玩家参演期间位移推进被持
     /// 留跳过，位不变——快照即现值）；朝向只被本模块的转身件改写，
@@ -2227,9 +2228,10 @@ pub fn consume_trigger(
                 pool_len: selection.pool_len,
                 replayed: selection.replayed,
                 read_report,
-                end_state: tutorial.as_ref().map(|(data, _)|data.next_action).or_else(||(request.exact.is_none() && route == TalkRoute::PlayingFixture)
-                    .then_some(crate::npc::NpcAction::FixtureActionIdle)),
-                tutorial_rotation: tutorial.as_ref().and_then(|(data, rotation)|data.restore_rotation.then_some(*rotation)),
+                end_state: (request.exact.is_none() && route == TalkRoute::PlayingFixture)
+                    .then_some(crate::npc::NpcAction::FixtureActionIdle),
+                default_tutorial: tutorial.is_some(),
+                tutorial_rotation: tutorial.as_ref().map(|(_, rotation)| *rotation),
             },
         );
     }
@@ -2265,6 +2267,7 @@ struct GeneralStart {
     replayed: bool,
     read_report: Option<i32>,
     end_state: Option<crate::npc::NpcAction>,
+    default_tutorial: bool,
     tutorial_rotation: Option<Quat>,
 }
 
@@ -2292,6 +2295,7 @@ fn open_general(
         replayed,
         read_report,
         end_state,
+        default_tutorial,
         tutorial_rotation,
     } = start;
     let needs_named_referent = row.steps.iter().any(|step| {
@@ -2360,6 +2364,7 @@ fn open_general(
         replayed,
         read_report,
         end_state,
+        default_tutorial,
         tutorial_rotation,
         player_position,
         player_rotation,
@@ -2467,6 +2472,7 @@ fn open_script_session(
             replayed: false,
             read_report: None,
             end_state,
+            default_tutorial: false,
             tutorial_rotation: None,
         },
     );
@@ -4038,10 +4044,14 @@ fn finish_session(
     if let Ok(mut entity) = commands.get_entity(session.npc) {
         entity.remove::<TalkHold>().remove::<PlayerTalkRuntime>();
         drop(entity);
-        crate::npc::leave_player_talk_to(commands, session.npc, session.end_state);
-        if let Some(rotation) = session.tutorial_rotation.filter(|_|completed) {
+        if session.default_tutorial && completed {
             let actor = session.npc;
-            commands.queue(move |world: &mut World| crate::npc_objective::events::tutorial::restore_rotation(world, actor, rotation));
+            let rotation = session.tutorial_rotation;
+            commands.queue(move |world: &mut World| {
+                crate::npc_objective::events::tutorial::finish_default_talk(world, actor, rotation);
+            });
+        } else {
+            crate::npc::leave_player_talk_to(commands, session.npc, session.end_state);
         }
     }
     // 玩家：撤持留与转身件（相位已是驻留；朝向保持当前值——玩家域

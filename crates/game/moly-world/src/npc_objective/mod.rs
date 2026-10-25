@@ -1565,6 +1565,7 @@ enum TalkFactory {
     /// A talk the director names (see [`DirectedTalks`]).
     Directed(i32),
     WeightedFixture,
+    FixtureArrival,
 }
 
 impl TalkFactory {
@@ -1586,6 +1587,7 @@ impl TalkFactory {
             TalkFactory::FixtureCommonTalk => "talk:common",
             TalkFactory::Directed(_) => "talk:director",
             TalkFactory::WeightedFixture => "hfsm:weighted_fixture",
+            TalkFactory::FixtureArrival => "hfsm:fixture_arrival",
         }
     }
 
@@ -1614,7 +1616,7 @@ impl TalkFactory {
             TalkFactory::Directed(talk) => {
                 npc_talk_lottery::director_talk(scene, seeker, talk, draws)
             }
-            TalkFactory::WeightedFixture => {
+            TalkFactory::WeightedFixture | TalkFactory::FixtureArrival => {
                 unreachable!("weighted fixture is resolved by the live presenter factory")
             }
         }
@@ -2757,7 +2759,8 @@ pub fn decide(
                                 | TalkType::CommunicationWhileDoingWait
                         )
                 });
-            let weighted = if hfsm && directed.is_none() {
+            let fixture_arrival=hfsm_plans.fixture_arrivals.get(&entity).cloned();
+            let weighted = if hfsm && directed.is_none() && fixture_arrival.is_none() {
                 hfsm_flags
                     .get(entity)
                     .ok()
@@ -2772,7 +2775,9 @@ pub fn decide(
                 None
             };
             let mut percent = PercentSource::new(&mut trial);
-            let hfsm_route = if let Some(state) = weighted {
+            let hfsm_route = if fixture_arrival.is_some() {
+                Some(DecisionRoute::Factory(TalkFactory::FixtureArrival))
+            } else if let Some(state) = weighted {
                 if state != moly_law::npc_hfsm::UpperType::MoveToFixture {
                     drop(percent);
                     *rng = trial;
@@ -3246,6 +3251,14 @@ pub fn decide(
                         let selected = if hfsm {
                             use npc_talk_lottery::HfsmTalkPlan as H;
                             match factory {
+                                TalkFactory::FixtureArrival => {
+                                    let target=fixture_arrival.as_ref().expect("arrival target retained");
+                                    match scene.fixtures.iter().find(|f|f.uid==target.uid) {
+                                        Some(fixture)=>npc_talk_lottery::fixture_arrival_plan(&scene,&seeker,&target.uid,fixture.fixture_id,&mut draws)
+                                            .map(|plan|H::Prepared(plan.unwrap_or(npc_talk_lottery::TalkPlan::Null {reason:"arrived fixture has no talk".into(),interrupt:false}))),
+                                        None=>Ok(H::Prepared(npc_talk_lottery::TalkPlan::Null {reason:"arrived fixture disappeared".into(),interrupt:false})),
+                                    }
+                                }
                                 TalkFactory::WeightedFixture => {
                                     (|| -> Result<_, npc_talk_lottery::Halt> {
                                         let available =
@@ -3748,6 +3761,11 @@ pub fn decide(
                             unit.0
                         );
                     }
+                    if fixture_arrival.is_some() {
+                        // Loading is not a completed empty lottery. Keep the
+                        // fixed target and uncommitted draws for the retry.
+                        continue 'npc;
+                    }
                     null_talk = Some(format!("host gap: {reason}"));
                 }
                 None => {}
@@ -3773,6 +3791,12 @@ pub fn decide(
             }
             if hfsm && hfsm_general_destination.is_some() {
                 null_talk = None;
+            }
+            if fixture_arrival.is_some() && null_talk.is_some() {
+                *rng=trial;*seeder.seeder()=trial_seeder;
+                hfsm_plans.fixture_arrivals.remove(&entity);
+                hfsm_plans.plans.insert(entity,controller::PreparedPlan::no_talk(state.0.position));
+                continue 'npc;
             }
             if weighted_no_fixture {
                 *rng = trial;
@@ -4228,7 +4252,9 @@ pub fn decide(
                     let field = &walk_face.field;
                     let from_xz = [from[0], from[2]];
                     let landing_xz = [landing[0], landing[2]];
-                    let gate_open = if gate_fixture.is_some() {
+                    let gate_open = if fixture_arrival.is_some() {
+                        true
+                    } else if gate_fixture.is_some() {
                         field.if_move_target_fixture_action_position(from_xz, landing_xz)
                     } else {
                         field.if_move_target_position(from_xz, landing_xz)
@@ -4272,9 +4298,10 @@ pub fn decide(
                         }
                         continue 'npc;
                     }
-                    // GeneratePath: the agent's own query, with its sampled retry.
+                    // An arrival factory starts its presentation in place; its
+                    // action-point helper owns any subsequent precise movement.
                     let polyline = field.generate_path(from_xz, landing_xz);
-                    match crate::npc::depart_along_to(
+                    let departure=if fixture_arrival.is_some() {Some(MotionPhase::Dwelling {remaining:None})} else {crate::npc::depart_along_to(
                         unit,
                         &mut state.0,
                         &mut path.0,
@@ -4295,7 +4322,8 @@ pub fn decide(
                         } else {
                             crate::npc::MOVE_GOAL_DISTANCE
                         },
-                    ) {
+                    )};
+                    match departure {
                         Some(depart_phase) => {
                             // A fixture talk whose pre-action carries a timeline:
                             // its move, window and timeline run as one fixture
@@ -4327,6 +4355,7 @@ pub fn decide(
                                 groups.begin_sub(entity, unit.0, kind, members);
                             }
                             *phase = depart_phase;
+                            if fixture_arrival.is_some() {route.outcome=Some(crate::npc::RouteOutcome::Arrived);hfsm_plans.fixture_arrivals.remove(&entity);}
                             if hfsm {
                                 let data = slot.current.as_ref();
                                 let lower = lower::for_talk(data, unit.0);
@@ -4334,7 +4363,7 @@ pub fn decide(
                                 hfsm_plans.plans.insert(
                                     entity,
                                     controller::PreparedPlan {
-                                        upper: if fixture.is_some() {
+                                        upper: if fixture_arrival.is_some() {moly_law::npc_hfsm::UpperState::Stay} else if fixture.is_some() {
                                             moly_law::npc_hfsm::UpperState::MoveToFixture {
                                                 fixture: fixture.map(|e| e.index().index()),
                                                 can_be_recruited: false,

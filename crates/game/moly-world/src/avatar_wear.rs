@@ -95,12 +95,12 @@ pub struct AvatarWear {
 /// 皮肤包内 `skin` 资产的产物路径（提取侧命名约定：`<包>__skin.png`；
 /// 真源按资产名 "skin" 从包里取）。
 fn skin_tex_path(bundle: &str) -> String {
-    format!("moly://avatar/skin/{bundle}/tex/{bundle}__skin.png")
+    format!("moly://avatar-parts/skin/{bundle}/tex/{bundle}__skin.png")
 }
 
 /// 饰件包的 glb 路径。
 fn decoration_glb_path(bundle: &str) -> String {
-    format!("moly://avatar/decoration/{bundle}/{bundle}.glb")
+    format!("moly://avatar-parts/decoration/{bundle}/{bundle}.glb")
 }
 
 /// glb 内嵌图像的标签子资产路径（装载器把全部内嵌贴图注册为

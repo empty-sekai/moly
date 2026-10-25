@@ -60,9 +60,8 @@
 //!   (towards the player's position over the rotate time, out-quart), with
 //!   the same clips; the knock sound is awaited until its playback is over
 //!   (one frame late: the sound player drops a finished playback on its next
-//!   run); the brightness
-//!   fade, the tweet's eye, mouth and emoticon, and the facial reset are not
-//!   played.
+//!   run). The room entry brightness fades from zero to one over one second;
+//!   tweet expressions and emoticons return to the default face on completion.
 
 use std::collections::HashMap;
 
@@ -213,6 +212,26 @@ impl ChangeSiteRuns {
         self.runs.remove(&actor);
         self.start_positions.remove(&actor);
         self.target_sites.remove(&actor);
+    }
+}
+
+#[derive(Component)]
+struct EntryBrightness {elapsed:f32}
+
+fn set_brightness(world:&mut World,actor:Entity,value:f32) {
+    let handles:Vec<_>=world.get::<crate::character_material::ToonMaterials>(actor).map(|m|m.slot_handles().cloned().collect()).unwrap_or_default();
+    if let Some(mut materials)=world.get_resource_mut::<Assets<crate::character_material::CharacterMaterial>>() {
+        for handle in handles {if let Some(material)=materials.get_mut(&handle) {material.params.brightness=value;}}
+    }
+}
+
+fn advance_brightness(world:&mut World) {
+    let dt=world.resource::<Time>().delta_secs();
+    let actors:Vec<_>=world.query::<(Entity,&EntryBrightness)>().iter(world).map(|(entity,fade)|(entity,fade.elapsed+dt)).collect();
+    for (entity,elapsed) in actors {
+        set_brightness(world,entity,elapsed.min(1.0));
+        if elapsed>=1.0 {world.entity_mut(entity).remove::<EntryBrightness>();}
+        else if let Some(mut fade)=world.get_mut::<EntryBrightness>(entity) {fade.elapsed=elapsed;}
     }
 }
 
@@ -514,6 +533,7 @@ fn entry_point(world: &mut World, target: i32) -> Option<(Vec3, Vec3)> {
 
 /// Update: every run in flight, one step per frame.
 pub fn advance(world: &mut World) {
+    advance_brightness(world);
     if world.resource::<ChangeSiteRuns>().runs.is_empty() {
         return;
     }
@@ -1217,16 +1237,19 @@ fn floor_door(world: &mut World, actor: Entity, unit: u32, frame: u32, on_site: 
 
 /// FloorEnter after the door opened: the show and the entry clip.
 fn floor_enter_after_door(world: &mut World, actor: Entity, unit: u32, frame: u32) {
-    // The brightness fade is not played; SetTransparencyEnabled(true).
+    set_brightness(world,actor,0.0);
+    world.entity_mut(actor).insert(EntryBrightness {elapsed:0.0});
     if let Some(mut visibility) = world.get_mut::<Visibility>(actor) {
         visibility.set_if_neq(Visibility::Inherited);
     }
     start_clip(world, actor, unit, FLOOR_ENTER_CLIP, frame, true);
 }
 
-/// OnEntrySite's end: the facial reset (not played here) and the flag that
+/// OnEntrySite's end: the facial/emoticon reset and the flag that
 /// skips the next rest; then the state's setup ends.
 fn on_entry_site_end(world: &mut World, actor: Entity, unit: u32, frame: u32) {
+    crate::npc_objective::events::reset_face(world,actor);
+    if let Some(mut emotes)=world.get_resource_mut::<crate::emoticon::RestEmoteRequests>() {emotes.hide(actor);}
     if let Some(mut mind) = world.get_mut::<ObjectiveMind>(actor) {
         mind.skip_next_rest = true;
     }
@@ -1447,7 +1470,20 @@ fn show_entry_tweet(
         );
         return None;
     };
-    let text = tweet.text.clone();
+    let (text,eye,mouth,emote)=(tweet.text.clone(),tweet.eye_name.clone(),tweet.mouth_name.clone(),tweet.emoticon_name.clone());
+    let handles=world.get::<crate::character_material::ToonMaterials>(actor).and_then(|m|Some((m.slot_handle("eye")?.clone(),m.slot_handle("mouth")?.clone())));
+    if let Some((eye_handle,mouth_handle))=handles {
+        if world.contains_resource::<crate::alone_action_runtime::FacialTables>() {
+            world.resource_scope(|world,tables:Mut<crate::alone_action_runtime::FacialTables>| {
+                let eye=tables.eye_pattern(&eye);let mouth=tables.lip_pattern(&mouth).unwrap_or_default();
+                if let Some(mut materials)=world.get_resource_mut::<Assets<crate::character_material::CharacterMaterial>>() {
+                    crate::alone_action_runtime::apply_eye_pattern(&mut materials,&eye_handle,eye);
+                    crate::alone_action_runtime::apply_mouth_pattern(&mut materials,&mouth_handle,mouth);
+                }
+            });
+        }
+    }
+    if let Some(emote)=emote {if let Some(mut emotes)=world.get_resource_mut::<crate::emoticon::RestEmoteRequests>() {emotes.show(actor,emote,false);}}
     let site = world
         .get::<NpcActions>(actor)
         .and_then(|actions| residency::site_type_value(&actions.site_type));

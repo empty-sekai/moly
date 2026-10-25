@@ -19,7 +19,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use bevy::{animation::AnimatedBy, prelude::*};
+use bevy::{animation::AnimatedBy, gltf::{Gltf, GltfNode}, prelude::*};
 use moly_assets::source_navigation::SourceObjectIdentity;
 use serde_json::Value;
 
@@ -489,21 +489,23 @@ pub struct HouseBinding {
     joint_on: Option<Entity>,
     /// The `NPCOn` clip's joint when that program was accepted.
     joint_npc_on: Option<Entity>,
+    npc_exit_default_rotation: Result<Quat, String>,
     definition: Arc<HouseDefinition>,
 }
 
 /// The house's direct NPC exit state survives unloading its view. Its authored
 /// duration still participates in ChangeSite's WhenAll on an unseen site.
 #[derive(Clone)]
-pub struct NpcExitProgram(Arc<DoorProgram>);
+pub struct NpcExitProgram {
+    clip: Arc<DoorProgram>,
+    default_rotation: Quat,
+}
 
 impl HouseBinding {
     pub fn npc_exit_program(&self) -> Result<NpcExitProgram, String> {
-        self.definition
-            .npc_off
-            .as_ref()
-            .map(|p| NpcExitProgram(p.clone()))
-            .map_err(Clone::clone)
+        let program = self.definition.npc_off.as_ref().map_err(Clone::clone)?;
+        let default_rotation = self.npc_exit_default_rotation.as_ref().map_err(Clone::clone)?;
+        Ok(NpcExitProgram { clip: program.clone(), default_rotation: *default_rotation })
     }
 }
 
@@ -533,10 +535,9 @@ impl NpcExitPlayback {
                 }
                 if world
                     .get::<SourceObjectIdentity>(entity)
-                    .is_some_and(|id| program.0.joint.matches(&house.definition.file, id))
+                    .is_some_and(|id| program.clip.joint.matches(&house.definition.file, id))
                 {
-                    let base = world.get::<Transform>(entity)?.rotation;
-                    return Some((house.root, entity, base, house.uid.clone()));
+                    return Some((house.root, entity, program.default_rotation, house.uid.clone()));
                 }
             }
             None
@@ -546,7 +547,7 @@ impl NpcExitPlayback {
                 doors.playing.retain(|p| p.root != *root);
             }
             if let Some(mut transform) = world.get_mut::<Transform>(*joint) {
-                transform.rotation = program.0.sample(0.0);
+                transform.rotation = program.clip.sample(0.0);
             }
         }
         Self {
@@ -566,7 +567,7 @@ impl NpcExitPlayback {
         if self.reset {
             return true;
         }
-        let length = (self.program.0.duration / self.program.0.speed) as f32;
+        let length = (self.program.clip.duration / self.program.clip.speed) as f32;
         if self.elapsed >= length {
             if let Some((_, joint, base, _)) = self.binding {
                 if let Some(mut t) = world.get_mut::<Transform>(joint) {
@@ -578,9 +579,9 @@ impl NpcExitPlayback {
         }
         self.elapsed += dt;
         if let Some((root, joint, _, uid)) = &self.binding {
-            let time = f64::from(self.elapsed) * self.program.0.speed;
+            let time = f64::from(self.elapsed) * self.program.clip.speed;
             if let Some(mut t) = world.get_mut::<Transform>(*joint) {
-                t.rotation = self.program.0.sample(time);
+                t.rotation = self.program.clip.sample(time);
             }
             let ignored = world
                 .get_resource::<HouseDoors>()
@@ -591,7 +592,7 @@ impl NpcExitPlayback {
                 &ignored,
                 *root,
                 uid,
-                &self.program.0,
+                &self.program.clip,
                 time,
                 &mut self.next_event,
             );
@@ -799,8 +800,49 @@ fn bind(
         joint,
         joint_on,
         joint_npc_on,
+        npc_exit_default_rotation: definition.npc_off.as_ref()
+            .map_err(Clone::clone)
+            .and_then(|program| default_door_rotation(world, root, &definition.file, &program.joint)),
         definition,
     })
+}
+
+/// The motionless write-defaults state restores the source binding pose, not
+/// the pose left by whichever door clip happened to play before this one.
+fn default_door_rotation(
+    world: &World,
+    root: Entity,
+    file: &str,
+    joint: &NodeId,
+) -> Result<Quat, String> {
+    let owner = world.get::<crate::fixture::FixtureSource>(root)
+        .ok_or("house default pose has no source asset owner")?;
+    let gltfs = world.get_resource::<Assets<Gltf>>()
+        .ok_or("house source glTF assets are unavailable")?;
+    let gltf = gltfs.get(&owner.0)
+        .ok_or("house source glTF is still loading")?;
+    let nodes = world.get_resource::<Assets<GltfNode>>()
+        .ok_or("house source glTF nodes are unavailable")?;
+    let mut matches = Vec::new();
+    for handle in &gltf.nodes {
+        let node = nodes.get(handle).ok_or("house source glTF node is still loading")?;
+        let Some(extras) = node.extras.as_ref() else { continue; };
+        let extras: Value = serde_json::from_str(&extras.value)
+            .map_err(|error| format!("house source node extras: {error}"))?;
+        let Some(source) = extras.get("sourceObject") else { continue; };
+        if source["file"].as_str() == Some(file)
+            && source["gameObjectId"].as_str().and_then(|value| value.parse::<i64>().ok())
+                == Some(joint.game_object)
+            && source["transformId"].as_str().and_then(|value| value.parse::<i64>().ok())
+                == Some(joint.transform)
+        {
+            matches.push(node.transform.rotation);
+        }
+    }
+    match matches.as_slice() {
+        [rotation] => Ok(*rotation),
+        _ => Err(format!("house default door pose has {} source-identity matches", matches.len())),
+    }
 }
 
 struct DoorPlayback {

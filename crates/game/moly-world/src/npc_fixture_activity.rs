@@ -412,7 +412,7 @@ impl Factory<'_, '_> {
             .ok_or("source locator arrays loading")?;
         let array = points.source_array(&identity.model_package, world)?;
         if array.is_empty() {
-            return Ok(true);
+            return Ok(false);
         }
         Ok(array.iter().any(|(name, _)| {
             let stripped = name.replace("loc_start", "");
@@ -1322,17 +1322,14 @@ impl Factory<'_, '_> {
             .timeline(timeline_id)
             .ok_or_else(|| format!("timeline {timeline_id} has no master row"))?
             .clone();
-        let row = data
-            .locate
-            .as_deref()
-            .and_then(|locate| locate.iter().find(|row| row.unit == unit as i32))
-            .copied()
-            .ok_or("the fixture talk's locate list has no row for its main character")?;
+        let locate = data.locate.as_deref().ok_or("fixture timeline locate list is null")?;
+        let row = locate.iter().find(|row| row.unit == unit as i32).copied();
+        let locate_index = row.map_or(0, |row| row.index);
         let array = points.source_array(&identity.model_package, world)?;
-        let (name, pair) = array.get(row.index).ok_or_else(|| {
+        let (name, pair) = array.get(locate_index).ok_or_else(|| {
             format!(
                 "locator index {} is outside {}'s array",
-                row.index, identity.uid
+                locate_index, identity.uid
             )
         })?;
         // The action-point value the locator was found by: the digits of the
@@ -1348,10 +1345,10 @@ impl Factory<'_, '_> {
             })
             .and_then(|digits| digits.parse::<i32>().ok())
             .ok_or_else(|| format!("locator name {name} carries no action-point value"))?;
-        if points.instance_index(&identity.model_package, point) != Some(row.index) {
+        if points.instance_index(&identity.model_package, point) != Some(locate_index) {
             return Err(format!(
                 "{} locator {point} does not resolve to array index {}",
-                identity.uid, row.index
+                identity.uid, locate_index
             ));
         }
         let slot_id = points
@@ -1377,7 +1374,7 @@ impl Factory<'_, '_> {
             tweet: Some(tweet),
             timeline,
             point,
-            locate_index: row.index,
+            locate_index,
             slot_id,
             put_type: master.put_type,
             position: data.target_position,
@@ -1778,6 +1775,7 @@ fn tick(
             return Err("selected action slot became occupied before playback".into());
         }
         let poses = live_poses(world, &session.selection)?;
+        crate::npc::navigation::set_enabled(world, actor, false);
         set_pose(world, actor, poses.0)?;
         world
             .entity_mut(actor)
@@ -1871,6 +1869,7 @@ fn tick(
                     fixture_activity_timeline::cancel_and_release(world, token);
                     session.token = None;
                     release_animation_lease(world, session);
+                    crate::npc::navigation::set_enabled(world, actor, true);
                     set_pose(world, actor, end)?;
                     if !world
                         .get::<MotionDriver>(actor)
@@ -1890,6 +1889,7 @@ fn tick(
                     .release(token);
                 session.token = None;
                 release_animation_lease(world, session);
+                crate::npc::navigation::set_enabled(world, actor, true);
                 change_action(world, actor, NpcAction::FixtureActionIdle, false)?;
                 let (_, end) = live_poses(world, &session.selection)?;
                 set_pose(world, actor, end)?;
@@ -1961,219 +1961,218 @@ fn start_talk_timeline(
     Ok(Phase::Preparing)
 }
 
-fn fixture_look_target(
-    world: &World,
-    actor: Entity,
-    selection: &Selection,
-) -> Result<Vec3, String> {
-    let (start, _) = live_poses(world, selection)?;
-    let at = world
-        .get::<Transform>(actor)
-        .ok_or("fixture look actor disappeared")?
-        .translation;
-    Ok(at + start.rotation * Vec3::Z)
+fn approach_point(world:&World,selection:&Selection)->Result<Option<Transform>,String> {
+    let fixture=world.get::<GlobalTransform>(selection.target.entity).ok_or("fixture transform disappeared")?;
+    let points=world.get_resource::<AttachPoints>().ok_or("fixture locator source loading")?
+        .source_array(&selection.identity.model_package,fixture)?;
+    Ok(points.get(selection.locate_index).or_else(||points.first()).map(|(_,pair)|
+        Transform::from_translation(Vec3::from(pair.start.position)).with_rotation(pair.start.rotation)))
 }
-
-fn start_hfsm_approach(
-    world: &mut World,
-    actor: Entity,
-    selection: &Selection,
-) -> Result<Phase, String> {
-    let (start, _) = live_poses(world, selection)?;
+fn fixture_look_target(world:&World,actor:Entity,selection:&Selection)->Result<Vec3,String> {
+    if let Some(point)=approach_point(world,selection)? {
+        let at=world.get::<Transform>(actor).ok_or("fixture look actor disappeared")?.translation;
+        Ok(at+point.rotation*Vec3::Z)
+    } else {
+        world.get::<GlobalTransform>(selection.target.entity).map(|pose|pose.translation()).ok_or("fixture transform disappeared".into())
+    }
+}
+fn start_hfsm_approach(world:&mut World,actor:Entity,selection:&Selection)->Result<Phase,String> {
     world.entity_mut(actor).remove::<NpcFixtureMotionOwner>();
-    Ok(Phase::HfsmApproach(ActionPointApproach::start(
-        world,
-        actor,
-        start.translation,
-    )?))
+    Ok(Phase::HfsmApproach(ActionPointApproach::start_fixture(world, actor, selection.target.entity, selection.locate_index)?))
 }
 
-/// NPCActionPointApproach shared by single, no-talk and multi fixture lowers.
+/// The helper owns its direct navigation and exact view writes. Animation
+/// coroutines belong to the presenter and survive cancellation of this helper.
 pub(crate) struct ActionPointApproach {
-    point: Vec3,
+    point: Option<Vec3>,
+    live_point: Option<(Entity, String, String)>,
     step: ApproachStep,
+    owner: u64,
+    original_stopping: Option<f32>,
+    restore_navigation: bool,
 }
 enum ApproachStep {
-    Walking {
-        anchor: Vec3,
-        stalled: f32,
-    },
-    Exact {
-        target: Vec3,
-        speed: f32,
-        elapsed: f32,
-        timeout: f32,
-    },
+    Walking { anchor: Vec3, stalled: f32 },
+    Exact { target: Vec3, speed: f32, elapsed: f32, timeout: f32 },
     SwitchingIdle,
     Done,
 }
+#[derive(Resource,Default)]
+struct NextApproachOwner(u64);
 #[derive(Component)]
-pub(crate) struct ActionPointExactMotion;
-
-/// The action-point helper's owned-motion guard for the ordinary agent pass.
+struct ActionPointExactMotion(u64);
 #[derive(bevy::ecs::system::SystemParam)]
-pub struct ActionPointMotionOwners<'w, 's> {
-    actors: Query<'w, 's, Entity, With<ActionPointExactMotion>>,
+pub struct ActionPointMotionOwners<'w,'s> {
+    actors: Query<'w,'s,Entity,With<ActionPointExactMotion>>,
 }
-
 impl ActionPointMotionOwners<'_, '_> {
-    pub fn contains(&self, entity: Entity) -> bool {
-        self.actors.contains(entity)
-    }
+    pub fn contains(&self,entity:Entity)->bool { self.actors.contains(entity) }
 }
-
 impl ActionPointApproach {
-    pub(crate) fn start(world: &mut World, actor: Entity, point: Vec3) -> Result<Self, String> {
-        let at = world
-            .get::<Transform>(actor)
-            .ok_or("approach actor disappeared")?
-            .translation;
-        let target = world
-            .get_resource::<ObjectiveFace>()
-            .and_then(|f| f.sample(point.to_array(), 0.5))
-            .map(Vec3::from)
-            .unwrap_or(point);
-        let step = if at.distance(target) > 0.01
-            && crate::npc_objective::controller::navigate_lower(
-                world,
-                actor,
-                target.to_array(),
-                0.01,
-            ) {
-            change_action(world, actor, NpcAction::AutoMove, false)?;
-            ApproachStep::Walking {
-                anchor: at,
-                stalled: 0.0,
+    pub(crate) fn start_fixture(world:&mut World,actor:Entity,fixture:Entity,index:usize)->Result<Self,String> {
+        let package=world.get::<FixtureActivityIdentity>(fixture).ok_or("approach fixture identity missing")?.model_package.clone();
+        let transform=world.get::<GlobalTransform>(fixture).ok_or("approach fixture pose missing")?;
+        let points=world.get_resource::<AttachPoints>().ok_or("approach fixture points loading")?.source_array(&package,transform)?;
+        let selected=points.get(index).or_else(||points.first());
+        let point=selected.map(|(_,pair)|Vec3::from(pair.start.position));
+        let live_point=selected.map(|(name,_)|(fixture,package,name.clone()));
+        Self::start_optional(world,actor,point,live_point)
+    }
+    fn start_optional(world:&mut World,actor:Entity,point:Option<Vec3>,live_point:Option<(Entity,String,String)>)->Result<Self,String> {
+        use crate::npc::navigation as nav;
+        world.init_resource::<NextApproachOwner>();
+        let owner={let mut next=world.resource_mut::<NextApproachOwner>();next.0=next.0.checked_add(1).expect("approach owner exhausted");next.0};
+        world.entity_mut(actor).insert(ActionPointExactMotion(owner));
+        let mut helper=Self { point,live_point,step:ApproachStep::Done,owner,original_stopping:None,restore_navigation:false };
+        let initialized=(||->Result<(),String> {
+        let Some(point)=point else { helper.switch_idle(world,actor)?;return Ok(()); };
+        nav::refresh_binding(world,actor);
+        let at=world.get::<Transform>(actor).ok_or("approach view missing")?.translation;
+        let target=nav::face(world,actor).and_then(|face|face.sample(point.to_array(),0.5)).map(Vec3::from).unwrap_or(point);
+        if at.distance(target)>0.01 && nav::active(world,actor) && nav::on_mesh(world,actor) {
+            helper.step=ApproachStep::Walking {anchor:at,stalled:0.0};
+            helper.original_stopping=nav::stopping_distance(world,actor);
+            nav::set_stopping_distance(world,actor,0.01);
+            change_action(world,actor,NpcAction::AutoMove,false)?;
+            nav::set_destination(world,actor,owner,target);
+            world.entity_mut(actor).insert(MotionPhase::Walking);
+            if let Some(name)=world.get::<crate::npc::MotionClips>(actor).map(|clips|clips.walk.clone()) {
+                crate::npc_objective::events::begin_animation(world,actor,&name,true,0.5)?;
             }
-        } else {
-            Self::exact(world, actor, point)?
-        };
-        Ok(Self { point, step })
-    }
-    fn exact(world: &mut World, actor: Entity, point: Vec3) -> Result<ApproachStep, String> {
-        let at = world
-            .get::<Transform>(actor)
-            .ok_or("approach actor disappeared")?
-            .translation;
-        let target = Vec3::new(point.x, at.y, point.z);
-        let distance = at.distance(target);
-        let speed = world
-            .get::<WalkSpeed>(actor)
-            .ok_or("approach source walk speed missing")?
-            .0;
-        crate::npc::stop_movement(world, actor);
-        if distance < 0.005 || distance > 0.5 || speed <= 0.0 {
-            return Ok(ApproachStep::Done);
+            helper.step=ApproachStep::Walking {anchor:at,stalled:0.0};
+        } else { helper.start_exact(world,actor)?; }
+        Ok(())
+        })();
+        if let Err(reason)=initialized {
+            helper.cancel(world,actor);
+            helper.release(world,actor);
+            return Err(reason);
         }
-        world.entity_mut(actor).insert(ActionPointExactMotion);
-        let clips = world
-            .get::<crate::npc::MotionClips>(actor)
-            .ok_or("approach motion names missing")?;
-        let name = if distance >= 0.15 {
-            clips.walk.clone()
-        } else {
-            clips.idle.clone()
-        };
-        crate::npc_objective::events::begin_animation(
-            world,
-            actor,
-            &name,
-            distance >= 0.15,
-            if distance >= 0.15 { 0.1 } else { 0.15 },
-        )?;
-        if let Some(mut phase) = world.get_mut::<MotionPhase>(actor) {
-            *phase = if distance >= 0.15 {
-                MotionPhase::Walking
-            } else {
-                MotionPhase::Dwelling { remaining: None }
-            };
-        }
-        Ok(ApproachStep::Exact {
-            target,
-            speed,
-            elapsed: 0.0,
-            timeout: distance / speed + 1.0,
-        })
+        Ok(helper)
     }
-    pub(crate) fn update(
-        &mut self,
-        world: &mut World,
-        actor: Entity,
-        dt: f32,
-    ) -> Result<bool, String> {
+    fn owns(&self,world:&World,actor:Entity)->bool {
+        world.get::<ActionPointExactMotion>(actor).is_some_and(|held|held.0==self.owner)
+    }
+    fn release(&self,world:&mut World,actor:Entity) {
+        if self.owns(world,actor) { world.entity_mut(actor).remove::<ActionPointExactMotion>(); }
+    }
+    fn restore_stopping(&mut self,world:&mut World,actor:Entity) {
+        if let Some(distance)=self.original_stopping.take() {crate::npc::navigation::set_stopping_distance(world,actor,distance);}
+    }
+    fn switch_idle(&mut self,world:&mut World,actor:Entity)->Result<(),String> {
+        crate::npc_objective::events::begin_animation(world,actor,"mov_cw_normal_idle001",false,0.5)?;
+        self.step=ApproachStep::SwitchingIdle;
+        Ok(())
+    }
+    fn finish(&mut self,world:&mut World,actor:Entity)->Result<(),String> {
+        crate::npc::navigation::stop(world,actor,self.owner);
+        if let Some(name)=world.get::<crate::npc::MotionClips>(actor).map(|clips|clips.idle.clone()) {
+            crate::npc_objective::events::begin_animation(world,actor,&name,true,0.5)?;
+        }
+        self.step=ApproachStep::Done;
+        self.release(world,actor);
+        Ok(())
+    }
+    fn start_exact(&mut self,world:&mut World,actor:Entity)->Result<(),String> {
+        use crate::npc::navigation as nav;
+        let Some(at)=world.get::<Transform>(actor).map(|pose|pose.translation) else {return self.finish(world,actor);};
+        let live = if let Some((fixture,package,name))=&self.live_point {
+            world.get::<GlobalTransform>(*fixture).and_then(|pose|
+                world.get_resource::<AttachPoints>()?.source_array(package,pose).ok())
+                .and_then(|points|points.into_iter().find(|(current,_)|current==name))
+                .map(|(_,point)|Vec3::from(point.start.position))
+        } else { self.point };
+        let Some(point)=live else {return self.finish(world,actor);};
+        let target=Vec3::new(point.x,at.y,point.z);
+        let distance=at.distance(target);
+        let speed=world.get::<WalkSpeed>(actor).map_or(0.0,|speed|speed.0);
+        if distance<0.005 || distance>0.5 || speed<=0.0 {return self.finish(world,actor);}
+        let clips=world.get::<crate::npc::MotionClips>(actor).ok_or("approach motion names missing")?;
+        let name=if distance>=0.15 {clips.walk.clone()} else {clips.idle.clone()};
+        if distance>=0.15 {
+            let animation=crate::npc_objective::events::begin_suffix_animation(world,actor,&name,
+                crate::npc_objective::events::AnimationSuffix::Loop,true,false,0.1)?;
+            crate::npc_objective::events::forget_animation_outcome(world,animation);
+        } else {crate::npc_objective::events::begin_animation(world,actor,&name,false,0.15)?;}
+        self.restore_navigation=nav::enabled(world,actor);
+        nav::set_enabled(world,actor,false);
+        world.entity_mut(actor).insert(if distance>=0.15 {MotionPhase::Walking} else {MotionPhase::Dwelling{remaining:None}});
+        self.step=ApproachStep::Exact {target,speed,elapsed:0.0,timeout:distance/speed+1.0};
+        Ok(())
+    }
+    fn finish_exact(&mut self,world:&mut World,actor:Entity) {
+        use crate::npc::navigation as nav;
+        if self.restore_navigation {
+            if let Some(at)=world.get::<Transform>(actor).map(|pose|pose.translation) {
+                if nav::face(world,actor).and_then(|face|face.sample(at.to_array(),0.05))
+                    .is_some_and(|hit|at.distance_squared(Vec3::from(hit))<0.0025) {
+                    nav::set_enabled(world,actor,true);
+                }
+            }
+        }
+    }
+    pub(crate) fn update(&mut self,world:&mut World,actor:Entity,dt:f32)->Result<bool,String> {
+        use crate::npc::navigation as nav;
+        if matches!(self.step,ApproachStep::Done) {return Ok(true);}
+        if !self.owns(world,actor) {return Err("action-point movement owner replaced".into());}
         match &mut self.step {
-            ApproachStep::Walking { anchor, stalled } => {
-                if world.get_resource::<ObjectiveFace>().is_none() {
-                    crate::npc::stop_movement(world, actor);
-                    crate::npc_objective::events::begin_animation(
-                        world,
-                        actor,
-                        "mov_cw_normal_idle001",
-                        false,
-                        0.5,
-                    )?;
-                    self.step = ApproachStep::SwitchingIdle;
+            ApproachStep::Walking{anchor,stalled} => {
+                if !nav::active(world,actor) {
+                    self.restore_stopping(world,actor);
+                    self.switch_idle(world,actor)?;
                     return Ok(false);
                 }
-                let at = world
-                    .get::<Transform>(actor)
-                    .ok_or("approach actor disappeared")?
-                    .translation;
-                if at.distance(*anchor) > 0.05 {
-                    *anchor = at;
-                    *stalled = 0.0;
-                } else {
-                    *stalled += dt;
-                }
-                if world
-                    .get::<RouteStops>(actor)
-                    .is_none_or(|r| r.outcome.is_some())
-                    || *stalled >= 3.0
-                {
-                    self.step = Self::exact(world, actor, self.point)?;
-                }
+                let status=nav::status(world,actor,self.owner);
+                if status.is_some_and(|status|status.pending) {return Ok(false);}
+                let stopping=nav::stopping_distance(world,actor).unwrap_or(0.1);
+                let exhausted=status.is_none_or(|status|!status.has_path || status.remaining<=stopping);
+                let at=world.get::<Transform>(actor).ok_or("approach view disappeared")?.translation;
+                if at.distance(*anchor)>0.05 {*anchor=at;*stalled=0.0;} else {*stalled+=dt;}
+                if exhausted || *stalled>=3.0 {
+                    if nav::on_mesh(world,actor) {nav::reset(world,actor,self.owner);}
+                    self.restore_stopping(world,actor);
+                    self.start_exact(world,actor)?;
+                } else {nav::step(world,actor,self.owner,dt);}
             }
-            ApproachStep::Exact {
-                target,
-                speed,
-                elapsed,
-                timeout,
-            } => {
-                *elapsed += dt;
-                let at = world
-                    .get::<Transform>(actor)
-                    .ok_or("approach actor disappeared")?
-                    .translation;
-                let mut done = *elapsed >= *timeout;
+            ApproachStep::Exact{target,speed,elapsed,timeout} => {
+                let Some(at)=world.get::<Transform>(actor).map(|pose|pose.translation) else {
+                    self.finish_exact(world,actor);self.switch_idle(world,actor)?;return Ok(false);
+                };
+                *elapsed+=dt;
+                let mut done=*elapsed>=*timeout;
                 if !done {
-                    let delta = *target - at;
-                    let next = at + delta.normalize_or_zero() * (dt * *speed).min(delta.length());
-                    crate::npc::force_set_position(world, actor, next.to_array());
-                    if next.distance_squared(*target) < 0.000025 {
-                        crate::npc::force_set_position(world, actor, target.to_array());
-                        done = true;
-                    }
+                    let delta=*target-at;
+                    let distance=delta.length();
+                    let movement=dt**speed;
+                    let next=if distance==0.0 || distance<=movement {*target} else {at+delta/distance*movement};
+                    nav::set_view_position(world,actor,next);
+                    if next.distance_squared(*target)<0.000025 {nav::set_view_position(world,actor,*target);done=true;}
                 }
-                if done {
-                    Self::cancel(world, actor);
-                    self.step = ApproachStep::Done;
-                }
+                if done {self.finish_exact(world,actor);self.finish(world,actor)?;}
             }
-            ApproachStep::Done => {}
             ApproachStep::SwitchingIdle => {
-                if !crate::npc_objective::events::animation_changing(world, actor) {
-                    self.step = ApproachStep::Done;
+                if !crate::npc_objective::events::animation_changing(world,actor) {
+                    self.step=ApproachStep::Done;self.release(world,actor);
                 }
             }
+            ApproachStep::Done=>{}
         }
-        Ok(matches!(self.step, ApproachStep::Done))
+        Ok(matches!(self.step,ApproachStep::Done))
     }
-    pub(crate) fn cancel(world: &mut World, actor: Entity) {
-        if let Ok(mut e) = world.get_entity_mut(actor) {
-            e.remove::<ActionPointExactMotion>();
+    pub(crate) fn cancel(&self,world:&mut World,actor:Entity) {
+        use crate::npc::navigation as nav;
+        if matches!(self.step,ApproachStep::Done) || !self.owns(world,actor) {return;}
+        if let Some(distance)=self.original_stopping {nav::set_stopping_distance(world,actor,distance);}
+        if matches!(self.step,ApproachStep::Walking{..}) && nav::active(world,actor) && nav::on_mesh(world,actor) {
+            nav::reset(world,actor,self.owner);
         }
-        crate::npc::stop_movement(world, actor);
-        crate::npc_objective::events::cancel_animation(world, actor);
+        if matches!(self.step,ApproachStep::Exact{..}) && self.restore_navigation {
+            if let Some(at)=world.get::<Transform>(actor).map(|pose|pose.translation) {
+                if nav::face(world,actor).and_then(|face|face.sample(at.to_array(),0.05))
+                    .is_some_and(|hit|at.distance_squared(Vec3::from(hit))<0.0025) {nav::set_enabled(world,actor,true);}
+            }
+        }
+        self.release(world,actor);
     }
 }
 
@@ -2182,7 +2181,6 @@ fn finish_hfsm_approach(
     actor: Entity,
     selection: &Selection,
 ) -> Result<Phase, String> {
-    crate::npc::stop_movement(world, actor);
     change_action(world, actor, NpcAction::FixtureAction, false)?;
     if selection.kind == TalkType::NoneTalk {
         let target = fixture_look_target(world, actor, selection)?;
@@ -2378,10 +2376,9 @@ fn change_action(
 
 fn release_animation_lease(world: &mut World, session: &Session) {
     let actor = session.owner.actor;
-    if matches!(session.phase, Phase::HfsmApproach(_)) {
-        crate::npc_objective::events::cancel_animation(world, actor);
+    if let Phase::HfsmApproach(approach) = &session.phase {
+        approach.cancel(world, actor);
     }
-    world.entity_mut(actor).remove::<ActionPointExactMotion>();
     if world
         .get::<NpcFixtureAnimationOwner>(actor)
         .is_some_and(|held| held.0 == session.owner)
@@ -2405,7 +2402,10 @@ fn dispose(world: &mut World, session: Session, site_changed: bool, completed: b
             timelines.release(token);
         }
     }
+    let owned_timeline = world.get::<NpcFixtureAnimationOwner>(actor)
+        .is_some_and(|held| held.0 == session.owner);
     release_animation_lease(world, &session);
+    if owned_timeline { crate::npc::navigation::set_enabled(world, actor, true); }
     let holds_motion = world
         .get::<NpcFixtureMotionOwner>(actor)
         .is_some_and(|held| held.0 == session.owner);
@@ -2628,7 +2628,7 @@ impl LocalMove {
                 // after exact landing that is zero. DOLocalRotateAsync then
                 // passes the Euler END VALUE as a world vector. Do not replace
                 // this strange location-dependent fallback with yaw error/60.
-                let (z, x, y) = self.final_rotation.to_euler(EulerRot::ZXY);
+                let (y, x, z) = self.final_rotation.to_euler(EulerRot::YXZ);
                 let end_value = Vec3::new(
                     make_positive_yaw(x.to_degrees()),
                     make_positive_yaw(y.to_degrees()),

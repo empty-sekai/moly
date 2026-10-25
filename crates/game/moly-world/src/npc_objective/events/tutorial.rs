@@ -215,6 +215,110 @@ pub fn invoke_overwrite(world: &mut World, entity: Entity) -> bool {
     }
 }
 
+/// The default tutorial callback reads the live data after the script finishes.
+/// A waiting/free-walk operation may have replaced it while the window was open.
+pub fn finish_default_talk(world: &mut World, entity: Entity, backup_rotation: Option<Quat>) {
+    let Some(data) = world.get::<TutorialTalkData>(entity).cloned() else {
+        warn!("[tutorial-talk] default talk finished without its current tutorial data");
+        return;
+    };
+    if data.restore_rotation {
+        if let Some(rotation) = backup_rotation {
+            restore_rotation(world, entity, rotation);
+        }
+    }
+    let mut query = world.query::<(&mut NpcActions, &mut crate::npc::RestLifecycle)>();
+    if let Ok((mut actions, mut rest)) = query.get_mut(world, entity) {
+        actions.change(data.next_action, &mut rest);
+        actions.talk_owner = None;
+    }
+    if let Some(mut emotes) = world.get_resource_mut::<crate::emoticon::RestEmoteRequests>() {
+        emotes.hide(entity);
+    }
+    super::reset_face(world, entity);
+}
+
+/// A local Euler tween for the native under-five-degree branch. That branch
+/// deliberately plays no turn clip and does not use the locomotion turn driver.
+#[derive(Component)]
+pub(crate) struct SmallTutorialRotation {
+    target: Quat,
+    started: Option<(Vec3, Vec3)>,
+    elapsed: f32,
+    frame: u32,
+}
+
+/// Movement yields to the view's local rotation without exposing its tween state.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct TutorialRotationOwners<'w, 's> {
+    actors: Query<'w, 's, (), With<SmallTutorialRotation>>,
+}
+
+impl TutorialRotationOwners<'_, '_> {
+    pub fn owns(&self, entity: Entity) -> bool {
+        self.actors.contains(entity)
+    }
+}
+
+fn local_angles(rotation: Quat) -> Vec3 {
+    let (y, x, z) = rotation.to_euler(EulerRot::YXZ);
+    Vec3::new(x.to_degrees(), y.to_degrees(), z.to_degrees()).map(moly_law::path::make_positive_yaw)
+}
+
+fn advance_small_rotation(world: &mut World) {
+    let dt = world.resource::<crate::npc_clock::NpcClock>().delta();
+    let frame = super::frame(world);
+    let entities: Vec<Entity> = world
+        .query_filtered::<Entity, With<SmallTutorialRotation>>()
+        .iter(world)
+        .collect();
+    for entity in entities {
+        let Some(mut tween) = world.entity_mut(entity).take::<SmallTutorialRotation>() else {
+            continue;
+        };
+        if tween.frame == frame {
+            world.entity_mut(entity).insert(tween);
+            continue;
+        }
+        let Some(rotation) = world.get::<Transform>(entity).map(|pose| pose.rotation) else {
+            continue;
+        };
+        let target = tween.target;
+        let (start, change) = *tween.started.get_or_insert_with(|| {
+            let start = local_angles(rotation);
+            let end = local_angles(target);
+            (
+                start,
+                Vec3::new(
+                    moly_law::path::look_at::fast_change(start.x, end.x),
+                    moly_law::path::look_at::fast_change(start.y, end.y),
+                    moly_law::path::look_at::fast_change(start.z, end.z),
+                ),
+            )
+        });
+        tween.elapsed = (tween.elapsed + dt).min(0.75);
+        let ease = moly_law::ui::dotween::Ease::OutQuad.evaluate(tween.elapsed, 0.75);
+        let angle = (start + change * ease).map(f32::to_radians);
+        let rotation = Quat::from_euler(EulerRot::YXZ, angle.y, angle.x, angle.z);
+        if let Some(mut pose) = world.get_mut::<Transform>(entity) {
+            pose.rotation = rotation;
+        }
+        if let Some(mut walk) = world.get_mut::<crate::npc::WalkState>(entity) {
+            walk.0.forward = (rotation * Vec3::Z).to_array();
+        }
+        if tween.elapsed < 0.75 {
+            world.entity_mut(entity).insert(tween);
+        } else if let Some(idle) = world
+            .get::<crate::npc::MotionClips>(entity)
+            .map(|clips| clips.idle.clone())
+        {
+            if let Err(reason) = super::begin_animation(world, entity, &idle, true, 0.5) {
+                warn!("[tutorial-talk] restore idle: {reason}");
+            }
+        }
+    }
+}
+
 /// Fire-and-forget DOLocalRotateAsync at the default tutorial talk's end.
 pub fn restore_rotation(world: &mut World, entity: Entity, rotation: Quat) {
     let Some(from) = world.get::<Transform>(entity).map(|t| t.rotation) else {
@@ -223,6 +327,17 @@ pub fn restore_rotation(world: &mut World, entity: Entity, rotation: Quat) {
     let from_yaw = moly_law::path::heading_yaw((from * Vec3::Z).to_array());
     let to_yaw = moly_law::path::heading_yaw((rotation * Vec3::Z).to_array());
     let change = moly_law::path::look_at::fast_change(from_yaw, to_yaw);
+    world.entity_mut(entity).remove::<SmallTutorialRotation>();
+    if change.abs() < 5.0 {
+        let frame = super::frame(world);
+        world.entity_mut(entity).insert(SmallTutorialRotation {
+            target: rotation,
+            started: None,
+            elapsed: 0.0,
+            frame,
+        });
+        return;
+    }
     use moly_law::path::TurnMotion;
     let motion = match (change >= 0.0, change.abs()) {
         (true, angle) if angle <= 60.0 => TurnMotion::Turn45R,
@@ -233,20 +348,16 @@ pub fn restore_rotation(world: &mut World, entity: Entity, rotation: Quat) {
         (false, _) => TurnMotion::Turn180L,
     };
     let clip_name = format!("{}_S", motion.base_name());
-    let duration = if change.abs() < 5.0 {
-        0.75
-    } else {
-        world
-            .get_resource::<crate::character::MotionLibrary>()
-            .and_then(|library| {
-                world
-                    .get_resource::<Assets<bevy::gltf::Gltf>>()?
-                    .get(&library.gltf)
-            })
-            .and_then(|gltf| gltf.named_animations.get(clip_name.as_str()))
-            .and_then(|clip| world.get_resource::<Assets<AnimationClip>>()?.get(clip))
-            .map_or(0.75, AnimationClip::duration)
-    };
+    let duration = world
+        .get_resource::<crate::character::MotionLibrary>()
+        .and_then(|library| {
+            world
+                .get_resource::<Assets<bevy::gltf::Gltf>>()?
+                .get(&library.gltf)
+        })
+        .and_then(|gltf| gltf.named_animations.get(clip_name.as_str()))
+        .and_then(|clip| world.get_resource::<Assets<AnimationClip>>()?.get(clip))
+        .map_or(0.75, AnimationClip::duration);
     let mut to = rotation;
     if from.dot(to) < 0.0 {
         to = -to;
@@ -343,6 +454,7 @@ fn read_commands(world: &mut World) {
 }
 
 pub(super) fn update(world: &mut World) {
+    advance_small_rotation(world);
     world.init_resource::<PanelDriver>();
     read_commands(world);
     let active = world

@@ -185,6 +185,7 @@ fn controller_request(world: &World, entity: Entity, unit: u32, frame: u32, requ
 
 /// Presenter.Hide: the model's visibility off, the view hidden.
 pub fn hide(world: &mut World, entity: Entity) {
+    crate::npc::navigation::set_enabled(world,entity,false);
     let Ok(mut entity_mut) = world.get_entity_mut(entity) else {
         return;
     };
@@ -196,6 +197,7 @@ pub fn hide(world: &mut World, entity: Entity) {
 /// Presenter.Show: the model's visibility on, the view shown (the teleport
 /// check is not modelled).
 pub fn show(world: &mut World, entity: Entity) {
+    crate::npc::navigation::set_enabled(world,entity,true);
     let Ok(mut entity_mut) = world.get_entity_mut(entity) else {
         return;
     };
