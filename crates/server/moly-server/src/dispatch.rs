@@ -915,15 +915,15 @@ mod tests {
         }
         let left = &model.doc.delivery.mysekai_materials;
         assert_eq!((left[&1], left[&21], left[&10]), (40, 4, 4));
-        assert_eq!(
-            model.doc.inventory.fixtures,
-            vec![UserMysekaiFixture {
-                mysekai_fixture_id: 4,
-                texture_id: BASE_TEXTURE_ID,
-                quantity: 3,
-                last_obtained_at: model.now_ms(),
-            }]
-        );
+        let crafted = [UserMysekaiFixture {
+            mysekai_fixture_id: 4,
+            texture_id: BASE_TEXTURE_ID,
+            quantity: 3,
+            last_obtained_at: model.now_ms(),
+        }];
+        let mut expected = fixture_model().doc.inventory.fixtures;
+        expected.extend(crafted);
+        assert_eq!(model.doc.inventory.fixtures, expected);
         assert_eq!(model.doc.gamedata.total_exp, 1000);
     }
 

@@ -595,9 +595,10 @@ pub(crate) fn edit_path(
     value: &Value,
 ) -> Option<Result<Option<&'static str>, String>> {
     let result = match parts {
-        [SECTION_FIXTURES] => parse_fixtures(value).map(|rows| {
+        [SECTION_FIXTURES] => parse_fixtures(value).and_then(|rows| {
             doc.fixtures = rows;
-            Some(SECTION_FIXTURES)
+            doc.check_structure()
+                .map(|()| Some(SECTION_FIXTURES))
         }),
         [SECTION_CANVASES] => parse_canvases(value).map(|rows| {
             doc.canvases = rows;

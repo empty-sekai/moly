@@ -1,6 +1,6 @@
 //! The system fixture action: the user's actioned system
 //! fixtures, the request that adds one, and the party cakes the home layout
-//! serves.
+//! may serve.
 //!
 //! - `userMysekaiSystemFixtureActions` (`UserMysekaiSystemFixtureAction`
 //!   {userId, mysekaiSystemFixtureId}): the system fixtures the user has
@@ -26,10 +26,11 @@
 //!   as stated (the server model does not read the system fixture master).
 //!   `obtainedResources` is empty: which rewards an action grants is the
 //!   server's, and no master table names one.
-//! - *Birthday party fixtures* (`policies.birthdayPartyFixtures`): `placed`
-//!   (the product default) serves the two party cakes of the system fixture
-//!   master (rows 58 and 59, type `birthday`, parties 1 and 2) in the home
-//!   site's housing layout: fixture 844 `mdl_bir1106_fixture_cake1` at cells
+//! - *Birthday party fixtures* (`policies.birthdayPartyFixtures`): `none`
+//!   (the product default) serves no cake, so the home site's served layout
+//!   holds only its own rows. `placed` serves the two party cakes of the system
+//!   fixture master (rows 58 and 59, type `birthday`, parties 1 and 2) in the
+//!   home site's housing layout: fixture 844 `mdl_bir1106_fixture_cake1` at cells
 //!   x 2..5, z 2..5 and fixture 849 `mdl_bir1103_fixture_cake1` at x 8..11,
 //!   z 2..5, both 4 x 3 x 4 cells (the fixture master's grid size), floor
 //!   layout, rotation 0, texture 1. Where the server places a party's cake,
@@ -39,7 +40,7 @@
 //!   the layout is served, against the layout's floor rows and the starter
 //!   house ([`STARTER_HOUSE`]), with the XZ overlap rule
 //!   the house append uses; a cake that overlaps one, or whose fixture a row
-//!   already places, is not served, loudly. `none` serves no cake.
+//!   already places, is not served, loudly.
 
 use bevy::prelude::*;
 use moly_law::fixture::{Direction, GridPosition};
@@ -101,11 +102,11 @@ pub(crate) enum ReplyPolicy {
     Failure,
 }
 
-/// `policies.birthdayPartyFixtures`.
+/// `policies.birthdayPartyFixtures`; the document's default is `none`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub(crate) enum PartyFixturesPolicy {
-    #[default]
     Placed,
+    #[default]
     None,
 }
 

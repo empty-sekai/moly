@@ -26,7 +26,9 @@
 //! harness or owner state) keeps its fixed clock at its `refreshedAt` and its
 //! stated schedule rows, so replays built on it see the same values; the
 //! checked-in slice becomes the product default, with the device clock and
-//! a daily schedule of the same phenomenon per refresh window.
+//! a daily schedule of the same phenomenon per refresh window. Either
+//! migration keeps a `userMysekaiFixtures` section the slice states (the
+//! owned fixtures); a slice without one starts with none owned.
 //!
 //! Parsing is strict: an unknown key, a missing key, a wrong type, or a
 //! schemaVersion other than 2 is refused by name. Nothing is reset silently.
@@ -698,6 +700,8 @@ pub(crate) fn migrate_v1(text: &str, migration: Migration) -> Result<ServerDocum
             "mysekaiPhenomenaSchedules",
             "userMysekaiGateCharacterVisit",
             "userMysekaiSiteHousingLayouts",
+            // The owned fixtures, read by the owned-data part.
+            super::inventory::SECTION_FIXTURES,
             "talkListPolicy",
             "controls",
         ],
@@ -759,6 +763,13 @@ pub(crate) fn migrate_v1(text: &str, migration: Migration) -> Result<ServerDocum
             doc.get("about").and_then(Value::as_str).unwrap_or("")
         ),
     };
+    // The owned fixtures a slice states (none when absent): the rest of the
+    // owned data keeps its named defaults.
+    let mut inventory = super::inventory::InventoryDoc::default();
+    if let Some(value) = doc.get(super::inventory::SECTION_FIXTURES) {
+        inventory.fixtures = super::inventory::parse_fixtures(value)?;
+        inventory.check_structure()?;
+    }
     let document = ServerDocument {
         about,
         clock,
@@ -789,7 +800,7 @@ pub(crate) fn migrate_v1(text: &str, migration: Migration) -> Result<ServerDocum
         home_action_reply: Default::default(),
         music_settings: Vec::new(),
         avatar: Default::default(),
-        inventory: Default::default(),
+        inventory,
         music_play_reply: Default::default(),
         music_records: Vec::new(),
         system_fixture_actions: Default::default(),

@@ -8,6 +8,9 @@
 //! - `{"type": "server.edit", "action": "gate.change", "mysekaiGateId": <id>,
 //!   "mysekaiGateSkinId": <id>, "mysekaiGameCharacterUnitGroupIds": [<id>, ...]}`
 //! - `{"type": "server.edit", "action": "sync"}`
+//! - `{"type": "server.edit", "action": "fixture.grant", "mysekaiFixtureId": <id>,
+//!   "textureId": <id>, "quantity": <n>}`: adds owned copies to the fixture's
+//!   row (or a new row) and delivers the owned fixtures at once.
 //!
 //! Delivery: `clock`, `policies` and the schedule apply live; the game data,
 //! the stamina, the pass and the birthday-party sections apply as the next
@@ -649,6 +652,49 @@ impl ServerModel {
                     "mysekaiGameCharacterUnitGroupIds": groups, "revision": self.revision}),
                 )
             }
+            "fixture.grant" => {
+                only(
+                    command,
+                    &["type", "action", "mysekaiFixtureId", "textureId", "quantity"],
+                )?;
+                let field = |key: &str| {
+                    int32(command.get(key).unwrap_or(&Value::Null), &format!("fixture.grant {key}"))
+                };
+                let (fixture_id, texture_id, quantity) =
+                    (field("mysekaiFixtureId")?, field("textureId")?, field("quantity")?);
+                if quantity <= 0 {
+                    return Err(format!("server.edit fixture.grant quantity {quantity} is not positive"));
+                }
+                let mut next = self.doc.clone();
+                let fixtures = &mut next.inventory.fixtures;
+                match fixtures
+                    .iter_mut()
+                    .find(|row| row.mysekai_fixture_id == fixture_id && row.texture_id == texture_id)
+                {
+                    Some(row) => {
+                        row.quantity = row.quantity.checked_add(quantity).ok_or_else(|| {
+                            format!("server.edit fixture.grant: fixture {fixture_id} quantity overflows")
+                        })?;
+                        row.last_obtained_at = now;
+                    }
+                    None => fixtures.push(moly_protocol::rows::UserMysekaiFixture {
+                        mysekai_fixture_id: fixture_id,
+                        texture_id,
+                        quantity,
+                        last_obtained_at: now,
+                    }),
+                }
+                next.check_structure()
+                    .and_then(|()| check_masters(&next, &masters))
+                    .map_err(|reason| format!("server.edit fixture.grant: {reason}"))?;
+                self.doc = next;
+                self.mark_pending(super::inventory::SECTION_FIXTURES);
+                self.commit();
+                self.respond(ResponseKind::Sync, false, &[], masters);
+                info!("[server] server.edit fixture.grant {fixture_id} texture {texture_id} x{quantity} accepted");
+                Ok(json!({"action": action, "mysekaiFixtureId": fixture_id, "textureId": texture_id,
+                    "quantity": quantity, "revision": self.revision}))
+            }
             other => Err(format!("server.edit action {other} is unknown")),
         }
     }
@@ -807,6 +853,10 @@ fn actions() -> Value {
             {"name": "mysekaiGameCharacterUnitGroupIds", "type": "int-list"}]},
         {"action": "sync", "title": "Deliver pending sections now", "fields": [],
             "note": "stands in for the next request the client makes; the source has no push"},
+        {"action": "fixture.grant", "title": "Give owned fixtures", "fields": [
+            {"name": "mysekaiFixtureId", "type": "int", "min": 1},
+            {"name": "textureId", "type": "int", "min": 0},
+            {"name": "quantity", "type": "int", "min": 1}]},
     ])
 }
 
@@ -818,6 +868,7 @@ fn policies() -> Value {
         {"name": "rank from experience", "rule": "mysekaiRank is the master rank of totalExp; editing either sets the other"},
         {"name": "harvest stamina", "rule": "the harvest reply carries the rests the client sent, unless a panel stamina edit is pending"},
         {"name": "gate reserve", "rule": "the unit group joins the home gate's characters (isReservation true, visitCount 1)"},
+        {"name": "fixture grant", "rule": "an extension this mock adds: the quantity joins the fixture's owned row of that texture (a new row when none), lastObtainedAt takes the server clock, and the owned fixtures are delivered at once"},
         {"name": "gate change", "rule": "the home gate takes the gate and skin; the unit groups become its characters (isReservation false, visitCount 1)"},
         {"name": "daily schedule", "rule": "rows for the local day before, of and after the server clock, one per refresh window, schedule date at local midnight"},
     ])
