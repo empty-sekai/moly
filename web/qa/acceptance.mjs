@@ -464,14 +464,15 @@ try {
     };
     cases.push(one);
     record("case", key);
-    const tab =
-      key === "talk:general:3912"
-        ? "conversations"
-        : key.startsWith("fixture:")
-          ? "furniture"
-          : key.startsWith("activity:")
-            ? "activities"
-            : "performances";
+    const tab = ["talk:general:", "talk:common:"].some((prefix) =>
+      key.startsWith(prefix),
+    )
+      ? "conversations"
+      : key.startsWith("fixture:")
+        ? "furniture"
+        : key.startsWith("activity:")
+          ? "activities"
+          : "performances";
     await command("tab", tab);
     await command("fixture", null);
     await command("query", "");
