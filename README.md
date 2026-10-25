@@ -15,8 +15,6 @@ MYSEKAI 的还原项目，使用 Rust 与 [Bevy](https://bevyengine.org/) 构建
 > **项目仍在开发中。** 当前版本的范围与之后的计划见 [路线图](ROADMAP.md)，
 > 已知问题见 [Issues](https://github.com/empty-sekai/moly/issues)。
 
-![moly 中的角色、家具与头顶气泡](screenshots/readme.png)
-
 ## 功能
 
 - **场景与移动**：入场流程，大炮与门在站点之间移动，室内房间，玩家角色、脚步声与表情。

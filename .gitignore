@@ -1,7 +1,6 @@
 /target
 /shared-target
-/screenshots/*
-!/screenshots/readme.png
+/screenshots/
 /*.exe
 /build-guarded.log
 /balloon-order-*.log

@@ -12,8 +12,6 @@ The project recreates scene exploration, character behaviour, furniture interact
 
 > **The project is still under development.** The scope of the current version and later plans are described in the [roadmap](ROADMAP.en.md), and known issues are listed in [Issues](https://github.com/empty-sekai/moly/issues).
 
-![Characters, furniture and overhead bubbles in moly](screenshots/readme.png)
-
 ## Features
 
 - **Scenes and movement**: the entry flow, cannons and doors that move between sites, indoor rooms, player characters, footsteps and expressions.
