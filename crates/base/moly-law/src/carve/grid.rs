@@ -4,41 +4,179 @@
 //! 每一步都是引擎原生烘焙链在 2D（单高度面）上的转录，锚点在
 //! [`super`] 的模块注释里。本文件只有形状与常数，不出现任何 bevy。
 
-use std::collections::HashMap;
-use std::hash::{BuildHasherDefault, Hasher};
-
 use super::{
-    BuildVolume, ColliderPolygon, Obstacle, AGENT_CLIMB, AGENT_HEIGHT, AGENT_SLOPE_DEGREES,
+    BuildVolume, ColliderPolygon, Obstacle, SurfaceBake, AGENT_CLIMB, AGENT_HEIGHT,
+    AGENT_SLOPE_DEGREES,
 };
 
-/// Hasher for maps keyed by a dense cell index. The keys are small integers
-/// derived from the bake's own grid, never adversarial input, and the bake
-/// never lets map iteration order decide a result (every map pass is per-cell
-/// or a set closure), so a multiply mix is enough and much cheaper than the
-/// default SipHash on the hot neighbour lookups.
-#[derive(Default)]
-struct CellHasher(u64);
+/// Every cell's span column, compressed by cell: the spans of all columns in
+/// one flat vector, and for every cell where its column starts there. The
+/// columns are packed back to back in cell order, so cell `i`'s column ends
+/// where the next cell's begins; a cell without a column has an empty range,
+/// and its start is the same as its predecessor's (or zero).
+///
+/// A column that is merged or has spans killed in it shortens: its live
+/// length is the per-cell `u32` length the store's owner keeps, and the slots
+/// it frees up stay at the end of its range, unused.
+pub(crate) struct CellColumns {
+    start: Vec<u32>,
+    spans: Vec<Span>,
+}
 
-impl Hasher for CellHasher {
-    fn finish(&self) -> u64 {
-        self.0
+impl CellColumns {
+    pub(crate) fn cells(&self) -> usize {
+        self.start.len() - 1
     }
 
-    fn write(&mut self, bytes: &[u8]) {
-        let mut value = 0xcbf2_9ce4_8422_2325_u64;
-        for byte in bytes {
-            value = (value ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        self.0 = value;
+    /// The column of `index`, `None` when it has none.
+    pub(crate) fn get(&self, index: usize, len: &[u32]) -> Option<&[Span]> {
+        let live = len[index] as usize;
+        (live > 0).then(|| &self.area(index)[..live])
     }
 
-    fn write_usize(&mut self, value: usize) {
-        self.0 = (value as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    /// The column of `index`, `None` when it has none.
+    pub(crate) fn get_mut<'a>(&'a mut self, index: usize, len: &[u32]) -> Option<&'a mut [Span]> {
+        let live = len[index] as usize;
+        let at = self.start[index] as usize;
+        (live > 0).then(|| &mut self.spans[at..at + live])
+    }
+
+    /// Whether `index` has a column (its live length is above zero).
+    pub(crate) fn has(&self, index: usize, len: &[u32]) -> bool {
+        len[index] > 0
+    }
+
+    /// The cells with a column, in ascending cell order, with their spans.
+    pub(crate) fn columns<'a>(
+        &'a self,
+        len: &'a [u32],
+    ) -> impl Iterator<Item = (usize, &'a [Span])> + 'a {
+        (0..self.cells()).filter_map(move |index| {
+            let live = len[index] as usize;
+            let at = self.start[index] as usize;
+            (live > 0).then(|| (index, &self.spans[at..at + live]))
+        })
+    }
+
+    /// The slots reserved for `index`'s column.
+    fn area(&self, index: usize) -> &[Span] {
+        &self.spans[self.start[index] as usize..self.start[index + 1] as usize]
     }
 }
 
-/// A map keyed by cell index (see [`CellHasher`]).
-type CellMap<V> = HashMap<usize, V, BuildHasherDefault<CellHasher>>;
+/// Gather the spans of consecutive bands into cell columns. `parts` are the
+/// spans each band produced, in that band's own order; cell `c` holds, in
+/// order, the site face sampled from `site` at `c` and then the band spans
+/// gathered for it. The bands cover disjoint cells, so a stable counting sort
+/// by cell reproduces the sequential rasterization's order.
+fn gather_columns(cells: usize, site: &[f32], parts: &[ColliderRaster]) -> (CellColumns, Vec<u32>) {
+    let mut count = vec![0u32; cells];
+    for part in parts {
+        for &(cell, _) in &part.spans {
+            count[cell as usize] += 1;
+        }
+    }
+    let mut len = vec![0u32; cells];
+    let mut start = vec![0u32; cells + 1];
+    let mut total = 0u32;
+    for (cell, &count) in count.iter().enumerate() {
+        if count > 0 {
+            len[cell] = count + 1;
+            total += count + 1;
+        }
+        start[cell + 1] = total;
+    }
+    let mut spans = vec![Span::site(0.0); total as usize];
+    // The slot each cell's next span goes to; the site face takes the first.
+    let mut fill = vec![0u32; cells];
+    for cell in 0..cells {
+        if start[cell + 1] > start[cell] {
+            spans[start[cell] as usize] = Span::site(site[cell]);
+            fill[cell] = start[cell] + 1;
+        }
+    }
+    for part in parts {
+        for &(cell, span) in &part.spans {
+            let at = fill[cell as usize] as usize;
+            spans[at] = span;
+            fill[cell as usize] += 1;
+        }
+    }
+    debug_assert_eq!(start[cells], total);
+    (CellColumns { start, spans }, len)
+}
+
+/// What the bake reads back from the span pipeline besides the walkable mask:
+/// the collider plane that produced a cell's surface (no plane elsewhere) and
+/// the ceiling of the span the ground flood chose (no ceiling elsewhere).
+pub(crate) struct SpanTables {
+    /// The plane table index of every cell, `u32::MAX` when its surface is
+    /// not a collider's.
+    cell_type: Vec<u32>,
+    planes: Vec<[f32; 3]>,
+    /// The table index of every plane, by its three f32 bit patterns.
+    plane_ids: std::collections::HashMap<[u32; 3], u32>,
+    ceilings: Vec<f32>,
+}
+
+impl SpanTables {
+    fn new(cells: usize) -> Self {
+        Self {
+            cell_type: vec![u32::MAX; cells],
+            planes: Vec::new(),
+            plane_ids: std::collections::HashMap::new(),
+            ceilings: vec![f32::INFINITY; cells],
+        }
+    }
+
+    fn set_ceiling(&mut self, index: usize, ceiling: f32) {
+        self.ceilings[index] = ceiling;
+    }
+
+    /// Give `index` its plane, stored among the existing planes when the same
+    /// plane (the same three f32 bits) is already there.
+    fn set_plane(&mut self, index: usize, plane: [f32; 3]) {
+        let bits = plane.map(f32::to_bits);
+        let planes = &mut self.planes;
+        let id = *self.plane_ids.entry(bits).or_insert_with(|| {
+            planes.push(plane);
+            (planes.len() - 1) as u32
+        });
+        self.cell_type[index] = id;
+    }
+}
+
+/// The collider planes that give a cell's surface, with the table index of
+/// every cell's plane (`u32::MAX` where the surface is not a collider's).
+/// Cloning shares the arrays.
+#[derive(Clone)]
+pub(crate) struct SurfacePlanes {
+    cell_type: std::sync::Arc<[u32]>,
+    planes: std::sync::Arc<[[f32; 3]]>,
+}
+
+impl SurfacePlanes {
+    fn new(tables: &SpanTables) -> Self {
+        Self {
+            cell_type: tables.cell_type.clone().into(),
+            planes: tables.planes.clone().into(),
+        }
+    }
+
+    /// Nothing: no cell's surface is a collider's.
+    pub(crate) fn none() -> Self {
+        Self {
+            cell_type: Vec::new().into(),
+            planes: Vec::new().into(),
+        }
+    }
+
+    /// The plane of a cell whose surface a collider produced.
+    pub(crate) fn plane(&self, index: usize) -> Option<[f32; 3]> {
+        let id = *self.cell_type.get(index)?;
+        (id != u32::MAX).then(|| self.planes[id as usize])
+    }
+}
 
 /// 烘焙格面：世界 xz 平面上的等距格，`walkable` 是侵蚀与小区过滤都
 /// 过完之后的净可行走表。格原点是面三角网包围盒的最小角——引擎侧
@@ -227,7 +365,7 @@ pub(crate) fn surface_heights(grid: &Grid, triangles: &[[[f32; 3]; 3]]) -> Vec<f
 /// below. The walkable flag is the rasterized face's own, before the column
 /// filters.
 #[derive(Clone, Copy)]
-struct Span {
+pub(crate) struct Span {
     min: f32,
     max: f32,
     walkable: bool,
@@ -239,7 +377,9 @@ struct Span {
 }
 
 impl Span {
-    fn site(height: f32) -> Self {
+    /// The site walk face as a column's base span, at the sampled height
+    /// `height` of its cell.
+    pub(crate) fn site(height: f32) -> Self {
         Self {
             min: height,
             max: height,
@@ -248,26 +388,6 @@ impl Span {
             reached: false,
         }
     }
-}
-
-/// What the span pipeline resolved for the walk surface: the source triangles
-/// kept for exact height reads, the collider plane of every cell whose surface
-/// a collider produced, how many cells reached more than one span, and the
-/// connection edges the erosion measures from.
-pub(crate) struct SurfaceBake {
-    /// Cells the explicit carving obstacles removed (the bake's foot null).
-    pub(crate) obstacle_nulled: usize,
-    /// Walk face triangles, kept to evaluate the site surface exactly.
-    pub(crate) site: Vec<[[f32; 3]; 3]>,
-    /// Cell index → the collider top face's plane.
-    pub(crate) surfaces: HashMap<usize, [f32; 3]>,
-    /// Cells where more than one walkable span was reached from the ground;
-    /// the highest one became the cell's surface.
-    pub(crate) multi_surface: usize,
-    /// Walkable cells whose chosen span is not connected to a walkable
-    /// neighbour's chosen span (the erosion adds these to its walkability
-    /// boundary).
-    pub(crate) edges: Vec<u32>,
 }
 
 fn triangle_normal(tri: &[[f32; 3]; 3]) -> Option<[f32; 3]> {
@@ -305,22 +425,47 @@ fn surface_plane(tri: &[[f32; 3]; 3], normal: [f32; 3]) -> Option<[f32; 3]> {
     (a.is_finite() && b.is_finite() && c.is_finite()).then_some([a, b, c])
 }
 
-fn push_span(columns: &mut CellMap<Vec<Span>>, heights: &[f32], index: usize, span: Span) {
-    if !heights[index].is_finite() {
-        return;
-    }
-    columns
-        .entry(index)
-        .or_insert_with(|| vec![Span::site(heights[index])])
-        .push(span);
+/// The rows one rasterizing worker visits, `start..=end`. Rows are the unit
+/// of the split: every cell of a row is visited by the same worker.
+#[derive(Clone, Copy)]
+struct Band {
+    start: usize,
+    end: usize,
 }
 
-/// Visit every cell column the triangle touches with the triangle's vertical
-/// interval inside it. The caller decides what the interval yields; nothing is
-/// allocated per triangle.
+impl Band {
+    /// The band's rows. A band is never empty (see [`row_bands`]), and it
+    /// lies inside the grid's rows.
+    fn rows(&self) -> core::ops::RangeInclusive<usize> {
+        self.start..=self.end
+    }
+}
+
+/// Contiguous bands over `rows` grid rows, one per worker and at least one
+/// row each: every band but the last holds `rows / workers` rows.
+fn row_bands(rows: usize, workers: usize) -> Vec<Band> {
+    let workers = workers.clamp(1, rows.max(1));
+    let per = rows / workers;
+    let mut bands = Vec::with_capacity(workers);
+    let mut start = 0;
+    for worker in 0..workers {
+        let len = if worker + 1 == workers { rows - start } else { per };
+        bands.push(Band {
+            start,
+            end: start + len - 1,
+        });
+        start += len;
+    }
+    bands
+}
+
+/// Visit every cell column the triangle touches whose row lies in `rows`,
+/// with the triangle's vertical interval inside it. The caller decides what
+/// the interval yields; nothing is allocated per triangle.
 fn for_each_triangle_cell(
     grid: &Grid,
     tri: &[[f32; 3]; 3],
+    rows: core::ops::RangeInclusive<isize>,
     mut visit: impl FnMut(usize, [f32; 2]),
 ) {
     let mut min = [f32::INFINITY; 2];
@@ -336,7 +481,12 @@ fn for_each_triangle_cell(
     let epsilon = grid.voxel * 1e-4;
     let (x0, z0) = grid.cell_of(min[0] - epsilon, min[1] - epsilon);
     let (x1, z1) = grid.cell_of(max[0] + epsilon, max[1] + epsilon);
-    for z in z0.max(0)..=z1.min(grid.rows as isize - 1) {
+    let lo = z0.max(*rows.start());
+    let hi = z1.min(*rows.end());
+    if lo > hi {
+        return;
+    }
+    for z in lo..=hi {
         for x in x0.max(0)..=x1.min(grid.cols as isize - 1) {
             let index = z as usize * grid.cols + x as usize;
             if !grid.walkable[index] {
@@ -353,23 +503,25 @@ fn for_each_triangle_cell(
     }
 }
 
-/// Clip one source triangle to every cell column it touches and add its
-/// interval. The column's site face is inserted first, so the collider surface
-/// is placed above or below it by the merge.
+/// Clip one source triangle to every cell column it touches (rows in `rows`)
+/// and append its interval.
+#[allow(clippy::too_many_arguments)]
 fn rasterize_triangle_spans(
     grid: &Grid,
-    columns: &mut CellMap<Vec<Span>>,
+    spans: &mut Vec<(u32, Span)>,
     heights: &[f32],
     tri: &[[f32; 3]; 3],
     normal: [f32; 3],
     walkable: bool,
+    rows: core::ops::RangeInclusive<isize>,
 ) {
     let plane = surface_plane(tri, normal);
-    for_each_triangle_cell(grid, tri, |index, span| {
-        push_span(
-            &mut *columns,
-            heights,
-            index,
+    for_each_triangle_cell(grid, tri, rows, |index, span| {
+        if !heights[index].is_finite() {
+            return;
+        }
+        spans.push((
+            index as u32,
             Span {
                 min: span[0],
                 max: span[1],
@@ -377,14 +529,19 @@ fn rasterize_triangle_spans(
                 surface: Some(plane.unwrap_or([0.0, 0.0, span[1]])),
                 reached: false,
             },
-        );
+        ));
     });
 }
 
 /// Spans of a source that has no triangle list: the projected hull with its
-/// own vertical bounds, one interval per cell inside the hull. Explicit
-/// carving is never surface rasterization (see the caller).
-fn polygon_spans(grid: &Grid, polygon: &ColliderPolygon) -> Vec<(usize, [f32; 2])> {
+/// own vertical bounds, one interval per cell inside the hull, for the cells
+/// whose row lies in `rows`. Explicit carving is never surface rasterization
+/// (see the caller).
+fn polygon_spans(
+    grid: &Grid,
+    polygon: &ColliderPolygon,
+    rows: core::ops::RangeInclusive<isize>,
+) -> Vec<(usize, [f32; 2])> {
     let mut spans = Vec::new();
     if polygon.vertices.is_empty() {
         return spans;
@@ -401,7 +558,12 @@ fn polygon_spans(grid: &Grid, polygon: &ColliderPolygon) -> Vec<(usize, [f32; 2]
         });
     let (x0, z0) = grid.cell_of(min[0] - grid.voxel, min[1] - grid.voxel);
     let (x1, z1) = grid.cell_of(max[0] + grid.voxel, max[1] + grid.voxel);
-    for z in z0.max(0)..=z1.min(grid.rows as isize - 1) {
+    let lo = z0.max(*rows.start());
+    let hi = z1.min(*rows.end());
+    if lo > hi {
+        return spans;
+    }
+    for z in lo..=hi {
         for x in x0.max(0)..=x1.min(grid.cols as isize - 1) {
             let index = z as usize * grid.cols + x as usize;
             if !grid.walkable[index] {
@@ -462,7 +624,8 @@ fn span_is_ledge(
     cz: usize,
     near: &[bool],
     grid: &Grid,
-    columns: &CellMap<Vec<Span>>,
+    columns: &CellColumns,
+    lengths: &[u32],
     heights: &[f32],
 ) -> bool {
     let mut lowest_difference = f32::INFINITY;
@@ -483,8 +646,8 @@ fn span_is_ledge(
         // other cell's whole column is its site face.
         let spans: &[Span] = if near[index] {
             columns
-                .get(&index)
-                .map_or_else(|| std::slice::from_ref(&base), |list| list.as_slice())
+                .get(index, lengths)
+                .map_or_else(|| std::slice::from_ref(&base), |list| list)
         } else {
             std::slice::from_ref(&base)
         };
@@ -552,12 +715,12 @@ fn span_is_disconnected(
     cz: usize,
     near: &[bool],
     grid: &Grid,
-    ceilings: &CellMap<f32>,
+    ceilings: &[f32],
     heights: &[f32],
 ) -> bool {
     let top = heights[index];
     let ceiling = if near[index] {
-        ceilings.get(&index).copied().unwrap_or(f32::INFINITY)
+        ceilings[index]
     } else {
         f32::INFINITY
     };
@@ -573,7 +736,7 @@ fn span_is_disconnected(
         }
         // A cell away from every column has no ceiling entry.
         let next = if near[nindex] {
-            ceilings.get(&nindex).copied().unwrap_or(f32::INFINITY)
+            ceilings[nindex]
         } else {
             f32::INFINITY
         };
@@ -584,36 +747,45 @@ fn span_is_disconnected(
     false
 }
 
-/// Resolve the non-carving collider sources into the walk surface the way the
-/// engine's bake builds its span columns, then carve the explicit obstacles
-/// against the selected surface (see the caller). Returns the collision
-/// surfaces, the multi-surface count and the erosion edges; `grid.walkable`
-/// and `heights` come back holding the chosen surface of every walkable cell.
-pub(crate) fn mark_collider_spans(
-    grid: &mut Grid,
-    heights: &mut [f32],
+/// What one rasterizing band produced: the collider spans it appended to
+/// cells, `(cell, span)` in the order it appended them, and the explicit
+/// carving footprints it found. The spans become cell columns with
+/// [`gather_columns`].
+pub(crate) struct ColliderRaster {
+    spans: Vec<(u32, Span)>,
+    carving: Vec<(usize, [f32; 2])>,
+}
+
+/// Collider spans and carving footprints of `polygons` for the cells whose
+/// row lies in `rows`. Polygons, and the triangles within a polygon, are
+/// walked in their own order, so a cell's spans are appended in the same
+/// order whatever the row range.
+pub(crate) fn rasterize_colliders(
+    grid: &Grid,
+    heights: &[f32],
     polygons: &[ColliderPolygon],
-) -> SurfaceBake {
-    let cells = grid.cols * grid.rows;
-    debug_assert_eq!(heights.len(), cells);
+    rows: core::ops::RangeInclusive<usize>,
+) -> ColliderRaster {
+    let rows = *rows.start() as isize..=*rows.end() as isize;
     let slope_cos = AGENT_SLOPE_DEGREES.to_radians().cos();
-    let mut columns: CellMap<Vec<Span>> = CellMap::default();
+    let mut spans: Vec<(u32, Span)> = Vec::new();
     let mut carving: Vec<(usize, [f32; 2])> = Vec::new();
     for polygon in polygons {
         if polygon.carve {
             // Explicit carving is not a walkable surface: its footprint blocks
             // whatever surface the bake selected, tested below.
-            carving.extend(polygon_spans(grid, polygon));
+            carving.extend(polygon_spans(grid, polygon, rows.clone()));
             continue;
         }
         if polygon.triangles.is_empty() {
             // A hull-only source (the legacy projected prism) contributes one
             // solid interval per cell, whatever its own face slopes are.
-            for (index, span) in polygon_spans(grid, polygon) {
-                push_span(
-                    &mut columns,
-                    heights,
-                    index,
+            for (index, span) in polygon_spans(grid, polygon, rows.clone()) {
+                if !heights[index].is_finite() {
+                    continue;
+                }
+                spans.push((
+                    index as u32,
                     Span {
                         min: span[0],
                         max: span[1],
@@ -621,7 +793,7 @@ pub(crate) fn mark_collider_spans(
                         surface: Some([0.0, 0.0, span[1]]),
                         reached: false,
                     },
-                );
+                ));
             }
             continue;
         }
@@ -632,7 +804,7 @@ pub(crate) fn mark_collider_spans(
             // own height, the conservative reading the foot support used.
             let mut intervals: Vec<(u32, [f32; 2])> = Vec::new();
             for triangle in &polygon.triangles {
-                for_each_triangle_cell(grid, triangle, |index, interval| {
+                for_each_triangle_cell(grid, triangle, rows.clone(), |index, interval| {
                     intervals.push((index as u32, interval));
                 });
             }
@@ -647,10 +819,11 @@ pub(crate) fn mark_collider_spans(
                     span[1] = span[1].max(intervals[at].1[1]);
                     at += 1;
                 }
-                push_span(
-                    &mut columns,
-                    heights,
-                    index,
+                if !heights[index].is_finite() {
+                    continue;
+                }
+                spans.push((
+                    index as u32,
                     Span {
                         min: span[0],
                         max: span[1],
@@ -658,7 +831,7 @@ pub(crate) fn mark_collider_spans(
                         surface: Some([0.0, 0.0, span[1]]),
                         reached: false,
                     },
-                );
+                ));
             }
             continue;
         }
@@ -669,63 +842,189 @@ pub(crate) fn mark_collider_spans(
             // A triangle is walkable when its up component beats the agent
             // slope's cosine (strictly, as the rasterizer marks it).
             let walkable = normal[1] > slope_cos;
-            rasterize_triangle_spans(grid, &mut columns, heights, triangle, normal, walkable);
+            rasterize_triangle_spans(
+                grid,
+                &mut spans,
+                heights,
+                triangle,
+                normal,
+                walkable,
+                rows.clone(),
+            );
         }
     }
+    ColliderRaster { spans, carving }
+}
 
-    // Merge each column the way a heightfield span stack merges: spans that
-    // overlap or touch become one; a merge whose tops are within one climb
-    // also merges the walkable mark, so a short steep lip on a walkable floor
-    // stays walkable. Then a non-walkable span just above a walkable one
-    // inherits it when the climb covers the step (the low-hanging filter).
-    for list in columns.values_mut() {
-        list.sort_by(|a, b| a.min.total_cmp(&b.min).then(a.max.total_cmp(&b.max)));
-        // Merge in place: `write` never overtakes `read`, so each merged span
-        // can be stored where the first span of its group was.
-        let mut write = 0;
-        for read in 0..list.len() {
-            let span = list[read];
-            if write > 0 {
-                let last = &mut list[write - 1];
-                if span.min <= last.max + 1e-6 {
-                    if (span.max - last.max).abs() <= AGENT_CLIMB + 1e-5 {
-                        last.walkable |= span.walkable;
-                    } else {
-                        // Outside the merge threshold the incoming span's own
-                        // face decides the merged span's walkability.
-                        last.walkable = span.walkable;
-                    }
-                    if span.max > last.max {
-                        last.max = span.max;
-                        last.surface = span.surface;
-                    }
-                    continue;
+/// What the banded rasterization produced, one part per band in band order,
+/// and how many cells the bake covers.
+pub(crate) struct BandRaster {
+    parts: Vec<ColliderRaster>,
+    cells: usize,
+}
+
+impl BandRaster {
+    /// The cell columns from the band parts, cells in ascending order, and the
+    /// explicit carving footprints in band order.
+    pub(crate) fn columns(&self, site: &[f32]) -> (CellColumns, Vec<u32>) {
+        gather_columns(self.cells, site, &self.parts)
+    }
+
+    /// The explicit carving footprints, in band order.
+    pub(crate) fn carving(&self) -> Vec<(usize, [f32; 2])> {
+        self.parts.iter().flat_map(|part| part.carving.iter().copied()).collect()
+    }
+}
+
+/// [`rasterize_colliders`] split into contiguous row bands, one per worker.
+/// One worker, or a grid with fewer rows than workers, runs the single band of
+/// every row on this thread.
+pub(crate) fn rasterize_collider_bands(
+    grid: &Grid,
+    heights: &[f32],
+    polygons: &[ColliderPolygon],
+    workers: usize,
+) -> BandRaster {
+    let bands = row_bands(grid.rows, workers);
+    let parts = if bands.len() == 1 {
+        vec![rasterize_colliders(grid, heights, polygons, bands[0].rows())]
+    } else {
+        run_bands(grid, heights, polygons, &bands)
+    };
+    BandRaster {
+        parts,
+        cells: grid.cols * grid.rows,
+    }
+}
+
+/// Work every band on its own thread where threads exist, and return the
+/// parts in band order.
+#[cfg(not(target_arch = "wasm32"))]
+fn run_bands(
+    grid: &Grid,
+    heights: &[f32],
+    polygons: &[ColliderPolygon],
+    bands: &[Band],
+) -> Vec<ColliderRaster> {
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = bands
+            .iter()
+            .map(|band| {
+                let rows = band.rows();
+                scope.spawn(move || rasterize_colliders(grid, heights, polygons, rows))
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| match handle.join() {
+                Ok(part) => part,
+                Err(payload) => std::panic::resume_unwind(payload),
+            })
+            .collect()
+    })
+}
+
+/// Without threads the bands run one after another on this thread.
+#[cfg(target_arch = "wasm32")]
+fn run_bands(
+    grid: &Grid,
+    heights: &[f32],
+    polygons: &[ColliderPolygon],
+    bands: &[Band],
+) -> Vec<ColliderRaster> {
+    bands
+        .iter()
+        .map(|band| rasterize_colliders(grid, heights, polygons, band.rows()))
+        .collect()
+}
+
+/// Merge one cell column the way a heightfield span stack merges: spans that
+/// overlap or touch become one; a merge whose tops are within one climb also
+/// merges the walkable mark, so a short steep lip on a walkable floor stays
+/// walkable. Then a non-walkable span just above a walkable one inherits it
+/// when the climb covers the step (the low-hanging filter).
+fn merge_span_column(list: &mut [Span]) -> u32 {
+    list.sort_by(|a, b| a.min.total_cmp(&b.min).then(a.max.total_cmp(&b.max)));
+    // Merge in place: `write` never overtakes `read`, so each merged span
+    // can be stored where the first span of its group was.
+    let mut write = 0;
+    for read in 0..list.len() {
+        let span = list[read];
+        if write > 0 {
+            let last = &mut list[write - 1];
+            if span.min <= last.max + 1e-6 {
+                if (span.max - last.max).abs() <= AGENT_CLIMB + 1e-5 {
+                    last.walkable |= span.walkable;
+                } else {
+                    // Outside the merge threshold the incoming span's own
+                    // face decides the merged span's walkability.
+                    last.walkable = span.walkable;
                 }
+                if span.max > last.max {
+                    last.max = span.max;
+                    last.surface = span.surface;
+                }
+                continue;
             }
-            list[write] = span;
-            write += 1;
         }
-        list.truncate(write);
-        let mut previous_walkable = false;
-        let mut previous_max = 0.0;
-        for span in list.iter_mut() {
-            let original = span.walkable;
-            if !original
-                && previous_walkable
-                && (span.max - previous_max).abs() <= AGENT_CLIMB + 1e-5
-            {
-                span.walkable = true;
+        list[write] = span;
+        write += 1;
+    }
+    let list = &mut list[..write];
+    let mut previous_walkable = false;
+    let mut previous_max = 0.0;
+    for span in list.iter_mut() {
+        let original = span.walkable;
+        if !original
+            && previous_walkable
+            && (span.max - previous_max).abs() <= AGENT_CLIMB + 1e-5
+        {
+            span.walkable = true;
+        }
+        // The low-hanging rule never chains through two non-walkable spans.
+        previous_walkable = original;
+        previous_max = span.max;
+    }
+    write as u32
+}
+
+/// Resolve the non-carving collider sources already rasterized by
+/// [`rasterize_collider_bands`] into the walk surface the way the engine's
+/// bake builds its span columns, then carve the explicit obstacles against
+/// the selected surface (see the caller). Returns the collision surfaces, the
+/// multi-surface count and the erosion edges; `grid.walkable` and `heights`
+/// come back holding the chosen surface of every walkable cell.
+pub(crate) fn mark_collider_spans(
+    grid: &mut Grid,
+    heights: &mut [f32],
+    raster: BandRaster,
+) -> SurfaceBake {
+    let cells = grid.cols * grid.rows;
+    debug_assert_eq!(heights.len(), cells);
+    let (mut columns, mut lengths) = raster.columns(heights);
+    let carving = raster.carving();
+    // Merge each column as a heightfield span stack; a column whose site has
+    // no height sample is all site face.
+    for index in 0..cells {
+        if lengths[index] == 0 {
+            continue;
+        }
+        if heights[index].is_finite() {
+            if let Some(slots) = columns.get_mut(index, &lengths) {
+                lengths[index] = merge_span_column(slots);
             }
-            // The low-hanging rule never chains through two non-walkable spans.
-            previous_walkable = original;
-            previous_max = span.max;
+        } else {
+            lengths[index] = 1;
         }
     }
 
     // Cells next to a column are the only ones whose ledge test has to look at
     // span stacks; everywhere else the site face is the whole neighbour column.
     let mut near = vec![false; cells];
-    for &index in columns.keys() {
+    for index in 0..cells {
+        if lengths[index] == 0 {
+            continue;
+        }
         near[index] = true;
         let (cx, cz) = (index % grid.cols, index / grid.cols);
         for (dx, dz) in [(1isize, 0isize), (-1, 0), (0, 1), (0, -1)] {
@@ -767,15 +1066,24 @@ pub(crate) fn mark_collider_spans(
                 }
                 continue;
             }
-            match columns.get(&index) {
+            match columns.get(index, &lengths) {
                 Some(list) => {
                     for (k, span) in list.iter().enumerate() {
                         if !span.walkable {
                             continue;
                         }
                         let ceiling = list.get(k + 1).map_or(f32::INFINITY, |next| next.min);
-                        if span_is_ledge(span.max, ceiling, cx, cz, &near, grid, &columns, heights)
-                        {
+                        if span_is_ledge(
+                            span.max,
+                            ceiling,
+                            cx,
+                            cz,
+                            &near,
+                            grid,
+                            &columns,
+                            &lengths,
+                            heights,
+                        ) {
                             span_kills.push((index, k));
                         }
                     }
@@ -789,6 +1097,7 @@ pub(crate) fn mark_collider_spans(
                         &near,
                         grid,
                         &columns,
+                        &lengths,
                         heights,
                     ) {
                         cell_kills.push(index);
@@ -798,7 +1107,7 @@ pub(crate) fn mark_collider_spans(
         }
     }
     for (index, k) in span_kills {
-        if let Some(span) = columns.get_mut(&index).and_then(|list| list.get_mut(k)) {
+        if let Some(span) = columns.get_mut(index, &lengths).and_then(|list| list.get_mut(k)) {
             span.walkable = false;
         }
     }
@@ -808,11 +1117,13 @@ pub(crate) fn mark_collider_spans(
 
     // Low-height filter: a walkable span needs the agent's height up to the
     // next span in its own column.
-    for list in columns.values_mut() {
-        for k in 0..list.len() {
-            let ceiling = list.get(k + 1).map_or(f32::INFINITY, |next| next.min);
-            if list[k].walkable && ceiling - list[k].max < AGENT_HEIGHT {
-                list[k].walkable = false;
+    for index in 0..cells {
+        if let Some(list) = columns.get_mut(index, &lengths) {
+            for k in 0..list.len() {
+                let ceiling = list.get(k + 1).map_or(f32::INFINITY, |next| next.min);
+                if list[k].walkable && ceiling - list[k].max < AGENT_HEIGHT {
+                    list[k].walkable = false;
+                }
             }
         }
     }
@@ -822,9 +1133,9 @@ pub(crate) fn mark_collider_spans(
     // face itself), and connections carry the flood outward (the bridge ramp).
     // Unreached spans (a table top, a lantern cap) are not part of the field.
     let mut seeds: Vec<(usize, usize)> = Vec::new();
-    for (index, list) in columns.iter() {
-        let height = heights[*index];
-        let (cx, cz) = (*index % grid.cols, *index / grid.cols);
+    for (index, list) in columns.columns(&lengths) {
+        let height = heights[index];
+        let (cx, cz) = (index % grid.cols, index / grid.cols);
         for (k, span) in list.iter().enumerate() {
             if !span.walkable {
                 continue;
@@ -840,10 +1151,8 @@ pub(crate) fn mark_collider_spans(
                     }
                     let nindex = nz as usize * grid.cols + nx as usize;
                     // A cell away from every column has no span stack of its
-                    // own; only a cell next to one needs the map.
-                    if !grid.walkable[nindex]
-                        || (near[nindex] && columns.contains_key(&nindex))
-                    {
+                    // own; only a cell next to one needs its column.
+                    if !grid.walkable[nindex] || (near[nindex] && columns.has(nindex, &lengths)) {
                         continue;
                     }
                     if connected(span.max, ceiling, heights[nindex], f32::INFINITY) {
@@ -853,13 +1162,13 @@ pub(crate) fn mark_collider_spans(
                 }
             }
             if reachable {
-                seeds.push((*index, k));
+                seeds.push((index, k));
             }
         }
     }
     let mut queue: Vec<(usize, usize)> = Vec::with_capacity(seeds.len());
     for (index, k) in seeds {
-        if let Some(span) = columns.get_mut(&index).and_then(|list| list.get_mut(k)) {
+        if let Some(span) = columns.get_mut(index, &lengths).and_then(|list| list.get_mut(k)) {
             if !span.reached {
                 span.reached = true;
                 queue.push((index, k));
@@ -869,7 +1178,7 @@ pub(crate) fn mark_collider_spans(
     let mut found: Vec<(usize, usize)> = Vec::new();
     while let Some((index, k)) = queue.pop() {
         let (top, ceiling) = {
-            let list = &columns[&index];
+            let list = columns.get(index, &lengths).expect("a reached span's cell has a column");
             let span = &list[k];
             (
                 span.max,
@@ -889,7 +1198,7 @@ pub(crate) fn mark_collider_spans(
             if !grid.walkable[nindex] || !near[nindex] {
                 continue;
             }
-            let Some(list) = columns.get(&nindex) else {
+            let Some(list) = columns.get(nindex, &lengths) else {
                 continue;
             };
             for (j, span) in list.iter().enumerate() {
@@ -903,7 +1212,10 @@ pub(crate) fn mark_collider_spans(
             }
         }
         for &(nindex, j) in &found {
-            if let Some(span) = columns.get_mut(&nindex).and_then(|list| list.get_mut(j)) {
+            if let Some(span) = columns
+                .get_mut(nindex, &lengths)
+                .and_then(|list| list.get_mut(j))
+            {
                 if !span.reached {
                     span.reached = true;
                     queue.push((nindex, j));
@@ -915,10 +1227,9 @@ pub(crate) fn mark_collider_spans(
     // The chosen surface per cell: the highest reached span, or no surface at
     // all when nothing was reached. A column that reached several spans is
     // counted; a single-surface host cannot represent more than one.
-    let mut surfaces: HashMap<usize, [f32; 3]> = HashMap::new();
-    let mut ceilings: CellMap<f32> = CellMap::default();
+    let mut tables = SpanTables::new(cells);
     let mut multi_surface = 0;
-    for (index, list) in columns.iter() {
+    for (index, list) in columns.columns(&lengths) {
         let mut best: Option<usize> = None;
         let mut reached = 0;
         for (k, span) in list.iter().enumerate() {
@@ -933,24 +1244,26 @@ pub(crate) fn mark_collider_spans(
         match best {
             Some(k) => {
                 let span = list[k];
-                heights[*index] = span.max;
-                ceilings.insert(
-                    *index,
+                heights[index] = span.max;
+                tables.set_ceiling(
+                    index,
                     list.get(k + 1).map_or(f32::INFINITY, |next| next.min),
                 );
                 if let Some(plane) = span.surface {
-                    surfaces.insert(*index, plane);
+                    tables.set_plane(index, plane);
                 }
                 if reached > 1 {
                     multi_surface += 1;
                 }
             }
-            None => grid.walkable[*index] = false,
+            None => grid.walkable[index] = false,
         }
     }
 
     // Explicit obstacles test their own hull against the surface that was
-    // selected, not against the original floor.
+    // selected, not against the original floor; the carving spans come in
+    // band order after a banded rasterization, an order the cell count does not
+    // depend on.
     let mut nulled = 0;
     for (index, span) in carving {
         if !grid.walkable[index] {
@@ -975,12 +1288,17 @@ pub(crate) fn mark_collider_spans(
     let mut edges: Vec<u32> = Vec::new();
     // The sparse walk is only worth it when the near region is smaller than
     // the grid; otherwise the plain scan is cheaper and equally correct.
-    if site_max - site_min <= AGENT_CLIMB && columns.len().saturating_mul(5) < cells {
-        for &key in columns.keys() {
-            let (cx, cz) = (key % grid.cols, key / grid.cols);
-            if grid.walkable[key] && span_is_disconnected(key, cx, cz, &near, grid, &ceilings, heights)
+    let columns_with_spans = lengths.iter().filter(|len| **len > 0).count();
+    if site_max - site_min <= AGENT_CLIMB && columns_with_spans.saturating_mul(5) < cells {
+        for column in 0..cells {
+            if lengths[column] == 0 {
+                continue;
+            }
+            let (cx, cz) = (column % grid.cols, column / grid.cols);
+            if grid.walkable[column]
+                && span_is_disconnected(column, cx, cz, &near, grid, &tables.ceilings, heights)
             {
-                edges.push(key as u32);
+                edges.push(column as u32);
             }
             for (dx, dz) in [(1isize, 0isize), (-1, 0), (0, 1), (0, -1)] {
                 let nx = cx as isize + dx;
@@ -996,7 +1314,7 @@ pub(crate) fn mark_collider_spans(
                         nz as usize,
                         &near,
                         grid,
-                        &ceilings,
+                        &tables.ceilings,
                         heights,
                     )
                 {
@@ -1009,7 +1327,7 @@ pub(crate) fn mark_collider_spans(
             for cx in 0..grid.cols {
                 let index = cz * grid.cols + cx;
                 if grid.walkable[index]
-                    && span_is_disconnected(index, cx, cz, &near, grid, &ceilings, heights)
+                    && span_is_disconnected(index, cx, cz, &near, grid, &tables.ceilings, heights)
                 {
                     edges.push(index as u32);
                 }
@@ -1019,7 +1337,7 @@ pub(crate) fn mark_collider_spans(
     SurfaceBake {
         obstacle_nulled: nulled,
         site: Vec::new(),
-        surfaces,
+        surfaces: SurfacePlanes::new(&tables),
         multi_surface,
         edges,
     }

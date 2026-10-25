@@ -123,6 +123,22 @@ impl PolyMesh {
     pub(crate) fn polygon_count(&self) -> usize {
         self.tris.len()
     }
+
+    /// Fold the polygon mesh into `hash`: the cell of every vertex, in order,
+    /// then every triangle's vertex indices.
+    pub(crate) fn fold_digest(&self, hash: &mut super::Fnv) {
+        hash.write_usize(self.verts.len());
+        for &[x, z] in &self.verts {
+            hash.write_i64(i64::from(x));
+            hash.write_i64(i64::from(z));
+        }
+        hash.write_usize(self.tris.len());
+        for triangle in &self.tris {
+            for &vertex in triangle {
+                hash.write_u32(vertex);
+            }
+        }
+    }
 }
 
 /// 三角形两两之间的有向边 → (单元, 边序号)，用来配对邻接。

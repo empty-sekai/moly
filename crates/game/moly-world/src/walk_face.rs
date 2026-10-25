@@ -8,7 +8,10 @@ use crate::field_modes::LayoutSaved;
 use crate::site::{NavMeshSourceRegion, SiteActive, Sites, WalkFaceMeshes};
 use bevy::ecs::message::MessageReader;
 use bevy::prelude::*;
-use moly_law::carve::{self, BakeCounts, WalkField};
+use bevy::tasks::futures_lite::future;
+use bevy::tasks::{block_on, AsyncComputeTaskPool, Task};
+use moly_law::carve::{self, BakeCounts, ColliderPolygon, WalkField};
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 /// 站点可行走面：世界系三角网的 xz 投影 + 挖洞烘焙出的可行走场。换站
@@ -105,6 +108,273 @@ impl WalkFace {
     pub fn carve_counts(&self) -> &BakeCounts {
         self.field.counts()
     }
+
+    /// The baked field's fingerprint ([`WalkField::digest`]).
+    pub fn digest(&self) -> u64 {
+        self.field.digest()
+    }
+}
+
+/// Baked fields kept for reuse, most recently used last; at most
+/// [`KEPT_BAKES`].
+const KEPT_BAKES: usize = 4;
+
+/// How many row bands the collider rasterization may use, read once from
+/// `MOLY_WALK_BAKE_THREADS` (`0` and `1` keep it on one thread; values above
+/// 8 are capped). Without the variable the bake uses the machine's available
+/// parallelism, capped at 8; a target without threads uses one band.
+fn bake_threads() -> usize {
+    static THREADS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *THREADS.get_or_init(|| {
+        #[cfg(not(target_arch = "wasm32"))]
+        let available = || std::thread::available_parallelism().map_or(1, |count| count.get());
+        #[cfg(target_arch = "wasm32")]
+        let available = || 1;
+        let threads = std::env::var("MOLY_WALK_BAKE_THREADS")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<usize>().ok())
+            .unwrap_or_else(available);
+        threads.clamp(1, 8)
+    })
+}
+
+/// A baked field and the digest of the inputs it was baked from.
+struct CachedField {
+    key: u64,
+    field: Arc<WalkField>,
+}
+
+/// A walk-field bake running on the async compute pool.
+struct BakeJob {
+    key: u64,
+    tag: &'static str,
+    obstacles: usize,
+    started: bevy::platform::time::Instant,
+    /// The layout revision the inputs were gathered at.
+    revision: u64,
+    /// Whether it replaces a face in place (a layout rebake) rather than
+    /// giving the site its first face.
+    rebake: bool,
+    task: Task<WalkField>,
+}
+
+/// A finished bake.
+struct Finished {
+    field: Arc<WalkField>,
+    revision: u64,
+}
+
+/// The walk fields already baked, least recently used first, and the bake in
+/// flight, shared by [`build`] and the layout rebake. A request whose inputs
+/// match a kept field is served from it, so returning to a site whose faces
+/// and placed colliders are unchanged skips the bake. The inputs hash covers
+/// the site's faces, so fields of different sites never match. Any other
+/// request bakes on the async compute pool while the frames go on; the site
+/// keeps the face it has (or none) until the bake is in.
+#[derive(Resource, Default)]
+pub struct WalkFaceBakes {
+    entries: VecDeque<CachedField>,
+    job: Option<BakeJob>,
+}
+
+impl WalkFaceBakes {
+    /// The kept field of `key`, made the most recently used.
+    fn kept(&mut self, key: u64) -> Option<Arc<WalkField>> {
+        let index = self.entries.iter().position(|entry| entry.key == key)?;
+        let entry = self.entries.remove(index)?;
+        let field = entry.field.clone();
+        self.entries.push_back(entry);
+        Some(field)
+    }
+
+    fn keep(&mut self, key: u64, field: Arc<WalkField>) {
+        while self.entries.len() >= KEPT_BAKES {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(CachedField { key, field });
+    }
+
+    /// The field for `inputs` now when a kept one matches (logged as a
+    /// reuse). Otherwise the bake of these inputs goes on: the job already
+    /// baking them is kept, any other job is dropped and a new one starts
+    /// with `threads` row bands in the collider rasterization; `None` until
+    /// [`Self::finished`] hands the field over.
+    fn request(
+        &mut self,
+        inputs: BakeInputs,
+        tag: &'static str,
+        rebake: bool,
+        revision: u64,
+        threads: usize,
+    ) -> Option<Arc<WalkField>> {
+        let key = inputs.digest();
+        if let Some(field) = self.kept(key) {
+            info!("[walk-face] 可行走场复用：digest {:016x}", field.digest());
+            self.job = None;
+            return Some(field);
+        }
+        if let Some(job) = self.job.as_mut().filter(|job| job.key == key) {
+            job.revision = revision;
+            return None;
+        }
+        let obstacles = inputs.obstacles;
+        let task = AsyncComputeTaskPool::get().spawn(async move {
+            WalkField::bake_colliders_threads(
+                &inputs.surface,
+                &inputs.polygons,
+                inputs.voxel,
+                Some(inputs.volume),
+                threads,
+            )
+        });
+        self.job = Some(BakeJob {
+            key,
+            tag,
+            obstacles,
+            started: bevy::platform::time::Instant::now(),
+            revision,
+            rebake,
+            task,
+        });
+        None
+    }
+
+    /// The bake in flight: whether it is a rebake, and the layout revision
+    /// its inputs were gathered at.
+    fn in_flight(&self) -> Option<(bool, u64)> {
+        self.job.as_ref().map(|job| (job.rebake, job.revision))
+    }
+
+    /// The field of the bake in flight once it is done (logged and kept);
+    /// `None` while it runs or when there is none.
+    fn finished(&mut self) -> Option<Finished> {
+        let job = self.job.as_mut()?;
+        let field = block_on(future::poll_once(&mut job.task))?;
+        let job = self.job.take()?;
+        log_bake(job.tag, &field, job.obstacles, job.started.elapsed());
+        let field = Arc::new(field);
+        self.keep(job.key, field.clone());
+        Some(Finished {
+            field,
+            revision: job.revision,
+        })
+    }
+
+    /// Drops the bake in flight; its result is never used.
+    fn cancel(&mut self) {
+        self.job = None;
+    }
+}
+
+/// Everything the walk-field bake reads: the surface triangles, the collider
+/// polygons (every field of them), the voxel and the build volume. `obstacles`
+/// (the placed rows whose footprints were baked) is part of the log, not of
+/// the bake, and is not hashed.
+struct BakeInputs {
+    surface: Vec<[[f32; 3]; 3]>,
+    polygons: Vec<ColliderPolygon>,
+    voxel: f32,
+    volume: carve::BuildVolume,
+    obstacles: usize,
+}
+
+impl BakeInputs {
+    /// FNV-1a over the inputs' bytes (floats by their bits). The surface
+    /// triangles and the collider polygons are each hashed on their own and
+    /// folded in sorted order, so the key does not depend on the order the
+    /// site's meshes and fixtures were gathered in.
+    fn digest(&self) -> u64 {
+        let mut hash = Fnv::start();
+        hash.f32(self.voxel);
+        for &[x, z] in &[self.volume.min, self.volume.max] {
+            hash.f32(x);
+            hash.f32(z);
+        }
+        let mut triangles: Vec<u64> = self
+            .surface
+            .iter()
+            .map(|triangle| {
+                let mut hash = Fnv::start();
+                for point in triangle {
+                    for &value in point {
+                        hash.f32(value);
+                    }
+                }
+                hash.finish()
+            })
+            .collect();
+        triangles.sort_unstable();
+        hash.usize(triangles.len());
+        for triangle in triangles {
+            hash.u64(triangle);
+        }
+        let mut polygons: Vec<u64> = self.polygons.iter().map(polygon_digest).collect();
+        polygons.sort_unstable();
+        hash.usize(polygons.len());
+        for polygon in polygons {
+            hash.u64(polygon);
+        }
+        hash.finish()
+    }
+}
+
+/// FNV-1a over one collider polygon: its hull, vertical bounds, triangles and
+/// flags.
+fn polygon_digest(polygon: &ColliderPolygon) -> u64 {
+    let mut hash = Fnv::start();
+    hash.usize(polygon.vertices.len());
+    for point in &polygon.vertices {
+        hash.f32(point[0]);
+        hash.f32(point[1]);
+    }
+    hash.f32(polygon.min_y);
+    hash.f32(polygon.max_y);
+    hash.usize(polygon.triangles.len());
+    for triangle in &polygon.triangles {
+        for point in triangle {
+            for &value in point {
+                hash.f32(value);
+            }
+        }
+    }
+    hash.u8(u8::from(polygon.solid));
+    hash.u8(u8::from(polygon.carve));
+    hash.finish()
+}
+
+/// FNV-1a over bytes.
+#[derive(Default)]
+struct Fnv(u64);
+
+impl Fnv {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    fn start() -> Self {
+        Self(Self::OFFSET)
+    }
+
+    fn u8(&mut self, byte: u8) {
+        self.0 = (self.0 ^ u64::from(byte)).wrapping_mul(Self::PRIME);
+    }
+
+    fn u64(&mut self, value: u64) {
+        for byte in value.to_le_bytes() {
+            self.u8(byte);
+        }
+    }
+
+    fn usize(&mut self, value: usize) {
+        self.u64(value as u64);
+    }
+
+    fn f32(&mut self, value: f32) {
+        self.u64(u64::from(value.to_bits()));
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
 }
 
 /// Update：面网格柄齐备且站点场景展开后，把可行走面提为世界系三角网
@@ -125,8 +395,21 @@ pub fn build(
     collision: CollisionInputs,
     mut failure: Local<String>,
     parts: Query<(&Mesh3d, &GlobalTransform), Without<moly_assets::scene_state::SourceInactive>>,
+    mut baking: ResMut<WalkFaceBakes>,
 ) {
     if face.is_some() {
+        return;
+    }
+    // The site's first bake runs off the main thread; its face goes in once
+    // it is done.
+    if baking.in_flight().is_some_and(|(rebake, _)| !rebake) {
+        if let Some(done) = baking.finished() {
+            commands.insert_resource(WalkFace {
+                field: done.field,
+                generation: 1,
+                layout_revision: done.revision,
+            });
+        }
         return;
     }
     let Some(handles) = handles else {
@@ -159,11 +442,7 @@ pub fn build(
         colliders: sources.colliders,
         polygons: sources.polygons.len(),
     });
-    let n_obstacles = sources.colliders;
     let volume = site_volume(&sites, &site);
-    let started = bevy::platform::time::Instant::now();
-    let field = WalkField::bake_colliders_in(&tris, &sources.polygons, voxel, Some(volume));
-    let took = started.elapsed();
     let (min, max) =
         tris.iter()
             .flatten()
@@ -186,12 +465,20 @@ pub fn build(
         volume.min[1],
         volume.max[1]
     );
-    log_bake("烘好", &field, n_obstacles, took);
-    commands.insert_resource(WalkFace {
-        field: Arc::new(field),
-        generation: 1,
-        layout_revision: revision.0,
-    });
+    let inputs = BakeInputs {
+        surface: tris,
+        polygons: sources.polygons,
+        voxel,
+        volume,
+        obstacles: sources.colliders,
+    };
+    if let Some(field) = baking.request(inputs, "烘好", false, revision.0, bake_threads()) {
+        commands.insert_resource(WalkFace {
+            field,
+            generation: 1,
+            layout_revision: revision.0,
+        });
+    }
 }
 
 /// 放稳行变化即重烘；会话撤销时同时撤销增量洞，保存事件仍驱动同一入口。
@@ -214,6 +501,7 @@ pub fn rebake_on_save(
     mut failure: Local<String>,
     parts: Query<(&Mesh3d, &GlobalTransform), Without<moly_assets::scene_state::SourceInactive>>,
     mut carving: RuntimeCarving,
+    mut baking: ResMut<WalkFaceBakes>,
 ) {
     carving.adopt(&mut commands);
     let saved_now = !saved.is_empty();
@@ -233,6 +521,7 @@ pub fn rebake_on_save(
         &collision,
         &mut failure,
         &parts,
+        &mut baking,
     );
     if !rebaked {
         carving.apply(&mut commands, face.as_deref());
@@ -256,6 +545,7 @@ fn rebake(
     collision: &CollisionInputs,
     failure: &mut String,
     parts: &Query<(&Mesh3d, &GlobalTransform), Without<moly_assets::scene_state::SourceInactive>>,
+    baking: &mut WalkFaceBakes,
 ) -> bool {
     // A save stays pending until the committed scene's collision graph is ready.
     *pending |= saved_now || face.is_some_and(|face| face.layout_revision != revision.0);
@@ -267,6 +557,18 @@ fn rebake(
     else {
         return false; // 面不在（未烘好或换站清扫中）：台账已落，build 会带上
     };
+    // A rebake in flight replaces the face once it is done; until then the
+    // old face stays. A new save while it runs gathers the inputs again.
+    if let Some((true, baking_revision)) = baking.in_flight() {
+        if let Some(done) = baking.finished() {
+            replace_face(commands, face, done.field, done.revision);
+            *pending = false;
+            return true;
+        }
+        if !saved_now && baking_revision == revision.0 {
+            return false;
+        }
+    }
     let Some(tris) = collect_tris(meshes, handles, parts) else {
         return false;
     };
@@ -285,13 +587,28 @@ fn rebake(
         colliders: sources.colliders,
         polygons: sources.polygons.len(),
     });
-    let n_obstacles = sources.colliders;
-    let prior = *face.carve_counts();
     let volume = site_volume(sites, site);
-    let started = bevy::platform::time::Instant::now();
-    let field = WalkField::bake_colliders_in(&tris, &sources.polygons, voxel, Some(volume));
-    let took = started.elapsed();
-    log_bake("重烘（摆放变化）", &field, n_obstacles, took);
+    let inputs = BakeInputs {
+        surface: tris,
+        polygons: sources.polygons,
+        voxel,
+        volume,
+        obstacles: sources.colliders,
+    };
+    let Some(field) =
+        baking.request(inputs, "重烘（摆放变化）", true, revision.0, bake_threads())
+    else {
+        return false;
+    };
+    replace_face(commands, face, field, revision.0);
+    *pending = false;
+    true
+}
+
+/// Puts the rebaked `field` in place of `face` under the next navigation
+/// generation, and logs the counts against the old field.
+fn replace_face(commands: &mut Commands, face: &WalkFace, field: Arc<WalkField>, revision: u64) {
+    let prior = *face.carve_counts();
     let fresh = *field.counts();
     info!(
         "[walk-face] 重烘对账：可走 {} → {} 格 · 足迹杀 {} → {} · 侵蚀杀 {} → {} · 小区杀 {} → {}",
@@ -305,12 +622,10 @@ fn rebake(
         fresh.region_nulled,
     );
     commands.insert_resource(WalkFace {
-        field: Arc::new(field),
+        field,
         generation: face.generation.checked_add(1).expect("导航代数溢出"),
-        layout_revision: revision.0,
+        layout_revision: revision,
     });
-    *pending = false;
-    true
 }
 
 /// QA probe state: what the last report covered, so that a report is written
@@ -453,11 +768,16 @@ pub fn probe(
     state.reported = Some(key);
 }
 
-/// 换站清扫：面、面源柄与已存台账一起撤（新站由 [`build`] 重建）。
+/// 换站清扫：面、面源柄与已存台账一起撤（新站由 [`build`] 重建；已烘字段留在 [`WalkFaceBakes`] 供回站复用）。
 pub fn teardown(commands: &mut Commands) {
     commands.remove_resource::<WalkFaceMeshes>();
     commands.remove_resource::<WalkFace>();
     commands.remove_resource::<CollisionBakeStatus>();
+    commands.queue(|world: &mut World| {
+        if let Some(mut bakes) = world.get_resource_mut::<WalkFaceBakes>() {
+            bakes.cancel();
+        }
+    });
 }
 
 /// 面三角收集：柄对应的全部网格实体齐备且资产到齐时返回世界系三角网，
@@ -548,11 +868,11 @@ fn record_failure(commands: &mut Commands, prior: &mut String, reason: String) {
     });
 }
 
-/// 烘焙账目行（建面与重烘同格式）。
+/// 烘焙账目行（建面与重烘同格式，末段是场指纹）。
 fn log_bake(tag: &str, field: &WalkField, obstacles: usize, took: std::time::Duration) {
     let counts = field.counts();
     info!(
-        "[walk-face] 可行走场{tag}：voxel {:.2} · 格 {} · 入面 {} · 阻挡足迹 {obstacles} 行（杀 {} 格）· 侵蚀杀 {} · 小区杀 {} · 可走 {} 格 · 多层 {} 格 · 单调分区 {} 区 · 轮廓 {} 条/{} 顶点 · 导航多边形 {} 个 · 用时 {:.1} ms",
+        "[walk-face] 可行走场{tag}：voxel {:.2} · 格 {} · 入面 {} · 阻挡足迹 {obstacles} 行（杀 {} 格）· 侵蚀杀 {} · 小区杀 {} · 可走 {} 格 · 多层 {} 格 · 单调分区 {} 区 · 轮廓 {} 条/{} 顶点 · 导航多边形 {} 个 · 用时 {:.1} ms · digest {:016x}",
         field.voxel(),
         counts.cells,
         counts.face,
@@ -566,6 +886,7 @@ fn log_bake(tag: &str, field: &WalkField, obstacles: usize, took: std::time::Dur
         counts.contour_verts,
         counts.polygons,
         took.as_secs_f64() * 1000.0,
+        field.digest(),
     );
 }
 
@@ -825,9 +1146,10 @@ impl RuntimeCarving<'_, '_> {
         }
         let field = face.field.carve_obstacles(&carves);
         let counts = *field.counts();
+        let digest = field.digest();
         let generation = face.generation.checked_add(1).expect("导航代数溢出");
         info!(
-            "[walk-face] runtime carve: {} obstacle shapes, walk cells carved {}, walkable {}, cells {} (generation {generation})",
+            "[walk-face] runtime carve: {} obstacle shapes, walk cells carved {}, walkable {}, cells {} (generation {generation}) · digest {digest:016x}",
             carves.len(),
             counts.carved,
             counts.walkable,

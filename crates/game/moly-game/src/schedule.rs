@@ -165,6 +165,7 @@ pub fn install(app: &mut App) {
             .chain()
             .in_set(crate::npc_state::NpcPresenterSet),
     );
+    app.init_resource::<crate::walk_face::WalkFaceBakes>();
     app.init_resource::<crate::npc_fixture_activity::NpcFixtureActivities>()
         .init_resource::<crate::npc_fixture_activity::NpcFixtureAreas>()
         .add_systems(

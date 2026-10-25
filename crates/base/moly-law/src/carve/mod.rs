@@ -167,6 +167,49 @@ pub const FIXTURE_ACTION_REACH_THRESHOLD: f32 = 0.01;
 /// `GeneratePath` 重试时 `SamplePosition` 的 maxDistance（源字面量）。
 pub const GENERATE_PATH_SAMPLE_DISTANCE: f32 = 500.0;
 
+/// FNV-1a over bytes: deterministic across runs and processes (unlike the
+/// default hasher's random state), so two bakes of one input can be compared
+/// by the digest of their fields.
+#[derive(Default)]
+pub(crate) struct Fnv(u64);
+
+impl Fnv {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    fn start() -> Self {
+        Self(Self::OFFSET)
+    }
+
+    pub(crate) fn write_byte(&mut self, byte: u8) {
+        self.0 = (self.0 ^ u64::from(byte)).wrapping_mul(Self::PRIME);
+    }
+
+    fn write_u32(&mut self, value: u32) {
+        for byte in value.to_le_bytes() {
+            self.write_byte(byte);
+        }
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        for byte in value.to_le_bytes() {
+            self.write_byte(byte);
+        }
+    }
+
+    fn write_usize(&mut self, value: usize) {
+        self.write_u64(value as u64);
+    }
+
+    fn write_i64(&mut self, value: i64) {
+        self.write_u64(value as u64);
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
 /// A navigation agent's corridor (`PathCorridor`): the cells from the one
 /// the agent stands on to the target's, the agent's position and the
 /// target (whose heights are the caller's), and whether the corridor reaches
@@ -355,6 +398,27 @@ pub struct ColliderPolygon {
     pub carve: bool,
 }
 
+/// What the span pipeline resolved for the walk surface: the source triangles
+/// kept for exact height reads, the collider plane of every cell whose surface
+/// a collider produced, how many cells reached more than one span, and the
+/// connection edges the erosion measures from.
+pub(crate) struct SurfaceBake {
+    /// Cells the explicit carving obstacles removed (the bake's foot null).
+    pub(crate) obstacle_nulled: usize,
+    /// Walk face triangles, kept to evaluate the site surface exactly.
+    pub(crate) site: Vec<[[f32; 3]; 3]>,
+    /// Every cell's collider top face plane, as a dense table index into the
+    /// bake's plane table.
+    pub(crate) surfaces: grid::SurfacePlanes,
+    /// Cells where more than one walkable span was reached from the ground;
+    /// the highest one became the cell's surface.
+    pub(crate) multi_surface: usize,
+    /// Walkable cells whose chosen span is not connected to a walkable
+    /// neighbour's chosen span (the erosion adds these to its walkability
+    /// boundary).
+    pub(crate) edges: Vec<u32>,
+}
+
 /// The horizontal extent of a `NavMeshSurface` build volume
 /// (`CollectObjects.Volume`): the bake reads only the sources inside it and
 /// builds only inside it, so its sides are edges of the baked field.
@@ -475,8 +539,9 @@ pub struct WalkField {
     /// point (the cell's surface may come from one of them).
     site: Vec<[[f32; 3]; 3]>,
     /// Cells whose surface a collider triangle produced, as that triangle's
-    /// plane. Sparse: cells the site walk face supplies are absent.
-    surfaces: std::collections::HashMap<usize, [f32; 3]>,
+    /// plane: one table index per cell, with no plane where the site walk
+    /// face supplies the surface. Cloning and carving share the arrays.
+    surfaces: grid::SurfacePlanes,
     /// The baked field before runtime carving, kept once a carve is applied
     /// (the engine rebuilds a carved tile from its baked data).
     base: Option<std::sync::Arc<CarveBase>>,
@@ -500,10 +565,10 @@ impl WalkField {
             grid,
             face,
             input.voxel,
-            grid::SurfaceBake {
+            SurfaceBake {
                 obstacle_nulled,
                 site: Vec::new(),
-                surfaces: std::collections::HashMap::new(),
+                surfaces: grid::SurfacePlanes::none(),
                 multi_surface: 0,
                 edges: Vec::new(),
             },
@@ -528,6 +593,20 @@ impl WalkField {
         voxel: f32,
         volume: Option<BuildVolume>,
     ) -> WalkField {
+        Self::bake_colliders_threads(surface, colliders, voxel, volume, 1)
+    }
+
+    /// [`Self::bake_colliders_in`] with the collider rasterization spread over
+    /// at most `bands` row bands (one thread each on targets with threads;
+    /// `0` and `1` rasterize on the calling thread). The result does not
+    /// depend on the count.
+    pub fn bake_colliders_threads(
+        surface: &[[[f32; 3]; 3]],
+        colliders: &[ColliderPolygon],
+        voxel: f32,
+        volume: Option<BuildVolume>,
+        bands: usize,
+    ) -> WalkField {
         let tris: Vec<_> = surface
             .iter()
             .map(|tri| tri.map(|p| [p[0], p[2]]))
@@ -535,7 +614,8 @@ impl WalkField {
         let mut grid = grid::rasterize(&tris, voxel, volume);
         let face = grid.walkable.iter().filter(|w| **w).count();
         let mut heights = grid::surface_heights(&grid, surface);
-        let mut bake = grid::mark_collider_spans(&mut grid, &mut heights, colliders);
+        let raster = grid::rasterize_collider_bands(&grid, &heights, colliders, bands);
+        let mut bake = grid::mark_collider_spans(&mut grid, &mut heights, raster);
         bake.site = surface.to_vec();
         Self::finish_bake(grid, face, voxel, bake)
     }
@@ -544,9 +624,9 @@ impl WalkField {
         mut grid: grid::Grid,
         face: usize,
         voxel: f32,
-        bake: grid::SurfaceBake,
+        bake: SurfaceBake,
     ) -> WalkField {
-        let grid::SurfaceBake {
+        let SurfaceBake {
             obstacle_nulled,
             site,
             surfaces,
@@ -642,7 +722,7 @@ impl WalkField {
         let (x, z) = self.grid.cell_of(p[0], p[1]);
         if x >= 0 && z >= 0 && (x as usize) < self.grid.cols && (z as usize) < self.grid.rows {
             let index = z as usize * self.grid.cols + x as usize;
-            if let Some(plane) = self.surfaces.get(&index) {
+            if let Some(plane) = self.surfaces.plane(index) {
                 return Some(plane[0] * p[0] + plane[1] * p[1] + plane[2]);
             }
         }
@@ -1049,6 +1129,38 @@ impl WalkField {
     /// 体素（米）。
     pub fn voxel(&self) -> f32 {
         self.grid.voxel
+    }
+
+    /// A deterministic fingerprint of the baked field: the walkable mask, the
+    /// region of every cell and the navigation polygons' vertices (grid
+    /// coordinates) and triangles, folded with FNV-1a. Two bakes of the same
+    /// input give the same digest, and a bake whose digest changed walked a
+    /// different field.
+    pub fn digest(&self) -> u64 {
+        let mut hash = Fnv::start();
+        hash.write_usize(self.grid.cols);
+        hash.write_usize(self.grid.rows);
+        for &walkable in &self.grid.walkable {
+            hash.write_byte(u8::from(walkable));
+        }
+        for &region in &self.regions.ids {
+            hash.write_u32(region);
+        }
+        // Every cell's collider surface, as the plane it is (no plane is a
+        // distinct marker), whatever the plane table's order.
+        for index in 0..self.grid.cols * self.grid.rows {
+            match self.surfaces.plane(index) {
+                Some(plane) => {
+                    hash.write_byte(1);
+                    for value in plane {
+                        hash.write_u32(value.to_bits());
+                    }
+                }
+                None => hash.write_byte(0),
+            }
+        }
+        self.polys.fold_digest(&mut hash);
+        hash.finish()
     }
 
     /// 场格的世界包围盒（min 角 / max 远角）。
