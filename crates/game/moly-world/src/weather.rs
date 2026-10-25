@@ -2227,9 +2227,19 @@ impl Plugin for WeatherPlugin {
                     prepare_weather_pyramid.in_set(RenderSystems::PrepareResources),
                 ),
             )
+            // Every post-process system flips the view's ping-pong main
+            // texture when it runs, while the command buffers are submitted
+            // in the schedule's topological order. Two unordered passes can
+            // run in either order on the multi-threaded executor and then
+            // read a texture the other has not written yet, so the chain is
+            // pinned: tonemapping, stock post, weather post, anti-aliasing.
             .add_systems(
                 Core3d,
-                weather_post.after(tonemapping).in_set(Core3dSystems::PostProcess),
+                weather_post
+                    .after(tonemapping)
+                    .before(bevy::anti_alias::fxaa::fxaa)
+                    .before(bevy::anti_alias::smaa::smaa)
+                    .in_set(Core3dSystems::PostProcess),
             );
         app.add_plugins(crate::weather_stock_post::StockPostPlugin);
     }
