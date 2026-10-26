@@ -77,7 +77,7 @@ struct ParticleFrame {
 }
 fn extract(
     mut frame: ResMut<ParticleFrame>,
-    particles: Extract<Query<(Entity, &RenderEntity, &Mesh3d, Ref<SourceParticle>)>>,
+    particles: Extract<Query<(Entity, &RenderEntity, &Mesh3d, Ref<SourceParticle>), Without<crate::markers::SitePresentationHidden>>>,
     meshes: Extract<Res<Assets<Mesh>>>,
     catalogues: Extract<Res<Assets<SourceShaderCatalogue>>>,
     mut catalogue_events: Extract<MessageReader<AssetEvent<SourceShaderCatalogue>>>,

@@ -1278,7 +1278,7 @@ pub fn request_fixture_particles(
     server: Res<AssetServer>,
     jsons: Res<Assets<moly_assets::json::JsonAsset>>,
     mut index: Local<Option<Handle<moly_assets::json::JsonAsset>>>,
-    roots: Query<(Entity, &crate::render_inputs::FixtureSource), (With<crate::render_inputs::FixtureRoot>, Without<FixtureParticleRequest>, Without<FixtureParticlesResolved>)>,
+    roots: Query<(Entity, &crate::render_inputs::FixtureSource), (Or<(With<crate::render_inputs::FixtureRoot>,With<crate::render_inputs::HiddenResidentVisual>)>, Without<FixtureParticleRequest>, Without<FixtureParticlesResolved>)>,
 ) {
     let handle = index.get_or_insert_with(|| server.load("moly://fixture-particles-v2/index.json"));
     // The index is only consulted for fixture roots that have not been

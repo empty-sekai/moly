@@ -258,3 +258,8 @@ impl EffectType {
         format!("moly://fixture-particles-v2/{}.json", self.package())
     }
 }
+
+/// A real hidden resident view still needs material preparation. This marker
+/// prevents that preparation from making its render root visible.
+#[derive(Component)]
+pub struct HiddenResidentVisual;

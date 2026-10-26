@@ -146,12 +146,12 @@ pub fn alpha_gain(albedo: [f32; 3], alpha: f32) -> [f32; 3] {
 pub fn slot_albedo(input: &AvatarFragmentInputs, material: &AvatarMaterial) -> [f32; 3] {
     match input.part_index {
         SLOT_SKIN => {
-            // skin：tex.a 把 tex.rgb 往 _SkinColor.rgb 混，再过 alpha 增益。
+            // Skin alpha blends the sample toward its multiplicative tint.
             let s = input.skin_rgba;
             let mut base = [0.0; 3];
             for c in 0..3 {
-                // s.a * (skin_color - s.rgb) + s.rgb
-                base[c] = s[3] * (material.skin_color[c] - s[c]) + s[c];
+                // s.a * (skin_color * s.rgb - s.rgb) + s.rgb
+                base[c] = s[3] * (material.skin_color[c] * s[c] - s[c]) + s[c];
             }
             alpha_gain(base, material.alpha)
         }
@@ -305,18 +305,23 @@ mod tests {
     }
 
     #[test]
-    fn skin_slot_blends_tex_toward_skin_color_by_alpha() {
-        // skin 支：base = tex.a*(skin_color-tex.rgb)+tex.rgb，再过 alpha 增益
+    fn skin_slot_blends_tex_toward_multiplicative_tint_by_alpha() {
+        // skin 支：base = tex.a*(skin_color*tex.rgb-tex.rgb)+tex.rgb，再过 alpha 增益
         // （_Alpha=1 ⇒ 增益 0 ⇒ 输出即 base；_Alpha=0 才整支白）。这里钉调色
         // 混合的中间值：令 _Alpha=1（增益 0）看清 base。
         let mut m = default_material();
         m.alpha = 1.0; // 增益 0 ⇒ 输出 = base（看清混合）
         let input = skin_input(SLOT_SKIN, [0.4, 0.2, 0.0, 0.5]);
         let out = slot_albedo(&input, &m);
-        // base = 0.5*(1-tex)+tex。
-        close(out[0], 0.7); // 0.5*0.6+0.4 = 0.7
-        close(out[1], 0.6); // 0.5*0.8+0.2 = 0.6
-        close(out[2], 0.5); // 0.5*1.0+0.0 = 0.5
+        // White tint preserves the texture at every mask alpha.
+        close(out[0], 0.4);
+        close(out[1], 0.2);
+        close(out[2], 0.0);
+        m.skin_color = [0.5, 0.75, 1.0, 1.0];
+        let out = slot_albedo(&input, &m);
+        close(out[0], 0.3);
+        close(out[1], 0.175);
+        close(out[2], 0.0);
     }
 
     #[test]
@@ -377,15 +382,15 @@ mod tests {
         let mut g = globals();
         // light w=0 ⇒ lit = 0*(base*l - base) + base = base。
         g.light_color = [0.5, 0.5, 0.5, 0.0];
-        let input = skin_input(SLOT_SKIN, [0.4, 0.4, 0.4, 1.0]); // a=1 ⇒ base=skin_color=白
+        let input = skin_input(SLOT_SKIN, [0.4, 0.4, 0.4, 1.0]); // white tint preserves 0.4
         let (target0, target1) = avatar_fragment(&input, &g, &m);
-        close(target0[0], 1.0); // base=白，w=0 不暗化
+        close(target0[0], 0.4); // w=0 leaves the sample unchanged
         close(target0[3], 1.0);
         assert_eq!(target1, [0.0, 0.0, 0.0, 0.0]);
-        // w=1、光色 0.5：lit = 1*(1*0.5 - 1) + 1 = 0.5。
+        // w=1 and light=0.5: lit = 1*(0.4*0.5 - 0.4) + 0.4 = 0.2.
         g.light_color = [0.5, 0.5, 0.5, 1.0];
         let (target0, _) = avatar_fragment(&input, &g, &m);
-        close(target0[0], 0.5);
+        close(target0[0], 0.2);
     }
 
     #[test]

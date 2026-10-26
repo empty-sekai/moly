@@ -860,6 +860,7 @@ pub fn parse(
     handle: Option<Res<ShellNamesHandle>>,
     layouts: Res<UiLayouts>,
     stage: Option<Res<crate::browser_stage::BrowserStage>>,
+    photo: Option<Res<crate::photo_shot::PhotoCharset>>,
     phenomena: Option<Res<crate::learn_phenomena_dialog::PhenomenonGlyphs>>,
     inventory: Option<Res<crate::inventory::InventoryGlyphs>>,
     (delivery_screen, delivery): (
@@ -909,9 +910,11 @@ pub fn parse(
         },
         None => &[],
     };
+    if photo.as_ref().is_some_and(|photo|photo.0.is_none()) {return;}
     let parsed: Value = serde_json::from_str(&asset.0).expect("site name document");
     let rows = parsed["sites"].as_array().expect("site name rows");
     let mut chars = layouts.text_chars();
+    if let Some(photo)=photo.as_deref().and_then(|photo|photo.0.as_ref()) {chars.extend(photo.iter().copied());}
     for row in rows {
         chars.extend(row["name"].as_str().expect("site name").chars());
     }

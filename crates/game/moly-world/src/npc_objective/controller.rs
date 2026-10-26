@@ -1765,18 +1765,19 @@ fn start_weighted_upper(world: &mut World, entity: Entity, requested: UpperType,
         _ => UpperState::RandomWalk,
     };
     let target = if upper == UpperState::RandomWalk {
+        let own_site = world.get::<crate::npc::NpcActions>(entity).map(|a| a.site_type.clone());
         let others: Vec<_> = world
-            .query::<(Entity, &crate::npc::CharacterUnitId, &Transform)>()
+            .query::<(Entity, &crate::npc::NpcActions, &Transform)>()
             .iter(world)
-            .filter(|(e, _, _)| *e != entity)
+            .filter(|(e, a, _)| *e != entity && Some(&a.site_type) == own_site.as_ref())
             .map(|(_, _, t)| t.translation.to_array())
             .collect();
-        let face = world.get_resource::<super::ObjectiveFace>();
+        let face = crate::npc::navigation::face(world, entity);
         upper_walk::pick_target(
             &mut HostWalkDraw { rng: &mut rng },
             position,
             &others,
-            &mut |point, tolerance| face.and_then(|f| f.sample(point, tolerance)),
+            &mut |point, tolerance| face.as_ref().and_then(|f| f.sample(point, tolerance)),
         )
     } else {
         target_actor
@@ -1893,7 +1894,7 @@ fn apply_prepared(world: &mut World, entity: Entity, plan: PreparedPlan, frame: 
     let start = UpperStart {
         walk: if matches!(plan.upper, UpperState::Stay | UpperState::Rest) {
             WalkStart::NoRoute
-        } else if route.is_none() || world.get_resource::<super::ObjectiveFace>().is_none() {
+        } else if route.is_none() || crate::npc::navigation::face(world, entity).is_none() {
             WalkStart::NoAgent
         } else if route.is_some_and(|r| r.outcome == Some(crate::npc::RouteOutcome::Stopped)) {
             WalkStart::NoRoute
@@ -2047,7 +2048,7 @@ pub(crate) fn navigate_lower(
     else {
         return false;
     };
-    let Some(face) = world.get_resource::<super::ObjectiveFace>() else {
+    let Some(face) = crate::npc::navigation::face(world, entity) else {
         return false;
     };
     let path = face
@@ -2071,7 +2072,7 @@ pub(crate) fn navigate_lower(
         &mut mover.path.0,
         &mut mover.route,
         &face.walk_face(),
-        face,
+        &face,
         target,
         None,
         &mut rng,
@@ -2085,6 +2086,19 @@ pub(crate) fn navigate_lower(
     put_mover(world, entity, mover);
     world.entity_mut(entity).insert(rng);
     true
+}
+
+pub(crate) fn force_stop_in_world(world: &mut World, entity: Entity) {
+    super::events::exit(world, entity);
+    super::lower::exit(world, entity);
+    crate::npc::stop_for_external_activity(world, entity);
+    world.entity_mut(entity).insert((NpcHfsmPhase(NpcPhase::Inactive),
+        NpcHfsmActor::default(), NpcUpperBody(None), NpcLowerClock(None), NpcRecoveryTimer(0.0)));
+    if let Some(mut mind) = world.get_mut::<super::ObjectiveMind>(entity) {
+        mind.cancelled = true;
+        mind.executing = false;
+    }
+    crate::npc_fixture_activity::cancel_for_greeting(world, entity);
 }
 
 pub fn try_cancel_in_world(world: &mut World, entity: Entity) -> bool {
@@ -2388,18 +2402,14 @@ pub fn on_update(world: &mut World) {
 fn update_one(world: &mut World, entity: Entity, unit: u32, frame: u32, dt: f32) {
     if world.resource::<PreparedPlans>().fixture_arrivals.contains_key(&entity) {return;}
     if world.get_resource::<crate::field_modes::EditSessionActive>().is_some_and(|e|e.is_active()) {return;}
+    if world.get::<crate::npc::gate_entries::ModelHidden>(entity).is_some() { return; }
     let away = crate::npc::is_away(world, entity);
     if away {
         if !crate::npc::residency::loaded_site_runs(world.get_resource::<crate::site::SiteActive>()) {
             return;
         }
-        // Only retained upper/clock state can progress without the site's live
-        // fixture instances. Its lower factories still need a retained site
-        // context; never run them against the player's current site.
-        if world.get::<NpcHfsmActor>(entity).is_some_and(|actor| actor.lower.is_some_and(|lower|
-            !matches!(lower, LowerState::Idle { .. } | LowerState::Rest { .. }))) {
-            return;
-        }
+        if world.get::<crate::npc::NpcActions>(entity).is_none_or(|a|
+            world.get_resource::<crate::fixture::residency::FixtureSites>().and_then(|s| s.get(&a.site_type)).is_none()) { return; }
     }
 
     if world.get::<super::common::CommonMember>(entity).is_some()
@@ -2423,7 +2433,7 @@ fn update_one(world: &mut World, entity: Entity, unit: u32, frame: u32, dt: f32)
             }
         }
     }
-    if !away && super::lower::update(world, entity, dt) {
+    if super::lower::update(world, entity, dt) {
         return;
     }
     if world
@@ -2443,12 +2453,11 @@ fn update_one(world: &mut World, entity: Entity, unit: u32, frame: u32, dt: f32)
     let Some(face) = face else { return; };
     // The walk reads the other presenters' positions (the random walk's
     // avoidance direction) and the character's own suspension.
-    let mut others_query = world.query::<(Entity, &Transform)>();
-    let others: Vec<[f32; 3]> = others_query
-        .iter(world)
-        .filter(|(other, _)| *other != entity)
-        .map(|(_, transform)| transform.translation.to_array())
-        .collect();
+    let own_site = world.get::<crate::npc::NpcActions>(entity).map(|a| a.site_type.clone());
+    let mut others_query = world.query::<(Entity, &Transform, &crate::npc::NpcActions)>();
+    let others: Vec<[f32; 3]> = others_query.iter(world)
+        .filter(|(other, _, a)| *other != entity && Some(&a.site_type) == own_site.as_ref())
+        .map(|(_, transform, _)| transform.translation.to_array()).collect();
     if world.get::<MemberRng>(entity).is_none() {
         return;
     }
@@ -2518,7 +2527,7 @@ fn update_one(world: &mut World, entity: Entity, unit: u32, frame: u32, dt: f32)
             pause: pause.0,
             face: Some(&face),
             others: &others,
-            away,
+            away: false,
             navigator: navigator_slot.take(),
         };
         advance(&mut machine, frame, dt, &mut rng);

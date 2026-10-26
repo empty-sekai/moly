@@ -1,4 +1,4 @@
-//! Photo mode's source screen: menu entry, visible-character call and capture.
+//! Photo mode: capture, native presentation, frame selection and local export.
 //! The screen follows ScreenManager and uses its serialized component bindings.
 //! Capture renders the field camera alone at its current pixel dimensions, then
 //! crops the source frame rectangle. Saving exports a local image; no album
@@ -11,12 +11,15 @@ use bevy::{
     prelude::*,
     render::{render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages},
         render_asset::RenderAssets, texture::GpuImage, Render, RenderApp, RenderSystems,
-        view::screenshot::{save_to_disk, Screenshot, ScreenshotCaptured}},
+        view::screenshot::{Screenshot, ScreenshotCaptured}},
     window::PrimaryWindow,
 };
 use moly_assets::ui_layout::{UiComponent, UiPrefab};
 use crate::{gesture::{GestureEvent, GestureState}, ui_layers::{MenuScreenType, ScreenManager},
     ui_layout::{UiLayouts, UiPrefabView}};
+
+mod select;
+pub use select::PhotoCharset;
 
 const SCREEN: MenuScreenType = MenuScreenType::MysekaiPhotoShot;
 const KEY: &str = "PhotoShot";
@@ -31,18 +34,22 @@ const CALL_EFFECTS: [(&str,&str);2] = [
 #[derive(Message)]
 pub struct OpenPhoto;
 #[derive(Message, Clone, Copy)]
-enum PhotoAction { Open, Back, Call, Capture(UVec2) }
+enum PhotoAction { Open, Back, Call, Capture(UVec2), Skip, Save, Frame(i32) }
 #[derive(Component)]
 struct PhotoView;
 #[derive(Component)]
 struct PhotoHeader;
 #[derive(Resource, Default)]
-struct PhotoState { entered: bool, capture: Option<CaptureJob>, call_effect: Option<CallEffect>, last_error: Option<String> }
+struct PhotoState {
+    entered: bool, capture: Option<CaptureJob>, call_effect: Option<CallEffect>, last_error: Option<String>,
+    pending: Option<Image>, image: Option<Handle<Image>>, selection: Option<select::Selection>,
+    previous_frame: i32, discard: Option<crate::ui_layers::DialogId>,
+}
 struct CallEffect { hosts:Vec<Entity>, elapsed:f32, fade:Option<f32> }
 #[derive(Resource)]
 struct PhotoEffects { documents:[Handle<moly_assets::json::JsonAsset>;2], textures:Vec<Handle<Image>>, prepared:bool }
 struct CaptureJob { camera: Entity, previous: RenderTarget, target: Handle<Image>, elapsed: f32,
-    requested: UVec2, output: std::path::PathBuf, dispatched: bool, restored: bool }
+    requested: UVec2, dispatched: bool, restored: bool }
 #[derive(Resource, Clone, Default)]
 struct CaptureReadiness(std::sync::Arc<std::sync::Mutex<Option<(AssetId<Image>, bool)>>>);
 #[derive(Resource)]
@@ -137,6 +144,7 @@ pub fn source_available(layouts: &UiLayouts) -> bool {
 }
 
 pub fn install(app: &mut App) {
+    select::install(app);
     let readiness=CaptureReadiness::default();
     app.insert_resource(readiness.clone());
     if let Some(render)=app.get_sub_app_mut(RenderApp) {
@@ -161,7 +169,7 @@ fn mark_capture_ready(readiness: Res<CaptureReadiness>, images: Res<RenderAssets
 
 fn spawn_when_ready(mut commands: Commands, layouts: Res<UiLayouts>, server: Res<AssetServer>,
     bindings: Option<Res<PhotoBindings>>, mut state: ResMut<PhotoState>) {
-    if bindings.is_some() || !layouts.ready(KEY, &server) || !layouts.ready("EditorHeader", &server) || !source_available(&layouts) { return; }
+    if bindings.is_some() || !layouts.ready(KEY, &server) || !layouts.ready("EditorHeader", &server) || !layouts.ready("PhotoFrameCell", &server) || !source_available(&layouts) { return; }
     let result = PhotoBindings::read(layouts.document(KEY).expect("ready photo document"));
     match result {
         Ok(mut bindings) => {
@@ -219,23 +227,29 @@ fn click(mut open: MessageReader<OpenPhoto>, mut gestures: MessageReader<Gesture
     for _ in open.read() { actions.write(PhotoAction::Open); }
     let taps: Vec<_> = gestures.read().filter(|event| event.kind.is_tap_family() && event.state == GestureState::End)
         .map(|event| event.position).collect();
-    if screens.current_screen() != Some(SCREEN) || screens.is_ui_layer_working() || state.capture.is_some() { return; }
+    if screens.current_screen() != Some(SCREEN) || screens.is_ui_layer_working() || state.capture.is_some() || state.pending.is_some() || state.discard.is_some() { return; }
     let (Ok(window), Some(canvas), Ok(view), Some(bindings)) = (windows.single(), canvas.as_deref(), views.single(), bindings.as_deref()) else { return; };
     let size = canvas.size(window);
     for tap in taps {
         if consumed.0 { break; }
         let position = Vec2::new(tap.x - window.width() / 2., window.height() / 2. - tap.y) / canvas.scale(window);
         let hit = |path:&str| view.rect(&layouts, path, size).is_some_and(|rect| rect.active && rect.contains(position));
+        if let Some(selection)=state.selection.as_ref() {
+            if select::tap(selection, &layouts, view, position, size, &mut actions, &mut sounds) {
+                consumed.0=true; continue;
+            }
+            if selection.playing { consumed.0=true;continue; }
+        }
         if headers.single().ok().and_then(|header| header.rect(&layouts,&bindings.back,size)).is_some_and(|rect| rect.active && rect.contains(position)) {
             consumed.0=true;layouts.queue_button_se(&mut sounds,"EditorHeader",&bindings.back);actions.write(PhotoAction::Back);
         }
-        else if hit(&bindings.call) {
+        else if state.selection.is_none() && hit(&bindings.call) {
             consumed.0 = true;
             if state.call_effect.as_ref().is_none_or(|effect|effect.fade.is_some()) {
                 layouts.queue_button_se(&mut sounds,KEY,&bindings.call); actions.write(PhotoAction::Call);
             }
         }
-        else if hit(&bindings.shutter) {
+        else if state.selection.is_none() && hit(&bindings.shutter) {
             consumed.0 = true;
             layouts.queue_button_se(&mut sounds,KEY,&bindings.shutter);
             if let Some(rect) = view.rect(&layouts, &bindings.frame, size) {
@@ -267,7 +281,10 @@ fn dispatch(world: &mut World, mut reader: Local<bevy::ecs::message::MessageCurs
                     start_call_effect(world)
                 })
             }
-            PhotoAction::Back => { world.resource_mut::<ScreenManager>().back_ui_screen(false,"PhotoShot header BackUI");Ok(()) }
+            PhotoAction::Back => select::back(world),
+            PhotoAction::Skip => select::skip(world),
+            PhotoAction::Save => select::save(world),
+            PhotoAction::Frame(id) => select::choose(world,id),
             PhotoAction::Capture(size) => capture(world, size),
         };
         if let Err(error) = result { error!("[photo] {error}"); world.resource_mut::<PhotoState>().last_error = Some(error); }
@@ -277,6 +294,7 @@ fn dispatch(world: &mut World, mut reader: Local<bevy::ecs::message::MessageCurs
 fn lifecycle(world: &mut World) {
     let delta = world.resource::<Time>().delta_secs();
     advance_call_effect(world,delta);
+    select::advance(world,delta);
     let mut state = world.resource_mut::<PhotoState>();
     // The preceding frame has extracted the capture target. Return the field
     // camera to the window while the screenshot's GPU readback completes.
@@ -304,6 +322,7 @@ fn lifecycle(world: &mut World) {
         && !world.resource::<ScreenManager>().is_ui_layer_working();
     if exited {
         stop_call_effect(world);
+        select::dispose(world);
         if let Err(error) = crate::npc_objective::events::set_photo_mode(world, false) { error!("[photo] {error}"); }
         let restored=world.get_resource::<crate::game_state::HeldGameState>().map(|held|held.0)
             .unwrap_or(crate::game_state::GameStateType::Normal);
@@ -316,19 +335,22 @@ fn lifecycle(world: &mut World) {
 fn place(windows: Query<&Window, With<PrimaryWindow>>, canvas: Option<Res<crate::canvas::RootCanvas>>, layouts:Res<UiLayouts>,
     screens: Res<ScreenManager>, bindings: Option<Res<PhotoBindings>>, state: Res<PhotoState>,
     mut views: Query<(&mut Visibility, &mut Transform, &mut UiPrefabView), (With<PhotoView>,Without<PhotoHeader>)>,
-    mut headers: Query<(&mut Visibility, &mut Transform), (With<PhotoHeader>,Without<PhotoView>)>) {
+    mut headers: Query<(&mut Visibility, &mut Transform, &mut UiPrefabView), (With<PhotoHeader>,Without<PhotoView>)>) {
     let (Ok(window), Some(canvas), Some(bindings), Ok((mut visible, mut transform, mut view))) =
         (windows.single(), canvas.as_deref(), bindings.as_deref(), views.single_mut()) else { return; };
     let shown = screens.is_active(SCREEN);
-    for (mut visible,mut transform) in &mut headers {
+    for (mut visible,mut transform,mut header) in &mut headers {
         *visible=if shown {Visibility::Inherited}else{Visibility::Hidden};transform.scale=Vec3::splat(canvas.scale(window));
+        header.set_alpha("",state.selection.as_ref().map_or(1.,|selection|selection.header_fade/0.1));
+        if state.selection.as_ref().is_some_and(|selection| selection.playing) { *visible=Visibility::Hidden; }
     }
     *visible = if shown { Visibility::Inherited } else { Visibility::Hidden };
     if !shown { return; }
     let visual = screens.screen_visual(SCREEN);
     transform.scale = visual.scale * canvas.scale(window);
     view.set_alpha("", visual.alpha.unwrap_or(1.));
-    view.set_visible(PHOTO_ROOT, true); view.set_visible(SELECT_ROOT, false); view.set_visible(SAVE_ROOT, false);
+    let selecting=state.selection.is_some();
+    view.set_visible(PHOTO_ROOT, !selecting); view.set_visible(SELECT_ROOT, selecting); view.set_visible(SAVE_ROOT, false);
     view.set_visible(&bindings.cover, state.capture.is_some());
     view.set_visible(&bindings.call_cover, state.capture.is_some());
     view.set_visible("ComponentRoot/Root/PhotoShot/SafeArea/RemainCount", false);
@@ -511,42 +533,31 @@ fn source_node(world:&World,root:Entity,gltf:&Gltf,nodes:&Assets<GltfNode>,index
 }
 
 fn capture(world: &mut World, requested: UVec2) -> Result<(), String> {
-    if world.resource::<PhotoState>().capture.is_some() { return Ok(()); }
+    if world.resource::<PhotoState>().capture.is_some() || world.resource::<PhotoState>().selection.is_some() { return Ok(()); }
     let (camera, size, previous) = world.query_filtered::<(Entity, &Camera, &RenderTarget), With<Camera3d>>()
         .iter(world).find(|(_,camera,_)| camera.is_active)
         .and_then(|(entity,camera,target)| camera.physical_viewport_size().map(|size| (entity,size,target.clone())))
         .ok_or("photo field camera is unavailable")?;
     if requested.min_element() == 0 || size.min_element() == 0 { return Err("photo frame has no pixels".into()); }
-    // Output remains a local export; it never consumes or claims server film.
-    #[cfg(not(target_arch="wasm32"))]
-    let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|e|e.to_string())?.as_millis();
-    #[cfg(target_arch="wasm32")]
-    let timestamp = js_sys::Date::now() as u128;
-    let filename = format!("mysekai-photo-{timestamp}.png");
-    #[cfg(not(target_arch="wasm32"))]
-    let output = { let directory=std::env::var_os("MOLY_SCREENSHOT_DIR").map(std::path::PathBuf::from).unwrap_or_else(||"screenshots".into());
-        std::fs::create_dir_all(&directory).map_err(|e|e.to_string())?;directory.join(filename) };
-    #[cfg(target_arch="wasm32")]
-    let output = std::path::PathBuf::from(filename);
     let mut image = Image::new_fill(Extent3d { width:size.x,height:size.y,depth_or_array_layers:1 },
         TextureDimension::D2, &[0,0,0,255], TextureFormat::Rgba8UnormSrgb, RenderAssetUsages::default());
     image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST | TextureUsages::COPY_SRC | TextureUsages::RENDER_ATTACHMENT;
     let target = world.resource_mut::<Assets<Image>>().add(image);
     *world.resource::<CaptureReadiness>().0.lock().map_err(|_|"photo render readiness unavailable")?=Some((target.id(),false));
-    world.resource_mut::<PhotoState>().capture = Some(CaptureJob { camera, previous, target, elapsed:0., requested, output, dispatched:false, restored:false });
+    world.resource_mut::<crate::camera::PhotoGestureHeld>().0=true;
+    world.resource_mut::<PhotoState>().capture = Some(CaptureJob { camera, previous, target, elapsed:0., requested, dispatched:false, restored:false });
     Ok(())
 }
 
 fn dispatch_capture(world: &mut World) {
-    let (camera,target,requested,output) = {
+    let (camera,target,requested) = {
         let mut state=world.resource_mut::<PhotoState>();
         let job=state.capture.as_mut().expect("ready capture job");job.dispatched=true;
-        (job.camera,job.target.clone(),job.requested,job.output.clone())
+        (job.camera,job.target.clone(),job.requested)
     };
     world.entity_mut(camera).insert(RenderTarget::Image(target.clone().into()));
-    let mut save=save_to_disk(output);
     let capture_target = target.id();
-    world.spawn(Screenshot::image(target)).observe(move |mut captured: On<ScreenshotCaptured>, mut commands: Commands, mut state: ResMut<PhotoState>, readiness: Res<CaptureReadiness>, mut sounds:ResMut<crate::audio::SeRequests>| {
+    world.spawn(Screenshot::image(target)).observe(move |captured: On<ScreenshotCaptured>, mut commands: Commands, mut state: ResMut<PhotoState>, readiness: Res<CaptureReadiness>| {
         if !state.capture.as_ref().is_some_and(|job| job.target.id() == capture_target) { return; }
         let job=state.capture.take().expect("matching capture job");
         if !job.restored { commands.entity(camera).insert(job.previous); }
@@ -557,13 +568,10 @@ fn dispatch_capture(world: &mut World) {
             let mut output=image::RgbaImage::from_pixel(requested.x,requested.y,image::Rgba([0,0,0,255]));
             // ReadPixels writes at the lower-left of the requested texture.
             image::imageops::replace(&mut output,&crop,0,(requested.y-height) as i64);
-            captured.image=Image::from_dynamic(image::DynamicImage::ImageRgba8(output),true,RenderAssetUsages::default());
+            Image::from_dynamic(image::DynamicImage::ImageRgba8(output),true,RenderAssetUsages::default())
         });
         match result {
-            Ok(())=>{
-                sounds.0.push(crate::audio::SeRequest {owner:None,cue:"se_camera".into(),class:crate::audio::SeClass::Ui,source:"photo capture"});
-                save(captured);
-            }
+            Ok(image)=>{ state.pending=Some(image); }
             Err(error)=>{error!("[photo] {error}");state.last_error=Some(error);}
         }
     });

@@ -341,12 +341,15 @@ pub enum GeneralPick {
     },
     /// No talk was kept: the character's own previous talk id, no draw.
     Previous { talk_id: i32 },
+    /// Neither an eligible row nor a previous talk exists. No random draw.
+    Empty,
 }
 
 impl GeneralPick {
     pub fn talk_id(&self) -> i32 {
         match *self {
             GeneralPick::Drawn { talk_id, .. } | GeneralPick::Previous { talk_id } => talk_id,
+            GeneralPick::Empty => 0,
         }
     }
 }
@@ -373,6 +376,15 @@ pub fn lottery_general_talk_id(
         index,
         pool_len: pool.len(),
     })
+}
+
+/// JP 7's empty general-talk branch returns 0 without an integer draw.
+/// The legacy entry point above retains its previous/index-error behavior.
+pub fn lottery_general_talk_id_jp7(
+    pool: &[i32], previous: i32, rand: &mut impl UniformDraw,
+) -> Result<GeneralPick, LotteryFault> {
+    if pool.is_empty() && previous == 0 { return Ok(GeneralPick::Empty); }
+    lottery_general_talk_id(pool, previous, rand)
 }
 
 /// `NPCLottery*` 百分比族（服务端下发，mock 可改）。
@@ -465,6 +477,19 @@ pub fn select_fixture_lane(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn general_empty_returns_zero_without_consuming_random() {
+        struct NoDraw;
+        impl UniformDraw for NoDraw {
+            fn draw(&mut self, _: usize) -> usize { panic!("empty pool must not draw") }
+        }
+        let empty = lottery_general_talk_id_jp7(&[], 0, &mut NoDraw).unwrap();
+        assert_eq!(empty, GeneralPick::Empty);
+        assert_eq!(empty.talk_id(), 0);
+        assert_eq!(lottery_general_talk_id(&[], 41, &mut NoDraw).unwrap(), GeneralPick::Previous { talk_id: 41 });
+        assert_eq!(lottery_general_talk_id(&[], 0, &mut NoDraw), Err(LotteryFault::GeneralPoolEmpty));
+    }
 
     /// 权重抽签替身：返回固定比例的落点并数调用——「恰一次求值」的量法。
     struct FixedWeighted {

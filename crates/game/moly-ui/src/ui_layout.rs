@@ -247,6 +247,7 @@ const DOCUMENTS: &[(&str, &str)] = &[
 /// it refuses by name. Every other document is required.
 const OPTIONAL_DOCUMENTS: &[(&str, &str)] = &[
     ("PhotoShot", "screens/ScreenLayerMysekaiPhotoShot.json"),
+    ("PhotoFrameCell", "photocell/UIPartsPhotoFrameListThumbnail.json"),
     ("CommonReward", "menu/CommonRewardSubWindowDialog.json"),
     ("RecoverBoostStamina", "menu/MysekaiRecoverBoostStaminaDialog.json"),
     ("BoostStaminaConfirm", "menu/BoostStaminaRecoverConfirmDialog.json"),
@@ -1326,6 +1327,9 @@ impl UiLayouts {
         ready
     }
     fn image_ready(&self, path: &str, server: &AssetServer) -> bool {
+        // Host-owned images live in Assets<Image>, without an AssetServer load
+        // task. The draw path separately checks that their pixels exist.
+        if path.starts_with("host:") { return true; }
         let handle = self
             .images
             .get(path)
@@ -1532,11 +1536,16 @@ pub struct Override {
     transform: Option<(Vec2, Quat)>,
     /// A local rotation set by code on its own.
     rotation: Option<Quat>,
+    local_scale: Option<Vec3>,
     /// `Graphic.color` set by code on the Graphic component with this id.
     graphic_color: Option<(i64, [f32; 4])>,
-    /// `Behaviour.enabled` set by code on the component with this id (read by
-    /// the stencil Mask).
+    /// `Behaviour.enabled` set by code, consumed by graphics and stencil masks.
     behaviour_enabled: Option<(i64, bool)>,
+}
+
+fn component_enabled(component: &UiComponent, change: Option<&Override>) -> bool {
+    change.and_then(|value| value.behaviour_enabled).filter(|(id,_)| *id==component.path_id)
+        .map_or(component.enabled, |(_,enabled)| enabled)
 }
 
 impl Override {
@@ -1618,6 +1627,7 @@ impl UiPrefabView {
                 || value.size_delta != old.size_delta
                 || value.transform != old.transform
                 || value.rotation != old.rotation
+                || value.local_scale != old.local_scale
                 || value.text != old.text
                 || value.translated_text != old.translated_text
                 || value.texture != old.texture
@@ -1699,6 +1709,12 @@ impl UiPrefabView {
             return;
         }
         self.update(path, |v| v.anchored_position = Some(value));
+    }
+    /// Set the authored animation's local scale without rebuilding its prefab.
+    pub fn set_local_scale(&mut self, path: &str, value: Vec3) {
+        assert!(value.is_finite(), "non-finite UI scale");
+        if self.overrides.get(path).and_then(|v| v.local_scale) == Some(value) { return; }
+        self.update(path, |v| v.local_scale = Some(value));
     }
     /// A host's own transform write: node `path`'s anchor offset and its
     /// local rotation, as the animation would set them (its local scale
@@ -1808,6 +1824,9 @@ impl UiPrefabView {
                     .entry(i)
                     .or_insert_with(|| doc.nodes[i].rect.clone())
                     .size_delta = size.to_array();
+            }
+            if let Some(scale) = value.local_scale {
+                rect_overrides.entry(i).or_insert_with(|| doc.nodes[i].rect.clone()).local_scale = scale.to_array();
             }
             if let Some(rotation) = value.rotation {
                 rect_overrides
@@ -2017,7 +2036,8 @@ impl UiPrefabView {
         let serialized = component.fields["m_Interactable"].as_bool()
             .unwrap_or_else(|| panic!("UI {}: selectable {id} has no m_Interactable", doc.prefab));
         let rects = self.resolved(layouts, canvas)?;
-        let active = rects[node].active && component.enabled;
+        let change=self.overrides.values().find(|value|value.behaviour_enabled.is_some_and(|(target,_)|target==id));
+        let active = rects[node].active && component_enabled(component,change);
         let interactable = moly_law::ui::raycast::is_interactable(serialized, raycast::groups_allow_interaction(doc, node));
         Some((active, interactable))
     }
@@ -2217,7 +2237,7 @@ fn rebuild_image_users(
         if !rect.active || rect.size.min_element() <= 0. {
             continue;
         }
-        for comp in node.components.iter().filter(|comp| comp.enabled) {
+        for comp in node.components.iter().filter(|comp| component_enabled(comp,overrides.get(&index).copied())) {
             if comp.class.ends_with("Image") && comp.fields.get("m_Color").is_some() {
                 if let Some(path) = image_path(layouts, comp, overrides.get(&index).copied()) {
                     previous
@@ -2454,7 +2474,7 @@ pub fn render(
                     let ready = node
                         .components
                         .iter()
-                        .filter(|comp| comp.enabled)
+                        .filter(|comp| component_enabled(comp,change))
                         .filter(|comp| {
                             comp.class.ends_with("Image") && comp.fields.get("m_Color").is_some()
                         })
@@ -2483,7 +2503,7 @@ pub fn render(
             let ready = node
                 .components
                 .iter()
-                .filter(|comp| comp.enabled)
+                .filter(|comp| component_enabled(comp,change))
                 .filter(|comp| {
                     comp.class.ends_with("Image") && comp.fields.get("m_Color").is_some()
                 })
@@ -2505,7 +2525,7 @@ pub fn render(
             }
             rendered.clear(&mut commands, &mut meshes, &mut materials, &mut clip_materials);
             let has_drawing = node.components.iter().any(|comp| {
-                comp.enabled
+                component_enabled(comp,change)
                     && ((comp.class.ends_with("Image") && comp.fields.get("m_Color").is_some())
                         || comp.fields.get("m_fontSize").is_some())
             });
@@ -2532,7 +2552,7 @@ pub fn render(
                 scale,
             };
             for comp in &node.components {
-                if !comp.enabled {
+                if !component_enabled(comp,change) {
                     continue;
                 }
                 let f = &comp.fields;

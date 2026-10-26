@@ -404,7 +404,7 @@ impl TalkCatalog<'_> {
     /// lottery (see `npc_talk_lottery`). The source lottery runs even if
     /// PlayGeneralTalk subsequently overwrites the result with
     /// CurrentGeneral. With no talk kept the character's previous talk id
-    /// comes back with no draw; without one the source raises.
+    /// comes back with no draw; without one the source returns talk id 0.
     pub fn lottery(
         &self,
         unit: u32,
@@ -477,6 +477,11 @@ impl TalkCatalog<'_> {
                 master_id: talk_id,
                 pool_len: 0,
                 replayed: true,
+            },
+            moly_law::talk::GeneralPick::Empty => GeneralSelection {
+                master_id: 0,
+                pool_len: 0,
+                replayed: false,
             },
         })
     }

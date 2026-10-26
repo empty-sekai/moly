@@ -394,7 +394,7 @@ pub fn build(
     placements: Option<Res<FixturePlacements>>,
     collision: CollisionInputs,
     mut failure: Local<String>,
-    parts: Query<(&Mesh3d, &GlobalTransform), Without<moly_assets::scene_state::SourceInactive>>,
+    parts: Query<(&Mesh3d, &GlobalTransform), (Without<moly_assets::scene_state::SourceInactive>, With<crate::site::resident_load::ActiveSiteMesh>)>,
     mut baking: ResMut<WalkFaceBakes>,
 ) {
     if face.is_some() {
@@ -499,7 +499,7 @@ pub fn rebake_on_save(
     placements: Option<Res<FixturePlacements>>,
     collision: CollisionInputs,
     mut failure: Local<String>,
-    parts: Query<(&Mesh3d, &GlobalTransform), Without<moly_assets::scene_state::SourceInactive>>,
+    parts: Query<(&Mesh3d, &GlobalTransform), (Without<moly_assets::scene_state::SourceInactive>, With<crate::site::resident_load::ActiveSiteMesh>)>,
     mut carving: RuntimeCarving,
     mut baking: ResMut<WalkFaceBakes>,
 ) {
@@ -544,7 +544,7 @@ fn rebake(
     placements: Option<&FixturePlacements>,
     collision: &CollisionInputs,
     failure: &mut String,
-    parts: &Query<(&Mesh3d, &GlobalTransform), Without<moly_assets::scene_state::SourceInactive>>,
+    parts: &Query<(&Mesh3d, &GlobalTransform), (Without<moly_assets::scene_state::SourceInactive>, With<crate::site::resident_load::ActiveSiteMesh>)>,
     baking: &mut WalkFaceBakes,
 ) -> bool {
     // A save stays pending until the committed scene's collision graph is ready.
@@ -786,7 +786,7 @@ pub fn teardown(commands: &mut Commands) {
 fn collect_tris(
     meshes: &Assets<Mesh>,
     handles: &WalkFaceMeshes,
-    parts: &Query<(&Mesh3d, &GlobalTransform), Without<moly_assets::scene_state::SourceInactive>>,
+    parts: &Query<(&Mesh3d, &GlobalTransform), (Without<moly_assets::scene_state::SourceInactive>, With<crate::site::resident_load::ActiveSiteMesh>)>,
 ) -> Option<Vec<[[f32; 3]; 3]>> {
     let mut by_handle = handles
         .0
@@ -838,7 +838,7 @@ fn collect_tris(
 
 /// 站点体素（`InitializeNavMesh` 的站点分派，见 carve 律）。站点名是
 /// 九值闭集，出现未知名是接线错误——响亮拒绝。
-fn site_voxel(site: &SiteActive, source: &NavMeshSourceRegion) -> f32 {
+pub(crate) fn site_voxel(site: &SiteActive, source: &NavMeshSourceRegion) -> f32 {
     let value = carve::site_type_value(&site.site_type).unwrap_or_else(|| {
         panic!(
             "[walk-face] 未知站点类型名 {:?}：体素无法分派",
@@ -849,7 +849,7 @@ fn site_voxel(site: &SiteActive, source: &NavMeshSourceRegion) -> f32 {
 }
 
 /// The site's navigation build volume ([`Sites::nav_mesh_volume`]).
-fn site_volume(sites: &Sites, site: &SiteActive) -> carve::BuildVolume {
+pub(crate) fn site_volume(sites: &Sites, site: &SiteActive) -> carve::BuildVolume {
     sites
         .nav_mesh_volume(site)
         .unwrap_or_else(|reason| panic!("[walk-face] 烘焙体积无法确定：{reason}"))

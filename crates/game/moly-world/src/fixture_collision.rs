@@ -176,8 +176,9 @@ pub struct CollisionInputs<'w, 's> {
             Entity,
             Option<&'static crate::fixture::FixtureSource>,
             Option<&'static crate::fixture_colors::FixtureColorChoice>,
+            Has<crate::fixture::FixtureRoot>,
         ),
-        With<crate::fixture::FixtureRoot>,
+        Or<(With<crate::fixture::FixtureRoot>, With<crate::fixture::residency::FixtureSiteOwner>)>,
     >,
     gltfs: Res<'w, Assets<Gltf>>,
     gltf_nodes: Res<'w, Assets<GltfNode>>,
@@ -282,7 +283,11 @@ impl CollisionInputs<'_, '_> {
         if self.ready.is_none() {
             return Err("fixture collision scenes loading".into());
         }
-        let roots: HashSet<_> = self.roots.iter().map(|(entity, ..)| entity).collect();
+        let roots: HashSet<_> = self.roots.iter().filter(|(_, _, _, active)| *active).map(|(entity, ..)| entity).collect();
+        self.gather_roots(expected, roots)
+    }
+
+    fn gather_roots(&self, expected: usize, roots: HashSet<Entity>) -> Result<Gathered, String> {
         if roots.len() != expected {
             return Err(format!(
                 "fixture collision root count {}/{}",
@@ -344,7 +349,7 @@ impl CollisionInputs<'_, '_> {
                     .roots
                     .get(root)
                     .ok()
-                    .and_then(|(_, source, _)| source)
+                    .and_then(|(_, source, _, _)| source)
                     .ok_or("fixture collision reference has no source asset owner")?;
                 Some(documents::resolve(
                     &reference,
@@ -373,7 +378,12 @@ impl CollisionInputs<'_, '_> {
     }
 
     pub fn collect(&self, expected: usize) -> Result<Collected, String> {
-        let gathered = self.gather(expected)?;
+        self.collect_gathered(self.gather(expected)?)
+    }
+    pub(crate) fn collect_roots(&self, roots: &[Entity]) -> Result<Collected, String> {
+        self.collect_gathered(self.gather_roots(roots.len(), roots.iter().copied().collect())?)
+    }
+    fn collect_gathered(&self, gathered: Gathered) -> Result<Collected, String> {
         let Gathered { roots, owner, parents, source, documents, .. } = &gathered;
         let mut result = Collected {
             polygons: Vec::new(),
@@ -479,7 +489,7 @@ impl CollisionInputs<'_, '_> {
         let gathered = self.gather(expected)?;
         // Each fixture root's package, which names its placement row.
         let packages: HashMap<Entity, &str> = self.roots.iter()
-            .filter_map(|(entity, _, choice)| choice.map(|choice| (entity, choice.package.as_str())))
+            .filter_map(|(entity, _, choice, _)| choice.map(|choice| (entity, choice.package.as_str())))
             .collect();
         let mut out = Vec::new();
         for (entity, (node, _)) in &gathered.source {

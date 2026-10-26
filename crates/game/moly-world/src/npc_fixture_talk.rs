@@ -880,8 +880,7 @@ fn step_group(
                     .get::<GlobalTransform>(group.start.fixture)
                     .ok_or("fixture pose disappeared")?
                     .translation();
-                let target = world
-                    .get_resource::<crate::npc_objective::ObjectiveFace>()
+                let target = crate::npc::navigation::face(world, main)
                     .and_then(|f| f.sample(pose.translation.to_array(), 0.5))
                     .unwrap_or(fallback.to_array());
                 world.entity_mut(draft.entity).insert(HfsmFixtureMember {

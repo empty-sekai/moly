@@ -255,3 +255,7 @@ impl crate::animation_time::UnitId for CharacterUnitId {
 /// driver is in place.
 #[derive(Component)]
 pub struct CharacterDriver;
+
+/// A detached draw whose live owner belongs to another displayed site.
+#[derive(Component)]
+pub struct SitePresentationHidden;

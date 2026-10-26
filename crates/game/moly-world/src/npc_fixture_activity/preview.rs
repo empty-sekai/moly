@@ -2,6 +2,7 @@
 //! NPC furniture owner. Navigation, fitting, Timeline, IK and disposal remain
 //! in the same owner used by autonomous activities.
 use super::*;
+use crate::site::GroundEpoch;
 use bevy::ecs::system::{SystemParam, SystemState};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

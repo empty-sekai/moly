@@ -114,14 +114,13 @@ fn recruitable(world: &World, entity: Entity) -> bool {
 fn reservable(world: &World, entity: Entity, site: &str) -> bool {
     world.get::<NpcActions>(entity).is_some_and(|state| state.ready()
         && state.site_type == site && state.current != NpcAction::ChangeSite)
-        && !crate::npc::is_away(world, entity)
         && world.get::<CommonMember>(entity).is_none()
         && world.get::<TalkReservation>(entity).is_none()
 }
 
 fn communication_eligible(world: &World, entity: Entity, main: bool, now: f32, refresh: f32) -> bool {
     let Some(state) = world.get::<NpcActions>(entity) else { return false; };
-    if !state.ready() || state.since_initialized < 1.0 || crate::npc::is_away(world, entity)
+    if !state.ready() || state.since_initialized < 1.0
         || world.get::<CommonMember>(entity).is_some() || world.get::<TalkReservation>(entity).is_some() {
         return false;
     }
@@ -170,7 +169,7 @@ fn start_social(world: &mut World, main: Entity, nearby: &[u32], actors: &[(Enti
 fn advance_social(world: &mut World, mut plan: SocialPlan, dt: f32, now: f32, cancel: bool) {
     let main_talking = world.get::<NpcActions>(plan.main).is_some_and(|s|s.current == NpcAction::Talk);
     if !main_talking { plan.elapsed += dt; }
-    let ended = cancel || plan.elapsed >= 15.0 || plan.members.iter().any(|entity| !same_plan(world, *entity, plan.id) || crate::npc::is_away(world, *entity));
+    let ended = cancel || plan.elapsed >= 15.0 || plan.members.iter().any(|entity| !same_plan(world, *entity, plan.id) || !same_site(world, plan.main, *entity));
     if ended {
         for entity in plan.members {
             if !same_plan(world, entity, plan.id) { continue; }
@@ -192,15 +191,19 @@ fn advance_social(world: &mut World, mut plan: SocialPlan, dt: f32, now: f32, ca
     world.resource_mut::<CommonPlans>().socials.push(plan);
 }
 
+fn same_site(world: &World, a: Entity, b: Entity) -> bool {
+    world.get::<NpcActions>(a).zip(world.get::<NpcActions>(b)).is_some_and(|(a, b)| a.site_type == b.site_type)
+}
+
 fn reachable(world: &World, entity: Entity, target: [f32; 3]) -> bool {
     let Some(from) = position(world, entity) else { return false; };
-    world.get_resource::<super::ObjectiveFace>().is_some_and(|face|
+    crate::npc::navigation::face(world, entity).is_some_and(|face|
         face.agent_destination_path(Vec3::from(from), Vec3::from(target)).is_some_and(|(_, complete)| complete))
 }
 
 fn destinations(world: &World, positions: &[[f32; 3]], entities: &[Entity], rng: &mut MemberRng, all_free: bool) -> Option<Vec<[f32; 3]>> {
     if all_free && law::already_together(positions) { return Some(positions.to_vec()); }
-    let face = world.get_resource::<super::ObjectiveFace>()?;
+    let face = crate::npc::navigation::face(world, *entities.first()?)?;
     let mut center = [0.0; 3];
     for p in positions { for i in 0..3 { center[i] += p[i]; } }
     for value in &mut center { *value /= positions.len() as f32; }
@@ -210,7 +213,7 @@ fn destinations(world: &World, positions: &[[f32; 3]], entities: &[Entity], rng:
             let points = face.walkable();
             if points.is_empty() { return None; }
             let (x, z) = points[super::engine_int_draw(rng, points.len())];
-            face.sample([x as f32 * 0.25, face.site_height(), z as f32 * 0.25], 2.0)
+            face.sample([x as f32 * 0.25, face.ref_y(), z as f32 * 0.25], 2.0)
         });
         let Some(center) = candidate else { continue; };
         let Some(circle) = law::circle_positions(positions, center) else { continue; };
@@ -233,14 +236,14 @@ fn move_member(world: &mut World, member: &Member, plan: &CommonPlan) -> bool {
         budget.count += 1;
         if budget.count > moly_law::npc_hfsm::MAX_TRANSITIONS_PER_FRAME { return false; }
     }
-    let Some(face) = world.get_resource::<super::ObjectiveFace>() else { return false; };
+    let Some(face) = crate::npc::navigation::face(world, member.entity) else { return false; };
     let Some(from) = position(world, member.entity) else { return false; };
     let polyline = face.field.generate_path([from[0], from[2]], [member.target[0], member.target[2]]);
     let mut navigator = super::controller::mover_parts(world, member.entity);
     let Some(nav) = navigator.as_mut() else { return false; };
     let Some(mut rng) = world.get::<MemberRng>(member.entity).cloned() else { return false; };
     let phase = crate::npc::depart_along_to(&CharacterUnitId(member.unit), &mut nav.walk.0,
-        &mut nav.path.0, &mut nav.route, &face.walk_face(), face, member.target, None,
+        &mut nav.path.0, &mut nav.route, &face.walk_face(), &face, member.target, None,
         &mut rng, polyline, 0.1);
     world.entity_mut(member.entity).insert(rng);
     let Some(phase) = phase else { return false; };
@@ -410,7 +413,7 @@ fn advance_plan(world: &mut World, plan: &mut CommonPlan, dt: f32, now: f32) {
         return;
     }
     plan.main_off_plan = 0.0;
-    if plan.members.iter().any(|m| crate::npc::is_away(world, m.entity)) { plan.phase = law::CommonPhase::Complete; return; }
+    if plan.members.iter().any(|m| !same_site(world, plan.main, m.entity)) { plan.phase = law::CommonPhase::Complete; return; }
     for turn in &mut plan.turns {
         if world.get::<NpcActions>(turn.entity).is_some_and(|s| s.current == NpcAction::Talk) { continue; }
         turn.elapsed += dt;
@@ -541,7 +544,7 @@ fn advance_plan(world: &mut World, plan: &mut CommonPlan, dt: f32, now: f32) {
 /// consumed here before automatic selection; no fixture is synthesized.
 pub fn update(world: &mut World) {
     let Some(dt) = world.get_resource::<crate::npc_clock::NpcClock>().filter(|c| c.ready()).map(|c| c.delta()) else { return; };
-    if world.get_resource::<crate::client_config::ClientConfigs>().is_none() || world.get_resource::<super::ObjectiveFace>().is_none() { return; }
+    if world.get_resource::<crate::client_config::ClientConfigs>().is_none() { return; }
     let now = world.resource::<Time>().elapsed_secs();
     let frame = world.resource::<bevy::diagnostic::FrameCount>().0;
     let stale: Vec<Entity> = world.query::<(Entity, &TalkReservation)>().iter(world)

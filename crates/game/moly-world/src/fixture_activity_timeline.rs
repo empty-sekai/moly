@@ -1039,6 +1039,11 @@ pub struct FixtureActivityTimelines {
 }
 
 impl FixtureActivityTimelines {
+    pub(crate) fn has_npc_fixture_actor(&self, actor: Entity) -> bool {
+        self.sessions.values().any(|session| session.request.bindings.actors.values().any(|e| *e == actor)
+            && matches!(session.request.owner.kind, TimelineOwnerKind::Npc))
+    }
+
     pub fn has_no_loop(&self, token: TimelineToken) -> bool {
         self.sessions.get(&token).is_some_and(|session| {
             !session
@@ -1374,6 +1379,7 @@ pub fn prepare_source_sounds(
                 if request.bindings.silent_sounds.contains(&clip.key) {
                     continue;
                 }
+                sound_position(world,request,&clip.key)?;
                 let paths = routing.cue_asset_paths(package, cue).map_err(|reason| {
                     invalid(format!("missing source SE {package}/{cue}: {reason}"))
                 })?;
@@ -2630,8 +2636,9 @@ fn apply_events(
                 // The clip starts its cue on the SE player: the cue's sequence
                 // type picks the tracks, each waits for its own delay; the
                 // playback despawns itself when it has played out.
-                let entity = crate::audio::start_timeline_cue(world, package, cue, handles)
-                    .map_err(invalid)?;
+                let position = sound_position(world,&session.request,key)?;
+                let entity = crate::audio::start_timeline_cue_at(world, package, cue, handles,position).map_err(invalid)?;
+                if let Some(position)=position { crate::site_presentation::spatial_sound(world,entity,session.request.fixture,position); }
                 session.sound_entities.push(entity);
             }
             _ => unreachable!(),
@@ -3168,6 +3175,7 @@ mod handoff_regressions {
             },
             fixture: world.spawn_empty().id(),
             definition: Arc::new(TimelineDefinition {
+                director_transforms: None,
                 package: "fixture".into(),
                 prefab: "fixture".into(),
                 fixture_view: None,
@@ -3305,6 +3313,7 @@ mod handoff_regressions {
             },
             fixture,
             definition: Arc::new(TimelineDefinition {
+                director_transforms: None,
                 package: "fixture".into(),
                 prefab: "fixture".into(),
                 fixture_view: None,
@@ -3390,6 +3399,7 @@ mod handoff_regressions {
             },
             fixture,
             definition: Arc::new(TimelineDefinition {
+                director_transforms: None,
                 package: "horse2".into(),
                 prefab: "horse2".into(),
                 fixture_view: None,
@@ -3471,4 +3481,35 @@ mod handoff_regressions {
             AnimationNodeType::Blend
         ));
     }
+}
+
+fn sound_position(world:&World,request:&StartTimeline,key:&TimelineClipKey)->Result<Option<Vec3>,TimelineFailure> {
+    // CutSceneView parents its Director to CutSceneRoot; this is the source
+    // branch that deliberately plays a non-positional SE/one-shot.
+    if request.owner.kind==TimelineOwnerKind::CutScene { return Ok(None); }
+    let definition=request.companions.iter().find(|c|c.track==key.track).map_or(request.definition.as_ref(),|c|c.source.as_ref());
+    let director=definition.director.path_id.parse::<i64>().map_err(|_|invalid("Director component id invalid"))?;
+    let mut stack=vec![request.fixture];
+    let mut found=Vec::new();
+    while let Some(entity)=stack.pop() {
+        if world.get::<moly_assets::source_navigation::SourceObjectIdentity>(entity).is_some_and(|id|id.file==definition.director.file && id.components.contains(&director)) { found.push(entity); }
+        if let Some(children)=world.get::<Children>(entity) { stack.extend(children.iter()); }
+    }
+    match found.as_slice() {
+        [entity]=>return crate::fixture_scene_inputs::live_matrix(world,*entity).map(|m|Some(m.transform_point3(Vec3::ZERO))).ok_or_else(||invalid("live Director transform is absent")),
+        []=>{},
+        _=>return Err(invalid("multiple live instances match this Director")),
+    }
+    // A fixture timeline is instantiated as a child of FixtureView, preserving
+    // its prefab-local transform chain (SetUpView's isWorldSpace=false).
+    let view=world.get::<crate::fixture::FixtureViewInstance>(request.fixture).ok_or_else(||invalid("spatial Director has no live source view"))?.0;
+    let mut matrix=crate::fixture_scene_inputs::live_matrix(world,view).ok_or_else(||invalid("spatial FixtureView transform is absent"))?;
+    let chain=definition.director_transforms.as_ref().ok_or_else(||invalid("source Director transform chain is not exported"))?;
+    for local in chain {
+        let [x,y,z]=local.position;
+        let [qx,qy,qz,qw]=local.rotation;
+        let transform=Transform { translation:Vec3::new(-x,y,z),rotation:Quat::from_xyzw(qx,-qy,-qz,qw),scale:Vec3::from(local.scale) };
+        matrix=matrix*transform.to_matrix();
+    }
+    Ok(Some(matrix.transform_point3(Vec3::ZERO)))
 }

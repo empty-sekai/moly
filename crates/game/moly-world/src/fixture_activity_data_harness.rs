@@ -22,7 +22,10 @@ fn tables_of(root: &str) -> FixtureActivityTables {
             serde_json::from_str(&text).unwrap_or_else(|err| panic!("{file}: {err}"))
         })
         .collect();
-    FixtureActivityTables::from_documents(&documents).expect("activity tables")
+    let mut tables = FixtureActivityTables::from_documents(&documents).expect("activity tables");
+    let source = std::fs::read_to_string(format!("{root}/source.json")).expect("source identity");
+    tables.set_source(&serde_json::from_str(&source).expect("source identity JSON"));
+    tables
 }
 
 /// One general lottery with the engine draw fixed to `index`.
@@ -47,6 +50,7 @@ fn pool_of(scene: &LotteryScene<'_>, seeker: &NpcView) -> Value {
             json!({"pool": ids})
         }
         Ok(GeneralPick::Previous { talk_id }) => json!({"previous": talk_id}),
+        Ok(GeneralPick::Empty) => json!({"empty": true, "talk_id": 0}),
         Err(halt) => json!({"halt": halt}),
     }
 }

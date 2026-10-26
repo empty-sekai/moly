@@ -654,6 +654,7 @@ pub struct TimelineDefinition {
     pub prefab: String,
     pub fixture_view: Option<FixtureTimelineViewBinding>,
     pub director: SourceAssetId,
+    pub director_transforms: Option<Vec<DirectorTransform>>,
     pub timeline: SourceAssetId,
     pub duration: f64,
     pub tracks: Vec<TimelineTrack>,
@@ -937,6 +938,7 @@ impl TimelinePackage {
             prefab: string(prefab, "container")?.to_owned(),
             fixture_view,
             director: asset(&director["asset"])?,
+            director_transforms: director_transforms(director)?,
             timeline: identity,
             duration,
             tracks,
@@ -1382,4 +1384,32 @@ pub(super) fn asset(v: &Value) -> Result<SourceAssetId, TimelineFailure> {
         file: string(v, "file")?.into(),
         path_id: path_id(&v["pathId"])?,
     })
+}
+
+/// The Director's source Transform chain from prefab root to its own node.
+/// Imported into canonical axes exactly once when composed with the live view.
+#[derive(Clone,Debug)]
+pub struct DirectorTransform {
+    pub position: [f32;3],
+    pub rotation: [f32;4],
+    pub scale: [f32;3],
+}
+fn director_transforms(director: &Value) -> Result<Option<Vec<DirectorTransform>>,TimelineFailure> {
+    let Some(values)=director.get("transforms") else { return Ok(None); };
+    let values=values.as_array().ok_or_else(||invalid("director transforms is not an array"))?;
+    if values.is_empty() { return Err(invalid("director transform chain is empty")); }
+    let mut result=Vec::new();
+    for value in values {
+        let component=|group:&str,key:&str|->Result<f32,TimelineFailure>{
+            let n=value[group][key].as_f64().filter(|v|v.is_finite()).ok_or_else(||invalid(format!("director {group}.{key} missing")))? as f32;
+            if !n.is_finite() { return Err(invalid("director transform exceeds float range")); }
+            Ok(n)
+        };
+        result.push(DirectorTransform {
+            position: [component("position","x")?,component("position","y")?,component("position","z")?],
+            rotation: [component("rotation","x")?,component("rotation","y")?,component("rotation","z")?,component("rotation","w")?],
+            scale: [component("scale","x")?,component("scale","y")?,component("scale","z")?],
+        });
+    }
+    Ok(Some(result))
 }

@@ -1840,7 +1840,7 @@ fn switch_materials(
     swapped: Option<Res<FixtureMaterialsSwapped>>,
     server: Res<AssetServer>,
     env: Res<SiteEnv>,
-    roots: PendingVisuals,
+    (roots, hidden_residents): (PendingVisuals, Query<(), With<crate::render_inputs::HiddenResidentVisual>>),
     children: Query<&Children>,
     parts: Query<(
         &MeshMaterial3d<StandardMaterial>,
@@ -2143,7 +2143,8 @@ fn switch_materials(
         // A visible glTF scene would first enter the render queues with the
         // importer's material. Publish the prepared hierarchy in the same
         // command batch as the material replacements and hidden source passes.
-        commands.entity(root_entity).insert((Visibility::Inherited, FixtureVisualReady));
+        let visibility = if hidden_residents.contains(root_entity) { Visibility::Hidden } else { Visibility::Inherited };
+        commands.entity(root_entity).insert((visibility, FixtureVisualReady));
     }
     for (index, entities) in &swapped_entities {
         let item = &state.planned[*index];

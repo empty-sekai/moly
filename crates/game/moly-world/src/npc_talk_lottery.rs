@@ -14,7 +14,8 @@
 //!   type; its fixture condition is playable (always true here, since a
 //!   fixture row already raised in the fourth filter). The kept talks take
 //!   one engine integer range. With none kept the character's own previous
-//!   talk id comes back with no draw, and without one the source raises.
+//!   talk id comes back with no draw; JP 7 returns 0 without one, while
+//!   older source versions retain their empty-range/index exception.
 //! - **Fixture lotteries** (unread fixture talks, read talks, already-read
 //!   talks). The list is filtered (unread and carrying a fixture condition,
 //!   or read), then the eight lottery gates keep the pool in list order, and
@@ -856,6 +857,10 @@ pub fn lottery_general_talk_id(
         // 6: playable fixture condition: a talk that reached here has no
         // fixture row (the fourth filter raised on one), so it is true.
         pool.push(talk);
+    }
+    if scene.tables.general_empty_is_zero() {
+        return law::lottery_general_talk_id_jp7(&pool, seeker.previous_talk_id,
+            &mut IntDraw { draws, use_word }).map_err(Into::into);
     }
     if pool.is_empty() && seeker.previous_talk_id == 0 {
         // With no talk kept and no previous talk the source still takes its

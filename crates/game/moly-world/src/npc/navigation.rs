@@ -56,15 +56,12 @@ impl NavigationAgents<'_, '_> {
 }
 
 pub(crate) fn face(world: &World, actor: Entity) -> Option<ObjectiveFace> {
-    if super::is_away(world, actor) {
-        let own = &world.get::<super::NpcActions>(actor)?.site_type;
-        world
-            .get_resource::<super::residency::SiteNavigation>()?
-            .get(own)
-            .map(|site| site.objective.clone())
-    } else {
-        world.get_resource::<ObjectiveFace>().cloned()
+    let own = &world.get::<super::NpcActions>(actor)?.site_type;
+    let current = world.get_resource::<crate::site::SiteActive>().is_some_and(|s| s.site_type == *own);
+    if current {
+        if let Some(face) = world.get_resource::<ObjectiveFace>() { return Some(face.clone()); }
     }
+    world.get_resource::<super::residency::SiteNavigation>()?.get(own).map(|s| s.objective.clone())
 }
 
 pub(crate) fn exists(world: &World, actor: Entity) -> bool {
@@ -276,6 +273,24 @@ pub(crate) fn reset(world: &mut World, actor: Entity, owner: u64) {
         .is_some_and(|direct| direct.owner == owner)
     {
         world.entity_mut(actor).remove::<DirectDestination>();
+    }
+}
+
+/// Drop this helper's velocity/path and its unowned Walking phase without
+/// stopping a replacement route or cancelling a presenter animation.
+pub(crate) fn release_movement(world: &mut World, actor: Entity, owner: u64) {
+    if world.get::<DirectDestination>(actor).is_some_and(|direct| direct.owner != owner) { return; }
+    reset(world, actor, owner);
+    let empty = world.get::<RouteStops>(actor).is_some_and(|route|
+        route.goal.is_none() && route.navigation_destination.is_none()
+            && route.stops.is_empty() && route.suspended.is_none())
+        && world.get::<super::PathSlot>(actor).is_some_and(|p| p.0.corners().is_empty());
+    if empty {
+        if let Some(mut phase) = world.get_mut::<super::MotionPhase>(actor) {
+            if matches!(*phase, super::MotionPhase::Walking) {
+                *phase = super::MotionPhase::Dwelling { remaining: None };
+            }
+        }
     }
 }
 

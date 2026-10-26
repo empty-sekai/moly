@@ -822,7 +822,7 @@ pub fn build_face(
     epoch: Option<Res<GroundEpoch>>,
     walk_face: Option<Res<crate::walk_face::WalkFace>>,
     site: Option<Res<crate::site::SiteActive>>,
-    parts: Query<(&Mesh3d, &GlobalTransform)>,
+    parts: Query<(&Mesh3d, &GlobalTransform), With<crate::site::resident_load::ActiveSiteMesh>>,
 ) {
     let epoch = epoch.map(|epoch| epoch.0).unwrap_or(0);
     let Some(walk_face) = walk_face else {
@@ -885,6 +885,10 @@ pub fn build_face(
         return; // 场景未展开完，下一帧再试
     }
 
+    commands.insert_resource(face_from_triangles(tris, &walk_face, epoch, site_height));
+}
+
+pub(crate) fn face_from_triangles(tris: Vec<[[f32; 3]; 3]>, walk_face: &crate::walk_face::WalkFace, epoch: u64, site_height: f32) -> ObjectiveFace {
     // 包围盒与格界（含端点）。
     let mut min = [f32::MAX; 3];
     let mut max = [-f32::MAX; 3];
@@ -960,7 +964,7 @@ pub fn build_face(
         ref_y,
         epoch
     );
-    commands.insert_resource(face);
+    face
 }
 
 /// A prepared master reference keeps its parser/backend identity. A missing
@@ -1867,7 +1871,6 @@ pub fn general_data_destination(world: &mut World, entity: Entity) -> Result<[f3
         crate::npc::walkable::WalkableSource<'w, 's>,
         crate::player_talk::TalkCatalog<'w>,
         Res<'w, ClientConfigs>,
-        Res<'w, ObjectiveFace>,
         Query<
             'w,
             's,
@@ -1892,8 +1895,10 @@ pub fn general_data_destination(world: &mut World, entity: Entity) -> Result<[f3
         let state = bevy::ecs::system::SystemState::<Params>::new(world);
         world.insert_resource(SourceState(state));
     }
+    let face = crate::npc::navigation::face(world, entity).ok_or("own site navigation absent")?;
+    let current_site = world.get_resource::<SiteSelection>().map(|s| s.site_type().to_owned());
     let result = world.resource_scope(|world, state: Mut<SourceState>| {
-        let (mut walkable, catalog, config, face, npcs, players) =
+        let (mut walkable, catalog, config, npcs, players) =
             state.into_inner().0.get_mut(world);
         let snaps: Vec<MemberSnap> = npcs
             .iter()
@@ -1919,13 +1924,14 @@ pub fn general_data_destination(world: &mut World, entity: Entity) -> Result<[f3
             .iter()
             .find(|s| s.entity == entity)
             .ok_or("NPC source row absent")?;
-        let cells = walkable.cells()?;
+        let cells = walkable.cells_for(&own.site_type)?;
         let mut occupied: HashSet<Cell> = snaps
             .iter()
+            .filter(|s| s.site_type == own.site_type)
             .map(|s| cell_of(s.position[0], s.position[2]))
             .collect();
-        for t in players.iter() {
-            occupied.insert(cell_of(t.translation.x, t.translation.z));
+        if current_site.as_deref() == Some(own.site_type.as_str()) {
+            for t in players.iter() { occupied.insert(cell_of(t.translation.x, t.translation.z)); }
         }
         let mut record = DecisionRecord {
             fields: serde_json::Map::new(),
@@ -2020,6 +2026,8 @@ pub fn decide(
         mut reactions,
         fixture_worlds,
         multi_reservations,
+        fixture_sites,
+        retained_navigation,
     ): (
         Option<Res<crate::walk_face::WalkFace>>,
         ResMut<crate::npc::change_site_state::ChangeSiteRuns>,
@@ -2037,6 +2045,8 @@ pub fn decide(
         Option<ResMut<events::LayoutReactionFixtures>>,
         Query<&GlobalTransform, With<crate::fixture_activity_state::FixtureActivityIdentity>>,
         crate::npc_fixture_talk::HfsmReservations,
+        Res<crate::fixture::residency::FixtureSites>,
+        Res<crate::npc::residency::SiteNavigation>,
     ),
     attach_worlds: Option<Res<crate::fixture_attach::AttachWorlds>>,
     players: Query<&Transform, With<crate::player::PlayerControlled>>,
@@ -2059,7 +2069,6 @@ pub fn decide(
             &mut crate::npc::NpcActions,
             &mut crate::npc::RestLifecycle,
         ),
-        Without<crate::npc::residency::Away>,
     >,
 ) {
     // The site controllers clear every NPC's UnmovableFixtureList when a
@@ -2076,9 +2085,6 @@ pub fn decide(
     if editor.is_active() {
         return hold.hold(&DECISIONS, HOLD_EDITOR, now);
     }
-    let Some(face) = face else {
-        return hold.hold(&DECISIONS, "the objective face is not built", now);
-    };
     let Some(config) = configs.as_deref() else {
         return hold.hold(&DECISIONS, "the client configs are not loaded", now);
     };
@@ -2086,36 +2092,6 @@ pub fn decide(
     let Some(talk_list) = talk_list.as_deref() else {
         return hold.hold(&DECISIONS, "the client talk list is not set", now);
     };
-    // 代数资源在场才算「面已定案」：首站定案（inactiveNodes 清扫）之前
-    // 的面可能还含即将被撤的实例，不在它上面做决策。
-    let Some(epoch) = epoch else {
-        return hold.hold(&DECISIONS, "the ground epoch is not settled", now);
-    };
-    let face: &ObjectiveFace = &*face;
-    if !face.is_fresh(epoch.0) {
-        return hold.hold(
-            &DECISIONS,
-            "the objective face is not of the current ground epoch",
-            now,
-        );
-    }
-    // 可行走面（执行侧的折线来源）：不在场时整帧让路——决策写了落点也
-    // 算不出路线，等面与目标面同帧链齐（站点链先建面再建目标面）。
-    let Some(walk_face) = walk_face else {
-        return hold.hold(&DECISIONS, "the walk face is not built", now);
-    };
-    let walk_face: &crate::walk_face::WalkFace = &*walk_face;
-    if face.generation != walk_face.generation() {
-        return hold.hold(
-            &DECISIONS,
-            "the objective face and the walk face are of different generations",
-            now,
-        );
-    }
-    // 动作点世界位组合表：不在场时整帧让路（组合晚解析一帧落地）——
-    // 缺表时动作点支读不出挂点，静默落环带会把「表没到」伪装成「该
-    // 家具没有动作点」。
-    let attach = attach_worlds.as_deref();
     if !catalog.ready() {
         return hold.hold(
             &DECISIONS,
@@ -2150,16 +2126,6 @@ pub fn decide(
     }
     let dt = clock.delta();
     let frame = frame_count.0;
-    // The site's walkable list (the general talk's floor position reads
-    // it): the AI holds until it exists, as it holds for the site data.
-    let Ok(walkable_cells) = walkable.cells() else {
-        return hold.hold(
-            &DECISIONS,
-            "the site's walkable cell list is not available (named by [npc-walkable])",
-            now,
-        );
-    };
-
     // 成员快照：社交链的候选（位置 + 导航目的地 + 对话目标位）与游走链的
     // 占格都从全员位置算。每名成员决策后按它的现值刷新自己那一格，后决策
     // 的成员读到的是先决策者的新数据（源逐个续跑各成员的 AI、读现值）。
@@ -2183,15 +2149,6 @@ pub fn decide(
             },
         )
         .collect();
-    let mut occupied: std::collections::HashSet<Cell> = snaps
-        .iter()
-        .map(|snap| cell_of(snap.position[0], snap.position[2]))
-        .collect();
-    for player in &players {
-        let translation = player.translation;
-        occupied.insert(cell_of(translation.x, translation.z));
-    }
-
     // 面板占比与成员数权重。
     let percents = LotteryPercents {
         fixture_talk: config.float(KEY_NPC_LOTTERY_FIXTURE_TALK_PERCENT),
@@ -2206,16 +2163,6 @@ pub fn decide(
         talk3: config.float(KEY_NPC_LOTTERY_TALK3_WIGHT),
         talk4: config.float(KEY_NPC_LOTTERY_TALK4_WIGHT),
     };
-    // The landing identity test reads the attachment table: wait for it
-    // while anchored fixtures stand, so a table still loading never reads as
-    // a fixture without action points.
-    if attach.is_none() && placements.fixture_ids().iter().any(|id| *id != 0) {
-        return hold.hold(
-            &DECISIONS,
-            "the action-point attachment table is not composed",
-            now,
-        );
-    }
     hold.run(&DECISIONS, now);
     // Branch A's input: any unread row in the whole client talk list.
     let yet_unread_available = talk_list.any_unread();
@@ -2235,6 +2182,8 @@ pub fn decide(
         )
         .collect();
     if let Some(receipts) = reactions.as_deref_mut().filter(|r| !r.pending.is_empty()) {
+        let Some(face) = face.as_deref() else { return; };
+        if !epoch.as_deref().is_some_and(|epoch| face.is_fresh(epoch.0)) { return; }
         let changed = receipts.pending[0].clone();
         let fixtures = fixture_activities.talk_lottery_fixtures(
             &placements,
@@ -2258,7 +2207,7 @@ pub fn decide(
                 .filter_map(|(_, g)| fixture_worlds.get(g.entity).ok().map(|t| t.translation()))
                 .sum::<Vec3>()
                 / geometry.len().max(1) as f32;
-            let mut order: Vec<_> = snaps.iter().collect();
+            let mut order: Vec<_> = snaps.iter().filter(|s| s.site_type == placements.site_type()).collect();
             order.sort_by(|a, b| {
                 Vec3::from(a.position)
                     .distance_squared(center)
@@ -2369,8 +2318,8 @@ pub fn decide(
         // ordinary post-edit reactions begin.
         return;
     }
-    // The placed fixtures, built at the first talk factory of the frame.
-    let mut placed: Option<Vec<npc_talk_lottery::PlacedFixture>> = None;
+    // Each site's factory keeps its own ordered placement view.
+    let mut placed_by_site: HashMap<String, Option<Vec<npc_talk_lottery::PlacedFixture>>> = HashMap::new();
 
     // The avatar list's order; each character, once past its turn, is read
     // back from its live components before the next one runs.
@@ -2444,7 +2393,7 @@ pub fn decide(
         else {
             continue;
         };
-        if !actions.ready() {
+        if !actions.ready() || (hidden.contains(entity) && slot.kind() != Some(TalkType::EntrySite)) {
             continue;
         }
         let hfsm = hfsm_scope
@@ -2464,14 +2413,25 @@ pub fn decide(
         {
             continue;
         }
-        // A member whose own site is not the selected site is not on it (see
-        // `npc::residency`), even on the frame before its suspension lands.
-        if selection
-            .as_deref()
-            .is_some_and(|selection| selection.site_type() != actions.site_type)
-        {
-            continue;
+        let own_site = actions.site_type.as_str();
+        let retained = fixture_sites.get(own_site);
+        let is_current = placements.site_type() == own_site;
+        let site_placements = if is_current { Some(&*placements) } else { retained.map(|c| &c.placements) };
+        let site_face = if is_current { face.as_deref() } else { retained_navigation.get(own_site).map(|c| &c.objective) };
+        let site_walk = if is_current { walk_face.as_deref() } else { retained_navigation.get(own_site).map(|c| &c.walk) };
+        let site_epoch = if is_current { epoch.as_deref().map(|e| e.0) } else { retained.map(|c| c.inputs.stamp.site_epoch) };
+        let (Some(placements), Some(face), Some(walk_face), Some(site_epoch)) = (site_placements, site_face, site_walk, site_epoch) else { continue; };
+        if !face.is_fresh(site_epoch) || face.navigation_generation() != walk_face.generation() { continue; }
+        let epoch = GroundEpoch(site_epoch);
+        let attach = if is_current { attach_worlds.as_deref() } else { retained.and_then(|c| c.attach.as_ref()) };
+        if attach.is_none() && placements.fixture_ids().iter().any(|id| *id != 0) { continue; }
+        let Ok(walkable_cells) = walkable.cells_for(own_site) else { continue; };
+        let mut occupied: HashSet<Cell> = snaps.iter().filter(|s| s.site_type == own_site)
+            .map(|s| cell_of(s.position[0], s.position[2])).collect();
+        if selection.as_deref().is_some_and(|s| s.site_type() == own_site) {
+            for player in &players { occupied.insert(cell_of(player.translation.x, player.translation.z)); }
         }
+        let placed = placed_by_site.entry(own_site.to_owned()).or_default();
         if mind.ai_stopped.is_some() {
             continue;
         }
@@ -3129,9 +3089,7 @@ pub fn decide(
                         placed.get_or_insert_with(|| {
                             let fixtures = fixture_activities.talk_lottery_fixtures(
                                 &placements,
-                                selection
-                                    .as_deref()
-                                    .and_then(|site| catalog.site_type_value(site.site_type())),
+                                catalog.site_type_value(&actions.site_type),
                             );
                             // The placed fixtures the talk gates read, logged when
                             // they change, so a replay evaluates the same gates.
@@ -4565,6 +4523,8 @@ fn sub_objective_move_failed(
 /// [`CascadeScene::discarded_create_ai_talk_data`]).
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct CascadeScene<'w, 's> {
+    fixture_sites: Res<'w, crate::fixture::residency::FixtureSites>,
+    navigation: Res<'w, crate::npc::residency::SiteNavigation>,
     face: Option<Res<'w, ObjectiveFace>>,
     epoch: Option<Res<'w, GroundEpoch>>,
     selection: Option<Res<'w, SiteSelection>>,
@@ -4682,31 +4642,21 @@ impl CascadeScene<'_, '_> {
         cause: &str,
     ) -> Result<Result<(), String>, CascadeHold> {
         let hold = |reason: &str| Err(CascadeHold(reason.to_owned()));
-        let walkable = self.walkable.cells().map_err(CascadeHold)?;
-        let (Some(face), Some(epoch), Some(config), Some(talk_list), Some(together)) = (
-            self.face.as_deref(),
-            self.epoch.as_deref(),
-            self.configs.as_deref(),
-            self.talk_list.as_deref(),
-            self.together.as_deref(),
-        ) else {
-            return hold(
-                "the decision scene's face, configs, talk list or together table is not installed",
-            );
-        };
-        if !face.is_fresh(epoch.0) || !catalog.ready() || self.extras_pending.is_some() {
-            return hold("the decision scene is still loading");
-        }
-        if self.attach_worlds.is_none() && self.placements.fixture_ids().iter().any(|id| *id != 0) {
-            return hold("the action point table is still loading");
-        }
-        let Some(member) = members.get(own) else {
-            return hold("the character is not in the avatar list");
-        };
+        let Some(member) = members.get(own) else { return hold("the character is not in the avatar list"); };
         let site_type = member.snap.site_type.as_str();
-        if let Err(reason) = self.fixture_activities.loading(epoch.0, site_type) {
-            return Err(CascadeHold(reason));
-        }
+        let walkable = self.walkable.cells_for(site_type).map_err(CascadeHold)?;
+        let active = self.placements.site_type() == site_type;
+        let retained = self.fixture_sites.get(site_type);
+        let face = if active { self.face.as_deref() } else { self.navigation.get(site_type).map(|n| &n.objective) };
+        let epoch = if active { self.epoch.as_deref().map(|e| e.0) } else { retained.map(|c| c.inputs.stamp.site_epoch) };
+        let placements = if active { Some(&*self.placements) } else { retained.map(|c| &c.placements) };
+        let attach = if active { self.attach_worlds.as_deref() } else { retained.and_then(|c| c.attach.as_ref()) };
+        let (Some(face), Some(epoch), Some(placements), Some(config), Some(talk_list), Some(together)) = (
+            face, epoch, placements, self.configs.as_deref(), self.talk_list.as_deref(), self.together.as_deref()
+        ) else { return hold("the owning decision scene is not installed"); };
+        if !face.is_fresh(epoch) || !catalog.ready() || self.extras_pending.is_some() { return hold("the decision scene is still loading"); }
+        if attach.is_none() && placements.fixture_ids().iter().any(|id| *id != 0) { return hold("the action point table is still loading"); }
+        if let Err(reason) = self.fixture_activities.loading(epoch, site_type) { return Err(CascadeHold(reason)); }
         let entity = member.snap.entity;
         let seeker = member.view.clone();
         let views: Vec<npc_talk_lottery::NpcView> =
@@ -4714,10 +4664,11 @@ impl CascadeScene<'_, '_> {
         let snaps: Vec<MemberSnap> = members.iter().map(|member| member.snap.clone()).collect();
         let mut occupied: HashSet<Cell> = snaps
             .iter()
+            .filter(|snap| snap.site_type == site_type)
             .map(|snap| cell_of(snap.position[0], snap.position[2]))
             .collect();
-        if let Some(player) = player {
-            occupied.insert(cell_of(player.x, player.z));
+        if self.selection.as_deref().is_some_and(|s| s.site_type() == site_type) {
+            if let Some(player) = player { occupied.insert(cell_of(player.x, player.z)); }
         }
         let weights = LotteryWeights {
             talk1: config.float(KEY_NPC_LOTTERY_TALK1_WIGHT),
@@ -4734,15 +4685,11 @@ impl CascadeScene<'_, '_> {
             already_read_when_has_not_read: config
                 .float(KEY_NPC_LOTTERY_ALREADY_READ_WHEN_HAS_NOT_READ),
         };
-        let selection_site_type = self
-            .selection
-            .as_deref()
-            .and_then(|site| catalog.site_type_value(site.site_type()));
+        let selection_site_type = catalog.site_type_value(site_type);
         let mut trial = rng.clone();
         let mut trial_seeder = self.seeder.seeder().clone();
         let calls_before = rng.calls();
         let fixture_activities = &self.fixture_activities;
-        let placements: &FixturePlacements = &self.placements;
         let Some(tables) = fixture_activities.tables() else {
             return hold("the master tables are not installed");
         };

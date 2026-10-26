@@ -32,6 +32,10 @@
 //!   等价、瞬态有差。
 //! * 约束读位：反编译同迭代内并行读位置（job 系统序不保证）；
 //!   本律顺序投影（Gauss-Seidel）。
+//! * 显式 mode-0 重置沿用本律的 pos/prev 表示：当帧动画位播种，
+//!   按帧恢复 velocityWeight，分别权重积分前惯性与约束/回拉后的
+//!   保存速度。没有补造原生独立速度/旋转/oldBase/oldSlow 缓冲，
+//!   也没有改变现有的限速位置、摩擦缺口与约束速度全吸收语义。
 
 use super::collider::WorldCollider;
 use super::math;
@@ -219,6 +223,8 @@ impl EvaluatedParams {
 pub struct StepStats {
     /// 本帧实际子步数。
     pub substeps: u32,
+    /// 本帧消费了显式 mode-0 重置，且至少执行一次物理子步。
+    pub requested_reset: bool,
     /// 本帧发生了 teleport 复位。
     pub teleport_reset: bool,
     /// 本帧发生了 NaN 复位。
@@ -246,6 +252,12 @@ pub struct ClothState {
     pub nan_resets: u32,
     /// teleport 复位累计（诊断）。
     pub teleport_resets: u32,
+    /// 只在推进拥有当帧动画输入时消费；停帧保留，不从事件回调播种。
+    pending_reset: Option<f32>,
+    /// TeamData.velocityWeight；新链恒为 1，不改变未请求重置的轨迹。
+    velocity_weight: f32,
+    /// authored resetStabilizationTime，按帧 delta 恢复而非按子步恢复。
+    velocity_recovery_time: f32,
 }
 
 impl ClothState {
@@ -259,7 +271,24 @@ impl ClothState {
             accumulator: 0.0,
             nan_resets: 0,
             teleport_resets: 0,
+            pending_reset: None,
+            velocity_weight: 1.0,
+            velocity_recovery_time: 0.0,
         }
+    }
+
+    /// 排队 `BaseCloth.ResetCloth` 的 Reset（mode 0）分支。
+    /// 调用本身不改粒子/锚点/时钟；下一次有正 dt 的有效输入消费它。
+    /// 相同帧的多个请求折叠成一次，以最后一个 authored 时间为准。
+    /// Keep（mode 1）保留形状及旋转速度的语义不由此 API 代替。
+    pub fn request_reset_mode0(&mut self, stabilization_time: f32) -> Result<(), String> {
+        if !stabilization_time.is_finite() || stabilization_time < 0.0 {
+            return Err(format!(
+                "cloth solver: resetStabilizationTime 非法（{stabilization_time}）"
+            ));
+        }
+        self.pending_reset = Some(stabilization_time);
+        Ok(())
     }
 }
 
@@ -291,7 +320,11 @@ pub fn build_chain(
             rest.len()
         ));
     }
-    let fixed_bits: Vec<bool> = def.selection.iter().map(|&s| s == Selection::Fixed).collect();
+    let fixed_bits: Vec<bool> = def
+        .selection
+        .iter()
+        .map(|&s| s == Selection::Fixed)
+        .collect();
 
     // 拓扑序：反复放置「父已放」的顶点（demo 形）。
     let mut order = Vec::with_capacity(n);
@@ -429,79 +462,107 @@ pub fn advance_with_scratch(
     if input.anim.len() != topo.n || state.pos.len() != topo.n {
         return Err("cloth solver: 输入长度与链不一致".to_string());
     }
-    if !state.inited {
-        seed(state, input.anim, input.anchor_rot);
-        return Ok(StepStats {
-            substeps: 0,
-            teleport_reset: false,
-            nan_reset: false,
-            max_disp: 0.0,
-        });
-    }
-
-    // ---- 世界运动惯性（demo step() 的 inertia 块；数据结构 =
-    // TeamData.WorldInfluence 的 now/old position/rotation）----
-    let a = topo.anchor as usize;
-    let a1 = input.anim[a];
-    let a0 = state.anchor_prev_pos;
-    let dq = math::quat_normalize(mul_quat(
-        input.anchor_rot,
-        math::quat_conjugate(state.anchor_prev_rot),
-    ));
-    let trans = sub(a1, a0);
-    let t_len = math::length(trans);
-    let rot_angle = 2.0 * dq[3].abs().clamp(0.0, 1.0).acos();
-
-    // teleport 复位：useResetTeleport 链用数据阈值；其余 1.0m 兜底。
-    let dist_thresh = if params.use_reset_teleport {
-        params.teleport_distance
-    } else {
-        FALLBACK_TELEPORT_DISTANCE
-    };
-    let mut stats = StepStats::default();
-    if dt > 0.0
-        && (t_len > dist_thresh
-            || (params.use_reset_teleport && rot_angle > params.teleport_rotation))
+    let reset_time = state.pending_reset.filter(|_| dt > 0.0);
+    let resetting = reset_time.is_some();
+    // Reject malformed reset inputs before changing any state or consuming the
+    // request. Initial/automatic seed behavior outside explicit reset is kept.
+    if resetting
+        && (input.anim.iter().flatten().any(|v| !v.is_finite())
+            || input.anchor_rot.iter().any(|v| !v.is_finite()))
     {
+        return Err("cloth solver: 显式重置的动画输入非有限".to_string());
+    }
+    if let Some(recovery_time) = reset_time {
         seed(state, input.anim, input.anchor_rot);
-        state.teleport_resets += 1;
-        stats.teleport_reset = true;
-        return Ok(stats);
-    }
-
-    // 截流：maxMoveSpeed / maxRotationSpeed 是「每秒」量，乘帧 dt。
-    let cap_t = params.max_move_speed * dt;
-    let felt_t = if t_len > cap_t && t_len > 0.0 {
-        mul(trans, cap_t / t_len)
-    } else {
-        trans
-    };
-    let cap_r = params.max_rotation_speed * dt;
-    let felt_q = if rot_angle > cap_r && rot_angle > 1e-9 {
-        math::quat_slerp(math::quat_identity(), dq, cap_r / rot_angle)
-    } else {
-        dq
-    };
-    for i in 0..topo.n {
-        if topo.fixed_bits[i] {
-            continue;
-        }
-        let mi = params.move_influence[i].clamp(0.0, 1.0);
-        let ri = params.rotation_influence[i].clamp(0.0, 1.0);
-        let rel = sub(state.pos[i], a0);
-        // fullRigid = ΔR·(p-a0) - (p-a0) + trans：骨架刚性带动的那份
-        let rigid_disp = {
-            let r = math::quat_rotate(dq, rel);
-            add(sub(r, rel), trans)
+        // A topology's anchor need not occupy the first serialized vertex.
+        state.anchor_prev_pos = input.anim[topo.anchor as usize];
+        state.velocity_recovery_time = recovery_time;
+        state.velocity_weight = if recovery_time > 1e-6 { 0.0 } else { 1.0 };
+        // Native preprocess sets nowTime = updateDeltaTime before UpdateTime
+        // adds this frame's delta. This primes one update, clears old residual
+        // time, and keeps the existing maximum-substep cap.
+        state.accumulator = SIM_DT;
+    } else if !state.inited {
+        seed(state, input.anim, input.anchor_rot);
+        return Ok(StepStats::default());
+    } else if state.velocity_weight < 1.0 {
+        // One selected frame delta, even when this frame contains many (or no)
+        // substeps. Do not recover on the frame that consumes a positive reset.
+        let increment = if state.velocity_recovery_time <= 1e-6 {
+            1.0
+        } else {
+            dt / state.velocity_recovery_time
         };
-        // felt = 截流平移·mi + 截流旋转·ri：粒子「感到」的那份
-        let felt_rot = sub(math::quat_rotate(felt_q, rel), rel);
-        let shift = sub(rigid_disp, add(mul(felt_t, mi), mul(felt_rot, ri)));
-        state.pos[i] = add(state.pos[i], shift);
-        state.prev[i] = add(state.prev[i], shift);
+        state.velocity_weight = (state.velocity_weight + increment).clamp(0.0, 1.0);
     }
-    state.anchor_prev_pos = a1;
-    state.anchor_prev_rot = input.anchor_rot;
+    let mut stats = StepStats::default();
+
+    // Mode 0 clears world-movement history; its consumption frame must not
+    // reapply yesterday's anchor delta or enter automatic-teleport handling.
+    if !resetting {
+        // ---- 世界运动惯性（demo step() 的 inertia 块；数据结构 =
+        // TeamData.WorldInfluence 的 now/old position/rotation）----
+        let a = topo.anchor as usize;
+        let a1 = input.anim[a];
+        let a0 = state.anchor_prev_pos;
+        let dq = math::quat_normalize(mul_quat(
+            input.anchor_rot,
+            math::quat_conjugate(state.anchor_prev_rot),
+        ));
+        let trans = sub(a1, a0);
+        let t_len = math::length(trans);
+        let rot_angle = 2.0 * dq[3].abs().clamp(0.0, 1.0).acos();
+
+        // teleport 复位：useResetTeleport 链用数据阈值；其余 1.0m 兜底。
+        let dist_thresh = if params.use_reset_teleport {
+            params.teleport_distance
+        } else {
+            FALLBACK_TELEPORT_DISTANCE
+        };
+        if dt > 0.0
+            && (t_len > dist_thresh
+                || (params.use_reset_teleport && rot_angle > params.teleport_rotation))
+        {
+            seed(state, input.anim, input.anchor_rot);
+            state.teleport_resets += 1;
+            stats.teleport_reset = true;
+            return Ok(stats);
+        }
+
+        // 截流：maxMoveSpeed / maxRotationSpeed 是「每秒」量，乘帧 dt。
+        let cap_t = params.max_move_speed * dt;
+        let felt_t = if t_len > cap_t && t_len > 0.0 {
+            mul(trans, cap_t / t_len)
+        } else {
+            trans
+        };
+        let cap_r = params.max_rotation_speed * dt;
+        let felt_q = if rot_angle > cap_r && rot_angle > 1e-9 {
+            math::quat_slerp(math::quat_identity(), dq, cap_r / rot_angle)
+        } else {
+            dq
+        };
+        for i in 0..topo.n {
+            if topo.fixed_bits[i] {
+                continue;
+            }
+            let mi = params.move_influence[i].clamp(0.0, 1.0);
+            let ri = params.rotation_influence[i].clamp(0.0, 1.0);
+            let rel = sub(state.pos[i], a0);
+            // fullRigid = ΔR·(p-a0) - (p-a0) + trans：骨架刚性带动的那份
+            let rigid_disp = {
+                let r = math::quat_rotate(dq, rel);
+                add(sub(r, rel), trans)
+            };
+            // felt = 截流平移·mi + 截流旋转·ri：粒子「感到」的那份
+            let felt_rot = sub(math::quat_rotate(felt_q, rel), rel);
+            let shift = sub(rigid_disp, add(mul(felt_t, mi), mul(felt_rot, ri)));
+            state.pos[i] = add(state.pos[i], shift);
+            state.prev[i] = add(state.prev[i], shift);
+        }
+        state.anchor_prev_pos = a1;
+        state.anchor_prev_rot = input.anchor_rot;
+    }
 
     // ---- 定步长子步 ----
     let dt = dt.clamp(0.0, MAX_FRAME_DT);
@@ -516,6 +577,11 @@ pub fn advance_with_scratch(
     stats.substeps = n_sub;
     for _ in 0..n_sub {
         substep(state, topo, params, input, scratch);
+    }
+    if resetting && n_sub > 0 {
+        // PostProcessTeamData clears reset-position only after an update.
+        state.pending_reset = None;
+        stats.requested_reset = true;
     }
 
     // ---- NaN 守卫：任一非有限 → 整链复位并计数 ----
@@ -567,7 +633,15 @@ fn substep(
             continue;
         }
         let damp = (1.0 - params.drag[i]).max(0.0);
-        let mut v = mul(sub(state.pos[i], state.prev[i]), damp);
+        let saved_velocity = sub(state.pos[i], state.prev[i]);
+        // ForceAndVelocityJob weights stored velocity before drag; this step's
+        // gravity/external acceleration below is deliberately not weighted.
+        // Keep the old arithmetic exactly when no stabilization is active.
+        let mut v = if state.velocity_weight < 1.0 {
+            mul(mul(saved_velocity, state.velocity_weight), damp)
+        } else {
+            mul(saved_velocity, damp)
+        };
         let limit = params.max_velocity[i] * dt;
         let sp = math::length(v);
         if sp > limit && sp > 0.0 {
@@ -598,6 +672,26 @@ fn substep(
     // 回拉（restore）：demo 形——每子步一次、迭代环外、向动画方向
     // 按 power 旋转。见模块头「已知形差」。
     restore_rotation(state, topo, input.anim);
+
+    // FixPositionJob weights the saved post-constraint velocity a second time.
+    // In this solver prev still contains the pre-integration position x0, so
+    // prev = x1 - weight * (x1 - x0) stores that weighted displacement. Include
+    // the existing demo-form restore correction without moving its solver slot.
+    // At weight 1 leave prev untouched to preserve the old trajectory bitwise.
+    if state.velocity_weight < 1.0 {
+        for i in 0..topo.n {
+            if !topo.fixed_bits[i] {
+                state.prev[i] = if state.velocity_weight == 0.0 {
+                    state.pos[i]
+                } else {
+                    sub(
+                        state.pos[i],
+                        mul(sub(state.pos[i], state.prev[i]), state.velocity_weight),
+                    )
+                };
+            }
+        }
+    }
 }
 
 fn project_collision(
@@ -891,6 +985,136 @@ mod tests {
         advance(st, topo, ev, &input, dt).expect("advance")
     }
 
+    // ResetParticleJob copies the current snapBase into current/old positions
+    // and zeroes stored velocity. PreProcessTeamData resets old root pose to
+    // current root pose. With no force/correction, the numeric result is the
+    // supplied snapshot irrespective of the previous simulated history.
+    #[test]
+    fn source_mode0_reset_snapshot_and_anchor() {
+        let (mut def, mut p) = minimal_chain();
+        def.parent = vec![1, -1];
+        def.root = vec![1, -1];
+        def.selection = vec![Selection::Move, Selection::Fixed];
+        strip_constraints(&mut def);
+        disable_struct_spring(&mut p);
+        let old_anim = [[1.0, 0.0, 0.0], [0.0, 0.0, 0.0]];
+        let (topo, ev, mut st) = setup(&def, &p, &old_anim);
+        st.pos[0] = [30.0, 2.0, 0.0];
+        st.prev[0] = [-20.0, -1.0, 0.0];
+        st.anchor_prev_pos = [-10.0, 0.0, 0.0];
+        st.anchor_prev_rot = [0.0, 1.0, 0.0, 0.0];
+        st.accumulator = DT * 0.8;
+        st.request_reset_mode0(0.1).unwrap();
+        let snapshot = [[2.0, 4.0, 0.0], [2.0, 3.0, 0.0]];
+        let q = [0.0, 0.0, 0.5f32.sqrt(), 0.5f32.sqrt()];
+        let s = frame(&mut st, &topo, &ev, &snapshot, q, DT * 0.25);
+        // ResetParticleJob: current=old=snapBase, saved velocity=0.
+        assert_eq!(st.pos, snapshot);
+        assert_eq!(st.prev, snapshot);
+        // PreProcessTeamData: oldPosition=nowPosition, oldRotation=nowRotation.
+        assert_eq!(st.anchor_prev_pos, snapshot[1]);
+        assert_eq!(st.anchor_prev_rot, q);
+        // PreProcessTeamData and UpdateTime: h + h/4 -> one update, h/4 left.
+        assert_eq!(s.substeps, 1);
+        assert!((st.accumulator - DT * 0.25).abs() < 1e-8);
+    }
+
+    // PreProcessTeamData: reset overrides recovered weight to 0 when T>1e-6;
+    // later frames add frame_delta/T once and clamp01, independent of substeps.
+    #[test]
+    fn source_velocity_recovery_uses_frame_clock() {
+        let (mut def, mut p) = minimal_chain();
+        strip_constraints(&mut def);
+        disable_struct_spring(&mut p);
+        let anim = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        let (topo, ev, mut st) = setup(&def, &p, &anim);
+        st.request_reset_mode0(0.1).unwrap();
+        let s = frame(&mut st, &topo, &ev, &anim, math::quat_identity(), DT);
+        // Reset preprocess primes h before UpdateTime adds h: 2 updates.
+        assert_eq!(s.substeps, 2);
+        assert_eq!(st.velocity_weight, 0.0);
+        for expected in [0.4, 0.8, 1.0] {
+            frame(&mut st, &topo, &ev, &anim, math::quat_identity(), 0.04);
+            // clamp01(previous + 0.04/0.1).
+            assert!((st.velocity_weight - expected).abs() < 1e-6);
+        }
+        st.request_reset_mode0(0.1).unwrap();
+        frame(&mut st, &topo, &ev, &anim, math::quat_identity(), 0.001);
+        // ResetStabilizationTime restarts the same native reset branch.
+        assert_eq!(st.velocity_weight, 0.0);
+        let s = frame(&mut st, &topo, &ev, &anim, math::quat_identity(), 0.001);
+        // 0.002<h gives no update; preprocess still adds 0.001/0.1.
+        assert_eq!(s.substeps, 0);
+        assert!((st.velocity_weight - 0.01).abs() < 1e-6);
+    }
+
+    // PreProcessTeamData reset branch uses a strict T > 0.000001 comparison.
+    #[test]
+    fn source_reset_stabilization_threshold() {
+        let (def, p) = minimal_chain();
+        let anim = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        let (topo, ev, mut st) = setup(&def, &p, &anim);
+        for (time, expected) in [(0.0, 1.0), (1e-6, 1.0), (1.0001e-6, 0.0)] {
+            st.request_reset_mode0(time).unwrap();
+            frame(&mut st, &topo, &ev, &anim, math::quat_identity(), DT * 0.1);
+            assert_eq!(st.velocity_weight, expected);
+        }
+    }
+
+    // ForceAndVelocityJob: dx = saved_v*w*h + a*h*h. FixPositionJob saves
+    // ((x1-x0)/h)*w. With w=0 and a*h*h=1, each step moves 1 and saves 0.
+    #[test]
+    fn source_zero_weight_keeps_acceleration_unweighted() {
+        let (mut def, mut p) = minimal_chain();
+        strip_constraints(&mut def);
+        disable_struct_spring(&mut p);
+        p.use_gravity = true;
+        p.gravity = BezierParam::constant(1.0 / (DT * DT));
+        p.gravity_direction = [0.0, 1.0, 0.0];
+        let anim = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        let (topo, ev, mut st) = setup(&def, &p, &anim);
+        st.request_reset_mode0(0.1).unwrap();
+        let s = frame(&mut st, &topo, &ev, &anim, math::quat_identity(), DT);
+        // PreProcessTeamData primes h and holds weight=0 for both updates.
+        assert_eq!(s.substeps, 2);
+        assert_eq!(st.velocity_weight, 0.0);
+        // Two ForceAndVelocityJob predictions add 1+1; each FixPositionJob
+        // multiplies the resulting stored velocity by zero.
+        assert!((st.pos[1][1] - 2.0).abs() < 1e-6);
+        assert_eq!(st.prev[1], st.pos[1]);
+    }
+
+    // ForceAndVelocityJob then FixPositionJob, drag=0 and no correction:
+    // normalize d=saved_v*h, a*h*h=1; dx=d*w+1, x'=x+dx, d'=dx*w.
+    // Starting x=d=0, w=[0.5,0.5,0.25] gives the table below.
+    #[test]
+    fn source_velocity_weight_at_force_and_fix_sites() {
+        let (mut def, mut p) = minimal_chain();
+        strip_constraints(&mut def);
+        disable_struct_spring(&mut p);
+        p.use_gravity = true;
+        p.gravity = BezierParam::constant(1.0 / (DT * DT));
+        p.gravity_direction = [0.0, 1.0, 0.0];
+        let anim = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        let (topo, ev, mut st) = setup(&def, &p, &anim);
+        let input = FrameInput {
+            anim: &anim,
+            anchor_rot: math::quat_identity(),
+            colliders: &[],
+        };
+        let mut scratch = SolverScratch::default();
+        for (weight, position, saved_displacement) in [
+            (0.5, 1.0, 0.5),
+            (0.5, 2.25, 0.625),
+            (0.25, 3.40625, 0.2890625),
+        ] {
+            st.velocity_weight = weight;
+            substep(&mut st, &topo, &ev, &input, &mut scratch);
+            assert!((st.pos[1][1] - position).abs() < 1e-6);
+            assert!((st.pos[1][1] - st.prev[1][1] - saved_displacement).abs() < 1e-6);
+        }
+    }
+
     /// 首帧播种：不积分，位置=动画；次帧静止全零。
     #[test]
     fn first_frame_seeds() {
@@ -921,7 +1145,11 @@ mod tests {
         let (topo, ev, mut st) = setup(&def, &p, &anim);
         frame(&mut st, &topo, &ev, &anim, math::quat_identity(), DT);
         let expected = -90.0 * DT * DT;
-        assert!((st.pos[1][1] - expected).abs() < 1e-7, "got {}", st.pos[1][1]);
+        assert!(
+            (st.pos[1][1] - expected).abs() < 1e-7,
+            "got {}",
+            st.pos[1][1]
+        );
     }
 
     /// Verlet 阻尼：v' = v·(1-drag)，drag=0.25 → 0.75 倍。
@@ -955,7 +1183,11 @@ mod tests {
         st.pos[1] = [1.0, 0.0, 0.0];
         frame(&mut st, &topo, &ev, &anim, math::quat_identity(), DT);
         let expected = 1.0 + 3.0 * DT;
-        assert!((st.pos[1][0] - expected).abs() < 1e-6, "got {}", st.pos[1][0]);
+        assert!(
+            (st.pos[1][0] - expected).abs() < 1e-6,
+            "got {}",
+            st.pos[1][0]
+        );
     }
 
     /// fixed 每子步与迭代后都钉在动画位（带重力也钉）。
@@ -990,13 +1222,21 @@ mod tests {
         let (topo, ev, mut st) = setup(&def, &p, &anim);
         frame(&mut st, &topo, &ev, &anim, math::quat_identity(), DT);
         let expected = 1.1 + 0.9 * 1e-4;
-        assert!((st.pos[1][0] - expected).abs() < 1e-4, "got {}", st.pos[1][0]);
+        assert!(
+            (st.pos[1][0] - expected).abs() < 1e-4,
+            "got {}",
+            st.pos[1][0]
+        );
 
         let anim2 = [[0.0, 0.0, 0.0], [0.5, 0.0, 0.0]];
         let (topo, ev, mut st) = setup(&def, &p, &anim2);
         frame(&mut st, &topo, &ev, &anim2, math::quat_identity(), DT);
         let e = 0.2 * 1e-4;
-        assert!((st.pos[1][0] - (0.7 - e)).abs() < 1e-4, "got {}", st.pos[1][0]);
+        assert!(
+            (st.pos[1][0] - (0.7 - e)).abs() < 1e-4,
+            "got {}",
+            st.pos[1][0]
+        );
     }
 
     /// 结构距离（RestoreDistanceJob 形）：单条目 (1→0)，质量分摊
@@ -1020,7 +1260,11 @@ mod tests {
         frame(&mut st, &topo, &ev, &anim, math::quat_identity(), DT);
         let w: f32 = (5.0 + 5.0 * 0.3) / (5.0 * 0.3 + 1.0 + 5.0 + 5.0 * 0.3);
         let expected: f32 = 1.0 + (2.0 - 1.0) * (1.0 - w).powi(4);
-        assert!((st.pos[1][0] - expected).abs() < 1e-4, "got {}", st.pos[1][0]);
+        assert!(
+            (st.pos[1][0] - expected).abs() < 1e-4,
+            "got {}",
+            st.pos[1][0]
+        );
     }
 
     /// 限角（CompositeRotation clamp 半）：30° 拉回限值 20°，长度保持。
@@ -1186,7 +1430,14 @@ mod tests {
         disable_struct_spring(&mut p);
         let anim = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
         let (topo, ev, mut st) = setup(&def, &p, &anim);
-        let s = frame(&mut st, &topo, &ev, &anim, math::quat_identity(), 1.0 / 30.0);
+        let s = frame(
+            &mut st,
+            &topo,
+            &ev,
+            &anim,
+            math::quat_identity(),
+            1.0 / 30.0,
+        );
         assert_eq!(s.substeps, 3);
         assert!(st.accumulator.abs() < 1e-6, "残量 {}", st.accumulator);
 

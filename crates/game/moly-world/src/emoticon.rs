@@ -3634,7 +3634,7 @@ pub fn advance(
     children: Query<&Children>,
     names: Query<&Name>,
     cameras: Query<(&GlobalTransform, &Projection, &Camera), With<Camera3d>>,
-    holds: Query<&crate::talk::TalkHold>,
+    (holds, sites, active): (Query<&crate::talk::TalkHold>, Query<(&crate::npc::NpcActions,Has<crate::npc::gate_entries::ModelHidden>)>,Option<Res<crate::site::SiteActive>>),
     time: Res<Time>,
 ) {
     let (Some(mut driver), Some(mut emotes), Some(archive)) = (driver, emotes, archive) else {
@@ -3713,6 +3713,8 @@ pub fn advance(
             continue;
         }
         let inst = &mut emotes.instances[ii];
+        let hidden = sites.get(inst.npc).is_ok_and(|(actions,model_hidden)| model_hidden || active.as_deref().is_some_and(|site|site.site_type!=actions.site_type));
+        for draw in &inst.draws { commands.entity(draw.entity).insert(if hidden { Visibility::Hidden } else { Visibility::Inherited }); }
         let npc_global = globals
             .get(inst.npc)
             .map(|g| g.affine())

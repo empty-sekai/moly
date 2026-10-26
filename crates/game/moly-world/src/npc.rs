@@ -29,6 +29,7 @@ pub mod entry_probe;
 pub mod gate_entries;
 pub mod random_fixture_action;
 pub mod residency;
+pub mod site_removal;
 pub mod restore;
 pub mod navigation;
 pub mod walkable;
@@ -369,6 +370,7 @@ impl RestLifecycle {
 pub fn sync_rest_lifecycle(
     site: Option<Res<crate::site::SiteActive>>,
     epoch: Option<Res<crate::site::GroundEpoch>>,
+    contexts: Res<crate::fixture::residency::FixtureSites>,
     mut npcs: Query<(
         &mut NpcActions,
         Option<&crate::character::MotionDriver>,
@@ -386,7 +388,8 @@ pub fn sync_rest_lifecycle(
         .filter(|_| site.is_some())
         .map(|epoch| epoch.0);
     for (mut actions, driver, toon, talk, reaction, mut rest, away) in &mut npcs {
-        let Some(scene) = scene else {
+        let own_scene = contexts.get(&actions.site_type).map(|c| c.inputs.stamp.site_epoch);
+        let Some(scene) = (if away { own_scene } else { scene.or(own_scene) }) else {
             rest.leave();
             continue;
         };
@@ -402,7 +405,7 @@ pub fn sync_rest_lifecycle(
             actions.enable_talk = true;
             actions.initialize_status();
         }
-        if away || actions.current != NpcAction::Rest || talk.is_some() || reaction.is_some() {
+        if actions.current != NpcAction::Rest || talk.is_some() || reaction.is_some() {
             rest.leave();
         }
     }
@@ -611,9 +614,7 @@ pub fn force_set_position(world: &mut World, actor: Entity, at: [f32; 3]) -> boo
         &mut Transform,
         &mut MotionPhase,
     )>();
-    let generation = world
-        .get_resource::<crate::walk_face::WalkFace>()
-        .map(|face| face.generation());
+    let generation = navigation::face(world,actor).map(|face|face.navigation_generation());
     let Ok((mut path, mut walk, mut target, mut route, mut stuck, mut transform, mut phase)) =
         query.get_mut(world, actor)
     else {
@@ -1151,7 +1152,7 @@ pub fn spawn_when_ready(
     catalog: Option<Res<Catalog>>,
     epoch: Option<Res<crate::site::GroundEpoch>>,
     face: Option<Res<crate::npc_objective::ObjectiveFace>>,
-    placements: Res<crate::fixture::FixturePlacements>,
+    (placements, residents): (Res<crate::fixture::FixturePlacements>, Res<crate::site::ResidentSites>),
     configs: Option<Res<crate::client_config::ClientConfigs>>,
     spawned: Option<Res<Spawned>>,
     selection: Res<crate::site::SiteSelection>,
@@ -1174,6 +1175,7 @@ pub fn spawn_when_ready(
         _ if stage.is_some() => None,
         _ => return,
     };
+    if stage.is_none() && !residents.housing_initialized() { return; }
     let returned = panel.3.as_deref();
     let Some(catalog) = catalog else {
         return;
@@ -1541,6 +1543,8 @@ pub fn reseed(
     epoch: Option<Res<crate::site::GroundEpoch>>,
     site: Option<Res<crate::site::SiteActive>>,
     mut last: Local<u64>,
+    contexts: Res<crate::fixture::residency::FixtureSites>,
+    hidden_models: Query<(), With<crate::npc::gate_entries::ModelHidden>>,
     face: Option<Res<crate::npc_objective::ObjectiveFace>>,
     mut hud: MessageWriter<crate::npc_state::TweetHudEvent>,
     mut npcs: Query<(
@@ -1612,11 +1616,13 @@ pub fn reseed(
                 // The state machine skips away members, so its hide would
                 // never reach a balloon left over the hidden model.
                 hud.write(crate::npc_state::TweetHudEvent::Retire { npc: entity });
-                *slot = PathSlot(NpcPathWalkSlot::from_corners(Vec::new()));
-                *route = RouteStops::default();
-                *stuck = StuckBaseline::default();
-                *phase = MotionPhase::Dwelling { remaining: None };
-                rest.leave();
+                if contexts.get(&own).is_none() {
+                    *slot = PathSlot(NpcPathWalkSlot::from_corners(Vec::new()));
+                    *route = RouteStops::default();
+                    *stuck = StuckBaseline::default();
+                    *phase = MotionPhase::Dwelling { remaining: None };
+                    rest.leave();
+                }
             }
             suspended += 1;
             info!(
@@ -1631,6 +1637,15 @@ pub fn reseed(
                 transform.translation.y,
                 transform.translation.z,
             );
+            continue;
+        }
+        if contexts.get(&own).is_some() {
+            commands.entity(entity).remove::<residency::Away>();
+            if !hidden_models.contains(entity) && talk_slot.kind() != Some(moly_law::objective::TalkType::EntrySite) {
+                visibility.set_if_neq(Visibility::Inherited);
+            }
+            actions.scene = epoch.0;
+            resumed += 1;
             continue;
         }
         if away && talk_slot.kind() == Some(moly_law::objective::TalkType::EntrySite) {

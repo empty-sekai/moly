@@ -505,6 +505,7 @@ fn replace_live(world: &mut World, document: Value, selection: SiteSelection) {
         if let Some(mut user) = world.get_resource_mut::<crate::mysekai_rank::UserTotalExp>() {
             user.set(total_exp);
         }
+        crate::site::resident_load::reset_import(world);
         world.insert_resource(SiteFixtureLayouts::from_document(document));
     });
 }

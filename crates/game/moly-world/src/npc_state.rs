@@ -147,6 +147,7 @@ impl Plugin for NpcStatePlugin {
                 crate::npc_clock::advance.after(bevy::time::TimeSystems),
             )
             .add_systems(Update, crate::npc_tweet::parse)
+            .add_systems(Update, crate::npc::site_removal::update.after(crate::npc_fixture_activity::advance))
             // Residency: a member whose own site is not the loaded one is
             // suspended from its first frame there (after the registration
             // that writes its own site, before the next frame's AI loop).
@@ -414,10 +415,8 @@ pub fn on_update(
         Option<Res<crate::alone_action_runtime::FacialTables>>,
         ResMut<Assets<crate::character_material::CharacterMaterial>>,
     ),
-    visible: Query<
-        (&CharacterUnitId, &InheritedVisibility),
-        With<crate::character::MotionDriver>,
-    >,
+    visible: Query<&CharacterUnitId,
+        (With<crate::character::MotionDriver>, Without<crate::npc::gate_entries::ModelHidden>)>,
     players: Query<&Transform, With<crate::player::PlayerControlled>>,
     mut npcs: Query<
         (
@@ -434,7 +433,6 @@ pub fn on_update(
         ),
         (
             Without<crate::player::PlayerControlled>,
-            Without<crate::npc::residency::Away>,
         ),
     >,
     site: Option<Res<crate::site::SiteActive>>,
@@ -609,10 +607,9 @@ pub fn on_update(
         // since initialization advances first.
         let shown = visible
             .iter()
-            .any(|(id, visibility)| id.0 == unit && visibility.get());
-        if shown {
-            actions.since_initialized += dt;
-        }
+            .any(|id| id.0 == unit);
+        if !shown { continue; }
+        actions.since_initialized += dt;
         // The state machine: nothing in None; otherwise the state clock,
         // then the state's update.
         if actions.current == NpcAction::None {
@@ -629,7 +626,7 @@ pub fn on_update(
                 entity,
                 own_site,
                 transform.translation,
-                player,
+                player.filter(|_| selection.as_deref().is_some_and(|s| s.site_type() == actions.site_type)),
                 &mut actions,
                 &mut hud,
             ),

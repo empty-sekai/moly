@@ -202,8 +202,8 @@ fn fragment(in: AvatarVertexOutput) -> @location(0) vec4<f32> {
     if in.part_index == 0 {
         let s = textureSampleGrad(skin_tex, skin_sampler, in.uv, uv_dx, uv_dy);
         let s_rgb = srgb_format_encode(s.rgb);
-        // base = tex.a * (skin_color.rgb - tex.rgb) + tex.rgb，再过 alpha 增益。
-        let base = s.a * (params.skin_color.rgb - s_rgb) + s_rgb;
+        // base = tex.a * (skin_color.rgb * tex.rgb - tex.rgb) + tex.rgb，再过 alpha 增益。
+        let base = s.a * (params.skin_color.rgb * s_rgb - s_rgb) + s_rgb;
         albedo = alpha_gain(base, alpha);
     } else if in.part_index == 1 {
         let t = textureSampleGrad(accessory_tex, accessory_sampler, in.uv, uv_dx, uv_dy);

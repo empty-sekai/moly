@@ -138,6 +138,7 @@ impl Material for RoadMaterial {
 
 #[derive(Component)]
 struct RoadSurface {
+    root: Entity,
     row: usize,
     cell: usize,
     quadrant: usize,
@@ -151,7 +152,7 @@ fn bind_surfaces(
     ready: Option<Res<FixtureScenesReady>>,
     mut bound_revision: Local<u64>,
     revision: Res<super::FixtureLayoutRevision>,
-    roots: Query<(Entity, &FixtureRow)>,
+    roots: Query<(Entity, &FixtureRow), With<super::FixtureRoot>>,
     children: Query<&Children>,
     nodes: Query<&GltfExtras>,
     parts: Query<(
@@ -203,6 +204,7 @@ fn bind_surfaces(
                 .and_then(|m| m.base_color_texture.clone())
                 .expect("Road main texture");
             commands.entity(entity).insert(RoadSurface {
+                root,
                 row: row.0,
                 cell,
                 quadrant: primitive.0,
@@ -221,6 +223,7 @@ fn update_materials(
     mut commands: Commands,
     placements: Res<FixturePlacements>,
     surfaces: Query<(Entity, Ref<RoadSurface>)>,
+    active_roots: Query<(), With<super::FixtureRoot>>,
     mut materials: ResMut<Assets<RoadMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut cache: Local<MaterialCache>,
@@ -245,6 +248,7 @@ fn update_materials(
     let mut prepared = HashSet::new();
     let mut clipped = 0;
     for (entity, surface) in &surfaces {
+        if !active_roots.contains(surface.root) { continue; }
         let row = &placements.rows[surface.row];
         let bounds = row.placed();
         let (dx, dz) = CELL_OFFSETS[surface.cell];

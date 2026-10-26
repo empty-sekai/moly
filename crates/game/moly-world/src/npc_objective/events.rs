@@ -478,7 +478,11 @@ fn play_animation_clip(world: &mut World, entity: Entity, name: &str, blend: f32
 }
 
 fn current_animation_family(world: &World, entity: Entity) -> Option<String> {
-    if let Some(owner) = world.get::<EventAnimation>(entity) { return Some(owner.family.strip_suffix("_O").unwrap_or(&owner.family).to_owned()); }
+    if let Some(owner) = world.get::<EventAnimation>(entity) {
+        if owner.source_view.as_ref().is_none_or(|view| view.matches(world, entity)) {
+            return Some(owner.family.strip_suffix("_O").unwrap_or(&owner.family).to_owned());
+        }
+    }
     let driver = world.get::<crate::character::MotionDriver>(entity)?;
     let player = world.get::<AnimationPlayer>(driver.player)?;
     let graph = world.get_resource::<Assets<AnimationGraph>>()?.get(&driver.graph)?;
@@ -503,6 +507,51 @@ pub(crate) enum AnimationSuffix { Start, Loop, End, Once }
 impl AnimationSuffix {
     fn suffix(self)->&'static str {match self {Self::Start=>"_S",Self::Loop=>"_L",Self::End=>"_E",Self::Once=>"_O"}}
 }
+/// Exact clips belonging to one source view, joined by serialized identity.
+/// The renderer name and authored length remain paired; the shared GLB union
+/// cannot establish whether an individual controller contains a clip.
+#[derive(Clone, Debug)]
+pub(crate) struct SourceAnimationClip {
+    pub exported_name: String,
+    pub length: f32,
+}
+pub(crate) type SourceAnimationMap = std::collections::BTreeMap<String, SourceAnimationClip>;
+
+/// Release only this completed sequence. Keeping Idle in the locomotion
+/// driver prevents an immediate replay of the just-entered idle family.
+pub(crate) fn release_source_idle(world: &mut World, entity: Entity, lease: AnimationLease, idle: &str) {
+    let owned = world.get::<EventAnimation>(entity).is_some_and(|a| a.lease == lease && a.phase == 3);
+    if !owned { return; }
+    let has_loop = world.get::<EventAnimation>(entity).and_then(|a| a.source.as_ref())
+        .is_some_and(|source| source.contains_key(&format!("{idle}_L")));
+    let same_idle = world.get::<crate::npc::MotionClips>(entity).is_some_and(|clips| clips.idle == idle);
+    cancel_animation_if_owned(world, entity, lease);
+    if has_loop && same_idle {
+        if let Some(mut driver) = world.get_mut::<crate::character::MotionDriver>(entity) {
+            driver.playing = Some(crate::character::MotionKind::Idle);
+        }
+    }
+}
+
+fn play_animation_binding(
+    world: &mut World,
+    entity: Entity,
+    name: &str,
+    blend: f32,
+    repeat: bool,
+    source: Option<&SourceAnimationMap>,
+) -> Result<Option<(AnimationNodeIndex, f32)>, String> {
+    let Some(source) = source else {
+        return Ok(play_animation_clip(world, entity, name, blend, repeat));
+    };
+    let Some(binding) = source.get(name) else {
+        return Ok(None); // Known absence in this view: native skips this segment.
+    };
+    let (node, _) = play_animation_clip(world, entity, &binding.exported_name, blend, repeat)
+        .ok_or_else(|| format!("source clip {name} is present, but its renderer is unavailable"))?;
+    Ok(Some((node, binding.length)))
+}
+
 #[derive(Component)]
 struct EventAnimation {
     lease:AnimationLease,
@@ -510,6 +559,8 @@ struct EventAnimation {
     blend:f32,
     phase:u8,
     suffix:Option<AnimationSuffix>,
+    source:Option<std::sync::Arc<SourceAnimationMap>>,
+    source_view:Option<tutorial::rotation::ViewIdentity>,
     wait:Option<crate::tween_clock::Delay>,
 }
 
@@ -519,12 +570,27 @@ pub(crate) fn begin_animation(world:&mut World,entity:Entity,name:&str,play_end:
     Ok(())
 }
 pub(crate) fn begin_animation_owned(world:&mut World,entity:Entity,name:&str,has_exit_time:bool,play_end:bool,blend:f32)->Result<AnimationLease,String> {
-    begin_animation_inner(world,entity,name,None,has_exit_time,play_end,blend)
+    begin_animation_inner(world,entity,name,None,has_exit_time,play_end,blend,None,None)
 }
 pub(crate) fn begin_suffix_animation(world:&mut World,entity:Entity,name:&str,suffix:AnimationSuffix,has_exit_time:bool,play_end:bool,blend:f32)->Result<AnimationLease,String> {
-    begin_animation_inner(world,entity,name,Some(suffix),has_exit_time,play_end,blend)
+    begin_animation_inner(world,entity,name,Some(suffix),has_exit_time,play_end,blend,None,None)
 }
-fn begin_animation_inner(world:&mut World,entity:Entity,name:&str,suffix:Option<AnimationSuffix>,has_exit_time:bool,play_end:bool,blend:f32)->Result<AnimationLease,String> {
+/// The same owned ChangeAnimation sequence, bound to the actor's source map.
+pub(crate) fn begin_source_animation_owned(
+    world: &mut World,
+    entity: Entity,
+    name: &str,
+    has_exit_time: bool,
+    play_end: bool,
+    blend: f32,
+    source: std::sync::Arc<SourceAnimationMap>,
+    view: tutorial::rotation::ViewIdentity,
+) -> Result<AnimationLease, String> {
+    if !view.matches(world, entity) { return Err("source animation view was replaced".into()); }
+    begin_animation_inner(world, entity, name, None, has_exit_time, play_end, blend, Some(source), Some(view))
+}
+fn begin_animation_inner(world:&mut World,entity:Entity,name:&str,suffix:Option<AnimationSuffix>,has_exit_time:bool,play_end:bool,blend:f32,source:Option<std::sync::Arc<SourceAnimationMap>>,source_view:Option<tutorial::rotation::ViewIdentity>)->Result<AnimationLease,String> {
+    if world.get_entity(entity).is_err() { return Err("animation actor was removed".into()); }
     world.init_resource::<NextAnimationLease>();
     world.init_resource::<AnimationOutcomes>();
     let lease={let mut next=world.resource_mut::<NextAnimationLease>();next.0=next.0.checked_add(1).expect("animation lease exhausted");AnimationLease(next.0)};
@@ -536,19 +602,28 @@ fn begin_animation_inner(world:&mut World,entity:Entity,name:&str,suffix:Option<
     if suffix.is_none() && current.as_deref()==Some(family) {world.resource_mut::<AnimationOutcomes>().0.insert(lease.0,AnimationOutcome::Complete);return Ok(lease);}
     let library=world.get_resource::<crate::character::MotionLibrary>().ok_or("motion library is not requested")?;
     if world.get_resource::<Assets<bevy::gltf::Gltf>>().and_then(|gltfs|gltfs.get(&library.gltf)).is_none() {return Err("motion library is loading".into());}
+    // Retire a source task from a replaced view without releasing the new
+    // view's animation driver. It cannot satisfy the same-family fast path.
+    if world.get::<EventAnimation>(entity).and_then(|a| a.source_view.as_ref())
+        .is_some_and(|view| !view.matches(world, entity)) {
+        advance_animation(world, entity, 0.0)?;
+    }
     cancel_animation(world,entity);
-    let mut animation=EventAnimation {lease,family:name.to_owned(),blend,phase:0,suffix,wait:None};
+    let mut animation=EventAnimation {lease,family:name.to_owned(),blend,phase:0,suffix,source,source_view,wait:None};
     // TryPlayPrevEndAnimationAsync immediately returns when hasExitTime is true.
     if play_end && !has_exit_time {
         if let Some(current)=current {
-            if let Some((_,duration))=play_animation_clip(world,entity,&format!("{current}_E"),blend,false) {
+            if let Some((_,duration))=play_animation_binding(world,entity,&format!("{current}_E"),blend,false,animation.source.as_deref())? {
                 animation.wait=Some(crate::tween_clock::Delay::new(crate::tween_clock::delay_seconds(f64::from(duration)),u64::from(frame(world))));
             }
         }
     }
     world.resource_mut::<AnimationOutcomes>().0.insert(lease.0,AnimationOutcome::Pending);
     world.entity_mut(entity).insert(animation);
-    advance_animation(world,entity,0.0);
+    if let Err(reason) = advance_animation(world,entity,0.0) {
+        forget_animation_outcome(world, lease);
+        return Err(reason);
+    }
     Ok(lease)
 }
 pub(crate) fn animation_outcome(world:&World,_entity:Entity,lease:AnimationLease)->AnimationOutcome {
@@ -579,55 +654,86 @@ pub(crate) fn cancel_animation(world:&mut World,entity:Entity) {
         if let Some(mut driver)=world.get_mut::<crate::character::MotionDriver>(entity) {driver.alone_holds=false;}
     }
 }
-fn advance_animation(world:&mut World,entity:Entity,dt:f32) {
-    let Some(mut animation)=world.entity_mut(entity).take::<EventAnimation>() else {return;};
-    if let Some(wait)=animation.wait.as_mut() {
-        if !wait.tick(u64::from(frame(world)),dt) {world.entity_mut(entity).insert(animation);return;}
-        animation.wait=None;
-    }
-    if animation.phase==0 {
-        if let Some(suffix)=animation.suffix {
-            let repeat=matches!(suffix,AnimationSuffix::Loop);
-            let name=format!("{}{}",animation.family,suffix.suffix());
-            animation.phase=if repeat {3} else {2};
-            if let Some((_,duration))=play_animation_clip(world,entity,&name,animation.blend,repeat) {
-                if !repeat {animation.wait=Some(crate::tween_clock::Delay::new(crate::tween_clock::delay_seconds(f64::from(duration)),u64::from(frame(world))));}
+fn advance_animation(world: &mut World, entity: Entity, dt: f32) -> Result<(), String> {
+    let Some(mut animation) = world.get_entity_mut(entity).ok().and_then(|mut e| e.take::<EventAnimation>()) else {
+        return Ok(());
+    };
+    if animation.source_view.as_ref().is_some_and(|view| !view.matches(world, entity)) {
+        if let Some(mut outcomes) = world.get_resource_mut::<AnimationOutcomes>() {
+            if let Some(outcome) = outcomes.0.get_mut(&animation.lease.0) {
+                if *outcome == AnimationOutcome::Pending { *outcome = AnimationOutcome::Cancelled; }
             }
-        } else {
-            let one_shot=animation.family.ends_with("_O");
-            let clip=if one_shot {animation.family.clone()} else {format!("{}_S",animation.family)};
-            animation.phase=if one_shot {2} else {1};
-            if let Some((_,duration))=play_animation_clip(world,entity,&clip,animation.blend,false) {
-                animation.wait=Some(crate::tween_clock::Delay::new(crate::tween_clock::delay_seconds(f64::from(duration)),u64::from(frame(world))));
+        }
+        return Ok(()); // The replacement view and its driver are untouched.
+    }
+    let result = (|| -> Result<(), String> {
+        if let Some(wait) = animation.wait.as_mut() {
+            if !wait.tick(u64::from(frame(world)), dt) { return Ok(()); }
+            animation.wait = None;
+        }
+        if animation.phase == 0 {
+            if let Some(suffix) = animation.suffix {
+                let repeat = matches!(suffix, AnimationSuffix::Loop);
+                let name = format!("{}{}", animation.family, suffix.suffix());
+                animation.phase = if repeat { 3 } else { 2 };
+                if let Some((_, duration)) = play_animation_binding(world, entity, &name,
+                    animation.blend, repeat, animation.source.as_deref())? {
+                    if !repeat {
+                        animation.wait = Some(crate::tween_clock::Delay::new(
+                            crate::tween_clock::delay_seconds(f64::from(duration)), u64::from(frame(world))));
+                    }
+                }
+            } else {
+                let one_shot = animation.family.ends_with("_O");
+                let clip = if one_shot { animation.family.clone() } else { format!("{}_S", animation.family) };
+                animation.phase = if one_shot { 2 } else { 1 };
+                if let Some((_, duration)) = play_animation_binding(world, entity, &clip,
+                    animation.blend, false, animation.source.as_deref())? {
+                    animation.wait = Some(crate::tween_clock::Delay::new(
+                        crate::tween_clock::delay_seconds(f64::from(duration)), u64::from(frame(world))));
+                }
+            }
+        }
+        if animation.wait.is_none() && animation.phase == 1 {
+            let clip = format!("{}_L", animation.family);
+            play_animation_binding(world, entity, &clip, animation.blend, true, animation.source.as_deref())?;
+            animation.phase = 3;
+        } else if animation.wait.is_none() && animation.phase == 2 {
+            animation.phase = 3;
+        }
+        Ok(())
+    })();
+    if result.is_err() || animation.phase == 3 {
+        if let Some(mut outcomes) = world.get_resource_mut::<AnimationOutcomes>() {
+            if let Some(outcome) = outcomes.0.get_mut(&animation.lease.0) {
+                *outcome = if result.is_err() { AnimationOutcome::Cancelled } else { AnimationOutcome::Complete };
             }
         }
     }
-    if animation.wait.is_none() && animation.phase==1 {
-        let clip=format!("{}_L",animation.family);
-        play_animation_clip(world,entity,&clip,animation.blend,true);
-        animation.phase=3;
-    } else if animation.wait.is_none() && animation.phase==2 {animation.phase=3;}
-    if animation.phase==3 {
-        if let Some(mut outcomes)=world.get_resource_mut::<AnimationOutcomes>() {
-            if let Some(outcome)=outcomes.0.get_mut(&animation.lease.0) {*outcome=AnimationOutcome::Complete;}
+    if result.is_err() {
+        if let Some(mut driver) = world.get_mut::<crate::character::MotionDriver>(entity) {
+            driver.alone_holds = false;
         }
+    } else {
+        world.entity_mut(entity).insert(animation);
     }
-    world.entity_mut(entity).insert(animation);
+    result
 }
 
 fn overlap_position(world: &mut World, entity: Entity) -> Option<Vec3> {
+    let site = world.get::<NpcActions>(entity)?.site_type.clone();
     let position = world.get::<Transform>(entity)?.translation;
     let others: Vec<(Vec3, Option<Vec3>)> = world.query::<(Entity, &Transform, &NpcActions)>().iter(world)
-        .filter(|(other, _, _)|*other != entity)
+        .filter(|(other, _, actions)| *other != entity && actions.site_type == site)
         .map(|(_, t, actions)|(t.translation, actions.reserved_move_position.map(Vec3::from))).collect();
     let overlaps = |at: Vec3| others.iter().any(|(position, reserved)|position.distance(at) < 0.46
         || reserved.is_some_and(|position| position.distance(at) < 0.46));
     if !overlaps(position) { return None; }
     let cells = {
         let mut params = SystemState::<crate::npc::walkable::WalkableSource>::new(world);
-        params.get_mut(world).cells().ok()?
+        params.get_mut(world).cells_for(&site).ok()?
     };
-    let face = world.get_resource::<super::ObjectiveFace>()?;
+    let face = crate::npc::navigation::face(world, entity)?;
     let center = super::cell_of(position.x, position.z);
     let mut result = None;
     let mut nearest = f32::MAX;
@@ -771,7 +877,11 @@ pub(super) fn update(world: &mut World) {
     let Some(dt) = world.get_resource::<crate::npc_clock::NpcClock>().filter(|clock| clock.ready()).map(|clock|clock.delta()) else { return; };
     let at = frame(world);
     let animations: Vec<Entity> = world.query_filtered::<Entity, With<EventAnimation>>().iter(world).collect();
-    for entity in animations { advance_animation(world, entity, dt); }
+    for entity in animations {
+        if let Err(reason) = advance_animation(world, entity, dt) {
+            warn!("[event-animation] {reason}");
+        }
+    }
     let birthday: Vec<Entity> = world.query::<(Entity, &DeferredBirthday)>().iter(world)
         .filter(|(_, pending)|pending.yielded_at != at).map(|(entity, _)|entity).collect();
     for entity in birthday {

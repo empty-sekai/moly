@@ -147,9 +147,9 @@ pub fn advance(
     root_canvas: Option<Res<RootCanvas>>,
     learn: Option<Res<crate::field_modes::LearnSiteEnvironmentActive>>,
     held: Option<Res<crate::field_modes::HeldGameState>>,
-    gates: (Option<Res<crate::ui_layers::ScreenManager>>, Option<Res<crate::tutorial::TutorialInput>>),
+    gates: (Option<Res<crate::ui_layers::ScreenManager>>, Option<Res<crate::tutorial::TutorialInput>>, Option<Res<crate::camera::PhotoGestureHeld>>),
 ) {
-    let (screens, tutorial) = gates;
+    let (screens, tutorial, photo) = gates;
     let Some(window) = windows.single().ok() else {
         return;
     };
@@ -159,7 +159,7 @@ pub fn advance(
     // 分派表里），不算禁用源。
     // MysekaiUtility.EnableJoyStick(true) runs in the entry's Finish.
     let was_enabled = state.enabled;
-    state.enabled = !tutorial.is_some_and(|input|input.movement_blocked)
+    state.enabled = !photo.is_some_and(|held|held.0) && !tutorial.is_some_and(|input|input.movement_blocked)
         && !edits.is_active()
         && player_talk.is_none()
         && !overlays.block_world_input()

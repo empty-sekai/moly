@@ -349,6 +349,24 @@ impl SiteFixtureLayouts {
         validate_floor_layout(&layout, floor)
     }
 
+    /// A validated transient import supplies the complete named site. Never
+    /// append the local account's house or substitute its gate into that layout.
+    pub(super) fn restore_imported(
+        &self, site_id: u32, site_type: &str, level: u32,
+    ) -> Result<FixturePlacements, String> {
+        if let Some(cached) = self.visited.get(&site_id) {
+            if cached.site_type != site_type {
+                return Err(format!("imported site {site_id} changed identity"));
+            }
+            let mut layout = cached.clone();
+            layout.level = level;
+            return Ok(layout);
+        }
+        let saved = saved_site(self.document.as_ref().map_err(Clone::clone)?, site_id)?
+            .ok_or_else(|| format!("imported layout has no site {site_id}"))?;
+        decode(saved, site_id, site_type, level)
+    }
+
     /// `region` is the loaded snapshot's own source identity. Only the HOME
     /// starter reads it: visited and saved layouts name their packages
     /// themselves, and other sites start empty.

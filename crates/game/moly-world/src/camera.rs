@@ -1037,6 +1037,10 @@ fn ratio01(value: f32, from: f32, to: f32) -> f32 {
 /// 上限（16），逐个展开会让整个系统静默失去 `IntoSystem`（错误只在
 /// schedule 的 `.chain()` 处冒出来）。仅进入/退出支消费；拖拽/缩放的
 /// 常规路径不走它。
+/// The photo presenter owns gestures while capturing or selecting a frame.
+#[derive(Resource, Default)]
+pub struct PhotoGestureHeld(pub bool);
+
 #[derive(SystemParam)]
 pub struct FpsTransitionCtx<'w, 's> {
     dialogs: Res<'w, crate::ui_inputs::ShellDialogState>,
@@ -1044,6 +1048,7 @@ pub struct FpsTransitionCtx<'w, 's> {
     layers: Res<'w, crate::ui_layers::UiLayerStack>,
     avatar: Res<'w, crate::player_state::PlayerAvatarStates>,
     talk_camera: Option<Res<'w, crate::talk_camera::TalkCamera>>,
+    photo_input: Option<Res<'w, PhotoGestureHeld>>,
     players: Query<'w, 's, (&'static GlobalTransform, &'static mut Visibility), With<AvatarRoot>>,
     cameras: Query<'w, 's, &'static mut Projection, With<Camera3d>>,
 }
@@ -1068,7 +1073,7 @@ pub fn apply_input(
 ) {
     // 摆放编辑面持有输入期间（真源编辑模式下手势层归编辑面），相机
     // 拖拽/缩放整表让位——编辑模式内的输入分配收口。
-    if edits.is_active() || transition.dialogs.blocks_field_input() || (!transition.layers.on_field()
+    if transition.photo_input.as_ref().is_some_and(|held| held.0) || edits.is_active() || transition.dialogs.blocks_field_input() || (!transition.layers.on_field()
         && !(state.0 == CameraStateType::PhotoShot && transition.layers.is_active(crate::ui_layers::MenuScreenType::MysekaiPhotoShot)))
     {
         gestures.clear();

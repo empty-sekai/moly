@@ -35,7 +35,7 @@ const PATHS: [&str; 11] = [
 ];
 
 #[derive(Resource)]
-pub struct ActivityTableRequests(Vec<Handle<JsonAsset>>);
+pub struct ActivityTableRequests(Vec<Handle<JsonAsset>>, Handle<JsonAsset>);
 
 pub fn load(mut commands: Commands, server: Res<AssetServer>) {
     commands.insert_resource(ActivityTableRequests(
@@ -43,6 +43,7 @@ pub fn load(mut commands: Commands, server: Res<AssetServer>) {
             .iter()
             .map(|path| server.load::<JsonAsset>(*path))
             .collect(),
+        server.load::<JsonAsset>("moly://source.json"),
     ));
 }
 
@@ -55,6 +56,11 @@ pub fn parse(
     let Some(request) = request else {
         return;
     };
+    if let LoadState::Failed(error) = server.load_state(&request.1) {
+        panic!("activity source identity failed to load: {error:?}");
+    }
+    let Some(source) = jsons.get(&request.1) else { return; };
+    let source = serde_json::from_str::<Value>(&source.0).expect("activity source identity must be JSON");
     let mut documents = Vec::with_capacity(PATHS.len());
     for (path, handle) in PATHS.iter().zip(&request.0) {
         if let LoadState::Failed(error) = server.load_state(handle) {
@@ -68,8 +74,9 @@ pub fn parse(
                 .unwrap_or_else(|error| panic!("activity table {path}: {error}")),
         );
     }
-    let tables = FixtureActivityTables::from_documents(&documents)
+    let mut tables = FixtureActivityTables::from_documents(&documents)
         .unwrap_or_else(|error| panic!("activity table relationships: {error}"));
+    tables.set_source(&source);
     info!(
         "[fixture-activity] data ready: {} masters, {} timeline rows, {} pre-actions",
         tables.talks.rows.len(),
@@ -232,6 +239,7 @@ pub struct ActivityFixtureMaster {
 
 #[derive(Resource)]
 pub struct FixtureActivityTables {
+    general_empty_zero: bool,
     talks: OrderedTable<ActivityMaster>,
     units: OrderedTable<UnitGroup>,
     conditions: OrderedTable<Condition>,
@@ -288,6 +296,13 @@ pub struct TalkListFacts<'a> {
 }
 
 impl FixtureActivityTables {
+    fn set_source(&mut self, value: &Value) {
+        self.general_empty_zero = value["source"]["region"].as_str() == Some("jp")
+            && value["source"]["appVersion"].as_str().and_then(|version| version.split('.').next())
+                .and_then(|major| major.parse::<u32>().ok()).is_some_and(|major| major >= 7);
+    }
+    pub fn general_empty_is_zero(&self) -> bool { self.general_empty_zero }
+
     /// The client's group expansion: the five unit fields in slot order,
     /// zero fields skipped. A group missing from the table is the source's
     /// null dereference, so it is an error, never an empty cast.
@@ -665,6 +680,7 @@ impl FixtureActivityTables {
                 .push(entry.condition_id);
         }
         Ok(Self {
+            general_empty_zero: false,
             talks,
             units,
             conditions,

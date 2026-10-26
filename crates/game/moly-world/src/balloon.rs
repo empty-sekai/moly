@@ -2259,6 +2259,8 @@ pub fn place(
         Option<&LayerLogged>,
     )>,
     transforms: Query<&GlobalTransform>,
+    actors: Query<(&crate::npc::NpcActions, Has<crate::npc::gate_entries::ModelHidden>)>,
+    site: Option<Res<crate::site::SiteActive>>,
     cameras: Query<(&Camera, &GlobalTransform, &Projection), With<Camera3d>>,
     windows: Query<&Window>,
     children_q: Query<&Children>,
@@ -2332,7 +2334,9 @@ pub fn place(
         // 气泡静默丢掉（实测：跟随相机经过身侧的成员，头离相机 0.34m
         // < near 1.0，15/45 只气泡从未上屏）。改自折 NDC→视口像素。
         let view_z = (world - eye).dot(*fwd);
-        let behind = view_z <= 0.0;
+        let on_other_site = actors.get(anchor.npc).is_ok_and(|(actions, hidden)|
+            hidden || site.as_deref().is_none_or(|site| site.site_type != actions.site_type));
+        let behind = view_z <= 0.0 || on_other_site;
         if behind != anchor.hidden {
             anchor.hidden = behind;
             // Every part starts with its base color. Only a visibility edge

@@ -327,7 +327,12 @@ pub fn apply_sink_volumes(
     bus: Res<VolumeBus>,
     gate: Res<AudioGate>,
     mut sinks: Query<(&BusVolume, &mut AudioSink)>,
+    mut spatial: Query<(&BusVolume, &mut bevy::audio::SpatialAudioSink)>,
 ) {
+    for (source, mut sink) in &mut spatial {
+        let volume = match source { BusVolume::Cue(v)=>v.linear(&bus),BusVolume::Se(v)=>v.volume(&bus) } * gate.factor();
+        if sink.volume().to_linear()!=volume { sink.set_volume(Volume::Linear(volume)); }
+    }
     for (source, mut sink) in &mut sinks {
         let volume = match source {
             BusVolume::Cue(volume) => volume.linear(&bus),
@@ -2700,6 +2705,10 @@ pub fn start_timeline_cue(
     cue: &str,
     handles: Vec<Handle<AudioSource>>,
 ) -> Result<Entity, String> {
+    start_timeline_cue_at(world,package,cue,handles,None)
+}
+
+pub fn start_timeline_cue_at(world: &mut World, package: &str, cue: &str, handles: Vec<Handle<AudioSource>>, position: Option<Vec3>) -> Result<Entity,String> {
     let plan = world
         .get_resource::<Routing>()
         .ok_or_else(|| "audio routing is not ready".to_string())?
@@ -2730,8 +2739,12 @@ pub fn start_timeline_cue(
             "timeline SE",
         )
     });
-    Ok(cue::spawn_playback_in_world(world, playback, now))
+    Ok(cue::spawn_playback_in_world(world, playback.spatial(position), now))
 }
+
+/// Audio-only translation for an owner simulated in a different site's local frame.
+#[derive(Component,Clone,Copy)]
+pub struct SourcePositionOffset(pub Vec3);
 
 // ---- A 套邻近环境音管理器 -----------------------------------------------------
 
@@ -2784,7 +2797,7 @@ pub fn advance_proximity(
     routing: Option<Res<Routing>>,
     mut state: ResMut<ProximityState>,
     sources: Query<
-        (&SoundObject, &GlobalTransform),
+        (&SoundObject, &GlobalTransform,Option<&SourcePositionOffset>),
         Without<moly_assets::scene_state::SourceInactive>,
     >,
     avatars: Query<&GlobalTransform, With<AvatarRoot>>,
@@ -2813,8 +2826,8 @@ pub fn advance_proximity(
     // 真源初值是 int 最小值重释为 float，即 f32::MIN）。
     let mut best: Option<(&SoundObject, f32)> = None;
     let mut best_volume = f32::MIN;
-    for (source, transform) in &sources {
-        let volume = proximity_volume(position, transform.translation(), source.max_distance);
+    for (source, transform, offset) in &sources {
+        let volume = proximity_volume(position, transform.translation()+offset.map_or(Vec3::ZERO,|o|o.0), source.max_distance);
         if volume > best_volume {
             best = Some((source, volume));
             best_volume = volume;

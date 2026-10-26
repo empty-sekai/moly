@@ -33,7 +33,7 @@ use moly_law::{
 
 use crate::{
     character::MotionDriver,
-    fixture::{FixturePlacements, FixtureRoot, OccupancyRow},
+    fixture::{FixturePlacements, OccupancyRow},
     fixture_activity_data::{
         ActivityKey, ActivityOrigin, ActivitySpec, ActivityTimeline, FixtureActivityTables, PutType,
     },
@@ -54,7 +54,6 @@ use crate::{
     },
     npc_objective::{AiTalkData, MemberRng, ObjectiveFace, ObjectiveMind, TalkSlot},
     player_fixture_action::FixtureTileKnowledge,
-    site::GroundEpoch,
     talk::TalkHold,
 };
 
@@ -348,6 +347,8 @@ pub struct Factory<'w, 's> {
     scripts: Option<Res<'w, crate::talk::TalkStore>>,
     points: Option<Res<'w, AttachPoints>>,
     inputs: Option<Res<'w, FixtureSceneSupply>>,
+    sites: Res<'w, crate::fixture::residency::FixtureSites>,
+    owners: Query<'w, 's, &'static crate::fixture::residency::FixtureSiteOwner>,
     areas: Res<'w, NpcFixtureAreas>,
     reservations: ResMut<'w, FixtureActivityReservations>,
     runtime: ResMut<'w, NpcFixtureActivities>,
@@ -361,11 +362,17 @@ pub struct Factory<'w, 's> {
             &'static FixtureScenePlacement,
             &'static GlobalTransform,
         ),
-        (With<FixtureRoot>, Without<SourceInactive>),
+        Without<SourceInactive>,
     >,
 }
 
 impl Factory<'_, '_> {
+    fn site_inputs(&self, site: &str) -> Option<&crate::fixture_scene_inputs::FixtureSceneInputs> {
+        self.inputs.as_deref().and_then(FixtureSceneSupply::current)
+            .filter(|inputs| inputs.site_type == site).map(|inputs| &**inputs)
+            .or_else(|| self.sites.get(site).map(|context| &*context.inputs))
+    }
+
     pub fn reserve_upper_fixture(&mut self, actor: Entity, target: FixtureTarget) -> bool {
         if self.reservations.npc_target_in_use(&target)
             || self.upper_reservations.in_use(&target, actor)
@@ -387,7 +394,7 @@ impl Factory<'_, '_> {
     ) -> Result<bool, String> {
         let rows = placements.occupancy_rows();
         let instances = self
-            .live_instances(&rows)
+            .live_instances(&rows, placements.site_id())
             .map_err(FactoryIssue::into_reason)?;
         let Some(&(entity, identity, world, _row)) =
             instances.iter().find(|(_, id, _, _)| id.uid == uid)
@@ -477,10 +484,7 @@ impl Factory<'_, '_> {
         if self.points.is_none() {
             return Err("source fixture locator arrays are still loading".into());
         }
-        let inputs = self
-            .inputs
-            .as_deref()
-            .and_then(FixtureSceneSupply::current)
+        let inputs = self.site_inputs(site_type)
             .ok_or("current fixture scene inputs are not ready")?;
         if inputs.stamp.site_epoch != epoch || inputs.site_type != site_type {
             return Err("fixture scene inputs belong to another site generation".into());
@@ -492,11 +496,8 @@ impl Factory<'_, '_> {
     /// host data gaps that persist until the extractor or placement owner
     /// closes them, and only the no-talk factory reads the tile occupancy they
     /// leave incomplete.
-    fn snapshot_gap(&self) -> Option<String> {
-        let inputs = self
-            .inputs
-            .as_deref()
-            .and_then(FixtureSceneSupply::current)?;
+    fn snapshot_gap(&self, site: &str) -> Option<String> {
+        let inputs = self.site_inputs(site)?;
         if let Some(gap) = inputs.gaps.first() {
             return Some(format!(
                 "placement/floor snapshot has {} gap(s), first: {gap}",
@@ -523,10 +524,7 @@ impl Factory<'_, '_> {
         site_type: Option<i32>,
     ) -> Vec<crate::npc_talk_lottery::PlacedFixture> {
         let rows = placements.occupancy_rows();
-        let floor = self
-            .inputs
-            .as_deref()
-            .and_then(FixtureSceneSupply::current)
+        let floor = self.site_inputs(placements.site_type())
             .map(|inputs| &inputs.floor);
         let tables = self.tables.as_deref();
         rows.iter()
@@ -735,11 +733,13 @@ impl Factory<'_, '_> {
     fn live_instances<'a>(
         &'a self,
         rows: &'a [OccupancyRow],
+        site_id: u32,
     ) -> Result<Vec<LiveInstance<'a>>, FactoryIssue> {
         let mut live: HashMap<&str, Vec<_>> = HashMap::with_capacity(rows.len());
         for fixture in self.fixtures.iter() {
             let (_, identity, placed, _) = fixture;
-            if identity.uid == placed.0.uid {
+            if identity.uid == placed.0.uid
+                && self.owners.get(fixture.0).is_ok_and(|owner| owner.site_id == site_id) {
                 live.entry(identity.uid.as_str()).or_default().push(fixture);
             }
         }
@@ -922,7 +922,7 @@ impl Factory<'_, '_> {
         unmovable: &[String],
         face: &ObjectiveFace,
     ) -> Result<bool, String> {
-        if let Some(gap) = self.snapshot_gap() {
+        if let Some(gap) = self.snapshot_gap(placements.site_type()) {
             return Err(gap);
         }
         let tables = self
@@ -933,14 +933,11 @@ impl Factory<'_, '_> {
             .points
             .as_deref()
             .ok_or("source fixture locator arrays are still loading")?;
-        let inputs = self
-            .inputs
-            .as_deref()
-            .and_then(FixtureSceneSupply::current)
+        let inputs = self.site_inputs(placements.site_type())
             .ok_or("current fixture scene inputs are not ready")?;
         let rows = placements.occupancy_rows();
         let instances = self
-            .live_instances(&rows)
+            .live_instances(&rows, placements.site_id())
             .map_err(FactoryIssue::into_reason)?;
         let &(entity, identity, fixture_world, row) = instances
             .iter()
@@ -1018,21 +1015,18 @@ impl Factory<'_, '_> {
         uid: &str,
         placements: &FixturePlacements,
     ) -> Result<TalkFixtureGeometry, String> {
-        if let Some(gap) = self.snapshot_gap() {
+        if let Some(gap) = self.snapshot_gap(placements.site_type()) {
             return Err(gap);
         }
         let points = self
             .points
             .as_deref()
             .ok_or("source fixture locator arrays are still loading")?;
-        let inputs = self
-            .inputs
-            .as_deref()
-            .and_then(FixtureSceneSupply::current)
+        let inputs = self.site_inputs(placements.site_type())
             .ok_or("current fixture scene inputs are not ready")?;
         let rows = placements.occupancy_rows();
         let instances = self
-            .live_instances(&rows)
+            .live_instances(&rows, placements.site_id())
             .map_err(FactoryIssue::into_reason)?;
         let &(entity, identity, world, row) = instances
             .iter()
@@ -1073,7 +1067,7 @@ impl Factory<'_, '_> {
     ) -> Result<Option<Selection>, FactoryIssue> {
         use FactoryIssue::{Gap, Pending};
         self.loading(epoch, site_type).map_err(Pending)?;
-        if let Some(gap) = self.snapshot_gap() {
+        if let Some(gap) = self.snapshot_gap(placements.site_type()) {
             return Err(Gap(gap));
         }
         let tables = self
@@ -1084,13 +1078,10 @@ impl Factory<'_, '_> {
             .points
             .as_deref()
             .ok_or_else(|| Pending("source fixture locator arrays are still loading".into()))?;
-        let inputs = self
-            .inputs
-            .as_deref()
-            .and_then(FixtureSceneSupply::current)
+        let inputs = self.site_inputs(placements.site_type())
             .ok_or_else(|| Pending("current fixture scene inputs are not ready".into()))?;
         let rows = placements.occupancy_rows();
-        let instances = self.live_instances(&rows)?;
+        let instances = self.live_instances(&rows, placements.site_id())?;
         // A projection, not a fabricated row in the NoTalk source table.
         // Exact pre-actions retain their own origin and authored tweet.
         struct Candidate {
@@ -1309,7 +1300,7 @@ impl Factory<'_, '_> {
             .ok_or("source fixture locator arrays are still loading")?;
         let rows = placements.occupancy_rows();
         let instances = self
-            .live_instances(&rows)
+            .live_instances(&rows, placements.site_id())
             .map_err(FactoryIssue::into_reason)?;
         let &(entity, identity, world, _) = instances
             .iter()
@@ -1506,11 +1497,10 @@ fn tick(
         session.waiting_seconds += world.resource::<Time>().delta_secs();
     }
     let selection = &session.selection;
-    if world
-        .get_resource::<GroundEpoch>()
-        .is_none_or(|epoch| epoch.0 != selection.site_epoch)
-    {
-        return Err("site generation changed".into());
+    // Camera entry generations can change while this exact actor/fixture
+    // pair stays alive. The source lifetime is their owning site and identity.
+    if !crate::fixture::residency::actor_owns_fixture(world, actor, selection.target.entity) {
+        return Err("actor and selected fixture no longer share their site".into());
     }
     if world
         .get::<CharacterUnitId>(actor)
@@ -2054,7 +2044,10 @@ impl ActionPointApproach {
         world.get::<ActionPointExactMotion>(actor).is_some_and(|held|held.0==self.owner)
     }
     fn release(&self,world:&mut World,actor:Entity) {
-        if self.owns(world,actor) { world.entity_mut(actor).remove::<ActionPointExactMotion>(); }
+        if self.owns(world,actor) {
+            crate::npc::navigation::release_movement(world, actor, self.owner);
+            world.entity_mut(actor).remove::<ActionPointExactMotion>();
+        }
     }
     fn restore_stopping(&mut self,world:&mut World,actor:Entity) {
         if let Some(distance)=self.original_stopping.take() {crate::npc::navigation::set_stopping_distance(world,actor,distance);}
@@ -2218,8 +2211,7 @@ pub fn prepare_exit(
         .get::<WalkSpeed>(actor)
         .ok_or("source NPC walk speed is missing")?
         .0;
-    let sample = world
-        .get_resource::<ObjectiveFace>()
+    let sample = crate::npc::navigation::face(world, actor)
         .and_then(|face| face.sample(end.translation.to_array(), 2.0));
     // Source samples the authored EndLoc and uses it as fallback. The delayed
     // talk handoff changes only the movement's initial live pose, not its goal.
@@ -2540,6 +2532,10 @@ fn cancel_runtime(world: &mut World, site_changed: bool) {
         return;
     };
     for (actor, session) in std::mem::take(&mut runtime.sessions) {
+        if site_changed && world.get::<crate::fixture::residency::RetainedFixture>(session.selection.target.entity).is_some() {
+            runtime.sessions.insert(actor, session);
+            continue;
+        }
         if !site_changed
             && world
                 .get::<NpcActions>(actor)

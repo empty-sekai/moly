@@ -202,7 +202,8 @@ pub fn show(world: &mut World, entity: Entity) {
         return;
     };
     entity_mut.remove::<ModelHidden>();
-    entity_mut.insert(Visibility::Inherited);
+    let away = entity_mut.contains::<crate::npc::residency::Away>();
+    entity_mut.insert(if away { Visibility::Hidden } else { Visibility::Inherited });
     let unit = unit_of(world, entity).unwrap_or(0);
     info!("[npc-entry] unit={unit} frame={} Show", frame(world));
 }
@@ -440,19 +441,10 @@ pub fn create_npc(
     // The agent stands on the navigation surface nearest the instantiation
     // point within its query box; a point that maps nowhere keeps the raw
     // position.
-    let warped = world
-        .get_resource::<crate::walk_face::WalkFace>()
-        .and_then(|walk_face| {
-            walk_face.sample(
-                [position[0], position[2]],
-                moly_law::carve::AGENT_QUERY_HALF_EXTENT,
-            )
-        })
-        .and_then(|xz| {
-            world
-                .get_resource::<crate::npc_objective::ObjectiveFace>()
-                .and_then(|face| face.navigation_point_at(xz))
-        });
+    if let Some(mut actions)=world.get_mut::<NpcActions>(entity) { actions.site_type=home.clone(); }
+    let warped=crate::npc::navigation::face(world,entity).and_then(|face| {
+        face.walk_face().sample([position[0],position[2]],moly_law::carve::AGENT_QUERY_HALF_EXTENT).and_then(|xz|face.navigation_point_at(xz))
+    });
     let at = warped.unwrap_or(position);
     crate::npc::force_set_position(world, entity, at);
     let forward = (rotation * Vec3::Z).to_array();
