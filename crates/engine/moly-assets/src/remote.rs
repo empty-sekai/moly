@@ -251,6 +251,26 @@ pub fn master_version(host: Remote, region: Region) -> AssetPath<'static> {
     AssetPath::from(format!("{}://{path}", host.source()))
 }
 
+/// A table in an immutable commit of the admitted repository host. The
+/// source identity reader validates the full commit and its repository before
+/// calling this; it never names a different host or a moving mirror.
+pub(crate) fn master_table_at(region: Region, commit: &str, table: &str) -> AssetPath<'static> {
+    AssetPath::from(format!(
+        "{}://{}/{commit}/master/{table}.json",
+        Remote::MasterRepository.source(),
+        region.repository()
+    ))
+}
+
+/// The version document in the same immutable commit as [`master_table_at`].
+pub(crate) fn master_version_at(region: Region, commit: &str) -> AssetPath<'static> {
+    AssetPath::from(format!(
+        "{}://{}/{commit}/versions/current_version.json",
+        Remote::MasterRepository.source(),
+        region.repository()
+    ))
+}
+
 /// The bases the entry crate admitted; shared by the readers.
 #[derive(Resource, Clone, Default)]
 pub struct RemoteAdmission(Arc<RwLock<Option<RemoteBases>>>);
@@ -560,5 +580,45 @@ mod native {
             Ok(bytes)
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod master_pin_tests {
+    use super::*;
+
+    #[test]
+    fn commit_paths_stay_below_the_admitted_repository_template() {
+        let bases = crate::asset_source::remote_bases(crate::asset_source::RemoteBaseOverrides {
+            master_repository: Some("https://mirror.example/owner/{repo}/"),
+            ..Default::default()
+        })
+        .unwrap();
+        let admission = RemoteAdmission::default();
+        admission.set(bases);
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(
+            admission.url(&master_table_at(Region::Jp, commit, "mysekaiFixtures")),
+            Some(format!(
+                "https://mirror.example/owner/haruki-sekai-master/{commit}/master/mysekaiFixtures.json"
+            ))
+        );
+        assert_eq!(
+            admission.url(&master_version_at(Region::Jp, commit)),
+            Some(format!(
+                "https://mirror.example/owner/haruki-sekai-master/{commit}/versions/current_version.json"
+            ))
+        );
+        assert_eq!(
+            admission.url(&master_table(
+                Remote::MasterRepository,
+                Region::Jp,
+                "mysekaiFixtures"
+            )),
+            Some(
+                "https://mirror.example/owner/haruki-sekai-master/main/master/mysekaiFixtures.json"
+                    .to_owned()
+            )
+        );
     }
 }

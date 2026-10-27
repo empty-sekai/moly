@@ -10,8 +10,11 @@
 //! known (`source.region` of the root's `source.json`), each requested table
 //! is read as the merged table ([`merge_table`]): the JP table, then the same
 //! table of every enabled non-JP region ([`ENABLED`]). Each is read from the master
-//! bases in order ([`MasterBases`]), base by base and JP's table first, and
-//! the root's region's upstream data version is logged once. A base whose
+//! bases in order ([`MasterBases`]), base by base and JP's table first. A
+//! producer `master` pin in `source.json` selects its verified repository
+//! commit for that region. Its version document must agree before tables
+//! load; moving mirrors are not fallbacks for a pin. Roots without a pin
+//! keep the latest sources. The upstream data version is logged once. A base whose
 //! read timed out (no response headers within the reader's bound) is demoted
 //! for the session: every later table tries it after the others.
 //!
@@ -44,6 +47,10 @@ use bevy::asset::{
 use bevy::prelude::*;
 use serde_json::{Map, Value};
 
+mod source;
+
+use source::{parse_source, MasterSource};
+
 use super::JsonAsset;
 use crate::remote::{self, Region, ENABLED};
 
@@ -51,8 +58,7 @@ pub use super::master_merge::{
     merge_table, merged_regions, table_key, Collision, Merged, TableText, REGION_FIELD, TABLE_KEYS,
 };
 
-/// The root's identity document; its `source.region` names the root's
-/// region, whose master storage the root's assets are read from.
+/// The root's identity document: its region and optional producer master pin.
 const SOURCE_DOCUMENT: &str = "moly://source.json";
 
 /// One master table a consumer reads.
@@ -102,22 +108,10 @@ pub struct MasterBase {
     pub host: remote::Remote,
 }
 
-impl MasterBase {
-    /// A region's table, by its upstream name.
-    fn table(self, region: Region, table: &str) -> AssetPath<'static> {
-        remote::master_table(self.host, region, table)
-    }
-
-    /// A region's `versions/current_version.json`.
-    fn version(self, region: Region) -> AssetPath<'static> {
-        remote::master_version(self.host, region)
-    }
-}
-
 /// The bases every table is read from, tried in order: a table is absent
-/// only when each of them has failed. The first is each region's repository;
-/// the master hosts follow as its mirror, and carry the `jp` and `cn`
-/// directories only. The app may replace the list.
+/// only when each admitted base has failed. The first is each region's
+/// repository; moving master hosts follow as mirrors for roots without a pin,
+/// and carry the `jp` and `cn` directories only. The app may replace the list.
 #[derive(Resource, Clone)]
 pub struct MasterBases(pub Vec<MasterBase>);
 
@@ -137,6 +131,30 @@ impl Default for MasterBases {
                 host: remote::Remote::MasterMirror,
             },
         ])
+    }
+}
+
+impl MasterBases {
+    /// The first admitted untried base, preserving timeout demotion. A pin
+    /// admits only the repository; neither failover nor demotion drops it.
+    fn next(
+        &self,
+        source: &MasterSource,
+        region: Region,
+        tried: &[usize],
+        demoted: &[usize],
+    ) -> Option<usize> {
+        let available = |index: &usize| {
+            !tried.contains(index)
+                && self
+                    .0
+                    .get(*index)
+                    .is_some_and(|base| source.admits(base.host, region))
+        };
+        (0..self.0.len())
+            .filter(available)
+            .find(|index| !demoted.contains(index))
+            .or_else(|| demoted.iter().copied().find(available))
     }
 }
 
@@ -243,10 +261,9 @@ impl TableOutcome {
 /// take them, and the tables named missing.
 #[derive(Resource, Default)]
 pub struct MasterData {
-    /// The root's region: its master storage, and the region its upstream
-    /// data version is read for. Each table is the merged table of
-    /// [`ENABLED`] whatever the root's region is.
-    region: Document<Region>,
+    /// The root's region and optional immutable producer master pin. Each
+    /// table still merges the regions in [`ENABLED`].
+    source: Document<MasterSource>,
     upstream_version: Document<String>,
     pending: Vec<Pending>,
     resolved: HashMap<MasterKey, Result<Parsed, MasterError>>,
@@ -392,8 +409,8 @@ impl MasterData {
     /// master storage the root's own assets are read from, and the region
     /// whose upstream data version is logged.
     pub fn region(&self) -> Option<Region> {
-        match &self.region {
-            Document::Read(Ok(region)) => Some(*region),
+        match &self.source {
+            Document::Read(Ok(source)) => Some(source.region),
             _ => None,
         }
     }
@@ -516,28 +533,34 @@ pub fn resolve(
         return;
     }
     let data = &mut *data;
-    let region = match data.region.poll(
+    let source = match data.source.poll(
         &server,
         &jsons,
         || AssetPath::from(SOURCE_DOCUMENT),
-        parse_region,
+        parse_source,
     ) {
         None => return,
-        Some(Ok(region)) => *region,
+        Some(Ok(source)) => source.clone(),
         Some(Err(reason)) => {
-            let reason = format!("the root's region is unknown: source.json {reason}");
-            for entry in std::mem::take(&mut data.pending) {
-                let error = entry.error(reason.clone());
-                data.name_missing(&error, true);
-                data.resolved.insert(entry.key, Err(error));
-            }
+            let reason = format!("the root's master source is invalid: source.json {reason}");
+            data.refuse_pending(reason);
             return;
         }
     };
-    MasterData::read_version(data, &server, &jsons, &bases, region);
+    let version = data.read_version(&server, &jsons, &bases, &source);
+    if source.pin.is_some() {
+        match version {
+            None => return,
+            Some(Err(reason)) => {
+                data.refuse_pending(format!("the pinned master version was refused: {reason}"));
+                return;
+            }
+            Some(Ok(())) => {}
+        }
+    }
     let mut waiting = Vec::new();
     for mut entry in std::mem::take(&mut data.pending) {
-        match entry.advance(data, &server, &jsons, &bases) {
+        match entry.advance(data, &server, &jsons, &bases, &source) {
             Some(result) => {
                 data.resolved.insert(entry.key, result);
             }
@@ -548,46 +571,59 @@ pub fn resolve(
 }
 
 impl MasterData {
-    /// Logs the root's region's upstream data version once, from the first
-    /// base. The version file is where a server keeps it, so a base that does
-    /// not serve it is left out of the run of the tables.
+    fn refuse_pending(&mut self, reason: String) {
+        for entry in std::mem::take(&mut self.pending) {
+            let error = entry.error(reason.clone());
+            self.name_missing(&error, true);
+            self.resolved.insert(entry.key, Err(error));
+        }
+    }
+
+    /// Reads and logs the version once. Legacy roots only log it; a pinned
+    /// root waits for a matching version before requesting any master table.
     fn read_version(
-        data: &mut MasterData,
+        &mut self,
         server: &AssetServer,
         jsons: &Assets<JsonAsset>,
         bases: &MasterBases,
-        region: Region,
-    ) {
-        // The base the version was requested from: the first one, until the
-        // request names it.
-        let index = match &data.upstream_version {
-            Document::Read(_) => return,
-            Document::Loading(handle) => bases
-                .0
-                .iter()
-                .position(|base| handle.path() == Some(&base.version(region)))
-                .unwrap_or(0),
-            Document::Unrequested => 0,
-        };
-        let Some(base) = bases.0.get(index) else {
-            return;
-        };
-        match data
-            .upstream_version
-            .poll(server, jsons, || base.version(region), parse_version)
-        {
-            Some(Ok(version)) => info!(
-                "[masters] {}: upstream dataVersion {version} ({})",
-                region.directory(),
-                base.name
-            ),
-            Some(Err(reason)) => warn!(
-                "[masters] {}: the upstream dataVersion is missing: {}'s versions/current_version.json {reason}",
-                region.directory(),
-                base.name
-            ),
-            None => {}
+        source: &MasterSource,
+    ) -> Option<Result<(), String>> {
+        if let Document::Read(result) = &self.upstream_version {
+            return Some(result.as_ref().map(|_| ()).map_err(Clone::clone));
         }
+        let Some((base, path)) = bases
+            .0
+            .iter()
+            .find_map(|base| source.version(base.host).map(|path| (base, path)))
+        else {
+            let reason = "no admitted master base serves the source version".to_owned();
+            warn!("[masters] {reason}");
+            self.upstream_version = Document::Read(Err(reason.clone()));
+            return Some(Err(reason));
+        };
+        let result = self.upstream_version.poll(
+            server,
+            jsons,
+            || path,
+            |text| source.parse_version(text),
+        )?;
+        let identity = source.pin.as_ref().map_or_else(
+            || "latest".to_owned(),
+            |pin| format!("commit {}", pin.commit),
+        );
+        match result {
+            Ok(version) => info!(
+                "[masters] {}: upstream dataVersion {version} ({}; {identity})",
+                source.region.directory(),
+                base.name
+            ),
+            Err(reason) => warn!(
+                "[masters] {}: the upstream version was refused ({}; {identity}): {reason}",
+                source.region.directory(),
+                base.name
+            ),
+        }
+        Some(result.as_ref().map(|_| ()).map_err(Clone::clone))
     }
 }
 
@@ -608,6 +644,7 @@ impl Pending {
         server: &AssetServer,
         jsons: &Assets<JsonAsset>,
         bases: &MasterBases,
+        source: &MasterSource,
     ) -> Option<Result<Parsed, MasterError>> {
         // JP's table is the table; every later region adds to it.
         if self.region == 0 {
@@ -618,7 +655,7 @@ impl Pending {
         let Some(region) = self.regions.get(self.region).copied() else {
             return Some(self.finish(data));
         };
-        if unpublished(region, self.table).is_some() {
+        if !source.pinned(region) && unpublished(region, self.table).is_some() {
             self.outcomes.push(TableOutcome::Unpublished(region));
             self.next_region();
             return None;
@@ -626,15 +663,11 @@ impl Pending {
         // The next base: the first untried one that is not demoted, else the
         // first untried demoted one.
         if self.base.is_none() {
-            let untried = |index: &usize| !self.tried.contains(index);
-            self.base = (0..bases.0.len())
-                .filter(untried)
-                .find(|index| !data.demoted.contains(index))
-                .or_else(|| data.demoted.iter().copied().find(untried));
+            self.base = bases.next(source, region, &self.tried, &data.demoted);
         }
         let Some(index) = self.base else {
             let reason = if self.failures.is_empty() {
-                "no master base is configured".to_owned()
+                "no admitted master base serves this source".to_owned()
             } else {
                 format!("no master base served it ({})", self.failures.join("; "))
             };
@@ -649,18 +682,22 @@ impl Pending {
             return None;
         };
         let base = bases.0[index];
-        let handle = self
-            .handle
-            .get_or_insert_with(|| server.load(base.table(region, self.table)))
-            .clone();
+        let Some(path) = source.table(base.host, region, self.table) else {
+            self.failures
+                .push(format!("{} is not admitted for this source", base.name));
+            self.tried.push(index);
+            self.base = None;
+            self.handle = None;
+            return None;
+        };
+        let handle = self.handle.get_or_insert_with(|| server.load(path)).clone();
         if let LoadState::Failed(error) = server.load_state(&handle) {
             self.failures.push(format!("{}: {error}", base.name));
             self.tried.push(index);
             self.base = None;
             self.handle = None;
             if timed_out(&error) {
-                let next = (0..bases.0.len())
-                    .find(|other| !self.tried.contains(other) && !data.demoted.contains(other));
+                let next = bases.next(source, region, &self.tried, &data.demoted);
                 data.demote(index, &base, self.table, next.map(|other| &bases.0[other]));
             }
             return None;
@@ -828,31 +865,6 @@ fn timed_out(error: &AssetLoadError) -> bool {
         AssetLoadError::AssetReaderError(AssetReaderError::Io(io))
             if io.kind() == std::io::ErrorKind::TimedOut
     )
-}
-
-/// `source.region` of the root's identity document: one of the region
-/// directories.
-fn parse_region(text: &str) -> Result<Region, String> {
-    let value: Value =
-        serde_json::from_str(text).map_err(|error| format!("is not JSON ({error})"))?;
-    if value["version"].as_u64() != Some(1) {
-        return Err("has an unsupported or missing identity version".into());
-    }
-    match value["source"]["region"].as_str() {
-        Some(name) => Region::from_directory(name)
-            .ok_or_else(|| format!("names the source region {name:?}, not a region directory")),
-        None => Err("names no source region".into()),
-    }
-}
-
-/// `dataVersion` of an upstream `current_version.json`.
-fn parse_version(text: &str) -> Result<String, String> {
-    let value: Value =
-        serde_json::from_str(text).map_err(|error| format!("is not JSON ({error})"))?;
-    value["dataVersion"]
-        .as_str()
-        .map(str::to_owned)
-        .ok_or_else(|| "has no dataVersion".to_owned())
 }
 
 // ---------------------------------------------------------------------------
@@ -1332,5 +1344,74 @@ mod merge_tests {
         data.name_unmerged("t", "t (test)", "is not merged: a JP row lacks its key (id)".into());
         data.name_unmerged("t", "t (test)", "another reason".into());
         assert_eq!(data.unmerged().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod master_pin_tests {
+    use super::*;
+
+    fn source(pin: bool) -> MasterSource {
+        let mut value = serde_json::json!({
+            "version": 1,
+            "source": {"region": "jp", "assetVersion": "7", "assetHash": "assets"}
+        });
+        if pin {
+            value["master"] = serde_json::json!({
+                "region": "jp", "repository": "Team-Haruki/haruki-sekai-master",
+                "commit": "0123456789abcdef0123456789abcdef01234567",
+                "dataVersion": "7", "assetVersion": "7", "assetHash": "assets"
+            });
+        }
+        parse_source(&value.to_string()).unwrap()
+    }
+
+    #[test]
+    fn pinned_reads_do_not_fail_over_to_a_latest_mirror() {
+        let bases = MasterBases::default();
+        let source = source(true);
+        assert_eq!(bases.next(&source, Region::Jp, &[], &[]), Some(0));
+        // A previous timeout does not make a moving mirror an alternative.
+        assert_eq!(bases.next(&source, Region::Jp, &[], &[0]), Some(0));
+        // Once the repository failed, the pinned table has no further base.
+        assert_eq!(bases.next(&source, Region::Jp, &[0], &[0]), None);
+        assert_eq!(bases.next(&source, Region::Jp, &[0], &[]), None);
+    }
+
+    #[test]
+    fn latest_reads_keep_the_existing_failover_and_demotion_order() {
+        let bases = MasterBases::default();
+        let source = source(false);
+        assert_eq!(bases.next(&source, Region::Jp, &[], &[]), Some(0));
+        assert_eq!(bases.next(&source, Region::Jp, &[0], &[]), Some(1));
+        assert_eq!(bases.next(&source, Region::Jp, &[], &[0]), Some(1));
+        assert_eq!(bases.next(&source, Region::Jp, &[1, 2], &[0]), Some(0));
+        assert_eq!(bases.next(&source, Region::Jp, &[0, 1, 2], &[0]), None);
+    }
+
+    #[test]
+    fn a_version_refusal_reaches_every_waiting_consumer() {
+        const ONE: MasterTable<Vec<Value>> = MasterTable {
+            table: "first",
+            name: "first",
+            parse: rows,
+        };
+        const TWO: MasterTable<Vec<Value>> = MasterTable {
+            table: "second",
+            name: "second",
+            parse: rows,
+        };
+        let mut data = MasterData::default();
+        data.request(&ONE);
+        data.request(&TWO);
+        data.refuse_pending("the pinned master version was refused".into());
+        assert!(data.ready());
+        assert_eq!(data.missing().len(), 2);
+        for table in [&ONE, &TWO] {
+            assert_eq!(
+                data.take(table).unwrap().unwrap_err().reason,
+                "the pinned master version was refused"
+            );
+        }
     }
 }
