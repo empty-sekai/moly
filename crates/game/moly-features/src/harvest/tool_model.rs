@@ -252,6 +252,7 @@ pub fn swap_materials(
     server: Res<AssetServer>,
     json: Res<Assets<JsonAsset>>,
     models: Res<HarvestToolModels>,
+    step: Res<crate::player_avatar::item_timeline::PlayerStepItem>,
     roots: Query<(), Without<ToolMaterialsSwapped>>,
     children: Query<&Children>,
     parts: Query<(
@@ -262,13 +263,14 @@ pub fn swap_materials(
     standard: Res<Assets<StandardMaterial>>,
     mut tools: ResMut<Assets<HarvestToolMaterial>>,
 ) {
-    for (tool_id, root) in &models.instances {
-        if roots.get(*root).is_err() {
+    let mut source_models: Vec<_> = models.instances.iter().filter_map(|(id, root)|
+        models.documents.get(id).map(|document| (*id, *root, document.clone()))).collect();
+    if let Some((root, document)) = step.bulk_tool_model() { source_models.push((-1, root, document)); }
+    for (tool_id, root, document) in source_models {
+        if roots.get(root).is_err() {
             continue;
         }
-        let Some(doc) = models.documents.get(tool_id) else {
-            continue;
-        };
+        let doc = &document;
         if let LoadState::Failed(error) = server.load_state(doc) {
             panic!("tool document of tool {tool_id} failed to load: {error:?}");
         }
@@ -276,7 +278,7 @@ pub fn swap_materials(
             continue;
         };
         let mut found = Vec::new();
-        let mut stack = vec![*root];
+        let mut stack = vec![root];
         while let Some(entity) = stack.pop() {
             if let Ok(kids) = children.get(entity) {
                 stack.extend(kids.iter());
@@ -353,7 +355,7 @@ pub fn swap_materials(
                     .insert(MeshMaterial3d(handle));
             }
         }
-        commands.entity(*root).insert(ToolMaterialsSwapped);
+        commands.entity(root).insert(ToolMaterialsSwapped);
         info!(
             "[harvest] tool {tool_id}: {} material(s) drawn with {AVATAR_TOOL_SHADER_NAME}'s Base pass",
             swapped.len()

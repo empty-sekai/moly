@@ -17,3 +17,4 @@ moly-assets = { path = "../../engine/moly-assets", default-features = false }
 # it carries no renderer.
 bevy = { version = "0.19.1", default-features = false, features = ["std", "bevy_asset"] }
 serde_json = { workspace = true }
+serde = { version = "1", features = ["derive"] }

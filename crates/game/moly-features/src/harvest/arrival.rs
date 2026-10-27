@@ -110,6 +110,9 @@ impl HarvestArrival {
 
 #[derive(SystemParam)]
 pub struct ArrivalInputs<'w, 's> {
+    link: ResMut<'w, moly_link::ServerLink>,
+    queue: ResMut<'w, super::queue::HarvestLogQueue>,
+    answers: Res<'w, crate::userdata::AnsweredLog>,
     server: Res<'w, AssetServer>,
     gltfs: Res<'w, Assets<Gltf>>,
     json: Res<'w, Assets<moly_assets::json::JsonAsset>>,
@@ -129,7 +132,8 @@ pub struct ArrivalInputs<'w, 's> {
 /// one fixture row per frame.
 pub fn place(
     mut commands: Commands,
-    inputs: ArrivalInputs,
+    mut inputs: ArrivalInputs,
+    mut sync: Local<ArrivalMapSync>,
     mut arrival: ResMut<HarvestArrival>,
     mut glbs: ResMut<HarvestGltfs>,
     mut docs: ResMut<HarvestDocs>,
@@ -146,6 +150,50 @@ pub fn place(
     ) else {
         return;
     };
+    if site.category == "harvest" && arrival.run.is_none() && arrival.placed_epoch != Some(epoch.0)
+    {
+        let wanted = (site.site_id, epoch.0);
+        if sync.wanted != Some(wanted) {
+            inputs.queue.request_flush();
+            if !inputs.queue.is_idle() && !inputs.queue.has_failed() {
+                return;
+            }
+            sync.wanted = Some(wanted);
+            sync.pending = Some(inputs.link.call(moly_protocol::Call::HarvestMap {
+                mysekai_site_id: site.site_id as i32,
+            }));
+            sync.accepted = false;
+            return;
+        }
+        if let Some(seq) = sync.pending {
+            let Some(answer) = inputs.answers.get(seq) else {
+                return;
+            };
+            match &answer.outcome {
+                Ok(moly_protocol::Reply::HarvestMap) => {
+                    sync.accepted = true;
+                    sync.pending = None;
+                    inputs.queue.reset_refused_on_arrival();
+                }
+                Err(error) if error.code == "masters_loading" => {
+                    sync.wanted = None;
+                    return;
+                }
+                Err(error) => {
+                    error!("[harvest] authoritative arrival refused: {error}");
+                    sync.pending = None;
+                    return;
+                }
+                _ => {
+                    sync.pending = None;
+                    return;
+                }
+            }
+        }
+        if !sync.accepted {
+            return;
+        }
+    }
     // The site's content settles when GroundEpoch advances (the settle
     // marker itself lives only between the scene spawn and the camera
     // framing of one frame). Every epoch is recorded, harvest site or not,
@@ -227,13 +275,11 @@ pub fn place(
     };
     let height_at = |x: f32, z: f32| -> Option<f32> {
         face.surface_height([x, z]).or_else(|| {
-            surface
-                .surface_height_at([x, z])
-                .or_else(|| {
-                    surface
-                        .surface_sample([x, surface.ref_y(), z], f32::MAX)
-                        .map(|point| point[1])
-                })
+            surface.surface_height_at([x, z]).or_else(|| {
+                surface
+                    .surface_sample([x, surface.ref_y(), z], f32::MAX)
+                    .map(|point| point[1])
+            })
         })
     };
     // GenerateUnclaimedDropItemsAsync: rows already dropped whose threshold
@@ -686,4 +732,31 @@ pub fn bind_views(
             particles.setup(root);
         }
     }
+}
+
+#[derive(Default)]
+pub struct ArrivalMapSync {
+    wanted: Option<(u32, u64)>,
+    pending: Option<u32>,
+    accepted: bool,
+}
+
+/// Rebuild only the still-current site after an accepted authoritative reply.
+/// Keeps server rows; the regular placement path handles leftovers and drops.
+pub fn refresh_from_authoritative(world: &mut World, site_id: u32) -> bool {
+    if !world
+        .get_resource::<crate::site::SiteActive>()
+        .is_some_and(|site| site.site_id == site_id && site.category == "harvest")
+    {
+        return false;
+    }
+    if !world
+        .get_resource::<HarvestUserData>()
+        .is_some_and(|user| user.maps.contains_key(&site_id))
+    {
+        return false;
+    }
+    super::clear_for_site_change(world);
+    world.resource_mut::<HarvestArrival>().placed_epoch = None;
+    true
 }

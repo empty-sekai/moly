@@ -521,3 +521,67 @@ pub struct UserMysekaiStaminaRequest {
     pub mysekai_boost_stamina_recovery_type: BoostStaminaRecoveryType,
     pub user_mysekai_stamina_recovery_consume_resources: Vec<StaminaRecoveryConsume>,
 }
+
+/// JP 7.0.0 `UserMysekaiSiteBulkHarvestRequest`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserMysekaiSiteBulkHarvestRequest {
+    pub mysekai_site_id: i32,
+    pub mysekai_site_bulk_harvest_target_ids: Vec<i32>,
+    pub target_mysekai_site_harvest_fixtures: Vec<BulkHarvestFixture>,
+    pub gather_mysekai_site_harvest_resource_drops: Vec<MysekaiSiteHarvestResourceDrop>,
+    pub mysekai_stamina_useds: Vec<MysekaiStaminaUsed>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BulkHarvestFixture {
+    pub position_x: i32,
+    pub position_z: i32,
+    pub mysekai_site_harvest_fixture_id: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MysekaiSiteHarvestResourceDrop {
+    pub position_x: i32,
+    pub position_z: i32,
+    pub hp: i32,
+    pub seq: i32,
+    pub resource_type: String,
+    pub resource_id: i32,
+    pub quantity: i32,
+}
+
+impl MysekaiSiteHarvestResourceDrop {
+    pub fn from_row(row: &crate::harvest::UserDrop) -> Option<Self> {
+        Some(Self {
+            position_x: row.position_x,
+            position_z: row.position_z,
+            hp: row.hp,
+            seq: row.seq,
+            resource_type: crate::harvest::resource_word(row.resource_type)?.to_owned(),
+            resource_id: i32::try_from(row.resource_id).ok()?,
+            quantity: row.quantity,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserMysekaiGatherRequest {
+    pub mysekai_site_id: i32,
+    pub gather_mysekai_site_harvest_resource_drops: Vec<MysekaiSiteHarvestResourceDrop>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UserMysekaiSiteBulkHarvestResponse {
+    pub updated_resources: SuiteUserSections,
+    pub obtained_drop_resources: Vec<UserResource>,
+    pub player_rank_rewards: Vec<UserResource>,
+    pub is_in_break_time: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserMysekaiTreasureBoxSpawnRequest {
+    pub mysekai_site_id: i32,
+    pub seq: i32,
+    pub position_x: i32,
+    pub position_z: i32,
+}

@@ -86,7 +86,15 @@ jobs:
           cache-targets: false
           save-if: ${{ github.ref == 'refs/heads/master' }}
       - name: Build
-        run: cargo build --release --locked -p moly-app -p moly-launcher -p moly-server-host --target ${{ matrix.target }}
+        run: cargo build --release --locked -p moly-app -p moly-stage -p moly-launcher -p moly-server-host --target ${{ matrix.target }}
+      - name: Test shared rules, transport, settlement and runtime
+        if: runner.os == 'Linux'
+        run: >-
+          cargo test --release --locked --lib
+          -p moly-law -p moly-protocol -p moly-layout -p moly-masters
+          -p moly-assets -p moly-server -p moly-world -p moly-features
+          --target ${{ matrix.target }}
+          -- --test-threads=1
       - name: Compiler cache statistics
         if: always()
         run: sccache --show-stats
@@ -132,6 +140,12 @@ jobs:
         with:
           name: native-${{ matrix.target }}
           path: dist/out/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: inputs.package && runner.os == 'Windows'
+        with:
+          name: stage-system-audit-windows
+          path: target/${{ matrix.target }}/release/moly-stage.exe
           if-no-files-found: error
   browser:
     strategy:

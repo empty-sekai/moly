@@ -21,6 +21,10 @@ GitHub Actions runs version consistency checks (including that `CHANGELOG.md` ha
 
 The native programs and the web backends are built by the reusable `build.yml` workflow. Every compiler invocation goes through [sccache](https://github.com/mozilla/sccache) with the GitHub Actions cache as storage, so crates whose inputs are unchanged are not compiled again. A run can read the caches of its own ref and of the default branch, so the `Build cache` workflow builds every target on `master` (on pushes that change Rust code, and every five days so the caches do not expire) and release tags read those caches. Each build job ends with `sccache --show-stats`.
 
+The Linux build also runs the shared rules, protocol, layout, master, asset,
+server, world and feature library tests serially. These use synthetic inputs;
+passing them does not replace testing the packaged application with resources.
+
 ## Versioning and releases
 
 The version is defined once, in `[workspace.package]` in `Cargo.toml`; all crates inherit it. The settings panel shows the current version, and `moly-app --version` can be queried without loading resources.

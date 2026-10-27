@@ -2,85 +2,79 @@
 
 The source descriptor chooses the NPC controller. Japanese sources with an
 application major version of 7 or later use the hierarchical controller;
-earlier Japanese and Chinese sources retain their existing controller. The
-ordinary multi-character talk corpus is separate from furniture conversations
-and includes its own participant, script and voice identities.
+earlier Japanese and Chinese sources retain their existing controller.
+Ordinary multi-character conversations have their own participant, script and
+voice identities, separate from furniture conversations. Updating the corpus
+alone does not implement the new controller's behavior.
 
-The new controller coordinates upper navigation, lower activity, recruitment,
-reservations and cancellation. Shared approach and animation helpers preserve
-ownership when a character moves between conversation, furniture, event and
-tutorial states. Full-game photo controls and tutorial chapter input have
-separate feature owners; the embedded stage does not install those game screens.
+The hierarchical controller coordinates navigation, activities, recruitment,
+reservations and cancellation. Shared helpers preserve ownership as a
+character moves between conversation, furniture and other activities.
+Off-site scenes retain their entities, navigation contexts, detached visuals
+and spatial sound positions. Exported Director transform chains are required
+when the corresponding source Director is not instantiated.
 
-`moly-stage` is an independent browser application with the existing playback,
-weather, audio, camera, temporary scene restoration and imported-layout paths.
-It shares implementation crates with the game and has no dependency on
-`moly-game` or `moly-devtools`. Build receipts identify each product and backend.
-Matched WebGPU builds currently measure 122,040,178 raw WASM bytes for the
-stage and 145,153,835 for the full game (15.9% smaller). Brotli quality 11
-measures 10,493,359 and 12,362,768 bytes respectively (15.1% smaller); both
-deliver the same base font separately. Corresponding WebGL2 builds are
-123,395,058 and 146,842,777 bytes. All four receipts carry source fingerprint
-`f82976c8e54d970d27251cc8a145eb65e8de3d87688692e33fc5d58de61b5627`.
-These previous integration builds predate the latest site-residency,
-avatar tint, empty-lottery and photo-presentation changes.
+## Independent stage
 
-Display text uses stable IDs and source hashes. Resource snapshots contain
-original bindings, while official and community translations have independent
-publications. A playback pins its text session; new playback can discover a
-new publication. Official Chinese text takes priority over matching human
-translations, then original text. This changes display strings only.
+`moly-stage` is an independent application with playback, weather, audio,
+camera, temporary scene restoration and imported layouts. It shares engine
+crates with the game and does not depend on `moly-game` or `moly-devtools`.
+It omits full-game inventory, harvest and other game screens. Imported layouts
+restore the supplied scene instead of substituting the local account's home.
 
-The independent font catalogue matches coverage to the engine's actual base
-font hash. Supplemental open fonts are fetched only when the selected display
-strings require them, then verified before atomic installation. Editors use
-the same coverage in NextTrans; they do not build or upload font files.
+The browser release builds stage and game for both WebGPU and WebGL2.
+Receipts identify each product, renderer and actual source fingerprint.
+Compare package sizes only across builds with the same source fingerprint;
+allocated WASM memory capacity does not measure live memory use.
 
-## Validation status
+## Display text and fonts
 
-The implementation is under integration review. Native checks of stage, app
-and server-host pass after removing the unplanned tutorial expansion. The
-stage's 636-system access audit passed on an earlier integration snapshot and
-must be repeated after the latest changes. Protocol and
-text-publication checks pass, including unchanged resource text after a
-translation edit. These results do not establish full behavioral or visual
-equivalence.
+Text bindings use stable identities and source hashes. Resource snapshots
+contain original bindings; official and community translations have separate
+publications. A translation edit therefore does not change the resource
+snapshot identity. Playback pins a text session, and the next playback can
+discover a new text publication.
 
-Real WebGPU and WebGL2 runs completed ordinary cross-band playback with nonzero audio
-before and after resource prewarming. The embedded text flow has also verified
-official Chinese priority, supplemental font rendering, active-playback pinning,
-next-playback updates, stale-source fallback and Stop cleanup.
+For Chinese display, matching official Chinese text takes priority, followed
+by a matching community translation and then the original text. Only display
+strings change: Japanese scenes, motion, voice and timing remain Japanese.
+An unmatched or stale translation cannot replace the source string.
 
-A single local run of the same stage scenario observed first playback at 19.5s
-for stage and 20.7s for the game assembly. This is not a benchmark distribution.
-WASM memory capacity was 655,032,320 and 616,759,296 bytes respectively;
-geometric growth capacity is not live allocation, and no memory reduction is
-claimed. Six weather selections completed transitions with live particle
-emitters and no renderer errors in a WebGPU run. This does not establish
-complete weather equivalence.
+The font catalogue matches coverage to the engine's actual base font hash.
+Supplemental open fonts are fetched only when the selected display strings
+need them, then verified before atomic installation. Translators use the
+existing NextTrans review workflow and do not edit Lua or build font files.
+Distributed font packages include their open-source license and hash records.
 
-Current source retains real off-site scene and fixture entities, navigation
-contexts, detached visual ownership and captured spatial sound positions.
-Exported Director transform chains are required when the source Director is
-not instantiated. Imported layouts restore their own supplied layout instead
-of substituting the local account's home gate or house. Japanese 7.x empty
-conversation selection returns zero without a random draw; earlier source
-versions retain their original behavior. The avatar tint now multiplies the
-sampled color by the skin color before alpha interpolation.
+## Full-game changes
 
-The photo presenter implements capture animation, Skip, owned frame selection
+The game restores source road editing, weather selection and list scrolling,
+including confirmation, saved state and cancellation. JP 7 bulk harvest adds
+the original charge/release interaction, target preferences, hammer timeline
+and authoritative settlement. See [Bulk harvest](bulk-harvest.md) and
+[Server](server.md) for the resource and protocol requirements.
+
+The photo presenter supports capture animation, Skip, owned frame selection
 and a local ZIP containing the original JPEG plus frame identity. It does not
-report album-service success or consume film. These changes are native-check
-verified; current-build browser and desktop interaction acceptance remains open.
+report album-service success or consume film.
 
-Remaining gates include rebuilding both products and renderers from the final
-source, repeating system-access and playback/retry checks, verifying the
-imported-layout repair, off-site identity/cancellation/return behavior, avatar
-rendering and the full photo pointer/download flow. Matching final artifact
-measurements are also pending. A declared state is not proof of a working flow.
+Full tutorial progression, mission-service expansion and rank rewards remain
+outside this change. Existing tutorial NPC-state adapters remain. These
+changes do not establish complete fidelity of every inventory or game screen.
 
-Full tutorial progression, mission service expansion, navigation, rank-up and
-reward UI are outside this change's scope. Existing tutorial NPC-state adapters
-remain. The next UI work should investigate fidelity defects in the existing
-inventory and full-game screens, including preview, filtering, recycling,
-layout, input and dialog lifetimes; it is not completed by this migration.
+## Acceptance
+
+Release verification must use the final source and its matching resources:
+
+- Run shared rule, protocol, settlement and timeline tests, and audit native
+  stage and full-game system access.
+- Exercise cross-band playback, cancellation, scene restoration and retry on
+  both browser renderers; check sound and resource retirement.
+- Check official Chinese priority, supplemental fonts, active-playback text
+  pinning, next-playback updates and stale-source fallback. Editing a text
+  publication must leave the resource snapshot unchanged.
+- Exercise road placement, scrolling, weather save/cancel/restart and bulk
+  harvest's success, cancellation, shortages and replay protections.
+- Verify production assets and application pointers, then repeat playback in
+  the production host. Build success and HTTP availability alone do not
+  establish these interaction results.

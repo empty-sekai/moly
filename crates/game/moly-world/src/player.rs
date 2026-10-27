@@ -389,6 +389,7 @@ pub fn move_pace(
 /// 不能用播放器占用代替整段位移持留。输入仍由 read_input 采集，供
 /// 会话响应主动结束。内部形参带私有资源，故 pub。
 pub fn advance(
+    bulk: Option<Res<crate::field_modes::BulkHarvestActive>>,
     time: Res<Time>,
     configs: Option<Res<crate::client_config::ClientConfigs>>,
     site: Option<Res<crate::site::SiteSelection>>,
@@ -420,6 +421,7 @@ pub fn advance(
     mut boundary: Local<Boundary>,
     mut relocated: Local<Option<(Option<u64>, u64)>>,
 ) {
+    if bulk.is_some() { return; }
     let dt = time.delta_secs();
     let (Some(configs), Some(site), Some(ground), Some(face)) = (configs, site, ground, face)
     else {

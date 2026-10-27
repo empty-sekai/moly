@@ -1,0 +1,25 @@
+# Source fingerprints must identify the same bytes on every build platform.
+* text=auto eol=lf
+
+# Preserve the wrapper's upstream Windows bytes; it is not a Rust build input.
+android/gradlew.bat -text
+
+*.png -text
+*.jpg -text
+*.jpeg -text
+*.ico -text
+*.ttf -text
+*.otf -text
+*.woff -text
+*.woff2 -text
+*.wasm -text
+*.bin -text
+*.glb -text
+*.zip -text
+*.gz -text
+*.br -text
+*.ogg -text
+*.wav -text
+*.mp3 -text
+*.ktx2 -text
+*.spv -text

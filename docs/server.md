@@ -7,3 +7,10 @@ The server and the game read the same resources. The listen address, resource di
 - By default, the server listens on `127.0.0.1:15800`, and its control port is `127.0.0.1:15801`. When it is ready, it prints one line with its address. If a port is already in use, it exits with status 1.
 - The game connects to the server at `MOLY_SERVER_URL`. If the connection fails, it shows a specific message and does not fall back to an in-process implementation.
 - The server and the game read the same resource root and master table variables, so they see the same master tables.
+
+Protocol 12 adds authoritative harvest maps, ordinary hit and gather settlement,
+and bulk harvest. Upgrade the game and server together. The server persists the
+maps and their refresh window in the player document, so restarting a session
+does not regenerate collected resources. Documents without these fields are
+accepted and receive a map on their first harvest-site request. Invalid stored
+maps or refresh windows are rejected instead of silently replacing saved state.

@@ -1978,9 +1978,10 @@ pub fn read_switch(
     preview: Option<Res<TemporarySiteChangeRequest>>,
     mut exit: MessageWriter<AppExit>,
     // Paired for the same reason as `sites` above.
-    (edit, site_move): (
+    (edit, site_move, bulk): (
         Res<crate::field_modes::EditSessionActive>,
         Option<Res<crate::field_modes::SiteMoveActive>>,
+        Option<Res<crate::field_modes::BulkHarvestActive>>,
     ),
     layouts: Res<crate::fixture::layouts::SiteFixtureLayouts>,
     // Paired: this system is at the parameter-count limit.
@@ -1999,7 +2000,7 @@ pub fn read_switch(
     // GameState SiteMove: the move owns the site until it returns to Normal.
     // Its input lock covers the keys and the tour; a request queued by
     // another owner stays queued and is read once the move has ended.
-    if site_move.is_some() {
+    if site_move.is_some() || bulk.is_some() {
         if (pending.is_some() || preview.is_some()) && !tour.deferred_logged {
             info!("[site] switch request deferred: a site move is in progress");
             tour.deferred_logged = true;

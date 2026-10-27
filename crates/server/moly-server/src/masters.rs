@@ -281,6 +281,10 @@ pub(crate) struct Tables<'a> {
 }
 
 impl<'a> Tables<'a> {
+    pub(crate) fn shared_rows(&self) -> Option<&'a MasterTables> {
+        self.shared
+    }
+
     pub(crate) fn new(server: &'a Masters, shared: Option<&'a MasterTables>) -> Self {
         Self { server, shared }
     }
@@ -611,16 +615,18 @@ async fn read_root_document(
 pub(crate) fn install(app: &mut App) {
     // A game that hosts the server in its own app has added the shared
     // tables already.
+    if !app.is_plugin_added::<moly_masters::load::MasterRowsPlugin>() {
+        app.add_plugins(moly_masters::load::MasterRowsPlugin);
+    }
     if !app.is_plugin_added::<MasterTablesPlugin>() {
         app.add_plugins(MasterTablesPlugin);
     }
-    app.add_systems(Startup, load)
-        .add_systems(
-            PreUpdate,
-            resolve_masters
-                .after(master::resolve)
-                .after(moly_masters::load::resolve_tables),
-        );
+    app.add_systems(Startup, load).add_systems(
+        PreUpdate,
+        resolve_masters
+            .after(master::resolve)
+            .after(moly_masters::load::resolve_tables),
+    );
 }
 
 fn load(mut commands: Commands, server: Res<AssetServer>, mut masters: ResMut<MasterData>) {
@@ -662,15 +668,15 @@ pub(crate) fn resolve_masters(
     let mut outcomes: Vec<(&'static str, Parser, Result<Option<String>, String>)> = Vec::new();
     let mut reads_done = true;
     if let Some(mut reads) = reads {
-        reads.0.retain_mut(|(name, parser, read)| {
-            match block_on(future::poll_once(read)) {
+        reads.0.retain_mut(
+            |(name, parser, read)| match block_on(future::poll_once(read)) {
                 Some(outcome) => {
                     outcomes.push((*name, *parser, outcome));
                     false
                 }
                 None => true,
-            }
-        });
+            },
+        );
         if reads.0.is_empty() {
             commands.remove_resource::<RootReads>();
         } else {
@@ -683,13 +689,15 @@ pub(crate) fn resolve_masters(
     let mut still_loading: Vec<&'static str> = Vec::new();
     let shared_ready = tables.as_deref().is_none_or(MasterTables::ready);
     if let Some(mut seats) = seats {
-        seats.pending.retain(|table| match master_data.take(&table.table) {
-            Some(result) => {
-                seated.push((*table, result));
-                false
-            }
-            None => true,
-        });
+        seats
+            .pending
+            .retain(|table| match master_data.take(&table.table) {
+                Some(result) => {
+                    seated.push((*table, result));
+                    false
+                }
+                None => true,
+            });
         join_waits = seats.pending.iter().any(|table| table.deferred.is_none());
         for table in &seats.pending {
             if table.deferred.is_none() {
@@ -768,10 +776,7 @@ pub(crate) fn resolve_masters(
     }
     masters.pending = still_loading;
     if !masters.ready && reads_done && !join_waits && shared_ready {
-        info!(
-            "[server] masters resolved; missing: {:?}",
-            masters.missing
-        );
+        info!("[server] masters resolved; missing: {:?}", masters.missing);
         masters.ready = true;
         masters.pending.clear();
     }
@@ -923,9 +928,7 @@ fn parse_parties(text: &str) -> Result<Vec<PartyRow>, String> {
                 .get("assetbundleName")
                 .and_then(|v| v.as_str())
                 .map(str::to_owned),
-            delivery_item_material_id: row
-                .get("deliveryItemMaterialId")
-                .and_then(|v| v.as_i64()),
+            delivery_item_material_id: row.get("deliveryItemMaterialId").and_then(|v| v.as_i64()),
             delivery_reward_material_id: row
                 .get("deliveryRewardMysekaiMaterialId")
                 .and_then(|v| v.as_i64()),

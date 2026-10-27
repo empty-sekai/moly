@@ -515,6 +515,7 @@ pub struct ActionWorld<'w> {
 #[allow(clippy::too_many_arguments)]
 pub fn update_targets(
     eligibility: crate::interaction::InteractionEligibility,
+    bulk: Option<Res<super::bulk::BulkHarvest>>,
     players: Query<&Transform, (With<PlayerControlled>, Without<HarvestObject>)>,
     objects: Query<(Entity, &Transform, &HarvestObject)>,
     catalog: Option<Res<HarvestCatalog>>,
@@ -528,7 +529,7 @@ pub fn update_targets(
     let (Some(catalog), Some(model)) = (catalog, model.as_deref_mut()) else {
         return;
     };
-    if !eligibility.collision_updates() {
+    if bulk.as_deref().is_some_and(super::bulk::BulkHarvest::blocks_normal) || !eligibility.collision_updates() {
         return;
     }
     let Ok(player) = players.single() else {
@@ -626,6 +627,7 @@ fn yaw_of(rotation: Quat) -> f32 {
 /// Update: presses, the swing clock and the phases.
 #[allow(clippy::too_many_arguments)]
 pub fn advance(
+    bulk: Option<Res<super::bulk::BulkHarvest>>,
     mut action: ResMut<HarvestAction>,
     mut world: ActionWorld,
     mut body: Body,
@@ -634,6 +636,11 @@ pub fn advance(
     objects: Query<(&Transform, &HarvestObject)>,
     cameras: Query<&GlobalTransform, With<Camera3d>>,
 ) {
+    if bulk.as_deref().is_some_and(super::bulk::BulkHarvest::blocks_normal) {
+        world.button.presses = 0;
+        world.button.is_press = false;
+        return;
+    }
     action.camera = cameras.single().ok().map(GlobalTransform::translation);
     let (Some(configs), Some(catalog), Some(clips), Some(mut model)) = (
         world.configs.take(),

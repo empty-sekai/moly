@@ -64,6 +64,7 @@ pub(crate) mod craft;
 pub(crate) mod delivery;
 pub(crate) mod document;
 pub(crate) mod edit;
+pub(crate) mod harvest;
 pub(crate) mod home_action;
 pub(crate) mod housing_layout;
 pub(crate) mod inventory;
@@ -106,7 +107,9 @@ const SITE_LEVEL_RELEASE: &str = "mysekai_site_level";
 /// the site's level. The second value names the levels left out, for the
 /// model to report. `Err` names the master tables the rows are read from that
 /// the model has not seated.
-fn appended_release_rows(masters: &Tables<'_>) -> Result<(Vec<RankReleaseRow>, Vec<String>), String> {
+fn appended_release_rows(
+    masters: &Tables<'_>,
+) -> Result<(Vec<RankReleaseRow>, Vec<String>), String> {
     let (Some(categories), Some(levels), Some(releases), Some(ranks)) = (
         &masters.site_categories,
         &masters.site_levels,
@@ -392,10 +395,7 @@ impl ServerModel {
     /// `mysekaiRankReleases` ([`SiteLevelReleases::EveryAuthoredLevel`]).
     /// The source's own policy appends none; a model that has not seated a
     /// table the rows are read from refuses by name and appends none.
-    pub(crate) fn overlay_rank_releases(
-        &mut self,
-        masters: &Tables<'_>,
-    ) -> Vec<RankReleaseRow> {
+    pub(crate) fn overlay_rank_releases(&mut self, masters: &Tables<'_>) -> Vec<RankReleaseRow> {
         if self.doc.site_level_releases != SiteLevelReleases::EveryAuthoredLevel {
             return Vec::new();
         }
@@ -579,19 +579,23 @@ impl ServerModel {
         let has = |name: &str| sections.iter().any(|section| section == name);
         // A synchronised live edit serves the schedule again, as a join and a
         // refresh do.
-        let schedules =
-            matches!(kind, ResponseKind::Join | ResponseKind::Refresh | ResponseKind::Sync).then(
-                || {
-                    let rows = self.served_rows(now, masters);
-                    self.served = rows.clone();
-                    rows
-                },
-            );
+        let schedules = matches!(
+            kind,
+            ResponseKind::Join | ResponseKind::Refresh | ResponseKind::Sync
+        )
+        .then(|| {
+            let rows = self.served_rows(now, masters);
+            self.served = rows.clone();
+            rows
+        });
         let rank_releases = matches!(kind, ResponseKind::Join | ResponseKind::Refresh)
             .then(|| self.overlay_rank_releases(masters));
         let response = ServerResponse {
             kind,
             sections: moly_protocol::Sections {
+                harvest_maps: has(harvest::SECTION)
+                    .then(|| self.doc.harvest.maps.values().cloned().collect()),
+                treasure_boxes: has(harvest::BOX_SECTION).then(|| self.doc.harvest.boxes.clone()),
                 server_date_ms: now,
                 is_refreshed,
                 gamedata: has(SECTION_GAMEDATA).then_some(self.doc.gamedata),
@@ -669,8 +673,12 @@ impl ServerModel {
         // A developer start's convert request, answered once the user is in.
         if let Some((slot, post)) = self.convert_instrument.take() {
             match self.convert_reply(slot, post, masters) {
-                Ok(_) => info!("[server] native overlay: MOLY_CONVERT_MOCK_REQUEST -> slot {slot} answered"),
-                Err(reason) => info!("[server] native overlay: MOLY_CONVERT_MOCK_REQUEST refused: {reason}"),
+                Ok(_) => info!(
+                    "[server] native overlay: MOLY_CONVERT_MOCK_REQUEST -> slot {slot} answered"
+                ),
+                Err(reason) => {
+                    info!("[server] native overlay: MOLY_CONVERT_MOCK_REQUEST refused: {reason}")
+                }
             }
         }
         let refreshed = self.refresh_due(now, masters);
@@ -742,50 +750,6 @@ impl ServerModel {
         self.respond(ResponseKind::Sync, false, &[], masters);
     }
 
-    /// The harvest reply's stamina and tools (harvest stamina and tool use
-    /// policies), recorded as one response. The sent rests come back when an
-    /// edit of the stamina is pending; a run that used a tool also carries the
-    /// tool rows.
-    pub(super) fn harvest(
-        &mut self,
-        request: &moly_protocol::api::HarvestRequest,
-        masters: &Tables<'_>,
-    ) -> Stamina {
-        let rest = |kind: &str| {
-            request
-                .mysekai_stamina_useds
-                .iter()
-                .find(|used| used.mysekai_stamina_type == kind)
-                .map_or(0, |used| used.rest)
-        };
-        let sent = Stamina {
-            normal: rest("normal"),
-            enhance: rest("enhance"),
-            boost: rest("boost"),
-        };
-        if !self.pending.iter().any(|section| section == SECTION_STAMINA) {
-            if self.doc.stamina != Some(sent) {
-                self.doc.stamina = Some(sent);
-                self.commit();
-            }
-        } else {
-            info!("[server] harvest reply: a stamina edit is pending; the reply carries it instead of the sent rests {sent:?}");
-        }
-        let mut carries: Vec<&str> = vec![SECTION_STAMINA];
-        if let Some(tool) = &request.mysekai_tool_used {
-            if self.harvest_tool_use(
-                tool.mysekai_tool_id,
-                tool.use_count,
-                tool.durability,
-                masters,
-            ) {
-                carries.push(tools::SECTION);
-            }
-        }
-        self.respond(ResponseKind::Harvest, false, &carries, masters);
-        self.doc.stamina.unwrap_or(sent)
-    }
-
     /// The inventory screen's recycle and disassemble replies (see
     /// [`recycle`]): the rewards and the tables the request changed.
     pub(crate) fn inventory_disassemble(
@@ -798,16 +762,5 @@ impl ServerModel {
             obtained_resources,
             updated,
         })
-    }
-
-    /// The gather reply's stamina, recorded as a response.
-    pub(super) fn gather(&mut self, masters: &Tables<'_>) -> Option<Stamina> {
-        self.respond(
-            ResponseKind::Gather,
-            false,
-            &[SECTION_STAMINA],
-            masters,
-        );
-        self.doc.stamina
     }
 }

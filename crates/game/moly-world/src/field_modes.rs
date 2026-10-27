@@ -145,6 +145,11 @@ pub struct HarvestAutoMoveHeld {
 #[derive(Resource)]
 pub struct LearnSiteEnvironmentActive;
 
+/// A bulk-harvest charge or settlement owns scene actions. Raw joystick input
+/// remains readable so the charge can be cancelled by moving the stick.
+#[derive(Resource)]
+pub struct BulkHarvestActive;
+
 /// Holds the site loader until the rank change has set the housing
 /// sites' displayed levels.
 #[derive(Resource)]
@@ -250,6 +255,7 @@ pub struct UiHold(pub &'static str);
 pub struct PerformanceHolds<'w> {
     held: Option<Res<'w, HeldGameState>>,
     ui: Option<Res<'w, UiHold>>,
+    bulk: Option<Res<'w, BulkHarvestActive>>,
 }
 
 impl PerformanceHolds<'_> {
@@ -257,12 +263,12 @@ impl PerformanceHolds<'_> {
     /// Sketch only, so a held CutScene or LevelUpMyRoomSite state stops the
     /// collision scan; a removed collision sensor event stops it as well.
     pub fn collision_stopped(&self) -> bool {
-        self.held.is_some() || self.ui.is_some()
+        self.held.is_some() || self.ui.is_some() || self.bulk.is_some()
     }
 
     /// The UI canvas group is not interactable.
     pub fn ui_blocked(&self) -> bool {
-        self.ui.is_some()
+        self.ui.is_some() || self.bulk.is_some()
     }
 }
 

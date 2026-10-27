@@ -569,6 +569,7 @@ struct Shown {
 /// A call waiting for the inputs.
 #[derive(Debug, Clone)]
 enum Call {
+    Acquired(moly_protocol::rows::UserResource),
     Notice {
         resource_type: String,
         resource_id: i32,
@@ -619,6 +620,14 @@ pub struct GetResourceOpeners {
 }
 
 impl GetResourceOpeners {
+    /// An accepted response already resolved surplus conversion. Do not re-check ownership.
+    pub fn acquired(&mut self, resource: moly_protocol::rows::UserResource) {
+        self.calls.push_back(Call::Acquired(resource));
+    }
+    pub fn acquisition_pending(&self, player: &GetResourcePlayer) -> bool {
+        !self.calls.is_empty() || player.chain.is_some() || player.shown.is_some()
+    }
+
     /// `MysekaiResourceUtility.NoticeCollectItem(resourceType, resourceId,
     /// quantity)`. `caller` names the source caller for the log.
     #[allow(dead_code)] // Called by the harvest, delivery and talk seams.
@@ -1768,6 +1777,33 @@ pub fn place(
     if let (Some(masters), true) = (inputs.masters.as_ref(), sources_ready) {
         while let Some(call) = openers.calls.pop_front() {
             match call {
+                Call::Acquired(resource) => {
+                    let kind = match resource.resource_type.as_str() {
+                        "mysekai_blueprint" => Some(ResourceKind::Blueprint),
+                        "mysekai_music_record" => Some(ResourceKind::MusicRecord),
+                        "mysekai_item" => Some(ResourceKind::Item),
+                        _ => None,
+                    };
+                    if let Some(kind) = kind {
+                        match setup_texts(kind, resource.resource_id, masters, &layouts.wordings) {
+                            Ok((body, name)) => enqueue_chain(
+                                &mut player,
+                                ResourceEntry {
+                                    kind,
+                                    resource_id: resource.resource_id,
+                                    resource_level: resource.resource_level,
+                                    quantity: resource.quantity,
+                                    body,
+                                    name,
+                                },
+                                "BulkHarvest",
+                            ),
+                            Err(reason) => error!(
+                                "[get_resource] accepted resource cannot be displayed: {reason}"
+                            ),
+                        }
+                    }
+                }
                 Call::Notice {
                     resource_type,
                     resource_id,
@@ -1827,6 +1863,7 @@ pub fn place(
         let calls: Vec<Call> = openers.calls.drain(..).collect();
         for call in calls {
             match call {
+                Call::Acquired(resource) => error!("[get_resource] accepted resource {} {} cannot display without masters",resource.resource_type,resource.resource_id),
                 Call::Sketch { ticket, .. } => {
                     openers.closed_sketches.insert(ticket);
                 }

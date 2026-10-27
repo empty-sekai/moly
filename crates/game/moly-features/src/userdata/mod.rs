@@ -65,16 +65,12 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use moly_link::{Arrival, LinkState, ServerArrived, ServerLink};
 use moly_masters::craft::{is_first_craft, CraftMasters, CraftOwned};
-use moly_protocol::api::{
-    MysekaiCraftType, MysekaiInventoryDisassemble, UserMysekaiCraftRequest,
-};
+use moly_protocol::api::{MysekaiCraftType, MysekaiInventoryDisassemble, UserMysekaiCraftRequest};
 use moly_protocol::{AdminCall, Call, CallKind, PushKind, Refusal, Reply, Sections};
 use serde_json::{json, Value};
 
 pub use moly_protocol::gate::{GateReply, ReplyTalkList};
-pub use moly_protocol::rows::{
-    ColorfulPass, Gamedata, GateCharacter, ScheduleRow, Stamina,
-};
+pub use moly_protocol::rows::{ColorfulPass, Gamedata, GateCharacter, ScheduleRow, Stamina};
 
 pub use moly_core::dev_tools::{enter_game_mode, instrument_env};
 
@@ -181,7 +177,10 @@ pub enum ServerJoin {
     /// The page's seed document is being installed.
     Installing(u32),
     /// The join is waiting for its answer.
-    Joining { seq: u32, retry_at: Option<f32> },
+    Joining {
+        seq: u32,
+        retry_at: Option<f32>,
+    },
     Joined,
     /// The server refused the join or the install; no fallback.
     Failed(String),
@@ -264,6 +263,9 @@ const BASE_TEXTURE: i32 = 1;
 /// reader stays under the system parameter limit.
 #[derive(SystemParam)]
 pub struct ClientCopies<'w> {
+    pub harvest: ResMut<'w, ClientHarvestMaps>,
+    pub harvest_user: Option<ResMut<'w, crate::harvest::catalog::HarvestUserData>>,
+    pub harvest_possession: Option<ResMut<'w, crate::harvest::possession::PossessionMock>>,
     pub client: Option<ResMut<'w, ClientUserData>>,
     pub live: ResMut<'w, LiveSchedule>,
     pub replies: ResMut<'w, ServerGateReplies>,
@@ -284,7 +286,6 @@ pub struct ClientCopies<'w> {
     pub cache: ResMut<'w, ServerViewCache>,
     pub answered: MessageWriter<'w, Answered>,
 }
-
 
 // ---------------------------------------------------------------------------
 // The client copies
@@ -367,12 +368,18 @@ fn note_link_state(
         LinkState::Refused { reason } => {
             let body = format!("the server refused the session: {reason}");
             error!("[link] {body}");
-            crate::bus::emit("server.link", json!({ "state": "refused", "reason": reason }));
+            crate::bus::emit(
+                "server.link",
+                json!({ "state": "refused", "reason": reason }),
+            );
             commands.queue(move |world: &mut World| notice(world, &body));
         }
         LinkState::Offline { reason } => {
             info!("[link] no server: {reason}");
-            crate::bus::emit("server.link", json!({ "state": "offline", "reason": reason }));
+            crate::bus::emit(
+                "server.link",
+                json!({ "state": "offline", "reason": reason }),
+            );
         }
         LinkState::Lost { reason } => {
             let body = format!("the server is not reachable: {reason}");
@@ -390,20 +397,29 @@ fn notice(world: &mut World, body: &str) {
         errors.push(body.to_owned());
     }
     if !ui_ready(world) {
-        world.get_resource_or_init::<DeferredNotices>().0.push(body.to_owned());
+        world
+            .get_resource_or_init::<DeferredNotices>()
+            .0
+            .push(body.to_owned());
         return;
     }
     show_notice(world, body);
 }
 
 fn ui_ready(world: &World) -> bool {
-    world.get_resource::<crate::ui_layers::ScreenManager>().is_some()
-        && world.get_resource::<crate::ui_layout::UiLayouts>().is_some()
+    world
+        .get_resource::<crate::ui_layers::ScreenManager>()
+        .is_some()
+        && world
+            .get_resource::<crate::ui_layout::UiLayouts>()
+            .is_some()
 }
 
 /// Update: the notices raised before the UI existed, once it does.
 fn show_deferred_notices(world: &mut World) {
-    if world.get_resource::<DeferredNotices>().is_none_or(|notices| notices.0.is_empty())
+    if world
+        .get_resource::<DeferredNotices>()
+        .is_none_or(|notices| notices.0.is_empty())
         || !ui_ready(world)
     {
         return;
@@ -647,6 +663,47 @@ fn apply_sections(
     mode: &crate::run_mode::RunMode,
     saved: Option<&crate::player_data::SavedTotalExp>,
 ) {
+    if let Some(maps) = sections.harvest_maps.take() {
+        for map in maps {
+            copies.harvest.maps.insert(map.site_id, map);
+        }
+        copies.harvest.revision = copies.harvest.revision.wrapping_add(1);
+    }
+    if let Some(boxes) = sections.treasure_boxes.take() {
+        copies.harvest.boxes = boxes;
+    }
+    if let Some(user) = copies.harvest_user.as_deref_mut() {
+        user.maps = copies.harvest.maps.clone();
+        user.boxes = copies.harvest.boxes.clone();
+        if let Some(stamina) = sections.stamina {
+            user.stamina = crate::harvest::law::Stamina {
+                normal: stamina.normal,
+                enhance: stamina.enhance,
+                boost: stamina.boost,
+            };
+        }
+        if let Some(rows) = &sections.inventory.user_mysekai_materials {
+            user.materials = rows
+                .iter()
+                .map(|r| (i64::from(r.mysekai_material_id), i64::from(r.quantity)))
+                .collect();
+        }
+    }
+    if let Some(possession) = copies.harvest_possession.as_deref_mut() {
+        if let Some(row) = &sections.inventory.user_mysekai_material_possession {
+            possession.material_quantity = i64::from(row.quantity);
+        }
+        if let Some(rows) = &sections.inventory.user_mysekai_fixtures {
+            possession.fixtures = rows
+                .iter()
+                .map(|r| (i64::from(r.mysekai_fixture_id), i64::from(r.quantity)))
+                .collect();
+        }
+        if let Some(row) = &sections.inventory.user_mysekai_gamedata {
+            possession.material_level = row.mysekai_material_possession_level;
+            possession.fixture_level = row.mysekai_fixture_possession_level;
+        }
+    }
     clock::seat_server_date(sections.server_date_ms);
     if let Some(gate) = sections.gate {
         snapshot::seat_gate(gate);
@@ -657,14 +714,18 @@ fn apply_sections(
     if let Some(text) = sections.npc_panel.take() {
         copies.npc_panel.apply(text);
     }
-    copies.birthday.apply(std::mem::take(&mut sections.delivery));
+    copies
+        .birthday
+        .apply(std::mem::take(&mut sections.delivery));
     if let Some(rows) = sections.music.take() {
         copies.music.apply(rows);
     }
     if let Some(avatar) = sections.avatar.take() {
         copies.avatar.apply(avatar);
     }
-    copies.inventory.apply(std::mem::take(&mut sections.inventory));
+    copies
+        .inventory
+        .apply(std::mem::take(&mut sections.inventory));
     if let Some(rows) = sections.music_records.take() {
         copies.records.apply(rows);
     }
@@ -689,7 +750,9 @@ fn apply_sections(
     {
         let sheet = sections.normal_mission_sheet.take();
         let missions = sections.normal_missions.take();
-        copies.mission.apply(mission::MissionSections { sheet, missions });
+        copies
+            .mission
+            .apply(mission::MissionSections { sheet, missions });
     }
     let current = copies.client.as_deref().or(fresh.as_ref());
     let previous_rank = current.and_then(|copy| copy.gamedata.mysekai_rank);
@@ -883,7 +946,8 @@ fn craft_before(
         fixture_max_count: None,
     };
     let blueprint = masters.and_then(|masters| masters.blueprint(request.blueprint_id));
-    let tool = blueprint.is_some_and(|blueprint| blueprint.craft_type == MysekaiCraftType::MysekaiTool);
+    let tool =
+        blueprint.is_some_and(|blueprint| blueprint.craft_type == MysekaiCraftType::MysekaiTool);
     let texture_id = (!tool).then_some(request.texture_id.unwrap_or(BASE_TEXTURE));
     let spent = masters
         .and_then(|masters| masters.blueprint_costs(request.blueprint_id))
@@ -1130,6 +1194,7 @@ impl Plugin for UserDataPlugin {
         app.add_plugins(moly_masters::load::MasterRowsPlugin)
             .add_message::<RankDelivered>()
             .add_message::<Answered>()
+            .init_resource::<ClientHarvestMaps>()
             .init_resource::<LiveSchedule>()
             .init_resource::<ServerGateReplies>()
             .init_resource::<ClientTalkListUpdates>()
@@ -1162,10 +1227,7 @@ impl Plugin for UserDataPlugin {
                 )
                     .chain(),
             )
-            .add_systems(
-                PreUpdate,
-                inventory::mirror_materials.after(apply_arrivals),
-            )
+            .add_systems(PreUpdate, inventory::mirror_materials.after(apply_arrivals))
             .add_systems(Update, show_deferred_notices)
             .add_systems(Last, persist_local);
     }
@@ -1197,4 +1259,12 @@ mod tests {
         assert!(copy.has_mysekai_colorful_pass(2.4));
         assert!(!copy.has_mysekai_colorful_pass(2.5));
     }
+}
+
+/// Authoritative server maps, retained while the harvest catalog is loading.
+#[derive(Resource, Clone, Debug, Default)]
+pub struct ClientHarvestMaps {
+    pub maps: BTreeMap<u32, moly_protocol::harvest::UserHarvestMap>,
+    pub boxes: Vec<moly_protocol::harvest::UserTreasureBox>,
+    pub revision: u64,
 }

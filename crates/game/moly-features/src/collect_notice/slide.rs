@@ -137,10 +137,16 @@ pub trait NoticeData {
 impl<T: NoticeData> SlideNotices<T> {
     /// `Initialize`: `anchored_x` is each cell's anchored x after placement.
     pub fn new(anchored_x: f32) -> Self {
+        Self::with_shape(anchored_x, PARALLEL, POOL, SLIDE_IN_LEFT)
+    }
+
+    /// Initialize another source notice controller with its own capacity and side.
+    pub fn with_shape(anchored_x: f32, parallel: usize, pool: usize, offset: f32) -> Self {
+        assert!(parallel > 0 && pool > 0);
         Self {
-            drivers: (0..PARALLEL)
+            drivers: (0..parallel)
                 .map(|_| Driver {
-                    start_x: anchored_x + SLIDE_IN_LEFT,
+                    start_x: anchored_x + offset,
                     queue: VecDeque::new(),
                     phase: Phase::Idle,
                     x: anchored_x,
@@ -148,7 +154,7 @@ impl<T: NoticeData> SlideNotices<T> {
                 })
                 .collect(),
             driver_index: 0,
-            pool: (0..POOL).map(|_| None).collect(),
+            pool: (0..pool).map(|_| None).collect(),
             pool_index: 0,
         }
     }
@@ -178,7 +184,7 @@ impl<T: NoticeData> SlideNotices<T> {
     ) -> (usize, usize) {
         let slot = self.pool_index;
         self.pool[slot] = Some(data);
-        self.pool_index = (self.pool_index + 1) % POOL;
+        self.pool_index = (self.pool_index + 1) % self.pool.len();
         if !self.is_playing() {
             self.driver_index = 0;
         }
@@ -190,7 +196,7 @@ impl<T: NoticeData> SlideNotices<T> {
             driver.start_front(dt, false, &mut out);
             calls.extend(out.into_iter().map(|call| (index, call)));
         }
-        self.driver_index = (self.driver_index + 1) % PARALLEL;
+        self.driver_index = (self.driver_index + 1) % self.drivers.len();
         (slot, index)
     }
 

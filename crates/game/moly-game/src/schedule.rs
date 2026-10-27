@@ -1003,6 +1003,14 @@ pub fn install(app: &mut App) {
                 camera::follow_avatar
                     .after(TransformSystems::Propagate)
                     .after(camera::frame_site),
+                crate::player_avatar::item_timeline::advance_bulk_camera
+                    .after(camera::follow_avatar)
+                    .before(camera::report_follow)
+                    .before(sky::follow_player_view)
+                    .before(uber_particle::advance)
+                    .before(weather_fx::advance)
+                    .before(balloon::place)
+                    .before(emoticon::advance),
                 // 补间推进写相机投影的 FOV 分量与两个材质帧刷新的
                 // near/far（只读常量）无行为交集，不排序；对话相机链
                 // 对 follow_avatar 与 write_frame_state 各有先序约束，

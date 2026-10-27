@@ -1,6 +1,7 @@
 //! Frame-active LoopFlag callbacks, not continuous interval catch-up.
 
-use super::{TimelineDefinition, TimelineOwnerKind, TimelinePayload};
+use super::{TimelineClipKey, TimelineDefinition, TimelineOwnerKind, TimelinePayload};
+use std::collections::HashSet;
 
 #[derive(Default)]
 pub(super) struct Clock {
@@ -24,6 +25,108 @@ pub(super) struct Clock {
     /// A scene director view paused the director: its time does not advance
     /// and the held time is sampled every frame. No other owner sets it.
     paused: bool,
+    speed: Option<f64>,
+    section_active: HashSet<TimelineClipKey>,
+    pub section_stopped: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::source::BlendCurve;
+    use super::*;
+    use crate::fixture_activity_timeline::{SourceAssetId, TimelineClip, TimelineTrack};
+
+    fn definition(payloads: Vec<(f64, f64, TimelinePayload)>) -> TimelineDefinition {
+        let identity = SourceAssetId {
+            file: "synthetic".into(),
+            path_id: "1".into(),
+        };
+        TimelineDefinition {
+            package: "synthetic".into(),
+            prefab: "step".into(),
+            fixture_view: None,
+            director: identity.clone(),
+            director_transforms: None,
+            timeline: identity.clone(),
+            duration: 8.0,
+            tracks: vec![TimelineTrack {
+                identity: identity.clone(),
+                class: "SectionControlTrack".into(),
+                name: "Sections".into(),
+                markers: Vec::new(),
+                settings: serde_json::Value::Null,
+                infinite: None,
+                clips: payloads
+                    .into_iter()
+                    .enumerate()
+                    .map(|(clip_index, (start, duration, payload))| TimelineClip {
+                        key: TimelineClipKey {
+                            track: identity.clone(),
+                            clip_index,
+                        },
+                        playable: None,
+                        effect_binding: None,
+                        exposed_source: None,
+                        start,
+                        duration,
+                        clip_in: 0.0,
+                        time_scale: 1.0,
+                        ease_in: 0.0,
+                        ease_out: 0.0,
+                        blend_in: 0.0,
+                        blend_out: 0.0,
+                        mix_in: BlendCurve::empty(),
+                        mix_out: BlendCurve::empty(),
+                        pre_extrapolation: 0,
+                        post_extrapolation: 0,
+                        pre_time: 0.0,
+                        post_time: 0.0,
+                        payload,
+                        source_envelope: serde_json::Value::Null,
+                        source_payload: serde_json::Value::Null,
+                    })
+                    .collect(),
+            }],
+        }
+    }
+
+    #[test]
+    fn section_pause_holds_then_named_jump_and_play_reach_stop() {
+        let definition = definition(vec![
+            (1.0, 0.2, TimelinePayload::SectionPause),
+            (
+                3.0,
+                0.2,
+                TimelinePayload::SectionJumpTarget {
+                    name: "Finish".into(),
+                },
+            ),
+            (4.0, 0.2, TimelinePayload::SectionStop),
+        ]);
+        let mut clock = Clock::default();
+        clock.advance(&definition, 0.1, TimelineOwnerKind::StepItem);
+        clock.set_speed(2.0);
+        clock.advance(&definition, 0.55, TimelineOwnerKind::StepItem);
+        assert!((clock.time - 1.1).abs() < 1e-9);
+        assert!(clock.is_paused());
+        clock.advance(&definition, 5.0, TimelineOwnerKind::StepItem);
+        assert!((clock.time - 1.1).abs() < 1e-9);
+        clock.jump_to(3.0);
+        assert!(clock.is_paused());
+        clock.set_paused(false);
+        clock.advance(&definition, 0.55, TimelineOwnerKind::StepItem);
+        assert!(clock.section_stopped);
+        assert!((clock.sampled_time - 4.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn skipping_a_section_interval_does_not_invent_its_entry() {
+        let definition = definition(vec![(1.0, 0.1, TimelinePayload::SectionStop)]);
+        let mut clock = Clock::default();
+        clock.advance(&definition, 0.0, TimelineOwnerKind::StepItem);
+        clock.advance(&definition, 2.0, TimelineOwnerKind::StepItem);
+        assert!(!clock.section_stopped);
+    }
 }
 
 impl Clock {
@@ -37,6 +140,48 @@ impl Clock {
 
     pub fn set_paused(&mut self, paused: bool) {
         self.paused = paused;
+    }
+
+    pub fn set_speed(&mut self, speed: f64) {
+        self.speed = Some(speed);
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused
+    }
+
+    /// JumpTo first disables LoopFlag, then writes the named clip's start.
+    /// Play is a separate operation; a paused director remains paused.
+    pub fn jump_to(&mut self, time: f64) {
+        self.loop_flag_off = true;
+        self.time = time;
+    }
+
+    fn sections(&mut self, definition: &TimelineDefinition, owner: TimelineOwnerKind) {
+        if owner != TimelineOwnerKind::StepItem {
+            return;
+        }
+        let mut active = HashSet::new();
+        for clip in definition
+            .tracks
+            .iter()
+            .filter(|track| track.class == "SectionControlTrack")
+            .flat_map(|track| &track.clips)
+        {
+            if !clip.contains(self.sampled_time) {
+                continue;
+            }
+            active.insert(clip.key.clone());
+            if self.section_active.contains(&clip.key) {
+                continue;
+            }
+            match clip.payload {
+                TimelinePayload::SectionPause => self.paused = true,
+                TimelinePayload::SectionStop => self.section_stopped = true,
+                _ => {}
+            }
+        }
+        self.section_active = active;
     }
 
     /// The next frame samples `time` (a view's `MoveEndTime`).
@@ -70,10 +215,15 @@ impl Clock {
                 self.player_end_applied = true;
             }
         }
-        let step = if first || self.paused { 0.0 } else { delta };
+        let step = if first || self.paused {
+            0.0
+        } else {
+            delta * self.speed.unwrap_or(1.0)
+        };
         self.sampled_time = (self.time + step).min(definition.duration);
         self.time = self.sampled_time;
         let Some(clip) = loop_clip else {
+            self.sections(definition, owner);
             return;
         };
         let TimelinePayload::LoopFlag {
@@ -114,5 +264,6 @@ impl Clock {
         }
         self.loop_active = active;
         self.previous_loop_active = active;
+        self.sections(definition, owner);
     }
 }

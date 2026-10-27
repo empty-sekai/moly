@@ -246,6 +246,9 @@ const DOCUMENTS: &[(&str, &str)] = &[
 /// region root's manifest) is named once and left out; the view that draws
 /// it refuses by name. Every other document is required.
 const OPTIONAL_DOCUMENTS: &[(&str, &str)] = &[
+    ("BulkHarvestSettings", "dialogs/BulkHarvestTargetSettingDialog.json"),
+    ("BulkHarvestReward", "dialogs/MysekaiBulkHarvestRewardDialog.json"),
+    ("BulkHarvestRewardCell", "bulkharvest/UIPartsThumbnailRewardListCell.json"),
     ("EditorEnvironmentCell", "editor/SiteEnvironmentSelectCell.json"),
     ("PhotoShot", "screens/ScreenLayerMysekaiPhotoShot.json"),
     ("PhotoFrameCell", "photocell/UIPartsPhotoFrameListThumbnail.json"),

@@ -5310,6 +5310,7 @@ dependencies = [
  "moly-assets",
  "moly-law",
  "moly-protocol",
+ "serde",
  "serde_json",
 ]
 
@@ -5398,6 +5399,7 @@ dependencies = [
  "moly-law",
  "moly-masters",
  "moly-protocol",
+ "serde",
  "serde_json",
  "smol-hyper",
  "wasm-bindgen",

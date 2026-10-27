@@ -155,7 +155,10 @@ pub struct PlayableTimes {
 }
 
 impl PlayableTimes {
-    pub const NEW: Self = Self { last: f32::MAX, last_particle: f32::MAX };
+    pub const NEW: Self = Self {
+        last: f32::MAX,
+        last_particle: f32::MAX,
+    };
 }
 
 /// What a ParticleControlPlayable drives: the controlled system's time and
@@ -223,12 +226,21 @@ fn json(world: &World, handle: &Handle<JsonAsset>) -> Result<Arc<Value>, Timelin
 /// director owner whose prefab carries no fixture source of its own (a step
 /// item, a site scene, a cut scene); `None` reads the fixture's own source
 /// package. One holder reads one package.
-fn archive(world: &mut World, fixture: Entity, package: Option<&str>) -> Result<Arc<Value>, TimelineFailure> {
+fn archive(
+    world: &mut World,
+    fixture: Entity,
+    package: Option<&str>,
+) -> Result<Arc<Value>, TimelineFailure> {
     let now = realtime(world);
     if let Some(mut archive) = world.get_mut::<Archive>(fixture) {
         archive.last_used = now;
     }
-    if let (Some(wanted), Some(held)) = (package, world.get::<Archive>(fixture).and_then(|a| a.package.clone())) {
+    if let (Some(wanted), Some(held)) = (
+        package,
+        world
+            .get::<Archive>(fixture)
+            .and_then(|a| a.package.clone()),
+    ) {
         if wanted != held {
             return Err(invalid(format!(
                 "particle owner already reads the {held} particle document, not {wanted}"
@@ -300,7 +312,10 @@ fn archive(world: &mut World, fixture: Entity, package: Option<&str>) -> Result<
 #[derive(Resource, Default)]
 struct ParsedDocuments(HashMap<AssetId<JsonAsset>, Weak<Value>>);
 
-fn shared_document(world: &mut World, handle: &Handle<JsonAsset>) -> Result<Arc<Value>, TimelineFailure> {
+fn shared_document(
+    world: &mut World,
+    handle: &Handle<JsonAsset>,
+) -> Result<Arc<Value>, TimelineFailure> {
     let id = handle.id();
     if let Some(parsed) = world
         .get_resource::<ParsedDocuments>()
@@ -539,7 +554,11 @@ impl<'a> Inventory<'a> {
                 )));
             }
         }
-        Ok(Self { particles, nodes, by_id })
+        Ok(Self {
+            particles,
+            nodes,
+            by_id,
+        })
     }
 
     /// Each spawned node under `top` with the emitter it instantiates.
@@ -559,7 +578,10 @@ impl<'a> Inventory<'a> {
             }
             instances.push((entity, path, ordinal));
         }
-        Ok(Instances { rows: instances, placed })
+        Ok(Instances {
+            rows: instances,
+            placed,
+        })
     }
 }
 
@@ -592,7 +614,9 @@ pub fn prepare(
         })
         .ok_or_else(|| invalid(format!("fixture particle binding not found: {bind_name}")))?;
     let root_id = identity(&inventory.particles[root_ordinal], "particle")?;
-    prepare_root(world, fixture, &doc, &inventory, &instances, root, root_id, settings, true)
+    prepare_root(
+        world, fixture, &doc, &inventory, &instances, root, root_id, settings, true,
+    )
 }
 
 /// A Control clip of a director whose prefab carries no fixture particle
@@ -620,7 +644,9 @@ pub fn prepare_object(
         return Err(invalid("particle owner or controlled object was destroyed"));
     }
     if !instance_descends(world, object, owner) {
-        return Err(invalid("controlled object is outside its director's prefab"));
+        return Err(invalid(
+            "controlled object is outside its director's prefab",
+        ));
     }
     let root_id = instance_identity(world, object)
         .ok_or_else(|| invalid("controlled object carries no source GameObject identity"))?;
@@ -630,10 +656,18 @@ pub fn prepare_object(
         .nodes
         .iter()
         .find(|node| node["gameObjectId"].as_i64() == Some(root_id))
-        .ok_or_else(|| invalid(format!("GameObject {root_id} is not in the {package} particle document")))?;
+        .ok_or_else(|| {
+            invalid(format!(
+                "GameObject {root_id} is not in the {package} particle document"
+            ))
+        })?;
     let carries_system = node["componentClasses"]
         .as_array()
-        .ok_or_else(|| invalid(format!("GameObject {root_id}: component inventory missing; re-extract")))?
+        .ok_or_else(|| {
+            invalid(format!(
+                "GameObject {root_id}: component inventory missing; re-extract"
+            ))
+        })?
         .iter()
         .any(|class| class.as_str() == Some("ParticleSystem"));
     let instances = source.instances(world, object)?;
@@ -641,7 +675,9 @@ pub fn prepare_object(
         inventory(&doc, root_id, settings)?;
         return Ok(empty_binding(object, owner));
     }
-    prepare_root(world, owner, &doc, &source, &instances, object, root_id, settings, false)
+    prepare_root(
+        world, owner, &doc, &source, &instances, object, root_id, settings, false,
+    )
 }
 
 /// The systems of one object that an owner plays and stops by
@@ -714,7 +750,10 @@ fn prepare_played(
         return Err(invalid("played object is outside its owner's prefab"));
     }
     if let Some(prepared) = world.get::<PreparedPlay>(object) {
-        return Ok(ParticlePlayBinding { root: object, draws: prepared.draws.clone() });
+        return Ok(ParticlePlayBinding {
+            root: object,
+            draws: prepared.draws.clone(),
+        });
     }
     let root_id = instance_identity(world, object)
         .ok_or_else(|| invalid("played object carries no source GameObject identity"))?;
@@ -764,7 +803,10 @@ fn prepare_played(
         draws: draws.clone(),
         stopped: true,
     });
-    Ok(ParticlePlayBinding { root: object, draws })
+    Ok(ParticlePlayBinding {
+        root: object,
+        draws,
+    })
 }
 
 /// `ParticleSystem.Play()` on the object's system (withChildren): a system
@@ -807,7 +849,11 @@ pub fn play_object(world: &mut World, binding: &ParticlePlayBinding) -> Result<u
 /// installed and playing, as the `Play()` that follows resumes paused ones,
 /// so that Play finds them playing. Returns how many systems took the time
 /// update.
-pub fn simulate_object(world: &mut World, binding: &ParticlePlayBinding, t: f32) -> Result<usize, String> {
+pub fn simulate_object(
+    world: &mut World,
+    binding: &ParticlePlayBinding,
+    t: f32,
+) -> Result<usize, String> {
     let Some(mut prepared) = world.entity_mut(binding.root).take::<PreparedPlay>() else {
         return Err("played object was released".into());
     };
@@ -821,8 +867,13 @@ pub fn simulate_object(world: &mut World, binding: &ParticlePlayBinding, t: f32)
 /// `ParticleSystem.Simulate(t, withChildren, restart)` from script on the
 /// played object's own system: the restart with children is
 /// [`simulate_object`]; the other combinations are refused by name.
-pub fn simulate_played_object(world: &mut World, binding: &ParticlePlayBinding, t: f32, with_children: bool,
-    restart: bool) -> Result<usize, String> {
+pub fn simulate_played_object(
+    world: &mut World,
+    binding: &ParticlePlayBinding,
+    t: f32,
+    with_children: bool,
+    restart: bool,
+) -> Result<usize, String> {
     if !(with_children && restart) {
         return Err(format!(
             "Simulate(withChildren: {with_children}, restart: {restart}) on a played object: only the restart with children is ported"
@@ -841,8 +892,12 @@ pub fn simulate_played_object(world: &mut World, binding: &ParticlePlayBinding, 
 /// system refuses the call by name before anything is written. A listed node
 /// this host does not play has nothing to write. Returns how many systems were
 /// written.
-pub fn set_played_object_duration(world: &mut World, binding: &ParticlePlayBinding, systems: &[Entity],
-    duration: f32) -> Result<usize, String> {
+pub fn set_played_object_duration(
+    world: &mut World,
+    binding: &ParticlePlayBinding,
+    systems: &[Entity],
+    duration: f32,
+) -> Result<usize, String> {
     if world.get::<PreparedPlay>(binding.root).is_none() {
         return Err("played object was released".into());
     }
@@ -854,8 +909,10 @@ pub fn set_played_object_duration(world: &mut World, binding: &ParticlePlayBindi
         }) else {
             continue;
         };
-        if let (Some(played), Some(live)) = (world.get::<crate::weather_fx::fixture::Played>(draw),
-            world.get::<crate::uber_particle::FixtureParticleLive>(draw)) {
+        if let (Some(played), Some(live)) = (
+            world.get::<crate::weather_fx::fixture::Played>(draw),
+            world.get::<crate::uber_particle::FixtureParticleLive>(draw),
+        ) {
             if *played.route() == SourceRoute::Procedural && played.playing(&live.0, now) {
                 return Err(format!(
                     "{}: main.duration on a playing procedural-route system turns its procedural simulation off, which this host does not model; nothing written",
@@ -867,7 +924,10 @@ pub fn set_played_object_duration(world: &mut World, binding: &ParticlePlayBindi
     }
     for &draw in &written {
         if let Some(mut live) = world.get_mut::<crate::uber_particle::FixtureParticleLive>(draw) {
-            live.0.emitter.duration = moly_law::particle::main_duration::set_length_in_sec(live.0.emitter.duration, duration);
+            live.0.emitter.duration = moly_law::particle::main_duration::set_length_in_sec(
+                live.0.emitter.duration,
+                duration,
+            );
         }
     }
     Ok(written.len())
@@ -920,7 +980,11 @@ pub fn seed_played_object(
     binding: &ParticlePlayBinding,
     listed: &[Entity],
 ) -> Result<SeedPass, String> {
-    let anchor_of = |world: &World, draw: Entity| world.get::<FixtureParticleLive>(draw).and_then(|live| live.0.anchor);
+    let anchor_of = |world: &World, draw: Entity| {
+        world
+            .get::<FixtureParticleLive>(draw)
+            .and_then(|live| live.0.anchor)
+    };
     let mut pass = SeedPass::default();
     for &node in listed {
         if !instance_descends(world, node, binding.root) {
@@ -935,8 +999,13 @@ pub fn seed_played_object(
             pass.seeded += 1;
             continue;
         }
-        let subtree: Vec<Entity> = binding.draws.iter().copied()
-            .filter(|&other| anchor_of(world, other).is_some_and(|anchor| instance_descends(world, anchor, node)))
+        let subtree: Vec<Entity> = binding
+            .draws
+            .iter()
+            .copied()
+            .filter(|&other| {
+                anchor_of(world, other).is_some_and(|anchor| instance_descends(world, anchor, node))
+            })
             .collect();
         crate::weather_fx::fixture::stop_and_clear(world, &subtree);
         crate::weather_fx::fixture::set_random_seed(world, draw, 0);
@@ -968,15 +1037,26 @@ pub fn stop_and_clear_object(world: &mut World, binding: &ParticlePlayBinding) -
 fn anchor_active(world: &World, draw: Entity) -> bool {
     world.get::<FixtureParticleLive>(draw)
         .and_then(|live| live.0.anchor)
-        .is_some_and(|anchor| world.get::<moly_assets::scene_state::SourceInactive>(anchor).is_none())
+        .is_some_and(|anchor| {
+            world
+                .get::<moly_assets::scene_state::SourceInactive>(anchor)
+                .is_none()
+        })
 }
 
 /// `ParticleSystem.isPlaying` of the played object's own system when this
 /// host simulates it (`None` when no prepared system sits on the object
 /// itself). A system that never played is not playing.
 pub fn object_system_playing(world: &World, binding: &ParticlePlayBinding) -> Option<bool> {
-    binding.draws.iter().copied()
-        .find(|&draw| world.get::<FixtureParticleLive>(draw).is_some_and(|live| live.0.anchor == Some(binding.root)))
+    binding
+        .draws
+        .iter()
+        .copied()
+        .find(|&draw| {
+            world
+                .get::<FixtureParticleLive>(draw)
+                .is_some_and(|live| live.0.anchor == Some(binding.root))
+        })
         .map(|draw| crate::weather_fx::fixture::system_playing(world, draw))
 }
 
@@ -991,7 +1071,11 @@ pub fn play_systems(world: &mut World, binding: &ParticlePlayBinding) -> Result<
     play_listed(world, binding, &draws)
 }
 
-fn play_listed(world: &mut World, binding: &ParticlePlayBinding, draws: &[Entity]) -> Result<usize, String> {
+fn play_listed(
+    world: &mut World,
+    binding: &ParticlePlayBinding,
+    draws: &[Entity],
+) -> Result<usize, String> {
     let mut again = Vec::new();
     let mut first = false;
     let mut played = 0;
@@ -1021,17 +1105,35 @@ fn play_listed(world: &mut World, binding: &ParticlePlayBinding, draws: &[Entity
 /// hierarchy takes the engine's `ParticleSystem::AwakeFromLoad`, which plays
 /// a play-on-awake system. Returns how many systems it played; an object
 /// already active is left as it is (`Ok(None)`).
-pub fn activate_played_object(world: &mut World, binding: &ParticlePlayBinding) -> Result<Option<usize>, String> {
-    let activity = world.get::<moly_assets::scene_state::SourceNodeActivity>(binding.root)
+pub fn activate_played_object(
+    world: &mut World,
+    binding: &ParticlePlayBinding,
+) -> Result<Option<usize>, String> {
+    let activity = world
+        .get::<moly_assets::scene_state::SourceNodeActivity>(binding.root)
         .ok_or("played object carries no source activity")?;
     if activity.active_self() {
         return Ok(None);
     }
-    let dormant: Vec<Entity> = binding.draws.iter().copied().filter(|&draw| !anchor_active(world, draw)).collect();
-    moly_assets::scene_state::SetSourceActive { entity: binding.root, active: true }.apply(world);
-    let woken: Vec<Entity> = dormant.into_iter()
-        .filter(|&draw| anchor_active(world, draw)
-            && world.get::<FixtureParticleLive>(draw).is_some_and(|live| live.0.emitter.play_on_awake))
+    let dormant: Vec<Entity> = binding
+        .draws
+        .iter()
+        .copied()
+        .filter(|&draw| !anchor_active(world, draw))
+        .collect();
+    moly_assets::scene_state::SetSourceActive {
+        entity: binding.root,
+        active: true,
+    }
+    .apply(world);
+    let woken: Vec<Entity> = dormant
+        .into_iter()
+        .filter(|&draw| {
+            anchor_active(world, draw)
+                && world
+                    .get::<FixtureParticleLive>(draw)
+                    .is_some_and(|live| live.0.emitter.play_on_awake)
+        })
         .collect();
     play_listed(world, binding, &woken).map(Some)
 }
@@ -1042,14 +1144,27 @@ pub fn activate_played_object(world: &mut World, binding: &ParticlePlayBinding) 
 /// and takes it out of the manager, so its play ends and a later activation
 /// plays it from the start. Returns how many played systems it stopped; an
 /// object already inactive is left as it is (`Ok(None)`).
-pub fn deactivate_played_object(world: &mut World, binding: &ParticlePlayBinding) -> Result<Option<usize>, String> {
-    let activity = world.get::<moly_assets::scene_state::SourceNodeActivity>(binding.root)
+pub fn deactivate_played_object(
+    world: &mut World,
+    binding: &ParticlePlayBinding,
+) -> Result<Option<usize>, String> {
+    let activity = world
+        .get::<moly_assets::scene_state::SourceNodeActivity>(binding.root)
         .ok_or("played object carries no source activity")?;
     if !activity.active_self() {
         return Ok(None);
     }
-    let live: Vec<Entity> = binding.draws.iter().copied().filter(|&draw| anchor_active(world, draw)).collect();
-    moly_assets::scene_state::SetSourceActive { entity: binding.root, active: false }.apply(world);
+    let live: Vec<Entity> = binding
+        .draws
+        .iter()
+        .copied()
+        .filter(|&draw| anchor_active(world, draw))
+        .collect();
+    moly_assets::scene_state::SetSourceActive {
+        entity: binding.root,
+        active: false,
+    }
+    .apply(world);
     let stopped = crate::weather_fx::fixture::stop_and_clear(world, &live);
     if let Some(mut prepared) = world.get_mut::<PreparedPlay>(binding.root) {
         prepared.stopped = true;
@@ -1060,8 +1175,15 @@ pub fn deactivate_played_object(world: &mut World, binding: &ParticlePlayBinding
 /// A played object over draws a replay built itself (no document, no GPU
 /// preparation), already playing.
 #[cfg(test)]
-pub fn played_object_for_replay(world: &mut World, root: Entity, draws: Vec<Entity>) -> ParticlePlayBinding {
-    world.entity_mut(root).insert(PreparedPlay { draws: draws.clone(), stopped: false });
+pub fn played_object_for_replay(
+    world: &mut World,
+    root: Entity,
+    draws: Vec<Entity>,
+) -> ParticlePlayBinding {
+    world.entity_mut(root).insert(PreparedPlay {
+        draws: draws.clone(),
+        stopped: false,
+    });
     ParticlePlayBinding { root, draws }
 }
 
@@ -1173,7 +1295,12 @@ fn prepare_root(
     settings: &ControlSettings,
     fixture_host: bool,
 ) -> Result<ParticleControlBinding, TimelineFailure> {
-    let (particles, nodes, by_id, placed) = (source.particles, source.nodes, &source.by_id, &instances.placed);
+    let (particles, nodes, by_id, placed) = (
+        source.particles,
+        source.nodes,
+        &source.by_id,
+        &instances.placed,
+    );
     let instances = &instances.rows;
     inventory(doc, root_id, settings)?;
     if !settings.update_particle {
@@ -1337,7 +1464,11 @@ fn prepare_root(
     let target_draws: HashMap<String, Entity> = created
         .iter()
         .copied()
-        .filter(|&draw| world.get::<crate::weather_fx::fixture::DirectorTarget>(draw).is_some())
+        .filter(|&draw| {
+            world
+                .get::<crate::weather_fx::fixture::DirectorTarget>(draw)
+                .is_some()
+        })
         .filter_map(|draw| Some((world.get::<FixtureParticleLive>(draw)?.0.node.clone(), draw)))
         .collect();
     for &draw in &draws {
@@ -1360,8 +1491,11 @@ fn prepare_root(
         world.entity_mut(draw).insert(clock);
     }
     for (node, draw) in &target_draws {
-        let stepped = draws.iter().any(|&root| world.get::<DirectorClock>(root)
-            .is_some_and(|clock| clock.targets.iter().any(|(_, target)| target == draw)));
+        let stepped = draws.iter().any(|&root| {
+            world
+                .get::<DirectorClock>(root)
+                .is_some_and(|clock| clock.targets.iter().any(|(_, target)| target == draw))
+        });
         if !stepped {
             warn!("[prefab-director] {node}: a sub-emitter target no controlled root caches (its parent is outside this control, or the target comes first in the hierarchy): no Simulate steps it, it draws nothing");
         }
@@ -1378,10 +1512,7 @@ fn prepare_root(
     Ok(binding)
 }
 
-pub fn validate(
-    world: &World,
-    binding: &ParticleControlBinding,
-) -> Result<(), TimelineFailure> {
+pub fn validate(world: &World, binding: &ParticleControlBinding) -> Result<(), TimelineFailure> {
     let mut ancestor = Some(binding.root);
     while let Some(entity) = ancestor {
         if entity == binding.fixture {
@@ -1460,7 +1591,11 @@ pub fn initialize_seed(automatic: bool, serialized: u32, clip_seed: u32) -> u32 
 /// already did (see [`DirectorOwnerSeed`]); a manual owner keeps its
 /// serialized seed. The system is stopped and cleared; the playable starts
 /// with no last time.
-fn initialize(world: &mut World, draw: Entity, clip_seed: u32) -> Result<DirectorClock, TimelineFailure> {
+fn initialize(
+    world: &mut World,
+    draw: Entity,
+    clip_seed: u32,
+) -> Result<DirectorClock, TimelineFailure> {
     // A played parent whose targets are installed hands them its commands
     // after each frame's updates; a Director's Simulate would step those
     // targets before it, which this host does not run.
@@ -1470,8 +1605,11 @@ fn initialize(world: &mut World, draw: Entity, clip_seed: u32) -> Result<Directo
     let (route, event_edges) = world
         .get::<crate::weather_fx::fixture::DirectorRoute>(draw)
         .map(|route| (route.0.clone(), route.1.clone()))
-        .or_else(|| world.get::<crate::weather_fx::fixture::Played>(draw)
-            .map(|played| (played.route().clone(), played.event_edges().cloned())))
+        .or_else(|| {
+            world
+                .get::<crate::weather_fx::fixture::Played>(draw)
+                .map(|played| (played.route().clone(), played.event_edges().cloned()))
+        })
         .ok_or_else(|| invalid("controlled particle system has no source route"))?;
     let live = world
         .get::<FixtureParticleLive>(draw)
@@ -1525,11 +1663,18 @@ fn initialize_targets(
     let playable_seed = clip_seed.max(1);
     let mut targets: Vec<(String, Entity)> = Vec::new();
     for (index, node) in rows {
-        let Some(&draw) = target_draws.get(node) else { continue };
+        let Some(&draw) = target_draws.get(node) else {
+            continue;
+        };
         if targets.iter().any(|(_, known)| *known == draw) {
             continue;
         }
-        let Some(anchor) = world.get::<FixtureParticleLive>(draw).and_then(|live| live.0.anchor) else { continue };
+        let Some(anchor) = world
+            .get::<FixtureParticleLive>(draw)
+            .and_then(|live| live.0.anchor)
+        else {
+            continue;
+        };
         let seed = match world.get::<DirectorOwnerSeed>(anchor) {
             Some(owner) => owner.0,
             None => {
@@ -1691,8 +1836,13 @@ pub fn advance(
         return true;
     };
     let mut times = clock.times;
-    let mut target = ControlledSystem { system: &mut *system, stop_emitting: &mut clock.stop_emitting, route: &clock.route,
-        event_edges: clock.event_edges.as_ref(), ctx };
+    let mut target = ControlledSystem {
+        system: &mut *system,
+        stop_emitting: &mut clock.stop_emitting,
+        route: &clock.route,
+        event_edges: clock.event_edges.as_ref(),
+        ctx,
+    };
     let result = prepare_frame(&mut target, &mut times, time as f32);
     clock.times = times;
     let dropped = system.native_birth.as_mut().and_then(|birth| birth.events.as_mut())
@@ -1721,10 +1871,17 @@ pub fn advance(
 /// lends each one with its own context for one call.
 pub trait FamilyWorld {
     /// Run `f` on the system of `draw`; `None` when it has gone.
-    fn with_system<R>(&mut self, draw: Entity, f: impl FnOnce(&mut Runtime, &Context) -> R) -> Option<R>;
+    fn with_system<R>(
+        &mut self,
+        draw: Entity,
+        f: impl FnOnce(&mut Runtime, &Context) -> R,
+    ) -> Option<R>;
     /// The owner words a target's commands read, composed from its spawned
     /// instance now (see [`crate::weather_fx::fixture::instance_owner`]).
-    fn target_owner(&mut self, draw: Entity) -> Result<moly_law::particle::child_emit::ChildOwner, String>;
+    fn target_owner(
+        &mut self,
+        draw: Entity,
+    ) -> Result<moly_law::particle::child_emit::ChildOwner, String>;
 }
 
 /// One frame of a controlled system whose cached sub-emitter targets this
@@ -1791,7 +1948,9 @@ pub fn advance_family<W: FamilyWorld>(
     let result = prepare_frame(&mut family, &mut times, time as f32);
     let dropped = family.dropped;
     clock.times = times;
-    let node = world.with_system(parent, |system, _| (system.effect.clone(), system.node.clone()));
+    let node = world.with_system(parent, |system, _| {
+        (system.effect.clone(), system.node.clone())
+    });
     let (effect, node) = node.unwrap_or_default();
     if dropped > 0 {
         if clock.dropped == 0 {
@@ -1876,10 +2035,23 @@ impl<W: FamilyWorld> Family<'_, W> {
             }
             let frame_dt = self.frame_dt;
             match self.world.with_system(draw, |system, _| {
-                let installed = system.native_birth.as_ref().is_some_and(|native| native.target.is_some());
-                installed.then(|| crate::particle_runtime::deliver_command_with(system, &command, frame_dt, flags)
-                    .map_err(|reason| (reason, system.native_birth.as_ref().and_then(|n| n.target.as_ref())
-                        .is_some_and(|state| state.refused == 1))))
+                let installed = system
+                    .native_birth
+                    .as_ref()
+                    .is_some_and(|native| native.target.is_some());
+                installed.then(|| {
+                    crate::particle_runtime::deliver_command_with(system, &command, frame_dt, flags)
+                        .map_err(|reason| {
+                            (
+                                reason,
+                                system
+                                    .native_birth
+                                    .as_ref()
+                                    .and_then(|n| n.target.as_ref())
+                                    .is_some_and(|state| state.refused == 1),
+                            )
+                        })
+                })
             }) {
                 Some(Some(Ok(_))) => {}
                 Some(Some(Err((reason, first)))) => {
@@ -1895,8 +2067,13 @@ impl<W: FamilyWorld> Family<'_, W> {
     fn installed_targets(&mut self) -> Vec<String> {
         let mut installed = Vec::new();
         for (node, draw) in self.targets {
-            if self.world.with_system(*draw, |system, _|
-                system.native_birth.as_ref().is_some_and(|native| native.target.is_some())) == Some(true) {
+            if self.world.with_system(*draw, |system, _| {
+                system
+                    .native_birth
+                    .as_ref()
+                    .is_some_and(|native| native.target.is_some())
+            }) == Some(true)
+            {
                 installed.push(node.clone());
             }
         }
@@ -1919,8 +2096,9 @@ impl<W: FamilyWorld> Controlled for Family<'_, W> {
         // Each cached target first: Simulate(0, restart).
         for &(_, draw) in self.targets {
             let owner = self.world.target_owner(draw);
-            let result = self.world.with_system(draw, |system, _| owner.and_then(|owner|
-                crate::particle_runtime::restart_child_target(system, owner)));
+            let result = self.world.with_system(draw, |system, _| {
+                owner.and_then(|owner| crate::particle_runtime::restart_child_target(system, owner))
+            });
             match result {
                 Some(Ok(())) => { self.refused.remove(&draw); }
                 Some(Err(reason)) => self.refuse_target(draw, reason),
@@ -1931,11 +2109,17 @@ impl<W: FamilyWorld> Controlled for Family<'_, W> {
         // edges to the installed targets deliver.
         let (route, edges) = (self.route, self.event_edges);
         let installed = self.installed_targets();
-        let result = self.world.with_system(self.parent, |system, ctx| {
-            crate::particle_runtime::director_restart(system, route, edges, ctx).map(|_| {
-                crate::weather_fx::fixture::mark_delivered(system, installed.iter().map(String::as_str));
+        let result = self
+            .world
+            .with_system(self.parent, |system, ctx| {
+                crate::particle_runtime::director_restart(system, route, edges, ctx).map(|_| {
+                    crate::weather_fx::fixture::mark_delivered(
+                        system,
+                        installed.iter().map(String::as_str),
+                    );
+                })
             })
-        }).unwrap_or_else(|| Err("controlled particle system is gone".into()));
+            .unwrap_or_else(|| Err("controlled particle system is gone".into()));
         *self.stop_emitting = false;
         self.deliver(0);
         self.read_head();
@@ -1949,20 +2133,26 @@ impl<W: FamilyWorld> Controlled for Family<'_, W> {
             if self.refused.contains(&draw) {
                 continue;
             }
-            let result = self.world.with_system(draw, |system, ctx|
-                crate::particle_runtime::director_chunk(system, dt, false, ctx, |_| {}));
+            let result = self.world.with_system(draw, |system, ctx| {
+                crate::particle_runtime::director_chunk(system, dt, false, ctx, |_| {})
+            });
             if let Some(Err(reason)) = result {
                 self.refuse_target(draw, reason);
             }
         }
         let emitting = !*self.stop_emitting;
         let stop = &mut *self.stop_emitting;
-        let result = self.world.with_system(self.parent, |system, ctx|
-            crate::particle_runtime::director_chunk(system, dt, emitting, ctx, |s| {
-                if !s.emitter.looping && s.playback_head >= s.emitter.duration {
-                    *stop = true;
-                }
-            }).map(|_| ())).unwrap_or_else(|| Err("controlled particle system is gone".into()));
+        let result = self
+            .world
+            .with_system(self.parent, |system, ctx| {
+                crate::particle_runtime::director_chunk(system, dt, emitting, ctx, |s| {
+                    if !s.emitter.looping && s.playback_head >= s.emitter.duration {
+                        *stop = true;
+                    }
+                })
+                .map(|_| ())
+            })
+            .unwrap_or_else(|| Err("controlled particle system is gone".into()));
         self.deliver(4);
         self.read_head();
         result
@@ -1976,7 +2166,11 @@ impl<W: FamilyWorld> Controlled for Family<'_, W> {
 /// steps forward by the float difference when the time went forward, and does
 /// nothing when it is equal. The playable then keeps the time and the system
 /// time read after the simulation.
-pub fn prepare_frame(target: &mut impl Controlled, times: &mut PlayableTimes, time: f32) -> Result<(), String> {
+pub fn prepare_frame(
+    target: &mut impl Controlled,
+    times: &mut PlayableTimes,
+    time: f32,
+) -> Result<(), String> {
     // Mathf.Max(a, b) is `a > b ? a : b`: a NaN compares false.
     let max = |a: f32, b: f32| if a > b { a } else { b };
     let particle_time = target.system_time();
@@ -1998,7 +2192,11 @@ pub fn prepare_frame(target: &mut impl Controlled, times: &mut PlayableTimes, ti
 /// ParticleControlPlayable.Simulate: a restart first, then the time in raw
 /// chunks of at most Time.maximumDeltaTime, which the player serializes as
 /// 1/3 s and never assigns.
-fn simulate_playable(target: &mut impl Controlled, mut time: f32, restart: bool) -> Result<(), String> {
+fn simulate_playable(
+    target: &mut impl Controlled,
+    mut time: f32,
+    restart: bool,
+) -> Result<(), String> {
     let chunk = if crate::particle_runtime::arm("directorChunkIsParticleStep") {
         crate::particle_runtime::PLAYER_TIME.maximum_particle_timestep
     } else {
@@ -2032,7 +2230,12 @@ impl Controlled for ControlledSystem<'_> {
     }
 
     fn restart(&mut self) -> Result<(), String> {
-        crate::particle_runtime::director_restart(self.system, self.route, self.event_edges, self.ctx)?;
+        crate::particle_runtime::director_restart(
+            self.system,
+            self.route,
+            self.event_edges,
+            self.ctx,
+        )?;
         *self.stop_emitting = false;
         Ok(())
     }
@@ -2183,11 +2386,7 @@ mod tests {
         });
         let root = world.spawn(ChildOf(fixture)).id();
         let draw = world
-            .spawn((
-                FixtureParticleLive(manual(7)),
-                clock(),
-                ChildOf(root),
-            ))
+            .spawn((FixtureParticleLive(manual(7)), clock(), ChildOf(root)))
             .id();
         let binding = ParticleControlBinding {
             root,
@@ -2309,7 +2508,10 @@ mod tests {
         let lifetime = spec["lifetime"].as_array().unwrap();
         emitter.start.lifetime = match lifetime[0].as_str().unwrap() {
             "constant" => MinMaxCurve::Constant(number(&lifetime[1])),
-            "twoConstants" => MinMaxCurve::TwoConstants { min: number(&lifetime[1]), max: number(&lifetime[2]) },
+            "twoConstants" => MinMaxCurve::TwoConstants {
+                min: number(&lifetime[1]),
+                max: number(&lifetime[2]),
+            },
             other => panic!("lifetime mode {other}"),
         };
         emitter.ring_buffer_mode = moly_law::particle::RingBufferMode::Disabled;
@@ -2376,18 +2578,26 @@ mod tests {
                     let kind = event[0].as_str().unwrap();
                     match kind {
                         "initialize" => {
-                            target.seed = initialize_seed(auto, target.seed, event[1].as_u64().unwrap() as u32);
+                            target.seed = initialize_seed(
+                                auto,
+                                target.seed,
+                                event[1].as_u64().unwrap() as u32,
+                            );
                             auto = false;
                         }
                         "play" | "pause" => times.last = f32::MAX,
-                        "external" => target.time = f32::from_bits(event[1].as_u64().unwrap() as u32),
+                        "external" => {
+                            target.time = f32::from_bits(event[1].as_u64().unwrap() as u32)
+                        }
                         "prepare" if event[2] == false => times.last = f32::MAX,
                         "prepare" => {
                             let time = event[1].as_f64().unwrap() as f32;
                             if let Err(reason) = prepare_frame(&mut target, &mut times, time) {
                                 let native_events = native["events"].as_array().unwrap();
                                 match refusal_explained(native_events, spec) {
-                                    Some(why) => *tally.refused.entry(why.to_owned()).or_default() += 1,
+                                    Some(why) => {
+                                        *tally.refused.entry(why.to_owned()).or_default() += 1
+                                    }
                                     None => {
                                         tally.unexplained += 1;
                                         if tally.first.len() < 12 {
@@ -2403,9 +2613,16 @@ mod tests {
                     let snapshot = &native["snapshot"];
                     let calls: Vec<(String, u32, u32)> = native["events"].as_array().unwrap().iter()
                         .filter_map(|e| match e[0].as_str().unwrap() {
-                            "CUSTOM_Simulate" => Some(("CUSTOM_Simulate".to_owned(), e[1].as_u64().unwrap() as u32,
-                                e[3].as_u64().unwrap() as u32)),
-                            "Update" => Some(("Update".to_owned(), e[1].as_u64().unwrap() as u32, e[2].as_u64().unwrap() as u32)),
+                            "CUSTOM_Simulate" => Some((
+                                "CUSTOM_Simulate".to_owned(),
+                                e[1].as_u64().unwrap() as u32,
+                                e[3].as_u64().unwrap() as u32,
+                            )),
+                            "Update" => Some((
+                                "Update".to_owned(),
+                                e[1].as_u64().unwrap() as u32,
+                                e[2].as_u64().unwrap() as u32,
+                            )),
                             _ => None,
                         })
                         .collect();
@@ -2431,7 +2648,12 @@ mod tests {
                         problems.push(format!("seed {} auto {auto} native {} {}", target.seed, snapshot["seed"], snapshot["auto"]));
                     }
                     if let (Some(result), Some(warm)) = (result, target.warm) {
-                        if result[1] == 1 && (result[2].as_u64().unwrap() as u32, result[3].as_u64().unwrap() as u32) != warm {
+                        if result[1] == 1
+                            && (
+                                result[2].as_u64().unwrap() as u32,
+                                result[3].as_u64().unwrap() as u32,
+                            ) != warm
+                        {
                             problems.push(format!("warm {warm:?} native {result}"));
                         }
                     }
@@ -2490,9 +2712,20 @@ mod tests {
         if let Some(path) = std::env::var_os("MOLY_DIRECTOR_RECEIPT_REPORT") {
             std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
         }
-        assert!(product.cases > 1000 && product.restarts > 0 && product.chunks > 0 && product.warms > 0, "{report}");
-        assert_eq!((product.mismatched, product.unexplained), (0, 0), "{report}");
-        for arm in ["directorRestartOnEqual", "directorNoExternalCheck", "directorChunkIsParticleStep"] {
+        assert!(
+            product.cases > 1000 && product.restarts > 0 && product.chunks > 0 && product.warms > 0,
+            "{report}"
+        );
+        assert_eq!(
+            (product.mismatched, product.unexplained),
+            (0, 0),
+            "{report}"
+        );
+        for arm in [
+            "directorRestartOnEqual",
+            "directorNoExternalCheck",
+            "directorChunkIsParticleStep",
+        ] {
             let tally = replay_chain(&receipt, Some(arm));
             println!("arm {arm}: {} mismatched cases", tally.mismatched);
             assert!(tally.mismatched > 0, "arm {arm} must mismatch");
@@ -2521,4 +2754,84 @@ mod tests {
         assert!(!descends(&parents, 4, 2));
         assert!(!descends(&parents, 1, 2));
     }
+}
+
+/// `GetComponentsInChildren<ParticleSystem>()` for a source loop-particle
+/// behaviour. Root components are searched even when inactive; descendants
+/// must be active under that root. Records follow Transform child order.
+#[derive(Clone, Debug)]
+pub struct PlayedSystemInfo {
+    pub node: Entity,
+    pub duration: f32,
+    pub looping: bool,
+}
+
+pub fn played_object_systems(
+    world: &mut World,
+    owner: Entity,
+    object: Entity,
+    package: &str,
+) -> Result<Vec<PlayedSystemInfo>, TimelineFailure> {
+    if !instance_descends(world, object, owner) {
+        return Err(invalid("loop particle target is outside its owner"));
+    }
+    let doc = archive(world, owner, Some(package))?;
+    let inventory = Inventory::of(&doc)?;
+    let instances = inventory.instances(world, object)?;
+    let active_below = |mut node: Entity| {
+        while node != object {
+            if !world
+                .get::<moly_assets::scene_state::SourceNodeActivity>(node)
+                .is_none_or(moly_assets::scene_state::SourceNodeActivity::active_self)
+            {
+                return false;
+            }
+            let Some(parent) = world.get::<ChildOf>(node) else {
+                return false;
+            };
+            node = parent.parent();
+        }
+        true
+    };
+    let mut result = Vec::new();
+    for (node, _, ordinal) in instances.rows {
+        let Some(ordinal) = ordinal else {
+            continue;
+        };
+        if !active_below(node) {
+            continue;
+        }
+        let system = &inventory.particles[ordinal]["system"];
+        let authored_duration = system["duration"]
+            .as_f64()
+            .filter(|n| n.is_finite())
+            .ok_or_else(|| invalid("loop particle system duration missing"))?
+            as f32;
+        let looping = system["looping"]
+            .as_bool()
+            .ok_or_else(|| invalid("loop particle system looping missing"))?;
+        if !authored_duration.is_finite() {
+            return Err(invalid("loop particle duration exceeds float range"));
+        }
+        // A previous behaviour may have assigned main.duration. Unity does
+        // not restore it when that graph ends, so a new graph reads the live
+        // value rather than resetting it to the asset's original duration.
+        let duration = world
+            .get::<PreparedPlay>(object)
+            .and_then(|prepared| {
+                prepared.draws.iter().find_map(|&draw| {
+                    world
+                        .get::<FixtureParticleLive>(draw)
+                        .filter(|live| live.0.anchor == Some(node))
+                        .map(|live| live.0.emitter.duration)
+                })
+            })
+            .unwrap_or(authored_duration);
+        result.push(PlayedSystemInfo {
+            node,
+            duration,
+            looping,
+        });
+    }
+    Ok(result)
 }

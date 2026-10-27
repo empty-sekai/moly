@@ -202,6 +202,7 @@ pub enum CameraStateType {
     ScreenshotCapture = 18,
     ScreenshotCaptureFps = 19,
     DeliveryHonorReward = 20,
+    BulkHarvest = 21,
 }
 
 /// 场地相机当前态（真源 `FieldCamera.CurrentState` 的读写面）。真源构造
@@ -1049,6 +1050,7 @@ pub struct FpsTransitionCtx<'w, 's> {
     avatar: Res<'w, crate::player_state::PlayerAvatarStates>,
     talk_camera: Option<Res<'w, crate::talk_camera::TalkCamera>>,
     photo_input: Option<Res<'w, PhotoGestureHeld>>,
+    bulk_input: Option<Res<'w, crate::field_modes::BulkHarvestActive>>,
     players: Query<'w, 's, (&'static GlobalTransform, &'static mut Visibility), With<AvatarRoot>>,
     cameras: Query<'w, 's, &'static mut Projection, With<Camera3d>>,
 }
@@ -1073,7 +1075,7 @@ pub fn apply_input(
 ) {
     // 摆放编辑面持有输入期间（真源编辑模式下手势层归编辑面），相机
     // 拖拽/缩放整表让位——编辑模式内的输入分配收口。
-    if transition.photo_input.as_ref().is_some_and(|held| held.0) || edits.is_active() || transition.dialogs.blocks_field_input() || (!transition.layers.on_field()
+    if transition.bulk_input.is_some() || transition.photo_input.as_ref().is_some_and(|held| held.0) || edits.is_active() || transition.dialogs.blocks_field_input() || (!transition.layers.on_field()
         && !(state.0 == CameraStateType::PhotoShot && transition.layers.is_active(crate::ui_layers::MenuScreenType::MysekaiPhotoShot)))
     {
         gestures.clear();
@@ -1640,6 +1642,7 @@ fn player_view_position(world: &mut World) -> Option<Vec3> {
 /// from LearnSiteEnvironment (17); a housing site inherits after one of the
 /// five outdoor harvest site types ([`is_inherit_camera_setting`]).
 pub fn is_inherit(category: &str, prev_site_type: &str, prev: CameraStateType) -> bool {
+    if prev == CameraStateType::BulkHarvest { return false; }
     if matches!(category, "harvest" | "delivery") {
         prev != CameraStateType::LearnSiteEnvironment
     } else {
@@ -1838,6 +1841,12 @@ fn transfer_camera_settings(
         S::FloorEdit | S::WallEdit => {
             private.yaw = model.yaw;
             "case 2/3 (private yaw = live yaw)"
+        }
+        S::BulkHarvest => {
+            model.gestured_distance = model.distance;
+            private.yaw = model.yaw;
+            private.pitch = model.pitch;
+            return (None, "case 21 (private distance and rotation = live)");
         }
         S::LookAtPlayer => {
             model.distance = model.gestured_distance;
@@ -2454,7 +2463,7 @@ pub fn follow_avatar(
         CameraStateType::LearnSiteEnvironment => {}
         // DeliveryHonorRewardCameraState: its OnUpdate is `delivery_camera`,
         // which runs right after this system.
-        CameraStateType::DeliveryHonorReward => {}
+        CameraStateType::DeliveryHonorReward | CameraStateType::BulkHarvest => {}
         // FloorEditCameraState.OnUpdate: FieldCamera.UpdatePosition places
         // the eye from the model, then the camera looks at LookAt without
         // the offset. Its drag and pinch are `floor_edit_camera::input`.
