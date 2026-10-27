@@ -830,7 +830,10 @@ mod tests {
                     .updated
                     .user_mysekai_fixtures
                     .expect("the fixtures are carried");
-                assert_eq!(rows[0].quantity, 3);
+                let crafted = rows.iter().find(|row| {
+                    row.mysekai_fixture_id == 4 && row.texture_id == BASE_TEXTURE_ID
+                }).expect("the crafted fixture is carried");
+                assert_eq!(crafted.quantity, 3);
             }
             other => panic!("not the craft's reply: {other:?}"),
         }

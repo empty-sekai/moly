@@ -1251,9 +1251,10 @@ mod tests {
         let tables=Tables::new(&m,Some(&s));
         let mut model=model();
         model.doc.inventory.fixtures.push(UserMysekaiFixture{mysekai_fixture_id:7,texture_id:1,quantity:1,last_obtained_at:0});
+        let fixtures_before = model.doc.inventory.fixtures.clone();
         let req=request(&model,&tables,None);
         assert_eq!(model.bulk_harvest(&req,&tables).unwrap().obtained_drop_resources[0].quantity,3);
-        assert_eq!(model.doc.inventory.fixtures[0].quantity,1);
+        assert_eq!(model.doc.inventory.fixtures, fixtures_before);
     }
 
     #[test]
