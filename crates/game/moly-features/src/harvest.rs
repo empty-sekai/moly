@@ -38,6 +38,11 @@
 //! archives are not exported yet, so none is drawn.
 
 pub mod action;
+pub mod bulk;
+mod bulk_ui;
+mod bulk_dialog;
+mod bulk_effect;
+mod bulk_notice;
 mod airplane;
 mod arrival;
 pub mod catalog;
@@ -45,22 +50,22 @@ mod clips;
 pub(crate) mod damage;
 mod drops;
 mod effects;
+#[path = "harvest/server_mock.rs"]
+pub mod harvest_mock;
 pub mod harvest_summary;
 pub mod law;
 mod pickup;
 mod prop_animator;
 mod queue;
-#[path = "harvest/server_mock.rs"]
-pub mod harvest_mock;
 pub use self::harvest_mock as server_mock;
 mod learn;
 pub mod notice;
 mod obstacles;
 pub mod particles;
-mod possession;
+pub(crate) mod possession;
+mod stamina_hud;
 mod tone;
 mod tool_model;
-mod stamina_hud;
 mod tool_view;
 mod ui;
 
@@ -77,12 +82,12 @@ use server_mock::UserDrop;
 
 pub use crate::field_modes::HarvestAutoMoveHeld;
 pub use arrival::snap_from;
+pub use arrival::HarvestViewNodes;
 pub use drops::HarvestDropAnimation;
 pub use learn::{
     LearnPhenomenaDialogClosed, LearnPhenomenaDialogRequest, LearnSiteEnvironmentActive,
 };
 pub use pickup::move_towards;
-pub use arrival::HarvestViewNodes;
 pub use ui::{action_button_node, HarvestButton};
 
 /// The recover dialog's `UpdateStaminaView` asks, once per call: the gauge
@@ -682,7 +687,10 @@ pub fn clear_for_site_change(world: &mut World) {
     world.resource_mut::<HarvestDropBatches>().0.clear();
     world.resource_mut::<damage::HarvestStartHides>().0.clear();
     world.resource_mut::<damage::HarvestEffectOnly>().0.clear();
-    world.resource_mut::<damage::HarvestTurnRequests>().0.clear();
+    world
+        .resource_mut::<damage::HarvestTurnRequests>()
+        .0
+        .clear();
     world
         .resource_mut::<prop_animator::PropAnimatorCalls>()
         .0
@@ -793,7 +801,6 @@ impl Plugin for HarvestPlugin {
                     possession::build,
                     clips::parse,
                     tool_model::parse,
-                    server_mock::refresh_maps,
                     arrival::place,
                     arrival::bind_views,
                     obstacles::set_up,
@@ -828,7 +835,7 @@ impl Plugin for HarvestPlugin {
                     drops::advance_animations,
                     pickup::collect_on_leave,
                     pickup::advance,
-                    (tool_model::apply, tool_model::swap_materials).chain(),
+                    (tool_model::apply, tool_model::swap_materials, tool_model::swap_bulk_materials).chain(),
                     (ui::place, stamina_hud::advance).chain(),
                     queue::advance,
                 )
@@ -857,5 +864,12 @@ impl Plugin for HarvestPlugin {
                 ),
             );
         harvest_summary::install(app);
+        app.add_systems(Startup, bulk_effect::load)
+            .add_systems(Update, bulk_effect::tick.after(bulk::tick));
+        bulk_dialog::install(app);
+        app.init_resource::<bulk_notice::BulkNotices>().add_systems(Update, bulk_notice::tick);
+        app.init_resource::<bulk::BulkHarvest>()
+            .add_systems(Update, (bulk_ui::spawn, bulk_ui::spawn_gauge, bulk_ui::read_input, bulk::tick, bulk_ui::place, bulk_ui::place_gauge, bulk_ui::place_gauge_particles).chain()
+                .after(crate::userdata::apply_arrivals).before(HarvestActionSet));
     }
 }

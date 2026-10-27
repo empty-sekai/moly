@@ -418,7 +418,13 @@ impl PlayerDataImport {
         let roots = world.query_filtered::<Entity, With<crate::site::SiteRoot>>().iter(world).collect();
         let mut commands = world.commands();
         crate::site::queue_transition(&mut commands, roots, selection);
-        commands.insert_resource(layouts);
+        commands.queue(move |world: &mut World| {
+            // The imported rooms and their hidden furniture are owners too.
+            // Retire them after the active scene leaves, before restoring the
+            // original layout, so residency cannot reinstate imported rows.
+            crate::site::resident_load::reset_import(world);
+            world.insert_resource(layouts);
+        });
         self.cancel();
         self.status = "The original scene has been restored. No player data was saved.".into();
         Ok(())
@@ -505,6 +511,7 @@ fn replace_live(world: &mut World, document: Value, selection: SiteSelection) {
         if let Some(mut user) = world.get_resource_mut::<crate::mysekai_rank::UserTotalExp>() {
             user.set(total_exp);
         }
+        crate::site::resident_load::reset_import(world);
         world.insert_resource(SiteFixtureLayouts::from_document(document));
     });
 }
@@ -597,10 +604,11 @@ pub fn update(world: &mut World) {
     state.receive();
     let result = match state.action.take() {
         Some(ImportAction::Fetch) => {
-            if let Some(mut panel) = world.get_resource_mut::<crate::game_settings::SettingsPanel>()
-            {
-                panel.open = true;
-                panel.player_data = true;
+            if !world.contains_resource::<crate::browser_stage::BrowserStage>() {
+                if let Some(mut panel) = world.get_resource_mut::<crate::game_settings::SettingsPanel>() {
+                    panel.open = true;
+                    panel.player_data = true;
+                }
             }
             state.fetch()
         }
@@ -741,11 +749,15 @@ pub fn drop_files(
     }
 }
 
-pub fn install(app: &mut App) {
+pub fn install_stage(app: &mut App) {
     app.init_resource::<PlayerDataImport>();
     app.init_resource::<SavedTotalExp>()
         .add_systems(PreStartup, seat_saved_total_exp);
     app.add_systems(Update, update.before(crate::fixture::FixtureLayoutSet));
+}
+
+pub fn install(app: &mut App) {
+    install_stage(app);
     app.add_systems(
         PreUpdate,
         crate::player_data_ui::input

@@ -80,6 +80,8 @@ pub enum CastCaller {
     GoHome,
     /// `BirthdayPartyPresenter.PlayCutSceneAsync` (see `super::birthday`).
     Birthday,
+    /// The feature tutorial processor owns the chapter callbacks.
+    Tutorial,
 }
 
 impl CastCaller {
@@ -88,6 +90,7 @@ impl CastCaller {
             Self::Invite => "PlayInviteCutSceneAsync",
             Self::GoHome => "TryShowGoHomeCutSceneAsync",
             Self::Birthday => "BirthdayPartyPresenter.PlayCutSceneAsync",
+            Self::Tutorial => "MysekaiTutorialProcessor.PlayTutorialCutSceneAsync",
         }
     }
 }
@@ -1274,6 +1277,7 @@ pub(super) fn after_dispose(world: &mut World, cast: &mut Cast, definition: &Tim
     // The caller's `onEndFadeOutCallback`.
     match cast.play.caller {
         CastCaller::Birthday => super::birthday::end_fade_out_callback(world, cast),
+        CastCaller::Tutorial => crate::tutorial::end_fade_out_callback(world, cast),
         CastCaller::Invite | CastCaller::GoHome => {
             crate::gate_flow::cut_scene_end_callback(world, cast)
         }

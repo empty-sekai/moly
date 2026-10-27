@@ -43,6 +43,7 @@ export function releaseEnginePath({
 
 export const UI_FONT_MAX_BYTES = 64 * 1024 * 1024;
 const UI_FONT_PATH = /^fonts\/([a-f0-9]{64})\.ttf$/;
+const fontIdentities = new WeakMap();
 
 /**
  * The UI font an engine's build record names, read from beside the engine
@@ -107,6 +108,7 @@ export async function fetchUiFont(
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
   if (digest !== font.sha256) throw new Error("UI font checksum mismatch");
+  fontIdentities.set(bytes, digest);
   return bytes;
 }
 
@@ -266,7 +268,11 @@ export async function loadEngine({
       clearInterval(progressTimer);
     }
     mark("baseResourcesReady");
-    return { module, backend };
+    return {
+      module,
+      backend,
+      uiFontSha256: font ? fontIdentities.get(font) : null,
+    };
   } catch (error) {
     abort.abort();
     throw error;

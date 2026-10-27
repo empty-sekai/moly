@@ -34,13 +34,12 @@ use moly_law::fixture::GridPosition;
 use moly_law::objective::walkable::{self as law, FloorTile, SystemFixture};
 use moly_law::objective::Cell;
 
-use crate::fixture::{FixturePlacements, FixtureRoot, OccupancyRow};
+use crate::fixture::{FixturePlacements, OccupancyRow};
 use crate::fixture_activity_state::FixtureActivityIdentity;
 use crate::fixture_scene_inputs::FixtureSceneInputs;
 use crate::fixture_tiles::OccupancyCoverage;
 use crate::npc_objective::ObjectiveFace;
 use crate::player_fixture_action::FixtureTileKnowledge;
-use crate::site::GroundEpoch;
 
 const SYSTEM_FIXTURES: &str = "moly://mysekai-system-fixtures.json";
 
@@ -62,11 +61,12 @@ pub struct WalkableSource<'w, 's> {
     json: Res<'w, Assets<JsonAsset>>,
     supply: Res<'w, crate::fixture_scene_inputs::FixtureSceneSupply>,
     placements: Res<'w, FixturePlacements>,
-    identities: Query<'w, 's, &'static FixtureActivityIdentity, With<FixtureRoot>>,
+    identities: Query<'w, 's, (&'static FixtureActivityIdentity, Option<&'static crate::fixture::residency::FixtureSiteOwner>)>,
+    sites: Res<'w, crate::fixture::residency::FixtureSites>,
+    navigation: Res<'w, super::residency::SiteNavigation>,
     tables: Option<Res<'w, crate::fixture_activity_data::FixtureActivityTables>>,
     areas: Res<'w, crate::npc_fixture_activity::NpcFixtureAreas>,
     face: Option<Res<'w, ObjectiveFace>>,
-    epoch: Option<Res<'w, GroundEpoch>>,
     cache: Local<'s, WalkableCache>,
 }
 
@@ -111,7 +111,12 @@ impl WalkableSource<'_, '_> {
     /// The list as this host's cells, in the source's order; `Err` names
     /// the input that is missing or unresolved (the caller holds).
     pub fn cells(&mut self) -> Result<Vec<Cell>, String> {
-        let result = self.build();
+        let site = self.placements.site_type().to_owned();
+        self.cells_for(&site)
+    }
+
+    pub fn cells_for(&mut self, site: &str) -> Result<Vec<Cell>, String> {
+        let result = self.build(site);
         if let Err(reason) = &result {
             if self.cache.reported.as_deref() != Some(reason.as_str()) {
                 info!("[npc-walkable] the walkable list is not available: {reason}");
@@ -121,7 +126,7 @@ impl WalkableSource<'_, '_> {
         result
     }
 
-    fn build(&mut self) -> Result<Vec<Cell>, String> {
+    fn build(&mut self, site: &str) -> Result<Vec<Cell>, String> {
         if self.cache.table.is_none() {
             let handle = self
                 .cache
@@ -138,22 +143,17 @@ impl WalkableSource<'_, '_> {
             Some(Err(reason)) => return Err(reason.clone()),
             None => return Err("the system fixture table is loading".into()),
         };
-        let epoch = self.epoch.as_deref().map_or(0, |epoch| epoch.0);
-        let face = self
-            .face
-            .as_deref()
-            .ok_or("the objective face is not built")?;
-        if !face.is_fresh(epoch) {
-            return Err("the objective face belongs to another site generation".into());
-        }
-        let inputs = self
-            .supply
-            .current()
-            .ok_or("the fixture scene inputs are not ready")?
-            .clone();
-        if inputs.stamp.site_epoch != epoch {
-            return Err("the fixture scene inputs belong to another site generation".into());
-        }
+        let active = self.placements.site_type() == site;
+        let retained = (!active).then(|| self.sites.get(site)).flatten();
+        let placements = if active { &*self.placements } else {
+            &retained.ok_or("the owning fixture site is not retained")?.placements
+        };
+        let inputs = if active { self.supply.current() } else { retained.map(|s| &s.inputs) }
+            .ok_or("the owning fixture scene inputs are not ready")?.clone();
+        let face = if active { self.face.as_deref() } else { self.navigation.get(site).map(|n| &n.objective) }
+            .ok_or("the owning site's objective face is not built")?;
+        let epoch = inputs.stamp.site_epoch;
+        if !face.is_fresh(epoch) { return Err("the owning site's scene and navigation generations differ".into()); }
         let key = (
             epoch,
             inputs.stamp.input_revision,
@@ -161,7 +161,7 @@ impl WalkableSource<'_, '_> {
             Arc::as_ptr(&inputs) as usize,
         );
         if self.cache.key != Some(key) {
-            let cells = self.compute(&inputs, &table, face);
+            let cells = self.compute(&inputs, &table, face, placements);
             self.cache.key = Some(key);
             self.cache.cells = Some(cells);
         }
@@ -176,6 +176,7 @@ impl WalkableSource<'_, '_> {
         inputs: &FixtureSceneInputs,
         table: &HashMap<i32, i32>,
         face: &ObjectiveFace,
+        placements: &FixturePlacements,
     ) -> Result<Vec<Cell>, String> {
         let tables = self
             .tables
@@ -192,11 +193,12 @@ impl WalkableSource<'_, '_> {
         if floor.coverage() != OccupancyCoverage::Complete {
             return Err("the floor snapshot's occupancy is incomplete".into());
         }
-        let rows = self.placements.occupancy_rows();
+        let rows = placements.occupancy_rows();
         let masters: HashMap<&str, i32> = self
             .identities
             .iter()
-            .map(|identity| (identity.uid.as_str(), identity.master_id))
+            .filter(|(_, owner)| owner.is_some_and(|owner| owner.site_id == placements.site_id()))
+            .map(|(identity, _)| (identity.uid.as_str(), identity.master_id))
             .collect();
         let master_of = |uid: &str| -> Result<i32, String> {
             masters

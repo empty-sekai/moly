@@ -19,7 +19,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use bevy::{animation::AnimatedBy, prelude::*};
+use bevy::{animation::AnimatedBy, gltf::{Gltf, GltfNode}, prelude::*};
 use moly_assets::source_navigation::SourceObjectIdentity;
 use serde_json::Value;
 
@@ -116,6 +116,7 @@ pub struct HouseDefinition {
     player_on: Result<Arc<DoorProgram>, String>,
     /// Refused on its own, like `PlayerOn`.
     npc_on: Result<Arc<DoorProgram>, String>,
+    npc_off: Result<Arc<DoorProgram>, String>,
 }
 
 /// Packages that carry a `HouseView`, keyed by package name. A package whose
@@ -252,6 +253,12 @@ fn house_definition(package: &Value) -> Result<HouseDefinition, String> {
     let player_off = program(HouseTrigger::PlayerOff)?;
     let player_on = program(HouseTrigger::PlayerOn).map(Arc::new);
     let npc_on = program(HouseTrigger::NpcOn).map(Arc::new);
+    let npc_off = states
+        .iter()
+        .find(|state| state["name"].as_str() == Some("NPCOffState"))
+        .ok_or_else(|| "house has no NPCOffState".to_owned())
+        .and_then(|state| state_program(package, state, &animator_id, &file, "NPCOffState", 0.0, 0))
+        .map(Arc::new);
     Ok(HouseDefinition {
         file,
         view_game_object: view_object
@@ -268,6 +275,7 @@ fn house_definition(package: &Value) -> Result<HouseDefinition, String> {
         player_off: Arc::new(player_off),
         player_on,
         npc_on,
+        npc_off,
     })
 }
 
@@ -332,6 +340,26 @@ fn trigger_program(
         .iter()
         .find(|state| state["index"].as_u64() == Some(destination))
         .ok_or_else(|| format!("{name} destination state absent"))?;
+    state_program(
+        package,
+        state,
+        animator_id,
+        file,
+        name,
+        transition_seconds,
+        transition_index,
+    )
+}
+
+fn state_program(
+    package: &Value,
+    state: &Value,
+    animator_id: &SourceAssetId,
+    file: &str,
+    name: &str,
+    transition_seconds: f64,
+    transition_index: usize,
+) -> Result<DoorProgram, String> {
     if !array(state, "transitions")?.is_empty() {
         return Err(format!(
             "{name} state has outgoing transitions; it would need a controller runner"
@@ -461,7 +489,116 @@ pub struct HouseBinding {
     joint_on: Option<Entity>,
     /// The `NPCOn` clip's joint when that program was accepted.
     joint_npc_on: Option<Entity>,
+    npc_exit_default_rotation: Result<Quat, String>,
     definition: Arc<HouseDefinition>,
+}
+
+/// The house's direct NPC exit state survives unloading its view. Its authored
+/// duration still participates in ChangeSite's WhenAll on an unseen site.
+#[derive(Clone)]
+pub struct NpcExitProgram {
+    clip: Arc<DoorProgram>,
+    default_rotation: Quat,
+}
+
+impl HouseBinding {
+    pub fn npc_exit_program(&self) -> Result<NpcExitProgram, String> {
+        let program = self.definition.npc_off.as_ref().map_err(Clone::clone)?;
+        let default_rotation = self.npc_exit_default_rotation.as_ref().map_err(Clone::clone)?;
+        Ok(NpcExitProgram { clip: program.clone(), default_rotation: *default_rotation })
+    }
+}
+
+pub struct NpcExitPlayback {
+    program: NpcExitProgram,
+    binding: Option<(Entity, Entity, Quat, String)>,
+    created: u32,
+    elapsed: f32,
+    next_event: usize,
+    reset: bool,
+}
+
+impl NpcExitPlayback {
+    /// HouseView.PlayAnimationAsync("NPCOffState"): direct Animator.Play,
+    /// Yield, await the source state length, then ResetAnimation and Yield.
+    pub fn start(
+        world: &mut World,
+        program: NpcExitProgram,
+        house: Option<&HouseBinding>,
+        frame: u32,
+    ) -> Self {
+        let binding = house.and_then(|house| {
+            let mut stack = vec![house.root];
+            while let Some(entity) = stack.pop() {
+                if let Some(children) = world.get::<Children>(entity) {
+                    stack.extend(children.iter());
+                }
+                if world
+                    .get::<SourceObjectIdentity>(entity)
+                    .is_some_and(|id| program.clip.joint.matches(&house.definition.file, id))
+                {
+                    return Some((house.root, entity, program.default_rotation, house.uid.clone()));
+                }
+            }
+            None
+        });
+        if let Some((root, joint, _, _)) = &binding {
+            if let Some(mut doors) = world.get_resource_mut::<HouseDoors>() {
+                doors.playing.retain(|p| p.root != *root);
+            }
+            if let Some(mut transform) = world.get_mut::<Transform>(*joint) {
+                transform.rotation = program.clip.sample(0.0);
+            }
+        }
+        Self {
+            program,
+            binding,
+            created: frame,
+            elapsed: 0.0,
+            next_event: 0,
+            reset: false,
+        }
+    }
+
+    pub fn tick(&mut self, world: &mut World, frame: u32, dt: f32) -> bool {
+        if frame == self.created {
+            return false;
+        }
+        if self.reset {
+            return true;
+        }
+        let length = (self.program.clip.duration / self.program.clip.speed) as f32;
+        if self.elapsed >= length {
+            if let Some((_, joint, base, _)) = self.binding {
+                if let Some(mut t) = world.get_mut::<Transform>(joint) {
+                    t.rotation = base;
+                }
+            }
+            self.reset = true;
+            return false;
+        }
+        self.elapsed += dt;
+        if let Some((root, joint, _, uid)) = &self.binding {
+            let time = f64::from(self.elapsed) * self.program.clip.speed;
+            if let Some(mut t) = world.get_mut::<Transform>(*joint) {
+                t.rotation = self.program.clip.sample(time);
+            }
+            let ignored = world
+                .get_resource::<HouseDoors>()
+                .map(|d| d.ignored.clone())
+                .unwrap_or_default();
+            play_events(
+                world,
+                &ignored,
+                *root,
+                uid,
+                &self.program.clip,
+                time,
+                &mut self.next_event,
+            );
+        }
+        false
+    }
 }
 
 /// `FixtureManager.GetHouseView` over the placed layout.
@@ -663,8 +800,49 @@ fn bind(
         joint,
         joint_on,
         joint_npc_on,
+        npc_exit_default_rotation: definition.npc_off.as_ref()
+            .map_err(Clone::clone)
+            .and_then(|program| default_door_rotation(world, root, &definition.file, &program.joint)),
         definition,
     })
+}
+
+/// The motionless write-defaults state restores the source binding pose, not
+/// the pose left by whichever door clip happened to play before this one.
+fn default_door_rotation(
+    world: &World,
+    root: Entity,
+    file: &str,
+    joint: &NodeId,
+) -> Result<Quat, String> {
+    let owner = world.get::<crate::fixture::FixtureSource>(root)
+        .ok_or("house default pose has no source asset owner")?;
+    let gltfs = world.get_resource::<Assets<Gltf>>()
+        .ok_or("house source glTF assets are unavailable")?;
+    let gltf = gltfs.get(&owner.0)
+        .ok_or("house source glTF is still loading")?;
+    let nodes = world.get_resource::<Assets<GltfNode>>()
+        .ok_or("house source glTF nodes are unavailable")?;
+    let mut matches = Vec::new();
+    for handle in &gltf.nodes {
+        let node = nodes.get(handle).ok_or("house source glTF node is still loading")?;
+        let Some(extras) = node.extras.as_ref() else { continue; };
+        let extras: Value = serde_json::from_str(&extras.value)
+            .map_err(|error| format!("house source node extras: {error}"))?;
+        let Some(source) = extras.get("sourceObject") else { continue; };
+        if source["file"].as_str() == Some(file)
+            && source["gameObjectId"].as_str().and_then(|value| value.parse::<i64>().ok())
+                == Some(joint.game_object)
+            && source["transformId"].as_str().and_then(|value| value.parse::<i64>().ok())
+                == Some(joint.transform)
+        {
+            matches.push(node.transform.rotation);
+        }
+    }
+    match matches.as_slice() {
+        [rotation] => Ok(*rotation),
+        _ => Err(format!("house default door pose has {} source-identity matches", matches.len())),
+    }
 }
 
 struct DoorPlayback {
@@ -762,10 +940,7 @@ impl HouseDoors {
 }
 
 /// `HouseView.SetAnimationTrigger("PlayerOff")`.
-pub fn set_trigger_player_off(
-    world: &mut World,
-    binding: &HouseBinding,
-) -> Result<(), String> {
+pub fn set_trigger_player_off(world: &mut World, binding: &HouseBinding) -> Result<(), String> {
     set_trigger(world, binding, HouseTrigger::PlayerOff)
 }
 

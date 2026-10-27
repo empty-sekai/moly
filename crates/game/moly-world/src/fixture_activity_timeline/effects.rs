@@ -149,6 +149,16 @@ pub(super) fn prepare(
     // Director-bound clips already driven, by the object they control.
     let mut driven: Vec<(Entity, TimelineClip)> = Vec::new();
     for (clip, settings) in selected {
+        if let Some(target) = request.bindings.step_effects.get(&clip.key).cloned() {
+            if !valid_step_attachment(world, request, target.owner)
+                || !descendant_of(world, target.object, target.owner) {
+                return Err(invalid("step effect is outside the attached tool"));
+            }
+            let binding = particles::prepare_object(world, target.owner, target.object, &target.package, &settings)?;
+            request.bindings.controls.insert(clip.key.clone(), binding);
+            request.bindings.refused_controls.remove(&clip.key);
+            continue;
+        }
         // A view-named clip: the view's `BindEffects` binds the first
         // ParticleSystem with the bind name under the view's parent. A
         // preparation still loading is retried; a missing name falls through
@@ -324,7 +334,11 @@ pub(super) fn validate(
             .get(&clip.key)
             .ok_or_else(|| invalid("source particle control is not prepared"))?;
         particles::validate(world, binding)?;
-        if !descendant_of(world, binding.root, request.fixture)
+        let bound_attachment = request.bindings.step_effects.get(&clip.key).is_some_and(|target|
+            valid_step_attachment(world, request, target.owner)
+                && binding.root == target.object
+                && descendant_of(world, binding.root, target.owner));
+        if !(descendant_of(world, binding.root, request.fixture) || bound_attachment)
             || world.get::<SourceNodeActivity>(binding.root).is_none()
         {
             return Err(invalid(

@@ -11,22 +11,9 @@
 //! door move neither disposes nor hides an NPC, so the home NPCs stay on home
 //! while the player is elsewhere, and no NPC is ever on a harvest map.
 //!
-//! This host holds one site at a time. An NPC whose own site is not the
-//! loaded site has no ground here, so it is suspended ([`Away`]): hidden, left
-//! out of the objective machine, the agent step and the presenter calls, and
-//! not placed on the loaded site. When its own site is loaded again it
-//! resumes where it stood (the source never re-places an NPC on entering a
-//! site); only its current objective is restarted, because the fixtures it
-//! referred to were rebuilt with the site.
-//!
-//! Named gap: the source's AI loop has no site test. A home NPC's loop keeps
-//! running on the unseen home while the player is away: its rest delay
-//! elapses on the scaled clock, then it decides and walks, until a step waits
-//! on the per-frame state machine (the tweet state's Done, for one), which
-//! does not run off sites 0 to 3. That advance is driven by the scaled clock
-//! and by the agent's own motion over the time away, not a bounded set of
-//! steps at the moment the player leaves, so it is not replayed here; the
-//! suspended NPC keeps the state it had.
+//! Render visibility is separate from simulation ownership. A hidden retained
+//! home or floor keeps its navigation, furniture identities, reservations and
+//! clocks. Only actual site removal ends those owners.
 
 use bevy::prelude::*;
 use std::collections::HashMap;
@@ -40,12 +27,15 @@ pub struct Navigation {
     pub walk: crate::walk_face::WalkFace,
     pub objective: crate::npc_objective::ObjectiveFace,
     pub door: Option<(Vec3, Vec3)>,
+    pub house_exit: Option<crate::fixture_gimmick::house_door::NpcExitProgram>,
 }
 
 impl SiteNavigation {
     pub fn get(&self, site: &str) -> Option<&Navigation> {
         self.0.get(site)
     }
+
+    pub(crate) fn insert(&mut self, site: String, navigation: Navigation) { self.0.insert(site, navigation); }
 
     pub fn forget(&mut self, site: &str) {
         self.0.remove(site);
@@ -64,24 +54,39 @@ pub fn retain_navigation(world: &mut World) {
     }
     let (Some(walk), Some(objective)) = (
         world.get_resource::<crate::walk_face::WalkFace>().cloned(),
-        world.get_resource::<crate::npc_objective::ObjectiveFace>().cloned(),
+        world
+            .get_resource::<crate::npc_objective::ObjectiveFace>()
+            .cloned(),
     ) else {
         return;
     };
     if walk.generation() != objective.navigation_generation() {
         return;
     }
+    let mut house_exit = None;
     let point = match site_type_value(&name) {
         Some(0) => match crate::fixture_gimmick::house_door::find_house(world) {
-            crate::fixture_gimmick::house_door::HouseLookup::Found(house) => house.inside_door,
+            crate::fixture_gimmick::house_door::HouseLookup::Found(house) => {
+                house_exit = house.npc_exit_program().ok();
+                house.inside_door
+            }
             _ => None,
         },
         Some(1..=3) => crate::room_door_port::inside_point(world),
         _ => None,
     };
-    let door = point.and_then(|point| world.get::<GlobalTransform>(point))
+    let door = point
+        .and_then(|point| world.get::<GlobalTransform>(point))
         .map(|transform| (transform.translation(), transform.rotation() * Vec3::Z));
-    world.resource_mut::<SiteNavigation>().0.insert(name.clone(), Navigation { walk, objective, door });
+    world.resource_mut::<SiteNavigation>().0.insert(
+        name.clone(),
+        Navigation {
+            walk,
+            objective,
+            door,
+            house_exit,
+        },
+    );
     info!("[npc-residency] retained navigation of {name}, door {door:?}");
 }
 
@@ -155,21 +160,30 @@ pub fn mark_away(
             &crate::npc::NpcActions,
             &mut Visibility,
             &mut crate::npc::RestLifecycle,
+            Has<Away>,
+            Has<crate::npc::gate_entries::ModelHidden>,
         ),
-        (Without<Away>, Without<crate::player::PlayerControlled>),
+        Without<crate::player::PlayerControlled>,
     >,
 ) {
     let Some(site) = site.as_deref() else {
         return; // between two sites: nothing is loaded to compare with
     };
-    for (entity, unit, actions, mut visibility, mut rest) in &mut npcs {
-        if actions.site_type.is_empty() || actions.site_type == site.site_type {
+    for (entity, unit, actions, mut visibility, mut rest, away, model_hidden) in &mut npcs {
+        if actions.site_type.is_empty() { continue; }
+        if actions.site_type == site.site_type {
+            if away {
+                commands.entity(entity).remove::<Away>();
+                if !model_hidden { visibility.set_if_neq(Visibility::Inherited); }
+            }
             continue;
         }
+        if away { continue; }
         commands.entity(entity).insert(Away);
         visibility.set_if_neq(Visibility::Hidden);
         hud.write(crate::npc_state::TweetHudEvent::Retire { npc: entity });
-        rest.leave_for_residency();
+        // Hiding a retained site is not a Rest state transition.
+        let _ = &mut rest;
         info!(
             "[npc-residency] unit={} stays on {} (site type {:?}) while {} (site type {:?}) is loaded: suspended, not placed here; per-frame NPC update on this site: {}",
             unit.0,
@@ -177,7 +191,11 @@ pub fn mark_away(
             site_type_value(&actions.site_type),
             site.site_type,
             site_type_value(&site.site_type),
-            if npc_update_runs(&site.site_type) { "runs" } else { "off" },
+            if npc_update_runs(&site.site_type) {
+                "runs"
+            } else {
+                "off"
+            },
         );
     }
 }

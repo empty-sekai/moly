@@ -353,21 +353,18 @@ const FIXTURE_MASTER: &str = "moly://mysekai-fixtures.json";
 const MATERIAL_MASTER: &str = "moly://mysekai-materials.json";
 const ITEM_MASTER: &str = "moly://mysekai-items.json";
 const TOOL_MASTER: &str = "moly://mysekai-tools.json";
-/// `mysekaiFixtureFilteredDatas`: the stored fixture filters.
-const FILTER_MASTER: &str = "moly://mysekai-fixture-filtered-datas.json";
-const MASTER_PATHS: [&str; 5] = [
+const MASTER_PATHS: [&str; 4] = [
     FIXTURE_MASTER,
     MATERIAL_MASTER,
     ITEM_MASTER,
     TOOL_MASTER,
-    FILTER_MASTER,
 ];
 
 /// The row masters, requested at start-up; their names reach the shared text
 /// atlas through `texts`.
 #[derive(Resource)]
 pub struct InventoryGlyphs {
-    handles: Option<[Handle<JsonAsset>; 5]>,
+    handles: Option<[Handle<JsonAsset>; 4]>,
     masters: Option<Masters>,
     pub texts: Option<Vec<String>>,
 }
@@ -386,6 +383,16 @@ pub fn load(
     if live {
         catalog::request(&mut data);
         commands.init_resource::<Catalog>();
+        match crate::settings_store::read_document().and_then(|doc| stored_fixture_filters(&doc)) {
+            Ok(rows) => {
+                commands.insert_resource(catalog::Filters { rows });
+            }
+            Err(reason) => {
+                warn!(
+                    "[inventory] stored fixture filters could not be read: {reason}; storage is unchanged"
+                );
+            }
+        }
     } else {
         commands.insert_resource(Catalog::answered());
         commands.insert_resource(catalog::Filters::default());
@@ -397,6 +404,166 @@ pub fn load(
         masters: None,
         texts,
     });
+}
+
+/// ApplicationLocalSettings stores a map keyed by SearchTargetType. Reading
+/// only the implemented lists leaves LimitedCraft and newer fields untouched.
+/// Earlier adapters also accepted a bare row array or an `entries` wrapper.
+fn stored_fixture_filters(document: &Value) -> Result<[FixtureFilter; 3], String> {
+    #[derive(Default, serde::Deserialize)]
+    #[serde(default, rename_all = "camelCase")]
+    struct StoredFilter {
+        word: Option<String>,
+        tag_ids: Option<Vec<i32>>,
+        is_not_created_filter: Option<bool>,
+        series_sort_order_by: Option<i32>,
+    }
+    fn read(row: &Value) -> Result<FixtureFilter, String> {
+        if row.is_null() {
+            return Ok(FixtureFilter::default());
+        }
+        let row: StoredFilter = serde_json::from_value(row.clone())
+            .map_err(|error| format!("MysekaiFixtureFilteredData: {error}"))?;
+        Ok(FixtureFilter {
+            word: row.word.unwrap_or_default(),
+            tag_ids: row.tag_ids.unwrap_or_default(),
+            is_not_created_filter: row.is_not_created_filter.unwrap_or_default(),
+            series_sort_order: match row.series_sort_order_by.unwrap_or_default() {
+                0 => SortOrder::Asc,
+                1 => SortOrder::Desc,
+                other => {
+                    return Err(format!(
+                        "MysekaiFixtureFilteredData: unknown sort order {other}"
+                    ));
+                }
+            },
+        })
+    }
+    fn target(value: &Value) -> Option<usize> {
+        value
+            .as_u64()
+            .and_then(|id| usize::try_from(id).ok())
+            .or_else(|| {
+                value.as_str().and_then(|name| match name {
+                    "Craft" => Some(0),
+                    "Inventory" => Some(1),
+                    "SiteEdit" => Some(2),
+                    "LimitedCraft" => Some(3),
+                    _ => name.parse().ok(),
+                })
+            })
+    }
+    let mut filters: [FixtureFilter; 3] = Default::default();
+    let Some(stored) = document
+        .get("MysekaiFixtureFilteredData")
+        .filter(|v| !v.is_null())
+    else {
+        return Ok(filters);
+    };
+    if let Some(rows) = stored
+        .as_array()
+        .or_else(|| stored.get("entries").and_then(Value::as_array))
+    {
+        for (index, row) in rows.iter().enumerate() {
+            let index = match row.get("searchTargetType") {
+                Some(value) => {
+                    target(value).ok_or("MysekaiFixtureFilteredData: invalid search target")?
+                }
+                None => index,
+            };
+            if let Some(slot) = filters.get_mut(index) {
+                *slot = read(row)?;
+            }
+        }
+    } else if let Some(rows) = stored.as_object() {
+        for (key, row) in rows {
+            if let Some(slot) =
+                target(&Value::String(key.clone())).and_then(|index| filters.get_mut(index))
+            {
+                *slot = read(row)?;
+            }
+        }
+    } else {
+        return Err("MysekaiFixtureFilteredData must be a map or legacy row array".into());
+    }
+    Ok(filters)
+}
+
+#[cfg(test)]
+mod stored_filter_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn stored_targets_keep_their_identity_and_newer_fields_unchanged() {
+        let document = json!({"MysekaiFixtureFilteredData": {
+            "2": {"word": "site"},
+            "1": {"word": "chair", "tagIds": [4, 8], "seriesSortOrderBy": 1,
+                  "UnCheckedCharacterIds": [26], "VirtualSingerOutSide": true},
+            "3": {"word": "limited", "futureField": [1, 2]},
+            "0": {"isNotCreatedFilter": true}
+        }, "SoundSettings": {"volume": 75}});
+        let before = document.clone();
+        let filters = stored_fixture_filters(&document).unwrap();
+        assert!(filters[0].is_not_created_filter);
+        assert_eq!(filters[1].word, "chair");
+        assert_eq!(filters[1].tag_ids, [4, 8]);
+        assert_eq!(filters[1].series_sort_order, SortOrder::Desc);
+        assert_eq!(filters[2].word, "site");
+        assert_eq!(document, before);
+    }
+
+    #[test]
+    fn missing_and_old_nullable_fields_use_constructor_defaults() {
+        for section in [
+            json!(null),
+            json!({}),
+            json!({"1": {"word": null, "tagIds": null}}),
+        ] {
+            assert_eq!(
+                stored_fixture_filters(&json!({"MysekaiFixtureFilteredData": section})).unwrap(),
+                [
+                    FixtureFilter::default(),
+                    FixtureFilter::default(),
+                    FixtureFilter::default()
+                ]
+            );
+        }
+        assert_eq!(
+            stored_fixture_filters(&json!({})).unwrap()[1],
+            FixtureFilter::default()
+        );
+    }
+
+    #[test]
+    fn legacy_arrays_wrappers_and_named_targets_still_read() {
+        let rows = json!([{"searchTargetType": 2, "word": "site"},
+                          {"searchTargetType": 1, "word": "inventory"}]);
+        for section in [
+            rows.clone(),
+            json!({"entries": rows}),
+            json!({"Inventory": {"word": "inventory"}, "SiteEdit": {"word": "site"}}),
+        ] {
+            let filters =
+                stored_fixture_filters(&json!({"MysekaiFixtureFilteredData": section})).unwrap();
+            assert_eq!(filters[1].word, "inventory");
+            assert_eq!(filters[2].word, "site");
+        }
+    }
+
+    #[test]
+    fn malformed_existing_filter_is_refused_without_editing_storage() {
+        for section in [
+            json!(false),
+            json!({"1": {"tagIds": ["bad"]}}),
+            json!({"1": {"seriesSortOrderBy": 7}}),
+        ] {
+            let document = json!({"MysekaiFixtureFilteredData": section});
+            let before = document.clone();
+            assert!(stored_fixture_filters(&document).is_err());
+            assert_eq!(document, before);
+        }
+    }
 }
 
 fn id_of(row: &Value) -> Result<i32, String> {
@@ -497,13 +664,12 @@ fn keyed_rows(value: &Value, table: &str, icon: &str) -> Result<HashMap<i32, Mas
         .collect()
 }
 
-/// Reads the four row masters and the stored filters once they load; the
+/// Reads the four row masters once they load; the
 /// names join the shared text atlas.
 pub fn parse_glyphs(
     server: Res<AssetServer>,
     jsons: Res<Assets<JsonAsset>>,
     mut glyphs: ResMut<InventoryGlyphs>,
-    mut filters: ResMut<catalog::Filters>,
 ) {
     if glyphs.texts.is_some() {
         return;
@@ -514,11 +680,6 @@ pub fn parse_glyphs(
     let mut values = Vec::with_capacity(handles.len());
     for (handle, path) in handles.iter().zip(MASTER_PATHS) {
         if let LoadState::Failed(error) = server.load_state(handle) {
-            if path == FILTER_MASTER {
-                warn!("[inventory] {path} failed to load ({error:?}): no fixture filter is stored");
-                values.push(Value::Null);
-                continue;
-            }
             error!(
                 "[inventory] {path} failed to load ({error:?}): the screen lists no rows and writes no names"
             );
@@ -544,9 +705,6 @@ pub fn parse_glyphs(
         tools: keyed_rows(&values[3], "mysekaiTools", "assetbundleName")
             .unwrap_or_else(|e| panic!("[inventory] {TOOL_MASTER}: {e}")),
     };
-    if !values[4].is_null() {
-        filters.rows = catalog::filters_from(&values[4]);
-    }
     let mut texts: Vec<String> = masters
         .fixtures
         .values()

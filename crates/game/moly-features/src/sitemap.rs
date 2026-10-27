@@ -500,6 +500,17 @@ pub struct SitemapData {
 }
 
 impl SitemapData {
+    /// Released harvest tabs in BulkHarvestTargetSettingViewModel order.
+    pub fn released_harvest_sites(&self, rank: i32) -> Vec<(i32, String)> {
+        const ORDER: [&str; 4] = ["grassland", "flower_garden", "shore", "memorial_place"];
+        let mut sites: Vec<_> = self.sites.iter().filter_map(|site| {
+            let ordinal = ORDER.iter().position(|kind| *kind == site.site_type)?;
+            self.releases.released(site.id, rank).then_some((ordinal, site.id, site.name.clone()))
+        }).collect();
+        sites.sort_by_key(|(ordinal, id, _)| (*ordinal, *id));
+        sites.into_iter().map(|(_, id, name)| (id, name)).collect()
+    }
+
     /// `sites` 下标 → 图标真值行（缺位即拒：上地图的站必须有屏层行）。
     fn spot(&self, site_i: usize) -> &IconSpot {
         let site_type = &self.sites[site_i].site_type;

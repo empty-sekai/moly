@@ -4,6 +4,7 @@
 //! 移植时跑一次。
 
 pub mod alone_action;
+pub mod bulk_harvest;
 pub mod carve;
 pub mod cloth;
 pub mod fixture;

@@ -8,6 +8,7 @@
 
 mod clock;
 mod effects;
+mod loop_particles;
 mod source;
 
 pub use source::{
@@ -806,8 +807,13 @@ pub struct TimelineAnimationBinding {
 
 #[derive(Clone, Default)]
 pub struct TimelineBindings {
+    pub loop_particles: HashMap<TimelineClipKey, loop_particles::LoopParticleBinding>,
     pub animations: HashMap<TimelineClipKey, TimelineAnimationBinding>,
     pub actors: HashMap<SourceAssetId, Entity>,
+    /// A step view's explicitly attached tool, bound by output identity.
+    pub step_objects: HashMap<SourceAssetId, Entity>,
+    /// SetReferenceValue made by a step view (e.g. the attached hammer blur).
+    pub step_effects: HashMap<TimelineClipKey, StepEffectBinding>,
     /// SE clips that play silent because their SE has no route or its audio
     /// failed to load. Only the player owner fills this (see
     /// `silence_unavailable_sounds`); every other owner leaves it empty and
@@ -833,6 +839,34 @@ pub struct TimelineBindings {
     /// The particle calls of Signal markers that are not prepared, each with
     /// the reason: named coverage gaps that send nothing.
     pub refused_signals: Vec<String>,
+}
+
+#[derive(Component)]
+pub(crate) struct StepAttachment {
+    pub view: Entity,
+    pub actor: Entity,
+}
+
+#[derive(Clone)]
+pub struct StepEffectBinding {
+    pub owner: Entity,
+    pub object: Entity,
+    pub package: String,
+}
+
+pub(crate) fn valid_step_attachment(
+    world: &World,
+    request: &StartTimeline,
+    object: Entity,
+) -> bool {
+    request.owner.kind == TimelineOwnerKind::StepItem
+        && world
+            .get::<StepAttachment>(object)
+            .is_some_and(|attachment| {
+                attachment.view == request.fixture
+                    && attachment.actor == request.owner.activity.actor
+            })
+        && descendant_of(world, object, request.owner.activity.actor)
 }
 
 /// A `SignalReceiver` bound to a track: its name and its reaction table.
@@ -918,6 +952,7 @@ pub enum TimelineTimeoutBudget {
 #[derive(Clone, Copy, Debug)]
 pub enum TimelineCompletionReason {
     AxisEnd,
+    SectionStop,
     NpcBudgetThenAxisEnd,
     PlayerBudget,
 }
@@ -1003,6 +1038,7 @@ struct Session {
     sound_entities: Vec<Entity>,
     emoticons: HashMap<TimelineClipKey, crate::emoticon::timeline::EmoteLease>,
     effects: effects::OwnedEffects,
+    loop_particles: loop_particles::OwnedLoopParticles,
     coverage: Vec<TimelineCoverageGap>,
     cancel: bool,
     release: bool,
@@ -1039,6 +1075,18 @@ pub struct FixtureActivityTimelines {
 }
 
 impl FixtureActivityTimelines {
+    pub(crate) fn has_npc_fixture_actor(&self, actor: Entity) -> bool {
+        self.sessions.values().any(|session| {
+            session
+                .request
+                .bindings
+                .actors
+                .values()
+                .any(|e| *e == actor)
+                && matches!(session.request.owner.kind, TimelineOwnerKind::Npc)
+        })
+    }
+
     pub fn has_no_loop(&self, token: TimelineToken) -> bool {
         self.sessions.get(&token).is_some_and(|session| {
             !session
@@ -1074,6 +1122,7 @@ impl FixtureActivityTimelines {
                 sound_entities: Vec::new(),
                 emoticons: HashMap::new(),
                 effects: Default::default(),
+                loop_particles: Default::default(),
                 coverage: Vec::new(),
                 cancel: false,
                 release: false,
@@ -1096,11 +1145,7 @@ impl FixtureActivityTimelines {
     pub fn coverage(&self, token: TimelineToken) -> Option<&[TimelineCoverageGap]> {
         self.sessions.get(&token).map(|s| s.coverage.as_slice())
     }
-    pub fn set_timeout_budget(
-        &mut self,
-        token: TimelineToken,
-        advance: Option<bool>,
-    ) -> bool {
+    pub fn set_timeout_budget(&mut self, token: TimelineToken, advance: Option<bool>) -> bool {
         let Some(session) = self.sessions.get_mut(&token) else {
             return false;
         };
@@ -1122,10 +1167,7 @@ impl FixtureActivityTimelines {
             .get(&token)
             .map(|session| session.clock.sampled_time)
     }
-    pub fn completion_reason(
-        &self,
-        token: TimelineToken,
-    ) -> Option<TimelineCompletionReason> {
+    pub fn completion_reason(&self, token: TimelineToken) -> Option<TimelineCompletionReason> {
         self.sessions
             .get(&token)
             .and_then(|session| session.completion)
@@ -1185,7 +1227,59 @@ impl FixtureActivityTimelines {
         let Some(s) = self.sessions.get_mut(&token) else {
             return false;
         };
-        if s.request.owner.kind != TimelineOwnerKind::SceneDirector
+        if !matches!(
+            s.request.owner.kind,
+            TimelineOwnerKind::SceneDirector | TimelineOwnerKind::StepItem
+        ) || !matches!(
+            s.status,
+            TimelineStatus::Preparing | TimelineStatus::Playing { .. }
+        ) {
+            return false;
+        }
+        s.clock.set_paused(paused);
+        true
+    }
+    pub fn is_paused(&self, token: TimelineToken) -> bool {
+        self.sessions
+            .get(&token)
+            .is_some_and(|s| s.clock.is_paused())
+    }
+
+    pub fn first_signal_fired(&self, token: TimelineToken) -> bool {
+        self.sessions.get(&token).is_some_and(|session| {
+            session
+                .request
+                .definition
+                .tracks
+                .iter()
+                .filter(|track| track.class == "SignalTrack")
+                .flat_map(|track| &track.markers)
+                .find(|marker| marker.signal.is_some())
+                .is_some_and(|marker| session.signals_fired.contains(&marker.asset))
+        })
+    }
+
+    /// Root playable speed of a step-item director. Wall-time budgets stay real.
+    pub fn set_speed(&mut self, token: TimelineToken, speed: f64) -> bool {
+        if !speed.is_finite() || speed < 0.0 {
+            return false;
+        }
+        let Some(s) = self.sessions.get_mut(&token) else {
+            return false;
+        };
+        if s.request.owner.kind != TimelineOwnerKind::StepItem {
+            return false;
+        }
+        s.clock.set_speed(speed);
+        true
+    }
+
+    /// First matching source output/clip wins. An absent target stops the view.
+    pub fn jump_to_section(&mut self, token: TimelineToken, name: &str) -> bool {
+        let Some(s) = self.sessions.get_mut(&token) else {
+            return false;
+        };
+        if s.request.owner.kind != TimelineOwnerKind::StepItem
             || !matches!(
                 s.status,
                 TimelineStatus::Preparing | TimelineStatus::Playing { .. }
@@ -1193,8 +1287,23 @@ impl FixtureActivityTimelines {
         {
             return false;
         }
-        s.clock.set_paused(paused);
-        true
+        let target = s.request.definition.tracks.iter()
+            .filter(|track| track.class == "SectionControlTrack")
+            .flat_map(|track| &track.clips)
+            .find(|clip| matches!(&clip.payload, TimelinePayload::SectionJumpTarget { name: target } if target == name))
+            .map(|clip| clip.start);
+        match target {
+            Some(time) => {
+                s.clock.jump_to(time);
+                true
+            }
+            None => {
+                s.status = TimelineStatus::Failed(invalid(format!(
+                    "section jump target {name:?} is absent"
+                )));
+                false
+            }
+        }
     }
     /// A conversation can own a new Director or join an existing NPC activity.
     /// Release the loop of each admitted cast/fixture owner and retain the exact
@@ -1303,10 +1412,7 @@ fn routing_absent(world: &World) -> TimelineFailure {
 /// timeline plays on without it. Returns `package/cue: reason` for each clip
 /// newly marked. Decides nothing while the routing table is absent; the
 /// strict preparation reports that wait.
-pub fn silence_unavailable_sounds(
-    world: &World,
-    request: &mut StartTimeline,
-) -> Vec<String> {
+pub fn silence_unavailable_sounds(world: &World, request: &mut StartTimeline) -> Vec<String> {
     let Some(routing) = world.get_resource::<Routing>() else {
         return Vec::new();
     };
@@ -1374,6 +1480,7 @@ pub fn prepare_source_sounds(
                 if request.bindings.silent_sounds.contains(&clip.key) {
                     continue;
                 }
+                sound_position(world,request,&clip.key)?;
                 let paths = routing.cue_asset_paths(package, cue).map_err(|reason| {
                     invalid(format!("missing source SE {package}/{cue}: {reason}"))
                 })?;
@@ -1397,7 +1504,8 @@ pub fn prepare_source_effects(
     world: &mut World,
     request: &mut StartTimeline,
 ) -> Result<(), TimelineFailure> {
-    effects::prepare(world, request).map_err(source_effect_failure)
+    effects::prepare(world, request).map_err(source_effect_failure)?;
+    loop_particles::prepare(world, request)
 }
 
 /// The particle calls of the director's Signal markers. A `SignalEmitter`
@@ -1566,20 +1674,14 @@ fn source_effect_failure(mut failure: TimelineFailure) -> TimelineFailure {
     failure
 }
 
-pub fn validate_start(
-    world: &World,
-    request: &StartTimeline,
-) -> Result<(), TimelineFailure> {
+pub fn validate_start(world: &World, request: &StartTimeline) -> Result<(), TimelineFailure> {
     validate(world, request, None, true)
 }
 
 /// Check cached resource bindings without claiming an animator. An already
 /// running timeline is not a reason to reload its actor GLTF every frame;
 /// actual admission still goes through `validate_start` and its lease check.
-pub fn validate_prepared(
-    world: &World,
-    request: &StartTimeline,
-) -> Result<(), TimelineFailure> {
+pub fn validate_prepared(world: &World, request: &StartTimeline) -> Result<(), TimelineFailure> {
     validate(world, request, None, false)
 }
 
@@ -1667,15 +1769,21 @@ fn validate(
                     {
                         return Err(invalid("animator already belongs to another timeline"));
                     }
-                    let expected_root =
-                        if let Some(actor) = request.bindings.actors.get(&track.identity) {
-                            validate_track_actor(world, request, &track.identity, *actor)?;
-                            *actor
-                        } else if track.name == "CharacterAnimator" {
-                            request.owner.activity.actor
-                        } else {
-                            request.fixture
-                        };
+                    let expected_root = if let Some(object) =
+                        request.bindings.step_objects.get(&track.identity)
+                    {
+                        if !valid_step_attachment(world, request, *object) {
+                            return Err(invalid("step output is not the view's attached object"));
+                        }
+                        *object
+                    } else if let Some(actor) = request.bindings.actors.get(&track.identity) {
+                        validate_track_actor(world, request, &track.identity, *actor)?;
+                        *actor
+                    } else if track.name == "CharacterAnimator" {
+                        request.owner.activity.actor
+                    } else {
+                        request.fixture
+                    };
                     if !descendant_of(world, binding.animator, expected_root) {
                         return Err(invalid(
                             "track is not bound to its actual actor/fixture instance",
@@ -1852,8 +1960,17 @@ fn validate(
                     }
                 }
                 TimelinePayload::LoopFlag { .. } => loop_count += 1,
+                TimelinePayload::SectionPause
+                | TimelinePayload::SectionStop
+                | TimelinePayload::SectionJumpTarget { .. } => {
+                    if request.owner.kind != TimelineOwnerKind::StepItem
+                        || track.class != "SectionControlTrack"
+                    {
+                        return Err(invalid("section control needs its step-item receiver"));
+                    }
+                }
                 TimelinePayload::NoPresetChange => {}
-                TimelinePayload::Control(_) => {}
+                TimelinePayload::Control(_) | TimelinePayload::LoopParticle { .. } => {}
                 TimelinePayload::CutScene(payload) => {
                     if request.owner.kind != TimelineOwnerKind::CutScene {
                         return Err(invalid(format!(
@@ -1883,7 +2000,8 @@ fn validate(
             "bindings contain animation/sound clips outside selected source tracks",
         ));
     }
-    effects::validate(world, request, own, require_available).map_err(source_effect_failure)
+    effects::validate(world, request, own, require_available).map_err(source_effect_failure)?;
+    loop_particles::validate(world, request, own, require_available)
 }
 
 fn descendant_of(world: &World, mut entity: Entity, ancestor: Entity) -> bool {
@@ -2142,6 +2260,7 @@ fn initialize(
     }
     effects::claim(world, token, &session.request, &mut session.effects)
         .map_err(source_effect_failure)?;
+    loop_particles::claim(world, token, &session.request, &mut session.loop_particles);
     for track in &session.request.definition.tracks {
         for clip in &track.clips {
             let (TimelinePayload::Control(_), Some(binding)) = (
@@ -2442,6 +2561,14 @@ fn tick(
         sampled_time,
     )
     .map_err(source_effect_failure)?;
+    loop_particles::sample(
+        world,
+        token,
+        &session.request,
+        &mut session.loop_particles,
+        sampled_time,
+        session.clock.is_paused(),
+    )?;
     apply_events(world, session, sampled_time)?;
     process_character_tracks(world, session, sampled_time)?;
     emit_signals(world, session, sampled_time)?;
@@ -2462,8 +2589,13 @@ fn tick(
         }
     });
     let player_timeout = budget_expired && session.request.owner.kind == TimelineOwnerKind::Player;
-    session.status = if time >= session.request.definition.duration || player_timeout {
-        session.completion = Some(if player_timeout {
+    session.status = if time >= session.request.definition.duration
+        || player_timeout
+        || session.clock.section_stopped
+    {
+        session.completion = Some(if session.clock.section_stopped {
+            TimelineCompletionReason::SectionStop
+        } else if player_timeout {
             TimelineCompletionReason::PlayerBudget
         } else if session.timeout_requested {
             TimelineCompletionReason::NpcBudgetThenAxisEnd
@@ -2630,8 +2762,18 @@ fn apply_events(
                 // The clip starts its cue on the SE player: the cue's sequence
                 // type picks the tracks, each waits for its own delay; the
                 // playback despawns itself when it has played out.
-                let entity = crate::audio::start_timeline_cue(world, package, cue, handles)
-                    .map_err(invalid)?;
+                let position = sound_position(world, &session.request, key)?;
+                let entity =
+                    crate::audio::start_timeline_cue_at(world, package, cue, handles, position)
+                        .map_err(invalid)?;
+                if let Some(position) = position {
+                    crate::site_presentation::spatial_sound(
+                        world,
+                        entity,
+                        session.request.fixture,
+                        position,
+                    );
+                }
                 session.sound_entities.push(entity);
             }
             _ => unreachable!(),
@@ -3062,6 +3204,7 @@ fn update_facial_gates(world: &mut World, token: TimelineToken, session: &mut Se
 }
 
 fn cleanup(world: &mut World, token: TimelineToken, session: &mut Session) {
+    loop_particles::release(world, token, &session.request, &mut session.loop_particles);
     effects::release(world, token, &mut session.effects);
     for (_, lease) in session.emoticons.drain() {
         crate::emoticon::timeline::hide(world, lease, true);
@@ -3168,6 +3311,7 @@ mod handoff_regressions {
             },
             fixture: world.spawn_empty().id(),
             definition: Arc::new(TimelineDefinition {
+                director_transforms: None,
                 package: "fixture".into(),
                 prefab: "fixture".into(),
                 fixture_view: None,
@@ -3305,6 +3449,7 @@ mod handoff_regressions {
             },
             fixture,
             definition: Arc::new(TimelineDefinition {
+                director_transforms: None,
                 package: "fixture".into(),
                 prefab: "fixture".into(),
                 fixture_view: None,
@@ -3390,6 +3535,7 @@ mod handoff_regressions {
             },
             fixture,
             definition: Arc::new(TimelineDefinition {
+                director_transforms: None,
                 package: "horse2".into(),
                 prefab: "horse2".into(),
                 fixture_view: None,
@@ -3471,4 +3617,66 @@ mod handoff_regressions {
             AnimationNodeType::Blend
         ));
     }
+}
+
+fn sound_position(
+    world: &World,
+    request: &StartTimeline,
+    key: &TimelineClipKey,
+) -> Result<Option<Vec3>, TimelineFailure> {
+    // CutSceneView parents its Director to CutSceneRoot; this is the source
+    // branch that deliberately plays a non-positional SE/one-shot.
+    if request.owner.kind == TimelineOwnerKind::CutScene {
+        return Ok(None);
+    }
+    let definition = request
+        .companions
+        .iter()
+        .find(|c| c.track == key.track)
+        .map_or(request.definition.as_ref(), |c| c.source.as_ref());
+    let director = definition
+        .director
+        .path_id
+        .parse::<i64>()
+        .map_err(|_| invalid("Director component id invalid"))?;
+    let mut stack = vec![request.fixture];
+    let mut found = Vec::new();
+    while let Some(entity) = stack.pop() {
+        if world
+            .get::<moly_assets::source_navigation::SourceObjectIdentity>(entity)
+            .is_some_and(|id| {
+                id.file == definition.director.file && id.components.contains(&director)
+            })
+        {
+            found.push(entity);
+        }
+        if let Some(children) = world.get::<Children>(entity) {
+            stack.extend(children.iter());
+        }
+    }
+    match found.as_slice() {
+        [entity] => {
+            return crate::fixture_scene_inputs::live_matrix(world, *entity)
+                .map(|m| Some(m.transform_point3(Vec3::ZERO)))
+                .ok_or_else(|| invalid("live Director transform is absent"))
+        }
+        [] => {}
+        _ => return Err(invalid("multiple live instances match this Director")),
+    }
+    // A fixture timeline is instantiated as a child of FixtureView, preserving
+    // its prefab-local transform chain (SetUpView's isWorldSpace=false).
+    let view=world.get::<crate::fixture::FixtureViewInstance>(request.fixture).ok_or_else(||invalid("spatial Director has no live source view"))?.0;
+    let mut matrix=crate::fixture_scene_inputs::live_matrix(world,view).ok_or_else(||invalid("spatial FixtureView transform is absent"))?;
+    let chain=definition.director_transforms.as_ref().ok_or_else(||invalid("source Director transform chain is not exported"))?;
+    for local in chain {
+        let [x, y, z] = local.position;
+        let [qx, qy, qz, qw] = local.rotation;
+        let transform = Transform {
+            translation: Vec3::new(-x, y, z),
+            rotation: Quat::from_xyzw(qx, -qy, -qz, qw),
+            scale: Vec3::from(local.scale),
+        };
+        matrix = matrix * transform.to_matrix();
+    }
+    Ok(Some(matrix.transform_point3(Vec3::ZERO)))
 }

@@ -19,8 +19,8 @@ use crate::hub::{CallReceived, Sessions};
 use crate::masters::{Masters, Tables};
 use crate::model::{ResponseKind, ServerModel};
 use crate::users::Users;
-use moly_masters::load::MasterTables;
 use crate::{AdminClosed, ListenAddress};
+use moly_masters::load::MasterTables;
 
 /// One call's answer.
 #[derive(Clone)]
@@ -199,8 +199,19 @@ fn run(call: Call, model: &mut ServerModel, masters: &Tables<'_>) -> Result<Repl
             model.join(masters);
             Ok(Reply::Joined)
         }
-        Call::Harvest(request) => Ok(Reply::Harvest(model.harvest(&request, masters))),
-        Call::Gather => Ok(Reply::Gather(model.gather(masters))),
+        Call::Harvest(request) => Ok(Reply::Harvest(model.harvest(&request, masters)?)),
+        Call::Gather(request) => Ok(Reply::Gather(model.gather(&request, masters)?)),
+        Call::HarvestMap { mysekai_site_id } => {
+            model.harvest_map(mysekai_site_id, masters)?;
+            Ok(Reply::HarvestMap)
+        }
+        Call::BulkHarvest(request) => {
+            Ok(Reply::BulkHarvest(model.bulk_harvest(&request, masters)?))
+        }
+        Call::TreasureBoxSpawn(request) => {
+            model.harvest_spawn_box(&request, masters)?;
+            Ok(Reply::TreasureBoxSpawn)
+        }
         Call::GateReserve(request) => {
             let mut command = Map::new();
             command.insert("type".into(), json!("server.edit"));
@@ -233,9 +244,10 @@ fn run(call: Call, model: &mut ServerModel, masters: &Tables<'_>) -> Result<Repl
             model
                 .edit(&command, masters)
                 .map_err(|reason| Refusal::new("gate_refused", reason))?;
-            let reply = model.gate_replies.pop().ok_or_else(|| {
-                Refusal::new("gate_refused", "the gate change recorded no reply")
-            })?;
+            let reply = model
+                .gate_replies
+                .pop()
+                .ok_or_else(|| Refusal::new("gate_refused", "the gate change recorded no reply"))?;
             Ok(Reply::Gate(reply))
         }
         Call::BirthdayPartyDelivery(request) => {
@@ -251,23 +263,20 @@ fn run(call: Call, model: &mut ServerModel, masters: &Tables<'_>) -> Result<Repl
                         format!("PutUserMysekaiBirthdayPartyDeliveryApi: {reason}"),
                     )
                 })?;
-            model.delivery_reply(
-                ResponseKind::BirthdayPartyDelivery,
-                &changed,
-                masters,
-            );
+            model.delivery_reply(ResponseKind::BirthdayPartyDelivery, &changed, masters);
             Ok(Reply::Delivery(response))
         }
         Call::BirthdayPartyGather(request) => {
             let contents: &[GatherContent] = &request.contents;
-            let (response, changed) = model
-                .birthday_party_gather(contents, masters)
-                .map_err(|reason| {
-                    Refusal::new(
-                        "gather_refused",
-                        format!("PutUserMysekaiBirthdayPartyGatherApi: {reason}"),
-                    )
-                })?;
+            let (response, changed) =
+                model
+                    .birthday_party_gather(contents, masters)
+                    .map_err(|reason| {
+                        Refusal::new(
+                            "gather_refused",
+                            format!("PutUserMysekaiBirthdayPartyGatherApi: {reason}"),
+                        )
+                    })?;
             model.delivery_reply(ResponseKind::BirthdayPartyGather, &changed, masters);
             Ok(Reply::GatherDelivery(response))
         }
@@ -289,14 +298,15 @@ fn run(call: Call, model: &mut ServerModel, masters: &Tables<'_>) -> Result<Repl
             Ok(Reply::SuiteUser(reply))
         }
         Call::CharacterTalkRead(request) => {
-            let (resources, changed) = model
-                .talk_read(request.mysekai_character_talk_id)
-                .map_err(|reason| {
-                    Refusal::new(
-                        "talk_read_refused",
-                        format!("PutUserMysekaiCharacterTalkReadApi: {reason}"),
-                    )
-                })?;
+            let (resources, changed) =
+                model
+                    .talk_read(request.mysekai_character_talk_id)
+                    .map_err(|reason| {
+                        Refusal::new(
+                            "talk_read_refused",
+                            format!("PutUserMysekaiCharacterTalkReadApi: {reason}"),
+                        )
+                    })?;
             model.respond(ResponseKind::CharacterTalkRead, false, &changed, masters);
             let updated = model
                 .responses
@@ -339,40 +349,40 @@ fn run(call: Call, model: &mut ServerModel, masters: &Tables<'_>) -> Result<Repl
                 .map_err(|reason| {
                     Refusal::new(
                         "release_refused",
-                        format!(
-                            "{}: {reason}",
-                            crate::model::phenomena::API
-                        ),
+                        format!("{}: {reason}", crate::model::phenomena::API),
                     )
                 })?;
             Ok(Reply::Release)
         }
         Call::InventoryRecycle(request) => {
-            let reply = model.inventory_disassemble(request, masters).map_err(|reason| {
-                Refusal::new(
-                    "recycle_refused",
-                    format!("{}: {reason}", request.api_name()),
-                )
-            })?;
+            let reply = model
+                .inventory_disassemble(request, masters)
+                .map_err(|reason| {
+                    Refusal::new(
+                        "recycle_refused",
+                        format!("{}: {reason}", request.api_name()),
+                    )
+                })?;
             Ok(Reply::InventoryRecycle(reply))
         }
         Call::BoostStaminaRecovery(request) => {
-            let reply = model.boost_stamina_recovery(&request, masters).map_err(|refusal| {
-                Refusal::new(
-                    format!("stamina_recovery_{}", refusal.code),
-                    format!("PostUserMysekaiBoostStaminaRecoveryApi: {}", refusal.reason),
-                )
-            })?;
+            let reply = model
+                .boost_stamina_recovery(&request, masters)
+                .map_err(|refusal| {
+                    Refusal::new(
+                        format!("stamina_recovery_{}", refusal.code),
+                        format!("PostUserMysekaiBoostStaminaRecoveryApi: {}", refusal.reason),
+                    )
+                })?;
             Ok(Reply::BoostStaminaRecovery(reply))
         }
-        Call::Convert { slot_id, post } => model
-            .convert_reply(slot_id, post, masters)
-            .map_err(|reason| {
-                Refusal::new(
-                    "convert_refused",
-                    format!("{}: {reason}", post.api_name()),
-                )
-            }),
+        Call::Convert { slot_id, post } => {
+            model
+                .convert_reply(slot_id, post, masters)
+                .map_err(|reason| {
+                    Refusal::new("convert_refused", format!("{}: {reason}", post.api_name()))
+                })
+        }
         Call::NormalMissionReward(request) => model
             .normal_mission_reward(&request.mysekai_normal_mission_ids, masters)
             .map(Reply::NormalMissionReward)
@@ -386,7 +396,6 @@ fn run(call: Call, model: &mut ServerModel, masters: &Tables<'_>) -> Result<Repl
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,10 +404,11 @@ mod tests {
     use crate::model::{Origin, SECTION_STAMINA};
     use moly_protocol::api::{
         BirthdayPartyDeliveryRequest, BirthdayPartyGatherRequest, CharacterTalkReadRequest,
-        GateChangeRequest, GateReserveRequest, HarvestRequest, HomeActionPost, MusicPlayEjectRequest,
-        MusicPlayReply, MusicPlaySetRequest, MysekaiSiteHarvestFixtureTarget, MysekaiStaminaUsed,
-        MysekaiToolUsed, SystemFixtureActionRequest, UserMysekaiCraftRequest,
-        UserMysekaiHousingEditLayoutRequest, UserMysekaiHousingSketchRequest,
+        GateChangeRequest, GateReserveRequest, HarvestRequest, HomeActionPost,
+        MusicPlayEjectRequest, MusicPlayReply, MusicPlaySetRequest,
+        MysekaiSiteHarvestFixtureTarget, MysekaiStaminaUsed, MysekaiToolUsed,
+        SystemFixtureActionRequest, UserMysekaiCraftRequest, UserMysekaiHousingEditLayoutRequest,
+        UserMysekaiHousingSketchRequest,
     };
     use moly_protocol::gate::GateReply;
     use moly_protocol::rows::{
@@ -472,13 +482,16 @@ mod tests {
         });
         let call = |consumes: Vec<(i32, i32)>| {
             Call::BoostStaminaRecovery(moly_protocol::api::UserMysekaiStaminaRequest {
-                mysekai_boost_stamina_recovery_type: moly_protocol::api::BoostStaminaRecoveryType::Boost,
+                mysekai_boost_stamina_recovery_type:
+                    moly_protocol::api::BoostStaminaRecoveryType::Boost,
                 user_mysekai_stamina_recovery_consume_resources: consumes
                     .into_iter()
-                    .map(|(resource_id, quantity)| moly_protocol::api::StaminaRecoveryConsume {
-                        resource_id,
-                        quantity,
-                    })
+                    .map(
+                        |(resource_id, quantity)| moly_protocol::api::StaminaRecoveryConsume {
+                            resource_id,
+                            quantity,
+                        },
+                    )
                     .collect(),
             })
         };
@@ -588,114 +601,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_harvest_reply_is_the_sent_rests_unless_an_edit_is_pending() {
-        let masters = fixture_masters();
-        let shared = MasterTables::fixture();
-        let masters = Tables::new(&masters, Some(&shared));
-        let mut model = joined_model(&masters);
-        let sent = Stamina {
-            normal: 7,
-            enhance: 2,
-            boost: 1,
-        };
-        let answered = answer_call(
-            Call::Harvest(harvest_request([7, 2, 1], None)),
-            &mut model,
-            &masters,
-        );
-        assert_eq!(ok(answered.clone()), Reply::Harvest(sent));
-        assert_eq!(
-            answered.sections.expect("the stamina is carried").stamina,
-            Some(sent)
-        );
-        assert_eq!(model.doc.stamina, Some(sent));
-
-        // A pending stamina edit is the reply, not the sent rests.
-        let edited = Stamina {
-            normal: 500,
-            enhance: 0,
-            boost: 0,
-        };
-        model.doc.stamina = Some(edited);
-        model.mark_pending(SECTION_STAMINA);
-        let answered = answer_call(
-            Call::Harvest(harvest_request([9, 9, 9], None)),
-            &mut model,
-            &masters,
-        );
-        assert_eq!(ok(answered), Reply::Harvest(edited));
-    }
-
-    #[test]
-    fn the_harvest_tool_use_is_one_response_with_stamina_and_tools() {
-        let mut masters = fixture_masters();
-        masters.tools = Some(vec![
-            crate::model::tools::ToolMaster {
-                id: 7,
-                tool_type: "pickaxe".to_owned(),
-                level: 1,
-                max_durability: 10,
-            },
-            crate::model::tools::ToolMaster {
-                id: 8,
-                tool_type: "axe".to_owned(),
-                level: 1,
-                max_durability: 10,
-            },
-        ]);
-        let shared = MasterTables::fixture();
-        let masters = Tables::new(&masters, Some(&shared));
-        let mut model = joined_model(&masters);
-        let sent = Stamina {
-            normal: 7,
-            enhance: 2,
-            boost: 1,
-        };
-        let answered = answer_call(
-            Call::Harvest(harvest_request([7, 2, 1], Some((7, 3, 7)))),
-            &mut model,
-            &masters,
-        );
-        assert_eq!(ok(answered.clone()), Reply::Harvest(sent));
-        let sections = answered.sections.expect("the harvest response is carried");
-        assert_eq!(sections.stamina, Some(sent));
-        assert_eq!(
-            sections.tools,
-            Some(vec![
-                UserMysekaiTool {
-                    mysekai_tool_id: 7,
-                    quantity: 1,
-                    durability: 7,
-                    last_obtained_at: model.doc.tools.as_ref().expect("seated")[0]
-                        .last_obtained_at,
-                },
-                UserMysekaiTool {
-                    mysekai_tool_id: 8,
-                    quantity: 1,
-                    durability: 10,
-                    last_obtained_at: model.doc.tools.as_ref().expect("seated")[1]
-                        .last_obtained_at,
-                },
-            ])
-        );
-        assert!(model.responses.is_empty(), "one response per harvest call");
-        assert_eq!(model.doc.tools.as_ref().expect("seated")[0].durability, 7);
-    }
-
-    #[test]
-    fn the_gather_reply_carries_the_pools() {
-        let masters = fixture_masters();
-        let shared = MasterTables::fixture();
-        let masters = Tables::new(&masters, Some(&shared));
-        let mut model = joined_model(&masters);
-        let answered = answer_call(Call::Gather, &mut model, &masters);
-        assert_eq!(ok(answered.clone()), Reply::Gather(model.doc.stamina));
-        assert_eq!(
-            answered.sections.expect("the stamina is carried").stamina,
-            model.doc.stamina
-        );
-    }
+    // Harvest/gather settlement is covered in model::harvest::tests with
+    // authoritative fixture/drop rows and exact pool/tool debits.
 
     #[test]
     fn the_gate_reserve_and_change_answer_with_the_gate_rows() {
@@ -923,7 +830,10 @@ mod tests {
                     .updated
                     .user_mysekai_fixtures
                     .expect("the fixtures are carried");
-                assert_eq!(rows[0].quantity, 3);
+                let crafted = rows.iter().find(|row| {
+                    row.mysekai_fixture_id == 4 && row.texture_id == BASE_TEXTURE_ID
+                }).expect("the crafted fixture is carried");
+                assert_eq!(crafted.quantity, 3);
             }
             other => panic!("not the craft's reply: {other:?}"),
         }
@@ -980,7 +890,10 @@ mod tests {
             Reply::SuiteUser(reply) => {
                 assert!(!reply.success);
                 let refusal = reply.refusal.unwrap_or_default();
-                assert!(refusal.contains("is not a master blueprint term"), "{refusal}");
+                assert!(
+                    refusal.contains("is not a master blueprint term"),
+                    "{refusal}"
+                );
             }
             other => panic!("not a craft reply: {other:?}"),
         }
@@ -1021,8 +934,7 @@ mod tests {
         // Group 900: 5 x material 1 and 1 x material 21 per craft; the
         // blueprint's own rows (3 x material 1, 3 x 21, 3 x 10) are not
         // charged.
-        model.doc.delivery.mysekai_materials =
-            [(1, 100), (21, 10), (10, 10)].into_iter().collect();
+        model.doc.delivery.mysekai_materials = [(1, 100), (21, 10), (10, 10)].into_iter().collect();
         let answered = answer_call(term_craft_request(2, Some(2)), &mut model, &masters);
         match ok(answered.clone()) {
             Reply::SuiteUser(reply) => assert!(reply.success, "{reply:?}"),
@@ -1040,10 +952,12 @@ mod tests {
         let sections = answered.sections.expect("the reply carries its sections");
         assert_eq!(
             sections.blueprint_lend_craft_counts,
-            Some(vec![moly_protocol::rows::UserMysekaiBlueprintLendCraftCount {
-                mysekai_blueprint_term_id: 2,
-                craft_count: 2,
-            }]),
+            Some(vec![
+                moly_protocol::rows::UserMysekaiBlueprintLendCraftCount {
+                    mysekai_blueprint_term_id: 2,
+                    craft_count: 2,
+                }
+            ]),
             "the term counter comes back with the reply"
         );
     }
@@ -1118,8 +1032,7 @@ mod tests {
         let mut model = joined_model(&masters);
         model.doc.inventory.owned_blueprints = crate::model::inventory::OwnedBlueprints::Stated;
         model.doc.inventory.blueprints.clear();
-        model.doc.delivery.mysekai_materials =
-            [(1, 100), (21, 10), (10, 10)].into_iter().collect();
+        model.doc.delivery.mysekai_materials = [(1, 100), (21, 10), (10, 10)].into_iter().collect();
         // Blueprint 1 has no term row: not owned.
         let answered = answer_call(
             Call::Craft(UserMysekaiCraftRequest {
@@ -1195,6 +1108,7 @@ mod tests {
         let answered = answer_call(
             Call::HousingLayout(UserMysekaiHousingEditLayoutRequest {
                 mysekai_site_id: 1,
+                mysekai_phenomena_id: Some(2),
                 site_type: "home_site".to_owned(),
                 fixtures: vec![row],
             }),
@@ -1214,6 +1128,32 @@ mod tests {
             .expect("the served home-site row");
         assert_eq!(served.len(), 1);
         assert_eq!(served[0]["package"], "mysekai__fixture__mdl_test");
+        assert_eq!(model.doc.layouts[0]["mysekaiPhenomenaId"], 2);
+        let before = model.doc.layouts.clone();
+        let refused = answer_call(
+            Call::HousingLayout(UserMysekaiHousingEditLayoutRequest {
+                mysekai_site_id: 1,
+                site_type: "home_site".to_owned(),
+                fixtures: vec![],
+                mysekai_phenomena_id: Some(999),
+            }),
+            &mut model,
+            &masters,
+        );
+        assert!(matches!(ok(refused), Reply::SuiteUser(reply) if !reply.success));
+        assert_eq!(model.doc.layouts, before);
+        let reset = answer_call(
+            Call::HousingLayout(UserMysekaiHousingEditLayoutRequest {
+                mysekai_site_id: 1,
+                site_type: "home_site".to_owned(),
+                fixtures: vec![],
+                mysekai_phenomena_id: None,
+            }),
+            &mut model,
+            &masters,
+        );
+        assert!(matches!(ok(reset), Reply::SuiteUser(reply) if reply.success));
+        assert_eq!(model.doc.layouts[0]["mysekaiPhenomenaId"], 0);
     }
 
     #[test]
@@ -1459,7 +1399,11 @@ mod tests {
         match admin_over(Some("192.0.2.1:15800".parse().unwrap())) {
             Err(refusal) => {
                 assert_eq!(refusal.code, "admin_not_allowed");
-                assert!(refusal.reason.contains("192.0.2.1:15800"), "{}", refusal.reason);
+                assert!(
+                    refusal.reason.contains("192.0.2.1:15800"),
+                    "{}",
+                    refusal.reason
+                );
             }
             other => panic!("not a refusal: {other:?}"),
         }
@@ -1552,7 +1496,10 @@ mod tests {
             fixture: Some(vec![limit, raised]),
             material: Some(vec![limit, raised]),
         });
-        let mut convert = masters.convert.clone().expect("the fixture's convert tables");
+        let mut convert = masters
+            .convert
+            .clone()
+            .expect("the fixture's convert tables");
         convert.resource_boxes = Some(vec![crate::model::convert::ResourceBox {
             purpose: "mysekai_normal_mission_reward".to_owned(),
             id: 900,

@@ -13,6 +13,7 @@ pub mod material_passes;
 #[cfg(feature = "render")]
 pub mod source_shader;
 pub mod asset_source;
+pub mod browser_source;
 pub mod weather_effect;
 pub mod weather_index;
 pub mod weather_icons;

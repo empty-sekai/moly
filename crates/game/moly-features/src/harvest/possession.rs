@@ -231,6 +231,7 @@ pub fn build(
 
 /// What the capacity check reads.
 pub struct Capacity<'a> {
+    pub pending_gather_quantity: i64,
     pub stacks: &'a [Stack],
     pub catalog: &'a HarvestCatalog,
     pub limits: Option<&'a PossessionLimits>,
@@ -240,13 +241,15 @@ pub struct Capacity<'a> {
 impl Capacity<'_> {
     /// The quantities of every queued gather stack.
     fn queued(&self) -> i64 {
-        self.stacks
-            .iter()
-            .map(|stack| match stack {
-                Stack::Gather { drop, .. } => drop.quantity as i64,
-                Stack::Harvest(_) => 0,
-            })
-            .sum()
+        self.pending_gather_quantity
+            + self
+                .stacks
+                .iter()
+                .map(|stack| match stack {
+                    Stack::Gather { drop, .. } => drop.quantity as i64,
+                    Stack::Harvest(_) => 0,
+                })
+                .sum::<i64>()
     }
 
     /// `CanCollectResource(resourceId, resourceType, quantity)`.

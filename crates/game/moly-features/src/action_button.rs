@@ -663,9 +663,10 @@ pub use crate::ui_inputs::ActionTapConsumed;
 /// 图标按真源那张表里出现过的全部文件名一次装齐（每张两三 KB），
 /// 而不是只装当前接得出的两种——按钮类型是闭集，装齐以后新接一种
 /// 不需要再改装载面。
-pub fn load(mut commands: Commands, server: Res<AssetServer>) {
+pub fn load(mut commands: Commands, server: Res<AssetServer>, stage: Option<Res<crate::browser_stage::BrowserStage>>) {
     let mut art = ActionButtonArt::default();
     for button in ALL_BUTTON_TYPES {
+        if stage.is_some() && !stage_button(button) { continue; }
         if let Some(name) = button.icon_file_name() {
             art.icons
                 .entry(name)
@@ -682,6 +683,11 @@ pub fn load(mut commands: Commands, server: Res<AssetServer>) {
     commands.init_resource::<FixtureFacts>();
     commands.init_resource::<ActionTapConsumed>();
     info!("[action_button] 图标装载请求 {count} 件（真源二十五格表里的去重文件名）");
+}
+
+fn stage_button(button: ButtonType) -> bool {
+    matches!(button, ButtonType::Talk | ButtonType::GimmickFixture |
+        ButtonType::TimelineFixture | ButtonType::HouseEntry | ButtonType::GoHomeSite)
 }
 
 /// 按钮类型闭集。源枚举取值不连续，这里逐个列出而不是数值区间遍历。
@@ -986,9 +992,10 @@ pub fn advance(
     site_move: Option<Res<crate::site_move::SiteMoveActive>>,
     homes: Option<Res<crate::house::HomeFixtures>>,
     room_door: Option<Res<crate::site_move::room_door::RoomDoor>>,
-    (system_fixtures, birthday): (
+    (system_fixtures, birthday, stage): (
         Res<crate::system_fixture::SystemFixtures>,
         Option<Res<crate::cutscene::birthday::BirthdayContext>>,
+        Option<Res<crate::browser_stage::BrowserStage>>,
     ),
 ) {
     let state = &mut *state;
@@ -1146,6 +1153,11 @@ pub fn advance(
         let Some(button) = facts_of.button.or_else(party).or_else(home) else {
             continue;
         };
+        // The stage has no progression or inventory screens. It exposes
+        // only actions whose owners are installed by that application.
+        if stage.is_some() && !stage_button(button) {
+            continue;
+        }
         let package = facts.package_for_glb(&facts_of.glb)
             .expect("action button fixture has no package identity");
         let Some(has_collider) = inputs.fixture_has_collider(package) else {

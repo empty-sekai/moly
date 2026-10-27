@@ -111,6 +111,62 @@ const FPS_MAX_PITCH: f32 = 75.0;
 /// 与模型 offset（照常作用于取景点与眼位）是两个量。
 const FPS_CAMERA_HEIGHT_OFFSET: Vec3 = Vec3::new(0.0, 0.1, 0.0);
 
+const PHOTO_MIN_PITCH: f32 = -15.0;
+const PHOTO_MAX_PITCH: f32 = 75.0;
+const PHOTO_MIN_FOV: f32 = 30.0;
+const PHOTO_MAX_FOV: f32 = 60.0;
+
+#[derive(Resource)]
+struct PhotoCameraMemory { model: FieldCameraModel, near_planes: Vec<(Entity, Vec4)>, player: Entity, visibility: Visibility }
+
+fn photo_enter(world: &mut World) {
+    let player = world.query_filtered::<(Entity,&Transform,&Visibility), With<AvatarRoot>>().iter(world).next().map(|(e,t,v)|(e,*t,*v));
+    let Some((player_entity,player,visibility)) = player else { return; };
+    let Some(mut model) = world.get_resource::<FieldCameraModel>().cloned() else { return; };
+    let previous = model.clone();
+    let forward = player.rotation * Vec3::Z;
+    model.yaw = (-forward.x).atan2(forward.z).to_degrees().rem_euclid(360.0);
+    model.pitch = 0.0; model.fov = 45.0; model.offset = Vec3::ZERO;
+    model.distance = 2.0; model.min_distance = 1.0; model.max_distance = 5.0;
+    model.min_pitch = PHOTO_MIN_PITCH; model.max_pitch = PHOTO_MAX_PITCH;
+    model.look_at = player.translation + Vec3::new(forward.x,0.5,forward.z);
+    let candidate = model.look_at + view_dir(model.pitch,model.yaw) * model.distance;
+    if let Some(face) = world.get_resource::<crate::npc_objective::ObjectiveFace>() {
+        let origin=Vec3::new(player.translation.x,0.5,player.translation.z);
+        if let Some(hit)=face.navigation_ray_hit(origin,candidate) {model.distance=origin.distance(hit);}
+    }
+    let mut near_planes=Vec::new();
+    let mut cameras=world.query_filtered::<(Entity,&mut Projection),With<Camera3d>>();
+    for (entity,mut projection) in cameras.iter_mut(world) {
+        if let Projection::Perspective(p)=&mut *projection {
+            near_planes.push((entity,p.near_clip_plane)); p.near_clip_plane=Vec4::new(0.0,0.0,-1.0,-0.01); p.fov=model.fov.to_radians();
+        }
+    }
+    world.entity_mut(player_entity).insert(Visibility::Hidden);
+    world.insert_resource(PhotoCameraMemory {model:previous,near_planes,player:player_entity,visibility});
+    world.insert_resource(model);
+    world.remove_resource::<CameraTween>();
+    world.resource_mut::<FieldCameraState>().0=CameraStateType::PhotoShot;
+}
+
+fn photo_exit(world: &mut World) {
+    let Some(memory)=world.remove_resource::<PhotoCameraMemory>() else {return;};
+    if let Ok(mut player)=world.get_entity_mut(memory.player) {player.insert(memory.visibility);}
+    for (entity,near) in memory.near_planes {
+        if let Some(mut projection)=world.get_mut::<Projection>(entity) {
+            if let Projection::Perspective(p)=&mut *projection {p.near_clip_plane=near;}
+        }
+    }
+    world.insert_resource(memory.model);
+}
+
+fn photo_drag(model:&mut FieldCameraModel,delta:Vec2) {
+    let eye=model.look_at+model.offset+view_dir(model.pitch,model.yaw)*model.distance;
+    model.yaw=(model.yaw+delta.x*model.rot_sensitivity).rem_euclid(360.0);
+    model.pitch=(model.pitch-delta.y*model.rot_sensitivity).clamp(PHOTO_MIN_PITCH,PHOTO_MAX_PITCH);
+    model.look_at=eye-view_dir(model.pitch,model.yaw)*model.distance;
+}
+
 /// 转场补间时长（源字面量）：FPS 进入 0.2s；退出是 Normal 的 OnEnter——
 /// 继承支 0.5s（[`INHERIT_TWEEN_SECS`]），否则 TransferCameraSettings case
 /// 16 支 0.1s。缓动一律 OutQuad（源 EASE_BASIC = 6，DG.Tweening.Ease 枚举
@@ -146,6 +202,7 @@ pub enum CameraStateType {
     ScreenshotCapture = 18,
     ScreenshotCaptureFps = 19,
     DeliveryHonorReward = 20,
+    BulkHarvest = 21,
 }
 
 /// 场地相机当前态（真源 `FieldCamera.CurrentState` 的读写面）。真源构造
@@ -981,6 +1038,10 @@ fn ratio01(value: f32, from: f32, to: f32) -> f32 {
 /// 上限（16），逐个展开会让整个系统静默失去 `IntoSystem`（错误只在
 /// schedule 的 `.chain()` 处冒出来）。仅进入/退出支消费；拖拽/缩放的
 /// 常规路径不走它。
+/// The photo presenter owns gestures while capturing or selecting a frame.
+#[derive(Resource, Default)]
+pub struct PhotoGestureHeld(pub bool);
+
 #[derive(SystemParam)]
 pub struct FpsTransitionCtx<'w, 's> {
     dialogs: Res<'w, crate::ui_inputs::ShellDialogState>,
@@ -988,6 +1049,8 @@ pub struct FpsTransitionCtx<'w, 's> {
     layers: Res<'w, crate::ui_layers::UiLayerStack>,
     avatar: Res<'w, crate::player_state::PlayerAvatarStates>,
     talk_camera: Option<Res<'w, crate::talk_camera::TalkCamera>>,
+    photo_input: Option<Res<'w, PhotoGestureHeld>>,
+    bulk_input: Option<Res<'w, crate::field_modes::BulkHarvestActive>>,
     players: Query<'w, 's, (&'static GlobalTransform, &'static mut Visibility), With<AvatarRoot>>,
     cameras: Query<'w, 's, &'static mut Projection, With<Camera3d>>,
 }
@@ -1012,7 +1075,8 @@ pub fn apply_input(
 ) {
     // 摆放编辑面持有输入期间（真源编辑模式下手势层归编辑面），相机
     // 拖拽/缩放整表让位——编辑模式内的输入分配收口。
-    if edits.is_active() || transition.dialogs.blocks_field_input() || !transition.layers.on_field()
+    if transition.bulk_input.is_some() || transition.photo_input.as_ref().is_some_and(|held| held.0) || edits.is_active() || transition.dialogs.blocks_field_input() || (!transition.layers.on_field()
+        && !(state.0 == CameraStateType::PhotoShot && transition.layers.is_active(crate::ui_layers::MenuScreenType::MysekaiPhotoShot)))
     {
         gestures.clear();
         return;
@@ -1082,6 +1146,7 @@ pub fn apply_input(
         // Hit testing remains in host coordinates. Convert at this consumer.
         let source_drag = Vec2::new(drag.x, -drag.y);
         match state.0 {
+            CameraStateType::PhotoShot => photo_drag(model,source_drag),
             CameraStateType::Fps => fps_drag(model, &mut fps_view, source_drag.x, source_drag.y),
             // Talk deliberately has no Normal pitch/distance coupling.
             CameraStateType::Talk => {
@@ -1118,6 +1183,12 @@ pub fn apply_input(
         let ratio = config.float(crate::client_config::KEY_FIELD_CAMERA_ADD_DISTANCE_RATIO);
         let v13 = -ratio * pinch;
         match state.0 {
+            CameraStateType::PhotoShot => {
+                model.fov=(model.fov-ratio*pinch*5.0).clamp(PHOTO_MIN_FOV,PHOTO_MAX_FOV);
+                for mut projection in &mut transition.cameras {
+                    if let Projection::Perspective(p)=&mut *projection { p.fov=model.fov.to_radians(); }
+                }
+            }
             CameraStateType::Normal if playback_inspection => {
                 // Playback inspection must not replace the authored shot with
                 // an FPS transition or Normal's pitch/distance coupling.
@@ -1571,6 +1642,7 @@ fn player_view_position(world: &mut World) -> Option<Vec3> {
 /// from LearnSiteEnvironment (17); a housing site inherits after one of the
 /// five outdoor harvest site types ([`is_inherit_camera_setting`]).
 pub fn is_inherit(category: &str, prev_site_type: &str, prev: CameraStateType) -> bool {
+    if prev == CameraStateType::BulkHarvest { return false; }
     if matches!(category, "harvest" | "delivery") {
         prev != CameraStateType::LearnSiteEnvironment
     } else {
@@ -1770,6 +1842,12 @@ fn transfer_camera_settings(
             private.yaw = model.yaw;
             "case 2/3 (private yaw = live yaw)"
         }
+        S::BulkHarvest => {
+            model.gestured_distance = model.distance;
+            private.yaw = model.yaw;
+            private.pitch = model.pitch;
+            return (None, "case 21 (private distance and rotation = live)");
+        }
         S::LookAtPlayer => {
             model.distance = model.gestured_distance;
             model.yaw = private.yaw;
@@ -1954,7 +2032,8 @@ pub fn exit_state(world: &mut World, state: CameraStateType, tag: &str) {
             }
         }
         S::Fps => fps_on_exit(world),
-        S::ZoomPlayer | S::PreSiteMoveAction | S::FloorEdit | S::HarvestTone | S::None => {}
+        S::PhotoShot => photo_exit(world),
+        S::ZoomPlayer | S::PreSiteMoveAction | S::FloorEdit | S::SiteEnvironmentEdit | S::HarvestTone | S::None => {}
         other => warn!("[{tag}] {other:?}.OnExit is not run from here (its own module runs it)"),
     }
 }
@@ -1971,6 +2050,7 @@ pub fn enter_state(
     match next {
         CameraStateType::Normal => normal_on_enter(world, prev, tag),
         CameraStateType::Fps => fps_on_enter(world, prev),
+        CameraStateType::PhotoShot => photo_enter(world),
         other => {
             warn!("[{tag}] {other:?}.OnEnter is not run from here (its own module runs it); the state is set");
             world.resource_mut::<FieldCameraState>().0 = other;
@@ -2348,6 +2428,14 @@ pub fn follow_avatar(
     };
     let player = avatar.translation();
     match state.0 {
+        CameraStateType::PhotoShot => {
+            let mut eye=models.look_at+models.offset+view_dir(models.pitch,models.yaw)*models.distance;
+            eye.y=player.y+0.5;
+            if let Ok((mut camera,mut projection))=cameras.single_mut() {
+                *camera=Transform::from_translation(eye).looking_at(models.look_at,Vec3::Y);
+                if let Projection::Perspective(p)=&mut *projection {p.fov=models.fov.to_radians();}
+            }
+        }
         CameraStateType::HouseEntry | CameraStateType::ZoomPlayer => {
             // HouseEntryCameraState.OnUpdate: LookAt = the player's view
             // position, UpdatePosition, view.LookAt(LookAt + Offset). The
@@ -2375,11 +2463,11 @@ pub fn follow_avatar(
         CameraStateType::LearnSiteEnvironment => {}
         // DeliveryHonorRewardCameraState: its OnUpdate is `delivery_camera`,
         // which runs right after this system.
-        CameraStateType::DeliveryHonorReward => {}
+        CameraStateType::DeliveryHonorReward | CameraStateType::BulkHarvest => {}
         // FloorEditCameraState.OnUpdate: FieldCamera.UpdatePosition places
         // the eye from the model, then the camera looks at LookAt without
         // the offset. Its drag and pinch are `floor_edit_camera::input`.
-        CameraStateType::FloorEdit => {
+        CameraStateType::FloorEdit | CameraStateType::SiteEnvironmentEdit => {
             let pivot = models.look_at + models.offset;
             let eye = pivot + view_dir(models.pitch, models.yaw) * models.distance;
             if let Ok((mut camera, _)) = cameras.single_mut() {

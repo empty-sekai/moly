@@ -7,8 +7,16 @@ Release packages do not contain any game resources. The models, textures, animat
 ## Package contents
 
 - The game `moly-app` (`moly-app.exe` on Windows).
+- `fonts/OFL-1.1.txt`: the copyright and SIL Open Font License 1.1 for the open-source Resource Han Rounded font embedded in the game and launcher.
 - The launcher `moly-launcher` (`moly-launcher.exe` on Windows): downloads resources, handles settings, and starts the server and the game.
 - The server `moly-server` (`moly-server.exe` on Windows): stores player documents and answers requests from the game.
+
+Browser stage and game archives contain `pkg/fonts/<sha256>.ttf` and
+`pkg/fonts/OFL-1.1.txt`. Each renderer's `pkg/<renderer>/build.json` records the
+font and license paths, SHA-256 digests and byte lengths. A published browser
+release includes both files in its `integrity.json`. Keep the license alongside
+the font when copying or hosting these packages; packaging rejects missing or
+changed license files.
 
 There is also a server-only package, `moly-server-<version>-<platform>`, which contains only `moly-server`.
 

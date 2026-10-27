@@ -27,6 +27,8 @@ mod gallery;
 pub mod region;
 #[path = "fixture_layouts.rs"]
 pub mod layouts;
+#[path = "fixture_residency.rs"]
+pub mod residency;
 #[path = "road.rs"]
 pub mod road;
 
@@ -1021,6 +1023,7 @@ pub struct FixturePlacements {
     /// Opaque identities allocated by the offline layout owner. They do not
     /// change when a placed instance moves or rotates.
     instance_uids: Vec<String>,
+    phenomena_id: Option<i32>,
     site_id: u32,
     site_type: String,
     level: u32,
@@ -1118,12 +1121,24 @@ impl FixturePlacements {
         .expect("valid synthetic layout")
     }
 
+    pub fn phenomena_id(&self) -> Option<i32> { self.phenomena_id }
+
+    pub fn with_phenomena_id(mut self, id: Option<i32>) -> Result<Self, String> {
+        if id.is_some_and(|id| id <= 0) {
+            return Err("fixed phenomenon must be a positive master id".into());
+        }
+        self.phenomena_id = id;
+        Ok(self)
+    }
+
     pub fn site_id(&self) -> u32 {
         self.site_id
     }
     pub fn site_type(&self) -> &str {
         &self.site_type
     }
+    pub(crate) fn set_resident_floor(&mut self, floor: crate::site::FloorGridLayout) { self.floor = Some(floor); }
+
     pub fn floor_grid(&self) -> Option<crate::site::FloorGridLayout> {
         self.floor
     }
@@ -1529,14 +1544,17 @@ fn restore_selected_layout(
         stage.is_some(),
         exploration.is_some(),
     );
+    let imported = stage.is_some() && exploration.is_some();
+    // Imported layouts already specify their own house/gate. The local game
+    // account must not block them or replace their source fixture models.
     // The home site's layout is completed with the player's house, which
     // needs the fixture tables. An empty layout has no house.
-    if !empty_layout && selection.site_type() == "home_site" && homes.is_none() {
+    if !empty_layout && !imported && selection.site_type() == "home_site" && homes.is_none() {
         return hold.hold(&RESTORE, "the player's house fixtures are not installed", now);
     }
     // The home gate shows the model of the gate the server set at the home
     // site (`MysekaiGateModel.AssetBundleName`). An empty layout has no gate.
-    if !empty_layout && selection.site_type() == "home_site" && gate_model.is_none() {
+    if !empty_layout && !imported && selection.site_type() == "home_site" && gate_model.is_none() {
         return hold.hold(&RESTORE, "the home gate model is not installed", now);
     }
     hold.run(&RESTORE, now);
@@ -1551,6 +1569,8 @@ fn restore_selected_layout(
             floor: Some(floor),
             ..Default::default()
         })
+    } else if imported {
+        saved.restore_imported(site_id, selection.site_type(), floor.level)
     } else {
         // The home starter is the server panel's housing layout: hold, without
         // an error, until the panel document has installed it.
@@ -1573,7 +1593,7 @@ fn restore_selected_layout(
         Ok(mut layout) => {
             info!("[offline-layout] site {} ({}) level {}: restored {} fixtures; layouts are per-site",
                 site_id, selection.site_type(), floor.level, layout.total());
-            if selection.site_type() == "home_site" {
+            if !imported && selection.site_type() == "home_site" {
                 if let Some(model) = gate_model.as_deref() {
                     layout.show_gate_model(model);
                 }
@@ -1601,6 +1621,7 @@ fn restore_selected_layout(
 /// Called after the caller releases player/NPC furniture ownership. Clear only
 /// live instances and derived state, never the per-site storage or source data.
 pub fn reload_current_layout(world: &mut World) {
+    residency::invalidate_active(world);
     let roots: Vec<_> = world
         .query_filtered::<Entity, Or<(With<FixtureRoot>, With<PendingInstanceModel>)>>()
         .iter(world)
@@ -1925,6 +1946,7 @@ fn spawn_instance(
         .spawn((
             WorldAssetRoot(scene),
             FixtureRoot,
+            residency::FixtureSiteOwner { site_id: placements.site_id(), site_type: placements.site_type().to_owned() },
             FixtureVisualRoot { layout: row.layout },
             crate::fixture_colors::FixtureColorChoice {
                 package: row.package.clone(),
@@ -2011,7 +2033,7 @@ pub fn replace_instance_model(
         }
     }
     let roots: Vec<Entity> = world
-        .query::<(Entity, &FixtureInstanceSeed)>()
+        .query_filtered::<(Entity, &FixtureInstanceSeed), With<FixtureRoot>>()
         .iter(world)
         .filter(|(_, seed)| seed.uid == uid)
         .map(|(root, _)| root)
@@ -2136,12 +2158,12 @@ fn on_scene_ready(
             .entity(trigger.event().entity)
             .insert(FixtureVisualSceneReady);
     }
+    fence::bind_scene(trigger.event().entity, &children, &extras, &mut commands);
     if roots.get(trigger.event().entity).is_err() {
         return;
     }
     // Canonical geometry already has correct winding. No per-instance clone or
     // persistent strong-handle cache is needed after scene destruction.
-    fence::bind_scene(trigger.event().entity, &children, &extras, &mut commands);
     count.0 += 1;
     if count.0 == placements.total() {
         info!("家具 scene 全部展开：{}/{}", count.0, placements.total());
@@ -2274,13 +2296,12 @@ fn bind_activity_identities(
 
 fn bind_source_views(
     mut commands: Commands,
-    ready: Option<Res<FixtureScenesReady>>,
     points: Option<Res<crate::fixture_attach::AttachPoints>>,
-    roots: Query<(Entity, &FixtureInstanceSeed), Without<FixtureViewResolved>>,
+    roots: Query<(Entity, &FixtureInstanceSeed), (Without<FixtureViewResolved>, With<moly_assets::coordinates::CanonicalCoordinates>)>,
     children: Query<&Children>,
     identities: Query<&moly_assets::source_navigation::SourceObjectIdentity>,
 ) {
-    let (Some(_), Some(points)) = (ready, points) else {
+    let Some(points) = points else {
         return;
     };
     let (mut bound, mut absent, mut unmatched, mut ambiguous) = (0usize, 0usize, 0usize, 0usize);
@@ -2375,6 +2396,7 @@ impl Plugin for FixturePlugin {
     fn build(&self, app: &mut App) {
         road::install(app);
         app.init_resource::<layouts::SiteFixtureLayouts>()
+            .init_resource::<residency::FixtureSites>()
             .init_resource::<FixtureLayoutRevision>()
             .init_resource::<FixtureSpawnedCount>()
             .init_resource::<FixtureScenesReadyCount>()
@@ -2385,6 +2407,7 @@ impl Plugin for FixturePlugin {
             .add_systems(
                 Update,
                 (
+                    residency::restore_selected,
                     restore_selected_layout,
                     plan_when_ready,
                     spawn_when_ready,

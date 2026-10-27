@@ -860,6 +860,8 @@ pub fn parse(
     handle: Option<Res<ShellNamesHandle>>,
     layouts: Res<UiLayouts>,
     stage: Option<Res<crate::browser_stage::BrowserStage>>,
+    photo: Option<Res<crate::photo_shot::PhotoCharset>>,
+    bulk: Option<Res<crate::harvest::bulk::BulkHarvest>>,
     phenomena: Option<Res<crate::learn_phenomena_dialog::PhenomenonGlyphs>>,
     inventory: Option<Res<crate::inventory::InventoryGlyphs>>,
     (delivery_screen, delivery): (
@@ -909,9 +911,15 @@ pub fn parse(
         },
         None => &[],
     };
+    if photo.as_ref().is_some_and(|photo|photo.0.is_none()) {return;}
     let parsed: Value = serde_json::from_str(&asset.0).expect("site name document");
     let rows = parsed["sites"].as_array().expect("site name rows");
+    if layouts.document("BulkHarvestSettings").is_some() && bulk.as_deref().is_none_or(|bulk| bulk.masters.is_none()) { return; }
     let mut chars = layouts.text_chars();
+    if let Some(masters) = bulk.as_deref().and_then(|bulk|bulk.masters.as_ref()) {
+        for target in masters.sites.values().flatten() { chars.extend(target.name.chars()); chars.extend(target.group_name.chars()); }
+    }
+    if let Some(photo)=photo.as_deref().and_then(|photo|photo.0.as_ref()) {chars.extend(photo.iter().copied());}
     for row in rows {
         chars.extend(row["name"].as_str().expect("site name").chars());
     }
@@ -948,6 +956,7 @@ pub fn parse(
         .chain(crate::inventory::WORDINGS)
         .chain(crate::fixture_edit::WORDINGS)
         .chain(crate::stamina_recover_dialog::WORDINGS)
+        .chain(crate::harvest::bulk::WORDINGS)
     {
         if let Some(text) = layouts.wordings.get(*wording) {
             chars.extend(text.chars());
@@ -1685,10 +1694,10 @@ pub fn camera_reset_disable(
 /// One `GraphicButtonTapEffect` a button's view interaction drives: its
 /// component id, the Graphic components it fades (`_effectGraphic`, and
 /// `_effectGraphicIcon` when set) and its serialized colour fields.
-struct GraphicTapEffect {
-    id: i64,
-    graphics: Vec<i64>,
-    config: tap_rule::TapEffectConfig,
+pub(crate) struct GraphicTapEffect {
+    pub(crate) id: i64,
+    pub(crate) graphics: Vec<i64>,
+    pub(crate) config: tap_rule::TapEffectConfig,
 }
 
 /// The camera reset button's view interaction: the CustomButton's
@@ -1700,7 +1709,7 @@ struct GraphicTapEffect {
 /// (`CoverButtonTapEffect`, `HarvestButtonInteraction`; none is the camera
 /// reset button's on any root) is reported and drives nothing; a missing
 /// field is refused.
-fn tap_effect(doc: &UiPrefab, button: i64) -> Vec<GraphicTapEffect> {
+pub(crate) fn tap_effect(doc: &UiPrefab, button: i64) -> Vec<GraphicTapEffect> {
     let components = || doc.nodes.iter().flat_map(|node| node.components.iter());
     let component = |id: i64| components().find(|c| c.path_id == id)
         .unwrap_or_else(|| panic!("{}: component {id} is not in the layout", doc.prefab));

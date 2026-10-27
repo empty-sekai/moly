@@ -2,7 +2,7 @@
 // An unrecognised output flag must never silently publish to the default pkg/.
 export function parseWasmBuildArguments(args) {
   const values = new Map();
-  const names = new Set(["profile", "renderer", "out-dir"]);
+  const names = new Set(["profile", "renderer", "out-dir", "product"]);
   for (let i = 0; i < args.length; i++) {
     const match = /^--([^=]+)(?:=(.*))?$/.exec(args[i]);
     if (!match || !names.has(match[1]))
@@ -26,7 +26,11 @@ export function parseWasmBuildArguments(args) {
   const renderer = values.get("renderer") ?? "both";
   if (!["webgpu", "webgl2", "both"].includes(renderer))
     throw new Error(`Unsupported renderer: ${renderer}`);
+  const product = values.get("product") ?? "stage";
+  if (!["stage", "game"].includes(product))
+    throw new Error(`Unsupported product: ${product}`);
   return {
+    product,
     profile,
     renderer: renderer === "both" ? null : renderer,
     outDir: values.get("out-dir") ?? null,

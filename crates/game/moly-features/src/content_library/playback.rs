@@ -297,7 +297,7 @@ pub fn observe_start(
         EntryKey::Talk(TalkBackend::General, id) => player_session
             .as_ref()
             .is_some_and(|session| session.talk_id() == id),
-        EntryKey::Talk(TalkBackend::Fixture, id) => pair_session
+        EntryKey::Talk(TalkBackend::Fixture | TalkBackend::CommonSomeCharacter, id) => pair_session
             .as_ref()
             // Body admission starts playback; the same owner stays active
             // while its window is closed and the authored ending still runs.

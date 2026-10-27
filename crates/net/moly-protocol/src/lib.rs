@@ -38,12 +38,13 @@ use crate::api::{
 use crate::rows::{
     ColorfulPass, ConvertItemHistory, ConvertSlot, DeliveryUpdate, Gamedata, Gate,
     MusicPlaySetting, OwnedMusicRecord, RankReleaseRow, ScheduleRow, Stamina, SuiteUserSections,
-    UserAvatar, UserMysekaiNormalMission, UserMysekaiNormalMissionSheet,
-    UserMysekaiPhenomena, UserMysekaiSystemFixtureAction, UserMysekaiTool,
+    UserAvatar, UserMysekaiNormalMission, UserMysekaiNormalMissionSheet, UserMysekaiPhenomena,
+    UserMysekaiSystemFixtureAction, UserMysekaiTool,
 };
 
 pub mod api;
 pub mod gate;
+pub mod harvest;
 pub mod json;
 pub mod rows;
 
@@ -69,7 +70,8 @@ pub const RPC_PATH: &str = "/rpc";
 /// carry the user's mission rows and the sheet it is on.
 /// 10: the release call, and the section that carries the phenomena the user
 /// has learned.
-pub const PROTOCOL_VERSION: u32 = 10;
+/// 11: the housing save carries its fixed phenomenon.
+pub const PROTOCOL_VERSION: u32 = 12;
 
 /// The account a session belongs to. The server keeps one document per user.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -135,7 +137,10 @@ pub enum ServerMessage {
         sections: Option<Box<Sections>>,
     },
     /// User data the server sends without a call.
-    Push { kind: PushKind, sections: Box<Sections> },
+    Push {
+        kind: PushKind,
+        sections: Box<Sections>,
+    },
 }
 
 /// Why the server did not carry out a call. The game shows or logs `reason`;
@@ -182,7 +187,13 @@ pub enum Call {
     /// `PostUserMysekaiHarvestApi`.
     Harvest(HarvestRequest),
     /// `PostUserMysekaiGatherApi`.
-    Gather,
+    Gather(crate::api::UserMysekaiGatherRequest),
+    /// Authoritative map for the site being entered.
+    HarvestMap { mysekai_site_id: i32 },
+    /// JP 7.0.0 `PostUserMysekaiBulkHarvestApi`.
+    BulkHarvest(crate::api::UserMysekaiSiteBulkHarvestRequest),
+    /// `PatchUserMysekaiSpawnApi`.
+    TreasureBoxSpawn(crate::api::UserMysekaiTreasureBoxSpawnRequest),
     /// `PostUserMysekaiGateReserveApi`.
     GateReserve(GateReserveRequest),
     /// `PostUserMysekaiGateChangeApi`.
@@ -231,7 +242,10 @@ impl Call {
         match self {
             Self::Join => CallKind::Join,
             Self::Harvest(_) => CallKind::Harvest,
-            Self::Gather => CallKind::Gather,
+            Self::Gather(_) => CallKind::Gather,
+            Self::HarvestMap { .. } => CallKind::HarvestMap,
+            Self::BulkHarvest(_) => CallKind::BulkHarvest,
+            Self::TreasureBoxSpawn(_) => CallKind::TreasureBoxSpawn,
             Self::GateReserve(_) => CallKind::GateReserve,
             Self::GateChange(_) => CallKind::GateChange,
             Self::BirthdayPartyDelivery(_) => CallKind::BirthdayPartyDelivery,
@@ -266,6 +280,9 @@ pub enum CallKind {
     Join,
     Harvest,
     Gather,
+    HarvestMap,
+    BulkHarvest,
+    TreasureBoxSpawn,
     GateReserve,
     GateChange,
     BirthdayPartyDelivery,
@@ -293,6 +310,9 @@ impl CallKind {
             Self::Join => "join",
             Self::Harvest => "harvest",
             Self::Gather => "gather",
+            Self::HarvestMap => "harvest map",
+            Self::BulkHarvest => "bulk harvest",
+            Self::TreasureBoxSpawn => "treasure box spawn",
             Self::GateReserve => "gate reserve",
             Self::GateChange => "gate change",
             Self::BirthdayPartyDelivery => "birthday party delivery",
@@ -343,6 +363,9 @@ pub enum Reply {
     Harvest(Stamina),
     /// The gather reply's stamina (`None` while the pools are unseated).
     Gather(Option<Stamina>),
+    HarvestMap,
+    BulkHarvest(crate::api::UserMysekaiSiteBulkHarvestResponse),
+    TreasureBoxSpawn,
     /// A gate reserve or gate change reply, for the gate presenter.
     Gate(crate::gate::GateReply),
     /// The birthday-party delivery reply.
@@ -383,6 +406,9 @@ pub enum Reply {
 /// leaves the game's copy as it is.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Sections {
+    /// Authoritative maps changed by a harvest/gather, or the requested arrival.
+    pub harvest_maps: Option<Vec<crate::harvest::UserHarvestMap>>,
+    pub treasure_boxes: Option<Vec<crate::harvest::UserTreasureBox>>,
     /// The server time the sections were taken at, in milliseconds since the
     /// Unix epoch.
     pub server_date_ms: i64,
@@ -422,8 +448,7 @@ pub struct Sections {
     pub phenomena: Option<Vec<UserMysekaiPhenomena>>,
     /// `userMysekaiBlueprintLendCraftCounts`: the crafts each blueprint term
     /// has used (the craft screen's remaining-count and term-cap source).
-    pub blueprint_lend_craft_counts:
-        Option<Vec<crate::rows::UserMysekaiBlueprintLendCraftCount>>,
+    pub blueprint_lend_craft_counts: Option<Vec<crate::rows::UserMysekaiBlueprintLendCraftCount>>,
     /// `userMysekaiConvertSlots`.
     pub convert_slots: Option<Vec<ConvertSlot>>,
     /// `userMysekaiConvertItemHistories`.
@@ -517,7 +542,8 @@ mod tests {
             ClientMessage::Call {
                 seq: 10,
                 call: Call::BoostStaminaRecovery(crate::api::UserMysekaiStaminaRequest {
-                    mysekai_boost_stamina_recovery_type: crate::api::BoostStaminaRecoveryType::BoostItem,
+                    mysekai_boost_stamina_recovery_type:
+                        crate::api::BoostStaminaRecoveryType::BoostItem,
                     user_mysekai_stamina_recovery_consume_resources: vec![
                         crate::api::StaminaRecoveryConsume {
                             resource_id: 1201,
@@ -570,6 +596,8 @@ mod tests {
         }]);
         delivery.configs = Some(BTreeMap::from([("a".to_owned(), 13)]));
         Sections {
+            harvest_maps: None,
+            treasure_boxes: None,
             server_date_ms: 1_760_000_000_000,
             is_refreshed: true,
             gamedata: Some(Gamedata {
@@ -825,14 +853,13 @@ mod tests {
         assert_eq!(
             Call::Harvest(crate::api::HarvestRequest {
                 mysekai_site_id: 5,
-                mysekai_site_harvest_fixture_target:
-                    crate::api::MysekaiSiteHarvestFixtureTarget {
-                        position_x: 3,
-                        position_z: -4,
-                        mysekai_site_harvest_fixture_id: 9,
-                        hp: 0,
-                        is_last_attack: true,
-                    },
+                mysekai_site_harvest_fixture_target: crate::api::MysekaiSiteHarvestFixtureTarget {
+                    position_x: 3,
+                    position_z: -4,
+                    mysekai_site_harvest_fixture_id: 9,
+                    hp: 0,
+                    is_last_attack: true,
+                },
                 mysekai_tool_used: None,
                 mysekai_stamina_useds: vec![crate::api::MysekaiStaminaUsed {
                     mysekai_stamina_type: "normal".to_owned(),
@@ -842,7 +869,14 @@ mod tests {
             .kind(),
             CallKind::Harvest
         );
-        assert_eq!(Call::Gather.kind(), CallKind::Gather);
+        assert_eq!(
+            Call::Gather(crate::api::UserMysekaiGatherRequest {
+                mysekai_site_id: 5,
+                gather_mysekai_site_harvest_resource_drops: vec![]
+            })
+            .kind(),
+            CallKind::Gather
+        );
         assert_eq!(
             Call::GateReserve(crate::api::GateReserveRequest {
                 mysekai_game_character_unit_group_id: 4,
@@ -859,10 +893,7 @@ mod tests {
             .kind(),
             CallKind::GateChange
         );
-        assert_eq!(
-            Call::Admin(AdminCall::Schema).kind(),
-            CallKind::Admin
-        );
+        assert_eq!(Call::Admin(AdminCall::Schema).kind(), CallKind::Admin);
         assert_eq!(
             Call::BoostStaminaRecovery(crate::api::UserMysekaiStaminaRequest {
                 mysekai_boost_stamina_recovery_type: crate::api::BoostStaminaRecoveryType::Jewel,
@@ -888,8 +919,11 @@ mod tests {
         assert_eq!(convert.kind(), CallKind::Convert);
         assert_eq!(convert.name(), "convert");
         assert_eq!(
-            decode::<ClientMessage>(&encode(&ClientMessage::Call { seq: 11, call: convert }))
-                .unwrap(),
+            decode::<ClientMessage>(&encode(&ClientMessage::Call {
+                seq: 11,
+                call: convert
+            }))
+            .unwrap(),
             ClientMessage::Call {
                 seq: 11,
                 call: Call::Convert {
@@ -934,7 +968,10 @@ mod tests {
             )),
             sections: None,
         };
-        assert_eq!(decode::<ServerMessage>(&encode(&answered)).unwrap(), answered);
+        assert_eq!(
+            decode::<ServerMessage>(&encode(&answered)).unwrap(),
+            answered
+        );
     }
 
     /// The release call round-trips through a frame and names itself; the

@@ -168,6 +168,13 @@ enum Stage {
     /// Type 3: TryPlayTimelineAsync's WaitWhile(the main's state is 4, 11,
     /// 12, 16 or 18), polled from the frame after the change to state 16.
     TimelineWait { since: u32 },
+    HfsmGather {
+        elapsed: f32,
+        retry: f32,
+        deadline: f32,
+        turns: Option<Vec<ArriveTurn>>,
+        approach: Option<crate::npc_fixture_activity::ActionPointApproach>,
+    },
 }
 
 /// One locate row's RotateCharacterToActionPointRotation: the row's member
@@ -188,6 +195,7 @@ struct Group {
     owner: Option<FixtureActivityOwner>,
     /// The main's move failed at its departure (gate closed or no route).
     departure_failed: bool,
+    plan: u64,
 }
 
 /// A member's sub objective after its own decision.
@@ -216,6 +224,29 @@ enum SubStage {
 /// NPCAvatarSubCharacterFixtureActionObjective's TIMEOUT_SECONDS.
 const SUB_FIXTURE_ACTION_TIMEOUT_SECONDS: f32 = 60.0;
 
+#[derive(Component, Clone)]
+struct HfsmFixtureMember {
+    plan: u64,
+    main: Entity,
+    data: AiTalkData,
+    reserved: bool,
+    arrived: bool,
+    turning: bool,
+    target: [f32; 3],
+    forward: [f32; 3],
+    off_plan: f32,
+}
+
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct HfsmReservations<'w, 's> {
+    members: Query<'w, 's, &'static HfsmFixtureMember>,
+}
+impl HfsmReservations<'_, '_> {
+    pub(crate) fn contains(&self, actor: Entity) -> bool {
+        self.members.get(actor).is_ok_and(|m| m.reserved)
+    }
+}
+
 struct Sub {
     unit: u32,
     objective: ObjectiveType,
@@ -230,6 +261,7 @@ pub struct FixtureTalkGroups {
     groups: Vec<Group>,
     subs: HashMap<Entity, Sub>,
     controllers: Vec<controller::Controller>,
+    next_plan: u64,
 }
 
 impl FixtureTalkGroups {
@@ -276,7 +308,9 @@ impl FixtureTalkGroups {
                 ))
                 .collect::<Vec<_>>()
         );
+        self.next_plan = self.next_plan.wrapping_add(1);
         self.groups.push(Group {
+            plan: self.next_plan,
             start,
             stage: Stage::Draft,
             owner: None,
@@ -334,6 +368,12 @@ pub fn try_cancel_current(
     actor: Entity,
     frame: u32,
 ) -> (bool, u8) {
+    if crate::npc_objective::events::enrolled(world, actor) {
+        return (
+            crate::npc_objective::controller::try_cancel_in_world(world, actor),
+            0,
+        );
+    }
     if state_of(world, actor) == Some(NpcAction::Talk) {
         return (false, 0);
     }
@@ -474,6 +514,156 @@ fn slot_of_name(name: &str) -> i32 {
     }
 }
 
+fn hfsm_recruit(world: &mut World, entity: Entity, initial: bool) -> bool {
+    let Some(member) = world.get::<HfsmFixtureMember>(entity).cloned() else {
+        return false;
+    };
+    let ready = world
+        .get::<NpcActions>(entity)
+        .is_some_and(|a| a.current != NpcAction::Talk && a.current != NpcAction::ChangeSite)
+        && world
+            .get::<crate::npc_objective::controller::NpcHfsmActor>(entity)
+            .is_some_and(|a| {
+                a.lower.map_or_else(
+                    || a.upper.is_none_or(|u| u.can_be_recruited()),
+                    |l| l.flags().can_be_recruited,
+                )
+            });
+    if !ready
+        || (!initial
+            && member.reserved
+            && !world
+                .get::<crate::npc_objective::controller::NpcHfsmFlags>(entity)
+                .is_some_and(|f| f.needs_plan))
+    {
+        return false;
+    }
+    if !crate::npc_objective::controller::force_event_lower(
+        world,
+        entity,
+        moly_law::npc_hfsm::LowerState::SubFixtureAction,
+    ) {
+        return false;
+    }
+    if let Some(mut slot) = world.get_mut::<TalkSlot>(entity) {
+        slot.set_current(member.data);
+    }
+    if let Some(mut member) = world.get_mut::<HfsmFixtureMember>(entity) {
+        member.reserved = false;
+    }
+    let at = world
+        .get::<Transform>(entity)
+        .map(|t| t.translation.to_array())
+        .unwrap_or(member.target);
+    if distance(at, member.target) > 0.01
+        && crate::npc_objective::controller::navigate_lower(
+            world,
+            entity,
+            member.target,
+            crate::npc::MOVE_GOAL_DISTANCE,
+        )
+    {
+        change_state(world, entity, NpcAction::AutoMove);
+    } else if distance(at, member.target) > 0.5 {
+        world.entity_mut(entity).remove::<HfsmFixtureMember>();
+        crate::npc_objective::controller::finish_lower(world, entity);
+        return false;
+    } else {
+        hfsm_start_turn(world, entity, member.forward);
+    }
+    true
+}
+
+fn hfsm_start_turn(world: &mut World, entity: Entity, forward: [f32; 3]) {
+    crate::npc::stop_movement(world, entity);
+    let Some(transform) = world.get::<Transform>(entity) else {
+        return;
+    };
+    let current = (transform.rotation * Vec3::Z).to_array();
+    let target = transform.translation + Vec3::from(forward);
+    let duration = moly_law::path::rotate_time(moly_law::path::angle_between(current, forward));
+    let frame = world.resource::<bevy::diagnostic::FrameCount>().0;
+    world
+        .entity_mut(entity)
+        .insert(crate::npc_look_at::NpcLookAt::new(
+            target,
+            current,
+            duration,
+            moly_law::ui::dotween::Ease::OutQuart,
+            frame,
+        ));
+    if let Some(mut member) = world.get_mut::<HfsmFixtureMember>(entity) {
+        member.turning = true;
+    }
+}
+
+fn hfsm_members(world: &mut World, dt: f32, groups: &FixtureTalkGroups) {
+    let members: Vec<_> = world
+        .query::<(Entity, &HfsmFixtureMember)>()
+        .iter(world)
+        .map(|(e, m)| (e, m.clone()))
+        .collect();
+    for (entity, mut member) in members {
+        let generation = groups
+            .groups
+            .iter()
+            .any(|g| g.plan == member.plan && g.start.main == member.main);
+        let active = generation
+            && world
+                .get::<TalkSlot>(member.main)
+                .and_then(|s| s.current.as_ref())
+                .is_some_and(|d| {
+                    d.content.as_ref().map(|c| c.master_id)
+                        == member.data.content.as_ref().map(|c| c.master_id)
+                });
+        if !active {
+            member.off_plan += dt;
+        } else {
+            member.off_plan = 0.0;
+        }
+        if member.off_plan >= 1.0 {
+            world.entity_mut(entity).remove::<HfsmFixtureMember>();
+            if !member.reserved
+                && world
+                    .get::<crate::npc_objective::controller::NpcHfsmActor>(entity)
+                    .is_some_and(|a| {
+                        a.lower == Some(moly_law::npc_hfsm::LowerState::SubFixtureAction)
+                    })
+            {
+                crate::npc_objective::controller::finish_lower(world, entity);
+            }
+            continue;
+        }
+        if !member.reserved && !member.arrived {
+            if member.turning {
+                member.arrived = world.get::<crate::npc_look_at::NpcLookAt>(entity).is_none();
+            } else if let Some(outcome) = world.get::<RouteStops>(entity).and_then(|r| r.outcome) {
+                let at = world
+                    .get::<Transform>(entity)
+                    .map(|t| t.translation.to_array())
+                    .unwrap_or(member.target);
+                if outcome == RouteOutcome::Stopped && distance(at, member.target) > 0.5 {
+                    world.entity_mut(entity).remove::<HfsmFixtureMember>();
+                    crate::npc_objective::controller::finish_lower(world, entity);
+                    continue;
+                }
+                hfsm_start_turn(world, entity, member.forward);
+                member.turning = true;
+            }
+        }
+        world.entity_mut(entity).insert(member);
+    }
+}
+
+pub(crate) fn hfsm_owns(world: &World, entity: Entity) -> bool {
+    world
+        .get::<HfsmFixtureMember>(entity)
+        .is_some_and(|m| !m.reserved)
+        && world
+            .get::<crate::npc_objective::controller::NpcHfsmActor>(entity)
+            .is_some_and(|a| a.lower == Some(moly_law::npc_hfsm::LowerState::SubFixtureAction))
+}
+
 /// The group pass: after the decisions of the frame.
 pub fn advance(world: &mut World) {
     if world
@@ -492,6 +682,7 @@ pub fn advance(world: &mut World) {
     let window = world
         .get_resource::<crate::client_config::ClientConfigs>()
         .map(|config| config.int(KEY_COMMUNICATION_WHILE_DOING_WAIT_TIME));
+    hfsm_members(world, dt, &groups);
     let roster = roster(world);
     let running = std::mem::take(&mut groups.groups);
     for mut group in running {
@@ -569,6 +760,30 @@ fn end_group(
         }
     }
     let main = group.start.main;
+    if let Stage::HfsmGather { approach: Some(approach), .. } = &group.stage {
+        approach.cancel(world, main);
+    }
+    for draft in &group.start.drafts {
+        if world
+            .get::<HfsmFixtureMember>(draft.entity)
+            .is_some_and(|m| m.plan == group.plan)
+        {
+            world.entity_mut(draft.entity).remove::<HfsmFixtureMember>();
+            if world
+                .get::<crate::npc_objective::controller::NpcHfsmActor>(draft.entity)
+                .is_some_and(|a| a.lower == Some(moly_law::npc_hfsm::LowerState::SubFixtureAction))
+            {
+                crate::npc_objective::controller::finish_lower(world, draft.entity);
+            }
+        }
+    }
+    for unit in &group.start.members {
+        if let Some(&entity) = roster.get(unit) {
+            if let Ok(mut actor) = world.get_entity_mut(entity) {
+                actor.remove::<crate::communication_runtime::CommunicationPlayback>();
+            }
+        }
+    }
     match end {
         GroupEnd::MainFails | GroupEnd::Completes => {
             if let Some(mut mind) = world.get_mut::<ObjectiveMind>(main) {
@@ -602,6 +817,17 @@ fn end_group(
                 group.start.main_unit, group.start.talk_id
             );
         }
+    }
+    if world
+        .get::<crate::npc_objective::controller::NpcHfsmActor>(main)
+        .is_some_and(|a| a.lower == Some(moly_law::npc_hfsm::LowerState::MultiFixtureAction))
+        && world
+            .get::<TalkSlot>(main)
+            .and_then(|s| s.current.as_ref())
+            .and_then(|d| d.content.as_ref())
+            .is_some_and(|c| c.master_id == group.start.talk_id)
+    {
+        crate::npc_objective::controller::finish_lower(world, main);
     }
 }
 
@@ -644,6 +870,138 @@ fn step_group(
         return Ok(true);
     }
     match &mut group.stage {
+        Stage::Draft if crate::npc_objective::events::enrolled(world, main) => {
+            for draft in &group.start.drafts {
+                let Some(data) = draft.data.clone() else {
+                    return Err("multi fixture member data absent".into());
+                };
+                let pose = group_action_pose(world, &group.start, draft.unit)?;
+                let fallback = world
+                    .get::<GlobalTransform>(group.start.fixture)
+                    .ok_or("fixture pose disappeared")?
+                    .translation();
+                let target = crate::npc::navigation::face(world, main)
+                    .and_then(|f| f.sample(pose.translation.to_array(), 0.5))
+                    .unwrap_or(fallback.to_array());
+                world.entity_mut(draft.entity).insert(HfsmFixtureMember {
+                    plan: group.plan,
+                    main,
+                    data,
+                    reserved: true,
+                    arrived: false,
+                    turning: false,
+                    target,
+                    forward: (pose.rotation * Vec3::Z).to_array(),
+                    off_plan: 0.0,
+                });
+                hfsm_recruit(world, draft.entity, true);
+            }
+            group.stage = Stage::HfsmGather {
+                elapsed: 0.0,
+                retry: 0.0,
+                deadline: world.resource::<Time>().elapsed_secs() + 30.0,
+                turns: None,
+                approach: None,
+            };
+            Ok(false)
+        }
+        Stage::HfsmGather {
+            elapsed,
+            retry,
+            deadline,
+            turns,
+            approach,
+        } => {
+            *elapsed += dt;
+            let pending = group.start.drafts.iter().any(|d| {
+                world
+                    .get::<HfsmFixtureMember>(d.entity)
+                    .is_some_and(|m| m.plan == group.plan && m.reserved)
+            });
+            if pending && world.resource::<Time>().elapsed_secs() >= *deadline {
+                return Err("multi fixture reservation deadline".into());
+            }
+            if *elapsed - *retry >= 1.0 {
+                *retry = *elapsed;
+                for draft in &group.start.drafts {
+                    if world
+                        .get::<HfsmFixtureMember>(draft.entity)
+                        .is_some_and(|m| m.plan == group.plan && m.reserved)
+                    {
+                        hfsm_recruit(world, draft.entity, false);
+                    }
+                }
+            }
+            let main_arrived = world
+                .get::<crate::npc_objective::controller::NpcHfsmActor>(main)
+                .is_some_and(|a| {
+                    a.lower == Some(moly_law::npc_hfsm::LowerState::MultiFixtureAction)
+                });
+            if !main_arrived {
+                return Ok(false);
+            }
+            let all = group.start.drafts.iter().all(|d| {
+                world
+                    .get::<HfsmFixtureMember>(d.entity)
+                    .is_some_and(|m| m.plan == group.plan && m.arrived)
+            });
+            let on_plan = group.start.drafts.iter().all(|d| {
+                world
+                    .get::<HfsmFixtureMember>(d.entity)
+                    .is_some_and(|m| m.plan == group.plan)
+            });
+            if !on_plan && !pending && *elapsed >= 10.0 {
+                return Err("multi fixture member left shared plan".into());
+            }
+            if !all {
+                return Ok(false);
+            }
+            if approach.is_none() {
+                let index = group.start.locate.iter().find(|row|row.unit as u32==group.start.main_unit).map_or(0,|row|row.index);
+                *approach = Some(crate::npc_fixture_activity::ActionPointApproach::start_fixture(
+                    world, main, group.start.fixture, index,
+                )?);
+                return Ok(false);
+            }
+            if !approach
+                .as_mut()
+                .expect("approach initialized")
+                .update(world, main, dt)?
+            {
+                return Ok(false);
+            }
+            if turns.is_none() {
+                *turns = Some(on_arrive_some_character(world, roster, &group.start, frame));
+                return Ok(false);
+            }
+            let active_turns = turns.as_mut().expect("arrival turns initialized");
+            let mut finished = true;
+            for turn in active_turns.iter_mut() {
+                if let Some(current) = world.get::<Transform>(turn.actor).copied() {
+                    let from = *turn.from.get_or_insert(current.rotation);
+                    turn.elapsed += dt;
+                    let t = if turn.duration > 0.0 {
+                        (turn.elapsed / turn.duration).min(1.0)
+                    } else {
+                        1.0
+                    };
+                    crate::npc_fixture_activity::set_pose(
+                        world,
+                        turn.actor,
+                        current.with_rotation(crate::npc::sample_turn_rotation(from, turn.to, t)),
+                    )?;
+                    finished &= t >= 1.0;
+                }
+            }
+            if !finished {
+                return Ok(false);
+            }
+            let finished_turns = turns.take().expect("arrival turns initialized");
+            for turn in &finished_turns {
+                finish_turn(world, turn);
+            }
+            after_arrive_some_character(world, roster, groups, group, frame)
+        }
         Stage::Draft => {
             draft_members(world, groups, group, frame);
             claim_action_points(world, roster, group);
@@ -738,7 +1096,7 @@ fn step_group(
                     Ok(false)
                 }
                 TalkType::MultipleCharacterFixture => {
-                    let turns = on_arrive_some_character(world, roster, group, frame);
+                    let turns = on_arrive_some_character(world, roster, &group.start, frame);
                     if turns.iter().any(|turn| turn.duration > 0.0) {
                         group.stage = Stage::ArriveTurning { turns };
                         return Ok(false);
@@ -883,6 +1241,14 @@ fn step_group(
                 if at_target {
                     arrived.push(*unit);
                     change_state(world, *actor, NpcAction::Communication);
+                    if crate::npc_objective::events::enrolled(world, *actor) {
+                        world.entity_mut(*actor).insert(
+                            crate::communication_runtime::CommunicationPlayback {
+                                epoch: u64::from(frame),
+                                participants: group.start.members.clone(),
+                            },
+                        );
+                    }
                     info!(
                         "[npc-group] unit={unit} frame={frame} talk {}: arrived; call=RotateCenterAsync({} members); change to SomeCharacterCommunication",
                         group.start.talk_id,
@@ -932,16 +1298,41 @@ fn step_group(
 /// StartLoc rotation) while its OnArrive turn's time runs (in the source the
 /// later of the two rotation tweens kills the other); the frame on which a
 /// turn of time 0 completes.
+fn group_action_pose(world: &World, start: &GroupStart, unit: u32) -> Result<Transform, String> {
+    let identity = world
+        .get::<crate::fixture_activity_state::FixtureActivityIdentity>(start.fixture)
+        .ok_or("fixture identity disappeared")?;
+    let fixture = world
+        .get::<GlobalTransform>(start.fixture)
+        .ok_or("fixture pose disappeared")?;
+    let points = world
+        .get_resource::<crate::fixture_attach::AttachPoints>()
+        .ok_or("fixture points unavailable")?
+        .source_array(&identity.model_package, fixture)?;
+    let index = start
+        .locate
+        .iter()
+        .find(|row| row.unit as u32 == unit)
+        .map_or(0, |row| row.index);
+    points
+        .get(index).or_else(||points.first())
+        .map(|(_, pair)| {
+            Transform::from_translation(Vec3::from(pair.start.position))
+                .with_rotation(pair.start.rotation)
+        })
+        .ok_or_else(|| "fixture action point index unavailable".into())
+}
+
 fn on_arrive_some_character(
     world: &mut World,
     roster: &Roster,
-    group: &Group,
+    start: &GroupStart,
     frame: u32,
 ) -> Vec<ArriveTurn> {
     let points = world
-        .get::<crate::fixture_activity_state::FixtureActivityIdentity>(group.start.fixture)
+        .get::<crate::fixture_activity_state::FixtureActivityIdentity>(start.fixture)
         .map(|identity| identity.model_package.clone())
-        .zip(world.get::<GlobalTransform>(group.start.fixture).copied())
+        .zip(world.get::<GlobalTransform>(start.fixture).copied())
         .and_then(|(package, fixture)| {
             world
                 .get_resource::<crate::fixture_attach::AttachPoints>()?
@@ -950,19 +1341,18 @@ fn on_arrive_some_character(
         })
         .unwrap_or_default();
     let mut turns = Vec::new();
-    for row in group.start.locate.iter().filter(|row| row.unit != 0) {
+    for row in start.locate.iter().filter(|row| row.unit != 0) {
         let Some((_, pair)) = points.get(row.index) else {
             warn!(
                 "[npc-group] unit={} frame={frame} talk {}: OnArrive: action point {} is outside the {} action points; skipped",
-                group.start.main_unit,
-                group.start.talk_id,
+                start.main_unit,
+                start.talk_id,
                 row.index,
                 points.len()
             );
             continue;
         };
-        let owner = group
-            .start
+        let owner = start
             .locate
             .iter()
             .find(|first| first.index == row.index)
@@ -974,7 +1364,7 @@ fn on_arrive_some_character(
             continue;
         };
         let to = pair.start.rotation.normalize();
-        let (z, x, y) = to.to_euler(EulerRot::ZXY);
+        let (y, x, z) = to.to_euler(EulerRot::YXZ);
         let end_value = Vec3::new(
             moly_law::path::make_positive_yaw(x.to_degrees()),
             moly_law::path::make_positive_yaw(y.to_degrees()),
@@ -995,10 +1385,9 @@ fn on_arrive_some_character(
     }
     info!(
         "[npc-group] unit={} frame={frame} talk {}: OnArrive: call=RotateCharacterToActionPointRotation {:?} (unit, action point index, GetRotateTime)",
-        group.start.main_unit,
-        group.start.talk_id,
-        group
-            .start
+        start.main_unit,
+        start.talk_id,
+        start
             .locate
             .iter()
             .filter(|row| row.unit != 0)
@@ -1196,9 +1585,9 @@ fn draft_members(world: &mut World, groups: &mut FixtureTalkGroups, group: &Grou
                 let (cancelled, owed) = try_cancel_current(world, groups, draft.entity, frame);
                 if owed > 0 {
                     warn!(
-                    "[npc-group] unit={} frame={frame} talk {}: the cancelled objective's own ForceUpdateObjective cascade is not drawn (its data is replaced by the reset that follows)",
-                    draft.unit, group.start.talk_id
-                );
+                        "[npc-group] unit={} frame={frame} talk {}: the cancelled objective's own ForceUpdateObjective cascade is not drawn (its data is replaced by the reset that follows)",
+                        draft.unit, group.start.talk_id
+                    );
                 }
                 cancelled
             };
@@ -1238,6 +1627,13 @@ fn draft_members(world: &mut World, groups: &mut FixtureTalkGroups, group: &Grou
         }
         if let Some(mut mind) = world.get_mut::<ObjectiveMind>(draft.entity) {
             mind.skip_next_rest = true;
+        }
+        if handed && crate::npc_objective::events::enrolled(world, draft.entity) {
+            if let Some(mut flags) =
+                world.get_mut::<crate::npc_objective::controller::NpcHfsmFlags>(draft.entity)
+            {
+                flags.needs_plan = true;
+            }
         }
         info!(
             "[npc-group] unit={} frame={frame} talk {}: drafted (data handed {}, data {}), interrupt {marker_type}, next rest skipped",
@@ -1538,7 +1934,11 @@ fn step_sub(
                 info!(
                     "[npc-group] unit={} frame={frame} sub objective 18: a member's data is not the multiple-character talk; stops{}",
                     sub.unit,
-                    if own.target_fixture.is_some() { " (Model.ForceUpdateObjective)" } else { "" }
+                    if own.target_fixture.is_some() {
+                        " (Model.ForceUpdateObjective)"
+                    } else {
+                        ""
+                    }
                 );
                 return true;
             }

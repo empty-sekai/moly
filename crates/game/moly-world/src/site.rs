@@ -843,6 +843,7 @@ impl Default for ResidentSites {
 }
 
 struct Resident {
+    active: SiteActive,
     site_type: String,
     level: u32,
     /// `SitePosition` in the runtime frame.
@@ -886,6 +887,11 @@ impl ResidentView {
 }
 
 impl ResidentSites {
+    pub(crate) fn housing_initialized(&self) -> bool {
+        self.booted && ["home_site",self.loaded_floor.as_str()].iter().all(|name| {
+            self.sites.iter().any(|site| site.site_type == *name && !matches!(site.view, ResidentView::Loaded))
+        })
+    }
     /// `CanRemoveSite`: false for home and for the loaded floor.
     fn can_remove(&self, site_type: &str) -> bool {
         site_type != "home_site" && !(is_room(site_type) && site_type == self.loaded_floor)
@@ -913,6 +919,7 @@ impl ResidentSites {
         }
         let json = moly_assets::site_scene_json(&active.scene);
         Resident {
+            active: active.clone(),
             site_type: active.site_type.clone(),
             level: active.level,
             origin: placement.map_or(Vec3::ZERO, |p| p.product_origin()),
@@ -933,6 +940,7 @@ impl ResidentSites {
         selection: &SiteSelection,
         layouts: &crate::fixture::layouts::SiteFixtureLayouts,
         region: Option<NavMeshSourceRegion>,
+        imported: bool,
     ) {
         if std::mem::replace(&mut self.booted, true) {
             return;
@@ -943,7 +951,14 @@ impl ResidentSites {
             }
             let mut probe = selection.clone();
             probe.site = site.to_owned();
-            let level = match probe.resolve_level(sites, layouts, region) {
+            let resolved = if imported {
+                probe.resolve_temporary_level(sites).and_then(|level| {
+                    let id=sites.site_id(site).ok_or("imported site not in master")?;
+                    crate::fixture::residency::validate_imported(layouts,id,site,sites.floor_grid(site,level)?)?;
+                    Ok(level)
+                })
+            } else { probe.resolve_level(sites, layouts, region) };
+            let level = match resolved {
                 Ok(level) => level,
                 Err(error) => {
                     warn!(
@@ -982,10 +997,10 @@ impl ResidentSites {
             if let Some(index) = self.position(&old) {
                 let entry = self.sites.remove(index);
                 let removed = old.clone();
+                let old_roots = entry.view.roots().to_vec();
                 commands.queue(move |world: &mut World| {
-                    world.resource_mut::<crate::npc::residency::SiteNavigation>().forget(&removed);
+                    crate::npc::site_removal::begin(world, &removed, old_roots);
                 });
-                despawn_roots(commands, entry.view.roots());
                 info!("[site] UpdateLoadedFloor({site}): RemoveSite({old})");
             }
         }
@@ -1127,6 +1142,11 @@ fn despawn_now(world: &mut World, roots: &[Entity]) {
 /// The roots stop being the loader's: tagged with their site, kept shown or
 /// hidden (`HideSite`).
 fn detach(world: &mut World, roots: &[Entity], site: &str, hide: bool) {
+    let mut stack=roots.to_vec();
+    while let Some(node)=stack.pop() {
+        if let Some(children)=world.get::<Children>(node) { stack.extend(children.iter()); }
+        if let Ok(mut entity)=world.get_entity_mut(node) { entity.remove::<resident_load::ActiveSiteMesh>(); }
+    }
     for &root in roots {
         let Ok(mut entity) = world.get_entity_mut(root) else {
             continue;
@@ -1334,6 +1354,7 @@ pub fn plan(
     source_region: Option<Res<NavMeshSourceRegion>>,
     level_hold: Option<Res<crate::field_modes::LevelHold>>,
     mut residents: ResMut<ResidentSites>,
+    removing: Option<Res<crate::npc::site_removal::RemovalPending>>,
     (stage, exploration): (
         Option<Res<crate::browser_stage::BrowserStage>>,
         Option<Res<crate::stage_layout::TransientExploration>>,
@@ -1356,13 +1377,20 @@ pub fn plan(
     );
     // Resolving the level checks the layout the site will restore; the home
     // starter comes from the server panel, so hold until it is installed.
-    if !empty_layout
+    let imported = stage.is_some() && exploration.is_some();
+    if !empty_layout && !imported
         && crate::fixture::waits_for_panel_layout(selection.site_type(), selection.content())
     {
         return;
     }
     let site_level = match if empty_layout {
         selection.resolve_temporary_level(&sites)
+    } else if imported {
+        selection.resolve_temporary_level(&sites).and_then(|level| {
+            let id=sites.site_id(selection.site_type()).ok_or("imported site not in master")?;
+            crate::fixture::residency::validate_imported(&layouts,id,selection.site_type(),sites.floor_grid(selection.site_type(),level)?)?;
+            Ok(level)
+        })
     } else {
         selection.resolve_level(&sites, &layouts, source_region.as_deref().copied())
     } {
@@ -1384,7 +1412,18 @@ pub fn plan(
         &selection,
         &layouts,
         source_region.as_deref().copied(),
+        imported,
     );
+    if removing.is_some() { return; }
+    if is_room(&selection.site) && residents.loaded_floor != selection.site {
+        let old = residents.loaded_floor.clone();
+        if let Some(index) = residents.position(&old) {
+            let entry = residents.sites.remove(index);
+            let roots = entry.view.roots().to_vec();
+            commands.queue(move |world: &mut World| crate::npc::site_removal::begin(world, &old, roots));
+            return;
+        }
+    }
     let planned = plan_family(&server, &sites, &selection.site, site_level);
     // AddSite: a listed site is reused (its family is still loaded; its
     // hidden scene is shown again), an unlisted one is loaded.
@@ -1599,132 +1638,10 @@ pub fn spawn_when_ready(
     let Some(assets) = assets else {
         return;
     };
-    if !ready(&server, &assets.gltf, "站点主 glTF") {
-        return;
-    }
-    // navmesh 面极小，到齐只会早于主包；先过门再发任何展开命令，避免
-    // 半途 return 把主 scene 铺两遍。
-    if let Some(handle) = &assets.navmesh {
-        if !ready(&server, handle, "可行走面 glTF") {
-            return;
-        }
-    }
-    let Some(gltf) = gltfs.get(&assets.gltf) else {
-        return;
-    };
-    // glTF 的语义单位是默认 scene；没有它，这个文件对任何查看器都不是站点。
-    let Some(scene) = gltf.default_scene.clone() else {
-        panic!("站点主 glTF 没有默认 scene");
-    };
-    // A room can wait for its module or navigation after its main scene is
-    // loaded. Plan all roots before emitting commands, so that a pending asset
-    // cannot leave a partial expansion to be spawned again next frame.
-    let mut scenes = vec![(scene, false)];
-    // These are the original authored obstacle prefabs, not scaled terrain or
-    // generated fences. Every ring is spawned; the site level decides which
-    // are active (default home L5 shows only the authored-empty rank5 root).
-    let mut rings = Vec::new();
-    for rank in &assets.home_obstacle_levels {
-        let name = format!("rank{rank}");
-        let obstacle = gltf
-            .named_scenes
-            .get(name.as_str())
-            .unwrap_or_else(|| panic!("home glTF lacks authored obstacle scene {name}"));
-        rings.push((scenes.len(), *rank));
-        scenes.push((obstacle.clone(), false));
-    }
+    let Some(ScenePlan { scenes, rings, ground, face }) = scene_plan(&server, &gltfs, &gltf_meshes, &assets) else { return; };
     if !assets.home_obstacle_levels.is_empty() {
         commands.insert_resource(HomeObstacleLevel(assets.home_obstacle_site_level));
     }
-    let (ground, face) = match (&assets.module, &assets.walkable) {
-        // 场景包站点：地表是主 glTF 里承载地表的网格（相机取景的锚，名
-        // 单逐站对账）。有独立导航输入的站另装可行走面
-        // ——隐藏实体，只采样不进画面（真源里它也只在导航上被读）；
-        // 清单未提供独立导航输入时才让地表兼面。
-        (None, None) => {
-            let mut ground = Vec::new();
-            for name in &assets.grounds {
-                let Some(handle) = gltf.named_meshes.get(name.as_str()) else {
-                    panic!("站点主 glTF 没有名为 {name} 的地表网格");
-                };
-                ground.extend(ground_meshes(&gltf_meshes, handle));
-            }
-            let face = match &assets.navmesh {
-                Some(handle) => {
-                    let Some(navmesh) = gltfs.get(handle) else {
-                        return;
-                    };
-                    let Some((_, mesh)) = navmesh.named_meshes.iter().next() else {
-                        panic!("可行走面 glTF 没有网格");
-                    };
-                    let face = ground_meshes(&gltf_meshes, mesh);
-                    let Some(scene) = navmesh.default_scene.clone() else {
-                        panic!("可行走面 glTF 没有默认 scene");
-                    };
-                    scenes.push((scene, true));
-                    Some(face)
-                }
-                None => None,
-            };
-            (ground, face)
-        }
-        // 房间站：壳之外再拼模块两面（按场景名定位），寻路面按账目来源取。
-        (Some(module), walkable) => {
-            if !ready(&server, module, "房间模块 glTF") {
-                return;
-            }
-            let Some(module) = gltfs.get(module) else {
-                return;
-            };
-            for name in MODULE_SCENES {
-                let Some(scene) = module.named_scenes.get(name) else {
-                    panic!("房间模块 glTF 没有名为 {name} 的 scene");
-                };
-                scenes.push((scene.clone(), false));
-            }
-            match walkable {
-                // 寻路面有落盘几何：铺成不可见实体（寻路面采样只读顶点，
-                // 不进画面——真源里它也只在导航烘焙时被读）。
-                Some(handle) => {
-                    if !ready(&server, handle, "室内寻路面 glTF") {
-                        return;
-                    }
-                    let Some(walkable) = gltfs.get(handle) else {
-                        return;
-                    };
-                    let Some((_, mesh)) = walkable.named_meshes.iter().next() else {
-                        panic!("室内寻路面 glTF 没有网格");
-                    };
-                    let meshes = ground_meshes(&gltf_meshes, mesh);
-                    let Some(scene) = walkable.default_scene.clone() else {
-                        panic!("室内寻路面 glTF 没有默认 scene");
-                    };
-                    scenes.push((scene, true));
-                    (meshes, None)
-                }
-                // authored 无几何：模块地板兼寻路面（画面上它本来就是地板）。
-                None => {
-                    let name = module
-                        .named_meshes
-                        .keys()
-                        .find(|name| name.starts_with(MODULE_FLOOR_PREFIX))
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            panic!("房间模块 glTF 没有 {MODULE_FLOOR_PREFIX} 前缀的地板网格")
-                        });
-                    let mesh = module.named_meshes.get(&name).expect("键取自同一张表");
-                    (ground_meshes(&gltf_meshes, mesh), None)
-                }
-            }
-        }
-        // 模块与寻路面成对构造（计划侧同源于 room 账目），残缺是组装层坏了。
-        _ => unreachable!("站点资产族残缺：module 与 walkable 不成对"),
-    };
-    if ground.is_empty() {
-        panic!("寻路面网格未随 glTF 到达");
-    }
-    // 未提供独立导航输入时，地表网格兼可行走面；室内模块地板也走此臂。
-    let face = face.unwrap_or_else(|| ground.clone());
     if let Some(reuse) = reuse {
         commands.remove_resource::<SiteReuse>();
         // `ShowSite` on the listed site: the same instance, already expanded
@@ -1797,6 +1714,140 @@ pub fn spawn_when_ready(
     commands.insert_resource(SiteScenePending(pending));
 }
 
+
+struct ScenePlan {
+    scenes: Vec<(Handle<WorldAsset>, bool)>,
+    rings: Vec<(usize, u32)>,
+    ground: Vec<Handle<Mesh>>,
+    face: Vec<Handle<Mesh>>,
+}
+fn scene_plan(server: &AssetServer, gltfs: &Assets<Gltf>, gltf_meshes: &Assets<GltfMesh>, assets: &SiteAssets) -> Option<ScenePlan> {
+    if !ready(&server, &assets.gltf, "站点主 glTF") {
+        return None;
+    }
+    // navmesh 面极小，到齐只会早于主包；先过门再发任何展开命令，避免
+    // 半途 return 把主 scene 铺两遍。
+    if let Some(handle) = &assets.navmesh {
+        if !ready(&server, handle, "可行走面 glTF") {
+            return None;
+        }
+    }
+    let Some(gltf) = gltfs.get(&assets.gltf) else {
+        return None;
+    };
+    // glTF 的语义单位是默认 scene；没有它，这个文件对任何查看器都不是站点。
+    let Some(scene) = gltf.default_scene.clone() else {
+        panic!("站点主 glTF 没有默认 scene");
+    };
+    // A room can wait for its module or navigation after its main scene is
+    // loaded. Plan all roots before emitting commands, so that a pending asset
+    // cannot leave a partial expansion to be spawned again next frame.
+    let mut scenes = vec![(scene, false)];
+    // These are the original authored obstacle prefabs, not scaled terrain or
+    // generated fences. Every ring is spawned; the site level decides which
+    // are active (default home L5 shows only the authored-empty rank5 root).
+    let mut rings = Vec::new();
+    for rank in &assets.home_obstacle_levels {
+        let name = format!("rank{rank}");
+        let obstacle = gltf
+            .named_scenes
+            .get(name.as_str())
+            .unwrap_or_else(|| panic!("home glTF lacks authored obstacle scene {name}"));
+        rings.push((scenes.len(), *rank));
+        scenes.push((obstacle.clone(), false));
+    }
+    let (ground, face) = match (&assets.module, &assets.walkable) {
+        // 场景包站点：地表是主 glTF 里承载地表的网格（相机取景的锚，名
+        // 单逐站对账）。有独立导航输入的站另装可行走面
+        // ——隐藏实体，只采样不进画面（真源里它也只在导航上被读）；
+        // 清单未提供独立导航输入时才让地表兼面。
+        (None, None) => {
+            let mut ground = Vec::new();
+            for name in &assets.grounds {
+                let Some(handle) = gltf.named_meshes.get(name.as_str()) else {
+                    panic!("站点主 glTF 没有名为 {name} 的地表网格");
+                };
+                ground.extend(ground_meshes(&gltf_meshes, handle));
+            }
+            let face = match &assets.navmesh {
+                Some(handle) => {
+                    let Some(navmesh) = gltfs.get(handle) else {
+                        return None;
+                    };
+                    let Some((_, mesh)) = navmesh.named_meshes.iter().next() else {
+                        panic!("可行走面 glTF 没有网格");
+                    };
+                    let face = ground_meshes(&gltf_meshes, mesh);
+                    let Some(scene) = navmesh.default_scene.clone() else {
+                        panic!("可行走面 glTF 没有默认 scene");
+                    };
+                    scenes.push((scene, true));
+                    Some(face)
+                }
+                None => None,
+            };
+            (ground, face)
+        }
+        // 房间站：壳之外再拼模块两面（按场景名定位），寻路面按账目来源取。
+        (Some(module), walkable) => {
+            if !ready(&server, module, "房间模块 glTF") {
+                return None;
+            }
+            let Some(module) = gltfs.get(module) else {
+                return None;
+            };
+            for name in MODULE_SCENES {
+                let Some(scene) = module.named_scenes.get(name) else {
+                    panic!("房间模块 glTF 没有名为 {name} 的 scene");
+                };
+                scenes.push((scene.clone(), false));
+            }
+            match walkable {
+                // 寻路面有落盘几何：铺成不可见实体（寻路面采样只读顶点，
+                // 不进画面——真源里它也只在导航烘焙时被读）。
+                Some(handle) => {
+                    if !ready(&server, handle, "室内寻路面 glTF") {
+                        return None;
+                    }
+                    let Some(walkable) = gltfs.get(handle) else {
+                        return None;
+                    };
+                    let Some((_, mesh)) = walkable.named_meshes.iter().next() else {
+                        panic!("室内寻路面 glTF 没有网格");
+                    };
+                    let meshes = ground_meshes(&gltf_meshes, mesh);
+                    let Some(scene) = walkable.default_scene.clone() else {
+                        panic!("室内寻路面 glTF 没有默认 scene");
+                    };
+                    scenes.push((scene, true));
+                    (meshes, None)
+                }
+                // authored 无几何：模块地板兼寻路面（画面上它本来就是地板）。
+                None => {
+                    let name = module
+                        .named_meshes
+                        .keys()
+                        .find(|name| name.starts_with(MODULE_FLOOR_PREFIX))
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            panic!("房间模块 glTF 没有 {MODULE_FLOOR_PREFIX} 前缀的地板网格")
+                        });
+                    let mesh = module.named_meshes.get(&name).expect("键取自同一张表");
+                    (ground_meshes(&gltf_meshes, mesh), None)
+                }
+            }
+        }
+        // 模块与寻路面成对构造（计划侧同源于 room 账目），残缺是组装层坏了。
+        _ => unreachable!("站点资产族残缺：module 与 walkable 不成对"),
+    };
+    if ground.is_empty() {
+        panic!("寻路面网格未随 glTF 到达");
+    }
+    // 未提供独立导航输入时，地表网格兼可行走面；室内模块地板也走此臂。
+    let face = face.unwrap_or_else(|| ground.clone());
+    Some(ScenePlan { scenes, rings, ground, face })
+}
+
 /// Set a root's local transform and write its subtree's global transforms
 /// from it at once.
 fn place_subtree(
@@ -1849,7 +1900,7 @@ pub fn apply_obstacle_level(
 
 /// 一条网格柄的全部 primitive 地表。
 fn ground_meshes(
-    gltf_meshes: &Res<Assets<GltfMesh>>,
+    gltf_meshes: &Assets<GltfMesh>,
     ground: &Handle<GltfMesh>,
 ) -> Vec<Handle<Mesh>> {
     let Some(ground) = gltf_meshes.get(ground) else {
@@ -1869,7 +1920,7 @@ fn ground_names(scene: &str) -> &'static [&'static str] {
 }
 
 /// 一个柄的依赖图到齐判据；失败具名 panic（资产边界的唯一拒绝点）。
-fn ready(server: &Res<AssetServer>, handle: &Handle<Gltf>, label: &str) -> bool {
+fn ready(server: &AssetServer, handle: &Handle<Gltf>, label: &str) -> bool {
     if let LoadState::Failed(err) = server.load_state(handle) {
         panic!("{label}装载失败：{err:?}");
     }
@@ -1927,9 +1978,10 @@ pub fn read_switch(
     preview: Option<Res<TemporarySiteChangeRequest>>,
     mut exit: MessageWriter<AppExit>,
     // Paired for the same reason as `sites` above.
-    (edit, site_move): (
+    (edit, site_move, bulk): (
         Res<crate::field_modes::EditSessionActive>,
         Option<Res<crate::field_modes::SiteMoveActive>>,
+        Option<Res<crate::field_modes::BulkHarvestActive>>,
     ),
     layouts: Res<crate::fixture::layouts::SiteFixtureLayouts>,
     // Paired: this system is at the parameter-count limit.
@@ -1948,7 +2000,7 @@ pub fn read_switch(
     // GameState SiteMove: the move owns the site until it returns to Normal.
     // Its input lock covers the keys and the tour; a request queued by
     // another owner stays queued and is read once the move has ended.
-    if site_move.is_some() {
+    if site_move.is_some() || bulk.is_some() {
         if (pending.is_some() || preview.is_some()) && !tour.deferred_logged {
             info!("[site] switch request deferred: a site move is in progress");
             tour.deferred_logged = true;
@@ -2134,7 +2186,15 @@ pub fn queue_cannon_swap(commands: &mut Commands, roots: Vec<Entity>, next: Site
 fn queue_exit(commands: &mut Commands, roots: Vec<Entity>, next: SiteSelection, exit: Exit) {
     // Release furniture ownership and detach the logical player before any
     // scene subtree disappears or the next site reseeds that same player.
-    commands.queue(crate::npc::residency::retain_navigation);
+    let keep_next = next.site.clone();
+    commands.queue(move |world: &mut World| {
+        let keep = world.get_resource::<SiteActive>().is_some_and(|active| {
+            active.site_type != keep_next
+                && world.get_resource::<ResidentSites>().is_some_and(|sites| !sites.can_remove(&active.site_type))
+        });
+        if keep { crate::fixture::residency::retain_current(world); }
+        crate::npc::residency::retain_navigation(world);
+    });
     commands.queue(crate::player_fixture_action::cancel_for_site_change);
     commands.queue(crate::npc_fixture_activity::cancel_for_site_change);
     commands.queue(crate::fixture_gimmick::cancel_for_site_change);
@@ -2514,6 +2574,10 @@ impl Plugin for SitePlugin {
         app.insert_resource(SiteSelection::from(self.0.clone()))
             .init_schedule(SiteChangeTeardown)
             .init_resource::<ResidentSites>()
+            .init_resource::<resident_load::Loads>()
+            .add_systems(Update, resident_load::advance.after(crate::fixture::FixtureLayoutSet))
+            .add_systems(PostUpdate, crate::site_presentation::update.before(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate).before(bevy::transform::TransformSystems::Propagate))
+            .add_systems(PostUpdate, resident_load::publish_mesh_owners.before(bevy::transform::TransformSystems::Propagate))
             .add_systems(Update, (settle_departures, report_residency))
             .add_observer(on_scene_ready);
     }
@@ -2567,3 +2631,6 @@ impl moly_layout::validate::GridLike for FloorGridLayout {
         moly_layout::SiteGrid::new(self.level, self.layout_id, self.width, self.height, self.depth)
     }
 }
+
+#[path = "site_resident_load.rs"]
+pub mod resident_load;

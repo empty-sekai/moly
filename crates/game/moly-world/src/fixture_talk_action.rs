@@ -580,6 +580,7 @@ mod tests {
         let owner = world.spawn_empty().id();
         let identity = timeline::SourceAssetId { file: "source".into(), path_id: "1".into() };
         let definition = Arc::new(timeline::TimelineDefinition {
+            director_transforms: None,
             package: "fixture".into(), prefab: "fixture".into(), fixture_view: None,
             director: identity.clone(), timeline: identity, duration: 1.0, tracks: Vec::new(),
         });

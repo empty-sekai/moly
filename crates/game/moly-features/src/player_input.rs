@@ -39,6 +39,7 @@ pub fn read_input(
     learn: Option<Res<crate::field_modes::LearnSiteEnvironmentActive>>,
     held: Option<Res<crate::field_modes::HeldGameState>>,
     screens: Option<Res<crate::ui_layers::ScreenManager>>,
+    tutorial: Option<Res<crate::tutorial::TutorialInput>>,
 ) {
     // 摆放编辑面持有输入期间（真源编辑模式下手势层/摇杆归编辑面，
     // ScreenLayerMysekaiCommon 的 _joyStickCanvasGroup），玩家移动让位。
@@ -46,7 +47,7 @@ pub fn read_input(
     // The keyboard adaptation follows the joystick: off until the entry's Finish.
     // A dialog over the field takes the field's input, as it takes the stick's
     // new presses (ExistsDialog(Layer_Dialog)), so the adaptation is off too.
-    if edits.is_active()
+    if tutorial.is_some_and(|input|input.movement_blocked) || edits.is_active()
         || overlays.block_world_input()
         || library.blocks_exploration_input()
         || site_move.is_some()

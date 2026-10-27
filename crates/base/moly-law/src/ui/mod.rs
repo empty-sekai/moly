@@ -16,4 +16,5 @@ pub mod image;
 pub mod mysekai_rank;
 pub mod raycast;
 pub mod screen_ray;
+pub mod scrollbar;
 pub mod unity_math;

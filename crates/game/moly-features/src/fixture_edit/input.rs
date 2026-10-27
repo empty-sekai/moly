@@ -28,7 +28,7 @@ pub fn read_keyboard(
     if keys.just_pressed(KeyCode::Escape) {
         actions.write(if session.exit_dialog {
             EditCommand::KeepEditing
-        } else if session.selected.is_some() {
+        } else if session.selected.is_some() || !session.road.planned.is_empty() {
             EditCommand::Cancel
         } else {
             EditCommand::RequestExit
@@ -114,6 +114,10 @@ pub fn read_pointer(
     mut actions: MessageWriter<EditCommand>,
 ) {
     if session.phase == EditPhase::Idle
+        || matches!(
+            session.content,
+            super::EditContentType::Environment | super::EditContentType::Road
+        )
         || session.exit_dialog
         || session.clean_up_dialog
         || consumed.0

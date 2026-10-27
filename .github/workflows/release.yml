@@ -77,24 +77,31 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - uses: actions/download-artifact@v4
         with:
-          pattern: browser-*
-          path: pkg
+          pattern: browser-stage-*
+          path: stage/pkg
           merge-multiple: true
-      - name: Check both renderers and the font are present
-        run: |
-          test -f pkg/webgpu/build.json
-          test -f pkg/webgl2/build.json
-          test "$(find pkg/fonts -name '*.ttf' | wc -l)" -eq 1
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: browser-game-*
+          path: game/pkg
+          merge-multiple: true
+      - name: Verify both renderers' font and its license
+        run: node web/ui-font-package.mjs --verify stage/pkg game/pkg
       - name: Package
         run: |
           mkdir -p dist
-          tar -czf "dist/moly-$VERSION-web.tar.gz" pkg
+          tar -czf "dist/moly-$VERSION-web-stage.tar.gz" -C stage pkg
+          tar -czf "dist/moly-$VERSION-web-game.tar.gz" -C game pkg
       - uses: actions/upload-artifact@v4
         with:
           name: browser
-          path: dist/moly-${{ env.VERSION }}-web.tar.gz
+          path: dist/moly-${{ env.VERSION }}-web-*.tar.gz
           if-no-files-found: error
 
   release:

@@ -1,18 +1,8 @@
-//! The harvest log loop (`HarvestUserDataManager.ScheduleExecuteHarvestLogData`).
-//!
-//! Each hit enqueues a harvest stack (`HarvestStackData`, event 32) and each
-//! collected drop a gather stack (`GatherStackData`). While a harvest site is
-//! loaded, a loop waits `HarvestAPIInterval` (FloatConfigs 81) and flushes
-//! the queue: consecutive harvest stacks on the same fixture (key id, x, z)
-//! merge into one request unless the tool changed or broke in between
-//! (`GatheringActionLogToAPIConverter`); gather stacks become one gather
-//! request. One harvest request at a time goes to the server as
-//! `Call::Harvest` (the hit, the run's tool and the stamina that is left);
-//! its answer updates the stamina and the tools, and this client applies its
-//! own hit to the map, from which each object's pending drop rows are rebuilt.
-//! The gather requests go to the `HarvestServerMock` panel; its replies update
-//! the user data (event 30: stamina and tools; event 31: the harvest map).
-
+//! Ordinary harvest and gather logs share one authoritative server map.
+//! Consecutive hits merge by fixture and tool; harvest requests precede
+//! their gathers, one at a time. Bulk waits for this queue to finish.
+//! Replies update user maps before Answered is published; the final normal
+//! reply settles player prediction after all earlier hit logs are sent.
 use std::collections::{HashSet, VecDeque};
 
 use bevy::diagnostic::FrameCount;
@@ -27,10 +17,7 @@ use moly_protocol::{Call, Refusal, Reply};
 use super::action::HarvestPlayerModel;
 use super::catalog::{HarvestCatalog, HarvestUserData};
 use super::law::Stamina;
-use super::server_mock::{
-    GatherRequest, HarvestRequest, HarvestServerMock, SuiteUserReply, UserDrop, UserHarvestMap,
-    DROP_BEFORE,
-};
+use super::server_mock::{GatherRequest, HarvestRequest, UserDrop, UserHarvestMap, DROP_BEFORE};
 use super::HarvestObject;
 use crate::site_move::timeline::Delay;
 use crate::userdata::{Answered, ServerPending};
@@ -70,9 +57,52 @@ pub struct HarvestLogQueue {
     in_flight: Option<HarvestRequest>,
     /// Merged requests of the flush after the one in flight.
     pending: VecDeque<HarvestRequest>,
+    gathers: VecDeque<GatherRequest>,
+    gather_in_flight: Option<GatherRequest>,
+    force_flush: bool,
+    refused: bool,
 }
 
 impl HarvestLogQueue {
+    /// Gather rows already sent or waiting behind a hit still occupy capacity
+    /// until their authoritative reply updates the possession count.
+    pub fn pending_gather_quantity(&self) -> i64 {
+        self.gathers
+            .iter()
+            .chain(self.gather_in_flight.iter())
+            .flat_map(|request| &request.drops)
+            .map(|row| i64::from(row.quantity))
+            .sum()
+    }
+
+    pub fn has_failed(&self) -> bool {
+        self.refused
+    }
+    /// A fresh authoritative arrival restores any prediction refused before
+    /// leaving the old site. Uncollected server drops will be placed again.
+    pub fn reset_refused_on_arrival(&mut self) {
+        if self.refused {
+            self.stacks.clear();
+            self.pending.clear();
+            self.gathers.clear();
+            self.in_flight = None;
+            self.gather_in_flight = None;
+            self.awaiting = None;
+            self.refused = false;
+            self.destroyed.clear();
+        }
+    }
+    pub fn request_flush(&mut self) {
+        self.force_flush = true;
+    }
+    pub fn is_idle(&self) -> bool {
+        self.stacks.is_empty()
+            && self.awaiting.is_none()
+            && self.pending.is_empty()
+            && self.gathers.is_empty()
+            && !self.refused
+    }
+
     /// The server call this loop waits for, for the director.
     #[allow(dead_code)] // Read by the director's wait.
     pub fn server_pending(&self) -> Option<&ServerPending> {
@@ -134,20 +164,14 @@ pub fn advance(
     arrival: Res<super::arrival::HarvestArrival>,
     configs: Option<Res<crate::client_config::ClientConfigs>>,
     mut queue: ResMut<HarvestLogQueue>,
-    mut server: Option<ResMut<HarvestServerMock>>,
     mut user: Option<ResMut<HarvestUserData>>,
     mut model: Option<ResMut<HarvestPlayerModel>>,
     catalog: Option<Res<HarvestCatalog>>,
     mut objects: Query<&mut HarvestObject>,
-    mut possession: ResMut<super::possession::PossessionMock>,
 ) {
-    let (Some(configs), Some(server), Some(user), Some(model), Some(catalog)) = (
-        configs,
-        server.as_deref_mut(),
-        user.as_deref_mut(),
-        model.as_deref_mut(),
-        catalog,
-    ) else {
+    let (Some(configs), Some(user), Some(model), Some(catalog)) =
+        (configs, user.as_deref_mut(), model.as_deref_mut(), catalog)
+    else {
         return;
     };
     // The harvest call's answer: the server's stamina is applied here, and the
@@ -166,18 +190,49 @@ pub fn advance(
                 &request,
                 seq,
                 &answer.outcome,
-                server,
                 user,
                 model,
                 &catalog,
                 &mut objects,
+                queue.pending.is_empty() && queue.stacks.is_empty(),
             );
         }
-        if let Some(next) = queue.pending.pop_front() {
-            send_harvest(&mut queue, &mut link, next);
+        if let Some(request) = queue.gather_in_flight.take() {
+            match &answer.outcome {
+                Ok(Reply::Gather(_)) => {
+                    if let Some(map) = user.maps.get(&request.site_id).cloned() {
+                        apply_map(&map, request.site_id, user, &catalog, &mut objects);
+                    }
+                }
+                Err(error) => {
+                    queue.refused = true;
+                    error!("[harvest-api] gather refused: {error}");
+                }
+                _ => {
+                    queue.refused = true;
+                    error!("[harvest-api] unexpected gather reply");
+                }
+            }
+        }
+        if answer.outcome.is_err() {
+            queue.refused = true;
+        }
+        if !queue.refused {
+            if let Some(next) = queue.pending.pop_front() {
+                send_harvest(&mut queue, &mut link, next);
+            } else if let Some(next) = queue.gathers.pop_front() {
+                send_gather(&mut queue, &mut link, next);
+            }
         }
     }
-    let Some(site_id) = arrival.site_id() else {
+    let queued_site = queue.stacks.first().map(|stack| match stack {
+        Stack::Harvest(row) => row.site_id,
+        Stack::Gather { site_id, .. } => *site_id,
+    });
+    let Some(site_id) = arrival
+        .site_id()
+        .or(queued_site.filter(|_| queue.force_flush))
+    else {
         queue.timer = None;
         return;
     };
@@ -193,7 +248,7 @@ pub fn advance(
             false
         }
     };
-    if !due {
+    if !due && !queue.force_flush {
         return;
     }
     queue.timer = Some((
@@ -206,6 +261,10 @@ pub fn advance(
     if queue.stacks.is_empty() {
         return;
     }
+    if queue.refused {
+        return;
+    }
+    queue.force_flush = false;
     let stacks = std::mem::take(&mut queue.stacks);
     let harvests: Vec<HarvestStack> = stacks
         .iter()
@@ -240,17 +299,12 @@ pub fn advance(
             site_id: site,
             drops,
         };
-        let reply = server.gather(&request);
-        possession.on_gather(&request.drops, &catalog);
-        queue.gather_requests += 1;
-        info!(
-            "[harvest-api] PostUserMysekaiGatherApi (mock) site {site}: {} drops -> materials {:?}; PossessionMock material quantity {}, fixtures {}",
-            request.drops.len(),
-            reply.materials,
-            possession.material_quantity,
-            possession.fixtures.values().sum::<i64>(),
-        );
-        apply_reply(&reply, site, user, model, &catalog, &mut objects);
+        queue.gathers.push_back(request);
+    }
+    if queue.awaiting.is_none() {
+        if let Some(next) = queue.gathers.pop_front() {
+            send_gather(&mut queue, &mut link, next);
+        }
     }
 }
 
@@ -265,13 +319,13 @@ fn send_harvest(queue: &mut HarvestLogQueue, link: &mut ServerLink, request: Har
             hp: request.hp,
             is_last_attack: request.is_last_attack,
         },
-        mysekai_tool_used: request.tool.map(|(tool_id, use_count, durability)| {
-            MysekaiToolUsed {
+        mysekai_tool_used: request
+            .tool
+            .map(|(tool_id, use_count, durability)| MysekaiToolUsed {
                 mysekai_tool_id: tool_id as i32,
                 use_count,
                 durability,
-            }
-        }),
+            }),
         mysekai_stamina_useds: vec![
             MysekaiStaminaUsed {
                 mysekai_stamina_type: "normal".to_owned(),
@@ -315,11 +369,11 @@ fn finish_harvest(
     request: &HarvestRequest,
     seq: u32,
     outcome: &Result<Reply, Refusal>,
-    server: &mut HarvestServerMock,
     user: &mut HarvestUserData,
     model: &mut HarvestPlayerModel,
     catalog: &HarvestCatalog,
     objects: &mut Query<&mut HarvestObject>,
+    settle_prediction: bool,
 ) {
     match outcome {
         Ok(Reply::Harvest(stamina)) => {
@@ -328,7 +382,6 @@ fn finish_harvest(
                 enhance: stamina.enhance,
                 boost: stamina.boost,
             };
-            server.set_stamina(stamina);
             info!(
                 "[harvest-api] PostUserMysekaiHarvestApi site {} target ({}, {}) fixture {} hp {} last {} tool {:?} stamina rests {:?} -> stamina {:?} (seq {seq})",
                 request.site_id,
@@ -341,8 +394,11 @@ fn finish_harvest(
                 request.stamina_rests,
                 stamina,
             );
-            apply_stamina(stamina, model, user);
-            if let Some(map) = server.hit(request) {
+            user.stamina = stamina;
+            if settle_prediction {
+                apply_stamina(stamina, model, user);
+            }
+            if let Some(map) = user.maps.get(&request.site_id).cloned() {
                 apply_map(&map, request.site_id, user, catalog, objects);
             }
         }
@@ -353,9 +409,7 @@ fn finish_harvest(
             );
         }
         Ok(other) => {
-            error!(
-                "[harvest-api] PostUserMysekaiHarvestApi (seq {seq}) answered with {other:?}"
-            );
+            error!("[harvest-api] PostUserMysekaiHarvestApi (seq {seq}) answered with {other:?}");
         }
     }
 }
@@ -410,26 +464,6 @@ fn apply_map(
     }
 }
 
-/// A `GatherApiMock` reply's user-data events.
-fn apply_reply(
-    reply: &SuiteUserReply,
-    site_id: u32,
-    user: &mut HarvestUserData,
-    model: &mut HarvestPlayerModel,
-    catalog: &HarvestCatalog,
-    objects: &mut Query<&mut HarvestObject>,
-) {
-    apply_stamina(reply.stamina, model, user);
-    if let Some(tools) = &reply.tools {
-        model.refresh_tools(tools);
-        user.tools = tools.clone();
-    }
-    user.materials = reply.materials.clone();
-    if let Some(map) = reply.map.as_ref() {
-        apply_map(map, site_id, user, catalog, objects);
-    }
-}
-
 #[cfg(test)]
 mod value_checks {
     use super::*;
@@ -469,5 +503,61 @@ mod value_checks {
         assert_eq!(requests[1].tool, Some((2, 1, 100)));
         assert_eq!(requests[2].tool, None);
         assert!(requests[2].is_last_attack);
+    }
+}
+
+fn send_gather(queue: &mut HarvestLogQueue, link: &mut ServerLink, request: GatherRequest) {
+    let drops: Option<Vec<_>> = request
+        .drops
+        .iter()
+        .map(moly_protocol::api::MysekaiSiteHarvestResourceDrop::from_row)
+        .collect();
+    let Some(drops) = drops else {
+        queue.refused = true;
+        error!("[harvest-api] unsupported gather resource");
+        return;
+    };
+    let call = Call::Gather(moly_protocol::api::UserMysekaiGatherRequest {
+        mysekai_site_id: request.site_id as i32,
+        gather_mysekai_site_harvest_resource_drops: drops,
+    });
+    let kind = call.kind();
+    let seq = link.call(call);
+    queue.awaiting = Some(ServerPending {
+        seq: Some(seq),
+        call: kind,
+    });
+    queue.gather_in_flight = Some(request);
+    queue.gather_requests += 1;
+}
+
+#[cfg(test)]
+mod pending_capacity_tests {
+    use super::*;
+    #[test]
+    fn sent_gather_rows_still_reserve_capacity_until_reply() {
+        let drop = UserDrop {
+            resource_type: 41,
+            resource_id: 1,
+            position_x: 0,
+            position_z: 0,
+            hp: 0,
+            seq: 1,
+            status: 1,
+            quantity: 3,
+            group_id: 0,
+        };
+        let mut queue = HarvestLogQueue::default();
+        queue.gathers.push_back(GatherRequest {
+            site_id: 5,
+            drops: vec![drop.clone()],
+        });
+        queue.gather_in_flight = Some(GatherRequest {
+            site_id: 5,
+            drops: vec![drop],
+        });
+        assert_eq!(queue.pending_gather_quantity(), 6);
+        queue.gather_in_flight = None;
+        assert_eq!(queue.pending_gather_quantity(), 3);
     }
 }

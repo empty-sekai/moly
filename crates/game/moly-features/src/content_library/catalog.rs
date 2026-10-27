@@ -542,6 +542,7 @@ pub fn build_talk_catalog(
             });
             let lines = general_lines(&row.steps, &catalog.character(*unit), &row.tweet.text);
             talks.push(make_talk(
+                &row.lua,
                 TalkContent {
                     master_id: row.talk_id,
                     backend: TalkBackend::General,
@@ -556,6 +557,20 @@ pub fn build_talk_catalog(
                 &row.tweet,
             ));
         }
+    }
+    for row in &store.common {
+        if !identities.insert((2, row.talk_id)) {
+            catalog.data_issues.push(format!("对话 {} 的多人脚本重复，已保留第一份", row.talk_id));
+            continue;
+        }
+        let units: Vec<u32> = row.unit_ids.iter().map(|unit| *unit as u32).collect();
+        let fallback = units.first().map(|unit| catalog.character(*unit)).unwrap_or_default();
+        talks.push(make_talk(
+            &row.lua,
+            TalkContent { master_id: row.talk_id, backend: TalkBackend::CommonSomeCharacter, is_general: Some(true) },
+            units, Vec::new(), fixture_lines(&row.steps, &fallback, &row.tweet.text),
+            false, false, &catalog, &row.tweet,
+        ));
     }
     for row in &fixtures.rows {
         if !identities.insert((1, row.talk_id)) {
@@ -586,6 +601,7 @@ pub fn build_talk_catalog(
         // operations, not the fixture-script representation alone, imply it.
         let related = !fixture_ids.is_empty() || drives;
         talks.push(make_talk(
+            &row.lua,
             TalkContent {
                 master_id: row.talk_id,
                 backend: TalkBackend::Fixture,
@@ -610,6 +626,7 @@ pub fn build_talk_catalog(
     );
 }
 fn make_talk(
+    lua: &str,
     content: TalkContent,
     units: Vec<u32>,
     fixture_ids: Vec<i32>,
@@ -651,6 +668,7 @@ fn make_talk(
     )
     .to_lowercase();
     LibraryTalk {
+        script_key: lua.strip_suffix(".lua").unwrap_or(lua).to_owned(),
         preview_tweet: (tweet.id > 0 && !tweet.text.trim().is_empty()).then(|| tweet.clone()),
         content,
         units,
@@ -665,13 +683,16 @@ fn make_talk(
 }
 fn general_lines(steps: &[TalkStep], fallback: &str, tweet: &str) -> Vec<DialogueLine> {
     let mut speaker = fallback.to_owned();
+    let mut speaker_step = None;
     let mut lines = Vec::new();
-    for step in steps {
+    for (index, step) in steps.iter().enumerate() {
         match step {
-            TalkStep::Label { name } if !name.is_empty() => speaker = plain_text(name),
+            TalkStep::Label { name } if !name.is_empty() => { speaker = plain_text(name); speaker_step = Some(index); },
             TalkStep::Text { text } if !text.is_empty() => lines.push(DialogueLine {
                 speaker: speaker.clone(),
                 text: plain_text(text),
+                text_step: Some(index),
+                speaker_step,
             }),
             _ => {}
         }
@@ -680,19 +701,24 @@ fn general_lines(steps: &[TalkStep], fallback: &str, tweet: &str) -> Vec<Dialogu
         lines.push(DialogueLine {
             speaker,
             text: plain_text(tweet),
+            text_step: None,
+            speaker_step: None,
         });
     }
     lines
 }
 fn fixture_lines(steps: &[FixtureStep], fallback: &str, tweet: &str) -> Vec<DialogueLine> {
     let mut speaker = fallback.to_owned();
+    let mut speaker_step = None;
     let mut lines = Vec::new();
-    for step in steps {
+    for (index, step) in steps.iter().enumerate() {
         match step {
-            FixtureStep::Label { name } if !name.is_empty() => speaker = plain_text(name),
+            FixtureStep::Label { name } if !name.is_empty() => { speaker = plain_text(name); speaker_step = Some(index); },
             FixtureStep::Text { text } if !text.is_empty() => lines.push(DialogueLine {
                 speaker: speaker.clone(),
                 text: plain_text(text),
+                text_step: Some(index),
+                speaker_step,
             }),
             _ => {}
         }
@@ -701,6 +727,8 @@ fn fixture_lines(steps: &[FixtureStep], fallback: &str, tweet: &str) -> Vec<Dial
         lines.push(DialogueLine {
             speaker,
             text: plain_text(tweet),
+            text_step: None,
+            speaker_step: None,
         });
     }
     lines
@@ -873,6 +901,7 @@ mod tests {
     #[test]
     fn later_lines_are_searchable() {
         let row = make_talk(
+            "sample",
             TalkContent {
                 master_id: 12,
                 backend: TalkBackend::General,
@@ -884,10 +913,12 @@ mod tests {
                 DialogueLine {
                     speaker: "一歌".into(),
                     text: "开场".into(),
+                    text_step: Some(1), speaker_step: Some(0),
                 },
                 DialogueLine {
                     speaker: "一歌".into(),
                     text: "独特的关键词".into(),
+                    text_step: Some(2), speaker_step: Some(0),
                 },
             ],
             false,
@@ -1052,6 +1083,7 @@ mod tests {
         };
         let build = |tweet: &moly_law::talk::TweetRef| {
             make_talk(
+                "sample",
                 TalkContent {
                     master_id: 1374,
                     backend: TalkBackend::Fixture,
@@ -1062,6 +1094,7 @@ mod tests {
                 vec![DialogueLine {
                     speaker: "奏".into(),
                     text: "这里是完整正式对白，不得截取替代气泡".into(),
+                    text_step: Some(1), speaker_step: Some(0),
                 }],
                 true,
                 true,

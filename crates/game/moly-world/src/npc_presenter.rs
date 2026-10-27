@@ -178,7 +178,8 @@ pub fn try_greeting(
     ) in &mut npcs
     {
         let unit = unit.0;
-        if !actions.ready() || mind.ai_stopped.is_some() || mind.greeting_halt.is_some() {
+        if !actions.ready() || mind.ai_stopped.is_some() || mind.greeting_halt.is_some()
+            || slot.kind() == Some(TalkType::CommonSomeCharacter) {
             continue;
         }
         if mind.overlap_cancel_frame == Some(frame) {
@@ -416,37 +417,14 @@ pub fn try_greeting(
 /// this host (its NPC entity is removed).
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct PresenterGate<'w, 's> {
-    visible: Query<
-        'w,
-        's,
-        (&'static CharacterUnitId, &'static InheritedVisibility),
-        With<crate::character::MotionDriver>,
-    >,
-    npcs: Query<
-        'w,
-        's,
-        (&'static CharacterUnitId, &'static NpcActions),
-        Without<crate::npc::residency::Away>,
-    >,
+    npcs: Query<'w, 's, &'static NpcActions,
+        (With<crate::character::MotionDriver>, Without<crate::npc::gate_entries::ModelHidden>)>,
     site: Option<Res<'w, crate::site::SiteActive>>,
 }
-
 impl PresenterGate<'_, '_> {
-    /// The avatar store runs the presenter's per-frame update for every NPC
-    /// only while the current site is home or a floor; a suspended member
-    /// has no presenter frame here (see `npc::residency`).
     pub fn runs(&self, entity: Entity) -> bool {
-        if !crate::npc::residency::loaded_site_runs(self.site.as_deref()) {
-            return false;
-        }
-        let Ok((unit, actions)) = self.npcs.get(entity) else {
-            return false;
-        };
-        actions.ready()
-            && self
-                .visible
-                .iter()
-                .any(|(id, visibility)| id.0 == unit.0 && visibility.get())
+        crate::npc::residency::loaded_site_runs(self.site.as_deref())
+            && self.npcs.get(entity).is_ok_and(NpcActions::ready)
     }
 }
 
@@ -457,7 +435,7 @@ pub fn write_avoidance() {}
 
 /// Presenter call 6: `UpdateIK` (the free look-on timers and the IK target
 /// choice). Not in this host yet; until then no IK target is chosen.
-pub fn update_ik() {}
+pub fn update_ik(world: &mut World) { crate::npc_ik::update(world); }
 
 /// Presenter call 7: `TryResetNavMesh`. When the agent's destination x is
 /// infinite (an agent that is not bound to the navigation mesh, which is the
@@ -469,10 +447,11 @@ pub fn update_ik() {}
 /// nothing observable here.
 pub fn try_reset_navmesh() {}
 
-/// Presenter call 9: `TrySomeCharacterCommunication`. Not in this host; until
-/// then it never starts a communication (the source's result 1 would end the
-/// update before the greeting gate).
-pub fn try_some_character_communication() {}
+/// Presenter call 9: common conversation recruitment and the shared plan's
+/// continuation, before the same character can greet the player.
+pub fn try_some_character_communication(world: &mut World) {
+    crate::npc_objective::common::update(world);
+}
 
 /// Presenter call 8: `TryCancelIfCharacterOverlap`, per NPC in the avatar
 /// list order. The timer rule is [`moly_law::objective::overlap::overlap_frame`];
@@ -499,26 +478,17 @@ pub fn try_cancel_if_overlap(world: &mut World) {
     }) else {
         return;
     };
-    let shown: Vec<u32> = world
-        .query_filtered::<(&CharacterUnitId, &InheritedVisibility), With<crate::character::MotionDriver>>()
-        .iter(world)
-        .filter(|(_, visibility)| visibility.get())
-        .map(|(unit, _)| unit.0)
-        .collect();
     let snaps: Vec<(Entity, u32, Vec3)> = world
         .query_filtered::<(Entity, &CharacterUnitId, &Transform), (
-            With<ObjectiveMind>,
-            Without<crate::player::PlayerControlled>,
-            Without<crate::npc::residency::Away>,
+            With<ObjectiveMind>, With<crate::character::MotionDriver>,
+            Without<crate::player::PlayerControlled>, Without<crate::npc::gate_entries::ModelHidden>,
         )>()
-        .iter(world)
-        .map(|(entity, unit, transform)| (entity, unit.0, transform.translation))
-        .collect();
+        .iter(world).map(|(entity, unit, transform)| (entity, unit.0, transform.translation)).collect();
     for &(entity, unit, position) in &snaps {
         let Some(actions) = world.get::<NpcActions>(entity) else {
             continue;
         };
-        if !actions.ready() || !shown.contains(&unit) {
+        if !actions.ready() {
             continue;
         }
         let action = actions.current;
@@ -533,7 +503,8 @@ pub fn try_cancel_if_overlap(world: &mut World) {
         let kind = world.get::<TalkSlot>(entity).and_then(|slot| slot.kind());
         let group_talk = moly_law::objective::overlap::has_group_talk(current, kind);
         let overlaps = snaps.iter().any(|&(other, _, other_position)| {
-            other != entity && position.distance(other_position) < reach
+            other != entity && world.get::<NpcActions>(other).is_some_and(|a| a.site_type == actions.site_type)
+                && position.distance(other_position) < reach
         });
         let mut elapsed = mind.overlap_seconds;
         let attempt = moly_law::objective::overlap::overlap_frame(

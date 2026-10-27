@@ -47,12 +47,24 @@ if (packRoot && !statSync(packRoot, { throwIfNoEntry: false })?.isDirectory()) {
     "MOLY_ASSET_PACK_ROOT must name an existing package directory",
   );
 }
+const textMounts = [];
+for (const [variable, prefix] of [
+  ["MOLY_FONT_ROOT", "/moly/fonts/"],
+  ["MOLY_TRANSLATION_ROOT", "/moly/translations/"],
+]) {
+  const root = (process.env[variable] ?? "").trim();
+  if (!root) continue;
+  if (!statSync(root, { throwIfNoEntry: false })?.isDirectory())
+    throw new Error(`${variable} must name an existing publication directory`);
+  textMounts.push([prefix, realpathSync(root)]);
+}
 
 // 前缀按序匹配：/assets/ 在前，避免被 / 的兜底吃掉。挂载根先过一遍
 // resolve：越界检查比对的是 resolve 后的绝对路径，根若保留正斜杠
 // （Windows 上「盘符:/…」形的 MOLY_ASSET_ROOT），startsWith 对每个
 // 文件都对不上，全部 404。
 const mounts = [
+  ...textMounts,
   ...(jpRoot ? [["/assets-jp/", realpathSync(jpRoot)]] : []),
   ...(packRoot
     ? [
@@ -238,7 +250,7 @@ function reportFreshness() {
   const wasmArtifacts = ["webgpu", "webgl2"].map((backend) =>
     path.join(here, "pkg", backend, "moly-app_bg.wasm"),
   );
-  const anchor = path.join("crates", "moly-app", "src", "main.rs");
+  const anchor = path.join("crates", "app", "moly-stage", "src", "main.rs");
   let newest = { mtimeMs: -1, file: null };
   let sawAnchor = false;
   const walk = (dir) => {

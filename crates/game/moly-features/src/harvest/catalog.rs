@@ -18,10 +18,7 @@ use moly_assets::json::JsonAsset;
 use serde_json::Value;
 
 use super::law::{Stamina, ToolType};
-use super::server_mock::{
-    HarvestServerMock, MockFixtureRow, MockInputs, MockMaterialRow, UserHarvestMap, UserTool,
-    MOCK_EXCLUDED,
-};
+use super::server_mock::{MockMaterialRow, UserHarvestMap, UserTool, MOCK_EXCLUDED};
 use super::ActionInterface;
 
 /// The package index and what it gates.
@@ -76,19 +73,15 @@ impl HarvestMasters {
     /// layer).
     fn absent(&self) -> Vec<String> {
         [self.boost_grant.as_ref().err()]
-        .into_iter()
-        .flatten()
-        .map(MasterError::to_string)
-        .collect()
+            .into_iter()
+            .flatten()
+            .map(MasterError::to_string)
+            .collect()
     }
 }
 
 /// Startup: request every input.
-pub fn load(
-    mut commands: Commands,
-    server: Res<AssetServer>,
-    mut masters: ResMut<MasterData>,
-) {
+pub fn load(mut commands: Commands, server: Res<AssetServer>, mut masters: ResMut<MasterData>) {
     commands.insert_resource(HarvestInputs {
         index: server.load(bevy::asset::AssetPath::from(format!("moly://{INDEX}"))),
         masters: None,
@@ -144,7 +137,6 @@ fn parse_tools(rows: &[Value]) -> Result<Vec<ToolDef>, String> {
         .collect()
 }
 
-
 /// One boost recovery: the table's single row (`boostQuantity`,
 /// `recoveryBoostStamina`), which the stamina mock grants once.
 fn parse_boost_grant(text: &str) -> Result<moly_masters::RecoveryRow, String> {
@@ -154,7 +146,6 @@ fn parse_boost_grant(text: &str) -> Result<moly_masters::RecoveryRow, String> {
         recovery_boost_stamina: master::int32(&row, "recoveryBoostStamina")?,
     })
 }
-
 
 /// `mysekaiMusicRecords`: every id, and the ids by track type.
 #[derive(Default)]
@@ -323,6 +314,7 @@ pub fn build(
     master_tables: Option<Res<moly_masters::load::MasterTables>>,
     sites: Option<Res<crate::site::Sites>>,
     server_tools: Option<Res<crate::userdata::client::tools::ClientMysekaiTools>>,
+    client_user: Option<Res<crate::userdata::ClientUserData>>,
 ) {
     let Some(mut inputs) = inputs else {
         return;
@@ -429,7 +421,7 @@ pub fn build(
         commands.remove_resource::<HarvestInputs>();
         return;
     }
-    let Some(max_stamina) = stamina else {
+    let Some(_max_stamina) = stamina else {
         return;
     };
     let Some(sites) = sites else {
@@ -446,7 +438,7 @@ pub fn build(
     let index: serde_json::Value =
         serde_json::from_str(&asset.0).unwrap_or_else(|error| panic!("{INDEX}: not JSON: {error}"));
     let Some(HarvestMasters {
-        boost_grant: Ok(recovery),
+        boost_grant: Ok(_recovery),
     }) = inputs.masters.take()
     else {
         return;
@@ -567,39 +559,23 @@ pub fn build(
         }
     }
 
-    // A drop needs a model: rows without one never become drop rows.
-    let mock_materials: Vec<MockMaterialRow> = mock_materials
-        .into_iter()
-        .filter(|row| materials_by_id.contains_key(&row.id))
-        .collect();
     let harvest_sites: Vec<u32> = sites
         .switchable()
         .filter_map(|(site_type, _)| sites.placement(site_type))
         .filter(|placement| placement.category == "harvest")
         .map(|placement| placement.site_id)
         .collect();
-    let mut mock_fixtures: Vec<MockFixtureRow> = defs
-        .values()
-        .map(|def| MockFixtureRow {
-            id: def.id,
-            kind: def.master_kind,
-            hp: def.hp,
-        })
-        .collect();
-    mock_fixtures.sort_by_key(|row| row.id);
-    let mock_inputs = MockInputs {
-        fixtures: mock_fixtures,
-        materials: mock_materials,
-        max_normal_stamina: max_stamina.normal,
-        boost_grant: recovery.recovery_boost_stamina,
-        harvest_sites: harvest_sites.clone(),
-        music_records: music_records.by_track_type,
+    let Some(server_stamina) = client_user.as_deref().and_then(|user| user.stamina) else {
+        return;
     };
-    let mock = HarvestServerMock::new(mock_inputs, crate::userdata::clock::refresh_window_start());
-    let (maps, stamina) = mock.login();
+    let stamina = super::law::Stamina {
+        normal: server_stamina.normal,
+        enhance: server_stamina.enhance,
+        boost: server_stamina.boost,
+    };
     let user_tools = super::server_mock::user_tools(server_tools.rows());
     info!(
-        "[harvest] catalog: {} master fixtures on {} packages, {} drop materials, {} tools; HarvestServerMock (the built-in map rules, one map per refresh window) for harvest sites {:?}; left out of the mock map: {}",
+        "[harvest] catalog: {} master fixtures on {} packages, {} drop materials, {} tools; authoritative server maps for harvest sites {:?}; left out of the mock map: {}",
         defs.len(),
         packages.len(),
         materials_by_id.len(),
@@ -611,22 +587,8 @@ pub fn build(
             .collect::<Vec<_>>()
             .join(", "),
     );
-    for (site_id, map) in &maps {
-        let mut kinds: std::collections::BTreeMap<i32, usize> = std::collections::BTreeMap::new();
-        for fixture in &map.fixtures {
-            *kinds
-                .entry(defs[&fixture.fixture_id].master_kind)
-                .or_default() += 1;
-        }
-        info!(
-            "[harvest-mock] HarvestMapMock site {site_id}: {} fixtures (by kind {:?}), {} drop rows",
-            map.fixtures.len(),
-            kinds,
-            map.drops.len()
-        );
-    }
     info!(
-        "[harvest-mock] tools (the server document's userMysekaiTools): {:?}; stamina mock: normal {} enhance {} boost {}",
+        "[harvest-mock] tools (the server document's userMysekaiTools): {:?}; server stamina: normal {} enhance {} boost {}",
         user_tools
             .iter()
             .map(|tool| format!(
@@ -643,13 +605,12 @@ pub fn build(
         &user_tools,
     ));
     commands.insert_resource(HarvestUserData {
-        maps,
+        maps: Default::default(),
         tools: user_tools,
         stamina,
         materials: Default::default(),
-        boxes: mock.treasure_boxes(),
+        boxes: Vec::new(),
     });
-    commands.insert_resource(mock);
     commands.insert_resource(HarvestCatalog {
         fixtures: defs,
         materials: materials_by_id,
@@ -669,6 +630,7 @@ pub fn build(
 /// leaves the player model alone, so hits the client has counted but not yet
 /// sent are not undone.
 pub fn follow_server_tools(
+    queue: Res<super::queue::HarvestLogQueue>,
     server_tools: Option<Res<crate::userdata::client::tools::ClientMysekaiTools>>,
     user: Option<ResMut<HarvestUserData>>,
     model: Option<ResMut<super::action::HarvestPlayerModel>>,
@@ -677,6 +639,9 @@ pub fn follow_server_tools(
     let (Some(server_tools), Some(mut user), Some(mut model)) = (server_tools, user, model) else {
         return;
     };
+    if !queue.is_idle() {
+        return;
+    }
     if server_tools.revision == *seen {
         return;
     }

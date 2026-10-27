@@ -101,8 +101,9 @@ test("the engine downloads and compiles while the source preflight runs", async 
   assert.ok(!events.some(([kind]) => kind === "prepared"));
   assert.ok(!events.some(([kind]) => kind === "instantiate"));
   release();
-  const { backend } = await run;
+  const { backend, uiFontSha256 } = await run;
   assert.equal(backend, "webgl2");
+  assert.equal(uiFontSha256, fontDigest);
   const order = events.map(([kind, value]) => (kind === "mark" ? value : kind));
   assert.ok(order.indexOf("prepared") < order.indexOf("instantiate"));
   assert.ok(order.indexOf("instantiate") < order.indexOf("wasmReady"));

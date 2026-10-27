@@ -154,9 +154,11 @@ pub struct CuePlayback {
     channel: &'static str,
     /// The call's own volume factor (1.0 unless the call passes one).
     scale: f32,
+    spatial: Option<Vec3>,
 }
 
 impl CuePlayback {
+    pub fn spatial(mut self, position: Option<Vec3>) -> Self { self.spatial=position; self }
     /// The call's own volume: multiplies every track's volume.
     pub fn scaled(mut self, scale: f32) -> Self {
         self.scale = scale;
@@ -210,6 +212,8 @@ pub type TrackBundle = (
     PlaybackSettings,
     BusVolume,
     ChildOf,
+    Transform,
+    GlobalTransform,
 );
 
 /// Spawn a started cue; the entity is the playback's handle (despawn stops
@@ -226,6 +230,7 @@ pub fn spawn_playback(
     start_due_tracks(&mut playback, entity, bus, gate, now, &mut |track| {
         commands.spawn(track).id()
     });
+    if let Some(position)=playback.spatial { commands.entity(entity).insert((Transform::from_translation(position),GlobalTransform::from_translation(position))); }
     commands.entity(entity).insert(playback);
     entity
 }
@@ -242,6 +247,7 @@ pub fn spawn_playback_in_world(
     start_due_tracks(&mut playback, entity, &bus, &gate, now, &mut |track| {
         world.spawn(track).id()
     });
+    if let Some(position)=playback.spatial { world.entity_mut(entity).insert((Transform::from_translation(position),GlobalTransform::from_translation(position))); }
     world.entity_mut(entity).insert(playback);
     entity
 }
@@ -282,9 +288,11 @@ fn start_due_tracks(
         let linear = volume.linear(bus) * gate.factor();
         let sound = spawn((
             AudioPlayer::new(playback.handles[slot].clone()),
-            settings.with_volume(Volume::Linear(linear)),
+            settings.with_volume(Volume::Linear(linear)).with_spatial(playback.spatial.is_some()),
             BusVolume::Cue(volume),
             ChildOf(entity),
+            Transform::IDENTITY,
+            GlobalTransform::from_translation(playback.spatial.unwrap_or_default()),
         ));
         if playback.plan.work_key.is_some() {
             debug!(
@@ -334,6 +342,7 @@ pub fn start_cue_with_handles(
         voices: Vec::new(),
         channel,
         scale: 1.0,
+        spatial: None,
     };
     start_round(&mut playback, work, rngs, now);
     playback
@@ -411,6 +420,7 @@ pub fn advance_cue_playbacks(
     mut playbacks: Query<(Entity, &mut CuePlayback)>,
     players: Query<&AudioPlayer<AudioSource>>,
     sinks: Query<&AudioSink>,
+    spatial_sinks: Query<&bevy::audio::SpatialAudioSink>,
 ) {
     let now = time.elapsed_secs_f64();
     for (entity, mut playback) in &mut playbacks {
@@ -423,7 +433,7 @@ pub fn advance_cue_playbacks(
             for index in 0..playback.voices.len() {
                 match playback.voices[index] {
                     RoundVoice::Sounding { entity: sound, .. } => {
-                        if one_shot_finished_or_failed(sound, &server, &players, &sinks) {
+                        if spatial_sinks.get(sound).is_ok_and(|sink|sink.empty()) || one_shot_finished_or_failed(sound, &server, &players, &sinks) {
                             if let Ok(mut sound_commands) = commands.get_entity(sound) {
                                 sound_commands.despawn();
                             }

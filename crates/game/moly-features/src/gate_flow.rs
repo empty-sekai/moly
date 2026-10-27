@@ -1622,6 +1622,11 @@ fn appearance_step(world: &mut World, appearance: &mut Appearance) -> bool {
         }
         appearance.next_at = t;
         for (index, unit) in appearance.units.iter().enumerate() {
+            if let Some((_, actor)) = npcs.iter().find(|(id, _)| id == unit) {
+                if crate::npc_objective::events::enrolled(world, *actor) {
+                    crate::npc_objective::events::enter_standby(world, *actor);
+                }
+            }
             appearance.visitors.push(Visitor {
                 unit: *unit,
                 timeline: if index == 0 { FIRST_VISIT } else { NEXT_VISIT },
@@ -1814,6 +1819,12 @@ fn force_update_objective_immediately_timeline(
     visitor: &Visitor,
     t: f64,
 ) {
+    if let Some(character) = crate::npc::gate_entries::find_npc(world, visitor.unit) {
+        if crate::npc_objective::events::enrolled(world, character) {
+            info!("[gate] t={t:.3} unit {}: preparing the complete immediate NPC timeline", visitor.unit);
+            return;
+        }
+    }
     let uid = world
         .get::<FixtureActivityIdentity>(gate)
         .map(|identity| identity.uid.clone());
@@ -1847,6 +1858,10 @@ fn visitor_step(
     if t + 1e-9 < timeline_start {
         return;
     }
+    let hfsm_actor = if visitor.unit == 0 { None } else {
+        crate::npc::gate_entries::find_npc(world, visitor.unit)
+            .filter(|actor| crate::npc_objective::events::enrolled(world, *actor))
+    };
     if let Some(token) = visitor.token {
         let status = world
             .resource::<FixtureActivityTimelines>()
@@ -1879,7 +1894,7 @@ fn visitor_step(
                     visitor.timeline, visitor.unit
                 );
                 timeline::cancel_and_release(world, token);
-                if visitor.unit != 0 {
+                if hfsm_actor.is_none() && visitor.unit != 0 {
                     info!("[gate] PlayGateCharacterAppearTimelineInternal(unit {}): the gate part ends; the NPC side after the forced timeline (its waits, ReleaseUsingFixture and the second cancel) is not routed with it", visitor.unit);
                 }
                 visitor.done = true;
@@ -1909,8 +1924,10 @@ fn visitor_step(
         Some(request) => request,
         None => {
             *generation += 1;
-            let (kept, left_out) = gate_part(&definition, visitor.unit != 0);
-            if visitor.unit != 0 {
+            let (kept, left_out) = if hfsm_actor.is_some() {
+                (definition.clone(), Vec::new())
+            } else { gate_part(&definition, visitor.unit != 0) };
+            if visitor.unit != 0 && hfsm_actor.is_none() {
                 force_update_objective_immediately_timeline(world, gate, visitor, t);
                 info!("[gate] t={t:.3} {} (unit {}): the timeline's own gate, SE and Control tracks play on the gate; the NPC's tracks left out: {:?}", visitor.timeline, visitor.unit, left_out);
             }
@@ -1918,22 +1935,26 @@ fn visitor_step(
             StartTimeline {
                 owner: TimelineOwner {
                     activity: FixtureActivityOwner {
-                        actor: gate,
+                        actor: hfsm_actor.unwrap_or(gate),
                         generation: *generation,
                     },
-                    kind: TimelineOwnerKind::FixtureOnly,
+                    kind: if hfsm_actor.is_some() { TimelineOwnerKind::Npc } else { TimelineOwnerKind::FixtureOnly },
                 },
                 fixture: gate,
                 definition: kept,
                 bindings: TimelineBindings::default(),
                 companions: Vec::new(),
                 timeout_secs: NO_TIMEOUT,
-                timeout_budget: TimelineTimeoutBudget::PlayerWall,
+                timeout_budget: if hfsm_actor.is_some() { TimelineTimeoutBudget::OwnerGated { advance: Some(true) } } else { TimelineTimeoutBudget::PlayerWall },
             }
         }
     };
+    let cast = hfsm_actor.and_then(|actor| world.get::<crate::character::MotionDriver>(actor)
+        .map(|driver| (visitor.unit, actor, driver.player, driver.graph.clone())));
+    if hfsm_actor.is_some() && cast.is_none() { visitor.request = Some(request); return; }
     let prepared = world.resource_scope(|world, mut provider: Mut<FixtureActivityProvider>| {
-        provider.prepare_fixture_only_bindings(world, &mut request)
+        if let Some(cast) = cast { provider.prepare_talk_cast_bindings(world, &mut request, &[cast]) }
+        else { provider.prepare_fixture_only_bindings(world, &mut request) }
     });
     match prepared {
         Ok(()) => {}
@@ -1950,6 +1971,11 @@ fn visitor_step(
         }
         Err(pending) => {
             let reason = format!("{}: {}", pending.stage, pending.reason);
+            if hfsm_actor.is_some() {
+                error!("[gate] complete NPC timeline {} failed preparation: {reason}", visitor.timeline);
+                visitor.done = true;
+                return;
+            }
             if !step_down(visitor, &mut request, &reason) {
                 error!(
                     "[gate] {} (unit {}): {reason}; its gate part does not play",
@@ -1976,7 +2002,7 @@ fn visitor_step(
             visitor.request = Some(request);
             return;
         }
-        if step_down(visitor, &mut request, &error.message) {
+        if hfsm_actor.is_none() && step_down(visitor, &mut request, &error.message) {
             return;
         }
         error!(
@@ -1986,9 +2012,12 @@ fn visitor_step(
         visitor.done = true;
         return;
     }
-    let token = world
-        .resource_mut::<FixtureActivityTimelines>()
-        .request_start(request.clone());
+    let token = if let Some(actor) = hfsm_actor {
+        match crate::npc_objective::events::begin_immediate_timeline(world, actor, request.clone()) {
+            Ok(token) => token,
+            Err(reason) => { visitor.request = Some(request); visitor.reported = Some(reason); return; }
+        }
+    } else { world.resource_mut::<FixtureActivityTimelines>().request_start(request.clone()) };
     info!(
         "[gate] t={t:.3} {} (unit {}) starts on the gate: director {} duration {:.4} s, {} tracks ({} Control clips driven, {} refused), SE {:?}",
         visitor.timeline,
@@ -2098,9 +2127,9 @@ pub fn cut_scene_started(world: &mut World, cast: &Cast) {
         CastCaller::Invite => {
             info!("[gate] PlayInviteCutSceneAsync: no start callback");
         }
-        // Empty: cutscene.rs dispatches Birthday casts to its own callbacks
-        // and never calls gate_flow for them.
-        CastCaller::Birthday => {}
+        // These callers own separate callbacks in cutscene.rs. Return here
+        // as well so this gate entry cannot publish duplicate side effects.
+        CastCaller::Birthday | CastCaller::Tutorial => return,
     }
     info!(
         "[gate] joystick enabled before the cut-scene state: {:?}",
@@ -2129,9 +2158,9 @@ pub fn cut_scene_end_callback(world: &mut World, cast: &Cast) {
             }
             dispose_npc_all(world, "OnEndGoHomeCutScene");
         }
-        // Empty: cutscene.rs dispatches Birthday casts to its own callbacks
-        // and never calls gate_flow for them.
-        CastCaller::Birthday => {}
+        // These callers own separate callbacks in cutscene.rs. Return here
+        // as well so this gate entry cannot publish duplicate side effects.
+        CastCaller::Birthday | CastCaller::Tutorial => return,
     }
 }
 

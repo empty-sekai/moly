@@ -16,6 +16,7 @@
 //! the presenter's fixture-first test.
 
 pub mod decider;
+pub mod common;
 pub mod lower_dispatch;
 pub mod lower_idle;
 pub mod plan;
@@ -466,7 +467,7 @@ impl LowerState {
         // state body decides.
         if matches!(
             self,
-            L::CutScene | L::EntrySite | L::SubFixtureAction | L::ImmediatelyTimeline
+            L::CutScene | L::EntrySite | L::SubFixtureAction | L::MultiFixtureAction | L::ImmediatelyTimeline
         ) {
             flags.can_interrupt = false;
         }
@@ -478,6 +479,11 @@ impl LowerState {
                 | L::MultiFixtureAction
                 | L::SubFixtureAction
                 | L::ImmediatelyTimeline
+                | L::CommunicationWhileDoingWait
+                | L::SubCommunicationWhileDoingWait
+                | L::CommonSomeCharacterCommunication
+                | L::SubCommonSomeCharacterWait
+                | L::NoneTalkFixtureAction
         ) {
             flags.can_be_recruited = false;
         }
@@ -487,6 +493,8 @@ impl LowerState {
                 | L::CommonFixtureTweet
                 | L::SingleFixtureAction
                 | L::MultiFixtureAction
+                | L::SubFixtureAction
+                | L::NoneTalkFixtureAction
         ) {
             flags.blocks_photo_shot_capture = true;
         }
@@ -498,6 +506,8 @@ impl LowerState {
                 | L::CommunicationWhileDoingWait
                 | L::MainCommunication
                 | L::SubCommunication
+                | L::SubCommunicationWhileDoingWait
+                | L::SubCommonSomeCharacterWait
         ) {
             flags.is_multi_character_action = true;
         }

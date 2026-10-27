@@ -23,6 +23,9 @@ use crate::harvest_material::{HarvestToolMaterial, AVATAR_TOOL_SHADER_NAME};
 use crate::player::PlayerControlled;
 use crate::player_avatar::AvatarDriver;
 
+mod bulk_material;
+pub use bulk_material::swap as swap_bulk_materials;
+
 const INDEX: &str = "moly://avatar/tools/index.json";
 const MOUNT: &str = "Penlight_R";
 
@@ -262,13 +265,13 @@ pub fn swap_materials(
     standard: Res<Assets<StandardMaterial>>,
     mut tools: ResMut<Assets<HarvestToolMaterial>>,
 ) {
-    for (tool_id, root) in &models.instances {
-        if roots.get(*root).is_err() {
+    let source_models: Vec<_> = models.instances.iter().filter_map(|(id, root)|
+        models.documents.get(id).map(|document| (*id, *root, document.clone()))).collect();
+    for (tool_id, root, document) in source_models {
+        if roots.get(root).is_err() {
             continue;
         }
-        let Some(doc) = models.documents.get(tool_id) else {
-            continue;
-        };
+        let doc = &document;
         if let LoadState::Failed(error) = server.load_state(doc) {
             panic!("tool document of tool {tool_id} failed to load: {error:?}");
         }
@@ -276,7 +279,7 @@ pub fn swap_materials(
             continue;
         };
         let mut found = Vec::new();
-        let mut stack = vec![*root];
+        let mut stack = vec![root];
         while let Some(entity) = stack.pop() {
             if let Ok(kids) = children.get(entity) {
                 stack.extend(kids.iter());
@@ -353,7 +356,7 @@ pub fn swap_materials(
                     .insert(MeshMaterial3d(handle));
             }
         }
-        commands.entity(*root).insert(ToolMaterialsSwapped);
+        commands.entity(root).insert(ToolMaterialsSwapped);
         info!(
             "[harvest] tool {tool_id}: {} material(s) drawn with {AVATAR_TOOL_SHADER_NAME}'s Base pass",
             swapped.len()

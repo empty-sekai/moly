@@ -105,6 +105,7 @@ impl<'a> Inputs<'a> {
         'a: 'q,
     {
         Capacity {
+            pending_gather_quantity: queue.pending_gather_quantity(),
             stacks: &queue.stacks,
             catalog: self.catalog,
             limits: self.limits,
@@ -176,6 +177,7 @@ fn on_collect_drop_item(
 /// Update: the collision scan, then the manager's frame pass.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn advance(
+    bulk: Option<Res<crate::field_modes::BulkHarvestActive>>,
     mut commands: Commands,
     time: Res<Time>,
     configs: Option<Res<crate::client_config::ClientConfigs>>,
@@ -203,6 +205,7 @@ pub fn advance(
     ),
     mut notices: MessageWriter<CollectNotice>,
 ) {
+    if bulk.is_some() { return; }
     let (catalog, user, limits, mock, site_move) = data;
     let (Some(configs), Some(catalog), Some(user)) = (configs, catalog, user) else {
         return;

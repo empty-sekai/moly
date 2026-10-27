@@ -50,7 +50,7 @@ use bevy::prelude::*;
 use moly_assets::json::JsonAsset;
 
 use super::catalog::{HarvestCatalog, HarvestUserData};
-use super::server_mock::{HarvestServerMock, BOX_BEFORE_SPAWNED, BOX_SPAWNED};
+use super::server_mock::{BOX_BEFORE_SPAWNED, BOX_SPAWNED};
 use crate::audio::SeRequests;
 use crate::player::PlayerControlled;
 use crate::site_move::timeline::Delay;
@@ -255,6 +255,18 @@ struct Airplane {
     end: Vec3,
     /// The box row read back after the spawn reply.
     box_position: (i32, i32),
+    spawn_pending: Option<u32>,
+}
+
+/// An answered request is no longer pending, including a refused spawn.
+/// The flight and hide stages keep their own bulk-harvest gate afterward.
+fn take_spawn_reply<'a>(
+    pending: &mut Option<u32>,
+    answers: &'a crate::userdata::AnsweredLog,
+) -> Option<&'a crate::userdata::Answered> {
+    let answer = answers.get((*pending)?)?;
+    *pending = None;
+    Some(answer)
 }
 
 /// The airplanes of the current harvest-site stay.
@@ -270,6 +282,9 @@ pub struct PaperAirplanes {
 }
 
 impl PaperAirplanes {
+    pub fn bulk_unsynced(&self, site: u32) -> bool {
+        self.runs.iter().any(|run| run.site_id == site && (run.spawn_pending.is_some() || matches!(run.stage, Stage::Flying { .. } | Stage::Hiding { .. })))
+    }
     /// The site goes: its airplanes go with it (the presenters are destroyed
     /// and their cancellation fires).
     pub fn clear(&mut self, commands: &mut Commands) {
@@ -284,6 +299,8 @@ impl PaperAirplanes {
 
 #[derive(SystemParam)]
 pub struct AirplaneInputs<'w> {
+    link: ResMut<'w, moly_link::ServerLink>,
+    answers: Res<'w, crate::userdata::AnsweredLog>,
     time: Res<'w, Time>,
     frames: Res<'w, FrameCount>,
     server: Res<'w, AssetServer>,
@@ -294,7 +311,6 @@ pub struct AirplaneInputs<'w> {
     site_move: Option<Res<'w, crate::site_move::SiteMoveActive>>,
     catalog: Option<Res<'w, HarvestCatalog>>,
     user: Option<ResMut<'w, HarvestUserData>>,
-    mock: Option<ResMut<'w, HarvestServerMock>>,
     arrival: ResMut<'w, super::arrival::HarvestArrival>,
     ground: Res<'w, super::HarvestGroundVerts>,
     face: Option<Res<'w, crate::walk_face::WalkFace>>,
@@ -320,6 +336,8 @@ pub fn advance(
     scene: AirplaneScene,
 ) {
     let AirplaneInputs {
+        mut link,
+        answers,
         time,
         frames,
         server,
@@ -330,7 +348,6 @@ pub fn advance(
         site_move,
         catalog,
         mut user,
-        mut mock,
         mut arrival,
         ground,
         face,
@@ -345,12 +362,11 @@ pub fn advance(
         mut transforms,
         mut visibility,
     } = scene;
-    let (Some(site), Some(epoch), Some(catalog), Some(user), Some(mock)) = (
+    let (Some(site), Some(epoch), Some(catalog), Some(user)) = (
         site.as_deref(),
         epoch.as_deref(),
         catalog,
         user.as_deref_mut(),
-        mock.as_deref_mut(),
     ) else {
         return;
     };
@@ -358,6 +374,9 @@ pub fn advance(
     let frame = u64::from(frames.0);
     let on_harvest_site = site_move.is_none() && site.category == "harvest";
 
+    if site.category == "harvest" && arrival.site_id() != Some(site.site_id) {
+        return;
+    }
     // A new site settles: the previous site's airplanes go; a harvest site
     // sets up one per unspawned box.
     if airplanes.epoch != Some(epoch.0) {
@@ -404,6 +423,7 @@ pub fn advance(
                     plane_meshes: Vec::new(),
                     end: Vec3::ZERO,
                     box_position: (0, 0),
+                    spawn_pending: None,
                 });
             }
         }
@@ -454,7 +474,11 @@ pub fn advance(
             if let Some(scene) = scene.clone() {
                 run.root = Some(
                     commands
-                        .spawn((WorldAssetRoot(scene), Transform::default(), Visibility::Hidden))
+                        .spawn((
+                            WorldAssetRoot(scene),
+                            Transform::default(),
+                            Visibility::Hidden,
+                        ))
                         .id(),
                 );
             }
@@ -492,16 +516,25 @@ pub fn advance(
                 // The player's site-local position (the product frame
                 // reflects x), truncated toward zero.
                 let (x, z) = (-player.x as i32, player.z as i32);
-                let Some((boxes, map)) = mock.spawn_treasure_box(run.site_id, run.seq, x, z) else {
-                    warn!(
-                        "[harvest-airplane] box seq {} SyncTresureBoxSpawned(site {}, ({x}, {z})): the spawn mock did not serve it; the airplane ends",
-                        run.seq, run.site_id
-                    );
-                    run.stage = Stage::Done;
+                if run.spawn_pending.is_none() {
+                    run.spawn_pending = Some(link.call(moly_protocol::Call::TreasureBoxSpawn(
+                        moly_protocol::api::UserMysekaiTreasureBoxSpawnRequest {
+                            mysekai_site_id: run.site_id as i32,
+                            seq: run.seq,
+                            position_x: x,
+                            position_z: z,
+                        },
+                    )));
+                    continue;
+                }
+                let Some(answer) = take_spawn_reply(&mut run.spawn_pending, &answers) else {
                     continue;
                 };
-                user.boxes = boxes;
-                user.maps.insert(run.site_id, map);
+                if !matches!(&answer.outcome, Ok(moly_protocol::Reply::TreasureBoxSpawn)) {
+                    warn!("[harvest-airplane] spawn refused: {:?}", answer.outcome);
+                    run.stage = Stage::Done;
+                    continue;
+                }
                 let Some(row) = user
                     .boxes
                     .iter()
@@ -537,9 +570,9 @@ pub fn advance(
                             .and_then(|face| face.surface_height([px, pz]))
                     })
                     .or_else(|| {
-                        verts.as_deref().map(|verts| {
-                            super::surface_y(verts, px, pz, f32::NEG_INFINITY)
-                        })
+                        verts
+                            .as_deref()
+                            .map(|verts| super::surface_y(verts, px, pz, f32::NEG_INFINITY))
                     })
                     .filter(|y| y.is_finite() && *y <= RAY_HEIGHT);
                 let Some(y) = hit else {
@@ -756,6 +789,87 @@ fn find_named(
 #[cfg(test)]
 mod value_checks {
     use super::*;
+
+    fn airplane(stage: Stage) -> Airplane {
+        Airplane {
+            seq: 1,
+            site_id: 2,
+            transport: 10.0,
+            elapsed: 0.0,
+            stage,
+            root: None,
+            plane: None,
+            plane_meshes: Vec::new(),
+            end: Vec3::ZERO,
+            box_position: (0, 0),
+            spawn_pending: None,
+        }
+    }
+
+    #[test]
+    fn bulk_waits_only_for_outstanding_spawn_and_active_delivery() {
+        let mut airplanes = PaperAirplanes {
+            runs: vec![airplane(Stage::Waiting)],
+            ..Default::default()
+        };
+        let mut answers = crate::userdata::AnsweredLog::default();
+        // Before delivery, the user box rows supply the unspawned-box gate.
+        assert!(!airplanes.bulk_unsynced(2));
+        airplanes.runs[0].stage = Stage::WaitSite;
+        assert!(!airplanes.bulk_unsynced(2));
+        airplanes.runs[0].spawn_pending = Some(42);
+        assert!(airplanes.bulk_unsynced(2));
+        assert!(!airplanes.bulk_unsynced(3));
+
+        answers.push(crate::userdata::Answered {
+            seq: 41,
+            call: moly_protocol::CallKind::TreasureBoxSpawn,
+            outcome: Ok(moly_protocol::Reply::TreasureBoxSpawn),
+        });
+        assert!(take_spawn_reply(&mut airplanes.runs[0].spawn_pending, &answers).is_none());
+        assert_eq!(airplanes.runs[0].spawn_pending, Some(42));
+        answers.push(crate::userdata::Answered {
+            seq: 42,
+            call: moly_protocol::CallKind::TreasureBoxSpawn,
+            outcome: Ok(moly_protocol::Reply::TreasureBoxSpawn),
+        });
+        assert!(take_spawn_reply(&mut airplanes.runs[0].spawn_pending, &answers).is_some());
+        assert!(airplanes.runs[0].spawn_pending.is_none());
+        assert!(take_spawn_reply(&mut airplanes.runs[0].spawn_pending, &answers).is_none());
+
+        airplanes.runs[0].stage = Stage::Flying {
+            time: 0.0,
+            started: 0.0,
+            renderer: false,
+            switches: Vec::new(),
+        };
+        assert!(airplanes.bulk_unsynced(2));
+        airplanes.runs[0].stage = Stage::Hiding {
+            delay: Delay::new(HIDE_DELAY, 0),
+        };
+        assert!(airplanes.bulk_unsynced(2));
+        airplanes.runs[0].stage = Stage::Done;
+        assert!(!airplanes.bulk_unsynced(2));
+    }
+
+    #[test]
+    fn refused_spawn_reply_does_not_leave_a_pending_bulk_gate() {
+        let mut airplanes = PaperAirplanes {
+            runs: vec![airplane(Stage::WaitSite)],
+            ..Default::default()
+        };
+        airplanes.runs[0].spawn_pending = Some(42);
+        let mut answers = crate::userdata::AnsweredLog::default();
+        answers.push(crate::userdata::Answered {
+            seq: 42,
+            call: moly_protocol::CallKind::TreasureBoxSpawn,
+            outcome: Err(moly_protocol::Refusal::new("spawn_refused", "cannot spawn")),
+        });
+        let answer = take_spawn_reply(&mut airplanes.runs[0].spawn_pending, &answers).unwrap();
+        assert!(answer.outcome.is_err());
+        airplanes.runs[0].stage = Stage::Done;
+        assert!(!airplanes.bulk_unsynced(2));
+    }
 
     /// The segment format as read (value `((a s + b) s + c) s + d` from the
     /// segment start; the first value before the first segment; the last

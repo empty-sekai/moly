@@ -102,6 +102,14 @@ checks measured source paths, lossless gzip, region/version mismatch and stale
 sidecars. `release-artifact.test.mjs` checks exact catalogue identity and WASM
 section stripping without changing runtime sections.
 
+A new source may not have `browser-base.json` yet. Run acceptance once with
+`--measure-base` on a loopback development server. The harness marks only that
+document to skip prewarming, while keeping source checks and actual playback.
+Feed the successful trace to `prepare-browser-assets.mjs --assets ... --evidence ...`,
+then rerun acceptance without the flag. The first trace measures requests; only
+the second run validates the production prewarm path. Published HTML never
+carries the measurement marker.
+
 Run the repository boundary and version gates before committing:
 
 ```sh

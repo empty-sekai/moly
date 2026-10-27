@@ -400,6 +400,52 @@ pub fn library_snapshot() -> String {
     moly_game::library_snapshot()
 }
 
+/// Installs a hash-verified optional font for translated display text.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn install_text_font(bytes: Vec<u8>, sha256: &str) -> Result<(), wasm_bindgen::JsValue> {
+    moly_game::text_localization::install_font(bytes, sha256)
+        .map_err(|error| wasm_bindgen::JsValue::from_str(&error))
+}
+
+/// Install display text independently of the selected game-resource region.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn configure_text(source: &str, official: &str, community: &str, locale: &str) -> Result<(), wasm_bindgen::JsValue> {
+    moly_game::text_localization::configure(source, official, community, locale)
+        .map_err(|error| wasm_bindgen::JsValue::from_str(&error))
+}
+
+/// Called at the stage's idle boundary after all publication fonts download.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn configure_text_session(
+    source: &str,
+    official: &str,
+    community: &str,
+    locale: &str,
+    font_bytes: Vec<u8>,
+    font_references: &str,
+) -> Result<(), wasm_bindgen::JsValue> {
+    moly_core::ui_font::with_text_font_session(font_bytes, font_references, || {
+        if source.is_empty() && official.is_empty() && community.is_empty() {
+            moly_game::text_localization::clear()
+        } else {
+            moly_game::text_localization::configure(source, official, community, locale)
+        }
+    }).map_err(|error| wasm_bindgen::JsValue::from_str(&error))
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn clear_text() -> Result<(), wasm_bindgen::JsValue> {
+    moly_game::text_localization::clear().map_err(|error| wasm_bindgen::JsValue::from_str(&error))
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn text_ready() -> bool { moly_game::text_localization::ready() }
+
 /// Deployment tooling requests a source-scoped catalogue, never a live entity.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]

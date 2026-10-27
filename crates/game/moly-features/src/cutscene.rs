@@ -348,7 +348,7 @@ pub fn play_async(world: &mut World, play: CastPlay) -> Result<(), String> {
         return Err("another cut-scene is being played".into());
     }
     info!(
-        "[cutscene] {}: CutSceneExecutor.PlayAsync(characterUnitIds {:?}, cutSceneId {}, startTransform {:?}, useAlreadyExistCharacter {}, hidePlayer {}, showUI {}): CutSceneRoot found (its own pose taken as identity); MagicaCloth RequestReset (logged only); FadeAndSetUpAsync: bundle mysekai/cut_scene/{}",
+        "[cutscene] {}: CutSceneExecutor.PlayAsync(characterUnitIds {:?}, cutSceneId {}, startTransform {:?}, useAlreadyExistCharacter {}, hidePlayer {}, showUI {}): CutSceneRoot found (created at zero with default rotation and scale); MagicaCloth RequestReset (logged only); FadeAndSetUpAsync: bundle mysekai/cut_scene/{}",
         play.caller.name(),
         play.units,
         play.cut_scene_id,
@@ -601,11 +601,11 @@ fn screen_cast(caller: &Caller, timeline: &str) -> screen::ScreenCast {
     match caller {
         Caller::Cast(cast) => screen::ScreenCast {
             caller: cast.play.caller.name(),
-            voice_bank: (cast.play.caller == CastCaller::Birthday).then(|| {
-                crate::audio::cutscene::bundle_package(&format!(
-                    "mysekai/talk/birthday/voice/{timeline}"
-                ))
-            }),
+            voice_bank: match cast.play.caller {
+                CastCaller::Tutorial => Some(crate::audio::cutscene::bundle_package(&format!("mysekai/talk/tutorial/voice/{timeline}"))),
+                CastCaller::Birthday => Some(crate::audio::cutscene::bundle_package(&format!("mysekai/talk/birthday/voice/{timeline}"))),
+                _ => None,
+            },
             members: cast.members(),
         },
         _ => screen::ScreenCast {
@@ -620,6 +620,7 @@ fn screen_cast(caller: &Caller, timeline: &str) -> screen::ScreenCast {
 fn cast_returned(world: &mut World, cast: cast::Cast) {
     match cast.play.caller {
         CastCaller::Birthday => birthday::cut_scene_returned(world, &cast),
+        CastCaller::Tutorial => crate::tutorial::cut_scene_returned(world, &cast),
         CastCaller::Invite | CastCaller::GoHome => {
             crate::gate_flow::cut_scene_returned(world, cast)
         }
@@ -667,7 +668,7 @@ fn unlock_cutscene(world: &mut World, unlock: SiteLevelRow, rank: i32) -> Option
     );
     save_unlock(world, &unlock);
     hide_fixture_all(world);
-    info!("[cutscene] CutSceneExecutor.PlayAsync: CutSceneRoot found (its own pose taken as identity); MagicaCloth RequestReset (logged only); FadeAndSetUpAsync");
+    info!("[cutscene] CutSceneExecutor.PlayAsync: CutSceneRoot found (created at zero with default rotation and scale); MagicaCloth RequestReset (logged only); FadeAndSetUpAsync");
     let package = format!("{PACKAGE_PREFIX}{}", row.bundle);
     let server = world.resource::<AssetServer>().clone();
     let tracks =
@@ -1842,7 +1843,8 @@ fn presenter_fade_in(world: &mut World, plan: &Plan) {
         }
         _ => [0.0; 4],
     };
-    crate::screen_fade::cutscene_fade_in(world, color, LAYER_FADE, "CutScenePresenter.FadeInAsync");
+    let duration = match &plan.caller { Caller::Cast(cast) if cast.play.caller == CastCaller::Tutorial => 0.0, _ => LAYER_FADE };
+    crate::screen_fade::cutscene_fade_in(world, color, duration, "CutScenePresenter.FadeInAsync");
 }
 
 /// `SetupInternal`, then `CutSceneView.PlayAsync` starts the director.
@@ -1851,6 +1853,7 @@ fn setup_internal(world: &mut World, plan: &mut Plan) -> Play {
     if let Caller::Cast(cast) = &plan.caller {
         match cast.play.caller {
             CastCaller::Birthday => birthday::start_fade_in_callback(world, cast),
+            CastCaller::Tutorial => crate::tutorial::start_fade_in_callback(world, cast),
             CastCaller::Invite | CastCaller::GoHome => {
                 crate::gate_flow::cut_scene_started(world, cast)
             }
@@ -2556,7 +2559,7 @@ fn end_async(world: &mut World, plan: &mut Plan, play: &Play) {
         crate::screen_fade::cutscene_fade_out_color(
             world,
             end,
-            LAYER_FADE,
+            if cast.play.caller == CastCaller::Tutorial { 0.0 } else { LAYER_FADE },
             "CutScenePresenter.FadeOutAsync",
         );
         return;
@@ -2579,4 +2582,18 @@ pub fn install(app: &mut App) {
             crate::site::apply_obstacle_level,
         ),
     );
+}
+
+/// SceneMysekai.CreateCutSceneRoot creates an unparented GameObject, names it
+/// CutSceneRoot and sets position zero. Its default rotation/scale are kept.
+#[derive(Resource)]
+struct SceneRoot(Entity);
+
+pub fn scene_root(world: &mut World) -> Entity {
+    if let Some(root) = world.get_resource::<SceneRoot>().map(|root|root.0) {
+        if world.get_entity(root).is_ok() { return root; }
+    }
+    let entity = world.spawn((Name::new("CutSceneRoot"), Transform::IDENTITY, GlobalTransform::IDENTITY)).id();
+    world.insert_resource(SceneRoot(entity));
+    entity
 }

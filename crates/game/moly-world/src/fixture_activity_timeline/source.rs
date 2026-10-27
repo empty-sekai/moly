@@ -102,6 +102,12 @@ pub enum TimelinePayload {
         looping: bool,
         enable_talk: bool,
     },
+    /// Section callbacks are evaluated on clip entry, like PlayableBehaviour.
+    SectionPause,
+    SectionStop,
+    SectionJumpTarget {
+        name: String,
+    },
     Se {
         package: String,
         cue: String,
@@ -115,6 +121,10 @@ pub enum TimelinePayload {
     /// curve over the clip's normalized time.
     FadeCharacter(Arc<FadeCurve>),
     Control(ControlSettings),
+    /// Script-owned Play/Pause particle lifecycle, not continuous Simulate.
+    LoopParticle {
+        exposed_name: String,
+    },
     /// A cut-scene track's clip. The runner keeps its clock; the cut-scene
     /// owner drives these tracks (any other owner refuses them by name).
     CutScene(CutScenePayload),
@@ -152,10 +162,9 @@ impl FadeCurve {
             })
             .collect::<Result<Vec<_>, TimelineFailure>>()?;
         let wrap = |field: &str| -> Result<Option<u32>, TimelineFailure> {
-            Ok(Some(
-                u32::try_from(unsigned(value, field)?)
-                    .map_err(|_| invalid(format!("fade curve {field} out of range")))?,
-            ))
+            Ok(Some(u32::try_from(unsigned(value, field)?).map_err(
+                |_| invalid(format!("fade curve {field} out of range")),
+            )?))
         };
         let last_value = keys.last().map_or(0.0, |key| key.value);
         let curve = moly_law::particle::Curve {
@@ -456,6 +465,10 @@ pub struct BlendCurve {
 }
 
 impl BlendCurve {
+    #[cfg(test)]
+    pub(super) fn empty() -> Self {
+        Self { keys: Vec::new() }
+    }
     fn parse(value: &Value) -> Result<Self, TimelineFailure> {
         let mut keys = Vec::new();
         for key in array(value, "curve")? {
@@ -654,6 +667,7 @@ pub struct TimelineDefinition {
     pub prefab: String,
     pub fixture_view: Option<FixtureTimelineViewBinding>,
     pub director: SourceAssetId,
+    pub director_transforms: Option<Vec<DirectorTransform>>,
     pub timeline: SourceAssetId,
     pub duration: f64,
     pub tracks: Vec<TimelineTrack>,
@@ -666,11 +680,7 @@ pub struct TimelinePackage {
 }
 
 impl TimelinePackage {
-    pub fn from_jsons(
-        tracks: &str,
-        clips: &str,
-        targets: &str,
-    ) -> Result<Self, TimelineFailure> {
+    pub fn from_jsons(tracks: &str, clips: &str, targets: &str) -> Result<Self, TimelineFailure> {
         let parse =
             |text| serde_json::from_str(text).map_err(|e| invalid(format!("timeline JSON: {e}")));
         let result = Self {
@@ -865,6 +875,12 @@ impl TimelinePackage {
                         &payload["fields"]["sourceGameObject"]["defaultValue"],
                         playable.as_ref(),
                     )),
+                    TimelinePayload::LoopParticle { exposed_name } => Some(resolve_exposed(
+                        &exposed,
+                        exposed_name,
+                        &payload["fields"]["TargetGameObject"]["defaultValue"],
+                        playable.as_ref(),
+                    )),
                     _ => None,
                 };
                 let result = TimelineClip {
@@ -937,6 +953,7 @@ impl TimelinePackage {
             prefab: string(prefab, "container")?.to_owned(),
             fixture_view,
             director: asset(&director["asset"])?,
+            director_transforms: director_transforms(director)?,
             timeline: identity,
             duration,
             tracks,
@@ -1034,6 +1051,11 @@ impl TimelinePackage {
                 looping: flag(f, "_loopFlag")?,
                 enable_talk: flag(f, "_enableTalkFlag")?,
             },
+            "SectionPauseClip" => TimelinePayload::SectionPause,
+            "SectionStopClip" => TimelinePayload::SectionStop,
+            "SectionJumpTargetClip" => TimelinePayload::SectionJumpTarget {
+                name: string(f, "_jumpName")?.to_owned(),
+            },
             "SEClip" => TimelinePayload::Se {
                 package: string(f, "_assetBundleName")?.replace('/', "__"),
                 cue: string(f, "_cueName")?.into(),
@@ -1046,6 +1068,9 @@ impl TimelinePackage {
                 TimelinePayload::FadeCharacter(Arc::new(FadeCurve::parse(&f["AnimationCurve"])?))
             }
             "ControlPlayableAsset" => TimelinePayload::Control(control_payload(f)?),
+            "LoopParticleControlPlayableAsset" => TimelinePayload::LoopParticle {
+                exposed_name: string(&f["TargetGameObject"], "exposedName")?.to_owned(),
+            },
             "CinemachineShot" => TimelinePayload::CutScene(CutScenePayload::CinemachineShot {
                 exposed_name: string(&f["VirtualCamera"], "exposedName")?.to_owned(),
             }),
@@ -1382,4 +1407,53 @@ pub(super) fn asset(v: &Value) -> Result<SourceAssetId, TimelineFailure> {
         file: string(v, "file")?.into(),
         path_id: path_id(&v["pathId"])?,
     })
+}
+
+/// The Director's source Transform chain from prefab root to its own node.
+/// Imported into canonical axes exactly once when composed with the live view.
+#[derive(Clone,Debug)]
+pub struct DirectorTransform {
+    pub position: [f32;3],
+    pub rotation: [f32;4],
+    pub scale: [f32;3],
+}
+fn director_transforms(
+    director: &Value,
+) -> Result<Option<Vec<DirectorTransform>>, TimelineFailure> {
+    let Some(values) = director.get("transforms") else {
+        return Ok(None);
+    };
+    let values = values
+        .as_array()
+        .ok_or_else(|| invalid("director transforms is not an array"))?;
+    if values.is_empty() {
+        return Err(invalid("director transform chain is empty"));
+    }
+    let mut result = Vec::new();
+    for value in values {
+        let component=|group:&str,key:&str|->Result<f32,TimelineFailure>{
+            let n=value[group][key].as_f64().filter(|v|v.is_finite()).ok_or_else(||invalid(format!("director {group}.{key} missing")))? as f32;
+            if !n.is_finite() { return Err(invalid("director transform exceeds float range")); }
+            Ok(n)
+        };
+        result.push(DirectorTransform {
+            position: [
+                component("position", "x")?,
+                component("position", "y")?,
+                component("position", "z")?,
+            ],
+            rotation: [
+                component("rotation", "x")?,
+                component("rotation", "y")?,
+                component("rotation", "z")?,
+                component("rotation", "w")?,
+            ],
+            scale: [
+                component("scale", "x")?,
+                component("scale", "y")?,
+                component("scale", "z")?,
+            ],
+        });
+    }
+    Ok(Some(result))
 }

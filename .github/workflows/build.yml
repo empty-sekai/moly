@@ -63,6 +63,10 @@ jobs:
       VERSION: ${{ inputs.version }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        if: inputs.package
+        with:
+          node-version: '22'
       - name: Install the Rust toolchain
         shell: bash
         run: |
@@ -82,7 +86,15 @@ jobs:
           cache-targets: false
           save-if: ${{ github.ref == 'refs/heads/master' }}
       - name: Build
-        run: cargo build --release --locked -p moly-app -p moly-launcher -p moly-server-host --target ${{ matrix.target }}
+        run: cargo build --release --locked -p moly-app -p moly-stage -p moly-launcher -p moly-server-host --target ${{ matrix.target }}
+      - name: Test shared rules, transport, settlement and runtime
+        if: runner.os == 'Linux'
+        run: >-
+          cargo test --release --locked --lib
+          -p moly-law -p moly-protocol -p moly-layout -p moly-masters
+          -p moly-assets -p moly-server -p moly-world -p moly-features
+          --target ${{ matrix.target }}
+          -- --test-threads=1
       - name: Compiler cache statistics
         if: always()
         run: sccache --show-stats
@@ -113,6 +125,7 @@ jobs:
             cp LICENSE THIRD_PARTY_NOTICES.md "dist/$name/"
             cp docs/release-package.md "dist/$name/README.md"
           done
+          node web/ui-font-package.mjs --copy-license "dist/$game"
           cd dist
           for name in "$game" "$server"; do
             if [[ "${{ matrix.archive }}" == zip ]]; then
@@ -128,11 +141,18 @@ jobs:
           name: native-${{ matrix.target }}
           path: dist/out/*
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: inputs.package && runner.os == 'Windows'
+        with:
+          name: stage-system-audit-windows
+          path: target/${{ matrix.target }}/release/moly-stage.exe
+          if-no-files-found: error
   browser:
     strategy:
       fail-fast: false
       matrix:
         renderer: [webgpu, webgl2]
+        product: [stage, game]
     runs-on: ubuntu-22.04
     timeout-minutes: 240
     steps:
@@ -147,7 +167,7 @@ jobs:
       - uses: mozilla-actions/sccache-action@v0.0.11
       - uses: Swatinem/rust-cache@v2
         with:
-          key: wasm32-${{ matrix.renderer }}
+          key: wasm32-${{ matrix.product }}-${{ matrix.renderer }}
           cache-targets: false
           cache-bin: true
           save-if: ${{ github.ref == 'refs/heads/master' }}
@@ -159,16 +179,16 @@ jobs:
             cargo install wasm-bindgen-cli --version "$version" --locked --force
           fi
           wasm-bindgen --version
-      - name: Build the ${{ matrix.renderer }} package
+      - name: Build the ${{ matrix.product }} ${{ matrix.renderer }} package
         env:
           CARGO_BUILD_JOBS: '4'
-        run: node web/build-wasm.mjs --renderer ${{ matrix.renderer }}
+        run: node web/build-wasm.mjs --product ${{ matrix.product }} --renderer ${{ matrix.renderer }} --out-dir web/pkg
       - name: Compiler cache statistics
         if: always()
         run: sccache --show-stats
       - uses: actions/upload-artifact@v4
         if: inputs.package
         with:
-          name: browser-${{ matrix.renderer }}
+          name: browser-${{ matrix.product }}-${{ matrix.renderer }}
           path: web/pkg
           if-no-files-found: error

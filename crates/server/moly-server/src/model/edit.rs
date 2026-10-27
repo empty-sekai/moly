@@ -144,9 +144,10 @@ pub(crate) fn check_masters(doc: &ServerDocument, masters: &Tables<'_>) -> Resul
     super::inventory::check_masters(&doc.inventory, masters)?;
     super::tools::check_masters(&doc.tools, masters)?;
     super::music_play::check_owned(&doc.music_records, masters.music_records.as_deref())?;
-    if let (Some(level), Some(convert)) =
-        (doc.gamedata.mysekai_convert_fixture_level, masters.convert.as_ref())
-    {
+    if let (Some(level), Some(convert)) = (
+        doc.gamedata.mysekai_convert_fixture_level,
+        masters.convert.as_ref(),
+    ) {
         if let Some(levels) = &convert.levels {
             if !levels.contains(&level) {
                 return Err(format!(
@@ -159,7 +160,9 @@ pub(crate) fn check_masters(doc: &ServerDocument, masters: &Tables<'_>) -> Resul
         if let Some(items) = &convert.items {
             for (i, row) in doc.convert.slots.iter().enumerate() {
                 if row.convert_count > 0
-                    && !items.iter().any(|item| item.id == row.mysekai_convert_item_id)
+                    && !items
+                        .iter()
+                        .any(|item| item.id == row.mysekai_convert_item_id)
                 {
                     return Err(format!(
                         "userMysekaiConvertSlots[{i}] converts item {}, which the master does not hold",
@@ -659,22 +662,35 @@ impl ServerModel {
             "fixture.grant" => {
                 only(
                     command,
-                    &["type", "action", "mysekaiFixtureId", "textureId", "quantity"],
+                    &[
+                        "type",
+                        "action",
+                        "mysekaiFixtureId",
+                        "textureId",
+                        "quantity",
+                    ],
                 )?;
                 let field = |key: &str| {
-                    int32(command.get(key).unwrap_or(&Value::Null), &format!("fixture.grant {key}"))
+                    int32(
+                        command.get(key).unwrap_or(&Value::Null),
+                        &format!("fixture.grant {key}"),
+                    )
                 };
-                let (fixture_id, texture_id, quantity) =
-                    (field("mysekaiFixtureId")?, field("textureId")?, field("quantity")?);
+                let (fixture_id, texture_id, quantity) = (
+                    field("mysekaiFixtureId")?,
+                    field("textureId")?,
+                    field("quantity")?,
+                );
                 if quantity <= 0 {
-                    return Err(format!("server.edit fixture.grant quantity {quantity} is not positive"));
+                    return Err(format!(
+                        "server.edit fixture.grant quantity {quantity} is not positive"
+                    ));
                 }
                 let mut next = self.doc.clone();
                 let fixtures = &mut next.inventory.fixtures;
-                match fixtures
-                    .iter_mut()
-                    .find(|row| row.mysekai_fixture_id == fixture_id && row.texture_id == texture_id)
-                {
+                match fixtures.iter_mut().find(|row| {
+                    row.mysekai_fixture_id == fixture_id && row.texture_id == texture_id
+                }) {
                     Some(row) => {
                         row.quantity = row.quantity.checked_add(quantity).ok_or_else(|| {
                             format!("server.edit fixture.grant: fixture {fixture_id} quantity overflows")
@@ -696,8 +712,10 @@ impl ServerModel {
                 self.commit();
                 self.respond(ResponseKind::Sync, false, &[], masters);
                 info!("[server] server.edit fixture.grant {fixture_id} texture {texture_id} x{quantity} accepted");
-                Ok(json!({"action": action, "mysekaiFixtureId": fixture_id, "textureId": texture_id,
-                    "quantity": quantity, "revision": self.revision}))
+                Ok(
+                    json!({"action": action, "mysekaiFixtureId": fixture_id, "textureId": texture_id,
+                    "quantity": quantity, "revision": self.revision}),
+                )
             }
             other => Err(format!("server.edit action {other} is unknown")),
         }
@@ -870,7 +888,7 @@ fn policies() -> Value {
         {"name": "site level releases", "key": "policies.siteLevelReleases", "rule": "the released site levels are the mysekaiRankReleases rows (rankReleases, the default: what the source server serves); with everyAuthoredLevel — an extension this mock adds, the source server sends no such policy — the server appends a mysekai_site_level row for every authored level of a housing site above the level that site's rows release, one rank each with the highest level at the highest master rank, and the client reads the rows alone"},
         {"name": "initial stamina", "rule": "a document without stamina gets normal at the master maximum, enhance 0 and boost of one recovery grant"},
         {"name": "rank from experience", "rule": "mysekaiRank is the master rank of totalExp; editing either sets the other"},
-        {"name": "harvest stamina", "rule": "the harvest reply carries the rests the client sent, unless a panel stamina edit is pending"},
+        {"name": "harvest stamina", "rule": "ordinary and bulk harvest share durable map rows; exact HP and finishing-hit costs debit boost, enhance, then normal; requests must agree with authoritative fixture/drop rows and available tools; a pending panel stamina edit supersedes the sent prediction"},
         {"name": "gate reserve", "rule": "the unit group joins the home gate's characters (isReservation true, visitCount 1)"},
         {"name": "fixture grant", "rule": "an extension this mock adds: the quantity joins the fixture's owned row of that texture (a new row when none), lastObtainedAt takes the server clock, and the owned fixtures are delivered at once"},
         {"name": "gate change", "rule": "the home gate takes the gate and skin; the unit groups become its characters (isReservation false, visitCount 1)"},

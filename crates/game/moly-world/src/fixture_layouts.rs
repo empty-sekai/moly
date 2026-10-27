@@ -22,13 +22,21 @@ pub const SECTION: &str = "OfflineSiteLayouts";
 /// layout block (the server decides placements; the panel document is the
 /// only source), each row with the authored piece's traits when the row
 /// states them. Installed once, when the panel document is parsed.
+static HOME_ENVIRONMENT: std::sync::OnceLock<Option<i32>> = std::sync::OnceLock::new();
+
 static HOME_STARTER: std::sync::OnceLock<Vec<StarterRow>> = std::sync::OnceLock::new();
 
 type StarterRow = (PlacementMock<String>, Option<super::region::PieceTraits>);
 
 /// Decodes and installs the panel's home starter rows (once per process);
 /// returns the row count.
-pub fn install_home_starter_records(records: &[Value]) -> Result<usize, String> {
+pub fn install_home_starter_records(records: &[Value], phenomena_id: Option<i32>) -> Result<usize, String> {
+    if phenomena_id.is_some_and(|id| id <= 0) { return Err("fixed home phenomenon must be positive".into()); }
+    if let Some(installed) = HOME_ENVIRONMENT.get() {
+        if *installed != phenomena_id { return Err("a different fixed home environment is already installed".into()); }
+    } else {
+        HOME_ENVIRONMENT.set(phenomena_id).map_err(|_| "home environment installed concurrently")?;
+    }
     let rows = records
         .iter()
         .enumerate()
@@ -210,6 +218,49 @@ impl SiteFixtureLayouts {
         }
     }
 
+    /// The saved home layout's fixed phenomenon; no fixed value means the
+    /// site's environment follows today's schedule.
+    pub fn home_phenomena_id(&self) -> Result<Option<i32>, String> {
+        if let Some(home) = self.visited.values().find(|layout| layout.site_type == "home_site") {
+            return Ok(home.phenomena_id);
+        }
+        let doc = self.document.as_ref().map_err(Clone::clone)?;
+        if let Some(section) = doc.get(SECTION) {
+            if section["version"].as_u64() != Some(VERSION) {
+                return Err("Unsupported OfflineSiteLayouts version".into());
+            }
+            let sites = section["sites"].as_object().ok_or("OfflineSiteLayouts.sites must be an object")?;
+            let mut homes = sites.values().filter(|row| row["siteType"] == "home_site");
+            if let Some(home) = homes.next() {
+                if homes.next().is_some() { return Err("OfflineSiteLayouts names multiple home sites".into()); }
+                return decode_phenomena_id(home.get("mysekaiPhenomenaId"));
+            }
+        }
+        Ok(HOME_ENVIRONMENT.get().copied().flatten())
+    }
+
+    /// Appearance rows are not fixture instances; each contributes its own
+    /// first placement cost to MysekaiSiteModel.GetTotalLayoutedCost.
+    pub fn surface_fixture_ids(&self, site_id: u32) -> Result<Vec<i32>, String> {
+        let document = self.document.as_ref().map_err(Clone::clone)?;
+        let Some(site) = saved_site(document, site_id)? else { return Ok(Vec::new()); };
+        let Some(value) = site.get("mysekaiFixtureSurfaceAppearances") else { return Ok(Vec::new()); };
+        let rows = value.as_array().ok_or("surface appearances must be an array")?;
+        let mut result = Vec::new();
+        let mut types = HashSet::new();
+        for row in rows {
+            let kind = row["mysekaiFixtureSurfaceAppearanceType"].as_str()
+                .ok_or("surface appearance type is missing")?;
+            if !matches!(kind, "floor_appearance" | "wall_appearance") || !types.insert(kind) {
+                return Err("surface appearance type is invalid or duplicated".into());
+            }
+            let id = row["mysekaiFixtureId"].as_i64().and_then(|id|i32::try_from(id).ok())
+                .ok_or("surface appearance fixture id is missing")?;
+            result.push(id);
+        }
+        Ok(result)
+    }
+
     pub fn saved_level(&self, site_id: u32) -> Result<Option<u32>, String> {
         if let Some(layout) = self.visited.get(&site_id) {
             return Ok(Some(layout.level));
@@ -252,6 +303,7 @@ impl SiteFixtureLayouts {
             complete_home_site(&mut saved, homes, "saved", false)?;
             if saved.editor_rows() != layout.editor_rows()
                 || saved.next_edit_uid() != layout.next_edit_uid()
+                || saved.phenomena_id != layout.phenomena_id
             {
                 return Err("The loaded site no longer matches its saved furniture/UID state; reload before editing".into());
             }
@@ -349,6 +401,24 @@ impl SiteFixtureLayouts {
         validate_floor_layout(&layout, floor)
     }
 
+    /// A validated transient import supplies the complete named site. Never
+    /// append the local account's house or substitute its gate into that layout.
+    pub(super) fn restore_imported(
+        &self, site_id: u32, site_type: &str, level: u32,
+    ) -> Result<FixturePlacements, String> {
+        if let Some(cached) = self.visited.get(&site_id) {
+            if cached.site_type != site_type {
+                return Err(format!("imported site {site_id} changed identity"));
+            }
+            let mut layout = cached.clone();
+            layout.level = level;
+            return Ok(layout);
+        }
+        let saved = saved_site(self.document.as_ref().map_err(Clone::clone)?, site_id)?
+            .ok_or_else(|| format!("imported layout has no site {site_id}"))?;
+        decode(saved, site_id, site_type, level)
+    }
+
     /// `region` is the loaded snapshot's own source identity. Only the HOME
     /// starter reads it: visited and saved layouts name their packages
     /// themselves, and other sites start empty.
@@ -424,6 +494,7 @@ impl SiteFixtureLayouts {
             site_type: site_type.to_owned(),
             level,
             next_edit_uid: 1,
+            phenomena_id: if site_type == "home_site" { HOME_ENVIRONMENT.get().copied().flatten() } else { None },
             floor: None,
         };
         // After the starter and its smoke knob, so neither rewrites the house.
@@ -502,6 +573,17 @@ fn grid(value: &Value, label: &str) -> Result<GridPosition, String> {
 
 fn grid_json(value: GridPosition) -> Value {
     json!({ "x": value.x, "y": value.y, "z": value.z })
+}
+
+fn decode_phenomena_id(value: Option<&Value>) -> Result<Option<i32>, String> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => {
+            let id = value.as_i64().and_then(|id| i32::try_from(id).ok())
+                .filter(|id| *id >= 0).ok_or("mysekaiPhenomenaId must be a nonnegative i32")?;
+            Ok((id != 0).then_some(id))
+        }
+    }
 }
 
 fn decode(
@@ -583,6 +665,7 @@ fn decode(
         site_type: site_type.to_owned(),
         level,
         next_edit_uid,
+        phenomena_id: decode_phenomena_id(saved.get("mysekaiPhenomenaId"))?,
         floor: None,
     })
 }
@@ -725,6 +808,7 @@ pub fn housing_layout_request(
     };
     UserMysekaiHousingEditLayoutRequest {
         mysekai_site_id: layout.site_id,
+        mysekai_phenomena_id: layout.phenomena_id,
         site_type: layout.site_type.clone(),
         fixtures: layout
             .rows
@@ -808,6 +892,7 @@ pub fn persist_edit(
                 "siteType": layout.site_type,
                 "level": layout.level,
                 "nextEditUid": layout.next_edit_uid,
+                "mysekaiPhenomenaId": layout.phenomena_id.unwrap_or(0),
                 "fixtures": fixtures,
             }),
         );
@@ -816,4 +901,37 @@ pub fn persist_edit(
         Ok(vec![(SECTION.to_owned(), patch)])
     })?;
     Ok(LayoutSaveReceipt::from_written(document, layout.site_id))
+}
+
+#[cfg(test)]
+mod environment_tests {
+    use super::*;
+
+    #[test]
+    fn fixed_environment_decodes_legacy_default_and_survives_layout_edits() {
+        let mut record = json!({ "mysekaiSiteId": 1, "siteType": "home_site",
+            "level": 1, "nextEditUid": 1, "fixtures": [] });
+        assert_eq!(decode(&record, 1, "home_site", 1).unwrap().phenomena_id(), None);
+        record["mysekaiPhenomenaId"] = json!(0);
+        assert_eq!(decode(&record, 1, "home_site", 1).unwrap().phenomena_id(), None);
+        record["mysekaiPhenomenaId"] = json!(3);
+        let layout = decode(&record, 1, "home_site", 1).unwrap().with_editor_rows(&[], 1).unwrap();
+        assert_eq!(layout.phenomena_id(), Some(3));
+        assert_eq!(housing_layout_request(&layout).mysekai_phenomena_id, Some(3));
+        let reset = layout.with_phenomena_id(None).unwrap();
+        assert_eq!(housing_layout_request(&reset).mysekai_phenomena_id, None);
+        record["mysekaiPhenomenaId"] = json!(-1);
+        assert!(decode(&record, 1, "home_site", 1).is_err());
+    }
+
+    #[test]
+    fn indoor_environment_reads_saved_home_instead_of_its_own_record() {
+        let layouts = SiteFixtureLayouts::from_document(json!({ "OfflineSiteLayouts": {
+            "version": 1, "sites": {
+                "1": { "siteType": "home_site", "mysekaiPhenomenaId": 11 },
+                "2": { "siteType": "first_floor", "mysekaiPhenomenaId": 3 }
+            }, "returnedFixtures": []
+        }}));
+        assert_eq!(layouts.home_phenomena_id().unwrap(), Some(11));
+    }
 }

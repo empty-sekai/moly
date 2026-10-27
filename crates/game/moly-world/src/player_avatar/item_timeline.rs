@@ -50,10 +50,13 @@ use bevy::{
     ecs::system::SystemState,
     gltf::Gltf,
     prelude::*,
-    world_serialization::{WorldInstance, WorldAssetRoot, WorldInstanceSpawner},
+    world_serialization::{WorldAssetRoot, WorldInstance, WorldInstanceSpawner},
 };
 use moly_assets::{coordinates::CanonicalCoordinates, json::JsonAsset};
 use serde_json::Value;
+
+mod bulk;
+pub use bulk::{advance_camera as advance_bulk_camera, BulkToolMaterialState};
 
 use super::{AvatarDriver, PlayerActionOwner, PlayerActionToken};
 use crate::{
@@ -91,6 +94,7 @@ struct StepEntry {
     clips: Arc<Value>,
     /// The view's `_playableDirector` (the director the prefab root's view plays).
     view_director: Option<timeline::SourceAssetId>,
+    bulk: Option<bulk::Entry>,
 }
 
 enum ObjectState {
@@ -124,6 +128,9 @@ struct StepItem {
     play: bool,
     stop: bool,
     loop_flag: Option<bool>,
+    speed: f64,
+    jump_section: Option<String>,
+    resume: bool,
     /// Bindings of the last preparation attempt (its SE handles and the SE
     /// found silent carry over to the next attempt).
     draft: Option<TimelineBindings>,
@@ -131,6 +138,7 @@ struct StepItem {
     /// "Signal Track".
     signal_receiver: Option<timeline::SignalReceiverBinding>,
     director: Option<Director>,
+    bulk: bulk::Object,
 }
 
 /// `BindSignalReceiver`'s output name.
@@ -150,6 +158,7 @@ pub struct PlayerStepItem {
     stopped: Vec<Director>,
     generation: u64,
     harness: Harness,
+    bulk_camera: Option<bulk::Camera>,
 }
 
 impl PlayerStepItem {
@@ -168,9 +177,13 @@ impl PlayerStepItem {
             play: false,
             stop: false,
             loop_flag: None,
+            speed: 1.0,
+            jump_section: None,
+            resume: false,
             draft: None,
             signal_receiver: None,
             director: None,
+            bulk: bulk::Object::default(),
         });
         info!("[step-item] UpdateStepItemObject({bundle}, {file})");
     }
@@ -178,6 +191,9 @@ impl PlayerStepItem {
     /// `ClearStepItemObject`: the object is destroyed at the next advance,
     /// with its director.
     pub fn clear_step_item_object(&mut self) {
+        if let Some(camera) = &mut self.bulk_camera {
+            camera.hold();
+        }
         if let Some(item) = self.item.take() {
             self.retired.push(item);
         }
@@ -200,6 +216,8 @@ impl PlayerStepItem {
             item.play = false;
             item.stop = false;
             item.loop_flag = None;
+            item.jump_section = None;
+            item.resume = false;
             self.stopped.extend(item.director.take());
             info!("[step-item] {} Setup(onStop {on_stop:?})", item.file);
         }
@@ -227,7 +245,61 @@ impl PlayerStepItem {
         if let Some(item) = self.item.as_mut() {
             item.play = true;
             item.stop = false;
+            item.resume = true;
         }
+    }
+
+    /// Queue the source named jump; admission resolves the exact output clip.
+    pub fn jump_to_section(&mut self, name: &str) -> bool {
+        let Some(item) = self.item.as_mut() else {
+            return false;
+        };
+        item.jump_section = Some(name.to_owned());
+        true
+    }
+
+    pub fn set_speed(&mut self, speed: f64) -> bool {
+        if !speed.is_finite() || speed < 0.0 {
+            return false;
+        }
+        let Some(item) = self.item.as_mut() else {
+            return false;
+        };
+        item.speed = speed;
+        true
+    }
+
+    /// Return from the last applied bulk pose, even after the step object is gone.
+    pub fn bulk_camera_return(&mut self) {
+        if let Some(camera) = &mut self.bulk_camera {
+            camera.return_to_normal();
+        }
+    }
+
+    pub fn bulk_camera_finished(&self) -> bool {
+        self.bulk_camera.is_none()
+    }
+
+    /// Immediate cancellation keeps the last displayed camera pose on exit.
+    pub fn bulk_camera_inherit(&mut self) {
+        if let Some(camera) = &mut self.bulk_camera {
+            camera.inherit();
+        }
+    }
+
+    /// The attached hammer and its source material document.
+    pub fn bulk_tool_model(&self) -> Option<(Entity, Handle<JsonAsset>)> {
+        self.item.as_ref()?.bulk.material_model()
+    }
+
+    /// RegisterSignalReaction's first source signal, observed on the real director clock.
+    pub fn first_signal_fired_on(&self, timelines: Option<&FixtureActivityTimelines>) -> bool {
+        self.item
+            .as_ref()
+            .and_then(|item| item.director.as_ref())
+            .is_some_and(|director| {
+                timelines.is_some_and(|runner| runner.first_signal_fired(director.token))
+            })
     }
 
     /// `ChangeLoopFlag(state)`.
@@ -261,10 +333,12 @@ impl PlayerStepItem {
         match &item.director {
             // Play was called; the director starts once its object is ready.
             None => true,
-            Some(director) => matches!(
-                timelines.and_then(|timelines| timelines.status(director.token)),
-                Some(TimelineStatus::Preparing | TimelineStatus::Playing { .. })
-            ),
+            Some(director) => {
+                matches!(
+                    timelines.and_then(|timelines| timelines.status(director.token)),
+                    Some(TimelineStatus::Preparing | TimelineStatus::Playing { .. })
+                ) && !timelines.is_some_and(|timelines| timelines.is_paused(director.token))
+            }
         }
     }
 
@@ -292,7 +366,14 @@ pub fn advance(world: &mut World) {
         retire(world, item);
     }
     let failed = match service.item.as_mut() {
-        Some(item) => step(world, &mut service.manifest, &mut service.generation, item).err(),
+        Some(item) => step(
+            world,
+            &mut service.manifest,
+            &mut service.generation,
+            &mut service.bulk_camera,
+            item,
+        )
+        .err(),
         None => None,
     };
     if let Some(reason) = failed {
@@ -303,6 +384,7 @@ pub fn advance(world: &mut World) {
             );
             retire(world, item);
         }
+        service.bulk_camera_return();
     }
     world.insert_resource(service);
 }
@@ -312,6 +394,7 @@ fn step(
     world: &mut World,
     manifest: &mut Option<Handle<JsonAsset>>,
     generation: &mut u64,
+    camera: &mut Option<bulk::Camera>,
     item: &mut StepItem,
 ) -> Result<(), String> {
     if item.entry.is_none() {
@@ -338,7 +421,11 @@ fn step(
         let scene = scene.ok_or("step item model has no default scene")?;
         let root = step_bone(world)?;
         let object = world
-            .spawn((WorldAssetRoot(scene), Transform::IDENTITY, Visibility::default()))
+            .spawn((
+                WorldAssetRoot(scene),
+                Transform::IDENTITY,
+                Visibility::default(),
+            ))
             .insert(ChildOf(root))
             .id();
         item.object = ObjectState::Spawned(object);
@@ -352,6 +439,19 @@ fn step(
         return Ok(());
     };
     if let Some(director) = item.director.as_mut() {
+        {
+            let mut timelines = world.resource_mut::<FixtureActivityTimelines>();
+            timelines.set_speed(director.token, item.speed);
+            if let Some(name) = item.jump_section.take() {
+                if !timelines.jump_to_section(director.token, &name) {
+                    return Err(format!("section jump {name:?} was refused"));
+                }
+            }
+            if item.resume {
+                timelines.set_paused(director.token, false);
+                item.resume = false;
+            }
+        }
         trace(world, director, &item.file, object);
         let release = steer(
             world,
@@ -364,6 +464,11 @@ fn step(
         if release {
             let director = item.director.take().expect("steered above");
             release_director(world, director);
+            item.play = false;
+            item.resume = false;
+            if let Some(camera) = camera {
+                camera.hold();
+            }
         }
         return Ok(());
     }
@@ -382,8 +487,18 @@ fn step(
     {
         return Ok(());
     }
-    let view = step_view(world, object)?;
+    let proxy_name = item
+        .entry
+        .as_ref()
+        .and_then(|entry| entry.bulk.as_ref())
+        .map(|entry| entry.camera_node.as_str());
+    let view = step_view(world, object, proxy_name)?;
     install_graphs(world, view);
+    match bulk::prepare_object(world, item, view) {
+        Ok(()) => {}
+        Err(Pending::Wait) => return Ok(()),
+        Err(Pending::Refused(reason)) => return Err(reason),
+    }
     let request = match prepare(world, generation, item, view) {
         Ok(request) => request,
         Err(Pending::Wait) => return Ok(()),
@@ -400,6 +515,14 @@ fn step(
                 request.definition.director
             ));
         }
+    }
+    if item
+        .entry
+        .as_ref()
+        .is_some_and(|entry| entry.bulk.is_some())
+        && camera.is_none()
+    {
+        *camera = bulk::Camera::enter(world, item.bulk.camera_proxy)?;
     }
     let lease = {
         let mut drivers = world.query_filtered::<&mut AvatarDriver, With<PlayerControlled>>();
@@ -436,6 +559,27 @@ fn step(
     let token = world
         .resource_mut::<FixtureActivityTimelines>()
         .request_start(request);
+    {
+        let mut timelines = world.resource_mut::<FixtureActivityTimelines>();
+        timelines.set_speed(token, item.speed);
+        if let Some(name) = item.jump_section.take() {
+            if !timelines.jump_to_section(token, &name) {
+                drop(timelines);
+                release_director(
+                    world,
+                    Director {
+                        token,
+                        lease,
+                        stopped: false,
+                        traced: f64::NEG_INFINITY,
+                        duration,
+                    },
+                );
+                return Err(format!("section jump {name:?} was refused"));
+            }
+        }
+        item.resume = false;
+    }
     item.draft = None;
     item.director = Some(Director {
         token,
@@ -583,6 +727,7 @@ fn read_entry(
         glb: format!("{STEP_ITEM_ROOT}{}", text("glb")?),
         clips: Arc::new(row["clips"].clone()),
         view_director,
+        bulk: bulk::Entry::parse(row.get("bulk_harvest"))?,
     }))
 }
 
@@ -611,12 +756,18 @@ fn step_bone(world: &mut World) -> Result<Entity, String> {
 
 /// The instantiated prefab: the one node of the spawned scene that carries
 /// the model file's coordinate contract.
-fn step_view(world: &World, object: Entity) -> Result<Entity, String> {
+fn step_view(world: &World, object: Entity, proxy_name: Option<&str>) -> Result<Entity, String> {
     let mut stack = vec![object];
     let mut found = Vec::new();
     while let Some(entity) = stack.pop() {
         if world.get::<CanonicalCoordinates>(entity).is_some() {
-            found.push(entity);
+            if !proxy_name.is_some_and(|name| {
+                world
+                    .get::<Name>(entity)
+                    .is_some_and(|node| node.as_str() == name)
+            }) {
+                found.push(entity);
+            }
             continue;
         }
         if let Some(children) = world.get::<Children>(entity) {
@@ -668,7 +819,11 @@ fn prepare(
     world.init_resource::<FixtureActivityProvider>();
     let definition = world
         .resource_scope(|world, mut provider: Mut<FixtureActivityProvider>| {
-            provider.site_definition(world, &entry.package, &entry.prefab)
+            if entry.bulk.is_some() {
+                provider.player_motion_definition(world, &entry.package, &entry.prefab)
+            } else {
+                provider.site_definition(world, &entry.package, &entry.prefab)
+            }
         })
         .map_err(|pending| {
             if pending.retryable {
@@ -710,6 +865,7 @@ fn prepare(
         // The Control clips an earlier attempt prepared stay prepared: a
         // dropped binding releases its systems.
         request.bindings.controls = previous.controls;
+        request.bindings.loop_particles = previous.loop_particles;
     }
     if let Some(receiver) = item.signal_receiver.as_ref() {
         let outputs: Vec<_> = request
@@ -754,6 +910,12 @@ fn prepare(
     let entry = item.entry.as_ref().expect("read before the object");
     let gltf = item.gltf.clone().expect("requested with its entry");
     let prepared = bind(world, &mut request, entry, &gltf, animator, graph, &clips);
+    let prepared = prepared.and_then(|events| {
+        bulk::bind(world, &mut request, item)?;
+        timeline::prepare_source_effects(world, &mut request)?;
+        timeline::prepare_source_signals(world, &mut request)?;
+        Ok(events)
+    });
     silence(world, &mut request);
     item.draft = Some(request.bindings.clone());
     for (clip, events) in prepared? {
@@ -779,8 +941,6 @@ fn bind(
     let with_events = timeline::prepare_player_group_bindings(request, animator, graph, clips)?;
     prepare_prop_bindings(world, request, entry, gltf)?;
     timeline::prepare_source_sounds(world, request)?;
-    timeline::prepare_source_effects(world, request)?;
-    timeline::prepare_source_signals(world, request)?;
     Ok(with_events)
 }
 
@@ -807,6 +967,11 @@ fn prepare_prop_bindings(
     let mut bindings = Vec::new();
     for track in &request.definition.tracks {
         if track.class != "AnimationTrack" || track.name == "CharacterAnimator" {
+            continue;
+        }
+        if entry.bulk.is_some()
+            && (track.name == "Fixture1" || track.name.to_ascii_lowercase().contains("camera"))
+        {
             continue;
         }
         for clip in &track.clips {
@@ -991,10 +1156,9 @@ fn trace(world: &mut World, director: &mut Director, file: &str, object: Entity)
 /// The director's session ends and the avatar's lease with it: locomotion
 /// plays its state clip again.
 fn release_director(world: &mut World, director: Director) {
-    if let Some(mut timelines) = world.get_resource_mut::<FixtureActivityTimelines>() {
-        timelines.cancel(director.token);
-        timelines.release(director.token);
-    }
+    // Release before destroying the attached tool/proxy so their source state
+    // and graph leases can still be restored by the shared runner.
+    timeline::cancel_and_release(world, director.token);
     let mut params = SystemState::<(
         Query<&mut AvatarDriver, With<PlayerControlled>>,
         Query<&mut AnimationPlayer>,
@@ -1018,6 +1182,7 @@ fn retire(world: &mut World, mut item: StepItem) {
     if let Some(director) = item.director.take() {
         release_director(world, director);
     }
+    item.bulk.retire(world);
     match item.object {
         ObjectState::Spawned(object) => {
             if let Ok(entity) = world.get_entity_mut(object) {

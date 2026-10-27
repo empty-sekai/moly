@@ -13,6 +13,8 @@ webgl2 = ["bevy/webgl2"]
 bevy = { workspace = true }
 moly-assets = { path = "../../engine/moly-assets" }
 moly-game = { path = "../../game/moly-game" }
+moly-core = { path = "../../game/moly-core", features = ["browser-heap"] }
+moly-features = { path = "../../game/moly-features" }
 moly-perf = { path = "../../engine/moly-perf" }
 moly-store = { path = "../../base/moly-store" }
 # The game connects to its server over one HTTP endpoint, natively and in the
@@ -37,5 +39,3 @@ web-sys = { version = "0.3", features = ["Window", "Location", "UrlSearchParams"
 js-sys = "0.3"
 # The control export answers a Promise.
 wasm-bindgen-futures = "0.4"
-# The global allocator's heap; its system layer is the crate's own (src/wasm_heap.rs).
-dlmalloc = "0.2"

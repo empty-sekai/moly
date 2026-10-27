@@ -12,7 +12,9 @@ import { workspaceFingerprint } from "./build-source.mjs";
 import { canonicalPackBytes } from "./asset-pack-client.mjs";
 import { COORDINATE_CONTRACT } from "./coordinate-contract.mjs";
 import { GAME_EXPORTS } from "./game-controller.mjs";
+import { sourceUiFontLicense } from "./ui-font-package.mjs";
 const here = path.dirname(fileURLToPath(import.meta.url));
+const fontLicense = sourceUiFontLicense(path.resolve(here, ".."));
 const golden = JSON.parse(
   fs.readFileSync(new URL("./fixtures/asset-pack-v2.json", import.meta.url)),
 );
@@ -301,6 +303,7 @@ function workspace(root, font = null, extraExports = []) {
                 path: `fonts/${sha(font)}.ttf`,
                 sha256: sha(font),
                 bytes: font.length,
+                license: fontLicense.record,
               },
             }
           : {}),
@@ -315,6 +318,10 @@ function workspace(root, font = null, extraExports = []) {
     fs.writeFileSync(
       path.join(work, "web/pkg/fonts", sha(font) + ".ttf"),
       font,
+    );
+    fs.writeFileSync(
+      path.join(work, "web/pkg", fontLicense.record.path),
+      fontLicense.bytes,
     );
   }
   return work;
@@ -516,6 +523,16 @@ test("external fonts stay complete and verified across publication and engine re
     );
   assert.equal(integrity.hashes[fontPath], sha(font));
   assert.deepEqual(fs.readFileSync(path.join(release, fontPath)), font);
+  const licensePath = `pkg/${fontLicense.record.path}`;
+  assert.equal(integrity.hashes[licensePath], fontLicense.record.sha256);
+  assert.deepEqual(
+    fs.readFileSync(path.join(release, licensePath)),
+    fontLicense.bytes,
+  );
+  assert.deepEqual(
+    gunzipSync(fs.readFileSync(path.join(release, licensePath + ".gz"))),
+    fontLicense.bytes,
+  );
   assert.deepEqual(
     gunzipSync(fs.readFileSync(path.join(release, fontPath + ".gz"))),
     font,
@@ -530,6 +547,7 @@ test("external fonts stay complete and verified across publication and engine re
     );
     assert.equal(record.uiFont.path, fontPath.slice(4));
     assert.equal(record.uiFont.bytes, font.length);
+    assert.deepEqual(record.uiFont.license, fontLicense.record);
   }
   await publish({
     workspace: work,
@@ -558,6 +576,68 @@ test("external fonts stay complete and verified across publication and engine re
     /Changed webgpu build record/,
   );
   fs.writeFileSync(reusedRecord, recordBytes);
+
+  // License bytes and their integrity entry stay in the reused closure.
+  fs.writeFileSync(path.join(release, licensePath), "truncated license");
+  await assert.rejects(
+    publish({
+      workspace: work,
+      output,
+      reuseEngine: true,
+      reuseSnapshots: true,
+    }),
+    /Changed UI font license/,
+  );
+  fs.writeFileSync(path.join(release, licensePath), fontLicense.bytes);
+  delete integrity.hashes[licensePath];
+  fs.writeFileSync(
+    path.join(release, "integrity.json"),
+    JSON.stringify(integrity),
+  );
+  await assert.rejects(
+    publish({
+      workspace: work,
+      output,
+      reuseEngine: true,
+      reuseSnapshots: true,
+    }),
+    /license integrity record/,
+  );
+  integrity.hashes[licensePath] = fontLicense.record.sha256;
+  fs.writeFileSync(
+    path.join(release, "integrity.json"),
+    JSON.stringify(integrity),
+  );
+
+  // Missing or altered license files cannot create or select a new release.
+  const sourceLicense = path.join(work, "web", licensePath);
+  fs.unlinkSync(sourceLicense);
+  await assert.rejects(publish({ workspace: work, output, sources }), /ENOENT/);
+  fs.writeFileSync(sourceLicense, "truncated license");
+  await assert.rejects(
+    publish({ workspace: work, output, sources }),
+    /Changed UI font license/,
+  );
+  fs.writeFileSync(sourceLicense, fontLicense.bytes);
+
+  const buildFiles = ["webgpu", "webgl2"].map((backend) =>
+    path.join(work, "web/pkg", backend, "build.json"),
+  );
+  const buildRecords = buildFiles.map((file) => fs.readFileSync(file));
+  for (const license of [undefined, { ...fontLicense.record, id: "unknown" }]) {
+    buildFiles.forEach((file, index) => {
+      const record = JSON.parse(buildRecords[index]);
+      record.uiFont.license = license;
+      fs.writeFileSync(file, JSON.stringify(record));
+    });
+    await assert.rejects(
+      publish({ workspace: work, output, sources }),
+      /Missing or invalid UI font license record/,
+    );
+  }
+  buildFiles.forEach((file, index) =>
+    fs.writeFileSync(file, buildRecords[index]),
+  );
 
   const sourceRecord = path.join(work, "web/pkg/webgl2/build.json"),
     originalRecord = fs.readFileSync(sourceRecord),

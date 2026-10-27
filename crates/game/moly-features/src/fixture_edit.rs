@@ -20,6 +20,7 @@ mod actors;
 mod assets;
 mod autoplay;
 mod edit_grid;
+mod environment;
 pub mod field_build;
 mod game_state;
 mod input;
@@ -27,6 +28,7 @@ mod layout_rules;
 mod owned;
 mod presentation;
 mod put_effect;
+mod road;
 mod validation;
 
 #[cfg(test)]
@@ -51,7 +53,8 @@ pub use crate::field_modes::{EditSessionActive, LayoutSaved};
 
 /// UI and platform input may request operations, never mutate draft fields.
 pub use crate::ui_inputs::{
-    EditCatalogView, EditCommand, EditItemView, EditPhase, EditSelectionView, EditView, PutStatus,
+    EditCatalogView, EditCommand, EditContentType, EditEnvironmentView, EditItemView, EditPhase,
+    EditSelectionView, EditView, PutStatus,
 };
 
 /// The view row of a placed or held fixture.
@@ -93,10 +96,15 @@ struct Selection {
 
 #[derive(Resource, Default)]
 pub struct EditSession {
+    road: road::RoadSession,
+    /// Retain road pointer ownership through the frame containing its release.
+    road_camera_drag_claimed: bool,
     next_fixture_uid: u64,
     revision: u64,
     phase: EditPhase,
     catalog_index: usize,
+    content: EditContentType,
+    environment: Option<i32>,
     baseline: Option<FixturePlacements>,
     storage_baseline: Option<crate::fixture::layouts::EditStorageSnapshot>,
     /// Keep editing input/actor ownership while the successful save's actual
@@ -118,6 +126,14 @@ pub struct EditSession {
     /// The waiting save was asked from the exit prompt.
     saving_exit_after: bool,
     feedback: String,
+}
+
+impl EditSession {
+    /// Input ownership is read after commands in the same frame so a road
+    /// drag never also pans the field camera before the view is republished.
+    pub(crate) fn road_dragging(&self) -> bool {
+        self.road.dragging || self.road_camera_drag_claimed
+    }
 }
 
 /// The dialogs of `SiteLayoutEditor.SaveLayoutWithValidation`.
@@ -147,8 +163,12 @@ const INVALID_REMOVE: &str = "MSG_MYSEKAI_CONFIRM_REMOVE_FIXTURE_INVALID_LAYOUT"
 const INVALID_REMOVE_OK: &str = "WORD_MYSEKAI_INVALID_FIXTURE_LIST_OK_BUTTON";
 
 /// The wordings of the save dialogs (the shell charset takes them).
-pub const WORDINGS: &[&str] =
-    &[CUTSCENE_CONFIRM, INVALID_GO_HOME, INVALID_REMOVE, INVALID_REMOVE_OK];
+pub const WORDINGS: &[&str] = &[
+    CUTSCENE_CONFIRM,
+    INVALID_GO_HOME,
+    INVALID_REMOVE,
+    INVALID_REMOVE_OK,
+];
 
 impl EditSession {
     /// The server call the editor waits for, for the director.
@@ -175,11 +195,16 @@ impl EditSession {
 
     fn dirty(&self) -> bool {
         self.baseline.as_ref().is_some_and(|base| {
-            self.rows != base.editor_rows() || self.inventory != self.initial_inventory
+            self.rows != base.editor_rows()
+                || self.inventory != self.initial_inventory
+                || self.environment != base.phenomena_id()
         })
     }
 
     fn cancel_selection(&mut self) {
+        if self.road.cancel() {
+            self.changed();
+        }
         // No original row or inventory record was removed during selection.
         // Dropping this pose overlay therefore restores the exact start state.
         if self.selected.take().is_some() {
@@ -198,6 +223,7 @@ impl EditSession {
         self.initial_inventory.clear();
         self.inventory.clear();
         self.selected = None;
+        self.road = road::RoadSession::default();
         self.exit_dialog = false;
         self.clean_up_dialog = false;
         self.saving = None;
@@ -222,7 +248,14 @@ pub enum FixtureEditSystems {
 }
 
 pub fn has_unsaved_layout(session: &EditSession) -> bool {
-    session.dirty() || session.selected.is_some() || session.pending_reload.is_some()
+    session.dirty()
+        || session.selected.is_some()
+        || road_pending(session)
+        || session.pending_reload.is_some()
+}
+
+fn road_pending(session: &EditSession) -> bool {
+    !session.road.planned.is_empty()
 }
 
 /// Draft occupancy never enters the gameplay walk-field or claims playable
@@ -243,6 +276,7 @@ pub fn clear_for_site_change(world: &mut World) {
     if let Some(mut active) = world.get_resource_mut::<EditSessionActive>() {
         active.active = false;
     }
+    world.remove_resource::<crate::field_modes::LayoutEnvironmentPreview>();
     presentation::clear(world);
     actors::clear_overlay(world);
     game_state::exit_for_site_change(world);
@@ -257,7 +291,8 @@ fn receive_commands(
 
 fn play_se(world: &mut World, cue: &'static str, source: &'static str) {
     if let Some(mut se) = world.get_resource_mut::<SeRequests>() {
-        se.0.push(SeRequest { owner: None,
+        se.0.push(SeRequest {
+            owner: None,
             cue: cue.into(),
             class: SeClass::Ui,
             source,
@@ -305,7 +340,8 @@ fn begin(world: &mut World, session: &mut EditSession) {
         return;
     }
     let homes = world.get_resource::<crate::house::HomeFixtures>();
-    let entry = world.get_resource::<crate::fixture::layouts::SiteFixtureLayouts>()
+    let entry = world
+        .get_resource::<crate::fixture::layouts::SiteFixtureLayouts>()
         .ok_or_else(|| "布局存档所有者尚未就绪".to_owned())
         .and_then(|layouts| layouts.begin_edit(&layout, homes));
     let (storage_baseline, inventory) = match entry {
@@ -316,6 +352,12 @@ fn begin(world: &mut World, session: &mut EditSession) {
         }
     };
     session.next_fixture_uid = session.next_fixture_uid.max(layout.next_edit_uid()).max(1);
+    session.content = if layout.site_type() == "home_site" {
+        EditContentType::Outdoor
+    } else {
+        EditContentType::Floor
+    };
+    session.environment = layout.phenomena_id();
     session.rows = layout.editor_rows();
     session.baseline = Some(layout);
     session.storage_baseline = Some(storage_baseline);
@@ -335,6 +377,7 @@ fn begin(world: &mut World, session: &mut EditSession) {
     crate::fixture_scene_inputs::invalidate_for_site_change(world);
     play_se(world, "se_change_layout", "edit-enter");
     game_state::enter(world);
+    environment::preview(world, session);
     if std::env::var("MOLY_EDIT_AUTOPLAY").is_ok() {
         census(world, session);
     }
@@ -423,7 +466,10 @@ fn focus(world: &mut World, item: &EditableFixture, source: &'static str) {
     let zoom_support = match put_effect::is_block(world, item.fixture_id) {
         Some(block) => !block,
         None => {
-            warn!("[edit-camera] focus on {} ({source}): fixture {} has no handle type in the fixture table; focused without zoom support", item.uid, item.fixture_id);
+            warn!(
+                "[edit-camera] focus on {} ({source}): fixture {} has no handle type in the fixture table; focused without zoom support",
+                item.uid, item.fixture_id
+            );
             false
         }
     };
@@ -486,12 +532,18 @@ fn put_search(
     let put_type = match put_effect::put_type(world, item.fixture_id) {
         Ok(put_type) => put_type,
         Err(error) => {
-            warn!("[edit-put] PutFixture {} ({source}): {error}; not put", item.uid);
+            warn!(
+                "[edit-put] PutFixture {} ({source}): {error}; not put",
+                item.uid
+            );
             return Err("家具主表仍在加载，暂时不能摆放新家具。".into());
         }
     };
     let Some(source_direction) = placement::rotation_to_direction(yaw) else {
-        warn!("[edit-put] PutFixture {} ({source}): camera yaw {yaw} names no direction; not put", item.uid);
+        warn!(
+            "[edit-put] PutFixture {} ({source}): camera yaw {yaw} names no direction; not put",
+            item.uid
+        );
         return Err("相机朝向无效，暂时不能摆放新家具。".into());
     };
     // The look-at relative to the site, in the source frame (X mirrored).
@@ -502,8 +554,13 @@ fn put_search(
     {
         Ok(found) => found,
         Err(missing) => {
-            warn!("[edit-put] PutFixture {} ({source}): the put check's input {missing:?} is missing; not put", item.uid);
-            return Err(format!("摆放检查的输入尚未就绪（{missing:?}），暂时不能摆放新家具。"));
+            warn!(
+                "[edit-put] PutFixture {} ({source}): the put check's input {missing:?} is missing; not put",
+                item.uid
+            );
+            return Err(format!(
+                "摆放检查的输入尚未就绪（{missing:?}），暂时不能摆放新家具。"
+            ));
         }
     };
     let (board, rules) = board;
@@ -536,7 +593,11 @@ fn put_search(
         found.start.z,
         found.source_direction,
         put_type,
-        if found.search_raised { "raised rings searched" } else { "rings at y 0" },
+        if found.search_raised {
+            "raised rings searched"
+        } else {
+            "rings at y 0"
+        },
         found.max_radius,
         found.rejected.len(),
         counts
@@ -553,7 +614,10 @@ fn put_search(
         }
     }
     let Some((tile, center, direction)) = found.chosen else {
-        warn!("[edit-put] PutFixture {} ({source}): no placeable tile within the radius cap; CantPutFixture", item.uid);
+        warn!(
+            "[edit-put] PutFixture {} ({source}): no placeable tile within the radius cap; CantPutFixture",
+            item.uid
+        );
         return Err("附近没有可以摆放的空间。".into());
     };
     item.center = center;
@@ -561,10 +625,24 @@ fn put_search(
     match item.footprint() {
         Ok((min, max)) => info!(
             "[edit-put] PutFixture {} ({source}): tile ({}, {}, {}) (source frame) -> product center ({}, {}, {}) direction {direction:?}; footprint ({}, {}, {})..=({}, {}, {})",
-            item.uid, tile.x, tile.y, tile.z, center.x, center.y, center.z,
-            min.x, min.y, min.z, max.x, max.y, max.z
+            item.uid,
+            tile.x,
+            tile.y,
+            tile.z,
+            center.x,
+            center.y,
+            center.z,
+            min.x,
+            min.y,
+            min.z,
+            max.x,
+            max.y,
+            max.z
         ),
-        Err(error) => warn!("[edit-put] PutFixture {} ({source}): chosen tile has no footprint ({error})", item.uid),
+        Err(error) => warn!(
+            "[edit-put] PutFixture {} ({source}): chosen tile has no footprint ({error})",
+            item.uid
+        ),
     }
     Ok(())
 }
@@ -657,7 +735,9 @@ fn drag(world: &mut World, session: &mut EditSession, target: DragTarget) {
     let (rules, board, piece) = match prepared {
         Ok(prepared) => prepared,
         Err(missing) => {
-            session.say(format!("摆放检查的输入尚未就绪（{missing:?}），未移动家具。"));
+            session.say(format!(
+                "摆放检查的输入尚未就绪（{missing:?}），未移动家具。"
+            ));
             return;
         }
     };
@@ -767,7 +847,9 @@ fn rotate(world: &mut World, session: &mut EditSession) {
     let (rules, board, piece, stacked) = match prepared {
         Ok(prepared) => prepared,
         Err(missing) => {
-            session.say(format!("摆放检查的输入尚未就绪（{missing:?}），未旋转家具。"));
+            session.say(format!(
+                "摆放检查的输入尚未就绪（{missing:?}），未旋转家具。"
+            ));
             return;
         }
     };
@@ -782,14 +864,19 @@ fn rotate(world: &mut World, session: &mut EditSession) {
     // UpdateEditRotateTargetPosition at the grid position.
     let direction =
         Direction::from_u8((piece.direction as u8 + 1) % 4).expect("four source directions");
-    let turned =
-        match tile_rules::Piece::at(&selected.item, &rules, piece.center, direction, piece.layout) {
-            Ok(turned) => turned,
-            Err(missing) => {
-                session.say(format!("旋转后超出网格（{missing:?}），未旋转家具。"));
-                return;
-            }
-        };
+    let turned = match tile_rules::Piece::at(
+        &selected.item,
+        &rules,
+        piece.center,
+        direction,
+        piece.layout,
+    ) {
+        Ok(turned) => turned,
+        Err(missing) => {
+            session.say(format!("旋转后超出网格（{missing:?}），未旋转家具。"));
+            return;
+        }
+    };
     let clamped = board.clamp(&turned, piece.center);
     let placed =
         match tile_rules::Piece::at(&selected.item, &rules, clamped, direction, piece.layout) {
@@ -882,7 +969,9 @@ fn select(
         match stacked_rows(world, session, &item.uid) {
             Ok(stacked) => stacked,
             Err(missing) => {
-                session.say(format!("摆放检查的输入尚未就绪（{missing:?}），暂时不能选中家具。"));
+                session.say(format!(
+                    "摆放检查的输入尚未就绪（{missing:?}），暂时不能选中家具。"
+                ));
                 return;
             }
         }
@@ -893,7 +982,10 @@ fn select(
         info!(
             "[edit-put] SelectFixture {}: stacked fixtures {:?} move with it",
             item.uid,
-            stacked.iter().map(|row| row.uid.as_str()).collect::<Vec<_>>()
+            stacked
+                .iter()
+                .map(|row| row.uid.as_str())
+                .collect::<Vec<_>>()
         );
     }
     // Selecting another item is an explicit Reset of an unfinished operation,
@@ -1131,8 +1223,8 @@ fn save(session: &mut EditSession, world: &mut World, exit_after: bool, validate
         session.say("保存已完成，正在等待家具与可行走场恢复；角色继续暂停。");
         return;
     }
-    if session.selected.is_some() {
-        session.say("请先决定或取消当前家具，再保存。");
+    if session.selected.is_some() || road_pending(session) {
+        session.say("请先决定或取消当前家具或道路规划，再保存。");
         return;
     }
     let Some(base) = session.baseline.as_ref() else {
@@ -1144,6 +1236,7 @@ fn save(session: &mut EditSession, world: &mut World, exit_after: bool, validate
     if current.site_id() != base.site_id()
         || current.site_type() != base.site_type()
         || current.editor_rows() != base.editor_rows()
+        || current.phenomena_id() != base.phenomena_id()
     {
         session.say("当前地图布局已变化，未覆盖其它布局；本次草稿仍保留。");
         return;
@@ -1160,10 +1253,21 @@ fn save(session: &mut EditSession, world: &mut World, exit_after: bool, validate
         validate_cutscene,
     ) {
         let floor = base.floor_grid();
-        refused_save(world, session, status, &error, floor, rules.as_ref().ok(), exit_after);
+        refused_save(
+            world,
+            session,
+            status,
+            &error,
+            floor,
+            rules.as_ref().ok(),
+            exit_after,
+        );
         return;
     }
-    let next = match base.with_editor_rows(&session.rows, session.next_fixture_uid) {
+    let next = match base
+        .with_editor_rows(&session.rows, session.next_fixture_uid)
+        .and_then(|layout| layout.with_phenomena_id(session.environment))
+    {
         Ok(next) => next,
         Err(error) => {
             session.say(format!("保存未完成：{error}。草稿仍保留。"));
@@ -1179,7 +1283,9 @@ fn save(session: &mut EditSession, world: &mut World, exit_after: bool, validate
     let call = Call::HousingLayout(crate::fixture::layouts::housing_layout_request(&next));
     let kind = call.kind();
     let seq = world.resource_mut::<ServerLink>().call(call);
-    info!("[edit-save] PostUserMysekaiHousingLayoutApi sent as seq {seq}; the draft is written on its reply");
+    info!(
+        "[edit-save] PostUserMysekaiHousingLayoutApi sent as seq {seq}; the draft is written on its reply"
+    );
     session.saving = Some(ServerPending {
         seq: Some(seq),
         call: kind,
@@ -1256,13 +1362,14 @@ fn commit_saved_layout(
     let Some(storage_baseline) = session.storage_baseline.as_ref() else {
         return;
     };
-    let receipt = match crate::fixture::layouts::persist_edit(&next, &session.inventory, storage_baseline) {
-        Ok(receipt) => receipt,
-        Err(error) => {
-            session.say(format!("保存失败：{error}。布局、库存及退出窗口均未提交。"));
-            return;
-        }
-    };
+    let receipt =
+        match crate::fixture::layouts::persist_edit(&next, &session.inventory, storage_baseline) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                session.say(format!("保存失败：{error}。布局、库存及退出窗口均未提交。"));
+                return;
+            }
+        };
     let next_storage_baseline = receipt.snapshot();
     // Only the successful durable receipt may publish either half of this
     // transaction. Existing settings and other site buckets are untouched.
@@ -1272,6 +1379,22 @@ fn commit_saved_layout(
     {
         layouts.did_save(&next, receipt);
     }
+    let previous = session
+        .baseline
+        .as_ref()
+        .map(|layout| layout.editor_rows())
+        .unwrap_or_default();
+    let updated: Vec<String> = next
+        .editor_rows()
+        .into_iter()
+        .filter(|row| previous.iter().find(|before| before.uid == row.uid) != Some(row))
+        .map(|row| row.uid)
+        .collect();
+    world.init_resource::<crate::npc_objective::events::LayoutReactionFixtures>();
+    world
+        .resource_mut::<crate::npc_objective::events::LayoutReactionFixtures>()
+        .pending
+        .push(updated);
     session.baseline = Some(next);
     session.storage_baseline = Some(next_storage_baseline);
     session.initial_inventory = session.inventory.clone();
@@ -1315,37 +1438,48 @@ fn refused_save(
         LayoutStatus::CutsceneAreaOverridden => (
             "SiteLayoutEditor.ShowCutsceneAreaConfirmDialog",
             CUTSCENE_CONFIRM,
-            Buttons::Two { ok: "WORD_OK", cancel: "WORD_CANCEL" },
+            Buttons::Two {
+                ok: "WORD_OK",
+                cancel: "WORD_CANCEL",
+            },
             SaveDialogKind::CutsceneArea,
         ),
         LayoutStatus::ErrorLayout | LayoutStatus::ErrorAnimationSpace => {
             let homes = world.get_resource::<crate::house::HomeFixtures>();
             let listed = match (floor, rules, homes) {
-                (Some(floor), Some(rules), Some(homes)) => validation::invalid_fixtures(
-                    &session.rows,
-                    floor,
-                    rules,
-                    |package| !homes.can_clean_up(package),
-                ),
+                (Some(floor), Some(rules), Some(homes)) => {
+                    validation::invalid_fixtures(&session.rows, floor, rules, |package| {
+                        !homes.can_clean_up(package)
+                    })
+                }
                 _ => Err("家具主表或摆放规则仍在加载".into()),
             };
             let listed = match listed {
                 Ok(listed) if !listed.is_empty() => listed,
                 Ok(_) => {
-                    session.say(format!("保存未完成：{error}；无效家具列表为空。原布局与草稿均保留。"));
-                    warn!("[edit-save] CheckSaveLayout refused ({error}) but CreateInValidFixtureList found nothing");
+                    session.say(format!(
+                        "保存未完成：{error}；无效家具列表为空。原布局与草稿均保留。"
+                    ));
+                    warn!(
+                        "[edit-save] CheckSaveLayout refused ({error}) but CreateInValidFixtureList found nothing"
+                    );
                     return;
                 }
                 Err(reason) => {
-                    session.say(format!("保存未完成：{error}；{reason}。原布局与草稿均保留。"));
+                    session.say(format!(
+                        "保存未完成：{error}；{reason}。原布局与草稿均保留。"
+                    ));
                     return;
                 }
             };
             let homes = world.get_resource::<crate::house::HomeFixtures>();
             let house_or_gate = session.rows.iter().any(|row| {
-                listed.contains(&row.uid) && homes.is_some_and(|homes| !homes.can_clean_up(&row.package))
+                listed.contains(&row.uid)
+                    && homes.is_some_and(|homes| !homes.can_clean_up(&row.package))
             });
-            info!("[edit-save] CreateInValidFixtureList: {listed:?} (house or gate listed: {house_or_gate})");
+            info!(
+                "[edit-save] CreateInValidFixtureList: {listed:?} (house or gate listed: {house_or_gate})"
+            );
             if house_or_gate {
                 (
                     "SiteLayoutEditor.ShowErrorGoToHomeDialog",
@@ -1360,7 +1494,10 @@ fn refused_save(
                 (
                     "SiteLayoutEditor.ShowConfirmRemoveInValidFixtureDialog",
                     INVALID_REMOVE,
-                    Buttons::Two { ok: INVALID_REMOVE_OK, cancel: "WORD_CANCEL" },
+                    Buttons::Two {
+                        ok: INVALID_REMOVE_OK,
+                        cancel: "WORD_CANCEL",
+                    },
                     SaveDialogKind::RemoveInvalid(listed),
                 )
             }
@@ -1368,11 +1505,17 @@ fn refused_save(
     };
     let text = crate::common_dialog::wording(world, caller, body);
     let Some(id) = crate::common_dialog::open(world, caller, text, buttons, None) else {
-        session.say(format!("保存未完成：{error}；确认窗口无法显示。原布局与草稿均保留。"));
+        session.say(format!(
+            "保存未完成：{error}；确认窗口无法显示。原布局与草稿均保留。"
+        ));
         return;
     };
     info!("[edit-save] CheckSaveLayout: {error}; {caller} ({body}) {id:?}");
-    session.save_dialog = Some(SaveDialog { id, kind, exit_after });
+    session.save_dialog = Some(SaveDialog {
+        id,
+        kind,
+        exit_after,
+    });
     session.changed();
 }
 
@@ -1392,7 +1535,11 @@ fn answer_save_dialog(world: &mut World) {
     };
     session.save_dialog = None;
     session.changed();
-    info!("[edit-save] {:?} answered {}", dialog.kind, if ok { "OK" } else { "cancel" });
+    info!(
+        "[edit-save] {:?} answered {}",
+        dialog.kind,
+        if ok { "OK" } else { "cancel" }
+    );
     match (dialog.kind, ok) {
         (_, false) => session.say("已取消保存；草稿仍保留。"),
         (SaveDialogKind::CutsceneArea, true) => save(&mut session, world, dialog.exit_after, false),
@@ -1419,6 +1566,11 @@ fn answer_save_dialog(world: &mut World) {
             if let Some(base) = session.baseline.as_ref() {
                 session.rows = base.editor_rows();
             }
+            session.environment = session
+                .baseline
+                .as_ref()
+                .and_then(FixturePlacements::phenomena_id);
+            environment::preview(world, &session);
             session.inventory = session.initial_inventory.clone();
             session.selected = None;
             session.phase = EditPhase::Browsing;
@@ -1461,14 +1613,39 @@ fn apply_command(world: &mut World, session: &mut EditSession, command: EditComm
     {
         return;
     }
+    if road::handle(world, session, &command) {
+        return;
+    }
     match command {
+        EditCommand::RoadTap { .. }
+        | EditCommand::RoadLongStart { .. }
+        | EditCommand::RoadLongEnd
+        | EditCommand::RoadDragStart { .. }
+        | EditCommand::RoadDragMove { .. }
+        | EditCommand::RoadDragEnd
+        | EditCommand::RoadPointerCancel
+        | EditCommand::RoadSelectMode
+        | EditCommand::RoadPlanningMode
+        | EditCommand::RoadToggleFixtures => {}
         EditCommand::Enter => {}
+        EditCommand::SelectContent(content) => environment::select_content(world, session, content),
+        EditCommand::SelectEnvironment { phenomena_id } => {
+            environment::select(world, session, phenomena_id)
+        }
         EditCommand::SelectCatalog { index } => {
+            if session.content == EditContentType::Environment {
+                return;
+            }
             let Some(base) = session.baseline.as_ref() else {
                 return;
             };
             let site_id = base.site_id();
-            let row = match owned::catalog(world, site_id, &session.rows) {
+            let row = match owned::catalog_for(
+                world,
+                site_id,
+                &session.rows,
+                session.content == EditContentType::Road,
+            ) {
                 Ok((rows, _)) => rows.into_iter().nth(index),
                 Err(error) => {
                     session.say(format!("持有家具清单不可用：{error}。"));
@@ -1523,6 +1700,9 @@ fn apply_command(world: &mut World, session: &mut EditSession, command: EditComm
             select(session, item, SelectionOrigin::Owned, world);
         }
         EditCommand::SelectPlaced { uid } => {
+            if session.content == EditContentType::Environment {
+                return;
+            }
             let Some(item) = session.rows.iter().find(|row| row.uid == uid).cloned() else {
                 session.say("该UID不在当前地图，没有选择相近位置的其它家具。");
                 return;
@@ -1537,6 +1717,9 @@ fn apply_command(world: &mut World, session: &mut EditSession, command: EditComm
             select(session, item, SelectionOrigin::Placed, world);
         }
         EditCommand::SelectInventory { uid } => {
+            if session.content == EditContentType::Environment {
+                return;
+            }
             let Some(mut item) = session.inventory.iter().find(|row| row.uid == uid).cloned()
             else {
                 session.say("该UID不在离线库存，未生成替代物品。");
@@ -1583,7 +1766,10 @@ fn apply_command(world: &mut World, session: &mut EditSession, command: EditComm
             session.changed();
         }
         EditCommand::RequestCleanUp => {
-            if session.phase != EditPhase::Idle && !session.exit_dialog {
+            if session.phase != EditPhase::Idle
+                && !session.exit_dialog
+                && session.content != EditContentType::Environment
+            {
                 session.clean_up_dialog = true;
                 session.changed();
             }
@@ -1595,6 +1781,9 @@ fn apply_command(world: &mut World, session: &mut EditSession, command: EditComm
             }
         }
         EditCommand::CleanUpAll => {
+            if session.content == EditContentType::Environment {
+                return;
+            }
             // Only the confirmation offers this action.
             if session.clean_up_dialog {
                 session.clean_up_dialog = false;
@@ -1609,7 +1798,14 @@ fn apply_command(world: &mut World, session: &mut EditSession, command: EditComm
                 // The published layout/inventory never changed. Drop only
                 // the explicit discarded draft while retaining the actor/input
                 // lease until Show has a safe current navigation attachment.
-                if let Some(base) = session.baseline.as_ref() { session.rows = base.editor_rows(); }
+                if let Some(base) = session.baseline.as_ref() {
+                    session.rows = base.editor_rows();
+                }
+                session.environment = session
+                    .baseline
+                    .as_ref()
+                    .and_then(FixturePlacements::phenomena_id);
+                environment::preview(world, session);
                 session.inventory = session.initial_inventory.clone();
                 session.selected = None;
                 session.phase = EditPhase::Browsing;
@@ -1623,9 +1819,22 @@ fn apply_command(world: &mut World, session: &mut EditSession, command: EditComm
 }
 
 fn apply_commands(world: &mut World) {
+    // The camera reads the whole gesture batch after these commands. A drag
+    // remains road-owned for that batch even when its End clears dragging.
+    if let Some(mut session) = world.get_resource_mut::<EditSession>() {
+        session.road_camera_drag_claimed = session.road.dragging;
+    }
     let pending = std::mem::take(&mut world.resource_mut::<PendingCommands>().0);
     if pending.is_empty() {
         return;
+    }
+    // Pointer loss is lifecycle cleanup, not a new edit. Process it before
+    // modal/save gates, which intentionally reject new layout operations.
+    let pointer_cancelled = pending.iter().any(|command| matches!(command, EditCommand::RoadPointerCancel));
+    if pointer_cancelled {
+        if let Some(mut session) = world.get_resource_mut::<EditSession>() {
+            if session.road.cancel_pointer() { session.changed(); }
+        }
     }
     if world
         .get_resource::<crate::game_settings::SettingsPanel>()
@@ -1637,12 +1846,24 @@ fn apply_commands(world: &mut World) {
         return;
     };
     if let Some(dialog) = &session.save_dialog {
-        info!("[edit-save] {:?} is shown; {} editor commands dropped", dialog.kind, pending.len());
+        info!(
+            "[edit-save] {:?} is shown; {} editor commands dropped",
+            dialog.kind,
+            pending.len()
+        );
         world.insert_resource(session);
         return;
     }
     for command in pending {
+        // A cancelled drag has an End gesture as well. Do not interpret it
+        // as a release that confirms the selection rectangle in this batch.
+        if pointer_cancelled && matches!(command,
+            EditCommand::RoadPointerCancel | EditCommand::RoadLongStart { .. }
+            | EditCommand::RoadLongEnd | EditCommand::RoadDragStart { .. }
+            | EditCommand::RoadDragMove { .. } | EditCommand::RoadDragEnd
+        ) { continue; }
         apply_command(world, &mut session, command);
+        session.road_camera_drag_claimed |= session.road.dragging;
     }
     let was_active = world.resource::<EditSessionActive>().active;
     world.resource_mut::<EditSessionActive>().active = session.phase != EditPhase::Idle;
@@ -1726,8 +1947,7 @@ fn item_from_served(
 ) -> Result<EditableFixture, String> {
     let min = GridPosition::new(row.minimum.x, row.minimum.y, row.minimum.z);
     let max = GridPosition::new(row.maximum.x, row.maximum.y, row.maximum.z);
-    let (mut center, derived) =
-        moly_law::fixture::position::footprint_to_center_size(min, max)?;
+    let (mut center, derived) = moly_law::fixture::position::footprint_to_center_size(min, max)?;
     let _ = derived;
     center.y = row.center_y;
     Ok(EditableFixture {
@@ -1757,10 +1977,7 @@ fn apply_rejected(code: moly_layout::RefusalCode) -> moly_layout::ApplyOutcome {
 /// writes the resulting rows back exactly as the equivalent manual commands
 /// would (selection cleared, phase browsing, draft dirty, removed rows to the
 /// offline inventory). The whole-layout save remains the only uplink.
-pub fn apply_request(
-    world: &mut World,
-    request: &moly_layout::Apply,
-) -> moly_layout::ApplyOutcome {
+pub fn apply_request(world: &mut World, request: &moly_layout::Apply) -> moly_layout::ApplyOutcome {
     let Some(mut session) = world.remove_resource::<EditSession>() else {
         return apply_rejected(moly_layout::RefusalCode::UnknownPiece);
     };
@@ -1800,7 +2017,10 @@ fn apply_in_session(
         .collect();
     let by_piece: std::collections::HashMap<_, _> = old.iter().cloned().collect();
     let mut kept = std::collections::HashSet::new();
-    let site_id = session.baseline.as_ref().map_or(0, FixturePlacements::site_id);
+    let site_id = session
+        .baseline
+        .as_ref()
+        .map_or(0, FixturePlacements::site_id);
     let mut rows = Vec::with_capacity(layout.rows.len());
     for placed in &layout.rows {
         let uid = match by_piece.get(&placed.piece) {
@@ -1860,11 +2080,19 @@ fn apply_in_session(
 }
 fn advance_recovery(world: &mut World) {
     actors::maintain(world);
-    let Some(mut session) = world.remove_resource::<EditSession>() else { return; };
-    let readiness = session.pending_reload.as_ref().map(|pending| actors::reload_ready(world, pending));
+    let Some(mut session) = world.remove_resource::<EditSession>() else {
+        return;
+    };
+    let readiness = session
+        .pending_reload
+        .as_ref()
+        .map(|pending| actors::reload_ready(world, pending));
     match readiness {
         Some(Ok(true)) => {
-            let exit_after = session.pending_reload.as_ref().is_some_and(|pending| pending.exit_after);
+            let exit_after = session
+                .pending_reload
+                .as_ref()
+                .is_some_and(|pending| pending.exit_after);
             if exit_after {
                 match actors::restore(world) {
                     Ok(()) => {
@@ -1881,7 +2109,9 @@ fn advance_recovery(world: &mut World) {
                         // editor commands behind a completed reload.
                         session.pending_reload = None;
                         session.changed();
-                        session.say(format!("场景已加载，但{error}；仍处于编辑，请调整家具后再退出。"));
+                        session.say(format!(
+                            "场景已加载，但{error}；仍处于编辑，请调整家具后再退出。"
+                        ));
                     }
                 }
             } else {
@@ -1915,7 +2145,15 @@ fn publish_view(world: &mut World) {
     let owned_revision = world
         .get_resource::<crate::userdata::client::inventory::ClientMysekaiInventory>()
         .map_or(0, |owned| owned.revision);
-    if view.revision == session.revision && view.owned_revision == owned_revision {
+    let environment_choices = if session.phase != EditPhase::Idle {
+        environment::choices(world)
+    } else {
+        Vec::new()
+    };
+    if view.revision == session.revision
+        && view.owned_revision == owned_revision
+        && view.environment_choices == environment_choices
+    {
         return;
     }
     let selected = session
@@ -1945,6 +2183,10 @@ fn publish_view(world: &mut World) {
         view
     };
     let next = EditView {
+        road: road::view(world, session),
+        content: session.content,
+        environment: session.environment,
+        environment_choices,
         revision: session.revision,
         active,
         phase: session.phase,
@@ -1976,6 +2218,7 @@ fn publish_view(world: &mut World) {
         owned_revision,
         can_save: active
             && session.selected.is_none()
+            && !road_pending(session)
             && session.pending_reload.is_none()
             && session.save_dialog.is_none(),
         feedback: session.feedback.clone(),
@@ -1986,13 +2229,23 @@ fn publish_view(world: &mut World) {
 /// The owned fixture list of the edited site; the list's account is logged
 /// whenever it changes.
 fn owned_catalog_view(world: &World, session: &EditSession) -> Vec<EditCatalogView> {
-    let site_id = session.baseline.as_ref().map_or(0, FixturePlacements::site_id);
-    let (rows, note) = match owned::catalog(world, site_id, &session.rows) {
+    let site_id = session
+        .baseline
+        .as_ref()
+        .map_or(0, FixturePlacements::site_id);
+    let (rows, note) = match owned::catalog_for(
+        world,
+        site_id,
+        &session.rows,
+        session.content == EditContentType::Road,
+    ) {
         Ok((rows, omitted)) => {
             let note = format!(
                 "{} rows listed (placeable {:?}); left out: {} without a master row, {} not floor or rug (their own edit states), {} without an exported fixture view, {} with no placeable count",
                 rows.len(),
-                rows.iter().map(|row| (row.fixture_id, row.texture_id, row.placeable())).collect::<Vec<_>>(),
+                rows.iter()
+                    .map(|row| (row.fixture_id, row.texture_id, row.placeable()))
+                    .collect::<Vec<_>>(),
                 omitted.no_master,
                 omitted.other_layout,
                 omitted.no_model,
@@ -2026,6 +2279,8 @@ pub struct FixtureEditPlugin;
 impl Plugin for FixtureEditPlugin {
     fn build(&self, app: &mut App) {
         edit_grid::install(app);
+        crate::fixture_put_limit::install(app);
+        road::install(app);
         app.init_resource::<EditSession>()
             .init_resource::<field_build::FieldBuilds>()
             .init_resource::<EditSessionActive>()
@@ -2063,7 +2318,12 @@ impl Plugin for FixtureEditPlugin {
             )
             .add_systems(
                 Update,
-                (receive_commands, answer_save_dialog, apply_commands, advance_recovery)
+                (
+                    receive_commands,
+                    answer_save_dialog,
+                    apply_commands,
+                    advance_recovery,
+                )
                     .chain()
                     .in_set(FixtureEditSystems::Commands)
                     .after(FixtureEditSystems::Input)
@@ -2084,7 +2344,12 @@ impl Plugin for FixtureEditPlugin {
                 publish_unsaved.after(FixtureEditSystems::Commands),
             )
             .add_systems(Update, read_save_answer.after(apply_commands))
-            .add_systems(Update, (field_build::read_answers, field_build::advance).chain().after(apply_commands))
+            .add_systems(
+                Update,
+                (field_build::read_answers, field_build::advance)
+                    .chain()
+                    .after(apply_commands),
+            )
             .add_systems(
                 Update,
                 autoplay::autoplay
@@ -2117,7 +2382,10 @@ impl Plugin for FixtureEditPlugin {
                 // Emoticon's explicit showcase can also create draws in
                 // PostUpdate. Flush those exact producers before the same
                 // visibility owner captures roots, then let Bevy propagate it.
-                (bevy::prelude::ApplyDeferred, actors::maintain_detached_views)
+                (
+                    bevy::prelude::ApplyDeferred,
+                    actors::maintain_detached_views,
+                )
                     .chain()
                     .after(crate::balloon::place)
                     .after(crate::emoticon::advance)

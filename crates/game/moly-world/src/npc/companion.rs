@@ -195,6 +195,7 @@ pub fn advance(
                 &mut state.0,
                 &mut route.crowd,
                 speed,
+                moly_law::path::crowd::NPC_STOPPING_DISTANCE,
                 walk_face,
                 objective_face,
                 &mut turned,

@@ -8,7 +8,7 @@
 //!   `⌊recoveryBoostStamina · quantity / boostQuantity⌋` boost stamina;
 //! - `jewel` — paid crystals (`resourceId` 1): the same conversion, charged
 //!   to the crystal wallet;
-//! - `boost_item` — boost items (`resourceId` = a `mysekaiBoostItems` id):
+//! - `boost_item` — boost items (`resourceId` = a `boostItems` id):
 //!   each row adds `⌊recoveryValue · quantity · recoveryBoostStamina /
 //!   boostQuantity⌋` boost stamina.
 //!
@@ -203,7 +203,7 @@ impl ServerModel {
                 let items = masters
                     .boost_items
                     .as_deref()
-                    .ok_or_else(|| refusal("stamina_masters_missing", "mysekaiBoostItems is not seated".to_owned()))?;
+                    .ok_or_else(|| refusal("stamina_masters_missing", "boostItems is not seated".to_owned()))?;
                 for consume in consumes {
                     let item = items.iter().find(|item| item.id == consume.resource_id).ok_or_else(|| {
                         refusal(

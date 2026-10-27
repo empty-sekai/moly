@@ -246,6 +246,12 @@ const DOCUMENTS: &[(&str, &str)] = &[
 /// region root's manifest) is named once and left out; the view that draws
 /// it refuses by name. Every other document is required.
 const OPTIONAL_DOCUMENTS: &[(&str, &str)] = &[
+    ("BulkHarvestSettings", "dialogs/BulkHarvestTargetSettingDialog.json"),
+    ("BulkHarvestReward", "dialogs/MysekaiBulkHarvestRewardDialog.json"),
+    ("BulkHarvestRewardCell", "bulkharvest/UIPartsThumbnailRewardListCell.json"),
+    ("EditorEnvironmentCell", "editor/SiteEnvironmentSelectCell.json"),
+    ("PhotoShot", "screens/ScreenLayerMysekaiPhotoShot.json"),
+    ("PhotoFrameCell", "photocell/UIPartsPhotoFrameListThumbnail.json"),
     ("CommonReward", "menu/CommonRewardSubWindowDialog.json"),
     ("RecoverBoostStamina", "menu/MysekaiRecoverBoostStaminaDialog.json"),
     ("BoostStaminaConfirm", "menu/BoostStaminaRecoverConfirmDialog.json"),
@@ -1178,6 +1184,9 @@ impl UiLayouts {
                     .text_rules
                     .as_ref()
                     .ok_or("TMP line rules are not loaded")?;
+                let translated = change.filter(|value| value.translated_text)
+                    .map(|_| tmp_layout::translated_inputs(comp, rules));
+                let (comp, rules) = translated.as_ref().map_or((comp, rules), |(comp, rules)| (comp, rules));
                 Some(tmp_layout::preferred_axis(
                     &text,
                     comp,
@@ -1322,6 +1331,9 @@ impl UiLayouts {
         ready
     }
     fn image_ready(&self, path: &str, server: &AssetServer) -> bool {
+        // Host-owned images live in Assets<Image>, without an AssetServer load
+        // task. The draw path separately checks that their pixels exist.
+        if path.starts_with("host:") { return true; }
         let handle = self
             .images
             .get(path)
@@ -1517,9 +1529,11 @@ pub struct Override {
     pub visible: Option<bool>,
     pub text: Option<String>,
     pub text_alignment: Option<i64>,
+    pub translated_text: bool,
     fill: Option<f32>,
     texture: Option<String>,
     slider: Option<f32>,
+    scrollbar: Option<(f32, f32)>,
     alpha: Option<f32>,
     pub anchored_position: Option<Vec2>,
     pub size_delta: Option<Vec2>,
@@ -1527,11 +1541,16 @@ pub struct Override {
     transform: Option<(Vec2, Quat)>,
     /// A local rotation set by code on its own.
     rotation: Option<Quat>,
+    local_scale: Option<Vec3>,
     /// `Graphic.color` set by code on the Graphic component with this id.
     graphic_color: Option<(i64, [f32; 4])>,
-    /// `Behaviour.enabled` set by code on the component with this id (read by
-    /// the stencil Mask).
+    /// `Behaviour.enabled` set by code, consumed by graphics and stencil masks.
     behaviour_enabled: Option<(i64, bool)>,
+}
+
+fn component_enabled(component: &UiComponent, change: Option<&Override>) -> bool {
+    change.and_then(|value| value.behaviour_enabled).filter(|(id,_)| *id==component.path_id)
+        .map_or(component.enabled, |(_,enabled)| enabled)
 }
 
 impl Override {
@@ -1539,6 +1558,7 @@ impl Override {
         match other {
             Some(other) => {
                 self.text == other.text
+                    && self.translated_text == other.translated_text
                     && self.text_alignment == other.text_alignment
                     && self.fill == other.fill
                     && self.texture == other.texture
@@ -1546,6 +1566,7 @@ impl Override {
                     && self.behaviour_enabled == other.behaviour_enabled
             }
             None => self.text.is_none()
+                && !self.translated_text
                 && self.text_alignment.is_none()
                 && self.fill.is_none()
                 && self.texture.is_none()
@@ -1607,11 +1628,14 @@ impl UiPrefabView {
             self.revision = self.revision.wrapping_add(1);
             if value.visible != old.visible
                 || value.slider != old.slider
+                || value.scrollbar != old.scrollbar
                 || value.anchored_position != old.anchored_position
                 || value.size_delta != old.size_delta
                 || value.transform != old.transform
                 || value.rotation != old.rotation
+                || value.local_scale != old.local_scale
                 || value.text != old.text
+                || value.translated_text != old.translated_text
                 || value.texture != old.texture
             {
                 self.geometry_revision = self.geometry_revision.wrapping_add(1);
@@ -1632,10 +1656,14 @@ impl UiPrefabView {
         self.update(path, |v| v.visible = Some(value));
     }
     pub fn set_text(&mut self, path: &str, value: String) {
-        if self.overrides.get(path).and_then(|v| v.text.as_ref()) == Some(&value) {
+        self.set_display_text(path, value, false);
+    }
+    /// A translated field is literal text and uses the publication font chain.
+    pub fn set_display_text(&mut self, path: &str, value: String, translated: bool) {
+        if self.overrides.get(path).is_some_and(|v| v.text.as_ref() == Some(&value) && v.translated_text == translated) {
             return;
         }
-        self.update(path, |v| v.text = Some(value));
+        self.update(path, |v| { v.text = Some(value); v.translated_text = translated; });
     }
     /// Runtime TMP.alignment on this text instance; do not alter the source
     /// RectTransform or its preferred size to simulate text alignment.
@@ -1673,6 +1701,16 @@ impl UiPrefabView {
         }
         self.update(path, |v| v.slider = Some(value));
     }
+    /// Scrollbar.value and size: unlike a Slider, its handle occupies a span.
+    pub fn set_scrollbar(&mut self, path: &str, value: f32, size: f32) {
+        assert!(value.is_finite() && size.is_finite(), "non-finite UI scrollbar");
+        let value = (value.clamp(0., 1.), size.clamp(0., 1.));
+        if self.overrides.get(path).and_then(|v| v.scrollbar) == Some(value) {
+            return;
+        }
+        self.update(path, |v| v.scrollbar = Some(value));
+    }
+
     pub fn set_alpha(&mut self, path: &str, value: f32) {
         assert!(value.is_finite(), "non-finite UI alpha");
         let value = value.clamp(0., 1.);
@@ -1687,6 +1725,12 @@ impl UiPrefabView {
             return;
         }
         self.update(path, |v| v.anchored_position = Some(value));
+    }
+    /// Set the authored animation's local scale without rebuilding its prefab.
+    pub fn set_local_scale(&mut self, path: &str, value: Vec3) {
+        assert!(value.is_finite(), "non-finite UI scale");
+        if self.overrides.get(path).and_then(|v| v.local_scale) == Some(value) { return; }
+        self.update(path, |v| v.local_scale = Some(value));
     }
     /// A host's own transform write: node `path`'s anchor offset and its
     /// local rotation, as the animation would set them (its local scale
@@ -1797,6 +1841,9 @@ impl UiPrefabView {
                     .or_insert_with(|| doc.nodes[i].rect.clone())
                     .size_delta = size.to_array();
             }
+            if let Some(scale) = value.local_scale {
+                rect_overrides.entry(i).or_insert_with(|| doc.nodes[i].rect.clone()).local_scale = scale.to_array();
+            }
             if let Some(rotation) = value.rotation {
                 rect_overrides
                     .entry(i)
@@ -1811,6 +1858,23 @@ impl UiPrefabView {
                     .or_insert_with(|| doc.nodes[i].rect.clone());
                 rect.anchored_position = anchored.to_array();
                 rect.local_rotation = rotation.to_array();
+            }
+            if let Some((amount, size)) = value.scrollbar {
+                let scrollbar = doc.nodes[i].components.iter()
+                    .find(|c| c.class.ends_with("Scrollbar"))
+                    .unwrap_or_else(|| panic!("UI scrollbar component missing {path}"));
+                let direction = scrollbar.fields["m_Direction"].as_i64()
+                    .and_then(moly_law::ui::scrollbar::Direction::from_source)
+                    .expect("source scrollbar direction");
+                let id = scrollbar.fields["m_HandleRect"].as_array()
+                    .and_then(|p| p.get(1)).and_then(Value::as_i64)
+                    .expect("source scrollbar handle");
+                if id != 0 {
+                    let n = doc.find(&format!("@{id}")).unwrap_or_else(|e| panic!("{e}"));
+                    let r = rect_overrides.entry(n).or_insert_with(|| doc.nodes[n].rect.clone());
+                    (r.anchors_min, r.anchors_max) =
+                        moly_law::ui::scrollbar::handle_anchors(direction, amount, size);
+                }
             }
             if let Some(amount) = value.slider {
                 let slider = doc.nodes[i]
@@ -2005,7 +2069,8 @@ impl UiPrefabView {
         let serialized = component.fields["m_Interactable"].as_bool()
             .unwrap_or_else(|| panic!("UI {}: selectable {id} has no m_Interactable", doc.prefab));
         let rects = self.resolved(layouts, canvas)?;
-        let active = rects[node].active && component.enabled;
+        let change=self.overrides.values().find(|value|value.behaviour_enabled.is_some_and(|(target,_)|target==id));
+        let active = rects[node].active && component_enabled(component,change);
         let interactable = moly_law::ui::raycast::is_interactable(serialized, raycast::groups_allow_interaction(doc, node));
         Some((active, interactable))
     }
@@ -2205,7 +2270,7 @@ fn rebuild_image_users(
         if !rect.active || rect.size.min_element() <= 0. {
             continue;
         }
-        for comp in node.components.iter().filter(|comp| comp.enabled) {
+        for comp in node.components.iter().filter(|comp| component_enabled(comp,overrides.get(&index).copied())) {
             if comp.class.ends_with("Image") && comp.fields.get("m_Color").is_some() {
                 if let Some(path) = image_path(layouts, comp, overrides.get(&index).copied()) {
                     previous
@@ -2442,7 +2507,7 @@ pub fn render(
                     let ready = node
                         .components
                         .iter()
-                        .filter(|comp| comp.enabled)
+                        .filter(|comp| component_enabled(comp,change))
                         .filter(|comp| {
                             comp.class.ends_with("Image") && comp.fields.get("m_Color").is_some()
                         })
@@ -2471,7 +2536,7 @@ pub fn render(
             let ready = node
                 .components
                 .iter()
-                .filter(|comp| comp.enabled)
+                .filter(|comp| component_enabled(comp,change))
                 .filter(|comp| {
                     comp.class.ends_with("Image") && comp.fields.get("m_Color").is_some()
                 })
@@ -2493,7 +2558,7 @@ pub fn render(
             }
             rendered.clear(&mut commands, &mut meshes, &mut materials, &mut clip_materials);
             let has_drawing = node.components.iter().any(|comp| {
-                comp.enabled
+                component_enabled(comp,change)
                     && ((comp.class.ends_with("Image") && comp.fields.get("m_Color").is_some())
                         || comp.fields.get("m_fontSize").is_some())
             });
@@ -2520,7 +2585,7 @@ pub fn render(
                 scale,
             };
             for comp in &node.components {
-                if !comp.enabled {
+                if !component_enabled(comp,change) {
                     continue;
                 }
                 let f = &comp.fields;
@@ -2647,6 +2712,7 @@ pub fn render(
                         &text,
                         input_box,
                         comp,
+                        change.is_some_and(|v| v.translated_text),
                         change.and_then(|v| v.text_alignment),
                         rect,
                         layouts
@@ -2950,6 +3016,7 @@ fn spawn_text(
     text: &str,
     input_box: bool,
     component: &moly_assets::ui_layout::UiComponent,
+    translated: bool,
     alignment: Option<i64>,
     rect: &UiRect,
     rules: &tmp_layout::TextRules,
@@ -2963,6 +3030,8 @@ fn spawn_text(
     clip_materials: &mut Assets<clip_render::UiClipMaterial>,
     clip_pixel_size: Vec2,
 ) {
+    let translated = translated.then(|| tmp_layout::translated_inputs(component, rules));
+    let (component, rules) = translated.as_ref().map_or((component, rules), |(component, rules)| (component, rules));
     let fields = &component.fields;
     let layout = tmp_layout::layout(text, component, rect.size, rect.pivot, rules, alignment, input_box)
         .unwrap_or_else(|error| panic!("UI TMP layout failed: {error}"));
@@ -3020,5 +3089,52 @@ fn spawn_text(
         clip_render::Draw { commands, images, meshes, materials: clip_materials,
             pixel_size: clip_pixel_size, layer
         }.glyphs(parent, rendered, clipped_glyphs, clip, alpha);
+    }
+}
+
+
+#[cfg(test)]
+mod scrollbar_tests {
+    use super::*;
+
+    fn document() -> UiPrefab {
+        let rect = |anchors_min, anchors_max, size_delta| serde_json::json!({
+            "anchorsMin": anchors_min, "anchorsMax": anchors_max,
+            "anchoredPosition": [0., 0.], "sizeDelta": size_delta,
+            "pivot": [0.5, 0.5], "localScale": [1., 1., 1.],
+            "localRotation": [0., 0., 0., 1.],
+        });
+        UiPrefab::parse(&serde_json::json!({
+            "version": 2, "prefab": "Bar", "nodes": [
+                { "path": "Bar", "name": "Bar", "gameObjectId": 1,
+                  "transformId": 2, "parentTransformId": 0, "active": true,
+                  "rect": rect([0., 0.], [1., 1.], [0., 0.]),
+                  "components": [{"pathId": 3, "class": "UnityEngine.UI.Scrollbar",
+                    "enabled": true, "fields": {"m_Direction": 2, "m_HandleRect": [0, 5]}}] },
+                { "path": "Bar/Handle", "name": "Handle", "gameObjectId": 4,
+                  "transformId": 5, "parentTransformId": 2, "active": true,
+                  "rect": rect([0., 0.], [0., 0.], [2., 20.]), "components": [] }
+            ]
+        }).to_string()).unwrap()
+    }
+
+    #[test]
+    fn scrollbar_drives_handle_span_and_invalidates_cached_geometry() {
+        let doc = document();
+        let mut view = UiPrefabView::new("test", 0);
+        view.set_scrollbar("Bar", 1., 0.25);
+        let revision = view.geometry_revision;
+        let (_, rects, _) = view.host_state(&doc);
+        let rect = &rects[&1];
+        assert_eq!(rect.anchors_min, [0., 0.75]);
+        assert_eq!(rect.anchors_max, [1., 1.]);
+        assert_eq!(rect.size_delta, [2., 20.]);
+        view.set_scrollbar("Bar", 1., 0.25);
+        assert_eq!(view.geometry_revision, revision);
+        view.set_scrollbar("Bar", 0., 0.5);
+        assert!(view.geometry_revision > revision);
+        let (_, rects, _) = view.host_state(&doc);
+        assert_eq!(rects[&1].anchors_min, [0., 0.]);
+        assert_eq!(rects[&1].anchors_max, [1., 0.5]);
     }
 }

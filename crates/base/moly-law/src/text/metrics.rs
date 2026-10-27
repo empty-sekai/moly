@@ -17,7 +17,7 @@
 //!   且锚基旁路竖直界（voffset 上下界）。
 
 use super::advance::{force_fallback_glyph, resolve_glyph_advance};
-use super::tags::{parse_rich_segments, transformed_glyphs, Indent, SizeSpec};
+use super::tags::{parse_rich_segments, transformed_glyphs, Indent, SizeSpec, TextSegment};
 
 /// 行量法输出。全部以**排版像素**计（`TEXT_SCALE` 已除回）。
 #[derive(Clone, Debug, PartialEq)]
@@ -59,6 +59,19 @@ pub fn layout_metrics(
     glyph_advance: &dyn Fn(char) -> Option<f32>,
 ) -> LayoutMetrics {
     let segments = parse_rich_segments(text);
+    layout_segments(&segments, font_size, font_family, line_spacing, base_size, glyph_advance)
+}
+
+/// The same line measurement for preselected segments. Display translations
+/// use one literal segment, without interpreting any formatting tags.
+pub fn layout_segments(
+    segments: &[TextSegment],
+    font_size: f32,
+    font_family: &str,
+    line_spacing: f32,
+    base_size: f32,
+    glyph_advance: &dyn Fn(char) -> Option<f32>,
+) -> LayoutMetrics {
     let mut clean: String = segments.iter().map(|seg| seg.text.as_str()).collect();
     if clean.ends_with('\n') {
         clean.pop();

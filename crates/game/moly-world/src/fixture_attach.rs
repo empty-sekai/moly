@@ -424,6 +424,7 @@ fn read_quat(cell: Option<&serde_json::Value>) -> Option<Quat> {
 /// local 位置；朝向 = 绕 Y 朝向 × local 朝向（两侧的因子都是纯绕 Y
 /// 旋转——摆放表朝向绕 Y、档案侧朝向实测全为恒等或纯绕 Y——所以
 /// 组合朝向恒纯绕 Y，贴合支的朝向律可以按欧拉 y 直读）。
+#[derive(Clone)]
 pub struct AttachWorld {
     pub uid: String,
     /// 摆放包名（组合表的键的一半）。
@@ -436,7 +437,7 @@ pub struct AttachWorld {
 
 /// 组合完的动作点世界位全表。两张读出面见 [`AttachWorlds::entry`] 与
 /// [`AttachWorlds::matching`]。
-#[derive(Resource)]
+#[derive(Resource, Clone)]
 pub struct AttachWorlds {
     worlds: Vec<AttachWorld>,
 }
@@ -464,7 +465,7 @@ impl AttachWorlds {
 /// 组合：全部摆放行 × 各自包的挂点条目。摆放包不在档案键上即具名
 /// panic（两份清单对不上一条摆放是数据断点，不是「该包没有挂点」——
 /// 后者的形状是键在、表空）。
-fn compose(placements: &FixturePlacements, points: &AttachPoints) -> AttachWorlds {
+pub(crate) fn compose(placements: &FixturePlacements, points: &AttachPoints) -> AttachWorlds {
     let mut worlds = Vec::new();
     for placed in placements.placed_instances() {
         let (package, position, yaw) = (placed.package, placed.position, placed.yaw);

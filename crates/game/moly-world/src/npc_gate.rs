@@ -544,6 +544,8 @@ fn place(
         );
         return None;
     };
+    let hfsm = crate::npc_objective::events::enrolled(world, entity);
+    if hfsm { crate::npc_objective::events::enter_standby(world, entity); }
     // Warp: the position mapped onto the navigation cells within the
     // agent's query box, at the navigation surface's height. A position
     // that maps nowhere leaves the agent where it is.
@@ -579,8 +581,11 @@ fn place(
         .get::<ObjectiveMind>(entity)
         .and_then(|mind| mind.current)
         .map(|kind| kind as u8);
-    let cancelled = crate::npc::gate_entries::try_cancel_current_objective(world, entity);
-    if cancelled {
+    let cancelled = if hfsm {
+        crate::npc_objective::events::complete(world, entity);
+        true
+    } else { crate::npc::gate_entries::try_cancel_current_objective(world, entity) };
+    if cancelled && !hfsm {
         crate::npc::gate_entries::force_update_objective(world, entity);
         if immediate {
             crate::npc::gate_entries::set_immediately_execute_next_objective(world, entity, true);

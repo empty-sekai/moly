@@ -34,9 +34,6 @@ pub use moly_core::render;
 pub use moly_core::system_access;
 pub use moly_core::ui_font;
 pub use moly_core::weather_transition;
-// The TOML parser the plugin manifests are read with, under the name the
-// tables the plugin runtime holds are written with.
-pub(crate) use moly_plugin::toml;
 pub use moly_render::billboard;
 pub use moly_render::character_material;
 pub use moly_render::fixture_timeline_particles;

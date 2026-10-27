@@ -47,7 +47,7 @@ pub struct MasterTables {
     /// `mysekaiStaminaRecovery`: the live bonus one recovery spends and the
     /// boost stamina it restores.
     pub stamina_recovery: Option<RecoveryRow>,
-    /// `mysekaiBoostItems` (master order).
+    /// `boostItems` (master order).
     pub boost_items: Option<Vec<BoostItemRow>>,
     /// The blueprint ids the harvest drop classifier reads, from the same
     /// table the craft reader takes (no second request for it).
@@ -310,8 +310,8 @@ static TABLES: &[Entry] = &[
         Stamina
     ),
     root_table!(
-        "mysekaiBoostItems",
-        "mysekaiBoostItems (what a boost item recovers)",
+        "boostItems",
+        "boostItems (what a boost item recovers)",
         parse_boost_items,
         boost_items,
         Stamina
@@ -666,7 +666,10 @@ impl Plugin for MasterTablesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MasterTables>()
             .add_systems(Startup, load)
-            .add_systems(PreUpdate, resolve_tables.after(moly_assets::json::master::resolve));
+            .add_systems(
+                PreUpdate,
+                resolve_tables.after(moly_assets::json::master::resolve),
+            );
     }
 }
 
@@ -674,6 +677,26 @@ impl Plugin for MasterTablesPlugin {
 /// the acquisition dialogs read the fixture, tool and record rows from
 /// [`MasterTables::rows`] instead of requesting the tables again.
 static ROW_TABLES: &[MasterTable<Vec<Value>>] = &[
+    MasterTable {
+        table: "mysekaiSiteHarvestFixtures",
+        name: "mysekaiSiteHarvestFixtures (harvest settlement)",
+        parse: moly_assets::json::master::rows,
+    },
+    MasterTable {
+        table: "mysekaiSiteBulkHarvests",
+        name: "mysekaiSiteBulkHarvests (harvest settlement)",
+        parse: moly_assets::json::master::rows,
+    },
+    MasterTable {
+        table: "mysekaiSiteBulkHarvestTargets",
+        name: "mysekaiSiteBulkHarvestTargets (harvest settlement)",
+        parse: moly_assets::json::master::rows,
+    },
+    MasterTable {
+        table: "mysekaiSiteBulkHarvestTargetGroups",
+        name: "mysekaiSiteBulkHarvestTargetGroups (harvest settlement)",
+        parse: moly_assets::json::master::rows,
+    },
     MasterTable {
         table: "mysekaiFixtures",
         name: "mysekaiFixtures (the acquisition dialogs' fixture rows)",
@@ -747,7 +770,10 @@ impl Plugin for MasterRowsPlugin {
         app.init_resource::<MasterTables>()
             .init_resource::<MasterRows>()
             .add_systems(Startup, load_rows)
-            .add_systems(PreUpdate, resolve_rows.after(moly_assets::json::master::resolve));
+            .add_systems(
+                PreUpdate,
+                resolve_rows.after(moly_assets::json::master::resolve),
+            );
     }
 }
 
@@ -791,7 +817,10 @@ fn material_rows(rows: &[Value]) -> Result<Vec<(i64, String, Vec<u32>)>, String>
 
 /// The convert module's tables, each filling its one field (see
 /// [`crate::convert`] for the readers).
-fn parse_convert_items(text: &str, rows: &mut Option<Vec<crate::convert::ConvertItem>>) -> Result<(), String> {
+fn parse_convert_items(
+    text: &str,
+    rows: &mut Option<Vec<crate::convert::ConvertItem>>,
+) -> Result<(), String> {
     *rows = Some(crate::convert::parse_items(text)?);
     Ok(())
 }
@@ -886,9 +915,9 @@ pub fn parse_stamina_recovery(text: &str, row: &mut Option<RecoveryRow>) -> Resu
     Ok(())
 }
 
-/// `mysekaiBoostItems`: the id and `recoveryValue` of each row.
+/// `boostItems`: the id and `recoveryValue` of each row.
 pub fn parse_boost_items(text: &str, items: &mut Option<Vec<BoostItemRow>>) -> Result<(), String> {
-    let rows = table_rows(text, "mysekaiBoostItems")?;
+    let rows = table_rows(text, "boostItems")?;
     *items = Some(
         rows.iter()
             .map(|row| {
@@ -1043,9 +1072,9 @@ pub fn parse_material_possessions(
 
 /// `birthdayPartyDeliveryRewards`, master order.
 pub fn parse_rewards(text: &str, parts: &mut DeliveryParts) -> Result<(), String> {
-    parts.rewards = Some(crate::delivery::parse_rewards(&moly_assets::json::master::rows(
-        text,
-    )?)?);
+    parts.rewards = Some(crate::delivery::parse_rewards(
+        &moly_assets::json::master::rows(text)?,
+    )?);
     Ok(())
 }
 
@@ -1085,8 +1114,7 @@ pub fn parse_mission_rewards(text: &str, parts: &mut MissionMasters) -> Result<(
 
 /// `mysekaiNormalMissionRewardMysekaiRankObtainedExps`, master order.
 pub fn parse_mission_rank_exps(text: &str, parts: &mut MissionMasters) -> Result<(), String> {
-    parts.rank_exps =
-        crate::mission::parse_rank_exps(&moly_assets::json::master::rows(text)?)?;
+    parts.rank_exps = crate::mission::parse_rank_exps(&moly_assets::json::master::rows(text)?)?;
     Ok(())
 }
 

@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { workspaceFingerprint, sha256 } from "./build-source.mjs";
 import { parseWasmBuildArguments } from "./build-wasm-arguments.mjs";
+import { sourceUiFontLicense } from "./ui-font-package.mjs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -19,9 +20,11 @@ const here = path.dirname(fileURLToPath(import.meta.url)); // .../web
 const workspaceRoot = path.resolve(here, "..");
 const buildArguments = parseWasmBuildArguments(process.argv.slice(2));
 const profileName = buildArguments.profile;
+const product = buildArguments.product;
+const crate = product === "stage" ? "moly-stage" : "moly-app";
 const outDir = buildArguments.outDir
   ? path.resolve(buildArguments.outDir)
-  : path.join(here, "pkg");
+  : path.join(here, product === "stage" ? "pkg" : "pkg-game");
 const lockPath = path.join(workspaceRoot, "Cargo.lock");
 const requestedBackend = buildArguments.renderer;
 // Keep local builds responsive; callers can explicitly raise this limit.
@@ -97,7 +100,7 @@ const cargoWasmPath = path.join(
   JSON.parse(metadata.stdout).target_directory,
   "wasm32-unknown-unknown",
   profileName,
-  "moly-app.wasm",
+  `${crate}.wasm`,
 );
 
 // wasm-bindgen CLI 只吃与自己 schema 版本精确一致的输入，不一致时报的是
@@ -138,10 +141,12 @@ const uiFontBytes = readFileSync(
     "crates/game/moly-core/assets/font/ResourceHanRoundedSC-Medium.subset.ttf",
   ),
 );
+const uiFontLicense = sourceUiFontLicense(workspaceRoot);
 const uiFont = {
   path: `fonts/${sha256(uiFontBytes)}.ttf`,
   sha256: sha256(uiFontBytes),
   bytes: uiFontBytes.length,
+  license: uiFontLicense.record,
 };
 {
   const declaration = readFileSync(
@@ -178,7 +183,7 @@ for (const [backend, features] of [
     "--target",
     "wasm32-unknown-unknown",
     "-p",
-    "moly-app",
+    crate,
     ...features,
     "--manifest-path",
     path.join(workspaceRoot, "Cargo.toml"),
@@ -190,6 +195,10 @@ for (const [backend, features] of [
   run(WASM_BINDGEN, [
     "--target",
     "web",
+    // Preserve immutable release paths and the loader ABI while the Rust
+    // product is selected independently above.
+    "--out-name",
+    "moly-app",
     "--out-dir",
     backendDir,
     cargoWasmPath,
@@ -209,6 +218,8 @@ for (const [backend, features] of [
     JSON.stringify(
       {
         schemaVersion: 1,
+        product,
+        crate,
         backend,
         profile: profileName,
         sourceFingerprint,
@@ -229,5 +240,6 @@ for (const [backend, features] of [
 const uiFontFile = path.join(outDir, uiFont.path);
 mkdirSync(path.dirname(uiFontFile), { recursive: true });
 writeFileSync(uiFontFile, uiFontBytes);
+writeFileSync(path.join(outDir, uiFont.license.path), uiFontLicense.bytes);
 console.log(`${uiFont.path}: ${uiFont.bytes} bytes`);
 console.log(`output: ${outDir}`);

@@ -13,9 +13,15 @@ moly-assets = { path = "../../engine/moly-assets", default-features = false }
 moly-law = { path = "../../base/moly-law" }
 bevy = { version = "0.19.1", default-features = false, features = ["std", "bevy_asset", "bevy_log", "async_executor", "multi_threaded"] }
 serde_json = { workspace = true }
+serde = { version = "1", features = ["derive"] }
 async-channel = "2.5"
 # The control port's JSON-RPC methods; the host adds its HTTP transport.
-bevy_remote = { version = "0.19.1", default-features = false }
+bevy_remote = { version = "0.19.1", default-features = false, optional = true }
+
+[features]
+# A standalone server host may expose its separate loopback control port.
+# An embedded stage only uses the in-process protocol transport.
+control = ["dep:bevy_remote"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # The server clock reads the device's local time (localtime_s / localtime_r).

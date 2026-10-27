@@ -71,7 +71,7 @@ pub(crate) enum Clock {
     Fixed { at_ms: i64 },
 }
 
-pub(crate) use moly_protocol::rows::{Stamina, Gamedata, ColorfulPass, ScheduleRow};
+pub(crate) use moly_protocol::rows::{ColorfulPass, Gamedata, ScheduleRow, Stamina};
 
 /// Where the served `mysekaiPhenomenaSchedules` come from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -114,6 +114,7 @@ pub(crate) use moly_protocol::rows::{Gate, GateCharacter};
 /// One document.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ServerDocument {
+    pub(crate) harvest: super::harvest::HarvestDoc,
     pub(crate) about: String,
     pub(crate) clock: Clock,
     pub(crate) stamina_refresh: StaminaRefresh,
@@ -194,7 +195,6 @@ pub(crate) const DEFAULT_TOTAL_EXP: i32 = 180_000;
 // ---------------------------------------------------------------------------
 
 pub(super) use moly_protocol::json::{array, boolean, field, int32, int64, object, only};
-
 
 /// The schemaVersion of a document text, refused by name when absent.
 pub(crate) fn schema_version(value: &Value, what: &str) -> Result<u64, String> {
@@ -552,6 +552,7 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
         .iter()
         .chain(super::delivery::DOCUMENT_KEYS.iter())
         .chain([super::music::SECTION, super::avatar::SECTION].iter())
+        .chain(super::harvest::DOCUMENT_KEYS.iter())
         .chain(super::inventory::DOCUMENT_KEYS.iter())
         .chain(std::iter::once(&super::music_play::RECORDS_SECTION))
         .chain(super::system_fixture_action::DOCUMENT_KEYS.iter())
@@ -596,9 +597,8 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
     let tools = super::tools::parse(doc)?;
     let phenomena = super::phenomena::PhenomenaDoc::parse(doc)?;
     let recycle = super::recycle::parse_policies(policies)?;
-    let stamina_recovery = super::stamina_recovery::parse_policies(
-        policies.get(super::stamina_recovery::POLICY_KEY),
-    )?;
+    let stamina_recovery =
+        super::stamina_recovery::parse_policies(policies.get(super::stamina_recovery::POLICY_KEY))?;
     let convert = super::convert::ConvertDoc::parse(doc, policies)?;
     let normal_mission = super::normal_mission::NormalMissionDoc::parse(doc)?;
     let (gate, gate_characters, talk_histories) = parse_visit(
@@ -680,6 +680,7 @@ pub(crate) fn parse_v2(text: &str) -> Result<(ServerDocument, Vec<String>), Stri
         stamina_recovery,
         convert,
         normal_mission,
+        harvest: super::harvest::HarvestDoc::parse(doc)?,
     };
     document.check_structure()?;
     Ok((document, pending))
@@ -813,6 +814,7 @@ pub(crate) fn migrate_v1(text: &str, migration: Migration) -> Result<ServerDocum
         music_play_reply: Default::default(),
         music_records: Vec::new(),
         system_fixture_actions: Default::default(),
+        harvest: super::harvest::HarvestDoc::default(),
         tools: None,
         phenomena: Default::default(),
         recycle: BTreeMap::new(),
@@ -831,7 +833,6 @@ pub(crate) fn migrate_v1(text: &str, migration: Migration) -> Result<ServerDocum
 impl ServerDocument {
     /// The checks that need no master data.
     pub(crate) fn check_structure(&self) -> Result<(), String> {
-
         if let Some(stamina) = self.stamina {
             for (name, value) in [
                 ("normalStamina", stamina.normal),
@@ -906,6 +907,7 @@ impl ServerDocument {
         }
         self.delivery.check_structure()?;
         self.inventory.check_structure()?;
+        self.harvest.check_structure()?;
         super::tools::check_structure(&self.tools)?;
         self.phenomena.check_structure()?;
         self.convert.check_structure()?;
@@ -1004,6 +1006,7 @@ impl ServerDocument {
             super::stamina_recovery::write_policy(&self.stamina_recovery, &mut policies);
             self.convert.write(top, &mut policies);
             self.normal_mission.write(top);
+            self.harvest.write(top);
             if let Some(gamedata) = top
                 .get_mut(moly_protocol::json::SECTION_GAMEDATA)
                 .and_then(Value::as_object_mut)

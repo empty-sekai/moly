@@ -106,6 +106,17 @@ impl FixtureActivityProvider {
             .family_definition(world, assets::TimelineFamily::SITE, package, prefab)
     }
 
+    /// A player-motion package retains its own namespace in the step tables.
+    pub fn player_motion_definition(
+        &mut self,
+        world: &World,
+        package: &str,
+        prefab: &str,
+    ) -> Result<Arc<TimelineDefinition>, ProviderPending> {
+        self.assets
+            .family_definition(world, assets::TimelineFamily::PLAYER_MOTION, package, prefab)
+    }
+
     /// One prefab's timeline from a cut-scene package's three timeline tables.
     pub fn cutscene_definition(
         &mut self,

@@ -53,6 +53,7 @@ const LARGE: f32 = 32767.0;
 const LARGE_POSITIVE_VECTOR: f32 = i32::MAX as f32;
 const MAX_ITERATIONS: usize = auto_size::MAX_ITERATION_COUNT as usize;
 
+#[derive(Clone)]
 pub struct TextRules {
     pub leading: HashSet<char>,
     pub following: HashSet<char>,
@@ -751,18 +752,21 @@ struct PairMetric {
 }
 thread_local! {
     static SHAPER: RefCell<ShapeContext> = RefCell::new(ShapeContext::new());
-    static PAIRS: RefCell<HashMap<(char, char), Result<PairMetric, String>>> = RefCell::new(HashMap::new());
+    static PAIRS: RefCell<HashMap<(u64, char, char), Result<PairMetric, String>>> = RefCell::new(HashMap::new());
 }
 
 fn pair_metric(left: char, right: char) -> Result<PairMetric, String> {
     let left = metric_character(left);
     let right = metric_character(right);
+    let key = (crate::ui_font::text_font_revision(), left, right);
     PAIRS.with(|cache| {
-        if let Some(value) = cache.borrow().get(&(left, right)) {
+        if let Some(value) = cache.borrow().get(&key) {
             return value.clone();
         }
-        let result = SHAPER.with(|context| {
-            let font = font();
+        let result = crate::ui_font::with_text_font(left, |font| {
+            // Kerning never crosses a font boundary.
+            if font.charmap().map(right as u32) == 0 { return Ok(PairMetric::default()); }
+            SHAPER.with(|context| {
             let expected = [font.charmap().map(left), font.charmap().map(right)];
             let mut context = context.borrow_mut();
             let settings: Vec<swash::Setting<u16>> = font
@@ -799,8 +803,10 @@ fn pair_metric(left: char, right: char) -> Result<PairMetric, String> {
                     Vec2::new(glyphs[1].x, glyphs[1].y),
                 ],
             })
+            })
         });
-        cache.borrow_mut().insert((left, right), result.clone());
+        let result = result.unwrap_or_else(|| Err(format!("UI font has no glyph U+{:04X}", left as u32)));
+        cache.borrow_mut().insert(key, result.clone());
         result
     })
 }
@@ -926,12 +932,10 @@ fn open_font_em(ch: char) -> Result<f32, String> {
     if zero_advance(ch) {
         return Ok(0.0);
     }
-    let font = font();
-    let gid = font.charmap().map(metric_character(ch));
-    if gid == 0 {
-        return Err(format!("UI font has no glyph U+{:04X}", ch as u32));
-    }
-    Ok(font.glyph_metrics(&[]).scale(1.0).advance_width(gid))
+    crate::ui_font::with_text_font(metric_character(ch), |font| {
+        let gid = font.charmap().map(metric_character(ch));
+        font.glyph_metrics(&[]).scale(1.0).advance_width(gid)
+    }).ok_or_else(|| format!("UI font has no glyph U+{:04X}", ch as u32))
 }
 
 /// The per-character metrics of TMP 3.0.7 with the root's font assets:
@@ -1133,8 +1137,6 @@ fn measure_open_font(
     size: f32,
     adjustment: f32,
 ) -> Result<Vec<Measured>, String> {
-    let font = font();
-    let glyph_metrics = font.glyph_metrics(&[]).scale(1.0);
     let mut result = Vec::with_capacity(prepared.tokens.len());
     for (i, token) in prepared.tokens.iter().enumerate() {
         let style = &prepared.segments[token.segment];
@@ -1151,11 +1153,7 @@ fn measure_open_font(
         }
         let mut glyph_advance = 0.0;
         if !zero_advance(token.ch) {
-            let gid = font.charmap().map(metric_character(token.ch));
-            if gid == 0 {
-                return Err(format!("UI font has no glyph U+{:04X}", token.ch as u32));
-            }
-            glyph_advance = glyph_metrics.advance_width(gid);
+            glyph_advance = open_font_em(token.ch)?;
         }
         let mut pair_advance = 0.0;
         let mut pair_offset = Vec2::ZERO;
@@ -2054,4 +2052,16 @@ pub fn layout(
         }
     }
     Ok(TextLayout { glyphs })
+}
+
+/// Inputs for a display translation. Source TMP font tables only describe
+/// the original language, so translations use the same open-font chain as
+/// glyph rasterization. Tags are literal text, never formatting commands.
+pub fn translated_inputs(component: &UiComponent, rules: &TextRules) -> (UiComponent, TextRules) {
+    let mut component = component.clone();
+    component.fields["m_isRichText"] = Value::Bool(false);
+    component.fields["m_parseCtrlCharacters"] = Value::Bool(false);
+    let mut rules = rules.clone();
+    rules.fonts = None;
+    (component, rules)
 }

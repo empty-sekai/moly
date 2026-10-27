@@ -460,6 +460,11 @@ pub fn spawn_when_ready(
             hidden += 1;
         }
     }
+    for node in &doc.nodes {
+        if node.components.iter().any(|c| c.class == "Sekai.Mysekai.BulkHarvestChargeGaugeView") {
+            view.set_visible(&format!("@{}", node.game_object_id), false);
+        }
+    }
     view.set_visible(&marks.root, false);
     info!(
         "[harvest-hud] stamina gauge view: {ROOT} of the HUD document ({hidden} other nodes hidden); gauge node {} serialized active {} alpha {}",

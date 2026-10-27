@@ -370,7 +370,7 @@ fn parse_program(
     law::Program { kind, blocks }
 }
 
-fn parse_steps(steps: &[serde_json::Value], unit: u32, scenario: &str) -> Vec<law::Step> {
+pub(crate) fn parse_steps(steps: &[serde_json::Value], unit: u32, scenario: &str) -> Vec<law::Step> {
     steps
         .iter()
         .map(|step| {
@@ -555,7 +555,7 @@ impl Lcg {
     /// One script `math.random(0, 99)`: one 31-bit value stands for the one
     /// `rand()` of the script VM, mapped by the VM's own conversion (see
     /// [`law::lua_math_random`]), not by an exact uniform 0..99.
-    fn percent(&mut self) -> u32 {
+    pub(crate) fn percent(&mut self) -> u32 {
         self.0 = self
             .0
             .wrapping_mul(6364136223846793005)
@@ -783,7 +783,7 @@ fn verify_step(
     }
 }
 
-fn suffix_letter(suffix: law::SegmentSuffix) -> &'static str {
+pub(crate) fn suffix_letter(suffix: law::SegmentSuffix) -> &'static str {
     match suffix {
         law::SegmentSuffix::S => "S",
         law::SegmentSuffix::L => "L",
@@ -1072,7 +1072,9 @@ pub fn advance(
         // This system runs after conversation admission. A Rest state never
         // survives TalkHold, and never steals a continuing dialogue's player.
         if talk.is_none() {
-            driver.alone_holds = rt.script.is_some();
+            if rt.script.is_some() || epoch.is_some() {
+                driver.alone_holds = rt.script.is_some();
+            }
         }
     }
 }

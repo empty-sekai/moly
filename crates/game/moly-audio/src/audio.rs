@@ -327,7 +327,12 @@ pub fn apply_sink_volumes(
     bus: Res<VolumeBus>,
     gate: Res<AudioGate>,
     mut sinks: Query<(&BusVolume, &mut AudioSink)>,
+    mut spatial: Query<(&BusVolume, &mut bevy::audio::SpatialAudioSink)>,
 ) {
+    for (source, mut sink) in &mut spatial {
+        let volume = match source { BusVolume::Cue(v)=>v.linear(&bus),BusVolume::Se(v)=>v.volume(&bus) } * gate.factor();
+        if sink.volume().to_linear()!=volume { sink.set_volume(Volume::Linear(volume)); }
+    }
     for (source, mut sink) in &mut sinks {
         let volume = match source {
             BusVolume::Cue(volume) => volume.linear(&bus),
@@ -819,6 +824,7 @@ const TALK_VOICE_PACKAGE_PREFIX: &str = "mysekai__talk__voice__";
 /// The talk voice bank under the Birthday context
 /// (`mysekai/talk/birthday/voice/{0}`), flattened like the plain one.
 const BIRTHDAY_TALK_VOICE_PACKAGE_PREFIX: &str = "mysekai__talk__birthday__voice__";
+const TUTORIAL_TALK_VOICE_PACKAGE_PREFIX: &str = "mysekai__talk__tutorial__voice__";
 
 impl Routing {
     fn phenomenon(&self, name: &str) -> &PhenomenonAudio {
@@ -1939,12 +1945,18 @@ fn parse_corpus(corpus: &serde_json::Value) -> VoiceCorpus {
 /// loads `mysekai/talk/birthday/voice/<lua>`, otherwise
 /// `mysekai/talk/voice/<lua>`.
 pub fn voice_package(cue: &str, birthday: bool) -> Option<String> {
+    contextual_voice_package(cue, false, birthday)
+}
+
+fn contextual_voice_package(cue: &str, tutorial: bool, birthday: bool) -> Option<String> {
     let body = cue.strip_prefix("voice_")?;
     let stem = body.rsplit_once('_')?.0.rsplit_once('_')?.0;
     if stem.is_empty() {
         return None;
     }
-    let prefix = if birthday {
+    let prefix = if tutorial {
+        TUTORIAL_TALK_VOICE_PACKAGE_PREFIX
+    } else if birthday {
         BIRTHDAY_TALK_VOICE_PACKAGE_PREFIX
     } else {
         TALK_VOICE_PACKAGE_PREFIX
@@ -2693,6 +2705,10 @@ pub fn start_timeline_cue(
     cue: &str,
     handles: Vec<Handle<AudioSource>>,
 ) -> Result<Entity, String> {
+    start_timeline_cue_at(world,package,cue,handles,None)
+}
+
+pub fn start_timeline_cue_at(world: &mut World, package: &str, cue: &str, handles: Vec<Handle<AudioSource>>, position: Option<Vec3>) -> Result<Entity,String> {
     let plan = world
         .get_resource::<Routing>()
         .ok_or_else(|| "audio routing is not ready".to_string())?
@@ -2723,8 +2739,12 @@ pub fn start_timeline_cue(
             "timeline SE",
         )
     });
-    Ok(cue::spawn_playback_in_world(world, playback, now))
+    Ok(cue::spawn_playback_in_world(world, playback.spatial(position), now))
 }
+
+/// Audio-only translation for an owner simulated in a different site's local frame.
+#[derive(Component,Clone,Copy)]
+pub struct SourcePositionOffset(pub Vec3);
 
 // ---- A 套邻近环境音管理器 -----------------------------------------------------
 
@@ -2777,7 +2797,7 @@ pub fn advance_proximity(
     routing: Option<Res<Routing>>,
     mut state: ResMut<ProximityState>,
     sources: Query<
-        (&SoundObject, &GlobalTransform),
+        (&SoundObject, &GlobalTransform,Option<&SourcePositionOffset>),
         Without<moly_assets::scene_state::SourceInactive>,
     >,
     avatars: Query<&GlobalTransform, With<AvatarRoot>>,
@@ -2806,8 +2826,8 @@ pub fn advance_proximity(
     // 真源初值是 int 最小值重释为 float，即 f32::MIN）。
     let mut best: Option<(&SoundObject, f32)> = None;
     let mut best_volume = f32::MIN;
-    for (source, transform) in &sources {
-        let volume = proximity_volume(position, transform.translation(), source.max_distance);
+    for (source, transform, offset) in &sources {
+        let volume = proximity_volume(position, transform.translation()+offset.map_or(Vec3::ZERO,|o|o.0), source.max_distance);
         if volume > best_volume {
             best = Some((source, volume));
             best_volume = volume;
@@ -3039,8 +3059,9 @@ fn route_voice(
     partvoice: Option<&PartVoiceMap>,
     streams: &Streams,
     birthday: bool,
+    tutorial: bool,
 ) -> VoiceRoute {
-    if let Some(package) = voice_package(&line.cue, birthday) {
+    if let Some(package) = contextual_voice_package(&line.cue, tutorial, birthday) {
         return if streams.0.contains_key(&(line.cue.clone(), package.clone())) {
             VoiceRoute::Play {
                 package,
@@ -3113,7 +3134,7 @@ pub fn prefetch_voice(
     routing: Option<Res<Routing>>,
     partvoice: Option<Res<PartVoiceMap>>,
     talk: Option<Res<crate::audio_inputs::TalkVoicePrefetch>>,
-    birthday: Option<Res<crate::audio_inputs::BirthdayVoice>>,
+    birthday: (Option<Res<crate::audio_inputs::BirthdayVoice>>, Option<Res<crate::audio_inputs::TutorialVoice>>),
     mut cache: ResMut<VoicePrefetchCache>,
 ) {
     let Some(routing) = routing else {
@@ -3131,7 +3152,7 @@ pub fn prefetch_voice(
             speaker: None,
         };
         let VoiceRoute::Play { package, .. } =
-            route_voice(&line, partvoice.as_deref(), &routing.streams, birthday.is_some())
+            route_voice(&line, partvoice.as_deref(), &routing.streams, birthday.0.is_some(), birthday.1.is_some())
         else {
             continue;
         };
@@ -3161,7 +3182,7 @@ pub fn serve_voice(
     corpus: Option<Res<VoiceCorpus>>,
     routing: Option<Res<Routing>>,
     partvoice: Option<Res<PartVoiceMap>>,
-    birthday: Option<Res<crate::audio_inputs::BirthdayVoice>>,
+    birthday: (Option<Res<crate::audio_inputs::BirthdayVoice>>, Option<Res<crate::audio_inputs::TutorialVoice>>),
     mut prefetch: ResMut<VoicePrefetchCache>,
     mut channel: ResMut<VoiceChannel>,
     lines: Query<(Entity, &VoiceLine)>,
@@ -3198,7 +3219,7 @@ pub fn serve_voice(
                 entity_commands.despawn();
             }
         }
-        match route_voice(&line, partvoice.as_deref(), &routing.streams, birthday.is_some()) {
+        match route_voice(&line, partvoice.as_deref(), &routing.streams, birthday.0.is_some(), birthday.1.is_some()) {
             VoiceRoute::Play { package, partvoice } => {
                 let Some(stream) = routing.streams.0.get(&(line.cue.clone(), package.clone()))
                 else {

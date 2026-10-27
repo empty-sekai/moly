@@ -551,7 +551,7 @@ pub fn setup_view(
     Ok(())
 }
 
-/// The Mask above a gauge's `fillImage`.
+/// The Mask on or above a gauge's `fillImage`.
 fn mask_of(doc: &UiPrefab, gauge: &str) -> Result<i64, String> {
     let pair = doc.nodes[doc.find(gauge)?]
         .components
@@ -566,7 +566,8 @@ fn mask_of(doc: &UiPrefab, gauge: &str) -> Result<i64, String> {
         .filter(|id| *id != 0)
         .ok_or_else(|| format!("{gauge}'s fillImage is null"))?;
     let index = doc.find(&format!("@{id}"))?;
-    let mut cursor = doc.parent(index);
+    // The fillImage may itself carry the Mask; GaugeFill is its child.
+    let mut cursor = Some(index);
     while let Some(parent) = cursor {
         if doc.nodes[parent]
             .components

@@ -223,7 +223,7 @@ impl FixtureFloorAreas {
     }
 }
 
-fn live_matrix(world: &World, entity: Entity) -> Option<Mat4> {
+pub(crate) fn live_matrix(world: &World, entity: Entity) -> Option<Mat4> {
     let mut chain = Vec::new();
     let mut seen = HashSet::new();
     let mut current = entity;
@@ -918,4 +918,40 @@ pub fn publish_navigation(
         coverage_notes,
     });
     Ok(())
+}
+
+/// Build an immutable site-local input set from its actual instantiated roots.
+/// This shares the occupancy/footprint law with the active site's supplier.
+pub(crate) fn resident_inputs(
+    world: &mut World,
+    placements: &crate::fixture::FixturePlacements,
+    roots: &[Entity],
+    origin_entity: Entity,
+    epoch: u64,
+) -> Result<Arc<FixtureSceneInputs>, String> {
+    let floor = placements.floor_grid().ok_or("resident floor grid is missing")?;
+    let players: Vec<_> = world.query_filtered::<Entity, With<PlayerControlled>>().iter(world).collect();
+    let [player] = players.as_slice() else { return Err("logical player is still loading".into()); };
+    let agent = world.get::<PlayerFixtureAgentParameters>(*player).copied().unwrap_or_default();
+    let mut rows = Vec::with_capacity(roots.len());
+    for &entity in roots {
+        let row = world.get::<FixtureScenePlacement>(entity).ok_or("resident layout-owner record missing")?;
+        rows.push(ObservedRow {
+            entity: Some(entity), row: row.0.clone(),
+            identity: world.get::<FixtureActivityIdentity>(entity).cloned(),
+            world_matrix: live_matrix(world, entity).map(|m| m.to_cols_array()),
+        });
+    }
+    rows.sort_by(|a,b| a.row.uid.cmp(&b.row.uid).then_with(|| a.entity.cmp(&b.entity)));
+    let signature = Signature {
+        epoch, site: placements.site_type().to_owned(), floor, origin_entity,
+        origin: Vec3::ZERO, player: *player, agent,
+        areas_revision: world.get_resource::<FixtureFloorAreas>().ok_or("fixture areas loading")?.revision,
+        rows,
+    };
+    let (floor, gaps) = build_floor(world, &signature)?;
+    Ok(Arc::new(FixtureSceneInputs {
+        stamp: FixtureSceneStamp { site_epoch: epoch, input_revision: 1, player: *player },
+        site_type: signature.site, floor: Arc::new(floor), agent, gaps,
+    }))
 }

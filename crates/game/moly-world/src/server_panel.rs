@@ -181,6 +181,7 @@ pub struct ServerPanel {
     reported_reads: Vec<i32>,
     /// The home site's starter placements (housing layout block rows).
     home_starter: Vec<Value>,
+    home_phenomena_id: Option<i32>,
     /// Control: advance the current schedule row every this many seconds.
     schedule_advance_seconds: Option<f32>,
     /// The server model's schedule revision this panel last wrote.
@@ -412,6 +413,7 @@ fn parse_document(text: &str, origin: DocumentOrigin) -> Result<ServerPanel, Str
         .collect::<Result<Vec<_>, String>>()?;
     let layouts = rows(&doc, "userMysekaiSiteHousingLayouts", "document")?;
     let mut home_starter = None;
+    let mut home_phenomena_id = None;
     for (i, layout) in layouts.iter().enumerate() {
         let at = format!("userMysekaiSiteHousingLayouts[{i}]");
         let site = field(layout, "siteType", &at)?
@@ -429,6 +431,11 @@ fn parse_document(text: &str, origin: DocumentOrigin) -> Result<ServerPanel, Str
             return Err(format!("{at} repeats the home site's starter layout"));
         }
         home_starter = Some(rows(layout, "mysekaiFixtures", &at)?.clone());
+        if !layout["mysekaiPhenomenaId"].is_null() {
+            let id = int32(layout, "mysekaiPhenomenaId", &at)?;
+            if id < 0 { return Err(format!("{at}.mysekaiPhenomenaId is negative")); }
+            home_phenomena_id = (id != 0).then_some(id);
+        }
     }
     let home_starter =
         home_starter.ok_or("userMysekaiSiteHousingLayouts has no home site starter layout")?;
@@ -514,6 +521,7 @@ fn parse_document(text: &str, origin: DocumentOrigin) -> Result<ServerPanel, Str
         tutorial_end,
         reported_reads: Vec::new(),
         home_starter,
+        home_phenomena_id,
         schedule_advance_seconds,
         live_revision: 0,
     })
@@ -827,7 +835,7 @@ fn parse(
             row["textureId"] = serde_json::json!(1);
         }
     }
-    let placed = match crate::fixture::layouts::install_home_starter_records(&panel.home_starter) {
+    let placed = match crate::fixture::layouts::install_home_starter_records(&panel.home_starter, panel.home_phenomena_id) {
         Ok(placed) => placed,
         Err(reason) => {
             // Other refusals keep the game alive and say what is wrong instead
@@ -1230,6 +1238,8 @@ struct HeldPhenomenon {
 /// phenomenon changes. The rooms follow home: the moves between them
 /// cross-fade, and the environment view hides the weather indoors.
 fn publish_today_phenomena(
+    preview: Option<Res<crate::field_modes::LayoutEnvironmentPreview>>,
+    layouts: Option<Res<crate::fixture::layouts::SiteFixtureLayouts>>,
     today: Res<TodayPhenomena>,
     catalogue: Res<crate::weather::PhenomenonCatalogue>,
     current: Res<crate::weather::CurrentPhenomenonId>,
@@ -1238,9 +1248,19 @@ fn publish_today_phenomena(
     mut refused: Local<Option<i32>>,
     mut hold: Local<HeldPhenomenon>,
 ) {
-    let Some(id) = today.phenomena_id else {
-        return;
-    };
+    let Some(today_id) = today.phenomena_id else { return; };
+    let home = site.as_deref().is_some_and(|site| site.site_type == "home_site" || site.is_indoor());
+    let fixed = if home {
+        if let Some(preview) = preview.as_deref().filter(|preview| site.as_deref().is_some_and(|site| site.site_id == preview.site_id)) {
+            preview.phenomena_id
+        } else if let Some(layouts) = layouts.as_deref() {
+            match layouts.home_phenomena_id() {
+                Ok(id) => id,
+                Err(reason) => { error!("[site-environment] saved home environment unavailable: {reason}"); return; }
+            }
+        } else { None }
+    } else { None };
+    let id = fixed.unwrap_or(today_id);
     if catalogue.0.is_empty() {
         return; // the weather catalogue is still loading
     }

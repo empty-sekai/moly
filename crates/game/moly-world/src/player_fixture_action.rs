@@ -529,7 +529,7 @@ pub fn refresh_availability(world: &mut World) {
         return;
     }
     let targets: Vec<FixtureTarget> = world
-        .query::<(Entity, &FixtureActivityIdentity)>()
+        .query_filtered::<(Entity, &FixtureActivityIdentity), With<crate::fixture::FixtureRoot>>()
         .iter(world)
         .map(|(entity, identity)| FixtureTarget {
             entity,

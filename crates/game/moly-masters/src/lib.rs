@@ -10,6 +10,7 @@ use bevy::prelude::Resource;
 use serde_json::Value;
 
 pub mod avatar;
+pub mod bulk_harvest;
 pub mod clock;
 pub mod convert;
 pub mod craft;
@@ -17,6 +18,7 @@ pub mod delivery;
 pub mod inventory;
 pub mod load;
 pub mod mission;
+pub mod offline_harvest;
 pub mod recovery;
 pub mod tools;
 

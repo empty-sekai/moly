@@ -122,6 +122,8 @@ struct ChainRuntime {
     /// 从 `topo.children` 反推的父表（`-1` = 链根）。
     parent: Vec<i32>,
     params: EvaluatedParams,
+    /// Validated authored mode-0 ResetCloth settings for this component.
+    reset: ResetSettings,
     state: ClothState,
     scratch: ChainScratch,
     /// 顶点 → 骨绑定（fixed 的位置由律钉回动画位，但旋转照写）。
@@ -161,6 +163,70 @@ struct ColliderBinding {
     path: Vec<Entity>,
 }
 
+/// The no-argument BaseCloth.ResetCloth overload uses each component's
+/// authored mode/time. Only Reset (0) is supported; Keep (1) must preserve the
+/// simulated shape and rotate its saved velocity, so it cannot alias reseeding.
+#[derive(Clone, Copy)]
+struct ResetSettings {
+    stabilization_time: f32,
+}
+
+impl ResetSettings {
+    fn from_component(comp: &JsonValue) -> Result<Self, String> {
+        let params = comp
+            .get("clothParams")
+            .ok_or_else(|| err_at("缺 clothParams", "component"))?;
+        let mode = params
+            .get("teleportMode")
+            .and_then(JsonValue::as_f64)
+            .ok_or_else(|| err_at("缺整数", "teleportMode"))?;
+        if mode == 1.0 {
+            return Err(
+                "cloth teleportMode=1 (Keep) 未实现：必须保留形状并旋转速度，不可当作 Reset"
+                    .to_string(),
+            );
+        }
+        if mode != 0.0 {
+            return Err(format!(
+                "cloth teleportMode 非法或未支持（{mode}）；当前仅支持 Reset=0"
+            ));
+        }
+        let stabilization_time = params
+            .get("resetStabilizationTime")
+            .and_then(JsonValue::as_f64)
+            .ok_or_else(|| err_at("缺数值", "resetStabilizationTime"))?;
+        if !stabilization_time.is_finite()
+            || stabilization_time < 0.0
+            || !(stabilization_time as f32).is_finite()
+        {
+            return Err(err_at("必须是非负有限 f32", "resetStabilizationTime"));
+        }
+        Ok(Self {
+            stabilization_time: stabilization_time as f32,
+        })
+    }
+}
+
+/// Queue all of this actor's mode-0 bone-cloth resets. No Transform or particle
+/// snapshot is read here: `advance` consumes each request after animations in
+/// PostUpdate, using its current FrameInput. An absent/unwired or despawned actor
+/// returns an error, and entity generations cannot transfer requests to a new
+/// actor. Unsupported authored modes are rejected at assembly by ResetSettings.
+pub(crate) fn request_reset(world: &mut World, entity: Entity) -> Result<(), String> {
+    let mut runtime = world
+        .get_mut::<ClothRuntime>(entity)
+        .ok_or_else(|| format!("cloth reset: actor {entity:?} 不存在或 cloth 尚未装配"))?;
+    for chain in &mut runtime.chains {
+        chain
+            .state
+            .request_reset_mode0(chain.reset.stabilization_time)
+            .map_err(|reason| {
+                format!("cloth reset: actor {entity:?} 链 {}：{reason}", chain.name)
+            })?;
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------- rig 解析
 
 /// 解析产物：律侧结构与本层自行解引用的绑定信息平行存放。
@@ -174,6 +240,7 @@ struct ParsedRig {
 
 struct ParsedChain {
     params: ClothParamsDef,
+    reset: ResetSettings,
     /// 顶点绑定世界位（rest）。
     rest: Vec<[f32; 3]>,
     /// team 消费的碰撞体 pathId 表。
@@ -271,6 +338,7 @@ fn parse_rig(raw: &str) -> Result<ParsedRig, String> {
             .ok_or_else(|| err_at("team.colliderPathIds 非数", "component"))?;
         chains.push(ParsedChain {
             params,
+            reset: ResetSettings::from_component(comp)?,
             rest,
             team,
             enabled: bool_of(comp, "enabled")?,
@@ -408,8 +476,13 @@ pub fn plan_when_wired(
             } else {
                 // WorldAssetRoot wrappers have no animation targets or imported
                 // node pose; their local transform is the stable identity.
-                assert!(names.get(entity).is_err(), "named character node lacks imported rest pose");
-                *transforms.get(entity).expect("character wrapper lacks Transform")
+                assert!(
+                    names.get(entity).is_err(),
+                    "named character node lacks imported rest pose"
+                );
+                *transforms
+                    .get(entity)
+                    .expect("character wrapper lacks Transform")
             }
         };
         let world_resolved = Cell::new(0usize);
@@ -585,6 +658,7 @@ pub fn plan_when_wired(
                 topo: b.topo,
                 parent: b.parent,
                 params: b.params,
+                reset: pchain.reset,
                 state: ClothState::new(b.bones.len()),
                 scratch: ChainScratch::default(),
                 bones: b.bones,
@@ -801,6 +875,9 @@ pub fn advance(
                 let world = collider_world_transform(&base, &c.path, &live, &cloth_bones);
                 colliders.push(world_collider(&c.def, world));
             }
+            // Explicit reset is consumed here from this frame's completed
+            // animation snapshot, never from the event callback or live cloth
+            // bone writes. The law retains a queued request while dt is zero.
             // 推进（律内部处理首帧播种、累加器、teleport 与 NaN 复位）。
             let anchor_q = anim_q[chain.topo.anchor as usize];
             let input = FrameInput {
@@ -1101,6 +1178,9 @@ mod tests {
             topo,
             parent: vec![-1, 0],
             params,
+            reset: ResetSettings {
+                stabilization_time: 0.1,
+            },
             state: ClothState::new(2),
             scratch: ChainScratch::default(),
             bones: vec![

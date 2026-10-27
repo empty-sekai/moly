@@ -524,11 +524,24 @@ pub fn bake_atlas(
     skin: Option<Res<SkinHandle>>,
     art: Option<Res<BalloonArt>>,
     mut hold: Local<crate::hold::HoldReport>,
+    mut text_revision: Local<(u64, u64)>,
 ) {
-    if art.is_some() {
-        return;
+    if let Some(art) = art.as_deref() {
+        let revision = crate::text_localization::revision();
+        let font_revision = crate::ui_font::text_font_revision();
+        if (revision, font_revision) == *text_revision { return; }
+        let additional = crate::text_localization::characters();
+        // An updated font can change advances and pixels for existing code
+        // points. Reuse cells only when the selected font bytes also match.
+        if font_revision == text_revision.1 && additional.iter().all(|ch| ch.is_control() || tmp_zero_metric(*ch) || art.cells.contains_key(ch)) {
+            crate::text_localization::mark_glyphs_ready(revision);
+            *text_revision = (revision, font_revision);
+            return;
+        }
     }
     let now = time.elapsed_secs();
+    let retained_skin = art.as_deref().map(|art| SkinHandle { bg: art.bg.clone(), arrow: art.arrow.clone() });
+    let skin = skin.as_deref().or(retained_skin.as_ref());
     let Some(skin) = skin else {
         return hold.hold(&ATLAS_BAKE, "the balloon skin handles are not installed", now);
     };
@@ -544,9 +557,9 @@ pub fn bake_atlas(
     if !(loaded(&skin.bg) && loaded(&skin.arrow)) {
         return hold.hold(&ATLAS_BAKE, "the balloon skin images are still loading", now);
     }
-    hold.run(&ATLAS_BAKE, now);
     // 尺寸核验：裁件尺寸与九宫/箭头采样常量脱节时，错采样是静默的——
     // 具名拒绝。两值都读自真源（sprite 账本按打包身份对齐）。
+    if art.is_none() {
     let bg_image = images
         .get(&skin.bg)
         .unwrap_or_else(|| panic!("[tweet] 气泡纹源 bg 状态 Loaded 但图像缺席"));
@@ -570,6 +583,7 @@ pub fn bake_atlas(
             ARROW_W,
             ARROW_H
         );
+    }
     }
     let missing = [
         (tables.is_none(), "the tweet tables are not installed"),
@@ -602,6 +616,7 @@ pub fn bake_atlas(
     else {
         unreachable!("every input was checked above");
     };
+    hold.run(&ATLAS_BAKE, now);
     let font = swash::FontRef::from_index(&FONT_BYTES, 0)
         .unwrap_or_else(|| panic!("仓内字体不是可读的 OpenType 字体"));
     let mut chars: Vec<char> = tables
@@ -613,6 +628,10 @@ pub fn bake_atlas(
         .chain(shell_charset.chars.iter().copied())
         .chain(collect_charset.chars.iter().copied())
         .chain(bgm_select_charset.chars.iter().copied())
+        .chain(crate::text_localization::characters())
+        // Rebuild from the source and selected display session. Old sprites
+        // own their page handles; obsolete glyphs must not keep obsolete font
+        // revisions necessary for every future atlas bake.
         .collect();
     chars.sort_unstable();
     chars.dedup();
@@ -631,9 +650,10 @@ pub fn bake_atlas(
     chars.retain(|ch| !ch.is_control());
 
     let mut context = swash::scale::ScaleContext::new();
-    let mut scaler = context.builder(font).size(BAKE_PPEM).build();
+    let translation_fonts = crate::text_localization::fonts();
+    let fallback_fonts: Vec<_> = translation_fonts.iter()
+        .filter_map(|bytes| swash::FontRef::from_index(bytes, 0)).collect();
     let render = swash::scale::Render::new(&[swash::scale::Source::Outline]);
-    let glyph_metrics = font.glyph_metrics(&[]).scale(BAKE_PPEM);
 
     // 第一遍：全部光栅化，量**实际墨迹**的上/下/左/右界。格边仍按
     // 实际墨迹定而不是 hhea 上下界；分页只改变存储，不缩字或裁字符集。
@@ -649,7 +669,12 @@ pub fn bake_atlas(
     let mut rasters: Vec<Raster> = Vec::new();
     let mut missing: Vec<char> = Vec::new();
     for ch in chars.iter().copied() {
+        let font = if font.charmap().map(ch as u32) != 0 { font } else {
+            fallback_fonts.iter().copied().find(|font| font.charmap().map(ch as u32) != 0).unwrap_or(font)
+        };
         let gid = font.charmap().map(ch as u32);
+        let glyph_metrics = font.glyph_metrics(&[]).scale(BAKE_PPEM);
+        let mut scaler = context.builder(font).size(BAKE_PPEM).build();
         let advance = glyph_metrics.advance_width(gid);
         if gid == 0 {
             missing.push(ch);
@@ -827,7 +852,8 @@ pub fn bake_atlas(
         "[tweet] 气泡纹源就位：bg btn_r30_wh {:.0}x{:.0} border {:.0} 四边（九宫 Sliced）· arrow balloon_direction_triangle_wh {:.0}x{:.0}（整图 Simple）",
         BG_SPRITE, BG_SPRITE, BG_BORDER, ARROW_W, ARROW_H
     );
-    commands.insert_resource(BalloonArt {
+    let baked_revision = crate::text_localization::revision();
+    let baked = BalloonArt {
         images: glyph_images,
         cells,
         baseline_from_top,
@@ -835,8 +861,13 @@ pub fn bake_atlas(
         cell,
         bg,
         arrow,
+    };
+    commands.queue(move |world: &mut World| {
+        world.insert_resource(baked);
+        world.remove_resource::<SkinHandle>();
+        crate::text_localization::mark_glyphs_ready(baked_revision);
     });
-    commands.remove_resource::<SkinHandle>();
+    *text_revision = (baked_revision, crate::ui_font::text_font_revision());
 }
 
 // ---------------------------------------------------------------------------
@@ -1120,6 +1151,11 @@ pub fn after_edit_reaction(
     clock: Option<Res<crate::npc_clock::NpcClock>>,
     site: Option<Res<crate::site::SiteActive>>,
     tutorial: Option<Res<crate::server_panel::ServerPanel>>,
+    (hfsm_scope, reaction_receipts, hfsm_plans): (
+        Option<Res<crate::npc_objective::controller::NpcHfsmScopeResource>>,
+        Option<Res<crate::npc_objective::events::LayoutReactionFixtures>>,
+        Res<crate::npc_objective::controller::PreparedPlans>,
+    ),
     mut saves: MessageReader<crate::field_modes::LayoutSaved>,
     tables: Option<Res<crate::npc_tweet::TweetTables>>,
     art: Option<Res<BalloonArt>>,
@@ -1145,6 +1181,7 @@ pub fn after_edit_reaction(
     >,
     players: Query<&GlobalTransform, With<crate::player::PlayerControlled>>,
     mut holds: Query<(Entity, &CharacterUnitId, &mut AfterEditHold)>,
+    hfsm_actors: Query<&crate::npc_objective::controller::NpcHfsmActor>,
     balloons: Query<(Entity, &BalloonAnchor)>,
 ) {
     // 池的 join 形 → 律的 AEH 行形，表一到就建一次（反查落空即数据
@@ -1226,6 +1263,7 @@ pub fn after_edit_reaction(
     let (Some(tables), Some(after_edit), Some(art)) = (tables, after_edit.as_ref(), art) else {
         return;
     };
+    if reaction_receipts.as_deref().is_some_and(|r|!r.pending.is_empty()) || !hfsm_plans.reactions.is_empty() { return; }
     // Each pass walks its queue: past a finished Delay, release the next NPC
     // whose cancel reports true, then start that NPC's Delay.
     for pass in passes.iter_mut() {
@@ -1251,12 +1289,15 @@ pub fn after_edit_reaction(
             let Ok((_, unit, _, actions, mind, held)) = npcs.get(npc) else {
                 continue;
             };
+            if hfsm_plans.reaction_members.contains(&unit.0) { continue; }
             // TryCancelCurrentObjective: false while talking, without a
             // current objective, or on one that completed.
             // A dialogue hold is this host's talking presentation.
             let cancels = actions.current != crate::npc::NpcAction::Talk
                 && !held
-                && mind.is_some_and(|mind| mind.cancel_reports());
+                && if hfsm_scope.as_deref().is_some_and(|scope|scope.0.enrols(unit.0)) {
+                    hfsm_actors.get(npc).is_ok_and(|actor| actor.lower.is_none_or(|lower|lower.flags().can_interrupt))
+                } else { mind.is_some_and(|mind| mind.cancel_reports()) };
             if !cancels {
                 info!(
                     "[tweet] after-edit unit={} 保存 #{}：TryCancelCurrentObjective 为假（对话中或无在行目标），不反应、无错峰",
@@ -1285,6 +1326,13 @@ pub fn after_edit_reaction(
                 );
                 continue;
             };
+            if hfsm_scope.as_deref().is_some_and(|scope| scope.0.enrols(unit.0)) {
+                let tweet = row.id;
+                commands.queue(move |world: &mut World| {
+                    crate::npc_objective::events::begin_after_edit(world, npc, tweet);
+                });
+                continue;
+            }
             // 新反应进场：头上的在屏气泡先关（驻留内重抽、跨链的问候
             // 气泡，同一条让位门——槽位只有一个）。
             for (balloon_entity, anchor) in &balloons {
@@ -1485,6 +1533,16 @@ pub fn walk_glyphs(
     word_extra: f32,
 ) -> (Vec<Vec<(GlyphSpot, f32, usize)>>, usize) {
     let segments = parse_rich_segments(text);
+    walk_segments(&segments, art, font_size, char_extra, word_extra)
+}
+
+fn walk_segments(
+    segments: &[moly_law::text::tags::TextSegment],
+    art: &BalloonArt,
+    font_size: f32,
+    char_extra: f32,
+    word_extra: f32,
+) -> (Vec<Vec<(GlyphSpot, f32, usize)>>, usize) {
     let mut clean: String = segments.iter().map(|seg| seg.text.as_str()).collect();
     if clean.ends_with('\n') {
         clean.pop();
@@ -1513,7 +1571,7 @@ pub fn walk_glyphs(
     let seg_raw_base: Vec<usize> = {
         let mut base = Vec::with_capacity(segments.len());
         let mut acc = 0usize;
-        for seg in &segments {
+        for seg in segments {
             base.push(acc);
             acc += seg.text.chars().count();
         }
@@ -1705,6 +1763,12 @@ pub fn spawn_balloon_on(
     probe: bool,
     layer: usize,
 ) -> Entity {
+    let session = crate::text_localization::snapshot();
+    let translated = session.as_ref().map(|session| session.resolve(
+        &format!("@tweet/{id}"), None, moly_text::TextKind::Tweet, text,
+    ));
+    let literal = translated.is_some_and(|display| display.origin != moly_text::TextOrigin::Original);
+    let text = translated.map_or(text, |display| display.text);
     // 对话路径没有 face 四键：tweet 对账日志读 face 的地方全部走
     // row.id/文本侧，face 缺省 None 不进对账。
     let row = TweetRow {
@@ -1718,15 +1782,20 @@ pub fn spawn_balloon_on(
         mouth_name: String::new(),
     };
     let text = row.text.as_str();
-    let metrics = layout_metrics(
-        text,
+    let segments = if literal {
+        let mut segment = parse_rich_segments(" ").remove(0);
+        segment.text = text.to_owned();
+        vec![segment]
+    } else { parse_rich_segments(text) };
+    let metrics = moly_law::text::metrics::layout_segments(
+        &segments,
         FONT_SIZE,
         FONT_FAMILY,
         LINE_SPACING,
         BAKE_PPEM,
         &|ch: char| art.advance(ch),
     );
-    let (lines, missing_used) = walk_glyphs(text, art, FONT_SIZE, 0.0, 0.0);
+    let (lines, missing_used) = walk_segments(&segments, art, FONT_SIZE, 0.0, 0.0);
     let line_count = metrics.line_widths.len();
 
     // 行数对账：摆位的行结构必须与律一致（不一致响 warn 不 panic——
@@ -2190,6 +2259,8 @@ pub fn place(
         Option<&LayerLogged>,
     )>,
     transforms: Query<&GlobalTransform>,
+    actors: Query<(&crate::npc::NpcActions, Has<crate::npc::gate_entries::ModelHidden>)>,
+    site: Option<Res<crate::site::SiteActive>>,
     cameras: Query<(&Camera, &GlobalTransform, &Projection), With<Camera3d>>,
     windows: Query<&Window>,
     children_q: Query<&Children>,
@@ -2263,7 +2334,9 @@ pub fn place(
         // 气泡静默丢掉（实测：跟随相机经过身侧的成员，头离相机 0.34m
         // < near 1.0，15/45 只气泡从未上屏）。改自折 NDC→视口像素。
         let view_z = (world - eye).dot(*fwd);
-        let behind = view_z <= 0.0;
+        let on_other_site = actors.get(anchor.npc).is_ok_and(|(actions, hidden)|
+            hidden || site.as_deref().is_none_or(|site| site.site_type != actions.site_type));
+        let behind = view_z <= 0.0 || on_other_site;
         if behind != anchor.hidden {
             anchor.hidden = behind;
             // Every part starts with its base color. Only a visibility edge

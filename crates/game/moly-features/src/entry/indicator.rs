@@ -955,16 +955,18 @@ fn step(world: &mut World, running: &mut Running, dt: f32) {
     running.updates += 1;
     apply_palette(world, running);
     layout(world, running);
-    let scales: Vec<String> = running
-        .circles
-        .iter()
-        .map(|c| format!("{}={:.4}", c.name, c.tween.value().x))
-        .collect();
-    info!(
-        "[entry-indicator] update {} dt={dt:.4} applied={applied} {}",
-        running.updates,
-        scales.join(" ")
-    );
+    if bevy::log::tracing::enabled!(bevy::log::tracing::Level::TRACE) {
+        let scales: Vec<String> = running
+            .circles
+            .iter()
+            .map(|c| format!("{}={:.4}", c.name, c.tween.value().x))
+            .collect();
+        trace!(
+            "[entry-indicator] update {} dt={dt:.4} applied={applied} {}",
+            running.updates,
+            scales.join(" ")
+        );
+    }
 }
 
 #[cfg(test)]

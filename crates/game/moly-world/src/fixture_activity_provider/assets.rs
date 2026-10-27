@@ -55,6 +55,11 @@ impl TimelineFamily {
         root: "site-timeline",
         prefix: "mysekai__site__",
     };
+    /// Player-owned motion timelines exported alongside site step items.
+    pub const PLAYER_MOTION: Self = Self {
+        root: "site-timeline",
+        prefix: "mysekai__player__motion__",
+    };
     /// Cut-scene timelines (`mysekai/cut_scene/...` bundles).
     pub const CUTSCENE: Self = Self {
         root: "cutscene-timeline",

@@ -21,6 +21,7 @@ const { values: options } = parseArgs({
     video: { type: "boolean", default: false },
     orbit: { type: "boolean", default: false },
     diagnostics: { type: "boolean", default: false },
+    "measure-base": { type: "boolean", default: false },
   },
 });
 assert.ok(["cn", "jp"].includes(options.region));
@@ -67,6 +68,35 @@ const context = await browser.newContext({
     : {}),
 });
 const page = await context.newPage();
+if (options["measure-base"]) {
+  if (
+    !["localhost", "127.0.0.1", "[::1]"].includes(
+      new URL(options.origin).hostname,
+    )
+  )
+    throw Error(
+      "Base measurement is available only on a loopback development server",
+    );
+  const stageDocument = new URL(options.stage, options.origin);
+  await page.route(
+    (url) =>
+      url.origin === stageDocument.origin &&
+      url.pathname === stageDocument.pathname,
+    async (route) => {
+      const response = await route.fetch();
+      const html = await response.text();
+      if (!html.includes('<html lang="en">'))
+        throw Error("Unexpected stage measurement document");
+      await route.fulfill({
+        response,
+        body: html.replace(
+          '<html lang="en">',
+          '<html lang="en" data-moly-measure-base="1">',
+        ),
+      });
+    },
+  );
+}
 page.setDefaultTimeout(15000);
 const backend =
   options.backend === "auto-fallback" ? "webgl2" : options.backend;
@@ -434,14 +464,15 @@ try {
     };
     cases.push(one);
     record("case", key);
-    const tab =
-      key === "talk:general:3912"
-        ? "conversations"
-        : key.startsWith("fixture:")
-          ? "furniture"
-          : key.startsWith("activity:")
-            ? "activities"
-            : "performances";
+    const tab = ["talk:general:", "talk:common:"].some((prefix) =>
+      key.startsWith(prefix),
+    )
+      ? "conversations"
+      : key.startsWith("fixture:")
+        ? "furniture"
+        : key.startsWith("activity:")
+          ? "activities"
+          : "performances";
     await command("tab", tab);
     await command("fixture", null);
     await command("query", "");

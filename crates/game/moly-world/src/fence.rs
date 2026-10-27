@@ -101,7 +101,7 @@ pub(super) fn bind_scene(
 pub(super) fn update_connections(
     ready: Option<Res<FixtureScenesReady>>,
     placements: Res<FixturePlacements>,
-    fences: Query<(Entity, &FixtureRow, Ref<FenceNodes>)>,
+    fences: Query<(Entity, &FixtureRow, Ref<FenceNodes>), With<super::FixtureRoot>>,
     mut commands: Commands,
 ) {
     let Some(ready) = ready else {

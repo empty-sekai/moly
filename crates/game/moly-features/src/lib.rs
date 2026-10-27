@@ -168,6 +168,7 @@ pub mod cutscene;
 pub mod delivery;
 pub mod entry;
 pub mod fixture_edit;
+pub mod fixture_put_limit;
 pub mod fixture_edit_ui;
 pub mod floor_edit_camera;
 pub mod footstep;
@@ -190,6 +191,7 @@ pub mod companion_cues;
 pub mod effect_show;
 pub mod mysekai_rank;
 pub mod option_dialog;
+pub mod photo_shot;
 pub mod pick;
 pub mod player_input;
 pub mod player_data;
@@ -202,3 +204,8 @@ pub mod sitemap;
 pub mod sitemap_phenomena;
 pub mod stamina_recover_dialog;
 pub mod weather_dialog;
+
+pub mod site_request;
+pub mod player_data_input;
+
+pub mod tutorial;

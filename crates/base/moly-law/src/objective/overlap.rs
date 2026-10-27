@@ -7,7 +7,7 @@ use super::{ObjectiveType, TalkType};
 pub fn has_group_talk(current: Option<ObjectiveType>, slot: Option<TalkType>) -> bool {
     slot.is_some()
         && (matches!(current, Some(ObjectiveType::MainSomeCharacterCommunication | ObjectiveType::SubSomeCharacterCommunication))
-            || matches!(slot, Some(TalkType::MultipleCharacterFixture | TalkType::CommunicationWhileDoingWait)))
+            || matches!(slot, Some(TalkType::MultipleCharacterFixture | TalkType::CommunicationWhileDoingWait | TalkType::CommonSomeCharacter)))
 }
 
 /// The action states in which the overlap cancel may run: the bits of

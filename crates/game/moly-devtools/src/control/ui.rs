@@ -39,8 +39,23 @@ pub(super) fn views(world: &mut World) -> Result<Value, String> {
                 })
             })
             .collect();
-        views.push(json!({ "view": view.key, "laidOut": true, "controls": controls }));
+        let scroll_rects: Vec<Value> = layouts.document(view.key).into_iter()
+            .flat_map(|doc| doc.nodes.iter())
+            .flat_map(|node| node.components.iter().map(move |component| (node, component)))
+            .filter(|(_, component)| component.class.ends_with("ScrollRect"))
+            .map(|(node, component)| {
+                let rectangle = |field: &str| {
+                    let pointer = &component.fields[field];
+                    if pointer[0].as_i64() != Some(0) { return Value::Null; }
+                    let Some(id) = pointer[1].as_i64().filter(|id| *id != 0) else { return Value::Null; };
+                    view.rect(layouts, &format!("@{id}"), canvas).map_or(Value::Null, |rect| {
+                        json!({"size": rect.size.to_array(), "center": rect.center().to_array(), "active": rect.active})
+                    })
+                };
+                json!({"path": node.path, "viewport": rectangle("m_Viewport"), "content": rectangle("m_Content")})
+            }).collect();
+        views.push(json!({ "view": view.key, "laidOut": true, "controls": controls, "scrollRects": scroll_rects }));
     }
     views.sort_by(|a, b| a["view"].as_str().cmp(&b["view"].as_str()));
-    Ok(json!({ "window": [window.width(), window.height()], "views": views }))
+    Ok(json!({ "window": [window.width(), window.height()], "canvas": canvas.to_array(), "scale": root.scale(&window), "views": views }))
 }

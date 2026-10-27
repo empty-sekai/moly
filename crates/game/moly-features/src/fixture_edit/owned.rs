@@ -77,6 +77,7 @@ fn parse_master(value: &Value) -> Result<HashMap<i32, MasterRow>, String> {
             let layout = match row["layoutType"].as_str() {
                 Some("floor") => Some(layout_type::FLOOR),
                 Some("rug") => Some(layout_type::RUG),
+                Some("road") => Some(layout_type::ROAD),
                 Some(_) => None,
                 None => return Err(format!("fixture master row {id} has no layoutType")),
             };
@@ -171,6 +172,15 @@ pub(super) fn catalog(
     site_id: u32,
     draft: &[EditableFixture],
 ) -> Result<(Vec<OwnedRow>, Omitted), String> {
+    catalog_for(world, site_id, draft, false)
+}
+
+pub(super) fn catalog_for(
+    world: &World,
+    site_id: u32,
+    draft: &[EditableFixture],
+    road: bool,
+) -> Result<(Vec<OwnedRow>, Omitted), String> {
     let owned = world
         .get_resource::<ClientMysekaiInventory>()
         .ok_or("the server model keeps no inventory copy in this build")?;
@@ -198,6 +208,10 @@ pub(super) fn catalog(
             omitted.other_layout += 1;
             continue;
         };
+        if (layout == layout_type::ROAD) != road {
+            omitted.other_layout += 1;
+            continue;
+        }
         if !paths.contains_key(&entry.package) {
             omitted.no_model += 1;
             continue;
