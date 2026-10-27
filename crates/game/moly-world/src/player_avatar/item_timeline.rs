@@ -819,7 +819,11 @@ fn prepare(
     world.init_resource::<FixtureActivityProvider>();
     let definition = world
         .resource_scope(|world, mut provider: Mut<FixtureActivityProvider>| {
-            provider.site_definition(world, &entry.package, &entry.prefab)
+            if entry.bulk.is_some() {
+                provider.player_motion_definition(world, &entry.package, &entry.prefab)
+            } else {
+                provider.site_definition(world, &entry.package, &entry.prefab)
+            }
         })
         .map_err(|pending| {
             if pending.retryable {
