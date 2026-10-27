@@ -37,6 +37,10 @@ pub fn tick(world: &mut World) {
     let mut state = world
         .remove_resource::<BulkNotices>()
         .expect("bulk notices installed");
+    if state.shown.is_none() && state.queue.is_empty() {
+        world.insert_resource(state);
+        return;
+    }
     if state.shown.is_none() {
         let layouts = world.resource::<UiLayouts>();
         let server = world.resource::<AssetServer>().clone();
