@@ -156,7 +156,7 @@ pub fn app(
         .disable::<bevy::app::PanicHandlerPlugin>()
         .disable::<bevy::log::LogPlugin>()
         .set(bevy::render::RenderPlugin {
-            render_creation: bevy::render::settings::RenderCreation::Automatic(web_render_settings),
+            render_creation: bevy::render::settings::RenderCreation::Automatic(Box::new(web_render_settings)),
             ..default()
         });
     app.add_plugins(plugins);

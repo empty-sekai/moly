@@ -278,7 +278,7 @@ pub fn app(
             .disable::<bevy::log::LogPlugin>()
             .set(bevy::render::RenderPlugin {
                 render_creation: bevy::render::settings::RenderCreation::Automatic(
-                    web_render_settings,
+                    Box::new(web_render_settings),
                 ),
                 ..default()
             });
@@ -360,4 +360,3 @@ pub fn app(
     home_action::install(&mut app);
     app
 }
-
