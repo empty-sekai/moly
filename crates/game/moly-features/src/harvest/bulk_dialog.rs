@@ -538,6 +538,11 @@ fn reward_document(
 }
 
 fn open(world: &mut World, state: &mut BulkDialogs) {
+    // The icon index is asynchronous. Leave rewards and special playback in
+    // their current order until it settles, before consuming any result.
+    if !state.open_settings && !world.contains_resource::<crate::item_icon::ItemIcons>() {
+        return;
+    }
     if state.shown.is_some() || world.resource::<ScreenManager>().exists_dialog() {
         return;
     }
@@ -1079,4 +1084,44 @@ pub fn install(app: &mut App) {
                 .chain()
                 .after(super::bulk::tick),
         );
+}
+
+#[cfg(test)]
+mod icon_readiness_tests {
+    use super::*;
+
+    #[test]
+    fn pending_icons_do_not_consume_or_restart_rewards() {
+        let mut world = World::new();
+        let mut state = BulkDialogs::default();
+        for (site_id, special_started) in [(5, true), (6, false)] {
+            state.rewards.push_back(RewardResult {
+                plan: Plan::default(),
+                special_started,
+                site_id,
+                before_stamina: super::super::law::Stamina {
+                    normal: 10,
+                    enhance: 2,
+                    boost: 3,
+                },
+                before_tools: Vec::new(),
+                reply: UserMysekaiSiteBulkHarvestResponse {
+                    updated_resources: Default::default(),
+                    obtained_drop_resources: Vec::new(),
+                    player_rank_rewards: Vec::new(),
+                    is_in_break_time: false,
+                },
+            });
+        }
+        open(&mut world, &mut state);
+        assert_eq!(
+            state
+                .rewards
+                .iter()
+                .map(|r| (r.site_id, r.special_started))
+                .collect::<Vec<_>>(),
+            [(5, true), (6, false)]
+        );
+        assert!(state.shown.is_none());
+    }
 }

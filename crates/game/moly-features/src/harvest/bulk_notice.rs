@@ -34,6 +34,11 @@ struct Shown {
 const RUNTIME: &str = "BulkToolNoticeRuntime";
 
 pub fn tick(world: &mut World) {
+    // Wait before draining the queue or advancing a shown cell. The index is
+    // installed only after loading settles, so an early notice must stay put.
+    if !world.contains_resource::<crate::item_icon::ItemIcons>() {
+        return;
+    }
     let mut state = world
         .remove_resource::<BulkNotices>()
         .expect("bulk notices installed");
@@ -223,4 +228,64 @@ pub fn tick(world: &mut World) {
         }
     }
     world.insert_resource(state);
+}
+
+#[cfg(test)]
+mod icon_readiness_tests {
+    use super::*;
+
+    #[test]
+    fn pending_icons_preserve_queue_and_shown_slide() {
+        let mut world = World::new();
+        let mut slide = SlideNotices::with_shape(0.0, 1, 64, 600.0);
+        slide.notice(
+            ToolNotice {
+                tool: 10,
+                broken: true,
+            },
+            0.1,
+            &mut Vec::new(),
+        );
+        let mut expected = slide.clone();
+        let entity = world.spawn_empty().id();
+        world.insert_resource(BulkNotices {
+            queue: [
+                ToolNotice {
+                    tool: 5,
+                    broken: false,
+                },
+                ToolNotice {
+                    tool: 6,
+                    broken: true,
+                },
+            ]
+            .into(),
+            shown: Some(Shown {
+                entity,
+                root: String::new(),
+                text: String::new(),
+                image: String::new(),
+                atlas: String::new(),
+                x: 20.0,
+                y: 10.0,
+                slide,
+            }),
+        });
+        tick(&mut world);
+        let mut state = world.resource_mut::<BulkNotices>();
+        assert_eq!(
+            state
+                .queue
+                .iter()
+                .map(|n| (n.tool, n.broken))
+                .collect::<Vec<_>>(),
+            [(5, false), (6, true)]
+        );
+        let shown = state.shown.as_mut().unwrap();
+        assert_eq!((shown.entity, shown.x, shown.y), (entity, 20.0, 10.0));
+        let (mut expected_calls, mut actual_calls) = (Vec::new(), Vec::new());
+        expected.step(0.1, &mut expected_calls);
+        shown.slide.step(0.1, &mut actual_calls);
+        assert_eq!(actual_calls, expected_calls);
+    }
 }

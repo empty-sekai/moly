@@ -19,6 +19,26 @@ use std::time::Duration;
 
 pub fn install(app: &mut App) {
     app.init_resource::<walk_face::WalkFaceBakes>();
+    // AvatarMaterialPlugin installs the companion domain, whose build swing
+    // uses this shared hand-item view. The game registers it with home_action;
+    // the embedded stage owns the same item lifecycle without that game UI.
+    app.init_resource::<player_avatar::avatar_item::AvatarItemView>()
+        .add_message::<player_avatar::avatar_item::AvatarItemRequest>()
+        .add_systems(Startup, player_avatar::avatar_item::load)
+        .add_systems(
+            Update,
+            player_avatar::avatar_item::parse
+                .before(moly_world::companion::CompanionSteps),
+        )
+        .add_systems(
+            Update,
+            player_avatar::avatar_item::apply
+                .after(player_avatar::avatar_item::parse)
+                .after(player_avatar::body::wire)
+                .after(player_state::drive_from_input)
+                .before(player::advance)
+                .before(player_avatar::drive),
+        );
     content_library::install(app);
     app.add_systems(
         Update,
