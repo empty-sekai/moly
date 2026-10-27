@@ -53,8 +53,10 @@ jobs:
         run: |
           if [[ -n "$PR_BASE_SHA" ]]; then
             git diff --check "$PR_BASE_SHA...$PR_HEAD_SHA"
-          elif [[ -n "$PUSH_BASE_SHA" && ! "$PUSH_BASE_SHA" =~ ^0+$ ]]; then
+          elif [[ -n "$PUSH_BASE_SHA" && ! "$PUSH_BASE_SHA" =~ ^0+$ ]] && git cat-file -e "$PUSH_BASE_SHA^{commit}" 2>/dev/null; then
             git diff --check "$PUSH_BASE_SHA" "$GITHUB_SHA"
           else
+            # A rebased push may no longer expose its previous tip to checkout.
+            # The PR check still checks the full base-to-head diff.
             git show --format= --check "$GITHUB_SHA"
           fi
