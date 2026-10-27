@@ -63,6 +63,10 @@ jobs:
       VERSION: ${{ inputs.version }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        if: inputs.package
+        with:
+          node-version: '22'
       - name: Install the Rust toolchain
         shell: bash
         run: |
@@ -113,6 +117,7 @@ jobs:
             cp LICENSE THIRD_PARTY_NOTICES.md "dist/$name/"
             cp docs/release-package.md "dist/$name/README.md"
           done
+          node web/ui-font-package.mjs --copy-license "dist/$game"
           cd dist
           for name in "$game" "$server"; do
             if [[ "${{ matrix.archive }}" == zip ]]; then

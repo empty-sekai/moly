@@ -77,6 +77,10 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - uses: actions/download-artifact@v4
         with:
           pattern: browser-stage-*
@@ -87,13 +91,8 @@ jobs:
           pattern: browser-game-*
           path: game/pkg
           merge-multiple: true
-      - name: Check both renderers and the font are present
-        run: |
-          for product in stage game; do
-            test -f "$product/pkg/webgpu/build.json"
-            test -f "$product/pkg/webgl2/build.json"
-            test "$(find "$product/pkg/fonts" -name '*.ttf' | wc -l)" -eq 1
-          done
+      - name: Verify both renderers' font and its license
+        run: node web/ui-font-package.mjs --verify stage/pkg game/pkg
       - name: Package
         run: |
           mkdir -p dist

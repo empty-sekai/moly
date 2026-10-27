@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { workspaceFingerprint, sha256 } from "./build-source.mjs";
 import { parseWasmBuildArguments } from "./build-wasm-arguments.mjs";
+import { sourceUiFontLicense } from "./ui-font-package.mjs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -140,10 +141,12 @@ const uiFontBytes = readFileSync(
     "crates/game/moly-core/assets/font/ResourceHanRoundedSC-Medium.subset.ttf",
   ),
 );
+const uiFontLicense = sourceUiFontLicense(workspaceRoot);
 const uiFont = {
   path: `fonts/${sha256(uiFontBytes)}.ttf`,
   sha256: sha256(uiFontBytes),
   bytes: uiFontBytes.length,
+  license: uiFontLicense.record,
 };
 {
   const declaration = readFileSync(
@@ -237,5 +240,6 @@ for (const [backend, features] of [
 const uiFontFile = path.join(outDir, uiFont.path);
 mkdirSync(path.dirname(uiFontFile), { recursive: true });
 writeFileSync(uiFontFile, uiFontBytes);
+writeFileSync(path.join(outDir, uiFont.license.path), uiFontLicense.bytes);
 console.log(`${uiFont.path}: ${uiFont.bytes} bytes`);
 console.log(`output: ${outDir}`);

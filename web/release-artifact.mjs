@@ -29,6 +29,7 @@ import {
 import { validatePublicationCoordinates } from "./coordinate-publication.mjs";
 import { bundleCacheWorkerFiles } from "./cache-worker-bundle.mjs";
 import { GAME_ABI, GAME_EXPORTS } from "./game-controller.mjs";
+import { readUiFontLicense } from "./ui-font-package.mjs";
 
 export const STAGE_FILES = [
   "embed.mjs",
@@ -858,7 +859,17 @@ export async function publish({
       (reused && reused.hashes[`pkg/${font.path}`] !== font.sha256)
     )
       throw new Error(`Changed UI font: ${font.path}`);
+    const licenseBytes = readUiFontLicense(
+      reused ? path.join(reusedRoot, "pkg") : packageRoot,
+      font,
+    );
+    if (
+      reused &&
+      reused.hashes[`pkg/${font.license.path}`] !== font.license.sha256
+    )
+      throw new Error("Changed UI font license integrity record");
     files.set(`pkg/${font.path}`, bytes);
+    files.set(`pkg/${font.license.path}`, licenseBytes);
   }
   const hashes = Object.fromEntries(
     [...files].map(([name, bytes]) => [name, sha256(bytes)]),
