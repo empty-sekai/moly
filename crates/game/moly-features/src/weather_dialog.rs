@@ -935,11 +935,11 @@ mod tests {
         let grid = |id| component(id, "UnityEngine.UI.GridLayoutGroup",
             json!({"m_CellSize":[348,184],"m_Spacing":[16,16],"m_Padding":[0,0,0,0],
                 "m_ChildAlignment":0,"m_Constraint":1,"m_ConstraintCount":2,"m_StartAxis":0,"m_StartCorner":0}), &[]);
-        let dialog = json!({"version":1,"prefab":"Dialog","nodes":[
+        let dialog = json!({"version":2,"prefab":"Dialog","nodes":[
             node(100,101,0,"Dialog",vec![component(102,DIALOG,json!({"_weatherCellList":[[0,113],[0,123]]}), &["/_weatherCellList/0","/_weatherCellList/1"])]),
             node(110,111,101,"Dialog/Today",vec![component(113,CELL_LIST,json!({"_content":[0,111],"_weatherCellPrefab":[7,19]}), &["/_content","/_weatherCellPrefab"]),grid(114)]),
             node(120,121,101,"Dialog/Tomorrow",vec![component(123,CELL_LIST,json!({"_content":[0,121],"_weatherCellPrefab":[7,19]}), &["/_content","/_weatherCellPrefab"]),grid(124)])]});
-        let cell = json!({"version":1,"prefab":"Cell","nodes":[
+        let cell = json!({"version":2,"prefab":"Cell","nodes":[
             node(6,17,0,"Cell",vec![component(19,CELL,json!({"_weatherIcon":[0,21],"_cover":[0,1],"_weatherLabel":[0,23]}), &["/_weatherIcon","/_cover","/_weatherLabel"])]),
             node(8,18,17,"Cell/Icon",vec![component(21,IMAGE,json!({}), &[])]),
             node(1,2,17,"Cell/Cover",vec![]),
