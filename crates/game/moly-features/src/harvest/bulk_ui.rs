@@ -410,6 +410,20 @@ pub fn reason_key(reason: UnavailableReason) -> Option<&'static str> {
     })
 }
 
+fn balloon_alpha(age: f32) -> f32 {
+    if age < 0.1 {
+        let t = (age / 0.1).clamp(0.0, 1.0);
+        t * (2.0 - t)
+    } else if age < 2.1 {
+        1.0
+    } else if age < 2.2 {
+        let t = ((age - 2.1) / 0.1).clamp(0.0, 1.0);
+        1.0 - t * (2.0 - t)
+    } else {
+        0.0
+    }
+}
+
 pub fn place(
     time: Res<Time<Real>>,
     state: Res<BulkHarvest>,
@@ -456,25 +470,34 @@ pub fn place(
             }
         }
         let age = state.balloon.map(|(_, at)| (now - at) as f32);
-        let alpha = age
-            .map_or(0.0, |age| {
-                if age < 0.1 {
-                    let t = age / 0.1;
-                    t * (2.0 - t)
-                } else if age < 2.1 {
-                    1.0
-                } else {
-                    let t = (age - 2.1) / 0.1;
-                    1.0 - t * (2.0 - t)
-                }
-            })
-            .clamp(0.0, 1.0);
+        let alpha = age.map_or(0.0, balloon_alpha);
         view.set_visible(&marks.balloon, alpha > 0.0);
         view.set_alpha(&marks.balloon, alpha);
         if let Some((reason, _)) = state.balloon {
             if let Some(text) = reason_key(reason).and_then(|key| layouts.wordings.get(key)) {
                 view.set_text(&marks.message, text.clone());
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::balloon_alpha;
+
+    #[test]
+    fn completed_balloon_fade_stays_hidden() {
+        assert_eq!(balloon_alpha(0.0), 0.0);
+        assert_eq!(balloon_alpha(0.1), 1.0);
+        assert_eq!(balloon_alpha(2.0), 1.0);
+        let mut previous = 1.0;
+        for tick in 0..=10 {
+            let alpha = balloon_alpha(2.1 + tick as f32 * 0.01);
+            assert!((0.0..=previous).contains(&alpha));
+            previous = alpha;
+        }
+        for age in [2.2, 2.3, 3.0, 60.0, 3600.0] {
+            assert_eq!(balloon_alpha(age), 0.0, "age {age}");
         }
     }
 }

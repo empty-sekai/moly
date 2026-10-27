@@ -258,6 +258,17 @@ struct Airplane {
     spawn_pending: Option<u32>,
 }
 
+/// An answered request is no longer pending, including a refused spawn.
+/// The flight and hide stages keep their own bulk-harvest gate afterward.
+fn take_spawn_reply<'a>(
+    pending: &mut Option<u32>,
+    answers: &'a crate::userdata::AnsweredLog,
+) -> Option<&'a crate::userdata::Answered> {
+    let answer = answers.get((*pending)?)?;
+    *pending = None;
+    Some(answer)
+}
+
 /// The airplanes of the current harvest-site stay.
 #[derive(Resource, Default)]
 pub struct PaperAirplanes {
@@ -516,7 +527,7 @@ pub fn advance(
                     )));
                     continue;
                 }
-                let Some(answer) = answers.get(run.spawn_pending.expect("sent")) else {
+                let Some(answer) = take_spawn_reply(&mut run.spawn_pending, &answers) else {
                     continue;
                 };
                 if !matches!(&answer.outcome, Ok(moly_protocol::Reply::TreasureBoxSpawn)) {
@@ -778,6 +789,87 @@ fn find_named(
 #[cfg(test)]
 mod value_checks {
     use super::*;
+
+    fn airplane(stage: Stage) -> Airplane {
+        Airplane {
+            seq: 1,
+            site_id: 2,
+            transport: 10.0,
+            elapsed: 0.0,
+            stage,
+            root: None,
+            plane: None,
+            plane_meshes: Vec::new(),
+            end: Vec3::ZERO,
+            box_position: (0, 0),
+            spawn_pending: None,
+        }
+    }
+
+    #[test]
+    fn bulk_waits_only_for_outstanding_spawn_and_active_delivery() {
+        let mut airplanes = PaperAirplanes {
+            runs: vec![airplane(Stage::Waiting)],
+            ..Default::default()
+        };
+        let mut answers = crate::userdata::AnsweredLog::default();
+        // Before delivery, the user box rows supply the unspawned-box gate.
+        assert!(!airplanes.bulk_unsynced(2));
+        airplanes.runs[0].stage = Stage::WaitSite;
+        assert!(!airplanes.bulk_unsynced(2));
+        airplanes.runs[0].spawn_pending = Some(42);
+        assert!(airplanes.bulk_unsynced(2));
+        assert!(!airplanes.bulk_unsynced(3));
+
+        answers.push(crate::userdata::Answered {
+            seq: 41,
+            call: moly_protocol::CallKind::TreasureBoxSpawn,
+            outcome: Ok(moly_protocol::Reply::TreasureBoxSpawn),
+        });
+        assert!(take_spawn_reply(&mut airplanes.runs[0].spawn_pending, &answers).is_none());
+        assert_eq!(airplanes.runs[0].spawn_pending, Some(42));
+        answers.push(crate::userdata::Answered {
+            seq: 42,
+            call: moly_protocol::CallKind::TreasureBoxSpawn,
+            outcome: Ok(moly_protocol::Reply::TreasureBoxSpawn),
+        });
+        assert!(take_spawn_reply(&mut airplanes.runs[0].spawn_pending, &answers).is_some());
+        assert!(airplanes.runs[0].spawn_pending.is_none());
+        assert!(take_spawn_reply(&mut airplanes.runs[0].spawn_pending, &answers).is_none());
+
+        airplanes.runs[0].stage = Stage::Flying {
+            time: 0.0,
+            started: 0.0,
+            renderer: false,
+            switches: Vec::new(),
+        };
+        assert!(airplanes.bulk_unsynced(2));
+        airplanes.runs[0].stage = Stage::Hiding {
+            delay: Delay::new(HIDE_DELAY, 0),
+        };
+        assert!(airplanes.bulk_unsynced(2));
+        airplanes.runs[0].stage = Stage::Done;
+        assert!(!airplanes.bulk_unsynced(2));
+    }
+
+    #[test]
+    fn refused_spawn_reply_does_not_leave_a_pending_bulk_gate() {
+        let mut airplanes = PaperAirplanes {
+            runs: vec![airplane(Stage::WaitSite)],
+            ..Default::default()
+        };
+        airplanes.runs[0].spawn_pending = Some(42);
+        let mut answers = crate::userdata::AnsweredLog::default();
+        answers.push(crate::userdata::Answered {
+            seq: 42,
+            call: moly_protocol::CallKind::TreasureBoxSpawn,
+            outcome: Err(moly_protocol::Refusal::new("spawn_refused", "cannot spawn")),
+        });
+        let answer = take_spawn_reply(&mut airplanes.runs[0].spawn_pending, &answers).unwrap();
+        assert!(answer.outcome.is_err());
+        airplanes.runs[0].stage = Stage::Done;
+        assert!(!airplanes.bulk_unsynced(2));
+    }
 
     /// The segment format as read (value `((a s + b) s + c) s + d` from the
     /// segment start; the first value before the first segment; the last

@@ -100,6 +100,14 @@ pub struct BulkHarvest {
 }
 
 impl BulkHarvest {
+    fn show_unavailable_balloon(&mut self, now: f64) {
+        // OnBulkHarvestCannotAsync has no message for a treasure-box sync.
+        // Leave any existing balloon alone instead of showing prefab text.
+        if super::bulk_ui::reason_key(self.available).is_some() {
+            self.balloon = Some((self.available, now));
+        }
+    }
+
     pub fn blocks_normal(&self) -> bool {
         self.phase != Phase::None
     }
@@ -449,7 +457,7 @@ fn tick_inner(world: &mut World, state: &mut BulkHarvest) {
     }
     for input in std::mem::take(&mut state.input) {
         match input {
-            Input::Cannot => state.balloon = Some((state.available, now)),
+            Input::Cannot => state.show_unavailable_balloon(now),
             Input::Down(pointer)
                 if state.phase == Phase::None
                     && state.visible
@@ -690,6 +698,22 @@ fn tick_inner(world: &mut World, state: &mut BulkHarvest) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn treasure_box_sync_does_not_show_a_pass_expired_balloon() {
+        let mut state = BulkHarvest {
+            available: UnavailableReason::TreasureBoxNotSynced,
+            ..Default::default()
+        };
+        state.show_unavailable_balloon(10.0);
+        assert_eq!(state.balloon, None);
+        state.available = UnavailableReason::PassExpired;
+        state.show_unavailable_balloon(11.0);
+        assert_eq!(state.balloon, Some((UnavailableReason::PassExpired, 11.0)));
+        state.available = UnavailableReason::TreasureBoxNotSynced;
+        state.show_unavailable_balloon(12.0);
+        assert_eq!(state.balloon, Some((UnavailableReason::PassExpired, 11.0)));
+    }
+
     #[test]
     fn full_charge_still_requires_same_pointer_release() {
         let press = Press {
