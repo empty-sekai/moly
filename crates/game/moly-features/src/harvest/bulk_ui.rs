@@ -341,6 +341,7 @@ pub fn read_input(
     layouts: Res<UiLayouts>,
     views: Query<(&BulkButtonView, &UiPrefabView)>,
     stack: Res<crate::ui_layers::UiLayerStack>,
+    eligibility: crate::interaction::InteractionEligibility,
     mut state: ResMut<BulkHarvest>,
     mut consumed: ResMut<crate::action_button::ActionTapConsumed>,
 ) {
@@ -368,6 +369,11 @@ pub fn read_input(
     for event in events {
         match event.phase {
             UiPointerPhase::Down if over(event.position) => {
+                // The bulk hold blocks ordinary field input itself. Qualify
+                // only a new press; keep reading release and cancellation.
+                if state.phase == Phase::None && !eligibility.field_input_open() {
+                    continue;
+                }
                 consumed.0 = true;
                 if state.phase == Phase::None {
                     if state.available == UnavailableReason::None {
