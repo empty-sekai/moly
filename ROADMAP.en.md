@@ -22,6 +22,15 @@ exclusive rows; the Japanese server is enabled.
 - The server runs as a separate process, stores the player document and answers the game's
   requests. The game sends it binary-encoded requests over HTTP.
 - Launcher: chooses, downloads and verifies a resource version, and starts the server and the game.
+- Packages for Windows x64, Linux x64 and macOS arm64, and a separate server package.
+  The Linux and macOS packages have not been tested on real machines; feedback is welcome.
+- Stable launcher locations: the home folder, data, logs, program versions and resources can each
+  be changed, and existing content is moved along; settings and saves can be imported from the
+  folder of an earlier version.
+- Checks for new versions and updates the game and the launcher itself in one click, downloading
+  the full package.
+- When the server refuses a save, the game shows the error and the save location instead of
+  staying on the entry screen.
 
 **Entry and movement**
 - The flow and banner for entering MySekai.
@@ -33,18 +42,27 @@ exclusive rows; the Japanese server is enabled.
 - Obstacles, gathering particles and holding limits.
 - Notices and dialogs for obtained items.
 - Gathering HUD: current tool, action icons, a hint bubble when a tool is missing, and the stamina bar.
+- Hammer gathering for clearing a map in one action: hold to charge, cancel, target settings,
+  effects and sound, and the settlement of costs and rewards.
 
 **Delivery, crafting and placement**
 - The full delivery flow, with honor rewards and total rewards.
 - The crafting screen and its result dialog, and the server replies for crafting and blueprints.
 - The server rules for furniture conversion.
 - The inventory screen, placing furniture from the inventory, and layout editing for floor furniture.
+- The road and tile page: choosing a style, planning the paving, confirm and cancel, moving the
+  selection, taking back and saving; the inventory and placed objects update in the same layout
+  transaction.
+- The weather page: choosing an environment from unlocked content, saved or discarded together
+  with the layout.
 
 **NPCs**
 - Pathfinding, conversations after pairing, overhead tweet bubbles, idle action decisions,
   autonomous behaviour and furniture interaction.
 - Target positions chosen from the original walkable cells, and the behaviour route while
   waiting to talk.
+- The layered NPC state machine of the Japanese 7.0.0 version, and conversations between
+  characters of different units.
 
 **Weather**
 - The weather phenomena pipeline, end to end: host lifecycle, sub-emitters, curves, raindrop quads
@@ -64,45 +82,37 @@ exclusive rows; the Japanese server is enabled.
 - MCP server: lets AI clients start and drive native or browser instances, read state, run scripts
   and capture frames.
 
+**Plugin layer**
+- The native program loads Luau plugins. Each plugin has a `plugin.toml` manifest: name, version,
+  the moly versions it supports, dependencies and conflicts. Which plugins are enabled is saved in
+  the personal profile; no plugin is enabled by default.
+- Replaceable parts of the original logic are interfaces. A plugin can replace a provider as a
+  whole or for selected characters only; when two plugins provide the same interface and the
+  profile does not choose one, the game reports it by name at startup and does not start.
+- Plugins can read scene state, subscribe to events, schedule asynchronous tasks, call game
+  actions and keep their own data.
+- Each plugin has its own sandbox, a memory limit and a per-frame execution budget.
+- Example plugins: a greeting example, and a scripted companion that walks, builds furniture with
+  a hammer, turns to react to the player and uses the furniture it has just built.
+
+**Browser stage and text**
+- The embedded stage is a separate program, `moly-stage`; the full game is provided separately.
+  The browser packages each contain WebGPU and WebGL2 builds.
+- When Chinese is selected in the browser, matching official text from the Chinese server can
+  replace the Japanese display text; without a matching translation the Japanese text is shown.
+  The text pack, font pack and resource snapshot are versioned separately.
+- The open-source Resource Han Rounded font is used.
+
 **Data**
 - Master tables are read at run time from the public per-region master repositories, with a
   mirror as a fallback.
 
-## 0.0.4 (in progress)
-
-**Releases**
-- Packages for Windows x64, Linux x64 and macOS arm64, and a separate server package.
-  The Linux and macOS packages have not been tested on real machines; feedback is welcome.
-
-**Launcher**
-- Stable locations: the home folder, data, logs, program versions and resources can each be
-  changed, and existing content is moved along.
-- Imports settings and saves from the folder of an earlier version.
-- Checks for new versions and updates the game and the launcher itself in one click, downloading
-  the full package.
-
-**Game**
-- When the server refuses a save, the game shows the error and the save location instead of
-  staying on the entry screen.
-
-## 0.0.5: plugin layer and AI player
+## Next release: remaining plugin layer and AI player
 
 **Plugin layer**
-- Each plugin has a manifest: name, version, the moly versions it supports, dependencies and
-  conflicts. Which plugins are enabled, and their settings, are saved per profile and managed in
-  the launcher.
-- Replaceable parts of the original logic (NPC decisions, player control and others) become
-  interfaces whose default provider is the original implementation. A plugin can replace a
-  provider as a whole or for selected characters only.
-- Plugins can read game state, subscribe to events and change the world through the same actions
-  as the UI.
-- Conflicts are reported by name at startup: when two plugins provide the same interface and the
-  profile does not choose one, the game does not start. Human input always takes precedence over
-  plugin control.
-- Plugin data is kept per plugin in the save; disabling a plugin does not delete its data.
-- Plugins are written in Luau. The game generates type definitions for the plugin API from its
-  own type registry, so editors can type-check plugins.
-- Plugins run in a sandbox and can use only the interfaces the game provides.
+- The game generates type definitions for the plugin API from its own type registry, so editors
+  can type-check plugins.
+- Human input always takes precedence over plugin control.
 - Built-in plugins: the MCP agent interface, SD character switching and the AI player, each of
   which can be turned on or off.
 
