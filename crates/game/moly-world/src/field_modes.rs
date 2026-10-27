@@ -288,3 +288,11 @@ pub fn stage_fixture_talk_observer(
         None => Ok(false),
     }
 }
+
+/// The layout editor's provisional home environment. The weather publisher
+/// resolves None against today's schedule; this never mutates that schedule.
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct LayoutEnvironmentPreview {
+    pub site_id: u32,
+    pub phenomena_id: Option<i32>,
+}

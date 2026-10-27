@@ -299,6 +299,8 @@ pub struct HousingLayoutFixture {
 /// and its whole layout.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserMysekaiHousingEditLayoutRequest {
+    /// None resets the fixed home environment to today.
+    pub mysekai_phenomena_id: Option<i32>,
     pub mysekai_site_id: u32,
     /// The site's type (`home_site`, ...), which names its served layout row.
     pub site_type: String,

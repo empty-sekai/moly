@@ -221,7 +221,7 @@ struct EntryBrightness {elapsed:f32}
 fn set_brightness(world:&mut World,actor:Entity,value:f32) {
     let handles:Vec<_>=world.get::<crate::character_material::ToonMaterials>(actor).map(|m|m.slot_handles().cloned().collect()).unwrap_or_default();
     if let Some(mut materials)=world.get_resource_mut::<Assets<crate::character_material::CharacterMaterial>>() {
-        for handle in handles {if let Some(material)=materials.get_mut(&handle) {material.params.brightness=value;}}
+        for handle in handles {if let Some(mut material)=materials.get_mut(&handle) {material.params.brightness=value;}}
     }
 }
 

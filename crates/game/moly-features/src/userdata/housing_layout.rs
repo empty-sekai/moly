@@ -7,8 +7,8 @@
 //! id, footprint corners, centre height, layout type bits, rotation, texture),
 //! the form the server document's `userMysekaiSiteHousingLayouts` rows use,
 //! not the source's `MysekaiSiteHousingLayout` fields. Named gaps: the
-//! request's `mysekaiFixtureSurfaceAppearances` (no surface editing here) and
-//! `mysekaiPhenomenaId` are not sent.
+//! request's `mysekaiFixtureSurfaceAppearances` still needs the surface editor.
+//! `mysekaiPhenomenaId` is sent with the saved home environment.
 //!
 //! The request is one `Call::HousingLayout` on the server link (see
 //! [`crate::fixture_edit`]).

@@ -41,6 +41,7 @@ struct ProjectionStamp {
 /// paths can remove only the editor's own overlays and restore captured poses.
 pub(super) fn clear(world: &mut World) {
     world.remove_resource::<ProjectionStamp>();
+    world.remove_resource::<crate::fixture::road::RoadDraft>();
     // Preview ownership ends with the session. The catalog keeps paths, not
     // every GLB ever browsed; committed fixtures own their own source handles.
     if let Some(mut candidates) = world.get_resource_mut::<CandidateAssets>() {
@@ -96,7 +97,14 @@ pub(super) fn sync_visuals(world: &mut World) {
         return;
     }
     let session = world.resource::<EditSession>();
-    let rows = session.rows.clone();
+    let rows = super::road::projection(session);
+    let hide_fixtures =
+        session.content == super::EditContentType::Road && session.road.hide_fixtures;
+    let road_rows: Vec<_> = rows
+        .iter()
+        .filter(|row| row.layout == moly_law::fixture::position::layout_type::ROAD)
+        .cloned()
+        .collect();
     let selected = session
         .selected
         .as_ref()
@@ -146,7 +154,9 @@ pub(super) fn sync_visuals(world: &mut World) {
             .as_ref()
             .filter(|item| item.uid == uid)
             .or_else(|| by_uid.get(uid.as_str()).copied());
-        let target_visibility = if item.is_some() {
+        let target_visibility = if item.is_some_and(|row| {
+            !hide_fixtures || row.layout == moly_law::fixture::position::layout_type::ROAD
+        }) {
             origin.visibility
         } else {
             Visibility::Hidden
@@ -181,7 +191,31 @@ pub(super) fn sync_visuals(world: &mut World) {
             }
         }
     }
+    world.insert_resource(crate::fixture::road::RoadDraft {
+        revision,
+        rows: road_rows,
+    });
     let waiting_assets = !sync_previews(world, &transient);
+    let previews: Vec<_> = world
+        .query::<(
+            Entity,
+            &DraftPreview,
+            Option<&crate::render_inputs::FixtureVisualReady>,
+        )>()
+        .iter(world)
+        .filter_map(|(entity, preview, ready)| ready.map(|_| (entity, preview.uid.clone())))
+        .collect();
+    for (entity, uid) in previews {
+        let visible = transient.iter().any(|row| {
+            row.uid == uid
+                && (!hide_fixtures || row.layout == moly_law::fixture::position::layout_type::ROAD)
+        });
+        world.entity_mut(entity).insert(if visible {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        });
+    }
     sync_marker(world, selected.as_ref(), status);
     world.insert_resource(ProjectionStamp {
         revision,
@@ -191,7 +225,9 @@ pub(super) fn sync_visuals(world: &mut World) {
 }
 
 fn sync_previews(world: &mut World, rows: &[EditableFixture]) -> bool {
-    world.resource_mut::<CandidateAssets>().glbs
+    world
+        .resource_mut::<CandidateAssets>()
+        .glbs
         .retain(|package, _| rows.iter().any(|row| &row.package == package));
     let mut ready = true;
     let previews: Vec<_> = world
@@ -209,6 +245,12 @@ fn sync_previews(world: &mut World, rows: &[EditableFixture]) -> bool {
             continue;
         };
         if let Some((entity, _)) = previews.iter().find(|(_, uid)| *uid == row.uid) {
+            if world
+                .get::<crate::render_inputs::FixtureVisualReady>(*entity)
+                .is_none()
+            {
+                ready = false;
+            }
             if let Some(mut transform) = world.get_mut::<Transform>(*entity) {
                 if transform.translation != pose.translation || transform.rotation != pose.rotation
                 {
@@ -252,16 +294,23 @@ fn sync_previews(world: &mut World, rows: &[EditableFixture]) -> bool {
         // Share source material preparation, but not committed gameplay roles.
         // The material owner reveals this root after the scene is expanded and
         // all source replacements are ready, exactly as for saved furniture.
-        world.spawn((
+        ready = false;
+        let mut entity = world.spawn((
             WorldAssetRoot(scene),
             crate::fixture::FixtureVisualRoot { layout: row.layout },
-            crate::fixture_colors::FixtureColorChoice { package: row.package.clone(), texture_id: row.texture_id },
+            crate::fixture_colors::FixtureColorChoice {
+                package: row.package.clone(),
+                texture_id: row.texture_id,
+            },
             DraftPreview {
                 uid: row.uid.clone(),
             },
             pose,
             Visibility::Hidden,
         ));
+        if row.layout == moly_law::fixture::position::layout_type::ROAD {
+            entity.insert(crate::fixture::road::RoadPreview(row.uid.clone()));
+        }
     }
     ready
 }

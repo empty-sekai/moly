@@ -94,16 +94,16 @@ use bevy::render::render_resource::{
 use bevy::shader::ShaderRef;
 use moly_assets::json::JsonAsset;
 use moly_assets::material_passes::SourceRenderState;
-use moly_law::fixture::areas::{motion_area_bounds, GridBound};
-use moly_law::fixture::position::layout_type;
 use moly_law::fixture::GridPosition;
+use moly_law::fixture::areas::{GridBound, motion_area_bounds};
+use moly_law::fixture::position::layout_type;
 use serde_json::Value;
 
 use super::assets::FixtureAreas;
 use super::layout_rules::zones_of;
-use moly_layout::validate::{self as tile_rules, TileBox};
 use super::{EditSession, FixtureEditSystems, PutStatus};
 use crate::fixture::{EditableFixture, FixturePlacements};
+use moly_layout::validate::{self as tile_rules, TileBox};
 
 const GRID: &str = "moly://layout-grid/grid.json";
 const PHENOMENA: &str = "moly://phenomena/index.json";
@@ -671,7 +671,10 @@ fn read_docs(world: &mut World, grid: &mut EditGrid) {
                     doc.uber.float("_PatternRepeat"),
                     doc.uber.float("_FillRate"),
                     doc.profiles.len(),
-                    doc.profiles.iter().map(|p| p.key.as_str()).collect::<Vec<_>>()
+                    doc.profiles
+                        .iter()
+                        .map(|p| p.key.as_str())
+                        .collect::<Vec<_>>()
                 ),
                 Err(error) => error!("[edit-grid] {GRID}: {error}; the layout grid is not drawn"),
             }
@@ -783,7 +786,11 @@ fn track_profile(world: &mut World, grid: &mut EditGrid) {
                 environment.phenomenon,
                 environment.site,
                 doc.profiles[index].key,
-                if found.is_none() { " (no row has the key: the table's first row)" } else { "" }
+                if found.is_none() {
+                    " (no row has the key: the table's first row)"
+                } else {
+                    ""
+                }
             );
             grid.profile_generation += 1;
             ProfileState::Read {
@@ -1235,13 +1242,7 @@ fn fill(
             .find(|flag| *state & **flag != 0)
             .map_or(0u8, |flag| flag.trailing_zeros() as u8 + 1);
         counts[n as usize] += 1;
-        let bit = |b: u8| -> u8 {
-            if n & b != 0 {
-                255
-            } else {
-                0
-            }
-        };
+        let bit = |b: u8| -> u8 { if n & b != 0 { 255 } else { 0 } };
         texels.extend([bit(4), bit(2), bit(1), 255]);
     }
     Fill {
@@ -1262,6 +1263,14 @@ fn fill(
 /// The fill of the session's current draft, with its inputs from the world.
 fn current_fill(world: &World, tiles: &TileBox) -> Option<(Fill, bool)> {
     let session = world.get_resource::<EditSession>()?;
+    if session.content == super::EditContentType::Road {
+        let empty = FixtureAreas::default();
+        let inputs = FillInputs {
+            areas: &empty,
+            zones: Some(&[]),
+        };
+        return Some((fill(tiles, &[], None, &inputs), true));
+    }
     let floor = world
         .get_resource::<FixturePlacements>()
         .and_then(FixturePlacements::floor_grid)?;
@@ -1393,8 +1402,8 @@ fn spawn(world: &mut World, grid: &mut EditGrid) {
         Some(Err(_)) => return,
         Some(Ok(doc)) => doc,
     };
-    if mode != 2 {
-        warn!("[edit-grid] ShowGrid({mode}): only the floor grid (2) is built; not drawn");
+    if !matches!(mode, 2 | 8) {
+        warn!("[edit-grid] ShowGrid({mode}): only field floor/road grids are built; not drawn");
         grid.shown = None;
         return;
     }
@@ -1426,7 +1435,9 @@ fn spawn(world: &mut World, grid: &mut EditGrid) {
         line_uniform(&doc.line, colours.line),
         line_uniform(&doc.dotted, colours.dotted),
     ) else {
-        error!("[edit-grid] ShowGrid({mode}): a line material lacks _LineRepeat or _LineFill; not drawn");
+        error!(
+            "[edit-grid] ShowGrid({mode}): a line material lacks _LineRepeat or _LineFill; not drawn"
+        );
         return;
     };
     let Some((filled, areas_loaded)) = current_fill(world, &tiles) else {
@@ -1501,18 +1512,42 @@ fn spawn(world: &mut World, grid: &mut EditGrid) {
     }
     info!(
         "[edit-grid] ShowGrid({mode}) (SetShowGrid floor): floor grid {}x{}x{} (level {}, layout {}); tile box x {}..={} z {}..={} (source frame, product cells x {}..={}); {} tiles = {}x{} of {TILE_SIZE} m; plane x {:.3}..{:.3} z {:.3}..{:.3} (product x {:.3}..{:.3}) at y {:.3} above the site origin {:.3}",
-        floor.width, floor.height, floor.depth, floor.level, floor.layout_id,
-        tiles.min[0], tiles.max[0], tiles.min[2], tiles.max[2],
-        source_cell_x(tiles.max[0]), source_cell_x(tiles.min[0]),
-        width * height, width, height,
-        min_x, max_x, min_z, max_z, -max_x, -min_x,
-        offset.y, origin
+        floor.width,
+        floor.height,
+        floor.depth,
+        floor.level,
+        floor.layout_id,
+        tiles.min[0],
+        tiles.max[0],
+        tiles.min[2],
+        tiles.max[2],
+        source_cell_x(tiles.max[0]),
+        source_cell_x(tiles.min[0]),
+        width * height,
+        width,
+        height,
+        min_x,
+        max_x,
+        min_z,
+        max_z,
+        -max_x,
+        -min_x,
+        offset.y,
+        origin
     );
     info!(
         "[edit-grid] lines: {} constant-x (width {}) + {} constant-z (width {}); {} solid (every {SOLID_INTERVAL}th, {}) and {} dotted ({}); IsShowLine {}; entities solid {:?} dotted {:?}",
-        lines.vertical, doc.vertical_line_size, lines.horizontal, doc.horizontal_line_size,
-        lines.solid_lines, doc.line.name, lines.dotted_lines, doc.dotted.name,
-        doc.show_line, solid, dotted
+        lines.vertical,
+        doc.vertical_line_size,
+        lines.horizontal,
+        doc.horizontal_line_size,
+        lines.solid_lines,
+        doc.line.name,
+        lines.dotted_lines,
+        doc.dotted.name,
+        doc.show_line,
+        solid,
+        dotted
     );
     info!(
         "[edit-grid] tile face: quad uv (0,0)..({width},{height}), state texture {width}x{height} RGBA8, {} ({}), entity {face:?}",
@@ -1520,13 +1555,23 @@ fn spawn(world: &mut World, grid: &mut EditGrid) {
     );
     info!(
         "[edit-grid] colours from {}: GridLine _Color1 {:?}, DottedGridLine _Color1 {:?}; face _TileSize {} _PatternRepeat {} _FillRate {}, highlight {:?} ({}), fixture exist {:?}, hided {:?}/{:?}, motion area {:?}/{:?}, motion disable {:?}/{:?}, conflict {:?}/{:?}",
-        colours.source, colours.line, colours.dotted,
-        colours.face.params.x, colours.face.params.y, colours.face.params.z,
-        colours.face.highlight, if can_place { "safe" } else { "alert" },
-        colours.face.fixture_exist, colours.face.hided, colours.face.hided2,
-        colours.face.motion_area, colours.face.motion_area2,
-        colours.face.motion_disable, colours.face.motion_disable2,
-        colours.face.conflict, colours.face.conflict2
+        colours.source,
+        colours.line,
+        colours.dotted,
+        colours.face.params.x,
+        colours.face.params.y,
+        colours.face.params.z,
+        colours.face.highlight,
+        if can_place { "safe" } else { "alert" },
+        colours.face.fixture_exist,
+        colours.face.hided,
+        colours.face.hided2,
+        colours.face.motion_area,
+        colours.face.motion_area2,
+        colours.face.motion_disable,
+        colours.face.motion_disable2,
+        colours.face.conflict,
+        colours.face.conflict2
     );
     log_fill(revision, &filled, areas_loaded);
     grid.shown = Some(Shown {
@@ -1549,13 +1594,31 @@ fn log_fill(revision: u64, filled: &Fill, areas_loaded: bool) {
     };
     info!(
         "[edit-grid] fill (session revision {revision}): packed n counts [empty {}, highlight {}, fixture exist {}, hided {}, motion area {}, motion disable {}, conflict {}]; flags fixture exist {} motion area {} motion disable {} conflict {}; {} floor fixtures whose footprints cover {} cells and add-using {} cells; {zones}; {} fixtures with motion areas ({} disabled, {} of them by the highlight); selection's own motion area {:?}{}",
-        filled.counts[0], filled.counts[1], filled.counts[2], filled.counts[3],
-        filled.counts[4], filled.counts[5], filled.counts[6],
-        flagged(FIXTURE_EXIST), flagged(MOTION_AREA), flagged(MOTION_DISABLE), flagged(MOTION_CONFLICT),
-        filled.floor_views, filled.footprint_cells, filled.add_using_cells,
-        filled.motion_fixtures, filled.disabled_fixtures, filled.highlight_disabled,
-        filled.selection_motion.map(|disabled| if disabled { "disabled" } else { "area" }),
-        if areas_loaded { "" } else { "; the fixture area table is not loaded (no motion areas)" }
+        filled.counts[0],
+        filled.counts[1],
+        filled.counts[2],
+        filled.counts[3],
+        filled.counts[4],
+        filled.counts[5],
+        filled.counts[6],
+        flagged(FIXTURE_EXIST),
+        flagged(MOTION_AREA),
+        flagged(MOTION_DISABLE),
+        flagged(MOTION_CONFLICT),
+        filled.floor_views,
+        filled.footprint_cells,
+        filled.add_using_cells,
+        filled.motion_fixtures,
+        filled.disabled_fixtures,
+        filled.highlight_disabled,
+        filled
+            .selection_motion
+            .map(|disabled| if disabled { "disabled" } else { "area" }),
+        if areas_loaded {
+            ""
+        } else {
+            "; the fixture area table is not loaded (no motion areas)"
+        }
     );
 }
 

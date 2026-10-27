@@ -17,6 +17,7 @@ pub mod mip;
 pub mod outline;
 pub mod position;
 pub mod road;
+pub mod road_edit;
 
 /// 朝向。源枚举把 Front 排在 0，旋转与换算都按这个取值分支；
 /// 越界值在源头是字节透传（switch default），这里收窄成闭集。
@@ -109,9 +110,5 @@ pub(crate) fn floor_half(n: i32) -> i32 {
 
 /// 负数夹 0。源写成 `(n & ~(n >> 31))` 一类的位式，语义就是 max(n, 0)。
 pub(crate) fn max0(n: i32) -> i32 {
-    if n < 0 {
-        0
-    } else {
-        n
-    }
+    if n < 0 { 0 } else { n }
 }

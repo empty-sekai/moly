@@ -66,6 +66,7 @@ pub(super) fn enter(world: &mut World) {
 /// `EditGameState.OnExit`, after the session ended (actors restored), and
 /// then Normal's entry for the camera.
 pub(super) fn exit(world: &mut World) {
+    world.remove_resource::<crate::field_modes::LayoutEnvironmentPreview>();
     if !world
         .get_resource::<EditGameState>()
         .is_some_and(|state| state.grid.is_some() || state.tweets_hidden || state.fog_disabled)

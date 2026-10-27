@@ -105,7 +105,7 @@ fn pick_general(world: &mut World, entity: Entity) -> bool {
         return false;
     };
     let mut state = bevy::ecs::system::SystemState::<crate::player_talk::TalkCatalog>::new(world);
-    let catalog = state.get(world);
+    let Ok(catalog) = state.get(world) else { return false; };
     let picked = catalog.lottery(unit, &site, previous, |len| {
         super::engine_int_draw(&mut rng, len)
     });

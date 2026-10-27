@@ -163,7 +163,7 @@ impl ResidentFixtureLoad {
         }
         let mut state = bevy::ecs::system::SystemState::<Commands>::new(world);
         {
-            let mut commands = state.get_mut(world);
+            let mut commands = state.get_mut(world).map_err(|error| error.to_string())?;
             for (index, handle, scene) in to_spawn {
                 let root = spawn_instance(&mut commands,&self.placements,&occupancy,index,handle,scene);
                 commands.entity(root).remove::<FixtureRoot>().insert(crate::render_inputs::HiddenResidentVisual);

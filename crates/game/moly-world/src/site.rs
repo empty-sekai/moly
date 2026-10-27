@@ -1716,7 +1716,7 @@ pub fn spawn_when_ready(
 
 
 struct ScenePlan {
-    scenes: Vec<(Handle<Scene>, bool)>,
+    scenes: Vec<(Handle<WorldAsset>, bool)>,
     rings: Vec<(usize, u32)>,
     ground: Vec<Handle<Mesh>>,
     face: Vec<Handle<Mesh>>,

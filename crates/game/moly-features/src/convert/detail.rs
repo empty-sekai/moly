@@ -211,7 +211,8 @@ pub fn compose(doc: &mut UiPrefab, layouts: &UiLayouts, view: &str) -> Result<De
                     .iter()
                     .any(|component| component.class.ends_with(&format!(".{COST_CLASS}")))
             })
-            .map(|node| node.path.clone())
+            // The source contains several siblings with the same path.
+            .map(|node| format!("@{}", node.game_object_id))
     });
     match (template, cell) {
         (Some(template), Some(cell)) => {

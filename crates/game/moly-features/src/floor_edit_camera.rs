@@ -79,8 +79,8 @@ use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::prelude::*;
 
 use crate::camera::{
-    perspective_fov_deg, to_rotation, wrap180, CameraSetting, CameraStateType, CameraTween,
-    FieldCameraModel, FieldCameraState, TweenCompletion,
+    CameraSetting, CameraStateType, CameraTween, FieldCameraModel, FieldCameraState,
+    TweenCompletion, perspective_fov_deg, to_rotation, wrap180,
 };
 use crate::gesture::{GestureEvent, GestureKind, GestureState};
 
@@ -111,6 +111,7 @@ const TILE_SCALE: f32 = moly_law::objective::TILE_SCALE;
 /// The state object: its private model and its own fields.
 #[derive(Resource, Debug, Clone)]
 pub struct FloorEditCamera {
+    environment: bool,
     look_at: Vec3,
     pitch: f32,
     yaw: f32,
@@ -129,6 +130,7 @@ pub struct FloorEditCamera {
 impl Default for FloorEditCamera {
     fn default() -> Self {
         Self {
+            environment: false,
             look_at: Vec3::ZERO,
             pitch: PITCHES[0],
             yaw: INIT_YAW,
@@ -140,6 +142,19 @@ impl Default for FloorEditCamera {
             look_count: 0,
             backup_distance: 0.0,
         }
+    }
+}
+
+/// The environment edit state has its own persistent model and pitch cycle.
+#[derive(Resource, Debug, Clone)]
+struct EnvironmentEditCamera(FloorEditCamera);
+
+impl Default for EnvironmentEditCamera {
+    fn default() -> Self {
+        let mut model = FloorEditCamera::default();
+        model.environment = true;
+        model.pitch = -5.;
+        Self(model)
     }
 }
 
@@ -235,7 +250,12 @@ fn tween_to(
 fn in_state(world: &World) -> bool {
     world
         .get_resource::<FieldCameraState>()
-        .is_some_and(|state| state.0 == CameraStateType::FloorEdit)
+        .is_some_and(|state| {
+            matches!(
+                state.0,
+                CameraStateType::FloorEdit | CameraStateType::SiteEnvironmentEdit
+            )
+        })
 }
 
 /// `FieldCamera.ChangeState(FloorEdit)` from the edit game state's entry:
@@ -253,6 +273,14 @@ pub fn enter(world: &mut World) -> Result<(), String> {
     }
     if world.get_resource::<FieldCameraModel>().is_none() {
         return Err("the field camera model is not built yet".into());
+    }
+    if previous == CameraStateType::SiteEnvironmentEdit {
+        if let Some(private) = world.remove_resource::<FloorEditCamera>() {
+            world.insert_resource(EnvironmentEditCamera(private));
+        }
+        if let Some(previous_floor) = world.remove_resource::<SavedFloorEditCamera>() {
+            world.insert_resource(previous_floor.0);
+        }
     }
     crate::camera::exit_state(world, previous, "edit-camera");
     let model = world.resource::<FieldCameraModel>().clone();
@@ -310,6 +338,67 @@ pub fn enter(world: &mut World) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Resource)]
+struct SavedFloorEditCamera(FloorEditCamera);
+
+/// `SiteEnvironmentEditCameraState.OnEnter`: inherit floor yaw, retain this
+/// state's own pitch/distance, and look at source height 1.5 over 0.5 seconds.
+pub fn enter_environment(world: &mut World) -> Result<(), String> {
+    let previous = world
+        .get_resource::<FieldCameraState>()
+        .map(|state| state.0)
+        .ok_or("the field camera has no state")?;
+    if previous == CameraStateType::SiteEnvironmentEdit {
+        return Ok(());
+    }
+    let model = world
+        .get_resource::<FieldCameraModel>()
+        .cloned()
+        .ok_or("the field camera model is not built")?;
+    crate::camera::exit_state(world, previous, "environment-edit-camera");
+    if let Some(floor) = world.remove_resource::<FloorEditCamera>() {
+        world.insert_resource(SavedFloorEditCamera(floor));
+    }
+    let mut private = world
+        .remove_resource::<EnvironmentEditCamera>()
+        .unwrap_or_default()
+        .0;
+    if previous == CameraStateType::FloorEdit {
+        private.yaw = model.yaw;
+    }
+    private.look_at = Vec3::new(model.look_at.x, 1.5, model.look_at.z);
+    let fov_now = camera_fov(world).unwrap_or(model.fov);
+    let tween = tween_to(
+        &model,
+        fov_now,
+        private.look_at,
+        private.pitch,
+        private.yaw,
+        private.fov,
+        private.distance,
+        TWEEN_SECONDS,
+    );
+    if let Some(mut model) = world.get_resource_mut::<FieldCameraModel>() {
+        model.min_distance = private.min_distance;
+        model.max_distance = private.max_distance;
+    }
+    world.insert_resource(tween);
+    world.insert_resource(private);
+    world.resource_mut::<FieldCameraState>().0 = CameraStateType::SiteEnvironmentEdit;
+    Ok(())
+}
+
+fn retain_environment_model(world: &mut World) {
+    if world.resource::<FieldCameraState>().0 == CameraStateType::SiteEnvironmentEdit {
+        if let Some(private) = world.remove_resource::<FloorEditCamera>() {
+            world.insert_resource(EnvironmentEditCamera(private));
+        }
+        if let Some(floor) = world.remove_resource::<SavedFloorEditCamera>() {
+            world.insert_resource(floor.0);
+        }
+    }
+}
+
 /// The edit game state's exit: `FieldCamera.ChangeState(Normal)`. This
 /// state's `OnExit` only removes its event registrations.
 pub fn leave(world: &mut World) {
@@ -317,6 +406,7 @@ pub fn leave(world: &mut World) {
         return;
     }
     info!("[edit-camera] FloorEdit.OnExit (event registrations removed); Normal's entry follows");
+    retain_environment_model(world);
     crate::camera::change_state(world, CameraStateType::Normal, "edit-camera");
 }
 
@@ -327,18 +417,13 @@ pub fn leave_for_site_change(world: &mut World) {
         return;
     }
     info!("[edit-camera] FloorEdit left for a site change: the new site frames the camera");
+    retain_environment_model(world);
     world.resource_mut::<FieldCameraState>().0 = CameraStateType::Normal;
 }
 
 /// `FocusOnLayoutEdit` (event 36): `SetZoomSupportIfNeeded`, then 0.5 s to
 /// the focus position with the private rotation, FOV and distance.
-pub fn focus(
-    world: &mut World,
-    position: Vec3,
-    size: Vec3,
-    zoom_support: bool,
-    source: &str,
-) {
+pub fn focus(world: &mut World, position: Vec3, size: Vec3, zoom_support: bool, source: &str) {
     if !in_state(world) {
         return;
     }
@@ -394,7 +479,9 @@ pub fn decided(world: &mut World, is_block: Option<bool>, source: &str) {
         return;
     }
     if is_block == Some(true) {
-        info!("[edit-camera] LayoutAction 1 ({source}): the decided fixture is a block; the distance is not restored");
+        info!(
+            "[edit-camera] LayoutAction 1 ({source}): the decided fixture is a block; the distance is not restored"
+        );
         return;
     }
     let Some(model) = world.get_resource::<FieldCameraModel>().cloned() else {
@@ -484,8 +571,13 @@ pub fn change_look(world: &mut World) {
     let Some(mut private) = world.get_resource::<FloorEditCamera>().cloned() else {
         return;
     };
-    private.look_count = (private.look_count + 1) % PITCHES.len();
-    private.pitch = PITCHES[private.look_count];
+    let pitches = if private.environment {
+        [-5., 40.]
+    } else {
+        PITCHES
+    };
+    private.look_count = (private.look_count + 1) % pitches.len();
+    private.pitch = pitches[private.look_count];
     let (pitch, yaw, count) = (private.pitch, private.yaw, private.look_count);
     world.insert_resource(private);
     rotate_to(
@@ -514,6 +606,24 @@ fn floor_bounds(origin: Vec3, width: i32, depth: i32) -> (Vec2, Vec2) {
     )
 }
 
+/// Consume the shared gesture batch once, honoring its owner through release.
+pub(crate) fn camera_drag_delta<'a>(
+    events: impl Iterator<Item = &'a GestureEvent>,
+    fixture_selected: bool,
+    road_owned: bool,
+) -> Vec2 {
+    events
+        .filter(|event| {
+            !fixture_selected
+                && !road_owned
+                && !event.ui_owned
+                && event.kind == GestureKind::Drag
+                && event.state == GestureState::Moved
+        })
+        .map(|event| event.delta)
+        .sum()
+}
+
 /// Update: `OnDrag` and `OnPinch` while the floor edit camera is current.
 #[allow(clippy::too_many_arguments)]
 pub fn input(
@@ -521,6 +631,7 @@ pub fn input(
     scroll: Res<AccumulatedMouseScroll>,
     state: Res<FieldCameraState>,
     view: Res<crate::fixture_edit::EditView>,
+    session: Res<crate::fixture_edit::EditSession>,
     configs: Option<Res<crate::client_config::ClientConfigs>>,
     setting: Option<Res<CameraSetting>>,
     placements: Option<Res<crate::fixture::FixturePlacements>>,
@@ -530,14 +641,17 @@ pub fn input(
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
     ui: crate::ui_layout::PointerUi,
 ) {
-    let mut drag = Vec2::ZERO;
-    for event in gestures.read() {
-        if event.kind == GestureKind::Drag && event.state == GestureState::Moved && !event.ui_owned
-        {
-            drag += event.delta;
-        }
-    }
-    if state.0 != CameraStateType::FloorEdit || !view.active || view.exit_dialog {
+    let drag = camera_drag_delta(
+        gestures.read(),
+        view.selected.is_some(),
+        session.road_dragging(),
+    );
+    if !matches!(
+        state.0,
+        CameraStateType::FloorEdit | CameraStateType::SiteEnvironmentEdit
+    ) || !view.active
+        || view.exit_dialog
+    {
         return;
     }
     let (Some(mut model), Some(configs), Some(setting)) = (model, configs, setting) else {
@@ -545,7 +659,7 @@ pub fn input(
     };
     // A drag with a selected fixture moves the fixture (see the module's
     // named differences).
-    if drag != Vec2::ZERO && view.selected.is_none() {
+    if drag != Vec2::ZERO {
         let Ok(camera) = cameras.single() else {
             return;
         };

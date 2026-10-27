@@ -1195,6 +1195,7 @@ mod tests {
         let answered = answer_call(
             Call::HousingLayout(UserMysekaiHousingEditLayoutRequest {
                 mysekai_site_id: 1,
+                mysekai_phenomena_id: Some(2),
                 site_type: "home_site".to_owned(),
                 fixtures: vec![row],
             }),
@@ -1214,6 +1215,20 @@ mod tests {
             .expect("the served home-site row");
         assert_eq!(served.len(), 1);
         assert_eq!(served[0]["package"], "mysekai__fixture__mdl_test");
+        assert_eq!(model.doc.layouts[0]["mysekaiPhenomenaId"], 2);
+        let before = model.doc.layouts.clone();
+        let refused = answer_call(Call::HousingLayout(UserMysekaiHousingEditLayoutRequest {
+            mysekai_site_id: 1, site_type: "home_site".to_owned(), fixtures: vec![],
+            mysekai_phenomena_id: Some(999),
+        }), &mut model, &masters);
+        assert!(matches!(ok(refused), Reply::SuiteUser(reply) if !reply.success));
+        assert_eq!(model.doc.layouts, before);
+        let reset = answer_call(Call::HousingLayout(UserMysekaiHousingEditLayoutRequest {
+            mysekai_site_id: 1, site_type: "home_site".to_owned(), fixtures: vec![],
+            mysekai_phenomena_id: None,
+        }), &mut model, &masters);
+        assert!(matches!(ok(reset), Reply::SuiteUser(reply) if reply.success));
+        assert_eq!(model.doc.layouts[0]["mysekaiPhenomenaId"], 0);
     }
 
     #[test]

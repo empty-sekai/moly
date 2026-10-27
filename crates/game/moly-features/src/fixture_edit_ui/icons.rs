@@ -11,12 +11,21 @@ use crate::ui_layout::{SpriteLayoutMetrics, UiLayouts};
 pub struct EditorIcons {
     /// Every registered thumbnail by (fixture id, texture id).
     variants: BTreeMap<(i32, i32), String>,
+    environments: BTreeMap<i32, String>,
+    environment_handles: BTreeMap<i32, Handle<Image>>,
+    environment_ready: std::collections::BTreeSet<i32>,
+    environment_failures: std::collections::BTreeSet<i32>,
+    environments_parsed: bool,
     handles: Vec<Handle<Image>>,
     parsed: bool,
     ready: bool,
 }
 
 impl EditorIcons {
+    pub fn environment(&self, id: Option<i32>) -> Option<&str> {
+        self.environment_ready.contains(&id.unwrap_or(0)).then(||self.environments.get(&id.unwrap_or(0))).flatten().map(String::as_str)
+    }
+
     /// Every registered thumbnail has loaded.
     pub fn is_ready(&self) -> bool {
         self.ready
@@ -36,6 +45,7 @@ impl EditorIcons {
 #[derive(Resource)]
 pub struct EditorAssetRequests {
     thumbnails: Handle<JsonAsset>,
+    phenomena: Handle<JsonAsset>,
 }
 
 pub fn load(
@@ -48,6 +58,7 @@ pub fn load(
     if stage.is_some() { return; }
     commands.insert_resource(EditorAssetRequests {
         thumbnails: server.load("moly://fixture-thumbnails/fixture-thumbnails.json"),
+        phenomena: server.load("moly://phenomena/index.json"),
     });
 }
 
@@ -59,11 +70,11 @@ pub fn parse(
     mut layouts: ResMut<UiLayouts>,
     mut icons: ResMut<EditorIcons>,
 ) {
-    if icons.ready || layouts.document("EditorSource").is_none() {
+    if layouts.document("EditorSource").is_none() {
         return;
     }
     if !icons.parsed {
-        let Some(request) = request else {
+        let Some(request) = request.as_deref() else {
             return;
         };
         if let LoadState::Failed(error) = server.load_state(&request.thumbnails) {
@@ -129,8 +140,49 @@ pub fn parse(
             );
         }
         icons.parsed = true;
-        commands.remove_resource::<EditorAssetRequests>();
+
     }
+    if !icons.environments_parsed {
+        if let Some(request) = request.as_deref() {
+            if let Some(data) = json.get(&request.phenomena) {
+        let index = moly_assets::weather_index::PhenomenonIndex::from_bytes(
+            data.0.as_bytes());
+        match index {
+        Ok(index) => {
+        let ids = std::iter::once((0, "env_default".to_owned()))
+            .chain(index.phenomena.values().filter_map(|row| row.master.as_ref()
+                .and_then(|master| master.icon_assetbundle_name.as_ref().map(|icon| (row.id, icon.clone())))));
+        for (id, icon) in ids {
+            let Some(receipt) = index.icon_sources.get(&icon) else {
+                warn!("editor weather {id} has no extracted thumbnail {icon}");
+                continue;
+            };
+            let alias = format!("editor-environment-{id}");
+            let handle = layouts.register_runtime_texture(&alias,
+                &format!("moly://phenomena/{}", receipt.artifact.file), &server);
+            icons.environment_handles.insert(id, handle);
+            icons.environments.insert(id, alias);
+        }
+        }
+        Err(reason) => warn!("editor weather thumbnail metadata refused: {reason}"),
+        }
+                icons.environments_parsed = true;
+            } else if let LoadState::Failed(error) = server.load_state(&request.phenomena) {
+                warn!("editor weather metadata failed: {error:?}; fixture editor remains available");
+                icons.environments_parsed = true;
+            }
+        }
+    }
+    for (id, handle) in icons.environment_handles.clone() {
+        match server.load_state(&handle) {
+            LoadState::Loaded => { icons.environment_ready.insert(id); }
+            LoadState::Failed(error) => {
+                if icons.environment_failures.insert(id) { warn!("editor weather thumbnail {id} failed: {error:?}"); }
+            }
+            _ => {}
+        }
+    }
+    if icons.parsed && icons.environments_parsed { commands.remove_resource::<EditorAssetRequests>(); }
     icons.ready = icons
         .handles
         .iter()

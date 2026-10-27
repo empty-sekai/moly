@@ -101,7 +101,8 @@ fn advance(world: &mut World, run: &mut Removal, frame: u32, dt: f32) -> bool {
                 if run.next == run.actors.len() { return true; }
                 let actor = run.actors[run.next];
                 if world.get_entity(actor).is_err() { run.next += 1; continue; }
-                let cells = world.resource_scope(|world, cache: Mut<Walkable>| cache.into_inner().0.get_mut(world).cells_for("home_site"));
+                let cells = world.resource_scope(|world, cache: Mut<Walkable>| cache.into_inner().0.get_mut(world)
+                    .map_err(|error| error.to_string()).and_then(|mut source| source.cells_for("home_site")));
                 let Ok(cells) = cells else { return false; };
                 let position = if cells.is_empty() { [0.0; 3] } else {
                     let pick = world.resource_mut::<Random>().0.range_int(0, cells.len() as i32) as usize;

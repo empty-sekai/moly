@@ -246,6 +246,7 @@ const DOCUMENTS: &[(&str, &str)] = &[
 /// region root's manifest) is named once and left out; the view that draws
 /// it refuses by name. Every other document is required.
 const OPTIONAL_DOCUMENTS: &[(&str, &str)] = &[
+    ("EditorEnvironmentCell", "editor/SiteEnvironmentSelectCell.json"),
     ("PhotoShot", "screens/ScreenLayerMysekaiPhotoShot.json"),
     ("PhotoFrameCell", "photocell/UIPartsPhotoFrameListThumbnail.json"),
     ("CommonReward", "menu/CommonRewardSubWindowDialog.json"),
@@ -1529,6 +1530,7 @@ pub struct Override {
     fill: Option<f32>,
     texture: Option<String>,
     slider: Option<f32>,
+    scrollbar: Option<(f32, f32)>,
     alpha: Option<f32>,
     pub anchored_position: Option<Vec2>,
     pub size_delta: Option<Vec2>,
@@ -1623,6 +1625,7 @@ impl UiPrefabView {
             self.revision = self.revision.wrapping_add(1);
             if value.visible != old.visible
                 || value.slider != old.slider
+                || value.scrollbar != old.scrollbar
                 || value.anchored_position != old.anchored_position
                 || value.size_delta != old.size_delta
                 || value.transform != old.transform
@@ -1695,6 +1698,16 @@ impl UiPrefabView {
         }
         self.update(path, |v| v.slider = Some(value));
     }
+    /// Scrollbar.value and size: unlike a Slider, its handle occupies a span.
+    pub fn set_scrollbar(&mut self, path: &str, value: f32, size: f32) {
+        assert!(value.is_finite() && size.is_finite(), "non-finite UI scrollbar");
+        let value = (value.clamp(0., 1.), size.clamp(0., 1.));
+        if self.overrides.get(path).and_then(|v| v.scrollbar) == Some(value) {
+            return;
+        }
+        self.update(path, |v| v.scrollbar = Some(value));
+    }
+
     pub fn set_alpha(&mut self, path: &str, value: f32) {
         assert!(value.is_finite(), "non-finite UI alpha");
         let value = value.clamp(0., 1.);
@@ -1842,6 +1855,23 @@ impl UiPrefabView {
                     .or_insert_with(|| doc.nodes[i].rect.clone());
                 rect.anchored_position = anchored.to_array();
                 rect.local_rotation = rotation.to_array();
+            }
+            if let Some((amount, size)) = value.scrollbar {
+                let scrollbar = doc.nodes[i].components.iter()
+                    .find(|c| c.class.ends_with("Scrollbar"))
+                    .unwrap_or_else(|| panic!("UI scrollbar component missing {path}"));
+                let direction = scrollbar.fields["m_Direction"].as_i64()
+                    .and_then(moly_law::ui::scrollbar::Direction::from_source)
+                    .expect("source scrollbar direction");
+                let id = scrollbar.fields["m_HandleRect"].as_array()
+                    .and_then(|p| p.get(1)).and_then(Value::as_i64)
+                    .expect("source scrollbar handle");
+                if id != 0 {
+                    let n = doc.find(&format!("@{id}")).unwrap_or_else(|e| panic!("{e}"));
+                    let r = rect_overrides.entry(n).or_insert_with(|| doc.nodes[n].rect.clone());
+                    (r.anchors_min, r.anchors_max) =
+                        moly_law::ui::scrollbar::handle_anchors(direction, amount, size);
+                }
             }
             if let Some(amount) = value.slider {
                 let slider = doc.nodes[i]
@@ -3056,5 +3086,52 @@ fn spawn_text(
         clip_render::Draw { commands, images, meshes, materials: clip_materials,
             pixel_size: clip_pixel_size, layer
         }.glyphs(parent, rendered, clipped_glyphs, clip, alpha);
+    }
+}
+
+
+#[cfg(test)]
+mod scrollbar_tests {
+    use super::*;
+
+    fn document() -> UiPrefab {
+        let rect = |anchors_min, anchors_max, size_delta| serde_json::json!({
+            "anchorsMin": anchors_min, "anchorsMax": anchors_max,
+            "anchoredPosition": [0., 0.], "sizeDelta": size_delta,
+            "pivot": [0.5, 0.5], "localScale": [1., 1., 1.],
+            "localRotation": [0., 0., 0., 1.],
+        });
+        UiPrefab::parse(&serde_json::json!({
+            "version": 2, "prefab": "Bar", "nodes": [
+                { "path": "Bar", "name": "Bar", "gameObjectId": 1,
+                  "transformId": 2, "parentTransformId": 0, "active": true,
+                  "rect": rect([0., 0.], [1., 1.], [0., 0.]),
+                  "components": [{"pathId": 3, "class": "UnityEngine.UI.Scrollbar",
+                    "enabled": true, "fields": {"m_Direction": 2, "m_HandleRect": [0, 5]}}] },
+                { "path": "Bar/Handle", "name": "Handle", "gameObjectId": 4,
+                  "transformId": 5, "parentTransformId": 2, "active": true,
+                  "rect": rect([0., 0.], [0., 0.], [2., 20.]), "components": [] }
+            ]
+        }).to_string()).unwrap()
+    }
+
+    #[test]
+    fn scrollbar_drives_handle_span_and_invalidates_cached_geometry() {
+        let doc = document();
+        let mut view = UiPrefabView::new("test", 0);
+        view.set_scrollbar("Bar", 1., 0.25);
+        let revision = view.geometry_revision;
+        let (_, rects, _) = view.host_state(&doc);
+        let rect = &rects[&1];
+        assert_eq!(rect.anchors_min, [0., 0.75]);
+        assert_eq!(rect.anchors_max, [1., 1.]);
+        assert_eq!(rect.size_delta, [2., 20.]);
+        view.set_scrollbar("Bar", 1., 0.25);
+        assert_eq!(view.geometry_revision, revision);
+        view.set_scrollbar("Bar", 0., 0.5);
+        assert!(view.geometry_revision > revision);
+        let (_, rects, _) = view.host_state(&doc);
+        assert_eq!(rects[&1].anchors_min, [0., 0.]);
+        assert_eq!(rects[&1].anchors_max, [1., 0.5]);
     }
 }

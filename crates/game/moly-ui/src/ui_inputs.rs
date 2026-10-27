@@ -13,7 +13,7 @@ use moly_layout::validate as tile_rules;
 pub mod atlas;
 mod fade;
 
-pub use atlas::{ascii_or, BalloonArt, BAKE_PPEM, BALLOON_LAYER, SCREEN_UI_LAYER};
+pub use atlas::{BAKE_PPEM, BALLOON_LAYER, BalloonArt, SCREEN_UI_LAYER, ascii_or};
 pub use fade::{ColorFade, FadeStage, UniTaskDelay};
 
 use crate::canvas::RootCanvas;
@@ -32,26 +32,38 @@ pub fn out_quad(t: f32) -> f32 {
 
 /// A window position (logical pixels, origin top-left) in root canvas units.
 pub fn to_canvas(position: Vec2, window: &Window, root: &RootCanvas) -> Vec2 {
-    Vec2::new(position.x - window.width() / 2., window.height() / 2. - position.y) / root.scale(window)
+    Vec2::new(
+        position.x - window.width() / 2.,
+        window.height() / 2. - position.y,
+    ) / root.scale(window)
 }
 
 /// A window position (logical pixels, origin top-left) as the engine's
 /// screen point (physical pixels, origin bottom-left).
 pub fn to_screen_point(position: Vec2, window: &Window) -> [f32; 2] {
     let ratio = window.scale_factor();
-    [position.x * ratio, window.physical_height() as f32 - position.y * ratio]
+    [
+        position.x * ratio,
+        window.physical_height() as f32 - position.y * ratio,
+    ]
 }
 
 /// The event camera's ray through an engine screen point, as the raycast
 /// pointer; None when the host canvas carries no camera pose. A point the
 /// camera cannot see gets the engine's fallback ray and its error is logged.
 pub fn screen_pointer(window: &Window, root: &RootCanvas, screen: [f32; 2]) -> Option<Pointer> {
-    let pixels = [window.physical_width() as f32, window.physical_height() as f32];
+    let pixels = [
+        window.physical_width() as f32,
+        window.physical_height() as f32,
+    ];
     let event = root.event_ray(pixels, screen)?;
     if let Some(error) = &event.error {
         warn!("{error}");
     }
-    Some(Pointer::Ray { ray: event.ray, root: event.root })
+    Some(Pointer::Ray {
+        ray: event.ray,
+        root: event.root,
+    })
 }
 
 /// The raycast pointer of a window position: the event camera's ray, or the
@@ -88,7 +100,14 @@ pub fn camera_reset_hit(
     node: usize,
     button: i64,
 ) -> CameraResetHit {
-    camera_reset_press(view, layouts, root.size(window), event_pointer(window, root, position), node, button)
+    camera_reset_press(
+        view,
+        layouts,
+        root.size(window),
+        event_pointer(window, root, position),
+        node,
+        button,
+    )
 }
 
 /// The camera reset press chain for a raycast pointer over a root canvas of
@@ -108,18 +127,30 @@ pub fn camera_reset_press(
         None => {
             // A canvas without area resolves and raycasts nothing, so the
             // pointer is over no button and these two are never read.
-            assert!(target.is_none() && !hovered, "a canvas without area produced a raycast target");
+            assert!(
+                target.is_none() && !hovered,
+                "a canvas without area produced a raycast target"
+            );
             (false, false)
         }
     };
-    CameraResetHit { pointer, target, over_button: target.is_some_and(|(_, id)| id == button), hovered, active, interactable }
+    CameraResetHit {
+        pointer,
+        target,
+        over_button: target.is_some_and(|(_, id)| id == button),
+        hovered,
+        active,
+        interactable,
+    }
 }
 
 /// The CustomButton behind `MysekaiMenuUIContent._cameraResetButton`: the
 /// field holds the MySekai button wrapper, whose `_button` is the
 /// CustomButton.
 pub fn camera_reset_button(doc: &moly_assets::ui_layout::UiPrefab) -> Option<i64> {
-    let content = doc.nodes.iter()
+    let content = doc
+        .nodes
+        .iter()
         .flat_map(|node| node.components.iter())
         .find(|c| c.class == "Sekai.Mysekai.MysekaiMenuUIContent")?;
     let reference = content.fields["_cameraResetButton"].as_array()?;
@@ -127,15 +158,19 @@ pub fn camera_reset_button(doc: &moly_assets::ui_layout::UiPrefab) -> Option<i64
         return None;
     }
     let id = reference.get(1)?.as_i64()?;
-    let component = doc.nodes.iter().flat_map(|node| node.components.iter()).find(|c| c.path_id == id)?;
+    let component = doc
+        .nodes
+        .iter()
+        .flat_map(|node| node.components.iter())
+        .find(|c| c.path_id == id)?;
     if component.fields.get("se").is_some() {
         return Some(id);
     }
     let inner = component.fields["_button"].as_array()?;
-    (inner.first()?.as_i64() == Some(0)).then(|| inner.get(1)?.as_i64()).flatten()
+    (inner.first()?.as_i64() == Some(0))
+        .then(|| inner.get(1)?.as_i64())
+        .flatten()
 }
-
-
 
 /// The layout key of the furniture editor's runtime prefab.
 pub const EDITOR_RUNTIME_KEY: &str = "EditorRuntime";
@@ -187,7 +222,11 @@ pub struct ShellDialogState {
 
 impl ShellDialogState {
     pub fn blocks_field_input(&self) -> bool {
-        self.leave_confirm || self.menu_open || self.menu_closing || self.option_open || self.get_resource_open
+        self.leave_confirm
+            || self.menu_open
+            || self.menu_closing
+            || self.option_open
+            || self.get_resource_open
             || self.learn_phenomena_open
     }
 }
@@ -210,16 +249,55 @@ pub struct SitemapRoot;
 #[derive(Message, Clone, Debug)]
 pub enum EditCommand {
     Enter,
+    SelectContent(EditContentType),
+    SelectEnvironment {
+        phenomena_id: Option<i32>,
+    },
+    /// Road-only pointer commands carry verified site-local source grid hits.
+    RoadTap {
+        center: GridPosition,
+    },
+    RoadLongStart {
+        center: GridPosition,
+        uid: Option<String>,
+    },
+    RoadLongEnd,
+    RoadDragStart {
+        center: GridPosition,
+        uid: Option<String>,
+    },
+    RoadDragMove {
+        center: GridPosition,
+        raw_center: GridPosition,
+    },
+    RoadDragEnd,
+    /// Host pointer loss releases a gesture without deciding its draft.
+    RoadPointerCancel,
+    RoadSelectMode,
+    RoadPlanningMode,
+    RoadToggleFixtures,
+
     /// A cell of the owned fixture list (`EditView::catalog`), by its index.
-    SelectCatalog { index: usize },
-    SelectPlaced { uid: String },
-    SelectInventory { uid: String },
+    SelectCatalog {
+        index: usize,
+    },
+    SelectPlaced {
+        uid: String,
+    },
+    SelectInventory {
+        uid: String,
+    },
     /// A drag's touched tile (product frame, `GetSelectTile`): the drag puts
     /// the selection's source center there, clamped into the grid and
     /// raised by the column.
-    MoveTo { center: GridPosition },
+    MoveTo {
+        center: GridPosition,
+    },
     /// The desktop arrow keys: one tile from the source center.
-    Nudge { x: i8, z: i8 },
+    Nudge {
+        x: i8,
+        z: i8,
+    },
     Rotate,
     Decide,
     Cancel,
@@ -240,6 +318,49 @@ pub enum EditCommand {
     CleanUpAll,
     /// The confirmation's cancel or close button, or a tap outside it.
     CancelCleanUp,
+}
+
+/// The source selector's content kinds. Fence belongs to the Road tab.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EditContentType {
+    #[default]
+    Outdoor,
+    Road,
+    Fence,
+    Floor,
+    Wall,
+    Environment,
+}
+
+impl EditContentType {
+    pub fn tab_kind(self) -> i64 {
+        match self {
+            Self::Outdoor => 0,
+            Self::Road | Self::Fence => 1,
+            Self::Floor => 3,
+            Self::Wall => 4,
+            Self::Environment => 19,
+        }
+    }
+
+    pub fn from_tab_kind(kind: i64) -> Option<Self> {
+        match kind {
+            0 => Some(Self::Outdoor),
+            1 => Some(Self::Road),
+            2 => Some(Self::Fence),
+            3 => Some(Self::Floor),
+            4 => Some(Self::Wall),
+            19 => Some(Self::Environment),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EditEnvironmentView {
+    /// None is the original default cell: use today's phenomenon.
+    pub phenomena_id: Option<i32>,
+    pub name: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -296,8 +417,28 @@ pub struct EditCatalogView {
     pub placeable: i32,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EditRoadView {
+    pub select_mode: bool,
+    pub selection_bounds: Option<(GridPosition, GridPosition)>,
+    pub target: Option<EditItemView>,
+    pub planned: Vec<EditItemView>,
+    pub moving: bool,
+    pub dragging: bool,
+    pub can_decide: bool,
+    pub remaining: i32,
+    pub can_cancel: bool,
+    pub show_fixtures: bool,
+    pub show_count: bool,
+    pub markers: Option<(GridPosition, GridPosition)>,
+}
+
 #[derive(Resource, Clone, Debug, Default, PartialEq, Eq)]
 pub struct EditView {
+    pub road: EditRoadView,
+    pub content: EditContentType,
+    pub environment: Option<i32>,
+    pub environment_choices: Vec<EditEnvironmentView>,
     pub revision: u64,
     pub active: bool,
     pub phase: EditPhase,
@@ -529,6 +670,10 @@ impl OverlayPanels<'_> {
     /// As [`Self::block_world_input`], and also while the pointer is over
     /// the control panel's drawer beside the field.
     pub fn block_pointer(&self) -> bool {
-        self.block_world_input() || self.claims.as_deref().is_some_and(crate::input_claims::InputClaims::holds_pointer)
+        self.block_world_input()
+            || self
+                .claims
+                .as_deref()
+                .is_some_and(crate::input_claims::InputClaims::holds_pointer)
     }
 }

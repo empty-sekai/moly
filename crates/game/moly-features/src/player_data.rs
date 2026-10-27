@@ -418,7 +418,13 @@ impl PlayerDataImport {
         let roots = world.query_filtered::<Entity, With<crate::site::SiteRoot>>().iter(world).collect();
         let mut commands = world.commands();
         crate::site::queue_transition(&mut commands, roots, selection);
-        commands.insert_resource(layouts);
+        commands.queue(move |world: &mut World| {
+            // The imported rooms and their hidden furniture are owners too.
+            // Retire them after the active scene leaves, before restoring the
+            // original layout, so residency cannot reinstate imported rows.
+            crate::site::resident_load::reset_import(world);
+            world.insert_resource(layouts);
+        });
         self.cancel();
         self.status = "The original scene has been restored. No player data was saved.".into();
         Ok(())

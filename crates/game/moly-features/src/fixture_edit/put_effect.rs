@@ -20,10 +20,12 @@
 //! `FixtureController.PlayPutSound` (the same table lookup, without the
 //! effect) is what selecting a placed fixture plays after its pick sound.
 //!
-//! Callers the product does not build: the wall put (`ShowWallPutEffect`,
-//! rotation from the wall direction), fence and road placement
-//! (`ShowFieldPlacementEffect` with cloned copies), the fence edit view and
-//! the site view's own put effect. Ground editing is the only editor here.
+//! Road placement shares this owner: `ShowFieldPlacementEffect` reuses the
+//! instance for the first straight segment and clones it for later segments
+//! when the direction changes. Each clone has independent source nodes and
+//! particle systems, and is destroyed 3.0 s after SetEffect and PlayPutSound.
+//! The caller supplies the segment size, mean global position and first
+//! fixture's sound identity. Wall and fence editing are separate callers.
 //!
 //! Named differences:
 //! - The instance is held inactive once its scene exists and its particle
@@ -70,6 +72,8 @@ const SAMPLE_SECONDS: f32 = 3.5;
 const SAMPLE_STEP: f32 = 0.25;
 /// How long the first put waits for the particle host's preparation.
 const PREPARE_WAIT: f32 = 10.0;
+/// `FixturePutEffect.ShowFieldPutEffect`: Destroy(copy, 3.0).
+const CLONE_SECONDS: f32 = 3.0;
 
 fn particle_doc_path() -> String {
     format!("moly://fixture-particles-v2/{PACKAGE}.json")
@@ -153,7 +157,11 @@ impl SoundTables {
                 id as i32,
                 moly_layout::FixtureMaster {
                     package: format!("mysekai__fixture__{bundle}"),
-                    grid_size: Vector3Int::new(int("gridWidth")?, int("gridHeight")?, int("gridDepth")?),
+                    grid_size: Vector3Int::new(
+                        int("gridWidth")?,
+                        int("gridHeight")?,
+                        int("gridDepth")?,
+                    ),
                     layout: match settable_layout {
                         "floor" => layout_type::FLOOR,
                         "rug" => layout_type::RUG,
@@ -207,6 +215,7 @@ enum Instance {
     },
     Spawned {
         root: Entity,
+        scene: Handle<WorldAsset>,
         doc: Arc<Value>,
         /// When its systems were handed to the particle host.
         planned: Option<f32>,
@@ -224,6 +233,17 @@ struct Put {
     size: Vector3Int,
     source: &'static str,
     at: f32,
+    clone: bool,
+}
+
+/// A source clone of the shared prefab, prepared independently and retired
+/// after its own activation. The shared instance remains reusable.
+struct PutClone {
+    root: Entity,
+    doc: Arc<Value>,
+    put: Option<Put>,
+    planned: Option<f32>,
+    played_at: Option<f32>,
 }
 
 struct Sample {
@@ -241,6 +261,7 @@ pub struct FixturePutEffect {
     queue: Vec<Put>,
     puts: u32,
     sample: Option<Sample>,
+    clones: Vec<PutClone>,
 }
 
 pub(super) fn request_tables(mut commands: Commands, server: Res<AssetServer>) {
@@ -253,6 +274,7 @@ pub(super) fn request_tables(mut commands: Commands, server: Res<AssetServer>) {
         queue: Vec::new(),
         puts: 0,
         sample: None,
+        clones: Vec::new(),
     });
 }
 
@@ -302,24 +324,34 @@ impl FixturePutEffect {
         let tables = match &self.tables {
             Tables::Read(Ok(tables)) => tables,
             Tables::Read(Err(error)) => {
-                warn!("[fixture-put] PlayPutSound for fixture {fixture_id} ({source}): {error}; no sound");
+                warn!(
+                    "[fixture-put] PlayPutSound for fixture {fixture_id} ({source}): {error}; no sound"
+                );
                 return;
             }
             Tables::Requested { .. } => {
-                warn!("[fixture-put] PlayPutSound for fixture {fixture_id} ({source}): the fixture and put sound tables are still loading; no sound");
+                warn!(
+                    "[fixture-put] PlayPutSound for fixture {fixture_id} ({source}): the fixture and put sound tables are still loading; no sound"
+                );
                 return;
             }
         };
         let Some(&id) = tables.put_sound_of.get(&fixture_id) else {
-            warn!("[fixture-put] PlayPutSound: fixture {fixture_id} ({source}) has no master row; no sound");
+            warn!(
+                "[fixture-put] PlayPutSound: fixture {fixture_id} ({source}) has no master row; no sound"
+            );
             return;
         };
         let Some(cue) = tables.cue_of.get(&id) else {
             // GetMysekaiFixturePutSound returns nothing: the source plays nothing.
-            info!("[fixture-put] PlayPutSound: fixture {fixture_id} put sound id {id} has no put sound row; the source plays nothing");
+            info!(
+                "[fixture-put] PlayPutSound: fixture {fixture_id} put sound id {id} has no put sound row; the source plays nothing"
+            );
             return;
         };
-        info!("[fixture-put] PlayPutSound({id}) for fixture {fixture_id} ({source}): SE one-shot {cue}");
+        info!(
+            "[fixture-put] PlayPutSound({id}) for fixture {fixture_id} ({source}): SE one-shot {cue}"
+        );
         // The same one-shot call as the editor's other sounds; the product's
         // class mapping puts layout-edit cues in the UI class.
         if let Some(mut se) = world.get_resource_mut::<SeRequests>() {
@@ -380,6 +412,37 @@ pub(crate) fn show(world: &mut World, item: &EditableFixture, source: &'static s
         size,
         source,
         at: now,
+        clone: false,
+    });
+}
+
+/// One `ShowFieldPutCenterEffect` segment. Position is the arithmetic mean
+/// of every controller's GlobalPosition; fixture_id belongs to the first
+/// controller. The source starts with clone=false, then uses true for the
+/// remaining segments whenever the placement direction changes.
+pub(super) fn show_field_placement(
+    world: &mut World,
+    fixture_id: i32,
+    position: Vec3,
+    size: Vector3Int,
+    clone: bool,
+    source: &'static str,
+) {
+    let at = world.get_resource::<Time>().map_or(0.0, Time::elapsed_secs);
+    let Some(mut effect) = world.get_resource_mut::<FixturePutEffect>() else {
+        warn!(
+            "[fixture-put] ShowFieldPlacementEffect ({source}): put effect owner is not installed"
+        );
+        return;
+    };
+    effect.queue.push(Put {
+        uid: format!("field-segment-{fixture_id}"),
+        fixture_id,
+        position,
+        size,
+        source,
+        at,
+        clone,
     });
 }
 
@@ -429,9 +492,7 @@ pub fn traits_table(world: &World) -> Option<Arc<HashMap<i32, moly_layout::valid
 
 /// The fixture master rows the transactions build pieces from, once the
 /// fixture table is read.
-pub fn masters_table(
-    world: &World,
-) -> Option<Arc<HashMap<i32, moly_layout::FixtureMaster>>> {
+pub fn masters_table(world: &World) -> Option<Arc<HashMap<i32, moly_layout::FixtureMaster>>> {
     let effect = world.get_resource::<FixturePutEffect>()?;
     match &effect.tables {
         Tables::Read(Ok(tables)) => Some(tables.masters_of.clone()),
@@ -442,7 +503,10 @@ pub fn masters_table(
 /// Test hook: the fixture table owner with a read table of these rows'
 /// predicates only.
 #[cfg(test)]
-pub(super) fn insert_test_tables(world: &mut World, traits: &[(i32, moly_layout::validate::Traits)]) {
+pub(super) fn insert_test_tables(
+    world: &mut World,
+    traits: &[(i32, moly_layout::validate::Traits)],
+) {
     world.insert_resource(FixturePutEffect {
         tables: Tables::Read(Ok(SoundTables {
             put_sound_of: HashMap::new(),
@@ -456,13 +520,16 @@ pub(super) fn insert_test_tables(world: &mut World, traits: &[(i32, moly_layout:
         queue: Vec::new(),
         puts: 0,
         sample: None,
+        clones: Vec::new(),
     });
 }
 
 /// `FixtureController.PlayPutSound`: the put sound alone.
 pub(crate) fn play_put_sound(world: &mut World, fixture_id: i32, source: &'static str) {
     if !world.contains_resource::<FixturePutEffect>() {
-        warn!("[fixture-put] PlayPutSound for fixture {fixture_id} ({source}): the put effect owner is not installed; no sound");
+        warn!(
+            "[fixture-put] PlayPutSound for fixture {fixture_id} ({source}): the put effect owner is not installed; no sound"
+        );
         return;
     }
     world.resource_scope(|world, effect: Mut<FixturePutEffect>| {
@@ -488,6 +555,7 @@ pub(super) fn advance(world: &mut World) {
         effect.read_tables(world);
         effect.advance_instance(world);
         effect.apply_puts(world);
+        effect.advance_clones(world);
         effect.sample(world);
     });
 }
@@ -505,7 +573,9 @@ impl FixturePutEffect {
                 let server = world.resource::<AssetServer>();
                 let glb = server.load(bevy::asset::AssetPath::from(PREFAB_GLB));
                 let doc = server.load(bevy::asset::AssetPath::from(particle_doc_path()));
-                info!("[fixture-put] FixturePutEffect created at the first put; SetupPutEffect loads {PACKAGE} (prefab {PREFAB}) once");
+                info!(
+                    "[fixture-put] FixturePutEffect created at the first put; SetupPutEffect loads {PACKAGE} (prefab {PREFAB}) once"
+                );
                 self.instance = Instance::Loading {
                     glb,
                     doc,
@@ -522,7 +592,9 @@ impl FixturePutEffect {
                         "prefab {PREFAB_GLB} or particle document {} failed to load",
                         particle_doc_path()
                     );
-                    warn!("[fixture-put] {reason}: the put effect is not shown and its sound is not played");
+                    warn!(
+                        "[fixture-put] {reason}: the put effect is not shown and its sound is not played"
+                    );
                     self.instance = Instance::Failed(reason);
                     return;
                 }
@@ -553,7 +625,7 @@ impl FixturePutEffect {
                 let loaded_after = now - *since;
                 let root = world
                     .spawn((
-                        WorldAssetRoot(scene),
+                        WorldAssetRoot(scene.clone()),
                         Transform::IDENTITY,
                         // Hidden until its source nodes are held inactive.
                         Visibility::Hidden,
@@ -561,9 +633,12 @@ impl FixturePutEffect {
                         Name::new(format!("fixture put effect {PREFAB}")),
                     ))
                     .id();
-                info!("[fixture-put] SetupPutEffect: {PREFAB} loaded {loaded_after:.2}s after the first put; one instance {root:?}");
+                info!(
+                    "[fixture-put] SetupPutEffect: {PREFAB} loaded {loaded_after:.2}s after the first put; one instance {root:?}"
+                );
                 self.instance = Instance::Spawned {
                     root,
+                    scene,
                     doc: Arc::new(parsed),
                     planned: None,
                     held: false,
@@ -576,6 +651,7 @@ impl FixturePutEffect {
                 planned,
                 held,
                 since,
+                ..
             } => {
                 let root = *root;
                 if planned.is_some() || world.get::<crate::site_move::InstanceReady>(root).is_none()
@@ -612,11 +688,13 @@ impl FixturePutEffect {
             return;
         }
         let now = world.resource::<Time>().elapsed_secs();
-        let (root, first) = match &mut self.instance {
+        let (root, first, scene, doc) = match &mut self.instance {
             Instance::Spawned {
                 root,
                 planned: Some(planned),
                 held,
+                scene,
+                doc,
                 ..
             } => {
                 // SetupPutEffect is awaited before SetEffect: the first put
@@ -638,7 +716,7 @@ impl FixturePutEffect {
                         now - *planned
                     );
                 }
-                (*root, std::mem::take(held))
+                (*root, *held, scene.clone(), doc.clone())
             }
             Instance::Failed(reason) => {
                 for put in self.queue.drain(..) {
@@ -653,7 +731,27 @@ impl FixturePutEffect {
         };
         let puts = std::mem::take(&mut self.queue);
         let count = puts.len();
+        let mut first_reusable = first;
         for (index, put) in puts.into_iter().enumerate() {
+            if put.clone {
+                let copy = world
+                    .spawn((
+                        WorldAssetRoot(scene.clone()),
+                        Transform::IDENTITY,
+                        Visibility::Hidden,
+                        crate::site_move::PendingInstance,
+                        Name::new(format!("fixture put clone {PREFAB}")),
+                    ))
+                    .id();
+                self.clones.push(PutClone {
+                    root: copy,
+                    doc: doc.clone(),
+                    put: Some(put),
+                    planned: None,
+                    played_at: None,
+                });
+                continue;
+            }
             // SetEffect: SetActive(false), position, local scale, rotation,
             // SetActive(true).
             let scale = effect_scale(put.size);
@@ -664,7 +762,10 @@ impl FixturePutEffect {
                     scale,
                 };
             }
-            let restart = if first && index == 0 {
+            let restart = if std::mem::take(&mut first_reusable) {
+                if let Instance::Spawned { held, .. } = &mut self.instance {
+                    *held = false;
+                }
                 let nodes = crate::site_move::effects::set_source_nodes_active(world, root, true);
                 format!("first activation, {nodes} source nodes active")
             } else {
@@ -699,6 +800,85 @@ impl FixturePutEffect {
                     next: 0.0,
                 });
             }
+        }
+    }
+
+    fn advance_clones(&mut self, world: &mut World) {
+        let now = world.resource::<Time>().elapsed_secs();
+        for mut copy in std::mem::take(&mut self.clones) {
+            if !world.entities().contains(copy.root) {
+                continue;
+            }
+            if copy.played_at.is_some_and(|at| now - at >= CLONE_SECONDS) {
+                // Scene nodes, live particle systems and pending preparation
+                // belong to this root through ChildOf and retire with it.
+                world.despawn(copy.root);
+                continue;
+            }
+            if copy.planned.is_none() {
+                if world
+                    .get::<crate::site_move::InstanceReady>(copy.root)
+                    .is_none()
+                {
+                    self.clones.push(copy);
+                    continue;
+                }
+                crate::site_move::effects::set_source_nodes_active(world, copy.root, false);
+                let anchors = crate::site_move::node_paths(world, copy.root)
+                    .into_iter()
+                    .map(|(path, list)| (format!("/{path}"), list))
+                    .collect();
+                let server = world.resource::<AssetServer>().clone();
+                crate::weather_fx::fixture::plan(
+                    &mut world.commands(),
+                    copy.root,
+                    &copy.doc,
+                    &anchors,
+                    &server,
+                );
+                world.flush();
+                copy.planned = Some(now);
+            }
+            if copy.put.is_some() {
+                let preparing = world
+                    .get::<crate::weather_fx::fixture::Request>(copy.root)
+                    .is_some();
+                if preparing && now - copy.planned.unwrap_or(now) < PREPARE_WAIT {
+                    self.clones.push(copy);
+                    continue;
+                }
+                if preparing {
+                    warn!(
+                        "[fixture-put] clone {:?}: particle preparation exceeded {PREPARE_WAIT} s; showing prepared systems only",
+                        copy.root
+                    );
+                }
+                let put = copy.put.take().expect("pending clone put");
+                if let Some(mut transform) = world.get_mut::<Transform>(copy.root) {
+                    *transform = Transform {
+                        translation: put.position,
+                        rotation: Quat::IDENTITY,
+                        scale: effect_scale(put.size),
+                    };
+                }
+                crate::site_move::effects::set_source_nodes_active(world, copy.root, true);
+                if let Some(mut visibility) = world.get_mut::<Visibility>(copy.root) {
+                    *visibility = Visibility::Inherited;
+                }
+                self.puts += 1;
+                self.play_sound(world, put.fixture_id, put.source);
+                copy.played_at = Some(now);
+                info!(
+                    "[fixture-put] SetEffect clone {} {:?} ({}, {:.2}s after request): position {:?}, grid {:?}; destroy after {CLONE_SECONDS} s",
+                    self.puts,
+                    copy.root,
+                    put.source,
+                    now - put.at,
+                    put.position,
+                    put.size
+                );
+            }
+            self.clones.push(copy);
         }
     }
 

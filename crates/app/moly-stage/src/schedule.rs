@@ -12,12 +12,13 @@ use crate::{
 };
 use bevy::app::{AnimationSystems, App, PostUpdate, PreUpdate, SpawnScene, Startup, Update};
 use bevy::prelude::{ApplyDeferred, IntoScheduleConfigs};
-use bevy::scene::SceneSpawnerSystems;
+use bevy::app::SceneSpawnerSystems;
 use bevy::time::common_conditions;
 use bevy::transform::TransformSystems;
 use std::time::Duration;
 
 pub fn install(app: &mut App) {
+    app.init_resource::<walk_face::WalkFaceBakes>();
     content_library::install(app);
     app.add_systems(
         Update,
@@ -532,7 +533,7 @@ pub fn install(app: &mut App) {
         )
         .add_systems(
             SpawnScene,
-            inactive_nodes::apply.after(SceneSpawnerSystems::Spawn),
+            inactive_nodes::apply.after(SceneSpawnerSystems::WorldInstanceSpawn),
         )
         .add_systems(
             Update,

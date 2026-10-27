@@ -13,6 +13,8 @@ use crate::fixture_edit::{
 
 pub(super) const COMMANDS: &[&str] = &[
     "enter",
+    "select_content",
+    "select_environment",
     "select_catalog",
     "select_placed",
     "select_inventory",
@@ -41,6 +43,21 @@ pub(super) fn view(world: &World) -> Value {
     json!({
         "revision": view.revision,
         "active": view.active,
+        "content": format!("{:?}", view.content),
+        "environment": view.environment,
+        "environment_choices": view.environment_choices.iter().map(|row| json!({
+            "phenomena_id": row.phenomena_id, "name": row.name,
+        })).collect::<Vec<_>>(),
+        "road": {
+            "planned": view.road.planned.iter().map(item).collect::<Vec<_>>(),
+            "target": view.road.target.as_ref().map(item),
+            "can_decide": view.road.can_decide,
+            "remaining": view.road.remaining,
+            "select_mode": view.road.select_mode,
+            "show_fixtures": view.road.show_fixtures,
+            "moving": view.road.moving,
+            "dragging": view.road.dragging,
+        },
         "phase": format!("{:?}", view.phase),
         "site_id": view.site_id,
         "site_type": view.site_type,
@@ -122,6 +139,21 @@ pub fn command(params: &Map<String, Value>) -> Result<EditCommand, String> {
     };
     Ok(match name {
         "enter" => EditCommand::Enter,
+        "select_content" => {
+            let kind = params.get("kind").and_then(Value::as_i64)
+                .ok_or("select_content needs source kind 0, 1, 2, 3, 4 or 19")?;
+            EditCommand::SelectContent(crate::fixture_edit::EditContentType::from_tab_kind(kind)
+                .ok_or("select_content kind is not a source content kind")?)
+        }
+        "select_environment" => {
+            let phenomena_id = match params.get("phenomena_id") {
+                Some(Value::Null) => None,
+                Some(value) => Some(value.as_i64().and_then(|id| i32::try_from(id).ok())
+                    .filter(|id| *id > 0).ok_or("phenomena_id must be positive or null for default")?),
+                None => return Err("select_environment needs phenomena_id (null means default)".into()),
+            };
+            EditCommand::SelectEnvironment { phenomena_id }
+        }
         "select_catalog" => EditCommand::SelectCatalog {
             index: params
                 .get("index")

@@ -16,6 +16,7 @@
 //! ended. [`CompanionAction::release`] gives every lease back.
 
 use super::*;
+use moly_core::markers::GroundEpoch;
 use bevy::ecs::system::SystemState;
 
 /// One fixture action of a companion, from its selection to its end.

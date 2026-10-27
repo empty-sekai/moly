@@ -168,6 +168,7 @@ pub mod cutscene;
 pub mod delivery;
 pub mod entry;
 pub mod fixture_edit;
+pub mod fixture_put_limit;
 pub mod fixture_edit_ui;
 pub mod floor_edit_camera;
 pub mod footstep;

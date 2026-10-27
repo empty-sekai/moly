@@ -463,10 +463,11 @@ fn play_animation_clip(world: &mut World, entity: Entity, name: &str, blend: f32
     let duration = world.get_resource::<Assets<AnimationClip>>()?.get(&clip)?.duration();
     let node = {
         let mut graphs = world.get_resource_mut::<Assets<AnimationGraph>>()?;
-        let graph = graphs.get_mut(&graph)?;
+        let mut graph = graphs.get_mut(&graph)?;
         let existing = graph.graph.node_indices().find(|node| matches!(&graph.graph[*node].node_type,
             bevy::animation::graph::AnimationNodeType::Clip(handle) if handle == &clip));
-        existing.unwrap_or_else(||graph.add_clip(clip, 1.0, graph.root))
+        let root = graph.root;
+        existing.unwrap_or_else(||graph.add_clip(clip, 1.0, root))
     };
     let mut query = world.query::<(&mut AnimationPlayer, &mut AnimationTransitions)>();
     let Ok((mut animation, mut transitions)) = query.get_mut(world, player) else { return None; };
@@ -731,7 +732,7 @@ fn overlap_position(world: &mut World, entity: Entity) -> Option<Vec3> {
     if !overlaps(position) { return None; }
     let cells = {
         let mut params = SystemState::<crate::npc::walkable::WalkableSource>::new(world);
-        params.get_mut(world).cells_for(&site).ok()?
+        params.get_mut(world).ok()?.cells_for(&site).ok()?
     };
     let face = crate::npc::navigation::face(world, entity)?;
     let center = super::cell_of(position.x, position.z);

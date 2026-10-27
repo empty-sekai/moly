@@ -71,8 +71,8 @@
 use std::collections::HashMap;
 
 use moly_law::fixture::areas::{
-    adjust_rotate_position, calculate_rotated_position, layout_square_min, rotated_center_grid,
-    GridAreaData,
+    GridAreaData, adjust_rotate_position, calculate_rotated_position, layout_square_min,
+    rotated_center_grid,
 };
 use moly_law::fixture::position::{layout_footprint, layout_type};
 use moly_law::fixture::{Direction, GridPosition, Vector3Int};
@@ -283,9 +283,7 @@ impl Refusal {
                 CellFail::Occupied | CellFail::Joint => Some(RefusalCode::Overlap),
             },
             Self::NoHeadroom { .. } => Some(RefusalCode::OutOfBounds),
-            Self::NoBase { .. } | Self::NotStackable { .. } => {
-                Some(RefusalCode::StackNotAllowed)
-            }
+            Self::NoBase { .. } | Self::NotStackable { .. } => Some(RefusalCode::StackNotAllowed),
             Self::UnavailableZone { .. } => Some(RefusalCode::UnavailableZone),
             Self::RugOverRugOrPlant { .. } | Self::StackedChild { .. } => {
                 Some(RefusalCode::Overlap)
@@ -438,6 +436,7 @@ pub fn add_using_cells<R: RowLike>(
 #[derive(Clone, Debug)]
 pub struct Piece {
     pub uid: String,
+    pub fixture_id: i32,
     pub layout: u8,
     pub center: GridPosition,
     pub direction: Direction,
@@ -487,6 +486,7 @@ impl Piece {
             .unwrap_or_default();
         Ok(Self {
             uid: item.uid().to_owned(),
+            fixture_id: item.fixture_id(),
             layout,
             center,
             direction,
@@ -561,11 +561,7 @@ fn stack_enable_cells(
 /// `SiteLayoutUtility.CalculateRotatedPosition(tile, center, size,
 /// Direction.Left)` (the four-argument overload): d = tile - center and
 /// m = max(size.x, size.z) - 1 give center + (d.z, d.y, m - d.x).
-pub fn rotate_right(
-    tile: GridPosition,
-    center: GridPosition,
-    size: Vector3Int,
-) -> GridPosition {
+pub fn rotate_right(tile: GridPosition, center: GridPosition, size: Vector3Int) -> GridPosition {
     let d = tile - center;
     let m = (size.x as i8).max(size.z as i8).wrapping_sub(1);
     center + GridPosition::new(d.z, d.y, m.wrapping_sub(d.x))
@@ -585,6 +581,7 @@ pub struct Board {
     zones: Option<Vec<Zone>>,
     occupant: HashMap<(u8, GridPosition), usize>,
     joints: std::collections::HashSet<(u8, GridPosition)>,
+    joint_occupants: HashMap<(u8, GridPosition), Vec<usize>>,
 }
 
 impl Board {
@@ -604,6 +601,7 @@ impl Board {
         }
         let mut occupant = HashMap::new();
         let mut joints = std::collections::HashSet::new();
+        let mut joint_occupants: HashMap<_, Vec<usize>> = HashMap::new();
         for (index, piece) in pieces.iter().enumerate() {
             let tiles = TileBox::of(grid, piece.layout);
             let mut add = |p: GridPosition| {
@@ -623,6 +621,10 @@ impl Board {
                         );
                         if tiles.contains(p) {
                             joints.insert((piece.layout, p));
+                            joint_occupants
+                                .entry((piece.layout, p))
+                                .or_default()
+                                .push(index);
                         }
                     }
                 }
@@ -650,7 +652,96 @@ impl Board {
             zones: rules.zones.clone(),
             occupant,
             joints,
+            joint_occupants,
         })
+    }
+
+    /// The source joint list at one tile, in placement order. A boolean joint
+    /// flag alone cannot answer road same-fixture overlaps or replacements.
+    pub fn joint_occupants(&self, layout: u8, at: GridPosition) -> impl Iterator<Item = &Piece> {
+        self.joint_occupants
+            .get(&(layout, at))
+            .into_iter()
+            .flatten()
+            .map(|&index| &self.pieces[index])
+    }
+
+    pub fn center_owner(&self, layout: u8, at: GridPosition) -> Option<&Piece> {
+        self.occupant
+            .get(&(layout, at))
+            .map(|&index| &self.pieces[index])
+    }
+
+    /// Confirm rejects a missing tile. Its additional controller check only
+    /// runs for a tile whose pool value is the invalid (-1) sentinel. This
+    /// board contains validated live draft rows, so recorded owners are the
+    /// source's IsExists=true branch; floor occupancy is a separate grid.
+    pub fn can_move_road(&self, fixture: &Piece) -> bool {
+        fixture
+            .bottom_cells()
+            .all(|at| self.tiles(layout_type::ROAD).contains(at))
+    }
+
+    /// RoadEditState.CanPutRoad (source frame), with its separate planning
+    /// overlap pass and the moved-road overload's ignored UID.
+    pub fn can_put_road(
+        &self,
+        fixture: &Piece,
+        planned: &[Piece],
+        ignore_uid: Option<&str>,
+    ) -> bool {
+        for x in i32::from(fixture.min.x)..=i32::from(fixture.max.x) {
+            for z in i32::from(fixture.min.z)..=i32::from(fixture.max.z) {
+                let at = GridPosition::new(x as i8, 0, z as i8);
+                if !self.tiles(layout_type::ROAD).contains(at) {
+                    return false;
+                }
+                if fixture.center == at
+                    && self
+                        .center_owner(layout_type::ROAD, at)
+                        .is_some_and(|owner| {
+                            owner.center == at && Some(owner.uid.as_str()) != ignore_uid
+                        })
+                {
+                    return false;
+                }
+                if self.joint_occupants(layout_type::ROAD, at).any(|owner| {
+                    Some(owner.uid.as_str()) != ignore_uid && owner.fixture_id != fixture.fixture_id
+                }) {
+                    return false;
+                }
+                if planned.iter().any(|other| {
+                    (other.min.x..=other.max.x).contains(&at.x)
+                        && (other.min.z..=other.max.z).contains(&at.z)
+                }) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// IsOverlapJointObject: every covered tile already has this fixture id;
+    /// the remove-overlap overload refuses a tile still naming the candidate.
+    pub fn road_fully_covered(&self, fixture: &Piece, ignore_uid: Option<&str>) -> bool {
+        for x in i32::from(fixture.min.x)..=i32::from(fixture.max.x) {
+            for z in i32::from(fixture.min.z)..=i32::from(fixture.max.z) {
+                let at = GridPosition::new(x as i8, 0, z as i8);
+                if !self.tiles(layout_type::ROAD).contains(at) {
+                    return false;
+                }
+                let mut owners = self.joint_occupants(layout_type::ROAD, at).peekable();
+                if owners.peek().is_none()
+                    || owners.any(|owner| {
+                        Some(owner.uid.as_str()) == ignore_uid
+                            || owner.fixture_id != fixture.fixture_id
+                    })
+                {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     pub fn tiles(&self, layout: u8) -> TileBox {
@@ -981,5 +1072,64 @@ mod tests {
         assert!(t.plant && !t.rug && t.put_target && t.put_base && t.joint);
         let t = Traits::from_row("normal", "rug", "none", "none");
         assert!(!t.plant && t.rug && !t.put_target && !t.put_base && !t.joint);
+    }
+    fn road(uid: &str, id: i32, x: i8, z: i8) -> Fixture {
+        let size = Vector3Int::new(2, 1, 2);
+        let (center, direction, layout) = mirror_fixture_layout(
+            GridPosition::new(x, 0, z),
+            size,
+            Direction::Front,
+            layout_type::ROAD,
+        )
+        .unwrap();
+        Fixture {
+            uid: uid.into(),
+            package: format!("road-{id}"),
+            fixture_id: id,
+            center,
+            grid_size: size,
+            layout,
+            direction,
+        }
+    }
+
+    fn road_rules() -> Rules {
+        let mut rules = Rules::default();
+        for id in [1, 2] {
+            rules
+                .traits
+                .insert(id, Traits::from_row("normal", "road", "none", "road"));
+        }
+        rules
+    }
+
+    #[test]
+    fn road_joint_lists_preserve_uid_type_and_partial_overlaps() {
+        let rules = road_rules();
+        let grid = SiteGrid::new(1, 1, 20, 8, 20);
+        let old = road("old", 1, 0, 0);
+        let board = Board::new(&[old.clone()], grid, &rules).unwrap();
+        let exact = Piece::new(&road("new", 1, 0, 0), &rules).unwrap();
+        assert!(!board.can_put_road(&exact, &[], None));
+        assert!(board.road_fully_covered(&exact, None));
+        assert!(!board.road_fully_covered(&exact, Some("old")));
+        assert!(board.can_put_road(&exact, &[], Some("old")));
+        let partial = Piece::new(&road("partial", 1, 1, 0), &rules).unwrap();
+        assert!(board.can_put_road(&partial, &[], None));
+        assert!(!board.road_fully_covered(&partial, None));
+        assert!(!board.can_put_road(&partial, &[exact.clone()], None));
+        let different = Piece::new(&road("different", 2, 1, 0), &rules).unwrap();
+        assert!(!board.can_put_road(&different, &[], None));
+        assert!(board.can_move_road(&different));
+        let outside = Piece::new(&road("outside", 1, 9, 0), &rules).unwrap();
+        assert!(!board.can_move_road(&outside));
+        let board = Board::new(&[old, road("partial", 1, 1, 0)], grid, &rules).unwrap();
+        assert_eq!(
+            board
+                .joint_occupants(layout_type::ROAD, GridPosition::new(1, 0, 0))
+                .map(|row| row.uid.as_str())
+                .collect::<Vec<_>>(),
+            vec!["old", "partial"]
+        );
     }
 }

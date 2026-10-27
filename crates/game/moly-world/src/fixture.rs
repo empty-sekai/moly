@@ -1023,6 +1023,7 @@ pub struct FixturePlacements {
     /// Opaque identities allocated by the offline layout owner. They do not
     /// change when a placed instance moves or rotates.
     instance_uids: Vec<String>,
+    phenomena_id: Option<i32>,
     site_id: u32,
     site_type: String,
     level: u32,
@@ -1118,6 +1119,16 @@ impl FixturePlacements {
         }
         .with_editor_rows(rows, 1)
         .expect("valid synthetic layout")
+    }
+
+    pub fn phenomena_id(&self) -> Option<i32> { self.phenomena_id }
+
+    pub fn with_phenomena_id(mut self, id: Option<i32>) -> Result<Self, String> {
+        if id.is_some_and(|id| id <= 0) {
+            return Err("fixed phenomenon must be a positive master id".into());
+        }
+        self.phenomena_id = id;
+        Ok(self)
     }
 
     pub fn site_id(&self) -> u32 {

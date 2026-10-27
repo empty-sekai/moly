@@ -1899,7 +1899,7 @@ pub fn general_data_destination(world: &mut World, entity: Entity) -> Result<[f3
     let current_site = world.get_resource::<SiteSelection>().map(|s| s.site_type().to_owned());
     let result = world.resource_scope(|world, state: Mut<SourceState>| {
         let (mut walkable, catalog, config, npcs, players) =
-            state.into_inner().0.get_mut(world);
+            state.into_inner().0.get_mut(world).map_err(|error| error.to_string())?;
         let snaps: Vec<MemberSnap> = npcs
             .iter()
             .map(

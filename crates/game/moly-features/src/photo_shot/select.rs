@@ -782,7 +782,7 @@ pub(super) fn dispose(world: &mut World) {
     // pixels after Save/discard, then replace this same asset on the next shot.
     let handle = world.resource::<PhotoState>().image.clone();
     if let Some(handle) = handle {
-        if let Some(image) = world.resource_mut::<Assets<Image>>().get_mut(&handle) {
+        if let Some(mut image) = world.resource_mut::<Assets<Image>>().get_mut(&handle) {
             *image = Image::new_fill(
                 Extent3d {
                     width: 1,

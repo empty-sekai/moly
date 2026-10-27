@@ -1,10 +1,10 @@
 //! Road runtime material and RoadCell neighborhood adapter.
 //! Source: CN Road Base/instancing shader, RoadNativeArrayCache and RoadView.
 
-use super::{fence::FixtureRow, layout_type, FixturePlacements, FixtureScenesReady};
+use super::{EditableFixture, FixturePlacements, fence::FixtureRow, layout_type};
 use crate::env::SiteEnvGpuBuffer;
 use bevy::{
-    ecs::system::{lifetimeless::SRes, SystemParamItem},
+    ecs::system::{SystemParamItem, lifetimeless::SRes},
     gltf::{GltfExtras, GltfMaterialExtras},
     pbr::{Material, MaterialPipeline, MaterialPipelineKey, MaterialPlugin, StandardMaterial},
     prelude::*,
@@ -14,7 +14,8 @@ use bevy::{
     shader::ShaderRef,
 };
 use moly_assets::material_textures::SourcePrimitiveIndex;
-use moly_law::fixture::road::{quarter, CELL_OFFSETS, NEIGHBOR_OFFSETS};
+use moly_law::fixture::GridPosition;
+use moly_law::fixture::road::{CELL_OFFSETS, NEIGHBOR_OFFSETS, quarter};
 use std::collections::{HashMap, HashSet};
 
 const SHADER: &str = "Mysekai/Fixture/Road";
@@ -136,10 +137,26 @@ impl Material for RoadMaterial {
     }
 }
 
+/// The editor publishes its entire private road projection. Committed
+/// placement records and gameplay occupancy remain untouched until save.
+#[derive(Resource, Clone)]
+pub struct RoadDraft {
+    pub revision: u64,
+    pub rows: Vec<EditableFixture>,
+}
+
+/// A source road view created solely for the editor's private projection.
+#[derive(Component)]
+pub struct RoadPreview(pub String);
+
+#[derive(Component)]
+struct RoadBound;
+
 #[derive(Component)]
 struct RoadSurface {
     root: Entity,
-    row: usize,
+    row: Option<usize>,
+    uid: Option<String>,
     cell: usize,
     quadrant: usize,
     texture: Handle<Image>,
@@ -149,10 +166,19 @@ struct RoadSurface {
 
 fn bind_surfaces(
     mut commands: Commands,
-    ready: Option<Res<FixtureScenesReady>>,
-    mut bound_revision: Local<u64>,
-    revision: Res<super::FixtureLayoutRevision>,
-    roots: Query<(Entity, &FixtureRow), With<super::FixtureRoot>>,
+    roots: Query<
+        (
+            Entity,
+            &super::FixtureVisualRoot,
+            Option<&FixtureRow>,
+            Option<&RoadPreview>,
+            Option<&crate::fixture_scene_inputs::FixtureScenePlacement>,
+        ),
+        (
+            With<crate::render_inputs::FixtureVisualSceneReady>,
+            Without<RoadBound>,
+        ),
+    >,
     children: Query<&Children>,
     nodes: Query<&GltfExtras>,
     parts: Query<(
@@ -162,10 +188,13 @@ fn bind_surfaces(
     )>,
     standard: Res<Assets<StandardMaterial>>,
 ) {
-    if *bound_revision == revision.0 || ready.is_none() {
-        return;
-    }
-    for (root, row) in &roots {
+    for (root, visual, row, preview, placement) in &roots {
+        if visual.layout != layout_type::ROAD {
+            continue;
+        }
+        let uid = preview
+            .map(|value| value.0.clone())
+            .or_else(|| placement.map(|value| value.0.uid.clone()));
         let mut stack = vec![(root, None)];
         while let Some((entity, mut cell)) = stack.pop() {
             if let Ok(extras) = nodes.get(entity) {
@@ -205,7 +234,8 @@ fn bind_surfaces(
                 .expect("Road main texture");
             commands.entity(entity).insert(RoadSurface {
                 root,
-                row: row.0,
+                row: row.map(|row| row.0),
+                uid: uid.clone(),
                 cell,
                 quadrant: primitive.0,
                 texture,
@@ -213,8 +243,8 @@ fn bind_surfaces(
                 lighting: get("_UsePhenomenaLighting"),
             });
         }
+        commands.entity(root).insert(RoadBound);
     }
-    *bound_revision = revision.0;
 }
 
 type MaterialCache = HashMap<(AssetId<Image>, Vec<u32>), Handle<RoadMaterial>>;
@@ -223,7 +253,9 @@ fn update_materials(
     mut commands: Commands,
     placements: Res<FixturePlacements>,
     surfaces: Query<(Entity, Ref<RoadSurface>)>,
-    active_roots: Query<(), With<super::FixtureRoot>>,
+    active_roots: Query<(), With<super::FixtureVisualRoot>>,
+    draft: Option<Res<RoadDraft>>,
+    mut had_draft: Local<bool>,
     mut materials: ResMut<Assets<RoadMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut cache: Local<MaterialCache>,
@@ -233,38 +265,73 @@ fn update_materials(
     if revision.is_changed() {
         cache.clear();
     }
+    let draft_changed =
+        draft.as_ref().is_some_and(|draft| draft.is_changed()) || *had_draft != draft.is_some();
+    *had_draft = draft.is_some();
     if surfaces.is_empty()
-        || (!placements.is_changed() && !surfaces.iter().any(|(_, s)| s.is_added()))
+        || (!placements.is_changed()
+            && !draft_changed
+            && !surfaces.iter().any(|(_, s)| s.is_added()))
     {
         return;
     }
-    let rows: Vec<_> = placements
-        .rows
-        .iter()
-        .filter(|r| r.layout == layout_type::ROAD)
-        .map(|r| (r.package.as_str(), r.placed()))
-        .collect();
+    let rows: Vec<(String, GridPosition, GridPosition)> = if let Some(draft) = &draft {
+        draft
+            .rows
+            .iter()
+            .filter(|row| row.layout == layout_type::ROAD)
+            .filter_map(|row| {
+                row.footprint()
+                    .ok()
+                    .map(|(min, max)| (row.package.clone(), min, max))
+            })
+            .collect()
+    } else {
+        placements
+            .rows
+            .iter()
+            .filter(|row| row.layout == layout_type::ROAD)
+            .map(|row| {
+                let bounds = row.placed();
+                (row.package.clone(), bounds.min, bounds.max)
+            })
+            .collect()
+    };
     let mut next = MaterialCache::new();
     let mut prepared = HashSet::new();
     let mut clipped = 0;
     for (entity, surface) in &surfaces {
-        if !active_roots.contains(surface.root) { continue; }
-        let row = &placements.rows[surface.row];
-        let bounds = row.placed();
+        if !active_roots.contains(surface.root) {
+            continue;
+        }
+        let current = match &draft {
+            Some(draft) => surface
+                .uid
+                .as_ref()
+                .and_then(|uid| draft.rows.iter().find(|row| &row.uid == uid))
+                .and_then(|row| {
+                    row.footprint()
+                        .ok()
+                        .map(|(min, _)| (row.package.as_str(), min))
+                }),
+            None => surface
+                .row
+                .and_then(|index| placements.rows.get(index))
+                .map(|row| (row.package.as_str(), row.placed().min)),
+        };
+        let Some((package, min)) = current else {
+            continue;
+        };
         let (dx, dz) = CELL_OFFSETS[surface.cell];
-        let x = bounds.min.x.wrapping_add(dx);
-        let z = bounds.min.z.wrapping_add(dz);
+        let x = min.x.wrapping_add(dx);
+        let z = min.z.wrapping_add(dz);
         // TileNeighbourData.CanConnect accepts any joint occupant with the same
         // fixture ID. Road package identity is one-to-one with that source ID.
         let neighbors = NEIGHBOR_OFFSETS.map(|(dx, dz)| {
             let nx = x.wrapping_add(dx);
             let nz = z.wrapping_add(dz);
-            rows.iter().any(|(package, p)| {
-                *package == row.package
-                    && nx >= p.min.x
-                    && nx <= p.max.x
-                    && nz >= p.min.z
-                    && nz <= p.max.z
+            rows.iter().any(|(other, min, max)| {
+                other == package && nx >= min.x && nx <= max.x && nz >= min.z && nz <= max.z
             })
         });
         let q = quarter(neighbors, surface.quadrant);
@@ -289,11 +356,13 @@ fn update_materials(
             // its chain already exists. The pixels stay in the main world: a
             // furniture material could still need this image's emission mask
             // mean, and only the furniture material swap records those.
-            use crate::fixture_material::{generate_mip_chain, mip_chain_plan, MipSkip};
+            use crate::fixture_material::{MipSkip, generate_mip_chain, mip_chain_plan};
             let chained = match images.get(&surface.texture).map(mip_chain_plan) {
                 Some(Ok(_)) => images
                     .get_mut(&surface.texture)
-                    .map_or(Err(MipSkip::NoData), |image| generate_mip_chain(image.into_inner())),
+                    .map_or(Err(MipSkip::NoData), |image| {
+                        generate_mip_chain(image.into_inner())
+                    }),
                 Some(Err(reason)) => Err(reason),
                 None => Ok(0),
             };
@@ -301,7 +370,9 @@ fn update_materials(
                 // The chained upload replaces the texture the image already
                 // has on the GPU (see crate::gpu_image_release).
                 Ok(levels) if levels > 0 => {
-                    replaced.write(crate::gpu_image_release::ImageTextureReplaced(surface.texture.id()));
+                    replaced.write(crate::gpu_image_release::ImageTextureReplaced(
+                        surface.texture.id(),
+                    ));
                 }
                 Ok(_) | Err(MipSkip::AlreadyChained) => {}
                 Err(reason) => warn!("Road mip generation: {reason:?}"),
@@ -327,7 +398,12 @@ fn update_materials(
             .remove::<MeshMaterial3d<StandardMaterial>>()
             .insert(MeshMaterial3d(handle));
     }
-    info!("Road material: {} quadrant meshes, {} shared material states, {} alpha-clipped; source queue 2006", surfaces.iter().count(), next.len(), clipped);
+    info!(
+        "Road material: {} quadrant meshes, {} shared material states, {} alpha-clipped; source queue 2006",
+        surfaces.iter().count(),
+        next.len(),
+        clipped
+    );
     *cache = next;
 }
 

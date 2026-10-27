@@ -42,7 +42,7 @@ pub(crate) fn publish_mesh_owners(world: &mut World) {
     let roots: Vec<_> = world.query_filtered::<Entity, Or<(With<SiteRoot>, With<ResidentSiteRoot>)>>().iter(world).collect();
     for root in roots {
         let active = world.get::<SiteRoot>(root).is_some();
-        let ready=world.get::<bevy::scene::SceneInstance>(root).is_some_and(|instance|world.resource::<bevy::scene::SceneSpawner>().instance_is_ready(**instance));
+        let ready=world.get::<bevy::world_serialization::WorldInstance>(root).is_some_and(|instance|world.resource::<bevy::world_serialization::WorldInstanceSpawner>().instance_is_ready(**instance));
         if !ready || world.get::<MeshOwnershipPublished>(root).is_some_and(|prior|prior.0==active) { continue; }
         let mut stack = vec![root];
         while let Some(entity) = stack.pop() {
@@ -83,7 +83,7 @@ pub(crate) fn advance(world: &mut World) {
             let Some(plan) = planned else { break; };
             let mut roots = Vec::new();
             for (index,(scene, navigation)) in plan.scenes.into_iter().enumerate() {
-                let mut root = world.spawn((SceneRoot(scene), Visibility::Hidden,
+                let mut root = world.spawn((WorldAssetRoot(scene), Visibility::Hidden,
                     ResidentSiteRoot { site_type: name.clone(), local: Transform::IDENTITY, origin: index == 0 }));
                 if navigation { root.insert(SiteNavigationRoot); }
                 if let Some((_,level)) = plan.rings.iter().find(|(i,_)| *i == index) {
@@ -126,8 +126,8 @@ pub(crate) fn advance(world: &mut World) {
 
 type Ready = (std::sync::Arc<crate::fixture_scene_inputs::FixtureSceneInputs>,crate::npc::residency::Navigation);
 fn advance_load(world: &mut World, load: &mut Load) -> Result<Option<Ready>,String> {
-    let spawner = world.resource::<bevy::scene::SceneSpawner>();
-    if load.roots.iter().any(|root| world.get::<bevy::scene::SceneInstance>(*root).is_none_or(|instance| !spawner.instance_is_ready(**instance))) { return Ok(None); }
+    let spawner = world.resource::<bevy::world_serialization::WorldInstanceSpawner>();
+    if load.roots.iter().any(|root| world.get::<bevy::world_serialization::WorldInstance>(*root).is_none_or(|instance| !spawner.instance_is_ready(**instance))) { return Ok(None); }
     if load.fixtures.is_none() {
         let sites = world.resource::<Sites>();
         let selection = world.resource::<SiteSelection>();
@@ -164,7 +164,7 @@ fn advance_load(world: &mut World, load: &mut Load) -> Result<Option<Ready>,Stri
     let epoch = u64::MAX - u64::from(load.active.site_id);
     let inputs = crate::fixture_scene_inputs::resident_inputs(world,&fixtures.placements,&fixtures.roots,load.roots[0],epoch)?;
     let state = &mut SystemState::<crate::fixture_collision::CollisionInputs>::new(world);
-    let polygons = state.get(world).collect_roots(&fixtures.roots)?;
+    let polygons = state.get(world).map_err(|error| error.to_string())?.collect_roots(&fixtures.roots)?;
     let source = world.get_resource::<NavMeshSourceRegion>().ok_or("navigation source region pending")?;
     let voxel = crate::walk_face::site_voxel(&load.active,source);
     let volume = crate::walk_face::site_volume(world.resource::<Sites>(),&load.active);

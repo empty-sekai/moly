@@ -69,7 +69,8 @@ pub const RPC_PATH: &str = "/rpc";
 /// carry the user's mission rows and the sheet it is on.
 /// 10: the release call, and the section that carries the phenomena the user
 /// has learned.
-pub const PROTOCOL_VERSION: u32 = 10;
+/// 11: the housing save carries its fixed phenomenon.
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// The account a session belongs to. The server keeps one document per user.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]

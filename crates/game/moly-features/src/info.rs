@@ -163,7 +163,7 @@ use crate::sitemap::SITEMAP_LAYER;
 use crate::ui_layers::{
     DialogBackKey, DialogBackKeyEvent, DialogId, DialogType, DisplayLayerType, LayerId, UiLayerStack,
 };
-use moly_assets::json::master::{self, MasterData, MasterTable};
+
 
 /// 页数（真源 SetupPage 装配序定谳：排名页 + 设置页）。
 const PAGE_COUNT: usize = 2;
@@ -942,106 +942,14 @@ pub const WORDINGS: &[&str] = &["WORD_DOWNLOADED", "WORD_BULK_DOWNLOAD", MYROOM_
 
 const MYROOM_COST_WORDING: &str = "MSG_MYSEKAI_FIXTURE_MYROOM_LAYOUT_COST";
 
-/// (mysekaiRank, externalId) of the `mysekai_fixture_put_limit` rank
-/// releases, in master row order.
-const PUT_LIMIT_RELEASES: MasterTable<Vec<(i64, i64)>> = MasterTable {
-    table: "mysekaiRankReleases",
-    name: "mysekaiRankReleases (the rank page's put-cost limits)",
-    parse: parse_put_limit_releases,
-};
-
-/// The put-limit level rows, in master row order.
-const PUT_LIMIT_LEVELS: MasterTable<Vec<PutLimitLevel>> = MasterTable {
-    table: "mysekaiFixturePutLimitLevels",
-    name: "mysekaiFixturePutLimitLevels (the rank page's put-cost limits)",
-    parse: parse_put_limit_levels,
-};
-
-/// `MysekaiSiteCategory` of a put-limit level row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SiteCategory {
-    HousingHome,
-    HousingRoom,
-    Other,
-}
-
-struct PutLimitLevel {
-    id: i64,
-    level: i64,
-    put_cost_limit: i64,
-    category: SiteCategory,
-}
-
-/// The master rows `GetMasterMysekaiFixturePutLimitLevelFromMysekaiRankRelease`
-/// reads, in master row order.
-struct PutLimitTables {
-    /// (mysekaiRank, externalId) of the `mysekai_fixture_put_limit` releases.
-    releases: Vec<(i64, i64)>,
-    levels: Vec<PutLimitLevel>,
-}
-
-// Both put-limit tables refuse as a whole on a row they cannot read (the
-// put-cost texts are then hidden) rather than dropping the row:
-// a dropped release or level row would change the limit computed from the
-// rows that remain.
-
-fn parse_put_limit_releases(text: &str) -> Result<Vec<(i64, i64)>, String> {
-    let mut releases = Vec::new();
-    for row in crate::site_expansion::law::rank_release_rows(master::rows(text)?) {
-        if master::text(&row, "mysekaiRankRelaseType")? == "mysekai_fixture_put_limit" {
-            releases.push((master::int(&row, "mysekaiRank")?, master::int(&row, "externalId")?));
-        }
-    }
-    Ok(releases)
-}
-
-fn parse_put_limit_levels(text: &str) -> Result<Vec<PutLimitLevel>, String> {
-    master::rows(text)?.iter().map(|row| {
-        let category = match master::text(row, "mysekaiSiteCategory")? {
-            "housing_home" => SiteCategory::HousingHome,
-            "housing_room" => SiteCategory::HousingRoom,
-            _ => SiteCategory::Other,
-        };
-        Ok(PutLimitLevel { id: master::int(row, "id")?, level: master::int(row, "level")?, put_cost_limit: master::int(row, "putCostLimit")?, category })
-    }).collect()
-}
-
-impl PutLimitTables {
-    /// `GetFixturePutLimitCost(category)` at `rank`.
-    fn cost(&self, rank: i64, category: SiteCategory) -> i64 {
-        let ids: Vec<i64> = self.releases.iter().filter(|(release_rank, _)| *release_rank <= rank).map(|(_, id)| *id).collect();
-        let mut best: Option<&PutLimitLevel> = None;
-        for level in &self.levels {
-            if level.category == category && ids.contains(&level.id) && best.is_none_or(|b| b.level < level.level) {
-                best = Some(level);
-            }
-        }
-        best.map_or(0, |level| level.put_cost_limit)
-    }
-}
-
-/// The two tables once both have resolved; None while one still loads. A
-/// table that is absent or not in the shape the JP rule reads is named once
-/// by the master layer, and its error is kept.
-fn resolve_put_limit(masters: &mut MasterData) -> Option<Result<PutLimitTables, String>> {
-    masters.request(&PUT_LIMIT_RELEASES);
-    masters.request(&PUT_LIMIT_LEVELS);
-    if !masters.is_resolved(PUT_LIMIT_RELEASES.key()) || !masters.is_resolved(PUT_LIMIT_LEVELS.key()) {
-        return None;
-    }
-    let (releases, levels) = (masters.take(&PUT_LIMIT_RELEASES)?, masters.take(&PUT_LIMIT_LEVELS)?);
-    Some(match (releases, levels) {
-        (Ok(releases), Ok(levels)) => Ok(PutLimitTables { releases, levels }),
-        (Err(error), _) | (_, Err(error)) => Err(error.to_string()),
-    })
-}
+use crate::fixture_put_limit::{PutLimitTables, SiteCategory};
 
 // ScreenLayerMysekaiInfo's constructor sets the page fade duration to 0.1s.
 const PAGE_FADE_SECONDS: f32 = 0.1;
 
 pub fn spawn_when_ready(
     mut commands: Commands, layouts: Res<crate::ui_layout::UiLayouts>, server: Res<AssetServer>, spawned: Option<Res<InfoSpawned>>,
-    mut masters: ResMut<MasterData>,
+    put_costs: Option<Res<crate::fixture_put_limit::PutCostMaster>>,
 ) {
     if spawned.is_some() || !["Info","Common1"].iter().all(|key|layouts.ready(key,&server)) {return;}
     let doc = layouts.document("Info").expect("ready Info prefab");
@@ -1049,9 +957,10 @@ pub fn spawn_when_ready(
     // (the CN classes, whose count texts come from the panel) does not read
     // them, so a CN root's own table shape is never requested here.
     let put_limit = if info_field_set(doc).put_limit_costs {
-        let Some(put_limit) = resolve_put_limit(&mut masters) else { return; };
+        let Some(put_limit) = put_costs.as_deref().and_then(crate::fixture_put_limit::PutCostMaster::limits) else { return; };
+        let put_limit = put_limit.clone();
         match &put_limit {
-            Ok(tables) => info!("[info] put-limit tables: {} put-limit releases, {} level rows", tables.releases.len(), tables.levels.len()),
+            Ok(tables) => info!("[info] put-limit tables: {} put-limit releases, {} level rows", tables.releases.len(), tables.level_count()),
             Err(_) => info!("[info] no put-limit tables: the rank page's put-cost texts are hidden"),
         }
         put_limit

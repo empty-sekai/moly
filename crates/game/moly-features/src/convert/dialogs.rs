@@ -259,6 +259,8 @@ pub fn read(doc: &UiPrefab, which: Which) -> Result<Nodes, String> {
             ]);
         }
         Which::Detail => {
+            // Unlike the confirm dialogs, the detail has no Content wrapper.
+            let content = sub(&window, "ContentRoot");
             let thumbnail = sub(&content, "UIPartsItemThumbnail");
             nodes.detail_icon = sub(&thumbnail, "mask/Icon");
             nodes.detail_thumbnail = thumbnail;

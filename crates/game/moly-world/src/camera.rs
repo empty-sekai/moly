@@ -2024,7 +2024,7 @@ pub fn exit_state(world: &mut World, state: CameraStateType, tag: &str) {
         }
         S::Fps => fps_on_exit(world),
         S::PhotoShot => photo_exit(world),
-        S::ZoomPlayer | S::PreSiteMoveAction | S::FloorEdit | S::HarvestTone | S::None => {}
+        S::ZoomPlayer | S::PreSiteMoveAction | S::FloorEdit | S::SiteEnvironmentEdit | S::HarvestTone | S::None => {}
         other => warn!("[{tag}] {other:?}.OnExit is not run from here (its own module runs it)"),
     }
 }
@@ -2458,7 +2458,7 @@ pub fn follow_avatar(
         // FloorEditCameraState.OnUpdate: FieldCamera.UpdatePosition places
         // the eye from the model, then the camera looks at LookAt without
         // the offset. Its drag and pinch are `floor_edit_camera::input`.
-        CameraStateType::FloorEdit => {
+        CameraStateType::FloorEdit | CameraStateType::SiteEnvironmentEdit => {
             let pivot = models.look_at + models.offset;
             let eye = pivot + view_dir(models.pitch, models.yaw) * models.distance;
             if let Ok((mut camera, _)) = cameras.single_mut() {

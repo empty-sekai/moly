@@ -38,9 +38,13 @@ impl ServerModel {
     ) -> SuiteUserReply {
         let UserMysekaiHousingEditLayoutRequest {
             mysekai_site_id,
+            mysekai_phenomena_id,
             site_type,
             fixtures,
         } = request;
+        if mysekai_phenomena_id.is_some_and(|id| id <= 0 || masters.phenomena.as_ref().is_none_or(|rows| !rows.iter().any(|row| row.0 == id))) {
+            return SuiteUserReply { success: false, refusal: Some("fixed phenomenon must identify a loaded master row".into()), updated: SuiteUserSections::default() };
+        }
         let count = fixtures.len();
         let served = self.doc.layouts.as_array_mut().and_then(|rows| {
             rows.iter_mut()
@@ -48,6 +52,7 @@ impl ServerModel {
         });
         match served {
             Some(row) => {
+                row["mysekaiPhenomenaId"] = serde_json::json!(mysekai_phenomena_id.unwrap_or(0));
                 row["mysekaiFixtures"] =
                     moly_protocol::json::housing_layout_fixtures_value(&fixtures);
                 info!(
