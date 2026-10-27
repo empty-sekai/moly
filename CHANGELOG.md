@@ -2,6 +2,33 @@
 
 All notable changes to this project are listed here. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.0.5](https://github.com/empty-sekai/moly/compare/v0.0.4...v0.0.5) - 2026-10-28
+
+### Features
+
+- **plugins:** Add native Luau plugins with manifests, opt-in profiles, dependency and conflict checks, sandbox limits, events, tasks and per-plugin saved data. Include source examples for scripted companions that walk, build furniture, react and use what they built.
+- **JP 7.0.0:** Run hierarchical NPC states and cross-group conversations with the source actors, navigation, animations and scene ownership.
+- **editor:** Restore the road and weather tabs, source icons and controls. Roads support placement planning, confirmation, cancellation, selection, movement and returning pieces to inventory; weather edits share the layout save/discard transaction.
+- **harvest:** Add the JP 7.0.0 bulk hammer: hold-to-charge, cancellation, target settings, the source hammer and timeline, gauge, effects, sounds, stamina/tool settlement and rewards.
+- **stage:** Split the embedded stage into the `moly-stage` crate and publish separate stage/game WASM packages, each with WebGPU and WebGL2 builds.
+- **text:** Add independent, versioned text overlays. Chinese display text can use matching official CN lines while retaining JP scenes, voices and performances; unmatched lines keep the original text. Translation updates do not replace the resource snapshot.
+- **fonts:** Ship the open-source Resource Han Rounded font and its SIL Open Font License with native and browser packages.
+
+### Fixes and performance
+
+- Restore list overflow scrolling and scrollbar dragging, source weather cells, and editor input ownership so UI gestures do not also move the camera.
+- Preserve road inventory and UIDs across edits; prevent the road release frame from also panning the camera.
+- Clear the bulk-harvest gate after treasure delivery, suppress the unrelated pass-expired balloon, and bound its fade lifetime.
+- Restore gameplay/UI audio delivery and reduce repeated tool-notice preparation; retain browser audio scheduling recovery after a main-thread stall.
+- Bake the walk field off the main thread, honor immutable master-source pins, and preserve NPC navigation and temporary scene restoration.
+- Upgrade the engine to Bevy 0.19.1 and backport the empty-mesh copy guard; place weather post-processing before anti-aliasing and load unnamed glTF scene roots.
+
+### Distribution
+
+- Native game packages include the game, launcher and server for Windows x64, Linux x64 and macOS Apple Silicon; server-only archives remain available.
+- Browser archives are now `moly-0.0.5-web-stage.tar.gz` and `moly-0.0.5-web-game.tar.gz`, replacing the single web archive. Game resources remain separately supplied.
+- The community translation upload service is a separate project and is not included in this release. Native plugins are not exposed by the embedded stage.
+
 ## [0.0.4](https://github.com/empty-sekai/moly/compare/v0.0.3...v0.0.4) - 2026-10-24
 
 ### Features
