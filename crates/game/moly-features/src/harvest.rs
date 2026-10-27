@@ -835,7 +835,7 @@ impl Plugin for HarvestPlugin {
                     drops::advance_animations,
                     pickup::collect_on_leave,
                     pickup::advance,
-                    (tool_model::apply, tool_model::swap_materials).chain(),
+                    (tool_model::apply, tool_model::swap_materials, tool_model::swap_bulk_materials).chain(),
                     (ui::place, stamina_hud::advance).chain(),
                     queue::advance,
                 )

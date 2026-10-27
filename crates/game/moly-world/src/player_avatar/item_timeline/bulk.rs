@@ -2,6 +2,14 @@
 use super::*;
 use crate::camera::{self, CameraStateType, FieldCameraModel, FieldCameraState};
 
+/// The attached hammer stays hidden and its timeline waits for source shading.
+#[derive(Component)]
+pub enum BulkToolMaterialState {
+    Pending,
+    Ready,
+    Refused(String),
+}
+
 pub(super) struct Entry {
     tool: Box<StepEntry>,
     document: String,
@@ -125,7 +133,8 @@ pub(super) fn prepare_object(
                 .spawn((
                     WorldAssetRoot(scene),
                     Transform::IDENTITY,
-                    Visibility::Inherited,
+                    Visibility::Hidden,
+                    BulkToolMaterialState::Pending,
                     ChildOf(mount),
                     timeline::StepAttachment { view, actor },
                 ))
@@ -141,6 +150,13 @@ pub(super) fn prepare_object(
         .instance_is_ready(**instance)
     {
         return Err(Pending::Wait);
+    }
+    match world.get::<BulkToolMaterialState>(tool) {
+        Some(BulkToolMaterialState::Ready) => {}
+        Some(BulkToolMaterialState::Refused(reason)) => {
+            return Err(Pending::Refused(format!("bulk hammer source material: {reason}")));
+        }
+        _ => return Err(Pending::Wait),
     }
     install_graphs(world, tool);
     let ObjectState::Spawned(object) = item.object else {

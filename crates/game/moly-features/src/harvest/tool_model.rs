@@ -23,6 +23,9 @@ use crate::harvest_material::{HarvestToolMaterial, AVATAR_TOOL_SHADER_NAME};
 use crate::player::PlayerControlled;
 use crate::player_avatar::AvatarDriver;
 
+mod bulk_material;
+pub use bulk_material::swap as swap_bulk_materials;
+
 const INDEX: &str = "moly://avatar/tools/index.json";
 const MOUNT: &str = "Penlight_R";
 
@@ -252,7 +255,6 @@ pub fn swap_materials(
     server: Res<AssetServer>,
     json: Res<Assets<JsonAsset>>,
     models: Res<HarvestToolModels>,
-    step: Res<crate::player_avatar::item_timeline::PlayerStepItem>,
     roots: Query<(), Without<ToolMaterialsSwapped>>,
     children: Query<&Children>,
     parts: Query<(
@@ -263,9 +265,8 @@ pub fn swap_materials(
     standard: Res<Assets<StandardMaterial>>,
     mut tools: ResMut<Assets<HarvestToolMaterial>>,
 ) {
-    let mut source_models: Vec<_> = models.instances.iter().filter_map(|(id, root)|
+    let source_models: Vec<_> = models.instances.iter().filter_map(|(id, root)|
         models.documents.get(id).map(|document| (*id, *root, document.clone()))).collect();
-    if let Some((root, document)) = step.bulk_tool_model() { source_models.push((-1, root, document)); }
     for (tool_id, root, document) in source_models {
         if roots.get(root).is_err() {
             continue;

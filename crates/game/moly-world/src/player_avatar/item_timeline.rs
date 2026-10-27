@@ -56,7 +56,7 @@ use moly_assets::{coordinates::CanonicalCoordinates, json::JsonAsset};
 use serde_json::Value;
 
 mod bulk;
-pub use bulk::advance_camera as advance_bulk_camera;
+pub use bulk::{advance_camera as advance_bulk_camera, BulkToolMaterialState};
 
 use super::{AvatarDriver, PlayerActionOwner, PlayerActionToken};
 use crate::{
