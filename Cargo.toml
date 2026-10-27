@@ -26,12 +26,14 @@ members = [
     "crates/app/moly-launcher",
     "crates/app/moly-server-host",
 ]
-exclude = ["crates/vendor/cpal"]
+exclude = ["crates/vendor/cpal", "crates/vendor/bevy_render"]
 
 # CPAL 0.15.3's WebAudio backend retains expired buffer deadlines after a
 # main-thread stall. Keep the small transport fix in the fingerprinted sources.
 [patch.crates-io]
 cpal = { path = "crates/vendor/cpal" }
+# Backport Bevy #24960: empty meshes must skip copies as well as allocation.
+bevy_render = { path = "crates/vendor/bevy_render" }
 
 [workspace.package]
 edition = "2021"
