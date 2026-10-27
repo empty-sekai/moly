@@ -37,7 +37,7 @@ bevy_render = { path = "crates/vendor/bevy_render" }
 
 [workspace.package]
 edition = "2021"
-version = "0.0.4"
+version = "0.0.5"
 license = "AGPL-3.0-only"
 
 [workspace.dependencies]
