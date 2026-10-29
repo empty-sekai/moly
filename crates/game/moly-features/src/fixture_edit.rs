@@ -1964,22 +1964,22 @@ fn item_from_served(
     })
 }
 
-fn apply_rejected(code: moly_layout::RefusalCode) -> moly_layout::ApplyOutcome {
-    Err(moly_layout::Rejected {
-        index: 0,
-        refusal: moly_layout::Refusal::new(code),
-        results_before: Vec::new(),
-    })
-}
-
 /// Runs one `moly.layout.apply` transaction against the open session. A dry
 /// run returns the results without touching the draft; a successful real run
 /// writes the resulting rows back exactly as the equivalent manual commands
 /// would (selection cleared, phase browsing, draft dirty, removed rows to the
 /// offline inventory). The whole-layout save remains the only uplink.
-pub fn apply_request(world: &mut World, request: &moly_layout::Apply) -> moly_layout::ApplyOutcome {
+///
+/// `Err` names an input the transaction could not run on (no open session,
+/// no layout or site grid, rules unavailable, a resulting row that does not
+/// convert, the uid counter exhausted); `Ok(Err(_))` is the layout's own
+/// refusal.
+pub fn apply_request(
+    world: &mut World,
+    request: &moly_layout::Apply,
+) -> Result<moly_layout::ApplyOutcome, String> {
     let Some(mut session) = world.remove_resource::<EditSession>() else {
-        return apply_rejected(moly_layout::RefusalCode::UnknownPiece);
+        return Err("the editor is not open".to_owned());
     };
     let result = apply_in_session(world, &mut session, request);
     world.insert_resource(session);
@@ -1990,23 +1990,18 @@ fn apply_in_session(
     world: &mut World,
     session: &mut EditSession,
     request: &moly_layout::Apply,
-) -> moly_layout::ApplyOutcome {
-    let mut layout = match session_layout(session) {
-        Ok(layout) => layout,
-        Err(_) => return apply_rejected(moly_layout::RefusalCode::OutOfBounds),
-    };
-    let rules = match session
+) -> Result<moly_layout::ApplyOutcome, String> {
+    let mut layout = session_layout(session)?;
+    let floor = session
         .baseline
         .as_ref()
         .and_then(FixturePlacements::floor_grid)
-        .map(|floor| layout_rules::rules(world, Some(floor)))
-    {
-        Some(Ok(rules)) => rules,
-        _ => return apply_rejected(moly_layout::RefusalCode::WrongLayer),
-    };
+        .ok_or_else(|| "the site grid is not loaded".to_owned())?;
+    let rules = layout_rules::rules(world, Some(floor))
+        .map_err(|missing| format!("layout rules unavailable: {missing:?}"))?;
     let outcome = moly_layout::apply(&mut layout, &rules, request);
     if outcome.is_err() || request.dry_run {
-        return outcome;
+        return Ok(outcome);
     }
 
     let old: Vec<(moly_layout::Piece, String)> = session
@@ -2028,7 +2023,7 @@ fn apply_in_session(
             None => {
                 let serial = session.next_fixture_uid;
                 let Some(next) = serial.checked_add(1) else {
-                    return apply_rejected(moly_layout::RefusalCode::OutOfBounds);
+                    return Err("the fixture uid counter is exhausted".to_owned());
                 };
                 session.next_fixture_uid = next;
                 format!("offline-edit-{site_id}-{serial}")
@@ -2056,10 +2051,9 @@ fn apply_in_session(
                 },
                 |master| master.grid_size,
             );
-        match item_from_served(&placed.row, uid, grid_size) {
-            Ok(item) => rows.push(item),
-            Err(_) => return apply_rejected(moly_layout::RefusalCode::OutOfBounds),
-        }
+        let item = item_from_served(&placed.row, uid, grid_size)
+            .map_err(|error| format!("a resulting row does not convert: {error}"))?;
+        rows.push(item);
     }
     for (piece, uid) in old {
         if kept.contains(&piece) {
@@ -2076,7 +2070,7 @@ fn apply_in_session(
     session.phase = EditPhase::Browsing;
     session.say("已应用摆放操作（尚未保存）。");
     session.changed();
-    outcome
+    Ok(outcome)
 }
 fn advance_recovery(world: &mut World) {
     actors::maintain(world);

@@ -140,7 +140,7 @@ const METHODS: &[(&str, &str, &str)] = &[
     ),
     (
         "moly.layout.apply",
-        "Runs one atomic layout operation sequence against the open editor session: all operations or none. Operations name the session piece numbers (moly.layout.view placed rows). A dry run returns the results and leaves the draft unchanged; a successful run updates the draft and the original whole-layout save stays the only uplink. Returns status applied with results, or status rejected with index, closed refusal code and results before it.",
+        "Runs one atomic layout operation sequence against the open editor session: all operations or none. Operations name the session piece numbers (moly.layout.view placed rows). A place or move anchor of kind cell takes x and z in the grid's centered frame, the frame of the placed rows' center and corners in moly.layout.view (a grid of width w runs x from -ceil(w/2) to ceil(w/2) - 1, and z likewise with its depth), not a zero-based index, and puts the piece at y 0. A dry run returns the results and leaves the draft unchanged; a successful run updates the draft and the original whole-layout save stays the only uplink. Returns status applied with results, or status rejected with index, closed refusal code, the refusal's detail naming the failing cell or missing input, and results before it. An input the session cannot supply (no open editor, no layout or grid, rules unavailable) is refused as a method error.",
         r#"{"type":"object","properties":{"ops":{"type":"array","minItems":1},"dry_run":{"type":"boolean"},"base":{"type":"integer"},"check_paths":{"type":"boolean"}},"required":["ops"]}"#,
     ),
     (
@@ -614,7 +614,7 @@ fn layout_command(In(params): In<Option<Value>>, world: &mut World) -> BrpResult
 fn layout_apply(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
     let params = object(params, "moly.layout.apply")?;
     let request = layout::apply_request(&params).map_err(refuse)?;
-    let outcome = crate::fixture_edit::apply_request(world, &request);
+    let outcome = crate::fixture_edit::apply_request(world, &request).map_err(refuse)?;
     Ok(layout::apply_outcome(&outcome))
 }
 

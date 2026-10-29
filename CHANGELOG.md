@@ -2,6 +2,12 @@
 
 All notable changes to this project are listed here. Versions follow [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Bug fixes
+
+- **layout:** Name the failing cell or missing input in `moly.layout.apply` rejections through a `detail`, refuse a missing editor session, layout, grid or rule table with its own message instead of a layout code, and document the `cell` anchor's centered grid frame
+
 ## [0.0.5](https://github.com/empty-sekai/moly/compare/v0.0.4...v0.0.5) - 2026-10-28
 
 ### Features

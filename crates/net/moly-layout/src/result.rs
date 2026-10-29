@@ -35,13 +35,16 @@ pub enum RefusalCode {
 /// resolver could offer. `piece` is absent when the operation names none (a
 /// placement) or the named piece is unknown; `nearest` is absent when no cell
 /// was searched or none was feasible. `holder` is the member holding the edit
-/// lease when `code` is [`RefusalCode::Locked`].
+/// lease when `code` is [`RefusalCode::Locked`]. `detail` names the failing
+/// cell and reason, or the input the check found missing, when the executor
+/// could read it from the validator.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Refusal {
     pub code: RefusalCode,
     pub piece: Option<Piece>,
     pub nearest: Option<Cell>,
     pub holder: Option<String>,
+    pub detail: Option<String>,
 }
 
 impl Refusal {
@@ -51,6 +54,7 @@ impl Refusal {
             piece: None,
             nearest: None,
             holder: None,
+            detail: None,
         }
     }
 }

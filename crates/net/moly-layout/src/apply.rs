@@ -10,7 +10,7 @@ use crate::op::{LayoutOp, Layer, Piece, Rot};
 use crate::result::{Apply, ApplyOutcome, Applied, OpResult, Refusal, RefusalCode, Rejected};
 use crate::rules::{FixtureMaster, Rules};
 use crate::validate::{
-    Board, Missing, Piece as PlacedPiece, Refusal as CellRefusal, RowLike,
+    refusal_label, Board, Missing, Piece as PlacedPiece, Refusal as CellRefusal, RowLike,
 };
 use crate::Layout;
 
@@ -66,6 +66,8 @@ fn grid_of(position: GridPosition) -> GridPosition {
     position
 }
 
+/// A row's center and footprint size. A stored row whose corners leave the
+/// signed grid domain has no footprint, so its center cannot be resolved.
 fn row_center(row: &HousingLayoutFixture) -> Result<(GridPosition, Vector3Int), Refusal> {
     let min = grid_of(GridPosition::new(
         row.minimum.x,
@@ -77,8 +79,20 @@ fn row_center(row: &HousingLayoutFixture) -> Result<(GridPosition, Vector3Int), 
         row.maximum.y,
         row.maximum.z,
     ));
-    let (mut center, size) =
-        footprint_to_center_size(min, max).map_err(|_| Refusal::new(RefusalCode::OutOfBounds))?;
+    let (mut center, size) = footprint_to_center_size(min, max).map_err(|error| {
+        let mut refusal = Refusal::new(RefusalCode::OutOfBounds);
+        refusal.detail = Some(format!(
+            "fixture {} stored footprint x {}..={}, y {}..={}, z {}..={} has no center: {error}",
+            row.mysekai_fixture_id,
+            row.minimum.x,
+            row.maximum.x,
+            row.minimum.y,
+            row.maximum.y,
+            row.minimum.z,
+            row.maximum.z,
+        ));
+        refusal
+    })?;
     center.y = row.center_y;
     Ok((center, size))
 }
@@ -97,7 +111,14 @@ fn row_from(
     direction: Direction,
 ) -> Result<HousingLayoutFixture, Refusal> {
     let (min, max) = layout_footprint(center, master.grid_size, direction, master.layout)
-        .map_err(|_| Refusal::new(RefusalCode::OutOfBounds))?;
+        .map_err(|error| {
+            let mut refusal = Refusal::new(RefusalCode::OutOfBounds);
+            refusal.detail = Some(format!(
+                "fixture {fixture} at ({}, {}, {}) does not fit the grid: {error}",
+                center.x, center.y, center.z,
+            ));
+            refusal
+        })?;
     Ok(HousingLayoutFixture {
         package: master.package.clone(),
         mysekai_fixture_id: fixture,
@@ -136,22 +157,31 @@ fn board(layout: &Layout, rules: &Rules) -> Result<Board, Refusal> {
     Board::new(&rows, layout.grid, rules).map_err(missing_refusal)
 }
 
-fn missing_refusal(_missing: Missing) -> Refusal {
+fn missing_refusal(missing: Missing) -> Refusal {
     // A missing input cannot be named by the operation contract's closed
     // codes; the caller only reaches this with an incomplete master set, which
-    // it reports as a layer refusal rather than silently placing.
-    Refusal::new(RefusalCode::WrongLayer)
+    // it reports as a layer refusal rather than silently placing. The detail
+    // names the input so the refusal is not silent.
+    let mut refusal = Refusal::new(RefusalCode::WrongLayer);
+    refusal.detail = Some(format!("input missing: {missing:?}"));
+    refusal
 }
 
 fn cell_refusal(refusal: CellRefusal) -> Refusal {
-    Refusal::new(refusal.code().unwrap_or(RefusalCode::WrongLayer))
+    // The detailed refusal's own code names the failing cell and why in
+    // `detail`; the executor has no input code and reports a missing input as
+    // the layer refusal (see `missing_refusal`).
+    let mut refused = Refusal::new(refusal.code().unwrap_or(RefusalCode::WrongLayer));
+    refused.detail = Some(refusal_label(refusal));
+    refused
 }
 
 fn master(rules: &Rules, fixture: i32) -> Result<&FixtureMaster, Refusal> {
-    rules
-        .masters
-        .get(&fixture)
-        .ok_or_else(|| Refusal::new(RefusalCode::NotOwned))
+    rules.masters.get(&fixture).ok_or_else(|| {
+        let mut refusal = Refusal::new(RefusalCode::NotOwned);
+        refusal.detail = Some(format!("fixture {fixture} is not in the rules' master table"));
+        refusal
+    })
 }
 
 fn placed_row<'a>(layout: &'a Layout, piece: Piece) -> Result<&'a HousingLayoutFixture, Refusal> {
@@ -418,8 +448,9 @@ fn apply_one(
 /// copy, and the caller's layout is replaced only when all of them succeed.
 /// A dry run returns the same result without writing the copy back. The
 /// operation contract's closed refusal codes are used; a missing master or
-/// zone input is reported as a layer refusal because the closed set has no
-/// input code.
+/// zone input is reported as a layer refusal whose `detail` names the input,
+/// because the closed set has no input code. A layout refusal's `detail` names
+/// the failing cell and reason.
 pub fn apply(layout: &mut Layout, rules: &Rules, request: &Apply) -> ApplyOutcome {
     let mut work = layout.clone();
     let mut results = Vec::with_capacity(request.ops.len());

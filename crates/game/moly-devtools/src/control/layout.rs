@@ -250,6 +250,8 @@ fn anchor(value: &Value) -> Result<moly_layout::Anchor, String> {
             .ok_or_else(|| format!("moly.layout.apply: anchor {kind} needs integer {key}"))
     };
     Ok(match kind {
+        // x and z are in the grid's centered frame, the one the view's placed
+        // centers and corners use; the piece goes at y 0.
         "cell" => moly_layout::Anchor::Cell {
             x: int("x")?,
             z: int("z")?,
@@ -401,6 +403,7 @@ fn refusal(value: &moly_layout::Refusal) -> Value {
         "piece": value.piece.map(|piece| piece.0),
         "nearest": value.nearest.map(|cell| [cell.x, cell.z]),
         "holder": value.holder,
+        "detail": value.detail,
     })
 }
 

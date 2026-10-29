@@ -3,8 +3,8 @@
 
 use crate::op::{Layer, Piece};
 
-/// A grid cell in the layout's horizontal plane. The vertical position comes
-/// from the target layer or from the piece's current height.
+/// A grid column in the layout's horizontal plane (x and z). The vertical
+/// position comes from the target layer or from the piece's current height.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Cell {
     pub x: i8,
@@ -12,6 +12,8 @@ pub struct Cell {
 }
 
 impl Cell {
+    /// x and z in the site's centered grid frame (see [`Anchor::Cell`]), not
+    /// zero-based.
     pub fn new(x: i8, z: i8) -> Self {
         Self { x, z }
     }
@@ -42,7 +44,13 @@ pub enum Wall {
 /// caller computed itself.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Anchor {
-    /// An absolute cell; `layer` absent means the piece's own layout type.
+    /// An absolute cell in the site's centered grid frame, not a zero-based
+    /// index: the same frame the placed rows' centers and corners use, whose
+    /// floor cells run from `-ceil(width/2)` to `ceil(width/2) - 1` in x and
+    /// likewise in z with the depth, so a 9-wide grid spans x -5..=4 and an
+    /// 8-wide one -4..=3. The cell resolves
+    /// at y 0, the grid's lowest tile; `layer` absent means the piece's own
+    /// layout type.
     Cell {
         x: i8,
         z: i8,
