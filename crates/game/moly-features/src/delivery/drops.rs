@@ -303,20 +303,8 @@ fn height_at(
     x: f32,
     z: f32,
 ) -> f32 {
-    let point = face
-        .zip(objective)
-        .zip(epoch)
-        .and_then(|((face, surface), epoch)| {
-            (surface.navigation_generation() == face.generation() && surface.is_fresh(epoch))
-                .then(|| surface.navigation_point_at([x, z]))
-                .flatten()
-        });
-    match point {
-        Some(point) => point[1],
-        None => face
-            .and_then(|face| face.surface_height([x, z]))
-            .unwrap_or_else(|| crate::harvest::surface_y(verts, x, z, 0.0)),
-    }
+    face.and_then(|face| crate::harvest::walk_surface_y(face, objective, epoch, x, z))
+        .unwrap_or_else(|| crate::harvest::surface_y(verts, x, z, 0.0))
 }
 
 /// `PlayDropItemSE(rarity)`.

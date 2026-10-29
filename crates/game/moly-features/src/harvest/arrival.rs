@@ -274,13 +274,7 @@ pub fn place(
         return;
     };
     let height_at = |x: f32, z: f32| -> Option<f32> {
-        face.surface_height([x, z]).or_else(|| {
-            surface.surface_height_at([x, z]).or_else(|| {
-                surface
-                    .surface_sample([x, surface.ref_y(), z], f32::MAX)
-                    .map(|point| point[1])
-            })
-        })
+        super::walk_surface_y(face, Some(surface), Some(epoch.0), x, z)
     };
     // GenerateUnclaimedDropItemsAsync: rows already dropped whose threshold
     // is at or above the fixture's hp come back on the ground.

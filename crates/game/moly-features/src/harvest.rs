@@ -594,8 +594,31 @@ pub fn ground_world_verts(
     verts
 }
 
-/// Highest ground vertex within 2 m, or `fallback` without one (a stand-in
-/// for the source's downward raycast on the ground collider).
+/// The height a downward ray through x/z meets the walk surface at: the
+/// collider triangle's plane where one produced the cell's surface, else the
+/// site walk face, else the navigation input triangles of the current epoch
+/// (the nearest one when none covers the point). Harvest objects, drops and
+/// the airplane box all land by this rule, so a point beside raised ground
+/// takes its own ground height and not the raised one's.
+pub fn walk_surface_y(
+    face: &crate::walk_face::WalkFace,
+    objective: Option<&crate::npc_objective::ObjectiveFace>,
+    epoch: Option<u64>,
+    x: f32,
+    z: f32,
+) -> Option<f32> {
+    face.surface_height([x, z]).or_else(|| {
+        let surface = objective.filter(|surface| epoch.is_some_and(|epoch| surface.is_fresh(epoch)))?;
+        surface.surface_height_at([x, z]).or_else(|| {
+            surface
+                .surface_sample([x, surface.ref_y(), z], f32::MAX)
+                .map(|point| point[1])
+        })
+    })
+}
+
+/// Highest ground vertex within 2 m, or `fallback` without one. Only the
+/// last resort for a landing the walk surface cannot answer.
 pub fn surface_y(verts: &[Vec3], x: f32, z: f32, fallback: f32) -> f32 {
     const RADIUS: f32 = 2.0;
     verts

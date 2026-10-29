@@ -8,6 +8,7 @@ All notable changes to this project are listed here. Versions follow [Semantic V
 
 - **layout:** Name the failing cell or missing input in `moly.layout.apply` rejections through a `detail`, refuse a missing editor session, layout, grid or rule table with its own message instead of a layout code, and document the `cell` anchor's centered grid frame
 - **harvest:** Follow the server's stamina in the player model, so stamina edited from the server panel is applied to the gauge and to harvest settlement
+- **harvest:** Land gathered drops, delivery drops and the airplane box at the walk surface height of their landing point, so drops beside raised ground no longer float
 - **world:** Simulate hair and skirt cloth on a character body worn by the player
 
 ## [0.0.5](https://github.com/empty-sekai/moly/compare/v0.0.4...v0.0.5) - 2026-10-28

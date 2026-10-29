@@ -10,7 +10,7 @@
 //! `y + d2 * d1 * r * 0.43` / 0.12 InQuad down, two more draws: yaw and r in
 //! [0.6, 0.8]) and takes radius 1.0 once landed; an unscattered item has
 //! radius 1.0 at once. The landing height stands in for the source's
-//! raycast with the ground-vertex sample.
+//! downward raycast with the walk surface's height at the landing point.
 
 use bevy::gltf::Gltf;
 use bevy::prelude::*;
@@ -98,6 +98,9 @@ pub fn spawn(
     mut objects: Query<&mut HarvestObject>,
     mut seq: ResMut<HarvestDropSeq>,
     mut stats: ResMut<HarvestStats>,
+    face: Option<Res<crate::walk_face::WalkFace>>,
+    objective: Option<Res<crate::npc_objective::ObjectiveFace>>,
+    epoch: Option<Res<crate::site::GroundEpoch>>,
 ) {
     let Some(verts) = ground.0.as_ref() else {
         return;
@@ -151,7 +154,18 @@ pub fn spawn(
             let source_z = batch.position_z as f32 + angle.sin() * range;
             let land_x = -source_x;
             let land_z = source_z;
-            let land_y = super::surface_y(verts, land_x, land_z, height);
+            let land_y = face
+                .as_deref()
+                .and_then(|face| {
+                    super::walk_surface_y(
+                        face,
+                        objective.as_deref(),
+                        epoch.as_deref().map(|epoch| epoch.0),
+                        land_x,
+                        land_z,
+                    )
+                })
+                .unwrap_or_else(|| super::surface_y(verts, land_x, land_z, height));
             let spawn_pos = Vec3::new(-(batch.position_x as f32), 0.0, batch.position_z as f32);
             let landing = Vec3::new(land_x, land_y, land_z);
             let distance = spawn_pos.distance(landing);
