@@ -23,7 +23,7 @@ use bevy::{animation::AnimatedBy, gltf::{Gltf, GltfNode}, prelude::*};
 use moly_assets::source_navigation::SourceObjectIdentity;
 use serde_json::Value;
 
-use super::{array, identity, number, one, referenced, rotation};
+use super::{array, identity, lane, number, one, referenced};
 use crate::{
     audio::{SeClass, SeRequest, SeRequests},
     fixture::{FixtureViewInstance, FixtureViewResolved},
@@ -435,7 +435,7 @@ fn state_program(
             return Err("quaternion curves do not share one Transform".into());
         }
         joint = Some(current);
-        components[component] = Some(rotation::curve(value)?);
+        components[component] = Some(lane::curve(value)?);
     }
     let [Some(x), Some(y), Some(z), Some(w)] = components else {
         return Err("quaternion component set is incomplete".into());

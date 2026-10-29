@@ -3,15 +3,18 @@
 //! Event-only motions are real clips: an empty pose curve set does not make
 //! their AnimationEvents empty. Controller references select the motion; its
 //! authored event selects the output, never a guess based on the clip name.
-//! A bounded single-Transform Euler lane also preserves authored coefficients.
+//! Transform Euler and scale lanes and behaviour-enable lanes (see [`lane`])
+//! also preserve authored coefficients.
 //! Non-interrupting source Trigger bits wait for the next eligible evaluation.
 //! The player's switch plays its source clip `c_000_mov_fixture_action_01_01`.
 //! The view's effect events show and hide its named effect objects (see
 //! [`effect`]).
 //! General controllers and nonzero interruption sources remain separate gaps.
 
+mod dolly;
 mod effect;
-mod rotation;
+mod lane;
+mod tween;
 pub mod catalog_stream;
 pub mod house_door;
 pub mod session;
@@ -98,7 +101,7 @@ struct Program {
     speed: f64,
     events: Vec<ClipEvent>,
     transition_seconds: f64,
-    rotation: Option<rotation::Program>,
+    lanes: lane::Program,
 }
 
 struct Definition {
@@ -109,6 +112,7 @@ struct Definition {
     trigger_order: Option<[Trigger; 2]>,
     on: Arc<Program>,
     off: Arc<Program>,
+    lanes: lane::Plan,
 }
 
 #[derive(Resource, Default)]
@@ -133,7 +137,7 @@ impl Playback {
     fn new(program: Arc<Program>, outputs: Vec<Entity>, previous: Option<Playback>) -> Self {
         let elapsed = program.initial_time;
         let next_event = program.events.partition_point(|event| event.time < elapsed);
-        let previous = if program.rotation.is_some() {
+        let previous = if !program.lanes.is_empty() {
             previous.map(|previous| PreviousPlayback {
                 program: previous.program,
                 elapsed: previous.elapsed,
@@ -146,7 +150,7 @@ impl Playback {
     }
 
     fn transitioning(&self) -> bool {
-        self.program.rotation.is_some()
+        !self.program.lanes.is_empty()
             && self.transition_elapsed < self.program.transition_seconds
     }
 }
@@ -155,7 +159,7 @@ struct Instance {
     on: bool,
     definition: Arc<Definition>,
     playback: Option<Playback>,
-    rotation: Option<rotation::Binding>,
+    lanes: Option<lane::Binding>,
     pending: PendingTriggers,
     outputs: Vec<Entity>,
     effects: effect::Effects,
@@ -359,19 +363,17 @@ fn definition(package: &Value) -> Result<Definition, String> {
     let empty_activate = audited_empty_activation(package, view);
     let on = Arc::new(program(package, machine, "On", &animator_id, empty_activate)?);
     let off = Arc::new(program(package, machine, "Off", &animator_id, empty_activate)?);
-    if on.rotation.is_some()
+    let lanes = lane::plan(&on.lanes, &off.lanes, animator)?;
+    if !lanes.is_empty()
         && (view_component.file != view_id.file || animator_id.file != view_id.file)
     {
-        return Err("Euler receiver components cross serialized-file identity domains".into());
+        return Err("lane receiver components cross serialized-file identity domains".into());
     }
-    if on.rotation.as_ref().map(|rotation| &rotation.target)
-        != off.rotation.as_ref().map(|rotation| &rotation.target)
-    {
-        return Err("On/Off Euler programs do not own the same source Transform".into());
-    }
-    let trigger_order = if on.rotation.is_some() {
-        Some(euler_trigger_order(controller, machine)?)
-    } else { None };
+    let trigger_order = if lanes.is_empty() {
+        None
+    } else {
+        Some(lane_trigger_order(controller, machine)?)
+    };
     Ok(Definition {
         view_game_object: view_id
             .path_id
@@ -383,44 +385,45 @@ fn definition(package: &Value) -> Result<Definition, String> {
         trigger_order,
         on,
         off,
+        lanes,
     })
 }
 
-fn euler_trigger_order(controller: &Value, machine: &Value) -> Result<[Trigger; 2], String> {
+fn lane_trigger_order(controller: &Value, machine: &Value) -> Result<[Trigger; 2], String> {
     let [first, second] = array(machine, "anyStateTransitions")? else {
-        return Err("Euler trigger lane requires exactly the authored On/Off AnyState pair".into());
+        return Err("Lane trigger controller requires exactly the authored On/Off AnyState pair".into());
     };
     let parameters = array(controller, "parameters")?;
     let defaults = array(&controller["defaultValues"], "m_BoolValues")?;
     let read = |transition: &Value| -> Result<(Trigger, usize), String> {
-        let condition = one(array(transition, "conditions")?, "Euler trigger condition")?;
+        let condition = one(array(transition, "conditions")?, "Lane trigger condition")?;
         let trigger = match condition["parameterName"].as_str() {
             Some("On") => Trigger::On,
             Some("Off") => Trigger::Off,
-            _ => return Err("Euler AnyState condition is not an On/Off trigger".into()),
+            _ => return Err("Lane AnyState condition is not an On/Off trigger".into()),
         };
         if condition["mode"].as_u64() != Some(1) {
-            return Err("Euler AnyState condition is not Trigger mode If".into());
+            return Err("Lane AnyState condition is not Trigger mode If".into());
         }
-        let id = condition["parameterId"].as_u64().ok_or("Euler trigger condition has no parameter id")?;
+        let id = condition["parameterId"].as_u64().ok_or("Lane trigger condition has no parameter id")?;
         let rows: Vec<_> = parameters.iter().filter(|parameter| parameter["id"].as_u64() == Some(id)).collect();
         let [parameter] = rows.as_slice() else {
-            return Err("Euler trigger parameter is missing or ambiguous".into());
+            return Err("Lane trigger parameter is missing or ambiguous".into());
         };
         if parameter["type"].as_u64() != Some(9) || parameter["name"].as_str() != Some(trigger.name()) {
-            return Err("Euler condition does not resolve to its source Trigger parameter".into());
+            return Err("Lane condition does not resolve to its source Trigger parameter".into());
         }
         let index = parameter["index"].as_u64().and_then(|index| usize::try_from(index).ok())
-            .ok_or("Euler trigger has no source bool slot")?;
+            .ok_or("Lane trigger has no source bool slot")?;
         if defaults.get(index).and_then(Value::as_bool) != Some(false) {
-            return Err("Euler trigger lane requires authored false initial trigger slots".into());
+            return Err("Lane trigger controller requires authored false initial trigger slots".into());
         }
         Ok((trigger, index))
     };
     let a = read(first)?;
     let b = read(second)?;
     if a.0 == b.0 || a.1 == b.1 {
-        return Err("Euler On/Off triggers do not have distinct source bool slots".into());
+        return Err("Lane On/Off triggers do not have distinct source bool slots".into());
     }
     // Keep array order, not names, FIFO arrival order, or the latest request.
     Ok([a.0, b.0])
@@ -484,16 +487,16 @@ fn program(
     if !array(clip, "pptrCurves")?.is_empty() {
         return Err("this controller needs object-reference animation curves".into());
     }
-    let rotation = rotation::program(clip, animator)?;
-    let transition_seconds = if rotation.is_some() {
+    let lanes = lane::program(clip, animator)?;
+    let transition_seconds = if !lanes.is_empty() {
         if transition["raw"]["m_InterruptionSource"].as_u64() != Some(0)
             || transition["canTransitionToSelf"].as_bool() != Some(true)
         {
-            return Err("Euler trigger lane requires source interruptionSource=0 and self transitions".into());
+            return Err("Lane trigger controller requires source interruptionSource=0 and self transitions".into());
         }
         let seconds = number(transition, "duration")?;
         if transition["hasFixedDuration"].as_bool() != Some(true) || seconds < 0.0 {
-            return Err("Euler playback requires a nonnegative fixed-duration transition".into());
+            return Err("Lane playback requires a nonnegative fixed-duration transition".into());
         }
         if state["raw"]["m_CycleOffset"].as_f64() != Some(0.0)
             || state["raw"]["m_SpeedParamID"].as_u64() != Some(0)
@@ -501,7 +504,7 @@ fn program(
             || state["raw"]["m_TimeParamID"].as_u64() != Some(0)
             || state["raw"]["m_Mirror"].as_bool() != Some(false)
         {
-            return Err("Euler state has unsupported dynamic time or mirror inputs".into());
+            return Err("Lane state has unsupported dynamic time or mirror inputs".into());
         }
         seconds
     } else {
@@ -568,7 +571,7 @@ fn program(
         speed,
         events,
         transition_seconds,
-        rotation,
+        lanes,
     })
 }
 
@@ -592,7 +595,7 @@ fn effect_outputs(world: &World, view: Entity) -> Vec<Entity> {
 struct Prepared {
     definition: Arc<Definition>,
     view: Entity,
-    rotation: Option<rotation::Binding>,
+    lanes: Option<lane::Binding>,
     outputs: Vec<Entity>,
     light: bool,
     one_shot: bool,
@@ -642,14 +645,14 @@ fn prepare_binding(world: &World, target: &FixtureTarget) -> Result<Prepared, St
     if extras["gameObjectId"].as_i64() != Some(definition.view_game_object) {
         return Err("controller receiver differs from the actual FixtureView".into());
     }
-    let rotation = rotation::bind(world, view, &definition)?;
+    let lanes = lane::bind(world, view, &definition)?;
     let outputs = effect_outputs(world, view);
     let needs_emission = definition.on.events.iter().chain(&definition.off.events)
         .any(|event| matches!(&event.effect, Effect::Emission(_)));
     if needs_emission && outputs.is_empty() {
         return Err("fixture's actual emission materials are not ready".into());
     }
-    Ok(Prepared { definition, view, rotation, outputs, light, one_shot })
+    Ok(Prepared { definition, view, lanes, outputs, light, one_shot })
 }
 
 /// The player's gimmick tap, in OnClickGimmickAction's order: resolve the
@@ -661,14 +664,14 @@ pub fn start(
     target: &FixtureTarget,
     generation: u64,
 ) -> Result<(), String> {
-    let Prepared { definition, view, rotation, outputs, light, one_shot } = prepare_binding(world, target)?;
+    let Prepared { definition, view, lanes, outputs, light, one_shot } = prepare_binding(world, target)?;
     world.resource_scope(|world, mut runtime: Mut<Gimmicks>| {
         let runtime = &mut *runtime;
         let instance = runtime.instances.entry(target.clone()).or_insert_with(|| Instance {
             on: false,
             definition: definition.clone(),
             playback: None,
-            rotation,
+            lanes,
             pending: PendingTriggers::default(),
             outputs: outputs.clone(),
             effects: effect::Effects::default(),
@@ -706,7 +709,7 @@ fn start_exclusive(
     target: &FixtureTarget,
     generation: u64,
 ) -> Result<(), String> {
-    let Prepared { definition, view, rotation, outputs, light, one_shot } = prepare_binding(world, target)?;
+    let Prepared { definition, view, lanes, outputs, light, one_shot } = prepare_binding(world, target)?;
     let actor = switch_actor(world)?;
     let owner = FixtureActivityOwner {
         actor: actor.entity,
@@ -719,7 +722,7 @@ fn start_exclusive(
             on: false,
             definition: definition.clone(),
             playback: None,
-            rotation,
+            lanes,
             pending: PendingTriggers::default(),
             outputs: outputs.clone(),
             effects: effect::Effects::default(),
@@ -742,7 +745,7 @@ fn toggle(instance: &mut Instance, definition: &Definition, outputs: Vec<Entity>
     let program = if instance.on { definition.on.clone() } else { definition.off.clone() };
     info!("[fixture-gimmick] {} trigger={} source-clip={:?} outputs={}", target.uid, if instance.on { "On" } else { "Off" }, program.clip, outputs.len());
     instance.outputs = outputs.clone();
-    if instance.rotation.is_some() {
+    if instance.lanes.is_some() {
         // The source business model changed above, but the Animator may
         // still be blending another state. Set only the requested bool.
         instance.pending.set(if instance.on { Trigger::On } else { Trigger::Off });
@@ -856,6 +859,14 @@ pub fn advance(world: &mut World) {
                     }
                 }
             }
+            // Enabled behaviours update before the Animator writes this
+            // update's pose, as scripts update before animation does.
+            if let Some(binding) = &mut instance.lanes {
+                if let Err(reason) = lane::step(world, binding, delta) {
+                    warn!("[fixture-gimmick] {} lane behaviour stopped: {reason}", target.uid);
+                    continue;
+                }
+            }
             let Some(mut playback) = instance.playback.take() else { continue; };
             let mut reset_triggered = false;
             playback.elapsed += f64::from(delta) * playback.program.speed;
@@ -871,9 +882,9 @@ pub fn advance(world: &mut World) {
             // Source controller consumption is separate from event callbacks.
             // Clear only the selected bit now; a callback's new Off survives.
             if let Some(trigger) = consumed { instance.pending.consume(trigger); }
-            if let Some(binding) = &instance.rotation {
-                if let Err(reason) = rotation::apply(world, binding, &playback) {
-                    warn!("[fixture-gimmick] {} Euler playback stopped: {reason}", target.uid);
+            if let Some(binding) = &mut instance.lanes {
+                if let Err(reason) = lane::apply(world, binding, &playback) {
+                    warn!("[fixture-gimmick] {} lane playback stopped: {reason}", target.uid);
                     continue;
                 }
             }
@@ -899,7 +910,7 @@ pub fn advance(world: &mut World) {
                     }
                     Effect::FinishOneShot => {
                         instance.on = false;
-                        if instance.rotation.is_some() {
+                        if instance.lanes.is_some() {
                             // SetTrigger does not replace the active state.
                             // Preserve any pending On and select Off only in
                             // a later eligible controller evaluation.
@@ -923,7 +934,7 @@ pub fn advance(world: &mut World) {
                 instance.playback = Some(Playback::new(
                     instance.definition.off.clone(), playback.outputs.clone(), Some(playback),
                 ));
-            } else if playback.elapsed < playback.program.duration || instance.rotation.is_some() {
+            } else if playback.elapsed < playback.program.duration || instance.lanes.is_some() {
                 instance.playback = Some(playback);
             }
         }

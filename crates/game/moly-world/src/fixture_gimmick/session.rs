@@ -10,7 +10,7 @@ pub(super) struct Lease {
     scope: Scope,
     previous: Option<Instance>,
     emission: Vec<(Entity, Option<FixtureEmissionOverride>)>,
-    rotation: Option<(Entity, Quat)>,
+    lanes: Vec<(Entity, Transform)>,
     stop_after: Option<f32>,
     one_shot: bool,
 }
@@ -23,21 +23,21 @@ fn acquire(world: &mut World, target: &FixtureTarget, owner: Entity, scope: Scop
     if let Some(lease) = world.resource::<Gimmicks>().leases.get(target) {
         return if lease.owner == owner { Ok(()) } else { Err("fixture controller is owned by another performance".into()) };
     }
-    let Prepared { definition, rotation, outputs, one_shot, .. } = prepare_binding(world, target)?;
+    let Prepared { definition, lanes, outputs, one_shot, .. } = prepare_binding(world, target)?;
     let emission = outputs.iter().map(|entity| (*entity, world.get::<FixtureEmissionOverride>(*entity).copied())).collect();
-    let rotation_snapshot = rotation.as_ref().and_then(|binding| super::rotation::snapshot(world, binding));
+    let pose_snapshot = lanes.as_ref().map(|binding| super::lane::snapshot(world, binding)).unwrap_or_default();
     let mut runtime = world.resource_mut::<Gimmicks>();
     let previous = runtime.instances.remove(target);
-    runtime.instances.insert(target.clone(), Instance { on: false, definition, playback: None, rotation,
+    runtime.instances.insert(target.clone(), Instance { on: false, definition, playback: None, lanes,
         pending: PendingTriggers::default(), outputs, effects: super::effect::Effects::default() });
-    runtime.leases.insert(target.clone(), Lease { owner, scope, previous, emission, rotation: rotation_snapshot,
+    runtime.leases.insert(target.clone(), Lease { owner, scope, previous, emission, lanes: pose_snapshot,
         stop_after: None, one_shot });
     Ok(())
 }
 
 fn trigger(instance: &mut Instance, on: bool) {
     instance.on = on;
-    if instance.rotation.is_some() {
+    if instance.lanes.is_some() {
         instance.pending.set(if on { Trigger::On } else { Trigger::Off });
     } else {
         let program = if on { instance.definition.on.clone() } else { instance.definition.off.clone() };
@@ -101,8 +101,8 @@ pub fn finish_owner(world: &mut World, owner: Entity) {
                 if let Some(mode) = prior { world.entity_mut(entity).insert(mode); }
                 else { world.entity_mut(entity).remove::<FixtureEmissionOverride>(); }
             }
-            if let Some((entity, rotation)) = lease.rotation {
-                if let Some(mut transform) = world.get_mut::<Transform>(entity) { transform.rotation = rotation; }
+            for (entity, pose) in lease.lanes {
+                if let Some(mut transform) = world.get_mut::<Transform>(entity) { *transform = pose; }
             }
             if let Some(previous) = lease.previous { runtime.instances.insert(target.clone(), previous); }
             info!("[fixture-gimmick] owner {:?} restored {}", owner, target.uid);
@@ -150,7 +150,7 @@ mod tests {
         let old = world.spawn_empty().id(); let current = world.spawn_empty().id();
         let target = FixtureTarget { entity: world.spawn_empty().id(), uid: "fixture-a".into() };
         world.resource_mut::<Gimmicks>().leases.insert(target, Lease { owner: current, scope: Scope::Talk,
-            previous: None, emission: vec![], rotation: None, stop_after: Some(3.), one_shot: false });
+            previous: None, emission: vec![], lanes: vec![], stop_after: Some(3.), one_shot: false });
         finish_owner(&mut world, old);
         assert!(active(world.resource::<Gimmicks>(), current));
         assert!(!active(world.resource::<Gimmicks>(), old));
@@ -160,7 +160,7 @@ mod tests {
         let mut world = World::new(); world.init_resource::<Gimmicks>();
         let owner = world.spawn_empty().id(); let target = FixtureTarget { entity: world.spawn_empty().id(), uid: "talk-fixture".into() };
         world.resource_mut::<Gimmicks>().leases.insert(target, Lease { owner, scope: Scope::Talk,
-            previous: None, emission: vec![], rotation: None, stop_after: None, one_shot: false });
+            previous: None, emission: vec![], lanes: vec![], stop_after: None, one_shot: false });
         cancel_previews(&mut world); assert!(active(world.resource::<Gimmicks>(), owner));
     }
 }
