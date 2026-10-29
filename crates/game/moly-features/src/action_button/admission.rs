@@ -48,11 +48,6 @@ pub enum FixtureKind {
 pub enum Availability {
     Available,
     Unavailable,
-    /// JP GetNearestPlayerLocatorIndex reads the player locator list, which
-    /// only timeline furniture with player rows has. With a non-empty attach
-    /// array and no such list the source raises inside AddShowButtonStack,
-    /// so the fixture is neither pushed nor removed.
-    Raises,
 }
 
 /// The stack effect of one rising edge, after the lock check.
@@ -168,11 +163,6 @@ impl AdmissionInputs<'_> {
             Availability::Unavailable => {
                 return Ok(Enter::Skip("IsActionButtonTypeAvailable is false"))
             }
-            Availability::Raises => {
-                return Ok(Enter::Skip(
-                    "the source raises reading a missing player locator list",
-                ))
-            }
             Availability::Available => {}
         }
         Ok(if self.can_action(probe)? {
@@ -194,12 +184,10 @@ impl AdmissionInputs<'_> {
         }
         let seats = self.seats(probe, &ids)?;
         let region = self.region()?;
-        if seats.is_none() && region == NavMeshRegion::Jp {
-            return Ok(Availability::Raises);
-        }
         let navigation = self.navigation(probe.player)?;
-        // GetNearestPlayerLocatorIndex: without a qualifying seat (or, in CN,
-        // without a seat list) it returns its default, index 0.
+        // GetNearestPlayerLocatorIndex: without a qualifying seat, or without
+        // a seat list (furniture whose action is not a timeline), it returns
+        // its default, index 0.
         let mut nearest: Option<(f32, usize)> = None;
         for seat in seats.iter().flatten() {
             if self.slot_in_use(probe, seat.slot)?

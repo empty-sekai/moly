@@ -1799,10 +1799,6 @@ fn remove_not_colliding(
         match available {
             Ok(Availability::Available) => {}
             Ok(Availability::Unavailable) => removed.push(key),
-            Ok(Availability::Raises) => warn!(
-                "[action_button] {} is stacked although the source raises on its availability; kept",
-                target.uid
-            ),
             Err(deferred) => info!(
                 "[action_button] {} availability undecided while pruning ({}); kept",
                 target.uid, deferred.reason
