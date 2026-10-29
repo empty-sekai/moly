@@ -13,7 +13,7 @@
 //! (`Mysekai/Indoor/BG`, queue 2070, cull off, depth test less-equal with
 //! depth write, no blending); its program puts the vertices straight into clip
 //! space at that eye distance and paints a vertical two-colour gradient
-//! (`shaders/plain_background.wgsl`). `ChangePlainBgTexture` sets a main
+//! (`shaders/plain_background.wesl`). `ChangePlainBgTexture` sets a main
 //! texture that this program never samples.
 //!
 //! The program writes the depth-buffer value of that eye distance (from
@@ -66,11 +66,11 @@ impl From<&PlainBackgroundMaterial> for PlainBackgroundKey {
 
 impl Material for PlainBackgroundMaterial {
     fn vertex_shader() -> ShaderRef {
-        "embedded://moly_world/shaders/plain_background.wgsl".into()
+        "embedded://moly_world/shaders/plain_background.wesl".into()
     }
 
     fn fragment_shader() -> ShaderRef {
-        "embedded://moly_world/shaders/plain_background.wgsl".into()
+        "embedded://moly_world/shaders/plain_background.wesl".into()
     }
 
     fn enable_prepass() -> bool {
@@ -312,7 +312,7 @@ fn show(site: Option<Res<SiteActive>>, mut quads: Query<&mut Visibility, With<Pl
 }
 
 pub fn install(app: &mut App) {
-    bevy::asset::embedded_asset!(app, "shaders/plain_background.wgsl");
+    bevy::asset::embedded_asset!(app, "shaders/plain_background.wesl");
     crate::gpu_image_release::prepare_after_images::<PlainBackgroundMaterial>(app);
     app.add_plugins(MaterialPlugin::<PlainBackgroundMaterial>::default())
         .add_systems(Startup, load)

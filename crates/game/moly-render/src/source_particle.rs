@@ -323,7 +323,7 @@ impl RecentParticleAssets {
 
 /// A draw's assets join [`RecentParticleAssets`] as the draw is removed.
 pub fn keep_released(
-    remove: On<Remove, SourceParticle>,
+    remove: On<Remove<SourceParticle>>,
     particles: Query<&SourceParticle>,
     textures: Res<Assets<SourceTextureAsset>>,
     mut recent: ResMut<RecentParticleAssets>,

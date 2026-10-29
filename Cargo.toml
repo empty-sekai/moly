@@ -26,14 +26,12 @@ members = [
     "crates/app/moly-launcher",
     "crates/app/moly-server-host",
 ]
-exclude = ["crates/vendor/cpal", "crates/vendor/bevy_render"]
+exclude = ["crates/vendor/cpal"]
 
 # CPAL 0.15.3's WebAudio backend retains expired buffer deadlines after a
 # main-thread stall. Keep the small transport fix in the fingerprinted sources.
 [patch.crates-io]
 cpal = { path = "crates/vendor/cpal" }
-# Backport Bevy #24960: empty meshes must skip copies as well as allocation.
-bevy_render = { path = "crates/vendor/bevy_render" }
 
 [workspace.package]
 edition = "2021"
@@ -46,7 +44,7 @@ license = "AGPL-3.0-only"
 # Explicit expansion of Bevy 0.18's default 2d/3d/ui feature groups. Keep the
 # existing renderer, audio, animation, UI, codecs and native platform support;
 # omit only engine gizmos and picking. Moly owns its gesture/raycast UI routes.
-bevy = { version = "0.19.1", default-features = false, features = [
+bevy = { version = "0.20.1", default-features = false, features = [
     "async_executor", "bevy_asset", "bevy_input_focus", "bevy_log",
     "bevy_state", "bevy_window", "custom_cursor", "reflect_auto_register",
     "std", "android-game-activity", "bevy_gilrs",

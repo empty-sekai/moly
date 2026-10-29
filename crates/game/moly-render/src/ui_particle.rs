@@ -49,7 +49,7 @@
 //!
 //! The draw: the UI camera draws the pass tagged `SRPDefaultUnlit` (the pass
 //! without a LightMode) once per batch; see [`admission`]. Three programs,
-//! selected by the material's shader name (`shaders/ui_particle.wgsl`):
+//! selected by the material's shader name (`shaders/ui_particle.wesl`):
 //! - `Mysekai/Effect/UI-Uber`: the texture times the vertex colour, the rgb
 //!   times alpha for `_BlendMode` 2; pass blend `[_SrcBlend] [_DstBlend]`,
 //!   `ColorMask RGB`, `Cull Off`, `ZTest LEqual`, `ZWrite Off`.
@@ -108,7 +108,7 @@ use bevy::render::render_resource::{
     AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
 };
 use bevy::shader::ShaderRef;
-use bevy::sprite_render::{AlphaMode2d, Material2d, Material2dKey, Material2dPlugin};
+use bevy::sprite_render::{AlphaMode2d, Material2d, Material2dKey, Material2dPipeline, Material2dPlugin};
 use bevy::window::PrimaryWindow;
 use moly_assets::json::JsonAsset;
 use moly_assets::material_passes::SourceRenderState;
@@ -315,6 +315,7 @@ impl Material2d for UiParticleMaterial {
         AlphaMode2d::Blend
     }
     fn specialize(
+        _pipeline: &Material2dPipeline,
         descriptor: &mut RenderPipelineDescriptor,
         layout: &MeshVertexBufferLayoutRef,
         key: Material2dKey<Self>,
@@ -338,9 +339,9 @@ impl Plugin for UiParticlePlugin {
             .resource_mut::<Assets<Shader>>()
             .insert(
                 SHADER.id(),
-                Shader::from_wgsl(
-                    include_str!("shaders/ui_particle.wgsl"),
-                    "moly_render/shaders/ui_particle.wgsl",
+                Shader::from_wesl(
+                    include_str!("shaders/ui_particle.wesl"),
+                    "moly_render/shaders/ui_particle.wesl",
                 ),
             )
             .expect("UI particle shader installation");

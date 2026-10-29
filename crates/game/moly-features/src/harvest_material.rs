@@ -426,37 +426,38 @@ impl AsBindGroup for HarvestToolMaterial {
         "harvest_tool_material"
     }
     fn bind_group_data(&self) -> Self::Data {}
-    fn unprepared_bind_group(
+    fn build_bind_group(
         &self,
         _layout: &BindGroupLayout,
         _device: &RenderDevice,
         (env, images): &mut SystemParamItem<'_, '_, Self::Param>,
         _force_no_bindless: bool,
-    ) -> Result<UnpreparedBindGroup, AsBindGroupError> {
+        output: &mut BindGroupBuilder,
+    ) -> Result<(), AsBindGroupError> {
         let image = images
             .get(&self.main_tex)
             .ok_or(AsBindGroupError::RetryNextUpdate)?;
-        let bytes = self.options.iter().flat_map(|v| v.to_le_bytes()).collect();
-        Ok(UnpreparedBindGroup {
-            bindings: BindingResources(vec![
-                (0, OwnedBindingResource::Data(OwnedData(bytes))),
-                (1, OwnedBindingResource::Buffer(env.buffer.clone())),
+        let bytes: Vec<u8> = self.options.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let options = crate::render::gpu::push_data(output, &bytes);
+        output.binding_resources.0.extend([
+                (0, options),
+                (1, UnpreparedBindingResource::Buffer(env.buffer.clone())),
                 (
                     2,
-                    OwnedBindingResource::TextureView(
+                    UnpreparedBindingResource::TextureView(
                         TextureViewDimension::D2,
                         image.texture_view.clone(),
                     ),
                 ),
                 (
                     3,
-                    OwnedBindingResource::Sampler(
+                    UnpreparedBindingResource::Sampler(
                         SamplerBindingType::Filtering,
                         image.sampler.clone(),
                     ),
                 ),
-            ]),
-        })
+        ]);
+        Ok(())
     }
     fn bind_group_layout_entries(
         _device: &RenderDevice,
@@ -497,7 +498,7 @@ impl AsBindGroup for HarvestToolMaterial {
 
 impl Material for HarvestToolMaterial {
     fn vertex_shader() -> ShaderRef {
-        "embedded://moly_features/shaders/harvest_tool.wgsl".into()
+        "embedded://moly_features/shaders/harvest_tool.wesl".into()
     }
     fn fragment_shader() -> ShaderRef {
         Self::vertex_shader()
@@ -663,7 +664,7 @@ pub struct HarvestMaterialPlugin;
 
 impl Plugin for HarvestMaterialPlugin {
     fn build(&self, app: &mut App) {
-        bevy::asset::embedded_asset!(app, "shaders/harvest_tool.wgsl");
+        bevy::asset::embedded_asset!(app, "shaders/harvest_tool.wesl");
         app.add_plugins(MaterialPlugin::<HarvestToolMaterial>::default())
             .add_systems(Update, (switch_materials, switch_drop_materials));
     }

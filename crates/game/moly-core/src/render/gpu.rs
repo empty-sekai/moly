@@ -11,9 +11,9 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use bevy::diagnostic::FrameCount;
 use bevy::prelude::*;
 use bevy::render::render_resource::{
-    AddressMode, BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutId, BindingResource,
+    AddressMode, BindGroup, BindGroupBuilder, BindGroupEntry, BindGroupLayout, BindGroupLayoutId, BindingResource,
     Buffer, BufferBinding, BufferId, FilterMode, MipmapFilterMode, Sampler, SamplerDescriptor,
-    SamplerId, TextureView, TextureViewId,
+    SamplerId, TextureView, TextureViewId, UnpreparedBindingResource,
 };
 use bevy::render::renderer::RenderDevice;
 use bevy::render::{Extract, ExtractSchedule, RenderApp, RenderStartup};
@@ -27,6 +27,15 @@ pub fn store_bits<const N: usize>(slot: &mut [f32; N], value: [f32; N]) -> bool 
     }
     *slot = value;
     true
+}
+
+/// Appends `bytes` to the plain-data region of `output` and returns the
+/// binding resource that refers to that range, for a uniform block whose
+/// contents the material encodes itself.
+pub fn push_data(output: &mut BindGroupBuilder, bytes: &[u8]) -> UnpreparedBindingResource {
+    let start = output.data_buffer.len() as u32;
+    output.data_buffer.extend_from_slice(bytes);
+    UnpreparedBindingResource::Data(start..output.data_buffer.len() as u32)
 }
 
 /// Samplers whose descriptors never change, created once at render startup and

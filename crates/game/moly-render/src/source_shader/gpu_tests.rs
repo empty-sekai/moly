@@ -387,7 +387,7 @@ fn actual_source_program_binding_pixels() {
             .recv_timeout(Duration::from_secs(30))
             .unwrap()
             .unwrap();
-        let pixels = readback.slice(..).get_mapped_range().to_vec();
+        let pixels = readback.slice(..).get_mapped_range().expect("mapped range").to_vec();
         readback.unmap();
         assert_eq!(pixels.len(), (size * size * 4) as usize);
         let clear = &pixels[..4];

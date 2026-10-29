@@ -73,7 +73,7 @@ pub struct UberT1Params {
 }
 
 impl UberT1Params {
-    /// 手写绑定组用的字节序；槽序与 `shaders/uber_particle.wgsl` 的
+    /// 手写绑定组用的字节序；槽序与 `shaders/uber_particle.wesl` 的
     /// `UberT1Params` 是契约，也与 `fixture_emission` 的对象块前四槽一致。
     fn bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(80);
@@ -153,35 +153,37 @@ impl AsBindGroup for UberParticleMaterial {
         "uber_particle_material"
     }
 
-    fn unprepared_bind_group(
+    fn build_bind_group(
         &self,
         _layout: &BindGroupLayout,
         _render_device: &RenderDevice,
         (env_buffer, images): &mut SystemParamItem<'_, '_, Self::Param>,
         _force_no_bindless: bool,
-    ) -> Result<UnpreparedBindGroup, AsBindGroupError> {
+        output: &mut BindGroupBuilder,
+    ) -> Result<(), AsBindGroupError> {
         let base = images
             .get(&self.base_map)
             .ok_or(AsBindGroupError::RetryNextUpdate)?;
-        let bindings = BindingResources(vec![
-            (0, OwnedBindingResource::Data(OwnedData(self.params.bytes()))),
+        let bindings = UnpreparedBindingResources(vec![
+            (0, crate::render::gpu::push_data(output, &self.params.bytes())),
             (
                 1,
-                OwnedBindingResource::TextureView(
+                UnpreparedBindingResource::TextureView(
                     TextureViewDimension::D2,
                     base.texture_view.clone(),
                 ),
             ),
             (
                 2,
-                OwnedBindingResource::Sampler(SamplerBindingType::Filtering, base.sampler.clone()),
+                UnpreparedBindingResource::Sampler(SamplerBindingType::Filtering, base.sampler.clone()),
             ),
             // binding 3：站点全局量，与家具/站点材质共用同一个 buffer。
             // `_GlobalPhenomenaDirectionalLightColor` 是逐帧全局量，不能烘进
             // 材质——烘进去天气一换材质就是陈旧值，而材质不会因此重建。
-            (3, OwnedBindingResource::Buffer(env_buffer.buffer.clone())),
+            (3, UnpreparedBindingResource::Buffer(env_buffer.buffer.clone())),
         ]);
-        Ok(UnpreparedBindGroup { bindings })
+        output.binding_resources.0.extend(bindings.0);
+        Ok(())
     }
 
     fn bind_group_data(&self) -> Self::Data {
@@ -302,7 +304,7 @@ impl Material for UberParticleMaterial {
         // view-independent. The matching draw command installs the same layout.
         descriptor.layout[1] = crate::weather_depth::raw_depth_layout();
         // 顶点布局显式装配：默认的网格布局不含自定义流那两条，而源程序的
-        // 逐粒子选择器要从它们取分量。槽位与 `shaders/uber_particle.wgsl`
+        // 逐粒子选择器要从它们取分量。槽位与 `shaders/uber_particle.wesl`
         // 的 `UberVertex` 是契约。
         descriptor.vertex.buffers = vec![layout.0.get_layout(&[
             Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
@@ -364,9 +366,9 @@ pub fn install(app: &mut App) {
 pub fn load(mut shaders: ResMut<Assets<Shader>>) {
     let _ = shaders.insert(
         UBER_SHADER.id(),
-        Shader::from_wgsl(
-            include_str!("shaders/uber_particle.wgsl"),
-            "moly_render/src/shaders/uber_particle.wgsl".to_owned(),
+        Shader::from_wesl(
+            include_str!("shaders/uber_particle.wesl"),
+            "moly_render/src/shaders/uber_particle.wesl".to_owned(),
         ),
     );
 }

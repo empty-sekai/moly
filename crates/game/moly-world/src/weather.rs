@@ -243,6 +243,7 @@ pub use crate::ui_inputs::{PhenomenonCatalogue, PhenomenonOption};
 /// 一帧解出的后处理轴值（淡化权重已折进强度），主世界每帧写、抽取到渲染
 /// 世界。两条轴全关时节点整段旁路。
 #[derive(Debug, Clone, Copy, Resource, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct WeatherPostParams {
     pub diff_on: bool,
     pub diff_intensity: f32,
@@ -420,9 +421,9 @@ fn load(mut commands: Commands, mut shaders: ResMut<Assets<Shader>>, server: Res
     // 返回的句柄就是钉死的 WEATHER_SHADER，丢弃以免 must_use 告警。
     let _ = shaders.insert(
         WEATHER_SHADER.id(),
-        Shader::from_wgsl(
-            include_str!("shaders/weather_post.wgsl"),
-            "moly_world/src/shaders/weather_post.wgsl".to_owned(),
+        Shader::from_wesl(
+            include_str!("shaders/weather_post.wesl"),
+            "moly_world/src/shaders/weather_post.wesl".to_owned(),
         ),
     );
     commands.insert_resource(WeatherRun::default());
@@ -1260,7 +1261,7 @@ fn switch_phenomenon(
 
 // ---- 渲染侧 ---------------------------------------------------------------
 
-/// uniform 块的 GPU 形：与 `weather_post.wgsl` 的 `WeatherPostUniform` 逐 lane
+/// uniform 块的 GPU 形：与 `weather_post.wesl` 的 `WeatherPostUniform` 逐 lane
 /// 对齐（12 个 vec4，192 字节）。
 #[derive(Debug, Clone, Copy, ShaderType)]
 struct WeatherPostUniform {
@@ -2186,6 +2187,7 @@ fn fullscreen_pass(
 /// 天气系统插件：主世界装载/切换/逐帧写出，渲染世界 uniform + 金字塔 +
 /// Core3d 后处理系统（排在色调映射之后）。
 #[derive(Component, Clone, bevy::render::extract_component::ExtractComponent)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct TransparentCapture;
 
 pub struct WeatherPlugin;

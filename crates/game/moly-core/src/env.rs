@@ -39,13 +39,14 @@ const DROPITEM_GLOBALS: [f32; 4] = [0.4, 0.04, 0.65, 1.0];
 const SKY_BOTTOM_COLOR_NEUTRAL: [f32; 4] = [0.5, 0.5, 0.5, 1.0];
 
 /// 表的 GPU 布局：26 个 vec4 槽、416 字节。槽序是本文件与
-/// `shaders/site_material.wgsl` / `shaders/fixture_material.wgsl` 里 `SiteEnv`
+/// `shaders/site_material.wesl` / `shaders/fixture_material.wesl` 里 `SiteEnv`
 /// 结构体之间的契约，两边同改。
 pub const ENV_SLOTS: usize = 26;
 pub const ENV_BYTES: usize = ENV_SLOTS * 16;
 
 /// 一帧的站点全局量。
 #[derive(Debug, Clone, Resource, ExtractResource)]
+#[extract_app(RenderApp)]
 pub struct SiteEnv {
     pub globals: FieldObjectGlobals,
     pub drop_shadow_color: [f32; 4],

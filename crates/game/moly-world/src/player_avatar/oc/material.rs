@@ -28,7 +28,7 @@ const SHADER: Handle<Shader> = Handle::Uuid(
 );
 
 /// Parameter uniform: two vec4 slots. The slot order is a contract with
-/// `OcParams` in `shaders/oc_material.wgsl`.
+/// `OcParams` in `shaders/oc_material.wesl`.
 pub const PARAMS_BYTES: usize = 2 * 16;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -110,23 +110,24 @@ impl AsBindGroup for OcMaterial {
         "oc_material"
     }
 
-    fn unprepared_bind_group(
+    fn build_bind_group(
         &self,
         _layout: &BindGroupLayout,
         _render_device: &RenderDevice,
         (env_buffer, images, fallback): &mut bevy::ecs::system::SystemParamItem<'_, '_, Self::Param>,
         _force_no_bindless: bool,
-    ) -> Result<UnpreparedBindGroup, AsBindGroupError> {
+        output: &mut BindGroupBuilder,
+    ) -> Result<(), AsBindGroupError> {
         let image = match &self.base_texture {
             Some(handle) => images.get(handle).ok_or(AsBindGroupError::RetryNextUpdate)?,
             None => &fallback.d2,
         };
-        let bindings = BindingResources(vec![
-            (0, OwnedBindingResource::Data(OwnedData(self.params.bytes()))),
-            (1, OwnedBindingResource::Buffer(env_buffer.buffer.clone())),
+        let bindings = UnpreparedBindingResources(vec![
+            (0, crate::render::gpu::push_data(output, &self.params.bytes())),
+            (1, UnpreparedBindingResource::Buffer(env_buffer.buffer.clone())),
             (
                 2,
-                OwnedBindingResource::TextureView(
+                UnpreparedBindingResource::TextureView(
                     TextureViewDimension::D2,
                     image.texture_view.clone(),
                 ),
@@ -134,13 +135,14 @@ impl AsBindGroup for OcMaterial {
             // The texture's own sampler: the model file's wrap and filter modes.
             (
                 3,
-                OwnedBindingResource::Sampler(
+                UnpreparedBindingResource::Sampler(
                     SamplerBindingType::Filtering,
                     image.sampler.clone(),
                 ),
             ),
         ]);
-        Ok(UnpreparedBindGroup { bindings })
+        output.binding_resources.0.extend(bindings.0);
+        Ok(())
     }
 
     fn bind_group_data(&self) -> Self::Data {
@@ -247,9 +249,9 @@ pub fn install(app: &mut App) {
         .resource_mut::<Assets<Shader>>()
         .insert(
             SHADER.id(),
-            Shader::from_wgsl(
-                include_str!("../../shaders/oc_material.wgsl"),
-                "moly_world/src/shaders/oc_material.wgsl".to_owned(),
+            Shader::from_wesl(
+                include_str!("../../shaders/oc_material.wesl"),
+                "moly_world/src/shaders/oc_material.wesl".to_owned(),
             ),
         )
         .expect("OC material shader installation");

@@ -2,7 +2,7 @@
 //!
 //! 一张光源向正交深度图（单图单矩阵，非级联、无图集），
 //! Core3d 图内自建节点在主 pass 之前直画全部 caster；消费侧是四族站点
-//! 材质（`shaders/site_material.wgsl` 的 DropShadow 律消费口，绑定
+//! 材质（`shaders/site_material.wesl` 的 DropShadow 律消费口，绑定
 //! group 3 的 10/11/12）。节点与绘制范式：weather.rs 的 render graph
 //! 节点 + bevy_pbr volumetric_fog 的 MeshAllocator 手画（0.18 registry
 //! 逐一核对，非记忆）。
@@ -90,7 +90,7 @@ use std::sync::Mutex;
 
 use bevy::asset::uuid::Uuid;
 use bevy::core_pipeline::{Core3d, Core3dSystems};
-use bevy::math::bounding::Aabb3d;
+use bevy::shape::Aabb3d;
 use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
 use bevy::mesh::{Mesh, MeshVertexBufferLayoutRef};
 use bevy::prelude::*;
@@ -260,7 +260,7 @@ fn mat4_bytes(matrix: Mat4, bytes: &mut Vec<u8>) {
     }
 }
 
-/// 消费块的 Rust 形：槽序与 `shaders/site_material.wgsl` 的 `SiteShadow`
+/// 消费块的 Rust 形：槽序与 `shaders/site_material.wesl` 的 `SiteShadow`
 /// 是契约，两边同改。摊平序 = 矩阵四列 + size + params。
 struct ShadowConsumer {
     world_to_shadow: Mat4,
@@ -968,6 +968,7 @@ fn queue_depth_pipeline(
             label: Some("site_shadow_depth_skinned_pipeline".into()),
             layout: vec![gpu.depth_layout.clone(), gpu.skin_layout.clone()],
             vertex: VertexState {
+                constants: vec![],
                 shader: SHADOW_DEPTH_SHADER.clone(),
                 shader_defs: vec![],
                 entry_point: Some("shadow_depth_skinned_vertex".into()),
@@ -1014,6 +1015,7 @@ fn queue_depth_pipeline(
             label: Some("site_shadow_depth_pipeline".into()),
             layout: vec![gpu.depth_layout.clone()],
             vertex: VertexState {
+                constants: vec![],
                 shader: SHADOW_DEPTH_SHADER.clone(),
                 shader_defs: vec![],
                 entry_point: Some(entry_point.into()),
@@ -1792,7 +1794,10 @@ fn finish_pending_probe(world: &World, render_context: &RenderContext) {
     }
 
     // 深度统计：非清 texel 数（clear 是 1.0，光栅只会更小）与最小深度。
-    let data = buffer.slice(..).get_mapped_range();
+    let Ok(data) = buffer.slice(..).get_mapped_range() else {
+        warn!("主光阴影账目：深度图读回 map 范围无效，本次读回作废");
+        return;
+    };
     let texel = |x: usize, y: usize| -> f32 {
         let i = (y * SHADOWMAP_SIZE as usize + x) * 4;
         f32::from_le_bytes(data[i..i + 4].try_into().unwrap())

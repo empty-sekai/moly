@@ -10,7 +10,7 @@
 //! tween's completion and the wipe stays covering the screen. `FadeIn` plays
 //! `se_transition_start` and tweens back to 0.75 with `OutCirc`; at its
 //! completion the wipe is hidden and the callback runs. The laws are in
-//! [`super::door_law`], the program in `shaders/site_wipe_circle.wgsl`.
+//! [`super::door_law`], the program in `shaders/site_wipe_circle.wesl`.
 //!
 //! The prefab is requested at startup (the release root carries it or not);
 //! everything the draw depends on is checked against it: the canvas render
@@ -137,9 +137,9 @@ pub fn install(app: &mut App) {
         .resource_mut::<Assets<Shader>>()
         .insert(
             SHADER.id(),
-            Shader::from_wgsl(
-                include_str!("../shaders/site_wipe_circle.wgsl"),
-                "moly_features/src/shaders/site_wipe_circle.wgsl".to_owned(),
+            Shader::from_wesl(
+                include_str!("../shaders/site_wipe_circle.wesl"),
+                "moly_features/src/shaders/site_wipe_circle.wesl".to_owned(),
             ),
         )
         .expect("site wipe shader installation");

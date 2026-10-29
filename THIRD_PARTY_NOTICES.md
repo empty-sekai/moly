@@ -131,11 +131,3 @@ software is freely granted, provided that this notice
 is preserved.
 ====================================================
 ```
-
-## Bevy rendering backport
-
-The vendored `bevy_render` 0.19.1 crate retains its MIT / Apache-2.0 licenses
-in [LICENSE-MIT](crates/vendor/bevy_render/LICENSE-MIT) and
-[LICENSE-APACHE](crates/vendor/bevy_render/LICENSE-APACHE).
-[MOLY-PATCH.md](crates/vendor/bevy_render/MOLY-PATCH.md) records the upstream
-empty-mesh copy fix and original archive identity.

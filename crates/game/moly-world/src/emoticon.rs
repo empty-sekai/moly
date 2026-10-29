@@ -68,7 +68,7 @@ const EMOTICON_SHADER: Handle<Shader> = Handle::Uuid(
     PhantomData,
 );
 
-/// 表情材质：sprite 子矩形与粒子 billboard 共用一条片元链（`emoticon.wgsl`）。
+/// 表情材质：sprite 子矩形与粒子 billboard 共用一条片元链（`emoticon.wesl`）。
 ///
 /// 两族的逐粒子/逐槽 uv 差异（sprite 的子矩形、片表动画的格位、基础图
 /// 旋转）全部折进 UV_0 顶点流，uniform 侧只留材质级的 `base_st`
@@ -132,9 +132,9 @@ pub fn load(
     // 返回的句柄就是钉死的 EMOTICON_SHADER，丢弃以免 must_use 告警。
     let _ = shaders.insert(
         EMOTICON_SHADER.id(),
-        Shader::from_wgsl(
-            include_str!("shaders/emoticon.wgsl"),
-            "moly_world/src/shaders/emoticon.wgsl".to_owned(),
+        Shader::from_wesl(
+            include_str!("shaders/emoticon.wesl"),
+            "moly_world/src/shaders/emoticon.wesl".to_owned(),
         ),
     );
     commands.insert_resource(EmoticonsHandle(

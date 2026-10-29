@@ -837,7 +837,7 @@ impl RoomAppearanceState {
 }
 
 pub fn install(app: &mut App) {
-    bevy::asset::embedded_asset!(app, "shaders/room_shell.wgsl");
+    bevy::asset::embedded_asset!(app, "shaders/room_shell.wesl");
     crate::gpu_image_release::prepare_after_images::<RoomShellMaterial>(app);
     app.add_plugins(MaterialPlugin::<RoomShellMaterial>::default())
         .init_resource::<RoomAppearance>()

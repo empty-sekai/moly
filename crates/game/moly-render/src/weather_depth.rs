@@ -6,15 +6,16 @@
 //! Do not enable an engine DepthPrepass merely to obtain a sampleable texture:
 //! it performs the same invalid copy and its geometry coverage is different.
 //! Effect and forward particles sample this stable per-view snapshot, while
-//! Effect depth testing still uses the actual ViewDepthTexture attachment.
+//! Effect depth testing still uses the actual ViewDepthStencilTexture attachment.
 use bevy::render::texture::{CachedTexture, TextureCache};
 use bevy::prelude::*;
 use bevy::render::renderer::{RenderContext, ViewQuery};
-use bevy::render::view::ViewDepthTexture;
+use bevy::render::view::ViewDepthStencilTexture;
 use bevy::render::render_resource::*;
 
 /// Explicit request for a post-opaque snapshot, independent of engine prepasses.
 #[derive(Component, Clone, Copy, Default, bevy::render::extract_component::ExtractComponent)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct WeatherDepthSnapshot;
 
 #[derive(Component)]
@@ -110,6 +111,7 @@ pub fn weather_opaque_depth(
 /// The effect feature rejects Overlay cameras; unknown roles also fail closed.
 #[derive(bevy::prelude::Component, Clone, Copy, Debug, PartialEq, Eq,
     bevy::render::extract_component::ExtractComponent)]
+#[extract_app(bevy::render::RenderApp)]
 pub enum WeatherCameraRole { Base, Overlay }
 
 pub fn effect_attachment_compatible(role: Option<WeatherCameraRole>, camera_depth_samples: u32) -> bool {
@@ -252,23 +254,23 @@ pub fn prepare_raw_depth(
     gpu: Res<RawDepthGpu>,
     frame: Res<bevy::diagnostic::FrameCount>,
     groups: Local<crate::render::gpu::SharedBindGroupCache>,
-    views: Query<(Entity, &ViewDepthTexture, Option<&WeatherDepthSnapshot>, Option<&WeatherCameraRole>)>,
+    views: Query<(Entity, &ViewDepthStencilTexture, Option<&WeatherDepthSnapshot>, Option<&WeatherCameraRole>)>,
 ) {
     use crate::render::gpu::Bound;
     let frame = frame.0;
     let mut groups = groups.lock();
     for (entity, main, requested, role) in &views {
         let compatible = requested.is_some()
-            && effect_attachment_compatible(role.copied(), main.texture.sample_count())
-            && main.texture.format() == TextureFormat::Depth32Float
-            && main.texture.usage().contains(TextureUsages::TEXTURE_BINDING)
+            && effect_attachment_compatible(role.copied(), main.texture().sample_count())
+            && main.texture().format() == TextureFormat::Depth32Float
+            && main.texture().usage().contains(TextureUsages::TEXTURE_BINDING)
             && cache.get_render_pipeline(gpu.copy_pipeline).is_some()
             && cache.get_render_pipeline(gpu.source_copy_pipeline).is_some();
         let snapshot = compatible.then(|| {
             let texture = textures.get(&device, TextureDescriptor {
                 label: Some("weather_actual_opaque_depth_snapshot"),
-                size: main.texture.size(), mip_level_count: 1, sample_count: 1,
-                dimension: TextureDimension::D2, format: main.texture.format(),
+                size: main.texture().size(), mip_level_count: 1, sample_count: 1,
+                dimension: TextureDimension::D2, format: main.texture().format(),
                 usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING
                     | TextureUsages::COPY_SRC,
                 view_formats: &[],
@@ -277,11 +279,11 @@ pub fn prepare_raw_depth(
             // the same descriptor a per-frame create_view would use.
             let source = groups.get(&device, "weather_actual_depth_source",
                 &cache.get_bind_group_layout(&depth_copy_layout()),
-                &[(0, Bound::View(main.view())), (1, Bound::Sampler(&gpu.sampler))], frame);
+                &[(0, Bound::View(main.attachment.depth_stencil_views().attachment_view())), (1, Bound::Sampler(&gpu.sampler))], frame);
             let source_texture = textures.get(&device, TextureDescriptor {
                 label: Some("source_GLES_actual_opaque_depth"),
-                size: main.texture.size(), mip_level_count: 1, sample_count: 1,
-                dimension: TextureDimension::D2, format: main.texture.format(),
+                size: main.texture().size(), mip_level_count: 1, sample_count: 1,
+                dimension: TextureDimension::D2, format: main.texture().format(),
                 usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING
                     | TextureUsages::COPY_SRC,
                 view_formats: &[],

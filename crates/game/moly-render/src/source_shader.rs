@@ -656,12 +656,14 @@ pub fn pipeline_descriptor(
         label: Some(format!("source program {}", program.receipt.source.program.identity).into()),
         layout: vec![binding_layout(abi)?],
         vertex: VertexState {
+            constants: vec![],
             shader: program.vertex.clone(),
             shader_defs: vec![],
             entry_point: Some("main".into()),
             buffers: vec![vertices],
         },
         fragment: Some(FragmentState {
+            constants: vec![],
             shader: program.fragment.clone(),
             shader_defs: vec![],
             entry_point: Some("main".into()),

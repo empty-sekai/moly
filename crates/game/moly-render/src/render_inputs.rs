@@ -132,6 +132,7 @@ pub struct CannonEnvironmentWrite {
 /// the profile; the emission node reads only this gate before it decides
 /// whether its target is observable.
 #[derive(Clone, Copy, Resource, bevy::render::extract_resource::ExtractResource, Default)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct PostBloomInput {
     pub bloom_on: bool,
 }

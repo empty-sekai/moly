@@ -110,7 +110,7 @@ use bevy::render::render_resource::binding_types::uniform_buffer_sized;
 use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
 use bevy::render::texture::{CachedTexture, GpuImage, TextureCache};
-use bevy::render::view::{ExtractedView, ViewDepthTexture, ViewTarget};
+use bevy::render::view::{ExtractedView, ViewDepthStencilTexture, ViewTarget};
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems};
 use moly_assets::json::JsonAsset;
 use moly_assets::scene_state::SourceInactive;
@@ -213,6 +213,7 @@ const CLIP_MASK_FORMAT: TextureFormat = TextureFormat::Rg8Unorm;
 
 /// The clip mask's texture, at the size of the 3D camera's target.
 #[derive(Resource, Clone, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct StencilClipMask {
     pub image: Handle<Image>,
     size: UVec2,
@@ -1242,12 +1243,14 @@ fn queue_clip_pipeline(
         label: Some("stencil_clip_mask_pipeline".into()),
         layout: Vec::new(),
         vertex: VertexState {
+            constants: vec![],
             shader: SILHOUETTE_SHADER.clone(),
             shader_defs: Vec::new(),
             entry_point: Some("clip_vertex".into()),
             buffers: Vec::new(),
         },
         fragment: Some(FragmentState {
+            constants: vec![],
             shader: SILHOUETTE_SHADER.clone(),
             shader_defs: Vec::new(),
             entry_point: Some("clip_fragment".into()),
@@ -1340,6 +1343,7 @@ fn queue_pipeline(
             "character_silhouette_pipeline",
             vec![gpu.view_layout.clone(), space, gpu.composite_layout.clone()],
             Some(FragmentState {
+                constants: vec![],
                 shader: SILHOUETTE_SHADER.clone(),
                 shader_defs: shader_defs.clone(),
                 entry_point: Some("silhouette_fragment".into()),
@@ -1367,6 +1371,7 @@ fn queue_pipeline(
         label: Some(label.into()),
         layout,
         vertex: VertexState {
+            constants: vec![],
             shader: SILHOUETTE_SHADER.clone(),
             shader_defs,
             entry_point: Some("vertex".into()),
@@ -1414,7 +1419,7 @@ fn prepare_silhouette(
         &ExtractedCamera,
         &ExtractedView,
         &ViewTarget,
-        &ViewDepthTexture,
+        &ViewDepthStencilTexture,
         Has<SilhouetteTarget>,
     )>,
 ) {
@@ -1436,17 +1441,17 @@ fn prepare_silhouette(
         // camera set-up error of this product, not a case with a source
         // answer, and it stops the frame loudly.
         assert!(
-            target.main_texture().sample_count() == 1 && depth.texture.sample_count() == 1,
+            target.main_texture().sample_count() == 1 && depth.texture().sample_count() == 1,
             "character silhouette: a multisampled 3D view ({} colour samples, {} depth samples); the source pipeline renders MySekai single-sample",
             target.main_texture().sample_count(),
-            depth.texture.sample_count(),
+            depth.texture().sample_count(),
         );
         // The pass reads the camera depth as a texture (the depth test Greater
         // against what the camera holds, see the module comment), so the view
         // must allow depth sampling; the field camera does.
         assert!(
             depth
-                .texture
+                .texture()
                 .usage()
                 .contains(TextureUsages::TEXTURE_BINDING),
             "character silhouette: the 3D view's depth texture is not bound for sampling; the camera must list TEXTURE_BINDING in its depth texture usages"
@@ -1657,7 +1662,7 @@ macro_rules! draw_mesh {
 /// Core3d：剪影合成，排在主透明 pass 之后。
 fn character_silhouette(
     world: &World,
-    view: ViewQuery<(&ViewTarget, &ViewDepthTexture, Option<&SilhouetteTarget>)>,
+    view: ViewQuery<(&ViewTarget, &ViewDepthStencilTexture, Option<&SilhouetteTarget>)>,
     node: Local<CharacterSilhouetteNode>,
     mut render_context: RenderContext,
 ) {
@@ -1711,7 +1716,7 @@ fn character_silhouette(
         &cache.get_bind_group_layout(&gpu.composite_layout),
         &[
             (0, Bound::View(&target.scratch.default_view)),
-            (1, Bound::View(depth.view())),
+            (1, Bound::View(depth.attachment.depth_stencil_views().attachment_view())),
             (2, Bound::whole(&gpu.colour)),
             (3, Bound::Sampler(&gpu.depth_sampler)),
         ],
@@ -2209,8 +2214,15 @@ fn finish_pending_probe(world: &World, render_context: &RenderContext) {
     }
     let (mut histogram, mut left, mut drawn) = ([0usize; 256], 0usize, 0usize);
     {
-        let a = before.slice(..).get_mapped_range();
-        let b = after.slice(..).get_mapped_range();
+        let (Ok(a), Ok(b)) = (
+            before.slice(..).get_mapped_range(),
+            after.slice(..).get_mapped_range(),
+        ) else {
+            warn!(
+                "character silhouette account: a stencil read-back range is invalid; this read-back is void"
+            );
+            return;
+        };
         for y in 0..probe.height as usize {
             let start = y * probe.row as usize;
             for x in start..start + probe.width as usize {
@@ -2277,9 +2289,9 @@ fn log_counter_line(world: &World) {
 fn load_shader(mut shaders: ResMut<Assets<Shader>>) {
     let _ = shaders.insert(
         SILHOUETTE_SHADER.id(),
-        Shader::from_wgsl(
-            include_str!("shaders/character_silhouette.wgsl"),
-            "moly_world/src/shaders/character_silhouette.wgsl".to_owned(),
+        Shader::from_wesl(
+            include_str!("shaders/character_silhouette.wesl"),
+            "moly_world/src/shaders/character_silhouette.wesl".to_owned(),
         ),
     );
 }

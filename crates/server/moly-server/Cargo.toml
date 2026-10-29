@@ -11,12 +11,12 @@ moly-protocol = { path = "../../net/moly-protocol" }
 moly-masters = { path = "../../game/moly-masters" }
 moly-assets = { path = "../../engine/moly-assets", default-features = false }
 moly-law = { path = "../../base/moly-law" }
-bevy = { version = "0.19.1", default-features = false, features = ["std", "bevy_asset", "bevy_log", "async_executor", "multi_threaded"] }
+bevy = { version = "0.20.1", default-features = false, features = ["std", "bevy_asset", "bevy_log", "async_executor", "multi_threaded"] }
 serde_json = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 async-channel = "2.5"
 # The control port's JSON-RPC methods; the host adds its HTTP transport.
-bevy_remote = { version = "0.19.1", default-features = false, optional = true }
+bevy_remote = { version = "0.20.1", default-features = false, optional = true }
 
 [features]
 # A standalone server host may expose its separate loopback control port.

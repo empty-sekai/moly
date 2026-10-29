@@ -18,7 +18,7 @@ use bevy::render::{
     render_resource::*,
     renderer::{RenderContext, RenderDevice, ViewQuery},
     texture::{CachedTexture, TextureCache},
-    view::{ExtractedView, ViewDepthTexture, ViewTarget},
+    view::{ExtractedView, ViewDepthStencilTexture, ViewTarget},
     Render, RenderApp, RenderSystems,
 };
 use std::collections::HashMap;
@@ -27,6 +27,7 @@ use crate::render::gpu::{BindGroupCache, Bound, SharedBindGroupCache};
 
 /// Explicit output contract, not inferred from a shader or material name.
 #[derive(Component, Clone, Copy, Default, ExtractComponent)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct EncodedColorOutput;
 
 pub const ENCODED_FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
@@ -80,9 +81,9 @@ impl SourceColorView {
 /// Both attachments must be this frame's: the depth texture is created in
 /// `PrepareResources`, after the view target, so a reader earlier in the frame
 /// still holds the previous frame's depth, which differs after a resize.
-pub fn compatible(target: &ViewTarget, depth: &ViewDepthTexture) -> bool {
-    srgb_single_sample(target, depth.texture.sample_count())
-        && target.main_texture().size() == depth.texture.size()
+pub fn compatible(target: &ViewTarget, depth: &ViewDepthStencilTexture) -> bool {
+    srgb_single_sample(target, depth.texture().sample_count())
+        && target.main_texture().size() == depth.texture().size()
 }
 
 /// The part of [`compatible`] a queue system can decide before this frame's
@@ -111,7 +112,7 @@ fn prepare_views(
     cache: Res<PipelineCache>,
     mut gpu: ResMut<ColorGpu>,
     mut textures: ResMut<TextureCache>,
-    views: Query<(Entity, &ViewTarget, &ViewDepthTexture)>,
+    views: Query<(Entity, &ViewTarget, &ViewDepthStencilTexture)>,
 ) {
     for (entity, target, depth) in &views {
         if !compatible(target, depth) {
@@ -227,7 +228,7 @@ fn source_transparent_pass(
         &ExtractedCamera,
         &ExtractedView,
         &ViewTarget,
-        &ViewDepthTexture,
+        &ViewDepthStencilTexture,
         Option<&MainPassResolutionOverride>,
         Option<&SourceColorView>,
     )>,

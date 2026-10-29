@@ -2,7 +2,7 @@
 //!
 //! 材质值来自 sidecar 的 [`MaterialSlot`]（key 是 Unity 属性名的原拼写），
 //! 族与 keyword 变体由 [`SiteMaterialKey`] 编码进管线特化；WGSL 在
-//! `shaders/site_material.wgsl`，九族共用一份、按宏分派。
+//! `shaders/site_material.wesl`，九族共用一份、按宏分派。
 //!
 //! 族门（按真源重定）：门 = 「序列化 keyword 全部落在本族的
 //! 已实现轴清单内」+「族要求的必在键都在」+「值域开关在已实现的取值上」。
@@ -42,7 +42,7 @@ use moly_assets::sidecar::{MolyJson, MolyJsonLoader, SiteSidecar};
 ///
 /// # 线性声明是一道 fail-closed 联锁
 ///
-/// `shaders/site_material.wgsl` 采样后**无条件**把值编回存储（gamma）域
+/// `shaders/site_material.wesl` 采样后**无条件**把值编回存储（gamma）域
 /// ——真源是 gamma 色彩空间构建，整条片元链在存储域上算。那一步只有在
 /// 硬件确实解码过（= 纹理按 sRGB 装载）时才是恒等的往返。
 ///
@@ -119,7 +119,7 @@ pub const TREASUREBOX_SHADER_NAME: &str = "Mysekai/TreasureBox";
 pub const FIXTURE_BASIC_SHADER_NAME: &str = "Mysekai/Fixture/Basic";
 
 /// 材质 uniform 的槽数与字节数。槽序是本文件与
-/// `shaders/site_material.wgsl` 里 `SiteParams` 结构体之间的契约，两边同改。
+/// `shaders/site_material.wesl` 里 `SiteParams` 结构体之间的契约，两边同改。
 pub const PARAMS_SLOTS: usize = 50;
 pub const PARAMS_BYTES: usize = PARAMS_SLOTS * 16;
 
@@ -459,13 +459,14 @@ impl AsBindGroup for SiteMaterial {
         "site_material"
     }
 
-    fn unprepared_bind_group(
+    fn build_bind_group(
         &self,
         _layout: &BindGroupLayout,
         _render_device: &RenderDevice,
         (env_buffer, shadow, images, fallback, fallback_zero, samplers, site_extension): &mut SystemParamItem<'_, '_, Self::Param>,
         _force_no_bindless: bool,
-    ) -> Result<UnpreparedBindGroup, AsBindGroupError> {
+        output: &mut BindGroupBuilder,
+    ) -> Result<(), AsBindGroupError> {
         let main = images
             .get(&self.main_tex)
             .ok_or(AsBindGroupError::RetryNextUpdate)?;
@@ -496,65 +497,65 @@ impl AsBindGroup for SiteMaterial {
         // The sampler is created once at render startup and shared by every
         // site material; its descriptor never varies per material.
         let repeat = samplers.repeat_linear.clone();
-        let bindings = BindingResources(vec![
+        let bindings = UnpreparedBindingResources(vec![
             // binding 0：材质自己的参数块。
-            (0, OwnedBindingResource::Data(OwnedData(self.params.bytes()))),
+            (0, crate::render::gpu::push_data(output, &self.params.bytes())),
             // binding 1：全局量，全部站点材质共用一个 buffer。
-            (1, OwnedBindingResource::Buffer(env_buffer.buffer.clone())),
+            (1, UnpreparedBindingResource::Buffer(env_buffer.buffer.clone())),
             (
                 2,
-                OwnedBindingResource::TextureView(
+                UnpreparedBindingResource::TextureView(
                     TextureViewDimension::D2,
                     main.texture_view.clone(),
                 ),
             ),
-            (3, OwnedBindingResource::Sampler(SamplerBindingType::Filtering, repeat.clone())),
+            (3, UnpreparedBindingResource::Sampler(SamplerBindingType::Filtering, repeat.clone())),
             (
                 4,
-                OwnedBindingResource::TextureView(
+                UnpreparedBindingResource::TextureView(
                     TextureViewDimension::D2,
                     overlay.texture_view.clone(),
                 ),
             ),
             (
                 5,
-                OwnedBindingResource::Sampler(SamplerBindingType::Filtering, repeat.clone()),
+                UnpreparedBindingResource::Sampler(SamplerBindingType::Filtering, repeat.clone()),
             ),
             (
                 6,
-                OwnedBindingResource::TextureView(
+                UnpreparedBindingResource::TextureView(
                     TextureViewDimension::D2,
                     overlay2nd.texture_view.clone(),
                 ),
             ),
             (
                 7,
-                OwnedBindingResource::Sampler(SamplerBindingType::Filtering, repeat.clone()),
+                UnpreparedBindingResource::Sampler(SamplerBindingType::Filtering, repeat.clone()),
             ),
             (
                 8,
-                OwnedBindingResource::TextureView(
+                UnpreparedBindingResource::TextureView(
                     TextureViewDimension::D2,
                     leaf_mask.texture_view.clone(),
                 ),
             ),
-            (9, OwnedBindingResource::Sampler(SamplerBindingType::Filtering, repeat)),
+            (9, UnpreparedBindingResource::Sampler(SamplerBindingType::Filtering, repeat)),
             // binding 10：主光阴影消费块（矩阵 + 尺寸 + 参数），全族共用。
             (
                 10,
-                OwnedBindingResource::Buffer(shadow.consumer_buffer.clone()),
+                UnpreparedBindingResource::Buffer(shadow.consumer_buffer.clone()),
             ),
             // binding 11/12：深度图 + 比较采样器（pcf9 的硬件比较口）。
             (
                 11,
-                OwnedBindingResource::TextureView(
+                UnpreparedBindingResource::TextureView(
                     TextureViewDimension::D2,
                     shadow.depth_view.clone(),
                 ),
             ),
             (
                 12,
-                OwnedBindingResource::Sampler(
+                UnpreparedBindingResource::Sampler(
                     SamplerBindingType::Comparison,
                     shadow.cmp_sampler.clone(),
                 ),
@@ -563,10 +564,11 @@ impl AsBindGroup for SiteMaterial {
             // values), one buffer for every site material.
             (
                 13,
-                OwnedBindingResource::Buffer(site_extension.buffer.clone()),
+                UnpreparedBindingResource::Buffer(site_extension.buffer.clone()),
             ),
         ]);
-        Ok(UnpreparedBindGroup { bindings })
+        output.binding_resources.0.extend(bindings.0);
+        Ok(())
     }
 
     fn bind_group_data(&self) -> Self::Data {
@@ -671,11 +673,11 @@ impl Material for SiteMaterial {
     // embedded 源的键前缀是调用方 crate 的 lib 名（module_path 的根），
     // 包名 moly-game 的 lib 名是 moly_game（连字符转下划线）。
     fn vertex_shader() -> ShaderRef {
-        "embedded://moly_render/shaders/site_material.wgsl".into()
+        "embedded://moly_render/shaders/site_material.wesl".into()
     }
 
     fn fragment_shader() -> ShaderRef {
-        "embedded://moly_render/shaders/site_material.wgsl".into()
+        "embedded://moly_render/shaders/site_material.wesl".into()
     }
 
     /// 站点族不进 prepass：本单只交付 Base 片元，阴影消费方不在范围里。
@@ -2369,6 +2371,8 @@ pub struct SiteMaterialPlugin;
 
 impl Plugin for SiteMaterialPlugin {
     fn build(&self, app: &mut App) {
+        // The material plugin resolves the shader path while it is added.
+        bevy::asset::embedded_asset!(app, "shaders/site_material.wesl");
         crate::render::gpu::install_shared_samplers(app);
         crate::gpu_image_release::prepare_after_images::<SiteMaterial>(app);
         app.add_plugins((
@@ -2379,7 +2383,6 @@ impl Plugin for SiteMaterialPlugin {
         .init_asset::<MolyJson>()
         .init_asset_loader::<MolyJsonLoader>()
         .add_systems(Update, (switch_materials, reveal_material_ready_roots).chain());
-        bevy::asset::embedded_asset!(app, "shaders/site_material.wgsl");
     }
 }
 

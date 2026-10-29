@@ -92,7 +92,8 @@ fn button(
 ) -> Entity {
     let id = c
         .spawn((
-            Button,
+            Interaction::None,
+            bevy::ui::FocusPolicy::Block,
             action,
             kind,
             Node {
@@ -333,7 +334,12 @@ pub fn setup(
         Region::SearchBox,
     );
     c.entity(search)
-        .insert((Button, LibraryAction::FocusSearch, ButtonKind::Secondary));
+        .insert((
+            Interaction::None,
+            bevy::ui::FocusPolicy::Block,
+            LibraryAction::FocusSearch,
+            ButtonKind::Secondary,
+        ));
     text(&mut c, search, &font, "搜索", 13., ACCENT);
     let query = label(&mut c, search, &font, UiLabel::Search, 15., INK);
     c.entity(query).insert(Node {
@@ -1022,7 +1028,8 @@ fn populate_list(
     {
         let item = c
             .spawn((
-                Button,
+                Interaction::None,
+                bevy::ui::FocusPolicy::Block,
                 LibraryAction::Select(*key),
                 ButtonKind::Row,
                 Node {

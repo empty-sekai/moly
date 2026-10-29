@@ -8,7 +8,7 @@ license.workspace = true
 # and the server's pushes, as Bevy messages, over one HTTP endpoint.
 [dependencies]
 moly-protocol = { path = "../moly-protocol" }
-bevy = { version = "0.19.1", default-features = false, features = ["std", "bevy_log"] }
+bevy = { version = "0.20.1", default-features = false, features = ["std", "bevy_log"] }
 async-channel = "2.5"
 # The server the `local` feature hosts in the game's own app.
 moly-server = { path = "../../server/moly-server", optional = true }

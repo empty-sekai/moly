@@ -67,6 +67,7 @@ const PYRAMID_FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
 /// 主世界 → 渲染世界：烘好的表（按代号去重上传）、uber 查表参数、引擎
 /// 泛光的门与采纳值。
 #[derive(Resource, Clone, Default, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct StockPostState {
     lut: Option<Arc<Vec<u8>>>,
     /// 每烘一次加一；渲染世界只在代号变时上传。0 = 还没有表。
@@ -644,9 +645,9 @@ pub(crate) fn stock_post(
 fn load_shader(mut shaders: ResMut<Assets<Shader>>) {
     let _ = shaders.insert(
         STOCK_SHADER.id(),
-        Shader::from_wgsl(
-            include_str!("shaders/weather_stock_post.wgsl"),
-            "moly_world/src/shaders/weather_stock_post.wgsl".to_owned(),
+        Shader::from_wesl(
+            include_str!("shaders/weather_stock_post.wesl"),
+            "moly_world/src/shaders/weather_stock_post.wesl".to_owned(),
         ),
     );
 }

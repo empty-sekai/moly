@@ -15,6 +15,6 @@ moly-law = { path = "../../base/moly-law" }
 moly-assets = { path = "../../engine/moly-assets", default-features = false }
 # `bevy_asset` brings the app, ECS and asset types the loader's plugin needs;
 # it carries no renderer.
-bevy = { version = "0.19.1", default-features = false, features = ["std", "bevy_asset"] }
+bevy = { version = "0.20.1", default-features = false, features = ["std", "bevy_asset"] }
 serde_json = { workspace = true }
 serde = { version = "1", features = ["derive"] }

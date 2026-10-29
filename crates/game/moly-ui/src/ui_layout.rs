@@ -4,6 +4,7 @@ mod filled_image;
 pub mod tmp_font;
 pub mod tmp_layout;
 mod clip_render;
+mod texture_slice;
 mod stencil_mask;
 mod raycast;
 pub use raycast::Pointer;

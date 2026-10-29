@@ -185,7 +185,8 @@ fn button(
 ) {
     let button = commands
         .spawn((
-            Button,
+            Interaction::None,
+            bevy::ui::FocusPolicy::Block,
             action,
             Node {
                 padding: UiRect::axes(px(12), px(9)),

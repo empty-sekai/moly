@@ -181,13 +181,14 @@ pub fn reset_global_dissolve(world: &mut World) {
 /// The environment shader view's copy: the keyword state and the nine
 /// globals of this frame.
 #[derive(Resource, Debug, Clone, Default, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct SiteExtensionGlobals {
     pub data: SiteExtensionData,
 }
 
 /// GPU layout: 5 vec4 slots, 80 bytes. The slot order is the contract with
-/// the `SiteExtension` struct of `shaders/site_material.wgsl` and
-/// `shaders/room_shell.wgsl`.
+/// the `SiteExtension` struct of `shaders/site_material.wesl` and
+/// `shaders/room_shell.wesl`.
 pub const SITE_EXTENSION_SLOTS: usize = 5;
 pub const SITE_EXTENSION_BYTES: usize = SITE_EXTENSION_SLOTS * 16;
 

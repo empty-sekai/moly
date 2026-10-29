@@ -70,21 +70,24 @@ impl AsBindGroup for FixtureSurfaceMaterial {
     type Param = (SRes<SiteEnvGpuBuffer>, SRes<RenderAssets<GpuImage>>);
     fn label() -> &'static str { "fixture_surface_material" }
     fn bind_group_data(&self) -> Self::Data { self.key }
-    fn unprepared_bind_group(
+    fn build_bind_group(
         &self, _layout: &BindGroupLayout, _device: &RenderDevice,
         (env, images): &mut SystemParamItem<'_, '_, Self::Param>, _force: bool,
-    ) -> Result<UnpreparedBindGroup, AsBindGroupError> {
+        output: &mut BindGroupBuilder,
+    ) -> Result<(), AsBindGroupError> {
         let main = images.get(&self.main_tex).ok_or(AsBindGroupError::RetryNextUpdate)?;
         let overlay = images.get(&self.overlay_tex).ok_or(AsBindGroupError::RetryNextUpdate)?;
-        let bytes = self.uniforms.iter().flatten().flat_map(|v| v.to_le_bytes()).collect();
-        Ok(UnpreparedBindGroup { bindings: BindingResources(vec![
-            (0, OwnedBindingResource::Data(OwnedData(bytes))),
-            (1, OwnedBindingResource::Buffer(env.buffer.clone())),
-            (2, OwnedBindingResource::TextureView(TextureViewDimension::D2, main.texture_view.clone())),
-            (3, OwnedBindingResource::Sampler(SamplerBindingType::Filtering, main.sampler.clone())),
-            (4, OwnedBindingResource::TextureView(TextureViewDimension::D2, overlay.texture_view.clone())),
-            (5, OwnedBindingResource::Sampler(SamplerBindingType::Filtering, overlay.sampler.clone())),
-        ]) })
+        let bytes: Vec<u8> = self.uniforms.iter().flatten().flat_map(|v| v.to_le_bytes()).collect();
+        let uniforms = crate::render::gpu::push_data(output, &bytes);
+        output.binding_resources.0.extend([
+            (0, uniforms),
+            (1, UnpreparedBindingResource::Buffer(env.buffer.clone())),
+            (2, UnpreparedBindingResource::TextureView(TextureViewDimension::D2, main.texture_view.clone())),
+            (3, UnpreparedBindingResource::Sampler(SamplerBindingType::Filtering, main.sampler.clone())),
+            (4, UnpreparedBindingResource::TextureView(TextureViewDimension::D2, overlay.texture_view.clone())),
+            (5, UnpreparedBindingResource::Sampler(SamplerBindingType::Filtering, overlay.sampler.clone())),
+        ]);
+        Ok(())
     }
     fn bind_group_layout_entries(_device: &RenderDevice, _force: bool) -> Vec<BindGroupLayoutEntry> {
         let uniform = |binding| BindGroupLayoutEntry { binding, visibility: ShaderStages::VERTEX_FRAGMENT,
@@ -149,7 +152,7 @@ fn apply_state(descriptor: &mut RenderPipelineDescriptor, state: SourceRenderSta
 }
 
 impl Material for FixtureSurfaceMaterial {
-    fn vertex_shader() -> ShaderRef { "embedded://moly_render/shaders/fixture_surface.wgsl".into() }
+    fn vertex_shader() -> ShaderRef { "embedded://moly_render/shaders/fixture_surface.wesl".into() }
     fn fragment_shader() -> ShaderRef { Self::vertex_shader() }
     fn enable_prepass() -> bool { false }
     fn enable_shadows() -> bool { false }
@@ -178,20 +181,21 @@ impl AsBindGroup for FixtureTreeMaterial {
     fn bind_group_layout_entries(device: &RenderDevice, force: bool) -> Vec<BindGroupLayoutEntry> {
         SiteMaterial::bind_group_layout_entries(device, force)
     }
-    fn unprepared_bind_group(&self, layout: &BindGroupLayout, device: &RenderDevice,
-        param: &mut SystemParamItem<'_, '_, Self::Param>, force: bool) -> Result<UnpreparedBindGroup, AsBindGroupError> {
-        let mut group = self.material.unprepared_bind_group(layout, device, param, force)?;
+    fn build_bind_group(&self, layout: &BindGroupLayout, device: &RenderDevice,
+        param: &mut SystemParamItem<'_, '_, Self::Param>, force: bool,
+        output: &mut BindGroupBuilder) -> Result<(), AsBindGroupError> {
+        self.material.build_bind_group(layout, device, param, force, output)?;
         // glTF already retained the authored samplers, including Clamp and
         // Mirror. Do not replace those with the site loader's Repeat sampler.
         for (binding, handle) in [(3, Some(&self.material.main_tex)), (9, self.material.leaf_mask_tex.as_ref())] {
             if let Some(handle) = handle {
                 let image = param.2.get(handle).ok_or(AsBindGroupError::RetryNextUpdate)?;
-                if let Some((_, resource)) = group.bindings.0.iter_mut().find(|(slot, _)| *slot == binding) {
-                    *resource = OwnedBindingResource::Sampler(SamplerBindingType::Filtering, image.sampler.clone());
+                if let Some((_, resource)) = output.binding_resources.0.iter_mut().find(|(slot, _)| *slot == binding) {
+                    *resource = UnpreparedBindingResource::Sampler(SamplerBindingType::Filtering, image.sampler.clone());
                 }
             }
         }
-        Ok(group)
+        Ok(())
     }
 }
 
@@ -315,6 +319,8 @@ pub(super) struct FixtureSurfacePlugin;
 
 impl Plugin for FixtureSurfacePlugin {
     fn build(&self, app: &mut App) {
+        // The material plugin resolves the shader path while it is added.
+        bevy::asset::embedded_asset!(app, "shaders/fixture_surface.wesl");
         crate::gpu_image_release::prepare_after_images::<FixtureSurfaceMaterial>(app);
         crate::gpu_image_release::prepare_after_images::<FixtureTreeMaterial>(app);
         app.add_plugins((MaterialPlugin::<FixtureSurfaceMaterial>::default(), MaterialPlugin::<FixtureTreeMaterial>::default()))
@@ -323,6 +329,5 @@ impl Plugin for FixtureSurfacePlugin {
             .add_systems(Update, (bind_surfaces, update_block_opacity).chain()
                 .after(crate::render_inputs::FixtureLayoutSet).after(crate::fixture_colors::prepare)
                 .run_if(crate::fixture_colors::ready).before(FixtureMaterialSet));
-        bevy::asset::embedded_asset!(app, "shaders/fixture_surface.wgsl");
     }
 }

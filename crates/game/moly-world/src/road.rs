@@ -34,42 +34,43 @@ impl AsBindGroup for RoadMaterial {
         "road_material"
     }
     fn bind_group_data(&self) -> Self::Data {}
-    fn unprepared_bind_group(
+    fn build_bind_group(
         &self,
         _layout: &BindGroupLayout,
         _device: &RenderDevice,
         (env, images): &mut SystemParamItem<'_, '_, Self::Param>,
         _force_no_bindless: bool,
-    ) -> Result<UnpreparedBindGroup, AsBindGroupError> {
+        output: &mut BindGroupBuilder,
+    ) -> Result<(), AsBindGroupError> {
         let image = images
             .get(&self.main_tex)
             .ok_or(AsBindGroupError::RetryNextUpdate)?;
-        let bytes = self
+        let bytes: Vec<u8> = self
             .uniforms
             .iter()
             .flatten()
             .flat_map(|v| v.to_le_bytes())
             .collect();
-        Ok(UnpreparedBindGroup {
-            bindings: BindingResources(vec![
-                (0, OwnedBindingResource::Data(OwnedData(bytes))),
-                (1, OwnedBindingResource::Buffer(env.buffer.clone())),
+        let uniforms = crate::render::gpu::push_data(output, &bytes);
+        output.binding_resources.0.extend([
+                (0, uniforms),
+                (1, UnpreparedBindingResource::Buffer(env.buffer.clone())),
                 (
                     2,
-                    OwnedBindingResource::TextureView(
+                    UnpreparedBindingResource::TextureView(
                         TextureViewDimension::D2,
                         image.texture_view.clone(),
                     ),
                 ),
                 (
                     3,
-                    OwnedBindingResource::Sampler(
+                    UnpreparedBindingResource::Sampler(
                         SamplerBindingType::Filtering,
                         image.sampler.clone(),
                     ),
                 ),
-            ]),
-        })
+        ]);
+        Ok(())
     }
     fn bind_group_layout_entries(
         _device: &RenderDevice,
@@ -110,7 +111,7 @@ impl AsBindGroup for RoadMaterial {
 
 impl Material for RoadMaterial {
     fn vertex_shader() -> ShaderRef {
-        "embedded://moly_world/shaders/road_material.wgsl".into()
+        "embedded://moly_world/shaders/road_material.wesl".into()
     }
     fn fragment_shader() -> ShaderRef {
         Self::vertex_shader()
@@ -408,7 +409,7 @@ fn update_materials(
 }
 
 pub(super) fn install(app: &mut App) {
-    bevy::asset::embedded_asset!(app, "shaders/road_material.wgsl");
+    bevy::asset::embedded_asset!(app, "shaders/road_material.wesl");
     crate::gpu_image_release::install(app);
     crate::gpu_image_release::prepare_after_images::<RoadMaterial>(app);
     app.add_plugins(MaterialPlugin::<RoadMaterial>::default())

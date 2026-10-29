@@ -14,7 +14,7 @@
 //! Everything the draw depends on is read from the extracted prefab: the
 //! material's six floats and its colour, the pass blend state, the image's
 //! material and uvRect, the canvas render mode and the image's rect. The
-//! program itself is transcribed in `shaders/concentration_line.wgsl`. A
+//! program itself is transcribed in `shaders/concentration_line.wesl`. A
 //! missing or different prefab refuses the overlay with one WARN; the move
 //! continues without it.
 //!
@@ -124,9 +124,9 @@ pub fn install(app: &mut App) {
         .resource_mut::<Assets<Shader>>()
         .insert(
             SHADER.id(),
-            Shader::from_wgsl(
-                include_str!("../shaders/concentration_line.wgsl"),
-                "moly_features/src/shaders/concentration_line.wgsl".to_owned(),
+            Shader::from_wesl(
+                include_str!("../shaders/concentration_line.wesl"),
+                "moly_features/src/shaders/concentration_line.wesl".to_owned(),
             ),
         )
         .expect("speed-line shader installation");

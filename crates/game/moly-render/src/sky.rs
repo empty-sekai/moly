@@ -179,9 +179,9 @@ pub fn load(
     // 返回的句柄就是钉死的 SKY_SHADER，丢弃以免 must_use 告警。
     let _ = shaders.insert(
         SKY_SHADER.id(),
-        Shader::from_wgsl(
-            include_str!("shaders/sky_gradient.wgsl"),
-            "moly_render/src/shaders/sky_gradient.wgsl".to_owned(),
+        Shader::from_wesl(
+            include_str!("shaders/sky_gradient.wesl"),
+            "moly_render/src/shaders/sky_gradient.wesl".to_owned(),
         ),
     );
     commands.insert_resource(ShellListings(server.load::<JsonAsset>(AssetPath::from(

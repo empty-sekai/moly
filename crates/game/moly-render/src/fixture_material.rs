@@ -5,7 +5,7 @@
 //! `fixtureShaderUsage`、`shader` 名）与 `GltfMaterialName`；主贴图句柄取
 //! glb 材质本身的 `baseColorTexture`（提取侧把 `_MainTex` 写进它）。
 //! 变体由 `FixtureMaterialKey` 编码进管线特化；WGSL 在
-//! `shaders/fixture_material.wgsl`。
+//! `shaders/fixture_material.wesl`。
 //!
 //! 拒绝语义：族门（shader 名闭集 + 具名拒绝 URP/Lit）不过、必需浮点
 //! 缺失、(usage, blend) 二维选择越界或与混合模式矛盾、glb 材质没有
@@ -156,7 +156,7 @@ const RUG_SHADER: &str = "Mysekai/Fixture/Rug";
 const FENCE_SHADER: &str = "Mysekai/Fixture/Fence";
 
 /// 材质 uniform 的槽数与字节数。槽序是本文件与
-/// `shaders/fixture_material.wgsl` 里 `FixtureParams` 结构体之间的契约，
+/// `shaders/fixture_material.wesl` 里 `FixtureParams` 结构体之间的契约，
 /// 两边同改。
 pub const PARAMS_SLOTS: usize = 12;
 pub const PARAMS_BYTES: usize = PARAMS_SLOTS * 16;
@@ -411,13 +411,14 @@ impl AsBindGroup for FixtureMaterial {
         "fixture_material"
     }
 
-    fn unprepared_bind_group(
+    fn build_bind_group(
         &self,
         _layout: &BindGroupLayout,
         render_device: &RenderDevice,
         (env_buffer, images, fallback, samplers): &mut SystemParamItem<'_, '_, Self::Param>,
         _force_no_bindless: bool,
-    ) -> Result<UnpreparedBindGroup, AsBindGroupError> {
+        output: &mut BindGroupBuilder,
+    ) -> Result<(), AsBindGroupError> {
         let main = images
             .get(&self.main_tex)
             .ok_or(AsBindGroupError::RetryNextUpdate)?;
@@ -432,33 +433,33 @@ impl AsBindGroup for FixtureMaterial {
         };
         // 唯一的纹理槽永远有真实贴图——缺主贴图的材质在建计划时已拒，
         // 不需要 fallback 绑定。
-        let mut bindings = BindingResources(vec![
+        let mut bindings = UnpreparedBindingResources(vec![
             // binding 0：材质自己的参数块。
-            (0, OwnedBindingResource::Data(OwnedData(self.params.bytes()))),
+            (0, crate::render::gpu::push_data(output, &self.params.bytes())),
             // binding 1：全局量，与站点材质共用同一个 buffer。
-            (1, OwnedBindingResource::Buffer(env_buffer.buffer.clone())),
+            (1, UnpreparedBindingResource::Buffer(env_buffer.buffer.clone())),
             (
                 2,
-                OwnedBindingResource::TextureView(
+                UnpreparedBindingResource::TextureView(
                     TextureViewDimension::D2,
                     main.texture_view.clone(),
                 ),
             ),
-            (3, OwnedBindingResource::Sampler(
+            (3, UnpreparedBindingResource::Sampler(
                 SamplerBindingType::Filtering,
                 if self.site_sampler { samplers.repeat_linear.clone() } else { main.sampler.clone() },
             )),
             // binding 4：两条质感分支的参数（分支关着的变体不读它，照绑
             // ——布局是全变体共享的，多的绑定合法）。
-            (4, OwnedBindingResource::Data(OwnedData(self.shading_branch_bytes()))),
+            (4, crate::render::gpu::push_data(output, &self.shading_branch_bytes())),
             (
                 5,
-                OwnedBindingResource::TextureView(
+                UnpreparedBindingResource::TextureView(
                     TextureViewDimension::D2,
                     normal.texture_view.clone(),
                 ),
             ),
-            (6, OwnedBindingResource::Sampler(SamplerBindingType::Filtering, normal.sampler.clone())),
+            (6, UnpreparedBindingResource::Sampler(SamplerBindingType::Filtering, normal.sampler.clone())),
         ]);
         // Bindings 7..12: the three multi-UV layers, fallback when absent.
         for (layer, slot) in [(0usize, 7u32), (1, 9), (2, 11)] {
@@ -468,14 +469,15 @@ impl AsBindGroup for FixtureMaterial {
             };
             bindings.0.push((
                 slot,
-                OwnedBindingResource::TextureView(TextureViewDimension::D2, image.texture_view.clone()),
+                UnpreparedBindingResource::TextureView(TextureViewDimension::D2, image.texture_view.clone()),
             ));
             bindings.0.push((
                 slot + 1,
-                OwnedBindingResource::Sampler(SamplerBindingType::Filtering, image.sampler.clone()),
+                UnpreparedBindingResource::Sampler(SamplerBindingType::Filtering, image.sampler.clone()),
             ));
         }
-        Ok(UnpreparedBindGroup { bindings })
+        output.binding_resources.0.extend(bindings.0);
+        Ok(())
     }
 
     fn bind_group_data(&self) -> Self::Data {
@@ -544,11 +546,11 @@ impl AsBindGroup for FixtureMaterial {
 impl Material for FixtureMaterial {
     // embedded 源的键前缀是 lib 名（连字符转下划线），见 site 材质同注。
     fn vertex_shader() -> ShaderRef {
-        "embedded://moly_render/shaders/fixture_material.wgsl".into()
+        "embedded://moly_render/shaders/fixture_material.wesl".into()
     }
 
     fn fragment_shader() -> ShaderRef {
-        "embedded://moly_render/shaders/fixture_material.wgsl".into()
+        "embedded://moly_render/shaders/fixture_material.wesl".into()
     }
 
     /// 混合模式：`_FixtureObjectBlendMode` = 1（AlphaBlended）的材质走
@@ -1695,7 +1697,7 @@ impl MaskMeans {
 }
 
 /// 遮罩贴图第 0 级的逐通道均值，**在存储（gamma）域**上取——自发光缓冲
-/// 存的就是存储域的值（`shaders/fixture_emission.wgsl` 采样后编回存储域，
+/// 存的就是存储域的值（`shaders/fixture_emission.wesl` 采样后编回存储域，
 /// 而那张缓冲是 `Rgba16Float`、硬件不再编码），账目均值同一域才可比。
 /// 8 位纹素本身就是存储值，所以这里**不解码**。alpha 丢弃。
 ///
@@ -2646,6 +2648,8 @@ pub struct FixtureMaterialPlugin;
 
 impl Plugin for FixtureMaterialPlugin {
     fn build(&self, app: &mut App) {
+        // The material plugin resolves the shader path while it is added.
+        bevy::asset::embedded_asset!(app, "shaders/fixture_material.wesl");
         crate::gpu_image_release::install(app);
         crate::render::gpu::install_shared_samplers(app);
         crate::gpu_image_release::prepare_after_images::<FixtureMaterial>(app);
@@ -2654,6 +2658,5 @@ impl Plugin for FixtureMaterialPlugin {
             .add_systems(Update, switch_materials.in_set(FixtureMaterialSet)
                 .after(crate::render_inputs::FixtureLayoutSet).after(crate::fixture_colors::prepare)
                 .run_if(crate::fixture_colors::ready));
-        bevy::asset::embedded_asset!(app, "shaders/fixture_material.wgsl");
     }
 }

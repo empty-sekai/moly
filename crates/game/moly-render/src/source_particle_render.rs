@@ -19,7 +19,7 @@ use bevy::render::{
     },
     renderer::{RenderContext, ViewQuery},
     sync_world::{MainEntity, RenderEntity},
-    view::{ExtractedView, Msaa, ViewDepthTexture, ViewTarget},
+    view::{ExtractedView, Msaa, ViewDepthStencilTexture, ViewTarget},
     Extract, ExtractSchedule, Render, RenderApp, RenderSystems,
 };
 use bevy::render::{
@@ -617,7 +617,7 @@ fn queue(
     programs: Res<RenderAssets<GpuSourceProgram>>,
     cache: Res<PipelineCache>,
     mut gpu: ResMut<ParticleGpu>,
-    // No ViewDepthTexture here: this frame's depth texture is created in
+    // No ViewDepthStencilTexture here: this frame's depth texture is created in
     // PrepareResources, after this queue. The component still present is the
     // previous frame's, whose size differs on the frame a view is resized.
     // The pipeline is keyed on what this frame's depth texture is created
@@ -903,7 +903,7 @@ fn prepare(
         Entity,
         &ExtractedView,
         &ViewTarget,
-        &ViewDepthTexture,
+        &ViewDepthStencilTexture,
         Option<&crate::weather_depth::PreparedDepthSnapshot>,
         Option<&crate::source_color::SourceColorView>,
     )>,
@@ -952,7 +952,7 @@ fn prepare(
         );
         // This frame's attachments, which the queued pipeline was keyed for.
         let attached = crate::source_color::compatible(target, attachment)
-            && attachment.texture.format() == CORE_3D_DEPTH_FORMAT;
+            && attachment.texture().format() == CORE_3D_DEPTH_FORMAT;
         for item in &frame.particles {
             let catalogue = &frame.catalogues[&item.source.catalogue.id()];
             for pass in &item.source.passes {
@@ -1308,7 +1308,7 @@ fn source_effect_pass(
     view: ViewQuery<(
         Entity,
         &crate::fixture_emission::ViewEmissionTarget,
-        &ViewDepthTexture,
+        &ViewDepthStencilTexture,
         &ExtractedView,
         &crate::weather_depth::WeatherCameraRole,
     )>,
@@ -1317,7 +1317,7 @@ fn source_effect_pass(
     let (entity, target, depth, view, role) = view.into_inner();
     if !crate::weather_depth::effect_attachment_compatible(
         Some(*role),
-        depth.texture.sample_count(),
+        depth.texture().sample_count(),
     ) {
         return;
     }
@@ -1363,7 +1363,7 @@ fn source_effect_pass(
             label: Some("source particle effect programs"),
             color_attachments: &attachments,
             depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
-                view: depth.view(),
+                view: depth.attachment.depth_stencil_views().attachment_view(),
                 depth_ops: Some(Operations {
                     load: LoadOp::Load,
                     store: StoreOp::Store,
@@ -1392,7 +1392,7 @@ fn source_effect_pass(
 }
 
 // The render world holds no particle component, so removal has nothing to strip.
-impl bevy::render::sync_component::SyncComponent for SourceParticle {
+impl bevy::render::sync_component::SyncComponent<bevy::render::RenderApp> for SourceParticle {
     type Target = ();
 }
 

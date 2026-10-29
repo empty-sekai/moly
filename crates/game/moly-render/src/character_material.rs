@@ -2,7 +2,7 @@
 //!
 //! 式子全在 moly-law 的 shading::character（纯函数 + `resolve`），本模块
 //! 只做装配：把骨架档案（rig json）里的 Unity 属性喂给律的 `resolve`，
-//! 得到的值摊进 uniform 槽；WGSL 在 `shaders/character_material.wgsl`，
+//! 得到的值摊进 uniform 槽；WGSL 在 `shaders/character_material.wesl`，
 //! 逐句转录律的片元链。变体两件：眉按纹理槽在场（已裁），雾按全局量
 //! 桥在场（换装等雾档案到齐，变体全侧一致）。
 //!
@@ -81,7 +81,7 @@ const FACE_SPHERE_SHADOW_SMOOTHNESS: f32 = f32::from_bits(0x3f80_0000);
 // ---- 材质参数块 ----
 
 /// 参数 uniform 的槽数与字节数。槽序是本文件与
-/// `shaders/character_material.wgsl` 里 `CharacterParams` 结构体之间的
+/// `shaders/character_material.wesl` 里 `CharacterParams` 结构体之间的
 /// 契约，两边同改。
 pub const PARAMS_SLOTS: usize = 9;
 pub const PARAMS_BYTES: usize = PARAMS_SLOTS * 16;
@@ -187,13 +187,14 @@ impl AsBindGroup for CharacterMaterial {
         "character_material"
     }
 
-    fn unprepared_bind_group(
+    fn build_bind_group(
         &self,
         _layout: &BindGroupLayout,
         _render_device: &RenderDevice,
         (env_buffer, images, fallback, samplers): &mut SystemParamItem<'_, '_, Self::Param>,
         _force_no_bindless: bool,
-    ) -> Result<UnpreparedBindGroup, AsBindGroupError> {
+        output: &mut BindGroupBuilder,
+    ) -> Result<(), AsBindGroupError> {
         let main = images
             .get(&self.main_tex)
             .ok_or(AsBindGroupError::RetryNextUpdate)?;
@@ -215,37 +216,38 @@ impl AsBindGroup for CharacterMaterial {
         // The sampler is created once at render startup and shared by every
         // character material; its descriptor never varies per material.
         let clamp = samplers.clamp_linear.clone();
-        let bindings = BindingResources(vec![
+        let bindings = UnpreparedBindingResources(vec![
             // binding 0：材质自己的参数块（含头参考点）。
-            (0, OwnedBindingResource::Buffer(self.params_buffer.clone())),
+            (0, UnpreparedBindingResource::Buffer(self.params_buffer.clone())),
             // binding 1：全局量，全部角色材质共用一个 buffer。
-            (1, OwnedBindingResource::Buffer(env_buffer.buffer.clone())),
+            (1, UnpreparedBindingResource::Buffer(env_buffer.buffer.clone())),
             (
                 2,
-                OwnedBindingResource::TextureView(
+                UnpreparedBindingResource::TextureView(
                     TextureViewDimension::D2,
                     main.texture_view.clone(),
                 ),
             ),
-            (3, OwnedBindingResource::Sampler(SamplerBindingType::Filtering, clamp.clone())),
+            (3, UnpreparedBindingResource::Sampler(SamplerBindingType::Filtering, clamp.clone())),
             (
                 4,
-                OwnedBindingResource::TextureView(
+                UnpreparedBindingResource::TextureView(
                     TextureViewDimension::D2,
                     body_mask.texture_view.clone(),
                 ),
             ),
-            (5, OwnedBindingResource::Sampler(SamplerBindingType::Filtering, clamp.clone())),
+            (5, UnpreparedBindingResource::Sampler(SamplerBindingType::Filtering, clamp.clone())),
             (
                 6,
-                OwnedBindingResource::TextureView(
+                UnpreparedBindingResource::TextureView(
                     TextureViewDimension::D2,
                     eyebrow.texture_view.clone(),
                 ),
             ),
-            (7, OwnedBindingResource::Sampler(SamplerBindingType::Filtering, clamp)),
+            (7, UnpreparedBindingResource::Sampler(SamplerBindingType::Filtering, clamp)),
         ]);
-        Ok(UnpreparedBindGroup { bindings })
+        output.binding_resources.0.extend(bindings.0);
+        Ok(())
     }
 
     fn bind_group_data(&self) -> Self::Data {
@@ -297,11 +299,11 @@ impl AsBindGroup for CharacterMaterial {
 
 impl Material for CharacterMaterial {
     fn vertex_shader() -> ShaderRef {
-        "embedded://moly_render/shaders/character_material.wgsl".into()
+        "embedded://moly_render/shaders/character_material.wesl".into()
     }
 
     fn fragment_shader() -> ShaderRef {
-        "embedded://moly_render/shaders/character_material.wgsl".into()
+        "embedded://moly_render/shaders/character_material.wesl".into()
     }
 
     /// 本单只交付 Base 片元；阴影与深度消费方不在范围里。
@@ -339,7 +341,7 @@ impl Material for CharacterMaterial {
 // ---- 全局量桥 ----
 
 /// 全局量表的 GPU 布局：11 个 vec4 槽、176 字节。槽序是本文件与
-/// `shaders/character_material.wgsl` 里 `CharacterEnv` 结构体之间的
+/// `shaders/character_material.wesl` 里 `CharacterEnv` 结构体之间的
 /// 契约，两边同改。字段集照律的 CharacterGlobals，外加雾斜坡重建要的
 /// 投影参数（near/far）。
 pub const ENV_SLOTS: usize = 11;
@@ -347,6 +349,7 @@ pub const ENV_BYTES: usize = ENV_SLOTS * 16;
 
 /// 一帧的角色全局量。
 #[derive(Debug, Clone, Resource, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct CharacterEnv {
     pub globals: CharacterGlobals,
     /// `(翻转位, 近裁剪, 远裁剪, 1/远裁剪)`；翻转位在本管线的 GL 约定下
@@ -1132,6 +1135,8 @@ pub struct CharacterMaterialPlugin;
 
 impl Plugin for CharacterMaterialPlugin {
     fn build(&self, app: &mut App) {
+        // The material plugin resolves the shader path while it is added.
+        bevy::asset::embedded_asset!(app, "shaders/character_material.wesl");
         crate::render::gpu::install_shared_samplers(app);
         crate::gpu_image_release::prepare_after_images::<CharacterMaterial>(app);
         app.add_plugins((
@@ -1150,6 +1155,5 @@ impl Plugin for CharacterMaterialPlugin {
                 // 渲染世界，无序挂载会读到不存在的那一帧。
                 .add_systems(Render, write_env_buffer.in_set(RenderSystems::Prepare));
         }
-        bevy::asset::embedded_asset!(app, "shaders/character_material.wgsl");
     }
 }

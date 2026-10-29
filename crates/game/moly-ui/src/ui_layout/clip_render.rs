@@ -10,7 +10,6 @@ use bevy::{
     prelude::*,
     render::render_resource::{AsBindGroup, ShaderType},
     shader::ShaderRef,
-    sprite::TextureSlice,
     sprite_render::{AlphaMode2d, Material2d, Material2dPlugin},
 };
 use moly_assets::ui_layout::{
@@ -19,6 +18,7 @@ use moly_assets::ui_layout::{
 };
 use std::marker::PhantomData;
 use super::stencil_mask::MAX_STENCIL_QUADS;
+use super::texture_slice::{compute_slices, TextureSlice};
 
 const SHADER: Handle<Shader> = Handle::Uuid(
     Uuid::from_u128(0x7569_7265_6374_636c_6970_0000_0000_0001),
@@ -83,7 +83,7 @@ pub(super) fn install(app: &mut App) {
         .resource_mut::<Assets<Shader>>()
         .insert(
             SHADER.id(),
-            Shader::from_wgsl(include_str!("clip.wgsl"), "moly_ui/ui_layout/clip.wgsl"),
+            Shader::from_wesl(include_str!("clip.wesl"), "moly_ui/ui_layout/clip.wesl"),
         )
         .expect("UI clip shader installation");
 }
@@ -406,7 +406,7 @@ impl Draw<'_, '_, '_> {
                 draw_size,
                 offset: Vec2::ZERO,
             }],
-            SpriteImageMode::Sliced(slicer) => slicer.compute_slices(rect, Some(draw_size)),
+            SpriteImageMode::Sliced(slicer) => compute_slices(slicer, rect, Some(draw_size)),
             SpriteImageMode::Tiled {
                 tile_x,
                 tile_y,

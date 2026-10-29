@@ -176,7 +176,8 @@ pub(super) fn button(
     };
     let id = c
         .spawn((
-            Button,
+            Interaction::None,
+            bevy::ui::FocusPolicy::Block,
             action,
             kind,
             Node {

@@ -648,7 +648,8 @@ fn add_button(
 ) {
     let entity = commands
         .spawn((
-            Button,
+            Interaction::None,
+            bevy::ui::FocusPolicy::Block,
             action,
             Node {
                 min_width: px(40),

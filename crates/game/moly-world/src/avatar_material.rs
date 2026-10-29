@@ -3,7 +3,7 @@
 //! 式子全在 moly-law 的 shading::avatar（纯函数 + 逐值判据），本模块只做
 //! 装配：把穿戴集（`avatar_wear` 面板解析出的皮肤包/调色/饰件贴图）摊进
 //! uniform 槽，换到玩家 avatar 合成体的网格实体上。WGSL 在
-//! `shaders/avatar_material.wgsl`，逐式镜像律。
+//! `shaders/avatar_material.wesl`，逐式镜像律。
 //!
 //! **这是「接错」的修复，不是「没接」。** 真源玩家 avatar 装配链
 //! （`CreateMysekaiMaterialAsync`）运行时 `new Material(Mysekai/Avatar)` 现建，
@@ -58,7 +58,7 @@ pub struct AudienceBody;
 const SUNNY_LIGHT_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
 /// 材质参数 uniform 的槽数与字节数。槽序是本文件与
-/// `shaders/avatar_material.wgsl` 里 `AvatarParams` 结构体之间的契约，两边同改。
+/// `shaders/avatar_material.wesl` 里 `AvatarParams` 结构体之间的契约，两边同改。
 pub const PARAMS_SLOTS: usize = 8;
 pub const PARAMS_BYTES: usize = PARAMS_SLOTS * 16;
 
@@ -139,13 +139,14 @@ impl AsBindGroup for AvatarMaterial {
         "avatar_material"
     }
 
-    fn unprepared_bind_group(
+    fn build_bind_group(
         &self,
         _layout: &BindGroupLayout,
         render_device: &RenderDevice,
         (env_buffer, images, fallback): &mut bevy::ecs::system::SystemParamItem<'_, '_, Self::Param>,
         _force_no_bindless: bool,
-    ) -> Result<UnpreparedBindGroup, AsBindGroupError> {
+        output: &mut BindGroupBuilder,
+    ) -> Result<(), AsBindGroupError> {
         let skin = images
             .get(&self.skin_tex)
             .ok_or(AsBindGroupError::RetryNextUpdate)?;
@@ -172,18 +173,18 @@ impl AsBindGroup for AvatarMaterial {
         let tex = |binding: u32, view: &bevy::render::texture::GpuImage| {
             (
                 binding,
-                OwnedBindingResource::TextureView(TextureViewDimension::D2, view.texture_view.clone()),
+                UnpreparedBindingResource::TextureView(TextureViewDimension::D2, view.texture_view.clone()),
             )
         };
         let samp = |binding: u32| {
             (
                 binding,
-                OwnedBindingResource::Sampler(SamplerBindingType::Filtering, clamp.clone()),
+                UnpreparedBindingResource::Sampler(SamplerBindingType::Filtering, clamp.clone()),
             )
         };
-        let bindings = BindingResources(vec![
-            (0, OwnedBindingResource::Data(OwnedData(self.params.bytes()))),
-            (1, OwnedBindingResource::Buffer(env_buffer.buffer.clone())),
+        let bindings = UnpreparedBindingResources(vec![
+            (0, crate::render::gpu::push_data(output, &self.params.bytes())),
+            (1, UnpreparedBindingResource::Buffer(env_buffer.buffer.clone())),
             tex(2, skin),
             samp(3),
             tex(4, accessory),
@@ -193,7 +194,8 @@ impl AsBindGroup for AvatarMaterial {
             tex(8, penlight_light),
             samp(9),
         ]);
-        Ok(UnpreparedBindGroup { bindings })
+        output.binding_resources.0.extend(bindings.0);
+        Ok(())
     }
 
     fn bind_group_data(&self) -> Self::Data {
@@ -249,11 +251,11 @@ impl AsBindGroup for AvatarMaterial {
 
 impl Material for AvatarMaterial {
     fn vertex_shader() -> ShaderRef {
-        "embedded://moly_world/shaders/avatar_material.wgsl".into()
+        "embedded://moly_world/shaders/avatar_material.wesl".into()
     }
 
     fn fragment_shader() -> ShaderRef {
-        "embedded://moly_world/shaders/avatar_material.wgsl".into()
+        "embedded://moly_world/shaders/avatar_material.wesl".into()
     }
 
     /// 本单只交付 Base 片元；阴影与深度消费方不在范围里。
@@ -269,13 +271,14 @@ impl Material for AvatarMaterial {
 // ---- 全局量桥 ----
 
 /// 全局量表的 GPU 布局：4 个 vec4 槽、64 字节。槽序是本文件与
-/// `shaders/avatar_material.wgsl` 里 `AvatarEnv` 结构体之间的契约，两边同改。
+/// `shaders/avatar_material.wesl` 里 `AvatarEnv` 结构体之间的契约，两边同改。
 pub const ENV_SLOTS: usize = 4;
 pub const ENV_BYTES: usize = ENV_SLOTS * 16;
 
 /// 一帧的 avatar 全局量（`_GlobalCharacterDirectionalLightColor` /
 /// `_MysekaiScreenParams` / `_GlobalMipBias` / 投影参数）。
 #[derive(Debug, Clone, Resource, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct AvatarEnv {
     pub light_color: [f32; 4],
     pub screen_params: [f32; 4],
@@ -742,6 +745,8 @@ impl Plugin for AvatarMaterialPlugin {
         // The player domain's own systems ride on this registration.
         app.add_plugins(crate::player::PlayerPlugin);
         app.add_plugins(crate::companion::CompanionPlugin);
+        // The material plugin resolves the shader path while it is added.
+        bevy::asset::embedded_asset!(app, "shaders/avatar_material.wesl");
         app.add_plugins((
             MaterialPlugin::<AvatarMaterial>::default(),
             ExtractResourcePlugin::<AvatarEnv>::default(),
@@ -766,6 +771,5 @@ impl Plugin for AvatarMaterialPlugin {
                 .add_systems(RenderStartup, create_env_buffer)
                 .add_systems(Render, write_env_buffer.in_set(RenderSystems::Prepare));
         }
-        bevy::asset::embedded_asset!(app, "shaders/avatar_material.wgsl");
     }
 }

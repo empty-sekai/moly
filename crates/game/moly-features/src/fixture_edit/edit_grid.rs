@@ -60,8 +60,8 @@
 //! Inputs: `layout-grid/grid.json` (the grid settings, the materials, their
 //! shaders' pass state, the colour profiles) and the phenomenon index's
 //! configuration for the committed phenomenon at the current environment
-//! site. The programs are ported in `edit_grid_line.wgsl` and
-//! `edit_grid_face.wgsl`. Each material's queue and pass state (cull, depth
+//! site. The programs are ported in `edit_grid_line.wesl` and
+//! `edit_grid_face.wesl`. Each material's queue and pass state (cull, depth
 //! test and write, blend, colour mask) are taken from the asset.
 //!
 //! The source works in its own grid frame; the product frame is its X mirror
@@ -594,16 +594,16 @@ pub struct EditGrid {
 fn insert_shaders(mut shaders: ResMut<Assets<Shader>>) {
     let _ = shaders.insert(
         LINE_SHADER.id(),
-        Shader::from_wgsl(
-            include_str!("../shaders/edit_grid_line.wgsl"),
-            "moly_features/src/shaders/edit_grid_line.wgsl".to_owned(),
+        Shader::from_wesl(
+            include_str!("../shaders/edit_grid_line.wesl"),
+            "moly_features/src/shaders/edit_grid_line.wesl".to_owned(),
         ),
     );
     let _ = shaders.insert(
         FACE_SHADER.id(),
-        Shader::from_wgsl(
-            include_str!("../shaders/edit_grid_face.wgsl"),
-            "moly_features/src/shaders/edit_grid_face.wgsl".to_owned(),
+        Shader::from_wesl(
+            include_str!("../shaders/edit_grid_face.wesl"),
+            "moly_features/src/shaders/edit_grid_face.wesl".to_owned(),
         ),
     );
 }

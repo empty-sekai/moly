@@ -1,5 +1,5 @@
 //! Room shell material: the module walls, floor and entrance of a room floor
-//! drawn with the source programs (`shaders/room_shell.wgsl`).
+//! drawn with the source programs (`shaders/room_shell.wesl`).
 //!
 //! Source: the room module prefabs (house lv_01..lv_05) carry four materials:
 //! `mat_floor_main` (`Mysekai/Room/Floor`), `mat_wall_main` (`Mysekai/Object`,
@@ -351,11 +351,11 @@ pub fn resolve(
 
 impl Material for RoomShellMaterial {
     fn vertex_shader() -> ShaderRef {
-        "embedded://moly_world/shaders/room_shell.wgsl".into()
+        "embedded://moly_world/shaders/room_shell.wesl".into()
     }
 
     fn fragment_shader() -> ShaderRef {
-        "embedded://moly_world/shaders/room_shell.wgsl".into()
+        "embedded://moly_world/shaders/room_shell.wesl".into()
     }
 
     fn enable_prepass() -> bool {
@@ -513,7 +513,7 @@ impl AsBindGroup for RoomShellMaterial {
         "room_shell_material"
     }
 
-    fn unprepared_bind_group(
+    fn build_bind_group(
         &self,
         _layout: &BindGroupLayout,
         _render_device: &RenderDevice,
@@ -523,7 +523,8 @@ impl AsBindGroup for RoomShellMaterial {
             Self::Param,
         >,
         _force_no_bindless: bool,
-    ) -> Result<UnpreparedBindGroup, AsBindGroupError> {
+        output: &mut BindGroupBuilder,
+    ) -> Result<(), AsBindGroupError> {
         let main = images
             .get(&self.main_tex)
             .ok_or(AsBindGroupError::RetryNextUpdate)?;
@@ -539,54 +540,55 @@ impl AsBindGroup for RoomShellMaterial {
                 bytes.extend_from_slice(&value.to_le_bytes());
             }
         }
-        let bindings = BindingResources(vec![
-            (0, OwnedBindingResource::Data(OwnedData(bytes))),
-            (1, OwnedBindingResource::Buffer(env_buffer.buffer.clone())),
+        let bindings = UnpreparedBindingResources(vec![
+            (0, crate::render::gpu::push_data(output, &bytes)),
+            (1, UnpreparedBindingResource::Buffer(env_buffer.buffer.clone())),
             (
                 2,
-                OwnedBindingResource::TextureView(
+                UnpreparedBindingResource::TextureView(
                     TextureViewDimension::D2,
                     main.texture_view.clone(),
                 ),
             ),
             (
                 3,
-                OwnedBindingResource::Sampler(
+                UnpreparedBindingResource::Sampler(
                     SamplerBindingType::Filtering,
                     samplers.repeat_linear.clone(),
                 ),
             ),
             (
                 4,
-                OwnedBindingResource::Buffer(shadow.consumer_buffer.clone()),
+                UnpreparedBindingResource::Buffer(shadow.consumer_buffer.clone()),
             ),
             (
                 5,
-                OwnedBindingResource::TextureView(
+                UnpreparedBindingResource::TextureView(
                     TextureViewDimension::D2,
                     shadow.depth_view.clone(),
                 ),
             ),
             (
                 6,
-                OwnedBindingResource::Sampler(
+                UnpreparedBindingResource::Sampler(
                     SamplerBindingType::Comparison,
                     shadow.cmp_sampler.clone(),
                 ),
             ),
             (
                 7,
-                OwnedBindingResource::Buffer(site_extension.buffer.clone()),
+                UnpreparedBindingResource::Buffer(site_extension.buffer.clone()),
             ),
             (
                 8,
-                OwnedBindingResource::TextureView(
+                UnpreparedBindingResource::TextureView(
                     TextureViewDimension::D2,
                     clip_mask.texture_view.clone(),
                 ),
             ),
         ]);
-        Ok(UnpreparedBindGroup { bindings })
+        output.binding_resources.0.extend(bindings.0);
+        Ok(())
     }
 
     fn bind_group_data(&self) -> Self::Data {

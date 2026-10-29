@@ -5,7 +5,7 @@
 //! 输入缓冲。本管线的主 pass 只有一个颜色目标（与站点族同一裁决），这条
 //! 第二目标由本模块自建 render graph 节点直画：深度测试复用主 pass 的
 //! 深度图（只读不写），颜色写进一张单采样 ARGB32 缓冲，天气链的泛光金字塔以它
-//! 为预滤波源。着色程序在 `shaders/fixture_emission.wgsl`（片元式与绑定
+//! 为预滤波源。着色程序在 `shaders/fixture_emission.wesl`（片元式与绑定
 //! 契约的注释在那里）。
 //!
 //! JP client additions carried by [`FixtureEmission`]: the colour picker
@@ -64,7 +64,7 @@ use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery
 use bevy::render::texture::{GpuImage, TextureCache};
 use bevy::render::sync_world::MainEntity;
 use bevy::render::view::{
-    ExtractedView, Msaa, ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms,
+    ExtractedView, Msaa, ViewDepthStencilTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms,
 };
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems};
 
@@ -88,7 +88,7 @@ pub const EMISSION_FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
 
 /// 逐对象 uniform（着色程序里的 `EmissionObject`）的字节数：对象矩阵
 /// 64 + 材质参数 12 槽 192 + 自发光 vec4 16 + skin address uvec4 16 + JP
-/// second-target slots 4 vec4 64. 槽序契约见 `shaders/fixture_emission.wgsl`。
+/// second-target slots 4 vec4 64. 槽序契约见 `shaders/fixture_emission.wesl`。
 /// 家具存 world_from_local；粒子的既有对象契约仍存 clip_from_local，二者由
 /// 相应着色器解释，字节偏移不变（the particle shader reads only the first
 /// 288 bytes; its JP slots are zero）。
@@ -163,6 +163,7 @@ pub struct ViewEmissionTarget {
 /// Optional raw-target copies for diagnostic readback. These never feed back
 /// into rendering and therefore cannot change the pixel oracle being observed.
 #[derive(Resource, Clone, Default, bevy::render::extract_resource::ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct WeatherEffectProbes {
     pub after_opaques: Option<Handle<Image>>,
     pub after_transparents: Option<Handle<Image>>,
@@ -403,7 +404,7 @@ fn extract_emission_draws(
 }
 
 /// 对象 uniform 的字节：对象矩阵四列（列主序摊平）+ 参数 12 槽 + 自发光
-/// vec4。槽序与 `shaders/fixture_emission.wgsl` 的 `EmissionObject` 是契约。
+/// vec4。槽序与 `shaders/fixture_emission.wesl` 的 `EmissionObject` 是契约。
 fn emission_object_bytes(draw: &EmissionDraw) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(EMISSION_OBJECT_BYTES);
     for component in draw.vertex_transform.to_cols_array() {
@@ -581,12 +582,14 @@ fn prepare_emission(
                     label: Some("fixture_emission_pipeline".into()),
                     layout: vec![gpu.object_layout.clone(), gpu.texture_layout.clone()],
                     vertex: VertexState {
+                        constants: vec![],
                         shader: shader.clone(),
                         shader_defs: vec![],
                         entry_point: Some("emission_vertex".into()),
                         buffers: vec![vertex_layout],
                     },
                     fragment: Some(FragmentState {
+                        constants: vec![],
                         shader: shader.clone(),
                         shader_defs: vec![],
                         entry_point: Some("emission_fragment".into()),
@@ -668,7 +671,7 @@ pub(crate) fn emission_pass<const EARLY: bool>(
     world: &World,
     view: ViewQuery<(
         &ViewEmissionTarget,
-        &ViewDepthTexture,
+        &ViewDepthStencilTexture,
         &ViewUniformOffset,
         Option<&crate::weather_depth::RawDepthBinding>,
         Option<&crate::weather_depth::WeatherCameraRole>,
@@ -683,7 +686,7 @@ pub(crate) fn emission_pass<const EARLY: bool>(
     let (target, depth, view_offset, depth_binding, role, has_camera, view, has_view_target) =
         view.into_inner();
     let attachment_compatible = crate::weather_depth::effect_attachment_compatible(
-        role.copied(), depth.texture.sample_count());
+        role.copied(), depth.texture().sample_count());
     let draws = world.resource::<EmissionDrawList>();
     // The emission target is read only by the weather post node's bloom
     // path and by diagnostic probe copies, and the opaque node clears it
@@ -1042,9 +1045,9 @@ fn init_emission_resources(mut commands: Commands, render_device: Res<RenderDevi
 fn load(mut shaders: ResMut<Assets<Shader>>) {
     let _ = shaders.insert(
         FIXTURE_EMISSION_SHADER.id(),
-        Shader::from_wgsl(
-            include_str!("shaders/fixture_emission.wgsl"),
-            "moly_render/src/shaders/fixture_emission.wgsl".to_owned(),
+        Shader::from_wesl(
+            include_str!("shaders/fixture_emission.wesl"),
+            "moly_render/src/shaders/fixture_emission.wesl".to_owned(),
         ),
     );
 }

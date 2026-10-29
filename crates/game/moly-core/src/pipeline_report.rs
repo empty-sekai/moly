@@ -39,6 +39,7 @@ fn report(cache: Res<PipelineCache>, frame: Option<Res<FrameCount>>, mut ready: 
         let label = match &pipeline.descriptor {
             PipelineDescriptor::RenderPipelineDescriptor(descriptor) => descriptor.label.as_deref(),
             PipelineDescriptor::ComputePipelineDescriptor(descriptor) => descriptor.label.as_deref(),
+            PipelineDescriptor::MeshPipelineDescriptor(descriptor) => descriptor.label.as_deref(),
         };
         *labels.entry(label.unwrap_or("(unlabelled)")).or_default() += 1;
     }
