@@ -190,6 +190,19 @@ exclusive rows; the Japanese server is enabled.
   following the system language by default; each language replaces only the displayed text and
   shares the same resources.
 
+## Graphics (unscheduled)
+
+**Shadows**
+- Sharper shadows: a shadow map fitted to the area the camera sees, with texel snapping so
+  edges do not shimmer while moving, and bias that scales with the map's resolution.
+- Smooth soft-shadow filtering in place of the single-texel comparison, so edges lose their
+  stair-stepping and small shapes stay readable.
+
+**Graphics panel**
+- A settings panel whose changes take effect immediately, without a restart: shadow quality,
+  anti-aliasing, render scale and further post-processing effects, with presets and per-option
+  control. Choices are saved in the personal profile.
+
 ## Engineering
 
 - Upgrade Bevy to 0.20.
