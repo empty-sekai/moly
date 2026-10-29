@@ -1,0 +1,22 @@
+[plugin]
+id = "moly.talk-shot"
+name = "Talk shot"
+version = "0.1.0"
+moly = ">=0.0.5"
+kind = "luau"
+entry = "main.luau"
+description = "Summons one cross-unit conversation's cast, starts the talk, and turns the lens to the speaker as the lines play."
+
+[config]
+talk = 8570
+cast = [1, 15]
+lens_distance = 1.9
+lens_height = 0.8
+lens_target_height = 0.47
+lens_fov = 35
+# A cast of two stands on a triangle with the player: each body `half` metres
+# off the stage's middle, the player on the third vertex `back` metres behind
+# it. Three or more keep the `ring` around the middle instead.
+half = 0.85
+back = 1.9
+ring = 0.7
