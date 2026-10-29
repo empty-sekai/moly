@@ -38,6 +38,8 @@ pub const TABLE_KEYS: &[(&str, &[&str])] = &[
     ("resourceBoxes", &["resourceBoxPurpose", "id"]),
     // The id and sequence columns are not in every region's table.
     ("musicTags", &["musicId", "musicTag"]),
+    // A config entry is its own key; the rows have no `id`.
+    ("configs", &["configKey"]),
 ];
 
 /// The table's key fields: those of [`TABLE_KEYS`], or `id`.

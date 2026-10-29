@@ -519,8 +519,8 @@ static SERVER_TABLES: &[ServerTable] = &[
         convert_record_categories
     ),
     server_table!(
-        "colorfulPasses",
-        "colorfulPasses (the convert time's pass decrease)",
+        "mysekaiColorfulPass",
+        "mysekaiColorfulPass (the convert time's pass decrease)",
         convert::parse_convert_pass_rate,
         convert_pass_rate
     ),

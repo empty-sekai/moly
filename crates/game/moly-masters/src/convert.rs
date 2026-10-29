@@ -19,7 +19,7 @@
 //! - `mysekaiConvertItemObtainMysekaiBlueprints`,
 //!   `mysekaiConvertItemObtainMysekaiMusicRecords`,
 //!   `mysekaiMusicRecordCategories` and `mysekaiMusicRecords`.
-//! - `colorfulPasses`: `mysekaiConvertFixtureConvertMinutesDecreaseRate`.
+//! - `mysekaiColorfulPass`: `mysekaiConvertFixtureConvertMinutesDecreaseRate`.
 //! - `configs`: `mysekai_convert_time_shorten_consume_jewel_per_minute`.
 //!
 //! Every reader fails by name on a column it cannot read; the tables are
@@ -173,11 +173,10 @@ pub fn parse_tabs(text: &str) -> Result<Vec<(i32, i32)>, String> {
 /// `mysekaiConvertFixtureSlot`: (slotNoUpperLimit,
 /// slotNoUpperLimitForMysekaiColorfulPass) of the first row.
 pub fn parse_slot(text: &str) -> Result<(i32, i32), String> {
-    let rows = crate::load::master_rows_of(text, "mysekaiConvertFixtureSlot")?;
-    let row = rows.first().ok_or("mysekaiConvertFixtureSlot has no row")?;
+    let row = crate::load::master_single_row(text, "mysekaiConvertFixtureSlot")?;
     Ok((
-        crate::int32(row, "slotNoUpperLimit")?,
-        crate::int32(row, "slotNoUpperLimitForMysekaiColorfulPass")?,
+        crate::int32(&row, "slotNoUpperLimit")?,
+        crate::int32(&row, "slotNoUpperLimitForMysekaiColorfulPass")?,
     ))
 }
 
@@ -298,20 +297,18 @@ pub fn parse_music_records(text: &str) -> Result<Vec<MusicRecord>, String> {
         .collect()
 }
 
-/// `colorfulPasses.mysekaiConvertFixtureConvertMinutesDecreaseRate` of the
-/// first row: the fraction a convert's minutes are multiplied by while the
-/// pass runs.
+/// `mysekaiColorfulPass.mysekaiConvertFixtureConvertMinutesDecreaseRate`: the
+/// fraction a convert's minutes are multiplied by while the pass runs.
 pub fn parse_pass_rate(text: &str) -> Result<f32, String> {
-    let rows = crate::load::master_rows_of(text, "colorfulPasses")?;
-    let row = rows.first().ok_or("colorfulPasses has no row")?;
+    let row = crate::load::master_single_row(text, "mysekaiColorfulPass")?;
     let raw = row
         .get("mysekaiConvertFixtureConvertMinutesDecreaseRate")
         .and_then(Value::as_f64)
-        .ok_or("colorfulPasses has no mysekaiConvertFixtureConvertMinutesDecreaseRate")?
+        .ok_or("mysekaiColorfulPass has no mysekaiConvertFixtureConvertMinutesDecreaseRate")?
         as f32;
     if !raw.is_finite() || raw < 0.0 {
         return Err(format!(
-            "colorfulPasses.mysekaiConvertFixtureConvertMinutesDecreaseRate = {raw} is negative"
+            "mysekaiColorfulPass.mysekaiConvertFixtureConvertMinutesDecreaseRate = {raw} is negative"
         ));
     }
     Ok(raw)

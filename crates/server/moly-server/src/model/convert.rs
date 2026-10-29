@@ -30,7 +30,7 @@
 //!   holds no pass).
 //! - *Convert time*: the master `convertMinutes` of the item times the
 //!   pass's `mysekaiConvertFixtureConvertMinutesDecreaseRate`, rounded down,
-//!   while the user's pass runs. `colorfulPasses` carries the rate as a
+//!   while the user's pass runs. `mysekaiColorfulPass` carries the rate as a
 //!   fraction; a rate of 1 or more leaves the minutes as the master states
 //!   them (an inference: a master that carried a percentage would need one,
 //!   and `GetOnceConvertMinutes` has no such branch).
@@ -330,7 +330,7 @@ pub(crate) struct ConvertMasters {
     pub(crate) blueprint_obtains: Option<Vec<BlueprintObtain>>,
     pub(crate) record_obtains: Option<Vec<RecordObtain>>,
     pub(crate) record_categories: Option<Vec<RecordCategory>>,
-    /// `colorfulPasses.mysekaiConvertFixtureConvertMinutesDecreaseRate` as
+    /// `mysekaiColorfulPass.mysekaiConvertFixtureConvertMinutesDecreaseRate` as
     /// the fraction the convert time multiplies by.
     pub(crate) pass_rate: Option<f32>,
 }
@@ -526,19 +526,27 @@ fn table_rows(text: &str, table: &str) -> Result<Vec<Value>, String> {
     Ok(rows)
 }
 
+/// The row of a one-row master table, which upstream publishes as one JSON
+/// object (an array's first row is read as well).
+fn single_row(text: &str, table: &str) -> Result<Value, String> {
+    let value: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
+    match value {
+        Value::Object(_) => Ok(value),
+        Value::Array(rows) => rows.into_iter().next().ok_or(format!("{table} has no row")),
+        _ => Err(format!("{table} is neither a row object nor an array of rows")),
+    }
+}
+
 /// `mysekaiConvertFixtureSlot`: (slotNoUpperLimit,
-/// slotNoUpperLimitForMysekaiColorfulPass) of the first row.
+/// slotNoUpperLimitForMysekaiColorfulPass).
 pub(crate) fn parse_convert_fixture_slot(
     text: &str,
     masters: &mut super::Masters,
 ) -> Result<(), String> {
-    let rows = table_rows(text, "mysekaiConvertFixtureSlot")?;
-    let row = rows
-        .first()
-        .ok_or("mysekaiConvertFixtureSlot has no row")?;
+    let row = single_row(text, "mysekaiConvertFixtureSlot")?;
     masters.convert_slots = Some((
-        super::int32(row, "slotNoUpperLimit")?,
-        super::int32(row, "slotNoUpperLimitForMysekaiColorfulPass")?,
+        super::int32(&row, "slotNoUpperLimit")?,
+        super::int32(&row, "slotNoUpperLimitForMysekaiColorfulPass")?,
     ));
     Ok(())
 }
@@ -730,23 +738,22 @@ pub(crate) fn parse_convert_record_categories(
     Ok(())
 }
 
-/// `colorfulPasses`: `mysekaiConvertFixtureConvertMinutesDecreaseRate` of the
+/// `mysekaiColorfulPass`: `mysekaiConvertFixtureConvertMinutesDecreaseRate` of the
 /// first row, as the fraction the convert time multiplies by.
 pub(crate) fn parse_convert_pass_rate(
     text: &str,
     masters: &mut super::Masters,
 ) -> Result<(), String> {
-    let rows = table_rows(text, "colorfulPasses")?;
-    let row = rows.first().ok_or("colorfulPasses has no row")?;
+    let row = single_row(text, "mysekaiColorfulPass")?;
     let raw = row
         .get("mysekaiConvertFixtureConvertMinutesDecreaseRate")
         .and_then(Value::as_f64)
         .ok_or(
-            "colorfulPasses has no mysekaiConvertFixtureConvertMinutesDecreaseRate",
+            "mysekaiColorfulPass has no mysekaiConvertFixtureConvertMinutesDecreaseRate",
         )? as f32;
     if !raw.is_finite() || raw < 0.0 {
         return Err(format!(
-            "colorfulPasses.mysekaiConvertFixtureConvertMinutesDecreaseRate = {raw} is negative"
+            "mysekaiColorfulPass.mysekaiConvertFixtureConvertMinutesDecreaseRate = {raw} is negative"
         ));
     }
     // The rate is the fraction `GetOnceConvertMinutes` multiplies by; 1 or
@@ -2147,7 +2154,7 @@ pub(crate) fn schema_sections() -> Value {
 pub(crate) fn schema_policies() -> Value {
     json!([
         {"name": "convert slots", "rule": "mysekaiConvertFixtureSlot gives the slot numbers (slotNoUpperLimit) and the ones a world pass extends the machine to (slotNoUpperLimitForMysekaiColorfulPass); the join seats one slot per extended number, and a slot above slotNoUpperLimit needs the pass"},
-        {"name": "convert time", "rule": "a convert takes the master convertMinutes of the item; while the world pass runs, times colorfulPasses.mysekaiConvertFixtureConvertMinutesDecreaseRate, rounded down; a rate of 1 or more leaves the minutes as the master states them"},
+        {"name": "convert time", "rule": "a convert takes the master convertMinutes of the item; while the world pass runs, times mysekaiColorfulPass.mysekaiConvertFixtureConvertMinutesDecreaseRate, rounded down; a rate of 1 or more leaves the minutes as the master states them"},
         {"name": "convert machine level", "rule": "userMysekaiGamedata.mysekaiConvertFixtureLevel seats at the first mysekaiConvertFixtureLevels level; an item whose requiredConvertFixtureLevel is above it cannot start"},
         {"name": "convert draws (server-decided)", "rule": "a convert's resources are drawn when it starts: a resource_box item draws every detail (seq order, resourceQuantity) of the mysekai_convert_obtain box <externalId> as one step; the cost is every detail of the mysekai_convert_consumption box <consumeResourceBoxId>; a mysekai_blueprint item draws a random mysekaiBlueprints row with isObtainedByConvert the user does not own (the white blueprint item for white_blueprint); a mysekai_music_record item draws a mysekaiMusicRecords row the user does not own. The pick is seeded by the slot, the step, the choice and the item"},
         {"name": "convert convertible count", "rule": "an item with convertLimit is capped by the limit less its history convertCount (reset on a weekly or monthly refresh) and by the resources of its consumeResourceBoxId box, at onceConvertLimit at most; a pass slot is also capped by the pass's remaining minutes"},
@@ -2745,7 +2752,7 @@ mod tests {
 
     #[test]
     fn the_pass_rate_is_a_fraction() {
-        // colorfulPasses.mysekaiConvertFixtureConvertMinutesDecreaseRate is
+        // mysekaiColorfulPass.mysekaiConvertFixtureConvertMinutesDecreaseRate is
         // 0.5: a 12-minute convert takes 6 minutes while the pass runs.
         let convert = ConvertMasters {
             pass_rate: Some(0.5),

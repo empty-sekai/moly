@@ -218,7 +218,7 @@ impl<'a> Machine<'a> {
     }
 
     /// `MysekaiConvertUtility.GetConvertTimeDecreaseRate`
-    /// (`colorfulPasses.mysekaiConvertFixtureConvertMinutesDecreaseRate`; 1
+    /// (`mysekaiColorfulPass.mysekaiConvertFixtureConvertMinutesDecreaseRate`; 1
     /// when the table is not in).
     pub fn convert_time_decrease_rate(&self) -> f32 {
         self.masters.pass_rate.unwrap_or(1.0)

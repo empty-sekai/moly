@@ -400,8 +400,8 @@ static TABLES: &[Entry] = &[
         Convert
     ),
     field_table!(
-        "colorfulPasses",
-        "colorfulPasses (the convert time's pass decrease)",
+        "mysekaiColorfulPass",
+        "mysekaiColorfulPass (the convert time's pass decrease)",
         parse_convert_pass_rate,
         convert,
         pass_rate,
@@ -903,6 +903,17 @@ fn table_rows(text: &str, table: &str) -> Result<Vec<Value>, String> {
 /// [`table_rows`] for the readers of other modules of this crate.
 pub(crate) fn master_rows_of(text: &str, table: &str) -> Result<Vec<Value>, String> {
     table_rows(text, table)
+}
+
+/// The row of a one-row table, which upstream publishes as one JSON object
+/// (an array's first row is read as well).
+pub(crate) fn master_single_row(text: &str, table: &str) -> Result<Value, String> {
+    let value: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
+    match value {
+        Value::Object(_) => Ok(value),
+        Value::Array(rows) => rows.into_iter().next().ok_or(format!("{table} has no row")),
+        _ => Err(format!("{table} is neither a row object nor an array of rows")),
+    }
 }
 
 /// `mysekaiStaminaRecovery`: the single row's two columns.
