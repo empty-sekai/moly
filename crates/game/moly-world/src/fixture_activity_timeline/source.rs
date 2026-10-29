@@ -83,6 +83,10 @@ pub enum TimelinePayload {
         target: ClipTarget,
         settings: AnimationPlayableSettings,
     },
+    /// An `AnimationPlayableAsset` whose `m_Clip` is null: it creates no
+    /// playable, so the clip occupies its span on the track without mixing
+    /// any pose.
+    EmptyAnimation,
     /// `ChangeEyePresetClip`: the selected row's pattern name. The view
     /// looks the name up in its own eye table (`ChangeEyePattern`); the row's
     /// cells in the clip are not read.
@@ -980,6 +984,16 @@ impl TimelinePackage {
                     return Err(invalid("missing or duplicated full-identity animation target row; legacy pathId-only rows need re-extraction"));
                 }
                 let target = &rows[0]["target"];
+                if target.is_null() {
+                    // The clip reference itself is null: CreatePlayable returns
+                    // Playable.Null and the track mixes nothing for this clip.
+                    if path_id(&f["m_Clip"]["m_PathID"])? != "0" {
+                        return Err(invalid(
+                            "animation target row is null but the clip reference is not",
+                        ));
+                    }
+                    return Ok(TimelinePayload::EmptyAnimation);
+                }
                 TimelinePayload::Animation {
                     target: ClipTarget {
                         target_package: string(target, "targetPackage")?.to_owned(),

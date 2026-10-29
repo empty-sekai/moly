@@ -1828,10 +1828,12 @@ fn validate(
                     let animation = clips
                         .get(&binding.clip)
                         .ok_or_else(|| TimelineFailure::loading("animation clip still loading"))?;
+                    // A held pose is a single key at time 0: its length is the
+                    // authored source span checked above, not the key span.
                     if animation.curves().is_empty()
                         || animation.curves().values().all(Vec::is_empty)
                         || !animation.duration().is_finite()
-                        || animation.duration() <= 0.0
+                        || animation.duration() < 0.0
                     {
                         return Err(invalid("empty AnimationClip is not playable"));
                     }
@@ -1969,7 +1971,7 @@ fn validate(
                         return Err(invalid("section control needs its step-item receiver"));
                     }
                 }
-                TimelinePayload::NoPresetChange => {}
+                TimelinePayload::NoPresetChange | TimelinePayload::EmptyAnimation => {}
                 TimelinePayload::Control(_) | TimelinePayload::LoopParticle { .. } => {}
                 TimelinePayload::CutScene(payload) => {
                     if request.owner.kind != TimelineOwnerKind::CutScene {

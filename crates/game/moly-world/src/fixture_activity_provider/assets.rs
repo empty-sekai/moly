@@ -359,6 +359,9 @@ impl ActivityAssets {
                 continue;
             }
             for clip in &track.clips {
+                if matches!(clip.payload, TimelinePayload::EmptyAnimation) {
+                    continue;
+                }
                 let TimelinePayload::Animation { target, .. } = &clip.payload else {
                     return Err(ProviderPending::new(
                         "fixture-animation-payload",
@@ -403,7 +406,7 @@ impl ActivityAssets {
                         .filter(|(_, curves)| !curves.is_empty())
                         .map(|(id, _)| *id)
                         .collect();
-                    if ids.is_empty() || !clip.duration().is_finite() || clip.duration() <= 0.0 {
+                    if ids.is_empty() || !clip.duration().is_finite() || clip.duration() < 0.0 {
                         return Err(ProviderPending::new(
                             "fixture-empty-clip",
                             format!("{} has no actual renderable curves", target.clip_name),
