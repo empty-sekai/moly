@@ -193,10 +193,13 @@ exclusive rows; the Japanese server is enabled.
 ## Graphics (unscheduled)
 
 **Shadows**
-- Sharper shadows: a shadow map fitted to the area the camera sees, with texel snapping so
-  edges do not shimmer while moving, and bias that scales with the map's resolution.
+- Cascaded shadow maps: fine near the camera and coarser with distance, aligned to texels so
+  edges do not shimmer while moving, with bias that scales with the map's resolution.
 - Smooth soft-shadow filtering in place of the single-texel comparison, so edges lose their
   stair-stepping and small shapes stay readable.
+
+**Post effects**
+- Screen-space ambient occlusion and contact shadows, each switchable in the graphics panel.
 
 **Graphics panel**
 - A settings panel whose changes take effect immediately, without a restart: shadow quality,
@@ -206,6 +209,9 @@ exclusive rows; the Japanese server is enabled.
 ## Engineering
 
 - Upgrade Bevy to 0.20.
+- Move the materials' mesh, depth and shadow passes onto the engine's standard interfaces (depth
+  and normal prepass, the engine's cascaded shadow maps), keeping each material's shading
+  arithmetic as it is.
 - Tidy the environment variable switches, moving values decided by the server into the
   simulation panel.
 - Split oversized source files along the original game's classes.
