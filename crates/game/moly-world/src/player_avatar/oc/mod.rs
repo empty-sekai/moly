@@ -14,6 +14,8 @@
 //! - [`source`]: choosing the character body or the file, and its load;
 //! - [`bind`]: fitting a loaded model to the avatar skeleton;
 //! - [`dress`]: a character body's character material;
+//! - [`crate::cloth_runtime::plan_cloth`]: a character body's hair and skirt
+//!   cloth, as for a cast member;
 //! - [`pose`]: the per-frame pose pass;
 //! - [`own`]: a body's own idle and walk segments, played on the body's own
 //!   skeleton in place of the retarget, with the fade back into it;
@@ -82,6 +84,11 @@ pub fn install(app: &mut App) {
                 bind::attach,
                 bind::bind,
                 own::load_profiles,
+                // The body's bone cloth (hair and skirt chains of its rig
+                // profile): named in the OC's scene, so it plans after the
+                // binding; the pose pass runs before the cloth's advance
+                // every frame.
+                crate::cloth_runtime::plan_cloth,
                 dress::dress,
                 dress::refuse_failed_textures,
                 dress::show,

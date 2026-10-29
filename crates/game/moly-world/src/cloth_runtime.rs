@@ -1,10 +1,12 @@
-//! 头发骨布上屏：把 rig 的 `cloth` 节装成每名成员的二级物理，逐帧
-//! 消费 `moly_law::cloth` 的解算器并写回骨变换。
+//! 头发骨布上屏：把 rig 的 `cloth` 节装成每个角色的二级物理（名册成员，
+//! 以及玩家身上穿的角色本体读同一份档案），逐帧消费 `moly_law::cloth`
+//! 的解算器并写回骨变换。
 //!
-//! # 装配（[`plan_when_wired`]）
+//! # 装配（[`plan_when_wired`]、[`plan_cloth`]）
 //!
 //! 骨架装配完成后（动画目标已插、播放器已装、名册成员的模型场景已
-//! 展开），解析 rig 的 cloth 节：链拓扑/参数/约束表走律的 schema
+//! 展开；玩家身上穿的角色本体即 OC 的绑定完成后），解析 rig 的 cloth
+//! 节：链拓扑/参数/约束表走律的 schema
 //! （缺键与非法值响亮拒绝，不造默认值），绑定姿态取顶点的
 //! `worldPosition`，碰撞体的骨绑定与 team 消费表按 pathId 自行解引用
 //! （schema 只搬几何，绑定归本层）。每链 [`build_chain`] 一次，链骨与
@@ -13,6 +15,11 @@
 //! [`WORLD_MATCH_TOL`]。链内
 //! 父子关系与场景父子关系做一致性检查：写回的局部化按链内父算，场景
 //! 父不一致时直写会错位，必须在装配期就响。
+//!
+//! 两条装配路共用一个规划器：名册成员在成员实体上装运行时、以成员实体
+//! 为世界基；玩家身上的角色本体在 OC 模型实体上装运行时、以玩家实体为
+//! 世界基（骨路径穿过动画器与 OC 场景根，后者的贴合变换照常按当帧局
+//! 部合成）。
 //!
 //! # 帧次序（[`advance`]）
 //!
@@ -25,8 +32,8 @@
 //! 律的 [`FrameInput`] 要每粒子的当帧动画世界位。动作库的目标链不含
 //! 头发/饰品骨，这些骨的局部变换静止在绑定姿态，而布料写回又会改
 //! 它们——所以动画位**不读**布料骨的现行局部变换，而是沿
-//! 成员 → 模型 → … → 骨手工合成世界变换：路径上落在链骨集合里的
-//! 实体取装配时快照的绑定局部姿态，其余取当帧局部变换。成员实体是
+//! 世界基 → … → 骨手工合成世界变换：路径上落在链骨集合里的
+//! 实体取装配时快照的绑定局部姿态，其余取当帧局部变换。世界基是
 //! 场景根（无父），它的 Transform 由推进律在 Update 写好，当帧即是
 //! 世界。这与对照实现「每帧先还原布料骨到绑定姿态、更新矩阵、再读
 //! 动画位」逐帧等价，但不触碰场景状态。模拟在世界空间进行——世界
@@ -54,8 +61,10 @@
 
 use crate::character::{CharacterModel, CharacterPack, CharacterRestTransform, MotionDriver};
 use crate::npc::CharacterUnitId;
+use crate::player_avatar::oc::{bind::OcBinding, OcModel};
 use bevy::asset::{Assets, LoadState};
 use bevy::math::Affine3A;
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use moly_assets::json::JsonAsset;
 use moly_law::cloth::math;
@@ -76,8 +85,10 @@ pub const REPORT_PERIOD: Duration = Duration::from_secs(2);
 
 /// 同名消歧的世界位容差（米）。档案为每个绑定点存了提取器绑定的那个
 /// 实例的绑定姿态世界位（链骨 `vertices.worldPosition`、碰撞体
-/// `boneWorld.position`）。rig 可晚于模型到达，装配时动画可能已经起播；
-/// 必须合成 CharacterRestTransform 中保存的导入姿态，不能读当前动画姿态。
+/// `boneWorld.position`）。rig 可晚于模型到达，名册成员装配时动画可能已经
+/// 起播：必须合成 CharacterRestTransform 中保存的导入姿态，不能读当前
+/// 动画姿态（玩家身上角色本体的链骨没有动作写过，规划时现取的局部
+/// 变换就是绑定姿态，见 [`plan_cloth`]）。
 /// 候选实体的合成绑定世界位与档案值逐值比：差只许是浮点
 /// 圆整（全批档案实测最大 1.76e-7），容差放在圆整噪声之上四个数量级、
 /// 在相邻骨间距（厘米级）之下两个数量级。恰一命中才收，零命中或多命中
@@ -93,9 +104,17 @@ const WORLD_MATCH_TOL: f32 = 1e-3;
 #[derive(Component)]
 pub struct ClothBone;
 
-/// 一名成员的骨布运行时（装配闩，装好即永驻）。
+/// 一副骨布的运行时（装配闩，装好即永驻）：名册成员的装在成员实体上，
+/// 玩家身上角色本体的装在 OC 模型实体上——两条路的帧推进只认这里的
+/// 世界基与单位号，不再假定运行时与 [`CharacterUnitId`] 同实体。
 #[derive(Component)]
 pub struct ClothRuntime {
+    /// 单位号（消息与汇报用；OC 的模型实体不带 `CharacterUnitId`）。
+    unit: u32,
+    /// 世界基：场景根，骨路径与链根链外父路径的起点、当帧 Transform 即
+    /// 世界。成员是成员实体自己；OC 是它的玩家实体（OC 场景挂在玩家的
+    /// 动画器下）。
+    base: Entity,
     chains: Vec<ChainRuntime>,
     /// 链骨实体集：动画位合成时，路径上落在集合里的实体改用绑定姿态。
     chain_bones: HashSet<Entity>,
@@ -151,7 +170,7 @@ struct ChainScratch {
 /// 顶点绑定。
 struct BoneBinding {
     entity: Entity,
-    /// 成员（不含）→ 本骨（含）的实体路径。
+    /// 世界基（不含）→ 本骨（含）的实体路径。
     path: Vec<Entity>,
     fixed: bool,
 }
@@ -159,7 +178,7 @@ struct BoneBinding {
 /// 碰撞体绑定。
 struct ColliderBinding {
     def: ColliderDef,
-    /// 成员（不含）→ 碰撞骨（含）的实体路径。
+    /// 世界基（不含）→ 碰撞骨（含）的实体路径。
     path: Vec<Entity>,
 }
 
@@ -377,7 +396,8 @@ fn parse_rig(raw: &str) -> Result<ParsedRig, String> {
 /// Update：骨架装配完成的成员解析 cloth 节、绑骨、建链。闩在
 /// NPC的[`MotionDriver`]或SD玩家的AvatarDriver上（场景已展开、动画目标已插）；档案装载失败或
 /// 任何数据面缺口响亮失败——装载面按 schema 的拒绝语义走，缺键即
-/// 停，不造默认值。
+/// 停，不造默认值。数据面交给共用规划器（[`ClothWeave::plan`]），绑定
+/// 姿态读装配时插在节点上的 [`CharacterRestTransform`]。
 #[allow(clippy::type_complexity)]
 pub fn plan_when_wired(
     mut commands: Commands,
@@ -390,11 +410,8 @@ pub fn plan_when_wired(
             Without<ClothRuntime>,
         ),
     >,
-    children: Query<&Children>,
-    child_of: Query<&ChildOf>,
+    weave: ClothWeave,
     models: Query<&CharacterModel>,
-    names: Query<&Name>,
-    transforms: Query<&Transform>,
     imported: Query<&CharacterRestTransform>,
 ) {
     for (npc, unit, pack) in &npcs {
@@ -411,21 +428,15 @@ pub fn plan_when_wired(
         let Some(json) = jsons.get(&pack.rig) else {
             continue;
         };
-        let parsed = match parse_rig(&json.0) {
-            Ok(p) => p,
-            Err(reason) => panic!(
-                "unit {} 的骨架档案 {} cloth 节解析失败：{reason}",
-                unit.0, pack.rig_file
-            ),
-        };
         // 世界合成的假设：成员实体是场景根，其当帧 Transform 即世界。
-        if child_of.get(npc).is_ok() {
+        if weave.child_of.get(npc).is_ok() {
             panic!(
                 "unit {} 的成员实体挂在别的实体下：布料的世界合成假设被破坏",
                 unit.0
             );
         }
-        let Some(model) = children
+        let Some(model) = weave
+            .children
             .get(npc)
             .expect("模型挂载后有子链")
             .iter()
@@ -433,66 +444,159 @@ pub fn plan_when_wired(
         else {
             panic!("unit {} 的成员实体下没有 CharacterModel 子实体", unit.0);
         };
-        // 名字表：模型子树全量走一遍。链骨与碰撞骨按名绑定；同名多实体
+        let runtime = weave.plan(
+            unit.0,
+            &pack.rig_file,
+            &json.0,
+            model,
+            &|entity: Entity| imported.get(entity).ok().map(|pose| pose.0),
+            npc,
+        );
+        weave.install(&mut commands, npc, runtime);
+    }
+}
+
+/// Update（在 OC 绑定之后）：玩家身上穿的角色本体（OC）按同一份骨架档案
+/// 绑骨、建链，运行时装在 OC 模型实体上，世界基是它的玩家实体——头发与
+/// 裙摆的链与名册成员同形同律。数据面的缺失与名册成员同一声势：装载
+/// 失败与解析失败响亮失败；档案未到时等下一帧。模型文件
+/// （`character: None`）没有档案、没有骨布，不碰。OC 换掉或退回时模型
+/// 实体连同运行时、链骨的 [`ClothBone`] 一起消失，再穿时重新规划。
+pub fn plan_cloth(
+    mut commands: Commands,
+    server: Res<AssetServer>,
+    jsons: Res<Assets<JsonAsset>>,
+    oc_models: Query<(Entity, &OcModel), (With<OcBinding>, Without<ClothRuntime>)>,
+    weave: ClothWeave,
+) {
+    for (oc, model) in &oc_models {
+        // 模型文件没有角色档案、没有骨布。
+        let Some(body) = &model.character else {
+            continue;
+        };
+        match server.load_state(&body.rig) {
+            LoadState::Failed(err) => {
+                panic!(
+                    "unit {} 的骨架档案 {} 装载失败：{err:?}",
+                    body.unit, body.rig_file
+                )
+            }
+            LoadState::Loaded => {}
+            _ => continue, // 这个 OC 等下一帧，不挡别人
+        }
+        let Some(json) = jsons.get(&body.rig) else {
+            continue;
+        };
+        // 绑名子树是 OC 模型实体本身。绑定姿态在这里现取节点局部变换：
+        // OC 场景不装引擎动画目标与播放器，自身动作只发生在它自己的骨
+        // （`OwnAnimator`）上，OC 绑定也只写过被驱动的骨与节点约束的节点；
+        // 骨布的链骨（头发、裙摆）既不在驱动集里、约束也不碰它们，仍是
+        // 文件里的导入姿态；世界基一直是场景根，OC 根的贴合变换只是骨
+        // 路径上的一个当帧局部节点，链骨的绑定局部与基的姿态无关。所以
+        // 此刻的局部变换就是绑定姿态，与名册成员读导入姿态逐值同等。
+        let runtime = weave.plan(
+            body.unit,
+            &body.rig_file,
+            &json.0,
+            oc,
+            &|entity: Entity| weave.transforms.get(entity).ok().copied(),
+            model.player,
+        );
+        weave.install(&mut commands, oc, runtime);
+    }
+}
+
+/// 两条装配路共用的规划：绑名子树里的名字表、按名绑骨、世界位消歧、
+/// 建链、碰撞体解引用。只借用查询；运行时与 [`ClothBone`] 由
+/// [`ClothWeave::install`] 装上。
+#[derive(SystemParam)]
+pub struct ClothWeave<'w, 's> {
+    children: Query<'w, 's, &'static Children>,
+    child_of: Query<'w, 's, &'static ChildOf>,
+    names: Query<'w, 's, &'static Name>,
+    transforms: Query<'w, 's, &'static Transform>,
+}
+
+impl ClothWeave<'_, '_> {
+    /// `scope` 里的骨名绑到实体，`pose` 给出节点规划时读得到的绑定局部
+    /// 姿态（`None` = 缺）；`world_base` 是场景根（路径与帧推进的世界基）。
+    /// 数据缺口一律响亮失败：链骨与碰撞骨按名绑定，同名多实体时按档案存的
+    /// 绑定姿态世界位消歧（见 [`WORLD_MATCH_TOL`]）。
+    fn plan(
+        &self,
+        unit: u32,
+        rig_file: &str,
+        rig_raw: &str,
+        scope: Entity,
+        pose: &dyn Fn(Entity) -> Option<Transform>,
+        world_base: Entity,
+    ) -> ClothRuntime {
+        let parsed = match parse_rig(rig_raw) {
+            Ok(p) => p,
+            Err(reason) => panic!(
+                "unit {} 的骨架档案 {} cloth 节解析失败：{reason}",
+                unit, rig_file
+            ),
+        };
+        let rest_local = |entity: Entity| -> Transform {
+            if let Some(pose) = pose(entity) {
+                pose
+            } else {
+                // WorldAssetRoot wrappers have no animation targets or imported
+                // node pose; their local transform is the stable identity.
+                assert!(
+                    self.names.get(entity).is_err(),
+                    "named character node lacks imported rest pose"
+                );
+                *self
+                    .transforms
+                    .get(entity)
+                    .expect("character wrapper lacks Transform")
+            }
+        };
+        // 名字表：绑定子树全量走一遍。链骨与碰撞骨按名绑定；同名多实体
         // 时按档案存的绑定姿态世界位消歧（见 [`WORLD_MATCH_TOL`]）。
         let mut by_name: HashMap<&str, Vec<Entity>> = HashMap::new();
-        let mut stack = vec![model];
+        let mut stack = vec![scope];
         while let Some(entity) = stack.pop() {
-            if let Ok(name) = names.get(entity) {
+            if let Ok(name) = self.names.get(entity) {
                 by_name.entry(name.as_str()).or_default().push(entity);
             }
-            if let Ok(kids) = children.get(entity) {
+            if let Ok(kids) = self.children.get(entity) {
                 stack.extend(kids.iter());
             }
         }
-        // 实体路径：从骨沿父链上溯到成员（不含），返回自上而下序。
+        // 实体路径：从骨沿父链上溯到世界基（不含），返回自上而下序。
         let path_to = |bone: Entity| -> Vec<Entity> {
             let mut reversed = Vec::new();
             let mut cursor = bone;
             for _ in 0..10_000 {
-                if cursor == npc {
+                if cursor == world_base {
                     reversed.reverse();
                     return reversed;
                 }
-                let parent = child_of
+                let parent = self
+                    .child_of
                     .get(cursor)
                     .unwrap_or_else(|e| {
-                        panic!("unit {} 的场景实体 {cursor:?} 没有父：{e:?}", unit.0)
+                        panic!("unit {unit} 的场景实体 {cursor:?} 没有父：{e:?}")
                     })
                     .0;
                 reversed.push(cursor);
                 cursor = parent;
             }
-            panic!("unit {} 的场景树过深：路径上溯没有回到成员实体", unit.0);
+            panic!("unit {unit} 的场景树过深：路径上溯没有回到世界基实体");
         };
         // 按名绑骨：名字唯一即收；同名多实体时逐一合成候选的绑定世界位，
         // 不使用可能已经播放待机动作的当前姿态。与档案的世界位比，恰一
         // 命中才收。源资产允许骨名重名（本批 31 份档案里 3 份有：链骨
         // 的环尾骨与链根同名、同名定位碰撞体挂在身体不同部位），档案
         // 记的绑定姿态世界位是提取器绑定的那个实例的直接痕迹。
-        let rest_local = |entity: Entity| -> Transform {
-            if let Ok(pose) = imported.get(entity) {
-                pose.0
-            } else {
-                // WorldAssetRoot wrappers have no animation targets or imported
-                // node pose; their local transform is the stable identity.
-                assert!(
-                    names.get(entity).is_err(),
-                    "named character node lacks imported rest pose"
-                );
-                *transforms
-                    .get(entity)
-                    .expect("character wrapper lacks Transform")
-            }
-        };
         let world_resolved = Cell::new(0usize);
         let bind = |chain: &str, kind: &str, name: &str, expected: [f32; 3]| -> Entity {
-            let candidates = by_name.get(name).unwrap_or_else(|| {
-                panic!(
-                    "unit {} 链 {chain} 的{kind}骨名 {name}：角色包里没有",
-                    unit.0
-                )
-            });
+            let candidates = by_name
+                .get(name)
+                .unwrap_or_else(|| panic!("unit {unit} 链 {chain} 的{kind}骨名 {name}：角色包里没有"));
             if candidates.len() == 1 {
                 return candidates[0];
             }
@@ -513,13 +617,11 @@ pub fn plan_when_wired(
                     *only
                 }
                 [] => panic!(
-                    "unit {} 链 {chain} 的{kind}骨 {name} 同名 {} 处，无一世界位命中档案的绑定姿态 {expected:?}",
-                    unit.0,
+                    "unit {unit} 链 {chain} 的{kind}骨 {name} 同名 {} 处，无一世界位命中档案的绑定姿态 {expected:?}",
                     candidates.len()
                 ),
                 many => panic!(
-                    "unit {} 链 {chain} 的{kind}骨 {name} 同名 {} 处，世界位命中 {} 个：消歧不足",
-                    unit.0,
+                    "unit {unit} 链 {chain} 的{kind}骨 {name} 同名 {} 处，世界位命中 {} 个：消歧不足",
                     candidates.len(),
                     many.len()
                 ),
@@ -549,7 +651,7 @@ pub fn plan_when_wired(
             let ev = EvaluatedParams::evaluate(&pchain.params, &def.depth);
             let topo = match build_chain(def, &ev, &pchain.rest) {
                 Ok(topo) => topo,
-                Err(reason) => panic!("unit {} 链 {} 建链被拒：{reason}", unit.0, def.name),
+                Err(reason) => panic!("unit {unit} 链 {} 建链被拒：{reason}", def.name),
             };
             let n = def.bones.len();
             let mut bones = Vec::with_capacity(n);
@@ -568,11 +670,11 @@ pub fn plan_when_wired(
             // 不一致时位置直写会错位——装配期必须响。
             for (vi, &p) in def.parent.iter().enumerate() {
                 if p >= 0 {
-                    let actual = child_of.get(bones[vi].entity).expect("链骨必有父").0;
+                    let actual = self.child_of.get(bones[vi].entity).expect("链骨必有父").0;
                     if actual != bones[p as usize].entity {
                         panic!(
-                            "unit {} 链 {} 骨 {} 的场景父不是链内父顶点：写回局部化会错位",
-                            unit.0, def.name, def.bones[vi]
+                            "unit {unit} 链 {} 骨 {} 的场景父不是链内父顶点：写回局部化会错位",
+                            def.name, def.bones[vi]
                         );
                     }
                 }
@@ -584,14 +686,15 @@ pub fn plan_when_wired(
                     parent[c as usize] = p as i32;
                 }
             }
-            // 链根的链外父：链根局部化的基准（空路径 = 父即成员实体）。
+            // 链根的链外父：链根局部化的基准（空路径 = 父即世界基实体）。
             let root_entity = bones
                 .iter()
                 .enumerate()
                 .find(|(vi, _)| def.parent[*vi] < 0)
                 .map(|(_, b)| b.entity)
-                .unwrap_or_else(|| panic!("unit {} 链 {} 无链根", unit.0, def.name));
-            let root_parent_path = path_to(child_of.get(root_entity).expect("链根必有场景父").0);
+                .unwrap_or_else(|| panic!("unit {unit} 链 {} 无链根", def.name));
+            let root_parent_path =
+                path_to(self.child_of.get(root_entity).expect("链根必有场景父").0);
             particles += n;
             built.push(Built {
                 chain_index: i,
@@ -618,8 +721,7 @@ pub fn plan_when_wired(
                     .position(|c| c.path_id == *pid)
                     .unwrap_or_else(|| {
                         panic!(
-                            "unit {} 的 team 碰撞体 pathId {pid} 不在 cloth.colliders 里",
-                            unit.0
+                            "unit {unit} 的 team 碰撞体 pathId {pid} 不在 cloth.colliders 里"
                         )
                     });
                 let pc = &parsed.colliders[idx];
@@ -629,9 +731,8 @@ pub fn plan_when_wired(
                 }
                 if pc.is_global {
                     panic!(
-                        "unit {} 的碰撞体 pathId {pid} 是全局绑定：本批数据没有 \
-                         这种碰撞体，行为未转录，不猜",
-                        unit.0
+                        "unit {unit} 的碰撞体 pathId {pid} 是全局绑定：本批数据没有 \
+                         这种碰撞体，行为未转录，不猜"
                     );
                 }
                 let entity = bind(chain_name, "碰撞体", &pc.bone, pc.bone_world);
@@ -669,16 +770,20 @@ pub fn plan_when_wired(
         }
         if disabled_chains > 0 || disabled_colliders > 0 {
             warn!(
-                "[npc unit={}] 骨布装配剔除停用项：链 {} 碰撞体 {}",
-                unit.0, disabled_chains, disabled_colliders
+                "[npc unit={unit}] 骨布装配剔除停用项：链 {disabled_chains} 碰撞体 {disabled_colliders}"
             );
         }
-        for chain in &chains {
-            for bone in &chain.bones {
-                commands.entity(bone.entity).insert(ClothBone);
-            }
-        }
-        commands.entity(npc).insert(ClothRuntime {
+        info!(
+            "[npc unit={unit}] 骨布装配：{} 链 {} 顶点，team 碰撞体绑定 {}（链骨碰撞体 {}，同名按绑定姿态世界位解 {}）",
+            parsed.chains.len() - disabled_chains,
+            particles,
+            collider_bindings,
+            chain_bone_colliders,
+            world_resolved.get()
+        );
+        ClothRuntime {
+            unit,
+            base: world_base,
             chains,
             chain_bones,
             rest,
@@ -688,23 +793,25 @@ pub fn plan_when_wired(
             substeps: 0,
             writes: 0,
             max_disp: 0.0,
-        });
-        info!(
-            "[npc unit={}] 骨布装配：{} 链 {} 顶点，team 碰撞体绑定 {}（链骨碰撞体 {}，同名按绑定姿态世界位解 {}）",
-            unit.0,
-            parsed.chains.len() - disabled_chains,
-            particles,
-            collider_bindings,
-            chain_bone_colliders,
-            world_resolved.get()
-        );
+        }
+    }
+
+    /// 运行时装到 `entity` 上，链骨挂 [`ClothBone`]（写查询与读查询以此
+    /// 分界）。
+    fn install(&self, commands: &mut Commands, entity: Entity, runtime: ClothRuntime) {
+        for chain in &runtime.chains {
+            for bone in &chain.bones {
+                commands.entity(bone.entity).insert(ClothBone);
+            }
+        }
+        commands.entity(entity).insert(runtime);
     }
 }
 
 // ---------------------------------------------------------------- 推进
 
 /// 路径上实体的世界变换：链骨取绑定姿态，其余取当帧局部变换。
-/// `base` 是成员实体的当帧世界（成员无父，Transform 即世界）。
+/// `base` 是运行时的世界基的当帧世界（场景根无父，Transform 即世界）。
 fn world_transform(
     base: &Transform,
     path: &[Entity],
@@ -816,17 +923,19 @@ fn world_collider(def: &ColliderDef, world: Affine3A) -> WorldCollider {
 }
 
 /// PostUpdate（动画之后、变换传播之前）：逐链读当帧动画位与世界碰撞
-/// 体，推进律，写回骨变换。世界合成从成员实体起（其 Transform 由推进
-/// 律当帧写好），链骨用绑定姿态、链外用当帧姿势——见模块注释。
+/// 体，推进律，写回骨变换。世界合成从运行时的世界基起（成员是成员实
+/// 体、OC 是玩家实体，其 Transform 由推进律当帧写好），链骨用绑定姿
+/// 态、链外用当帧姿势——见模块注释。
 pub fn advance(
     time: Res<Time>,
-    mut npcs: Query<(Entity, &CharacterUnitId, &mut ClothRuntime)>,
+    mut runtimes: Query<&mut ClothRuntime>,
     live: Query<&Transform, Without<ClothBone>>,
     mut cloth_bones: Query<&mut Transform, With<ClothBone>>,
 ) {
     let dt = time.delta_secs();
-    for (npc, unit, mut runtime) in &mut npcs {
-        let base = *live.get(npc).expect("成员实体必有 Transform");
+    for mut runtime in &mut runtimes {
+        let unit = runtime.unit;
+        let base = *live.get(runtime.base).expect("世界基实体必有 Transform");
         // 统计先攒在本地，链循环结束后一次落账（链引用与账本字段
         // 分开借，见下面的分字段借用）。
         let mut substeps = 0u64;
@@ -894,7 +1003,7 @@ pub fn advance(
                 &mut scratch.solver,
             ) {
                 Ok(stats) => stats,
-                Err(reason) => panic!("unit {} 链 {} 推进被拒：{reason}", unit.0, chain.name),
+                Err(reason) => panic!("unit {} 链 {} 推进被拒：{reason}", unit, chain.name),
             };
             // 写回：位置直写 + 父→子方向反解旋转。拓扑序父先于子，
             // 链内父的新世界边算边用。
@@ -967,13 +1076,13 @@ pub fn advance(
     }
 }
 
-/// PostUpdate 周期汇报：每成员的链数/顶点数/推进子步/写回次数与复位
+/// PostUpdate 周期汇报：每副骨布的链数/顶点数/推进子步/写回次数与复位
 /// 计数——「布料真的在跑」的现算证据。
-pub fn report(npcs: Query<(&CharacterUnitId, &ClothRuntime)>) {
+pub fn report(runtimes: Query<&ClothRuntime>) {
     if !bevy::log::tracing::enabled!(bevy::log::Level::DEBUG) {
         return;
     }
-    for (unit, runtime) in &npcs {
+    for runtime in &runtimes {
         let nan = runtime
             .chains
             .iter()
@@ -986,7 +1095,7 @@ pub fn report(npcs: Query<(&CharacterUnitId, &ClothRuntime)>) {
             .sum::<u32>();
         debug!(
             "[npc unit={}] 骨布推进：{} 链 {} 顶点 {} 碰撞体绑定 · 帧 {} 子步累计 {} 写回累计 {} max|pos-anim| {:.3}m NaN复位 {} teleport复位 {}",
-            unit.0,
+            runtime.unit,
             runtime.chains.len(),
             runtime.particles,
             runtime.collider_bindings,
@@ -1200,6 +1309,8 @@ mod tests {
             reflected: None,
         };
         app.world_mut().entity_mut(actor).insert(ClothRuntime {
+            unit: 1,
+            base: actor,
             chains: vec![chain],
             chain_bones: HashSet::from([root, tip]),
             rest: HashMap::from([(root, root_pose), (tip, tip_pose)]),
