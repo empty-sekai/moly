@@ -798,6 +798,7 @@ impl Plugin for HarvestPlugin {
                 (
                     catalog::build,
                     catalog::follow_server_tools,
+                    catalog::follow_server_stamina,
                     possession::build,
                     clips::parse,
                     tool_model::parse,

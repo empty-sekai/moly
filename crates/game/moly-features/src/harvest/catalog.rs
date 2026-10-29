@@ -663,3 +663,41 @@ pub fn follow_server_tools(
     model.refresh_tools(&rows);
     user.tools = rows;
 }
+
+/// Update: the player model's stamina follows the client's
+/// `userMysekaiStamina` copy when a response other than the harvest's own
+/// changes it (a panel edit, a recovery reply). Only a copy that differs from
+/// the one last seen counts, and only while the harvest queue is idle, so hits
+/// the client has counted but not yet sent are not undone.
+pub fn follow_server_stamina(
+    queue: Res<super::queue::HarvestLogQueue>,
+    client_user: Option<Res<crate::userdata::ClientUserData>>,
+    user: Option<ResMut<HarvestUserData>>,
+    model: Option<ResMut<super::action::HarvestPlayerModel>>,
+    mut seen: Local<Option<super::law::Stamina>>,
+) {
+    let (Some(client_user), Some(mut user), Some(mut model)) = (client_user, user, model) else {
+        return;
+    };
+    let Some(copy) = client_user.stamina else {
+        return;
+    };
+    let stamina = super::law::Stamina {
+        normal: copy.normal,
+        enhance: copy.enhance,
+        boost: copy.boost,
+    };
+    if *seen == Some(stamina) || !queue.is_idle() {
+        return;
+    }
+    *seen = Some(stamina);
+    if model.stamina == stamina {
+        return;
+    }
+    info!(
+        "[harvest] userMysekaiStamina changed by the server: {:?} -> {:?}",
+        model.stamina, stamina
+    );
+    model.stamina = stamina;
+    user.stamina = stamina;
+}
