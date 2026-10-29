@@ -9,6 +9,7 @@
 //! narrow one it covers the field and takes all of its input.
 
 mod director;
+mod fault_toast;
 mod methods;
 
 
@@ -245,6 +246,7 @@ pub fn install(app: &mut App) {
         )
         .add_systems(PreUpdate, (release_guard, input).chain().after(bevy::ui::UiSystems::Focus))
         .add_systems(Update, (poll, refresh, widgets::style).chain());
+    fault_toast::install(app);
 }
 
 fn setup(mut c: Commands, ui_font: Res<crate::ui_font::UiFontAsset>, hud: Query<Entity, With<crate::balloon::HudCamera>>) {
