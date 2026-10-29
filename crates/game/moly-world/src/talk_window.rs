@@ -221,6 +221,9 @@ pub struct TalkWindowState {
     skip_text: bool,
     /// The manual click latch the chains' `WaitClicked` reads.
     clicked: bool,
+    /// Seconds left before the auto-advance releases the next line: the
+    /// picture cuts to the next speaker first.
+    release_lead: Option<f32>,
     /// `_endIconObj`'s active state.
     end_icon: bool,
     /// `playerData.AutoMode` and its marker.
@@ -264,6 +267,7 @@ impl Default for TalkWindowState {
             playing: false,
             skip_text: false,
             clicked: false,
+            release_lead: None,
             end_icon: false,
             auto: false,
             auto_wait: 0.0,
@@ -562,11 +566,27 @@ pub fn bind_voice(
     sinks: Query<&AudioSink>,
     mut state: ResMut<TalkWindowState>,
     mut binding: ResMut<TalkVoiceBinding>,
+    time: Res<Time>,
 ) {
+    if let Some(left) = state.release_lead {
+        let left = left - time.delta_secs();
+        if left <= 0.0 {
+            state.clicked = true;
+            state.release_lead = None;
+        } else {
+            state.release_lead = Some(left);
+        }
+    }
     let sink = channel.active_sink().filter(|sink| sources.contains(*sink));
     let Some(sink) = sink else {
         if binding.player.take().is_some() {
             info!("[talkwin] the talk voice ended (SetIsPlayingVoice(false))");
+            // `MOLY_TALK_AUTO_ADVANCE=1`: a line advances as soon as its own
+            // voice has played out, without a tap — the pacing a recording
+            // needs, where nobody is there to click.
+            if auto_advance_on_voice_end() {
+                state.release_lead = Some(AUTO_ADVANCE_LEAD);
+            }
         }
         state.voice_playing = false;
         return;
@@ -1063,4 +1083,19 @@ pub fn tick_window(
             *metrics = stage_layout::source_metrics(scale, &panel, font, &state.text);
         }
     }
+}
+/// Seconds between a line's voice ending and the next line being released
+/// under auto-advance; the lens uses the gap to cut to the next speaker.
+const AUTO_ADVANCE_LEAD: f32 = 0.2;
+
+impl TalkWindowState {
+    /// Whether the auto-advance is holding the next line for its lead.
+    pub fn release_pending(&self) -> bool {
+        self.release_lead.is_some()
+    }
+}
+
+fn auto_advance_on_voice_end() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("MOLY_TALK_AUTO_ADVANCE").ok().as_deref() == Some("1"))
 }

@@ -281,6 +281,11 @@ pub struct VisitingCharacters {
 }
 
 impl VisitingCharacters {
+    /// A roster of exactly these units: the director's way to say who stands
+    /// on the site for one conversation, instead of the gate's fixed rows.
+    pub fn of_units(units: Vec<u32>) -> Self {
+        Self { units, groups: Vec::new() }
+    }
     pub fn units(&self) -> &[u32] {
         &self.units
     }
@@ -888,6 +893,20 @@ fn boot_visitors(
         }
         groups.push((row.unit_group_id, expanded));
     }
+    // A named host switch: the characters the home site boots with, as unit
+    // ids. The gate's own rows still place them (the gate draws the gathering
+    // and the cells); this only says who is on the roster, which is what the
+    // conversation cast is read from.
+    if let Ok(text) = std::env::var("MOLY_VISITOR_UNITS") {
+        let named: Vec<u32> = text
+            .split(',')
+            .filter_map(|part| part.trim().parse::<u32>().ok())
+            .collect();
+        if !named.is_empty() {
+            info!("[server-panel] visit list from MOLY_VISITOR_UNITS: units {named:?} (the gate rows still place them)");
+            units = named;
+        }
+    }
     info!(
         "[server-panel] visitors: rows {:?} (gate, group, reservation, visit count) -> units {units:?}",
         panel
@@ -1089,7 +1108,19 @@ fn apply_talk_list_updates(
                 "[server-panel] {}: visitors -> units {units:?}",
                 update.caller
             );
+            let changed = units != visitors.units;
             current = VisitingCharacters { units, groups };
+            if changed {
+                // The site's cast is created once from this resource. A new
+                // visit list is a new cast: dispose the roster and let its
+                // creator build it again with the new units (the source does
+                // DisposeNPCAll, then SetupNpcVisitingAsync).
+                commands.queue(|world: &mut World| {
+                    let gone = crate::npc::dispose::dispose_npc_all(world, "the visit list changed");
+                    world.remove_resource::<crate::npc::Spawned>();
+                    info!("[server-panel] the visit list changed: {} NPCs disposed; the roster is built again", gone.len());
+                });
+            }
         }
         let rows = match &update.talks {
             moly_protocol::gate::ReplyTalkList::Stated(rows) => {

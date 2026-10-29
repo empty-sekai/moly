@@ -406,14 +406,27 @@ fn cleanup(world: &mut World, mut plan: CommonPlan) {
 
 fn advance_plan(world: &mut World, plan: &mut CommonPlan, dt: f32, now: f32) {
     if world.get::<NpcActions>(plan.main).is_none() { plan.phase = law::CommonPhase::Complete; return; }
-    let main_matches = same_plan(world, plan.main, plan.id) && world.get::<NpcHfsmActor>(plan.main).is_some_and(|a|a.upper.is_some() || a.lower == Some(plan.lower(true)));
+    // The plan owns its main: the membership component is the ownership, and
+    // the presenter's actor is presentation (it drops to None the moment the
+    // lower state finishes its entry, which is not the main leaving the
+    // conversation). Reading the actor here ended every plan one grace after
+    // its cast arrived.
+    let main_matches = same_plan(world, plan.main, plan.id);
     if !main_matches {
         plan.main_off_plan += dt;
-        if plan.fixture_data.is_some() || plan.main_off_plan >= law::SHARED_PLAN_GRACE_SECONDS { plan.phase = law::CommonPhase::Complete; }
+        if plan.fixture_data.is_some() || plan.main_off_plan >= law::SHARED_PLAN_GRACE_SECONDS {
+            info!("[common] plan {} ends: its main left the plan (off it {:.2} s, fixture {})", plan.id, plan.main_off_plan, plan.fixture_data.is_some());
+            plan.phase = law::CommonPhase::Complete;
+        }
         return;
     }
     plan.main_off_plan = 0.0;
-    if plan.members.iter().any(|m| !same_site(world, plan.main, m.entity)) { plan.phase = law::CommonPhase::Complete; return; }
+    if plan.members.iter().any(|m| !same_site(world, plan.main, m.entity)) {
+        let odd: Vec<u32> = plan.members.iter().filter(|m| !same_site(world, plan.main, m.entity)).map(|m| m.unit).collect();
+        let sites: Vec<String> = plan.members.iter().map(|m| world.get::<NpcActions>(m.entity).map(|a| a.site_type.clone()).unwrap_or_default()).collect();
+        info!("[common] plan {} ends: members {odd:?} are on another site (sites {sites:?})", plan.id);
+        plan.phase = law::CommonPhase::Complete; return;
+    }
     for turn in &mut plan.turns {
         if world.get::<NpcActions>(turn.entity).is_some_and(|s| s.current == NpcAction::Talk) { continue; }
         turn.elapsed += dt;
@@ -444,7 +457,11 @@ fn advance_plan(world: &mut World, plan: &mut CommonPlan, dt: f32, now: f32) {
             if !plan.entered_lower { return; }
             let pending = plan.members.iter().any(|m| world.get::<TalkReservation>(m.entity).is_some_and(|r| r.identity.plan == plan.id));
             let moving = plan.members.iter().any(|m| world.get::<crate::npc::MotionPhase>(m.entity).is_some_and(|p| matches!(p, crate::npc::MotionPhase::Walking)));
-            if !plan.clock.advance(dt, now, pending, moving) { plan.phase = law::CommonPhase::Complete; return; }
+            if !plan.clock.advance(dt, now, pending, moving) {
+                info!("[common] plan {} gathering ended: elapsed {:.1} s, arrived {}/{}, pending {pending}, moving {moving}",
+                    plan.id, plan.clock.elapsed, plan.arrived.len(), plan.members.len());
+                plan.phase = law::CommonPhase::Complete; return;
+            }
             for member in plan.members.clone() {
                 if !same_plan(world, member.entity, plan.id) {
                     if let Some(reservation) = world.get::<TalkReservation>(member.entity).cloned() {
@@ -465,9 +482,17 @@ fn advance_plan(world: &mut World, plan: &mut CommonPlan, dt: f32, now: f32) {
                 }
                 let Some(at) = position(world, member.entity) else { plan.phase = law::CommonPhase::Complete; return; };
                 let stopped = world.get::<crate::npc::MotionPhase>(member.entity).is_some_and(|p| matches!(p, crate::npc::MotionPhase::Dwelling { .. }));
-                if !plan.approaching.contains(&member.entity) && law::distance(at, member.target) < law::ARRIVAL_DISTANCE && stopped {
+                // The plan owns the last step onto the gather point. The
+                // navigation agent reports a leg complete about 0.2 m out,
+                // while the talk waits for the cast within 0.1 m of the data
+                // targets; a member left standing at the agent's own
+                // tolerance therefore holds the gathering open until its
+                // clock runs out and no conversation ever starts. Distance
+                // alone decides the approach, not the motion phase.
+                if !plan.approaching.contains(&member.entity) && law::distance(at, member.target) < law::ARRIVAL_DISTANCE {
                     crate::npc::stop_movement(world, member.entity);
                     plan.approaching.insert(member.entity); plan.clock.progress();
+                    info!("[common] plan {} member {} starts its final approach from {:.2} m", plan.id, member.unit, law::distance(at, member.target));
                 }
                 if plan.approaching.contains(&member.entity) {
                     let next = law::approach_step(at, member.target, dt);
@@ -520,6 +545,15 @@ fn advance_plan(world: &mut World, plan: &mut CommonPlan, dt: f32, now: f32) {
                         }
                     }
                 }
+                // The conversation asks for its own playback: the cast has
+                // gathered on its points and the plan's row is now the main's
+                // current talk data, so the request the Talk button writes is
+                // written here. Without it nothing ever hands the row to the
+                // talk player: the tweet plays out and the plan ends.
+                // The objective is activated the way the entry's own placement
+                // activates one: a forced update makes the presenter run the
+                // decision again with the plan's row already in its talk slot.
+                crate::npc::gate_entries::force_update_objective(world, plan.main);
                 plan.phase = law::CommonPhase::Tweeting; plan.phase_time = 0.0;
             }
         }
@@ -527,6 +561,23 @@ fn advance_plan(world: &mut World, plan: &mut CommonPlan, dt: f32, now: f32) {
             plan.phase_time += dt;
             let talking = world.get::<NpcActions>(plan.main).is_some_and(|s| s.current == NpcAction::Talk);
             let timeout = world.resource::<crate::client_config::ClientConfigs>().int(COMMUNICATION_TWEET_TIME) as f32 / 1000.0;
+            // The talk player only takes the row once the player stands in the
+            // interaction stack of the main, so the request is offered again
+            // every frame of the tweet rather than once: the ask is the
+            // plan's, and the player's walk to the conversation is the
+            // player's own.
+            if !talking {
+                if plan.phase_time < dt * 1.5 {
+                    info!("[common] plan {} offers row {} to the talk player (arrived {}/{})",
+                        plan.id, plan.talk.talk_id, plan.arrived.len(), plan.members.len());
+                }
+                world.write_message(crate::player_talk::PlayerTalkRequest {
+                    entity: plan.main,
+                    unit: plan.unit,
+                    exact: None,
+                    target_fixture: None,
+                });
+            }
             if talking || plan.phase_time >= timeout {
                 hide_tweet(world, plan);
                 if !talking { if let Some(entity) = plan.expression_actor.take() { facial(world, entity, None); } }
@@ -534,7 +585,23 @@ fn advance_plan(world: &mut World, plan: &mut CommonPlan, dt: f32, now: f32) {
             }
         }
         law::CommonPhase::WaitingTalkEnd => {
-            if world.get::<NpcActions>(plan.main).is_some_and(|s| s.current != NpcAction::Talk) { plan.phase = law::CommonPhase::Complete; }
+            plan.phase_time += dt;
+            let talking = world.get::<NpcActions>(plan.main).is_some_and(|s| s.current == NpcAction::Talk);
+            if talking {
+                plan.phase_time = 0.0;
+                return;
+            }
+            // The conversation has not begun yet: the row is offered again
+            // (the talk player only takes it while the player stands in the
+            // main's interaction stack), and the cast keeps standing until
+            // the wait gives up.
+            if plan.phase_time < dt * 1.5 {
+                info!("[common] plan {} waits for its conversation to begin (row {})", plan.id, plan.talk.talk_id);
+            }
+            // The row was offered while the tweet played; a conversation that
+            // did not begin by then ends here instead of being offered
+            // again (which replayed a conversation that had already run).
+            if plan.phase_time > 1.5 { plan.phase = law::CommonPhase::Complete; }
         }
         law::CommonPhase::Complete => {}
     }

@@ -298,8 +298,8 @@ pub fn reseed(
 
 /// The player domain's systems that the host schedule does not list: the
 /// player avatar's talk-camera dither. Added by the avatar material plugin,
-/// which the host registers. The dash button's own systems are installed by
-/// the action button.
+/// which the host registers. The host schedule lists the dash button's
+/// systems with the action buttons.
 pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {

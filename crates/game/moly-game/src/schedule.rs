@@ -399,6 +399,7 @@ pub fn install(app: &mut App) {
         // 摇杆层状态（手势层与玩家输入都读它；缺资源会在系统参数校验
         // 处 panic，与手势层同款兜底）。
         .init_resource::<joystick::JoystickState>()
+        .init_resource::<action_button::dash::DashButton>()
         // SitePlugin owns the site WorldInstanceReady observer. Registering it
         // again here would decrement SiteScenePending twice for one scene root.
         .add_observer(character::on_model_scene_ready)
@@ -566,10 +567,15 @@ pub fn install(app: &mut App) {
                     // 落在按钮上的那一下不该再打一条世界射线。
                     action_button::parse_tables,
                     action_button::spawn_when_ready,
+                    action_button::dash::spawn_when_ready,
                     action_button::advance.before(crate::markers::ActionButtonOrder),
                     action_button::place_ui,
                     action_button::place_change_ui,
                     action_button::click,
+                    // The dash button: Setup when its screen mounts, the view,
+                    // then its own click, after the action buttons' click.
+                    action_button::dash::place,
+                    action_button::dash::click,
                     // NPC 臂冒烟口（MOLY_PICK_NPC_TAP_SECS）：名册成员的
                     // 世界位投影点按，走同一条拾取链过配对门。
                     pick::smoke_npc_autotap,

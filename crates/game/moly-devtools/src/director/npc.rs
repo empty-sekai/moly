@@ -63,9 +63,48 @@ pub fn open_talk(world: &mut World, unit: u32, talk: i32) -> Result<Entity, Stri
         return Err(format!("talk {talk} is opened by its first speaker, not by character {unit} (speakers {speakers:?})"));
     }
     for &speaker in &speakers[1..] {
-        if super::cond::npc(world, speaker).is_ok_and(|other| world.get::<DirectorOwned>(other).is_some()) {
+        let Ok(other) = super::cond::npc(world, speaker) else { continue };
+        if world.get::<DirectorOwned>(other).is_some() {
             return Err(format!("character {speaker} speaks in talk {talk} and the director holds it (npc.release first)"));
         }
+        // A member busy with its own activity keeps CanBeRecruited false for
+        // as long as that activity lasts, so the gathering would wait out its
+        // clock and the talk would never start. The step asked for this talk,
+        // so the member's activity is cancelled the way the entry's own
+        // placement cancels one; its next decision joins the plan.
+        crate::npc::gate_entries::try_cancel_current_objective(world, other);
+        crate::npc::stop_for_external_activity(world, other);
+    }
+    // Only the conversation's cast stands on the site: the roster is set to
+    // this talk's speakers and rebuilt, so what is on screen is the two or
+    // three characters that speak and nobody else. The caller asks again once
+    // they stand.
+    let cast: Vec<u32> = speakers.iter().map(|speaker| *speaker as u32).collect();
+    info!(
+        "[director] play_talk {talk}: roster {:?} vs cast {:?}",
+        world
+            .get_resource::<crate::server_panel::VisitingCharacters>()
+            .map(|visitors| visitors.units().to_vec()),
+        cast
+    );
+    let mut wanted = cast.clone();
+    wanted.sort_unstable();
+    let stale = world
+        .get_resource::<crate::server_panel::VisitingCharacters>()
+        .is_none_or(|visitors| {
+            let mut there = visitors.units().to_vec();
+            there.sort_unstable();
+            there != wanted
+        });
+    if stale {
+        world.insert_resource(crate::server_panel::VisitingCharacters::of_units(cast.clone()));
+        crate::npc::dispose::dispose_npc_all(world, "the conversation's cast");
+        // The roster is created again the way the scene restores one: the
+        // arrival runs for the new bodies, which stay hidden until it has.
+        if let Err(reason) = crate::npc::restore::begin(world) {
+            warn!("[director] play_talk: the roster is not restored: {reason}");
+        }
+        return Err(format!("the conversation's cast {cast:?} is being placed on the site; ask again once they stand"));
     }
     let mind = world.get::<ObjectiveMind>(entity).ok_or_else(|| format!("character {unit} has no AI"))?;
     if let Some(reason) = mind.ai_stopped.as_deref().filter(|reason| *reason != OWNED) {
@@ -385,4 +424,65 @@ fn site_type(world: &World, entity: Entity) -> Option<i32> {
     world
         .get::<NpcActions>(entity)
         .and_then(|actions| crate::npc::residency::site_type_value(&actions.site_type))
+}
+
+/// Plays a conversation at once: the request carries the row itself
+/// (`exact`), which is the content library's own path, so no gathering runs
+/// and no cast has to be recruited. The speakers' own activities are
+/// cancelled first so the conversation is theirs.
+pub fn play_talk(world: &mut World, unit: u32, talk: i32) -> Result<Entity, String> {
+    let speakers = {
+        let tables = world
+            .get_resource::<crate::fixture_activity_data::FixtureActivityTables>()
+            .ok_or("the furniture activity tables are not loaded")?;
+        let master = tables.talk_master(talk).ok_or_else(|| format!("talk {talk} has no master row"))?;
+        tables.unit_ids_of_group(master.unit_group_id)?
+    };
+    // Only the conversation's cast stands on the site: a full roster crawls
+    // the sim and puts strangers in frame. The roster is rebuilt in place —
+    // no site reload, so no door transition plays over the shot.
+    let cast: Vec<u32> = speakers.iter().map(|speaker| *speaker as u32).collect();
+    info!(
+        "[director] play_talk {talk}: roster {:?} vs cast {:?}",
+        world
+            .get_resource::<crate::server_panel::VisitingCharacters>()
+            .map(|visitors| visitors.units().to_vec()),
+        cast
+    );
+    let mut wanted = cast.clone();
+    wanted.sort_unstable();
+    let stale = world
+        .get_resource::<crate::server_panel::VisitingCharacters>()
+        .is_none_or(|visitors| {
+            let mut there = visitors.units().to_vec();
+            there.sort_unstable();
+            there != wanted
+        });
+    if stale {
+        world.insert_resource(crate::server_panel::VisitingCharacters::of_units(cast.clone()));
+        crate::npc::dispose::dispose_npc_all(world, "the conversation's cast");
+        if let Err(reason) = crate::npc::restore::begin(world) {
+            warn!("[director] play_talk: the roster is not restored: {reason}");
+        }
+        return Err(format!("the conversation's cast {cast:?} is being placed; ask again once they stand"));
+    }
+    let entity = super::cond::npc(world, unit)?;
+    for &speaker in &speakers {
+        if let Ok(other) = super::cond::npc(world, speaker) {
+            crate::npc::gate_entries::try_cancel_current_objective(world, other);
+            crate::npc::stop_for_external_activity(world, other);
+        }
+    }
+    world.write_message(crate::player_talk::PlayerTalkRequest {
+        entity,
+        unit,
+        exact: Some(crate::npc_objective::TalkContent {
+            master_id: talk,
+            backend: crate::npc_objective::TalkBackend::CommonSomeCharacter,
+            is_general: Some(true),
+        }),
+        target_fixture: None,
+    });
+    info!("[director] talk {talk} handed to the talk player on character {unit} (no gathering)");
+    Ok(entity)
 }

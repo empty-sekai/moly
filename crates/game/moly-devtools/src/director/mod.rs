@@ -135,6 +135,7 @@ mod hand;
 mod npc;
 pub mod run;
 mod script;
+pub mod talk_lens;
 
 /// The touch the director's steps write, for the control surface's own steps.
 pub use hand::{tap, ui_point, window_size};

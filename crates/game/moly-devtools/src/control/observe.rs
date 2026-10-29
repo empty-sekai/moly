@@ -20,6 +20,7 @@ pub(super) const SECTIONS: &[&str] = &[
     "recipes",
     "fixtures",
     "characters",
+    "talk",
     "companions",
     "npc_ai",
     "weather",
@@ -66,6 +67,9 @@ pub(crate) fn observe(world: &mut World, what: &[String]) -> Result<Value, Strin
     }
     if wanted("weather") {
         out.insert("weather".into(), super::state::weather(world));
+    }
+    if wanted("talk") {
+        out.insert("talk".into(), super::state::talk(world));
     }
     if wanted("time") {
         out.insert(

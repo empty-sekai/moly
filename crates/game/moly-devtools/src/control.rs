@@ -221,7 +221,21 @@ pub fn install(app: &mut App) {
         .add_systems(Startup, share_sender)
         .add_systems(First, crate::bus::stamp)
         .add_systems(Last, (crate::bus::watch, end_step, publish_report))
-        .add_systems(Last, crate::camera::apply_free_camera);
+        .add_systems(Last, (crate::camera::apply_free_camera, free_camera_global).chain())
+        // The talk camera rewrites the camera transform in PostUpdate every
+        // frame, after transform propagation; the pose is stated again
+        // after it, on the transform and the global transform both, so the
+        // rendered view is the free one while a conversation plays.
+        .add_systems(
+            PostUpdate,
+            (
+                crate::director::talk_lens::follow_speaker,
+                crate::camera::apply_free_camera,
+                free_camera_global,
+            )
+                .chain()
+                .after(crate::talk_camera::advance),
+        );
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(port) = native_port() {
         info!("[control] listening on 127.0.0.1:{port}");
@@ -712,6 +726,18 @@ fn vec3_param(value: Option<&Value>, method: &str, name: &str) -> Result<Vec3, B
             .ok_or_else(|| refuse(format!("{method}: {name} must be [x, y, z] of numbers")))? as f32;
     }
     Ok(Vec3::from(out))
+}
+
+fn free_camera_global(
+    pose: Res<crate::camera::FreeCameraPose>,
+    mut camera: Query<(&Transform, &mut GlobalTransform), With<Camera3d>>,
+) {
+    if pose.0.is_none() {
+        return;
+    }
+    if let Ok((transform, mut global)) = camera.single_mut() {
+        *global = GlobalTransform::from(*transform);
+    }
 }
 
 fn camera_free(

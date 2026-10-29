@@ -2,6 +2,8 @@
 //! and the lifetime of its exclusive storage lease.
 
 pub mod asset_source;
+#[cfg(not(target_arch = "wasm32"))]
+mod clean_view;
 pub mod player_data_input;
 pub mod site_request;
 
@@ -100,9 +102,38 @@ fn run_app(
     #[cfg(not(target_arch = "wasm32"))]
     {
         let StartMode::Library = mode;
+        if let Err(message) = configure_text_from_files().and_then(|()| clean_view::install(&mut app)) {
+            fail_loud(&message);
+        }
         install_link(&mut app);
     }
     app.run();
+}
+
+/// The developer window's display translation: `MOLY_TEXT_SOURCE` names a
+/// source catalogue file, `MOLY_TEXT_OFFICIAL` and `MOLY_TEXT_COMMUNITY`
+/// optional overlay files, `MOLY_TEXT_LOCALE` the locale (default `zh-CN`).
+/// Without `MOLY_TEXT_SOURCE` the window shows the original text.
+#[cfg(not(target_arch = "wasm32"))]
+fn configure_text_from_files() -> Result<(), String> {
+    let Some(source) = std::env::var_os("MOLY_TEXT_SOURCE") else {
+        return Ok(());
+    };
+    let read = |name: &std::ffi::OsStr| {
+        std::fs::read_to_string(name)
+            .map_err(|error| format!("{}: {error}", name.to_string_lossy()))
+    };
+    let optional = |key: &str| match std::env::var_os(key) {
+        Some(path) => read(&path),
+        None => Ok(String::new()),
+    };
+    let locale = std::env::var("MOLY_TEXT_LOCALE").unwrap_or_else(|_| "zh-CN".to_owned());
+    moly_game::text_localization::configure(
+        &read(&source)?,
+        &optional("MOLY_TEXT_OFFICIAL")?,
+        &optional("MOLY_TEXT_COMMUNITY")?,
+        &locale,
+    )
 }
 
 /// The browser game: seed inputs only, no library or stage configuration,

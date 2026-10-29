@@ -607,6 +607,19 @@ pub struct ActiveTalk {
     player: Option<Entity>,
     /// 当前说话人（`who` 指称跟踪；None＝玩家槽、悬空指称或步首）。
     speaker: Option<u32>,
+    /// The unit whose voice line played last: the one who talks, as opposed
+    /// to the referent of any step (a look or an eye change can name a
+    /// listener).
+    voice_speaker: Option<u32>,
+    /// The last voice line names no single cast member (the whole cast
+    /// speaks, or the referent is not a slot of this talk).
+    voice_group: bool,
+    /// The last name-bar text reads as the whole cast.
+    label_all: bool,
+    /// When the last voice line began, on the app clock.
+    voice_at: f32,
+    /// The latest animation start of a cast member: who, and when.
+    reaction: Option<(u32, f32)>,
     /// 挂起侧已记账的步型（避免逐帧重复记账）。
     hold_logged: Option<&'static str>,
     started_at: f32,
@@ -630,6 +643,56 @@ struct TalkTurn {
 }
 
 impl ActiveTalk {
+    /// Who is speaking now: the step's who the player is following, None
+    /// for the player's own slot or before the first labelled line.
+    pub fn speaker(&self) -> Option<u32> {
+        self.speaker
+    }
+
+    /// Who the next voice line belongs to: the first voice step the stream has
+    /// not reached yet.
+    pub fn upcoming_voice_speaker(&self) -> Option<u32> {
+        self.row.steps.get(self.state.cursor..)?.iter().find_map(|step| match step {
+            FixtureStep::Voice { who, .. } => resolve_speaker(self, *who, self.state.cursor),
+            _ => None,
+        })
+    }
+
+    /// Who the last voice line belongs to; None before the first one.
+    pub fn voice_speaker(&self) -> Option<u32> {
+        self.voice_speaker
+    }
+
+    /// Whether the last voice line has no single speaker.
+    pub fn voice_group(&self) -> bool {
+        self.voice_group || self.label_all
+    }
+
+    /// Whether the next voice line the stream has not reached yet has no
+    /// single speaker.
+    pub fn upcoming_voice_is_group(&self) -> bool {
+        let mut all = false;
+        for step in self.row.steps.get(self.state.cursor..).unwrap_or_default() {
+            match step {
+                FixtureStep::Label { name } => all = is_all_speakers(name),
+                FixtureStep::Voice { who, .. } => {
+                    return all || resolve_speaker(self, *who, self.state.cursor).is_none();
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// A cast member that started an animation more than `after` seconds into
+    /// the current voice line, other than the line's own speaker: who, and
+    /// how long ago it started.
+    pub fn late_reaction(&self, now: f32, after: f32) -> Option<(u32, f32)> {
+        let (unit, at) = self.reaction?;
+        (at - self.voice_at > after && Some(unit) != self.voice_speaker && at >= self.voice_at)
+            .then(|| (unit, now - at))
+    }
+
     pub fn body_ready(&self) -> bool {
         !self.preparing && !self.ending
     }
@@ -927,6 +990,11 @@ pub fn start_selected(
         participants,
         player: Some(player),
         speaker: None,
+        voice_speaker: None,
+        voice_group: false,
+        label_all: false,
+        voice_at: 0.0,
+        reaction: None,
         hold_logged: None,
         started_at: now,
         steps_fired: 0,
@@ -1086,6 +1154,11 @@ pub fn voice_probe(
         participants: Vec::new(),
         player: None,
         speaker: None,
+        voice_speaker: None,
+        voice_group: false,
+        label_all: false,
+        voice_at: 0.0,
+        reaction: None,
         hold_logged: None,
         started_at: time.elapsed_secs(),
         steps_fired: 0,
@@ -1263,6 +1336,11 @@ pub fn partvoice_probe(
         participants: Vec::new(),
         player: None,
         speaker: None,
+        voice_speaker: None,
+        voice_group: false,
+        label_all: false,
+        voice_at: 0.0,
+        reaction: None,
         hold_logged: None,
         started_at: time.elapsed_secs(),
         steps_fired: 0,
@@ -1502,6 +1580,7 @@ pub fn advance_talk(
     let due = playback.delayed_animations.advance(dt);
     run_animation_commands(
         active,
+        now,
         due,
         lib,
         &mut playback.graphs,
@@ -1548,6 +1627,7 @@ pub fn advance_talk(
         let flushed = playback.delayed_animations.wait_clicked();
         run_animation_commands(
             active,
+            now,
             flushed,
             lib,
             &mut playback.graphs,
@@ -1622,6 +1702,14 @@ pub fn advance_talk(
         if let Some(who) = referent_of(&step) {
             active.speaker = resolve_speaker(&*active, who, index);
         }
+        if let FixtureStep::Voice { who, .. } = &step {
+            let unit = resolve_speaker(&*active, *who, index);
+            if unit.is_some() {
+                active.voice_speaker = unit;
+            }
+            active.voice_group = unit.is_none();
+            active.voice_at = now;
+        }
         // voice 行投递音频域（serve_voice 同帧起播）：真源逐行命令序里
         // voice 先于 text，起播挂点是行推进，不是窗体开场。partvoice 族
         // 的包随说话者变体，指称一并投递（voice_ 族不读它）。
@@ -1694,6 +1782,7 @@ pub fn advance_talk(
         let due = playback.delayed_animations.on_complete();
         run_animation_commands(
             active,
+            now,
             due,
             lib,
             &mut playback.graphs,
@@ -1748,6 +1837,11 @@ pub fn advance_talk(
 /// voice/眼/口/动作/表情件的 0 号指称是 0 条；0 号实际出现的步只有转身
 /// 一族（look_at_body 两侧、look_at_fixture、look_at_to_npc），它们各自
 /// 走玩家的转身入口。
+/// The name-bar text of a line the whole cast speaks together.
+fn is_all_speakers(name: &str) -> bool {
+    name.trim() == "全員"
+}
+
 fn resolve_speaker(active: &ActiveTalk, who: f64, index: usize) -> Option<u32> {
     if who == 0.0 {
         return None;
@@ -1902,6 +1996,7 @@ fn dispatch_step(
         FixtureStep::Label { name } => {
             // 名字栏 SetText（真源 Label → 名字栏文本组件）——窗体开在这条
             // 链上。语料里锚点跳转的 label 步 0 出现，此支防御记账。
+            active.label_all = is_all_speakers(name);
             window.set_label_at(TalkSession::Pair(&mut *active), index, name);
             info!(
                 "[talk] 段 {} 步 {} label：名字栏 SetText（{} 字，名字不进日志）",
@@ -2703,7 +2798,8 @@ fn turn_toward_point(
 /// 前一条，与引擎取消上一条动作任务同效）。
 #[allow(clippy::too_many_arguments)]
 fn run_animation_commands(
-    active: &ActiveTalk,
+    active: &mut ActiveTalk,
+    now: f32,
     due: Vec<AnimationCommand>,
     lib: &Gltf,
     graphs: &mut Assets<AnimationGraph>,
@@ -2761,6 +2857,7 @@ fn run_animation_commands(
         ) else {
             continue;
         };
+        let unit = command.unit as u32;
         begin_animation(
             &mut runtime,
             command,
@@ -2770,6 +2867,7 @@ fn run_animation_commands(
             &mut player,
             transitions.into_inner(),
         );
+        active.reaction = Some((unit, now));
     }
 }
 

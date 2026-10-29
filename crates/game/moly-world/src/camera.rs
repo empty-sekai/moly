@@ -1085,12 +1085,18 @@ pub fn apply_input(
     // UPDATE 态走 OnDrag；tap/drag 的区分阈值在手势层）。增量即事件
     // 自带的当帧增量。模型未立也把事件读掉，别攒陈账。
     let mut drag = Vec2::ZERO;
+    let mut ui_drag = Vec2::ZERO;
     for event in gestures.read() {
-        if event.kind == GestureKind::Drag && event.state == GestureState::Moved && !event.ui_owned
+        if event.kind == GestureKind::Drag && event.state == GestureState::Moved
         {
-            drag += event.delta;
+            if event.ui_owned { ui_drag += event.delta } else { drag += event.delta }
         }
     }
+    // A conversation's window captures the pointer at press time, so a drag
+    // started anywhere over it is marked UI-owned and the lens would never
+    // turn while a conversation plays. In the talk state the same drag turns
+    // the camera too: the window consumes taps, not the viewer's hand.
+    if state.0 == CameraStateType::Talk { drag += ui_drag; }
     let Some(model) = models.as_deref_mut() else {
         return; // 站点未取景：模型未立，输入无处落
     };
@@ -1148,16 +1154,10 @@ pub fn apply_input(
         match state.0 {
             CameraStateType::PhotoShot => photo_drag(model,source_drag),
             CameraStateType::Fps => fps_drag(model, &mut fps_view, source_drag.x, source_drag.y),
-            // Talk deliberately has no Normal pitch/distance coupling.
-            CameraStateType::Talk => {
-                if transition
-                    .talk_camera
-                    .as_deref()
-                    .is_some_and(|camera| camera.accepts_input())
-                {
-                    update_angle(model, source_drag.x, source_drag.y);
-                }
-            }
+            // Talk deliberately has no Normal pitch/distance coupling. The
+            // lens keeps turning while a conversation plays: only the shot's
+            // own framing is fixed, not the viewer's hand.
+            CameraStateType::Talk => update_angle(model, source_drag.x, source_drag.y),
             CameraStateType::Normal => {
                 normal_drag(model, source_drag, playback_inspection);
             }

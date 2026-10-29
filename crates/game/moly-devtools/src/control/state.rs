@@ -112,6 +112,7 @@ pub(super) fn characters(world: &mut World) -> Value {
                     "hfsm_lower": machine["hfsm_lower"].clone(),
                     "hfsm_transitions": machine["hfsm_transitions"].clone(),
                     "position": vec3(transform.translation()),
+                    "facing": vec3(transform.compute_transform().rotation * Vec3::Z),
                     "away": away,
                     "action": actions.map(|actions| format!("{:?}", actions.current)),
                     "tweeting": actions.map(|actions| actions.is_tweeting),
@@ -171,4 +172,13 @@ fn camera(world: &World) -> Value {
         "pitch": model.pitch,
         "fov": model.fov,
     })
+}
+
+/// The conversation playing now and who is speaking: the talk window's own
+/// speaker slot, which a plugin needs to turn a lens to the right face.
+pub fn talk(world: &World) -> Value {
+    match world.get_resource::<crate::talk::ActiveTalk>() {
+        None => json!({ "active": false, "speaker": null }),
+        Some(talk) => json!({ "active": true, "speaker": talk.speaker() }),
+    }
 }

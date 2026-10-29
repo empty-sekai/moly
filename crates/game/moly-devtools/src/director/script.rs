@@ -70,7 +70,16 @@ pub enum Node {
     DialogAnswer { ok: bool },
     /// One press of the back key.
     BackKey,
-    Tap { at: [f32; 2], fraction: bool },
+    /// The field camera held at a world pose (a screenshot's eye, a shot's lens).
+    CameraFree { position: [f32; 3], target: [f32; 3], fov: f32 },
+    TalkLens { distance: f32, height: f32, target: f32, fov: f32, swing: f32, unit: Option<u32>, wide: bool, wide_hold: f32 },
+    TalkLensOff,
+    /// A character stood at a world point at once (a summon, not a walk).
+    NpcWarp { unit: u32, to: [f32; 3] },
+    /// The player stood at a world point at once.
+    PlayerWarp { to: [f32; 3] },
+    /// A conversation played at once, without the cast's gathering.
+    NpcPlayTalk { unit: u32, talk: i32 },    Tap { at: [f32; 2], fraction: bool },
     /// A tap at the centre of a node of a shown UI view.
     UiTap { view: String, path: String },
     /// The joystick held at a stick ratio (x right, y up, within the unit
@@ -412,6 +421,47 @@ fn step(value: &Value, at: &str) -> Result<Vec<Step>, String> {
             vec![one(Node::Deliver { party, hold }, Some(180.0))]
         }
         "key.back" => vec![one(Node::BackKey, None)],
+        "npc.play_talk" => {
+            let unit = fields.req_u32("unit")?;
+            let talk = fields.req_i32("talk")?;
+            vec![one(Node::NpcPlayTalk { unit, talk }, Some(20.0))]
+        }        "npc.warp_to" => {
+            let unit = fields.req_u32("unit")?;
+            let to = triple(fields.req("to")?, &format!("{at}.to"))?;
+            vec![one(Node::NpcWarp { unit, to }, Some(20.0))]
+        }
+        "player.warp_to" => {
+            let to = triple(fields.req("to")?, &format!("{at}.to"))?;
+            vec![one(Node::PlayerWarp { to }, Some(20.0))]
+        }        "camera.free" => {
+            let position = triple(fields.req("position")?, &format!("{at}.position"))?;
+            let target = triple(fields.req("target")?, &format!("{at}.target"))?;
+            let fov = fields.opt_f32("fov")?.unwrap_or(45.0);
+            if !(5.0..=120.0).contains(&fov) {
+                return Err(format!("{at}: fov is degrees in 5..=120, got {fov}"));
+            }
+            vec![one(Node::CameraFree { position, target, fov }, None)]
+        }
+        "camera.talk_lens" => {
+            let fov = fields.opt_f32("fov")?.unwrap_or(35.0);
+            if !(5.0..=120.0).contains(&fov) {
+                return Err(format!("{at}: fov is degrees in 5..=120, got {fov}"));
+            }
+            vec![one(
+                Node::TalkLens {
+                    distance: fields.opt_f32("distance")?.unwrap_or(1.9),
+                    height: fields.opt_f32("height")?.unwrap_or(0.8),
+                    target: fields.opt_f32("target")?.unwrap_or(0.47),
+                    fov,
+                    swing: fields.opt_f32("swing")?.unwrap_or(0.5),
+                    unit: fields.opt_u32("unit")?,
+                    wide: fields.opt_bool("wide")?.unwrap_or(true),
+                    wide_hold: fields.opt_f32("wide_hold")?.unwrap_or(2.5),
+                },
+                None,
+            )]
+        }
+        "camera.talk_lens_off" => vec![one(Node::TalkLensOff, None)],
         "player.talk_to" => {
             let unit = fields.req_u32("unit")?;
             vec![

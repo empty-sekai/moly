@@ -299,6 +299,7 @@ pub fn install(app: &mut App) {
         .add_message::<fixture_edit::LayoutSaved>()
         .init_resource::<gesture::GestureLayerState>()
         .init_resource::<joystick::JoystickState>()
+        .init_resource::<action_button::dash::DashButton>()
         .add_observer(character::on_model_scene_ready)
         .add_observer(player_avatar::body::on_scene_ready)
         .init_resource::<weather::CurrentPhenomenonId>()
@@ -387,10 +388,15 @@ pub fn install(app: &mut App) {
                     joystick::place_ui,
                     action_button::parse_tables,
                     action_button::spawn_when_ready,
+                    action_button::dash::spawn_when_ready,
                     action_button::advance.before(crate::markers::ActionButtonOrder),
                     action_button::place_ui,
                     action_button::place_change_ui,
                     action_button::click,
+                    // The dash button: Setup when its screen mounts, the view,
+                    // then its own click, after the action buttons' click.
+                    action_button::dash::place,
+                    action_button::dash::click,
                     pick::pick,
                 )
                     .chain(),

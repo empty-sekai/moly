@@ -668,6 +668,61 @@ fn start(world: &mut World, shared: &mut Shared, ticket: u64, step: Step, path: 
             Err(error) => return ended(path, Err(error), optional),
         },
         Node::DialogAnswer { ok } => Kind::DialogAnswer(DialogAnswer { ok: *ok, tapped: None, pressed: None }),
+        Node::NpcPlayTalk { unit, talk } => {
+            let result = super::npc::play_talk(world, *unit, *talk)
+                .map(|_| format!("talk {talk} asked to play on character {unit}"));
+            return ended(path, result, optional);
+        }        Node::NpcWarp { unit, to } => {
+            let result = match super::cond::npc(world, *unit) {
+                Ok(entity) => {
+                    // A warped character stands where it was put: its AI makes no
+                    // decision until released.
+                    let _ = super::npc::take(world, *unit);
+                    crate::npc::stop_for_external_activity(world, entity);
+                    crate::npc::force_set_position(world, entity, *to);
+                    Ok(format!("character {unit} warped to {to:?}"))
+                }
+                Err(reason) => Err(reason),
+            };
+            return ended(path, result, optional);
+        }
+        Node::PlayerWarp { to } => {
+            let mut query = world.query_filtered::<&mut Transform, With<crate::player::PlayerControlled>>();
+            let result = match query.iter_mut(world).next() {
+                Some(mut transform) => {
+                    transform.translation = Vec3::from(*to);
+                    Ok(format!("the player warped to {to:?}"))
+                }
+                None => Err("the player is not on the site".to_owned()),
+            };
+            return ended(path, result, optional);
+        }        Node::CameraFree { position, target, fov } => {
+            let pose = crate::camera::FreeCameraPose(Some(crate::camera::FreeCameraPoseValue {
+                eye: Vec3::from(*position),
+                target: Vec3::from(*target),
+                up: Vec3::Y,
+                fov_degrees: *fov,
+            }));
+            world.insert_resource(pose);
+            return ended(path, Ok("the free camera holds the pose".to_owned()), optional);
+        }
+        Node::TalkLens { distance, height, target, fov, swing, unit, wide, wide_hold } => {
+            world.insert_resource(super::talk_lens::TalkLens {
+                distance: *distance,
+                height: *height,
+                target: *target,
+                fov: *fov,
+                swing: *swing,
+                idle_unit: *unit,
+                wide: *wide,
+                wide_hold: *wide_hold,
+            });
+            return ended(path, Ok("the talk lens follows the speaker".to_owned()), optional);
+        }
+        Node::TalkLensOff => {
+            world.remove_resource::<super::talk_lens::TalkLens>();
+            return ended(path, Ok("the talk lens is off".to_owned()), optional);
+        }
         Node::BackKey => {
             let result = hand::back_key(world).map(|()| "the back key pressed".to_owned()).map_err(str::to_owned);
             return ended(path, result, optional);
