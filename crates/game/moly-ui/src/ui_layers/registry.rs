@@ -325,6 +325,12 @@ impl ScreenRegistry {
         self.data.get(&screen)
     }
 
+    /// Whether the root's screen data has been read (or is known to be
+    /// absent); a screen booted earlier would boot without its data.
+    pub fn ready(&self) -> bool {
+        matches!(self.load, Load::Done)
+    }
+
     #[allow(dead_code)]
     pub fn loaded(&self) -> usize {
         self.data.len()

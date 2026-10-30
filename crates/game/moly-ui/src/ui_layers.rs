@@ -1858,6 +1858,9 @@ pub fn advance(
     mut events: MessageWriter<ScreenLayerEvent>,
     time: Res<Time>,
 ) {
+    if !screen_registry.ready() {
+        return;
+    }
     let stack = &mut *stack;
     let mut ctx = Ctx {
         registry: &mut *screen_registry,
