@@ -394,6 +394,11 @@ fn code(value: moly_layout::RefusalCode) -> &'static str {
         moly_layout::RefusalCode::UnknownPiece => "unknown_piece",
         moly_layout::RefusalCode::StaleRevision => "stale_revision",
         moly_layout::RefusalCode::Locked => "locked",
+        moly_layout::RefusalCode::InvalidStackedChild => "invalid_stacked_child",
+        moly_layout::RefusalCode::InputMissing => "input_missing",
+        moly_layout::RefusalCode::StoredFootprintInvalid => "stored_footprint_invalid",
+        moly_layout::RefusalCode::ResultFootprintInvalid => "result_footprint_invalid",
+        moly_layout::RefusalCode::MasterMissing => "master_missing",
     }
 }
 
@@ -401,6 +406,8 @@ fn refusal(value: &moly_layout::Refusal) -> Value {
     json!({
         "code": code(value.code),
         "piece": value.piece.map(|piece| piece.0),
+        "index": value.index,
+        "cell": value.cell.map(|cell| [cell.x, cell.z]),
         "nearest": value.nearest.map(|cell| [cell.x, cell.z]),
         "holder": value.holder,
         "detail": value.detail,

@@ -5,12 +5,13 @@ use moly_law::fixture::position::{footprint_to_center_size, layout_footprint, la
 use moly_law::fixture::{Direction, GridPosition, Vector3Int};
 use moly_protocol::api::{HousingLayoutCorner, HousingLayoutFixture};
 
-use crate::anchor::{Anchor, Side};
+use crate::anchor::{Anchor, Cell, Side};
 use crate::op::{LayoutOp, Layer, Piece, Rot};
 use crate::result::{Apply, ApplyOutcome, Applied, OpResult, Refusal, RefusalCode, Rejected};
 use crate::rules::{FixtureMaster, Rules};
 use crate::validate::{
-    refusal_label, Board, Missing, Piece as PlacedPiece, Refusal as CellRefusal, RowLike,
+    mirror_fixture_layout, refusal_label, Board, Missing, Piece as PlacedPiece,
+    Refusal as CellRefusal, RowLike,
 };
 use crate::Layout;
 
@@ -80,7 +81,7 @@ fn row_center(row: &HousingLayoutFixture) -> Result<(GridPosition, Vector3Int), 
         row.maximum.z,
     ));
     let (mut center, size) = footprint_to_center_size(min, max).map_err(|error| {
-        let mut refusal = Refusal::new(RefusalCode::OutOfBounds);
+        let mut refusal = Refusal::new(RefusalCode::StoredFootprintInvalid);
         refusal.detail = Some(format!(
             "fixture {} stored footprint x {}..={}, y {}..={}, z {}..={} has no center: {error}",
             row.mysekai_fixture_id,
@@ -112,7 +113,7 @@ fn row_from(
 ) -> Result<HousingLayoutFixture, Refusal> {
     let (min, max) = layout_footprint(center, master.grid_size, direction, master.layout)
         .map_err(|error| {
-            let mut refusal = Refusal::new(RefusalCode::OutOfBounds);
+            let mut refusal = Refusal::new(RefusalCode::ResultFootprintInvalid);
             refusal.detail = Some(format!(
                 "fixture {fixture} at ({}, {}, {}) does not fit the grid: {error}",
                 center.x, center.y, center.z,
@@ -158,27 +159,27 @@ fn board(layout: &Layout, rules: &Rules) -> Result<Board, Refusal> {
 }
 
 fn missing_refusal(missing: Missing) -> Refusal {
-    // A missing input cannot be named by the operation contract's closed
-    // codes; the caller only reaches this with an incomplete master set, which
-    // it reports as a layer refusal rather than silently placing. The detail
-    // names the input so the refusal is not silent.
-    let mut refusal = Refusal::new(RefusalCode::WrongLayer);
+    // The executor cannot place without the input the check reads, so the
+    // refusal names the missing input rather than reporting a layout rule.
+    let mut refusal = Refusal::new(RefusalCode::InputMissing);
     refusal.detail = Some(format!("input missing: {missing:?}"));
     refusal
 }
 
 fn cell_refusal(refusal: CellRefusal) -> Refusal {
-    // The detailed refusal's own code names the failing cell and why in
-    // `detail`; the executor has no input code and reports a missing input as
-    // the layer refusal (see `missing_refusal`).
-    let mut refused = Refusal::new(refusal.code().unwrap_or(RefusalCode::WrongLayer));
+    // The detailed refusal's own code and cell are carried through; `detail`
+    // names the failing cell and why.
+    let mut refused = Refusal::new(refusal.code().unwrap_or(RefusalCode::InputMissing));
+    // The validator names the cell in the source frame; the operation's
+    // frame is its X mirror.
+    refused.cell = refusal.cell().map(|cell| Cell::new((-i16::from(cell.x) - 1) as i8, cell.z));
     refused.detail = Some(refusal_label(refusal));
     refused
 }
 
 fn master(rules: &Rules, fixture: i32) -> Result<&FixtureMaster, Refusal> {
     rules.masters.get(&fixture).ok_or_else(|| {
-        let mut refusal = Refusal::new(RefusalCode::NotOwned);
+        let mut refusal = Refusal::new(RefusalCode::MasterMissing);
         refusal.detail = Some(format!("fixture {fixture} is not in the rules' master table"));
         refusal
     })
@@ -204,23 +205,51 @@ fn base_center(layout: &Layout, piece: Piece) -> Result<(GridPosition, Vector3In
 
 fn anchor_center(
     layout: &Layout,
+    rules: &Rules,
+    uid: &str,
+    direction: Direction,
     anchor: &Anchor,
     master: &FixtureMaster,
     current: Option<GridPosition>,
 ) -> Result<GridPosition, Refusal> {
     match anchor {
         Anchor::Cell { x, z, layer } => {
-            if let Some(layer) = layer {
-                let matches = match layer {
-                    Layer::Floor => master.layout & layout_type::FLOOR != 0,
-                    Layer::Rug => master.layout & layout_type::RUG != 0,
-                    Layer::Wall | Layer::Top => false,
-                };
-                if !matches {
+            let layer_type = match layer {
+                None => master.layout,
+                Some(Layer::Floor) if master.layout & layout_type::FLOOR != 0 => {
+                    layout_type::FLOOR
+                }
+                Some(Layer::Rug) if master.layout & layout_type::RUG != 0 => layout_type::RUG,
+                Some(Layer::Floor | Layer::Rug | Layer::Wall | Layer::Top) => {
                     return Err(Refusal::new(RefusalCode::WrongLayer));
                 }
-            }
-            Ok(GridPosition::new(*x, 0, *z))
+            };
+            // The board holds the source frame, the X mirror of the rows'.
+            let invalid = |error: String| {
+                let mut refusal = Refusal::new(RefusalCode::ResultFootprintInvalid);
+                refusal.detail = Some(format!("cell ({x}, {z}): {error}"));
+                refusal
+            };
+            let (source_center, source_direction, source_type) = mirror_fixture_layout(
+                GridPosition::new(*x, 0, *z),
+                master.grid_size,
+                direction,
+                layer_type,
+            )
+            .map_err(invalid)?;
+            // The piece stands at the height of the column above its minimum
+            // corner, as the editor puts a moved piece down: the lowest y
+            // there with no other object, 0 when the corner is not in the
+            // grid.
+            let (min, _) = layout_footprint(
+                source_center,
+                master.grid_size,
+                source_direction,
+                source_type,
+            )
+            .map_err(invalid)?;
+            let y = board(layout, rules)?.column_height(source_type, min, uid);
+            Ok(GridPosition::new(*x, y, *z))
         }
         Anchor::Near { of, side, gap } => {
             let (center, size) = base_center(layout, *of)?;
@@ -310,7 +339,8 @@ fn owned_available(layout: &Layout, rules: &Rules, fixture: i32, texture: u32) -
     owned.quantity - owned.placed_elsewhere - placed
 }
 
-fn refused(index: usize, refusal: Refusal, results: &[OpResult]) -> Rejected {
+fn refused(index: usize, mut refusal: Refusal, results: &[OpResult]) -> Rejected {
+    refusal.index = Some(index);
     Rejected {
         index,
         refusal,
@@ -338,8 +368,7 @@ fn apply_one(
             if owned_available(layout, rules, *fixture, texture) <= 0 {
                 return Err(Refusal::new(RefusalCode::NotOwned));
             }
-            let center = anchor_center(layout, at, master, None)?;
-            let row = row_from(master, *fixture, texture, center, rotation.direction())?;
+            let direction = rotation.direction();
             let next = layout
                 .rows
                 .iter()
@@ -348,6 +377,9 @@ fn apply_one(
                 .unwrap_or(0)
                 + 1;
             let piece = Piece(next);
+            let center =
+                anchor_center(layout, rules, &piece_uid(piece), direction, at, master, None)?;
+            let row = row_from(master, *fixture, texture, center, direction)?;
             check(layout, rules, piece, &row)?;
             let result = result_of(piece, &row);
             layout.rows.push(crate::PlacedRow { piece, row });
@@ -360,10 +392,18 @@ fn apply_one(
         } => {
             let current = placed_row(layout, *piece)?.clone();
             let master = master(rules, current.mysekai_fixture_id)?;
-            let center = anchor_center(layout, at, master, Some(row_center(&current)?.0))?;
             let direction = rotation
                 .map(Rot::direction)
                 .unwrap_or_else(|| direction_of(&current));
+            let center = anchor_center(
+                layout,
+                rules,
+                &piece_uid(*piece),
+                direction,
+                at,
+                master,
+                Some(row_center(&current)?.0),
+            )?;
             let row = row_from(
                 master,
                 current.mysekai_fixture_id,

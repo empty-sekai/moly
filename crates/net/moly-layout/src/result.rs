@@ -29,19 +29,39 @@ pub enum RefusalCode {
     StaleRevision,
     /// `locked`: another member holds the piece's edit lease.
     Locked,
+    /// `invalid_stacked_child`: a fixture stacked on the named one does not
+    /// fit at its moved place (its top leaves the grid, or its cell holds
+    /// another object).
+    InvalidStackedChild,
+    /// `input_missing`: an input the check reads is not loaded (a rules table,
+    /// the site's zone table or the site grid).
+    InputMissing,
+    /// `stored_footprint_invalid`: a layout row's stored corners have no
+    /// center and size.
+    StoredFootprintInvalid,
+    /// `result_footprint_invalid`: a resulting row's center and footprint do
+    /// not fit the signed grid.
+    ResultFootprintInvalid,
+    /// `master_missing`: the rules' master table has no row for the fixture.
+    MasterMissing,
 }
 
 /// A refusal with the piece it names and the nearest feasible cell the
 /// resolver could offer. `piece` is absent when the operation names none (a
-/// placement) or the named piece is unknown; `nearest` is absent when no cell
-/// was searched or none was feasible. `holder` is the member holding the edit
-/// lease when `code` is [`RefusalCode::Locked`]. `detail` names the failing
-/// cell and reason, or the input the check found missing, when the executor
-/// could read it from the validator.
+/// placement) or the named piece is unknown; `index` is the operation's place
+/// in the transaction and is set by the executor on every refusal. `nearest`
+/// is absent when no cell was searched or none was feasible. `holder` is the
+/// member holding the edit lease when `code` is [`RefusalCode::Locked`].
+/// `cell` is the failing cell in the operations' frame (the placed rows'
+/// centered frame), when the validator found one; `detail` names the failing
+/// cell in the validator's own frame, the X mirror of that one (x there is
+/// `-x - 1` here), and the reason, or the input the check found missing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Refusal {
     pub code: RefusalCode,
     pub piece: Option<Piece>,
+    pub index: Option<usize>,
+    pub cell: Option<Cell>,
     pub nearest: Option<Cell>,
     pub holder: Option<String>,
     pub detail: Option<String>,
@@ -52,6 +72,8 @@ impl Refusal {
         Self {
             code,
             piece: None,
+            index: None,
+            cell: None,
             nearest: None,
             holder: None,
             detail: None,

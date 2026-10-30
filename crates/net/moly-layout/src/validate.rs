@@ -12,7 +12,8 @@
 //!   grid size, y from its center's y over its height), and every add-using
 //!   cell at its center's y (`AddUsingGridTileData`);
 //! - a joint, i.e. a fence or a road (`GridData.AddJointData`): its minimum
-//!   corner only, and the joint mark on the cells of its current size at y 0.
+//!   corner, and the joint mark on the cells of its current size at the
+//!   minimum corner's y.
 //! An add that finds the tile taken is refused by the source; the first row
 //! keeps it here too.
 //!
@@ -285,11 +286,24 @@ impl Refusal {
             Self::NoHeadroom { .. } => Some(RefusalCode::OutOfBounds),
             Self::NoBase { .. } | Self::NotStackable { .. } => Some(RefusalCode::StackNotAllowed),
             Self::UnavailableZone { .. } => Some(RefusalCode::UnavailableZone),
-            Self::RugOverRugOrPlant { .. } | Self::StackedChild { .. } => {
-                Some(RefusalCode::Overlap)
-            }
+            Self::RugOverRugOrPlant { .. } => Some(RefusalCode::Overlap),
+            Self::StackedChild { .. } => Some(RefusalCode::InvalidStackedChild),
             Self::Unsupported => Some(RefusalCode::WrongLayer),
             Self::Missing(_) => None,
+        }
+    }
+
+    /// The cell the refusal names, for the reasons that name one.
+    pub fn cell(&self) -> Option<GridPosition> {
+        match self {
+            Self::Cell { cell, .. }
+            | Self::NoBase { cell }
+            | Self::NotStackable { cell }
+            | Self::NoHeadroom { cell }
+            | Self::UnavailableZone { cell, .. }
+            | Self::RugOverRugOrPlant { cell, .. }
+            | Self::StackedChild { cell } => Some(*cell),
+            Self::Unsupported | Self::Missing(_) => None,
         }
     }
 }
@@ -616,7 +630,7 @@ impl Board {
                     for k in 0..size.z {
                         let p = GridPosition::new(
                             (i32::from(piece.min.x) + i) as i8,
-                            0,
+                            piece.min.y,
                             (i32::from(piece.min.z) + k) as i8,
                         );
                         if tiles.contains(p) {
