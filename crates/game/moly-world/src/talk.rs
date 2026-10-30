@@ -169,6 +169,8 @@ fn parse_talks(text: &str) -> (TalkStore, Vec<String>) {
     };
     let mut rows = Vec::with_capacity(talks.len());
     for (index, row) in talks.iter().enumerate() {
+        let converted = crate::talk_ingest::script_integer_referents(row);
+        let row = converted.as_ref().unwrap_or(row);
         match crate::talk_ingest::fixture_row(row).and_then(|()| parse_row(row)) {
             Ok(parsed) => rows.push(parsed),
             Err(reason) => issues.push(format!("source row {}: {reason}", index + 1)),

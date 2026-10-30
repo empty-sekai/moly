@@ -118,6 +118,36 @@ fn ordinary_row(row: &Value, strict_tweet: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// The row with every string speaker or target of a step read the way the
+/// script engine's integer conversion reads a string: surrounding spaces are
+/// ignored, a string holding a whole integer is that integer, and any other
+/// string (a trailing comma included) is 0. `None` when no step holds one.
+pub fn script_integer_referents(row: &Value) -> Option<Value> {
+    let has_text = |step: &Value| {
+        ["who", "target"]
+            .iter()
+            .any(|field| step.get(field).is_some_and(Value::is_string))
+    };
+    if !row
+        .get("steps")
+        .and_then(Value::as_array)
+        .is_some_and(|steps| steps.iter().any(has_text))
+    {
+        return None;
+    }
+    let mut row = row.clone();
+    for step in row.get_mut("steps")?.as_array_mut()? {
+        for field in ["who", "target"] {
+            let Some(text) = step.get(field).and_then(Value::as_str) else {
+                continue;
+            };
+            let value = text.trim().parse::<i64>().unwrap_or(0);
+            step[field] = Value::from(value);
+        }
+    }
+    Some(row)
+}
+
 pub fn fixture_row(row: &Value) -> Result<(), String> {
     let id = i32_integer(row, "talkId")?;
     string(row, "lua")?;
