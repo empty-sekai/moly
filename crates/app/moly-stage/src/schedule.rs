@@ -669,6 +669,7 @@ pub fn install(app: &mut App) {
                 balloon::place
                     .after(TransformSystems::Propagate)
                     .after(camera::follow_avatar),
+                balloon::requeue_moved_parts.after(TransformSystems::Propagate),
                 emoticon::advance
                     .after(TransformSystems::Propagate)
                     .after(camera::follow_avatar),

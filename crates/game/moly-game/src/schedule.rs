@@ -1051,6 +1051,7 @@ pub fn install(app: &mut App) {
                 balloon::place
                     .after(TransformSystems::Propagate)
                     .after(camera::follow_avatar),
+                balloon::requeue_moved_parts.after(TransformSystems::Propagate),
                 // 表情链的帧推进与周期账目：在骨骼传播与相机之后——挂点、
                 // 发射形状、billboard 基读到的都是本帧值。
                 emoticon::advance

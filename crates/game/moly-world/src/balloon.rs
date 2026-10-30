@@ -1868,7 +1868,7 @@ pub fn spawn_balloon_on(
     let anim = commands
         .spawn((
             BalloonAnim,
-            Transform::from_xyz(0.0, bg_h / 2.0, 0.0).with_scale(Vec3::ZERO),
+            Transform::from_xyz(0.0, bg_h / 2.0, 0.0).with_scale(anim_scale(0.0)),
             RenderLayers::layer(layer),
         ))
         .id();
@@ -2128,7 +2128,7 @@ pub fn tick(
             elapsed.t = (elapsed.t + dt).min(SCALE_SECONDS);
             for kid in kids.iter() {
                 if let Ok(mut transform) = anims.get_mut(kid) {
-                    crate::canvas::set_scale(&mut transform, (elapsed.t / SCALE_SECONDS).clamp(0.,1.));
+                    set_anim_scale(&mut transform, (elapsed.t / SCALE_SECONDS).clamp(0.,1.));
                 }
             }
             continue;
@@ -2164,7 +2164,7 @@ pub fn tick(
             hud.scale = scale;
             for kid in kids.iter() {
                 if let Ok(mut transform) = anims.get_mut(kid) {
-                    crate::canvas::set_scale(&mut transform, scale);
+                    set_anim_scale(&mut transform, scale);
                 }
             }
             continue;
@@ -2201,7 +2201,7 @@ pub fn tick(
         };
         for kid in kids.iter() {
             if let Ok(mut transform) = anims.get_mut(kid) {
-                crate::canvas::set_scale(&mut transform, scale);
+                set_anim_scale(&mut transform, scale);
             }
         }
         if let Some(layer) = layer.as_deref() {
@@ -2461,6 +2461,56 @@ pub fn place(
                     }
                 }
             }
+        }
+    }
+}
+
+/// The animation node's scale: the enter/exit tween grows the bubble in the
+/// plane only. The node's z scale stays 1, so the parts keep their layer
+/// offsets (background below text below arrow) from the first frame; with a
+/// uniform scale the offsets are 0 while the tween starts.
+fn anim_scale(scale: f32) -> Vec3 {
+    Vec3::new(scale, scale, 1.0)
+}
+
+fn set_anim_scale(transform: &mut Mut<Transform>, scale: f32) {
+    let scale = anim_scale(scale);
+    if transform.scale != scale {
+        transform.scale = scale;
+    }
+}
+
+/// The depth a part was last queued for drawing at.
+#[derive(Component)]
+pub struct QueuedDepth(f32);
+
+/// A part's depth moving farther than this re-queues it. It is above the
+/// span of one bubble's layers and below the step between two bubbles.
+const REQUEUE_DEPTH: f32 = 1.0;
+
+/// PostUpdate, after transform propagation: re-queues the parts of a bubble
+/// whose depth moved. The 2D transparent phase takes a mesh sprite's sort key
+/// from its depth when the sprite is queued and keeps it until the sprite's
+/// mesh or material changes. A bubble is placed after propagation, so its
+/// parts are first queued at the spawn depth, and the stacking step
+/// ([`BALLOON_LAYER_STRIDE`]) changes when another bubble appears or goes;
+/// without a re-queue a part keeps drawing in the order of its first depth,
+/// and a glyph can fall under the translucent background.
+pub fn requeue_moved_parts(
+    mut commands: Commands,
+    mut parts: Query<(Entity, &GlobalTransform, &mut Mesh2d, Option<&mut QueuedDepth>), With<BalloonPart>>,
+) {
+    for (entity, transform, mut mesh, queued) in &mut parts {
+        let depth = transform.translation().z;
+        match queued {
+            None => {
+                commands.entity(entity).insert(QueuedDepth(depth));
+            }
+            Some(mut queued) if (depth - queued.0).abs() > REQUEUE_DEPTH => {
+                queued.0 = depth;
+                mesh.set_changed();
+            }
+            Some(_) => {}
         }
     }
 }
