@@ -1556,19 +1556,29 @@ fn prepare_silhouette(
 const _: () = assert!(matches!(CORE_3D_DEPTH_FORMAT, TextureFormat::Depth32Float));
 
 /// The first read-back comes on this replayed frame, then one every
-/// `MOLY_SILHOUETTE_PROBE_INTERVAL` replayed frames (default below).
+/// `MOLY_SILHOUETTE_PROBE_INTERVAL` replayed frames.
 const PROBE_FIRST_FRAME: u64 = 10;
 const PROBE_INTERVAL: u64 = 300;
 
-fn probe_interval() -> u64 {
-    static INTERVAL: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *INTERVAL.get_or_init(|| {
-        std::env::var("MOLY_SILHOUETTE_PROBE_INTERVAL")
-            .ok()
-            .and_then(|raw| raw.trim().parse::<u64>().ok())
-            .filter(|frames| *frames > 0)
-            .unwrap_or(PROBE_INTERVAL)
-    })
+/// The native stencil read-back waits for the GPU on the render thread, so it
+/// runs only for a diagnosis run that sets `MOLY_SILHOUETTE_PROBE_INTERVAL`;
+/// read once. The browser build only logs a counter line and keeps the
+/// default interval.
+fn probe_interval() -> Option<u64> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        Some(PROBE_INTERVAL)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        static INTERVAL: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+        *INTERVAL.get_or_init(|| {
+            std::env::var("MOLY_SILHOUETTE_PROBE_INTERVAL")
+                .ok()
+                .and_then(|raw| raw.trim().parse::<u64>().ok())
+                .filter(|frames| *frames > 0)
+        })
+    }
 }
 
 /// A stencil read-back recorded this frame, read on the next.
@@ -1729,10 +1739,13 @@ fn character_silhouette(
         if inner.next_probe == 0 {
             inner.next_probe = PROBE_FIRST_FRAME;
         }
-        let due = inner.frames_drawn >= inner.next_probe;
-        if due {
-            inner.next_probe = inner.frames_drawn + probe_interval();
-        }
+        let due = match probe_interval() {
+            Some(interval) if inner.frames_drawn >= inner.next_probe => {
+                inner.next_probe = inner.frames_drawn + interval;
+                true
+            }
+            _ => false,
+        };
         due
     };
     #[cfg(not(target_arch = "wasm32"))]

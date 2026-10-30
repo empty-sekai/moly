@@ -165,17 +165,25 @@ const SHADOW_FADE_BIAS: f32 = -506.25 / 118.75;
 const PROBE_FIRST_FRAME: u64 = 60;
 const PROBE_INTERVAL: u64 = 600;
 
-/// The read-back interval: `MOLY_SHADOW_PROBE_INTERVAL` (frames, at least 1)
-/// overrides [`PROBE_INTERVAL`] for a diagnosis run; read once.
-fn probe_interval() -> u64 {
-    static INTERVAL: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *INTERVAL.get_or_init(|| {
-        std::env::var("MOLY_SHADOW_PROBE_INTERVAL")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(PROBE_INTERVAL)
-    })
+/// The frames between accounts. The native depth-map read-back waits for the
+/// GPU on the render thread, so it runs only for a diagnosis run that sets
+/// `MOLY_SHADOW_PROBE_INTERVAL` (frames, at least 1); read once. The browser
+/// build only logs a counter line and keeps the default interval.
+fn probe_interval() -> Option<u64> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        Some(PROBE_INTERVAL)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        static INTERVAL: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+        *INTERVAL.get_or_init(|| {
+            std::env::var("MOLY_SHADOW_PROBE_INTERVAL")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .filter(|value| *value > 0)
+        })
+    }
 }
 
 /// 深度图读回里判「非空」的阈值：clear 是 1.0，光栅深度只会更小。
@@ -1703,6 +1711,9 @@ fn shadow_depth_pass(
 /// 读回档期判定与顺延（锁内调用）：首个读回在第 [`PROBE_FIRST_FRAME`]
 /// 个成图帧，此后每 [`PROBE_INTERVAL`] 帧一次。0 是未初始化档期的哨兵。
 fn frames_drawn_due(inner: &mut AccountInner) -> bool {
+    let Some(interval) = probe_interval() else {
+        return false;
+    };
     if inner.probe_pending {
         return false;
     }
@@ -1710,7 +1721,7 @@ fn frames_drawn_due(inner: &mut AccountInner) -> bool {
         inner.next_probe_frame = PROBE_FIRST_FRAME;
     }
     if inner.frames_drawn >= inner.next_probe_frame {
-        inner.next_probe_frame = inner.frames_drawn + probe_interval();
+        inner.next_probe_frame = inner.frames_drawn + interval;
         true
     } else {
         false
