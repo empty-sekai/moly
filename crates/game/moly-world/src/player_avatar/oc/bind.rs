@@ -448,6 +448,18 @@ pub fn bind(
                 continue;
             }
         };
+        // A character body's imported pose, taken before the fit, the aligned
+        // rest and the first retarget write any bone, as a cast member's
+        // skeleton records it: the bone cloth binds against it.
+        if model.character.is_some() {
+            for node in &tree.all {
+                if let Ok(pose) = transforms.get(*node) {
+                    commands
+                        .entity(*node)
+                        .insert(crate::character::CharacterRestTransform(*pose));
+                }
+            }
+        }
         if let Ok(mut transform) = transforms.get_mut(entity) {
             set(&mut transform, &plan.fit);
         }

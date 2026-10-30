@@ -87,8 +87,7 @@ pub const REPORT_PERIOD: Duration = Duration::from_secs(2);
 /// 实例的绑定姿态世界位（链骨 `vertices.worldPosition`、碰撞体
 /// `boneWorld.position`）。rig 可晚于模型到达，名册成员装配时动画可能已经
 /// 起播：必须合成 CharacterRestTransform 中保存的导入姿态，不能读当前
-/// 动画姿态（玩家身上角色本体的链骨没有动作写过，规划时现取的局部
-/// 变换就是绑定姿态，见 [`plan_cloth`]）。
+/// 动画姿态（玩家身上角色本体装配时同样记下这份姿态，见 [`plan_cloth`]）。
 /// 候选实体的合成绑定世界位与档案值逐值比：差只许是浮点
 /// 圆整（全批档案实测最大 1.76e-7），容差放在圆整噪声之上四个数量级、
 /// 在相邻骨间距（厘米级）之下两个数量级。恰一命中才收，零命中或多命中
@@ -103,6 +102,11 @@ const WORLD_MATCH_TOL: f32 = 1e-3;
 /// 变换（见 [`collider_world_transform`]）。
 #[derive(Component)]
 pub struct ClothBone;
+
+/// 骨布规划被拒：按名绑骨对不上档案时挂在 OC 模型实体上，值是原因。
+/// 也是装配闩——挂上后不再重试规划，该本体不带骨布。
+#[derive(Component)]
+pub struct ClothRefused(pub String);
 
 /// 一副骨布的运行时（装配闩，装好即永驻）：名册成员的装在成员实体上，
 /// 玩家身上角色本体的装在 OC 模型实体上——两条路的帧推进只认这里的
@@ -451,7 +455,9 @@ pub fn plan_when_wired(
             model,
             &|entity: Entity| imported.get(entity).ok().map(|pose| pose.0),
             npc,
-        );
+            None,
+        )
+        .unwrap_or_else(|reason| panic!("{reason}"));
         weave.install(&mut commands, npc, runtime);
     }
 }
@@ -462,11 +468,17 @@ pub fn plan_when_wired(
 /// 失败与解析失败响亮失败；档案未到时等下一帧。模型文件
 /// （`character: None`）没有档案、没有骨布，不碰。OC 换掉或退回时模型
 /// 实体连同运行时、链骨的 [`ClothBone`] 一起消失，再穿时重新规划。
+/// 按名绑骨对不上（骨名缺失、同名无一命中或命中多个）不中止进程：模型
+/// 实体挂 [`ClothRefused`] 带着原因，记一条 error，该本体不带骨布。
 pub fn plan_cloth(
     mut commands: Commands,
     server: Res<AssetServer>,
     jsons: Res<Assets<JsonAsset>>,
-    oc_models: Query<(Entity, &OcModel), (With<OcBinding>, Without<ClothRuntime>)>,
+    oc_models: Query<
+        (Entity, &OcModel),
+        (With<OcBinding>, Without<ClothRuntime>, Without<ClothRefused>),
+    >,
+    imported: Query<&CharacterRestTransform>,
     weave: ClothWeave,
 ) {
     for (oc, model) in &oc_models {
@@ -487,22 +499,34 @@ pub fn plan_cloth(
         let Some(json) = jsons.get(&body.rig) else {
             continue;
         };
-        // 绑名子树是 OC 模型实体本身。绑定姿态在这里现取节点局部变换：
-        // OC 场景不装引擎动画目标与播放器，自身动作只发生在它自己的骨
-        // （`OwnAnimator`）上，OC 绑定也只写过被驱动的骨与节点约束的节点；
-        // 骨布的链骨（头发、裙摆）既不在驱动集里、约束也不碰它们，仍是
-        // 文件里的导入姿态；世界基一直是场景根，OC 根的贴合变换只是骨
-        // 路径上的一个当帧局部节点，链骨的绑定局部与基的姿态无关。所以
-        // 此刻的局部变换就是绑定姿态，与名册成员读导入姿态逐值同等。
-        let runtime = weave.plan(
+        // 绑名子树是 OC 模型实体本身。自身动作（`OwnAnimator`）一起播就会
+        // 带动被驱动的骨（Hips、Spine、Head），这些骨的绑定局部取装配时
+        // 记下的 [`CharacterRestTransform`]，与名册成员同源；链骨（头发、
+        // 裙摆）不在驱动集里，约束也不碰它们，仍是文件里的导入姿态，没有
+        // 记录的节点取当前局部变换。世界基一直是场景根，OC 根的贴合变换只是
+        // 骨路径上的一个当帧局部节点。
+        let planned = weave.plan(
             body.unit,
             &body.rig_file,
             &json.0,
             oc,
-            &|entity: Entity| weave.transforms.get(entity).ok().copied(),
+            &|entity: Entity| {
+                imported
+                    .get(entity)
+                    .ok()
+                    .map(|pose| pose.0)
+                    .or_else(|| weave.transforms.get(entity).ok().copied())
+            },
             model.player,
+            Some(oc),
         );
-        weave.install(&mut commands, oc, runtime);
+        match planned {
+            Ok(runtime) => weave.install(&mut commands, oc, runtime),
+            Err(reason) => {
+                error!("[cloth] {reason}；该本体不带骨布");
+                commands.entity(oc).insert(ClothRefused(reason));
+            }
+        }
     }
 }
 
@@ -520,8 +544,11 @@ pub struct ClothWeave<'w, 's> {
 impl ClothWeave<'_, '_> {
     /// `scope` 里的骨名绑到实体，`pose` 给出节点规划时读得到的绑定局部
     /// 姿态（`None` = 缺）；`world_base` 是场景根（路径与帧推进的世界基）。
+    /// `file_root` 给出时，同名消歧的世界位只合成它之下的节点（它本身带
+    /// 着贴合变换，不属于档案的文件空间）。
     /// 数据缺口一律响亮失败：链骨与碰撞骨按名绑定，同名多实体时按档案存的
     /// 绑定姿态世界位消歧（见 [`WORLD_MATCH_TOL`]）。
+    #[allow(clippy::too_many_arguments)]
     fn plan(
         &self,
         unit: u32,
@@ -530,7 +557,8 @@ impl ClothWeave<'_, '_> {
         scope: Entity,
         pose: &dyn Fn(Entity) -> Option<Transform>,
         world_base: Entity,
-    ) -> ClothRuntime {
+        file_root: Option<Entity>,
+    ) -> Result<ClothRuntime, String> {
         let parsed = match parse_rig(rig_raw) {
             Ok(p) => p,
             Err(reason) => panic!(
@@ -593,20 +621,28 @@ impl ClothWeave<'_, '_> {
         // 的环尾骨与链根同名、同名定位碰撞体挂在身体不同部位），档案
         // 记的绑定姿态世界位是提取器绑定的那个实例的直接痕迹。
         let world_resolved = Cell::new(0usize);
-        let bind = |chain: &str, kind: &str, name: &str, expected: [f32; 3]| -> Entity {
+        let bind = |chain: &str, kind: &str, name: &str, expected: [f32; 3]| -> Result<Entity, String> {
             let candidates = by_name
                 .get(name)
-                .unwrap_or_else(|| panic!("unit {unit} 链 {chain} 的{kind}骨名 {name}：角色包里没有"));
+                .ok_or_else(|| format!("unit {unit} 链 {chain} 的{kind}骨名 {name}：角色包里没有"))?;
             if candidates.len() == 1 {
-                return candidates[0];
+                return Ok(candidates[0]);
             }
             let tol2 = WORLD_MATCH_TOL * WORLD_MATCH_TOL;
             let mut hits = Vec::with_capacity(candidates.len());
+            let mut worlds = Vec::with_capacity(candidates.len());
             for &candidate in candidates {
                 let mut world = Affine3A::IDENTITY;
-                for entity in path_to(candidate) {
-                    world *= rest_local(entity).compute_affine();
+                let path = path_to(candidate);
+                // 档案的世界位在文件空间：`file_root` 及其以上（贴合变换、
+                // 动画器）不在其中。
+                let below = file_root
+                    .and_then(|root| path.iter().position(|entity| *entity == root))
+                    .map_or(0, |at| at + 1);
+                for entity in &path[below..] {
+                    world *= rest_local(*entity).compute_affine();
                 }
+                worlds.push(Vec3::from(world.translation));
                 if Vec3::from(world.translation).distance_squared(Vec3::from(expected)) <= tol2 {
                     hits.push(candidate);
                 }
@@ -614,17 +650,17 @@ impl ClothWeave<'_, '_> {
             match hits.as_slice() {
                 [only] => {
                     world_resolved.set(world_resolved.get() + 1);
-                    *only
+                    Ok(*only)
                 }
-                [] => panic!(
-                    "unit {unit} 链 {chain} 的{kind}骨 {name} 同名 {} 处，无一世界位命中档案的绑定姿态 {expected:?}",
+                [] => Err(format!(
+                    "unit {unit} 链 {chain} 的{kind}骨 {name} 同名 {} 处，无一世界位命中档案的绑定姿态 {expected:?}（候选 {worlds:?}）",
                     candidates.len()
-                ),
-                many => panic!(
+                )),
+                many => Err(format!(
                     "unit {unit} 链 {chain} 的{kind}骨 {name} 同名 {} 处，世界位命中 {} 个：消歧不足",
                     candidates.len(),
                     many.len()
-                ),
+                )),
             }
         };
 
@@ -656,7 +692,7 @@ impl ClothWeave<'_, '_> {
             let n = def.bones.len();
             let mut bones = Vec::with_capacity(n);
             for (vi, bone_name) in def.bones.iter().enumerate() {
-                let entity = bind(&def.name, "链", bone_name, pchain.rest[vi]);
+                let entity = bind(&def.name, "链", bone_name, pchain.rest[vi])?;
                 let local = rest_local(entity);
                 bones.push(BoneBinding {
                     entity,
@@ -735,7 +771,7 @@ impl ClothWeave<'_, '_> {
                          这种碰撞体，行为未转录，不猜"
                     );
                 }
-                let entity = bind(chain_name, "碰撞体", &pc.bone, pc.bone_world);
+                let entity = bind(chain_name, "碰撞体", &pc.bone, pc.bone_world)?;
                 // 碰撞骨同时是链骨：真源的合法形态，不是结构冲突。真源的
                 // 骨读（ReadBoneFromTransform）在帧首一次读全部登记骨的
                 // **当前**变换、先于模拟（UpdateStartSimulation，两条更新
@@ -781,7 +817,7 @@ impl ClothWeave<'_, '_> {
             chain_bone_colliders,
             world_resolved.get()
         );
-        ClothRuntime {
+        Ok(ClothRuntime {
             unit,
             base: world_base,
             chains,
@@ -793,7 +829,7 @@ impl ClothWeave<'_, '_> {
             substeps: 0,
             writes: 0,
             max_disp: 0.0,
-        }
+        })
     }
 
     /// 运行时装到 `entity` 上，链骨挂 [`ClothBone`]（写查询与读查询以此
