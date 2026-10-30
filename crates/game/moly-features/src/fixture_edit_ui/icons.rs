@@ -73,6 +73,16 @@ pub fn parse(
     if layouts.document("EditorSource").is_none() {
         return;
     }
+    // Everything is parsed and every thumbnail handle has settled: the
+    // per-handle load-state scans below would only repeat their answer.
+    if icons.ready
+        && icons.parsed
+        && icons.environments_parsed
+        && icons.environment_handles.len()
+            == icons.environment_ready.len() + icons.environment_failures.len()
+    {
+        return;
+    }
     if !icons.parsed {
         let Some(request) = request.as_deref() else {
             return;

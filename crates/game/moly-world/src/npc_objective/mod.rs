@@ -132,19 +132,22 @@ const BUCKET_MARGIN: f32 = 0.5;
 
 /// 目标面：世界系三角网（保留高度）+ 格桶索引 + 可行走格集。站点域换装
 /// 后由 [`build_face`] 按新面重建（代数戳记在 `epoch` 上）。
+///
+/// 三角、格桶与可行走格建好后只读，用 `Arc` 共享：控制器每帧给每个角色
+/// 复制一份面，复制只增引用计数，不复制几千个三角与每格一个下标表。
 #[derive(Resource, Clone)]
 pub struct ObjectiveFace {
     /// 世界系三角（三顶点，含高度）。
-    tris: Vec<[[f32; 3]; 3]>,
+    tris: std::sync::Arc<Vec<[[f32; 3]; 3]>>,
     /// 格 → 覆盖该格（外扩余量后）的三角下标。
-    buckets: HashMap<Cell, Vec<u32>>,
+    buckets: std::sync::Arc<HashMap<Cell, Vec<u32>>>,
     /// 面包围盒折算的格界（含端点）。
     grid_min: Cell,
     grid_max: Cell,
     /// 格角映射的参考平面高度（面顶点均值）：格 → 世界的 y 档。
     ref_y: f32,
     /// 可行走格（格角在侵蚀场内且采到高度面），升序。
-    walkable: Vec<Cell>,
+    walkable: std::sync::Arc<Vec<Cell>>,
     /// 构建时的站点代数（换站后过期）。
     epoch: u64,
     field: std::sync::Arc<moly_law::carve::WalkField>,
@@ -927,12 +930,12 @@ pub(crate) fn face_from_triangles(tris: Vec<[[f32; 3]; 3]>, walk_face: &crate::w
     // 可行走格：格角在游走容差内采到面，且不在任何摆放盒内（烘焙刻洞
     // 的替身，见模块注释）。
     let face = ObjectiveFace {
-        tris: tris.clone(),
-        buckets,
+        tris: std::sync::Arc::new(tris.clone()),
+        buckets: std::sync::Arc::new(buckets),
         grid_min,
         grid_max,
         ref_y,
-        walkable: Vec::new(),
+        walkable: std::sync::Arc::new(Vec::new()),
         epoch,
         field: walk_face.field.clone(),
         generation: walk_face.generation(),
@@ -951,7 +954,7 @@ pub(crate) fn face_from_triangles(tris: Vec<[[f32; 3]; 3]>, walk_face: &crate::w
         }
     }
     let walkable_count = walkable.len();
-    let face = ObjectiveFace { walkable, ..face };
+    let face = ObjectiveFace { walkable: std::sync::Arc::new(walkable), ..face };
     info!(
         "[npc-objective] 目标面就绪：三角 {}，格界 x [{},{}] z [{},{}]，可行走 {} 格（导航代数 {}），参考高度 {:.3}，站点代数 {}",
         tris.len(),
@@ -5171,12 +5174,12 @@ mod navigation_height_tests {
             }
         }
         ObjectiveFace {
-            tris,
-            buckets,
+            tris: std::sync::Arc::new(tris),
+            buckets: std::sync::Arc::new(buckets),
             grid_min: (-16, -16),
             grid_max: (16, 16),
             ref_y: 0.0,
-            walkable: Vec::new(),
+            walkable: std::sync::Arc::new(Vec::new()),
             epoch: 1,
             field,
             generation: 1,
@@ -5213,7 +5216,7 @@ mod navigation_height_tests {
     #[test]
     fn navigation_height_on_a_sloped_rug_never_moves_valid_xz() {
         let mut face = low_step_face();
-        for triangle in &mut face.tris {
+        for triangle in std::sync::Arc::make_mut(&mut face.tris) {
             for point in triangle {
                 point[1] = point[0] * 0.25;
             }
