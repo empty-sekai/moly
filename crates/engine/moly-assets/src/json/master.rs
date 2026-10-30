@@ -1121,12 +1121,12 @@ mod merge_tests {
         row.get(REGION_FIELD).and_then(Value::as_str)
     }
 
-    /// The merged text and what the merge reported; `JpOnly` gives the JP
-    /// text back, as its caller does.
+    /// The merged text's rows and what the merge reported; `JpOnly` gives
+    /// the JP text back, as its caller does.
     fn merged(table: &str, jp: &str, others: &[TableText<'_>]) -> (Vec<Value>, Merged) {
         let (text, outcome) = merge_table(table, jp, others).expect("a table of rows");
         match outcome {
-            Merged::JpOnly => (rows(jp), outcome),
+            Merged::JpOnly => (rows(jp).unwrap_or_default(), outcome),
             other => match text {
                 Some(text) => (rows(&text), other),
                 None => panic!("a merged table without its text"),
@@ -1200,6 +1200,25 @@ mod merge_tests {
         assert_eq!(key("wordings"), ["wordingKey"]);
         assert_eq!(key("resourceBoxes"), ["resourceBoxPurpose", "id"]);
         assert_eq!(key("musicTags"), ["musicId", "musicTag"]);
+        assert_eq!(key("configs"), ["configKey"]);
+
+        // The published configs rows are configKey/value pairs, with no id.
+        let configs_jp = r#"[{"configKey": "date_change_hour", "value": "4"}]"#;
+        let configs_cn = r#"[{"configKey": "date_change_hour", "value": "5"},
+                              {"configKey": "mysekai_refresh_hour", "value": "5"}]"#;
+        let (rows, outcome) = merged(
+            "configs",
+            configs_jp,
+            &[TableText::Region(Region::Cn, configs_cn)],
+        );
+        assert_eq!(outcome, Merged::Merged { added: vec![(Region::Cn, 1)] });
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1]["configKey"], "mysekai_refresh_hour");
+        // A configs row without its configKey is refused by name.
+        let no_key = r#"[{"value": "5"}]"#;
+        let error = merge_table("configs", configs_jp, &[TableText::Region(Region::Cn, no_key)])
+            .expect_err("a row without its key");
+        assert!(error.contains("configKey"));
 
         let wordings_jp = r#"[{"wordingKey": "W", "value": "a"}]"#;
         let wordings_cn = r#"[{"wordingKey": "W", "value": "b"}, {"wordingKey": "X", "value": "c"}]"#;
@@ -1287,7 +1306,15 @@ mod merge_tests {
         assert!(merge_table("t", jp, &[TableText::Region(Region::Cn, cn)]).is_err());
         let jp = r#"[{"name": "no id"}]"#;
         let cn = r#"[{"id": 1}]"#;
-        assert!(merge_table("t", jp, &[TableText::Region(Region::Cn, cn)]).is_err());
+        let error = merge_table("t", jp, &[TableText::Region(Region::Cn, cn)])
+            .expect_err("a jp row without its key");
+        assert!(error.contains("jp"));
+        // Without another region enabled the JP rows are the table as they
+        // are, key or no key.
+        if merged_regions().is_empty() {
+            let (text, outcome) = merge_table("t", jp, &[]).expect("the jp text");
+            assert_eq!((text, outcome), (None, Merged::JpOnly));
+        }
         // A key only JP has is JP's row.
         let jp = r#"[{"id": 1}, {"id": 1}]"#;
         let cn = r#"[{"id": 1}]"#;

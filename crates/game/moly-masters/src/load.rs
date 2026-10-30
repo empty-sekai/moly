@@ -888,14 +888,17 @@ fn parse_convert_configs(
     Ok(())
 }
 
-/// An upstream row table, sorted by `id` (a table without ids keeps its
-/// master order).
+/// An upstream row table, sorted by `id` (a table without ids, such as
+/// `configs`, keeps its master order).
 fn table_rows(text: &str, table: &str) -> Result<Vec<Value>, String> {
     let value: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
-    let mut rows = value
-        .as_array()
-        .ok_or_else(|| format!("{table} is not an array of rows"))?
-        .clone();
+    let Value::Array(rows) = value else {
+        return Err(format!("{table} is not an array of rows"));
+    };
+    if let Some(index) = rows.iter().position(|row| !row.is_object()) {
+        return Err(format!("{table} row {index} is not an object"));
+    }
+    let mut rows = rows;
     rows.sort_by_key(|row| row["id"].as_i64().unwrap_or(i64::MAX));
     Ok(rows)
 }
@@ -906,12 +909,17 @@ pub(crate) fn master_rows_of(text: &str, table: &str) -> Result<Vec<Value>, Stri
 }
 
 /// The row of a one-row table, which upstream publishes as one JSON object
-/// (an array's first row is read as well).
+/// (`mysekaiConvertFixtureSlot`, `mysekaiColorfulPass`); an array's first row
+/// is read as well.
 pub(crate) fn master_single_row(text: &str, table: &str) -> Result<Value, String> {
     let value: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
     match value {
-        Value::Object(_) => Ok(value),
-        Value::Array(rows) => rows.into_iter().next().ok_or(format!("{table} has no row")),
+        row @ Value::Object(_) => Ok(row),
+        Value::Array(rows) => match rows.into_iter().next() {
+            Some(row @ Value::Object(_)) => Ok(row),
+            Some(other) => Err(format!("{table} row 0 is {other}, not an object")),
+            None => Err(format!("{table} has no row")),
+        },
         _ => Err(format!("{table} is neither a row object nor an array of rows")),
     }
 }
