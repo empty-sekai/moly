@@ -666,10 +666,12 @@ pub fn follow_server_tools(
 
 /// Update: the player model's stamina follows the client's
 /// `userMysekaiStamina` copy when a response other than the harvest's own
-/// changes it (a panel edit, a recovery reply). Only a copy that differs from
-/// the one last seen counts, and only while the harvest queue is idle, so hits
-/// the client has counted but not yet sent are not undone.
+/// changes it (a response carrying the pools, a push, a recovery reply). Only
+/// a copy that differs from the one last seen counts, and only while the
+/// harvest queue is idle, so hits the client has counted but not yet sent are
+/// not undone.
 pub fn follow_server_stamina(
+    mut refresh: ResMut<super::HarvestStaminaRefresh>,
     queue: Res<super::queue::HarvestLogQueue>,
     client_user: Option<Res<crate::userdata::ClientUserData>>,
     user: Option<ResMut<HarvestUserData>>,
@@ -700,4 +702,7 @@ pub fn follow_server_stamina(
     );
     model.stamina = stamina;
     user.stamina = stamina;
+    // The gauge follows the pools it shows: the next `Initialize` or recover
+    // write draws the state the model now holds.
+    refresh.0.push(());
 }
