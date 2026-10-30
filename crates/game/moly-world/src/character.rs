@@ -825,7 +825,7 @@ mod visibility_regressions {
             primitives::{Aabb, Frustum},
             visibility::{check_visibility_cpu_culling, VisibleEntities},
         };
-        use bevy::math::primitives::{HalfSpace, ViewFrustum};
+        use bevy::shape::{HalfSpace, ViewFrustum};
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .add_systems(Update, check_visibility_cpu_culling);

@@ -1043,6 +1043,7 @@ pub fn install(app: &mut App) {
                     .after(TransformSystems::Propagate)
                     .after(camera::frame_site),
                 character_material::update_head.after(TransformSystems::Propagate),
+                character_material::sync_eye_overlay.after(character_material::update_head),
                 character_material::report_head
                     .after(character_material::update_head)
                     .run_if(common_conditions::on_timer(Duration::from_secs(3))),

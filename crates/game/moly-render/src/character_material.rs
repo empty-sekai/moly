@@ -306,6 +306,16 @@ impl Material for CharacterMaterial {
         "embedded://moly_render/shaders/character_material.wesl".into()
     }
 
+    /// The eye overlay (the eyebrow variant) blends over the scene; every
+    /// other character draw is opaque.
+    fn alpha_mode(&self) -> AlphaMode {
+        if self.key.eyebrow {
+            AlphaMode::Blend
+        } else {
+            AlphaMode::Opaque
+        }
+    }
+
     /// 本单只交付 Base 片元；阴影与深度消费方不在范围里。
     fn enable_prepass() -> bool {
         false
@@ -732,6 +742,35 @@ fn build_material(
     })
 }
 
+/// The eye overlay of a slot that carries an eye mask: the same material
+/// read through the eyebrow variant, with a parameter buffer of its own. The
+/// source draws this pass through hair with the per-character stencil; the
+/// product draws it as a blended second layer pulled toward the camera
+/// (`EYEBROW_PULL` in the shader), which hair of the same character covers
+/// and farther geometry still hides.
+fn build_eye_overlay(base: &CharacterMaterial, render_device: &RenderDevice) -> Option<CharacterMaterial> {
+    base.eyebrow_tex.as_ref()?;
+    let params_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
+        label: Some("character_material_eye_overlay_params"),
+        contents: &base.params.byte_array(),
+        usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+    });
+    Some(CharacterMaterial {
+        key: CharacterKey {
+            eyebrow: true,
+            ..base.key
+        },
+        params: base.params,
+        params_buffer,
+        lip_pattern: None,
+        lip_pattern_revision: 0,
+        eye_pattern: None,
+        main_tex: base.main_tex.clone(),
+        body_mask_tex: base.body_mask_tex.clone(),
+        eyebrow_tex: base.eyebrow_tex.clone(),
+    })
+}
+
 // ---- 换装 ----
 
 /// 已解析待换装的逐实体计划（材质资产等贴图到齐）。
@@ -739,6 +778,9 @@ fn build_material(
 pub struct ToonPlan {
     /// (网格实体, 材质名, 材质资产)。
     parts: Vec<(Entity, String, CharacterMaterial)>,
+    /// (mesh entity, slot name, overlay material) of every part with an eye
+    /// mask.
+    overlays: Vec<(Entity, String, CharacterMaterial)>,
     /// 头骨实体：头参考点的逐帧写者读它。
     head: Entity,
     hips: Entity,
@@ -751,6 +793,9 @@ pub struct ToonMaterials {
     head: Entity,
     hips: Entity,
     slots: Vec<(String, Handle<CharacterMaterial>)>,
+    /// (slot material, its eye overlay material): the overlay copies the
+    /// slot's parameters every frame.
+    overlays: Vec<(Handle<CharacterMaterial>, Handle<CharacterMaterial>)>,
 }
 
 impl ToonMaterials {
@@ -851,6 +896,7 @@ pub fn plan_body(
         return Err("角色包里没有带 StandardMaterial 的网格实体".into());
     }
     let mut parts = Vec::new();
+    let mut overlays = Vec::new();
     let mut accessories = Vec::new();
     for (entity, name) in mesh_parts {
         let slot = rig
@@ -864,13 +910,16 @@ pub fn plan_body(
         }
         let material = build_material(&rig, slot, rig_file, server, render_device, true)
             .map_err(|reason| format!("角色材质解析失败：{reason}"))?;
+        if let Some(overlay) = build_eye_overlay(&material, render_device) {
+            overlays.push((entity, name.clone(), overlay));
+        }
         parts.push((entity, name, material));
     }
     commands.entity(head).insert(HeadBone);
     for entity in accessories {
         commands.entity(entity).insert(crate::shadowmap::NoShadowCast);
     }
-    Ok(ToonPlan { parts, head, hips })
+    Ok(ToonPlan { parts, overlays, head, hips })
 }
 
 /// Update：装配完成的成员解析骨架档案、建材质计划。等雾档案进表
@@ -975,6 +1024,7 @@ pub fn swap_when_planned(
     server: Res<AssetServer>,
     mut materials: ResMut<Assets<CharacterMaterial>>,
     npcs: Query<(Entity, Option<&CharacterUnitId>, &ToonPlan, Has<PlayerWorn>), Without<ToonMaterials>>,
+    meshes: Query<(&Mesh3d, Option<&bevy::mesh::skinning::SkinnedMesh>, Option<&bevy::camera::visibility::RenderLayers>)>,
 ) {
     for (npc, unit, plan, worn) in &npcs {
         let who = member_label(unit);
@@ -995,12 +1045,41 @@ pub fn swap_when_planned(
             slots.push((name.clone(), handle));
             names.push(name.clone());
         }
+        // The eye overlay: a child draw of the slot's mesh with the overlay
+        // material, skinned by the same joints.
+        let mut overlays = Vec::new();
+        for (entity, name, material) in &plan.overlays {
+            let Some((_, source)) = slots.iter().find(|(slot, _)| slot == name) else {
+                panic!("{who} 的眼睛叠层材质 {name} 没有对应的槽材质");
+            };
+            let Ok((mesh, skin, layers)) = meshes.get(*entity) else {
+                panic!("{who} 的网格实体 {entity:?} 没有 Mesh3d：眼睛叠层无处挂");
+            };
+            let handle = materials.add(material.clone());
+            let mut overlay = commands.spawn((
+                Mesh3d(mesh.0.clone()),
+                MeshMaterial3d(handle.clone()),
+                Transform::default(),
+                Visibility::Inherited,
+                bevy::camera::visibility::NoFrustumCulling,
+                crate::shadowmap::NoShadowCast,
+                ChildOf(*entity),
+            ));
+            if let Some(skin) = skin {
+                overlay.insert(skin.clone());
+            }
+            if let Some(layers) = layers {
+                overlay.insert(layers.clone());
+            }
+            overlays.push((source.clone(), handle));
+        }
         commands
             .entity(npc)
             .insert(ToonMaterials {
                 head: plan.head,
                 hips: plan.hips,
                 slots,
+                overlays,
             })
             .remove::<ToonPlan>();
         info!(
@@ -1055,6 +1134,33 @@ pub fn update_head(
                     material.params.dither_alpha = 1.0;
                     material.params.use_dither = 0.0;
                 }
+            }
+        }
+    }
+}
+
+/// PostUpdate（update_head 之后）：眼睛叠层材质逐帧抄它的槽材质参数
+/// （表情格、抖动、头参考点都写在槽材质上）。
+///
+/// Like `update_head`, the copy is stored without an asset event;
+/// `upload_params` writes the buffer during extraction.
+pub fn sync_eye_overlay(
+    mut materials: ResMut<Assets<CharacterMaterial>>,
+    toons: Query<&ToonMaterials>,
+) {
+    for toon in &toons {
+        for (source, overlay) in &toon.overlays {
+            let Some(params) = materials.get(source).map(|material| material.params) else {
+                continue;
+            };
+            let stale = materials
+                .get(overlay)
+                .is_some_and(|material| material.params.byte_array() != params.byte_array());
+            if !stale {
+                continue;
+            }
+            if let Some(material) = materials.get_mut_untracked(overlay) {
+                material.params = params;
             }
         }
     }
