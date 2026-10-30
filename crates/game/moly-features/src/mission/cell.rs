@@ -37,9 +37,10 @@
 //! copy's own Mask, which [`GaugeFill`] remaps through the instance. Rows past
 //! the page's count stay hidden.
 //!
-//! The two dialogs' lists (`MysekaiMissionSheetCell`, `MysekaiMissionRewardCell`)
-//! are prefabs with no document in this root: [`refuse_document`] names each
-//! once, and those lists draw no row.
+//! The list dialog's `MysekaiMissionSheetCell` is a prefab with no document
+//! in this root: [`refuse_document`] names it once, and that list draws no
+//! row. The detail dialog's `MysekaiMissionRewardCell` has a document of its
+//! own, which that dialog reads for itself.
 //!
 //! Named gaps:
 //! - The reward thumbnails: neither cell's thumbnail prefab nor the reward

@@ -43,6 +43,7 @@ impl Plugin for MissionPlugin {
             .init_resource::<cell::MissionCells>()
             .init_resource::<list_dialog::MissionListDialog>()
             .init_resource::<detail_dialog::MissionDetailDialog>()
+            .init_resource::<detail_dialog::RewardCellSource>()
             .add_message::<service::MissionReceived>()
             .add_message::<service::MissionReceiveFailed>()
             .add_message::<cell::MissionDialogRequest>()

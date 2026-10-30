@@ -231,6 +231,7 @@ pub fn parse_boxes(text: &str) -> Result<Vec<ResourceBox>, String> {
             Ok(ResourceBox {
                 id,
                 purpose,
+                box_type: string_column(row, "resourceBoxType")?,
                 name: string_column(row, "name")?,
                 description: string_column(row, "description")?,
                 details,
@@ -348,15 +349,17 @@ pub struct BoxDetail {
     pub quantity: i32,
 }
 
-/// One `resourceBoxes` row: a (purpose, id) pair, its details, and the row's
-/// `name` and `description`. Most rows of the master carry neither column
-/// (e.g. `id` 1 has a description and no name in the 2026-10-18 master), so
-/// both are `None` where the row lacks them; a column that is present must be
-/// a string.
+/// One `resourceBoxes` row: a (purpose, id) pair, its type, its details, and
+/// the row's `name` and `description`. Most rows of the master carry neither
+/// name column (e.g. `id` 1 has a description and no name in the 2026-10-18
+/// master), so both are `None` where the row lacks them; a column that is
+/// present must be a string.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResourceBox {
     pub id: i32,
     pub purpose: String,
+    /// `resourceBoxType` (`expand`, `list`, ...): a column most rows carry.
+    pub box_type: Option<String>,
     pub name: Option<String>,
     pub description: Option<String>,
     pub details: Vec<BoxDetail>,
@@ -479,12 +482,13 @@ mod tests {
 
     /// `resourceBoxes` rows carry `name` and `description` where the master
     /// gives them (`id` 1 in the 2026-10-18 master has a description and no
-    /// name): a missing column reads `None`, a present one reads its text,
-    /// and a present column that is not a string is refused, never defaulted.
+    /// name): a missing column reads `None` (`resourceBoxType` included), a
+    /// present one reads its text, and a present column that is not a string
+    /// is refused, never defaulted.
     #[test]
     fn a_box_column_some_rows_lack_is_none_not_defaulted() {
         let rows = r#"[
-            {"id": 1, "resourceBoxPurpose": "p", "resourceBoxType": "expand",
+            {"id": 1, "resourceBoxPurpose": "p",
              "description": "only a description",
              "details": [{"seq": 1, "resourceType": "material", "resourceId": 6, "resourceQuantity": 100}]},
             {"id": 2, "resourceBoxPurpose": "p", "resourceBoxType": "expand",
@@ -495,7 +499,9 @@ mod tests {
         let boxes = parse_boxes(rows).expect("the master's columns");
         assert_eq!(boxes.len(), 2);
         assert_eq!(boxes[0].name, None);
+        assert_eq!(boxes[0].box_type, None);
         assert_eq!(boxes[0].description.as_deref(), Some("only a description"));
+        assert_eq!(boxes[1].box_type.as_deref(), Some("expand"));
         assert_eq!(boxes[1].name.as_deref(), Some("box name"));
         assert_eq!(boxes[1].description.as_deref(), Some("box description"));
         assert_eq!(boxes[1].details.len(), 2);
