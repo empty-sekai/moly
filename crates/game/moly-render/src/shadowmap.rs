@@ -884,7 +884,7 @@ pub fn push_palette(bytes: &mut Vec<u8>, matrices: &[Mat4]) -> u32 {
 /// 光源向正交的一对矩阵：深度 pass 用裁剪矩阵，消费侧用采样矩阵
 /// （xy 已折进 [0,1] 且带 y 翻转——WebGPU 帧缓冲原点在左上而 NDC y 向上，
 /// 纹理 v=0 对应 NDC y=+1；z 是 [0,1] 比较深度，近 0 远 1，
-/// `orthographic_rh` 的 z 语义恰是这一约定）。随矩阵带回框的几何三数
+/// `orthographic` 的 z 语义恰是这一约定）。随矩阵带回框的几何三数
 /// （光系宽/高/深度程，米），账目行用它折 texel 尺寸与深度差。
 struct LightMatrices {
     clip: Mat4,
@@ -904,7 +904,7 @@ fn light_matrices(env: &SiteEnv, bounds: (Vec3, Vec3)) -> Option<LightMatrices> 
     let center = (bounds.0 + bounds.1) * 0.5;
     // up 与光向近平行的档位换轴，避免 look_at 退化。
     let up = if to_light.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
-    let view = Mat4::look_at_rh(center + to_light * 100.0, center, up);
+    let view = glam::camera::rh::view::look_at_mat4(center + to_light * 100.0, center, up);
     let mut light_min = Vec3::INFINITY;
     let mut light_max = Vec3::NEG_INFINITY;
     for sx in [bounds.0.x, bounds.1.x] {
@@ -921,7 +921,7 @@ fn light_matrices(env: &SiteEnv, bounds: (Vec3, Vec3)) -> Option<LightMatrices> 
     if far <= near || !light_max.x.is_finite() {
         return None;
     }
-    let proj = Mat4::orthographic_rh(
+    let proj = glam::camera::rh::proj::directx::orthographic(
         light_min.x,
         light_max.x,
         light_min.y,

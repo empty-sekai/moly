@@ -5607,6 +5607,7 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "getrandom 0.2.17",
+ "glam",
  "image",
  "js-sys",
  "libc",
