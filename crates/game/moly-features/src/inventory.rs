@@ -268,7 +268,7 @@ pub struct MasterRow {
     pub seq: Option<i32>,
     /// `pronunciation`, the AlphabeticalOrder sort's key.
     pub pronunciation: String,
-    /// The fixture's layout cost (`mysekaiFixtureIPC.putCost`).
+    /// The fixture's layout cost (`firstPutCost`).
     pub layout_cost: i32,
     /// The fixture's main and sub genre ids.
     pub main_genre: i32,
@@ -615,7 +615,7 @@ fn fixture_rows(value: &Value) -> Result<HashMap<i32, MasterRow>, String> {
                     icon: None,
                     seq: seq_of(row),
                     pronunciation: text_of(row, "pronunciation"),
-                    layout_cost: 0,
+                    layout_cost: int_of(row, "firstPutCost"),
                     main_genre: int_of(row, "mysekaiFixtureMainGenreId"),
                     sub_genre: int_of(row, "mysekaiFixtureSubGenreId"),
                     grid: grid_of(row),

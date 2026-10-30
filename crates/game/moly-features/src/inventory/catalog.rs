@@ -1,12 +1,11 @@
 //! The master tables the inventory screen reads besides the rows' names: a
-//! fixture's layout cost (`mysekaiFixtureIPC.putCost`); a material's type,
-//! site ids and description; a tool's description; and the tab rows with
+//! material's type, site ids and description; a tool's description; and the tab rows with
 //! their genre names.
 //!
 //! The tables are requested at start-up (`catalog::request`) and taken when
 //! they resolve (`MasterData::take`). A table the runtime root does not carry
-//! leaves the columns it holds at their reading without it: a fixture's
-//! layout cost 0, a material's description empty, and the screen names the
+//! leaves the columns it holds at their reading without it: a material's
+//! description empty, and the screen names the
 //! absent table in its log once.
 //!
 //! The fixture filter document (`mysekaiFixtureFilteredDatas`) holds one
@@ -22,7 +21,6 @@ use serde_json::Value;
 use super::order::{self, FixtureFilter, Tab};
 
 /// The layout cost of a fixture (`PutCost`), by fixture id.
-pub type LayoutCosts = HashMap<i32, i32>;
 
 /// A material's type (`mysekaiMaterialType`), by material id.
 pub type MaterialTypes = HashMap<i32, String>;
@@ -44,24 +42,6 @@ fn int(row: &Value, key: &str) -> Option<i32> {
 
 fn field_text(row: &Value, key: &str) -> String {
     row[key].as_str().unwrap_or_default().to_owned()
-}
-
-/// `mysekaiFixtureIPC` (`putCost`), by fixture id.
-fn parse_layout_costs(text: &str) -> Result<LayoutCosts, String> {
-    let (costs, refused) = master::read_parsed_rows(&rows(text)?, |row| {
-        Ok(Some((
-            int(row, "mysekaiFixtureId")
-                .ok_or_else(|| format!("mysekaiFixtureId of {row} is not an int"))?,
-            int(row, "putCost").ok_or_else(|| format!("putCost of {row} is not an int"))?,
-        )))
-    });
-    if !refused.is_empty() {
-        let left_out: Vec<&str> = refused.iter().map(|refusal| refusal.row.as_str()).collect();
-        warn!(
-            "[inventory] mysekaiFixtureIPC rows {left_out:?} are left out; their fixtures sort by layout cost 0"
-        );
-    }
-    Ok(costs.into_iter().collect())
 }
 
 /// `mysekaiMaterials`: the types, the site ids and the descriptions.
@@ -99,11 +79,6 @@ fn parse_tools(text: &str) -> Result<ToolTexts, String> {
     Ok(out)
 }
 
-const LAYOUT_COSTS: MasterTable<LayoutCosts> = MasterTable {
-    table: "mysekaiFixtureIPC",
-    name: "mysekaiFixtureIPC (the inventory fixture layout cost)",
-    parse: parse_layout_costs,
-};
 const MATERIALS: MasterTable<(MaterialTypes, MaterialSites, MaterialTexts)> = MasterTable {
     table: "mysekaiMaterials",
     name: "mysekaiMaterials (the inventory material types and texts)",
@@ -137,7 +112,6 @@ const MATERIAL_TABS: MasterTable<Vec<Value>> = MasterTable {
 
 /// Start-up: requests the tables the screen reads besides the rows' masters.
 pub fn request(data: &mut MasterData) {
-    data.request(&LAYOUT_COSTS);
     data.request(&MATERIALS);
     data.request(&TOOLS);
     data.request(&FIXTURE_TAB_VIEWS);
@@ -172,7 +146,6 @@ fn take<T: 'static>(
 /// The tables, by what they are read for.
 #[derive(Resource, Default)]
 pub struct Catalog {
-    layout_costs: Option<Result<LayoutCosts, MasterError>>,
     materials: Option<Result<(MaterialTypes, MaterialSites, MaterialTexts), MasterError>>,
     tools: Option<Result<ToolTexts, MasterError>>,
     pub fixture_tab_views: Option<Result<Vec<Value>, MasterError>>,
@@ -186,7 +159,6 @@ pub struct Catalog {
 impl Catalog {
     /// Takes each table as it resolves.
     pub fn poll(&mut self, data: &mut MasterData) {
-        take(&mut self.layout_costs, data, &LAYOUT_COSTS);
         take(&mut self.materials, data, &MATERIALS);
         take(&mut self.tools, data, &TOOLS);
         take(&mut self.fixture_tab_views, data, &FIXTURE_TAB_VIEWS);
@@ -197,8 +169,7 @@ impl Catalog {
 
     /// Whether the layer answered every table.
     pub fn settled(&self) -> bool {
-        self.layout_costs.is_some()
-            && self.materials.is_some()
+        self.materials.is_some()
             && self.tools.is_some()
             && self.fixture_tab_views.is_some()
             && self.main_genres.is_some()
@@ -209,7 +180,6 @@ impl Catalog {
     /// The catalogue that answers nothing: a stage, which draws no screen.
     pub fn answered() -> Self {
         Self {
-            layout_costs: Some(Ok(LayoutCosts::new())),
             materials: Some(Ok((
                 MaterialTypes::new(),
                 MaterialSites::new(),
@@ -224,8 +194,8 @@ impl Catalog {
         }
     }
 
-    /// Fills the rows' columns the catalogue tables hold: a fixture's layout
-    /// cost, a material's description.
+    /// Fills the rows' columns the catalogue tables hold: a material's
+    /// description.
     pub fn decorate(&self, kind: super::ContentListType, rows: &mut [super::Row]) {
         use super::ContentListType;
         for row in rows {
@@ -234,13 +204,7 @@ impl Catalog {
                 continue;
             };
             match kind {
-                ContentListType::Fixture => {
-                    if let Some(costs) = Self::ok(&self.layout_costs) {
-                        if let Some(cost) = costs.get(&id) {
-                            master.layout_cost = *cost;
-                        }
-                    }
-                }
+                ContentListType::Fixture => {}
                 ContentListType::Material => {
                     if let Some(texts) = Self::ok(&self.materials).map(|materials| &materials.2) {
                         if let Some(description) = texts.get(&id) {
@@ -255,8 +219,7 @@ impl Catalog {
 
     /// Names each absent table once, with what its columns read without it.
     pub fn name_absent(&mut self) {
-        let tables: [(&str, Option<String>); 7] = [
-            ("mysekaiFixtureIPC", reason(&self.layout_costs)),
+        let tables: [(&str, Option<String>); 6] = [
             ("mysekaiMaterials", reason(&self.materials)),
             ("mysekaiTools", reason(&self.tools)),
             ("mysekaiFixtureTabViews", reason(&self.fixture_tab_views)),
@@ -278,10 +241,6 @@ impl Catalog {
 
     fn ok<T>(slot: &Option<Result<T, MasterError>>) -> Option<&T> {
         slot.as_ref().and_then(|result| result.as_ref().ok())
-    }
-
-    pub fn layout_costs(&self) -> Option<&LayoutCosts> {
-        Self::ok(&self.layout_costs)
     }
 
     pub fn material_types(&self) -> Option<&MaterialTypes> {
