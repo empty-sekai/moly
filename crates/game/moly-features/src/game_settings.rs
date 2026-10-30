@@ -359,6 +359,9 @@ pub fn setup(
                 ..default()
             },
             RenderLayers::none(),
+            // Draws only the panel's UI root; with the panel closed the root
+            // is `Display::None`, so the camera has nothing to render.
+            crate::overlay_camera::IdleWhenEmpty,
             SettingsUiCamera,
         ))
         .id();
