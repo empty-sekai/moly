@@ -83,15 +83,12 @@ fn source_position(p: [f32; 3]) -> [f32; 3] {
 
 /// What this runtime qualifies of an authored TrailModule: the transcribed
 /// recording and geometry laws, restricted to the inputs the runtime supplies
-/// exactly. `None` without a TrailModule.
+/// exactly. `None` without a TrailModule. The `dieWithParticles` flag is not
+/// read by the kill pass, the recording or the geometry job, so both of its
+/// values take the same path.
 pub fn qualify(emitter: &EmitterParams) -> Result<Option<TrailGeometryLaw>, &'static str> {
     let Some(params) = emitter.trails.as_ref() else { return Ok(None) };
     let law = TrailGeometryLaw::from_params(params).map_err(refusal)?;
-    if !params.die_with_particles {
-        // The kill pass then keeps an over-age particle while its ring holds
-        // points; the death compaction here is the plain law.
-        return Err("trail outliving its particle (dieWithParticles false) is not transcribed");
-    }
     if params.world_space {
         return Err("world-space trail: the matrix the recording transforms with is not identified");
     }

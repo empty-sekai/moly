@@ -1225,10 +1225,8 @@ fn validate_emitter(
     }
     // A particle with a non-positive start lifetime is killed here without
     // its update (see simulate_range); what its death event would read then
-    // was never executed. The trail keep-alive branch of the kill pass (a
-    // per-particle trail that outlives its particle skips the kill and its
-    // event) is refused with every trail that does not die with its
-    // particles, so every admitted kill records.
+    // was never executed. The kill pass removes every over-age particle and
+    // records its death event, with or without a TrailModule.
     if emitter.sub_emitters.iter().any(|edge| edge.trigger == SubEmitterTrigger::Death && !authored_null(edge))
         && !match emitter.start.lifetime {
             moly_law::particle::MinMaxCurve::Constant(value) => value > 0.0,
