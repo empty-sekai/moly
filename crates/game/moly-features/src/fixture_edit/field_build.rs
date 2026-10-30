@@ -14,8 +14,9 @@
 //! state then goes `Saving` → `Reloading` → `Placed` (the fixture is spawned
 //! and the walk cells are baked with it), or `Refused` with the reason.
 
-use super::{actors, layout_rules, owned, put_search, validation, EditPhase, EditSession};
+use super::{actors, layout_rules, owned, put_search, validation, EditPhase, EditSession, Facing, PutAim};
 use crate::fixture::{EditableFixture, FixturePlacements};
+use moly_law::fixture::Direction;
 use crate::userdata::Answered;
 use bevy::prelude::*;
 use moly_link::ServerLink;
@@ -68,16 +69,47 @@ impl FieldBuilds {
     }
 }
 
-/// Puts an owned copy of `fixture_id` (of `texture`, or any) on the tile the
-/// put search finds nearest `near`, and sends the layout with it. `Ok` is
-/// the build's ticket and the new row's uid.
+/// Where and how a field build puts its fixture.
+#[derive(Clone, Copy, Debug)]
+pub struct FieldPut {
+    /// A world point: the put search starts at the tile nearest it, or, when
+    /// `exact`, the fixture goes on the cell it falls in or the put is
+    /// refused.
+    pub at: Vec3,
+    pub exact: bool,
+    /// The direction number the put gets (0 front, 1 left, 2 back, 3 right,
+    /// the number a camera yaw of 90 × n degrees gives); the camera's yaw
+    /// decides it when absent.
+    pub direction: Option<Direction>,
+}
+
+/// Is a field build's layout save in flight? Only one save is out at a time:
+/// [`start`] refuses while it is.
+pub fn saving(world: &World) -> bool {
+    world.get_resource::<FieldBuilds>().is_some_and(|builds| builds.in_flight.is_some())
+}
+
+/// The cell and direction a placed fixture was saved with.
+pub fn placed_cell(world: &World, uid: &str) -> Option<(moly_law::fixture::GridPosition, Direction)> {
+    world
+        .get_resource::<FixturePlacements>()?
+        .editor_rows()
+        .into_iter()
+        .find(|row| row.uid == uid)
+        .map(|row| (row.center, row.direction))
+}
+
+/// Puts an owned copy of `fixture_id` (of `texture`, or any) where `put`
+/// says, and sends the layout with it. `Ok` is the build's ticket and the
+/// new row's uid.
 pub fn start(
     world: &mut World,
     fixture_id: i32,
     texture: Option<u32>,
-    near: Vec3,
+    put: FieldPut,
 ) -> Result<(u64, String), String> {
-    if world.get_resource::<FieldBuilds>().is_some_and(|builds| builds.in_flight.is_some()) {
+    let FieldPut { at: near, exact, direction } = put;
+    if saving(world) {
         return Err("another field build is still saving".into());
     }
     if world.get_resource::<EditSession>().is_some_and(|session| session.phase != EditPhase::Idle) {
@@ -133,13 +165,20 @@ pub fn start(
             row.fixture(uid)
         }
     };
-    let Some(yaw) = world
-        .get_resource::<crate::camera::FieldCameraModel>()
-        .map(|model| model.yaw)
-    else {
-        return Err("the camera is not ready".into());
+    let facing = match direction {
+        Some(direction) => Facing::Fixed(direction),
+        None => {
+            let Some(yaw) = world
+                .get_resource::<crate::camera::FieldCameraModel>()
+                .map(|model| model.yaw)
+            else {
+                return Err("the camera is not ready".into());
+            };
+            Facing::Yaw(yaw)
+        }
     };
-    put_search(world, &rows, floor, &mut item, near, yaw, "field")?;
+    let aim = PutAim { facing, exact };
+    put_search(world, &rows, floor, &mut item, near, aim, "field")?;
     rows.push(item.clone());
     let rules = layout_rules::rules(world, Some(floor));
     let Some(areas) = world.get_resource::<super::FixtureAreas>() else {

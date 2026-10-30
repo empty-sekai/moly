@@ -133,7 +133,7 @@ pub enum Node {
     /// Puts an owned fixture near a world point (by default in front of the
     /// companion) and has the companion of `unit` hammer it from a ghost to
     /// solid in `swings` hits.
-    CompanionBuild { unit: u32, fixture: i32, texture: Option<u32>, near: Option<[f32; 3]>, swings: u32 },
+    CompanionBuild { unit: u32, fixture: i32, texture: Option<u32>, place: BuildPlace, swings: u32 },
     /// Has the companion of `unit` use a placed fixture: walk to the action
     /// point of its character's action there and play it.
     CompanionUse { unit: u32, target: UseTarget, activity: Option<i32>, variant: Option<u32> },
@@ -153,6 +153,19 @@ pub enum Node {
 }
 
 /// The point a companion turns to.
+/// Where a `companion.build` step puts its fixture.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BuildPlace {
+    /// A world point; in front of the companion when absent.
+    pub at: Option<[f32; 3]>,
+    /// The fixture goes on the cell `at` falls in or the step fails, rather
+    /// than on the nearest legal tile.
+    pub exact: bool,
+    /// The direction number (0 front, 1 left, 2 back, 3 right); the
+    /// camera's when absent.
+    pub direction: Option<u8>,
+}
+
 /// The fixture a `companion.use` step uses.
 #[derive(Clone, Debug, PartialEq)]
 pub enum UseTarget {
@@ -611,11 +624,24 @@ fn step(value: &Value, at: &str) -> Result<Vec<Step>, String> {
             let fixture = fields.req_i32("fixture")?;
             let texture = fields.opt_u32("texture")?;
             let near = fields.opt("near").map(|near| triple(near, &format!("{at}.near"))).transpose()?;
+            let exact = fields.opt("at").map(|exact| triple(exact, &format!("{at}.at"))).transpose()?;
+            if near.is_some() && exact.is_some() {
+                return Err(format!("{at}: takes one of near and at"));
+            }
+            let direction = fields.opt_u32("direction")?;
+            if direction.is_some_and(|direction| direction > 3) {
+                return Err(format!("{at}: direction is 0 to 3"));
+            }
+            let place = BuildPlace {
+                at: exact.or(near),
+                exact: exact.is_some(),
+                direction: direction.map(|direction| direction as u8),
+            };
             let swings = fields
                 .opt_u32("swings")?
                 .unwrap_or(crate::companion::build::DEFAULT_SWINGS)
                 .clamp(1, crate::companion::build::MAX_SWINGS);
-            vec![one(Node::CompanionBuild { unit, fixture, texture, near, swings }, Some(120.0))]
+            vec![one(Node::CompanionBuild { unit, fixture, texture, place, swings }, Some(120.0))]
         }
         "companion.use" => {
             let unit = fields.req_u32("unit")?;

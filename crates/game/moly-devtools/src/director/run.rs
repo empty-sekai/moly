@@ -17,7 +17,7 @@ use crate::userdata::{Answered, AnsweredLog};
 
 use super::cond::{self, flat};
 use super::hand::{self, Hand};
-use super::script::{GatherRef, Join, Node, Step, Target, TargetKind};
+use super::script::{BuildPlace, GatherRef, Join, Node, Step, Target, TargetKind};
 
 /// The ticket offset the steps asked for outside a script advance with:
 /// their own ticket, that high in the range, so the director's run (ticket
@@ -339,7 +339,7 @@ enum Kind {
     CompanionDespawn { unit: u32, written: bool },
     /// A companion's build: the fixture's put and save, its reload, then the
     /// companion's build command.
-    CompanionBuild { unit: u32, fixture: i32, texture: Option<u32>, near: Option<Vec3>, swings: u32, phase: BuildStep },
+    CompanionBuild { unit: u32, fixture: i32, texture: Option<u32>, place: BuildPlace, swings: u32, phase: BuildStep },
 }
 
 /// Where a `companion.build` step stands.
@@ -920,7 +920,7 @@ fn start(world: &mut World, shared: &mut Shared, ticket: u64, step: Step, path: 
             }
             Kind::CompanionDespawn { unit: *unit, written: false }
         }
-        Node::CompanionBuild { unit, fixture, texture, near, swings } => {
+        Node::CompanionBuild { unit, fixture, texture, place, swings } => {
             if companion_seq(world, *unit).is_none() {
                 return ended(path, Err(format!("no companion of unit {unit} is spawned")), optional);
             }
@@ -928,7 +928,7 @@ fn start(world: &mut World, shared: &mut Shared, ticket: u64, step: Step, path: 
                 unit: *unit,
                 fixture: *fixture,
                 texture: *texture,
-                near: near.map(Vec3::from),
+                place: *place,
                 swings: *swings,
                 phase: BuildStep::Put,
             }
@@ -1276,7 +1276,7 @@ fn poll(world: &mut World, shared: &mut Shared, active: &mut Active, ticket: u64
                 None => Poll::Failed(format!("companion {unit} was removed while walking")),
             }
         }
-        Kind::CompanionBuild { unit, fixture, texture, near, swings, phase } => companion_build(world, *unit, *fixture, *texture, *near, *swings, phase),
+        Kind::CompanionBuild { unit, fixture, texture, place, swings, phase } => companion_build(world, *unit, *fixture, *texture, *place, *swings, phase),
         Kind::CompanionDespawn { unit, written } => {
             if !*written {
                 *written = true;
@@ -1498,20 +1498,33 @@ fn companion_build(
     unit: u32,
     fixture: i32,
     texture: Option<u32>,
-    near: Option<Vec3>,
+    place: BuildPlace,
     swings: u32,
     phase: &mut BuildStep,
 ) -> Poll {
     use crate::companion::{build::GHOST_ALPHA, CompanionCommand, FixtureGhosts};
-    use crate::fixture_edit::field_build::{self, FieldBuildState, FieldBuilds};
+    use crate::fixture_edit::field_build::{self, FieldBuildState, FieldBuilds, FieldPut};
     match phase {
         BuildStep::Put => {
             let Some(stand) = companion_place(world, unit) else {
                 return Poll::Failed(format!("no companion of unit {unit} is spawned"));
             };
+            // One layout save is out at a time: a build whose turn has not
+            // come waits for the save in flight (until the step's timeout).
+            if field_build::saving(world) {
+                return Poll::Running(format!("companion {unit}: waiting for another build's save"));
+            }
             // In front of the companion: its body faces its local +Z.
-            let near = near.unwrap_or(stand.translation + stand.rotation * Vec3::Z * BUILD_AHEAD);
-            match field_build::start(world, fixture, texture, near) {
+            let near = place
+                .at
+                .map(Vec3::from)
+                .unwrap_or(stand.translation + stand.rotation * Vec3::Z * BUILD_AHEAD);
+            let put = FieldPut {
+                at: near,
+                exact: place.exact,
+                direction: place.direction.and_then(moly_law::fixture::Direction::from_u8),
+            };
+            match field_build::start(world, fixture, texture, put) {
                 Err(reason) => Poll::Failed(format!("fixture {fixture} was not put: {reason}")),
                 Ok((ticket, uid)) => {
                     // Drawn as a ghost from its first frame.
@@ -1590,9 +1603,14 @@ fn companion_built(
         )),
         CompanionState::Done => {
             let note = format!("companion {unit} build {seq} done");
+            let cell = crate::fixture_edit::field_build::placed_cell(world, uid)
+                .map(|(center, direction)| {
+                    format!(", cell ({}, {}, {}) direction {}", center.x, center.y, center.z, direction as u8)
+                })
+                .unwrap_or_default();
             match companion_fixture(world, uid) {
-                Some(at) => Poll::Done(format!("{note}; fixture {uid} at ({:.2}, {:.2}, {:.2})", at.x, at.y, at.z)),
-                None => Poll::Done(note),
+                Some(at) => Poll::Done(format!("{note}; fixture {uid} at ({:.2}, {:.2}, {:.2}){cell}", at.x, at.y, at.z)),
+                None => Poll::Done(format!("{note}; fixture {uid}{cell}")),
             }
         }
         CompanionState::Failed(reason) => Poll::Failed(format!("companion {unit} build {seq} failed: {reason}")),

@@ -213,6 +213,40 @@ pub fn place<R: RowLike>(
     }
 }
 
+/// The single-cell form of [`place`]: the fixture goes on the tile `look_at`
+/// falls in, with no snap to a ground tile and no search around it. The
+/// candidate check is the one `place` makes of its start tile, so a cell that
+/// is not a tile of the grid, or that `CanPutFloor` refuses, is rejected and
+/// `chosen` stays empty.
+pub fn place_at<R: RowLike>(
+    item: &R,
+    source_direction: Direction,
+    look_at: [f32; 3],
+    board: &Board,
+    rules: &Rules,
+) -> Placement {
+    let tiles = board.tiles(item.layout());
+    let look_at_grid = to_grid(look_at);
+    let mut rejected = Vec::new();
+    let chosen = match candidate(item, source_direction, look_at_grid, tiles, board, rules) {
+        Ok((center, direction)) => Some((look_at_grid, center, direction)),
+        Err(reason) => {
+            rejected.push((look_at_grid, reason));
+            None
+        }
+    };
+    Placement {
+        look_at,
+        look_at_grid,
+        start: look_at_grid,
+        source_direction,
+        search_raised: false,
+        max_radius: 0,
+        chosen,
+        rejected,
+    }
+}
+
 /// `TryPlaceAt` for one candidate (source frame): a tile of the grid, and
 /// `CanPutFloor` with the fixture's center there.
 fn candidate<R: RowLike>(

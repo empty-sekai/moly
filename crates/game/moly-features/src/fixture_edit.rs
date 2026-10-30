@@ -507,7 +507,7 @@ fn place_new(
         return false;
     };
     let (look_at, yaw) = camera;
-    match put_search(world, &session.rows, floor, item, look_at, yaw, source) {
+    match put_search(world, &session.rows, floor, item, look_at, PutAim { facing: Facing::Yaw(yaw), exact: false }, source) {
         Ok(()) => true,
         Err(message) => {
             session.say(message);
@@ -516,17 +516,34 @@ fn place_new(
     }
 }
 
-/// The put search of a new fixture (`PutFixture`): its direction from
-/// `yaw` and its tile from the spiral around `look_at` (a world point) on
-/// the tile data of `rows`. `Err` is the message the editor shows; `item`
-/// is unchanged then.
+/// Where a new fixture's direction comes from.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Facing {
+    /// The camera yaw (`RotationToDirection`).
+    Yaw(f32),
+    Fixed(moly_law::fixture::Direction),
+}
+
+/// How a new fixture's direction and tile are taken: `PutFixture` takes the
+/// direction from the camera yaw and the tile from the spiral around the
+/// look-at; an exact aim tries only the cell the look-at falls in.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PutAim {
+    pub facing: Facing,
+    pub exact: bool,
+}
+
+/// The put search of a new fixture (`PutFixture`): its direction from the
+/// aim's yaw and its tile from the spiral around `look_at` (a world point) on
+/// the tile data of `rows`; an exact aim tries only the cell `look_at` falls
+/// in. `Err` is the message the editor shows; `item` is unchanged then.
 fn put_search(
     world: &mut World,
     rows: &[EditableFixture],
     floor: crate::site::FloorGridLayout,
     item: &mut EditableFixture,
     look_at: Vec3,
-    yaw: f32,
+    aim: PutAim,
     source: &'static str,
 ) -> Result<(), String> {
     let put_type = match put_effect::put_type(world, item.fixture_id) {
@@ -539,12 +556,18 @@ fn put_search(
             return Err("家具主表仍在加载，暂时不能摆放新家具。".into());
         }
     };
-    let Some(source_direction) = placement::rotation_to_direction(yaw) else {
-        warn!(
-            "[edit-put] PutFixture {} ({source}): camera yaw {yaw} names no direction; not put",
-            item.uid
-        );
-        return Err("相机朝向无效，暂时不能摆放新家具。".into());
+    let (source_direction, yaw) = match aim.facing {
+        Facing::Yaw(yaw) => {
+            let Some(direction) = placement::rotation_to_direction(yaw) else {
+                warn!(
+                    "[edit-put] PutFixture {} ({source}): camera yaw {yaw} names no direction; not put",
+                    item.uid
+                );
+                return Err("相机朝向无效，暂时不能摆放新家具。".into());
+            };
+            (direction, yaw)
+        }
+        Facing::Fixed(direction) => (direction, f32::from(direction as u8) * 90.0),
     };
     // The look-at relative to the site, in the source frame (X mirrored).
     let relative = look_at - site_origin(world);
@@ -564,14 +587,18 @@ fn put_search(
         }
     };
     let (board, rules) = board;
-    let found = placement::place(
-        item,
-        source_direction,
-        relative.to_array(),
-        &board,
-        &rules,
-        put_type.as_deref(),
-    );
+    let found = if aim.exact {
+        placement::place_at(item, source_direction, relative.to_array(), &board, &rules)
+    } else {
+        placement::place(
+            item,
+            source_direction,
+            relative.to_array(),
+            &board,
+            &rules,
+            put_type.as_deref(),
+        )
+    };
     let mut counts: Vec<(String, usize)> = Vec::new();
     for (_, reason) in &found.rejected {
         let label = placement::reject_label(reason);
@@ -618,6 +645,15 @@ fn put_search(
             "[edit-put] PutFixture {} ({source}): no placeable tile within the radius cap; CantPutFixture",
             item.uid
         );
+        if let (true, Some((tile, reason))) = (aim.exact, found.rejected.first()) {
+            return Err(format!(
+                "the cell ({}, {}, {}) cannot take the fixture: {}",
+                tile.x,
+                tile.y,
+                tile.z,
+                placement::reject_label(reason)
+            ));
+        }
         return Err("附近没有可以摆放的空间。".into());
     };
     item.center = center;

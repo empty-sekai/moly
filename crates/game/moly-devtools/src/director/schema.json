@@ -965,7 +965,7 @@
   },
   {
    "name": "companion.build",
-   "description": "Has the companion of unit build an owned fixture. The fixture is put on the tile the editor's own put search finds nearest near (a world point; by default 1.5 m in front of the companion) and saved to the layout, and stands as a ghost; the companion walks beside it and hammers it, and each of swings hits makes it more solid until it is solid. The step ends when the fixture is built and fails with the reason when the put, the save or the build is refused.",
+   "description": "Has the companion of unit build an owned fixture. The fixture is put on the tile the editor's own put search finds nearest near (a world point; by default 1.5 m in front of the companion), or, with at, on exactly the cell that world point falls in, and saved to the layout, and stands as a ghost; only one layout save is out at a time, so a build whose turn has not come waits for the save in flight until its timeout; the companion walks beside it and hammers it, and each of swings hits makes it more solid until it is solid. The step ends when the fixture is built, and its answer names the saved cell and direction (the layout is saved mirrored in x, so a left direction is saved as right and the other way round); it fails with the reason when the put (including an at cell that cannot take the fixture), the save or the build is refused.",
    "macro": false,
    "timeout_default": 120,
    "params": {
@@ -994,6 +994,21 @@
       "minItems": 3,
       "maxItems": 3,
       "description": "[x, y, z] world point the put search starts from."
+     },
+     "at": {
+      "type": "array",
+      "items": {
+       "type": "number"
+      },
+      "minItems": 3,
+      "maxItems": 3,
+      "description": "[x, y, z] world point: the fixture is put on the cell it falls in, with no search, or the step fails with the refusal. Not together with near."
+     },
+     "direction": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 3,
+      "description": "Direction number of the put fixture: 0 front, 1 left, 2 back, 3 right (the number a camera yaw of 90 times it degrees gives). The field camera's yaw decides when absent."
      },
      "swings": {
       "type": "integer",
