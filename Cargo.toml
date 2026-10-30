@@ -62,11 +62,17 @@ bevy = { version = "0.20.1", default-features = false, features = [
 ] }
 serde_json = { version = "1", features = ["preserve_order"] }
 
+# Line tables keep panics and profiles readable. Full debug information for the
+# engine and every dependency pushes the application's PDB past 2 GB and makes
+# every test and example link far slower; the MSVC linker also stops at a 4 GB
+# PDB.
 [profile.dev]
 opt-level = 1
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 3
+debug = false
 
 # Browser size profile, measured and browser-validated. Native release is unchanged.
 # Thin LTO keeps the release build reproducible on the 32 GiB review host: the
