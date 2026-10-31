@@ -22,8 +22,7 @@ use bevy::prelude::*;
 use crate::audio::{SeClass, SeRequest, SeRequests};
 use crate::companion::BuildCue;
 use crate::fixture::{EditableFixture, FixturePlacements};
-use crate::harvest::damage::push_se;
-use crate::harvest::{EffectHook, HarvestEffectHooks};
+use crate::site_move::effects::{EffectHook, HarvestEffectHooks};
 
 /// The fixture editor's put cue (`FixtureController.ShowPutEffect`): the
 /// editor registers it when it installs, and a finished build plays it in
@@ -77,7 +76,7 @@ fn play_cues(
             BuildCue::Hit { unit, uid, hit, of, at, from } => {
                 let (position, rotation) = hit_pose(*at, *from);
                 effects.pending.push(EffectHook { kind: HIT_EFFECT, position, rotation });
-                push_se(&mut se, HIT_SE, "companion-build");
+                se.ingame(HIT_SE, "companion-build");
                 info!(
                     "[companion-cue] unit {unit} build hit {hit}/{of} on fixture {uid}: {HIT_SE} and effect {HIT_EFFECT}"
                 );

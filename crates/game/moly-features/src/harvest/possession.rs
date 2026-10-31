@@ -23,15 +23,8 @@
 //! document that fails to load is named once and every material and fixture
 //! drop is refused (no default limit), as it is while they load.
 //!
-//! Server values: `PossessionMock`, the named panel. Its values are the
-//! mock's own choices, not the server's: both possession levels 1 (the
-//! lowest master level); `userMysekaiMaterialPossession.quantity` 0 at login,
-//! then each gather reply adds the gathered quantity of every Mysekai
-//! material that is not taken over the limit (the server's aggregation is
-//! not on disk); no user fixture rows at login, then each gather reply adds
-//! the gathered fixtures. `MOLY_HARVEST_MOCK_MATERIAL_POSSESSION` seats the
-//! login's material quantity (an unparsable value is refused loudly and the
-//! mock's 0 stands).
+//! Server values: `PossessionMock`, the named panel, which the replies set
+//! (see its definition for the values before the first reply).
 
 use std::collections::BTreeMap;
 
@@ -41,7 +34,6 @@ use moly_assets::json::JsonAsset;
 
 use super::catalog::HarvestCatalog;
 use super::queue::Stack;
-use super::server_mock::UserDrop;
 use super::{
     RT_MATERIAL, RT_MYSEKAI_BLUEPRINT, RT_MYSEKAI_FIXTURE, RT_MYSEKAI_ITEM, RT_MYSEKAI_MATERIAL,
     RT_MYSEKAI_MUSIC_RECORD,
@@ -73,64 +65,7 @@ pub struct PossessionLimits {
     pub fixture: BTreeMap<i32, i64>,
 }
 
-/// `PossessionMock`: the user possession values the capacity check reads
-/// (see the module comment for the mock's choices).
-#[derive(Resource, Debug, Clone)]
-pub struct PossessionMock {
-    /// `userMysekaiGamedata.mysekaiMaterialPossessionLevel`.
-    pub material_level: i32,
-    /// `userMysekaiGamedata.mysekaiFixturePossessionLevel`.
-    pub fixture_level: i32,
-    /// `userMysekaiMaterialPossession.quantity`.
-    pub material_quantity: i64,
-    /// `userMysekaiFixtures` quantities by fixture id.
-    pub fixtures: BTreeMap<i64, i64>,
-}
-
-impl Default for PossessionMock {
-    fn default() -> Self {
-        let mut material_quantity = 0;
-        if let Ok(raw) = std::env::var("MOLY_HARVEST_MOCK_MATERIAL_POSSESSION") {
-            match raw.trim().parse::<i64>() {
-                Ok(value) if value >= 0 => material_quantity = value,
-                _ => error!(
-                    "[harvest-mock] MOLY_HARVEST_MOCK_MATERIAL_POSSESSION={raw:?} is not a quantity; the mock's 0 stands"
-                ),
-            }
-        }
-        Self {
-            material_level: 1,
-            fixture_level: 1,
-            material_quantity,
-            fixtures: BTreeMap::new(),
-        }
-    }
-}
-
-impl PossessionMock {
-    /// `GatherApiMock`'s possession side (the mock's rule): the gathered
-    /// Mysekai materials not taken over the limit add to the material
-    /// quantity, the gathered fixtures to the fixture rows.
-    pub fn on_gather(&mut self, drops: &[UserDrop], catalog: &HarvestCatalog) {
-        for drop in drops {
-            match drop.resource_type {
-                RT_MYSEKAI_MATERIAL => {
-                    let over = catalog.materials.get(&drop.resource_id).is_some_and(|row| {
-                        row.material_type == MATERIAL_TYPE_GAME_CHARACTER
-                            || row.material_type == MATERIAL_TYPE_BIRTHDAY_PARTY
-                    });
-                    if !over {
-                        self.material_quantity += drop.quantity as i64;
-                    }
-                }
-                RT_MYSEKAI_FIXTURE => {
-                    *self.fixtures.entry(drop.resource_id).or_default() += drop.quantity as i64;
-                }
-                _ => {}
-            }
-        }
-    }
-}
+pub use crate::userdata::harvest::PossessionMock;
 
 /// Startup: request both limit documents.
 pub fn load(mut commands: Commands, server: Res<AssetServer>) {

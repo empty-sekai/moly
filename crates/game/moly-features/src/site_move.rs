@@ -114,6 +114,20 @@ pub struct RevealHold;
 #[derive(Component)]
 pub struct RevealHeld(Visibility);
 
+/// One placed harvest object's root; the rendering hold covers it.
+#[derive(Component)]
+pub struct HarvestRoot;
+
+/// `HarvestUtility.SaveHarvestPoint` and `ShowHarvestPointSummary`: the
+/// cannon move calls the first when it leaves home and the second 0.5 s
+/// after it arrives home. The harvest registers them when it installs;
+/// without them the move logs that none is registered.
+#[derive(Resource, Clone, Copy)]
+pub struct HarvestPointHooks {
+    pub save: fn(&mut World, &str),
+    pub show: fn(&mut World, &str),
+}
+
 /// An entity the move spawned (the cannon and the pooled effects); never
 /// part of the destination's rendering hold.
 #[derive(Component)]
@@ -499,7 +513,11 @@ fn admit(world: &mut World, request: SiteMoveRequest, frame: u64) {
     crate::footstep::stop_key(world, "cannon pre-action");
     if from_place.category == "housing_home"
         && !world.contains_resource::<crate::browser_stage::BrowserStage>() {
-        crate::harvest::harvest_summary::save_harvest_point(world, "MoveSiteUseCannonActionState.OnSiteMovePreAction");
+        let caller = "MoveSiteUseCannonActionState.OnSiteMovePreAction";
+        match world.get_resource::<HarvestPointHooks>().copied() {
+            Some(hooks) => (hooks.save)(world, caller),
+            None => info!("[site-move] {caller}: no harvest point hooks are registered; SaveHarvestPoint is not called"),
+        }
     }
     world.insert_resource(SiteMove {
         source_clip: None,
@@ -762,7 +780,11 @@ impl SiteMove {
                     let delay = *delay;
                     self.due_by(delay);
                     if !world.contains_resource::<crate::browser_stage::BrowserStage>() {
-                        crate::harvest::harvest_summary::show_harvest_point_summary(world, "MoveSiteUseCannonActionState.EndAction");
+                        let caller = "MoveSiteUseCannonActionState.EndAction";
+                        match world.get_resource::<HarvestPointHooks>().copied() {
+                            Some(hooks) => (hooks.show)(world, caller),
+                            None => info!("[site-move] {caller}: no harvest point hooks are registered; ShowHarvestPointSummary is not called"),
+                        }
                     }
                     self.normal(world, frame);
                     self.stage = Stage::Done;
@@ -1435,7 +1457,7 @@ fn hold_reveal(
             Or<(
                 With<crate::site::SiteRoot>,
                 With<crate::fixture::FixtureRoot>,
-                With<crate::harvest::HarvestRoot>,
+                With<HarvestRoot>,
                 With<crate::uber_particle::UberParticleDraw>,
             )>,
             Without<RevealHeld>,

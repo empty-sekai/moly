@@ -4,6 +4,8 @@
 use std::collections::BTreeMap;
 
 use bevy::prelude::*;
+
+use crate::ui_charsets::ShellTextSources;
 use moly_law::bulk_harvest::{self as law, Budget, Gates, Plan, Tool, UnavailableReason};
 use moly_masters::bulk_harvest::BulkHarvestMasters;
 use moly_protocol::{api, Call, Reply};
@@ -13,6 +15,9 @@ use crate::player::{PlayerControlled, PlayerInput};
 use crate::player_avatar::item_timeline::PlayerStepItem;
 
 pub use super::bulk_dialog::WORDINGS;
+
+/// The bulk harvest's text source in the shell's [`ShellTextSources`].
+pub const TEXT_SOURCE: &str = "bulk_harvest";
 pub const CHARGE_TIME: i32 = 222;
 const CHARGE_SPEED: i32 = 220;
 const REWARD_DELAY: i32 = 223;
@@ -735,5 +740,32 @@ mod tests {
         let settings = read_settings(&serde_json::json!({"MysekaiOptionSettingData":{"BulkHarvestCheckedTargetIds":{"5":[]}}})).unwrap();
         assert_eq!(settings.get(&5), Some(&Vec::new()));
         assert!(read_settings(&serde_json::json!({"MysekaiOptionSettingData":{"BulkHarvestCheckedTargetIds":{"5":["bad"]}}})).is_err());
+    }
+}
+
+/// Update: fills the shell's text source with the site and group names of
+/// the bulk targets once the masters are joined; with nothing when the UI
+/// root has no `BulkHarvestSettings` document.
+pub fn fill_text_source(
+    layouts: Res<crate::ui_layout::UiLayouts>,
+    state: Res<BulkHarvest>,
+    mut sources: ResMut<ShellTextSources>,
+) {
+    if sources.is_filled(TEXT_SOURCE) {
+        return;
+    }
+    if layouts.document("BulkHarvestSettings").is_none() {
+        if layouts.root().is_some() {
+            sources.fill(TEXT_SOURCE, Vec::new());
+        }
+        return;
+    }
+    if let Some(masters) = &state.masters {
+        let mut chars = Vec::new();
+        for target in masters.sites.values().flatten() {
+            chars.extend(target.name.chars());
+            chars.extend(target.group_name.chars());
+        }
+        sources.fill(TEXT_SOURCE, chars);
     }
 }

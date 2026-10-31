@@ -78,7 +78,7 @@ use crate::audio::{SeClass, SeRequest, SeRequests};
 use crate::camera::{CameraStateType, FieldCameraModel, FieldCameraState};
 use crate::fixture::FixtureRoot;
 use crate::fixture_activity_state::{FixtureActivityIdentity, FixtureTarget};
-use crate::harvest::{EffectHook, HarvestEffectHooks};
+use crate::site_move::effects::{EffectHook, HarvestEffectHooks};
 use crate::player::PlayerControlled;
 use crate::player_avatar::avatar_item::{AvatarItem, AvatarItemRequest, AvatarItemView, Hand};
 use crate::player_avatar::{
@@ -113,6 +113,11 @@ const PROBE_INTERVAL: f32 = 0.25;
 /// The home action systems' set (the harvest effect player runs after it).
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HomeActionSet;
+
+/// The harvest's action loop set (the schedule orders player-state writers and
+/// the input chain around it).
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct HarvestActionSet;
 
 /// Which of the three world sequences.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1468,7 +1473,7 @@ pub fn install(app: &mut App) {
                 .chain()
                 .in_set(HomeActionSet)
                 .after(crate::player_state::drive_from_input)
-                .after(crate::harvest::HarvestActionSet)
+                .after(HarvestActionSet)
                 .before(crate::player::advance)
                 .before(crate::player_avatar::drive)
                 .before(crate::audio::advance_se),

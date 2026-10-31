@@ -32,7 +32,7 @@ use super::{
     HarvestHitResults, HarvestHits, HarvestObject, HarvestStats, HarvestViewNodes, HitResult,
     PendingDrop, STATUS_HARVESTED,
 };
-use crate::audio::{SeClass, SeRequest, SeRequests};
+use crate::audio::SeRequests;
 use crate::player::PlayerControlled;
 use crate::site_material::SiteMaterial;
 use crate::site_move::timeline::Delay;
@@ -108,12 +108,7 @@ pub enum HarvestAfterForm {
 }
 
 pub fn push_se(se: &mut SeRequests, cue: &str, source: &'static str) {
-    se.0.push(SeRequest {
-        owner: None,
-        cue: cue.to_owned(),
-        class: SeClass::Ingame,
-        source,
-    });
+    se.ingame(cue, source);
 }
 
 /// Hit effect by tool level (`PlayDamageNormalEffect`): tree 121 / 122 / 123

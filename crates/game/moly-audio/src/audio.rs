@@ -3428,6 +3428,17 @@ pub struct ButtonSe {
 }
 
 impl SeRequests {
+    /// Queues an in-game one-shot `cue` with no owner; `source` names the
+    /// writer in logs.
+    pub fn ingame(&mut self, cue: &str, source: &'static str) {
+        self.0.push(SeRequest {
+            owner: None,
+            cue: cue.to_owned(),
+            class: SeClass::Ingame,
+            source,
+        });
+    }
+
     /// Queues a `PlaySE(se, otherSeName)` call.
     pub fn button(
         &mut self,

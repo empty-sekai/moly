@@ -189,6 +189,39 @@ enum TableState {
     Absent,
 }
 
+/// An `EffectManager.Emit` a flow asks for; the harvest's effect player
+/// draws it from the pools.
+#[derive(Debug, Clone, Copy)]
+pub struct EffectHook {
+    pub kind: u16,
+    pub position: Vec3,
+    pub rotation: Quat,
+}
+
+impl EffectHook {
+    /// `Emit(type, position, key)`: the prefab's own rotation.
+    pub fn at(kind: u16, position: Vec3) -> Self {
+        Self {
+            kind,
+            position,
+            rotation: Quat::IDENTITY,
+        }
+    }
+}
+
+/// The emits the harvest, the home actions and the companion cues ask for,
+/// which the harvest's effect player drains.
+#[derive(Resource, Default)]
+pub struct HarvestEffectHooks {
+    pub pending: Vec<EffectHook>,
+    pub total: usize,
+    /// Emits whose copy the caller keeps (`ManagedEffect` held by its
+    /// emitter), by the caller's ticket.
+    pub kept: Vec<(u64, EffectHook)>,
+    /// `ManagedEffect.Stop` on a kept copy, by ticket.
+    pub stops: Vec<u64>,
+}
+
 /// `EffectManager._assetPool`: the pools of every drawable table row.
 #[derive(Resource)]
 pub struct EffectPools {

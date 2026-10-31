@@ -1,7 +1,7 @@
 //! The learn-phenomenon dialog (`LearnPhenomenaSubWindowDialog`, dialog type
 //! 381), opened by the harvest site's learn run with
-//! [`crate::harvest::LearnPhenomenaDialogRequest`] and answered with
-//! [`crate::harvest::LearnPhenomenaDialogClosed`] (its onClose).
+//! [`LearnPhenomenaDialogRequest`] and answered with
+//! [`LearnPhenomenaDialogClosed`] (its onClose).
 //!
 //! The source, in order:
 //! - `ScreenManager.ShowSubWindowDialog` instantiates the prefab, runs
@@ -67,11 +67,29 @@ use serde_json::Value;
 use crate::action_button::ActionTapConsumed;
 use crate::audio::{SeClass, SeRequest, SeRequests};
 use crate::gesture::{GestureEvent, GestureKind, GestureState};
-use crate::harvest::{LearnPhenomenaDialogClosed, LearnPhenomenaDialogRequest};
 use crate::menu_shell::ShellDialogState;
 use crate::sitemap::SITEMAP_LAYER;
 use crate::ui_layers::{DialogBackKey, DialogBackKeyEvent, DialogId, DialogType, DisplayLayerType, ScreenManager};
 use crate::ui_layout::{Pointer, UiLayouts, UiPrefabView};
+
+/// `HarvestUtility.ShowLearnPhenomenaDialog(master, onClose)`: open a
+/// `LearnPhenomenaSubWindowDialog` (dialog type 381, the dialog slot,
+/// `allowCloseExternal`) and `Setup(name, thumbnail)`: the message body is
+/// the wording `MSG_LEARN_PHENOMENA` formatted with the name, the image is
+/// the thumbnail, the button opens the common balloon with the name, and the
+/// open plays `se_get_blueprint`.
+#[derive(Message, Clone, Debug)]
+pub struct LearnPhenomenaDialogRequest {
+    /// The phenomenon master row id (`mysekaiPhenomenas`,
+    /// [`crate::sitemap_phenomena::PhenomenaMaster`]).
+    pub phenomena_id: i32,
+    /// `mysekai/thumbnail/phenomena/` + `iconAssetbundleName`.
+    pub thumbnail: String,
+}
+
+/// The dialog's onClose: the flag the effect player's `WaitUntil` reads.
+#[derive(Message, Clone, Copy, Debug)]
+pub struct LearnPhenomenaDialogClosed;
 
 pub const KEY: &str = "LearnPhenomena";
 const PRESENTER: &str = "Sekai.Mysekai.LearnPhenomenaSubWindowDialog";

@@ -75,7 +75,7 @@ pub struct QaDiagnostics<'w, 's> {
     control: Option<Res<'w, crate::player_fixture_action::PlayerFixtureControlOwner>>,
     activity: Option<Res<'w, crate::npc_fixture_activity::preview::PreviewRecord>>,
     activity_bubbles: Query<'w, 's, Entity, With<crate::balloon::ActivityBalloon>>,
-    harvests: Query<'w, 's, Entity, With<crate::harvest::HarvestObject>>,
+    harvests: Query<'w, 's, Entity, With<crate::site_move::HarvestRoot>>,
     fixture_talk_action: Option<Res<'w, crate::talk::fixture_action::FixtureTalkAction>>,
     cast_timelines: Option<Res<'w, crate::fixture_activity_timeline::FixtureActivityTimelines>>,
     provider: Option<Res<'w, crate::fixture_activity_provider::FixtureActivityProvider>>,

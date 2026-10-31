@@ -162,48 +162,7 @@ pub fn harvest_action_time(
     }
 }
 
-/// The client's stamina triple (`StaminaData`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Stamina {
-    pub normal: i32,
-    pub enhance: i32,
-    pub boost: i32,
-}
-
-impl Stamina {
-    /// `StaminaData.Sum`: enhance + normal + boost.
-    pub fn sum(self) -> i32 {
-        self.enhance + self.normal + self.boost
-    }
-
-    /// `StaminaData.IsEmptyStamina`.
-    pub fn is_empty(self) -> bool {
-        self.normal <= 0 && self.boost <= 0 && self.enhance < 1
-    }
-
-    /// `StaminaData.HasBoostOrEnhance`.
-    pub fn has_boost_or_enhance(self) -> bool {
-        self.boost > 0 || self.enhance > 0
-    }
-
-    /// `HarvestPlayerModel.DecreaseStamina`: the amount comes out of boost
-    /// first; what boost cannot cover (a non-positive remainder) goes to the
-    /// normal pool while enhance is below one, else to enhance, and boost
-    /// becomes zero.
-    pub fn decrease(&mut self, amount: i32) {
-        let remainder = self.boost - amount;
-        if remainder <= 0 {
-            if self.enhance < 1 {
-                self.normal += remainder;
-            } else {
-                self.enhance += remainder;
-            }
-            self.boost = 0;
-        } else {
-            self.boost = remainder;
-        }
-    }
-}
+pub use crate::userdata::harvest::Stamina;
 
 /// `HarvestPlayerPresenter.GetAnimationSpeed`: the boost speed (FloatConfigs
 /// key 91) while enhance is positive or boost is at least one, else 1.0.

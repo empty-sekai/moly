@@ -40,6 +40,7 @@ pub mod client;
 pub mod clock;
 pub mod convert;
 pub mod craft;
+pub mod harvest;
 pub mod home_action;
 pub mod housing_layout;
 pub mod inventory;
@@ -264,8 +265,8 @@ const BASE_TEXTURE: i32 = 1;
 #[derive(SystemParam)]
 pub struct ClientCopies<'w> {
     pub harvest: ResMut<'w, ClientHarvestMaps>,
-    pub harvest_user: Option<ResMut<'w, crate::harvest::catalog::HarvestUserData>>,
-    pub harvest_possession: Option<ResMut<'w, crate::harvest::possession::PossessionMock>>,
+    pub harvest_user: Option<ResMut<'w, harvest::HarvestUserData>>,
+    pub harvest_possession: Option<ResMut<'w, harvest::PossessionMock>>,
     pub client: Option<ResMut<'w, ClientUserData>>,
     pub live: ResMut<'w, LiveSchedule>,
     pub replies: ResMut<'w, ServerGateReplies>,
@@ -675,7 +676,7 @@ fn apply_sections(
         user.maps = copies.harvest.maps.clone();
         user.boxes = copies.harvest.boxes.clone();
         if let Some(stamina) = sections.stamina {
-            user.stamina = crate::harvest::law::Stamina {
+            user.stamina = harvest::Stamina {
                 normal: stamina.normal,
                 enhance: stamina.enhance,
                 boost: stamina.boost,

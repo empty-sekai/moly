@@ -50,31 +50,7 @@ use crate::audio::SeRequests;
 /// `MysekaiMaterialType.tone`.
 const MATERIAL_TYPE_TONE: i32 = 6;
 
-/// The resource type arm of the notice.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NoticeArm {
-    MysekaiMaterial,
-    MysekaiFixture,
-    MysekaiItem,
-    /// `mysekai_blueprint`: the get-resource dialog, no notice.
-    MysekaiBlueprint,
-    /// `mysekai_music_record`: the get-resource dialog, no notice.
-    MysekaiMusicRecord,
-    /// A type outside the switch (empty name).
-    Other,
-}
-
-/// `MysekaiUtility.NoticeCollectItem`'s arguments, by id (the drawer
-/// resolves the name, the preview bundle and the resource name).
-#[derive(Message, Clone, Debug)]
-pub struct CollectNotice {
-    pub arm: NoticeArm,
-    pub resource_id: i64,
-    pub get_count: i32,
-    pub is_limit: bool,
-    pub is_new: bool,
-    pub is_rare: bool,
-}
+pub use crate::get_resource::{CollectNotice, NoticeArm};
 
 /// `MysekaiResourceUtility.NoticeCollectItem(resourceType, resourceId,
 /// quantity)`.

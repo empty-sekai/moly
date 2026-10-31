@@ -97,8 +97,6 @@ use serde_json::Value;
 
 use crate::action_button::ActionTapConsumed;
 use crate::gesture::{GestureEvent, GestureState};
-use crate::harvest::action::HarvestPlayerModel;
-use crate::harvest::HarvestStaminaRefresh;
 use crate::menu_dialog::{stamina_view_state, RecoverStaminaRequest};
 use crate::sitemap::SITEMAP_LAYER;
 use crate::ui_layers::{
@@ -108,6 +106,17 @@ use crate::ui_layout::{UiLayouts, UiPrefabView};
 use crate::userdata::client::ClientUserData;
 use crate::userdata::stamina_recover::{self, request};
 use crate::userdata::{Answered, ServerPending};
+
+/// The recover dialog's `UpdateStaminaView` asks, once per call: the gauge
+/// reads them in the frame they are written.
+#[derive(Resource, Default)]
+pub struct HarvestStaminaRefresh(pub Vec<()>);
+
+/// The harvest model's stamina pools (`HarvestPlayerModel`), as the harvest
+/// published them at the end of the last frame; `None` while there is no
+/// model. The dialog reads them when the client copy holds no stamina.
+#[derive(Resource, Default)]
+pub struct HarvestModelStamina(pub Option<Stamina>);
 
 /// `DialogType.MysekaiRecoverBoostStaminaDialog`.
 const DIALOG: DialogType = DialogType::MysekaiRecoverBoostStaminaDialog;
@@ -604,7 +613,7 @@ fn open(
     mut recover: ResMut<Recover>,
     shared: Option<Res<moly_masters::load::MasterTables>>,
     user: Option<Res<ClientUserData>>,
-    model: Option<Res<HarvestPlayerModel>>,
+    model: Option<Res<HarvestModelStamina>>,
 ) {
     for RecoverStaminaRequest(menu) in lines.read() {
         if recover.live.is_some() || recover.confirm.is_some() {
@@ -621,11 +630,7 @@ fn open(
             continue;
         };
         let boosts = tables.boost_items.clone().unwrap_or_default();
-        let model_stamina = model.as_deref().map(|model| Stamina {
-            normal: model.stamina.normal,
-            enhance: model.stamina.enhance,
-            boost: model.stamina.boost,
-        });
+        let model_stamina = model.as_deref().and_then(|model| model.0);
         let Some(stamina) = stamina_recover::stamina(user.as_deref(), model_stamina) else {
             error!("[stamina-recover] {caller}: the client holds no UserMysekaiStamina yet; the dialog cannot show");
             continue;

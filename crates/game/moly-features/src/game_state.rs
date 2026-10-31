@@ -146,7 +146,7 @@ pub fn release_level_up(world: &mut World) {
         Some((GameStateType::Edit, "ChangeState(2 Edit)"))
     } else if world.contains_resource::<crate::player_talk::PlayerTalkSession>() {
         Some((GameStateType::Talk, "ChangeState(3 Talk)"))
-    } else if world.contains_resource::<crate::harvest::LearnSiteEnvironmentActive>() {
+    } else if world.contains_resource::<crate::field_modes::LearnSiteEnvironmentActive>() {
         Some((
             GameStateType::LearnSiteEnvironment,
             "ChangeState(6 LearnSiteEnvironment)",

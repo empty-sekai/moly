@@ -6,24 +6,7 @@ pub use moly_protocol::harvest::{
     DROP_BEFORE, DROP_DROPPED, FIXTURE_HARVESTED, FIXTURE_SPAWNED,
 };
 pub const TRANSPORT_SECONDS: i32 = 10;
-/// One `UserMysekaiTool` row as the harvest reads it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct UserTool {
-    pub tool_id: i64,
-    pub quantity: i32,
-    pub durability: i32,
-}
-
-/// The server's `userMysekaiTools` rows as the harvest reads them.
-pub fn user_tools(rows: &[moly_protocol::rows::UserMysekaiTool]) -> Vec<UserTool> {
-    rows.iter()
-        .map(|row| UserTool {
-            tool_id: i64::from(row.mysekai_tool_id),
-            quantity: row.quantity,
-            durability: row.durability,
-        })
-        .collect()
-}
+pub use crate::userdata::harvest::{user_tools, UserTool};
 
 pub use moly_masters::offline_harvest::{
     generate_map, MapRules, MockFixtureRow, MockInputs, MockMaterialRow, MOCK_EXCLUDED,

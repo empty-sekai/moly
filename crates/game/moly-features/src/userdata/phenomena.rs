@@ -7,10 +7,11 @@
 //!   copy as it is. The join carries it, and so does the release reply.
 //! - `SiteEnvironmentUtility.HasTodayEnvironment()`: `Any` over the rows whose
 //!   `mysekaiPhenomenaId` equals `UserDataManager.TodayMysekaiPhenomenaId`;
-//!   the harvest site's arrival reads it
-//!   ([`crate::harvest::learn`]), as the site-map phenomena catalog does.
+//!   the harvest site's arrival reads it, as the site-map phenomena catalog
+//!   does.
 //! - `SiteEnvironmentUtility.ExecuteReleaseAPI(siteId)` is one
-//!   `Call::Release` on the server link ([`crate::harvest::learn`]); its
+//!   `Call::Release` on the server link, which the harvest's learn step
+//!   sends; its
 //!   reply is a `SuiteUser` answer whose sections this copy receives.
 
 use bevy::prelude::*;

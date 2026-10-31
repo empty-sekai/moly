@@ -91,10 +91,8 @@ pub use learn::{
 pub use pickup::move_towards;
 pub use ui::{action_button_node, HarvestButton};
 
-/// The recover dialog's `UpdateStaminaView` asks, once per call: the gauge
-/// reads them in the frame they are written.
-#[derive(Resource, Default)]
-pub struct HarvestStaminaRefresh(pub Vec<()>);
+pub use crate::home_action::HarvestActionSet;
+pub use crate::stamina_recover_dialog::{HarvestModelStamina, HarvestStaminaRefresh};
 
 /// `UserMysekaiSiteHarvestFixtureStatus.harvested`.
 pub const STATUS_HARVESTED: i32 = server_mock::FIXTURE_HARVESTED;
@@ -239,9 +237,7 @@ pub fn kind_word(kind: i32) -> &'static str {
     }
 }
 
-/// One placed harvest object's root.
-#[derive(Component)]
-pub struct HarvestRoot;
+pub use crate::site_move::HarvestRoot;
 
 /// The model of one placed object (`HarvestObjectModel` and the view fields
 /// the flow reads).
@@ -481,35 +477,7 @@ pub struct HitResult {
 #[derive(Resource, Default)]
 pub struct HarvestHitResults(pub Vec<HitResult>);
 
-/// An `EffectManager.Emit` the flow asks for; `effects` draws it.
-#[derive(Debug, Clone, Copy)]
-pub struct EffectHook {
-    pub kind: u16,
-    pub position: Vec3,
-    pub rotation: Quat,
-}
-
-impl EffectHook {
-    /// `Emit(type, position, key)`: the prefab's own rotation.
-    pub fn at(kind: u16, position: Vec3) -> Self {
-        Self {
-            kind,
-            position,
-            rotation: Quat::IDENTITY,
-        }
-    }
-}
-
-#[derive(Resource, Default)]
-pub struct HarvestEffectHooks {
-    pub pending: Vec<EffectHook>,
-    pub total: usize,
-    /// Emits whose copy the caller keeps (`ManagedEffect` held by its
-    /// emitter), by the caller's ticket.
-    pub kept: Vec<(u64, EffectHook)>,
-    /// `ManagedEffect.Stop` on a kept copy, by ticket.
-    pub stops: Vec<u64>,
-}
+pub use crate::site_move::effects::{EffectHook, HarvestEffectHooks};
 
 /// Counters for the periodic status line (control flow only).
 #[derive(Resource, Default)]
@@ -764,10 +732,20 @@ fn report(
 /// bookkeeping, drops, tweens, pickup, the log queue.
 pub struct HarvestPlugin;
 
-/// The action loop's system set (the schedule orders player-state writers and
-/// the input chain around it).
-#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct HarvestActionSet;
+/// Last: the model's stamina pools, published for the recover dialog.
+fn publish_model_stamina(
+    model: Option<Res<action::HarvestPlayerModel>>,
+    mut view: ResMut<HarvestModelStamina>,
+) {
+    let stamina = model.as_deref().map(|model| moly_protocol::rows::Stamina {
+        normal: model.stamina.normal,
+        enhance: model.stamina.enhance,
+        boost: model.stamina.boost,
+    });
+    if view.0 != stamina {
+        view.0 = stamina;
+    }
+}
 
 impl Plugin for HarvestPlugin {
     fn build(&self, app: &mut App) {
@@ -903,6 +881,17 @@ impl Plugin for HarvestPlugin {
             .add_systems(Update, bulk_effect::tick.after(bulk::tick));
         bulk_dialog::install(app);
         app.init_resource::<bulk_notice::BulkNotices>().add_systems(Update, bulk_notice::tick);
+        app.init_resource::<HarvestModelStamina>()
+            .add_systems(Last, publish_model_stamina);
+        {
+            let mut sources = app
+                .init_resource::<crate::ui_charsets::ShellTextSources>()
+                .world_mut()
+                .resource_mut::<crate::ui_charsets::ShellTextSources>();
+            sources.register_texts(bulk::TEXT_SOURCE, bulk::WORDINGS, &[]);
+            sources.declare(bulk::TEXT_SOURCE);
+        }
+        app.add_systems(Update, bulk::fill_text_source.after(bulk::tick));
         app.init_resource::<bulk::BulkHarvest>()
             .add_systems(Update, (bulk_ui::spawn, bulk_ui::spawn_gauge, bulk_ui::read_input, bulk::tick, bulk_ui::place, bulk_ui::place_gauge, bulk_ui::place_gauge_particles).chain()
                 .after(crate::userdata::apply_arrivals).before(HarvestActionSet));

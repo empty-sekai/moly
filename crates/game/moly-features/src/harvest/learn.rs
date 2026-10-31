@@ -108,24 +108,7 @@ const RETURN_SECONDS: f32 = 0.3;
 const DIALOG_TYPE: i32 = 381;
 const THUMBNAIL_PREFIX: &str = "mysekai/thumbnail/phenomena/";
 
-/// `HarvestUtility.ShowLearnPhenomenaDialog(master, onClose)`: open a
-/// `LearnPhenomenaSubWindowDialog` (dialog type 381, the dialog slot,
-/// `allowCloseExternal`) and `Setup(name, thumbnail)`: the message body is
-/// the wording `MSG_LEARN_PHENOMENA` formatted with the name, the image is
-/// the thumbnail, the button opens the common balloon with the name, and the
-/// open plays `se_get_blueprint`.
-#[derive(Message, Clone, Debug)]
-pub struct LearnPhenomenaDialogRequest {
-    /// The phenomenon master row id (`mysekaiPhenomenas`,
-    /// [`crate::sitemap_phenomena::PhenomenaMaster`]).
-    pub phenomena_id: i32,
-    /// `mysekai/thumbnail/phenomena/` + `iconAssetbundleName`.
-    pub thumbnail: String,
-}
-
-/// The dialog's onClose: the flag the effect player's `WaitUntil` reads.
-#[derive(Message, Clone, Copy, Debug)]
-pub struct LearnPhenomenaDialogClosed;
+pub use crate::learn_phenomena_dialog::{LearnPhenomenaDialogClosed, LearnPhenomenaDialogRequest};
 
 /// The learn run and the camera state's lookups.
 #[derive(Resource, Default)]

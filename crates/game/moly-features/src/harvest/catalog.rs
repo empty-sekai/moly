@@ -17,8 +17,8 @@ use moly_assets::json::master::{self, MasterData, MasterError, MasterKey, Master
 use moly_assets::json::JsonAsset;
 use serde_json::Value;
 
-use super::law::{Stamina, ToolType};
-use super::server_mock::{MockMaterialRow, UserHarvestMap, UserTool, MOCK_EXCLUDED};
+use super::law::ToolType;
+use super::server_mock::{MockMaterialRow, MOCK_EXCLUDED};
 use super::ActionInterface;
 
 /// The package index and what it gates.
@@ -240,17 +240,7 @@ impl HarvestCatalog {
     }
 }
 
-/// The client's user data as the server mock last replied it (the login
-/// fetch, then each API reply merged in).
-#[derive(Resource)]
-pub struct HarvestUserData {
-    pub maps: std::collections::BTreeMap<u32, UserHarvestMap>,
-    pub tools: Vec<UserTool>,
-    pub stamina: Stamina,
-    pub materials: std::collections::BTreeMap<i64, i64>,
-    /// `userMysekaiTreasureBoxes`.
-    pub boxes: Vec<super::server_mock::UserTreasureBox>,
-}
+pub use crate::userdata::harvest::HarvestUserData;
 
 /// Master fixture type words (`MysekaiSiteHarvestFixtureType`).
 pub fn fixture_kind_value(word: &str) -> i32 {

@@ -43,7 +43,7 @@
 //! - any other type: the notice with an empty name and no icon, no sound.
 //!
 //! The harvest raises the same call from its own pickup
-//! (`crate::harvest::notice`, which reads the possession limit, the new
+//! (its notice step, which reads the possession limit, the new
 //! flag and the rarity and plays the cue): this module reads its
 //! `CollectNotice` messages and takes those flags as they are, playing no
 //! cue for them, so a drop's cue plays once.
@@ -1566,6 +1566,33 @@ fn enqueue_chain(player: &mut GetResourcePlayer, entry: ResourceEntry, caller: &
 // Update: the dialogs
 // ---------------------------------------------------------------------------
 
+/// The resource type arm of a harvest notice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoticeArm {
+    MysekaiMaterial,
+    MysekaiFixture,
+    MysekaiItem,
+    /// `mysekai_blueprint`: the get-resource dialog, no notice.
+    MysekaiBlueprint,
+    /// `mysekai_music_record`: the get-resource dialog, no notice.
+    MysekaiMusicRecord,
+    /// A type outside the switch (empty name).
+    Other,
+}
+
+/// `MysekaiUtility.NoticeCollectItem`'s arguments as the harvest's pickup
+/// raises them, by id (the drawer
+/// resolves the name, the preview bundle and the resource name).
+#[derive(Message, Clone, Debug)]
+pub struct CollectNotice {
+    pub arm: NoticeArm,
+    pub resource_id: i64,
+    pub get_count: i32,
+    pub is_limit: bool,
+    pub is_new: bool,
+    pub is_rare: bool,
+}
+
 #[derive(SystemParam)]
 pub struct PlaceInputs<'w, 's> {
     server: Res<'w, AssetServer>,
@@ -1578,7 +1605,7 @@ pub struct PlaceInputs<'w, 's> {
     root_canvas: Option<Res<'w, crate::canvas::RootCanvas>>,
     inventory: Option<Res<'w, ClientMysekaiInventory>>,
     records: Option<Res<'w, ClientMusicRecords>>,
-    harvest_notices: MessageReader<'w, 's, crate::harvest::notice::CollectNotice>,
+    harvest_notices: MessageReader<'w, 's, CollectNotice>,
 }
 
 /// The characters of `text` the atlas lacks (rich-text tags and white space
@@ -1746,7 +1773,6 @@ pub fn place(
 
     // The harvest's notices join the calls, in order.
     for harvest in harvest_notices.read() {
-        use crate::harvest::notice::NoticeArm;
         let resource_type = match harvest.arm {
             NoticeArm::MysekaiMaterial => RT_MYSEKAI_MATERIAL,
             NoticeArm::MysekaiFixture => RT_MYSEKAI_FIXTURE,

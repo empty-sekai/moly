@@ -564,7 +564,11 @@ pub fn advance(
 }
 
 pub fn install(app: &mut App) {
-    app.init_resource::<HarvestSummaryMock>()
+    app.insert_resource(crate::site_move::HarvestPointHooks {
+        save: save_harvest_point,
+        show: show_harvest_point_summary,
+    })
+    .init_resource::<HarvestSummaryMock>()
         .init_resource::<HarvestSummary>()
         .add_systems(
             Update,
