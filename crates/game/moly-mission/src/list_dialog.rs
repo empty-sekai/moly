@@ -1,67 +1,56 @@
 //! `MysekaiMissionListDialog` (dialog type 340, Common1): the sheet list the
-//! mission screen's `MissionListButton` opens.
+//! mission screen's list button opens.
 //!
-//! Source structure:
-//! - `ScreenLayerMysekaiMission.OnClickMissionListButton`: `CreateMissionAllList`
-//!   — every sheet in `seq` order, each with its completion mission's view
-//!   data and its normal missions' view data — then
-//!   `Show1ButtonDialog<MysekaiMissionListDialog>(340).Setup(list)`.
-//! - `MysekaiMissionListDialog.Setup`: `_missionListView.OnCreateCell` set to
-//!   `OnCreateCell`, `CreateViewItem(list.Count)`, then `SetupFirstView`.
-//! - `OnCreateCell`: `MysekaiMissionSheetCell.Setup` of that row's view data.
-//! - `Common1ButtonDialog.OnClickOK` closes; `OnCloseExternal` (the window's
-//!   close button) and the hardware back key both call it.
+//! Input: the request the screen's list button writes
+//! ([`MissionDialogRequest`]); every sheet in `seq` order, each with its
+//! completion mission's and its normal missions' view data
+//! (`CreateMissionAllList`); the root's `MissionList` document and the
+//! `MysekaiMissionSheetCell` document as a cell template ([`load_cell`]); the
+//! pointer's taps each frame.
 //!
-//! Host mapping: the dialog takes the dialog slot
-//! (`ScreenManager::show_dialog` for dialog type 340, `DialogBase`'s close
-//! rule) and draws the root's `MissionList` document through a runtime copy of
-//! its own, so the published document stays as the root carries it. The
-//! caller reads the request the screen's list button wrote and pushes the
-//! slot; the dialog's own view reads the pushed slot the next frame and runs
-//! `Setup` there ([`setup`]), as the source runs it on the shown dialog.
+//! Output: the dialog slot (dialog type 340) and its runtime copy of the
+//! `MissionList` document, with one `MysekaiMissionSheetCell` copy per sheet
+//! row under `ListView/Viewport/Content`, drawn each frame; a tap on the
+//! footer or a hardware back key closes it.
 //!
-//! Refused by name: a `MysekaiMissionSheetCell` document that is missing from
-//! the root or fails to parse, carry the cell prefab, or lack one of the nodes
-//! a row writes. A refusal leaves the list hidden, so every fail-closed path
-//! names itself in the log once and draws no row.
+//! Invariants:
+//! - The dialog is opened from the screen's list button and takes the dialog
+//!   slot for type 340 (`ScreenManager::show_dialog`); the dialog's view
+//!   reads the pushed slot the next frame and runs its setup there
+//!   ([`setup`]).
+//! - The runtime copy is made with the row copies: a replaced document drops
+//!   the subtrees copied into it, so the copies are installed with it
+//!   (`_missionListView.OnCreateCell` then `CreateViewItem(list.Count)`).
+//! - A row is written as `MysekaiMissionSheetCell.Setup` writes it: the
+//!   sheet's name into `Title/TitleText`, the sheet's reward name text into
+//!   `RewardName`, the other-count text into `Others`, and `Get` shown when
+//!   the sheet's completion mission is complete (`OnCreateCell`).
+//! - The footer's OK closes, and so do the window's close button
+//!   (`OnCloseExternal`) and the hardware back key
+//!   (`Common1ButtonDialog.OnClickOK`).
 //!
-//! The sheet rows: the list's `listViewItemPrefab` is the
-//! `MysekaiMissionSheetCell` prefab, which the UI root carries as a document
-//! of its own. The document is not one of the layouts the loader requests, so
-//! this unit reads it from the root the runtime draws from and admits it
-//! through that root's manifest ([`load_cell`], shared with the detail
-//! dialog); `Setup` waits for it and runs once it is in. Every `Setup`
-//! installs a runtime copy of the dialog's document with one
-//! `MysekaiMissionSheetCell` copy per sheet row, in sheet `seq` order, under
-//! `ListView/Viewport/Content` (a replaced document drops the subtrees copied
-//! into it, so the copies are made with it). The rows are written as
-//! `MysekaiMissionSheetCell.Setup` writes a row:
-//! - the sheet's name into `Title/TitleText`;
-//! - the sheet's reward name text into `RewardName`;
-//! - the other-count text into `Others`;
-//! - `Get` is shown when the sheet's completion mission is complete.
-//!
-//! The copies' `ThumbnailRoot` thumbnails are not drawn: their art is not on
-//! this root.
-//!
-//! The reward name and the other-count text are not in the list's view data
-//! (`MysekaiMissionListViewData` carries the sheet, the completion mission and
-//! the normal missions): the source builds them from the rewards
-//! `MysekaiMissionUtility` converts, which this unit's data does not carry, so
-//! [`SheetRow`] keeps no text for them and the rows leave those two nodes
-//! empty. The sheet's completion is read from the mission masters' completion
-//! mission, not from the user data (`IsAllCompleted`'s session state).
-//!
-//! `SetupFirstView` places no row: the source's pick of the first index needs
-//! `IsAllCompleted`, which a host would take from a session state this unit
-//! does not own, and a false pick would show a wrong sheet.
-//!
-//! Named gaps: the `Tabs` object stays as the document has it (inactive);
-//! the window scale tween of `DialogBase` is not drawn (the canvas scale the
-//! view's entity carries stands); the footer's close label is the document's
-//! serialized text (`useWordingKey` on with an empty key); the list's wheel
-//! and drag scroll is not drawn, so the rows are placed from the list's top
-//! and the scrollbar object is hidden.
+//! Boundaries (each a named line, nothing drawn in its place):
+//! - A `MysekaiMissionSheetCell` document missing from the root, failing to
+//!   parse, not carrying the cell prefab, or lacking a node a row writes is
+//!   refused; the list stays hidden and no row is drawn.
+//! - The copies' `ThumbnailRoot` thumbnails are not drawn: their art is not on
+//!   this root.
+//! - The reward name and the other-count text are not in the list's view data
+//!   (`MysekaiMissionListViewData` carries the sheet, the completion mission
+//!   and the normal missions), and the rewards the utility converts are not
+//!   in this unit's data, so [`SheetRow`] keeps no text for them and the rows
+//!   leave those two nodes empty. The sheet's completion is read from the
+//!   mission masters' completion mission, not from the user data
+//!   (`IsAllCompleted`'s session state).
+//! - The source's first-row pick (`SetupFirstView`) needs `IsAllCompleted`,
+//!   which a host would take from a session state this unit does not own, so
+//!   no row is placed first.
+//! - The `Tabs` object stays as the document has it (inactive); the window
+//!   scale tween of `DialogBase` is not drawn (the canvas scale the view's
+//!   entity carries stands); the footer's close label is the document's
+//!   serialized text (`useWordingKey` on with an empty key); the list's wheel
+//!   and drag scroll is not drawn, so the rows are placed from the list's top
+//!   and the scrollbar object is hidden.
 
 use std::collections::{BTreeSet, HashSet};
 
@@ -77,15 +66,15 @@ use super::cell::{
 };
 use super::detail_dialog::{load_cell, CellSource};
 use super::screen;
-use crate::action_button::ActionTapConsumed;
-use crate::canvas::RootCanvas;
-use crate::gesture::{GestureEvent, GestureState};
-use crate::ui_inputs::SITEMAP_LAYER;
-use crate::ui_layers::{
+use moly_features::action_button::ActionTapConsumed;
+use moly_features::canvas::RootCanvas;
+use moly_features::gesture::{GestureEvent, GestureState};
+use moly_features::ui_inputs::SITEMAP_LAYER;
+use moly_features::ui_layers::{
     DialogBackKey, DialogBackKeyEvent, DialogId, DialogType, DisplayLayerType, ScreenManager,
 };
-use crate::ui_layout::{UiLayouts, UiPrefabView};
-use crate::userdata::mission::ClientMission;
+use moly_features::ui_layout::{UiLayouts, UiPrefabView};
+use moly_features::userdata::mission::ClientMission;
 
 /// The root's document (`dialogs/MysekaiMissionListDialog.json`).
 pub const KEY: &str = "MissionList";
@@ -438,7 +427,7 @@ pub struct SheetRow {
 /// `CreateMissionAllList`: every sheet in `seq` order.
 pub fn all_rows(
     masters: &moly_masters::mission::MissionMasters,
-    state: &crate::userdata::mission::model::UserMissionState,
+    state: &moly_features::userdata::mission::model::UserMissionState,
 ) -> Vec<SheetRow> {
     masters
         .sheets_by_seq()
@@ -448,8 +437,8 @@ pub fn all_rows(
             name: sheet.name.clone(),
             complete: masters.parent_mission(sheet.id).map(|mission| mission.id),
             received: masters.parent_mission(sheet.id).is_some_and(|mission| {
-                crate::userdata::mission::model::mission_state(masters, state, mission)
-                    .is_some_and(|view| view.status == crate::userdata::mission::model::MissionStatus::Received)
+                moly_features::userdata::mission::model::mission_state(masters, state, mission)
+                    .is_some_and(|view| view.status == moly_features::userdata::mission::model::MissionStatus::Received)
             }),
             children: masters
                 .child_missions(sheet.id)
@@ -749,16 +738,16 @@ fn hit(
 }
 
 /// Update: `Show1ButtonDialog(340)`'s close rule — the footer's close button
-/// (`OnClickOK`) closes, the window's close button (`OnCloseExternal` ->
-/// `OnClickOK`) closes, and any other tap is the dialog's (its slot is
-/// modal).
+/// answers its OK and closes (`OnClickOK`), the window's close button closes
+/// through the same answer (`OnCloseExternal`), and any other tap is the
+/// dialog's (its slot is modal).
 pub fn click(
     mut gestures: MessageReader<GestureEvent>,
     mut dialog: ResMut<MissionListDialog>,
     mut screens: ResMut<ScreenManager>,
     mut consumed: ResMut<ActionTapConsumed>,
     world: DialogWorld,
-    mut sounds: ResMut<crate::audio::SeRequests>,
+    mut sounds: ResMut<moly_features::audio::SeRequests>,
 ) {
     if dialog.shown.is_none() {
         gestures.clear();
@@ -845,7 +834,7 @@ pub fn place(
         return;
     };
     if let (Ok(window), Some(canvas)) = (windows.single(), root_canvas.as_deref()) {
-        crate::canvas::set_scale(&mut transform, canvas.scale(window));
+        moly_features::canvas::set_scale(&mut transform, canvas.scale(window));
     }
     // The document root is the window's own node: an override hiding it
     // would hide the window, so the entity's visibility alone hides the
@@ -867,7 +856,7 @@ pub fn first_row(
 ) -> usize {
     let mut state = user.state();
     state.current_sheet = screen::current_sheet(masters, user);
-    if crate::userdata::mission::model::is_all_completed(masters, &state) {
+    if moly_features::userdata::mission::model::is_all_completed(masters, &state) {
         return sheets.saturating_sub(1);
     }
     masters

@@ -1,26 +1,38 @@
-//! The mission screen (621) and its receive: the pure rules over the mission
-//! master tables and a plain user state
-//! ([`crate::userdata::mission::model`]), the one receive request
-//! the screen sends (`MysekaiMissionService`, [`service`]), the screen layer's
-//! view, its two pages and the page turn ([`screen`]), the list cells
-//! ([`cell`]) and the two dialogs those cells open ([`list_dialog`],
-//! [`detail_dialog`]).
+//! The mission screen (621) and its receive: the screen layer's view, its two
+//! pages and the page turn ([`screen`]), the list cells ([`cell`]), the two
+//! dialogs those cells open ([`list_dialog`], [`detail_dialog`]) and the one
+//! receive request the screen sends (`MysekaiMissionService`, [`service`]).
 //!
-//! The model decides what the screen shows and what a receive asks for; it
-//! holds no Bevy resource, loads nothing and draws nothing. The tables are
-//! [`moly_masters::mission::MissionMasters`] (sheets, missions, missions'
-//! reward rows and the missions' rank-experience rows); the user data is the
-//! sheet the user is on and the mission rows the server keeps, as the client
-//! copy holds them (`userdata::mission::ClientMission`).
+//! Input: the mission master tables
+//! ([`moly_masters::mission::MissionMasters`]: sheets, missions, the
+//! missions' reward rows and rank-experience rows), the client's mission copy
+//! (`moly_features::userdata::mission::ClientMission`: the sheet the user is
+//! on and the mission rows the server keeps) and the pure rules over them
+//! ([`moly_features::userdata::mission::model`], which lives in the hub); the
+//! screen, cell and dialog documents of the UI root; the pointer, the back
+//! key and the server's answers on the link.
 //!
-//! Order inside a frame: the view spawns once its document is in; the layer's
-//! hooks follow the screen manager; the receive's answers are applied to the
-//! copies by the user data reader, then its callbacks run ([`service`]); the
+//! Output: the screen view with both pages, drawn each frame; the dialog
+//! slots of the list dialog (340) and the detail dialog (339); the receive
+//! request and its [`service::MissionReceived`] /
+//! [`service::MissionReceiveFailed`] answers; the dialog request a button or
+//! row tap writes ([`cell::MissionDialogRequest`]).
+//!
+//! Invariants: the model decides what the screen shows and what a receive
+//! asks for; it holds no Bevy resource, loads nothing and draws nothing. A
+//! button or a row tap writes the dialog request the two dialogs read, which
+//! push their dialog slot in the same frame and run their own setup on it
+//! the next frame; their own taps and the back key run before the shell's.
+//!
+//! Frame order: the view spawns once its document is in; the layer's hooks
+//! follow the screen manager; the receive's answers are applied to the copies
+//! by the user data reader, then its callbacks run ([`service`]); the
 //! screen's turn, content and buttons follow; the list cells are composed
-//! after the view exists and drawn with it; a button or row tap writes the
-//! dialog request the two dialog units read, which push their dialog slot in
-//! the same frame and run their own `Setup` on it next frame; their own taps
-//! and the back key run before the shell's.
+//! after the view exists and drawn with it.
+//!
+//! Boundaries: the reward chain that follows a receive, the retry-or-cancel
+//! dialog of a refused receive and the tutorial API variant are not built;
+//! each is named where it would stand (see [`service`], [`screen`]).
 
 pub mod cell;
 pub mod detail_dialog;
@@ -30,7 +42,7 @@ pub mod service;
 
 use bevy::prelude::*;
 
-use crate::ui_layers;
+use moly_features::ui_layers;
 
 /// The mission screen, its list cells and its two dialogs.
 pub struct MissionPlugin;
@@ -53,14 +65,14 @@ impl Plugin for MissionPlugin {
             // systems is needed: PreUpdate runs first).
             .add_systems(
                 PreUpdate,
-                service::remember_levels.after(crate::userdata::apply_arrivals),
+                service::remember_levels.after(moly_features::userdata::apply_arrivals),
             )
             // The answer's callbacks: after the reader, before the frames
             // that draw the copies it changes.
             .add_systems(
                 Update,
                 (
-                    service::answers.after(crate::userdata::apply_arrivals),
+                    service::answers.after(moly_features::userdata::apply_arrivals),
                     screen::spawn_when_ready,
                     screen::follow_screen.after(ui_layers::advance),
                     screen::follow_receive.after(service::answers),
@@ -71,13 +83,13 @@ impl Plugin for MissionPlugin {
                     // left: the shell's click runs before the manager steps,
                     // so this cannot wait for the step.
                     screen::input
-                        .run_if(crate::game_settings::scene_input_enabled)
-                        .after(crate::gesture::advance)
-                        .before(crate::menu_shell::click),
+                        .run_if(moly_features::game_settings::scene_input_enabled)
+                        .after(moly_features::gesture::advance)
+                        .before(moly_features::menu_shell::click),
                     screen::advance
                         .after(screen::follow_screen)
                         .after(screen::input)
-                        .before(crate::ui_layout::render),
+                        .before(moly_features::ui_layout::render),
                 ),
             )
             // The list cells: composed once the screen's view exists, drawing
@@ -97,7 +109,7 @@ impl Plugin for MissionPlugin {
                         .after(screen::advance)
                         .after(cell::spawn_cells)
                         .after(cell::scroll)
-                        .before(crate::ui_layout::render),
+                        .before(moly_features::ui_layout::render),
                 ),
             )
             // The two dialogs: their documents install once the root has
@@ -115,10 +127,10 @@ impl Plugin for MissionPlugin {
                     list_dialog::setup
                         .after(ui_layers::advance)
                         .after(list_dialog::spawn_when_ready)
-                        .before(crate::ui_layout::render),
+                        .before(moly_features::ui_layout::render),
                     detail_dialog::setup
                         .after(ui_layers::advance)
-                        .before(crate::ui_layout::render),
+                        .before(moly_features::ui_layout::render),
                     list_dialog::open
                         .after(screen::input)
                         .after(list_dialog::spawn_when_ready)
@@ -132,13 +144,13 @@ impl Plugin for MissionPlugin {
                         .after(detail_dialog::back_key)
                         .before(ui_layers::advance),
                     list_dialog::click
-                        .run_if(crate::game_settings::scene_input_enabled)
-                        .after(crate::action_button::click)
-                        .before(crate::menu_shell::click),
+                        .run_if(moly_features::game_settings::scene_input_enabled)
+                        .after(moly_features::action_button::click)
+                        .before(moly_features::menu_shell::click),
                     detail_dialog::click
-                        .run_if(crate::game_settings::scene_input_enabled)
-                        .after(crate::action_button::click)
-                        .before(crate::menu_shell::click),
+                        .run_if(moly_features::game_settings::scene_input_enabled)
+                        .after(moly_features::action_button::click)
+                        .before(moly_features::menu_shell::click),
                     list_dialog::back_key.after(ui_layers::back_key),
                     detail_dialog::back_key.after(ui_layers::back_key),
                 ),
@@ -152,12 +164,12 @@ impl Plugin for MissionPlugin {
                         .after(list_dialog::open)
                         .after(list_dialog::click)
                         .after(list_dialog::back_key)
-                        .before(crate::ui_layout::render),
+                        .before(moly_features::ui_layout::render),
                     detail_dialog::place
                         .after(detail_dialog::open)
                         .after(detail_dialog::click)
                         .after(detail_dialog::back_key)
-                        .before(crate::ui_layout::render),
+                        .before(moly_features::ui_layout::render),
                 ),
             );
     }

@@ -1,0 +1,18 @@
+[package]
+name = "moly-mission"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+moly-features = { path = "../moly-features" }
+moly-masters = { path = "../moly-masters" }
+moly-protocol = { path = "../../net/moly-protocol" }
+moly-link = { path = "../../net/moly-link" }
+moly-law = { path = "../../base/moly-law" }
+moly-assets = { path = "../../engine/moly-assets" }
+bevy = { workspace = true }
+serde_json = "1"
+
+[lints]
+workspace = true

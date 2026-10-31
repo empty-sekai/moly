@@ -1,21 +1,30 @@
 //! `ScreenLayerMysekaiMission` (screen 621): the mission screen's view, its
 //! two pages and the page turn.
 //!
-//! Source structure:
-//! - `OnBoot`: the multiplay UI is hidden (this tree has no multiplay UI),
-//!   then `ScreenBootDone`.
-//! - `OnInitComponent`: `InitializePage` (both pages set up, page 1 current
-//!   at x 0, page 2 next at x 2580, both stamp roots inactive, page 1's
-//!   mission view initialized with the user's current sheet), `SetupEvent`,
-//!   `RefreshScreenView`, `UpdateCurrentPageStatus`, `SetupTutorial`, then
-//!   `ContinueNextMission` when the temporary return cache holds
-//!   `FinishExpand`, and the cache entry is always removed.
-//! - `OnWillExit`: the multiplay UI again, then `ScreenWillExitDone`.
-//! - `OnExited`: each page disposed (its stamp unloaded), the bundle
-//!   unloaded.
+//! Input: the screen manager's layer hooks and the mission document; the
+//! mission masters and the client's mission copy; the model's list
+//! ([`moly_features::userdata::mission::model`]); the pointer's events and the
+//! wheel; the clock.
 //!
-//! The screen shows the model's list ([`crate::userdata::mission::model`]). Its
-//! buttons:
+//! Output: the screen view with both pages (drawn each frame, the current
+//! page first), the page turn, the stamp and the tap cover; the receive
+//! requests and the dialog requests the buttons write ([`cell`],
+//! [`service`]).
+//!
+//! Invariants:
+//! - The boot hides the multiplay UI (this tree has none) and is then done
+//!   (`OnBoot`).
+//! - `OnInitComponent` sets both pages up: page 1 current at x 0, page 2 next
+//!   at x 2580, both stamp roots inactive, page 1's mission view initialized
+//!   with the user's current sheet (`InitializePage`); then `SetupEvent`,
+//!   `RefreshScreenView` and `UpdateCurrentPageStatus` run, `SetupTutorial`
+//!   is refused, `ContinueNextMission` runs when the temporary return cache
+//!   holds `FinishExpand`, and the cache entry is always removed.
+//! - The exit hides the multiplay UI again and never waits (`OnWillExit`);
+//!   on exit each page is disposed (its stamp unloaded) and the bundle is
+//!   unloaded (`OnExited`).
+//! - The screen shows the model's list
+//!   ([`moly_features::userdata::mission::model`]). Its buttons:
 //! - the page's own cell is the sheet's completion mission
 //!   (`_completeCell`): a complete sheet sends the bulk receive
 //!   (`OnClickMysekaiMissionCell` -> `OnClickBulkReceiveButton`), otherwise
@@ -25,7 +34,7 @@
 //! - `BulkReceiveButton` sends the bulk receive (`OnClickBulkReceiveButton`)
 //!   when the receivable list is not empty (`UpdateCurrentPageStatus`).
 //!
-//! The list's normal mission rows are [`crate::mission::cell`]'s: it copies
+//! The list's normal mission rows are [`crate::cell`]'s: it copies
 //! the document's own `MysekaiMissionCell` subtree into each page's list and
 //! reports which row a press reached. A row tap is
 //! `OnClickMysekaiMissionCell` too: an achieved mission sends its receive, any
@@ -38,21 +47,23 @@
 //! (`DOScale(1, 0.125)`), the current page's stamp hides, the pages swap
 //! (`index = ~index & 1`), the next page waits at 2580, and both roots then
 //! slide (the next from 2580 to 0, the current from 0 to -2580) over 0.2 s
-//! with `Ease.OutCubic`, snapping at the end. The scale steps are not drawn:
-//! this view has no scale override (named). The start dialog and the rule
-//! slides of `StartNextMission` are later units (named). The reward chain,
-//! which decides that the sheet is complete, is a later unit: it calls
-//! [`turn_page`], and until then no turn starts by itself.
+//! with `Ease.OutCubic`, snapping at the end.
 //!
 //! The stamp (`ShowMissionComplete`, the FX instantiated under the page's
 //! `CompleteStampRoot`) and the tap cover (`_tapCoverCollider`, on while the
 //! reward chain plays) are drawn from the screen state. The cover's
 //! `TapCoverEffect` and `Cover` are drawn as the document has them.
 //!
-//! Product mapping, named:
+//! Boundaries (each a named line, nothing drawn or sent in its place):
+//! - The scale steps of the page turn are not drawn: this view has no scale
+//!   override.
+//! - The start dialog and the rule slides of `StartNextMission` are not
+//!   built. The reward chain, which decides that the sheet is complete, is
+//!   not built either: it calls [`turn_page`], and until then no turn starts
+//!   by itself.
 //! - The completion cell's nodes are bound and drawn from
 //!   [`PageContent::complete`], the sheet's completion mission. The list's
-//!   normal-mission rows are [`crate::mission::cell`]'s: it copies the
+//!   normal-mission rows are [`crate::cell`]'s: it copies the
 //!   document's own cell subtree into each page's list and reports which row a
 //!   press reached, and the list's texts the atlas cannot draw are drawn empty
 //!   there rather than left as the copied text.
@@ -77,19 +88,19 @@ use moly_law::ui::dotween::Ease;
 use moly_masters::mission::MissionMasters;
 use serde_json::Value;
 
-use crate::userdata::mission::model::{self, CellTap, MissionScreen as MissionModel};
+use moly_features::userdata::mission::model::{self, CellTap, MissionScreen as MissionModel};
 use super::service::{MissionReceiveFailed, MissionReceived, MysekaiMissionService};
-use crate::balloon::BALLOON_LAYER;
-use crate::canvas::RootCanvas;
-use crate::gesture::{UiPointerEvent, UiPointerPhase};
-use crate::menu_shell::ShellDialogState;
-use crate::tween_clock::TweenClock;
-use crate::ui_inputs::BalloonArt;
-use crate::ui_layers::{
+use moly_features::balloon::BALLOON_LAYER;
+use moly_features::canvas::RootCanvas;
+use moly_features::gesture::{UiPointerEvent, UiPointerPhase};
+use moly_features::menu_shell::ShellDialogState;
+use moly_features::tween_clock::TweenClock;
+use moly_features::ui_inputs::BalloonArt;
+use moly_features::ui_layers::{
     LayerCommand, MenuScreenType, ScreenHook, ScreenLayerEvent, ScreenLayerState, ScreenManager,
 };
-use crate::ui_layout::{UiLayouts, UiPrefabView};
-use crate::userdata::mission::ClientMission;
+use moly_features::ui_layout::{UiLayouts, UiPrefabView};
+use moly_features::userdata::mission::ClientMission;
 
 /// The screen layer's document (`screens/ScreenLayerMysekaiMission.json`).
 pub const KEY: &str = "MissionScreen";
@@ -329,7 +340,7 @@ pub struct PageContent {
     /// The completion cell; `None` until the masters read, so the document's
     /// texts stand.
     pub complete: Option<CompleteCell>,
-    /// The normal missions, in the order [`crate::mission::cell`]'s list
+    /// The normal missions, in the order [`crate::cell`]'s list
     /// copies its cells for.
     pub children: Vec<CompleteCell>,
     /// `CreateMissionList` made no normal mission cell (the list's
@@ -471,7 +482,7 @@ pub fn note_once(seen: &mut BTreeSet<String>, message: String) {
     }
 }
 
-/// The one line a unit leaves where a later unit's call stands:
+/// The one line left where a call into code that is not built stands:
 /// `"mission: <what> is not built yet"`, and nothing else.
 pub fn not_built(seen: &mut BTreeSet<String>, what: &str) {
     note_once(seen, format!("{what} is not built yet"));
@@ -941,8 +952,8 @@ pub struct InputWorld<'w, 's> {
 pub struct InputWrites<'w> {
     pub service: ResMut<'w, MysekaiMissionService>,
     pub screen: ResMut<'w, MissionScreen>,
-    pub sounds: ResMut<'w, crate::audio::SeRequests>,
-    pub consumed: ResMut<'w, crate::action_button::ActionTapConsumed>,
+    pub sounds: ResMut<'w, moly_features::audio::SeRequests>,
+    pub consumed: ResMut<'w, moly_features::action_button::ActionTapConsumed>,
     pub dialogs: MessageWriter<'w, super::cell::MissionDialogRequest>,
     pub link: ResMut<'w, moly_link::ServerLink>,
 }
@@ -999,7 +1010,7 @@ pub fn input(
         if current_screen {
             consumed.0 = true;
         }
-        let pointer = crate::ui_inputs::event_pointer(window, root_canvas, event.position);
+        let pointer = moly_features::ui_inputs::event_pointer(window, root_canvas, event.position);
         let target = view.press_target(layouts, pointer, canvas);
         match event.phase {
             UiPointerPhase::Down => {

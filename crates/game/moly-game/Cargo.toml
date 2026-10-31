@@ -12,6 +12,7 @@ moly-ui = { path = "../moly-ui" }
 moly-world = { path = "../moly-world" }
 moly-features = { path = "../moly-features" }
 moly-convert = { path = "../moly-convert" }
+moly-mission = { path = "../moly-mission" }
 moly-devtools = { path = "../moly-devtools" }
 moly-protocol = { path = "../../net/moly-protocol" }
 moly-link = { path = "../../net/moly-link" }

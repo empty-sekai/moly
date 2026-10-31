@@ -187,7 +187,6 @@ pub mod joystick;
 pub mod layout_director;
 pub mod menu_dialog;
 pub mod menu_shell;
-pub mod mission;
 pub mod collect_notice;
 pub mod companion_cues;
 pub mod effect_show;

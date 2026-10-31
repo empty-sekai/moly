@@ -56,9 +56,8 @@
     "clippy::len_without_is_empty": 2,
     "clippy::manual_range_contains": 1,
     "clippy::map_clone": 1,
-    "clippy::map_flatten": 1,
-    "clippy::needless_borrow": 14,
-    "clippy::needless_lifetimes": 7,
+    "clippy::needless_borrow": 13,
+    "clippy::needless_lifetimes": 6,
     "clippy::needless_return": 2,
     "clippy::neg_cmp_op_on_partial_ord": 4,
     "clippy::option_map_or_none": 1,
@@ -73,13 +72,12 @@
     "clippy::unnecessary_unwrap": 1,
     "clippy::useless_conversion": 2,
     "clippy::while_let_loop": 1,
-    "dead_code": 21,
+    "dead_code": 17,
     "deprecated": 22,
-    "for_loops_over_fallibles": 1,
-    "private_interfaces": 16,
+    "private_interfaces": 8,
     "unreachable_patterns": 1,
-    "unused_imports": 11,
-    "unused_mut": 8,
+    "unused_imports": 9,
+    "unused_mut": 6,
     "unused_variables": 2
   },
   "moly-game": {
@@ -130,6 +128,16 @@
   },
   "moly-link": {
     "clippy::large_enum_variant": 1
+  },
+  "moly-mission": {
+    "clippy::map_flatten": 1,
+    "clippy::needless_borrow": 1,
+    "clippy::needless_lifetimes": 1,
+    "dead_code": 4,
+    "for_loops_over_fallibles": 1,
+    "private_interfaces": 8,
+    "unused_imports": 2,
+    "unused_mut": 2
   },
   "moly-plugin": {
     "clippy::manual_pattern_char_comparison": 1,

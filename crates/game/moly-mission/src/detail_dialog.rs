@@ -1,59 +1,58 @@
 //! `MysekaiMissionDetailDialog` (dialog type 339, Common2): one mission's
 //! progress, or one sheet's information.
 //!
-//! Source structure:
-//! - `ScreenLayerMysekaiMission.OnClickMysekaiMissionCell` opens the detail
-//!   with `Show2ButtonDialog<MysekaiMissionDetailDialog>(339).SetupProgress(viewData)`
-//!   when the tapped cell is not an achieved child and is not a complete
-//!   sheet — that is, for a normal mission still in progress, and for the
-//!   completion cell of a sheet that is not complete.
-//! - `SetupProgress`: `_progressContent` on and `_infomationContent` off; the
-//!   gauge `Setup(min(current, max), max)` with the progress clamped at 0; the
-//!   text `"{current}/{max}"`; `_missionText` the master's sentence;
-//!   `_rewardLabelText` `WORD_REWARD` with its background widened to
-//!   `preferredWidth + 32`; `SetupContentElement(480, count)`; the reward
-//!   list's `offsetMax.y` set to -240; `_buttonOK` off, because the
-//!   `_transitionMethod` it would run is null.
-//! - `SetupInformation` (`MysekaiMissionSheetCell.OnClickInfoButton`):
-//!   `_progressContent` off and `_infomationContent` on; `_infoMissionText`
-//!   the sheet's completion mission's sentence; `_rewardLabelText`
-//!   `WORD_COMPLETE_REWARD` with the same widened background; `_missionClearObj`
-//!   on with the mission complete; `SetupContentElement(390, count)`; the
-//!   reward list's `offsetMax.y` set to -150; `_buttonOK` off.
-//! - `SetupContentElement`: `_contentElement.preferredHeight = base +
-//!   min(count, 3) * 176 - 176`, `SetContentFirstIndex(0)`, and — one frame
-//!   later — `ScrollRect.enabled` and the vertical scrollbar's object active
-//!   exactly when the count is not 3.
-//! - `OnClickOK` (the footer's positive button) closes, as do `OnClickCancel`
-//!   (the footer's close button), `OnCloseExternal` (the window's close
-//!   button) and the hardware back key.
+//! Input: the request a cell's tap writes (the progress of a normal mission
+//! still in progress, or the information of a sheet's completion cell that
+//! is not complete); the master's rewards, converted to detail rows; the
+//! root's `MissionDetail` document and the `MysekaiMissionRewardCell`
+//! document as a row template ([`load_cell`]); the taps and the back key.
 //!
-//! Host mapping: the dialog takes the dialog slot
-//! (`ScreenManager::show_dialog` for dialog type 339) and draws a runtime copy
-//! of the root's `MissionDetail` document (`VIEW`), because the content height
-//! is written into the `ContentRoot`'s `LayoutElement` — the layout reads that
-//! serialized preferred height — so each opening installs a copy with the
-//! height `SetupContentElement` computes, while the published document stays
-//! as the root carries it. Both modes share that copy, its node set and its
-//! entity; the mode picks the content nodes, the label, the list's top and the
-//! height. The caller reads the request a cell's tap wrote and pushes the
-//! slot; the dialog's own view reads it and runs `SetupProgress` /
-//! `SetupInformation` there.
+//! Output: the dialog slot (dialog type 339) and its runtime copy of the
+//! `MissionDetail` document (`VIEW`), drawn in one of two modes, with one
+//! reward row per detail row; a close on any of the footer's buttons, the
+//! window's close button or the hardware back key.
 //!
-//! The reward rows: the list's `listViewItemPrefab` is the
-//! `MysekaiMissionRewardCell` prefab, which the UI root carries as a document
-//! of its own. The document is not one of the layouts the loader requests, so
-//! this unit reads it from the root the runtime draws from and admits it
-//! through that root's manifest ([`load_cell`]); the rows are copies of it
-//! under `ListView/Viewport/Content`, made by `UiPrefab::instantiate_children`
-//! on the runtime copy each `Setup` installs (a replaced document drops the
-//! subtrees copied into it, so the copies are made with it).
-//!
-//! `SetupContentElement` takes
-//! `MysekaiMissionUtility.ConvertRewardDataToDetailData(Rewards).Count`,
-//! which is not the master's reward-row count: the conversion is
-//! [`reward_rows`], its count sizes the content and draws one copy per row,
-//! and each copy runs `MysekaiMissionRewardCell.Setup` ([`draw_rows`]).
+//! Invariants:
+//! - The progress mode (`SetupProgress`, opened by
+//!   `ScreenLayerMysekaiMission.OnClickMysekaiMissionCell` with
+//!   `Show2ButtonDialog<MysekaiMissionDetailDialog>(339)`): the progress
+//!   content on and the information content off; the gauge
+//!   `Setup(min(current, max), max)` with the progress clamped at 0 (a
+//!   negative progress shows 0); the text
+//!   `"{current}/{max}"`; the master's sentence; the `WORD_REWARD` label with
+//!   its background widened to `preferredWidth + 32`; the content sized by
+//!   `SetupContentElement(480, count)`; the reward list's `offsetMax.y` at
+//!   -240; the OK button off, because the transition it would run is null.
+//! - The information mode (`SetupInformation`, from the sheet cell's info
+//!   button): the progress content off and the information content on; the
+//!   sheet's completion mission's sentence; the `WORD_COMPLETE_REWARD` label
+//!   with the same widened background; the clear object on with the mission
+//!   complete; the content sized by `SetupContentElement(390, count)`; the
+//!   reward list's `offsetMax.y` at -150; the OK button off.
+//! - The content height is `base + min(count, 3) * 176 - 176`, and the list
+//!   starts at its first index (`SetupContentElement`); one frame later the
+//!   scroll rect and the vertical scrollbar are active exactly when the
+//!   count is not 3.
+//! - The footer's positive button answers its OK and closes
+//!   (`OnClickOK`), and so do the footer's close button
+//!   (`OnClickCancel`), the window's close button (`OnCloseExternal`) and the
+//!   hardware back key.
+//! - The runtime copy (taken from the dialog slot for type 339) exists because
+//!   the content height is written into the
+//!   `ContentRoot`'s `LayoutElement`, whose serialized preferred height the
+//!   layout reads: each opening installs a copy with the height
+//!   `SetupContentElement` computes, while the published document stays as
+//!   the root carries it. Both modes share that copy, its node set and its
+//!   entity; the mode picks the content nodes, the label, the list's top and
+//!   the height.
+//! - The reward rows count
+//!   `MysekaiMissionUtility.ConvertRewardDataToDetailData(Rewards).Count`,
+//!   which is not the master's reward-row count: the conversion is
+//!   [`reward_rows`], its count sizes the content and draws one copy per row,
+//!   and each copy runs `MysekaiMissionRewardCell.Setup` ([`draw_rows`]).
+//!   The copies are made on the runtime copy each setup installs (a replaced
+//!   document drops the subtrees copied into it, so the copies are made with
+//!   it).
 //!
 //! Rendering limits:
 //! - A row's label: a resource row names its resource as
@@ -77,7 +76,7 @@
 //! info button, and that cell has no document in this root, so no request
 //! reaches it; one that does is refused and no slot is pushed.
 //!
-//! Named gaps: the window scale tween of `DialogBase` is not drawn and the
+//! Boundaries: the window scale tween of `DialogBase` is not drawn and the
 //! `DialogSizeFitter` window height is not recomputed, so the document's own
 //! layout groups take the content root's new preferred height; the footer
 //! close label is the document's serialized text.
@@ -96,15 +95,15 @@ use serde_json::Value;
 
 use super::cell::{component_at, widen_to_text, MissionDialogRequest, REWARD_CELL};
 use super::screen;
-use crate::action_button::ActionTapConsumed;
-use crate::canvas::RootCanvas;
-use crate::gesture::{GestureEvent, GestureState};
-use crate::ui_inputs::SITEMAP_LAYER;
-use crate::ui_layers::{
+use moly_features::action_button::ActionTapConsumed;
+use moly_features::canvas::RootCanvas;
+use moly_features::gesture::{GestureEvent, GestureState};
+use moly_features::ui_inputs::SITEMAP_LAYER;
+use moly_features::ui_layers::{
     DialogBackKey, DialogBackKeyEvent, DialogId, DialogType, DisplayLayerType, ScreenManager,
 };
-use crate::ui_layout::{UiLayouts, UiPrefabView};
-use crate::userdata::mission::ClientMission;
+use moly_features::ui_layout::{UiLayouts, UiPrefabView};
+use moly_features::userdata::mission::ClientMission;
 
 /// The root's document (`dialogs/MysekaiMissionDetailDialog.json`).
 pub const KEY: &str = "MissionDetail";
@@ -696,7 +695,7 @@ pub fn place(
         return;
     };
     if let (Ok(window), Some(canvas)) = (windows.single(), root_canvas.as_deref()) {
-        crate::canvas::set_scale(&mut transform, canvas.scale(window));
+        moly_features::canvas::set_scale(&mut transform, canvas.scale(window));
     }
     // The document root is the window's own node: an override hiding it
     // would hide the window, so the entity's visibility alone hides the
@@ -1117,7 +1116,7 @@ pub fn setup(
     dialog.set_up = true;
     let mut state = user.state();
     state.current_sheet = screen::current_sheet(masters, user);
-    let view_data = crate::userdata::mission::model::mission_state(masters, &state, master);
+    let view_data = moly_features::userdata::mission::model::mission_state(masters, &state, master);
     let data = SetupData {
         mode: dialog.mode,
         sentence: moly_law::text::custom_text_mesh::set_text(&master.sentence, false),
@@ -1196,7 +1195,7 @@ pub fn click(
     mut consumed: ResMut<ActionTapConsumed>,
     layouts: Res<UiLayouts>,
     world: DialogWorld,
-    mut sounds: ResMut<crate::audio::SeRequests>,
+    mut sounds: ResMut<moly_features::audio::SeRequests>,
 ) {
     if dialog.shown.is_none() {
         gestures.clear();

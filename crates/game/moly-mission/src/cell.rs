@@ -1,48 +1,59 @@
-//! `MysekaiMissionCell` on the mission screen's list, with the two list cells
-//! of the mission dialogs alongside it.
+//! The mission screen's list cell (`MysekaiMissionCell`), with the list cells
+//! of the two mission dialogs alongside it.
 //!
-//! Source structure:
-//! - `MysekaiMissionView.CreateMissionList`: the page's own cell is the
-//!   sheet's completion mission (`_completeCell`, which the screen unit
-//!   draws); the list holds one cell per normal mission whose status is not
-//!   received.
-//! - `MysekaiMissionView.Refresh`: `ListView.CreateViewItem(count)` then
-//!   `SetContentFirstIndex(0)`.
-//! - `MysekaiMissionCell.Setup`: the top reward thumbnail under
-//!   `RewardThumbnailRoot`, `SetProgress`, `SetMissionContent`,
-//!   `SetCompleteLabel`, then `_otherLabel` hidden.
-//! - `MissionCellView.SetProgress`: the gauge `Setup(min(current, max), max)`
-//!   with the progress clamped at 0, and the text `"{current}/{max}"`.
-//! - `MissionCellView.SetMissionContent`: `ChangeNonBreakingSpace` of the
-//!   mission's sentence.
-//! - `MissionCellView.SetCompleteLabel`: the achievement label on with the
-//!   mission complete, and `cellBaceImage.color` `#ffffee` when complete,
-//!   `Color.white` otherwise.
-//! - `MysekaiMissionView.OnClickMissionCell`: a tapped row reaches
-//!   `ScreenLayerMysekaiMission.OnClickMysekaiMissionCell`.
-//! - `ListView.SetListViewItemVertical` / `ListView.SetContentSize`: a row's
-//!   anchored position is the list's left padding and `-row * (cell height +
-//!   spacing) - top padding`, and the content's height is the rows' height
-//!   plus the padding, less the last spacing.
+//! Input: the screen document's own `MysekaiMissionCell` (the template); the
+//! composed page's `ListView/Viewport/Content`; the listed missions and the
+//! model's per-mission view ([`model::MissionView`]); the pointer's presses and
+//! its wheel; the layout's wording.
 //!
-//! Host mapping: the list's `listViewItemPrefab` is the
-//! `MysekaiMissionScreenCell` prefab, which this root has no document for.
-//! The screen document's own `MysekaiMissionCell` (the same cell, holding the
-//! completion mission) is the template: `UiPrefab::instantiate_children`
-//! copies its subtree once per row under each page's
-//! `ListView/Viewport/Content`, each copy names its own button, and the
-//! composed document is drawn by [`crate::mission::screen`]'s view, whose
-//! `UiPrefabView` accepts the copies' `@<identity>` selectors. A copy's gauge
-//! fill keeps its source's serialized reference, so the fill is drawn on the
-//! copy's own Mask, which [`GaugeFill`] remaps through the instance. Rows past
-//! the page's count stay hidden.
+//! Output: one subtree copied per listed mission under each page's content
+//! (`UiPrefab::instantiate_children`), each copy naming its own button; the
+//! copy's reward thumbnail, gauge, progress text and achievement label; a
+//! tapped row's [`MissionDialogRequest`].
+//!
+//! Invariants:
+//! - The page's own cell is the sheet's completion mission (`_completeCell`,
+//!   which the screen draws); the list holds one cell per normal mission
+//!   whose status is not received (`MysekaiMissionView.CreateMissionList`).
+//! - The list makes its rows once per count and starts at the first one
+//!   (`ListView.CreateViewItem(count)`, then `SetContentFirstIndex(0)`).
+//! - A cell's setup writes the top reward thumbnail under
+//!   `RewardThumbnailRoot`, the progress, the mission's sentence, the
+//!   achievement label, and hides the other-kinds label
+//!   (`MysekaiMissionCell.Setup`).
+//! - The gauge shows `min(current, max)` of `max`, with the progress clamped
+//!   at 0, and its text is `"{current}/{max}"`
+//!   (`MissionCellView.SetProgress`).
+//! - The mission's sentence is shown with its non-breaking spaces changed
+//!   (`MissionCellView.SetMissionContent`).
+//! - The achievement label is on while the mission is complete, and the cell's
+//!   own image is `#ffffee` when complete and `Color.white` otherwise
+//!   (`MissionCellView.SetCompleteLabel`).
+//! - A row's anchored position is the list's left padding and
+//!   `-row * (cell height + spacing) - top padding`; the content's height is
+//!   the rows' height plus the padding, less the last spacing
+//!   (`ListView.SetListViewItemVertical`, `ListView.SetContentSize`).
+//! - A tapped row reaches the screen's cell handler
+//!   (`ScreenLayerMysekaiMission.OnClickMysekaiMissionCell` via
+//!   `MysekaiMissionView.OnClickMissionCell`).
+//!
+//! A copy's gauge fill keeps its source's serialized reference, so the fill
+//! is drawn on the copy's own Mask, which [`GaugeFill`] remaps through the
+//! instance. Rows past the page's count stay hidden. The composed document
+//! is drawn by [`crate::screen`]'s view, whose `UiPrefabView` accepts the
+//! copies' `@<identity>` selectors.
+//!
+//! Boundary: the list's `listViewItemPrefab` is the
+//! `MysekaiMissionScreenCell` prefab, which this root has no document for;
+//! the screen document's own cell stands in for it as the template (see the
+//! invariants above).
 //!
 //! The list dialog's `MysekaiMissionSheetCell` has a document of its own,
-//! which that dialog reads and draws for itself ([`crate::mission::list_dialog`]).
+//! which that dialog reads and draws for itself ([`crate::list_dialog`]).
 //! The detail dialog's `MysekaiMissionRewardCell` has a document of its own,
 //! which that dialog reads for itself.
 //!
-//! Named gaps:
+//! Boundaries (each a named line, nothing drawn in its place):
 //! - The reward thumbnails: neither cell's thumbnail prefab nor the reward
 //!   art is in this root, and the masters carry no `resourceBoxes` table to
 //!   resolve a box reward's contents; `Reward/Base` stands as the cell's one
@@ -65,15 +76,15 @@ use bevy::window::PrimaryWindow;
 use moly_assets::ui_layout::{UiComponent, UiInstance, UiNode, UiPrefab};
 use serde_json::Value;
 
-use crate::userdata::mission::model;
+use moly_features::userdata::mission::model;
 use super::screen;
-use crate::canvas::RootCanvas;
-use crate::gesture::{GestureEvent, GestureKind, GestureState};
-use crate::menu_shell::ShellDialogState;
-use crate::ui_inputs;
-use crate::ui_layers::ScreenManager;
-use crate::ui_layout::{tmp_layout, UiLayouts, UiPrefabView};
-use crate::userdata::mission::ClientMission;
+use moly_features::canvas::RootCanvas;
+use moly_features::gesture::{GestureEvent, GestureKind, GestureState};
+use moly_features::menu_shell::ShellDialogState;
+use moly_features::ui_inputs;
+use moly_features::ui_layers::ScreenManager;
+use moly_features::ui_layout::{tmp_layout, UiLayouts, UiPrefabView};
+use moly_features::userdata::mission::ClientMission;
 
 /// One cell per listed mission. This branch's sheets hold at most nine normal
 /// missions, so twelve rows cover every page.

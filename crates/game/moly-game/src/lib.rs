@@ -355,7 +355,7 @@ pub fn app(
     ));
     app.add_plugins(delivery::DeliveryPlugin);
     app.add_plugins(moly_convert::ConvertPlugin);
-    app.add_plugins(moly_features::mission::MissionPlugin);
+    app.add_plugins(moly_mission::MissionPlugin);
     app.add_plugins(ui_particle::UiParticlePlugin);
     common_dialog::install(&mut app);
     moly_ui::subwindow_dialog::install(&mut app);

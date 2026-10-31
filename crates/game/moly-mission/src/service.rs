@@ -1,46 +1,46 @@
 //! `MysekaiMissionService`: the mission screen's one receive request.
 //!
-//! The service holds one request (the mission ids, and the sheet the screen
-//! named) and sends it as `PostUserMysekaiNormalMissionRewardApi`
-//! (`Call::NormalMissionReward`). `MysekaiMissionService.Receive(sheetId,
-//! missionId, callback)` is a cell's receive and `.BulkReceive(sheetId,
-//! missionIds, callback)` the bulk button's; both write the one request and
-//! both are sent by `MysekaiMissionService.ExecuteRewardApi` through
-//! `APIExecutor.Execute(caller, null, null, RetryCancel, Stay)`.
+//! Input: a receive a cell or the bulk button asks for (the sheet's id, the
+//! mission ids and a callback); the client's mission copy; the link and the
+//! user data reader's answers ([`Answered`]).
 //!
-//! The answer follows `MysekaiMissionService`'s own handlers: the success
-//! callback runs only when the answer is the API's success state and its
-//! reply carries `updatedResources` and `obtainedRewards`
-//! (`MysekaiMissionService.cs`'s `(ApiStatus.SuccessComplete, response)`
-//! branch); otherwise the failure callback runs with no response, and its
-//! `APIExecutor`'s RetryCancel shows the retry-or-cancel dialog, which this
-//! tree does not build (named in the log). In either case the request is
-//! released, so a second receive can be sent.
+//! Output: one request sent as `PostUserMysekaiNormalMissionRewardApi`
+//! (`Call::NormalMissionReward`, [`MysekaiMissionService`]); on its success,
+//! [`MissionReceived`] with the reply's resources and rewards, otherwise
+//! [`MissionReceiveFailed`]; the levels the reply's sections changed
+//! ([`MissionLevelsBefore`]).
 //!
-//! One request is in flight at a time: the source's `Receive` and
-//! `BulkReceive` each overwrite the service's one request, so a second call
-//! before the first answer would replace it; here the second call is
-//! refused by name ([`MysekaiMissionService::send`]).
+//! Invariants:
+//! - One request is in flight at a time: a cell's receive
+//!   (`MysekaiMissionService.Receive`) and the bulk button's
+//!   (`.BulkReceive`) both write the one request, and a second call before
+//!   the first answer is refused by name
+//!   ([`MysekaiMissionService::send`]) rather than replacing it.
+//! - The success callback runs only when the answer is the API's success
+//!   state and its reply carries `updatedResources` and `obtainedRewards`
+//!   (`ApiStatus.SuccessComplete` with the response); otherwise the failure
+//!   callback runs with no response. In either case the request is released,
+//!   so a second receive can be sent.
+//! - `IsCompleteSheet` is the model's
+//!   ([`moly_features::userdata::mission::model::ReceiveRequest::is_complete_sheet`])
+//!   and is read from the request kept while it is in flight.
 //!
-//! Named refusals:
-//! - The tutorial API variant (`PostUserMysekaiTutorialNormalMissionRewardApi`,
-//!   sent while `MysekaiTutorialManager.IsTutorial`) is refused by name: this
-//!   tree has no tutorial domain.
-//! - `IsCompleteSheet` (`MysekaiMissionService.cs`) is the model's
-//!   ([`crate::userdata::mission::model::ReceiveRequest::is_complete_sheet`]) and is
-//!   read from the request kept while it is in flight.
-//! - The reward chain (`ShowRewards`) is not built here (a later unit): a
-//!   success is published as [`MissionReceived`] and the screen logs the
-//!   chain's call.
+//! Boundaries (each a named line, nothing shown in its place):
+//! - The tutorial API variant
+//!   (`PostUserMysekaiTutorialNormalMissionRewardApi`, sent while
+//!   `MysekaiTutorialManager.IsTutorial`): this tree has no tutorial domain.
+//! - The failure's retry-or-cancel dialog (`APIExecutor`'s RetryCancel).
+//! - The reward chain (`ShowRewards`): a success is published as
+//!   [`MissionReceived`] and the screen logs the chain's call.
 
 use bevy::prelude::*;
 use moly_link::ServerLink;
 use moly_protocol::api::{UserMysekaiNormalMissionRewardRequest, UserMysekaiNormalMissionRewardResponse};
 use moly_protocol::{Call, CallKind, Refusal, Reply};
 
-use crate::userdata::mission::model::ReceiveRequest;
-use crate::userdata::mission::ClientMission;
-use crate::userdata::ServerPending;
+use moly_features::userdata::mission::model::ReceiveRequest;
+use moly_features::userdata::mission::ClientMission;
+use moly_features::userdata::ServerPending;
 
 /// The call the receive sends.
 const CALL: CallKind = CallKind::NormalMissionReward;
@@ -67,8 +67,8 @@ impl MissionRequest {
 #[derive(Resource, Debug, Default)]
 pub struct MysekaiMissionService {
     in_flight: Option<MissionRequest>,
-    /// The last request, whether it succeeded or not (`_missionSheetId`
-    /// survives an answer in the source).
+    /// The last request, whether it succeeded or not (the sheet's id
+    /// `_missionSheetId` survives an answer).
     last: Option<MissionRequest>,
     /// Why the last call was refused before it was sent.
     refused: Option<String>,
@@ -230,8 +230,8 @@ fn is_level_up(before: Option<i32>, after: Option<i32>) -> bool {
 /// PreUpdate, right after the reader applied the arrival's sections: the
 /// copy of the levels the reply's own sections would change.
 pub fn remember_levels(
-    client: Option<Res<crate::userdata::ClientUserData>>,
-    inventory: Option<Res<crate::userdata::inventory::ClientMysekaiInventory>>,
+    client: Option<Res<moly_features::userdata::ClientUserData>>,
+    inventory: Option<Res<moly_features::userdata::inventory::ClientMysekaiInventory>>,
     mut before: ResMut<MissionLevelsBefore>,
 ) {
     *before = MissionLevelsBefore {
@@ -249,17 +249,17 @@ pub const RECEIVE: CallKind = CALL;
 ///
 /// A link that cannot send the call answers it with a `link_lost` refusal,
 /// and the features read that answer against the calls they remember
-/// ([`crate::userdata::SentCalls`]): the last receive of that kind is the
+/// ([`moly_features::userdata::SentCalls`]): the last receive of that kind is the
 /// one this service holds, so a `link_lost` answer of the receive's kind,
 /// which does not match the request in flight (another send took its
 /// number), still finishes the request rather than leaving it unanswered.
 pub fn answers(
-    mut answers: MessageReader<crate::userdata::Answered>,
+    mut answers: MessageReader<moly_features::userdata::Answered>,
     mut service: ResMut<MysekaiMissionService>,
-    sent: Res<crate::userdata::SentCalls>,
+    sent: Res<moly_features::userdata::SentCalls>,
     before: Res<MissionLevelsBefore>,
-    client: Option<Res<crate::userdata::ClientUserData>>,
-    inventory: Option<Res<crate::userdata::inventory::ClientMysekaiInventory>>,
+    client: Option<Res<moly_features::userdata::ClientUserData>>,
+    inventory: Option<Res<moly_features::userdata::inventory::ClientMysekaiInventory>>,
     mut mission: Option<ResMut<ClientMission>>,
     mut received: MessageWriter<MissionReceived>,
     mut failed: MessageWriter<MissionReceiveFailed>,

@@ -5511,6 +5511,7 @@ dependencies = [
  "moly-layout",
  "moly-link",
  "moly-masters",
+ "moly-mission",
  "moly-perf",
  "moly-protocol",
  "moly-render",
@@ -5586,6 +5587,20 @@ dependencies = [
  "moly-law",
  "moly-protocol",
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "moly-mission"
+version = "0.0.5"
+dependencies = [
+ "bevy",
+ "moly-assets",
+ "moly-features",
+ "moly-law",
+ "moly-link",
+ "moly-masters",
+ "moly-protocol",
  "serde_json",
 ]
 
