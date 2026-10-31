@@ -219,6 +219,15 @@ struct SiteExtension {
 }
 
 @group(3) @binding(13) var<uniform> site_extension: SiteExtension;
+// The stencil clip mask (blue: the opaque ground's stencil test, NotEqual
+// against the ground-clip id). A pixel outside it passes.
+@group(3) @binding(14) var clip_mask: texture_2d<f32>;
+
+fn clip_mask_fails(position: vec2<f32>) -> bool {
+    let texel = vec2<u32>(position);
+    return all(texel < textureDimensions(clip_mask))
+        && textureLoad(clip_mask, texel, 0).b < 0.5;
+}
 
 // ---- 色彩域（改这个文件里任何一条算术之前先读）----
 //
@@ -710,6 +719,9 @@ fn toon_ramp(half_lambert: f32, threshold: f32, smoothness: f32) -> f32 {
 // 片元按族分臂：每条管线恰有一个族键，预处理后只剩一臂（各自带 return）。
 @fragment
 fn fragment(in: SiteVertexOutput) -> @location(0) vec4<f32> {
+    @if(SITE_GROUND_CLIP) if clip_mask_fails(in.position.xy) {
+        discard;
+    }
     // ---- FieldObject 族 ----
     // 主贴图带全局 mip 偏置采样。
     @if(SITE_FIELDOBJECT) let base = textureSampleBias(main_tex, main_sampler, in.uv, env.mip_bias.x);

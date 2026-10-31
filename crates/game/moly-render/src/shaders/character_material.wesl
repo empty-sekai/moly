@@ -18,13 +18,6 @@ import bevy_pbr::render::forward_io::Vertex;
 import bevy_pbr::render::mesh_functions;
 import bevy_pbr::render::skinning;
 import bevy_pbr::render::view_transformations::position_world_to_clip;
-import bevy_pbr::render::mesh_view_bindings::view;
-
-// The eye overlay (CHARACTER_EYEBROW) is drawn blended and pulled this far
-// toward the camera along the view ray: the same character's hair in front of
-// the eye then covers it no more, while geometry farther in front still hides
-// it. World units.
-const EYEBROW_PULL: f32 = 0.05;
 
 // ---- 材质 uniform（group 3 binding 0）：每条 Unity 属性一个槽 ----
 
@@ -32,6 +25,7 @@ struct CharacterParams {
     // x: _CharacterShaderUsage · y: _EyebrowClip · z: _EyebrowAlpha ·
     // w: _UseDither。
     usage_and_eyebrow: vec4<f32>,
+    // x: _Brightness · y: _EyebrowStencil.
     brightness: vec4<f32>,
     override_shading_parameter: vec4<f32>,
     local_body_shading_intensity: vec4<f32>,
@@ -69,6 +63,20 @@ struct CharacterEnv {
 @group(3) @binding(5) var body_mask_sampler: sampler;
 @group(3) @binding(6) var eyebrow_tex: texture_2d<f32>;
 @group(3) @binding(7) var eyebrow_sampler: sampler;
+// The stencil clip mask: alpha holds the stencil value / 255 where it is the
+// reference of a shown eyebrow pass. A pixel outside it holds no value.
+@group(3) @binding(8) var clip_mask: texture_2d<f32>;
+
+// The eyebrow pass's stencil test, Equal against the material's own
+// `_EyebrowStencil` (params.brightness.y).
+fn eyebrow_stencil_fails(position: vec2<f32>) -> bool {
+    let texel = vec2<u32>(position);
+    if any(texel >= textureDimensions(clip_mask)) {
+        return true;
+    }
+    let value = u32(round(textureLoad(clip_mask, texel, 0).a * 255.0));
+    return value != u32(params.brightness.y);
+}
 
 // ---- 顶点输出 ----
 
@@ -102,9 +110,7 @@ fn vertex(mesh: Vertex) -> CharacterVertexOutput {
         world_from_local,
         vec4<f32>(mesh.position, 1.0),
     );
-    @if(CHARACTER_EYEBROW) let pulled = world_position.xyz + normalize(view.world_position.xyz - world_position.xyz) * EYEBROW_PULL;
-    @if(!CHARACTER_EYEBROW) let pulled = world_position.xyz;
-    let clip = position_world_to_clip(pulled);
+    let clip = position_world_to_clip(world_position.xyz);
 
     var out: CharacterVertexOutput;
     out.position = clip;
@@ -196,6 +202,10 @@ fn fragment(in: CharacterVertexOutput) -> @location(0) vec4<f32> {
         if params.dither_alpha.x - bayer_value(in.screen_pos) < 0.0 {
             discard;
         }
+    }
+
+    @if(CHARACTER_EYEBROW) if eyebrow_stencil_fails(in.position.xy) {
+        discard;
     }
 
     // 眉纹理 r；discard 门槛低于零丢弃，恰等于门槛不丢。

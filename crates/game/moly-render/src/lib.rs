@@ -61,6 +61,7 @@ pub mod weather_fx;
 pub mod weather_depth;
 pub mod source_render_state;
 pub mod source_shader;
+pub mod source_stencil;
 pub mod source_color;
 pub mod source_camera;
 pub mod source_particle;

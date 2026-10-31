@@ -33,9 +33,11 @@
 //! avatar's meshes with the stencil test Equal 1 and the pass's operations
 //! against that stencil, the depth test Greater against the camera's own
 //! depth, and the pass's blend computed in the encoded values of the
-//! source's gamma colour space. The replay runs only while a room door's
-//! stencil mesh is shown; with no writer of 1 the stencil holds no 1, and
-//! the pass is known to draw nothing.
+//! source's gamma colour space. The silhouette is drawn only while a room
+//! door's stencil mesh is shown; with no writer of 1 the stencil holds no 1,
+//! and the pass is known to draw nothing. The replay itself runs while any
+//! of its readers is shown: a door's stencil mesh, a ground-clip mesh, or a
+//! character eyebrow pass.
 //!
 //! # The room shell's stencil tests
 //!
@@ -51,31 +53,57 @@
 //! queue left. The room shell programs of those two attributes keep a pixel
 //! only where their channel holds 1. Without a replay the mask holds each
 //! test's result on a stencil of 0, the stencil no draw has written; without
-//! the graphics configuration it holds 1 in both channels.
+//! the graphics configuration it holds 1 in every channel.
 //!
-//! Draws replayed: the room door's parts (by the attribute the door binds on
-//! them, [`SourceStencilAttribute`]), the room shell (floor, walls, entrance),
-//! the fixtures with the fixture material, the player avatar and the NPCs.
+//! # The ground's stencil test
+//!
+//! The opaque ground's row tests NotEqual against the ground-clip id (3 in
+//! the table) at its queue. Its writer is the ground-clip program: the
+//! colourless stencil mesh a pool or a bath carries, drawn before the
+//! ground with no colour, no depth write and its stencil comparison
+//! Disabled. Disabled is not "no stencil": the engine enables the stencil
+//! state whenever an operation or comparison differs from the defaults and
+//! maps the Disabled comparison to Always, so the mesh writes 3 where it
+//! passes the depth test, and the ground is cut away over the water. The
+//! blue channel holds this test; the site ground programs keep a pixel only
+//! where it holds 1.
+//!
+//! # The eyebrow pass
+//!
+//! The character programs write their own stencil reference (the material's
+//! eyebrow stencil value) with Always and Replace. Their eyebrow pass runs
+//! after the transparents with depth test Always and stencil Equal against
+//! that reference, so an eyebrow shows exactly where its own character was
+//! the last stencil writer, over its own hair and not through anyone else.
+//! After the replay, one draw per distinct reference of the shown eyebrow
+//! passes writes the reference / 255 into the mask's alpha where the
+//! stencil holds it; the eyebrow program keeps a pixel only where the alpha
+//! equals its own reference.
+//!
+//! Draws replayed: the room door's parts and the fixtures' colourless
+//! stencil meshes (by the attribute bound on them,
+//! [`SourceStencilAttribute`]), the room shell (floor, walls, entrance), the
+//! fixtures with the fixture material, the player avatar and the NPCs.
 //!
 //! # Cases this cannot match (named)
 //!
 //! - Draws of other programs are not replayed and are counted in the account
 //!   line (with the names of their nodes, once per room visit): canvas,
-//!   transparent-block and tree fixtures, window stencil masks, the room's
+//!   transparent-block and tree fixtures, the room's
 //!   plain background (its stencil test is Equal 0 with Keep and never
-//!   changes a 1), effects and particles. A window mask in front of a door
-//!   would turn door pixels from 1 to 2.
+//!   changes a 1), effects and particles.
 //! - Alpha-clipped and dithered fragments are replayed whole: the source
 //!   discards them before its stencil write. An NPC whose dither alpha is 0
 //!   with its dither gate on discards every fragment and is left out.
-//! - The NPC stencil reference is the character's own id (4 i + 4); the
-//!   replay writes 4 for all of them. Every such id is at least 4, never 1.
+//! - The site's ground and other draws the replay does not carry write no
+//!   stencil here; where the source's ground writes Zero under its own test,
+//!   the replay keeps the value below it.
 //! - The source's silhouette writes the avatar's depth into the camera depth;
 //!   here the camera depth is only read.
 //! - Face morphs are not applied to the replayed meshes.
-//! - In the main pass only the wall and door-outside programs apply their
-//!   stencil test; the other programs whose rows test the stencil (the
-//!   floor and ground lookups, window clips, fixtures) draw without it.
+//! - In the main pass only the wall, door-outside, site ground and eyebrow
+//!   programs apply their stencil test; the other programs whose rows test
+//!   the stencil (the floor lookups, window clips, fixtures) draw without it.
 //! - The clip mask follows the first active 3D camera's target; a view of
 //!   another size gets no replay that frame and is counted.
 //! - The source's pipeline renders MySekai single-sample (its asset's MSAA
@@ -103,7 +131,7 @@ use bevy::prelude::*;
 use bevy::render::camera::ExtractedCamera;
 use bevy::render::mesh::allocator::MeshAllocator;
 use bevy::render::mesh::{RenderMesh, RenderMeshBufferInfo};
-use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
+use bevy::render::extract_resource::ExtractResourcePlugin;
 use bevy::render::render_asset::RenderAssets;
 use bevy::ecs::schedule::ScheduleLabel;
 use bevy::render::render_resource::binding_types::uniform_buffer_sized;
@@ -114,10 +142,15 @@ use bevy::render::view::{ExtractedView, ViewDepthStencilTexture, ViewTarget};
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems};
 use moly_assets::json::JsonAsset;
 use moly_assets::scene_state::SourceInactive;
+use moly_render::source_stencil::{source_attribute, CLIP_MASK_FORMAT};
+pub use moly_render::source_stencil::{
+    object_usage_attribute, SourceStencilAttribute, StencilClipMask,
+};
 use serde_json::Value;
 
 use crate::avatar_material::AvatarMaterial;
 use crate::character_material::CharacterMaterial;
+use crate::site_material::SiteMaterial;
 use crate::fixture_material::FixtureMaterial;
 use crate::render::gpu::{Bound, SharedBindGroupCache};
 use crate::room_shell::{RoomShellKey, RoomShellMaterial, ShellProgram};
@@ -147,6 +180,7 @@ const STENCIL_ID_TABLE: [u32; 6] = [0, 2, 1, 3, 2, 0];
 /// Shader attribute values (the settings rows' `shaderAttribute`).
 mod attribute {
     pub const GROUND_OPAQUE: u8 = 1;
+    pub const GROUND_CLIP: u8 = 2;
     pub const WALL: u8 = 3;
     pub const DOOR_WALL_CLIP: u8 = 4;
     pub const FIXTURE_OBJECT_OPAQUE: u8 = 5;
@@ -158,16 +192,17 @@ mod attribute {
     pub const RUG_ALPHA_BLENDED: u8 = 29;
 }
 
-/// A room shell attribute whose stencil test the main pass applies through
-/// the clip mask.
+/// An attribute whose stencil test the main pass applies through the clip
+/// mask: the room shell's wall and door outside, and the site ground.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum StencilClip {
     Wall,
     DoorOutside,
+    Ground,
 }
 
 impl StencilClip {
-    const ALL: [Self; 2] = [Self::Wall, Self::DoorOutside];
+    const ALL: [Self; 3] = [Self::Wall, Self::DoorOutside, Self::Ground];
 
     /// The clip of an object-program material, by its usage's attribute.
     pub fn of_object_usage(usage: u32) -> Option<Self> {
@@ -182,14 +217,17 @@ impl StencilClip {
         match self {
             Self::Wall => attribute::WALL,
             Self::DoorOutside => attribute::DOOR_OUTSIDE,
+            Self::Ground => attribute::GROUND_OPAQUE,
         }
     }
 
-    /// The mask channel: red the wall, green the door outside.
+    /// The mask channel: red the wall, green the door outside, blue the
+    /// ground.
     fn channel(self) -> usize {
         match self {
             Self::Wall => 0,
             Self::DoorOutside => 1,
+            Self::Ground => 2,
         }
     }
 
@@ -197,32 +235,18 @@ impl StencilClip {
         match self {
             Self::Wall => ColorWrites::RED,
             Self::DoorOutside => ColorWrites::GREEN,
+            Self::Ground => ColorWrites::BLUE,
         }
     }
 
-    /// The room shell program's shader def that reads the channel.
+    /// The room shell program's shader def that reads the channel. The
+    /// ground's channel is read by the site ground program, not a shell.
     pub fn shader_def(self) -> &'static str {
         match self {
             Self::Wall => "ROOM_CLIP_RED",
             Self::DoorOutside => "ROOM_CLIP_GREEN",
+            Self::Ground => "ROOM_CLIP_BLUE",
         }
-    }
-}
-
-const CLIP_MASK_FORMAT: TextureFormat = TextureFormat::Rg8Unorm;
-
-/// The clip mask's texture, at the size of the 3D camera's target.
-#[derive(Resource, Clone, ExtractResource)]
-#[extract_app(bevy::render::RenderApp)]
-pub struct StencilClipMask {
-    pub image: Handle<Image>,
-    size: UVec2,
-}
-
-impl StencilClipMask {
-    /// Whether a prepared texture has the size the main world gave the mask.
-    pub fn fits(&self, size: Extent3d) -> bool {
-        size.width == self.size.x && size.height == self.size.y
     }
 }
 
@@ -245,20 +269,19 @@ fn init_clip_mask(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     image.texture_descriptor.label = Some("stencil_clip_mask");
     image.texture_descriptor.usage =
         TextureUsages::TEXTURE_BINDING | TextureUsages::RENDER_ATTACHMENT;
-    commands.insert_resource(StencilClipMask {
-        image: images.add(image),
-        size,
-    });
+    commands.insert_resource(StencilClipMask::new(images.add(image), size));
 }
 
-/// Sizes the mask to the first active 3D camera's target. The room shell
-/// materials' bind groups hold the mask's view, so every one is marked
-/// modified and rebuilt with the new texture.
+/// Sizes the mask to the first active 3D camera's target. The room shell,
+/// site and character materials' bind groups hold the mask's view, so every
+/// one is marked modified and rebuilt with the new texture.
 fn size_clip_mask(
     mut mask: ResMut<StencilClipMask>,
     cameras: Query<&Camera, With<Camera3d>>,
     mut images: ResMut<Assets<Image>>,
     mut shells: ResMut<Assets<RoomShellMaterial>>,
+    mut sites: ResMut<Assets<SiteMaterial>>,
+    mut characters: ResMut<Assets<CharacterMaterial>>,
 ) {
     let Some(size) = cameras
         .iter()
@@ -267,15 +290,17 @@ fn size_clip_mask(
     else {
         return;
     };
-    if size == mask.size || size.min_element() == 0 {
+    if size == mask.size() || size.min_element() == 0 {
         return;
     }
     let Some(image) = images.get_mut(&mask.image).map(|asset| asset.into_inner()) else {
         return;
     };
     image.resize(extent(size));
-    mask.size = size;
+    mask.set_size(size);
     for _ in shells.iter_mut() {}
+    for _ in sites.iter_mut() {}
+    for _ in characters.iter_mut() {}
 }
 
 /// Opaque queues end here; above it a queue is transparent.
@@ -294,10 +319,21 @@ struct StencilRule {
 /// A replayed draw's depth and stencil state, in the product's reversed depth.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct ReplayState {
-    /// `None`: the stencil test is disabled (comparison 0).
+    /// `None`: the draw has no stencil state (it neither tests nor writes).
     stencil: Option<StencilRule>,
     depth_compare: CompareFunction,
     depth_write: bool,
+}
+
+impl ReplayState {
+    /// The state a pipeline is built for: the reference is set per draw
+    /// (`set_stencil_reference`), so draws that differ only in it share one.
+    fn pipeline_key(self) -> Self {
+        Self {
+            stencil: self.stencil.map(|rule| StencilRule { reference: 0, ..rule }),
+            ..self
+        }
+    }
 }
 
 const fn always(reference: u32, pass: StencilOperation) -> Option<StencilRule> {
@@ -318,11 +354,14 @@ const AVATAR_PASS: ReplayState = ReplayState {
     depth_write: true,
 };
 /// The NPC program's colour pass: the character's stencil id, Always,
-/// Replace. The id is 4 i + 4 for character index i; 4 stands for all.
-const NPC_PASS: ReplayState = ReplayState {
-    stencil: always(4, StencilOperation::Replace),
-    ..AVATAR_PASS
-};
+/// Replace. The id is the material's `_EyebrowStencil` (4 i + 4 for
+/// character index i), set per draw by [`npc_pass`].
+const fn npc_pass(reference: u32) -> ReplayState {
+    ReplayState {
+        stencil: always(reference, StencilOperation::Replace),
+        ..AVATAR_PASS
+    }
+}
 /// The NPC accessory program's colour pass: reference 0, Always, Zero.
 const NPC_ACCESSORY_PASS: ReplayState = ReplayState {
     stencil: always(0, StencilOperation::Zero),
@@ -342,8 +381,16 @@ const SILHOUETTE_STENCIL: StencilFaceState = StencilFaceState {
 
 /// Unity's CompareFunction as a stencil comparison (reference against the
 /// buffer value, the order wgpu compares in).
+///
+/// Disabled (0) passes every fragment and keeps the pass's operations. A
+/// pass whose stencil state is bound to material properties always has its
+/// stencil enabled (the engine turns the stencil on for any face state that
+/// is not the default Always/Keep with literal values), the comparison is
+/// stored as given, and every graphics back end maps Disabled to Always.
+/// So the ground clip's row (comparison 0, pass Replace) writes its id.
 fn stencil_compare(value: u64) -> Result<CompareFunction, String> {
     Ok(match value {
+        0 => CompareFunction::Always,
         1 => CompareFunction::Never,
         2 => CompareFunction::Less,
         3 => CompareFunction::Equal,
@@ -472,22 +519,17 @@ fn parse_row(row: &Value) -> Result<AttributeRule, String> {
     if !flag("isActiveZTest")? || !flag("isActiveZWrite")? {
         return Err("depth state left to the material".into());
     }
-    let comparison = int("stencilComp")?;
-    let stencil = if comparison == 0 {
-        None
-    } else {
-        let id = int("stencilIdReference")? as usize;
-        let reference = *STENCIL_ID_TABLE
-            .get(id)
-            .ok_or_else(|| format!("stencil id reference {id} is outside the table"))?;
-        Some(StencilRule {
-            reference,
-            compare: stencil_compare(comparison)?,
-            pass: stencil_op(int("stencilPassOp")?)?,
-            fail: stencil_op(int("stencilFailOp")?)?,
-            depth_fail: stencil_op(int("stencilZFailOp")?)?,
-        })
-    };
+    let id = int("stencilIdReference")? as usize;
+    let reference = *STENCIL_ID_TABLE
+        .get(id)
+        .ok_or_else(|| format!("stencil id reference {id} is outside the table"))?;
+    let stencil = Some(StencilRule {
+        reference,
+        compare: stencil_compare(int("stencilComp")?)?,
+        pass: stencil_op(int("stencilPassOp")?)?,
+        fail: stencil_op(int("stencilFailOp")?)?,
+        depth_fail: stencil_op(int("stencilZFailOp")?)?,
+    });
     Ok(AttributeRule {
         queue,
         state: ReplayState {
@@ -552,54 +594,10 @@ fn settle_rules(
     }
 }
 
-/// The source shader attribute of a draw whose program the product does not
-/// run: the room door's parts, bound by the door from its sidecar materials.
-#[derive(Component, Clone, Copy, Debug)]
-pub struct SourceStencilAttribute(pub u8);
-
-/// The object program's usage switch, its cells with a fixed attribute.
-/// Usages 0 and 14 go to the ground lookup, 4 and 13 to the basic-fixture
-/// lookup and 8 to the field-object lookup, each of which reads further
-/// properties; those are not decided by the usage.
-fn object_usage_attribute(usage: u32) -> Option<u8> {
-    Some(match usage {
-        1 => 2,
-        2 => 3,
-        3 => 4,
-        5 => 7,
-        6 => 8,
-        7 => 9,
-        9 => 12,
-        10 => 14,
-        11 => 18,
-        12 => 17,
-        15 => 22,
-        _ => return None,
-    })
-}
-
-/// The shader attribute of a door sidecar material: the object program by
-/// its usage, the basic-fixture program by its usage and blend mode (a
-/// property the material lacks reads 0, as the source lookup reads it).
-/// Other programs (the switched-off shadow mesh) have none here.
+/// The shader attribute of a door sidecar material (its program by name and
+/// its float properties); see [`source_attribute`].
 pub fn door_part_attribute(material: &Value) -> Option<u8> {
-    let floats = &material["floats"];
-    let whole = |key: &str| -> Option<f64> {
-        floats[key]
-            .as_f64()
-            .filter(|v| v.fract() == 0.0 && *v >= 0.0)
-    };
-    match material["shader"]["name"].as_str()? {
-        "Mysekai/Object" => object_usage_attribute(whole("_ObjectShaderUsage")? as u32),
-        "Mysekai/Fixture/Basic" => {
-            let usage = whole("_FixtureShaderUsage").unwrap_or(0.0) as i32;
-            let blend = whole("_FixtureObjectBlendMode").unwrap_or(0.0) as i32;
-            moly_law::fixture::family::basic_fixture_shader_attribute(usage, blend)
-                .ok()
-                .and_then(|a| u8::try_from(a).ok())
-        }
-        _ => None,
-    }
+    source_attribute(material["shader"]["name"].as_str()?, &material["floats"])
 }
 
 /// The room shell's attribute. Its programs are the floor program and the
@@ -686,6 +684,8 @@ struct ClipStep {
 #[derive(Clone, Default, Debug)]
 struct SilhouetteTally {
     door_masks: usize,
+    ground_clips: usize,
+    eyebrows: usize,
     /// Replayed draws by shader attribute (the character programs under
     /// the character attribute).
     by_attribute: BTreeMap<u8, usize>,
@@ -710,7 +710,13 @@ struct SilhouetteDrawList {
     /// In queue order.
     clips: Vec<ClipStep>,
     /// The mask where no replay writes it, by channel.
-    clip_rest: [bool; 2],
+    clip_rest: [bool; 3],
+    /// The distinct stencil references of the shown eyebrow passes: after
+    /// the last replayed draw, the mask's alpha takes each where the stencil
+    /// holds it.
+    eyebrow_references: Vec<u32>,
+    /// Chosen in prepare.
+    eyebrow_pipeline: Option<CachedRenderPipelineId>,
     transform_bytes: Vec<u8>,
     palette_bytes: Vec<u8>,
     tally: SilhouetteTally,
@@ -848,7 +854,8 @@ fn extract_silhouette_draws(
     list.palette_bytes.clear();
     list.tally = SilhouetteTally::default();
     list.clips.clear();
-    list.clip_rest = [true; 2];
+    list.clip_rest = [true; 3];
+    list.eyebrow_references.clear();
     let Some(rules) = rules.as_ref().map(|rules| &**rules) else {
         return;
     };
@@ -880,15 +887,39 @@ fn extract_silhouette_draws(
                     .is_ok_and(|shown| shown.get())
             })
     };
-    let door_masks = doors
-        .iter()
-        .filter(|(_, _, attribute, _, _, shown, parent)| {
-            attribute.0 == attribute::DOOR_WALL_CLIP && part_shown(*shown, *parent)
-        })
-        .count();
-    if door_masks == 0 {
+    let shown_parts = |wanted: u8| {
+        doors
+            .iter()
+            .filter(|(_, _, attribute, _, _, shown, parent)| {
+                attribute.0 == wanted && part_shown(*shown, *parent)
+            })
+            .count()
+    };
+    let door_masks = shown_parts(attribute::DOOR_WALL_CLIP);
+    let ground_clips = shown_parts(attribute::GROUND_CLIP);
+    // The eyebrow passes shown this frame, by their stencil reference.
+    let mut eyebrows = 0usize;
+    for (_, _, _, _, _, npc, _, shown) in characters.iter() {
+        let Some(material) = npc.and_then(|material| character_materials.get(&material.0)) else {
+            continue;
+        };
+        if !shown.get() || !material.key.eyebrow {
+            continue;
+        }
+        eyebrows += 1;
+        let reference = material.params.eyebrow_stencil;
+        if !list.eyebrow_references.contains(&reference) {
+            list.eyebrow_references.push(reference);
+        }
+    }
+    // The replay serves three readers: the stencil-shadow pass (a writer of
+    // 1 is a door's stencil mesh), the ground's test (a writer of 3 is a
+    // ground clip mesh) and the eyebrow passes. With none of them shown the
+    // mask keeps its rest value, which is each test's result on a stencil
+    // no draw has written.
+    if door_masks == 0 && ground_clips == 0 && eyebrows == 0 {
         if *named {
-            info!("character silhouette: replay off (no door stencil mesh shown)");
+            info!("character silhouette: replay off (no door or ground clip stencil mesh, no eyebrow pass shown)");
         }
         *named = false;
         return;
@@ -896,6 +927,8 @@ fn extract_silhouette_draws(
     list.active = true;
     list.colour = rules.colour;
     list.tally.door_masks = door_masks;
+    list.tally.ground_clips = ground_clips;
+    list.tally.eyebrows = eyebrows;
     let eye = cameras
         .iter()
         .next()
@@ -999,12 +1032,19 @@ fn extract_silhouette_draws(
             let state = if avatar {
                 AVATAR_PASS
             } else {
-                let dither = npc
-                    .and_then(|material| character_materials.get(&material.0))
-                    .map(|material| (material.params.use_dither, material.params.dither_alpha));
+                let Some(material) = npc.and_then(|material| character_materials.get(&material.0))
+                else {
+                    list.tally.unstated += 1;
+                    continue;
+                };
+                // The eye overlay is the eyebrow pass of its slot (Equal,
+                // every operation Keep): it writes no stencil.
+                if material.key.eyebrow {
+                    continue;
+                }
                 // With its dither gate on, a dither alpha of 0 is below every
                 // threshold of the dither table: every fragment is discarded.
-                if dither.is_some_and(|(gate, alpha)| gate > 0.0 && alpha == 0.0) {
+                if material.params.use_dither > 0.0 && material.params.dither_alpha == 0.0 {
                     list.tally.npc_discarded += 1;
                     continue;
                 }
@@ -1013,7 +1053,7 @@ fn extract_silhouette_draws(
                     NPC_ACCESSORY_PASS
                 } else {
                     list.tally.npc += 1;
-                    NPC_PASS
+                    npc_pass(material.params.eyebrow_stencil)
                 }
             };
             let Some(space) = push(
@@ -1028,7 +1068,9 @@ fn extract_silhouette_draws(
             ) else {
                 continue;
             };
-            if avatar {
+            // The stencil-shadow pass has a pixel only where a door's
+            // stencil mesh wrote 1.
+            if avatar && door_masks > 0 {
                 list.tally.avatar += 1;
                 list.silhouette.push(SilhouetteDraw {
                     mesh: mesh.0.id(),
@@ -1074,7 +1116,7 @@ fn extract_silhouette_draws(
             .map(|(name, count)| format!("{name} x{count}"))
             .collect();
         info!(
-            "character silhouette: replay on ({door_masks} door stencil meshes shown); {} shown meshes of other programs are not replayed ({} parent nodes, first: {})",
+            "character silhouette: replay on ({door_masks} door and {ground_clips} ground clip stencil meshes, {eyebrows} eyebrow passes shown); {} shown meshes of other programs are not replayed ({} parent nodes, first: {})",
             list.tally.not_replayed,
             not_replayed.len(),
             shown.join(", ")
@@ -1224,6 +1266,63 @@ struct SilhouettePipelines(HashMap<PipelineKey, CachedRenderPipelineId>);
 
 #[derive(Resource, Default)]
 struct ClipPipelines(HashMap<(StencilClip, CompareFunction), CachedRenderPipelineId>);
+
+/// The eyebrow pass's mask write: one triangle over the target, stencil
+/// Equal against the reference set per draw, the blend constant (the
+/// reference / 255, set per draw) written into alpha only.
+fn queue_eyebrow_pipeline(cache: &PipelineCache) -> CachedRenderPipelineId {
+    let face = StencilFaceState {
+        compare: CompareFunction::Equal,
+        fail_op: StencilOperation::Keep,
+        depth_fail_op: StencilOperation::Keep,
+        pass_op: StencilOperation::Keep,
+    };
+    let constant = BlendComponent {
+        src_factor: BlendFactor::Constant,
+        dst_factor: BlendFactor::Zero,
+        operation: BlendOperation::Add,
+    };
+    cache.queue_render_pipeline(RenderPipelineDescriptor {
+        label: Some("stencil_eyebrow_mask_pipeline".into()),
+        layout: Vec::new(),
+        vertex: VertexState {
+            constants: vec![],
+            shader: SILHOUETTE_SHADER.clone(),
+            shader_defs: Vec::new(),
+            entry_point: Some("clip_vertex".into()),
+            buffers: Vec::new(),
+        },
+        fragment: Some(FragmentState {
+            constants: vec![],
+            shader: SILHOUETTE_SHADER.clone(),
+            shader_defs: Vec::new(),
+            entry_point: Some("clip_fragment".into()),
+            targets: vec![Some(ColorTargetState {
+                format: CLIP_MASK_FORMAT,
+                blend: Some(BlendState {
+                    color: constant,
+                    alpha: constant,
+                }),
+                write_mask: ColorWrites::ALPHA,
+            })],
+        }),
+        primitive: PrimitiveState::default(),
+        depth_stencil: Some(DepthStencilState {
+            format: DEPTH_STENCIL_FORMAT,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(CompareFunction::Always),
+            stencil: StencilState {
+                front: face,
+                back: face,
+                read_mask: 0xff,
+                write_mask: 0,
+            },
+            bias: DepthBiasState::default(),
+        }),
+        multisample: MultisampleState::default(),
+        ..Default::default()
+    })
+}
 
 /// A clip's mask write: one triangle over the target, the row's stencil
 /// comparison with every operation Keep and no stencil write, its channel
@@ -1407,6 +1506,7 @@ fn prepare_silhouette(
     mut list: ResMut<SilhouetteDrawList>,
     mut pipelines: ResMut<SilhouettePipelines>,
     mut clip_pipelines: ResMut<ClipPipelines>,
+    mut eyebrow_pipeline: Local<Option<CachedRenderPipelineId>>,
     pipeline_cache: Res<PipelineCache>,
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
@@ -1504,6 +1604,8 @@ fn prepare_silhouette(
             .entry((step.clip, step.compare))
             .or_insert_with(|| queue_clip_pipeline(&pipeline_cache, step.clip, step.compare));
     }
+    list.eyebrow_pipeline =
+        Some(*eyebrow_pipeline.get_or_insert_with(|| queue_eyebrow_pipeline(&pipeline_cache)));
     let gpu = &mut *gpu;
     gpu.views.write(&device, &queue, &view_bytes, 0);
     gpu.transforms
@@ -1531,7 +1633,7 @@ fn prepare_silhouette(
     };
     for draw in &mut list.replay {
         let skinned = matches!(draw.space, Space::Skinned(_));
-        draw.pipeline = pipeline_for(draw.mesh, skinned, PassKey::Replay(draw.state));
+        draw.pipeline = pipeline_for(draw.mesh, skinned, PassKey::Replay(draw.state.pipeline_key()));
     }
     if let Some(format) = format {
         for draw in &mut list.silhouette {
@@ -1881,7 +1983,7 @@ struct StencilReplayNode {
     bind_groups: SharedBindGroupCache,
     /// The mask texture and the value a frame without a replay cleared it
     /// to; `None` once a replay has written it.
-    mask_rest: Mutex<Option<(TextureId, [bool; 2])>>,
+    mask_rest: Mutex<Option<(TextureId, [bool; 3])>>,
 }
 
 impl FromWorld for StencilReplayNode {
@@ -1962,6 +2064,13 @@ impl StencilReplayNode {
             };
             clip_pipelines.push(pipeline);
         }
+        let Some(eyebrow_pipeline) = list
+            .eyebrow_pipeline
+            .and_then(|id| cache.get_render_pipeline(id))
+        else {
+            account.0.lock().unwrap().frames_not_ready += 1;
+            return false;
+        };
 
         let gpu = world.resource::<SilhouetteGpu>();
         let meshes = world.resource::<RenderAssets<RenderMesh>>();
@@ -2064,12 +2173,53 @@ impl StencilReplayNode {
             }
             start = end;
         }
+        // The eyebrow passes run after the transparents, so they read the
+        // stencil every replayed draw left. The alpha holds the stencil
+        // value where it is one of their references and 0 elsewhere
+        // (cleared with the first clip's write).
+        if !list.eyebrow_references.is_empty() {
+            let mut pass = render_context
+                .command_encoder()
+                .begin_render_pass(&RenderPassDescriptor {
+                    label: Some("stencil_eyebrow_mask"),
+                    multiview_mask: None,
+                    color_attachments: &[Some(RenderPassColorAttachment {
+                        view: &mask.texture_view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: Operations {
+                            load: LoadOp::Load,
+                            store: StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                        view: &target.depth_stencil.default_view,
+                        depth_ops: Some(Operations {
+                            load: LoadOp::Load,
+                            store: StoreOp::Store,
+                        }),
+                        stencil_ops: Some(Operations {
+                            load: LoadOp::Load,
+                            store: StoreOp::Store,
+                        }),
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+            pass.set_pipeline(eyebrow_pipeline);
+            for &reference in &list.eyebrow_references {
+                let value = reference as f32 / 255.0;
+                pass.set_stencil_reference(reference);
+                pass.set_blend_constant(LinearRgba::new(value, value, value, value).into());
+                pass.draw(0..3, 0..1);
+            }
+        }
         account.0.lock().unwrap().replayed = Some((frame, recorded));
         true
     }
 
     /// Clears the mask to its rest value, once per texture and value.
-    fn rest_mask(&self, render_context: &mut RenderContext, mask: &GpuImage, rest: [bool; 2]) {
+    fn rest_mask(&self, render_context: &mut RenderContext, mask: &GpuImage, rest: [bool; 3]) {
         let key = (mask.texture.id(), rest);
         let mut last = self.mask_rest.lock().unwrap();
         if *last == Some(key) {
@@ -2087,7 +2237,8 @@ impl StencilReplayNode {
                     resolve_target: None,
                     ops: Operations {
                         load: LoadOp::Clear(
-                            LinearRgba::new(channel(rest[0]), channel(rest[1]), 0.0, 0.0).into(),
+                            LinearRgba::new(channel(rest[0]), channel(rest[1]), channel(rest[2]), 0.0)
+                                .into(),
                         ),
                         store: StoreOp::Store,
                     },

@@ -141,6 +141,7 @@ use moly_law::fixture::family::{basic_fixture_shader_attribute, check_family_sha
 use moly_law::fixture::mip::mip_levels;
 
 use crate::env::{SiteEnv, SiteEnvGpuBuffer};
+use crate::source_stencil::{source_attribute, SourceStencilAttribute};
 use crate::render_inputs::{FixtureScenesReady, FixtureVisualRoot, FixtureVisualSceneReady};
 use crate::render_inputs::FixtureVisualReady;
 use crate::fixture_emission::FixtureEmission;
@@ -652,12 +653,11 @@ pub struct WallLayoutShadowCasterOff;
 
 /// 渲染状态「写零」pass 的网格实体标记：材质 `_ColorMask` = 0（颜色通道
 /// 全关）且 `_ZWrite` = 0（深度不写）。这样的 pass 在源里只写模板缓冲，
-/// 对颜色与深度的贡献恒为零——本管线没有模板消费方，隐藏即与源输出
-/// 逐值相等，不是近似。注意判据是 **CPU 侧渲染状态浮点**，不是 shader
+/// 对颜色与深度的贡献恒为零，主 pass 里隐藏即与源输出逐值相等；它们的
+/// 模板写入由模板重放按挂上的 [`SourceStencilAttribute`] 重现。注意判据是 **CPU 侧渲染状态浮点**，不是 shader
 /// 名：Unity 由这些浮点配渲染状态，shader 程序本身不消费它们；按名字
 /// （「stencil 材质该藏」）或按纹理在场（白板材质没贴图）判断都是错门
-/// ——与变体门只认 keyword 是同族教训。模板消费方接进来时按此标记找回
-/// 这些网格。
+/// ——与变体门只认 keyword 是同族教训。
 #[derive(Component)]
 pub struct StencilOnlyPass;
 
@@ -1782,8 +1782,9 @@ struct Planned {
 /// 一次换装的全部状态。
 struct SwapPlan {
     planned: Vec<Planned>,
-    /// 渲染状态写零的材质句柄：执行阶段对这些句柄的网格实体隐藏。
-    stencil_only: Vec<Handle<StandardMaterial>>,
+    /// 渲染状态写零的材质句柄与其源 shader 属性：执行阶段对这些句柄的
+    /// 网格实体隐藏，并挂上属性供模板重放读取。
+    stencil_only: Vec<(Handle<StandardMaterial>, Option<u8>)>,
     /// ShadowMesh 族的材质句柄：源里恒 0 像素，执行阶段隐藏。
     shadow_mesh: Vec<Handle<StandardMaterial>>,
     tally: SwapTally,
@@ -2130,10 +2131,14 @@ fn switch_materials(
                     commands.entity(entity).insert(WallLayoutShadowCasterOff);
                     state.tally.wall_entities += 1;
                 }
-            } else if state.stencil_only.iter().any(|handle| handle == &material.0) {
-                commands
-                    .entity(entity)
-                    .insert((StencilOnlyPass, Visibility::Hidden));
+            } else if let Some((_, attribute)) =
+                state.stencil_only.iter().find(|(handle, _)| handle == &material.0)
+            {
+                let mut entity = commands.entity(entity);
+                entity.insert((StencilOnlyPass, Visibility::Hidden));
+                if let Some(attribute) = *attribute {
+                    entity.insert(SourceStencilAttribute(attribute));
+                }
                 state.tally.stencil_hidden_entities += 1;
             } else if state.shadow_mesh.iter().any(|handle| handle == &material.0) {
                 commands
@@ -2460,7 +2465,11 @@ fn build_swap_plan(
         // 只会把不可见网格画成白板。
         if is_stencil_only(&extras) {
             tally.stencil_hidden_names.push(name.clone());
-            stencil_only.push(handle.clone());
+            let attribute = extras
+                .get("shader")
+                .and_then(|value| value.as_str())
+                .and_then(|shader| source_attribute(shader, &extras["floats"]));
+            stencil_only.push((handle.clone(), attribute));
             continue;
         }
         // 族门：具名拒绝（URP/Lit）与未知名字走拒绝；闭集内非 Basic 走
@@ -2503,7 +2512,7 @@ fn build_swap_plan(
     // 平面、凸）后排环序。四点以外的形状或多张不可合并的写零面都具名
     // 记 Err——usage=1 材质解析时按 Err 拒绝，不静默放行。
     let mut stencil_points: HashMap<Entity, Vec<Vec3>> = HashMap::new();
-    for handle in &stencil_only {
+    for (handle, _) in &stencil_only {
         for &(root, entity) in handle_entities.get(handle).into_iter().flatten() {
             let points = stencil_points.entry(root).or_default();
             let Ok(mesh_handle) = mesh_parts.get(entity) else {

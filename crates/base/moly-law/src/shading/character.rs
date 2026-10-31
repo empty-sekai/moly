@@ -98,13 +98,17 @@ pub struct CharacterMaterial {
     pub main_tex: Option<usize>,
     pub body_mask_tex: Option<usize>,
     pub eyebrow: Option<EyebrowParams>,
+    /// The stencil reference the base pass writes (Always, Replace) and the
+    /// eyebrow pass tests (Equal): `_EyebrowStencil`, a whole number in
+    /// 0..=255. The accessory program does not declare it and gets 0.
+    pub eyebrow_stencil: u32,
 }
 
 /// 解析角色槽的标量与纹理值。缺的值按名字报错，不发明 shader 默认值；
 /// 眉纹理在场时才要求眉标量成对。
 ///
 /// Accessory 变体的程序不声明 shading 组（31 员普查：93 个
-/// `Mysekai/Character` 材质全带八标量，唯一 1 个 `Mysekai/Character-
+/// `Mysekai/Character` 材质全带八标量与 `_EyebrowStencil`，唯一 1 个 `Mysekai/Character-
 /// Accessory` 带 4/8——缺的恰是 shading 四元组）。变体按分表只要求它
 /// 声明过的四标量；四元组补 0.0：`_CharacterShaderUsage=0` 钉
 /// [`mask_for_slot`] 到 `[1, 0]`，[`select_shading`] 恒走球面支，
@@ -112,8 +116,9 @@ pub struct CharacterMaterial {
 /// 落的是全局缺省 `(1, 0, 0)` 支，不发明值（与眉纹理缺席退 ref 0 同款：
 /// 前提具名，见 SHADER.md 的普查记载）。
 pub fn resolve(material: &MaterialSlot) -> Result<CharacterMaterial, String> {
-    const REQUIRED: [&str; 8] = [
+    const REQUIRED: [&str; 9] = [
         "_CharacterShaderUsage",
+        "_EyebrowStencil",
         "_Brightness",
         "_OverrideShadingParameter",
         "_LocalBodyShadingIntensity",
@@ -165,6 +170,20 @@ pub fn resolve(material: &MaterialSlot) -> Result<CharacterMaterial, String> {
             material.name
         ));
     }
+    let eyebrow_stencil = if accessory {
+        0
+    } else {
+        let raw = get("_EyebrowStencil")?;
+        float_to_i32(raw)
+            .and_then(|value| u8::try_from(value).ok())
+            .map(u32::from)
+            .ok_or_else(|| {
+                format!(
+                    "material {:?}: _EyebrowStencil = {raw} is not a stencil value",
+                    material.name
+                )
+            })?
+    };
     let eyebrow_tex = texture_slot(material, "_EyebrowTex");
     let eyebrow = match eyebrow_tex {
         Some(tex) => Some(EyebrowParams {
@@ -205,6 +224,7 @@ pub fn resolve(material: &MaterialSlot) -> Result<CharacterMaterial, String> {
         main_tex: texture_slot(material, "_MainTex"),
         body_mask_tex,
         eyebrow,
+        eyebrow_stencil,
     })
 }
 
@@ -798,6 +818,7 @@ mod tests {
             main_tex: Some(0),
             body_mask_tex: Some(1),
             eyebrow: None,
+            eyebrow_stencil: 0,
         };
         // body 槽：mask=(0.8, 0.2)，lambert=0.8 过上界全亮（body 因子 0），
         // 但 0.8 ≥ 0.5 切进球面 regime：sdot=0 → 因子 0.5。
@@ -867,6 +888,7 @@ mod tests {
                 clip: 0.5,
                 alpha: 0.4,
             }),
+            eyebrow_stencil: 0,
         };
         let (rgb, _) = character_fragment(&input, &globals, &material);
         // 光混恒等；shade.a=0 把着色混变恒等，rgb 停在 albedo；

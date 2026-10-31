@@ -102,6 +102,7 @@ use crate::shadowmap::ShadowMapGpu;
 use crate::markers::{SiteScenesReady, SiteVisualPending};
 use crate::render_inputs::SiteSceneGltf;
 use crate::site_extension::SiteExtensionGpuBuffer;
+use crate::source_stencil::StencilClipMask;
 
 /// Ground-Birthday 族名（真源 shader 名）。law 侧只收了四个老族；
 /// 这四个新族的族名在本层声明。
@@ -453,6 +454,7 @@ impl AsBindGroup for SiteMaterial {
         SRes<FallbackImageZero>,
         SRes<SharedSamplers>,
         SRes<SiteExtensionGpuBuffer>,
+        Option<SRes<StencilClipMask>>,
     );
 
     fn label() -> &'static str {
@@ -463,7 +465,7 @@ impl AsBindGroup for SiteMaterial {
         &self,
         _layout: &BindGroupLayout,
         _render_device: &RenderDevice,
-        (env_buffer, shadow, images, fallback, fallback_zero, samplers, site_extension): &mut SystemParamItem<'_, '_, Self::Param>,
+        (env_buffer, shadow, images, fallback, fallback_zero, samplers, site_extension, clip_mask): &mut SystemParamItem<'_, '_, Self::Param>,
         _force_no_bindless: bool,
         output: &mut BindGroupBuilder,
     ) -> Result<(), AsBindGroupError> {
@@ -490,6 +492,17 @@ impl AsBindGroup for SiteMaterial {
                 .get(handle)
                 .ok_or(AsBindGroupError::RetryNextUpdate)?,
             None => &**fallback_zero,
+        };
+        // The stencil clip mask at the size the main world gave it (a group
+        // built on the texture of an earlier size would read the wrong
+        // pixels). Without a stencil replay the white fallback passes every
+        // test.
+        let clip_mask = match clip_mask.as_ref() {
+            Some(mask) => images
+                .get(&mask.image)
+                .filter(|image| mask.fits(image.texture_descriptor.size))
+                .ok_or(AsBindGroupError::RetryNextUpdate)?,
+            None => &fallback.d2,
         };
         // 站点贴图按源语义平铺（uv 滚动与 ST 缩放都会越出 [0,1]）；
         // GpuImage 自带的 sampler 是引擎默认的 ClampToEdge，在这里换成
@@ -565,6 +578,14 @@ impl AsBindGroup for SiteMaterial {
             (
                 13,
                 UnpreparedBindingResource::Buffer(site_extension.buffer.clone()),
+            ),
+            // binding 14: the stencil clip mask, read texel by texel.
+            (
+                14,
+                UnpreparedBindingResource::TextureView(
+                    TextureViewDimension::D2,
+                    clip_mask.texture_view.clone(),
+                ),
             ),
         ]);
         output.binding_resources.0.extend(bindings.0);
@@ -665,6 +686,17 @@ impl AsBindGroup for SiteMaterial {
                 },
                 count: None,
             },
+            // binding 14: the stencil clip mask.
+            BindGroupLayoutEntry {
+                binding: 14,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Texture {
+                    sample_type: TextureSampleType::Float { filterable: false },
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
         ]
     }
 }
@@ -719,6 +751,7 @@ impl Material for SiteMaterial {
             SiteFamily::Ground => {
                 defs.push("SITE_GROUND");
                 defs.push("SITE_SCROLL");
+                defs.push("SITE_GROUND_CLIP");
             }
             SiteFamily::Tree => defs.push("SITE_TREE"),
             SiteFamily::Water => {
@@ -728,6 +761,7 @@ impl Material for SiteMaterial {
             SiteFamily::GroundBirthday => {
                 defs.push("SITE_GROUND_BIRTHDAY");
                 defs.push("SITE_SCROLL");
+                defs.push("SITE_GROUND_CLIP");
             }
             SiteFamily::Object => defs.push("SITE_OBJECT"),
             SiteFamily::DropItem => defs.push("SITE_DROPITEM"),

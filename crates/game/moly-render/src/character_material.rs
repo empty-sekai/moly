@@ -46,6 +46,7 @@ use moly_law::shading::character::CharacterGlobals;
 use crate::light;
 use crate::markers::{CharacterDriver, CharacterModel, CharacterPack, CharacterUnitId};
 use crate::render::gpu::{store_bits, SharedSamplers};
+use crate::source_stencil::StencilClipMask;
 
 // ---- 现象常量（晴天配置的源值照抄） ----
 
@@ -97,6 +98,9 @@ pub struct CharacterParams {
     pub eyebrow_alpha: f32,
     pub use_dither: f32,
     pub brightness: f32,
+    /// `_EyebrowStencil`: the stencil reference the base pass writes and the
+    /// eyebrow pass tests (written as a float beside the brightness).
+    pub eyebrow_stencil: u32,
     pub override_shading_parameter: f32,
     pub local_body_shading_intensity: f32,
     pub local_body_shading_edge_threshold: f32,
@@ -121,7 +125,7 @@ impl CharacterParams {
                 self.eyebrow_alpha,
                 self.use_dither,
             ],
-            [self.brightness, 0.0, 0.0, 0.0],
+            [self.brightness, self.eyebrow_stencil as f32, 0.0, 0.0],
             [self.override_shading_parameter, 0.0, 0.0, 0.0],
             [self.local_body_shading_intensity, 0.0, 0.0, 0.0],
             [self.local_body_shading_edge_threshold, 0.0, 0.0, 0.0],
@@ -181,6 +185,7 @@ impl AsBindGroup for CharacterMaterial {
         SRes<RenderAssets<GpuImage>>,
         SRes<FallbackImage>,
         SRes<SharedSamplers>,
+        Option<SRes<StencilClipMask>>,
     );
 
     fn label() -> &'static str {
@@ -191,7 +196,7 @@ impl AsBindGroup for CharacterMaterial {
         &self,
         _layout: &BindGroupLayout,
         _render_device: &RenderDevice,
-        (env_buffer, images, fallback, samplers): &mut SystemParamItem<'_, '_, Self::Param>,
+        (env_buffer, images, fallback, samplers, clip_mask): &mut SystemParamItem<'_, '_, Self::Param>,
         _force_no_bindless: bool,
         output: &mut BindGroupBuilder,
     ) -> Result<(), AsBindGroupError> {
@@ -207,6 +212,15 @@ impl AsBindGroup for CharacterMaterial {
         let eyebrow = match &self.eyebrow_tex {
             Some(handle) => images
                 .get(handle)
+                .ok_or(AsBindGroupError::RetryNextUpdate)?,
+            None => &fallback.d2,
+        };
+        // The stencil clip mask at the size the main world gave it; its
+        // alpha holds the stencil value the eyebrow pass tests.
+        let clip_mask = match clip_mask.as_ref() {
+            Some(mask) => images
+                .get(&mask.image)
+                .filter(|image| mask.fits(image.texture_descriptor.size))
                 .ok_or(AsBindGroupError::RetryNextUpdate)?,
             None => &fallback.d2,
         };
@@ -245,6 +259,14 @@ impl AsBindGroup for CharacterMaterial {
                 ),
             ),
             (7, UnpreparedBindingResource::Sampler(SamplerBindingType::Filtering, clamp)),
+            // binding 8: the stencil clip mask, read texel by texel.
+            (
+                8,
+                UnpreparedBindingResource::TextureView(
+                    TextureViewDimension::D2,
+                    clip_mask.texture_view.clone(),
+                ),
+            ),
         ]);
         output.binding_resources.0.extend(bindings.0);
         Ok(())
@@ -293,6 +315,16 @@ impl AsBindGroup for CharacterMaterial {
             sampler(5),
             texture(6),
             sampler(7),
+            BindGroupLayoutEntry {
+                binding: 8,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Texture {
+                    sample_type: TextureSampleType::Float { filterable: false },
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
         ]
     }
 }
@@ -334,6 +366,13 @@ impl Material for CharacterMaterial {
         let mut defs: Vec<&str> = Vec::new();
         if key.bind_group_data.eyebrow {
             defs.push("CHARACTER_EYEBROW");
+            // The eyebrow pass: depth test Always with depth write; its
+            // stencil test (Equal against the character's own reference)
+            // is read from the clip mask in the fragment.
+            if let Some(depth) = descriptor.depth_stencil.as_mut() {
+                depth.depth_compare = Some(CompareFunction::Always);
+                depth.depth_write_enabled = Some(true);
+            }
         }
         if key.bind_group_data.fog {
             defs.push("CHARACTER_FOG");
@@ -707,6 +746,7 @@ fn build_material(
         eyebrow_alpha: resolved.eyebrow.map_or(0.0, |e| e.alpha),
         use_dither: resolved.use_dither,
         brightness: resolved.brightness,
+        eyebrow_stencil: resolved.eyebrow_stencil,
         override_shading_parameter: resolved.override_shading_parameter,
         local_body_shading_intensity: resolved.local_body_shading_intensity,
         local_body_shading_edge_threshold: resolved.local_body_shading_edge_threshold,
@@ -743,11 +783,11 @@ fn build_material(
 }
 
 /// The eye overlay of a slot that carries an eye mask: the same material
-/// read through the eyebrow variant, with a parameter buffer of its own. The
-/// source draws this pass through hair with the per-character stencil; the
-/// product draws it as a blended second layer pulled toward the camera
-/// (`EYEBROW_PULL` in the shader), which hair of the same character covers
-/// and farther geometry still hides.
+/// read through the eyebrow variant, with a parameter buffer of its own. It
+/// is the source's eyebrow pass: drawn after the transparents with depth
+/// test Always, kept only where the stencil holds the character's own
+/// reference (read from the stencil clip mask), so it shows through that
+/// character's hair and nowhere another draw wrote the stencil last.
 fn build_eye_overlay(base: &CharacterMaterial, render_device: &RenderDevice) -> Option<CharacterMaterial> {
     base.eyebrow_tex.as_ref()?;
     let params_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
