@@ -253,26 +253,25 @@ type MaterialCache = HashMap<(AssetId<Image>, Vec<u32>), Handle<RoadMaterial>>;
 fn update_materials(
     mut commands: Commands,
     placements: Res<FixturePlacements>,
-    surfaces: Query<(Entity, Ref<RoadSurface>)>,
+    surfaces: Query<(Entity, Ref<RoadSurface>, Option<&MeshMaterial3d<RoadMaterial>>)>,
     active_roots: Query<(), With<super::FixtureVisualRoot>>,
     draft: Option<Res<RoadDraft>>,
     mut had_draft: Local<bool>,
     mut materials: ResMut<Assets<RoadMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut cache: Local<MaterialCache>,
-    revision: Res<super::FixtureLayoutRevision>,
     mut replaced: MessageWriter<crate::gpu_image_release::ImageTextureReplaced>,
 ) {
-    if revision.is_changed() {
-        cache.clear();
-    }
+    // The cache is keyed by texture and uniforms and keeps only the states the
+    // last pass used, so it stays valid across layout reloads: a reload that
+    // leaves a quadrant's state alone leaves its material handle alone too.
     let draft_changed =
         draft.as_ref().is_some_and(|draft| draft.is_changed()) || *had_draft != draft.is_some();
     *had_draft = draft.is_some();
     if surfaces.is_empty()
         || (!placements.is_changed()
             && !draft_changed
-            && !surfaces.iter().any(|(_, s)| s.is_added()))
+            && !surfaces.iter().any(|(_, s, _)| s.is_added()))
     {
         return;
     }
@@ -298,10 +297,19 @@ fn update_materials(
             })
             .collect()
     };
+    // Every road cell with its occupant's package, so a quadrant's neighbour
+    // test is one lookup rather than a pass over every road row.
+    let occupied: HashSet<(&str, i8, i8)> = rows
+        .iter()
+        .flat_map(|(package, min, max)| {
+            (min.x..=max.x).flat_map(move |x| (min.z..=max.z).map(move |z| (package.as_str(), x, z)))
+        })
+        .collect();
     let mut next = MaterialCache::new();
+    let mut changed = 0;
     let mut prepared = HashSet::new();
     let mut clipped = 0;
-    for (entity, surface) in &surfaces {
+    for (entity, surface, bound) in &surfaces {
         if !active_roots.contains(surface.root) {
             continue;
         }
@@ -331,9 +339,7 @@ fn update_materials(
         let neighbors = NEIGHBOR_OFFSETS.map(|(dx, dz)| {
             let nx = x.wrapping_add(dx);
             let nz = z.wrapping_add(dz);
-            rows.iter().any(|(other, min, max)| {
-                other == package && nx >= min.x && nx <= max.x && nz >= min.z && nz <= max.z
-            })
+            occupied.contains(&(package, nx, nz))
         });
         let q = quarter(neighbors, surface.quadrant);
         clipped += usize::from(q.alpha_clip);
@@ -394,14 +400,19 @@ fn update_materials(
                 })
             })
             .clone();
+        if bound.is_some_and(|bound| bound.0 == handle) {
+            continue;
+        }
+        changed += 1;
         commands
             .entity(entity)
             .remove::<MeshMaterial3d<StandardMaterial>>()
             .insert(MeshMaterial3d(handle));
     }
     info!(
-        "Road material: {} quadrant meshes, {} shared material states, {} alpha-clipped; source queue 2006",
+        "Road material: {} quadrant meshes ({} rebound), {} shared material states, {} alpha-clipped; source queue 2006",
         surfaces.iter().count(),
+        changed,
         next.len(),
         clipped
     );
