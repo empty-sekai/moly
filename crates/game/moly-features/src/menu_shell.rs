@@ -866,10 +866,6 @@ pub fn parse(
     sources: Option<Res<crate::ui_charsets::ShellTextSources>>,
     phenomena: Option<Res<crate::learn_phenomena_dialog::PhenomenonGlyphs>>,
     inventory: Option<Res<crate::inventory::InventoryGlyphs>>,
-    (delivery_screen, delivery): (
-        Option<Res<crate::delivery::screen::DeliveryScreen>>,
-        Option<Res<crate::delivery::screen::DeliveryCharset>>,
-    ),
     (get_resource_inputs, get_resource, birthday): (
         Option<Res<crate::get_resource::GetResourceInputs>>,
         Option<Res<crate::get_resource::GetResourceCharset>>,
@@ -898,9 +894,6 @@ pub fn parse(
     let Some(phenomenon_names) = phenomena.as_deref().and_then(|p| p.texts.as_ref()) else { return; };
     // The inventory screen's master names and fixed texts.
     let Some(inventory_texts) = inventory.as_deref().and_then(|g| g.texts.as_ref()) else { return; };
-    // The delivery screen's item names (read from materials.json), when the
-    // delivery screen is installed.
-    if delivery_screen.is_some() && delivery.is_none() { return; }
     // The acquisition dialogs' names and wordings (masters and wordings
     // read), when the acquisition dialogs are installed.
     if get_resource_inputs.is_some() && get_resource.is_none() { return; }
@@ -935,9 +928,6 @@ pub fn parse(
     for text in inventory_texts {
         chars.extend(text.chars());
     }
-    if let Some(delivery) = delivery.as_deref() {
-        chars.extend(delivery.chars.iter().copied());
-    }
     if let Some(get_resource) = get_resource.as_deref() {
         chars.extend(get_resource.chars.iter().copied());
     }
@@ -949,8 +939,8 @@ pub fn parse(
         .into_iter().chain(crate::menu_dialog::RANK_GAUGE_WORDINGS) {
         chars.extend(layouts.wording(wording).chars());
     }
-    // The option dialog, the info screen, the delivery screen and the
-    // inventory screen write these wordings; a root without one is named by
+    // The option dialog, the info screen and the inventory screen write
+    // these wordings; a root without one is named by
     // the screen that writes it.
     for wording in crate::option_dialog::WORDINGS
         .iter()
@@ -958,7 +948,6 @@ pub fn parse(
         .chain(crate::cutscene::birthday::WORDINGS)
         .chain(crate::cutscene::birthday_party::WORDINGS)
         .chain(crate::info::WORDINGS)
-        .chain(crate::delivery::screen::WORDINGS.iter())
         .chain(crate::inventory::WORDINGS)
         .chain(crate::stamina_recover_dialog::WORDINGS)
     {
@@ -969,7 +958,6 @@ pub fn parse(
     for texts in [
         crate::info::FIXED_TEXTS, crate::menu_dialog::FIXED_TEXTS,
         crate::get_resource::FIXED_TEXTS, crate::option_dialog::FIXED_TEXTS,
-        crate::delivery::screen::FIXED_TEXTS,
     ] {
         for text in texts { chars.extend(text.chars()); }
     }

@@ -463,6 +463,7 @@ impl Plugin for DeliveryPlugin {
             .init_resource::<crate::delivery_camera::DeliveryHonorCamera>()
             .init_resource::<bloom::DeliveryBloom>()
             .init_resource::<screen::DeliveryScreen>()
+            .init_resource::<crate::ui_charsets::ShellTextSources>()
             .init_resource::<DeliveryEnterRetrigger>()
             .add_systems(Startup, screen::load)
             .add_systems(Update, (screen::load_names, screen::spawn_when_ready))
@@ -508,5 +509,12 @@ impl Plugin for DeliveryPlugin {
                 PostUpdate,
                 crate::delivery_camera::advance.after(crate::camera::follow_avatar),
             );
+        {
+            let mut sources = app
+                .world_mut()
+                .resource_mut::<crate::ui_charsets::ShellTextSources>();
+            sources.register_texts(screen::TEXT_SOURCE, &screen::WORDINGS, screen::FIXED_TEXTS);
+            sources.declare(screen::TEXT_SOURCE);
+        }
     }
 }

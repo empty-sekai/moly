@@ -63,8 +63,8 @@
 //!   and release run the button's pointer handlers without the raycast.
 //! - A text is set only when the shared glyph atlas holds every one of its
 //!   characters; otherwise its node is hidden and the missing character is
-//!   named once (the atlas charset takes the delivery texts from
-//!   [`DeliveryCharset`] and [`WORDINGS`]).
+//!   named once (the atlas charset takes the delivery texts from the
+//!   screen's [`TEXT_SOURCE`] and [`WORDINGS`]).
 //!
 //! Named gaps: the dash button (`_dashButton.Setup` and `ShowWithAnimation`)
 //! is not drawn; `_menuUIContent.EnableMenuButton` / `EnableSiteMap` are
@@ -106,6 +106,7 @@ use crate::canvas::RootCanvas;
 use crate::gesture::{UiPointerEvent, UiPointerPhase};
 use crate::menu_shell::{event_pointer, ShellDialogState, SourceInputManager};
 use crate::ui_layers::{MenuScreenType, ScreenHook, ScreenLayerEvent, ScreenManager};
+use crate::ui_charsets::ShellTextSources;
 use crate::ui_layout::{UiLayouts, UiPrefabView};
 
 /// The layout key of the screen layer's prefab.
@@ -797,14 +798,10 @@ struct Materials {
     registered: BTreeSet<i64>,
 }
 
-/// The characters of the delivery item names, for the shared atlas
-/// charset (inserted once `materials.json` is read or has failed).
-#[derive(Resource, Debug, Default)]
-pub struct DeliveryCharset {
-    #[allow(dead_code)]
-    // Read by the atlas charset (the field menu shell's parse) through its seam.
-    pub chars: Vec<char>,
-}
+/// The delivery screen's text source in the shell's [`ShellTextSources`]:
+/// the characters of the delivery item names, filled once `materials.json`
+/// is read (with nothing when it has failed).
+pub const TEXT_SOURCE: &str = "delivery_screen";
 
 /// The delivery screen's state.
 #[derive(Resource, Default)]
@@ -1189,7 +1186,7 @@ pub fn load(server: Res<AssetServer>, mut screen: ResMut<DeliveryScreen>) {
 /// Update: read the material names; the atlas charset takes the delivery
 /// item names.
 pub fn load_names(
-    mut commands: Commands,
+    mut sources: ResMut<ShellTextSources>,
     server: Res<AssetServer>,
     jsons: Res<Assets<JsonAsset>>,
     mut screen: ResMut<DeliveryScreen>,
@@ -1203,7 +1200,7 @@ pub fn load_names(
     if let LoadState::Failed(error) = server.load_state(&handle) {
         error!("[delivery-screen] materials.json failed to load ({error:?}): the item name keeps the layout's text (named missing input)");
         screen.materials.names = Some(BTreeMap::new());
-        commands.insert_resource(DeliveryCharset::default());
+        sources.fill(TEXT_SOURCE, Vec::new());
         return;
     }
     let Some(json) = jsons.get(&handle) else {
@@ -1236,7 +1233,7 @@ pub fn load_names(
         chars.len()
     );
     screen.materials.names = Some(names);
-    commands.insert_resource(DeliveryCharset { chars });
+    sources.fill(TEXT_SOURCE, chars);
 }
 
 /// Update: the view, once the layout is ready.
