@@ -145,21 +145,20 @@ const SERIALIZED: &[SerializedFog] = &[
     },
 ];
 
-/// `<MOLY_ASSET_ROOT>/phenomena`，env 未设则 `None`。
-fn phenomena_dir() -> Option<PathBuf> {
-    let root = std::env::var("MOLY_ASSET_ROOT").ok()?;
-    Some(Path::new(&root).join("phenomena"))
+/// `<MOLY_ASSET_ROOT>/phenomena`, the extracted weather profiles. The tests that
+/// read it are ignored by default; running them without the directory fails.
+fn phenomena_dir() -> PathBuf {
+    let root =
+        std::env::var("MOLY_ASSET_ROOT").expect("MOLY_ASSET_ROOT must name the extracted asset root");
+    let dir = Path::new(&root).join("phenomena");
+    assert!(dir.is_dir(), "{} is not a directory", dir.display());
+    dir
 }
 
 #[test]
+#[ignore = "needs MOLY_ASSET_ROOT with the extracted weather profiles under phenomena/"]
 fn all_15_weather_fog_globals_equal_the_hand_formula_from_serialized_values() {
-    let Some(dir) = phenomena_dir() else {
-        eprintln!(
-            "MOLY_ASSET_ROOT not set: 0 of the 15 weather profiles were compared, \
-             no evidence about the fog parser."
-        );
-        return;
-    };
+    let dir = phenomena_dir();
 
     let mut compared = 0usize;
     for s in SERIALIZED {
@@ -227,14 +226,9 @@ fn all_15_weather_fog_globals_equal_the_hand_formula_from_serialized_values() {
 /// 与逐现象手工量得的轴状态。`999_festivalgarden` 是站点皮肤不是
 /// 现象，不进任何计数（它自己的轴在下面另行解析核对）。
 #[test]
+#[ignore = "needs MOLY_ASSET_ROOT with the extracted weather profiles under phenomena/"]
 fn uber_axis_census_matches_the_hand_measurement() {
-    let Some(dir) = phenomena_dir() else {
-        eprintln!(
-            "MOLY_ASSET_ROOT not set: 0 profiles were resolved, \
-             no evidence about the axis census."
-        );
-        return;
-    };
+    let dir = phenomena_dir();
 
     const CLOSED_SET: &[(&str, u32)] = &[
         ("001_sunny", 1),
@@ -349,14 +343,9 @@ fn uber_axis_census_matches_the_hand_measurement() {
 /// 1.2300000190734863 照样被采纳（帧由 off 位保持，不靠清 lane）；
 /// id 14 连强度的门也关着，落构造默认 1.0。
 #[test]
+#[ignore = "needs MOLY_ASSET_ROOT with the extracted weather profiles under phenomena/"]
 fn rain_and_sekai_serialize_sun_flare_flag_with_the_gate_closed() {
-    let Some(dir) = phenomena_dir() else {
-        eprintln!(
-            "MOLY_ASSET_ROOT not set: the adoption-gate negative was not checked \
-             against the real profiles, no evidence."
-        );
-        return;
-    };
+    let dir = phenomena_dir();
 
     for weather in ["006_rain", "014_sekai"] {
         let bytes = std::fs::read(dir.join(weather).join("postprocess.json"))
@@ -408,11 +397,9 @@ fn rain_and_sekai_serialize_sun_flare_flag_with_the_gate_closed() {
 /// 序列化改成任何别的数，真游戏仍取 65472 ⇒ 这里的断言不会红；但把
 /// 构造默认改回 65520，下面两档就会红——它钉的是**构造默认本身**。
 #[test]
+#[ignore = "needs MOLY_ASSET_ROOT with the extracted weather profiles under phenomena/"]
 fn bloom_clamp_ctor_default_is_reachable_and_is_65472() {
-    let Some(dir) = phenomena_dir() else {
-        eprintln!("MOLY_ASSET_ROOT not set: 0 profiles were resolved.");
-        return;
-    };
+    let dir = phenomena_dir();
     let mut gate_closed = 0;
     let mut gate_open = 0;
     for d in std::fs::read_dir(&dir).unwrap() {
@@ -453,11 +440,9 @@ fn bloom_clamp_ctor_default_is_reachable_and_is_65472() {
 /// 001_sunny——它的五项全落构造默认）。这一条是「产品里 14 档逐档不同
 /// 的调色没进像素」这一缺的**反面**：现在它进了，且数对得上。
 #[test]
+#[ignore = "needs MOLY_ASSET_ROOT with the extracted weather profiles under phenomena/"]
 fn color_adjustments_pack_matches_hand_measurement() {
-    let Some(dir) = phenomena_dir() else {
-        eprintln!("MOLY_ASSET_ROOT not set: 0 profiles were resolved.");
-        return;
-    };
+    let dir = phenomena_dir();
     // 手工从 15 档档案读出的采纳值（EV, 色相度, 饱和百分, 对比百分,
     // 滤色 RGB gamma）。001_sunny 全落构造默认（恒等）。
     let hand: &[(&str, f32, f32, f32, f32, [f32; 3], bool)] = &[
