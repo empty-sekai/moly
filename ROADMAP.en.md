@@ -113,6 +113,13 @@ exclusive rows; the Japanese server is enabled.
   The text pack, font pack and resource snapshot are versioned separately.
 - The open-source Resource Han Rounded font is used.
 
+**Engineering**
+- Crates per gameplay domain: harvest, delivery, conversion, missions, photos and furniture
+  editing are separate crates that install into the `moly-features` hub.
+- The crate dependency levels are guarded by a check script.
+- One shared lint configuration; clippy warnings have a per-crate baseline that may only go down.
+- Test coverage across the whole workspace.
+
 ## Next release: remaining plugin layer and AI player
 
 **Plugin layer**
@@ -239,9 +246,7 @@ exclusive rows; the Japanese server is enabled.
   arithmetic as it is.
 - Tidy the environment variable switches, moving values decided by the server into the
   simulation panel.
-- Split moly-features into a crate per gameplay domain, leaving the hub with the UI shell and
-  shared state.
-- Guard the crate dependency levels with a check script.
-- One shared lint configuration with clippy.
-- Test coverage across the whole workspace.
+- Split the content library and cutscenes into their own crates, after giving the hub a
+  registration interface for its input gates and presentation calls.
+- Clear the remaining clippy warnings.
 - One code format across the workspace.

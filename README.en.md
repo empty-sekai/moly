@@ -14,16 +14,21 @@ The project recreates scene exploration, character behaviour, furniture interact
 
 ## Features
 
-- **Scenes and movement**: the entry flow, cannons and doors that move between sites, indoor rooms, player characters, footsteps and expressions.
-- **Gathering**: obstacles, gathering particles, holding limits, the gathering HUD and notices when items are obtained.
-- **Delivery, crafting and placement**: the delivery flow, crafting UI, inventory, placing furniture from the inventory, and layout editing for floor furniture.
-- **NPCs**: pathfinding, conversations after pairing, overhead tweet bubbles, idle action decisions, autonomous behaviour and furniture interaction.
-- **Weather**: the weather phenomena pipeline, end to end.
-- **Audio and presentation**: BGM, SE (sound effects), voice and ambient sound, record BGM, and birthday parties.
-- **Director scripts**: JSON scripts that orchestrate players, characters, the camera, weather and the server simulation panel.
-- **MCP server**: lets AI clients start and drive native or browser instances.
+Grouped by gameplay domain; the crates that implement each domain are in parentheses (see [Project structure](docs/architecture.md) for each crate's responsibility):
 
-The scope of each item is described in the [roadmap](ROADMAP.en.md).
+- **Scenes and movement** (`moly-world`, `moly-features`): the entry flow, cannons and doors that move between sites, indoor rooms, player characters, footsteps and expressions.
+- **Gathering** (`moly-harvest`): harvest maps, obstacles, tools and stamina, gathering particles, drops and pickup, holding limits, the gathering HUD, bulk harvest and notices when items are obtained.
+- **Delivery** (`moly-delivery`): the birthday party delivery site, the delivery flow, drops, honor rewards and the delivery screen.
+- **Crafting and conversion** (`moly-features`, `moly-convert`): the crafting UI and inventory, and the conversion machine's slots and screen.
+- **Furniture editing** (`moly-fixture-edit`): placing furniture from the inventory, and layout editing for floor furniture, roads and environments.
+- **Missions and photos** (`moly-mission`, `moly-photo`): the mission screen and reward receive, and photo mode with saving the shot.
+- **NPCs** (`moly-world`): pathfinding, conversations after pairing, overhead tweet bubbles, idle action decisions, autonomous behaviour and furniture interaction.
+- **Weather and particles** (`moly-law`, `moly-render`): the weather phenomena pipeline, end to end.
+- **Audio and presentation** (`moly-audio`, `moly-features`): BGM, SE (sound effects), voice and ambient sound, record BGM, birthday parties and cutscenes.
+- **Director scripts and plugins** (`moly-devtools`, `moly-plugin`): JSON scripts or Luau plugins that orchestrate players, characters, the camera, weather and the server simulation panel.
+- **MCP server** (`tools/mcp`): lets AI clients start and drive native or browser instances.
+
+Behaviour matches the original game; the structure is organised for this repository. What must match and how it is checked are described in [Method](docs/METHOD.md); the scope of each item is in the [roadmap](ROADMAP.en.md).
 
 ## Quick start
 
@@ -61,6 +66,7 @@ Each platform also has a server-only package, `moly-server-<version>-<platform>`
 - [MCP server](docs/mcp.md): the MCP server that lets AI clients start and drive game instances.
 - [Plugins](docs/plugins.md): the Luau plugin interface, every director step, the observable sections, the events and the environment switches.
 - [Project structure](docs/architecture.md): the responsibilities of each directory and crate.
+- [Method](docs/METHOD.md): which behaviour matches the original value for value, which is this repository's own, and how matching is checked.
 - [Development](docs/development.md): testing and checks, commit conventions, continuous integration, and versioning and releases.
 - [Release package guide](docs/release-package.md): what a downloaded release package contains, and how to run and upgrade it.
 
