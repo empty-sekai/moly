@@ -1428,7 +1428,7 @@
      "decide": {
       "type": "boolean",
       "default": true,
-      "description": "Decide the placement when the editor's put status allows it."
+      "description": "Decide the placement when the editor's put status allows it. false ends the step once the fixture is on the tile, still selected; nothing is decided or saved."
      },
      "save": {
       "type": "boolean",

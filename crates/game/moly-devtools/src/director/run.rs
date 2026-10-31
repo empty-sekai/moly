@@ -2733,8 +2733,12 @@ impl LayoutPlace {
                 };
                 let at = selected.item.center;
                 if at.x == self.center[0] && at.z == self.center[2] {
+                    let note = format!("the fixture is on tile [{}, {}, {}]", at.x, at.y, at.z);
+                    if !self.decide {
+                        return Poll::Done(format!("{note}; left selected, not decided"));
+                    }
                     self.begin(PlacePhase::Decide, now);
-                    return Poll::Running(format!("the fixture is on tile [{}, {}, {}]", at.x, at.y, at.z));
+                    return Poll::Running(note);
                 }
                 if self.sent {
                     return Poll::Running(format!("waiting for the move; the center is [{}, {}, {}]", at.x, at.y, at.z));

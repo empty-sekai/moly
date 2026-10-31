@@ -1280,7 +1280,7 @@ server.registerTool(
       texture_id: z.number().int().optional().describe('Catalog texture to pick, default the first placeable row'),
       center: tile.describe('Wanted center [x, y, z] in the frame of the placed rows; y is ignored'),
       rotate: z.number().int().min(0).max(3).optional().describe('Quarter turns before the move, default 0'),
-      decide: z.boolean().optional().describe('Decide the placement when its put status is ok, default true'),
+      decide: z.boolean().optional().describe('Decide the placement when its put status is ok, default true; false ends the step on the tile with the fixture still selected, nothing decided or saved'),
     },
   },
   guard('layout_place', async ({ id, ...params }) => {
