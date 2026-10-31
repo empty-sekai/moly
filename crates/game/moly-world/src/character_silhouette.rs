@@ -413,55 +413,13 @@ const NPC_ACCESSORY_PASS: ReplayState = ReplayState {
 // what another draw wrote fails and writes nothing.
 const OCCLUDER_DEPTH_COMPARE: CompareFunction = CompareFunction::GreaterEqual;
 
-fn queue_occluder_pipeline(
-    cache: &PipelineCache,
-    gpu: &SilhouetteGpu,
-    layout: &MeshVertexBufferLayoutRef,
-    topology: PrimitiveTopology,
-) -> CachedRenderPipelineId {
-    let Ok(vertex_layout) = layout.0.get_layout(&[Mesh::ATTRIBUTE_POSITION.at_shader_location(0)])
-    else {
-        return CachedRenderPipelineId::INVALID;
-    };
-    let face = StencilFaceState {
-        compare: CompareFunction::Always,
-        fail_op: StencilOperation::Keep,
-        depth_fail_op: StencilOperation::Keep,
-        pass_op: StencilOperation::Keep,
-    };
-    cache.queue_render_pipeline(RenderPipelineDescriptor {
-        label: Some("character_silhouette_occluder_pipeline".into()),
-        layout: vec![gpu.view_layout.clone(), gpu.rigid_layout.clone()],
-        vertex: VertexState {
-            constants: vec![],
-            shader: SILHOUETTE_SHADER.clone(),
-            shader_defs: Vec::new(),
-            entry_point: Some("vertex".into()),
-            buffers: vec![vertex_layout],
-        },
-        fragment: None,
-        primitive: PrimitiveState {
-            topology,
-            front_face: FrontFace::Ccw,
-            cull_mode: Some(Face::Back),
-            ..Default::default()
-        },
-        depth_stencil: Some(DepthStencilState {
-            format: DEPTH_STENCIL_FORMAT,
-            depth_write_enabled: Some(true),
-            depth_compare: Some(OCCLUDER_DEPTH_COMPARE),
-            stencil: StencilState {
-                front: face,
-                back: face,
-                read_mask: 0xff,
-                write_mask: 0,
-            },
-            bias: DepthBiasState::default(),
-        }),
-        multisample: MultisampleState::default(),
-        ..Default::default()
-    })
-}
+/// The occluder's stencil faces: Always, every operation Keep.
+const OCCLUDER_STENCIL: StencilFaceState = StencilFaceState {
+    compare: CompareFunction::Always,
+    fail_op: StencilOperation::Keep,
+    depth_fail_op: StencilOperation::Keep,
+    pass_op: StencilOperation::Keep,
+};
 
 /// The avatar programs' stencil-shadow pass: reference 1, Equal; pass and
 /// depth fail DecrementSaturate, fail Keep. Its depth test (Greater) runs in
@@ -787,6 +745,8 @@ enum Space {
 struct ReplayDraw {
     mesh: AssetId<Mesh>,
     space: Space,
+    /// The shader attribute the draw was stated under.
+    attribute: u8,
     state: ReplayState,
     queue: u32,
     distance: f32,
@@ -956,6 +916,7 @@ impl ReplayGather<'_, '_, '_> {
         list.replay.push(ReplayDraw {
             mesh: shown.mesh.0.id(),
             space,
+            attribute,
             state,
             queue,
             distance: shown.transform.translation().distance(self.eye),
@@ -1279,8 +1240,9 @@ fn extract_silhouette_draws(
         })
     });
     // The depth-only replays write depth and no stencil, so only the order
-    // among themselves matters; it is the main pass's, and they stand before
-    // every stated draw.
+    // among themselves matters; it is the main pass's, and they stand just
+    // before the first character draw: they hide a character's stencil
+    // writes, not the ground and door clips stated before it.
     list.occluders.sort_by(|a, b| {
         a.queue.cmp(&b.queue).then_with(|| {
             if a.queue <= OPAQUE_QUEUE_END {
@@ -1449,6 +1411,8 @@ fn init_gpu(mut commands: Commands, device: Res<RenderDevice>) {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum PassKey {
     Replay(ReplayState),
+    /// The depth-only replay of an occluder.
+    Occluder,
     Silhouette(TextureFormat),
 }
 
@@ -1634,6 +1598,23 @@ fn queue_pipeline(
                 depth_write_enabled: Some(state.depth_write),
                 depth_compare: Some(state.depth_compare),
                 stencil: stencil_state(state.stencil),
+                bias: DepthBiasState::default(),
+            },
+        ),
+        PassKey::Occluder => (
+            "character_silhouette_occluder_pipeline",
+            vec![gpu.view_layout.clone(), space],
+            None,
+            DepthStencilState {
+                format: DEPTH_STENCIL_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(OCCLUDER_DEPTH_COMPARE),
+                stencil: StencilState {
+                    front: OCCLUDER_STENCIL,
+                    back: OCCLUDER_STENCIL,
+                    read_mask: 0xff,
+                    write_mask: 0,
+                },
                 bias: DepthBiasState::default(),
             },
         ),
@@ -1834,17 +1815,9 @@ fn prepare_silhouette(
         let skinned = matches!(draw.space, Space::Skinned(_));
         draw.pipeline = pipeline_for(draw.mesh, skinned, PassKey::Replay(draw.state.pipeline_key()));
     }
-    let mut occluder_pipelines = HashMap::new();
     for draw in &mut list.occluders {
-        draw.pipeline = match meshes.get(draw.mesh) {
-            Some(render_mesh) => {
-                let key = (render_mesh.layout.clone(), render_mesh.primitive_topology());
-                *occluder_pipelines.entry(key).or_insert_with_key(|(layout, topology)| {
-                    queue_occluder_pipeline(&pipeline_cache, gpu, layout, *topology)
-                })
-            }
-            None => CachedRenderPipelineId::INVALID,
-        };
+        let skinned = matches!(draw.space, Space::Skinned(_));
+        draw.pipeline = pipeline_for(draw.mesh, skinned, PassKey::Occluder);
     }
     if let Some(format) = format {
         for draw in &mut list.silhouette {
@@ -2317,6 +2290,11 @@ impl StencilReplayNode {
         );
         let mut drawn = 0usize;
         let mut start = 0usize;
+        // The occluders go in just before the first character draw.
+        let occluders_at = list
+            .replay
+            .iter()
+            .position(|draw| draw.attribute == attribute::CHARACTER);
         // The draws below each clip's queue, then that clip's mask write;
         // after the last clip, the rest of the draws.
         for (index, step) in list.clips.iter().map(Some).chain([None]).enumerate() {
@@ -2346,27 +2324,27 @@ impl StencilReplayNode {
                             timestamp_writes: None,
                             occlusion_query_set: None,
                         });
-                // The depth of the draws that hide a character without a
-                // stated state, once this pass has cleared the depth and
-                // before every stated draw.
-                if first {
-                    for (draw, pipeline) in list.occluders.iter().zip(&occluder_pipelines) {
-                        let Some(pipeline) = pipeline else {
-                            continue;
-                        };
-                        pass.set_pipeline(pipeline);
-                        pass.set_bind_group(0, &view_group, &[target.view_offset]);
-                        match draw.space {
-                            Space::Rigid(offset) => pass.set_bind_group(1, &rigid_group, &[offset]),
-                            Space::Skinned(offset) => pass.set_bind_group(1, &skin_group, &[offset]),
-                        }
-                        draw_mesh!(pass, &draw.mesh, meshes, allocator);
-                    }
-                }
-                for (draw, pipeline) in list.replay[start..end]
+                for (offset, (draw, pipeline)) in list.replay[start..end]
                     .iter()
                     .zip(&replay_pipelines[start..end])
+                    .enumerate()
                 {
+                    // The depth of the draws that hide a character without a
+                    // stated state.
+                    if occluders_at == Some(start + offset) {
+                        for (draw, pipeline) in list.occluders.iter().zip(&occluder_pipelines) {
+                            let Some(pipeline) = pipeline else {
+                                continue;
+                            };
+                            pass.set_pipeline(pipeline);
+                            pass.set_bind_group(0, &view_group, &[target.view_offset]);
+                            match draw.space {
+                                Space::Rigid(offset) => pass.set_bind_group(1, &rigid_group, &[offset]),
+                                Space::Skinned(offset) => pass.set_bind_group(1, &skin_group, &[offset]),
+                            }
+                            draw_mesh!(pass, &draw.mesh, meshes, allocator);
+                        }
+                    }
                     let Some(pipeline) = pipeline else {
                         continue;
                     };
