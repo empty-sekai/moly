@@ -16,7 +16,6 @@ moly-game = { path = "../../game/moly-game" }
 moly-core = { path = "../../game/moly-core", features = ["browser-heap"] }
 moly-features = { path = "../../game/moly-features" }
 moly-perf = { path = "../../engine/moly-perf" }
-moly-store = { path = "../../base/moly-store" }
 # The game connects to its server over one HTTP endpoint, natively and in the
 # browser.
 moly-link = { path = "../../net/moly-link" }
