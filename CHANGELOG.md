@@ -4,6 +4,10 @@ All notable changes to this project are listed here. Versions follow [Semantic V
 
 ## Unreleased
 
+### Features
+
+- **config:** Read the launcher, game, developer window and server settings from one `moly.toml` in the data directory (or the file `MOLY_CONFIG` names). Each key keeps its environment variable as an override; an unknown key or a value of the wrong kind stops the start with the key named. The launcher edits the file in place and keeps its comments, and imports an existing `launcher.json` on first start.
+
 ### Bug fixes
 
 - **layout:** Name the failing cell or missing input in `moly.layout.apply` rejections through a `detail`, refuse a missing editor session, layout, grid or rule table with its own message instead of a layout code, and document the `cell` anchor's centered grid frame

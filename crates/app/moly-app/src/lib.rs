@@ -206,14 +206,16 @@ fn announce_ready(app: &mut App) {
     });
 }
 
-/// The native program starts the game, as the page does, unless
-/// `MOLY_DEV=1` asks for the developer window.
+/// The native program starts the game, as the page does, unless `dev.window`
+/// (`MOLY_DEV=1`) asks for the developer window. The configuration file is
+/// loaded first; a malformed one stops the start with its key named.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run() {
-    match std::env::var("MOLY_DEV").ok().as_deref() {
-        None | Some("") | Some("0") => run_native_game(),
-        Some("1") => run_app(StartMode::Library),
-        Some(other) => fail_loud(&format!("MOLY_DEV must be 1 or 0, not {other:?}")),
+    moly_store::config::install_program_config().unwrap_or_else(|message| fail_loud(&message));
+    match moly_config::global().flag(&moly_config::keys::DEV_WINDOW) {
+        Ok(None | Some(false)) => run_native_game(),
+        Ok(Some(true)) => run_app(StartMode::Library),
+        Err(error) => fail_loud(&error.to_string()),
     }
 }
 
@@ -244,23 +246,22 @@ fn run_native_game() {
     app.run();
 }
 
-/// The address the server has at `MOLY_SERVER_URL`, else the default.
+/// The server address at `server.url` (`MOLY_SERVER_URL`), else the default.
 ///
-/// A start with the variable set refuses an address that is not
-/// `http://host:port` or `https://host[:port]`; a start without it uses
+/// A configured address that is not `http://host:port` or
+/// `https://host[:port]` is refused; without one the game uses
 /// [`moly_link::DEFAULT_SERVER_URL`].
 #[cfg(not(target_arch = "wasm32"))]
 fn server_address_from_env() -> Result<String, String> {
-    match std::env::var("MOLY_SERVER_URL") {
-        Ok(value) if value.trim().is_empty() => {
-            Err("MOLY_SERVER_URL is empty; it names the server's http:// address".into())
-        }
-        Ok(value) if !moly_link::is_server_address(value.trim()) => Err(format!(
-            "MOLY_SERVER_URL must be an http://host:port or https://host address, not {value:?}"
+    match moly_config::global().text(&moly_config::keys::SERVER_URL) {
+        Some(value) if value.trim().is_empty() => Err(
+            "server.url (MOLY_SERVER_URL) is empty; it names the server's http:// address".into(),
+        ),
+        Some(value) if !moly_link::is_server_address(value.trim()) => Err(format!(
+            "server.url (MOLY_SERVER_URL) must be an http://host:port or https://host address, not {value:?}"
         )),
-        Ok(value) => Ok(value.trim().to_owned()),
-        Err(std::env::VarError::NotPresent) => Ok(moly_link::DEFAULT_SERVER_URL.to_owned()),
-        Err(std::env::VarError::NotUnicode(_)) => Err("MOLY_SERVER_URL is not valid text".into()),
+        Some(value) => Ok(value.trim().to_owned()),
+        None => Ok(moly_link::DEFAULT_SERVER_URL.to_owned()),
     }
 }
 

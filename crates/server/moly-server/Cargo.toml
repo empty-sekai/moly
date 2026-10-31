@@ -7,6 +7,7 @@ license.workspace = true
 # The game's server: sessions, the users' documents and the API handlers. It
 # runs headless (no window, renderer or UI), natively as its own process.
 [dependencies]
+moly-config = { path = "../../base/moly-config" }
 moly-protocol = { path = "../../net/moly-protocol" }
 moly-masters = { path = "../../game/moly-masters" }
 moly-assets = { path = "../../engine/moly-assets", default-features = false }

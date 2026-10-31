@@ -17,6 +17,7 @@ game_layers = ["game-core", "game-media", "world", "hub", "domain", "tools", "as
 
 # Lowest to highest. The index in this list is the layer rank.
 order = [
+    "config",    # moly-config: the program configuration, read by every program
     "base",      # moly-law, moly-store, moly-plugin, moly-text
     "engine",    # moly-assets, moly-perf
     "net",       # moly-protocol, moly-layout, moly-link
@@ -33,6 +34,9 @@ order = [
 
 # Every layer needs a [layers.<name>] sub-table; its keys document the crates
 # that belong to the layer (the rules use [files] and [crates] below).
+[layers.config]
+crates = ["moly-config"]
+
 [layers.base]
 crates = ["moly-law", "moly-store", "moly-plugin", "moly-text"]
 
@@ -72,6 +76,7 @@ crates = ["moly-app", "moly-stage", "moly-android", "moly-launcher", "moly-serve
 # Directory of a Cargo.toml, relative to the workspace root -> layer.
 [files]
 "crates/base/moly-law/Cargo.toml" = "base"
+"crates/base/moly-config/Cargo.toml" = "config"
 "crates/base/moly-store/Cargo.toml" = "base"
 "crates/base/moly-plugin/Cargo.toml" = "base"
 "crates/base/moly-text/Cargo.toml" = "base"

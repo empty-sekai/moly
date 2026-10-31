@@ -5278,12 +5278,14 @@ dependencies = [
  "console_error_panic_hook",
  "js-sys",
  "moly-assets",
+ "moly-config",
  "moly-core",
  "moly-features",
  "moly-game",
  "moly-link",
  "moly-perf",
  "moly-protocol",
+ "moly-store",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
@@ -5301,6 +5303,7 @@ dependencies = [
  "futures-lite",
  "gltf",
  "js-sys",
+ "moly-config",
  "moly-law",
  "moly-store",
  "serde",
@@ -5342,6 +5345,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "moly-config"
+version = "0.0.5"
+dependencies = [
+ "toml 1.1.8+spec-1.1.0",
+ "toml_edit 0.25.13+spec-1.1.0",
+]
+
+[[package]]
 name = "moly-convert"
 version = "0.0.5"
 dependencies = [
@@ -5371,6 +5382,7 @@ dependencies = [
  "getrandom 0.2.17",
  "js-sys",
  "moly-assets",
+ "moly-config",
  "moly-law",
  "moly-store",
  "reqwest 0.12.28",
@@ -5457,6 +5469,7 @@ dependencies = [
  "libc",
  "moly-assets",
  "moly-audio",
+ "moly-config",
  "moly-core",
  "moly-law",
  "moly-link",
@@ -5706,6 +5719,7 @@ dependencies = [
  "js-sys",
  "libc",
  "moly-assets",
+ "moly-config",
  "moly-law",
  "moly-masters",
  "moly-protocol",
@@ -5722,7 +5736,9 @@ dependencies = [
  "bevy",
  "bevy_remote",
  "moly-assets",
+ "moly-config",
  "moly-server",
+ "moly-store",
 ]
 
 [[package]]
@@ -5751,6 +5767,7 @@ name = "moly-store"
 version = "0.0.5"
 dependencies = [
  "flate2",
+ "moly-config",
  "self-replace",
  "semver",
  "serde",
@@ -9228,6 +9245,7 @@ dependencies = [
  "indexmap 2.14.2",
  "toml_datetime 1.1.2+spec-1.1.0",
  "toml_parser",
+ "toml_writer",
  "winnow 1.0.4",
 ]
 

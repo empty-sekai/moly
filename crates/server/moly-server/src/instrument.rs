@@ -10,14 +10,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Whether this process is a developer start.
 static DEV: AtomicBool = AtomicBool::new(false);
 
-/// Reads `MOLY_DEV` once, when the server is built.
+/// Reads `dev.window` (`MOLY_DEV`) once, when the server is built.
 pub(crate) fn install() {
     DEV.store(dev_requested(), Ordering::Relaxed);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn dev_requested() -> bool {
-    std::env::var("MOLY_DEV").ok().as_deref() == Some("1")
+    // A malformed value reads as off here; the program's own start refuses it.
+    moly_config::global().flag(&moly_config::keys::DEV_WINDOW) == Ok(Some(true))
 }
 
 #[cfg(target_arch = "wasm32")]

@@ -251,9 +251,24 @@ mod drives {
     }
 }
 
-/// The launcher's configuration file, in the data directory.
+/// The launcher's earlier configuration file, in the data directory. It is
+/// read once, to import its values into [`config_path`].
 pub fn launcher_config_path() -> Result<PathBuf, String> {
     Ok(data_dir()?.join("launcher.json"))
+}
+
+/// Environment variable that names the configuration file.
+pub const CONFIG_ENV: &str = "MOLY_CONFIG";
+
+/// The configuration file (`moly.toml`): `MOLY_CONFIG` when it is set and not
+/// empty, otherwise `moly.toml` in the data directory.
+pub fn config_path() -> Result<PathBuf, String> {
+    if let Some(value) = std::env::var_os(CONFIG_ENV) {
+        if !value.is_empty() {
+            return Ok(PathBuf::from(value));
+        }
+    }
+    Ok(data_dir()?.join("moly.toml"))
 }
 
 /// The logs directory of the saved [`Locations`].

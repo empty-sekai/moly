@@ -125,7 +125,8 @@ fn merge(target: &mut Value, patch: &Value) {
 #[cfg(not(target_arch = "wasm32"))]
 fn path() -> Result<std::path::PathBuf, String> {
     use std::path::PathBuf;
-    if let Ok(value) = std::env::var("MOLY_SETTINGS_FILE") {
+    // `paths.settings` in the configuration, or `MOLY_SETTINGS_FILE`.
+    if let Some(value) = moly_config::global().text(&moly_config::keys::SETTINGS_FILE) {
         if !value.trim().is_empty() {
             return Ok(PathBuf::from(value));
         }

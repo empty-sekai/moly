@@ -1,7 +1,7 @@
 //! The clean view: two switches that take the game's own furniture off the
 //! screen for a recording or a photograph. The players and plugins ask for
-//! them with `view.set`, the environment with `MOLY_HIDE_HUD` and
-//! `MOLY_HIDE_PLAYER`.
+//! them with `view.set`, the configuration with `display.hide_hud` and
+//! `display.hide_player` (`MOLY_HIDE_HUD`, `MOLY_HIDE_PLAYER`).
 //!
 //! - `hide_hud` hides every UI view but the talk window, so only the scene,
 //!   the in-world balloons and a conversation remain.
@@ -71,15 +71,6 @@ impl CleanView {
             if self.switches.hide_hud { "hidden" } else { "shown" },
             if self.switches.hide_player { "hidden" } else { "shown" }
         )
-    }
-}
-
-/// One environment switch: `1` or `0`; anything else is a named refusal.
-pub fn switch(variable: &str) -> Result<bool, String> {
-    match std::env::var(variable).ok().as_deref() {
-        None | Some("0") => Ok(false),
-        Some("1") => Ok(true),
-        Some(other) => Err(format!("{variable} must be 1 or 0, not {other:?}")),
     }
 }
 

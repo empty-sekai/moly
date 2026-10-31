@@ -10,6 +10,7 @@ webgpu = ["bevy/webgpu"]
 webgl2 = ["bevy/webgl2"]
 
 [dependencies]
+moly-config = { path = "../../base/moly-config" }
 bevy = { workspace = true }
 moly-assets = { path = "../../engine/moly-assets" }
 moly-game = { path = "../../game/moly-game" }
@@ -20,6 +21,9 @@ moly-perf = { path = "../../engine/moly-perf" }
 # browser.
 moly-link = { path = "../../net/moly-link" }
 moly-protocol = { path = "../../net/moly-protocol" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+moly-store = { path = "../../base/moly-store" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }

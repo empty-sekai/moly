@@ -5,20 +5,16 @@ use bevy::prelude::App;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn configure(app: &mut App) -> Result<(), String> {
-    let env = |name: &str| -> Result<Option<String>, String> {
-        match std::env::var(name) {
-            Ok(value) => Ok(Some(value.trim().to_owned())),
-            Err(std::env::VarError::NotPresent) => Ok(None),
-            Err(_) => Err(format!("{name} is not Unicode")),
-        }
-    };
-    let uid = env("MOLY_PLAYER_UID")?;
-    let file = std::env::var_os("MOLY_PLAYER_DATA_FILE");
+    use moly_config::keys;
+    let config = moly_config::global();
+    let value = |key| config.text(key).map(|value| value.trim().to_owned());
+    let uid = value(&keys::PLAYER_UID);
+    let file = config.text(&keys::PLAYER_DATA_FILE);
     if uid.is_some() && file.is_some() {
-        return Err("Choose either MOLY_PLAYER_UID or MOLY_PLAYER_DATA_FILE".into());
+        return Err("Choose either player_data.uid (MOLY_PLAYER_UID) or player_data.file (MOLY_PLAYER_DATA_FILE)".into());
     }
     let mut state = app.world_mut().resource_mut::<PlayerDataImport>();
-    state.configure(env("MOLY_PLAYER_API")?, env("MOLY_PLAYER_REGION")?)?;
+    state.configure(value(&keys::PLAYER_API), value(&keys::PLAYER_REGION))?;
     if let Some(uid) = uid {
         state.request_uid(uid);
     }

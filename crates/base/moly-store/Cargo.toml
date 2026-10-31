@@ -9,6 +9,7 @@ license.workspace = true
 # published catalog. No engine dependency, so the launcher and the game read
 # the same locations and records.
 [dependencies]
+moly-config = { path = "../moly-config" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = "0.10"

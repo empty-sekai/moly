@@ -2,16 +2,16 @@
 //! bases the product reads at runtime.
 //!
 //! The native game and the server resolve the root here, through one
-//! function: `MOLY_ASSET_ROOT` when it is set, else `MOLY_ASSET_STORE_URL`,
-//! else the resources the launcher installed. A browser page has no
-//! environment; its own resolution (the `?assets=` prefix and the game seed)
-//! stays in the entry crate and reuses the admission below.
+//! function: the configured `resources.root` when it is set, else
+//! `resources.store`, else the resources the launcher installed. A browser
+//! page has no configuration file; its own resolution (the `?assets=` prefix
+//! and the game seed) stays in the entry crate and reuses the admission below.
 //!
 //! Every web path is admitted once, here: a same-origin absolute prefix, or
-//! an HTTPS root this module names. `MOLY_ASSET_CATALOG` (a full lowercase
+//! an HTTPS root this module names. `resources.catalog` (a full lowercase
 //! SHA-256) selects a release of the content-addressed store, and
-//! `MOLY_ASSET_CACHE` names the native directory that keeps what a store
-//! read fetched.
+//! `resources.cache` names the native directory that keeps what a store read
+//! fetched.
 
 use crate::AssetSource;
 
@@ -221,18 +221,19 @@ pub fn remote_bases(
     })
 }
 
-/// Native: `MOLY_STORAGE_BASE`, `MOLY_STORAGE_MIRROR_BASE`, `MOLY_MASTER_BASE`,
-/// `MOLY_MASTER_MIRROR_BASE` and `MOLY_MASTER_HARUKI_BASE` (a template naming
-/// `{repo}`) replace the hosts.
+/// Native: the configuration's `resources.storage`, `resources.storage_mirror`,
+/// `masters.base`, `masters.mirror` and `masters.repository` (a template naming
+/// `{repo}`), each overridden by its environment variable, replace the hosts.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn resolve_remote() -> Result<crate::remote::RemoteBases, String> {
-    let read = |name: &str| std::env::var(name).ok();
+    use moly_config::keys;
+    let config = moly_config::global();
     let (storage, storage_mirror, master, master_mirror, master_repository) = (
-        read("MOLY_STORAGE_BASE"),
-        read("MOLY_STORAGE_MIRROR_BASE"),
-        read("MOLY_MASTER_BASE"),
-        read("MOLY_MASTER_MIRROR_BASE"),
-        read("MOLY_MASTER_HARUKI_BASE"),
+        config.text(&keys::STORAGE_BASE),
+        config.text(&keys::STORAGE_MIRROR),
+        config.text(&keys::MASTER_BASE),
+        config.text(&keys::MASTER_MIRROR),
+        config.text(&keys::MASTER_REPOSITORY),
     );
     remote_bases(RemoteBaseOverrides {
         storage: storage.as_deref(),
@@ -243,23 +244,26 @@ pub fn resolve_remote() -> Result<crate::remote::RemoteBases, String> {
     })
 }
 
-/// Native: `MOLY_ASSET_ROOT`, else `MOLY_ASSET_STORE_URL`, else the
-/// resources the launcher installed.
+/// Native: `resources.root`, else `resources.store`, else the resources the
+/// launcher installed. Each key is read from the configuration with its
+/// environment variable (`MOLY_ASSET_ROOT`, `MOLY_ASSET_STORE_URL`, ...) taking
+/// precedence.
 ///
-/// `MOLY_ASSET_ROOT` is the extracted-asset directory. `MOLY_ASSET_STORE_URL`
-/// is a public asset store directory over HTTPS (`.../moly/asset-store/`),
-/// read from the network as the browser reads it; setting both is an error,
-/// because one run reads one source. `MOLY_ASSET_CATALOG` (a full lowercase
-/// SHA-256) selects a release of either. `MOLY_ASSET_CACHE` is the directory
-/// a store read keeps the immutable documents and blobs it fetched in, and
-/// is created when missing; it applies to `MOLY_ASSET_STORE_URL` only.
+/// `resources.root` is the extracted-asset directory. `resources.store` is a
+/// public asset store directory over HTTPS (`.../moly/asset-store/`), read
+/// from the network as the browser reads it; setting both is an error,
+/// because one run reads one source. `resources.catalog` (a full lowercase
+/// SHA-256) selects a release of either. `resources.cache` is the directory a
+/// store read keeps the immutable documents and blobs it fetched in, and is
+/// created when missing; it applies to `resources.store` only.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn resolve() -> Result<AssetSource, String> {
-    let root = std::env::var("MOLY_ASSET_ROOT").ok();
-    let store = std::env::var("MOLY_ASSET_STORE_URL").ok();
+    let config = moly_config::global();
+    let root = config.text(&moly_config::keys::RESOURCE_ROOT);
+    let store = config.text(&moly_config::keys::RESOURCE_STORE);
     match (root, store) {
         (Some(_), Some(_)) => Err(
-            "MOLY_ASSET_ROOT and MOLY_ASSET_STORE_URL are both set; keep exactly one".into(),
+            "resources.root (MOLY_ASSET_ROOT) and resources.store (MOLY_ASSET_STORE_URL) are both set; keep exactly one".into(),
         ),
         (Some(raw), None) => local_root(raw),
         (None, Some(url)) => public_store(url),
@@ -270,16 +274,16 @@ pub fn resolve() -> Result<AssetSource, String> {
 #[cfg(not(target_arch = "wasm32"))]
 fn local_root(raw: String) -> Result<AssetSource, String> {
     if raw.trim().is_empty() {
-        return Err("MOLY_ASSET_ROOT is empty; point it at the extracted-asset directory".into());
+        return Err("resources.root (MOLY_ASSET_ROOT) is empty; point it at the extracted-asset directory".into());
     }
     let path = std::path::PathBuf::from(raw);
     if !path.is_dir() {
         return Err(format!(
-            "MOLY_ASSET_ROOT is not a directory: {}",
+            "resources.root (MOLY_ASSET_ROOT) is not a directory: {}",
             path.display()
         ));
     }
-    let catalog = std::env::var("MOLY_ASSET_CATALOG").ok();
+    let catalog = moly_config::global().text(&moly_config::keys::RESOURCE_CATALOG);
     validate_catalog_id(&catalog)?;
     if catalog.is_some() || path.join("asset-packs.json").is_file() {
         Ok(AssetSource::NativePacks { path, catalog })
@@ -299,40 +303,46 @@ fn local_root(raw: String) -> Result<AssetSource, String> {
 fn store_root(url: &str) -> Result<(), String> {
     let (origin, path) = public_asset_parts(url)
         .filter(|(_, path)| is_canonical_directory(path))
-        .ok_or("MOLY_ASSET_STORE_URL must be a canonical HTTPS asset store directory")?;
+        .ok_or("resources.store must be a canonical HTTPS asset store directory")?;
     let publication = path
         .strip_suffix("asset-store/")
         .map(|prefix| format!("{origin}{prefix}"))
-        .ok_or("MOLY_ASSET_STORE_URL must be a canonical HTTPS asset store directory")?;
+        .ok_or("resources.store must be a canonical HTTPS asset store directory")?;
     validate_asset_selection(url, Some(origin), Some(&publication))
-        .map_err(|error| format!("MOLY_ASSET_STORE_URL: {error}"))
+        .map_err(|error| format!("resources.store: {error}"))
 }
 
 /// The public asset store as an asset source, admitted by [`store_root`].
-/// `MOLY_ASSET_CACHE` names the directory that keeps the immutable files a
+/// `resources.cache` names the directory that keeps the immutable files a
 /// run fetched; it is created when missing.
 #[cfg(not(target_arch = "wasm32"))]
 fn public_store(url: String) -> Result<AssetSource, String> {
     if url.trim().is_empty() {
         return Err(
-            "MOLY_ASSET_STORE_URL is empty; point it at the public asset store directory".into(),
+            "resources.store (MOLY_ASSET_STORE_URL) is empty; point it at the public asset store"
+                .into(),
         );
     }
     store_root(&url)?;
-    let catalog = std::env::var("MOLY_ASSET_CATALOG").ok();
+    let catalog = moly_config::global().text(&moly_config::keys::RESOURCE_CATALOG);
     validate_catalog_id(&catalog)?;
-    let cache = match std::env::var("MOLY_ASSET_CACHE") {
-        Ok(value) if value.trim().is_empty() => {
-            return Err("MOLY_ASSET_CACHE is empty; point it at a cache directory".into());
+    let cache = match moly_config::global().text(&moly_config::keys::RESOURCE_CACHE) {
+        Some(value) if value.trim().is_empty() => {
+            return Err(
+                "resources.cache (MOLY_ASSET_CACHE) is empty; point it at a cache directory".into(),
+            );
         }
-        Ok(value) => {
+        Some(value) => {
             let path = std::path::PathBuf::from(value);
             std::fs::create_dir_all(&path).map_err(|error| {
-                format!("MOLY_ASSET_CACHE is not usable: {}: {error}", path.display())
+                format!(
+                    "resources.cache (MOLY_ASSET_CACHE) is not usable: {}: {error}",
+                    path.display()
+                )
             })?;
             Some(path)
         }
-        Err(_) => None,
+        None => None,
     };
     Ok(AssetSource::HttpPacks {
         url,
@@ -341,7 +351,7 @@ fn public_store(url: String) -> Result<AssetSource, String> {
     })
 }
 
-/// Without `MOLY_ASSET_ROOT` or `MOLY_ASSET_STORE_URL`, the resources the
+/// Without `resources.root` or `resources.store`, the resources the
 /// launcher installed: its resource directory and the selected (or newest)
 /// complete snapshot there.
 #[cfg(not(target_arch = "wasm32"))]
@@ -353,11 +363,13 @@ fn installed_resources() -> Result<AssetSource, String> {
             .unwrap_or_else(|error| error);
         format!(
             "no resources are installed in {dir}; download them with moly-launcher, \
-             or set MOLY_ASSET_ROOT to a resource directory, \
-             or MOLY_ASSET_STORE_URL to a public asset store"
+             or set resources.root (MOLY_ASSET_ROOT) to a resource directory, \
+             or resources.store (MOLY_ASSET_STORE_URL) to a public asset store"
         )
     })?;
-    let catalog = std::env::var("MOLY_ASSET_CATALOG").ok().or(Some(installed.catalog));
+    let catalog = moly_config::global()
+        .text(&moly_config::keys::RESOURCE_CATALOG)
+        .or(Some(installed.catalog));
     validate_catalog_id(&catalog)?;
     Ok(AssetSource::NativePacks { path, catalog })
 }

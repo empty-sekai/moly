@@ -11,6 +11,7 @@ default = ["render"]
 render = ["bevy/bevy_camera", "bevy/bevy_gltf", "bevy/bevy_image", "bevy/bevy_scene", "bevy/bevy_shader"]
 
 [dependencies]
+moly-config = { path = "../../base/moly-config" }
 moly-law = { path = "../../base/moly-law" }
 bevy = { version = "0.20.1", default-features = false, features = [
     "std", "bevy_asset", "bevy_log", "async_executor", "multi_threaded",

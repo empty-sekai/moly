@@ -13,6 +13,8 @@ name = "moly-server"
 path = "src/main.rs"
 
 [dependencies]
+moly-config = { path = "../../base/moly-config" }
+moly-store = { path = "../../base/moly-store" }
 moly-server = { path = "../../server/moly-server", features = ["control"] }
 moly-assets = { path = "../../engine/moly-assets", default-features = false }
 # The control port: bevy_remote's JSON-RPC server over HTTP.
