@@ -36,19 +36,24 @@
 //!
 //! # 采纳门 `overrideState` 是门，不是值
 //!
-//! 真源的 volume 栈只在参数 `overrideState` 为真时采纳序列化
-//! `value`，为假时保留组件构造函数的默认值。实证后果：id 6 RAIN 与
-//! id 14 SEKAI 序列化了 `isSunFlareActive value=1` 而 `overrideState=false`
-//! ——照 value 读会给它们一条真游戏不显示的太阳光晕。所以本模块的
-//! 每个字段都走「门开取序列化值、门关取构造默认」，下面的构造默认
-//! 逐项转写自真源四个 volume 组件的构造函数，不是发明。
+//! The volume stack keeps the serialized `value` of a parameter only when its
+//! `overrideState` is true; when it is false the component constructor's
+//! default value applies. Consequence in the sampled profiles: phenomenon
+//! id 6 RAIN and id 14 SEKAI serialize `isSunFlareActive value=1` with
+//! `overrideState=false`, so reading the value directly would give them a sun
+//! flare the game does not show. Every field here therefore follows "gate open:
+//! take the serialized value; gate closed: take the constructor default"; the
+//! defaults below are the constructor defaults of the four volume components.
 //!
-//! 组件整体缺席不是错误：各档案携带的组件本就不同（013、014、016 另带
-//! `SplitToning`，013、014 带 `WhiteBalance`，009、013 带原生 `Bloom`；四个 Mysekai 组件
-//! 是闭集），而真源栈为每种组件类型预建了默认实例，行为恰是
-//! 「组件缺席 → 构造默认」。组件在而参数缺才是 `Err`（点名它）：
-//! 序列化资产总是携带整个组件，缺参数是数据损伤，不是游戏状态，
-//! 静默兜底会重建本模块要替换的「接没接线分不清」。
+//! A component that is absent altogether is not an error: each profile carries
+//! a different set of components (013, 014 and 016 also carry `SplitToning`,
+//! 013 and 014 carry `WhiteBalance`, 009 and 013 carry the stock `Bloom`; the
+//! four Mysekai components are a closed set), and the stack creates a default
+//! instance for every component type, so an absent component resolves to its
+//! constructor defaults. Only a present component missing a parameter is an
+//! `Err` (naming it): a serialized asset always carries the whole component, so
+//! a missing parameter means damaged data, not a game state, and silently
+//! falling back would hide wiring mistakes this module exists to expose.
 //!
 //! ⚠ 有一个字段在源侧**零读者**：`MysekaiParticleBloomVolume` 的
 //! `useAreaOverride`。它的偏移在整份泛光 pass 里出现 0 次，而同一个类的
@@ -59,8 +64,10 @@
 //! # 形状纪律
 //!
 //! 无 GPU 对象、无文件读取：调用方拿字节来、决定读哪个现象的档案。
-//! 找到文件是宿主传参的活，与真源把现象 id 一路传下去取资产名的
-//! 形状一致——渲染侧没有从全局读「当前现象 id」的路径。
+//! Locating the file is the host's job: it passes the bytes in, in the same
+//! shape as the game, which passes the phenomenon id down to derive the asset
+//! name. The render side has no path that reads a global "current phenomenon
+//! id".
 
 mod json;
 
@@ -175,7 +182,8 @@ pub struct PostProcessProfile {
     pub components: Vec<VolumeComponent>,
 }
 
-/// 雾轴的采纳结果：每个字段都过了采纳门，就是真源栈本帧持有的值。
+/// The adopted fog state: every field has passed its adoption gate and holds
+/// the value the game's volume stack has this frame.
 ///
 /// `enabled` 是采纳后的 `MysekaiFogVolume.enabled`，即 `IsActive` 门
 /// 返回的那个值。
@@ -192,8 +200,8 @@ pub struct FogVolumeState {
     pub height: f32,
 }
 
-/// 真源雾 pass 每帧写出的三个全局量（`fog_params` / `fog_near_color` /
-/// `fog_far_color`）。
+/// The three globals the fog pass writes every frame (`fog_params` /
+/// `fog_near_color` / `fog_far_color`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FogGlobals {
     pub fog_params: [f32; 4],
@@ -202,7 +210,7 @@ pub struct FogGlobals {
 }
 
 impl FogVolumeState {
-    /// `MysekaiFogPass.ExecuteFog` 的逐项转写：
+    /// Matches `MysekaiFogPass.ExecuteFog` field by field:
     ///
     /// ```text
     /// disabled = !enabled || IsDisableFog
@@ -213,18 +221,21 @@ impl FogVolumeState {
     /// fog_far_color  = (farColor.rgb,  farA)
     /// ```
     ///
-    /// `fog_params.w` 是真源里的代码常量 `0.0`（`SetGlobalColor` 调用
-    /// 的第四分量，从来不是 volume 值），这里写死 `0.0`；它有没有被
-    /// 如实转写由配套的 w 配对测试看着。
+    /// `fog_params.w` is the code constant `0.0` (the fourth component of the
+    /// `SetGlobalColor` call; it is never a volume value), hard-coded here as
+    /// `0.0`; a paired w test checks that it stays that way.
     ///
-    /// `disable_fog` 是宿主侧的总开关，对应真源 client-only 的静态门
-    /// `IsDisable`/`IsDisableFog`。`IsDisableFog` 有写者：布局编辑的游戏
-    /// 状态（`EditGameState`）进入时置真、退出时置假——setter 在那里被内联
-    /// 成对静态字段的直接写，按名字搜调用点会得到一个假的零。宿主把产品的
-    /// 布局编辑会话接到这个参数上。
-    /// 如实照真源的 disabled 形状：只把两个 alpha 强制为 0.0，rgb 与
-    /// params 照写——合成端靠 `height_factor = fog_color.w * falloff = 0`
-    /// 精确化简回 `out = scene`。
+    /// `disable_fog` is the host-side master switch; it corresponds to the
+    /// static gate `IsDisable`/`IsDisableFog`, which is client-only.
+    /// `IsDisableFog` has writers: the layout-editing game state
+    /// (`EditGameState`) sets it to true on entry and false on exit (the
+    /// setter writes the static field directly, so searching for callers by
+    /// name finds no call sites). The host wires the product's layout-editing
+    /// session to this parameter.
+    /// The disabled shape matches the game: only the two alphas are forced to
+    /// 0.0; rgb and params are written unchanged, so the compositing side
+    /// reduces exactly to `out = scene` via
+    /// `height_factor = fog_color.w * falloff = 0`.
     pub fn globals(&self, disable_fog: bool) -> FogGlobals {
         let disabled = !self.enabled || disable_fog;
         let near_a = if disabled { 0.0 } else { self.near_density * self.density };
@@ -253,7 +264,7 @@ pub struct BloomParams {
     pub tint: [f32; 4],
     pub clamp: f32,
     /// `dirtTexture != null`。实证档案全部序列化 null，今天处处为 false；
-    /// 真源 dirt 关键字变体（`_BLOOM_LQ_DIRT`）以它为键。
+    /// The dirt keyword variant (`_BLOOM_LQ_DIRT`) is keyed on it.
     pub dirt_texture_present: bool,
     pub dirt_intensity: f32,
     pub fixed_buffer_height: f32,
@@ -462,14 +473,16 @@ pub struct PhenomenonPostProcess {
     pub sky_diffusion: AxisState<DiffusionParams>,
     pub screen_flarepara: AxisState<ScreenFlareParams>,
     pub sun_flarepara: AxisState<SunFlareParams>,
-    /// 引擎原生调色（`ColorAdjustments`）。`enabled` 是源组件
-    /// `IsActive()` 的逐项转写：五项里任一项非恒等即开。
+    /// Engine-native color grading (`ColorAdjustments`). `enabled` matches the
+    /// component's `IsActive()` field by field: it is on when any of the five
+    /// values is non-identity.
     pub color_grading: AxisState<ColorAdjustmentsParams>,
     pub grayscale: NotProfileDriven,
     pub distortion: NotProfileDriven,
 }
 
-/// 构造默认，逐项转写自真源四个 volume 组件的构造函数。
+/// Constructor defaults, field by field as the constructors of the four volume
+/// components define them.
 /// 「(默认门, 默认值) 成对」是过度建模：序列化资产的 `overrideState`
 /// 是逐字段的，本模块唯一施加的默认是门关时的*值*。
 mod ctor_defaults {
@@ -591,8 +604,8 @@ use ctor_defaults as cd;
 // ---------------------------------------------------------------------------
 // 装箱一跳：解析结果 → uber pass 的程序选择与 uniform 块。
 //
-// 下列式子逐项转写自真源每帧填 uber 材质的 pass 代码，不是从着色器
-// 的读法反推的：
+// The formulas below match, item by item, the pass code that fills the uber
+// material every frame:
 //
 // * 屏幕光晕：写 `_MysekaiScreenFlareColor`（screenFlareColor1）、
 //   `_MysekaiScreenFlareColor2`、`_MysekaiScreenFlareParam1` =
@@ -604,7 +617,7 @@ use ctor_defaults as cd;
 //   [`SunFlareParams`] 没有方向字段的原因。这两处每帧由
 //   [`sun_flare_screen`] 从方向光向量与相机变换算出；[`uber_post_params`]
 //   里它们停在零方向与因子 1 上，调用方逐帧覆写。档案携带的其余量
-//   （颜色、偏移、指数、强度）按真源自己的式子装箱。
+//   (color, offset, exponent, intensity) are packed with the same formulas.
 // * bloom：`_Bloom_Enable_States.x` = brightEnable ? 1 : 0；
 //   `_Bloom_Params` = (intensity, tint')，tint' 是 tint 经
 //   `GammaToLinearSpace` 进线性、再被 `ColorUtils.Luminance` 归一
@@ -624,9 +637,10 @@ use ctor_defaults as cd;
 // 就别往 [`UberVariant`] 里添这两位。
 // ---------------------------------------------------------------------------
 
-/// 真源光晕装箱在 sincos 前乘的角度系数（`screenFlareDirection *
-/// 0.017453292`）——照抄真源的截断字面量而不是算更精确的常数，装箱
-/// 结果才能与源值逐值一致。
+/// The angle factor multiplied before sincos when packing the flare
+/// (`screenFlareDirection * 0.017453292`): the truncated literal is used as
+/// is rather than computing a more precise constant, so the packed result
+/// matches value for value.
 const DEG_TO_RAD: f32 = 0.017453292;
 
 /// `Mathf.GammaToLinearSpace`：三段，不是两段。低段 `x / 12.92`、
@@ -637,17 +651,18 @@ const DEG_TO_RAD: f32 = 0.017453292;
 /// `[0, 1]`（钳制参数）、tint 恒白，所以补上第三段对既有两条泛光装箱
 /// 逐位无影响——它只在调色这条新轴上出力。
 ///
-/// 三处（tint、threshold、colorFilter）在源里都走同一个引擎原生换算，
-/// 所以这里直接用 [`sky::gamma_to_linear`]：同一份分段、同一个设备 libm
-/// `powf` 的移植，而不是再拼一份调 `f32::powf` 的——后者在浏览器目标上
-/// 与设备逐值不同。
+/// All three uses (tint, threshold, colorFilter) go through the same
+/// engine-native conversion, so this calls [`sky::gamma_to_linear`] directly:
+/// the same piecewise formula and the same device libm `powf` implementation,
+/// instead of a second copy calling `f32::powf`, which differs value by value
+/// from the device in browser targets.
 fn gamma_to_linear(x: f32) -> f32 {
     sky::gamma_to_linear(x)
 }
 
 /// `_Bloom_Params.yzw`：线性空间里的 tint，被 `ColorUtils.Luminance`
 /// （`r * 0.2126729 + g * 0.7151522 + b * 0.072175`）归一，亮度为零时
-/// 回退白色——真源自己的归一或白 guard。
+/// falls back to white (the same normalize-or-white guard).
 fn normalized_linear_tint(tint: [f32; 4]) -> [f32; 3] {
     let linear = [
         gamma_to_linear(tint[0]),
@@ -680,9 +695,10 @@ pub struct UberVariant {
     pub grayscale: bool,
 }
 
-/// uber pass 的 uniform 块：逐 lane 对应真源 uber 材质的具名属性，
-/// 每个成员一个 16 字节向量（标量挤进具名向量的 lane，见字段 doc），
-/// 接线侧的缓冲布局按这些 lane 名对齐。
+/// The uber pass's uniform block: each lane corresponds to a named property of
+/// the uber material, one 16-byte vector per member (scalars share the lanes
+/// of a named vector; see the field docs); the wiring side lays out its buffer
+/// to match these lane names.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct UberPostParams {
     /// `_MysekaiScreenFlareColor`；`w` 是第一层的权重。
@@ -718,8 +734,9 @@ pub struct UberPostParams {
     pub scalars: [f32; 4],
     /// `_GlobalMipBias` 的 `xy`；只读 `x`。
     pub mip_bias: [f32; 4],
-    /// `x` `_DiffusionBlendMode`。真源按具名分支切换，未识别值是
-    /// 有据的不动色，不是错误。
+    /// `x` `_DiffusionBlendMode`. The blend is switched by named branches; an
+    /// unrecognized value deliberately leaves the color untouched and is not
+    /// an error.
     pub modes: [i32; 4],
 }
 
@@ -753,9 +770,11 @@ impl PhenomenonPostProcess {
     /// `_GRAYSCALE`/`_DISTORTION` 恒关（证据见 [`NotProfileDriven`]，
     /// 别从档案的其他组件把它们「补回来」）。
     ///
-    /// 这就是真源每帧清空 uber 材质关键字、再由各轴的 Render 自开
-    /// 的那次逐帧重算：这里什么也不缓存，调用方每帧从当前解析状态
-    /// 重新取，档案切换或宿主停用下一帧即生效，无需失效步骤。
+    /// This is the per-frame recomputation that clears the uber material's
+    /// keywords and lets each axis's Render enable its own: nothing is cached,
+    /// and callers re-read from the current resolved state every frame, so a
+    /// profile switch or a host disable takes effect on the next frame with no
+    /// invalidation step.
     #[must_use]
     pub fn uber_variant(&self) -> UberVariant {
         UberVariant {
@@ -768,8 +787,9 @@ impl PhenomenonPostProcess {
         }
     }
 
-    /// 本帧的 uber uniform 块，按真源 pass 代码自己的式子从采纳值
-    /// 装箱。档案不驱动的 lane 保持 [`UberPostParams::default`] 的中性值。
+    /// This frame's uber uniform block, packed from the adopted values with
+    /// the pass's own formulas. Lanes the profile does not drive keep the
+    /// neutral values of [`UberPostParams::default`].
     #[must_use]
     pub fn uber_post_params(&self) -> UberPostParams {
         let mut p = UberPostParams::default();
@@ -862,12 +882,15 @@ pub fn scatter_prime(scatter: f32) -> f32 {
 /// 背后时整层熄灭），返回 `因子 × sunFlareIntensity`。一次 `v.z` 被读两次
 /// （一次比较、一次取小），不是两次取值。
 ///
-/// 全部量都在**真源坐标系**里：`light_vector` 是真源的方向光向量，
-/// `camera_local_to_world` 是真源相机（Unity 相机本地 +z 为视向）的
-/// 本地到世界矩阵，按列给出（`[列][行]`）。产品侧的坐标适配归调用方。
-/// 矩阵逆用一般 4×4 伴随矩阵法；引擎的原生求逆（`Matrix4x4.inverse` 背后
-/// 的带主元选择的消元）与之只在单精度末位上不同：把游戏自己的引擎求逆与托管
-/// 乘法在采样相机上原生执行对比，屏幕轴与权重的差不超过 2.4e-7。
+/// Everything is in the game's coordinate system: `light_vector` is the
+/// game's directional light vector, and `camera_local_to_world` is the game
+/// camera's (Unity camera, local +z is the view direction) local-to-world
+/// matrix given by columns (`[column][row]`). Adapting to the product's
+/// coordinates is the caller's job. The matrix is inverted with the general
+/// 4×4 adjugate method; the engine's native inverse (`Matrix4x4.inverse`,
+/// elimination with pivoting) differs from it only in the last single-precision
+/// bits: comparing the engine inverse with the managed multiply on sampled
+/// cameras, the screen axis and weight differ by at most 2.4e-7.
 #[must_use]
 pub fn sun_flare_screen(
     light_vector: [f32; 3],
@@ -1085,8 +1108,10 @@ impl PostProcessProfile {
     /// URP 原生 `Bloom` 的采纳与门。门是源组件 `IsActive()`：`intensity > 0`
     /// （再折进组件级 active：不活跃的组件不进音量栈，栈里是构造默认）。
     ///
-    /// 高质量滤波（双三次上采样 + 13 点预滤波）与脏污贴图两个变体没有移植：
-    /// 采纳后开着就 `Err`，不静默走普通变体。
+    /// The high-quality filtering variant (bicubic upsampling plus 13-tap
+    /// prefiltering) and the dirt-texture variant are not implemented: when the
+    /// adopted values enable either, this returns `Err` instead of silently
+    /// using the plain variant.
     pub fn stock_bloom(&self) -> Result<AxisState<StockBloomParams>, String> {
         const CTX: &str = "postprocess.json.Bloom";
         self.reject_unported_stock_components()?;
@@ -1147,13 +1172,15 @@ impl PostProcessProfile {
         }
     }
 
-    /// 引擎原生调色的采纳。门是源组件 `IsActive()` 的逐项转写：
+    /// Adoption of engine-native color grading. The gate matches the
+    /// component's `IsActive()` field by field:
     /// `postExposure != 0 || contrast != 0 || colorFilter != white ||
-    /// hueShift != 0 || saturation != 0`——**逐项相等比较，没有 epsilon**，
-    /// 所以照抄成精确比较。
+    /// hueShift != 0 || saturation != 0` — **each is an equality comparison
+    /// with no epsilon**, so these are exact comparisons.
     ///
-    /// `colorFilter != Color.white` 比的是四分量（含 alpha）；实证档案
-    /// 的 alpha 恒 1，与白的 alpha 相等，所以这里也带上第四分量。
+    /// `colorFilter != Color.white` compares all four components (alpha
+    /// included); the sampled profiles always have alpha 1, equal to white's
+    /// alpha, so the fourth component is compared here as well.
     fn resolve_color_adjustments(
         &self,
     ) -> Result<AxisState<ColorAdjustmentsParams>, String> {
@@ -1351,8 +1378,9 @@ mod tests {
         }"#.to_vec()
     }
 
-    /// 上面字节的手算期望 globals：直接从 ExecuteFog 的转写与写入
-    /// 字节的序列化值展开——不经实现的任何管道。
+    /// Hand-computed expected globals for the bytes above: expanded directly
+    /// from the `ExecuteFog` formulas and the serialized values in the bytes,
+    /// without going through any implementation path.
     fn sekai_expected_globals() -> FogGlobals {
         let density = 1.0f32;
         let near_color = [0.64106447f32, 0.85856f32, 0.9245283f32, 0.0f32];
@@ -1535,9 +1563,11 @@ mod tests {
         );
     }
 
-    /// 档案缺席的组件解析到构造默认（真源栈预建默认实例的语义），
-    /// 四个实证组件的默认门全 OFF。在场组件*缺参数*是 `Err` 且点名它
-    /// ——数据损伤，不是游戏状态。
+    /// A component absent from the profile resolves to its constructor
+    /// defaults (the stack creates a default instance for every component
+    /// type), and all four sampled components default to gate OFF. A present
+    /// component *missing a parameter* is an `Err` that names it — damaged
+    /// data, not a game state.
     #[test]
     fn absent_component_resolves_to_ctor_defaults_but_absent_parameter_is_an_error() {
         let src = br#"{"asset": "a", "components": []}"#;
@@ -1550,7 +1580,7 @@ mod tests {
         assert!(!resolved.sky_diffusion.enabled);
         assert!(!resolved.screen_flarepara.enabled);
         assert!(!resolved.sun_flarepara.enabled);
-        // 构造默认雾数：s=1, e=10, h=1——转写式子由它得 (-1/9, 10/9, 1, 0)。
+        // Constructor-default fog numbers: s=1, e=10, h=1 — the formulas give (-1/9, 10/9, 1, 0).
         assert_eq!(resolved.fog.params.start, 1.0);
         assert_eq!(resolved.fog.params.end, 10.0);
         assert_eq!(resolved.fog.params.height, 1.0);
@@ -1618,8 +1648,10 @@ mod tests {
         assert!(on.screen_flarepara.enabled);
     }
 
-    /// 不活跃的组件即使序列化门全部满足也不得点亮轴（真源栈整个
-    /// 无视不活跃组件，保持构造默认，默认门全关）。
+    /// An inactive component must not turn the axis on even when every
+    /// serialized gate is satisfied (the stack ignores inactive components
+    /// entirely and keeps the constructor defaults, whose gates are all
+    /// closed).
     #[test]
     fn inactive_component_resolves_off() {
         let src = br#"{
@@ -1692,9 +1724,10 @@ mod tests {
     // 形状，逐轴各来一遍。
     // -------------------------------------------------------------------
 
-    /// `Mathf.GammaToLinearSpace`（sRGB 分段）的手算展开：此处拼写而
-    /// 不导入，装箱测试的期望因此与实现不共 helper。幂是源里那次 C 库
-    /// `powf` 调用，所以调设备 libm 的移植，不调 `f32::powf`。
+    /// Hand expansion of `Mathf.GammaToLinearSpace` (sRGB piecewise): spelled
+    /// out here rather than imported, so the packing tests' expectations share
+    /// no helper with the implementation. The power is the C library `powf`
+    /// call, so this uses the device libm implementation, not `f32::powf`.
     fn hand_gamma_to_linear(x: f32) -> f32 {
         if x <= 0.04045f32 {
             x / 12.92f32
@@ -1703,8 +1736,9 @@ mod tests {
         }
     }
 
-    /// 真源 bloom tint 装箱的手算展开：进线性，再用 `ColorUtils.
-    /// Luminance` 的精确常数亮度归一，亮度为零回白。
+    /// Hand expansion of the bloom tint packing: convert to linear, then
+    /// normalize by `ColorUtils.Luminance` with its exact constants; a
+    /// luminance of zero falls back to white.
     fn hand_bloom_tint(tint: [f32; 4]) -> [f32; 3] {
         let l = [
             hand_gamma_to_linear(tint[0]),
@@ -1799,8 +1833,9 @@ mod tests {
 
     /// bloom 侧的采纳门：`brightEnable value=1` 而 `overrideState=false`
     /// 必须解析 OFF（构造默认 false）。门是逐字段的：自己的门开着的
-    /// intensity 照样被采纳、照样装箱——真源的材质也会带着它——只是
-    /// 位关时装箱块不被读，帧由位保持不变。
+    /// intensity is still adopted and still packed (the material carries it
+    /// too); when the bit is off the packed block is not read, so the frame is
+    /// left unchanged by the bit.
     #[test]
     fn bloom_gate_negative_arm_is_off_with_value_fields_still_adopted() {
         let resolved = PostProcessProfile::from_bytes(&bloom_profile(false))
@@ -1855,8 +1890,9 @@ mod tests {
         assert_eq!(p.modes[0], 18, "_DiffusionBlendMode");
         assert_eq!(p.scalars[2], 0.0, "the diffusion packing must not touch the bloom RGBM lane");
         // _Scatter 是**折算后**的值（scatter * 0.9 + 0.05），不是档案原值：
-        // 真源在建金字塔之前 SetFloat 的是折算结果。原值与折算值同时钉住，
-        // 改动其中任何一个都会红。
+        // The SetFloat before the pyramid is built carries the folded result.
+        // Both the profile value and the folded value are pinned, so changing
+        // either one fails.
         assert_eq!(resolved.diffusion_scatter()[0], 0.7 * 0.9 + 0.05, "_Scatter = scatter*0.9+0.05");
 
         // 门臂：同一个强度数，未标记。门要 intensity > 0，未采纳的
@@ -1923,7 +1959,7 @@ mod tests {
         assert!(resolved.screen_flarepara.enabled);
         assert!(resolved.uber_variant().screen_flare);
         let p = resolved.uber_post_params();
-        // 真源自己的截断角度系数，喂 sincos。
+        // The truncated angle factor, fed into sincos.
         let radians = 60.0f32 * 0.017_453_292f32;
         assert_eq!(p.screen_flare_param1[0], radians.cos(), "param1.x = cos(direction)");
         assert_eq!(p.screen_flare_param1[1], radians.sin(), "param1.y = sin(direction)");

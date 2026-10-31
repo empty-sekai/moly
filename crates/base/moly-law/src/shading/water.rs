@@ -1,21 +1,25 @@
-//! `Mysekai/Water` Base 片元程序（含 keyword 变体）的逐句翻译。
+//! `Mysekai/Water` Base fragment program (including keyword variants),
+//! formula by formula.
 //!
-//! 式子保持源程序的运算顺序，作为上屏 shader 移植的 oracle；
-//! 材质值按名字取，与源程序声明一致，不猜值。
+//! The formulas keep the program's operation order and serve as the oracle
+//! for the on-screen shader; material values are looked up by name, as the
+//! program declares them, never guessed.
 //!
-//! 已知缺口：材质表带 `_WaterFoamColor` 颜色与 `_WaterDistortionTex` /
-//! `_FoamTex` / `_WaterFoamMaskTex` 纹理槽，但已导出的 Water 记录
-//! （含本程序所译的无 keyword Base 与 fresnel / overlay / alpha-clip /
-//! skip-light 变体）没有任何一处消费 foam——泡沫辅助贴图在源导出里缺件，
-//! 本律不含 foam 项，也不发明它的数据。
+//! Known gap: the material table carries a `_WaterFoamColor` color and the
+//! `_WaterDistortionTex` / `_FoamTex` / `_WaterFoamMaskTex` texture slots, but
+//! none of the exported Water records covered here (the keyword-free Base and
+//! the fresnel / overlay / alpha-clip / skip-light variants) uses foam: the
+//! foam helper textures are missing from the export, so these rules contain no
+//! foam term and do not invent its data.
 //!
-//! 落影上色（真源全局量 `_MysekaiDropShadowColor1`）在本族收影变体里
-//! 只应用一次（带该全局量的收影变体全体一致；FieldObject 族是两次）。
+//! Drop-shadow tinting (the global `_MysekaiDropShadowColor1`) is applied once
+//! in this family's shadow-receiving variants (every shadow-receiving variant
+//! carrying that global agrees; the FieldObject family applies it twice).
 //! 落影的衰减与采样核不在本律内。
 
 use crate::shading::{TREASURE_SHADOW_EDGE, TREASURE_SHADOW_INV_RANGE, TREASURE_SHADOW_SCALE};
 
-/// 该族在真源里的 shader 名。
+/// The family's shader name.
 pub const SHADER_NAME: &str = "Mysekai/Water";
 
 /// 一帧的全局量，字段与源程序的全局块声明一一对应。
@@ -338,8 +342,10 @@ fn transform_clip_column_major(matrix: [f32; 16], position: [f32; 3]) -> [f32; 4
     ]
 }
 
-/// 顶点程序的逐句翻译：逆转置法线（带源的 epsilon 钳制）、透视/正交
-/// 两种视线、UV 滚动、原样顶点色 varying、雾深式子。
+/// The vertex program, formula by formula: inverse-transposed normal (with the
+/// source's epsilon clamp), perspective/orthographic view vectors, UV scroll,
+/// the vertex color passed through unchanged as a varying, and the fog-depth
+/// formula.
 #[must_use]
 pub fn water_vertex(input: WaterVertexInputs) -> WaterVertexVaryings {
     let world_position = transform_point_column_major(input.object_to_world, input.position);
@@ -432,9 +438,10 @@ pub struct WaterVertexVaryings {
     pub fog_factor: f32,
 }
 
-/// `_USE_ALPHA_CLIP` 变体的 discard 判据：被选 alpha（可选顶点 alpha 乘后）
-/// 严格低于字面 `0.5` 才丢弃。与输出 alpha（被选 alpha × `_BaseOpacity`）
-/// 是两个量，裁核的是前者。
+/// The `_USE_ALPHA_CLIP` variant's discard test: it discards only when the
+/// selected alpha (optionally multiplied by the vertex alpha) is strictly
+/// below the literal `0.5`. That is a different quantity from the output alpha
+/// (selected alpha × `_BaseOpacity`); the clip uses the former.
 #[must_use]
 pub fn alpha_clip_keeps(main_alpha: f32, vertex_alpha: f32, use_vertex_alpha_opacity: f32) -> bool {
     let selected = if use_vertex_alpha_opacity > 0.5 {

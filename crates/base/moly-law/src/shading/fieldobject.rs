@@ -1,12 +1,13 @@
-//! `Mysekai/Site/FieldObject` Base 片元程序的逐句翻译。
+//! `Mysekai/Site/FieldObject` Base fragment program, formula by formula.
 //!
-//! 式子保持源程序的运算顺序，作为上屏 shader 移植的 oracle；
-//! 材质值按名字取，与源程序声明一致，不猜值。
+//! The formulas keep the game program's operation order and serve as the
+//! oracle for the on-screen shader; material values are looked up by name, as
+//! the program declares them, never guessed.
 
 use crate::material::{texture_slot, FloatLookup, MaterialSlot};
 use crate::shading::{TREASURE_SHADOW_EDGE, TREASURE_SHADOW_INV_RANGE, TREASURE_SHADOW_SCALE};
 
-/// 该族在真源里的 shader 名。
+/// The family's shader name.
 pub const SHADER_NAME: &str = "Mysekai/Site/FieldObject";
 
 /// 源片元里字面出现的常数。
@@ -340,8 +341,8 @@ pub const TENT_WEIGHT: f32 = 0.159999996;
 pub const TENT_SECONDARY_WEIGHT: f32 = 0.0799999982;
 
 /// 落影上色：`tint = lerp(colour, colour × shadow_colour.rgb, shadow_colour.a)`。
-/// `shadow_colour` 是真源全局量 `_MysekaiDropShadowColor1` 形状的 RGBA；
-/// 一次应用在源片元里是对它的两行直线算术。
+/// `shadow_colour` is the RGBA of the global `_MysekaiDropShadowColor1` shape;
+/// one application is two straight-line arithmetic steps on it.
 #[must_use]
 pub fn drop_shadow_tint(colour: [f32; 3], shadow_colour: [f32; 4]) -> [f32; 3] {
     let mut out = [0.0; 3];
@@ -364,12 +365,15 @@ pub fn apply_drop_shadow(colour: [f32; 3], atten: f32, shadow_colour: [f32; 4]) 
     out
 }
 
-/// 主光阴影衰减合成。源片元的直线顺序是三步：强度门
-/// （`atten = sum·strength + (1−strength)`）→ 比较深度出 `[0, 1)` 整段
-/// 免影（覆写前一步）→ 距离 fade 平方往无影插回；次序是源程序原形，
-/// 不是可交换的等价改写。`params` 对应真源 `_MainLightShadowParams`：
-/// `.x` 强度、`.z` 距离平方系数、`.w` fade 起点。`dist_sq` 是世界位置到
-/// 相机位置的平方距离，采样值与比较深度由调用方供给。
+/// Main-light shadow attenuation. The fragment program runs three steps in
+/// this order: intensity gate (`atten = sum·strength + (1−strength)`) → a
+/// compare depth outside `[0, 1)` marks the whole fragment unshadowed
+/// (overwriting the previous step) → a squared distance fade interpolates back
+/// toward unshadowed. The order is the one the program uses and the steps are
+/// not interchangeable. `params` corresponds to `_MainLightShadowParams`:
+/// `.x` intensity, `.z` squared-distance coefficient, `.w` fade start.
+/// `dist_sq` is the squared distance from the world position to the camera
+/// position; the sample values and the compare depth come from the caller.
 #[must_use]
 pub fn shadow_attenuate(
     shadow_sum: f32,
@@ -386,11 +390,13 @@ pub fn shadow_attenuate(
     fade * (1.0 - atten) + atten
 }
 
-/// 单轴六份 tent 权重，按源 tent 核的直线算术逐字转录，次序
-/// `[wa, wb, wc, wd, we, wf]`：`wa = W(1−f)`、`wb = W((1−f) − min(f,0)² + 1)`、
-/// `wc = W((1+f) − max(f,0)² + 1)`、`wd = W(1+f)`、`we = W((f+0.5)²/2 − f)`、
-/// `wf = S(f+0.5)²`，其中 `W`/`S` 即 [`TENT_WEIGHT`] / [`TENT_SECONDARY_WEIGHT`]。
-/// `f` 是该轴落在基准 texel 内的带符号小数；六份之和恒为 1。
+/// The six tent weights for one axis, using the same straight-line arithmetic
+/// as the tent kernel, in the order
+/// `[wa, wb, wc, wd, we, wf]`: `wa = W(1−f)`, `wb = W((1−f) − min(f,0)² + 1)`,
+/// `wc = W((1+f) − max(f,0)² + 1)`, `wd = W(1+f)`, `we = W((f+0.5)²/2 − f)`,
+/// `wf = S(f+0.5)²`, where `W`/`S` are [`TENT_WEIGHT`] / [`TENT_SECONDARY_WEIGHT`].
+/// `f` is the axis's signed fraction within the base texel; the six always
+/// sum to 1.
 fn tent_weights(f: f32) -> [f32; 6] {
     let below = f.min(0.0);
     let above = f.max(0.0);

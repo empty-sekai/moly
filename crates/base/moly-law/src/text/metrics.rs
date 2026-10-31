@@ -2,11 +2,13 @@
 //! 盒宽、锚基、行偏移。纯测量，不放字形；字形查表以闭包入参给出
 //! （返回**基准字号下**的推进，未命中为 None）。
 //!
-//! 运算次序逐句对照真源 TextMeshPro 排版：量宽时推进先乘 `TEXT_SCALE`
-//! 再除回去，**不是**恒等变换——浮点上这个往返留下了真源的位形，
-//! 改动次序会挪动结果。全角/半角与回退推进见 [`super::advance`]。
+//! The operation order follows TextMeshPro's layout step by step: when
+//! measuring width the advance is multiplied by `TEXT_SCALE` and then divided
+//! back, which is **not** an identity in floating point — the round trip
+//! leaves the same bits as the engine, and changing the order moves the
+//! results. Full/half width and fallback advances are in [`super::advance`].
 //!
-//! 怪癖按真源保留（各有测试钉住）：
+//! The quirks are preserved as they are (each has a test pinning it):
 //! * 行尾一个 `\n` 弹掉（`"A\n"` 是一行）；
 //! * 段间空隙 `cspace` 在**行尾**额外补一次（只补最后一个非空段的）；
 //! * `<space=N>` 固定段无消费跟踪：它的推进泄漏进它之后每一行；
@@ -34,7 +36,7 @@ pub struct LayoutMetrics {
     pub line_offsets: Vec<f32>,
 }
 
-/// 内部固定常数（真源 TextMeshPro 排版）：坐标倍率、点尺寸、
+/// Internal fixed constants (TextMeshPro layout): coordinate scale, point size,
 /// 上/下行线、行距、盒内边距。
 const TEXT_SCALE: f32 = 2.0;
 const TMP_POINT_SIZE: f32 = 75.0;
@@ -46,7 +48,7 @@ const PAD_ORIGINAL: f32 = 64.0 / TEXT_SCALE;
 /// 行量法主入口。
 ///
 /// * `text`：带标签的富文本；
-/// * `font_size` / `line_spacing` / `font_family`：排版参数（真源层属性）；
+/// * `font_size` / `line_spacing` / `font_family`: layout parameters (properties of the text component);
 /// * `base_size`：字形表的基准字号（图集烘制时的字号）；
 /// * `glyph_advance`：按字符查字形推进（基准字号下的值），空格与
 ///   不换行空格**不会被查**（强制回退），未命中返回 None 走回退。
@@ -182,7 +184,7 @@ pub fn layout_segments(
                         font_family,
                     ) * char_scale
                         * TEXT_SCALE;
-                    // 乘 TEXT_SCALE 再除回去——保留真源的位形。
+                    // Multiply by TEXT_SCALE and divide back — keeps the same bits as the engine.
                     measured += (glyph_advance_tmp * seg_scale) / TEXT_SCALE;
                     rendered_count += 1;
                     max_cpv_width_tmp = update_cpv_width_for_char(
@@ -357,7 +359,7 @@ fn starts_with_chars(left: &[char], prefix: &[char]) -> bool {
 mod tests {
     use super::*;
 
-    /// 无字形表：全部走回退推进（真源锚样例 e02–e05 的口径）。
+    /// No glyph table: every character uses the fallback advance (as in the reference cases e02–e05).
     fn no_glyphs() -> impl Fn(char) -> Option<f32> {
         |_ch: char| None
     }
@@ -386,7 +388,7 @@ mod tests {
 
     #[test]
     fn fallback_only_single_line() {
-        // 半角 12 + 半角 12 = 24。
+        // Half-width 12 + half-width 12 = 24 (12 + 12).
         let m = metrics("AB");
         assert_eq!(m.line_widths, f(&[24.0]));
         assert_eq!(m.rect_widths, f(&[24.0]));
@@ -429,7 +431,7 @@ mod tests {
 
     #[test]
     fn space_advance_by_family() {
-        // Sans 24：space=round(24×5/24)=5 ⇒ 12+5+12=29。
+        // Sans 24: space = round(24×5/24)=5 ⇒ 12+5+12=29.
         let m = metrics("A B");
         assert_eq!(m.line_widths, f(&[29.0]));
         assert_eq!(m.rect_widths, f(&[29.0]));
@@ -446,7 +448,7 @@ mod tests {
         assert_eq!(m.rect_widths, f(&[24.0]));
         // 盒宽按可见宽：24+32=56。
         assert_eq!(m.box_w, 56.0);
-        // 中间空格不悬挂：24+5+24=53？真源：51（中间空格推进可见宽）。
+        // An inner space does not hang: 24+5+24=53? The game gives 51 (an inner space adds to the visible width).
         let m = metrics("AB   C");
         assert_eq!(m.line_widths, f(&[51.0]));
         assert_eq!(m.rect_widths, f(&[51.0]));
@@ -455,7 +457,7 @@ mod tests {
     #[test]
     fn nbsp_counts_as_advance_not_glyph() {
         // nbsp 推进 = 字号 24：12+24+12=48，且计入可见宽（非空白码点？不——
-        // U+00A0 是空白，悬挂）。真源：行宽 48、可见宽 48。
+        // U+00A0 is whitespace, so it hangs). The game gives line width 48, visible width 48.
         let m = metrics("A\u{00a0}B");
         assert_eq!(m.line_widths, f(&[48.0]));
         assert_eq!(m.rect_widths, f(&[48.0]));
@@ -465,7 +467,7 @@ mod tests {
 
     #[test]
     fn hard_breaks_split_lines() {
-        // "A\nB"：两行 [12,12]；行偏移 96.399994。
+        // "A\nB": two lines [12,12]; line offset 96.399994.
         let m = metrics("A\nB");
         assert_eq!(m.line_widths, f(&[12.0, 12.0]));
         assert_eq!(m.anchor_base, -14.98);
@@ -487,7 +489,7 @@ mod tests {
 
     #[test]
     fn blank_line_between_text_keeps_middle_line() {
-        // "A\n\nB"：三行 [12,0,12]，空行可见宽 0。
+        // "A\n\nB": three lines [12,0,12], the blank line has visible width 0.
         let m = metrics("A\n\nB");
         assert_eq!(m.line_widths, f(&[12.0, 0.0, 12.0]));
         assert_eq!(m.rect_widths, f(&[12.0, 0.0, 12.0]));
@@ -532,11 +534,12 @@ mod tests {
 
     #[test]
     fn cspace_added_per_char_and_once_at_line_end() {
-        // <cspace=10>AB：10/2=5 每字符 + 行尾再 5 ⇒ 12+5+12+5=37？
-        // 真源：行宽 39（12+5+12+5+5？不——cspace 10/TEXT_SCALE=5，
-        // 每字符计 5 两次 =10，行尾补 5）⇒ 12+10+5 = 27？真源给 39。
+        // <cspace=10>AB: gap 10/2=5 per character + 5 more at line end ⇒
+        // 12+5+12+5=37? The game gives line width 39 (12+5+12+5+5? No —
+        // cspace 10/TEXT_SCALE=5, 5 counted twice per character = 10, plus 5
+        // at line end) ⇒ 12+10+5 = 27? The game gives 39.
         let m = metrics("<cspace=10>AB</cspace>");
-        // 期望值取自真源锚：行宽 39、可见宽 29。
+        // Expected in the game's reference: line width 39, visible width 29.
         assert_eq!(m.line_widths, f(&[39.0]));
         assert_eq!(m.rect_widths, f(&[29.0]));
     }
@@ -548,7 +551,7 @@ mod tests {
         let m = metrics("A<space=30>B\nC");
         assert_eq!(m.line_widths, f(&[39.0, 27.0]));
         // 泄漏只进行宽、不进可见宽（固定段经 update_cpv_width）：
-        // 真源 rectWidths=[39,27]。锚定真源。
+        // The game's rectWidths are [39,27].
         assert_eq!(m.rect_widths, f(&[39.0, 27.0]));
     }
 
@@ -571,7 +574,7 @@ mod tests {
 
     #[test]
     fn voffset_pushes_anchor_down() {
-        // <voffset=10>A：竖直上界 +10 ⇒ 锚基 9.12+10/2=14.12？真源 11.62。
+        // <voffset=10>A: vertical upper bound +10 ⇒ anchor base 9.12+10/2=14.12? The game gives 11.62.
         let m = metrics("<voffset=10>A</voffset>");
         assert_eq!(m.anchor_base, 11.62);
     }
@@ -586,7 +589,7 @@ mod tests {
     #[test]
     fn leading_whitespace_line_has_chars_with_zero_rect() {
         // "   \nAB"：首行全是空白——has_chars=true（段消费过）但可见宽 0；
-        // 行宽 15（3 空格×5）。真源：[15,24] / [0,24]。
+        // Line width 15 (3 spaces × 5). The game gives [15,24] / [0,24].
         let m = metrics("   \nAB");
         assert_eq!(m.line_widths, f(&[15.0, 24.0]));
         assert_eq!(m.rect_widths, f(&[0.0, 24.0]));
@@ -628,7 +631,7 @@ mod tests {
     fn empty_text_is_legal_with_no_lines() {
         let m = metrics("");
         // 空文本：clean 为空串，split('\n') 产一行空文本。
-        // 真源 e2e 无实例输出（量不到）；单元口径：一行全空。
+        // The game's end-to-end run has no instance output to measure; the unit-level result: one all-blank line.
         assert!(m.line_widths.len() <= 1);
         if m.line_widths.len() == 1 {
             assert_eq!(m.line_widths[0], 0.0);

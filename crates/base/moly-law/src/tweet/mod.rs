@@ -1,6 +1,6 @@
 //! tweet 域：哪条 tweet 出场（选取律）+ 出场带什么（角色域装配输入）。
 //!
-//! [`row`] 镜像真源主表的行结构；[`select`] 是四条选取链与一条
+//! [`row`] mirrors the row structure of the game's master tables; [`select`] holds four selection chains and one
 //! 确定链接——每条抽签链对随机源**恰求值一次**；[`face`] 把 tweet 行
 //! 翻译成角色域消费的动作/眼/口三键。`text` 原样携带不解释，
 //! 排版归 `crate::text`。

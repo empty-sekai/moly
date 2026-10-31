@@ -22,7 +22,6 @@ pub(super) const EXIT: &str = "EditorExit";
 pub(super) const CLEAN_UP: &str = "Common2";
 
 pub(super) struct ExitBindings {
-    pub window: String,
     pub close: String,
     pub cancel: String,
     pub discard: String,
@@ -139,7 +138,6 @@ pub(super) fn exit(
         layouts.wording("WORD_EDIT_SAVE_CONFIRMATION"),
     );
     Ok(ExitBindings {
-        window: field(fields, "windowObject")?,
         close: field(fields, "closeButton")?,
         cancel,
         discard,

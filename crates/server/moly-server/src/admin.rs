@@ -41,11 +41,6 @@ pub(crate) fn schema_view(model: &ServerModel, masters: &Tables<'_>) -> String {
     edit::schema(model, masters).to_string()
 }
 
-/// The schema of a server that has no document yet.
-pub(crate) fn schema_without_model() -> String {
-    edit::schema_without_model().to_string()
-}
-
 /// One administration call answered, as JSON text.
 pub(crate) fn answer(
     call: AdminCall,

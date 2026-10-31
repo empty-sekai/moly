@@ -476,7 +476,6 @@ fn prepare_fixture_talk(
     resolved: crate::player_talk::ResolvedTalk,
     entity: Entity,
     unit: u32,
-    epoch: u64,
     data: npc_talk_lottery::FixtureTalkData,
     drafts: &[RawDraft],
 ) -> Result<PreparedFixtureTalk, String> {
@@ -491,7 +490,6 @@ fn prepare_fixture_talk(
             Some(fixture_activities.talk_timeline_selection(
                 entity,
                 unit,
-                epoch,
                 placements,
                 &data,
                 pre_action,
@@ -3502,7 +3500,6 @@ pub fn decide(
                                         resolved,
                                         entity,
                                         unit.0,
-                                        epoch.0,
                                         data,
                                         &drafts,
                                     ) {
@@ -3612,7 +3609,6 @@ pub fn decide(
                                                 resolved,
                                                 entity,
                                                 unit.0,
-                                                epoch.0,
                                                 forced,
                                                 &[],
                                             )

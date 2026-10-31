@@ -1,4 +1,5 @@
-//! 天空渐变律：真源天空视图脚本（`EnvironmentSkyView`）着色式的逐值复算。
+//! Sky gradient rules: per-value recomputation of the shading formula of the
+//! game's sky view script (`EnvironmentSkyView`).
 //!
 //! 天空不是天空盒，是一份产品网格加一条材质属性块：15 个现象共用同一份
 //! 网格与材质，天气只差一张 32×1 的渐变条（`_RampTex1`/`_RampTex2`）。
@@ -8,14 +9,18 @@
 //!
 //! # 域
 //!
-//! **全模块一路在存储（编码）域。** 真源是 gamma 色彩空间构建：渐变条
-//! 纹素按存储值采样、交叉淡化与附加项相加都在这一域里做、结果按编码值
-//! 直写帧缓冲。⇒ 本模块任何一处都不该出现「解码进线性域算一算再编码
-//! 回去」——唯一走那条往返的是附加色，而它整段在 CPU 侧、在渐变条被采样
-//! 之前就做完了（[`additive_property`]）。
+//! **The whole module stays in the storage (encoded) domain.** The game is
+//! built for the gamma color space: ramp texels are sampled by their stored
+//! values, the cross-fade and the additive term are added in this domain, and
+//! the result is written to the framebuffer as encoded values. ⇒ Nothing here
+//! should decode to linear, compute, and re-encode — the only value that makes
+//! that round trip is the additive color, and the whole trip happens on the
+//! CPU before the ramp is sampled ([`additive_property`]).
 //!
-//! 本仓的色彩目标是 sRGB 格式、写出时硬件会再编码一次，所以多出一步
-//! [`srgb_target_value`]：它**不是**真源的式子，是域适配，doc 里已具名。
+//! This repository's color target has an sRGB format, so the hardware encodes
+//! once more on write, which requires the extra step
+//! [`srgb_target_value`]: it is **not** part of the game's formula but a domain
+//! adaptation.
 //! 消费侧配套：渐变条按非 sRGB 装载，采样值与存储域同值。
 //!
 //! # 形状纪律
@@ -87,19 +92,23 @@ pub fn blend_ramps(a: [f32; 3], b: [f32; 3], progress: f32) -> [f32; 3] {
 
 /// 引擎的 `Mathf.GammaToLinearSpace`：sRGB 分段解码，**三支**。
 ///
-/// 分界与常量取自引擎自己的两份独立拼写——版本精确的引擎托管源里同一
-/// 换算的逐字节实现，与引擎内置着色器库里点名「精确版」的那一支——两份
-/// 逐支逐常量一致。托管入口是内部调用，方法体是引擎原生库里的自由函数；
-/// 日服客户端的播放器自带的引擎原生库里那份方法体已逐支读过、常量逐位对上。
-/// 原生体在 `x == 1` 处有一支直接返回 1 的短路，与 `powf(1, 2.2) == 1` 同值。
+/// The thresholds and constants agree branch by branch and constant by
+/// constant with the engine's own two spellings: the byte-level implementation
+/// of the same conversion in the engine's managed source, and the branch the
+/// engine's built-in shader library names as the "exact version". The managed
+/// entry point is an internal call whose body is a free function in the
+/// engine's native library. The native body short-circuits at `x == 1` and
+/// returns 1 directly, the same value as `powf(1, 2.2) == 1`.
 ///
-/// 幂运算是原生体对 C 库 `powf` 的调用，在手机上落到系统 libm。这里调
-/// [`crate::powf::powf`]（Android 10 起系统 libm 那份 `powf` 的逐位移植），
-/// **不调** `f32::powf`：后者在浏览器目标上是另一支实现（FreeBSD 那份），
-/// 在这两个换算上逐值不同。值比对（见 `color_lerp`）在模拟器里执行的是
-/// 原生体本身加 Android 10+ 系统镜像自带 libm 的 `powf`，本函数在本机原生
-/// 与 wasm32 两个目标上都与它逐位相等。Android 7–9 的系统 libm 是 FreeBSD
-/// 那份 `powf`，本函数不复现它。
+/// The power is a call to the C library `powf`, which on a phone resolves to
+/// the system libm. This calls [`crate::powf::powf`] (a bit-level
+/// implementation of the system libm `powf` of Android 10 and later), **not**
+/// `f32::powf`: the latter is a different implementation (the FreeBSD one) in
+/// browser targets and differs value by value on these two conversions. The
+/// value comparison (see `color_lerp`) runs the native body itself plus the
+/// `powf` of the Android 10+ system image's libm, and this function matches it
+/// bit for bit on both the local native and the wasm32 targets. The Android 7–9
+/// system libm uses the FreeBSD `powf`, which this function does not reproduce.
 ///
 /// 第三支必须在：附加强度可以把乘积抬过 1，那一支走的是 2.2 幂而不是
 /// 2.4 那一支的延伸。后处理装箱（泛光 tint 与 threshold、调色 colorFilter）
@@ -116,13 +125,18 @@ pub fn gamma_to_linear(x: f32) -> f32 {
 
 /// 引擎的 `Mathf.LinearToGammaSpace`：sRGB 分段编码，**四支**。
 ///
-/// 指数是引擎原生方法体里的单精度常量：`0.4166667`（位型 0x3ed55556）与
-/// `0.45454547`（位型 0x3ee8ba2f）。后者不是 `0.45454545`——那个十进制串
-/// 舍入到相邻的 0x3ee8ba2e，在 `x > 1` 一支上差 1 ULP（执行原生体的值比对
-/// 抓到的就是这一处）。不写 `1.0/2.4` 与 `1.0/2.2`。第一支是对非正输入的取零，
-/// 是源里就有的一支，不是本仓补的钳制；`x == 1` 那一支原生体直接返回 1。
-/// 线性段之后是先乘 1.055 再加 -0.055 的两次舍入（原生体没有融合乘加）。
-/// 幂运算同 [`gamma_to_linear`]：设备 libm 的 `powf`，不是 `f32::powf`。
+/// The exponents are the single-precision constants of the engine's native
+/// method body: `0.4166667` (bits 0x3ed55556) and `0.45454547` (bits
+/// 0x3ee8ba2f). The latter is not `0.45454545`, which rounds to the adjacent
+/// 0x3ee8ba2e and differs by 1 ULP on the `x > 1` branch (the value comparison
+/// against the native body catches exactly this). `1.0/2.4` and `1.0/2.2` are
+/// not written. The first branch maps non-positive input to zero; it is part
+/// of the original method, not a clamp added here. The `x == 1` case is
+/// covered by the last branch, which returns 1 directly. After the linear
+/// segment, the result is rounded once when multiplying by 1.055 and once when
+/// adding -0.055 (the native body uses no fused multiply-add). The power is
+/// the same as in [`gamma_to_linear`]: the device libm `powf`, not
+/// `f32::powf`.
 pub fn linear_to_gamma(x: f32) -> f32 {
     if x <= 0.0 {
         0.0
@@ -135,22 +149,30 @@ pub fn linear_to_gamma(x: f32) -> f32 {
     }
 }
 
-/// 天空材质属性块里 `_AdditiveColor` 的本帧取值（打雷闪光那一族）：真源
-/// 在 CPU 侧每帧算一次，逐通道 `LinearToGammaSpace(强度 × GammaToLinearSpace(底值))`，
-/// 然后 `SetColor` 进 `ShaderPropertyId.AdditiveColor`。底值是 `EnvironmentSkyView`
-/// 的静态设定色，强度是现象时间轴的 skyAdditiveIntensity。
+/// This frame's value of `_AdditiveColor` in the sky material's property block
+/// (the thunder-flash family): the game computes it once per frame on the CPU,
+/// per channel `LinearToGammaSpace(intensity × GammaToLinearSpace(base))`, then
+/// calls `SetColor` with `ShaderPropertyId.AdditiveColor`. The base is the
+/// static color set in `EnvironmentSkyView`; the intensity is the phenomenon
+/// timeline's skyAdditiveIntensity.
 ///
-/// 三件事都是从 `EnvironmentSkyView.OnUpdate` 与天空着色程序自身读出来的，
-/// 与本仓此前的写法**三处都不同**，逐条记在这里，免得后来的人照旧形改回去：
+/// Three facts follow from `EnvironmentSkyView.OnUpdate` and the sky shader
+/// itself; each differs from an earlier form of this code and is recorded
+/// here so it is not changed back:
 ///
-/// 1. **只有附加项走往返，底值（渐变条采样）根本不参与。** 往返整段在 CPU
-///    侧、在渐变条被采样之前就做完了；着色器拿到的是一个已经算好的编码域
-///    颜色，与渐变条的合成只是一次相加（见 [`with_additive`]）。
-/// 2. **底色的 alpha 从头到尾没被读。** 往返只走 r/g/b 三个通道；写进属性块
-///    的那个颜色的 alpha 是字面量 0，而着色器那边这个 uniform 声明成三分量、
-///    本就没有第四个通道可读。⇒ 任何 `× alpha` 都是本仓的发明，而它在真源
-///    实际下发的 alpha（0）上会把附加项整项抹掉。
-/// 3. **往返曲线是引擎的 sRGB 分段对，不是 2.2 纯幂。**
+/// 1. **Only the additive term makes the round trip; the base (the ramp
+///    sample) does not take part at all.** The whole trip happens on the CPU
+///    before the ramp is sampled; the shader receives an already computed
+///    encoded-domain color, and combining it with the ramp is a single
+///    addition (see [`with_additive`]).
+/// 2. **The base color's alpha is never read.** The round trip uses only the
+///    r/g/b channels; the alpha of the color written into the property block
+///    is the literal 0, and the shader declares this uniform with three
+///    components, so there is no fourth channel to read. ⇒ Any `× alpha` would
+///    cancel the additive term entirely at the alpha the game actually sends
+///    (0).
+/// 3. **The round-trip curve is the engine's sRGB piecewise pair, not a pure
+///    2.2 power.**
 ///
 /// 没有时间轴驱动时强度底值是 **0**：`GammaToLinearSpace` 的乘积随之为 0，
 /// [`linear_to_gamma`] 的取零支给出恰 0，附加项整项不出力——底值若为 1，
@@ -172,24 +194,34 @@ pub fn with_additive(base: [f32; 3], additive: [f32; 3]) -> [f32; 3] {
     [base[0] + additive[0], base[1] + additive[1], base[2] + additive[2]]
 }
 
-/// 交给 sRGB 色彩目标的值。⚠ **这一条不是真源的式子，是域适配**，写在
-/// 律这边只因为着色器逐式镜像本模块、这一步也得有个可复算的出处。
+/// The value handed to the sRGB color target. ⚠ **This is not part of the
+/// game's formula but a domain adaptation**, kept here only because the shader
+/// mirrors this module formula by formula and this step also needs a
+/// recomputable definition.
 ///
-/// 真源是 gamma 色彩空间构建：[`with_additive`] 的结果按编码值直写帧缓
-/// 冲，没有硬件编码那一步。本仓的主色彩目标是 sRGB 格式，写出时硬件会按
-/// sRGB OETF 再编码一次——把编码值直接交给它就编码了两次。实测代价（8 位
-/// 码值，闪光强度 0 的常态）：0.25 → +73 码 · 0.5 → +60 · 0.75 → +34，
-/// 全片同号偏亮。所以写出前先按格式的 EOTF 解一次，硬件那一次编码恰好还原。
+/// The game is built for the gamma color space: the result of
+/// [`with_additive`] is written directly to the framebuffer as encoded values,
+/// with no hardware encoding step. This repository's main color target has an
+/// sRGB format, so the hardware encodes once more (sRGB OETF) on write — handing
+/// it encoded values directly encodes twice. Measured cost (8-bit codes, in the
+/// normal state with flash intensity 0): 0.25 → +73 codes · 0.5 → +60 · 0.75 →
+/// +34, i.e. the whole image is too bright by the same sign. So the value is
+/// decoded once with the format's EOTF before writing, and the hardware's
+/// encoding restores it exactly.
 ///
-/// 用的是**格式的** EOTF（sRGB 标准那条分段，2.4 次幂），与
-/// [`gamma_to_linear`] 是两个来源：前者是本仓目标格式的规范，后者是引擎的
-/// 换算。两者在 0..1 上逐运算相同，这条同一性由判据钉住而不是靠共用一份
-/// 分段代码——任一份被改错时才能各自喊。幂运算两边共用
-/// [`crate::powf::powf`]：同一性要求同一个幂函数，而 `f32::powf` 在不同
-/// 目标上不是同一个函数。
+/// This uses the **format's** EOTF (the sRGB standard piecewise curve, power
+/// 2.4), a separate definition from [`gamma_to_linear`]: the first is the spec
+/// of this repository's target format, the second is the engine's conversion.
+/// The two agree on every operation over 0..1, and a test rather than shared
+/// piecewise code enforces that identity, so a mistake in either one shows up
+/// on its own. Both share [`crate::powf::powf`] for the power: the identity
+/// needs the same power function, and `f32::powf` is not the same function on
+/// every target.
 ///
-/// 先钳到 0..1 再解：UNORM 目标存不下这个区间之外的值，先钳与硬件写出时
-/// 后钳等价（两端都单调），顺带让每个幂底数都为正。
+/// The value is clamped to 0..1 before decoding: a UNORM target cannot store
+/// values outside that range, clamping before is equivalent to the hardware
+/// clamping on write (both ends are monotone), and it also makes every power
+/// base positive.
 pub fn srgb_target_value(encoded: [f32; 3]) -> [f32; 3] {
     fn eotf(x: f32) -> f32 {
         if x <= 0.04045 {
@@ -226,9 +258,10 @@ pub fn sample_ramp(ramp: &Ramp, u: f32) -> [f32; 3] {
 mod tests {
     use super::*;
 
-    /// 真源锚：001_sunny（现象 id 1）的 32×1 渐变条，逐纹素解码自提取产物
-    /// 的 ramp.png（RGBA8，解码后 0..1 浮点）。天顶侧（纹素 0）深蓝、地平
-    /// 侧（纹素 31）浅蓝，通道 a 恒 1。
+    /// Reference values: the 32×1 gradient ramp of 001_sunny (phenomenon id 1),
+    /// each texel decoded from ramp.png (RGBA8, decoded to 0..1 floats). Deep
+    /// blue at the zenith side (texel 0), pale blue at the horizon side (texel
+    /// 31); channel a is always 1.
     fn ramp_001_sunny() -> Ramp {
         const R: [f32; 32] = [
             0.176471, 0.180392, 0.184314, 0.188235, 0.192157, 0.196078, 0.2, 0.203922, 0.207843,
@@ -249,9 +282,10 @@ mod tests {
         ramp
     }
 
-    /// 真源锚：天空材质记录里的窗口两端（源浮点照抄）。
+    /// Reference values: the window ends in the sky material record (the
+    /// original floats, copied as is).
     fn common_sky_window() -> GradientWindow {
-        GradientWindow::new(0.449_999_98, 1.0).expect("真源窗口是正经区间")
+        GradientWindow::new(0.449_999_98, 1.0).expect("the reference window is a proper interval")
     }
 
     /// ±ULP 窗（同 powf 族范式）：powf 随平台 libm 差 1 ULP，且优化器会在
@@ -280,7 +314,7 @@ mod tests {
     #[test]
     fn window_rejects_degenerate_and_non_finite() {
         assert_eq!(GradientWindow::new(0.45, 1.0), Some(GradientWindow { min_y: 0.45, max_y: 1.0 }));
-        // 真源材质的窗口下限是 0.44999998807907104，照抄不抹平。
+        // The material window's lower bound is 0.44999998807907104; it is kept as is, not smoothed.
         assert!(GradientWindow::new(0.449_999_988_079_071_04, 1.0).is_some());
         assert_eq!(GradientWindow::new(1.0, 1.0), None); // 退化：两端相等
         assert_eq!(GradientWindow::new(1.0, 0.45), None); // 倒挂
@@ -346,11 +380,15 @@ mod tests {
         // 这里**不给 ULP 窗**：形状对了以后底值根本不进任何 powf，位级相等
         // 是可判的。要是谁把底值重新塞回一次往返，这条立刻红。
         //
-        // ⚠ 底值必须经 black_box 进来。判据跑在 optimized 档上，`powf` 的
-        // 常量折叠会在编译期按更高精度算完——**塞回往返的形状照样位级相等**，
-        // 这条判据就在它该抓的那一维上没有信号了（实测：不加 black_box 时
-        // 把底值塞回 2.2 幂往返，这条仍然绿）。取值也挑过：0.301961 与 1.0
-        // 恰好能被 2.2 幂往返位级还原，单靠它们同样抓不到。
+        // ⚠ The base must come in through black_box. The test runs in an
+        // optimized build, where constant folding of `powf` computes at higher
+        // precision at compile time — **a shape that puts the base back into
+        // the round trip would still be bit-equal**, and the test would have no
+        // signal on the dimension it is meant to catch (measured: without
+        // black_box, routing the base through a 2.2-power round trip still
+        // passes). The values are chosen too: 0.301961 and 1.0 happen to be
+        // restored bit-exactly by a 2.2-power round trip, so on their own they
+        // would not catch it either.
         let prop = additive_property([0.7, 0.3, 1.0], 0.0);
         assert_eq!(prop, [0.0, 0.0, 0.0]);
         for base in [
@@ -363,9 +401,11 @@ mod tests {
         }
     }
 
-    /// 本仓此前的形状，只作判别对照：底值也进往返、附加项乘一个 alpha。
-    /// 保留它是为了让「两种形状在同一输入上差多少」可判——真源的形状见
-    /// [`additive_property`] 的 doc（三条差异逐条记在那里）。
+    /// An earlier shape of this code, kept only as a contrast arm: the base
+    /// also enters the round trip and the additive term is scaled by an alpha.
+    /// It makes "how far the two shapes differ on the same input" testable —
+    /// the correct shape is described in [`additive_property`]'s doc (the three
+    /// differences are listed there).
     fn previous_shape(base: [f32; 3], additive: [f32; 4], intensity: f32) -> [f32; 3] {
         const GAMMA: f32 = 2.2;
         let mut lin = [0.0f32; 3];
@@ -378,23 +418,26 @@ mod tests {
 
     #[test]
     fn additive_survives_the_alpha_the_source_actually_delivers() {
-        // 判别点选在真源实际下发的那个 alpha 上：CPU 侧写进属性块的颜色，
-        // alpha 是字面量 0，而着色器那个 uniform 只有三分量、读不到它。
-        // ⇒ 附加项必须**完整出力**；乘 alpha 的形状会把它整项抹掉。
+        // The test point is the alpha the game actually sends: the color the
+        // CPU writes into the property block has alpha literal 0, and the
+        // shader's uniform has only three components and cannot read it.
+        // ⇒ The additive term must contribute **in full**; a shape that
+        // multiplies by alpha cancels it entirely.
         let base = [0.5, 0.25, 0.0];
         let add_rgb = [1.0, 0.5, 0.0];
         let intensity = 0.25;
 
         let prop = additive_property(add_rgb, intensity);
         let out = with_additive(base, prop);
-        // 附加项确实在（正向臂 > 0：没有它这条判据量不到任何东西）。现算
-        // 值 0.537099，判据只钉「过半量程」这一档，不钉小数位。
+        // The additive term is really there (positive arm > 0: without it this
+        // test measures nothing). The computed value is 0.537099; the test only
+        // pins the "more than half the range" band, not the decimals.
         assert!(prop[0] > 0.5, "附加项被抹平了：{prop:?}");
 
         // 同一输入喂旧形状：alpha=0 让它恰回底值。
         let old = previous_shape(base, [add_rgb[0], add_rgb[1], add_rgb[2], 0.0], intensity);
         assert_ulp(old[0], base[0]);
-        // 两种形状在这一点上差出半个量程——判据在这一维上有信号。
+        // The two shapes differ by half the range here — the test has a signal on this dimension.
         assert!(out[0] - old[0] > 0.5, "new {out:?} vs previous {old:?}");
 
         // 「第四个通道进不来」这件事由类型担着（[f32; 3]），不由运行时断言
@@ -420,8 +463,9 @@ mod tests {
     }
 
     /// 色彩目标写出时硬件那一次编码（sRGB OETF，按格式规范拼写；指数是
-    /// 精确的 `1/2.4`，不是引擎那份的截断字面量）。它是本模块之外的东西，
-    /// 所以在判据里手写一份——[`srgb_target_value`] 必须是它的逆。
+    /// exact `1/2.4`, not the engine's truncated literal). It lives outside this
+    /// module, so the test spells it out separately: [`srgb_target_value`]
+    /// must be its inverse.
     fn hardware_srgb_encode(x: f32) -> f32 {
         if x <= 0.003_130_8 {
             12.92 * x

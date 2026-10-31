@@ -126,7 +126,7 @@ mod tests {
         let mut world = World::new();
         let a = world.spawn_empty().id();
         let b = world.spawn_empty().id();
-        let group = UnitGroup { id: 1, units: [Some(14), None, Some(15), None, None] };
+        let group = UnitGroup { units: [Some(14), None, Some(15), None, None] };
         let slots = cast_slots(&group, &[(15, b), (14, a)]).unwrap();
         assert_eq!(slots, vec![(0, 14, a), (2, 15, b)]);
     }
@@ -135,7 +135,7 @@ mod tests {
     fn unknown_duplicate_and_unrepresentable_actors_fail_closed() {
         let mut world = World::new();
         let a = world.spawn_empty().id();
-        let group = UnitGroup { id: 1, units: [Some(14), Some(15), None, None, Some(16)] };
+        let group = UnitGroup { units: [Some(14), Some(15), None, None, Some(16)] };
         assert!(cast_slots(&group, &[(13, a)]).is_err());
         assert!(cast_slots(&group, &[(14, a), (14, a)]).is_err());
         assert!(cast_slots(&group, &[(16, a)]).is_err());

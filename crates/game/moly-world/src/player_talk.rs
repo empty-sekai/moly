@@ -530,8 +530,6 @@ impl PlayerTalkSites {
 #[derive(Resource)]
 pub struct PlayerTalkCandidates {
     units: Vec<(u32, Vec<TalkRow>)>,
-    /// 罗马指称名（不带 `Characters.` 前缀）→ unit。
-    names: HashMap<String, u32>,
 }
 
 /// Playback/input counters and throttle only. Current/Previous is owned by AI.
@@ -1328,7 +1326,6 @@ pub fn prepare(
     );
     commands.insert_resource(PlayerTalkCandidates {
         units,
-        names: store.names.clone(),
     });
     *prepared_roster = roster.clone();
 }

@@ -188,15 +188,6 @@ impl Sessions {
         self.0.get(&session).and_then(|open| open.user.as_ref())
     }
 
-    /// The number of open sessions.
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
     /// The sessions a user has open.
     pub fn sessions_of<'a>(&'a self, user: &'a UserId) -> impl Iterator<Item = SessionId> + 'a {
         self.0.iter().filter_map(move |(session, open)| {
@@ -224,7 +215,6 @@ pub struct CallReceived {
 /// A session that has said hello, for the handlers that seat its user.
 #[derive(Message, Clone, Debug)]
 pub struct SessionOpened {
-    pub session: SessionId,
     pub user: UserId,
 }
 
@@ -342,7 +332,7 @@ pub(crate) fn pump(
                                 server: server_name(),
                             },
                         );
-                        opened.write(SessionOpened { session, user });
+                        opened.write(SessionOpened { user });
                     }
                     ClientMessage::Call { seq, call } => {
                         let Some(user) = sessions.user(session).cloned() else {

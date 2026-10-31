@@ -6,8 +6,8 @@
 //! upper-left, upper-right, lower-right with triangles (0,1,2) and (2,3,0).
 //!
 //! Sprite UV and padding values come from the native sprite accessors
-//! (`Sprites.DataUtility`). Their arithmetic is transcribed from the engine's
-//! arm64 player: the outer UV is the texture rect times the texel size scaled
+//! (`Sprites.DataUtility`). Their arithmetic follows the engine's player: the
+//! outer UV is the texture rect times the texel size scaled
 //! by the render data's downscale multiplier; the inner UV insets it by the
 //! border minus the tight-packing offset; the padding is the offset on the
 //! left/bottom and the remainder of the sprite rect on the right/top. The

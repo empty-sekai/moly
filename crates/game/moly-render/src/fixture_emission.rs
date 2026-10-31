@@ -263,9 +263,6 @@ struct EmissionGpu {
     /// group 1 布局（全局量表 + 遮罩 + 主贴图 + 采样器，全 FRAGMENT）。
     texture_layout: BindGroupLayoutDescriptor,
     depth_layout: BindGroupLayoutDescriptor,
-    /// 钳边三线性采样器：与家具主材质同一组参数（同一 glb 里两张纹理
-    /// 共用同一条采样器条目）。
-    sampler: Sampler,
 }
 
 /// 顶点输入：位置 @0、uv @1；蒙皮另带 joints @2 / weights @3。槽位由这里
@@ -1017,15 +1014,6 @@ fn init_emission_resources(mut commands: Commands, render_device: Res<RenderDevi
             ),
         ),
     );
-    let sampler = render_device.create_sampler(&SamplerDescriptor {
-        address_mode_u: AddressMode::ClampToEdge,
-        address_mode_v: AddressMode::ClampToEdge,
-        address_mode_w: AddressMode::ClampToEdge,
-        mag_filter: FilterMode::Linear,
-        min_filter: FilterMode::Linear,
-        mipmap_filter: MipmapFilterMode::Linear,
-        ..Default::default()
-    });
     commands.insert_resource(EmissionGpu {
         object_buffer,
         object_stride: stride,
@@ -1034,7 +1022,6 @@ fn init_emission_resources(mut commands: Commands, render_device: Res<RenderDevi
         skin_uniforms,
         texture_layout,
         depth_layout: crate::weather_depth::raw_depth_layout(),
-        sampler,
     });
 }
 

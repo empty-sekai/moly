@@ -193,7 +193,6 @@ pub struct Selection {
     unit: u32,
     pub target: FixtureTarget,
     identity: FixtureActivityIdentity,
-    site_epoch: u64,
     source: ActivityKey,
     tweet: Option<moly_law::talk::TweetRef>,
     timeline: ActivityTimeline,
@@ -1249,7 +1248,6 @@ impl Factory<'_, '_> {
                     unit,
                     target,
                     identity: (*identity).clone(),
-                    site_epoch: epoch,
                     source: ActivityKey {
                         origin: action.origin,
                         timeline_id: timeline.id,
@@ -1278,7 +1276,6 @@ impl Factory<'_, '_> {
         &self,
         actor: Entity,
         unit: u32,
-        epoch: u64,
         placements: &FixturePlacements,
         data: &crate::npc_talk_lottery::FixtureTalkData,
         pre_action_id: i32,
@@ -1351,7 +1348,6 @@ impl Factory<'_, '_> {
                 uid: identity.uid.clone(),
             },
             identity: (*identity).clone(),
-            site_epoch: epoch,
             source: ActivityKey {
                 origin: ActivityOrigin::PreAction(pre_action_id),
                 timeline_id,

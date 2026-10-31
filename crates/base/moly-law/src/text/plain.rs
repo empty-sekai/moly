@@ -83,7 +83,7 @@ mod tests {
 
     #[test]
     fn numeric_runs_join_across_tags_and_split_on_symbols() {
-        // 标签两侧的数字接成一串（真源用例）。
+        // Digits on both sides of a tag join into one run (a game case).
         assert_eq!(
             numeric_text_runs("<color=#fff>12</color><b>34</b>"),
             vec![NumericTextRun {

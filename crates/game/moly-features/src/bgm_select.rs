@@ -246,24 +246,6 @@ pub struct BgmSelect {
     greeting_bubble: Option<Entity>,
 }
 
-/// `MysekaiRecordSettingDataList`'s vocal of a record, asked before a jacket
-/// package is resolved (the package follows the remembered vocal).
-fn remembered_vocal(record: i32) -> Option<i32> {
-    REMEMBERED.with(|vocals| vocals.borrow().get(&record).copied())
-}
-
-thread_local! {
-    /// The screen's remembered vocals, filed by the screen and read where a
-    /// record's jacket package is resolved.
-    static REMEMBERED: std::cell::RefCell<HashMap<i32, i32>> =
-        std::cell::RefCell::new(HashMap::new());
-}
-
-/// Files the remembered vocals for the jacket packages.
-fn file_remembered(state: Res<BgmSelect>) {
-    REMEMBERED.with(|vocals| *vocals.borrow_mut() = state.vocal_choice.clone());
-}
-
 impl BgmSelect {
     /// The server call this screen waits for, for the director.
     #[allow(dead_code)] // Read by the director's wait.
@@ -1189,14 +1171,6 @@ pub fn spawn_when_ready(
         header,
     ));
     commands.insert_resource(BgmSelectSpawned);
-}
-
-/// Reports a missing texture once, by its alias: the first frame would
-/// otherwise name it every frame.
-fn refuse_once(refused: &mut BTreeSet<String>, alias: &str, what: &str) {
-    if refused.insert(alias.to_owned()) {
-        warn!("[bgm-select] {what}: the UI root carries no runtime texture {alias}; it stays off");
-    }
 }
 
 /// The runtime alias of a record's jacket (bound once its load has arrived).
@@ -2249,10 +2223,7 @@ pub fn install(app: &mut App) {
             (
                 parse.before(crate::balloon::bake_atlas),
                 fixture::keep,
-                file_remembered,
-                jacket::advance
-                    .after(file_remembered)
-                    .before(spawn_when_ready),
+                jacket::advance.before(spawn_when_ready),
                 spawn_when_ready,
                 tap_instrument.before(crate::gesture::advance),
                 open.after(crate::action_button::click)

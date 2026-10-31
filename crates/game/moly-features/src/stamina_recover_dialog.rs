@@ -191,7 +191,6 @@ struct Live {
     stamina: Stamina,
     max: moly_masters::StaminaMax,
     row: RecoveryRow,
-    boosts: Vec<BoostItemRow>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -326,10 +325,7 @@ fn select_cost(doc: &UiPrefab, id: i64) -> (i64, i64, i64, i64) {
 /// The dialog's nodes.
 struct Page {
     positive: String,
-    positive_cover: String,
-    positive_label: String,
     negative: String,
-    negative_label: String,
     close: String,
     window: String,
     tabs: (String, String),
@@ -369,11 +365,6 @@ impl Page {
             .unwrap_or_else(|| panic!("{}: no MysekaiRecoverBoostStaminaDialog", doc.prefab));
         let field = |name: &str| reference(doc, &dialog.fields, name);
         let positive = field("positiveButton");
-        let positive_cover = reference(
-            doc,
-            &class_of(doc, positive, "Sekai.UI.CustomButton").fields,
-            "coverImage",
-        );
         let toggles = class_of(
             doc,
             field("_liveBoostConsumptionOrRecoverTabGroup"),
@@ -431,10 +422,7 @@ impl Page {
         let content = object_of(doc, reference(doc, &scroll.fields, "m_Content"));
         Page {
             positive: object_of(doc, positive),
-            positive_cover: object_of(doc, positive_cover),
-            positive_label: object_of(doc, field("positiveButtonLabelMesh")),
             negative: object_of(doc, field("negativeButton")),
-            negative_label: object_of(doc, field("negativeButtonLabelMesh")),
             close: common_button(doc, field("closeButton")),
             window: object_of(doc, doc.nodes[0].game_object_id),
             tabs: (toggle(0), toggle(1)),
@@ -474,9 +462,7 @@ struct ConfirmPage {
     message: String,
     changer: (i64, i64),
     before_normal: String,
-    before_boost: String,
     after_normal: String,
-    after_boost: String,
     before_warning: String,
     after_warning: String,
     positive: String,
@@ -503,9 +489,7 @@ impl ConfirmPage {
                 reference(doc, &changer.fields, "numberAfterTextMesh"),
             ),
             before_normal: text("_beforeNormalStaminaView"),
-            before_boost: text("_beforeBoostStaminaView"),
             after_normal: text("_afterNormalStaminaView"),
-            after_boost: text("_afterBoostStaminaView"),
             before_warning: text("_beforeWarningMessage"),
             after_warning: text("_afterWarningMessage"),
             positive: object_of(doc, field("positiveButton")),
@@ -675,7 +659,6 @@ fn open(
             stamina,
             max,
             row,
-            boosts,
         });
     }
 }

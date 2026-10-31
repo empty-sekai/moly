@@ -1,18 +1,25 @@
-//! 文字排版律：真源 TextMeshPro 的断行、富文本标签、全半角与行量法，纯函数。
+//! Text layout rules: line breaking, rich-text tags, full/half width and line
+//! measures as TextMeshPro defines them, as pure functions.
 //!
-//! 分四份：[`tags`] 把富文本解析成段（每个标签一个分支，逐字符合并成段）；
-//! [`advance`] 给出每字符的推进宽（全半角码点表、空格推进比、缺字形回退）；
-//! [`metrics`] 把段装配成行量法（行宽/可见宽/盒宽/锚基/行偏移）；
-//! [`plain`] 把带标签的文本剥成纯文本并找数字串。
+//! Four parts: [`tags`] parses rich text into segments (one branch per tag,
+//! characters merged into segments); [`advance`] gives each character's advance
+//! width (full/half-width code point table, space advance ratios, missing-glyph
+//! fallback); [`metrics`] assembles segments into line measures
+//! (line width/visible width/box width/anchor baseline/line offset); [`plain`]
+//! strips tagged text to plain text and finds numeric runs.
 //!
-//! 本模块只处理硬断行：`\n`、`<br>`、`<cr>`。这不是说真源没有软换行——
-//! TextMeshPro 开启 `enableWordWrapping` 时按行宽自动折行（断点表、
-//! U+00A0 不断行），UI 排版的软换行在 moly-game 的 TMP 排版里实现；
-//! 本模块移植的那份排版律只有硬断行，需要软换行的消费方不从这里取。
+//! This module handles only hard line breaks: `\n`, `<br>`, `<cr>`. That does
+//! not mean the game has no soft wrapping — TextMeshPro with
+//! `enableWordWrapping` wraps at the line width (line-break table, U+00A0 does
+//! not break), and the UI layout's soft wrapping is implemented in moly-game's
+//! TMP layout; the layout rules here cover only hard breaks, so consumers that
+//! need soft wrapping should not take it from here.
 //!
-//! 字形查表以闭包入参给出：真源按「区域+字哈+字族+字符」四元组查图集，
-//! 四元组的前三者在一次排版内是常量，等价于按字符查。
-//! 闭包返回的是**基准字号下的推进**；字号换算在本模块内做。
+//! Glyph lookup takes a closure: the game looks glyphs up in the atlas by the
+//! tuple "region + character style + font family + character", the first three
+//! of which are constant within one layout, which is equivalent to a lookup by
+//! character. The closure returns advances **at the base font size**; scaling
+//! to the current font size happens in this module.
 
 pub mod advance;
 pub mod auto_size;

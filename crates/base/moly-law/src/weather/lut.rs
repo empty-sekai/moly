@@ -1,6 +1,7 @@
 //! 引擎原生调色的 LDR 查找表：烘焙（CPU 一次一份）与 uber 侧的取表律。
 //!
-//! 真源是两段：URP 的颜色分级 LUT pass 每帧把音量栈里的七个调色组件烘成
+//! The game has two stages: URP's color grading LUT pass bakes the seven color
+//! grading components of the volume stack each frame into
 //! 一张 32³ 的查找表（摊平成 1024×32 的条带，`R8G8B8A8_UNorm`，双线性），
 //! 引擎 uber pass 再把场景色乘曝光、钳到 0..1、按条带坐标取两次样、沿蓝
 //! 通道插值。管线资产的颜色分级模式是 LDR、表边长 32；现象相机的
@@ -9,10 +10,12 @@
 //! [`CurveTexture::identity`]：取到 1 的输入被钳在 127/128，8 位存储后
 //! 线性 1.0 查出 253/255）。
 //!
-//! 本模块的烘焙律逐行转写自随包发布的 LDR 查找表构建程序（GLES3 片元
-//! 程序），常数照抄程序里编译器折好的字面量（`0.0734997839`、
-//! `13.6054821` 这一类），不回写成教科书式子；打包律转写自 URP 的
-//! 颜色分级 LUT pass 与 `ColorUtils` 的三个 `Prepare*`。
+//! The bake here follows line by line the LDR lookup table build program
+//! (a GLES3 fragment program) shipped with the game: constants are the
+//! compiler-folded literals of that program (`0.0734997839`, `13.6054821` and
+//! the like), not rewritten as textbook expressions. The packing follows
+//! URP's color grading LUT pass and the three `Prepare*` functions of
+//! `ColorUtils`.
 //!
 //! 输入值域：本模块只打包音量栈里 `ColorAdjustments`、`SplitToning`、
 //! `WhiteBalance` 三个组件的采纳值；`ChannelMixer`、`ShadowsMidtonesHighlights`、
@@ -114,9 +117,11 @@ pub struct LutStack {
 
 /// `Mathf.GammaToLinearSpace`：颜色分级 LUT pass 在 CPU 上打包参数时调的
 /// 是引擎的原生换算（`Color.linear` 也是它），幂落在设备 libm 的 `powf`。
-/// 所以直接用 [`super::sky::gamma_to_linear`]（同一条三支律、同一个设备
-/// `powf` 的移植），不另拼一份调 `f32::powf` 的——后者在浏览器目标上与
-/// 设备逐值不同。表的烘焙本身是着色器程序里的 `log2`/`exp2`，不经这里。
+/// so this calls [`super::sky::gamma_to_linear`] directly (the same three
+/// branches and the same device `powf` implementation) instead of a second
+/// copy calling `f32::powf`, which differs value by value from the device in
+/// browser targets. Baking the table itself uses `log2`/`exp2` in the shader
+/// program and does not go through here.
 fn gamma_to_linear(x: f32) -> f32 {
     super::sky::gamma_to_linear(x)
 }
@@ -261,10 +266,12 @@ fn soft_light(base: [f32; 3], blend: [f32; 3]) -> [f32; 3] {
     out
 }
 
-/// 构建程序里的 RGB→HSV，照程序自己的算术形状转写：两次「按 step 线性
-/// 插值」都写成 `底 + step · (目标 − 底)`，常数取程序里折好的字面量
-/// （`p.w` 在绿不小于蓝时是 `−1 + 0.666666687`，不是精确的 −1/3）。用选择
-/// 支写同一件事会在末位上与程序不同，而这张表要与程序逐字节一致。
+/// The RGB→HSV of the build program, following its arithmetic shape: both
+/// "linear interpolation by a step" pairings are written as
+/// `base + step · (target − base)`, with the program's folded literals
+/// (`p.w` is `−1 + 0.666666687` when green is not less than blue, not the
+/// exact −1/3). Writing the same thing with select branches would differ in
+/// the last bits from the program, and this table must match it byte for byte.
 fn rgb_to_hsv(c: [f32; 3]) -> [f32; 3] {
     let (r, g, b) = (c[0], c[1], c[2]);
     let s1 = if g >= b { 1.0f32 } else { 0.0 };
@@ -686,7 +693,7 @@ mod tests {
     /// `MOLY_LUT_APPLY_ORACLE`: `{"profile", "lut", "lutParams", "rows": [[in r,
     /// g, b, out r, g, b], ...]}`, colours in the encoded domain as the program
     /// reads and writes them). The program's own decode and encode are
-    /// transcribed here with its literals.
+    /// reproduced here with its literals.
     #[test]
     #[ignore = "MOLY_LUT_APPLY_ORACLE must name the executed engine uber receipt"]
     fn apply_matches_the_shipped_engine_uber_program() {

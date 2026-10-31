@@ -8,9 +8,9 @@
 //!
 //! Output: the cell's view state ([`CellView`]), which content, wave
 //! progress, button look, timer text and skip button a state shows, and its
-//! drawing into the page's view ([`Cell::draw`]); the wave tween of a start,
-//! a receive or a skip ([`WaveTween`]); the view state the page reads to
-//! decide which node takes a press.
+//! drawing into the page's view ([`Cell::draw`]); the wave tween of a start
+//! or a skip ([`WaveTween`]); the view state the page reads to decide which
+//! node takes a press.
 //!
 //! Invariants, one per view:
 //! - The gauge shows one content per state (locked: `Lock`; ready:
@@ -40,8 +40,8 @@
 //! wave until it lands, so a refresh does not overwrite it.
 //!
 //! Boundaries (named, nothing drawn in their place): the three effect prefabs
-//! ([`EFFECT_PREFABS`]) load from a bundle that is not part of the public
-//! asset root, so none is drawn; the countdown background's alpha is not what
+//! load from a bundle that is not part of the public asset root, so none is
+//! drawn; the countdown background's alpha is not what
 //! the layout draws, so the cells' serialized alpha stands; the gauge's
 //! receive and skip wave duration ([`RECEIVE_SECONDS`]) is not known.
 
@@ -73,15 +73,6 @@ pub const TIMER_IDLE_ALPHA: f32 = 0.1;
 /// reader for them, so the value is unknown. No duration is pinned here; the
 /// wave is drawn at the slot's progress by the slots' next read.
 pub const RECEIVE_SECONDS: Option<f32> = None;
-/// The three effects the gauge's roots hold (`fx_mysekai_convert_furniture`
-/// wait, highlight light and highlight). They load from a bundle that is not
-/// part of the public asset root: named, not loaded.
-pub const EFFECT_PREFABS: [&str; 3] = [
-    "fx_mysekai_convert_furniture_wait",
-    "fx_mysekai_convert_furniture_highlight_light",
-    "fx_mysekai_convert_furniture_highlight",
-];
-
 /// The node paths of one cell, below
 /// `.../MysekaiConvertFurnitureSlotView/Slots/MysekaiConvertFurnitureSlot`.
 #[derive(Debug, Clone, Default)]
@@ -407,17 +398,6 @@ impl Cell {
         self.setup_view(model, ctx, layouts, seen);
     }
 
-    /// `MysekaiConvertFixtureSlotView.Setup(slotId, model)` only: the detail
-    /// page's own gauge view shows an item that is not a slot.
-    pub fn setup_slot_only(
-        &mut self,
-        model: &SlotModel<'_>,
-        layouts: &UiLayouts,
-        seen: &mut BTreeSet<String>,
-    ) {
-        self.setup_slot_view(model, layouts, seen);
-    }
-
     fn progress_line(
         &self,
         model: &SlotModel<'_>,
@@ -562,27 +542,6 @@ impl Cell {
         change
     }
 
-    /// `PlayReceiveAsync(from, to)`: the wave from the slot's progress at the
-    /// receive to the fresh model's progress. Without
-    /// `_receiveAnimationSeconds` (see [`RECEIVE_SECONDS`]) the wave starts
-    /// at its end (`DOVirtual.Float`'s last value at duration 0).
-    pub fn play_receive(&mut self, from: f32, to: f32) {
-        match RECEIVE_SECONDS {
-            Some(seconds) => {
-                self.tween = Some(WaveTween {
-                    from,
-                    to,
-                    seconds,
-                    elapsed: 0.0,
-                });
-            }
-            None => {
-                self.tween = None;
-                self.view.wave_progress = Some(to);
-            }
-        }
-    }
-
     /// `Timer.PlayConvertStart(model)`: the count down's opacity 1, the skip
     /// hidden (`SetActive(false)`), and the remaining time of the model the
     /// cell holds; the slot's next read shows the skip again for its state.
@@ -641,8 +600,7 @@ impl Cell {
     }
 
     /// `PlayShortenAsync(progress)`: the wave from the slot's progress to 1.
-    /// Without `_receiveAnimationSeconds` it starts at 1, as in
-    /// [`Self::play_receive`].
+    /// Without `_receiveAnimationSeconds` it starts at 1.
     pub fn play_shorten(&mut self, progress: f32) {
         match RECEIVE_SECONDS {
             Some(seconds) => {

@@ -368,6 +368,7 @@ fn blend_color(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
 /// EnvironmentShaderView blends the light/config. Volume.sharedProfile,
 /// sky-bottom color and emission type are committed only after that transition.
 /// They are not interpolated, even when their stored values are numeric.
+#[cfg(test)]
 fn committed<'a, T>(previous: &'a T, next: &'a T, progress: f32) -> &'a T {
     if progress < 1.0 { previous } else { next }
 }

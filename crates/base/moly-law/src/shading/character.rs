@@ -1,5 +1,5 @@
-//! `Mysekai/Character` 程序的逐句翻译。配件族的 shader 名不同、程序与
-//! 本族逐字节相同，共用这里。
+//! `Mysekai/Character` program, formula by formula. The accessory family has a
+//! different shader name but a byte-identical program and shares this code.
 //!
 //! 角色域语料全部记录收六个不同程序：全色 Base、Base 加雾、Base 加眉、
 //! 加眉加雾、投影 caster、深度——变体之间只差对应的两段，下面按段给律。
@@ -28,7 +28,7 @@
 use crate::material::{texture_slot, FloatLookup, MaterialSlot};
 use crate::shading::SECOND_COLOR_TARGET;
 
-/// 该族在真源里的 shader 名。
+/// The family's shader name.
 pub const SHADER_NAME: &str = "Mysekai/Character";
 /// 配件族 shader 名；程序与本族逐字节相同。
 pub const SHADER_NAME_ACCESSORY: &str = "Mysekai/Character-Accessory";
@@ -373,8 +373,8 @@ pub fn bayer_threshold(screen_position: [f32; 4], screen_params: [f32; 4]) -> f3
     BAYER[iy.min(3)][ix.min(3)] * DITHER_SCALE + DITHER_BIAS
 }
 
-/// 源的 discard 判据：先 `_UseDither` 门，再 `_DitherAlpha` 减阈值低于
-/// 零丢弃。
+/// The source's discard test: first the `_UseDither` gate, then discard when
+/// `_DitherAlpha` minus the threshold is below zero.
 #[must_use]
 pub fn dither_discards(
     use_dither: f32,

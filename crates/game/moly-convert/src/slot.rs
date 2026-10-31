@@ -86,10 +86,6 @@ pub struct PageBindings {
     pub balloon_text: String,
     pub balloon_base_right_image: String,
     pub balloon_transition: String,
-    /// `Base/TitleIcon` (the system fixture icon).
-    pub title_icon: String,
-    /// `AnimationRoot`.
-    pub animation_root: String,
 }
 
 impl Default for PageBindings {
@@ -100,8 +96,6 @@ impl Default for PageBindings {
             balloon_text: String::new(),
             balloon_base_right_image: String::new(),
             balloon_transition: String::new(),
-            title_icon: String::new(),
-            animation_root: String::new(),
         }
     }
 }
@@ -161,8 +155,6 @@ pub fn bind_page(doc: &UiPrefab) -> Result<SlotBinding, String> {
             |node| node.path.clone(),
         );
     let page = PageBindings {
-        title_icon: format!("{view}/Base/TitleIcon"),
-        animation_root: format!("{view}/AnimationRoot"),
         balloon_text: format!("{balloon}/Content/CustomText"),
         balloon_base_right_image: format!("{balloon}/Content/Base/Right/Image"),
         balloon_transition: format!("{balloon}/Content/TransitionButton"),
@@ -243,11 +235,6 @@ impl SlotCells {
             cells,
             ..Self::default()
         }
-    }
-
-    /// The page's binding.
-    pub fn page(&self) -> &PageBindings {
-        &self.page
     }
 
     /// The page is shown.

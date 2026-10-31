@@ -302,23 +302,3 @@ impl Filters {
         }
     }
 }
-
-/// The `mysekaiFixtureFilteredDatas` rows as the document holds them
-/// (`entries`, or the bare array); a row's `searchTargetType` places it, and
-/// a row without one takes its index.
-pub fn filters_from(value: &Value) -> [FixtureFilter; 3] {
-    let rows = match value["entries"].as_array().or_else(|| value.as_array()) {
-        Some(rows) => rows,
-        None => return Default::default(),
-    };
-    let mut out: [FixtureFilter; 3] = Default::default();
-    for (index, row) in rows.iter().enumerate() {
-        let target = row["searchTargetType"]
-            .as_u64()
-            .map_or(index, |target| target as usize);
-        if let Some(slot) = out.get_mut(target) {
-            *slot = FixtureFilter::read(row);
-        }
-    }
-    out
-}

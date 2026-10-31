@@ -376,10 +376,6 @@ impl ServerModel {
         }
     }
 
-    pub(crate) fn document(&self) -> &ServerDocument {
-        &self.doc
-    }
-
     /// The server panel's NPC slice (schemaVersion 1): the rows served at the
     /// join and the client's `refreshedAt`.
     pub(crate) fn npc_slice(&self, served: &[ScheduleRow], refreshed_at: i64) -> Option<String> {
@@ -426,10 +422,6 @@ impl ServerModel {
                 Vec::new()
             }
         }
-    }
-
-    pub(crate) fn errors(&self) -> &[String] {
-        &self.errors
     }
 
     pub(super) fn push_error(&mut self, error: String) {

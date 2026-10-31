@@ -3,8 +3,7 @@
     "clippy::manual_is_multiple_of": 1,
     "clippy::manual_range_contains": 1,
     "clippy::question_mark": 1,
-    "clippy::unnecessary_filter_map": 1,
-    "dead_code": 1
+    "clippy::unnecessary_filter_map": 1
   },
   "moly-audio": {
     "clippy::collapsible_match": 1,
@@ -20,7 +19,7 @@
     "clippy::let_and_return": 1,
     "clippy::question_mark": 1,
     "clippy::useless_format": 1,
-    "dead_code": 5,
+    "dead_code": 1,
     "unused_mut": 4,
     "unused_variables": 2
   },
@@ -39,7 +38,6 @@
     "clippy::neg_cmp_op_on_partial_ord": 1,
     "clippy::possible_missing_else": 1,
     "clippy::unnecessary_cast": 2,
-    "dead_code": 1,
     "deprecated": 8
   },
   "moly-features": {
@@ -72,7 +70,6 @@
     "clippy::unnecessary_sort_by": 2,
     "clippy::unnecessary_to_owned": 1,
     "clippy::useless_conversion": 2,
-    "dead_code": 15,
     "deprecated": 20,
     "private_interfaces": 6,
     "unused_imports": 6,
@@ -85,7 +82,6 @@
     "clippy::int_plus_one": 1,
     "clippy::needless_borrow": 1,
     "clippy::while_let_loop": 1,
-    "dead_code": 2,
     "deprecated": 2,
     "private_interfaces": 2,
     "unused_imports": 3
@@ -181,7 +177,6 @@
     "clippy::unnecessary_cast": 2,
     "clippy::unnecessary_lazy_evaluations": 1,
     "clippy::unnecessary_map_or": 1,
-    "dead_code": 8,
     "unused_imports": 1,
     "unused_mut": 1,
     "unused_variables": 1
@@ -193,18 +188,15 @@
     "clippy::manual_contains": 1,
     "clippy::map_entry": 1,
     "clippy::needless_borrow": 5,
-    "dead_code": 9,
     "private_interfaces": 2
   },
   "moly-store": {
-    "clippy::manual_pattern_char_comparison": 1,
-    "dead_code": 2
+    "clippy::manual_pattern_char_comparison": 1
   },
   "moly-ui": {
     "clippy::explicit_auto_deref": 1,
     "clippy::neg_cmp_op_on_partial_ord": 1,
     "clippy::wrong_self_convention": 1,
-    "dead_code": 1,
     "unused_imports": 2
   },
   "moly-world": {
@@ -241,7 +233,6 @@
     "clippy::unnecessary_sort_by": 1,
     "clippy::unnecessary_unwrap": 1,
     "clippy::unused_unit": 1,
-    "dead_code": 10,
     "for_loops_over_fallibles": 1,
     "private_interfaces": 1,
     "unused_imports": 1

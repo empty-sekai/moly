@@ -590,8 +590,6 @@ impl ServerModel {
                 refusal: None,
                 updated: response.sections.inventory.clone(),
             },
-            delivery: Some(response.sections.delivery.clone()),
-            tools: response.sections.tools.clone(),
         }
     }
 
@@ -599,8 +597,6 @@ impl ServerModel {
         warn!("[server] {} refused: {reason}", kind.name());
         Answer {
             reply: SuiteUserReply::refused(format!("{}: {reason}", kind.name())),
-            delivery: None,
-            tools: None,
         }
     }
 
@@ -616,12 +612,10 @@ impl ServerModel {
     }
 }
 
-/// A reply and the delivery sections to merge with it.
+/// A craft or sketch reply. The sections of the response it records travel
+/// with the reply (`dispatch::answer_call`).
 pub(crate) struct Answer {
     pub(crate) reply: SuiteUserReply,
-    pub(crate) delivery: Option<super::delivery::DeliveryUpdate>,
-    /// `userMysekaiTools` when the reply carries it.
-    pub(crate) tools: Option<Vec<super::tools::UserMysekaiTool>>,
 }
 
 /// The native instrument `MOLY_CRAFT_MOCK_REQUEST`

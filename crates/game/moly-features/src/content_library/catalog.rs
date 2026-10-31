@@ -360,18 +360,16 @@ fn parse_fixtures(value: &Value, catalog: &mut LibraryCatalog) {
                 }
                 _ => FixturePresentation::default(),
             }
-        } else if let Some(path) = custom
+        } else if custom
             .and_then(|value| value["ornamentFile"].as_str())
-            .filter(|path| {
+            .is_some_and(|path| {
                 path.starts_with("custom-fixture-models/")
                     && path.ends_with(".glb")
                     && !path.contains([':', '\\'])
                     && !path.split('/').any(|part| matches!(part, "" | ".." | "."))
             })
         {
-            FixturePresentation::Custom {
-                ornament: path.into(),
-            }
+            FixturePresentation::Custom
         } else {
             FixturePresentation::default()
         };

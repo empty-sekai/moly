@@ -99,6 +99,7 @@ const CELL_LIST: &str = "Sekai.Mysekai.MysekaiWeatherCellList";
 const CELL: &str = "Sekai.Mysekai.MysekaiWeatherCell";
 const TEXT: &str = "Sekai.UI.CustomTextMesh";
 const BUTTON: &str = "Sekai.UI.CustomButton";
+#[cfg(test)]
 const IMAGE: &str = "Sekai.UI.CustomImage";
 
 /// The chain the dialog's class descends from.
@@ -146,7 +147,6 @@ impl WeatherPeriods {
 struct Core {
     tomorrow_label: String,
     time_labels: Vec<String>,
-    time_highlight: String,
     lists: Vec<String>,
 }
 
@@ -445,7 +445,6 @@ fn core(doc: &UiPrefab) -> Result<Core, String> {
             node_path(doc, pointer(value, &format!("_timeLabel[{i}]"))?, "time label").map(|(_, p)| p)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let (_, time_highlight) = node_path(doc, pointer(&f["_timeHighlight"], "_timeHighlight")?, "highlight")?;
     let mut lists = Vec::new();
     for (index, value) in f["_weatherCellList"]
         .as_array()
@@ -461,7 +460,6 @@ fn core(doc: &UiPrefab) -> Result<Core, String> {
     Ok(Core {
         tomorrow_label,
         time_labels,
-        time_highlight,
         lists,
     })
 }

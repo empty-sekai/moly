@@ -504,9 +504,9 @@ struct AnimationOutcomes(std::collections::HashMap<u64, AnimationOutcome>);
 #[derive(Resource,Default)]
 struct NextAnimationLease(u64);
 #[derive(Clone,Copy)]
-pub(crate) enum AnimationSuffix { Start, Loop, End, Once }
+pub(crate) enum AnimationSuffix { Loop }
 impl AnimationSuffix {
-    fn suffix(self)->&'static str {match self {Self::Start=>"_S",Self::Loop=>"_L",Self::End=>"_E",Self::Once=>"_O"}}
+    fn suffix(self)->&'static str {match self {Self::Loop=>"_L"}}
 }
 /// Exact clips belonging to one source view, joined by serialized identity.
 /// The renderer name and authored length remain paired; the shared GLB union
@@ -629,9 +629,6 @@ fn begin_animation_inner(world:&mut World,entity:Entity,name:&str,suffix:Option<
 }
 pub(crate) fn animation_outcome(world:&World,_entity:Entity,lease:AnimationLease)->AnimationOutcome {
     world.get_resource::<AnimationOutcomes>().and_then(|outcomes|outcomes.0.get(&lease.0)).copied().unwrap_or(AnimationOutcome::Cancelled)
-}
-pub(crate) fn animation_pending(world:&World,entity:Entity,lease:AnimationLease)->bool {
-    animation_outcome(world,entity,lease)==AnimationOutcome::Pending
 }
 /// Owned callers discard the outcome after observing its terminal state, or
 /// when they abandon the wait. Fire-and-forget callers discard it immediately.

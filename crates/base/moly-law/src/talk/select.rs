@@ -12,10 +12,12 @@
 //!
 //! # 权重与百分比是可下发参数
 //!
-//! 全部权重与百分比来自源 `ClientConfig`（服务端下发）——本律一律
-//! 以参数结构带入（[`LotteryWeights`] / [`LotteryPercents`]），不写死
-//! 任何值。源里另有一族 `NPCAvatarAITalkType*Weight` 配置键，反编译
-//! 全树找不到消费者（疑似死配置），不迁。
+//! All weights and percentages come from `ClientConfig` (delivered by the
+//! server) — they are always passed in as parameter structures
+//! ([`LotteryWeights`] / [`LotteryPercents`]), never hard-coded. A separate
+//! family of `NPCAvatarAITalkType*Weight` configuration keys has no consumer
+//! anywhere in the code (they look like dead configuration), so they are not
+//! handled here.
 //!
 //! # 条件族与 tweet 问候族的关系
 //!

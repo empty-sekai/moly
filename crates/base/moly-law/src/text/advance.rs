@@ -1,13 +1,15 @@
 //! 推进律：一个字符占多宽。三层：字形表命中走 [`resolve_glyph_advance`]，
 //! 缺字形走 [`fallback_advance`]，空格按字族的 [`space_advance_ratio`]。
 //!
-//! 全半角判定是码点区间表（真源 TextMeshPro 的并集），不查字形——
-//! 未知字符的宽由它的码点位置决定，这在真源是缺字形回退的规则。
-//! 空格与不换行空格**永远**不走字形表（真源对它们强制取回退路径），
-//! 即使图集里查得到。
+//! The full/half-width test is a code point range table (the union
+//! TextMeshPro uses) and does not consult glyphs — an unknown character's width
+//! is decided by its code point, which is the missing-glyph fallback rule.
+//! Space and no-break space **never** go through the glyph table (they are
+//! forced onto the fallback path) even when the atlas has a glyph for them.
 
-/// 全角码点区间并集（真源 TextMeshPro）。边界值是测量的一部分：
-/// 表内每区间的首尾码点在测试里成对钉住。
+/// The union of full-width code point ranges (as TextMeshPro defines it). The
+/// boundary values are part of the measurement: each range's first and last
+/// code points are pinned in pairs by tests.
 pub fn is_fullwidth(ch: char) -> bool {
     let cp = ch as u32;
     matches!(
@@ -30,12 +32,12 @@ pub fn is_fullwidth(ch: char) -> bool {
     )
 }
 
-/// 空格与不换行空格强制走回退：真源不查它们的字形。
+/// Space and no-break space are forced onto the fallback: their glyphs are never looked up.
 pub fn force_fallback_glyph(ch: char) -> bool {
     ch == ' ' || ch == '\u{00a0}'
 }
 
-/// 字族的空格推进比（真源按字族名 contains 匹配）：
+/// The font family's space advance ratio (selected by substring match on the family name):
 /// 少儿体 1/4 · 正黑体与 SkipPro 4/15 · 默认 5/24。
 pub fn space_advance_ratio(family: &str) -> f32 {
     if family.contains("FZShaoEr") {
@@ -88,7 +90,7 @@ mod tests {
     #[test]
     fn fullwidth_table_boundaries() {
         // 每区间首尾在内、外邻在外。成对写：区间端点必须命中，
-        // 它两侧的码点必须不命中——判据会红的输入是任何一个边界漂移。
+        // the code points on either side must not match — any drifted boundary would fail the test.
         let inside: &[u32] = &[
             0x2000, 0x206f, 0x2190, 0x21ff, 0x2200, 0x22ff, 0x2300, 0x23ff, 0x2460, 0x24ff,
             0x2500, 0x259f, 0x25a0, 0x25ff, 0x2600, 0x26ff, 0x2700, 0x27bf, 0x3000, 0x30ff,

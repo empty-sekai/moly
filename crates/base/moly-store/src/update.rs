@@ -398,7 +398,6 @@ fn install_with(
     let (triple, ext) = platform;
     let job = Job {
         release,
-        versions_dir,
         progress,
         cancel,
         fetch,
@@ -428,7 +427,6 @@ fn install_with(
 
 struct Job<'a> {
     release: &'a Release,
-    versions_dir: &'a Path,
     progress: &'a Progress,
     cancel: &'a AtomicBool,
     fetch: &'a dyn Fn(&Asset, &Path) -> Result<(), String>,
@@ -693,6 +691,7 @@ fn entry_name(path: &Path) -> Result<String, String> {
     Ok(parts.join("/"))
 }
 
+#[cfg(test)]
 fn zip_options(method: zip::CompressionMethod) -> zip::write::SimpleFileOptions {
     zip::write::SimpleFileOptions::default().compression_method(method)
 }

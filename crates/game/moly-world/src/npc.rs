@@ -753,7 +753,7 @@ pub struct RouteStops {
     reentry: Option<[f32; 3]>,
     pub outcome: Option<RouteOutcome>,
     /// The talk data target this move completes against (see
-    /// [`is_completed`]); every departure sets it.
+    /// [`is_completed_within`]); every departure sets it.
     completion: Option<MoveCompletion>,
     /// That route has run out without completing: only IsCompleted against
     /// the last destination or the IsStacked timer can end the movement.
@@ -1815,7 +1815,7 @@ fn dwell_seconds(pause_seconds: f32) -> f32 {
 /// 初始/重复 corner 保持 CheckPoint，不额外驻留；无路返回 None。
 /// 高度几何只为已查询到的导航点落高，侧偏候选由单独的三维采样门准入。
 /// `corner` is also the talk data target the move completes against
-/// ([`is_completed`]); a replan passes the same target again.
+/// ([`is_completed_within`]); a replan passes the same target again.
 pub fn depart(
     unit: &CharacterUnitId,
     state: &mut LawWalkState,
@@ -1874,7 +1874,8 @@ struct MoveCompletion {
     goal_distance: f32,
 }
 
-/// Source `NPCAvatarMoveExecutor.IsCompleted` with MoveAsync's goal distance,
+/// Source `NPCAvatarMoveExecutor.IsCompleted` at a caller's goal distance: an
+/// upper state passes the stopping distance its own walk tests with. Measured
 /// in site-local coordinates for NPC position `p`, talk data target `t`, agent
 /// destination `d` (the leg currently submitted) and SitePosition.y `site_y`.
 ///
@@ -1888,12 +1889,6 @@ struct MoveCompletion {
 /// MoveAsync polls this every frame of the move ([`advance`]), whichever leg
 /// the presenter is walking, so a move can complete before its waypoints run
 /// out and an NPC standing at the path end may never complete.
-fn is_completed(p: [f32; 3], t: [f32; 3], d: [f32; 3], site_y: f32) -> bool {
-    is_completed_within(p, t, d, site_y, MOVE_GOAL_DISTANCE)
-}
-
-/// [`is_completed`] at a caller's goal distance: an upper state passes the
-/// stopping distance its own walk tests with.
 fn is_completed_within(p: [f32; 3], t: [f32; 3], d: [f32; 3], site_y: f32, goal: f32) -> bool {
     let dx = t[0] - d[0];
     let height = site_y + t[1];
@@ -1910,7 +1905,7 @@ fn is_completed_within(p: [f32; 3], t: [f32; 3], d: [f32; 3], site_y: f32, goal:
 
 /// The distance a move with this completion has left from `p` to its target
 /// `t` (`SitePosition.y` of the site is not part of the distance), or zero
-/// once [`is_completed`] holds: the `remainingDistance` stand-in an upper
+/// once [`is_completed_within`] holds: the `remainingDistance` stand-in an upper
 /// state polls its walk with.
 pub fn remaining_distance(p: [f32; 3], t: [f32; 3], site_y: f32, goal: f32) -> f32 {
     let [px, py, pz] = [p[0] - t[0], p[1] - t[1], p[2] - t[2]];
@@ -1923,7 +1918,7 @@ pub fn remaining_distance(p: [f32; 3], t: [f32; 3], site_y: f32, goal: f32) -> f
 
 /// The objective's MoveAsync already passed its source gate and generated the
 /// polyline with the source `GeneratePath`. An empty polyline fails the move
-/// (TryGeneratePath). The move completes by [`is_completed`] against `target`.
+/// (TryGeneratePath). The move completes by [`is_completed_within`] against `target`.
 pub fn depart_along(
     unit: &CharacterUnitId,
     state: &mut LawWalkState,

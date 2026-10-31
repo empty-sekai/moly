@@ -1,16 +1,18 @@
-//! `Mysekai/Site/Ground` Base 程序（顶点 + 片元）的逐句翻译。
+//! `Mysekai/Site/Ground` Base program (vertex + fragment), formula by formula.
 //!
-//! 两个 keyword 变体——无 keyword 与 `_USE_ALPHA_CLIP`——的片元差异只有
-//! discard 与 alpha 附近的语句次序，不改变任何值。式子保持源程序的
-//! 运算顺序，作为上屏 shader 移植的 oracle。
+//! The two keyword variants — none and `_USE_ALPHA_CLIP` — differ in the
+//! fragment only in the order of statements around discard and alpha, and
+//! compute no different values. The formulas keep the program's operation
+//! order and serve as the oracle for the on-screen shader.
 //!
-//! 落影上色（真源全局量 `_MysekaiDropShadowColor1`）在本族收影变体里
-//! 只应用一次（带该全局量的收影变体全体一致；FieldObject 族是两次）。
+//! Drop-shadow tinting (the global `_MysekaiDropShadowColor1`) is applied once
+//! in this family's shadow-receiving variants (every shadow-receiving variant
+//! carrying that global agrees; the FieldObject family applies it twice).
 //! 落影的衰减与采样核不在本律内。
 
 use super::{TREASURE_SHADOW_EDGE, TREASURE_SHADOW_INV_RANGE, TREASURE_SHADOW_SCALE};
 
-/// 该族在真源里的 shader 名。
+/// The family's shader name.
 pub const SHADER_NAME: &str = "Mysekai/Site/Ground";
 
 /// 一帧的全局量，字段与源程序的全局块声明一一对应。
@@ -113,9 +115,10 @@ fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
     out
 }
 
-/// 顶点程序的逐句翻译：逆转置法线（带源的 epsilon 钳制）、透视/正交
-/// 两种视线、UV 滚动、平方顶点色、雾深式子。两个 keyword 变体的顶点
-/// 程序相同。
+/// The vertex program, formula by formula: inverse-transposed normal (with the
+/// source's epsilon clamp), perspective/orthographic view vectors, UV scroll,
+/// squared vertex color, and the fog-depth formula. Both keyword variants share
+/// the same vertex program.
 #[must_use]
 pub fn ground_vertex(input: GroundVertexInputs) -> GroundVertexVaryings {
     let world_position = transform_point_column_major(input.object_to_world, input.position);
@@ -197,8 +200,8 @@ fn normalize_source(v: [f32; 3]) -> [f32; 3] {
 }
 
 /// 被选 alpha：两个变体都输出它，`_USE_ALPHA_CLIP` 变体也拿它做
-/// discard 判据——`_UseVertexAlphaOpacity` 开时是 `TEXCOORD4.w * tex.w`，
-/// 否则是 `tex.w`。
+/// The discard test — when `_UseVertexAlphaOpacity` is on it is
+/// `TEXCOORD4.w * tex.w`, otherwise `tex.w`.
 #[must_use]
 pub fn selected_alpha(
     main_tex_alpha: f32,

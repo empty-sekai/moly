@@ -327,8 +327,6 @@ fn overlaps(a: (GridPosition, GridPosition), b: (GridPosition, GridPosition)) ->
 /// the Normal camera's initial yaw.
 pub(crate) struct StarterHouse {
     pub(crate) package: &'static str,
-    pub(crate) fixture_id: i32,
-    pub(crate) texture_id: u32,
     /// Unrotated (Front) footprint corners, as a saved layout row stores them.
     pub(crate) min: GridPosition,
     pub(crate) max: GridPosition,
@@ -337,8 +335,6 @@ pub(crate) struct StarterHouse {
 
 pub(crate) const STARTER_HOUSE: StarterHouse = StarterHouse {
     package: "mysekai__fixture__mdl_mis0001_house_house1",
-    fixture_id: 1,
-    texture_id: 1,
     min: GridPosition { x: 4, y: 0, z: -17 },
     max: GridPosition {
         x: 15,

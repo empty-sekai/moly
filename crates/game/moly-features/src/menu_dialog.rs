@@ -385,9 +385,6 @@ impl MenuButton {
     }
 }
 
-/// `DialogType.MysekaiRecoverBoostStaminaDialog`.
-const RECOVER_BOOST_STAMINA_DIALOG: DialogType = DialogType::MysekaiRecoverBoostStaminaDialog;
-
 /// A source target with no counterpart in this product: the subject of a
 /// greyed button's adaptation.
 #[derive(Debug, Clone, Copy)]
@@ -399,8 +396,6 @@ enum Missing {
     /// A `MenuScreenType` outside the MySekai block (its source name and
     /// value); the product's screen table holds the MySekai block only.
     OutGameScreen(&'static str, u16),
-    /// A dialog type that no view of this product draws.
-    Dialog(DialogType),
     /// A `SceneManager.Scene` other than MySekai.
     Scene(&'static str),
 }
@@ -419,12 +414,6 @@ impl Missing {
             Missing::Screen(screen) => format!("{screen:?} is {}", table(screen)),
             Missing::ScreenSource(screen) => format!("{screen:?}: the current source lacks its required layout bindings or textures"),
             Missing::OutGameScreen(name, id) => format!("{name}({id}) is {}", table(MenuScreenType(id))),
-            Missing::Dialog(dialog) => match dialog.prefab() {
-                Some(prefab) => format!(
-                    "{dialog:?}: the game carries {prefab}, so ShowDialog would return a dialog, but no view of this product draws it; ShowDialog is not called"
-                ),
-                None => format!("{dialog:?}: ShowDialog returns an error (no Dialog/ prefab in the game's Resources)"),
-            },
             Missing::Scene(scene) => format!("SceneManager.Scene.{scene} is not in this product (it has only the MySekai scene)"),
         }
     }

@@ -173,6 +173,7 @@ impl ChildCommand {
     /// Current ARM64 layout. The pointer at +0 is not dereferenced: the caller
     /// supplies its separately captured twelve-byte emission payload. Padding
     /// at +0x54 is not a semantic field. Preserve all inherited parameter bits.
+    #[cfg(test)]
     pub fn from_native_bytes(raw: &[u8], emission: &[u8]) -> Result<Self, Refused> {
         if raw.len() != 0x78 || emission.len() != 12 {
             return Err(Refused::InvalidCommand("native command/payload length"));

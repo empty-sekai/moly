@@ -1,14 +1,17 @@
-//! 语料比对：提取出的 15 份天气档案 × 各量，逐值对迁移前独立量得的
-//! 真源锚。
+//! Corpus comparison: the 15 extracted weather profiles × each quantity,
+//! value by value against the game's measured values.
 //!
-//! # 期望侧的来历
+//! # Where the expected side comes from
 //!
-//! 雾四元组（density/start/end/height）是实现存在之前从提取资产独立
-//! 量得的表；近/远颜色与近/远密度是档案里其余的序列化
-//! `MysekaiFogVolume` 值，逐字转写。期望 globals 在本测试内按
-//! `MysekaiFogPass.ExecuteFog` 的转写手工展开——绝不调被测实现自己的
-//! `globals()`，实现的式子错了不可能靠构造与期望一致。两边同序同
-//! f32 运算，精确 `==` 是诚实的比较子。
+//! The fog quadruple (density/start/end/height) is a table measured
+//! independently from the extracted assets before any implementation existed;
+//! the near/far colors and near/far densities are the remaining serialized
+//! `MysekaiFogVolume` values of the profiles, written out literally. The
+//! expected globals are expanded by hand inside this test following
+//! `MysekaiFogPass.ExecuteFog` — never by calling the implementation's own
+//! `globals()`, so a wrong formula cannot pass by construction. Both sides
+//! evaluate the same f32 operations in the same order, so exact `==` is an
+//! honest comparator.
 //!
 //! 档案根运行时读 `MOLY_ASSET_ROOT`；env 缺失时响亮说明「比了 0 份」
 //! 再返回——该轮不产生证据，但也不假装失败与通过。
@@ -17,8 +20,8 @@ use std::path::{Path, PathBuf};
 
 use super::{NotProfileDriven, PostProcessProfile, ProfileValue};
 
-/// 一份天气的序列化 `MysekaiFogVolume` 值（从提取的
-/// `postprocess.json` 转写，不在测试时解析）。
+/// One weather's serialized `MysekaiFogVolume` values (copied from the
+/// extracted `postprocess.json`, not parsed at test time).
 struct SerializedFog {
     weather: &'static str,
     density: f32,
@@ -184,7 +187,7 @@ fn all_15_weather_fog_globals_equal_the_hand_formula_from_serialized_values() {
         assert_eq!(fog.far_density, s.far_density, "{}: farDensity", s.weather);
         assert!(resolved.fog.enabled, "{}: fog enabled", s.weather);
 
-        // globals：按 ExecuteFog 转写在测试内手算——刻意不经被测实现。
+        // globals: computed by hand in the test following ExecuteFog — deliberately not through the implementation under test.
         let expected = [
             // fog_params = (-1/(end-start), end/(end-start), 1/fogHeight, 0)
             [-1.0 / (s.end - s.start), s.end / (s.end - s.start), 1.0 / s.height, 0.0],

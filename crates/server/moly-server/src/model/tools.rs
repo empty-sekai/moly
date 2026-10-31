@@ -38,7 +38,7 @@ use bevy::prelude::*;
 use serde_json::{json, Map, Value};
 
 use super::document::ServerDocument;
-use super::{Masters, ResponseKind, ServerModel, Tables};
+use super::{Masters, ServerModel, Tables};
 
 pub(crate) use moly_protocol::json::SECTION_TOOLS as SECTION;
 const INSTRUMENT: &str = "MOLY_HARVEST_MOCK_TOOLS";
@@ -278,52 +278,6 @@ impl ServerModel {
     ) -> UserMysekaiTool {
         let rows = self.doc.tools.get_or_insert_with(Vec::new);
         grant_tool(rows, tool_id, quantity, max, now)
-    }
-
-    /// The harvest reply's tools: the tool use policy. Whether the document
-    /// has tool rows for the reply to carry.
-    pub(super) fn harvest_tool_use(
-        &mut self,
-        tool_id: i32,
-        use_count: i32,
-        sent_durability: i32,
-        masters: &Tables<'_>,
-    ) -> bool {
-        let outcome = match (
-            max_durability(masters, tool_id),
-            self.doc.tools.as_mut(),
-        ) {
-            (_, None) => Err(format!("{SECTION} is not seated")),
-            (None, _) => Err(format!(
-                "tool {tool_id} has no master row (mysekaiTools) to reset its durability from"
-            )),
-            (Some(max), Some(rows)) => use_tool(rows, tool_id, use_count, max),
-        };
-        match outcome {
-            Ok(used) => {
-                info!(
-                    "[server] {}: tool {tool_id} used {use_count}: durability {} quantity {} (consumed {}); {SECTION} rows {}",
-                    ResponseKind::Harvest.name(),
-                    used.after.durability,
-                    used.after.quantity,
-                    used.consumed,
-                    self.doc.tools.as_ref().map_or(0, Vec::len)
-                );
-                if used.after.quantity > 0 && used.after.durability != sent_durability {
-                    warn!(
-                        "[server] {}: tool {tool_id}: server durability {} differs from the sent {sent_durability}",
-                        ResponseKind::Harvest.name(),
-                        used.after.durability
-                    );
-                }
-                self.commit();
-            }
-            Err(reason) => warn!(
-                "[server] {}: the tool use is not applied: {reason}",
-                ResponseKind::Harvest.name()
-            ),
-        }
-        self.doc.tools.is_some()
     }
 }
 

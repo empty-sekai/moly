@@ -306,7 +306,6 @@ fn ease(time_ratio: f32) -> f32 {
 pub struct SubWindowView {
     key: &'static str,
     layer: DisplayLayerType,
-    fade_group: String,
     alpha: f32,
 }
 
@@ -610,7 +609,6 @@ pub fn spawn_when_ready(
             SubWindowView {
                 key,
                 layer: shown.layer,
-                fade_group: shown.bindings.fade_group.clone(),
                 alpha: shown.alpha(),
             },
             Visibility::Inherited,

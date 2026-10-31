@@ -675,6 +675,7 @@ fn real_collision_edge(edge: &SubEmitterParams) -> bool {
 
 /// Ordinary no-shape birth. All calculations are staged before modifying the
 /// pool/RNG. Source graph admission remains separate from this explicit command.
+#[cfg(test)]
 pub(super) fn start_explicit(
     system: &mut Runtime,
     random: &mut ModuleRandom,
@@ -702,6 +703,7 @@ pub(super) fn start_explicit(
 /// Initial and Shape own independent streams, including all four padded
 /// lanes. Explicit probe/lifecycle caller; admission of a source system is
 /// decided by the installer, not by this command.
+#[cfg(test)]
 pub(super) fn start_explicit_with_shape(
     system: &mut Runtime,
     initial: &mut ModuleRandom,

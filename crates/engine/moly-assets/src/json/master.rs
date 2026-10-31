@@ -238,9 +238,8 @@ struct Pending {
 /// How one region's table was read.
 #[derive(Clone, Debug)]
 enum TableOutcome {
-    /// The region's table, and whether it was read from the repository host
-    /// (rather than from a master host's region directory).
-    Read(Region, String, bool),
+    /// The region's table.
+    Read(Region, String),
     /// The region's table could not be read, and why (the bases that failed).
     Missing(Region, String),
     /// The region's master hosts do not publish the table.
@@ -703,11 +702,7 @@ impl Pending {
             return None;
         }
         let text = jsons.get(&handle)?.0.clone();
-        self.outcomes.push(TableOutcome::Read(
-            region,
-            text,
-            base.host == remote::Remote::MasterRepository,
-        ));
+        self.outcomes.push(TableOutcome::Read(region, text));
         self.next_region();
         None
     }
@@ -734,7 +729,7 @@ impl Pending {
                 others.push(outcome);
             }
         }
-        let Some(TableOutcome::Read(_, text, _)) = jp else {
+        let Some(TableOutcome::Read(_, text)) = jp else {
             // JP's read is the table's failure, named once, above.
             let reason = data
                 .absent
@@ -746,7 +741,7 @@ impl Pending {
         let texts: Vec<TableText> = others
             .iter()
             .filter_map(|outcome| match outcome {
-                TableOutcome::Read(region, text, _) => Some(TableText::Region(*region, text.as_str())),
+                TableOutcome::Read(region, text) => Some(TableText::Region(*region, text.as_str())),
                 TableOutcome::Missing(region, reason) => {
                     Some(TableText::RegionMissing(*region, reason.as_str()))
                 }
@@ -839,7 +834,7 @@ fn count_rows(
     let mut rows = vec![(Region::Jp, jp_rows)];
     for outcome in others {
         match outcome {
-            TableOutcome::Read(region, text, _) => {
+            TableOutcome::Read(region, text) => {
                 let (region, added) = merge_table(table, jp, &[TableText::Region(*region, text)])
                     .ok()
                     .and_then(|(_, merged)| match merged {
@@ -1353,7 +1348,7 @@ mod merge_tests {
         let mut data = MasterData::default();
         let jp = r#"[{"id": 1}, {"id": 2}]"#;
         let others = vec![
-            TableOutcome::Read(Region::Cn, r#"[{"id": 2}, {"id": 3}]"#.to_owned(), true),
+            TableOutcome::Read(Region::Cn, r#"[{"id": 2}, {"id": 3}]"#.to_owned()),
             TableOutcome::Missing(Region::Tw, "no master base served it".to_owned()),
         ];
         count_rows(&mut data, "t", "t (test)", jp, &others);

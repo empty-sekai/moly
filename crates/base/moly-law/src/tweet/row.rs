@@ -1,4 +1,4 @@
-//! tweet 域的主表行：与真源 MessagePack 主表的字段一一对应。
+//! Rows of the tweet domain's master tables: fields correspond one to one with the game's MessagePack master tables.
 //!
 //! 行类型只镜像结构键。文本字段（`text` 与各名字）原样携带，不在本层
 //! 解释——文本的排版归 `crate::text` 消费。`emoticon_name` 在源表存在

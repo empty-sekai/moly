@@ -78,7 +78,6 @@ impl TalkStore {
 #[derive(Resource)]
 pub struct TalkCandidates {
     rows: Vec<FixtureTalkRow>,
-    roster: Vec<u32>,
 }
 
 /// 候选段文本字符集：`balloon::bake_atlas` 并进 tweet 主表字符集一起
@@ -528,7 +527,7 @@ pub fn prepare(
         chars.len(),
     );
     *prepared = Some((placed, roster.clone()));
-    commands.insert_resource(TalkCandidates { rows, roster });
+    commands.insert_resource(TalkCandidates { rows });
     commands.insert_resource(TalkCharset { chars });
 }
 

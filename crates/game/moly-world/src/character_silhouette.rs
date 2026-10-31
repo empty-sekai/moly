@@ -1848,6 +1848,8 @@ const _: () = assert!(matches!(CORE_3D_DEPTH_FORMAT, TextureFormat::Depth32Float
 /// The first read-back comes on this replayed frame, then one every
 /// `MOLY_SILHOUETTE_PROBE_INTERVAL` replayed frames.
 const PROBE_FIRST_FRAME: u64 = 10;
+/// The browser build's interval between read-backs, in replayed frames.
+#[cfg(target_arch = "wasm32")]
 const PROBE_INTERVAL: u64 = 300;
 
 /// The native stencil read-back waits for the GPU on the render thread, so it

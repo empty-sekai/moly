@@ -272,9 +272,6 @@ struct Tally {
     clamp_missing: usize,
     cone_no_angle: usize,
     start_delay: usize,
-    effect_pass_unresolved: usize,
-    effect_pass_not_declared: usize,
-    effect_pass_queue_excluded: usize,
     admitted: usize,
 }
 
@@ -495,6 +492,8 @@ impl WeatherFxRetirements {
     pub fn physics(&self) -> &crate::particle_runtime::collision_scene::SiteScene {
         &self.physics
     }
+    /// `stop_matching` for every kind.
+    #[cfg(test)]
     fn stop(&mut self, active: &mut WeatherFxState, now: f64, delta: f32) {
         self.stop_matching(active, now, delta, |_| true);
     }
@@ -1236,6 +1235,7 @@ fn source_shape_admission(shape: &Value) -> Option<String> {
 /// as part of that prefab. Instantiating a template as well would draw the same emitter tree twice, and some
 /// templates cannot emit alone: the ice template's mesh shape has no mesh, and each site copy assigns its own.
 /// A `fx_env_site_` prefab placed in a global package is not read either.
+#[cfg(test)]
 fn source_environment_role(effect_name: &str, variant: &str, phenomenon: &str) -> Option<EffectKind> {
     let site = variant.strip_prefix("unique__");
     if variant != "global" && site.is_none() {

@@ -1,4 +1,5 @@
-//! 待机动作域的主表行：与真源 XLua 剧本表的行结构一一对应。
+//! Rows of the idle-action domain's master tables: row structure corresponds
+//! one to one with the game's XLua scenario tables.
 //!
 //! 源是 XLua 宿主：场景剧本按角色单位各存一份文本资产（表行只带
 //! 单位 id 与剧本名三列），选取与步进逻辑写在剧本内。这里的行类型

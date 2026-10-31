@@ -22,7 +22,7 @@ use serde_json::{json, Map, Value};
 
 use super::document::{self, Clock, GateCharacter, SchedulePolicy, ServerDocument, Stamina};
 use super::{
-    GateReply, Masters, ReplyTalkList, ResponseKind, ServerModel, Tables, SECTION_GAMEDATA,
+    GateReply, ReplyTalkList, ResponseKind, ServerModel, Tables, SECTION_GAMEDATA,
     SECTION_PASS, SECTION_STAMINA,
 };
 
@@ -949,21 +949,6 @@ pub(crate) fn schema(model: &ServerModel, masters: &Tables<'_>) -> Value {
         "policies": concat(concat(concat(concat(policies(), super::delivery::schema_policies()), concat(super::home_action::schema_policies(), super::music_play::schema_policies())), concat(concat(concat(super::inventory::schema_policies(), super::craft::schema_policies()), concat(super::system_fixture_action::schema_policies(), super::tools::schema_policies())), super::recycle::schema_policies())), concat(concat(super::phenomena::schema_policies(), super::convert::schema_policies()), super::normal_mission::schema_policies())),
         "masters": masters_value(masters),
         "joined": model.joined,
-        "extensions": document::EXTENSIONS_KEY,
-    })
-}
-
-pub(crate) fn schema_without_model() -> Value {
-    let masters = Masters::default();
-    let tables = Tables::new(&masters, None);
-    json!({
-        "schemaVersion": document::SCHEMA_VERSION,
-        "command": "server.edit",
-        "sections": other_sections(sections(&tables), super::delivery::schema_sections(None), &tables),
-        "actions": actions(),
-        "policies": concat(concat(concat(concat(policies(), super::delivery::schema_policies()), concat(super::home_action::schema_policies(), super::music_play::schema_policies())), concat(concat(concat(super::inventory::schema_policies(), super::craft::schema_policies()), concat(super::system_fixture_action::schema_policies(), super::tools::schema_policies())), super::recycle::schema_policies())), concat(concat(super::phenomena::schema_policies(), super::convert::schema_policies()), super::normal_mission::schema_policies())),
-        "masters": null,
-        "joined": false,
         "extensions": document::EXTENSIONS_KEY,
     })
 }

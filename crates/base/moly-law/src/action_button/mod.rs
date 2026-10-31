@@ -4,7 +4,7 @@
 //! 碰撞对象求交，进出边沿分别转成「压栈」「出栈」两个调用；栈顶那
 //! 一项决定屏幕上显示哪个动作按钮，按下时按按钮类型分派。
 //!
-//! 三件从源逐句转录的东西在这里：
+//! Three pieces implemented here, formula by formula:
 //! 分离轴求交（`CollisionBox2D`）· 球形判定（`inside_circle`）·
 //! 两张类型映射表（`ButtonType::from_action_type` 与 `icon_file_name`）。
 //!

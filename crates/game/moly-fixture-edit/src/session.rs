@@ -110,13 +110,6 @@ pub(crate) fn apply(
     super::apply_in_session(world, &mut draft.0, request)
 }
 
-/// The site's rows as the editor's draft holds them.
-pub(crate) fn rows(world: &World) -> Vec<moly_features::fixture::EditableFixture> {
-    world
-        .get_resource::<FixturePlacements>()
-        .map_or_else(Vec::new, FixturePlacements::editor_rows)
-}
-
 /// The editor's save checks on a decided layout, against the site's fixture
 /// areas: what a save is held to before it is sent.
 pub(crate) fn check_save(

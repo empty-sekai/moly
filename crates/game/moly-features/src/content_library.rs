@@ -152,9 +152,7 @@ enum FixturePresentation {
         wall: bool,
         available: bool,
     },
-    Custom {
-        ornament: String,
-    },
+    Custom,
 }
 #[derive(Clone)]
 struct LibraryFixture {
@@ -178,7 +176,7 @@ impl LibraryFixture {
         if let FixturePresentation::Surface { wall, .. } = self.presentation {
             return if wall { "墙面外观" } else { "地板外观" };
         }
-        if matches!(self.presentation, FixturePresentation::Custom { .. }) {
+        if matches!(self.presentation, FixturePresentation::Custom) {
             return "自定义展示家具";
         }
         match self.action.as_str() {
@@ -661,8 +659,6 @@ pub enum ButtonKind {
     Row,
     Danger,
 }
-#[derive(Component)]
-struct DetailArtwork;
 
 pub fn install(app: &mut App) {
     input::install(app);

@@ -160,9 +160,11 @@ const SHADOW_SOFT: f32 = 1.0;
 const SHADOW_FADE_SCALE: f32 = 1.0 / 118.75;
 const SHADOW_FADE_BIAS: f32 = -506.25 / 118.75;
 
-/// 阴影账目：节点首个读回推迟到第 60 个成图帧（场景装配与管线编译
-/// 落定），此后每 600 帧（约 10 s）一次。
+/// The shadow account: the node's first read-back waits until the 60th
+/// rendered frame (scene assembly and pipeline compilation have settled).
 const PROBE_FIRST_FRAME: u64 = 60;
+/// The browser build's interval between accounts: 600 frames (about 10 s).
+#[cfg(target_arch = "wasm32")]
 const PROBE_INTERVAL: u64 = 600;
 
 /// The frames between accounts. The native depth-map read-back waits for the

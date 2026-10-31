@@ -614,6 +614,7 @@ impl MenuShellRoot {
     /// has just become the active one; while the chrome is drawn, the actions
     /// visible for this host, the home mission panel and the chrome motion
     /// are applied.
+    #[cfg(test)]
     fn advance_view(
         &mut self,
         set_up: bool,
@@ -628,7 +629,7 @@ impl MenuShellRoot {
         self.advance_view_with_mission(set_up, drawn, hidden, party, delta, now_ms, doc, view, None);
     }
 
-    /// [`MenuShellRoot::advance_view`] with the home mission panel's inputs
+    /// `advance_view` with the home mission panel's inputs
     /// ([`MissionInputs`]): `MysekaiMenuUIContent.RefreshMissionContent`
     /// runs while the host's screen is set up, and the panel hides with the
     /// chrome.
@@ -1089,7 +1090,7 @@ pub fn place(
         };
         let party = party.as_deref().and_then(BirthdayParty::ui);
         // The home mission panel (`MysekaiMissionHomePanel`), with the gauge
-        // and chrome motion of [`MenuShellRoot::advance_view`].
+        // and chrome motion of advance_view_with_mission.
         root.advance_view_with_mission(
             set_up,
             visible,

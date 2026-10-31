@@ -1,5 +1,6 @@
 //! NPCAvatarPresenter.TryCancelIfCharacterOverlap 的累计/取消门。
-//! 真源先比较旧累计值，再加本帧 dt；取消失败不清计时。
+//! The game compares the accumulated value first and only then adds this
+//! frame's dt; a failed cancel does not reset the timer.
 
 use super::{ObjectiveType, TalkType};
 

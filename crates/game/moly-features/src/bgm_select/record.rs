@@ -4,7 +4,7 @@
 //! The source loads the animation prefab from the player view's package,
 //! adds `MysekaiBGMRecordPlayer` to it and parents it below the player view's
 //! `_recordAnimationTransform`, then drives it through its `Animator`'s
-//! states: `None`, `SlideIn`, `SlideOut`, `PlayRecord`, `StopRecord` and
+//! states: `None`, `PlayRecord`, `StopRecord` and
 //! `LoopRecord`. Each state request crossfades in fixed time and cancels the
 //! request before it. The prefab's clips and their events are not in the
 //! public asset root, so the record's motion is this port's own, in the
@@ -40,8 +40,6 @@ const TURN_RAMP_DEGREES_PER_SECOND: f32 = 180.;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
     None,
-    SlideIn,
-    SlideOut,
     PlayRecord,
     StopRecord,
     LoopRecord,
@@ -52,8 +50,6 @@ impl State {
     pub fn name(self) -> &'static str {
         match self {
             State::None => "None",
-            State::SlideIn => "SlideIn",
-            State::SlideOut => "SlideOut",
             State::PlayRecord => "PlayRecord",
             State::StopRecord => "StopRecord",
             State::LoopRecord => "LoopRecord",

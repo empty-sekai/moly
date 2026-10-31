@@ -1,4 +1,5 @@
-//! `Mysekai/Avatar` 程序的逐句翻译——观众 avatar（玩家）第三条管线。
+//! `Mysekai/Avatar` program, formula by formula — the third pipeline for the
+//! audience avatar (the player).
 //!
 //! 与 `Mysekai/Character` 是两份不同的程序：Avatar 16 个属性、Character 20 个，
 //! 只共有 `_DitherAlpha` 与 `_groupDither` 两个，pass 集也不同（Avatar 是
@@ -10,13 +11,16 @@
 //! 合成一个网格一份材质，靠顶点 UV0 的 z 分量区分哪片属于哪个 part，
 //! 片元按它选贴图与调色。槽分派见 [`slot_albedo`]。
 //!
-//! **顶点 UV0.z（part-index）是数据，不是绘制结构。** 真源合并网格
-//! （`AvatarUtility.CombineMesh`）把每个 part 的 part-index 烘进它的 UV0.z，
-//! 合并出的单网格单材质靠它分派。本仓的合成体 glb **没有 z 分量**——那是
-//! 提取缺口，不是消费缺口：`CombineMesh` 那一步在提取侧没把 part-index 烘进
-//! UV0.z。⇒ 这里**照真源按「UV0.z 会在」写**；喂数据那一侧（`moly-game` 的
-//! avatar_material.rs）在缺 z 分量时响亮拒绝，**不拆绘制**（拆成多绘制是
-//! 另一个结构，真源是单网格单材质）。
+//! **Vertex UV0.z (the part index) is data, not draw structure.** The game's
+//! mesh combiner (`AvatarUtility.CombineMesh`) bakes each part's part index
+//! into its UV0.z, and the combined single mesh with a single material
+//! dispatches on it. This repository's synthetic-avatar glb has **no z
+//! component** — a gap in the extraction, not in consumption: `CombineMesh`
+//! did not bake the part index into UV0.z. ⇒ Here the code is written for
+//! "UV0.z is present"; the data side (`avatar_material.rs` in `moly-game`)
+//! rejects loudly when the z component is missing and **does not split the
+//! draw** (splitting into several draws is a different structure; the game
+//! uses a single mesh with a single material).
 //!
 //! 本程序不读顶点色：全部记录的顶点输入只有 POSITION/TEXCOORD/NORMAL。
 //! `_USE_DITHER` 具名挂账：代码明确 `EnableKeyword`，而 4 个 program record
@@ -26,7 +30,7 @@
 
 use crate::shading::{bayer_value_avatar, SECOND_COLOR_TARGET};
 
-/// 该族在真源里的 shader 名。
+/// The family's shader name.
 pub const SHADER_NAME: &str = "Mysekai/Avatar";
 
 /// part-index 槽的常量：身体基础图 `_SkinTex`。
@@ -248,7 +252,7 @@ pub fn avatar_fragment(
     ([rgb[0], rgb[1], rgb[2], 1.0], SECOND_COLOR_TARGET)
 }
 
-/// 源的 discard 判据：`_DitherAlpha` 减 bayer 阈值低于零丢弃。
+/// The source's discard test: discard when `_DitherAlpha` minus the bayer threshold is below zero.
 /// 本程序无 `_UseDither` 门（与 Character 不同），整支无条件执行。
 #[must_use]
 pub fn dither_discards(
@@ -401,8 +405,10 @@ mod tests {
         let params = [4.0, 4.0, 0.0, 0.0];
         assert!(dither_discards(0.25, pos, params));
         assert!(!dither_discards(0.26, pos, params));
-        // 判别臂（真源那一行改值会红）：阈值随 dither_alpha 单调——alpha 越小
-        // 越容易丢，恰等于阈值不丢（< 0 才丢）。
+        // Contrast arm (changing the value in the original line would fail): the
+        // threshold is monotone in dither_alpha — the smaller the alpha, the
+        // easier it discards; exactly equal to the threshold does not discard
+        // (only < 0 discards).
         assert!(dither_discards(0.2574, pos, params));
         assert!(!dither_discards(0.2575, pos, params));
         // 另一个 bayer 格：pos (0.5,0.25) ⇒ ix=2、iy=1 ⇒ 表元 11，

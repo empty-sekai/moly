@@ -162,13 +162,11 @@ pub struct ActivityMaster {
 }
 
 struct UnitGroup {
-    id: i32,
     // Five source positions; missing fields retain their absence.
     units: [Option<i32>; 5],
 }
 
 struct Condition {
-    id: i32,
     kind: String,
     value: i32,
 }
@@ -545,7 +543,6 @@ impl FixtureActivityTables {
         })?;
         let units = ordered(&d[1], |row| {
             Ok(UnitGroup {
-                id: int(row, "id")?,
                 units: [
                     optional_int(row, "gameCharacterUnitId1")?,
                     optional_int(row, "gameCharacterUnitId2")?,
@@ -557,7 +554,6 @@ impl FixtureActivityTables {
         })?;
         let conditions = ordered(&d[2], |row| {
             Ok(Condition {
-                id: int(row, "id")?,
                 kind: string(row, "mysekaiCharacterTalkConditionType")?,
                 value: int(row, "mysekaiCharacterTalkConditionTypeValue")?,
             })

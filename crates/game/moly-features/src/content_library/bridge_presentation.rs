@@ -24,7 +24,7 @@ pub(super) fn enrich(
                 .map(|f| match &f.presentation {
                     FixturePresentation::Surface { wall: true, .. } => "wall",
                     FixturePresentation::Surface { wall: false, .. } => "floor",
-                    FixturePresentation::Custom { .. } => "custom",
+                    FixturePresentation::Custom => "custom",
                     _ => match f.action.as_str() {
                         "timeline" => "timeline",
                         "loop" => "loop",

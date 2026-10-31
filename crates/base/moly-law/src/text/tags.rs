@@ -1,6 +1,7 @@
 //! 富文本标签律：把带标签的文本解析成段，每个标签一个分支。
-//! 真源 TextMeshPro 的标签集，逐标签对照原实现移译；未知标签被整吞
-//! （标签消失、不留字符、不留状态），与真源的「不认识就吃掉」一致。
+//! The tag set is TextMeshPro's, handled tag by tag; an unknown tag is
+//! swallowed whole (the tag disappears, leaving no characters and no state),
+//! matching the engine's "unknown means eaten".
 //!
 //! 段合并：追加字符时若与上一段除文本外全等则并入（跨标签边界也会
 //! 合并——`<b>a</b><b>b</b>` 两段样式相同即一段）。`<space=N>` 产出
@@ -58,7 +59,8 @@ pub struct TextSegment {
     pub italic: bool,
     pub underline: bool,
     pub strikethrough: bool,
-    /// 标记色：真源解析器无 mark 标签分支，此字段恒 None，按真源保留。
+    /// Mark color: the engine's parser has no mark tag branch, so this field is
+    /// always None; it is kept for shape compatibility.
     pub mark_color: Option<[f32; 4]>,
     pub superscript: bool,
     pub subscript: bool,
@@ -211,7 +213,7 @@ fn push_text(state: &mut ParseState, text: &str) {
         .push(build_segment(state, text.to_string(), None));
 }
 
-/// 处理一个标签。返回它是否被当作标签消费（真源恒真：未知标签也吞）。
+/// Handle one tag. Returns whether it was consumed as a tag (always true: unknown tags are swallowed too).
 /// 标签先被整体转小写，所以大小写不敏感；数值串里混进的 `#` 被剥掉。
 fn handle_tag(state: &mut ParseState, tag: &str) -> bool {
     if let Some(rest) = tag.strip_prefix("color=#") {
@@ -276,7 +278,7 @@ fn handle_tag(state: &mut ParseState, tag: &str) -> bool {
     }
     if let Some(rest) = tag.strip_prefix("alpha=") {
         // 只认前两个十六进制字符；空串当 ff。多字节输入会在此切片上
-        // panic——真源同样 panic，保持原样（响的拒绝优于静默取值）。
+        // panic — matching the engine, which panics here too (a loud rejection beats a silent value).
         let hex = rest.replace('#', "");
         let slice = &hex[..hex.len().min(2)];
         state.alpha_override =
@@ -663,7 +665,7 @@ mod tests {
     #[test]
     fn color_hex6_sets_rgb_without_alpha() {
         // /color 只弹嵌套层：栈里只剩首个颜色时弹不动，后续文本仍是该色
-        // 且与前段合并成一段（真源锚样例）。
+        // and merge with the preceding segment (reference case).
         let segs = seg("<color=#ff0000>a</color>b");
         assert_eq!(segs.len(), 1);
         assert_eq!(segs[0].text, "ab");

@@ -1,13 +1,15 @@
-//! `Mysekai/Site/Tree` Base 片元程序的逐句翻译。
+//! `Mysekai/Site/Tree` Base fragment program, formula by formula.
 //!
 //! 这一族不是 FieldObject 族，差异正是要点：Tree 的顶点色混合是普通乘
 //! （FieldObject 平方顶点色）；现象块在两个宝藏阴影之后把顶点色**再乘
 //! 一次**（同一个门）；高度雾乘的是雾梯度自己的 alpha。跑 FieldObject
 //! 尾部的 Tree 绘制能通过「变暗了没有」的检查，但律是错的。
 //!
-//! 落影上色（真源全局量 `_MysekaiDropShadowColor1`）在本族收影变体里
-//! 应用两次，与 FieldObject 族同针法：toon 阴影之后一次、顶点色乘法之后
-//! 一次，两次共用同一衰减——第二针之前是顶点色乘法而非菲涅耳。
+//! Drop-shadow tinting (the global `_MysekaiDropShadowColor1`) is applied
+//! twice in this family's shadow-receiving variants, as in the FieldObject
+//! family: once after the toon shading and once after the vertex color
+//! multiply, both with the same attenuation — the vertex color multiply, not
+//! Fresnel, precedes the second application.
 //! 落影的衰减与采样核不在本律内。
 //!
 //! live 站点材质不走无 keyword 的基形：15 份树材质全部声明
@@ -24,7 +26,7 @@
 
 use crate::shading::{SECOND_COLOR_TARGET, TREASURE_SHADOW_EDGE, TREASURE_SHADOW_INV_RANGE, TREASURE_SHADOW_SCALE};
 
-/// 该族在真源里的 shader 名。
+/// The family's shader name.
 pub const SHADER_NAME: &str = "Mysekai/Site/Tree";
 
 /// 源记录字面出现的常数。
@@ -37,8 +39,9 @@ pub const NORMALIZE_FLOOR: f32 = 1.17549435e-38;
 /// live 变体片元首条 alpha clip 的编译期常量阈值。uniform 槽在源里被
 /// 编译剔除；材质数据 `_AlphaClip` 恰是同值 0.5，但不是阈值的来源。
 pub const ALPHA_CLIP_THRESHOLD: f32 = 0.5;
-/// 树动画顶点段逐字转录的常数：波形二次项 `(w·0.1)·(w·0.1 − 0.1) + 0.1`
-/// 的步长，与摆向量 x 分量的分摊（z 分量乘 1.0）。
+/// Constants of the tree animation vertex stage: the step of the wave's
+/// quadratic term `(w·0.1)·(w·0.1 − 0.1) + 0.1`, and the share of the sway
+/// vector's x component (the z component is multiplied by 1.0).
 pub const WIND_SHAPE_STEP: f32 = 0.100000001;
 pub const WIND_DISP_X: f32 = 0.660000026;
 /// 高度到摆幅的映射：`s = 0.011·(y·strength) + 1`。
@@ -114,7 +117,7 @@ pub fn bayer_threshold(screen_position: [f32; 4], screen_params: [f32; 4]) -> f3
     BAYER[iy.min(3)][ix.min(3)] * DITHER_SCALE + DITHER_BIAS
 }
 
-/// 源的 discard 判据：`_DitherAlpha` 减阈值低于零丢弃。
+/// The source's discard test: discard when `_DitherAlpha` minus the threshold is below zero.
 /// `_DitherAlpha` 为 1.0 时全表无一超过它，discard 不可能触发。
 /// live 站点变体把整块抖动编译期移除（见模块注释），此路只在基形被走到。
 #[must_use]
@@ -126,8 +129,9 @@ pub fn dither_discards(
     dither_alpha - bayer_threshold(screen_position, screen_params) < 0.0
 }
 
-/// live 变体片元最前面的丢弃判据：采样 alpha 减常量阈值**严格**低于零
-/// 丢弃，恰 `0.5` 存活。发生在整条着色链之前。
+/// The discard test at the start of the live variant's fragment: discard when
+/// the sampled alpha minus the constant threshold is **strictly** below zero;
+/// exactly `0.5` survives. It runs before the whole shading chain.
 #[must_use]
 pub fn alpha_clip_discards(sampled_alpha: f32) -> bool {
     sampled_alpha - ALPHA_CLIP_THRESHOLD < 0.0
@@ -672,7 +676,7 @@ mod tests {
     #[test]
     fn alpha_clip_threshold_is_a_constant_strictly_below() {
         // 阈值是编译期常量：恰 0.5 存活（严格小于），之下丢弃——
-        // 材质数据里的同值 0.5 不参与判据。
+        // The material data's 0.5 of the same value does not take part in the test.
         assert!(!alpha_clip_discards(0.5));
         assert!(!alpha_clip_discards(1.0));
         assert!(alpha_clip_discards(0.4999));
@@ -681,9 +685,11 @@ mod tests {
 
     #[test]
     fn wind_sway_matches_the_independent_transcription() {
-        // live 参数 turbulence=2 / strength=13。静止相位（time·turb = 0，
-        // 波 0，形状项 0.1）与反相峰（time·turb = 3π/2，波 −1，形状项
-        // 0.12）各一组；期望值是按源语句序独立转录的 f32 现算字面量。
+        // live parameters turbulence=2 / strength=13. One case at rest phase
+        // (time·turb = 0, wave 0, shape term 0.1) and one at the inverted peak
+        // (time·turb = 3π/2, wave −1, shape term 0.12); the expected values
+        // are computed f32 literals evaluated independently in the program's
+        // statement order.
         let rest = wind_sway([1.0, 2.0, 3.0], 0.0, 2.0, 13.0);
         close(rest[0], 1.04171383);
         close(rest[1], 1.94465292);
@@ -706,7 +712,7 @@ mod tests {
     #[test]
     fn leaf_rotation_gate_has_both_arms() {
         let uv = [1.0, 0.5];
-        // 门开（> 0.5）：绕中心 45° 的独立转录期望。
+        // Gate open (> 0.5): expected value of the independent evaluation of a 45° rotation about the pivot.
         let open = leaf_rotation_uv(uv, 0.5, 1.0, 45.0, 1.0);
         close(open[0], 0.885299027);
         close(open[1], 0.576640725);

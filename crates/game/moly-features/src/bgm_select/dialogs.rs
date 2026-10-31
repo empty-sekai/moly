@@ -162,15 +162,14 @@ fn save_filter(filter: &BgmFilter) {
 // Detail master tables (fields the screen's model does not keep)
 // ---------------------------------------------------------------------------
 
-/// One `musicVocals` row: the cell's caption, release condition, special
-/// season and the characters `IsCharacterExist` reads.
+/// One `musicVocals` row: the cell's caption, special season and the
+/// characters `IsCharacterExist` reads.
 #[derive(Clone, Debug)]
 pub struct VocalDetail {
     pub id: i32,
     pub music_id: i32,
     pub vocal_type: String,
     pub seq: i32,
-    pub release_condition_id: i32,
     pub caption: String,
     pub special_season_id: i32,
     pub characters: Vec<(String, i32, i32)>,
@@ -191,7 +190,6 @@ fn parse_vocal_details(text: &str) -> Result<HashMap<i32, Vec<VocalDetail>>, Str
             music_id: master::int32(row, "musicId")?,
             vocal_type: master::text(row, "musicVocalType")?.to_owned(),
             seq: master::int32(row, "seq")?,
-            release_condition_id: master::int32(row, "releaseConditionId").unwrap_or(0),
             caption: row["caption"].as_str().unwrap_or_default().to_owned(),
             special_season_id: master::int32(row, "specialSeasonId").unwrap_or(0),
             characters,

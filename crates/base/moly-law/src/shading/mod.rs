@@ -1,6 +1,8 @@
-//! 站点族的着色律：每族一份文件，逐句翻译真源的程序，纯 Rust、无引擎依赖。
-//! 每族带一份移植时的逐值比对（采样输入对源程序独立求值的期望值），在各文件的
-//! `#[cfg(test)]` 里。
+//! Shading rules for the site families: one file per family, following the
+//! game's programs formula by formula, pure Rust with no engine dependency.
+//! Each family has a value-by-value comparison (expected values computed
+//! independently from sampled inputs) in the `#[cfg(test)]` section of its
+//! file.
 
 pub mod avatar;
 pub mod character;
@@ -44,9 +46,11 @@ pub(crate) fn close(a: f32, b: f32) {
     assert!((a - b).abs() < 1e-6, "{a} != {b}");
 }
 
-/// 逐值比对的位级窗：期望位来自源程序的独立求值；平台 libm 的
-/// exp2/powf 实现之间、以及优化器对二者间的改写，会让结果挪 1 ULP，
-/// 公式级错误挪动远超 1 ULP。只对正规格数成立（位表示随值单调）。
+/// Bit-level window for the value-by-value comparison: the expected bits come
+/// from an independent evaluation of the program; platform libm's
+/// exp2/powf implementations, and optimizer rewrites between them, can shift
+/// a result by 1 ULP, while a formula-level error shifts it far more than 1
+/// ULP. Only valid for normal numbers (bit patterns are monotone in value).
 #[cfg(test)]
 pub(crate) fn within_one_ulp(a: f32, b: f32) -> bool {
     a.to_bits().abs_diff(b.to_bits()) <= 1
