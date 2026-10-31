@@ -27,6 +27,7 @@ def message(package_id: str, code: str | None, level: str = "warning", line: int
     )
 
 
+FINISHED = json.dumps({"reason": "build-finished", "success": True})
 PLAIN = "path+file:///w/crates/alpha#0.1.0"
 NAMED = "path+file:///w/crates/dir#beta@0.1.0"
 
@@ -62,6 +63,7 @@ def main() -> int:
         message(NAMED, "dead_code"),
         message(NAMED, None),  # a note without a lint code
         "not json",
+        FINISHED,
     ]
     counts, errors = check.count(lines)
     expect(
@@ -95,6 +97,13 @@ def main() -> int:
 
     code, _ = run(lines + [message(PLAIN, "E0425", level="error")], same)
     expect("compiler errors fail", code == 1)
+
+    code, _ = run(lines[:-1], same)
+    expect("output without build-finished fails", code == 1)
+    code, _ = run(lines[:-1] + [json.dumps({"reason": "build-finished", "success": False})], same)
+    expect("a failed build fails", code == 1)
+    code, _ = run([], same)
+    expect("empty output fails", code == 1)
 
     print(f"{failures} failed")
     return 1 if failures else 0

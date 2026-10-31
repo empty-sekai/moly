@@ -3,8 +3,10 @@
 The check runs `cargo clippy` over the workspace (or reads its JSON output from
 a file), counts the warnings per package and lint, and compares the counts with
 `baseline.json` next to this script. A count above its baseline entry, or a lint
-that has no entry, fails the check. Counts below the baseline are reported so
-that the baseline can be lowered with `--update`.
+that has no entry, fails the check. Output without a successful
+`build-finished` record (cargo did not run, or the build failed) also fails.
+Counts below the baseline are reported so that the baseline can be lowered
+with `--update`.
 
 Usage:
     python tools/clippy-ratchet/check.py [--input FILE] [--update]
@@ -54,6 +56,21 @@ def package_name(package_id: str) -> str:
     if "@" in fragment:
         return fragment.split("@", 1)[0]
     return package_id.split("#", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+
+
+def finished(lines) -> bool:
+    """Whether the output ends a build with cargo's successful `build-finished` record."""
+    for line in lines:
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("reason") == "build-finished":
+            return record.get("success") is True
+    return False
 
 
 def count(lines) -> tuple[Counts, int]:
@@ -143,8 +160,9 @@ def main(argv: list[str]) -> int:
     if errors:
         print(f"clippy reported {errors} errors; the counts are not comparable", file=sys.stderr)
         return 1
-    if not current:
-        print("no warnings were read; check that clippy ran", file=sys.stderr)
+    if not finished(lines):
+        print("cargo did not report a successful build; the counts are not comparable", file=sys.stderr)
+        return 1
 
     baseline: Counts = {}
     if args.baseline.exists():
