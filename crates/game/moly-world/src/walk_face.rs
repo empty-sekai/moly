@@ -1059,6 +1059,10 @@ pub struct RuntimeCarving<'w, 's> {
     >,
     time: Res<'w, Time>,
     applied: Local<'s, CarveApplied>,
+    /// Each obstacle's carve as of its state's version: the carve shape is
+    /// built from the pose when the version bumps (the engine rebuilds an
+    /// obstacle's carve only then), not from every frame's pose.
+    built: Local<'s, std::collections::HashMap<(Entity, usize), (u32, Option<carve::RuntimeCarve>)>>,
 }
 
 impl RuntimeCarving<'_, '_> {
@@ -1096,11 +1100,12 @@ impl RuntimeCarving<'_, '_> {
         let mut rows: Vec<_> = self.obstacles.iter_mut().collect();
         rows.sort_by_key(|row| row.0);
         let mut carves = Vec::new();
-        for (_, mut obstacles, global, visibility, inactive) in rows {
+        let mut built = std::collections::HashMap::with_capacity(self.built.len());
+        for (entity, mut obstacles, global, visibility, inactive) in rows {
             let active = !inactive && visibility.is_none_or(|v| v.get());
             let (scale, rotation, translation) = global.to_scale_rotation_translation();
             let axes = [rotation * Vec3::X, rotation * Vec3::Y, rotation * Vec3::Z].map(|a| a.to_array());
-            for (record, state) in obstacles.0.iter_mut() {
+            for (index, (record, state)) in obstacles.0.iter_mut().enumerate() {
                 if !active || !record.enabled || !record.carve {
                     *state = carve::obstacle::ObstacleState::default();
                     continue;
@@ -1127,12 +1132,18 @@ impl RuntimeCarving<'_, '_> {
                     record.time_to_stationary,
                 );
                 if carving {
-                    if let Some(carve) = carve::runtime_carve(&shape, translation.y) {
-                        carves.push(carve);
+                    let carve = match self.built.get(&(entity, index)) {
+                        Some((version, carve)) if *version == state.version => carve.clone(),
+                        _ => carve::runtime_carve(&shape, translation.y),
+                    };
+                    if let Some(carve) = &carve {
+                        carves.push(carve.clone());
                     }
+                    built.insert((entity, index), (state.version, carve));
                 }
             }
         }
+        *self.built = built;
         let replaced = face.generation != self.applied.generation;
         if !replaced && carves == self.applied.carves {
             return;
