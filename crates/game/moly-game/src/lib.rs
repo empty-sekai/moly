@@ -77,6 +77,7 @@ pub use moly_world::camera;
 pub use moly_world::camera_site_move;
 pub use moly_world::character;
 pub use moly_world::character_silhouette;
+pub use moly_world::clean_view;
 pub use moly_world::cloth_runtime;
 pub use moly_world::companion;
 pub use moly_world::cutscene_camera;
@@ -344,6 +345,7 @@ pub fn app(
         fixture_emission::FixtureEmissionPlugin,
     ));
     app.add_plugins(character_silhouette::CharacterSilhouettePlugin);
+    clean_view::install(&mut app);
     app.add_plugins(fixture_edit::FixtureEditPlugin);
     app.add_plugins((source_color::SourceColorPlugin, source_particle_render::SourceParticlePlugin));
     app.add_plugins((

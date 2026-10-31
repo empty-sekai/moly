@@ -2,8 +2,7 @@
 //! and the lifetime of its exclusive storage lease.
 
 pub mod asset_source;
-#[cfg(not(target_arch = "wasm32"))]
-mod clean_view;
+pub mod clean_view;
 pub mod player_data_input;
 pub mod site_request;
 
@@ -71,6 +70,11 @@ fn run_app(
     let mut app = moly_game::app(source, site);
     moly_assets::remote::admit(&mut app, remote);
     moly_game::insert_dev_tools(&mut app);
+    // The clean view's switches from the environment, which the developer
+    // window and the stage share.
+    if let Err(message) = clean_view::install(&mut app) {
+        fail_loud(&message);
+    }
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(directory) = std::env::var_os("MOLY_PORTRAITS_OUT") {
         let directory = std::path::PathBuf::from(directory);
@@ -102,7 +106,7 @@ fn run_app(
     #[cfg(not(target_arch = "wasm32"))]
     {
         let StartMode::Library = mode;
-        if let Err(message) = configure_text_from_files().and_then(|()| clean_view::install(&mut app)) {
+        if let Err(message) = configure_text_from_files() {
             fail_loud(&message);
         }
         install_link(&mut app);
@@ -225,6 +229,7 @@ fn run_native_game() {
     let mut app = moly_game::app(source, site_request::game());
     moly_assets::remote::admit(&mut app, remote);
     moly_game::configure_browser_game(&mut app, seed);
+    clean_view::install(&mut app).unwrap_or_else(|message| fail_loud(&message));
     install_link(&mut app);
     // `MOLY_CHECK_SYSTEMS=1` reports every system parameter conflict and
     // exits instead of starting the game.

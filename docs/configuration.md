@@ -18,8 +18,10 @@
 | `MOLY_PLAYER_REGION` | Region of the player data, `cn` or `jp` (developer window) | |
 | `MOLY_PLAYER_UID` | Fetches and previews data for this UID at startup (developer window) | |
 | `MOLY_PLAYER_DATA_FILE` | Imports the specified JSON file at startup (developer window) | |
+| `MOLY_HIDE_HUD` | `1` hides every HUD, button and dialog view, so only the scene, the in-world balloons and the talk window remain (game, developer window and stage) | Off: the game's own interface |
+| `MOLY_HIDE_PLAYER` | `1` hides the player's own body, so a first-person shot does not have it fill the frame (game, developer window and stage) | Off: the body shows |
 
-Set only one of `MOLY_PLAYER_UID` and `MOLY_PLAYER_DATA_FILE`.
+Set only one of `MOLY_PLAYER_UID` and `MOLY_PLAYER_DATA_FILE`. `MOLY_HIDE_HUD` and `MOLY_HIDE_PLAYER` are `1` or `0`; any other value stops the start with the variable named. A plugin or a director script changes the same switches with the `view.set` step (see [Plugins](plugins.md)).
 
 Settings, server documents and the local list are stored separately: in the settings file, and in `settings.server.json` and `settings.local.json` next to it. A second process that runs at the same time only reads these files.
 
