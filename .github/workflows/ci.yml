@@ -44,6 +44,12 @@ jobs:
         run: git ls-files -z '*.mjs' | xargs -0 -r -n1 node --check
       - name: Check public source boundary
         run: node tools/boundary/check.mjs
+      - name: Test the layer and lint count checks
+        run: |
+          python tools/layers/selftest.py
+          python tools/clippy-ratchet/selftest.py
+      - name: Check crate layers
+        run: python tools/layers/check.py
       - name: Check commit whitespace
         shell: bash
         env:

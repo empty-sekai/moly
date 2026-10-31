@@ -1,0 +1,151 @@
+# Crate layering rules for tools/layers/check.py.
+#
+# New crates get their layer from the directory of their Cargo.toml in
+# [files]; [crates] pins individual crates by name and wins on a clash.
+# A dependency may only point to a lower layer on [order]; [allow].edges lists
+# the existing pairs that break that order. Crates in the "domain" layer may
+# not depend on one another except for [domain_exceptions].allowed.
+
+# Report a workspace member that has no layer instead of skipping it.
+deny_unassigned = true
+
+# These crates must keep [dependencies] empty (dev-dependencies are reported).
+dependency_free = ["moly-law"]
+
+# The server layer must never use crates from these layers.
+game_layers = ["game-core", "game-media", "world", "hub", "domain", "tools", "assembly", "app"]
+
+# Lowest to highest. The index in this list is the layer rank.
+order = [
+    "base",      # moly-law, moly-store, moly-plugin, moly-text
+    "engine",    # moly-assets, moly-perf
+    "net",       # moly-protocol, moly-layout, moly-link
+    "server",    # moly-server: above net, must not use game layers
+    "game-core", # moly-core
+    "game-media",# moly-render, moly-audio, moly-ui, moly-masters
+    "world",     # moly-world
+    "hub",       # moly-features
+    "domain",    # gameplay domain crates: moly-convert
+    "tools",     # moly-devtools
+    "assembly",  # moly-game
+    "app",       # moly-app, moly-stage, moly-android, moly-launcher, moly-server-host
+]
+
+# Every layer needs a [layers.<name>] sub-table; its keys document the crates
+# that belong to the layer (the rules use [files] and [crates] below).
+[layers.base]
+crates = ["moly-law", "moly-store", "moly-plugin", "moly-text"]
+
+[layers.engine]
+crates = ["moly-assets", "moly-perf"]
+
+[layers.net]
+crates = ["moly-protocol", "moly-layout", "moly-link"]
+
+[layers.server]
+crates = ["moly-server"]
+
+[layers.game-core]
+crates = ["moly-core"]
+
+[layers.game-media]
+crates = ["moly-render", "moly-audio", "moly-ui", "moly-masters"]
+
+[layers.world]
+crates = ["moly-world"]
+
+[layers.hub]
+crates = ["moly-features"]
+
+[layers.domain]
+crates = ["moly-convert"]
+
+[layers.tools]
+crates = ["moly-devtools"]
+
+[layers.assembly]
+crates = ["moly-game"]
+
+[layers.app]
+crates = ["moly-app", "moly-stage", "moly-android", "moly-launcher", "moly-server-host"]
+
+# Directory of a Cargo.toml, relative to the workspace root -> layer.
+[files]
+"crates/base/moly-law/Cargo.toml" = "base"
+"crates/base/moly-store/Cargo.toml" = "base"
+"crates/base/moly-plugin/Cargo.toml" = "base"
+"crates/base/moly-text/Cargo.toml" = "base"
+
+"crates/engine/moly-assets/Cargo.toml" = "engine"
+"crates/engine/moly-perf/Cargo.toml" = "engine"
+
+"crates/net/moly-protocol/Cargo.toml" = "net"
+"crates/net/moly-layout/Cargo.toml" = "net"
+"crates/net/moly-link/Cargo.toml" = "net"
+
+"crates/server/moly-server/Cargo.toml" = "server"
+
+"crates/game/moly-core/Cargo.toml" = "game-core"
+
+"crates/game/moly-render/Cargo.toml" = "game-media"
+"crates/game/moly-audio/Cargo.toml" = "game-media"
+"crates/game/moly-ui/Cargo.toml" = "game-media"
+"crates/game/moly-masters/Cargo.toml" = "game-media"
+
+"crates/game/moly-world/Cargo.toml" = "world"
+"crates/game/moly-features/Cargo.toml" = "hub"
+"crates/game/moly-convert/Cargo.toml" = "domain"
+"crates/game/moly-devtools/Cargo.toml" = "tools"
+"crates/game/moly-game/Cargo.toml" = "assembly"
+
+"crates/app/moly-app/Cargo.toml" = "app"
+"crates/app/moly-stage/Cargo.toml" = "app"
+"crates/app/moly-android/Cargo.toml" = "app"
+"crates/app/moly-launcher/Cargo.toml" = "app"
+"crates/app/moly-server-host/Cargo.toml" = "app"
+
+# Crates pinned by name.
+[crates]
+
+# Keys are "from -> to". An entry only excuses the edges it names; apply it to
+# one kind of edge (below) when possible so a later normal dependency on the
+# same pair is still reported.
+[allow]
+# Edges allowed regardless of layer order (edges that break the intended
+# order documented in [order]).
+edges = [
+    # Protocol types are split across two crates in the net layer.
+    "moly-layout -> moly-protocol",
+    "moly-link -> moly-protocol",
+    # Masterdata lives beside the media crates but is shared by render,
+    # audio and UI in both directions.
+    "moly-audio -> moly-masters",
+    "moly-render -> moly-masters",
+    "moly-ui -> moly-masters",
+    # UI builds on the audio and render crates.
+    "moly-ui -> moly-audio",
+    "moly-ui -> moly-render",
+    # The Android entry point embeds the desktop application crate.
+    "moly-android -> moly-app",
+    # The server needs masterdata (game-media) although the server layer
+    # must stay free of game behaviour.
+    "moly-server -> moly-masters",
+]
+
+# Optional or target-specific dependencies that may point to the same layer
+# or upwards (the package table of cargo metadata does not say whether a
+# dependency is optional).
+game_edges = [
+    # moly-link keeps moly-server behind an optional transport dependency.
+    "moly-link -> moly-server",
+]
+
+# Dev-dependencies that may point to the same layer or upwards.
+dev_edges = [
+    # Upward dev-dependency used by tests.
+    "moly-link -> moly-server",
+]
+
+[domain_exceptions]
+# Domain crates allowed to depend on each other (["a -> b"]).
+allowed = []
