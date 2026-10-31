@@ -1,48 +1,59 @@
-//! rotationOverLifetime：绕轴自旋的每帧角速度采样律。
+//! rotationOverLifetime: the per-frame angular velocity of a particle spinning
+//! about an axis.
 //!
-//! 档位：**引擎原生逐指令**（原生实现逐指令转录；常量按位钉死）。
+//! Tier: `bit-exact`: results, the order of operations and the constants match
+//! the reference bit for bit.
 //!
-//! 采样链按模块模式分六路（模式字 u16）：
+//! Input: the particle seed, the start module's randomize-direction value, the
+//! particle's age percent from before this frame's advance (this module runs
+//! before the advance), and the three axis curves in their modes. Output: one
+//! angular velocity per axis, in radians per second, and the rotation after
+//! one integration step. The six dispatch paths of the module's mode word (a
+//! u16) are:
 //!
-//! | 模式 | 路 | 值 | 翻转因子 |
+//! | mode | path | value | flip factor |
 //! |---|---|---|---|
-//! | 0 常数 | 通用 | v = 标量 | 常数杂凑（平移式） |
-//! | 3 双常数 | 通用 | v = (max−min)·r_lerp + min，**不钳制** lerp | 符号杂凑（原式） |
-//! | 1 曲线 | 通用 | v = 求值(曲线, t)·乘子 | 符号杂凑（原式） |
-//! | 2 双曲线 | 通用 | lo/hi 各乘乘子，v = (hi−lo)·r_lerp + lo | 符号杂凑（原式） |
-//! | 1 曲线 | 烘制 | v = 多项式（**不乘乘子**——乘子折入系数） | 常数杂凑（平移式） |
-//! | 2 双曲线 | 烘制 | 两结构各取多项式，v = (hi−lo)·r_lerp + lo | 符号杂凑（原式） |
+//! | 0 constant | generic | v = the scalar | constant hash (affine) |
+//! | 3 two constants | generic | v = (max-min)*r_lerp + min, the lerp **not clamped** | sign hash |
+//! | 1 curve | generic | v = evaluate(curve, t) * multiplier | sign hash |
+//! | 2 two curves | generic | lo and hi each times the multiplier, v = (hi-lo)*r_lerp + lo | sign hash |
+//! | 1 curve | baked | v = the polynomial, **no multiplier** (folded into the coefficients) | constant hash (affine) |
+//! | 2 two curves | baked | a polynomial per structure, v = (hi-lo)*r_lerp + lo | sign hash |
 //!
-//! t = max(agePercent·0.01, 0)，agePercent 取**本帧推进前**的值（模块
-//! 在推进之前跑）。翻转：randomizeDirection < r ? v : −v。本作资产该
-//! 数组结构上恒 0（正负散布来自双常数/双曲线的 lerp 抽签本身），法仍
-//! 取参数不硬编码。
+//! `t = max(agePercent * 0.01, 0)`.
+//! The flip is `if randomizeDirection < r { v } else { -v }`. The game's
+//! assets keep that value at 0 by construction (spread comes from the
+//! two-constant and two-curve lerp draws), where the call passes 0.0; the law
+//! still reads it from the parameter.
 //!
-//! 随机数消耗：**每帧 0 次流抽取**。全部因子都是逐粒子 u32 种子的纯
-//! 杂凑（t 与杂凑输入无关），同一颗粒子终生同批因子；种子在出生时
-//! 抽定一次，见消费侧。
+//! Random streams: 0 draws per frame. Every factor is a pure hash of the
+//! per-particle u32 seed, independent of `t`, so a particle keeps the same
+//! factors all its life; the caller draws the seed once, at birth.
 //!
-//! 与 value.rs 文档语义的三处差异（因此不复用其求值）：
-//! lerp 不钳制（value.rs 钳 [0,1]）；等时键退化给 v0（value.rs 给
-//! k1.value）；合成次序逐指令对齐（value.rs 是 a·v0+b·m0+c·v1+d·m1）。
+//! Three differences from the documented semantics in `value`: the lerp is not
+//! clamped (`value` clamps to [0,1]); keys at the same time give v0 (`value`
+//! gives `k1.value`); and the composition is `h01*v1 + ((h00*v0 + h10*m0) +
+//! h11*m1)` where `value` writes `a*v0 + b*m0 + c*v1 + d*m1`. This module
+//! therefore does not reuse that evaluation.
 
 use crate::particle::value::MinMaxCurve;
 pub use super::curve::{BakedCurve, CurveSampler as AngularVelocityLaw, CurveTime, eval_curve, normalized_age};
 pub(crate) use super::random::hash_mix;
 
-// ---- 杂凑核（常量按位钉死） ----
+// ---- Hash kernels (constants pinned by bit) ----
 
-/// 乘法因子 M。
+/// The multiplier M.
 const HASH_M: u32 = 0x6ab5_1b9d;
-/// lerp 因子的加项 T（原式）。
+/// The lerp factor's added term T.
 const HASH_T_LERP: u32 = 0x6aed_452e;
-/// lerp 因子的加项 C（原式）。
+/// The lerp factor's added term C.
 const HASH_C_LERP: u32 = 0x00a0_1275;
-/// 符号因子的加项 T。
+/// The sign factor's added term T.
 const HASH_T_SIGN: u32 = 0xff2b_b1a4;
-/// 符号因子的加项 C（原式）。
+/// The sign factor's added term C.
 const HASH_C_SIGN: u32 = 0x0bc7_08d3;
-/// lerp 因子（原式）：t = 种子+T_lerp，m = 种子·M + C_lerp。
+/// The lerp factor: `t = seed + T_lerp` and `m = seed * M + C_lerp`, the two
+/// arguments `hash_mix` takes.
 fn hash_lerp_raw(seed: u32) -> f32 {
     hash_mix(
         seed.wrapping_add(HASH_T_LERP),
@@ -50,7 +61,8 @@ fn hash_lerp_raw(seed: u32) -> f32 {
     )
 }
 
-/// 符号因子（原式）：t = 种子+T_sign，m = 种子·M + C_sign。
+/// The sign factor, built like the lerp one: `t = seed + T_sign`,
+/// `m = seed * M + C_sign`.
 fn hash_sign_raw(seed: u32) -> f32 {
     hash_mix(
         seed.wrapping_add(HASH_T_SIGN),
@@ -58,7 +70,7 @@ fn hash_sign_raw(seed: u32) -> f32 {
     )
 }
 
-// ---- 曲线求值（引擎原生逐指令） ----
+// ---- Curve evaluation (bit-exact) ----
 
 impl AngularVelocityLaw {
     /// Sample the prepared curve with the rotation module's independent lerp
@@ -70,8 +82,9 @@ impl AngularVelocityLaw {
     }
 }
 
-/// rotationOverLifetime 模块：三根轴各一条角速度律。separateAxes 为假
-/// 时只有 z（公告板自旋轴）；为真时三轴各自采样。
+/// The rotationOverLifetime module: one angular-velocity law per axis. With
+/// separateAxes off only z is sampled (the billboard spin axis); with it on
+/// each of the three axes samples on its own.
 #[derive(Clone, Debug)]
 pub struct RotationOverLifetime {
     pub separate_axes: bool,
@@ -81,8 +94,9 @@ pub struct RotationOverLifetime {
 }
 
 impl RotationOverLifetime {
-    /// 从文档语义的轴组构造。separate_axes 为真而 x/y 缺席（提取面缺
-    /// 键）时响亮拒绝——那不是「当 0」，是数据形状不对。
+    /// Builds from the axis curves. With `separate_axes` set and x or y
+    /// absent (the key missing from the export) construction refuses, by
+    /// name: a missing axis is not a zero, it is the wrong data shape.
     pub fn from_parts(
         separate_axes: bool,
         x: Option<&MinMaxCurve>,
@@ -91,7 +105,7 @@ impl RotationOverLifetime {
     ) -> Result<Self, String> {
         if separate_axes && (x.is_none() || y.is_none()) {
             return Err(format!(
-                "rotationOverLifetime: separateAxes 开而 x/y 轴键缺（x={} y={}）——提取面缺键，拒绝猜测",
+                "rotationOverLifetime: separateAxes is on but an x/y axis key is missing (x={} y={})",
                 x.is_some(),
                 y.is_some()
             ));
@@ -106,7 +120,8 @@ impl RotationOverLifetime {
         })
     }
 
-    /// 三轴每帧角速度（弧度每秒）。未启用的轴为 0。
+    /// The frame's angular velocity per axis, in radians per second. An axis
+    /// that is not enabled gives 0 (the constant 0).
     pub fn angular_velocity(
         &self,
         seed: u32,
@@ -128,9 +143,10 @@ impl RotationOverLifetime {
         }
     }
 
-    /// 推进旋转：rotation[axis] += 角速度[axis]·dt。rotation3d 为真三
-    /// 轴积分，为假只积 z（引擎里 x/y 的角速度也被清零，不积）。
-    /// 非有限 dt 拒绝（fail-closed）。
+    /// Advances the rotation: `rotation[axis] += angular_velocity[axis] * dt`.
+    /// With `rotation3d` all three axes integrate; without it only z does,
+    /// and x and y keep their angular velocity at zero. A non-finite `dt` is
+    /// refused.
     pub fn advance_rotation(
         &self,
         rotation: &mut [f32; 3],
@@ -141,7 +157,7 @@ impl RotationOverLifetime {
         dt: f32,
     ) -> Result<(), &'static str> {
         if !dt.is_finite() {
-            return Err("rotationOverLifetime: dt 非有限");
+            return Err("rotationOverLifetime: non-finite dt");
         }
         let w = self.angular_velocity(seed, randomize_direction, age_percent);
         if rotation3d {

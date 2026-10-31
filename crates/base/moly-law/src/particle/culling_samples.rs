@@ -1,7 +1,8 @@
-//! Research instrument: replays native culling cases (the game's own libunity
-//! run in an emulator) through this module's functions, word for
-//! word. The inputs and native outputs come from files named by environment
-//! variables; nothing here compares against this crate's own output.
+//! Research instrument: replays reference culling cases through this module's
+//! functions and requires every result to equal the reference bit for bit.
+//! Each case file holds the inputs and the reference outputs, and is named by
+//! an environment variable; nothing here compares against this crate's own
+//! output. The cases cover:
 //!
 //! - `MOLY_CULLING_BOUNDS_NATIVE`: `UpdateBounds` cases (procedural, particle,
 //!   stretched and empty paths, World and Custom space, invalidated systems).

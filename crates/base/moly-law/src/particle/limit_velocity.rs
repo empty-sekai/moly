@@ -1,37 +1,51 @@
-//! limitVelocity：限速（速度模向阈值收敛）与拖拽律。
+//! limitVelocity: the limit (the speed magnitude converges on a threshold)
+//! and the drag law.
 //!
-//! 档位：**引擎原生逐指令**（原生实现逐指令转录；常量按位钉死）。
+//! Tier: `bit-exact`: results, the order of operations and the constants match
+//! the reference bit for bit.
 //!
-//! 同一模块两段，按序都跑：
+//! Input: the particle's state velocity and the animated velocity added before
+//! this module in the same frame, `dt`, the dampen, the drag and its size and
+//! speed factors, and the speed limit in its magnitude mode. Output: the state
+//! velocity after both sections, which run in this order when their gates
+//! open; the animated velocity is read, never written.
 //!
-//! 1. **钳制段**（门 `dampen > 0`，非数 dampen 跳过）：每条道一次（该道的 dt）
-//!    `k = 1.0 − powf(1.0−dampen, |dt|·30.0)`；每颗粒子
-//!    合速度 = 状态速度 + 叠加速度；`mag2 = x² + (y²+z²)`；
-//!    `newmag = (limit < |mag|) ? |mag| + (limit−|mag|)·k : |mag|`；
-//!    `状态速度 = 单位向量·newmag − 叠加速度`。limit 按幅值模式取
-//!    常数（不读种子）/ 双常数（本段自己的杂凑，平移式，lerp 不钳制）
-//!    / 烘制曲线（t = max(agePercent·0.01, 0)，不读种子）。
-//! 2. **拖拽段**（门 `drag != 0`，**非数 drag 照跑**）：按当前合速度
-//!    （钳制后重算）取 `factor = ((尺寸因子·drag)·速度因子)·dt`，
-//!    `newmag = mag − factor`（下钳 0），单位向量除以 mag。
+//! - **Clamp section** (gate `dampen > 0`; a NaN dampen skips it), once per
+//!   lane with that lane's `dt`:
+//!   `k = 1.0 - powf(1.0 - dampen, |dt| * 30.0)`; then per particle
+//!   `mag2 = x² + (y²+z²)` over the combined velocity (state plus animated),
+//!   `newmag = (limit < |mag|) ? |mag| + (limit - |mag|) * k : |mag|`, and
+//!   `state velocity = unit vector * newmag - animated velocity`.
+//!   The limit comes from its magnitude mode: a constant (no seed read), two
+//!   constants (this section's own hash, an affine form, the lerp not
+//!   clamped), or a baked curve read at `t = max(agePercent * 0.01, 0)` (no
+//!   seed read).
+//! - **Drag section** (gate `drag != 0`; a NaN drag runs it): from the
+//!   combined velocity recomputed after the clamp, `factor = ((size factor *
+//!   drag) * speed factor) * dt`, `newmag = mag - factor` floored at 0, and
+//!   the unit vector by dividing by `mag`.
 //!
-//! 具名偏差（逐值比对处报告量级）：
-//! - powf 是库函数（经动态链接器调用），k 取宿主 powf，与设备 libm 的
-//!   逐位一致未证；arm64 构建每条道各调一次（`|dt[道]|·30`），调用方按
-//!   道给 dt；
-//! - 钳制段单位向量已按 arm64 构建逐指令同形：`合速度 · rsqrt(mag2)`，
-//!   rsqrt 为 FRSQRTE 加两步 FRSQRTS（`armf::rsqrt2`，mag2 为 0 时取
-//!   估计值），门 `1e-30 < mag2` 之外取 +0，newmag 乘 (0 < mag) 的
-//!   1.0/0.0。（旧记述「rsqrtps + 两步牛顿，此处精确除法」转录自 x86
-//!   构建，不适用于 arm64。）拖拽段仍按精确除法（arm64 未逐指令读，
-//!   语料拖拽全为 0，拖拽段不跑）。
+//! Named gaps (each value comparison reports their magnitude):
+//! - `powf` is a library function called through the dynamic linker, so `k`
+//!   is the host `powf` and its bit equivalence with the device libm is not
+//!   established; this implementation calls it once per lane
+//!   (`|dt[lane]| * 30`), so the caller gives `dt` per lane.
+//! - The clamp section's unit vector is the combined velocity times the
+//!   reciprocal square root of `mag2` (`armf::rsqrt2`: an estimate refined by
+//!   two steps, the estimate itself where `mag2` is 0, so the step is not
+//!   exact); outside the gate `1e-30 < mag2` it is +0, and `newmag` is
+//!   multiplied by 1.0/0.0 from `(0 < mag)`. The drag section divides exactly
+//!   (a rounding that does not match the reference; drag is 0 throughout the
+//!   corpus, so that section does not run there).
 //!
-//! 随机数消耗：**每帧 0 次流抽取**——唯一的杂凑（双常数 limit）是
-//! 逐粒子种子的纯函数，终生恒定。
+//! Random streams: 0 draws per frame. The only hash (the two-constant limit)
+//! is a pure function of the per-particle seed, constant for the particle's
+//! life.
 //!
-//! 未按原生路径实现（引擎有路、未逐指令读、语料 0；构造处响亮拒绝）：
-//! separateAxis 轴ewise 族 · 幅值通用曲线（模式 1/2 非烘制）· 幅值
-//! 模式 2 烘制 · 拖拽非常数（模式 1/2/3）。
+//! Not implemented (the engine has the path, the corpus has 0 cases, and
+//! construction refuses by name): the separateAxis per-axis family, general
+//! magnitude curves (modes 1/2 unbaked), the mode 2 baked magnitude, and a
+//! drag that is not constant (modes 1/2/3).
 
 use crate::particle::armf as a;
 use crate::particle::buffer::RingBufferMode;
@@ -39,17 +53,18 @@ use crate::particle::curve::{curve_time_fmax, BakedCurve};
 use crate::particle::rotation::hash_mix;
 use crate::particle::value::MinMaxCurve;
 
-// ---- 杂凑（钳制段双常数） ----
+// ---- Hashing (the clamp section's two constants) ----
 
-/// 钳制段加项 T。
+/// The clamp section's added term T.
 const HASH_T_CLAMP: u32 = 0x1337_1337;
-/// 钳制段加项 C（与角速度常数因子共用同一常量）。
+/// The clamp section's added term C (the same constant as the
+/// angular-velocity constant factor).
 const HASH_C_CONST: u32 = 0x714a_cb3f;
-/// 乘法因子 M（与角速度族共用）。
+/// The multiplier M (shared with the angular-velocity family).
 const HASH_M: u32 = 0x6ab5_1b9d;
 
-/// 双常数 limit 的 lerp 因子（平移式）：
-/// t = 种子+T_clamp，m = (种子+T_clamp)·M + C_const。不钳制。
+/// The lerp factor of the two-constant limit, an affine form:
+/// `t = seed + T_clamp`, `m = (seed + T_clamp) * M + C_const`. Not clamped.
 fn clamp_lerp_hash(seed: u32) -> f32 {
     let t = seed.wrapping_add(HASH_T_CLAMP);
     hash_mix(
@@ -58,22 +73,22 @@ fn clamp_lerp_hash(seed: u32) -> f32 {
     )
 }
 
-// ---- 收敛系数 ----
+// ---- Convergence factor ----
 
-/// `k = 1.0 − powf(1.0−dampen, |dt|·30.0)`。powf 为库函数，逐位一致
-/// 按构造不可达（具名偏差）。
+/// `k = 1.0 - powf(1.0 - dampen, |dt| * 30.0)`. `powf` is a library function,
+/// so a bit-exact match is out of reach by construction (a named gap).
 pub fn clamp_k(dampen: f32, dt: f32) -> f32 {
     1.0 - (1.0 - dampen).powf(dt.abs() * 30.0)
 }
 
-// ---- 幅值律 ----
+// ---- Magnitude law ----
 
-/// 限速阈值的取值律。
+/// How the speed limit is taken.
 #[derive(Clone, Debug)]
 pub enum MagnitudeLaw {
-    /// 模式 0：常数。不读种子、不读年寿。
+    /// Mode 0: a constant. Neither the seed nor the age is read.
     Constant(f32),
-    /// 模式 3：双常数。逐粒子杂凑一次，lerp 不钳制。
+    /// Mode 3: two constants. Hashed once per particle; the lerp is not clamped.
     TwoConstants { min: f32, max: f32 },
     /// Mode 1 with the reader's isOptimizedCurve bit set: ClampVelocityModule
     /// evaluates the polynomial inline, operation for operation as
@@ -83,8 +98,8 @@ pub enum MagnitudeLaw {
 }
 
 impl MagnitudeLaw {
-    /// 从文档语义四值模式构造。通用曲线与双曲线模式未按原生路径
-    /// 实现（语料 0），响亮拒绝。
+    /// Builds from the four documented modes. A general curve and the two-curve
+    /// mode are refused by name: the corpus has 0 cases of them.
     pub fn from_min_max_curve(curve: &MinMaxCurve) -> Result<Self, String> {
         match curve {
             MinMaxCurve::Constant(v) => Ok(MagnitudeLaw::Constant(*v)),
@@ -96,17 +111,17 @@ impl MagnitudeLaw {
             {
                 Some(b) => Ok(MagnitudeLaw::Baked(b)),
                 None => Err(
-                    "limitVelocity.magnitude: a curve without the isOptimizedCurve bit takes MagnitudeUpdateTpl, which is not transcribed"
+                    "limitVelocity.magnitude: a curve without the isOptimizedCurve bit takes MagnitudeUpdateTpl, which is unsupported"
                         .to_string(),
                 ),
             },
             MinMaxCurve::TwoCurves { .. } => Err(
-                "limitVelocity.magnitude: 双曲线模式未按原生路径实现，拒绝".to_string(),
+                "limitVelocity.magnitude: the two-curve mode is unsupported".to_string(),
             ),
         }
     }
 
-    /// 每颗粒子的限速阈值。
+    /// The speed limit of one particle, from the module's `_velocity`.
     pub fn limit(&self, seed: u32, age_percent: f32) -> f32 {
         match self {
             MagnitudeLaw::Constant(v) => *v,
@@ -119,27 +134,30 @@ impl MagnitudeLaw {
     }
 }
 
-// ---- 拖拽 ----
+// ---- Drag ----
 
-/// 拖拽系数的取值律。只有常数模式按原生路径实现（语料全为常数 0）。
+/// How the drag is taken. Only the constant mode is implemented; drag is 0
+/// throughout the corpus.
 #[derive(Clone, Copy, Debug)]
 pub enum DragLaw {
-    /// 模式 0：常数。不读种子、不读年寿。
+    /// Mode 0: a constant. Neither the seed nor the age is read.
     Constant(f32),
 }
 
-/// 拖拽段的尺寸输入。引擎按容器标志选「出生/当前」尺寸数组（何时
-/// 写、选哪组是消费侧的职责）；三分量与此处是否三维声明。
+/// The size input of the drag section. The engine picks the start or the
+/// current size array by a container flag; when it is written and which array
+/// is chosen is the caller's responsibility. The three components, and whether
+/// the particle arrays declare a 3D size.
 #[derive(Clone, Copy, Debug)]
 pub struct DragSize {
     pub components: [f32; 3],
     pub size3d: bool,
 }
 
-// ---- maxps 语义 ----
+// ---- `maxps` semantics ----
 
-/// maxps：任一非数取**源**操作数（Rust 的 `f32::max` 会吞掉非数，
-/// 与引擎不同）。
+/// The engine's `maxps`: a NaN operand gives the source operand back. Rust's
+/// `f32::max` returns the other operand instead, so it cannot stand in.
 fn maxps(dst: f32, src: f32) -> f32 {
     if dst.is_nan() || src.is_nan() {
         src
@@ -148,27 +166,31 @@ fn maxps(dst: f32, src: f32) -> f32 {
     }
 }
 
-/// 模块本体。inWorldSpace 在平面向量路径里不被读取（转储证实），
-/// 不设字段。
+/// The module. `inWorldSpace` is not read on the planar-vector path, so it has
+/// no field here.
 #[derive(Clone, Debug)]
 pub struct LimitVelocity {
-    /// dampen <= 0（含非数）时钳制段整段跳过。
+    /// At or below 0 (NaN included) the clamp section is skipped whole.
     pub dampen: f32,
     pub magnitude: MagnitudeLaw,
-    /// None = 拖拽段跳过（drag == 0 的规范形态）。
+    /// `None` skips the drag section; `drag == 0` is the canonical form (0).
     pub drag: Option<DragLaw>,
-    /// 拖拽 × 粒子尺寸（半尺寸平方 × π）。构造时未知而拖拽非零已拒；
-    /// 到达这里的 false 要么是数据真值、要么拖拽为零（惰性）。
+    /// Drag times the particle size (half the size squared, times pi). An
+    /// unknown value with a nonzero drag is refused at construction; a `false`
+    /// here is either the data's own value or sits beside a zero drag, where it
+    /// is inert.
     pub multiply_drag_by_size: bool,
-    /// 拖拽 × 速度平方。同上。
+    /// Drag times the squared speed, as above.
     pub multiply_drag_by_velocity: bool,
 }
 
 impl LimitVelocity {
-    /// 从文档语义构造。separateAxis 为真（轴ewise 族未实现，语料 0）
-    /// 与拖拽非常数模式响亮拒绝。乘法标志提取面暂不导出（None =
-    /// 未知）：拖拽为零时标志惰性（不进拖拽段），缺席可容；**拖拽
-    /// 非零而标志未知**时拒绝——缺一个会左右结果的键不是当 false。
+    /// Builds from the documented fields. `separate_axis` (the per-axis family
+    /// is not implemented; 0 corpus cases) and a drag that is not constant are
+    /// refused by name. The extraction side does not export the two multiplier
+    /// flags yet (`None` means unknown): with a zero drag they are inert and may
+    /// be absent, but a nonzero drag with an unknown flag is refused, because a
+    /// key that can change the result is not defaulted to false.
     pub fn from_parts(
         separate_axis: bool,
         magnitude: &MinMaxCurve,
@@ -178,23 +200,24 @@ impl LimitVelocity {
         multiply_drag_by_velocity: Option<bool>,
     ) -> Result<Self, String> {
         if separate_axis {
-            return Err("limitVelocity: separateAxis 轴ewise 族未按原生路径实现，拒绝".to_string());
+            return Err("limitVelocity: the separateAxis per-axis family is unsupported".to_string());
         }
         let drag = match drag {
             None => None,
             Some(MinMaxCurve::Constant(v)) => Some(DragLaw::Constant(*v)),
             Some(_) => {
                 return Err(
-                    "limitVelocity.drag: 非常数模式未按原生路径实现（语料全为常数），拒绝"
+                    "limitVelocity.drag: a non-constant drag is unsupported (the corpus is constant throughout)"
                         .to_string(),
                 )
             }
         };
-        // 拖拽段会不会跑：门是 `drag != 0`（非数照跑）。
+        // Whether the drag section runs: the gate is `drag != 0`, and a NaN
+        // drag passes it.
         let drag_runs = matches!(drag, Some(DragLaw::Constant(v)) if v != 0.0);
         if drag_runs && (multiply_drag_by_size.is_none() || multiply_drag_by_velocity.is_none()) {
             return Err(
-                "limitVelocity: 拖拽非零而乘法标志未导出（尺寸×/速度×）——缺会左右结果的键，拒绝"
+                "limitVelocity: a drag multiplier flag (size, speed squared) is missing with a nonzero drag; a key that changes the result is not defaulted"
                     .to_string(),
             );
         }
@@ -207,11 +230,12 @@ impl LimitVelocity {
         })
     }
 
-    /// 一步推进：钳制段 → 拖拽段（同帧同序）。`velocity` 是状态速度
-    /// （就地改写）；`animated_velocity` 是同帧早于本模块算好的叠加
-    /// 速度（两段都以「状态 + 叠加」的合速度为准，写回只改状态速度）。
-    /// 拖拽段从**钳制后**的状态速度重算合速度（转储证实）。
-    /// 非有限 dt 拒绝。
+    /// One step: the clamp section, then the drag section, in that order within
+    /// the frame. `velocity` is the state velocity, rewritten in place;
+    /// `animated_velocity` is the added velocity computed earlier in the frame
+    /// (both sections use the combined velocity, and only the state velocity is
+    /// written back). The drag section recomputes the combined velocity from the
+    /// post-clamp state velocity. A non-finite `dt` is refused.
     pub fn step(
         &self,
         velocity: &mut [f32; 3],
@@ -222,7 +246,7 @@ impl LimitVelocity {
         drag_size: DragSize,
     ) -> Result<(), &'static str> {
         if !dt.is_finite() {
-            return Err("limitVelocity: dt 非有限");
+            return Err("limitVelocity: non-finite dt");
         }
         if self.dampen > 0.0 {
             let k = clamp_k(self.dampen, dt);
@@ -246,9 +270,9 @@ impl LimitVelocity {
     }
 }
 
-/// 钳制段主体（逐指令）：mag2 = x² + (y²+z²)；(0 < mag) 取**开方
-/// 后、取绝对值前**的值；单位向量门 `1e-30 < mag2`；newmag 再乘
-/// `(0 < mag)` 掩码。
+/// The clamp section body: `mag2 = x² + (y²+z²)`; the `(0 < mag)` mask tests
+/// the square root before its absolute value is taken; the unit vector gate is
+/// `1e-30 < mag2`; `newmag` is then multiplied by the `(0 < mag)` mask.
 fn clamp_body(velocity: &mut [f32; 3], anim: [f32; 3], limit: f32, k: f32) {
     let total = [
         velocity[0] + anim[0],
@@ -264,10 +288,10 @@ fn clamp_body(velocity: &mut [f32; 3], anim: [f32; 3], limit: f32, k: f32) {
     } else {
         mag
     };
-    // The unit vector as the arm64 build computes it: tot * FRSQRTE with two
-    // FRSQRTS refinements of mag2 (the estimate where mag2 is zero), masked
-    // to +0 unless 1e-30 < mag2; newmag is multiplied by the (0 < mag) mask
-    // as 1.0 or 0.0, then each axis is unit * newmag - animated.
+    // The unit vector is the combined velocity times a reciprocal square root
+    // estimate refined twice on mag2 (the estimate itself where mag2 is
+    // zero), masked to +0 unless 1e-30 < mag2; newmag is multiplied by the
+    // (0 < mag) mask as 1.0 or 0.0, then each axis is unit * newmag - animated.
     let r = a::rsqrt2(mag2);
     let keep = f32::from_bits(0x0da2_4260) < mag2;
     let unit = total.map(|v| if keep { v * r } else { 0.0 });
@@ -277,12 +301,15 @@ fn clamp_body(velocity: &mut [f32; 3], anim: [f32; 3], limit: f32, k: f32) {
     velocity[2] = unit[2] * newmag - anim[2];
 }
 
-/// 拖拽段主体（逐指令）：尺寸 = 三声明取三分量最大否则取 x；
-/// 尺寸因子 = (半·π)·半；速度因子 = mag2；factor 乘链
-/// ((尺寸因子·drag)·速度因子)·dt；单位向量门 `1e-15 < mag`（对
-/// mag，不是 mag2），**精确除法**（与钳制段不同，转储证实 divps）；
-/// newmag = mag − factor 下钳 0（三元式，非 `f32::max`——maxps 的
-/// 非数路返回源，三元式逐位一致，`f32::max` 不一致）。
+/// The drag section body (2 of the module's sections, this one second): the
+/// size is the largest of the three components when the arrays declare a 3D
+/// size, otherwise x; the size factor is
+/// `(half * pi) * half`; the speed factor is `mag2`; the factors multiply as
+/// `((size factor * drag) * speed factor) * dt`; the unit vector divides
+/// exactly (not with rsqrt as the clamp section does) behind the gate
+/// `1e-15 < mag`, on `mag` rather than `mag2`; `newmag = mag - factor` floored
+/// at 0 through a comparison rather than `f32::max`, because `maxps` returns
+/// the source operand on a NaN and the comparison does the same.
 fn drag_body(
     velocity: &mut [f32; 3],
     anim: [f32; 3],
@@ -325,15 +352,17 @@ fn drag_body(
     velocity[2] = unit[2] * newmag - anim[2];
 }
 
-// ---- agePercent 推进（引擎推进器内联段，与本模块同帧） ----
+// ---- agePercent advance (inline in the engine's advancer, same frame) ----
 
-/// agePercent（0..100）一帧推进：
-/// `new = old + (1/寿限)·(dt·100)`；模式 2 回绕（门
-/// `fade_out <= new`，fade = loopRange·100，回绕量 = fade_out−fade_in；
-/// 环形缓冲的活动道掩码 `activeCount > laneIndex` 是缓冲实现细节，
-/// 不在此建模）；然后 `min(new, cap)`（模式 1 的 cap 略低）；
-/// `100.0 < old` 时保持 old（过百不回落）。寿限倒数在引擎里是出生时
-/// 写好的数组，写入点未读——此处按精确除法现算（具名）。
+/// One frame of agePercent (0..100):
+/// `new = old + (1 / start_lifetime) * (dt * 100)`; in mode 2 (Loop) a value
+/// at or past `fade_out` wraps by `fade_out - fade_in`, where
+/// `fade = loopRange * 100` (the active-lane mask `activeCount > laneIndex`
+/// belongs to the buffer's implementation and is not modelled here); then
+/// `min(new, cap)`, with a lower cap in mode 1 (1 ulp below the other's). An
+/// `old` above `100.0` is kept, so the age never falls back. The engine stores
+/// the reciprocal
+/// lifetime at birth; this function divides exactly instead (a named choice).
 pub fn advance_age_percent(
     age_percent: &mut f32,
     start_lifetime: f32,

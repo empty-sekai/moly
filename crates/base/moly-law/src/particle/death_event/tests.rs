@@ -171,12 +171,12 @@ fn compare(row: &Value, recorded: &RecordedDeath) -> Vec<&'static str> {
     bad
 }
 
-/// Every native death record, from RecordParticleDeath over every index and
-/// KillParticle with recording on, is reproduced word for word: the state
+/// Every reference death record, from RecordParticleDeath over every index
+/// and KillParticle with recording on, is reproduced bit for bit: the state
 /// before and after, whether commands are issued, and every command byte
 /// (the inherited block of the size edges included). Records the gate
-/// refuses are counted. Every one-rule arm differs from native on at least
-/// one row.
+/// refuses are counted. Every one-rule arm differs from the reference on at
+/// least one row.
 #[test]
 #[ignore = "needs MOLY_DEATH_EVENT_ROWS"]
 fn death_records_match_native_rows() {
@@ -225,7 +225,7 @@ fn death_records_match_native_rows() {
 }
 
 /// Finite and non-finite inputs never panic; the gate refuses what it does
-/// not transcribe instead.
+/// not support instead.
 #[test]
 fn record_death_never_panics() {
     let specials = [0.0, -0.0, 1.0, -1.0, f32::MAX, f32::MIN, f32::MIN_POSITIVE, f32::INFINITY,

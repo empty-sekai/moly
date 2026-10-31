@@ -6,7 +6,7 @@
 //! mesh-renderer shape, not Custom simulation space). The modes differ only in
 //! the local-to-world matrix, the emitter scale and the shape scale; the
 //! rotation, the inverse and the local 3x3 are the same tail. Custom space and
-//! mesh-renderer shapes take other branches and are not transcribed.
+//! mesh-renderer shapes take other branches and are not supported.
 //!
 //! Every step is one f32 operation in the engine's association; no fused
 //! multiply-add, no f64 (except the determinant threshold test, which the
@@ -37,7 +37,7 @@ pub struct OwnerMatrices {
     /// engine then keeps using (its caller ignores the flag).
     pub world_to_local: [f32; 16],
     pub invert_ok: bool,
-    /// Normalized global rotation (x, y, z, w).
+    /// Normalized global rotation (x, y, z, w): the transform's `_rotation`.
     pub rotation: [f32; 4],
     /// Column-major 3x3 of the node's own normalized rotation.
     pub local_rotation: [f32; 9],
@@ -48,7 +48,7 @@ pub struct OwnerMatrices {
     /// The scale the Shape module places births with: the lossy global scale
     /// under Shape scaling, (1, 1, 1) under Local and Hierarchy scaling (the
     /// default transform; a mesh-renderer shape's transform is not
-    /// transcribed).
+    /// supported).
     pub shape_scale: [f32; 3],
 }
 

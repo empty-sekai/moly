@@ -1,6 +1,12 @@
 //! Prepared particle curve evaluation, independent of module-specific random
 //! streams, spatial transforms and integration state.
 //!
+//! Input: a MinMaxCurve lane, the curve time and the module's random factor.
+//! Output: one f32 per evaluation. A constant and a two-constant lane are
+//! exact; a curve lane is evaluated in the engine's form for its kind (the
+//! prepared polynomial, the engine evaluator, or the weighted Bezier branch).
+//! A lane whose form cannot be prepared is refused when the sampler is built.
+//!
 //! Every module of the particle law and of the weather particle runtime that
 //! evaluates a MinMaxCurve follows the engine's MinMaxCurve dispatch through
 //! [`CurveSampler`] (limit velocity admits only the polynomial form, as a
@@ -23,26 +29,25 @@
 use crate::particle::device_libm;
 use crate::particle::value::{step_value, Curve, CurveKey, MinMaxCurve};
 
-/// agePercent（0..100）到曲线时刻的归一化：t = max(x·0.01, 0)。
-/// 非数输入落 0（SSE `maxps` 的非数路返回源操作数 0）。The JP ARM module
-/// bodies read so far use `fmax`, which keeps a NaN age NaN
-/// ([`curve_time_fmax`]); the other over-lifetime modules use this form, and
-/// their NaN case was not read.
+/// Normalizes agePercent (0..100) to a curve time: `t = max(x * 0.01, 0)`,
+/// where a NaN age becomes 0. The module bodies read so far use `fmax`,
+/// which keeps a NaN age NaN ([`curve_time_fmax`]); the other over-lifetime
+/// modules use this form, and their NaN case is not established.
 pub fn normalized_age(age_percent: f32) -> f32 {
     (age_percent * f32::from_bits(0x3c23_d70a)).max(0.0)
 }
 
-/// The particle job time `fmax(agePercent * 0.01, +0)` as the current ARM
-/// module bodies compute it: a NaN age stays NaN and a negative zero becomes
-/// positive zero. [`normalized_age`] turns a NaN into zero instead; this form
-/// is for the modules whose body was read with `fmax` (the Noise job and the
-/// ClampVelocityModule magnitude loop).
+/// The particle job time `fmax(agePercent * 0.01, +0)` as the current
+/// module bodies compute it: a NaN age stays NaN and a negative zero
+/// becomes positive zero. [`normalized_age`] turns a NaN into zero instead;
+/// this form is for the modules whose body was read with `fmax` (the Noise
+/// job and the ClampVelocityModule magnitude loop).
 pub fn curve_time_fmax(age_percent: f32) -> f32 {
     let t = age_percent * f32::from_bits(0x3c23_d70a);
     if t.is_nan() || t > 0.0 { t } else { 0.0 }
 }
 
-/// ARM `fmax` with default NaN disabled: a NaN operand propagates quieted,
+/// `fmax` with default NaN disabled: a NaN operand propagates quieted,
 /// and the maximum of -0 and +0 is +0.
 pub(crate) fn arm_fmax(a: f32, b: f32) -> f32 {
     if a.is_nan() {
@@ -57,7 +62,7 @@ pub(crate) fn arm_fmax(a: f32, b: f32) -> f32 {
     if a > b { a } else { b }
 }
 
-/// ARM `fmin` with default NaN disabled: a NaN operand propagates quieted,
+/// `fmin` with default NaN disabled: a NaN operand propagates quieted,
 /// and the minimum of -0 and +0 is -0.
 pub(crate) fn arm_fmin(a: f32, b: f32) -> f32 {
     if a.is_nan() {
@@ -81,13 +86,15 @@ pub(crate) fn arm_fmin(a: f32, b: f32) -> f32 {
 /// differently. `Evaluate` calls `InterpolateKeyframe` only for weighted
 /// segments (which [`EngineCurve`] evaluates through [`interpolate_keyframe`]),
 /// under the ping-pong wrap and for wrap values other than clamp, repeat and
-/// ping-pong (both refused by [`CurveSampler`]).
+/// ping-pong (both refused by [`CurveSampler`], 0 keys give 0).
 ///
-/// 次序逐指令对齐：h01·v1 + ((h00·v0 + h10·m0) + h11·m1)，
-/// m0 = 出切·d、m1 = d·入切、d == 0（及非数 d——比较 Z 置位同走
-/// 退化路 s=m0=m1=0，恰得 v0）恰好取 v0。段查找左闭右开：最后一
-/// 个 time <= t 的键。
+/// The association is `h01·v1 + ((h00·v0 + h10·m0) + h11·m1)` with
+/// `m0 = out tangent * d` and `m1 = d * in tangent`, each rounding on its
+/// own (0.0). A segment whose key times are equal, or `d` `(0.0)`, returns the left
+/// key's value, which is what the degenerate branch gives. The segment lookup
+/// is `[time, next time)`: the last key whose time is at most `t` starts it.
 pub fn eval_curve(keys: &[CurveKey], t: f32) -> f32 {
+    // No key gives 0, and one key gives its value (0 keys, 0 roundings).
     match keys.len() {
         0 => return 0.0,
         1 => return keys[0].value,
@@ -106,9 +113,8 @@ pub fn eval_curve(keys: &[CurveKey], t: f32) -> f32 {
     }
     let (k0, k1) = (keys[left], keys[left + 1]);
     let d = k1.time - k0.time;
-    // 原式 `fcmp d,#0.0; b.eq`：非数比较 Z 置位、同样跳退化路
-    // （s=m0=m1=0，按基底算出恰为 v0）——位级等价形是
-    // !(d < 0.0 || d > 0.0)。
+    // A NaN `d` (its comparison with 0.0 is unordered) takes the degenerate
+    // branch, as a zero `d` does.
     if !(d < 0.0 || d > 0.0) {
         return k0.value;
     }
@@ -210,8 +216,8 @@ pub fn bezier_interpolate(t: f32, l: CurveKey, r: CurveKey) -> f32 {
 /// closed form, with no iteration.
 ///
 /// With `a = ow*3`, `c = (a - omiw*3) + 1`, `b = omiw*3 + ow*-6` and the tolerance
-/// 0.001 (`0x3a83126f`); a comparison with NaN takes the branch the arm64 flags give
-/// it:
+/// 0.001 (`0x3a83126f`); a comparison with NaN is unordered, so it takes the
+/// branch a comparison that is not true takes:
 /// - `|c|` not above the tolerance: the quadratic `b u^2 + a u - x`; with `|b|` not
 ///   above it either, the linear `x / a`, or 0 where `|a|` is not above it (the
 ///   linear root is not checked against [0, 1]). The quadratic roots
@@ -374,10 +380,11 @@ fn cubic(c: [f32; 4], dt: f32) -> f32 {
 /// builds it and `EvaluateThreaded` evaluates it.
 ///
 /// Coefficients are stored highest power first, `[c0, c1, c2, c3]` in the
-/// `CalculateCacheData` order, each already multiplied by the curve
-/// multiplier; the evaluation applies no multiplier. Segment `a` is evaluated
-/// at t itself (the first key may lie up to 1e-4 away from zero), segment `b`
-/// at `t - switch`, and `b` is taken where `min(t, 0.99999) >= switch`.
+/// `CalculateCacheData` order (the engine's `_coefficients` field order), each
+/// already multiplied by the curve multiplier; the evaluation applies no
+/// multiplier. Segment `a` is evaluated at t itself (the first key may lie up
+/// to 1e-4 away from zero), segment `b` at `t - switch`, and `b` is taken
+/// where `min(t, 0.99999) >= switch`.
 #[derive(Clone, Copy, Debug)]
 pub struct BakedCurve {
     a: [f32; 4],
@@ -443,7 +450,7 @@ mod native_cache_tests {
         assert_eq!(sample_count, expected_samples);
     }
 
-    // Source three-key input, current native BuildCurves cache and native SIMD
+    // Source three-key input, the reference BuildCurves cache and the reference
     // samples: both endpoints, both segments and the split's neighboring f32s.
     #[test]
     #[ignore = "MOLY_SNOW_CURVE_CACHE_NATIVE identifies the current JP native receipt"]
@@ -561,7 +568,7 @@ impl CurveCache {
 /// `AnimationCurveTpl::Evaluate` computes it from an empty cache.
 ///
 /// One key returns its value and no key returns 0, before any other work. With
-/// two or more keys, in native branch order:
+/// two or more keys, in the source branch order:
 /// - from the last key on (`last <= t`), the post wrap: clamp evaluates the
 ///   cubic `(0, 0, 0, last value)` at `t - last`; repeat wraps t into
 ///   `[first, last]`, clamps it there, and evaluates the segment found for the
@@ -1024,7 +1031,7 @@ impl EngineCurve {
 /// One prepared scalar curve, shared across over-lifetime modules.
 #[derive(Clone, Debug)]
 pub enum CurveSampler {
-    /// 模式 0：常数。
+    /// Mode 0: a constant.
     Constant(f32),
     /// Mode 3: `min + random * (max - min)`, the random factor unclamped.
     TwoConstants { min: f32, max: f32 },
@@ -1072,7 +1079,7 @@ impl CurveSampler {
     }
 
     /// `time` None skips the cache question: the evaluation as from an empty
-    /// cache, for the replay of fresh native rows.
+    /// cache, for the replay of fresh reference rows.
     pub(crate) fn build(curve: &MinMaxCurve, time: Option<CurveTime>, allow_optimized: bool)
         -> Result<Self, &'static str> {
         let engine = |lane: &Curve| match time {

@@ -30,7 +30,7 @@ fn axis_group(curves: [&MinMaxCurve; 3]) -> Result<[CurveSampler; 3], &'static s
 
 impl VelocityOverLifetime {
     /// Every curve follows the engine's dispatch on the particle's normalized
-    /// age; a lane outside the transcribed evaluator is refused.
+    /// age; a lane outside the supported evaluator is refused.
     pub fn from_params(params: &VelocityOverLifetimeParams) -> Result<Self, &'static str> {
         Ok(Self {
             in_world_space: params.in_world_space,

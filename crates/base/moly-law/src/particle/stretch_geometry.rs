@@ -1,8 +1,7 @@
 //! Stretch render mode quads: the renderer's stretched billboard with freeform
-//! stretching off, as the engine's Stretch geometry body builds it and its
-//! vertex writer packs it (`引擎原生逐指令` for the composition; the operand
-//! order is the body's where it was read, and the receipt compares at a stated
-//! tolerance, not bit for bit).
+//! stretching off. Tier: `bit-exact` for the composition; the operand order
+//! is fixed here, and the receipt compares within a stated tolerance, not bit
+//! for bit.
 //!
 //! Everything is in the engine's world basis. Per particle, with `h` the
 //! camera-space position and `dv` the camera-space velocity (persistent plus
@@ -29,7 +28,7 @@
 //! and `n - d bend`, where `bend` is `cosf(normalDirection * 90 * 0.017453292)`
 //! (the Stretch mode's factor is one).
 //!
-//! Not transcribed and refused by the caller: freeform stretching, a non-zero
+//! Not supported and refused by the caller: freeform stretching, a non-zero
 //! pivot, and a velocity speed modifier other than the constant one (the
 //! engine multiplies the drawn velocity by it).
 use super::armf as a;

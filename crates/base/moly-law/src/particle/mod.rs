@@ -1,30 +1,36 @@
-//! 粒子仿真律：Unity `ParticleSystem` 的对应语义，纯函数、dt 显式入参。
+//! The particle laws: Unity `ParticleSystem` semantics as pure functions with
+//! `dt` passed explicitly.
 //!
-//! 锚是**版本匹配的 Unity 引擎真源**（C# 参考源 + 行为实测），不是游戏反编译：
-//! 站点粒子跑在引擎的 ParticleSystem 上，游戏侧只有参数数据。
-//! 引用真源时只写类名/成员名与它说了什么，不写路径——坐标活在别处。
+//! Site particles run on the engine's ParticleSystem, and the game side carries
+//! only the parameters. Where a law is tied to an engine class or member, the
+//! comment names that class or member and states what it does.
 //!
-//! # 出处档位（每条律的注释里标其一）
+//! # Evidence tiers (each law's comments mark one)
 //!
-//! | 档 | 含义 | 例 |
+//! | tier | meaning | example |
 //! |---|---|---|
-//! | `C# 可读` | UnityCsReference 里读得出逐式 | `MinMaxCurve.Evaluate` 的四模式 switch |
-//! | `C# 可读（存在性）` | 只能证明字段/成员存在，读不出行为 | `PlaybackState.m_ToEmitAccumulator` |
-//! | `行为口径` | 落在 extern 墙后（`Simulate`/`Evaluate` 全族原生） | 累加器取整规则、积分次序、死亡比较符 |
-//! | `引擎原生逐指令` | extern 墙后的原生体已逐指令转录（常量按位钉死） | 角速度/限速族的采样与推进 |
+//! | `C# readable` | the formula is readable in UnityCsReference | the four-mode switch of `MinMaxCurve.Evaluate` |
+//! | `C# readable (existence)` | only the presence of a field or member is established | `PlaybackState.m_ToEmitAccumulator` |
+//! | `behavioural spec` | behind the extern wall (`Simulate`/`Evaluate` are all native) | the accumulator's rounding, the integration order, the death comparison |
+//! | `bit-exact` | results, the order of operations and the constants match the reference bit for bit | the sampling and advance of the angular-velocity and limit-velocity families |
 //!
-//! `行为口径`的条目按可复算的行为规格实现，并在注释里给 Editor 测量方案；
-//! 未实测前它们是**带判据的假设**，不是已核事实。`引擎原生逐指令`的
-//! 条目以逐值比对对齐（操作次序与常量位型逐条对齐原生体；库函数与
-//! CPU 相关指令的逐位一致按构造不可达处，具名列出）。
+//! A `behavioural spec` entry is implemented from a behaviour specification
+//! that can be recomputed, and its comments give an Editor measurement plan;
+//! until that measurement runs it is a hypothesis with a criterion, not an
+//! established fact. A `bit-exact` entry is aligned by value comparison
+//! (operation order and constant bit patterns compared one by one; the places
+//! where a bit-exact match is out of reach by construction, such as library
+//! functions and CPU-dependent operations, are named).
 //!
-//! # 形状纪律
+//! # Shape
 //!
-//! 与 `path` 族同款：无引擎类型、无全局状态；随机一律显式 rand 入参
-//! （同一个 rand 被几条律读是调用方的决定，律不自己抽签——一次取值被
-//! 读两次不等于取两次值）。跨帧状态由调用方携带。
-//! 「纯杂凑因子」不算抽签：角速度/限速族的因子是逐粒子种子的确定
-//! 函数，每帧 0 次流抽取。
+//! As in the `path` family: no engine types and no global state; every random
+//! draw is an explicit argument (which laws read the same `rand` is the
+//! caller's decision; the laws draw nothing themselves, and one value read
+//! twice is not two draws). Cross-frame state is carried by the caller.
+//! A "pure hash factor" is not a draw: the angular-velocity and
+//! limit-velocity factors are deterministic functions of the per-particle
+//! seed and take 0 draws from a stream per frame.
 
 mod json;
 
@@ -33,18 +39,18 @@ pub mod shape;
 pub mod shape_birth;
 pub mod shape_mesh;
 pub mod emit;
-pub mod step;
-pub mod buffer;
+pub(crate) mod step;
+pub(crate) mod buffer;
 pub mod schema;
-pub mod rotation;
+pub(crate) mod rotation;
 pub mod rotation_by_speed;
-pub mod mesh_selection;
-pub mod limit_velocity;
+pub(crate) mod mesh_selection;
+pub(crate) mod limit_velocity;
 pub mod main_duration;
 pub mod velocity;
 pub mod random;
 pub mod curve;
-pub mod device_libm;
+pub(crate) mod device_libm;
 pub mod size;
 pub mod gradient;
 pub mod color;
@@ -86,6 +92,8 @@ mod corpus;
 #[cfg(test)]
 mod ring_lifecycle_samples;
 
+// The modules below are reachable from outside only through the re-exports in
+// this list.
 pub use buffer::{birth_capacity, compact, compact_with_side, compact_with_sides, compact_with_sides_indexed,
     finish_births, finish_births_with, RingBufferMode};
 pub use emit::{accumulate_rate, burst_check, Burst, BurstOutcome, EmissionState};

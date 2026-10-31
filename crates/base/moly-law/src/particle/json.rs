@@ -1,11 +1,16 @@
-//! 档案用的最小 JSON 读取器（`effects.json` 族）。
+//! A minimal JSON reader for the effect files (`effects.json`).
 //!
-//! 与 `weather::json` 是两份同构实现：那边是模块私有、且其形状决策
-//! （插入序保留）绑定在天气档案的诊断口径上，不为此处改成 pub——
-//! 两边各自演化比一条跨域的公共依赖便宜，重复在此具名。
-//! 行为逐行同源：对象保留插入序、转义处理、尾随字节放行。
+//! Input: bytes. Output: a [`Value`] tree in which objects keep their
+//! insertion order, so parameters come in file order and a diagnostic such
+//! as "the first missing parameter" is deterministic. Escapes are decoded;
+//! bytes after the top-level value are ignored.
+//!
+//! `weather::json` holds a second reader of the same shape. It is private to
+//! the weather module, whose diagnostics depend on that module's own rules,
+//! so it is not made public from here: the two readers are maintained
+//! separately, and the duplication is deliberate.
 
-/// 一个已解析的 JSON 值。
+/// One parsed JSON value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Null,
@@ -13,12 +18,13 @@ pub enum Value {
     Number(f64),
     Str(String),
     Array(Vec<Value>),
-    /// 插入序保留，见模块 doc。
+    /// Insertion order is kept; see the module documentation.
     Object(Vec<(String, Value)>),
 }
 
 impl Value {
-    /// 对象里 `key` 对应的值，不存在或不是对象则 `None`。
+    /// The value at `key` in an object; `None` when the key is absent or the
+    /// value is not an object.
     pub fn get(&self, key: &str) -> Option<&Value> {
         match self {
             Value::Object(entries) => entries.iter().find(|(k, _)| k == key).map(|(_, v)| v),
@@ -62,15 +68,16 @@ impl Value {
     }
 }
 
-/// 从 `bytes` 解析一个 JSON 值，忽略其后的所有字节。
+/// Parses one JSON value from `bytes` and ignores every byte after it.
 ///
-/// 尾随字节不算错：档案恒持一个顶层对象，为行尾换行拒绝良构输入没有收益。
+/// Trailing bytes are not an error: the files hold one top-level object, and
+/// refusing well-formed input over a trailing newline buys nothing.
 pub fn parse(bytes: &[u8]) -> Result<Value, String> {
     let mut p = Parser { bytes, pos: 0 };
     p.skip_ws();
     p.parse_value()
 }
-
+/// A byte cursor over the input, at position 0 of the first byte.
 struct Parser<'a> {
     bytes: &'a [u8],
     pos: usize,
@@ -81,6 +88,7 @@ impl<'a> Parser<'a> {
         self.bytes.get(self.pos).copied()
     }
 
+    /// Advances one byte and returns it: 0 when the input has ended.
     fn bump(&mut self) -> Option<u8> {
         let b = self.peek();
         if b.is_some() {
@@ -193,9 +201,9 @@ impl<'a> Parser<'a> {
         Ok(Value::Array(items))
     }
 
-    /// 读一个含转义的字符串。结构字节 `"` (0x22) 与 `\` (0x5C) 都在
-    /// 0x80 以下，不可能作为 UTF-8 续字节出现在多字节字符中间——
-    /// 这里的字节级扫描因此不会切进字符内部。
+    /// Reads a string with escapes: the quote is 0x22, the backslash 0x5C, and
+    /// every structural byte is below 0x80, so a byte scan never cuts into a
+    /// character (the highest structural value is 0x7F, below 0x80; not 8 bits).
     fn parse_string(&mut self) -> Result<String, String> {
         self.expect(b'"')?;
         let mut out = Vec::new();
@@ -306,8 +314,9 @@ mod tests {
 
     #[test]
     fn parses_nested_structure_with_escapes() {
-        // 原始字节串：`\t` 与 `é`（UTF-8 多字节）混在结构里，练到
-        // 本读取器自己的字节级扫描与 `é` 转义解码两路。
+        // A raw byte string: `\t` and `é` (multibyte in UTF-8) mixed into the
+        // structure exercise this reader's byte-level scan and the `é`
+        // escape decode, which gives one character (not 0 of them) from 2 bytes.
         let src: &[u8] =
             b"{\"a\": [1, 2.5, -3, true, false, null, \"x\tyz\xc3\xa9\\u00e9\"], \"b\": {\"c\": \"d\"}}";
         let v = parse(src).expect("valid JSON must parse");
@@ -335,7 +344,8 @@ mod tests {
 
     #[test]
     fn ignores_trailing_bytes() {
-        // 良构文件以行尾换行收束：尾随空白不是错。
+        // A well-formed file ends with a line break: trailing whitespace is
+        // not an error.
         assert_eq!(parse(b"{}\n").unwrap(), Value::Object(Vec::new()));
     }
 }

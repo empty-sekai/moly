@@ -1,6 +1,9 @@
-//! Current JP InitialModule::Start, one dispatched four-lane group.
+//! Current JP InitialModule::Start, one dispatched four-lane group, in the
+//! current JP client's engine library.
 //!
-//! Transcribed from the current JP client's engine library. The caller owns
+//! Input: the start parameters, the initial context and the group's draw
+//! stream; output: lifetime, size, rotation, colour and gravity per lane, with
+//! the lanes' draws taken from that stream. The caller owns
 //! capacity, aligned birth storage and packing. Every nonempty group consumes
 //! all four random lanes, including discarded tail lanes. This law excludes
 //! Shape, StartVelocity, module updates and the game seed/lifecycle owner.
@@ -11,9 +14,9 @@
 //! them), all five start-colour modes over Blend/Fixed gradients, and an
 //! autonomous initial context. Inherited initial multipliers/offsets, the perceptual
 //! gradient kernel and generic curve preparation need their own evidence.
-//! Nonzero randomize-rotation-direction remains unqualified. The native entry
-//! uses the included ARM FRECPE/FRECPS law; host division is not a bit-equivalent
-//! default. An explicit callback variant remains available for diagnostics.
+//! Nonzero randomize-rotation-direction remains unqualified. The entry uses the
+//! included reciprocal-estimate law (`armf`): host division is not a bit-equivalent
+//! substitute. An explicit callback variant remains available for diagnostics.
 
 use super::color::initial_rgba8x4;
 use super::curve::CurveSampler;
@@ -131,7 +134,7 @@ impl InitialLaw {
         })
     }
 
-    /// Use the current ARM reciprocal law directly. Explicit callback access
+    /// Uses the included reciprocal-estimate law directly. Explicit callback
     /// below is for diagnostics or a separately qualified numeric backend.
     pub fn start_group_native(
         &self,
@@ -293,7 +296,7 @@ fn validate_color(color: &MinMaxGradient) -> Result<(), Refused> {
 }
 
 /// The native key table holds at most eight keys per channel group and one
-/// 16-bit time code per key. Both kernels are transcribed for any key order
+/// 16-bit time code per key. Both kernels are covered for any key order
 /// (their shared four-lane key search included, `Gradient::evaluate4`) and
 /// for a single key, whose group the kernels skip, leaving the channels at
 /// 1.0. A group without keys was not executed and stays refused. The
@@ -318,11 +321,11 @@ fn prepare_axis(curve: Option<&MinMaxCurve>, field: InitialField) -> Result<Curv
 }
 
 /// InitialModule::Start evaluates each start curve through the engine's
-/// MinMaxCurve evaluation (the one [`CurveSampler`] transcribes) at the
+/// MinMaxCurve evaluation (the one [`CurveSampler`] implements) at the
 /// broadcast curve time with the lane's draw, in every mode: a curve-mode
 /// scalar is the multiplier the load clamped (see the schema's start block).
 /// A non-finite scalar is refused; a curve the sampler cannot build (keys,
-/// wraps or weights it does not transcribe) is unsupported.
+/// wraps or weights it does not support) is unsupported.
 fn prepare(curve: &MinMaxCurve, field: InitialField) -> Result<CurveSampler, Refused> {
     let valid = match curve {
         MinMaxCurve::Constant(value) => {
@@ -352,33 +355,35 @@ fn unit(word: u32) -> f32 {
 }
 
 fn nonnegative(value: f32) -> f32 {
-    // ARM FMAX with +0 produces +0 for either signed zero.
+    // A maximum with +0 produces +0 for either signed zero.
     if value > 0.0 { value } else { 0.0 }
 }
 
-// Current JP client InitialModule::Start: the start-lifetime reciprocal, an ARM
-// FRECPE estimate refined by FRECPS steps.
-// Contract: FPCR round-to-nearest ties-to-even, FZ=0, input already clamped by
-// Initial's FMAX to at least f32::from_bits(0x3727c5ac), or positive infinity.
+// Current JP client InitialModule::Start: the start-lifetime reciprocal, an
+// 8-bit estimate refined by two stepped products.
+// Contract: round to nearest even, denormals kept (flush-to-zero disabled, 0),
+// input already clamped by Initial's maximum to at least f32::from_bits(0x3727c5ac),
+// or positive infinity.
 // NaN, negative infinity and values below the source clamp are refused.
 pub fn initial_reciprocal(lifetime: f32) -> Option<f32> {
     if lifetime.is_nan() || lifetime < f32::from_bits(0x3727_c5ac) {
         return None;
     }
     if lifetime == f32::INFINITY {
-        // ARM FRECPE(+inf)=+0; FRECPS(+inf,+0)=2, so both steps retain +0.
+        // The estimate of +inf is +0; each refinement's step is 2, so the
+        // product stays +0 (+inf times +0 is the only 2 case).
         return Some(0.0);
     }
     Some(reciprocal_chain(lifetime))
 }
 
-/// The FRECPE estimate and its two FRECPS refinements for a positive normal
+/// The reciprocal estimate and its two refinements for a positive normal
 /// input (the callers clamp their lifetime at a positive normal floor first).
 fn reciprocal_chain(lifetime: f32) -> f32 {
     let bits = lifetime.to_bits();
     let exponent = ((bits >> 23) & 0xff) as i32;
     let index = 256 + ((bits & 0x007f_ffff) >> 15);
-    // Exact 8-bit ARM reciprocal estimate. Integer divisions are floors.
+    // Exact 8-bit reciprocal estimate. Integer divisions are floors.
     let estimate = (((1_u32 << 19) / (2 * index + 1)) + 1) / 2;
     let result_exponent = 253 - exponent;
     let estimate_bits = if result_exponent > 0 {
@@ -389,20 +394,19 @@ fn reciprocal_chain(lifetime: f32) -> f32 {
         estimate << (14 + result_exponent) as u32
     };
     let r0 = f32::from_bits(estimate_bits);
-    // The product is evaluated exactly in binary64 (the source significands have
-    // at most 24 bits each); one cast rounds the complete subtraction like the
-    // source FRECPS operation. This is a fused-rounding transcription, not a
-    // host reciprocal or an f32 multiply/subtract sequence.
-    // Casting each exact product likewise preserves FMUL's f32 rounding and
-    // gradual underflow. No host reciprocal or target FMA is used.
+    // Each step is computed so that it has exactly one rounding: the product is
+    // exact in binary64 (both significands have at most 24 bits each) and one
+    // cast rounds the complete 2 - product. The product by the step is cast
+    // on its own, which keeps the f32 rounding and gradual underflow. No host
+    // reciprocal and no target-specific fused multiply-add is used.
     let c0 = (2.0_f64 - (lifetime as f64) * (r0 as f64)) as f32;
     let r1 = ((r0 as f64) * (c0 as f64)) as f32;
     let c1 = (2.0_f64 - (lifetime as f64) * (r1 as f64)) as f32;
     ((r1 as f64) * (c1 as f64)) as f32
 }
 
-/// InitialModule::GenerateProcedural's lifetime reciprocal: the same FRECPE
-/// estimate and two FRECPS refinements, of the lifetime clamped by `fmax` at
+/// InitialModule::GenerateProcedural's lifetime reciprocal: the same estimate
+/// and two refinements, of the lifetime clamped by `fmax` at
 /// 1e-6, so a positive normal value, +inf or NaN (a NaN lifetime passes the
 /// clamp). A zero input would select the bare estimate; the clamp excludes it.
 pub fn procedural_reciprocal(lifetime: f32) -> f32 {
@@ -415,7 +419,7 @@ pub fn procedural_reciprocal(lifetime: f32) -> f32 {
     reciprocal_chain(lifetime)
 }
 
-/// ARM FMAX: a NaN operand gives NaN, and +0 is above -0.
+/// The maximum operation: a NaN operand gives NaN, and +0 is above -0.
 fn arm_fmax(a: f32, b: f32) -> f32 {
     if a.is_nan() || b.is_nan() {
         return f32::NAN;
@@ -426,7 +430,7 @@ fn arm_fmax(a: f32, b: f32) -> f32 {
     if a > b { a } else { b }
 }
 
-/// ARM FMIN: a NaN operand gives NaN, and -0 is below +0.
+/// The minimum operation: a NaN operand gives NaN, and -0 is below +0.
 fn arm_fmin(a: f32, b: f32) -> f32 {
     if a.is_nan() || b.is_nan() {
         return f32::NAN;
@@ -1133,7 +1137,7 @@ mod tests {
             let label = format!("case {}", exact(at(case, "id")));
             if at(case, "set").as_str() == Some("control-inherited") {
                 // A non-white multiplier or a finite curve-time override is the
-                // inherited context, which the port does not transcribe. A
+                // inherited context, which this crate does not support. A
                 // refusal commits no word; an admission is compared with the
                 // native groups like any other case.
                 assert!(
@@ -1280,7 +1284,7 @@ mod tests {
     /// differences), extreme finite times, degenerate key layouts, corpus
     /// blocks with multi-group calls, single-key groups and key codes out of
     /// order (whose lanes share the kernels' key search); plus native rows
-    /// authoring what the port does not transcribe (a non-finite colour or
+    /// authoring what this crate does not support (a non-finite colour or
     /// time), whose outcome is reported: a refusal commits no word, and an
     /// admission is compared with the native groups.
     #[test]
@@ -1326,7 +1330,7 @@ mod tests {
             let decoder = if decoded.is_ok() { "decoded" } else { "decoder-refused" };
             let outcome = format!("{decoder} {outcome}");
             // The battery's V sets, its single-key and unordered-code rows
-            // lie inside the envelope the port transcribes, and so does an
+            // lie inside the envelope this crate supports, and so does an
             // O-nantime row whose four times are all finite: such a row must
             // decode and replay exactly, so a narrowed gate turns the battery
             // red.

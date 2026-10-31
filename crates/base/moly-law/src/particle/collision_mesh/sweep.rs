@@ -89,7 +89,7 @@ pub fn sweep_sphere(mesh: &CookedMesh, pose: &Pose, center: [f32; 3], radius: f3
     let found = match &mesh.midphase {
         Midphase::Bvh33(rtree) => {
             if !pose.identity_rotation() {
-                return Err(Refused("a rotated collider on the BVH33 midphase is not transcribed"));
+                return Err(Refused("a rotated collider on the BVH33 midphase is unsupported"));
             }
             bvh33_cast(mesh, rtree, pose, center, r, direction, distance, faces)?
         }
@@ -661,7 +661,7 @@ fn ray_leaf(mesh: &CookedMesh, triangles: impl Iterator<Item = u32>, origin: V3,
 }
 
 /// `RTree::traverseRay<1>` with the extents: fattened node bounds, the
-/// reciprocal direction by FRECPE, one FRECPS step and one unfused Newton
+/// reciprocal direction by an estimate, one fused refinement step and one unfused Newton
 /// step, children pushed in lane order and popped in reverse, the ray
 /// length shortened after each leaf.
 #[allow(clippy::too_many_arguments)]

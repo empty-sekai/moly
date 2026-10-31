@@ -22,7 +22,7 @@ const ACTIVE_ANGLE: f32 = f32::from_bits(0x3dcc_cccd);
 const FOLDED_DOT: f32 = f32::from_bits(0xbf7f_be77);
 /// The host computes the edge angle in binary64; an angle this close to the
 /// threshold would need the engine's single-precision atan2, which is not
-/// transcribed.
+/// covered.
 const ANGLE_MARGIN: f64 = 1e-6;
 
 /// One four-lane RTree page: per axis the four lanes' minima and maxima, and
@@ -97,14 +97,14 @@ pub fn cook(positions: &[[f32; 3]], triangles: &[[u32; 3]], options: u32) -> Res
     let bv4 = match options {
         0 => false,
         30 => true,
-        o if o & 16 != 0 => return Err(Refused("fast-midphase cooking options other than 30 are not transcribed")),
-        _ => return Err(Refused("cooking options other than the default and 30 are not transcribed")),
+        o if o & 16 != 0 => return Err(Refused("fast-midphase cooking options other than 30 are unsupported")),
+        _ => return Err(Refused("cooking options other than the default and 30 are unsupported")),
     };
     if positions.is_empty() || triangles.is_empty() {
         return Err(Refused("an empty collision mesh"));
     }
     if positions.len() > 0xffff {
-        return Err(Refused("more than 65,535 vertices (32-bit cooked indices are not transcribed)"));
+        return Err(Refused("more than 65,535 vertices (32-bit cooked indices are unsupported)"));
     }
     if triangles.len() >= 1 << 20 {
         return Err(Refused("more triangles than the RTree node words can address here"));

@@ -96,7 +96,7 @@ pub fn overlap_oriented_box(mesh: &CookedMesh, pose: &Pose, center: [f32; 3], ex
         });
     }
     if !pose.identity_rotation() || rotation[..3].iter().any(|&v| v != 0.0) || rotation[3] != 1.0 {
-        return Err(Refused("a rotated collider or query box on the BVH33 midphase is not transcribed"));
+        return Err(Refused("a rotated collider or query box on the BVH33 midphase is unsupported"));
     }
     let m = inverse_matrix(pose.rotation(), pose.translation());
     let c2 = m.transform(center);

@@ -1,19 +1,33 @@
-//! Research instrument: replays the native ring-buffer lifecycle frames of the
-//! current player library through the law functions the runtime composes on
-//! every ordinary slice. The frames come from a private receipt; nothing here
-//! compares against this crate's own output.
+//! Replays the native ring-buffer lifecycle frames of the current player
+//! library through the law functions the runtime composes on every ordinary
+//! slice.
 //!
-//! Per frame, in the order of the engine's ordinary incremental update:
-//! 1. existing particles: `advance_lifetime` (Loop wraps only indices below
-//!    maxParticles; the overflow span ages as Disabled) then `compact_with_side`,
-//!    compared with the pool the engine holds when the post-simulation modules run;
-//! 2. `birth_capacity` over the count StartParticles saw and the requested count,
-//!    compared with the newborn count handed to CopyParticlesToUnalignedDst;
-//! 3. `finish_births` over the old prefix plus the newborn lanes, compared with
-//!    the frame-end pool, the ring cursor and every Pause RecordParticleDeath.
+//! Input: a receipt of frames, each holding the pool before the frame, the
+//! counts StartParticles and CopyParticlesToUnalignedDst saw, and the pool,
+//! ring cursor and Pause victims the engine recorded at the frame's end.
+//! Output: a tally of frames compared and of mismatches, and the both-sides
+//! invariants below. The frames come from a receipt outside the repository
+//! and nothing here compares against this crate's own output.
+//!
+//! Invariants of every admitted frame:
+//! - the existing particles after `advance_lifetime` (Loop wraps only indices
+//!   below maxParticles; the overflow span ages as Disabled) and
+//!   `compact_with_side` equal the pool the engine holds when the
+//!   post-simulation modules run;
+//! - `birth_capacity`, over the count StartParticles saw and the requested
+//!   count, equals the newborn count handed to CopyParticlesToUnalignedDst;
+//! - `finish_births` over the old prefix plus the newborn lanes equals the
+//!   frame-end pool, the ring cursor and every Pause RecordParticleDeath;
+//! - the ring cursor after the frame is the recorded one.
 //!
 //! The negative arm replays every ring case as if the mode were Disabled; each
-//! of them must then disagree with the engine somewhere.
+//! of them must then disagree with the engine somewhere (0 ring cases caught
+//! means the frames do not distinguish the two modes).
+//!
+//! A case whose Pause arm replaces every overflow slot per frame, and whose
+//! Loop arm wraps the pool, differs from the Disabled reading at one of the
+//! stages above (at 1), at 2 of them, or at every stage (at 3), depending on
+//! how far the frame has advanced.
 use super::buffer::{birth_capacity, compact_with_side, finish_births, RingBufferMode};
 use super::json::{self, Value};
 use super::step::{advance_lifetime, Particle};

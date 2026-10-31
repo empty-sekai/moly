@@ -45,7 +45,7 @@ pub struct SortCamera {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SortRefused {
     /// The normalized view-owner product has |determinant| at or below 1e-6;
-    /// the engine then takes its SVD inverse, which is not transcribed.
+    /// the engine then takes its SVD inverse, which is not supported.
     SingularOwner,
 }
 
@@ -183,14 +183,14 @@ mod tests {
     fn word(v: &Value) -> u32 { v.as_f64().expect("word") as u32 }
     fn words(v: &Value) -> Vec<u32> { v.as_array().expect("words").iter().map(word).collect() }
 
-    /// Research instrument: ParticleSystemRenderer::Sort executed in an ARMv8
-    /// emulator on the current engine library, over sampled views, owners
-    /// (rotation, nonuniform and negative scale), near planes, orthographic
-    /// cameras, exact position ties and particles at the camera. Every row's
-    /// index order and every key word must match. Rows of the engine's two
-    /// internal ascending spatial modes (5, 6) are replayed through the same
-    /// keys with the ascending order. Point MOLY_PARTICLE_DEPTH_SORT_ROWS at the
-    /// recorded rows; MOLY_SORT_MUTANT names a deliberate defect that must fail.
+    /// Research instrument: replays reference rows of
+    /// ParticleSystemRenderer::Sort. The sample covers views, owners (rotation,
+    /// nonuniform and negative scale), near planes, orthographic cameras,
+    /// exact position ties and particles at the camera. Every row's index
+    /// order and every key word must equal the reference. Rows of the
+    /// renderer's two ascending spatial modes (5, 6) are replayed through the
+    /// same keys with the ascending order. Point MOLY_PARTICLE_DEPTH_SORT_ROWS
+    /// at the rows; MOLY_SORT_MUTANT names a deliberate defect that must fail.
     #[test]
     #[ignore = "needs MOLY_PARTICLE_DEPTH_SORT_ROWS"]
     fn depth_and_distance_sort_match_native_rows() {

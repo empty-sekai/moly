@@ -194,10 +194,10 @@ fn compare(row: &Value, recorded: &RecordedDeath) -> Vec<&'static str> {
     bad
 }
 
-/// Every native row is either compared word for word (the command bytes with
+/// Every reference row is either compared bit for bit (the command bytes with
 /// the inherited block, the event states) or refused by name, and a refused
 /// row carries a bit or a parent size configuration the law does not
-/// transcribe. Every one-rule arm differs from native on some admitted row.
+/// support. Every one-rule arm differs from native on some admitted row.
 #[test]
 #[ignore = "needs MOLY_INHERIT_PARENT_ROWS"]
 fn inherited_blocks_match_native_rows() {
@@ -266,7 +266,7 @@ fn inherited_blocks_match_native_rows() {
 
 /// The properties gate names what it refuses; zero inherits nothing.
 #[test]
-fn properties_gate_names_every_untranscribed_bit() {
+fn properties_gate_names_every_unsupported_bit() {
     assert!(InheritSize::from_parent(0, None, false).unwrap().is_none());
     assert!(InheritSize::from_parent(INHERIT_SIZE, None, false).unwrap().is_some());
     for (bit, name) in [(INHERIT_COLOR, "color"), (INHERIT_ROTATION, "rotation"), (INHERIT_LIFETIME, "lifetime"),

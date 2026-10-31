@@ -1,6 +1,7 @@
 //! RotationBySpeedModule: angular velocity by particle speed.
 //!
-//! Tier: engine native, instruction for instruction (constants pinned by bit).
+//! Tier: `bit-exact`: results, the order of operations and the constants match
+//! the reference bit for bit.
 //!
 //! Where it runs. The pre-simulation module chain (the same function for the
 //! existing particles of a slice and for the newborns of a birth command)
@@ -35,8 +36,8 @@
 //! range remap: `scale = 1 / (b - a)` when `|b - a| > 0x3089705f`, else the
 //! range start `a` itself; `offset = scale * -a`.
 //!
-//! Not transcribed (the module dispatches them to a separate templated body
-//! that has not been read): a curve lane without the optimized bit and the
+//! Not supported (the module dispatches them to a separate templated body
+//! that is not established): a curve lane without the optimized bit and the
 //! two-curve mode. Those refuse at construction by name.
 //!
 //! Random stream consumption: none. Every factor is a pure hash of the
@@ -100,11 +101,11 @@ impl RotationBySpeed {
                     match CurveSampler::new(curve, CurveTime::Normalized)
                         .map_err(|reason| format!("rotationBySpeed: {reason}"))? {
                         sampler @ CurveSampler::CurveBaked(_) => Ok(AxisLaw::Curve(sampler)),
-                        _ => Err("rotationBySpeed: a curve without the optimized bit takes the templated body, which is not transcribed".into()),
+                        _ => Err("rotationBySpeed: a curve without the optimized bit takes the templated body, which is unsupported".into()),
                     }
                 }
                 crate::particle::MinMaxCurve::TwoCurves { .. } => {
-                    Err("rotationBySpeed: the two-curve mode takes the templated body, which is not transcribed".into())
+                    Err("rotationBySpeed: the two-curve mode takes the templated body, which is unsupported".into())
                 }
             }
         };
@@ -202,13 +203,13 @@ mod tests {
     }
 }
 
-/// Native rows of RotationBySpeedModule::Update, called directly in the
-/// game's own JP libunity with the pre-simulation chain's arguments: every
-/// row's module block (in the export's shape), particle seeds, persistent and
-/// animated velocity and the angular-velocity lanes before the call, and the
-/// lanes after it. The replay parses the block through the product schema,
-/// builds the law and adds into the same lanes; every lane of every row must
-/// match bit for bit. A control file of mutated rows must fail.
+/// Replays reference rows of RotationBySpeedModule::Update, called with the
+/// pre-simulation chain's arguments. Each row gives the module block (in the
+/// export's shape), the particle seeds, the persistent and animated velocity,
+/// the angular-velocity lanes before the call and the lanes after it. The
+/// replay parses the block through the product schema, builds the law and
+/// adds into the same lanes; every lane of every row must match the reference
+/// bit for bit. A control file of mutated rows must fail.
 #[cfg(test)]
 mod native_rows {
     use super::*;

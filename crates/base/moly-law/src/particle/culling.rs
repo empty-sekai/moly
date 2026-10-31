@@ -5,8 +5,8 @@
 //! (`ExtractProjectionPlanes`, `Camera::CalculateFrustumPlanes`,
 //! `CullObjectsWithoutUmbra`, `IsNodeVisibleFast` and `IsNodeVisibleSlow`).
 //!
-//! Every function follows the engine's instruction order one operation at a
-//! time, with the ARM semantics of each compare and each `fmin`/`fmax` (a NaN
+//! Every function evaluates one operation at a time in the engine's order,
+//! with the semantics of each compare and each `fmin`/`fmax` (a NaN
 //! operand propagates quieted, `-0` orders below `+0`). No product
 //! multiplication is fused. The libm calls of the cone shape bounds
 //! (`sincosf`, `sinf`) are the one place computed differently: in binary64,
@@ -34,12 +34,12 @@ const TENTH: f32 = f32::from_bits(0x3dcc_cccd);
 const NEG_ZERO: f32 = f32::from_bits(0x8000_0000);
 const QNAN: f32 = f32::from_bits(0x7fc0_0000);
 
-/// `fcmp a, b` read with `mi`: true only for an ordered `a < b`.
+/// The `mi` compare: true only for an ordered `a < b`.
 fn lt(a: f32, b: f32) -> bool { a < b }
-/// `fcmp a, b` read with `le`: true for `a <= b` and for unordered operands.
+/// The `le` compare: true for `a <= b` and for unordered operands.
 fn le_cc(a: f32, b: f32) -> bool { a.is_nan() || b.is_nan() || a <= b }
-/// `fneg` + `fcmp #0` + `fcsel mi`: negate only a value below zero, so `-0`
-/// and NaN keep their bits.
+/// Negate and select: negate only a value below zero, so `-0` (and 0) keep
+/// their bits along with NaN.
 fn fabs_sel(v: f32) -> f32 { if v < 0.0 { -v } else { v } }
 
 /// A box as the engine stores it after `UpdateBounds`: minimum then maximum.
@@ -109,13 +109,13 @@ pub enum BoundsRefused {
 impl std::fmt::Display for BoundsRefused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::IntegratedCurve => "curve-mode FindMinMaxIntegrated (libm cubic roots) is not transcribed",
-            Self::TrailModule => "trail module bounds are not transcribed",
-            Self::LightsModule => "lights module bounds are not transcribed",
-            Self::ForceModule => "force module bounds are not transcribed",
-            Self::SizeBySpeedModule => "size-by-speed bounds are not transcribed",
+            Self::IntegratedCurve => "curve-mode FindMinMaxIntegrated (libm cubic roots) is unsupported",
+            Self::TrailModule => "trail module bounds are unsupported",
+            Self::LightsModule => "lights module bounds are unsupported",
+            Self::ForceModule => "force module bounds are unsupported",
+            Self::SizeBySpeedModule => "size-by-speed bounds are unsupported",
             Self::SizeAxisMissing => "size module Y/Z curves of 3D-size particles are not carried",
-            Self::SpriteSheet => "sprite-sheet bounds factor is not transcribed",
+            Self::SpriteSheet => "sprite-sheet bounds factor is unsupported",
             Self::StretchInput => "stretched particle bounds need velocity, animated velocity and size",
         })
     }
@@ -567,7 +567,7 @@ fn velocity_procedural_bounds(velocity: &VelocityBounds, world_to_local: &[f32; 
     Ok((mn, mx))
 }
 
-// ---- FRSQRTE / FRSQRTS ----
+// ---- Reciprocal square root estimate and its refinement step ----
 
 fn recip_sqrt_estimate(a: u32) -> u32 {
     let a: u64 = if a < 256 { a as u64 * 2 + 1 } else { (((a >> 1) << 1) as u64 + 1) * 2 };
@@ -578,7 +578,7 @@ fn recip_sqrt_estimate(a: u32) -> u32 {
     ((b + 1) / 2) as u32
 }
 
-/// ARM `FRSQRTE` on a single lane.
+/// The reciprocal square root estimate on a single lane.
 fn frsqrte(x: f32) -> f32 {
     let w = x.to_bits();
     let sign = w >> 31;
@@ -620,8 +620,8 @@ fn step_f32(v: f32, up: bool) -> f32 {
     f32::from_bits(if away { bits + 1 } else { bits - 1 })
 }
 
-/// ARM `FRSQRTS`: `(3 - a*b) / 2` with the product not rounded and one final
-/// rounding to binary32.
+/// The reciprocal square root refinement step: `(3 - a*b) / 2` with the
+/// product not rounded and one final rounding to binary32.
 fn frsqrts(a: f32, b: f32) -> f32 {
     if a.is_nan() || b.is_nan() {
         return QNAN;

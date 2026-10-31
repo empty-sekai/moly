@@ -1,6 +1,6 @@
 //! Bounded JP client ParticleSystem prewarm plan. Source lifecycle admission remains separate.
-//! Transcribed from the current JP client's engine library: ParticleSystem::GetTimeStep
-//! and ParticleSystem::Update1Incremental; the native prewarm observations are
+//! The warm length and the warm's slices follow ParticleSystem::GetTimeStep
+//! and ParticleSystem::Update1Incremental; the prewarm observations are
 //! replayed by opt-in tests that read them from outside the repository. First
 //! Play runs ParticleSystem::ComputePrewarmStartParameters, then
 //! BeginUpdate(dt=out) and ParticleSystem::Update1b, which scales that dt by
@@ -70,7 +70,7 @@ pub struct SubEmitterNode {
     /// the graph; `None` for a null pointer.
     pub children: Vec<Option<usize>>,
     /// The start lifetime; `None` for a curve-mode lifetime, whose range
-    /// (CalculateCurveRangesValue) is not transcribed.
+    /// (CalculateCurveRangesValue) is not supported.
     pub lifetime: Option<Lifetime>,
 }
 
@@ -126,7 +126,7 @@ fn maximum_lifetime(nodes: &[SubEmitterNode], node: usize, life: f32, path: &mut
             .get(child)
             .ok_or("sub-emitter graph index outside the graph")?
             .lifetime
-            .ok_or("curve-mode child lifetime: its range is not transcribed")?
+            .ok_or("curve-mode child lifetime: its range is not supported")?
             .upper();
         let sum = if arms::on("maxInsteadOfSum") { upper } else { upper + life };
         if best < sum {
@@ -160,7 +160,7 @@ pub struct TimeManagerSnapshot {
 pub struct PlayState {
     pub elapsed: f32,
     pub live_count: usize,
-    /// Bool at the native Play boundary. The managed withChildren mapping is
+    /// Bool at the Play boundary. The managed withChildren mapping is
     /// not established by this scheduler replay.
     pub native_play_bool_argument: bool,
     pub world_playing: bool,
@@ -191,7 +191,7 @@ pub struct FrameStep {
     /// time. FMAX keeps a NaN speed, so the frame then skips.
     pub scaled_dt: f32,
     /// GetTimeStep: the scaled dt up to the maximum particle timestep, else
-    /// scaled / ceil(scaled / maximum), each an f32 fdiv / frintp / fdiv.
+    /// scaled / ceil(scaled / maximum), each an f32 division or rounding.
     pub step: f32,
 }
 
@@ -334,7 +334,7 @@ impl FirstPlayWarm {
         let mut start = (play.elapsed - lifetime) - phase;
         let magnitude = if start < 0.0 { -start } else { start };
         // Compute moves a negative start forward by whole
-        // durations (fcvtps rounds toward +Infinity, then back to f32).
+        // durations (the cycle count rounds toward +infinity, then back to f32).
         if start < 0.0 {
             let cycles = ((-start) / play.duration).ceil() as i32 as f32;
             start += play.duration * cycles;
@@ -381,7 +381,7 @@ impl PrewarmPlan {
     pub fn from_warm(warm: FirstPlayWarm, time: TimeManagerSnapshot, duration: f32) -> Result<Self, &'static str> {
         let remaining = warm.total;
         // GetTimeStep nonfixed: total / ceil(total / maximum particle step),
-        // f32 at each of its ARM fdiv, frintp and fdiv.
+        // f32 at each step of its integrate and round sequence.
         let ratio = remaining / time.maximum_particle_timestep;
         if !(ratio.is_finite() && ratio.ceil() <= 1_000_000.0) {
             return Err("prewarm slice budget outside bounded replay");
@@ -415,8 +415,8 @@ impl PrewarmPlan {
         })
     }
 
-    /// Boundary after native Compute/GetTimeStep. Input step and entry must
-    /// come from those source paths; the extra current-native matrix probes
+    /// Boundary after Compute and GetTimeStep. Input step and entry must
+    /// come from those source paths; the extra matrix probes
     /// this function without pretending each step came from GetTimeStep.
     /// Flags 8 is Play's explicit dt and 0 the per-frame BeginUpdate while the
     /// world plays; the loop reads only bits 0 to 2, clear in both.
@@ -543,7 +543,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "MOLY_CURRENT_PREWARM_MATRIX must identify current ARM64 incremental matrix"]
+    #[ignore = "MOLY_CURRENT_PREWARM_MATRIX must identify the current incremental matrix"]
     fn current_native_incremental_matrix_matches_bits() {
         let receipt = read("MOLY_CURRENT_PREWARM_MATRIX");
         assert_eq!(
@@ -613,7 +613,7 @@ mod tests {
             Some("937c6d28193ba1bea76fc86ffecd6bc6dd215c6e89fecfc99bc56ffc475badd9")
         );
         let cases = receipt.get("cases").unwrap();
-        // Same serialized inputs as the native probe cases.
+        // Same serialized inputs as the probe cases.
         let inputs = [
             ("cloudSunInfinite24", Lifetime::Constant(f32::INFINITY), 24.0, 1.0),
             ("snowTwoConstants12x8", Lifetime::TwoConstants { min: 12.0, max: 8.0 }, 1.0, 1.0),
@@ -686,7 +686,7 @@ mod tests {
         (head.step, Some(total), slices, ahead, plan.remaining())
     }
 
-    /// Replays every frame of the native per-frame Update1b receipts through
+    /// Replays every frame of the per-frame Update1b receipts through
     /// the head and slice law; returns (frames, mismatched frames).
     fn replay_frames(receipts: &[Value], arm: Option<&str>) -> (usize, usize) {
         let (mut frames, mut mismatched) = (0, 0);
@@ -739,7 +739,7 @@ mod tests {
                         if !same {
                             mismatched += 1;
                         }
-                        // Continue from the native state so one arm error is counted per frame.
+                        // Continue from the recorded state so one arm error is counted per frame.
                         pending = bits(frame.get("after").unwrap().get("pendingBits").unwrap());
                     }
                 }
@@ -761,7 +761,7 @@ mod tests {
         let (frames, mismatched) = replay_frames(&receipts, None);
         assert_eq!(frames, 667);
         assert_eq!(mismatched, 0);
-        // One-rule arms read against the same native rows must fail.
+        // One-rule arms read against the same rows must fail.
         for arm in ["singleSlice", "accumulateStep"] {
             let (_, wrong) = replay_frames(&receipts, Some(arm));
             assert!(wrong > 0, "{arm} arm matched every native frame");
@@ -800,9 +800,9 @@ mod tests {
         }
     }
 
-    /// One native Compute case as the normalized rows hold it: the system's
+    /// One Compute case as the normalized rows hold it: the system's
     /// warm inputs, its sub-emitter graph (node 0 the system itself, each
-    /// edge's trigger kept for the one-rule arms) and the native outcome.
+    /// edge's trigger kept for the one-rule arms) and the reference outcome.
     struct WarmLengthCase {
         name: String,
         lifetime: Option<Lifetime>,
@@ -897,7 +897,7 @@ mod tests {
     enum WarmLengthOutcome {
         /// valid, then out and clock bits of a valid window.
         Compared(bool, Option<(u32, u32)>),
-        /// A refusal by name: the law does not transcribe the input.
+        /// A refusal by name: the law does not support the input.
         Refused(&'static str),
     }
 

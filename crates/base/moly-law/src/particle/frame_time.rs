@@ -106,12 +106,13 @@ pub fn fmax_zero(speed: f32) -> f32 {
 
 /// GetTimeStep with UpdateData flags bit 0 clear, the player's per-frame and
 /// explicit-dt value: a scaled frame longer than the maximum particle step is
-/// cut into equal pieces, `dt / FRINTP(dt / max)`, each an f32 operation; any
+/// cut into equal pieces, `dt / ceil(dt / max)`, each a single binary32
+/// operation (the `ceil` part of the sequence); any
 /// other value, a NaN included, is returned as it is.
 pub fn time_step(scaled: f32, maximum_particle_timestep: f32) -> f32 {
     if maximum_particle_timestep < scaled {
         let step = scaled / (scaled / maximum_particle_timestep).ceil();
-        // An infinite dt divides infinity by infinity: the ARM result is the
+        // An infinite dt divides infinity by infinity: the result is the
         // default NaN (positive quiet), not the host's.
         if step.is_nan() { f32::from_bits(0x7fc0_0000) } else { step }
     } else {

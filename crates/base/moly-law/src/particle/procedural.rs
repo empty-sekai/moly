@@ -143,7 +143,7 @@ pub enum Refused {
 }
 
 /// GenerateProcedural's direction: the emitter matrix's third column over its
-/// length, `(x*x + y*y) + (z*z + 0)`, by FRSQRTE and two FRSQRTS refinements;
+/// length, `(x*x + y*y) + (z*z + 0)`, by an estimate and two refinements;
 /// zero at or below a tiny length (NaN included).
 pub fn direction(column: [f32; 3]) -> [f32; 3] {
     let square = (column[0] * column[0] + column[1] * column[1]) + (column[2] * column[2] + 0.0);
@@ -413,7 +413,7 @@ pub fn rotate(storage: &mut Storage, rotation: &Rotation) -> Result<(), Refused>
     Ok(())
 }
 
-/// FRECPE of the inverse lifetime refined twice (the bare estimate, +inf,
+/// The reciprocal estimate of the inverse lifetime refined twice (the bare estimate, +inf,
 /// for a zero); `None` outside the positive normal range and zero.
 fn rotation_lifetime(inverse: f32) -> Option<f32> {
     if inverse == 0.0 && inverse.is_sign_positive() {

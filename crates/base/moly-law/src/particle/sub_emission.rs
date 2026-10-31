@@ -29,7 +29,7 @@ pub enum Refused {
     InvalidInput,
     CountOutOfRange,
     /// A birth edge that inherits properties: the inherited block is
-    /// transcribed only for death edges ([`crate::particle::inherit`]).
+    /// supported only for death edges ([`crate::particle::inherit`]).
     InheritedProperties,
 }
 

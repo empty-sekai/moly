@@ -1,6 +1,7 @@
 //! Mesh render mode: which of the renderer's meshes a particle draws.
 //!
-//! Tier: engine native, instruction for instruction (constants pinned by bit).
+//! Tier: `bit-exact`: results, the order of operations and the constants match
+//! the reference bit for bit.
 //!
 //! The renderer keeps a cache of its mesh slots: in slot order, every slot
 //! whose mesh resolves and is drawable, packed to the front of four entries
@@ -116,12 +117,12 @@ mod tests {
     }
 }
 
-/// Native rows of the per-particle mesh index loop of the geometry
-/// preparation, run in the game's own JP libunity from its first instruction
-/// to the index register: every row's mesh count, distribution, weights,
-/// total weight (as the preparation accumulates it) and seeds, and the index
-/// per seed. Rows with a script-API mesh index (not modelled) are skipped
-/// and counted. A control file of mutated rows must fail.
+/// Replays reference rows of the per-particle mesh index loop of the geometry
+/// preparation and checks the index per seed. Each row gives the mesh count,
+/// the distribution, the weights, the running total weight and the seeds, and
+/// the reference index for each seed. Rows with a script-API mesh index (not
+/// modelled) are skipped and counted. A control file of mutated rows must
+/// fail.
 #[cfg(test)]
 mod native_rows {
     use super::*;

@@ -1,14 +1,15 @@
-//! ARM64 single-precision arithmetic as the engine's vector kernels execute it:
-//! round to nearest even, denormals kept (FPCR.FZ 0) and default NaN off
-//! (FPCR.DN 0). A NaN operand propagates (a signalling NaN is quietened, the
-//! first operand before the second), an invalid operation yields the default
-//! NaN `0x7fc00000`. The host's own NaN rules differ (its invalid result is
-//! `0xffc00000`, and it picks operands in another order), so every operation a
-//! NaN can reach goes through here. Non-NaN results are the IEEE-754 binary32
-//! results, which the host computes bit for bit.
+//! Single-precision arithmetic with the reference's floating-point semantics:
+//! round to nearest even, denormals kept (flush-to-zero disabled, 0) and
+//! default NaN off (0). A NaN operand propagates (a signalling NaN is
+//! quietened, the first operand before the second), and an invalid operation
+//! yields the default NaN `0x7fc00000`.
+//! The host's own NaN rules differ (its invalid result is `0xffc00000`, and it
+//! picks operands in another order), so every operation a NaN can reach goes
+//! through here. Non-NaN results are the IEEE-754 binary32 results, which the
+//! host computes bit for bit.
 //!
-//! The fused step instructions (reciprocal and reciprocal square root steps)
-//! round the exact value once; the estimates follow the ARMv8.0 8-bit tables.
+//! The fused reciprocal and reciprocal square root steps round the exact value
+//! once; the estimates are taken from the reference's 8-bit lookup tables.
 
 const QNAN: u32 = 0x7fc0_0000;
 const QUIET: u32 = 0x0040_0000;
@@ -86,7 +87,7 @@ pub(crate) fn abs(a: f32) -> f32 {
     f32::from_bits(a.to_bits() & 0x7fff_ffff)
 }
 
-/// FMAX: NaN propagates; +0 unless both zeros are -0.
+/// The maximum operation: a NaN operand propagates; +0 unless both zeros are -0.
 #[inline]
 pub(crate) fn max(a: f32, c: f32) -> f32 {
     if let Some(n) = nan2(a, c) {
@@ -98,7 +99,7 @@ pub(crate) fn max(a: f32, c: f32) -> f32 {
     if a > c { a } else { c }
 }
 
-/// FMIN: NaN propagates; -0 if either zero is -0.
+/// The minimum operation: a NaN operand propagates; -0 if either zero is -0.
 #[inline]
 pub(crate) fn min(a: f32, c: f32) -> f32 {
     if let Some(n) = nan2(a, c) {
@@ -110,7 +111,7 @@ pub(crate) fn min(a: f32, c: f32) -> f32 {
     if a < c { a } else { c }
 }
 
-/// FMAXNM: a single quiet NaN yields the other operand.
+/// The maximum with default NaN disabled: a single quiet NaN yields the other operand.
 #[inline]
 pub(crate) fn max_nm(a: f32, c: f32) -> f32 {
     let (an, cn) = (a.is_nan(), c.is_nan());
@@ -123,13 +124,13 @@ pub(crate) fn max_nm(a: f32, c: f32) -> f32 {
     max(a, c)
 }
 
-/// FCVT single from double, round to nearest even; a NaN becomes the default NaN.
+/// Binary64 to binary32, round to nearest even; a NaN becomes the default NaN.
 #[inline]
 pub(crate) fn narrow(d: f64) -> f32 {
     if d.is_nan() { f32::from_bits(QNAN) } else { d as f32 }
 }
 
-/// FCVTZS to i32: toward zero, saturating, NaN to zero.
+/// To i32: toward zero, saturating (the `fcvtzs` conversion), NaN to zero.
 #[inline]
 pub(crate) fn to_i32_toward_zero(a: f32) -> i32 {
     a as i32
@@ -213,12 +214,12 @@ fn step_special(a: f32, c: f32, zero_times_inf: f32) -> Option<f32> {
     None
 }
 
-/// FRECPS: 2 - a*c, fused.
+/// The reciprocal step: 2 - a*c, one rounding (the product and the subtraction are not rounded separately).
 pub(crate) fn recip_step(a: f32, c: f32) -> f32 {
     step_special(a, c, 2.0).unwrap_or_else(|| fused(2.0, a, c, false))
 }
 
-/// FRSQRTS: (3 - a*c) / 2, fused.
+/// The reciprocal square root step: (3 - a*c) / 2, one rounding.
 pub(crate) fn rsqrt_step(a: f32, c: f32) -> f32 {
     step_special(a, c, 1.5).unwrap_or_else(|| fused(3.0, a, c, true))
 }
@@ -242,7 +243,7 @@ fn rsqrt_estimate_table(a: u64) -> u64 {
 
 const FRAC52: u64 = (1u64 << 52) - 1;
 
-/// FRECPE.
+/// The reciprocal estimate.
 pub(crate) fn recip_estimate(a: f32) -> f32 {
     if a.is_nan() {
         return quiet(a);
@@ -281,7 +282,7 @@ pub(crate) fn recip_estimate(a: f32) -> f32 {
     f32::from_bits(sign | (((rexp as u32) & 0xff) << 23) | ((frac >> 29) as u32))
 }
 
-/// FRSQRTE.
+/// The reciprocal square root estimate.
 pub(crate) fn rsqrt_estimate(a: f32) -> f32 {
     if a.is_nan() {
         return quiet(a);
@@ -311,7 +312,7 @@ pub(crate) fn rsqrt_estimate(a: f32) -> f32 {
     f32::from_bits((((rexp as u32) & 0xff) << 23) | (((est as u32) & 0xff) << 15))
 }
 
-/// FRECPE and two FRECPS refinements; the estimate is kept where x is zero.
+/// The reciprocal estimate and two refinement steps; the estimate is kept where x is zero.
 pub(crate) fn recip2(x: f32) -> f32 {
     let e = recip_estimate(x);
     let r = mul(e, recip_step(x, e));
@@ -319,8 +320,8 @@ pub(crate) fn recip2(x: f32) -> f32 {
     if x == 0.0 { e } else { r }
 }
 
-/// FRSQRTE and two FRSQRTS refinements (the square multiplied first); the
-/// estimate is kept where x is zero.
+/// The reciprocal square root estimate and two refinement steps (the input
+/// multiplied first); the estimate is kept where x is zero.
 pub(crate) fn rsqrt2(x: f32) -> f32 {
     let e = rsqrt_estimate(x);
     let r = mul(e, rsqrt_step(mul(x, e), e));
@@ -333,10 +334,10 @@ mod tests {
     use super::*;
     use crate::particle::json;
 
-    /// Single ARM64 scalar instructions executed in an ARMv8 emulator on
-    /// recorded operands (special values, subnormals, wide exponents, and
-    /// operand pairs whose fused step lands on a binary32 tie): every result
-    /// bit must match, NaN payloads included.
+    /// One reference row per operation on recorded operands (special values,
+    /// subnormals, wide exponents, and operand pairs whose fused step lands on
+    /// a binary32 tie): every result bit must match the reference, NaN
+    /// payloads included.
     #[test]
     #[ignore = "needs MOLY_ARMF_ROWS"]
     fn emulated_instruction_rows_match_bits() {
@@ -359,6 +360,6 @@ mod tests {
             }
             total += rows.len();
         }
-        println!("armf replay: {total} emulated instruction rows, 0 mismatches");
+        println!("armf replay: {total} reference rows, 0 mismatches");
     }
 }

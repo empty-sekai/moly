@@ -1,7 +1,9 @@
 //! Minimal current JP seed ownership laws. No entropy provider or runtime wiring.
 //!
-//! Transcribed from the current JP client's engine library: ParticleSystem::ResetSeeds,
-//! RandN.SetSeed and RandomizeState. Reset evidence has
+//! These follow the current JP client's engine library: ParticleSystem::ResetSeeds,
+//! RandN.SetSeed and RandomizeState. Input: an owner seed and the per-module
+//! salts; output: the random words each stream produces, and no state beyond
+//! what the caller carries. Reset evidence has
 //! 192 exact native cases + 32 entropy-success passthrough cases.
 //! The global seed manager's pointer lies at another place in the current
 //! library than in the bundled symbol reference. The owner seed is the random

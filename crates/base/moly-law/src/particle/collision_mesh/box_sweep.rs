@@ -9,7 +9,7 @@
 //! deeper than its margins the EPA, and the depth comes back as a negative
 //! distance with the position pushed out along the normal.
 //!
-//! The arithmetic is the build's NEON vector library: every step is one
+//! The arithmetic is the vector module's: every step is one
 //! binary32 operation and nothing fuses (a multiply-add is a product then a
 //! sum); a reciprocal or a reciprocal square root is the estimate refined
 //! four times; a vector's square root is zero for zero and otherwise the
@@ -44,12 +44,12 @@ pub(super) fn recip(x: f32) -> f32 {
     e
 }
 
-/// `FSqrt`.
+/// The square root: zero for zero, otherwise the value times its reciprocal square root.
 pub(super) fn fsqrt(x: f32) -> f32 {
     if x == 0.0 { x } else { a::mul(x, rsqrt_n(x, 4)) }
 }
 
-/// `FDiv`: the product with the reciprocal.
+/// The division as the product with the reciprocal.
 fn fdiv(x: f32, y: f32) -> f32 {
     a::mul(x, recip(y))
 }

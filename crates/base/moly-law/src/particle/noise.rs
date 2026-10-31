@@ -1,10 +1,10 @@
 //! Qualified single-octave 3D/high particle Noise, one strength or separate axes, in any strength mode.
 //!
 //! Pure law: the consumer supplies owner seed, scroll and source simulation inputs.
-//! Transcribed from the current JP client's engine library, along the call chain
+//! It follows the current JP client's engine library along the call chain
 //! NoiseModule::Update -> CalculateNoise -> NoiseModule::CalculateNoiseJob -> Perlin3D.
-//! Perlin3D follows the native straight-line dataflow operation by operation;
-//! the curl pairing and scales follow the job body.
+//! Perlin3D runs as the native straight-line dataflow, operation by
+//! operation; the curl pairing and scales are the job body's.
 //! Complete particle-system timing and source admission are separate obligations.
 //!
 //! The permutation is Ken Perlin's standard improved-noise algorithm table;
@@ -138,7 +138,7 @@ impl NoiseLaw {
         let a = perlin_xy([z, y, x + state.scroll], self.frequency);
         let b = perlin_xy([x + 100.0, z, y + state.scroll], self.frequency);
         let c = perlin_xy([y, x + 100.0, z + state.scroll], self.frequency);
-        // CalculateNoiseJob: damping uses the refined ARM
+        // CalculateNoiseJob: damping uses the refined
         // reciprocal estimate of the clamped frequency, not host division.
         let damping = if self.damping {
             super::velocity::orbital_reciprocal(self.frequency)
@@ -192,13 +192,13 @@ fn owner_offset(seed: u32) -> [f32; 3] {
 }
 
 /// Improved Perlin's analytic x/y derivatives, including frequency chain rule.
-/// Transcribed from the current straight-line Perlin3D body (no fused
+/// As in the current straight-line Perlin3D body (no fused
 /// ops): trilinear coefficient form, every f32 operation in native
 /// order. Only the integer corner hash is written semantically. A per-corner
 /// sum is mathematically equal but rounds differently.
 fn perlin_xy(position: [f32; 3], frequency: f32) -> [f32; 2] {
     let scaled = position.map(|v| frequency * v);
-    // fcvtzs/scvtf/fcmgt floor: truncation minus one where it exceeds the value.
+    // A floor through a truncating conversion: truncation minus one where it exceeds the value.
     let floors = scaled.map(|v| {
         let truncated = (v as i32) as f32;
         truncated - if truncated > v { 1.0 } else { 0.0 }

@@ -1,10 +1,11 @@
 //! Source particle emission geometry, before EmitterStoreData transforms and
 //! direction normalisation. Random values are independent native U01 draws.
 //!
-//! Current JP ARM64 functions were executed independently to produce the checked
-//! numerical corpus. The circle, cone and torus do NOT share a thickness law.
-//! The native trigonometric kernel is signed and contains all five coefficients.
-//! A two-dimensional billboard is a renderer choice, never a substitute shape.
+//! The checked numerical corpus behind these kernels (360 samples) is
+//! independent of this crate's own output. The circle, cone and torus do NOT
+//! share a thickness law. The sine/cosine polynomial is signed and contains
+//! all five coefficients. A two-dimensional billboard is a renderer choice,
+//! never a substitute shape.
 
 use super::device_libm::{exp2f, log2f};
 
@@ -45,8 +46,10 @@ pub fn u01_from_bits(bits: u32) -> f32 {
     (bits & 0x7f_ffff) as f32 * f32::from_bits(0x3400_0001)
 }
 
-/// Return the native (sin, cos) pair. Sign-preserving nearest-even reduction is
-/// intentional; using abs(sin) or an incomplete polynomial breaks half a circle.
+/// The (sin, cos) pair of the source representation: sign-preserving
+/// nearest-even reduction, then the polynomial. The reduction must keep the
+/// sign and the polynomial must be complete; abs(sin) or a partial polynomial
+/// breaks half a circle.
 pub(crate) fn engine_sincos(angle: f32) -> (f32, f32) {
     fn polynomial(value: f32) -> f32 {
         let square = value * value;
@@ -65,7 +68,7 @@ pub(crate) fn engine_sincos(angle: f32) -> (f32, f32) {
     (polynomial(fold(turns - 0.25)), polynomial(fold(turns)))
 }
 
-/// Radial shell of the native sphere kernels: the inner radius cubed that
+/// Radial shell of the sphere kernels: the inner radius cubed that
 /// StartSphere and StartHemiSphere prepare once per call before their lanes,
 /// `exp2f(log2f(1 - thickness) * 3)`, through the device libm
 /// ([`shell_inner_cube`]). Thickness one is `log2f(+0) = -inf`, times three,
@@ -118,9 +121,9 @@ const fn rsqrt_estimates() -> [u16; 256] {
 }
 const RSQRT_ESTIMATE: [u16; 256] = rsqrt_estimates();
 
-// Current ARM FRSQRTE normalized positive domain. Integer midpoint/table
-// quantization, not a host reciprocal sqrt. Native refinement FRSQRTS uses
-// fused rounding of (3-a*b)/2 after the preceding separate f32 FMUL.
+// The normalized positive domain. The estimate is an integer midpoint table
+// lookup, not a host reciprocal square root. The refinement computes
+// (3-a*b)/2 with one rounding after the separate f32 multiply.
 fn rsqrt_estimate(value: f32) -> f32 {
     assert!(value.is_normal() && value > 0.0);
     let bits = value.to_bits();
@@ -131,18 +134,18 @@ fn rsqrt_estimate(value: f32) -> f32 {
     f32::from_bits(estimate_bits)
 }
 
-/// The FRSQRTE table lookup alone, for replaying recorded estimates.
+/// The estimate table lookup alone, for replaying recorded estimates.
 #[cfg(test)]
 pub(crate) fn native_rsqrt_estimate(value: f32) -> f32 {
     rsqrt_estimate(value)
 }
 
-/// FRSQRTE followed by two FRSQRTS refinements, each multiplying the current
-/// estimate by the square first. Every caller first masks its square at or
-/// below a positive threshold, so the value is normal positive, +inf or NaN.
-/// FRSQRTE of +inf is +0, whose first refinement multiplies back into inf
-/// times zero, so the native result is NaN, as it is for NaN input; both
-/// return NaN here and the caller's output refusal reports them.
+/// The reciprocal square root estimate followed by two refinements, each
+/// multiplying the current estimate by the square first. Every caller first
+/// masks its square at or below a positive threshold, so the value is normal
+/// positive, +inf or NaN. The estimate of +inf is +0, whose first refinement
+/// multiplies back into inf times zero, so the result is NaN; NaN input is
+/// NaN too, and the caller's output refusal reports both.
 pub(crate) fn native_rsqrt(value: f32) -> f32 {
     if !(value.is_normal() && value > 0.0) {
         return f32::NAN;
@@ -153,7 +156,7 @@ pub(crate) fn native_rsqrt(value: f32) -> f32 {
     r1 * step(value * r1, r1)
 }
 
-/// Native vector log2/exp2 cube-root kernel. It is not the host cbrt intrinsic.
+/// The log2/exp2 cube root, not the host cbrt intrinsic.
 /// The scalar shell preparation is the source log2f/exp2f call sequence
 /// through the device libm ([`shell_inner_cube`]).
 fn sphere_radius(radius: f32, thickness: f32, random: f32) -> f32 {
@@ -314,7 +317,7 @@ impl ArcLoopClock {
 
 /// StartCone's Loop arc angle for one lane, in radians. The lane's fraction of
 /// the update slice is the emission spacing times its lane index, clamped to
-/// [0, 1] with the native maximum and minimum; the angle clock interpolates
+/// [0, 1] with the maximum and minimum operations of ``armf``; the angle clock interpolates
 /// from the current value (fraction zero) to the previous one (fraction one),
 /// both doubled and scaled by pi as rounded to f32, all in binary64. A positive
 /// arc-spread step (arc in radians times spread, in f32) floors the clock to
@@ -343,7 +346,7 @@ pub fn loop_arc_angle(
 
 /// The lane's arc clock time the Loop and PingPong arc modes share, in
 /// binary64: the lane's fraction of the slice (spacing times lane index,
-/// clamped to [0, 1] with the native maximum and minimum) interpolates from
+/// clamped to [0, 1] with the maximum and minimum operations of ``armf``) interpolates from
 /// the current clock (fraction zero) to the previous one (fraction one), each
 /// doubled and scaled by pi as rounded to f32; a positive arc-spread step (in
 /// f32) floors the time to its multiple.
@@ -365,8 +368,8 @@ fn arc_clock_time(clock: ArcLoopClock, spacing: f32, lane_index: f32, step: f32)
 /// 1e-6 radians in magnitude (the engine's own threshold; a NaN arc is not
 /// below it) every lane sits at +0 and the clock is not read. Otherwise the
 /// lane's arc clock time (shared with the Loop mode, spread step included) is
-/// scaled by the ARM reciprocal estimate of the arc in radians, refined twice,
-/// widened to binary64, and reduced modulo 2 with the C remainder (fmod,
+/// scaled by the reciprocal estimate of the arc in radians, refined twice
+/// (``arm_reciprocal``), widened to binary64, and reduced modulo 2 with the C remainder (fmod,
 /// exact); the remainder is narrowed to f32 and taken in magnitude. A
 /// magnitude of one or more folds back as (2 - p) - 1e-6, then only the
 /// fractional part is kept (the whole part through the saturating
@@ -395,8 +398,9 @@ pub fn pingpong_arc_angle(
     arc * (phase - whole)
 }
 
-/// The ARM reciprocal estimate (FRECPE, flush-to-zero off, round to nearest)
-/// refined by two FRECPS/FMUL steps, with the estimate kept for a zero input:
+/// The reciprocal estimate (flush-to-zero off, round to nearest) refined by
+/// two fused steps (recps, one rounding), with the estimate kept for a zero
+/// input:
 /// the sequence the engine's shape kernels divide by. Defined for every f32:
 /// NaN gives NaN, an infinity a signed zero estimate, and a magnitude below
 /// 2^-128 (zero included) a signed infinite one.
@@ -447,7 +451,7 @@ fn arm_frecpe(value: f32) -> f32 {
     f32::from_bits(sign | ((result_exponent as u32) << 23) | result_fraction)
 }
 
-/// FRECPS: 2 - a * b with one rounding; an infinity times a zero gives 2, any
+/// The reciprocal refinement step: 2 - a * b with one rounding; an infinity times a zero gives 2, any
 /// other infinite product the infinity of the opposite sign.
 fn arm_frecps(a: f32, b: f32) -> f32 {
     if a.is_nan() || b.is_nan() {
@@ -480,7 +484,7 @@ fn arm_frecps(a: f32, b: f32) -> f32 {
     sum as f32
 }
 
-/// ARM FMAX: NaN if either operand is NaN, +0 over -0.
+/// The maximum operation: NaN if either operand is NaN, +0 over -0.
 fn arm_fmax(a: f32, b: f32) -> f32 {
     if a.is_nan() || b.is_nan() {
         f32::NAN
@@ -493,7 +497,7 @@ fn arm_fmax(a: f32, b: f32) -> f32 {
     }
 }
 
-/// ARM FMIN: NaN if either operand is NaN, -0 over +0.
+/// The minimum operation: NaN if either operand is NaN, -0 over +0.
 fn arm_fmin(a: f32, b: f32) -> f32 {
     if a.is_nan() || b.is_nan() {
         f32::NAN
@@ -591,7 +595,7 @@ pub(crate) mod shell_arms {
 /// in radians, or the single-sided edge's radius). With a positive step
 /// (extent times spread) the value snaps down to a multiple of the step: the
 /// step count is the extent over the step rounded up, and both roundings go
-/// through a saturating float-to-int conversion (FCVTZS, NaN to zero) and a
+/// through a saturating float-to-int conversion (toward zero, NaN to zero) and a
 /// compare-and-adjust, not floor/ceil, which agree only below 2^31. The
 /// quotient keeps the native order ((step * count) * u) / step; the
 /// algebraic shortcut count * u rounds differently for a few draws per
@@ -844,8 +848,8 @@ pub fn circle_burst_divisor(arc_deg: f32, accepted: std::num::NonZeroU32) -> std
     }
 }
 
-/// The BurstSpread reciprocal of a divisor converted to f32: the ARM estimate
-/// refined twice (the same FRECPE/FRECPS pair as the Initial lifetime
+/// The BurstSpread reciprocal of a divisor converted to f32: the estimate
+/// refined twice (the same estimate and steps as the Initial lifetime
 /// reciprocal). The divisor is at least one, so the estimate never meets
 /// zero, infinity or a subnormal.
 pub fn burst_spread_reciprocal(divisor: std::num::NonZeroU32) -> f32 {
@@ -1045,9 +1049,10 @@ mod tests {
             .collect()
     }
     #[test]
-    fn current_arm64_vectors_match_scalar_shape_equations() {
+    fn source_vectors_match_scalar_shape_equations() {
         let vectors = source_vectors();
         assert_eq!(vectors.len(), 360);
+        // A source-vector corpus produced independently of this crate's output.
         let mut failures = Vec::new();
         for v in vectors {
             let r = &v.random;

@@ -21,7 +21,7 @@
 //! finite duration replaces the time every start curve reads. None of it
 //! reaches the child's emission clock.
 //!
-//! Only the size bit is transcribed: it is the only bit an edge with a child
+//! Only the size bit is supported: it is the only bit an edge with a child
 //! sets in the weather effects. The other bits, and the parent size-module
 //! configurations the size path does not compose, are refused by name.
 
@@ -42,7 +42,7 @@ const MINUS_PERCENT: f32 = f32::from_bits(0xbc23_d70a);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refused {
-    /// An inherit bit this port does not transcribe, by name.
+    /// An inherit bit this crate does not support, by name.
     Bit(&'static str),
     /// A properties word with bits outside the five inherit flags.
     UnknownBits,
@@ -50,7 +50,7 @@ pub enum Refused {
     /// compose, by name.
     ParentSize(&'static str),
     /// A child command whose block carries a non-neutral word the child side
-    /// does not transcribe, by name.
+    /// does not support, by name.
     Block(&'static str),
 }
 
@@ -86,11 +86,11 @@ pub struct InheritParent {
 
 impl InheritSize {
     /// The inherit law of an edge's properties word. `Ok(None)` for zero.
-    /// `size_over_lifetime` is the parent's enabled SizeModule, `size_3d`
-    /// whether the parent's arrays store three size axes (start size 3D, or a
-    /// size module with separate axes). The parent admission refuses a system
-    /// with a SizeBySpeed module (no consumer), which the size path would read
-    /// after the SizeModule.
+    /// `size_over_lifetime` is the parent's enabled SizeModule (its `_curve`),
+    /// `size_3d` whether the parent's arrays store three size axes (start size
+    /// 3D, or a size module with separate axes). The parent admission refuses
+    /// a system with a SizeBySpeed module (no consumer), which the size path
+    /// would read after the SizeModule.
     pub fn from_parent(properties: u32, size_over_lifetime: Option<&SizeOverLifetimeParams>, size_3d: bool)
         -> Result<Option<Self>, Refused> {
         if properties == 0 {

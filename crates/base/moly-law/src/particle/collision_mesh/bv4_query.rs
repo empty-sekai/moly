@@ -5,7 +5,7 @@
 //!   the rotation bits are exactly (0, 0, 0, 1) and the translation bits are
 //!   zero), the local ray (`R^T c - R^T t`), the ordered traversal of the
 //!   quantised nodes (node bounds widened by the radius and 1e-7, the
-//!   reciprocal direction by FRECPE, one FRECPS step and one unfused Newton
+//!   reciprocal direction by an estimate, one fused refinement step and one unfused Newton
 //!   step, lanes tested 3 down to 0 against the running distance plus 1e-3,
 //!   leaves swept at once, inner nodes pushed in the order the sorting bits
 //!   of the direction's octant give), or every triangle when the tree has no

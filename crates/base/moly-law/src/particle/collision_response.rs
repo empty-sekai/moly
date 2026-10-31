@@ -2,8 +2,8 @@
 //! response (World type, 3D mode, High quality).
 //!
 //! `CollisionResponse::respond` is one hit of the module's reverse hit loop in
-//! the engine's arithmetic: every operation a NaN can reach follows the ARM
-//! rules, and the associations are the engine's. The whole module update, from
+//! the engine's arithmetic: every operation a NaN can reach follows the
+//! floating-point rules, and the associations are the engine's. The whole module update, from
 //! the query packs to the child commands, is
 //! [`crate::particle::collision_query::CollisionLaw::update`]; `apply_hits`
 //! stays an entry for hits already supplied in simulation coordinates.
@@ -155,7 +155,7 @@ pub fn world_hit_to_simulation(
 /// collider filtering, the sweep and the hit response.
 pub fn build_query(input: QueryInput) -> CollisionQuery {
     // Velocity sum, the optional speed modifier, then dt, subtracted from the
-    // current position; component-wise f32 with the ARM NaN rules.
+    // current position; component-wise f32 with the NaN rules.
     let total: [f32; 3] = std::array::from_fn(|axis| {
         let total = a::add(input.persistent_velocity[axis], input.animated_velocity[axis]);
         match input.speed_modifier {

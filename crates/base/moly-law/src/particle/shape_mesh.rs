@@ -1,6 +1,8 @@
 //! Mesh shape in its Triangle placement: ShapeModule's mesh cache and the
 //! triangle sample of one four-lane birth group.
-//! Transcribed from the current JP client's engine library.
+//!
+//! Tier: `bit-exact`: results, the order of operations and the constants match
+//! the reference bit for bit.
 //!
 //! The cache is what the module rebuilds whenever its mesh data changes.
 //! Each included submesh (every submesh, or only the one the material index
@@ -56,7 +58,7 @@ pub enum MeshCacheRefused {
     /// A submesh whose index count is not a multiple of three.
     PartialTriangle,
     /// No triangle is included. ShapeModule::Start then stores nothing and
-    /// draws nothing for the group; that path is not transcribed.
+    /// draws nothing for the group; that path is not supported.
     NoTriangles,
 }
 
@@ -90,7 +92,7 @@ pub(crate) mod arms {
     }
 }
 
-/// The triangle area of the cache, in the native operand order.
+/// The triangle area of the cache, in the source operand order.
 pub fn triangle_area(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> f32 {
     let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
     let e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
@@ -109,7 +111,7 @@ pub fn multiply_colour(start: [u8; 4], mesh: [u8; 4]) -> [u8; 4] {
     })
 }
 
-/// Round to nearest even in f32, as the native pick does: add and subtract
+/// Round to nearest even in f32: add and subtract
 /// 2^23 carrying the value's sign.
 fn round_even(x: f32) -> f32 {
     let m = f32::from_bits(0x4b00_0000 | (x.to_bits() & 0x8000_0000));
@@ -283,7 +285,7 @@ impl MeshShapeCache {
     }
 }
 
-/// Receipt rows of the native mesh run: the module cache, every group's
+/// Receipt rows of the mesh run: the module cache, every group's
 /// Store boundary and every stored lane, colours and dead marks included.
 #[cfg(test)]
 pub(crate) fn replay_mesh_rows(text: &str) -> MeshReplay {
@@ -436,8 +438,8 @@ pub(crate) fn replay_mesh_rows(text: &str) -> MeshReplay {
             if group.after_rng != random(&words(g.get("rngAfterStore").unwrap())) {
                 red.push(format!("rngAfterStore@{slot}"));
             }
-            // The refusing entry point must accept every finite native group
-            // and advance the stream exactly as native.
+            // The refusing entry point must accept every finite reference group
+            // and advance the stream exactly as the reference does.
             let mut advanced = stream;
             law.sample_group_with_mesh(&mut batch, &mut advanced, owner, world, emitter_scale, axis_flag, Some(&cache))
                 .unwrap_or_else(|refused| panic!("case {case}: finite native group refused {refused:?}"));
@@ -501,7 +503,7 @@ mod tests {
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", std::path::Path::new(&path).display()))
     }
 
-    /// The native rows of the mesh run: 212 cases, 380 groups, the cache and
+    /// The reference rows of the mesh run: 212 cases, 380 groups, the cache and
     /// every stored lane bit for bit. Each named mutant of the transcription
     /// must go red somewhere, except the table-start rounding, which the rows
     /// cannot observe (the walk reaches the same triangle from either start

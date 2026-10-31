@@ -32,16 +32,18 @@
 //! MTD keeps the first of equal penetrations, so the cooked leaf order is the
 //! order the triangles are visited in. The vector code of this path has no
 //! fused multiply-add; every operation below is a separate binary32
-//! operation in the engine's association, through the ARM rules (NaN
-//! propagation, FMIN/FMAX signed zeros, the reciprocal and reciprocal square
-//! root estimate tables and their fused step instructions).
+//! operation in the engine's association, through the floating-point rules
+//! (NaN propagation, the signed-zero order of the minimum and maximum, the
+//! reciprocal and reciprocal square root estimate tables and their fused
+//! refinement steps).
 //!
 //! The BV4 side runs the same MTD body with its own box midphase; its
 //! sweep, box queries and cooking are described in those files.
 //!
 //! The sphere sweep against a BoxCollider's box (`box_sweep`) is the
 //! capsule-box sweep's GJK raycast, and for an initial overlap the GJK
-//! penetration and the EPA, in the vector library's NEON arithmetic.
+//! penetration and the EPA, in the vector arithmetic of `vector`, where
+//! every step is one binary32 operation and nothing fuses.
 //!
 //! What is not covered refuses by name: other cooking options, a rotated
 //! collider on the BVH33 midphase (the BV4 queries take any rotation), a

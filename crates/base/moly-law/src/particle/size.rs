@@ -29,7 +29,7 @@ pub struct SizeOverLifetime {
 
 impl SizeOverLifetime {
     /// Each axis follows the engine's curve dispatch on the particle's
-    /// normalized age; a lane outside the transcribed evaluator is refused.
+    /// normalized age; a lane outside the supported evaluator is refused.
     pub fn from_params(params: &SizeOverLifetimeParams) -> Result<Self, &'static str> {
         let [x, y, z] = axis_curves(params);
         let axis = |curve| CurveSampler::new(curve, CurveTime::Normalized);

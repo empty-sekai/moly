@@ -2,8 +2,8 @@
 //! engine computes them.
 //!
 //! `Transform.eulerAngles = e` multiplies each component by the degree-to-radian
-//! constant in managed code and converts the result natively with rotation
-//! order ZXY: one device `sincosf` per half angle, then a scalar product that
+//! constant, then converts the result with rotation
+//! order ZXY: one `sincosf` per half angle, then a scalar product that
 //! keeps its zero terms (so the signs of zero components follow the engine).
 //! `Transform::SetRotation` brings that world rotation into the parent's frame
 //! through every ancestor, root first (the conjugate of the ancestor's local
@@ -34,7 +34,7 @@ pub fn degrees_to_radians(degrees: [f32; 3]) -> [f32; 3] {
     degrees.map(|v| v * DEG2RAD)
 }
 
-/// The native Euler conversion in rotation order ZXY (radians in, quaternion
+/// The Euler conversion in rotation order ZXY (radians in, quaternion
 /// `(x, y, z, w)` out), every operation in the engine's order.
 pub fn euler_to_quaternion_zxy(radians: [f32; 3]) -> [f32; 4] {
     let sincos = |v: f32| {
@@ -209,7 +209,7 @@ mod tests {
             }
         }
         // The product entry: the four directions under the site's identity
-        // ancestors, one and two of them, against the native stores.
+        // ancestors, one and two of them, against the recorded stores.
         let identity = SourceTrs { t: [0.0; 3], q: [0.0, 0.0, 0.0, 1.0], s: [1.0; 3] };
         for d in 0..4u8 {
             for (label, ancestors) in [("two-identity-ancestors", vec![identity; 2]), ("one-identity-ancestor", vec![identity])] {

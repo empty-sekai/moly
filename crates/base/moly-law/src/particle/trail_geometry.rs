@@ -10,7 +10,7 @@
 //!
 //! Inputs are the view (world to camera), the simulation owner (identity for
 //! World simulation), the trail module's clock and the particles. Everything
-//! outside the transcribed composition is refused, never approximated.
+//! outside the supported composition is refused, never approximated.
 use super::armf as a;
 use super::gradient::{time_code, GradientMode};
 use super::random::ParticleRandom;
@@ -838,13 +838,13 @@ mod tests {
             v.position[2].to_bits(), v.colour, v.u.to_bits(), v.v.to_bits()]).collect()
     }
 
-    /// Native trail geometry rows: SetMatrices, the trail job's Initialize and
-    /// RenderJobCommon executed in the engine library over the exported trail
+    /// Reference trail geometry rows: SetMatrices, the trail job's Initialize
+    /// and RenderJobCommon over the exported trail
     /// blocks on recorded rings, edge cases and random cases (all four texture
     /// modes, Local and World simulation, world-space trails, shadow pass, u16
     /// and u32 indices, NaN-producing inputs). Every vertex word and index of
     /// every row the receipt replays must match; every row it marks as outside
-    /// the transcription must be refused. Three input perturbations must each
+    /// the reference must be refused. Three input perturbations must each
     /// change the output somewhere: the tail clip removed (clock at the oldest
     /// point), the width taken as sqrt(x*y) with sizes not 3D, and a vertex
     /// count of two per recorded point.
@@ -863,7 +863,7 @@ mod tests {
             let rings = rings_of(case);
             let result = law_of(case).and_then(|law| run(case, &rings, &law, time, None).map(|m| (law, m)));
             if !at(row, "replay").as_bool().unwrap() {
-                assert!(result.is_err(), "{id}: the receipt marks this row outside the transcription ({:?}); it must be refused",
+                assert!(result.is_err(), "{id}: the receipt marks this row outside the reference ({:?}); it must be refused",
                     at(row, "refusal"));
                 refused += 1;
                 continue;

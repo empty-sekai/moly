@@ -4,7 +4,7 @@
 //! capsule-triangle contacts (`pcmDistanceSegmentTriangleSquared`, the
 //! inlined normal selection, `generateContacts`, `generateEEContactsMTD`),
 //! the deepest contact per triangle and over the batch, and up to four
-//! depenetration steps. The vector forms are the NEON ones: `V3Dot` adds the
+//! depenetration steps. The vector forms: `V3Dot` adds the
 //! zero fourth lanes, the square root is `a * rsqrt<4>(a)` and the
 //! reciprocal four refinement steps. The midphase is the mesh's own: the
 //! RTree box traversal for BVH33, the vertex-space box through the BV4

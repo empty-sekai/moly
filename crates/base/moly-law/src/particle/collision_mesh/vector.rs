@@ -1,5 +1,6 @@
 //! Vector, quaternion and matrix helpers in the engine's evaluation order.
-//! Each step is one binary32 operation through the ARM rules; nothing fuses.
+//! Each step is one binary32 operation through the floating-point rules;
+//! nothing fuses.
 use crate::particle::armf as a;
 
 pub(super) type V3 = [f32; 3];
@@ -89,7 +90,8 @@ pub(super) fn sel_max(x: f32, y: f32) -> f32 {
     if x > y { x } else { y }
 }
 
-/// FRECPE and `n` steps `e = e * FRECPS(x, e)`.
+/// The reciprocal estimate and `n` refinement steps `e = e * c`, where each
+/// step's `c` is `2 - x * e` rounded once (x and e as the step input).
 pub(super) fn recip_n(x: f32, n: usize) -> f32 {
     let mut e = a::recip_estimate(x);
     for _ in 0..n {
@@ -98,7 +100,7 @@ pub(super) fn recip_n(x: f32, n: usize) -> f32 {
     e
 }
 
-/// FRSQRTE and `n` steps `r = r * FRSQRTS(r*r, x)`.
+/// The reciprocal square root estimate and `n` refinement steps `r = r * step(r*r, x)`.
 pub(super) fn rsqrt_n(x: f32, n: usize) -> f32 {
     let mut r = a::rsqrt_estimate(x);
     for _ in 0..n {
@@ -107,13 +109,13 @@ pub(super) fn rsqrt_n(x: f32, n: usize) -> f32 {
     r
 }
 
-/// The vector library's square root: `a == 0 ? a : a * rsqrt<4>(a)`.
+/// The vector square root: `a == 0 ? a : a * rsqrt<4>(a)`.
 #[inline]
 pub(super) fn fsqrt(x: f32) -> f32 {
     if x == 0.0 { x } else { a::mul(x, rsqrt_n(x, 4)) }
 }
 
-/// The vector library's reciprocal, four refinement steps.
+/// The vector reciprocal, four refinement steps.
 #[inline]
 pub(super) fn frecip(x: f32) -> f32 {
     recip_n(x, 4)

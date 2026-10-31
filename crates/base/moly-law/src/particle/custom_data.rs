@@ -57,7 +57,7 @@ pub struct CustomData {
 
 impl CustomData {
     /// Every component follows the engine's curve dispatch on the particle's
-    /// normalized age; a lane outside the transcribed evaluator is refused. A
+    /// normalized age; a lane outside the supported evaluator is refused. A
     /// repeat wrap past the last key is admitted only where the cache history
     /// cannot change a result ([`CurveSampler::new`]): this form is for a host
     /// that does not evaluate the lanes past its calls' ends.

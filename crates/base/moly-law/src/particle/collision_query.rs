@@ -7,7 +7,7 @@
 //! and shares everything from the response on
 //! ([`CollisionLaw::update_planes`]).
 //!
-//! Every operation follows the ARM rules in the engine's order. The scene side
+//! Every operation follows the floating-point rules in the engine's order. The scene side
 //! (the broadphase overlap, each collider's world bounds and the sphere sweep
 //! against one collider) is the [`CollisionScene`] trait; the law reads only
 //! what the engine reads back from it.

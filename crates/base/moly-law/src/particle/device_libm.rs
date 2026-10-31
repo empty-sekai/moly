@@ -4,38 +4,36 @@
 //! `exp2f` of the sphere kernels' shell preparation (see [`super::shape::Shell`]).
 //!
 //! The Bezier time solve of a weighted AnimationCurve segment calls them through the
-//! dynamic linker, so its value is whatever the phone's libm returns. On Android that is
-//! bionic's libm. Since Android 10 bionic builds `logf`, `exp` and `cosf` from Arm
+//! dynamic linker, so its value is whatever the platform's libm returns. On Android that is
+//! bionic's libm, which since Android 10 builds `logf`, `exp` and `cosf` from Arm
 //! Optimized Routines and `atan2f` (with `atanf`) from FreeBSD's msun; Android 7 to 9
-//! built all four from msun. This module reproduces the Android 10 and later functions:
+//! built all four from msun. This module implements the Android 10 and later functions
+//! and the shell preparation exactly; the older functions are out of its scope. Its
+//! results must satisfy:
 //!
-//! * The multiply-adds the arm64 build fuses are fused here (`f64::mul_add`, one
-//!   rounding on every target); the ones it leaves as a multiply and an add stay so.
-//!   The msun functions fuse nothing.
-//! * Every other operation is one IEEE operation in the machine code's order, and the
-//!   rounding instructions are reproduced (`frinta` and `fcvtas` round half away from
-//!   zero, the conversion to single precision rounds to nearest even).
-//! * NaN results are NaN; their payload bits are not reproduced. No caller here reads a
-//!   NaN payload: each function returns NaN for a NaN argument whatever its payload, and
-//!   the solve only tests NaN-ness.
+//! * Every fused multiply-add is fused here (`f64::mul_add`, one rounding on every
+//!   target), and every multiply followed by an add that is not fused stays two
+//!   roundings. The msun functions fuse nothing.
+//! * Every other operation is one IEEE operation in the function's order.
+//! * Halves round away from zero where the value is rounded to an integer (the
+//!   `frinta` rounding), and the result rounds to nearest even when narrowed to a
+//!   single precision, and integer conversions saturate toward zero with NaN to 0.
+//! * A NaN argument gives NaN; the payload bits are not part of the contract. No
+//!   caller here reads a NaN payload: each function returns NaN for a NaN argument
+//!   whatever its payload, and the solve only tests NaN-ness.
 //!
-//! How this is known: the AOSP arm64 emulator images for API 29, 31, 33, 35 and 36 carry
-//! these functions with these table values; executed in an emulator they give the same
-//! bits as this module. The API 24 and 28 images carry the msun `logf`, `exp` and
-//! `cosf`; this module does not reproduce those. `sincosf`, `log2f` and `exp2f` are the
-//! API 29 image's, executed in an emulator over every path of each function.
+//! The reference values come from standalone executions of the platform's libm on
+//! the platform's own test images (API 29, 31, 33, 35 and 36) over every path of
+//! each function; the tests replay those rows.
 //!
-//! Ported from Arm Optimized Routines (`math/logf.c`, `math/logf_data.c`, `math/exp.c`,
-//! `math/exp_data.c`, `math/cosf.c`, `math/sincosf.c`, `math/sincosf.h`,
-//! `math/sincosf_data.c`, `math/log2f.c`, `math/log2f_data.c`, `math/exp2f.c`,
-//! `math/exp2f_data.c`),
-//! Copyright (c) 2017-2018 Arm Limited, MIT licence, and from FreeBSD msun
-//! (`e_atan2f.c`, `s_atanf.c`), Copyright (C) 1993 by Sun Microsystems, Inc.; see the
-//! repository's third-party notices.
+//! The Rust source derives from Arm Optimized Routines (Copyright (c) 2017-2018
+//! Arm Limited, MIT licence) and from FreeBSD msun (Copyright (C) 1993 by Sun
+//! Microsystems, Inc.); see the repository's third-party notices for the file
+//! list and the licences.
 
 /// `logf(x)`.
 ///
-/// Fused on the device: `invc * z - 1`, `ln2 * k + logc`, `A1 * r + A2`,
+/// Fused: `invc * z - 1`, `ln2 * k + logc`, `A1 * r + A2`,
 /// `A0 * r2 + y` and `r2 * y + (y0 + r)`.
 pub fn logf(x: f32) -> f32 {
     let mut ix = x.to_bits();
@@ -78,7 +76,7 @@ const LOGF_A: [f64; 3] = [
 
 /// `exp(x)`.
 ///
-/// Fused on the device: both reduction steps (`-ln2hi/N * kd + x` and
+/// Fused: both reduction steps (`-ln2hi/N * kd + x` and
 /// `kd * -ln2lo/N + r`), `C3 * r + C2`, `r2 * (C2 + C3 r) + (tail + r)`,
 /// `r * C5 + C4`, `r4 * (C4 + C5 r) + ...` and `tmp * scale + scale`; in the branch
 /// whose result is subnormal, `scale * tmp` and its sum are separate operations.
@@ -147,19 +145,19 @@ const EXP_NEGLN2HIN: u64 = 0xbf76_2e42_fefa_0000;
 const EXP_NEGLN2LON: u64 = 0xbd0c_f79a_bc9e_3b3a;
 const EXP_C: [u64; 4] = [0x3fdf_ffff_ffff_fdbd, 0x3fc5_5555_5555_543c, 0x3fa5_5555_cf17_2b91, 0x3f81_1111_67a4_d017];
 
-/// arm64 `frinta`: to the nearest integer, halves away from zero.
+/// Rounding to the nearest integer, halves away from zero (the `frinta` rounding).
 fn round_half_away(x: f64) -> f64 {
     x.round()
 }
 
-/// arm64 `fcvtas`: to the nearest integer, halves away from zero, saturating, NaN to 0.
+/// The same rounding, converted to a 64-bit integer with saturating NaN-to-0 semantics (a saturating convert of a rounded value).
 fn round_half_away_to_i64(x: f64) -> i64 {
     x.round() as i64
 }
 
 /// `cosf(y)`.
 ///
-/// Fused on the device: the fast reduction `x - kd * pi/2`, and in the polynomials
+/// Fused: the fast reduction `x - kd * pi/2`, and in the polynomials
 /// `C0 + x2 C1`, `C3 + x2 C4`, `(C0 + x2 C1) + x4 C2`, `S2 + x2 S3` and `x + x3 S1`.
 /// The last cosine term `c + x6 (C3 + x2 C4)` is fused for |y| < pi/4 only; after a
 /// reduction it, and the last sine term `s + x7 (S2 + x2 S3)`, are a multiply and an
@@ -218,7 +216,7 @@ pub fn cosf(y: f32) -> f32 {
 
 /// `sincosf(y)`: `(sin y, cos y)`.
 ///
-/// Fused on the device, on every path: the fast reduction `x - kd * pi/2` and every
+/// Fused on every path: the fast reduction `x - kd * pi/2` and every
 /// polynomial term, the last sine term `s + x5 (S2 + x2 S3)` and the last cosine term
 /// `c + x6 (C3 + x2 C4)` included (unlike `cosf`, whose last terms after a reduction are
 /// a multiply and an add). Below 2^-12 the pair is `(y, 1)`. After a reduction the
@@ -324,7 +322,7 @@ const SINCOSF: [SinCosTable; 2] = [
 
 /// `log2f(x)`.
 ///
-/// Fused on the device: `invc * z - 1`, `A1 * r + A2`, `A0 * r2 + y`, `A3 * r + y0`
+/// Fused: `invc * z - 1`, `A1 * r + A2`, `A0 * r2 + y`, `A3 * r + y0`
 /// and `r2 * y + p`; `logc + k` is a separate add. No errno is set (the image is built
 /// without it): +-0 gives -inf, a negative or NaN argument NaN.
 pub fn log2f(x: f32) -> f32 {
@@ -371,7 +369,7 @@ const LOG2F_A: [u64; 4] = [0xbfd712b6f70a7e4d, 0x3fdecabf496832e0, 0xbfe715479ff
 
 /// `exp2f(x)`.
 ///
-/// Fused on the device: `C0 * r + C1`, `r * C2 + 1` and `r2 * z + y`; the shift, the
+/// Fused: `C0 * r + C1`, `r * C2 + 1` and `r2 * z + y`; the shift, the
 /// reduction and the final scaling are separate operations. -inf gives +0, x at or
 /// below -150 gives +0 and a positive x at or above 128 gives +inf (no errno); inf and
 /// NaN give `x + x`.
@@ -721,7 +719,7 @@ mod native_tests {
         (a.is_nan() && f64::from_bits(native).is_nan()) || a.to_bits() == native
     }
 
-    // Rows of the device libm executed in an emulator: [fn, in0, in1, out_lo, out_hi]
+    // Reference rows of the device libm: [fn, in0, in1, out_lo, out_hi]
     // with fn 0 logf, 1 cosf, 2 exp(f64(f32) / 3), 3 atan2f(y, x), 4 exp of raw f64 bits.
     // NaN results compared as a class.
     #[test]

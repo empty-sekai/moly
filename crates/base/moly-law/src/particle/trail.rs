@@ -47,7 +47,7 @@ pub struct TrailRecording {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refused {
-    /// Ribbon trails share points across particles; not transcribed.
+    /// Ribbon trails share points across particles; not supported.
     Ribbon,
     /// Curve-mode lifetime or width reads the animation curve evaluator.
     CurveMode(&'static str),
@@ -61,7 +61,7 @@ pub enum Refused {
     /// perceptual kernel that calls the device libm.
     PerceptualGradient,
     /// The view matrix is too close to singular: the engine takes its general
-    /// inverse, which is not transcribed.
+    /// inverse, which is not supported.
     SingularView,
     /// Linear colour space converts every channel with the device libm.
     LinearColour,
@@ -294,8 +294,8 @@ pub(crate) mod tests {
         u64::from_str_radix(s.trim_start_matches("0x"), 16).expect("hex word")
     }
 
-    /// Native recording rows: TrailModule::Update with CalculateLifetime and
-    /// the ring reallocation, executed in the engine library, over the five
+    /// Reference recording rows: TrailModule::Update with CalculateLifetime and
+    /// the ring reallocation, over the five
     /// exported recording blocks on birth-and-slice schedules and random
     /// cases (partial ranges, dt 0, newborn resets, size-affected lifetimes,
     /// world-space transforms, ages across 100 and NaN, capacities 1, 2 and 4

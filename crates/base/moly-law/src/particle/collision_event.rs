@@ -20,7 +20,7 @@ const RANDOM_SCALE: f32 = f32::from_bits(0x3400_0001);
 pub enum Refused {
     /// Not a Collision edge.
     Trigger,
-    /// Inherited properties are not transcribed for this trigger.
+    /// Inherited properties are not supported for this trigger.
     Properties,
     /// A probability outside [0, 1] or not finite.
     Probability,

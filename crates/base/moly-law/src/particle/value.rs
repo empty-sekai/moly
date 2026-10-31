@@ -1,42 +1,57 @@
-//! `MinMaxCurve` / `MinMaxGradient` 的逐式求值：粒子模块全部「随时间
-//! 变化的参数」共用这一族。
+//! Evaluation of `MinMaxCurve` and `MinMaxGradient`, the value families every
+//! time-varying parameter of the particle modules shares.
 //!
-//! 四曲线模式与五颜色模式的 `Evaluate` 是 `C# 可读`（UnityCsReference
-//! `ParticleSystemStructs.cs`，逐式转写，含 `Mathf.Lerp` 与 `Color.Lerp`
-//! 的 t 钳位——两者同样 `C# 可读`）。底层 `AnimationCurve.Evaluate` 与
-//! `Gradient.Evaluate` 落在 extern 墙后（两者在引擎里都是原生实现），
-//! 本文件的曲线与梯度求值是**行为口径**：按文档语义实现，逐条见函数
-//! 注释里的测量方案。
+//! Input: a value in one of its modes, the normalized time and the caller's
+//! lerp factor. Output: the scalar or RGBA value for that time and factor;
+//! neither input is clamped on the way in.
+//!
+//! The four curve modes and the five colour modes follow
+//! `MinMaxCurve.Evaluate` and `MinMaxGradient.Evaluate` (`C# readable`, the
+//! `Mathf.Lerp` and `Color.Lerp` time clamps included).
+//! `AnimationCurve.Evaluate` and `Gradient.Evaluate` behind them are native in
+//! the engine; this file's curve and gradient evaluation is a `behavioural
+//! spec`, implemented from their documented semantics, with a measurement plan
+//! in each function's comment.
+//! The particle modules evaluate curves through `curve::CurveSampler`, not
+//! through this file's [`Curve::evaluate`].
 
 use crate::particle::value::MinMaxCurve::{Constant, TwoConstants, TwoCurves};
 
-/// 一根动画曲线键。加权位（`weighted_mode` 的 bit0=入权 · bit1=出权）
-/// 激活时，该键相邻段的求值走三次 Bezier 路（见 `curve::bezier_interpolate`）；
-/// 未激活的权重位引擎在求值时代 1/3，存值不参与求值。
+/// One key of an animation curve. When a weighted bit (`weighted_mode` bit0
+/// the in weight, bit1 the out weight) is set, the segments beside this key
+/// evaluate through a cubic Bezier (see `curve::bezier_interpolate`); an
+/// unset weight bit is evaluated as 1/3, and the stored value does not enter
+/// the evaluation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CurveKey {
-    /// 键时刻，归一化到 [0,1]（粒子模块的曲线恒用归一化时间）。
+    /// The key time, normalized to [0,1]: particle module curves always use
+    /// normalized time.
     pub time: f32,
     pub value: f32,
-    /// 入切线（本键左侧段的右端斜率）。
+    /// The in tangent: the end slope of the segment left of this key.
     pub in_slope: f32,
-    /// 出切线（本键右侧段的左端斜率）。
+    /// The out tangent: the start slope of the segment right of this key.
     pub out_slope: f32,
-    /// 加权模式位（0=未加权 · 1=仅入权 · 2=仅出权 · 3=双权）。
-    /// 高于 bit1 的位求值不读（引擎只测 bit0/bit1），原样存。
+    /// The weighted mode bits (0 unweighted, 1 in weight only, 2 out weight
+    /// only, 3 both). Evaluation reads no bit above bit1 (the engine tests
+    /// bit0 and bit1 only); the field keeps the value as serialized.
     pub weighted_mode: u8,
-    /// 入权（本键作为段右端时的 Bezier 控制点权重）。
+    /// The in weight: this key's Bezier control weight as a segment's right
+    /// end.
     pub in_weight: f32,
-    /// 出权（本键作为段左端时的 Bezier 控制点权重）。
+    /// The out weight: this key's Bezier control weight as a segment's left
+    /// end.
     pub out_weight: f32,
 }
 
-/// 一根未加权键序列。多键按时刻升序给定；求值不排序（键序错是数据
-/// 损伤，由 schema 解析处拒绝，不由求值处默默修正）。
+/// A sequence of unweighted keys, given in ascending time. Evaluation does not
+/// sort (a key out of order is damaged data; the schema decoder refuses it
+/// rather than the evaluator correcting it silently).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Curve {
-    /// 曲线乘子：`Curve` 模式乘在求值结果上，`TwoCurves` 模式乘在
-    /// 插值结果上——两处都乘且只乘一次，见 `MinMaxCurve::evaluate`。
+    /// The curve multiplier: `Curve` mode multiplies the evaluated value,
+    /// `TwoCurves` mode multiplies the interpolated value; both multiply, each
+    /// exactly once (see `MinMaxCurve::evaluate`).
     pub multiplier: f32,
     pub keys: Vec<CurveKey>,
     /// The serialized AnimationCurve wrap before the first key
@@ -49,12 +64,12 @@ pub struct Curve {
     pub post_wrap: Option<u32>,
 }
 
-// ---- 加权段 ----
+// ---- Weighted segments ----
 
 /// The step override `InterpolateKeyframe` applies after either branch: +inf on
 /// `k0`'s out tangent or `k1`'s in tangent gives `k0.value`; otherwise -inf on
 /// either gives `k1.value`. The weighted (Bezier) branch itself is
-/// `curve::interpolate_keyframe`, transcribed from the engine.
+/// `curve::interpolate_keyframe`, which reproduces the engine's body.
 pub(crate) fn step_value(k0: CurveKey, k1: CurveKey) -> Option<f32> {
     // The positive-infinity branch returns before the negative check.
     if k0.out_slope == f32::INFINITY || k1.in_slope == f32::INFINITY {
@@ -67,19 +82,23 @@ pub(crate) fn step_value(k0: CurveKey, k1: CurveKey) -> Option<f32> {
 }
 
 impl Curve {
-    /// `AnimationCurve.Evaluate(time)` 的行为口径（未加权支）+ 引擎
-    /// 原生逐指令（加权支）。
+    /// `AnimationCurve.Evaluate(time)`: a `behavioural spec` for the unweighted
+    /// branch, `bit-exact` for the weighted branch.
     ///
-    /// 未加权段：按文档语义实现——区间内三次 Hermite（切线 = 键斜率 ×
-    /// 区间时长），首键前/末键后取端点值（钳位），单键恒返回该键值。
+    /// Unweighted segments are the documented cubic Hermite (each tangent the
+    /// key slope times the segment length); before the first key and past the
+    /// last the end values hold (clamping); a single key returns its value
+    /// everywhere. Two keys at the same time take the right key's value.
     ///
-    /// 加权段（左键出权位或右键入权位激活）：引擎的 Bezier 路，见
-    /// [`crate::particle::curve::interpolate_keyframe`]——加权段无文档语义，只有引擎式。
+    /// A weighted segment (the left key's out weight bit or the right key's in
+    /// weight bit set) takes the engine's Bezier path
+    /// ([`crate::particle::curve::interpolate_keyframe`]); weighted segments
+    /// have no documented semantics, only the engine form.
     ///
-    /// Editor 测量方案：`AnimationCurve` 键 (0,0,outSlope=0) 与 (1,1,
-    /// inSlope=0) 在 t=0.25 处求值应为 smoothstep 值 5/32 = 0.15625
-    /// （本模块测试已按此锚）；再用非对称斜率 (out=2,in=−1) 于
-    /// t=0.5 采一点核对 Hermite 而非线性。
+    /// Editor measurement plan: the `AnimationCurve` keys (0,0,outSlope=0) and
+    /// (1,1,inSlope=0) evaluate at t=0.25 to the smoothstep value
+    /// 5/32 = 0.15625 (a module test uses this anchor); then sample the
+    /// asymmetric slopes (out=2,in=-1) at t=0.5 to tell Hermite from linear.
     ///
     /// This is the documented Hermite form, not what the engine computes: in
     /// range `AnimationCurveTpl::Evaluate` evaluates the cached cubic of
@@ -99,7 +118,7 @@ impl Curve {
                 if time >= last.time {
                     return last.value;
                 }
-                // 上面的钳位保证此处 time 落在 (first.time, last.time)。
+                // The clamps above put `time` inside (first.time, last.time).
                 let i = keys
                     .windows(2)
                     .position(|w| w[0].time <= time && time < w[1].time)
@@ -107,7 +126,8 @@ impl Curve {
                 let (k0, k1) = (keys[i], keys[i + 1]);
                 let dt = k1.time - k0.time;
                 if !(dt > 0.0) {
-                    // 键时刻重合：区间宽度为 0，取右键值（左键已越过）。
+                    // Equal key times: zero-width segment, the right key's
+                    // value (the search has already passed the left key).
                     return k1.value;
                 }
                 if crate::particle::curve::weighted_segment(k0, k1) {
@@ -116,7 +136,7 @@ impl Curve {
                 let t = (time - k0.time) / dt;
                 let m0 = k0.out_slope * dt;
                 let m1 = k1.in_slope * dt;
-                // 标准 Hermite 基：a·v0 + b·m0 + c·v1 + d·m1。
+                // The standard Hermite basis: a*v0 + b*m0 + c*v1 + d*m1.
                 let t2 = t * t;
                 let t3 = t2 * t;
                 let a = 2.0 * t3 - 3.0 * t2 + 1.0;
@@ -129,18 +149,19 @@ impl Curve {
     }
 }
 
-/// 粒子参数的四值模式。`C# 可读`：`ParticleSystemCurveMode`
-/// { Constant=0, Curve=1, TwoCurves=2, TwoConstants=3 }，`Evaluate`
-/// 逐式转写自 `MinMaxCurve.Evaluate`。
+/// The four modes of a particle parameter. `C# readable`:
+/// `ParticleSystemCurveMode` { Constant=0, Curve=1, TwoCurves=2,
+/// TwoConstants=3 }, with `evaluate` following `MinMaxCurve.Evaluate`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MinMaxCurve {
-    /// 序列化名 `constant`（引擎内部存 `constantMax`）。
+    /// Serialized as `constant` (stored as `constantMax`).
     Constant(f32),
-    /// 序列化名 `curve`（引擎内部存 `curveMax` × `curveMultiplier`）。
+    /// Serialized as `curve` (stored as `curveMax` times `curveMultiplier`).
     Curve { multiplier: f32, max: Curve },
-    /// 序列化名 `twoConstants`（`constantMin`/`constantMax`）。
+    /// Serialized as `twoConstants` (`constantMin`/`constantMax`).
     TwoConstants { min: f32, max: f32 },
-    /// 序列化名 `twoCurves`（`curveMin`/`curveMax` 共用一个乘子）。
+    /// Serialized as `twoCurves` (`curveMin`/`curveMax`, one shared
+    /// multiplier).
     TwoCurves {
         multiplier: f32,
         min: Curve,
@@ -149,7 +170,7 @@ pub enum MinMaxCurve {
 }
 
 impl MinMaxCurve {
-    /// `MinMaxCurve.Evaluate(time, lerpFactor)`，`C# 可读`逐式：
+    /// `MinMaxCurve.Evaluate(time, lerpFactor)`, `C# readable`:
     ///
     /// ```text
     /// Constant     -> constantMax
@@ -159,9 +180,9 @@ impl MinMaxCurve {
     ///                lerpFactor) * multiplier
     /// ```
     ///
-    /// `Lerp` 是 `Mathf.Lerp`：`a + (b-a) * Clamp01(t)`——钳位可读，
-    /// 不是猜的。`lerpFactor` 是调用方给的显式随机（典型是 `Random.value`，
-    /// 每粒子一次，见 `emit` 的 spawn 口径）。
+    /// `Lerp` is `Mathf.Lerp`: `a + (b-a) * Clamp01(t)`. `lerpFactor` is the
+    /// caller's explicit random draw (typically `Random.value`, one per
+    /// particle, as in the spawn path of `emit`).
     ///
     /// The lanes go through [`Curve::evaluate`], not the engine's curve
     /// dispatch; particle modules use `curve::CurveSampler` instead.
@@ -177,12 +198,13 @@ impl MinMaxCurve {
     }
 }
 
-/// `Mathf.Lerp`：插值因子钳位到 [0,1]。`C# 可读`。
+/// `Mathf.Lerp`: the lerp factor is clamped to [0,1]. `C# readable`.
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t.clamp(0.0, 1.0)
 }
 
-/// `Color.Lerp`：RGBA 四分量各自 `Mathf.Lerp`，t 同样钳位。`C# 可读`。
+/// `Color.Lerp`: each of the four RGBA components through `Mathf.Lerp`, with
+/// the same clamp on t. `C# readable`.
 fn color_lerp(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
     let t = t.clamp(0.0, 1.0);
     [
@@ -197,22 +219,23 @@ pub use super::gradient::{Gradient, GradientAlphaKey, GradientColorKey};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum MinMaxGradient {
-    /// 序列化名 `color`（引擎内部存 `colorMax`）。
+    /// Serialized as `color` (stored as `colorMax`).
     Color([f32; 4]),
-    /// 序列化名 `gradient`（`gradientMax`）。
+    /// Serialized as `gradient` (`gradientMax`).
     Gradient(Gradient),
-    /// 序列化名 `twoColors`（`colorMin`/`colorMax`）。
+    /// Serialized as `twoColors` (`colorMin`/`colorMax`).
     TwoColors { min: [f32; 4], max: [f32; 4] },
-    /// 序列化名 `twoGradients`（`gradientMin`/`gradientMax`）。
+    /// Serialized as `twoGradients` (`gradientMin`/`gradientMax`).
     TwoGradients { min: Gradient, max: Gradient },
-    /// 序列化名 `randomColor`：**插值因子当时间用**——`gradientMax.
-    /// Evaluate(lerpFactor)`，不是 `Evaluate(time)`。这是真源自己的
-    /// 怪写法（`C# 可读`），由测试钉住，别顺手「修好」它。
+    /// Serialized as `randomColor`, where the lerp factor is the time:
+    /// `gradientMax.Evaluate(lerpFactor)`, not `Evaluate(time)` (`C#
+    /// readable`). A test pins this order (0 and 1 are the ends of both
+    /// clocks), so a change to it is a deliberate one.
     RandomColor(Gradient),
 }
 
 impl MinMaxGradient {
-    /// `MinMaxGradient.Evaluate(time, lerpFactor)`，`C# 可读`逐式：
+    /// `MinMaxGradient.Evaluate(time, lerpFactor)`, `C# readable`:
     ///
     /// ```text
     /// Color         -> colorMax
@@ -238,7 +261,8 @@ impl MinMaxGradient {
 mod tests {
     use super::*;
 
-    /// 平滑两键：值域 [0,1]、双端切线为 0 的 smoothstep 形。
+    /// Two smooth keys: range [0,1], zero tangents at both ends
+    /// (smoothstep shape).
     fn smoothstep_curve() -> Curve {
         Curve {
             multiplier: 1.0,
@@ -253,9 +277,10 @@ mod tests {
 
     #[test]
     fn hermite_segment_matches_smoothstep_anchor() {
-        // 键 (0,0,切0) 与 (1,1,切0) 的 Hermite 恰是 smoothstep
-        // 3t^2-2t^3。t=0.25 -> 3/16 - 2/64 = 0.1875 - 0.03125 = 0.15625。
-        // 手算锚，非对拍。
+        // The Hermite of the keys (0,0,tangent 0) and (1,1,tangent 0) is
+        // exactly smoothstep, 3t^2-2t^3. At t=0.25:
+        // 3/16 - 2/64 = 0.1875 - 0.03125 = 0.15625. A hand-computed anchor,
+        // not a native comparison.
         let c = smoothstep_curve();
         assert!((c.evaluate(0.25) - 0.15625).abs() < 1e-6);
         assert!((c.evaluate(0.5) - 0.5).abs() < 1e-6);
@@ -264,10 +289,11 @@ mod tests {
 
     #[test]
     fn hermite_with_slopes_is_not_smoothstep() {
-        // 键 (0,0,out=2) 与 (1,1,in=-1)：m0=2、m1=-1。
-        // t=0.5 处基为 a=0.5,b=0.125,c=0.5,d=-0.125 ->
-        // v = 0.125*2 + 0.5*1 + (-0.125)*(-1) = 0.25+0.5+0.125 = 0.875。
-        // 若实现退化成线性会是 0.5——此锚专门钉「Hermite 真的在算切线」。
+        // Keys (0,0,out=2) and (1,1,in=-1): m0=2, m1=-1. At t=0.5 the basis
+        // is a=0.5, b=0.125, c=0.5, d=-0.125, so
+        // v = 0.125*2 + 0.5*1 + (-0.125)*(-1) = 0.25+0.5+0.125 = 0.875.
+        // A linear fallback would give 0.5; this anchor pins that the
+        // tangents enter the Hermite.
         let c = Curve {
             multiplier: 1.0,
             keys: vec![
@@ -302,7 +328,7 @@ mod tests {
 
     #[test]
     fn min_max_curve_constant_and_multiplier() {
-        // C# 可读逐式：Constant -> constantMax；Curve -> eval * multiplier。
+        // `C# readable`: Constant -> constantMax; Curve -> eval * multiplier.
         assert_eq!(Constant(5.0).evaluate(0.3, 0.0), 5.0);
         let c = MinMaxCurve::Curve { multiplier: 4.0, max: smoothstep_curve() };
         // t=0.5 -> 0.5 * 4。
@@ -311,7 +337,8 @@ mod tests {
 
     #[test]
     fn min_max_curve_two_constants_lerps_with_clamped_t() {
-        // Mathf.Lerp 钳位 t：t<0 取 min、t>1 取 max、中点居中。
+        // Mathf.Lerp clamps t: t<0 gives min, t>1 gives max, the midpoint
+        // stays centered.
         let c = TwoConstants { min: -1.0, max: 3.0 };
         assert_eq!(c.evaluate(0.0, -2.0), -1.0);
         assert_eq!(c.evaluate(0.0, 0.5), 1.0);
@@ -320,8 +347,8 @@ mod tests {
 
     #[test]
     fn min_max_curve_two_curves_lerps_then_multiplies_once() {
-        // C# 可读：Lerp(eval(min), eval(max), lerp) * multiplier —— 乘子
-        // 乘在插值结果上，不进两条曲线各自。
+        // `C# readable`: Lerp(eval(min), eval(max), lerp) * multiplier; the
+        // multiplier applies to the interpolated value, not to either curve.
         let lo = smoothstep_curve(); // t=0.5 -> 0.5
         let hi = Curve {
             multiplier: 1.0,
@@ -331,7 +358,7 @@ mod tests {
             ],
             pre_wrap: Some(2),
             post_wrap: Some(2),
-        }; // t=0.5 -> 2（端点切线 0，中点恰线性中值）
+        }; // t=0.5 -> 2 (zero end tangents, so the midpoint is the linear mean)
         let c = TwoCurves { multiplier: 10.0, min: lo, max: hi };
         // Lerp(0.5, 2.0, 0.25) = 0.875 * 10 = 8.75。
         assert!((c.evaluate(0.5, 0.25) - 8.75).abs() < 1e-6);
@@ -375,9 +402,10 @@ mod tests {
 
     #[test]
     fn random_color_uses_lerp_factor_as_time() {
-        // C# 可读的怪写法：RandomColor 求值时 lerpFactor 当 time。
-        // 键 (0,黑)→(1,白)，lerp=0.25 -> 0.25 灰；若误当 Gradient 模式
-        // （time 当 time）则 t=0 处恒黑——此锚钉住差异。
+        // `C# readable`: RandomColor evaluates with the lerp factor as the
+        // time. Keys (0, black) to (1, white) with lerp=0.25 give 0.25 grey;
+        // reading it as Gradient mode (time as time) would give black at t=0.
+        // This anchor pins the difference.
         let g = MinMaxGradient::RandomColor(Gradient {
             mode: super::super::gradient::GradientMode::Blend,
             color_space: super::super::gradient::GradientColorSpace::Unspecified,
@@ -416,7 +444,7 @@ mod tests {
                 GradientAlphaKey { time: 1.0, alpha: v }],
         };
         let g = MinMaxGradient::TwoGradients { min: mk(0.0), max: mk(1.0) };
-        // time=任意：两梯度各自恒值，Lerp(0,1,0.5) = 0.5。
+        // Any time: both gradients are constant, so Lerp(0,1,0.5) = 0.5.
         let c = g.evaluate(0.7, 0.5);
         assert!((c[0] - 0.5).abs() < 1e-6);
         assert!((c[3] - 0.5).abs() < 1e-6);

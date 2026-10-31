@@ -18,7 +18,7 @@ impl OrbitalMotion {
     /// Displacement in emitter-local coordinates. The speed modifier changes
     /// the angle and radial step before the displacement is calculated.
     /// The radial step moves the turned vector along its unit vector, which
-    /// ApplyOrbitalAndRadialVelocity takes as the vector times the ARM
+    /// ApplyOrbitalAndRadialVelocity takes as the vector times the
     /// reciprocal square root of its squared length (estimate and two
     /// refinements, the estimate kept at zero), masked to zero where the
     /// squared length is at most 0x0da24260; the step is added on every axis.
@@ -56,7 +56,7 @@ pub fn animated_velocity(displacement: [f32; 3], dt: f32, speed_modifier: f32) -
     displacement.map(|value| (value / speed_modifier) * inverse_dt)
 }
 
-/// ARM FRECPE followed by two FRECPS refinements, with the orbital kernel's
+/// A reciprocal estimate followed by two refinement steps, with the orbital kernel's
 /// lower dt mask (about 1e-6) rather than InitialModule's 1e-5 admission.
 /// The current JP client's orbital path uses this reciprocal sequence; the lower mask remains in animated_velocity.
 pub(crate) fn orbital_reciprocal(value: f32) -> f32 {

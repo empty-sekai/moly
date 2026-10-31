@@ -230,8 +230,8 @@ fn accumulate_window(bursts: &[ScheduledBurst], low: f32, high: f32, repeats: bo
 
 /// The bursts of an exported emission block as EmitOverTime reads them: the
 /// load normalization, then the runtime gate (at most eight slots, a
-/// constant or two-constant count), every time, cycle count, repeat interval
-/// and probability transcribed. For a caller that runs its own windows: the
+/// constant or two-constant count). Every time, cycle count, repeat interval
+/// and probability is covered. For a caller that runs its own windows: the
 /// sub-emitter birth event's call of EmitOverTime.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct BurstSchedule {
@@ -401,7 +401,7 @@ impl ConstantAutonomousEmission {
         // the system state's delay word, which the caller counts down per
         // slice (`prepare_slice_parts`). Only a finite, non-negative constant
         // is taken; a random delay is evaluated by Play with the system
-        // seed's hash, which is not transcribed.
+        // seed's hash, which is not modelled.
         if !matches!(delay, MinMaxCurve::Constant(v) if v.is_finite() && *v >= 0.0)
             || emission.bursts.len() > BURST_SLOTS
         {
@@ -415,7 +415,7 @@ impl ConstantAutonomousEmission {
     /// gate refuses a duration that is not finite and positive, a rate that
     /// is not a finite constant or pair of constants, a count in a curve
     /// mode, and more than eight bursts; every probability, cycle count,
-    /// repeat interval, time and count constant is transcribed.
+    /// repeat interval, time and count constant is covered.
     fn from_runtime(
         duration: f32,
         looping: bool,
@@ -534,9 +534,9 @@ impl ConstantAutonomousEmission {
     /// capacity. Even a zero-rate zero-count native call advances scalar RNG:
     /// EmitOverTime draws once at entry, and each burst hit draws once more
     /// for a probability draw and once for a two-constant count it evaluates.
-    /// Refusals leave state untouched. Supply the native reciprocal duration
-    /// instruction result; scalar 1/duration is not bit-exact for all
-    /// durations.
+    /// Refusals leave state untouched. The duration is supplied as its
+    /// reciprocal, computed with the reciprocal estimate and its steps; scalar
+    /// 1/duration is not bit-exact for all durations.
     pub fn schedule(
         &self,
         clock: ClockSlice,
@@ -656,7 +656,7 @@ impl ConstantAutonomousEmission {
 /// with EmitOverTime, which later draws once per slice and rewrites the
 /// spacing.
 ///
-/// Qualified subset, as executed: a finite constant rate above zero, no start
+/// Qualified subset, as the reference cases exercise it: a finite constant rate above zero, no start
 /// delay, and a constant rate over time. EmitOverDistance reads neither the
 /// bursts nor the rate over time (only its own rate curve, the emission
 /// state's spacing, offset and scalar stream, the emitter velocity and the
@@ -806,7 +806,7 @@ pub(crate) fn rate(curve: &MinMaxCurve) -> Result<EmissionRate, Refused> {
 /// The burst count as AccumulateBurst reads it, for every constant: the
 /// saturating conversion toward zero (NaN to 0). TwoConstants orders the pair
 /// with the same strict comparisons native uses, so a swapped pair is the
-/// ordered one. The curve modes are not transcribed.
+/// ordered one. The curve modes are not covered.
 fn burst_count(curve: &MinMaxCurve) -> Result<BurstCount, Refused> {
     match *curve {
         MinMaxCurve::Constant(value) => Ok(BurstCount::Constant(value as i32)),
@@ -1444,15 +1444,14 @@ mod tests {
         }
     }
 
-    /// Whether a native configuration authors something the port does not
-    /// transcribe, read from the configuration record the native call ran,
-    /// not through the gate: a duration that is not finite and positive, a
-    /// non-finite rate constant, or more bursts than the eight slots. A gate
-    /// refusal must fall on such a configuration, so a narrowed gate turns a
-    /// replay red; an admitted configuration, flagged or not, is compared
-    /// with the native calls. A port that transcribes one of these drops it
-    /// here.
-    fn untranscribed(config: &Value) -> bool {
+    /// Whether a native configuration is one this crate does not support,
+    /// read from the configuration record the native call ran, not through
+    /// the gate: a duration that is not finite and positive, a non-finite
+    /// rate constant, or more bursts than the eight slots. A gate refusal
+    /// must fall on such a configuration, so a narrowed gate turns a replay
+    /// red; an admitted configuration, flagged or not, is compared with the
+    /// native calls. Once one of these is supported, its line here goes.
+    fn unsupported_config(config: &Value) -> bool {
         let constants = |curve: &Value| match native_curve(curve) {
             MinMaxCurve::Constant(value) => vec![value],
             MinMaxCurve::TwoConstants { min, max } => vec![min, max],
@@ -1633,7 +1632,7 @@ mod tests {
     /// randomized envelopes, gate controls, real Update1 slices and the input
     /// controls. Rate count, total, spacing, carry, burst fraction and the
     /// scalar stream words must equal the native bits on every admitted call.
-    /// A refused chain must author something the port does not transcribe;
+    /// A refused chain must author something this crate does not support;
     /// which chains are refused, and how many calls replay, is reported.
     #[test]
     #[ignore = "MOLY_EMISSION_TWO_CONSTANTS_RECEIPT must name the private current-native two-constant emission receipt"]
@@ -1657,8 +1656,8 @@ mod tests {
                 }
                 Err(refusal) => {
                     assert!(
-                        untranscribed(config),
-                        "{label}: gate refused {refusal:?} a configuration the port transcribes"
+                        unsupported_config(config),
+                        "{label}: gate refused {refusal:?} a configuration the law supports"
                     );
                     refused.push((label.split('/').next().unwrap().to_owned(), refusal))
                 }
@@ -1718,7 +1717,7 @@ mod tests {
     /// What a native battery replay found, reported rather than pinned: calls
     /// equal to native, calls refused where native's own count leaves the
     /// representable range, calls of configurations the gate refuses (each
-    /// one authoring something the port does not transcribe), and admitted
+    /// one authoring something this crate does not support), and admitted
     /// calls whose rate Evaluate drew exactly 1.0.
     #[derive(Debug)]
     struct BatteryTally {
@@ -1730,7 +1729,7 @@ mod tests {
 
     /// Replays a native battery (families of direct EmitOverTime calls), each
     /// call on its own recorded state. A family the gate refuses must author
-    /// something the port does not transcribe. Inside the gate every call
+    /// something this crate does not support. Inside the gate every call
     /// equals the native bits, or is refused only where native's own rate
     /// count or total exceeds the representable count range, with the state
     /// left untouched.
@@ -1755,8 +1754,8 @@ mod tests {
                 Ok(law) => law,
                 Err(refused) => {
                     assert!(
-                        untranscribed(at(family, "config")),
-                        "{label}: gate refused {refused:?} a configuration the port transcribes"
+                        unsupported_config(at(family, "config")),
+                        "{label}: gate refused {refused:?} a configuration the law supports"
                     );
                     tally.gate_refused += rows.len();
                     continue;
@@ -1929,11 +1928,11 @@ mod tests {
         assert!(flipped.is_none_or(|n| n > 0), "the bit-flipped receipt must mismatch");
     }
 
-    /// The load normalization against native rows of the burst transfer and
+    /// The load normalization against reference rows of the burst transfer and
     /// of the module transfer up to its burst array (the curve reader itself
-    /// not executed: the row gives the curve's mode and scalars as read).
+    /// left out: the row gives the curve's mode and scalars as read).
     /// Every burst field and rate scalar the transfer stores equals the load
-    /// of the serialized value, bit for bit or NaN where native stored NaN;
+    /// of the serialized value, bit for bit or NaN where the reference stored NaN;
     /// the stored burst count is the serialized one clamped to the eight
     /// slots, which it reaches.
     #[test]

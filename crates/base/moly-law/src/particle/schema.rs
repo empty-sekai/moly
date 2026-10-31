@@ -1,16 +1,24 @@
-//! effects.json（rain 家族那份形状）→ 律侧发射器参数。
+//! Decodes `effects.json` (the shape the rain family uses) into the emitter
+//! parameters the laws take.
 //!
-//! 字段词汇按语料实测枚举（全部 25 个现象档案里 MinMax 值对象的键形
-//! 各只有一族）：曲线 `constant{value}` / `twoConstants{min,max}` /
-//! `curve{multiplier,keys}` / `twoCurves{multiplier,minKeys,maxKeys}`；
-//! 梯度 `color{color}` / `gradient{gradient}` / `twoColors{min,max}` /
-//! `twoGradients{minGradient,maxGradient}` / `randomColor{gradient}`。
-//! 解析**失败响亮**：键在而形状不对是数据损伤，静默兜底会重建
-//! 「接没接线分不清」。
+//! Input: the file's bytes, or an already parsed value. Output: one
+//! [`EmitterParams`] per emitted particle node, or an [`EffectsError`] naming
+//! the effect and node. The schema is the data side: it decodes values and
+//! decides which of them a law can compose, not what the law computes.
 //!
-//! 识别但**未映射**的键不丢弃也不报错——收进 `unmapped` 具名清单
-//! （scalingMode、renderer、以及 shape
-//! 的非圆参数族），消费侧可见「这条数据在，但律没管它」。
+//! The key shapes come from the corpus (in all 25 phenomenon archives each
+//! MinMax value object has one key family): curves `constant{value}` /
+//! `twoConstants{min,max}` / `curve{multiplier,keys}` /
+//! `twoCurves{multiplier,minKeys,maxKeys}`; gradients `color{color}` /
+//! `gradient{gradient}` / `twoColors{min,max}` /
+//! `twoGradients{minGradient,maxGradient}` / `randomColor{gradient}`.
+//! Decoding fails loudly: a present key in the wrong shape is damaged data,
+//! and a silent default would hide which parameters were never wired.
+//!
+//! A key the decoder recognizes but does not map is neither dropped nor an
+//! error: it goes into the named `unmapped` lists (scalingMode, renderer, and
+//! the non-circle shape parameters), so a consumer can see that the data is
+//! there and the laws do not read it.
 
 use std::fmt;
 
@@ -30,7 +38,7 @@ use crate::particle::value::{
     Curve, CurveKey, Gradient, GradientAlphaKey, GradientColorKey, MinMaxCurve, MinMaxGradient,
 };
 
-/// 解析失败：一条人话，带 effect/node 定位。
+/// A decode failure: one readable message located to the effect or node.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectsError(pub String);
 
@@ -42,16 +50,16 @@ impl fmt::Display for EffectsError {
 
 impl std::error::Error for EffectsError {}
 
-/// 一份档案的全部发射器（含未映射键清单）。
+/// Every emitter of one file, with the lists of unmapped keys.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Effects {
     pub emitters: Vec<EmitterParams>,
-    /// effect 层识别到但未映射的键（去重）。
+    /// Keys recognized at the effect level and not mapped (deduplicated).
     pub unmapped_effect_keys: Vec<String>,
 }
 
 impl Effects {
-    /// 从档案字节解析。
+    /// Decodes from the file's bytes.
     pub fn from_json_str(bytes: &[u8]) -> Result<Self, EffectsError> {
         let v = json::parse(bytes).map_err(|e| EffectsError(e))?;
         Self::from_value(&v)
@@ -68,7 +76,8 @@ impl Effects {
                 .get("particles")
                 .and_then(Value::as_array)
                 .ok_or_else(|| EffectsError(format!("effect {name}: \"particles\" array missing")))?;
-            // effect 层的键里只有 particles 进律；其余全收清单。
+            // Of the effect level's keys only particles reaches the laws; the
+            // rest go into the list.
             for (k, _) in e.as_object().unwrap_or(&[]) {
                 if k != "particles" && !out.unmapped_effect_keys.contains(k) {
                     out.unmapped_effect_keys.push(k.clone());
@@ -82,8 +91,8 @@ impl Effects {
     }
 }
 
-/// 模拟空间。字符串名与数值 `C# 可读`
-/// （`ParticleSystemSimulationSpace` Local=0/World=1/Custom=2）。
+/// The simulation space. `C# readable`: `ParticleSystemSimulationSpace`
+/// Local=0, World=1, Custom=2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SimulationSpace {
     Local,
@@ -102,13 +111,14 @@ impl SimulationSpace {
     }
 }
 
-/// start 模块：出生参数（全部 MinMax 值，rand lerp 求值）。
+/// The start module: the birth parameters, all MinMax values evaluated with
+/// the caller's random lerp factor.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StartParams {
     pub lifetime: MinMaxCurve,
     pub speed: MinMaxCurve,
     pub size: MinMaxCurve,
-    /// size3D 时的 Y/Z 分量曲线（缺省回落到 `size`）。
+    /// The Y/Z curves of size3D (absent falls back to `size`).
     pub size_y: Option<MinMaxCurve>,
     pub size_z: Option<MinMaxCurve>,
     pub size3d: bool,
@@ -120,7 +130,7 @@ pub struct StartParams {
     pub gravity_modifier: MinMaxCurve,
 }
 
-/// emission 模块。
+/// The emission module.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EmissionParams {
     pub rate_over_time: MinMaxCurve,
@@ -128,17 +138,19 @@ pub struct EmissionParams {
     pub bursts: Vec<Burst>,
 }
 
-/// shape 模块：只映射 Circle 律用到的参数；其余收 `unmapped`。
-/// 非圆 type 本身**解析不拒**（schema 是数据面），采样时由
-/// `shape::circle_position` 的调用方拒。
+/// The shape module: only the parameters the Circle law reads are mapped; the
+/// rest go into `unmapped`. A non-circle type is decoded, not refused, since
+/// the schema is the data side; the caller of `shape::circle_position`
+/// refuses it at sampling time.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShapeParams {
     pub shape_type: String,
     pub radius: f32,
     pub radius_thickness: f32,
     pub arc: f32,
-    /// 欧拉旋转（度）。施加口径见 `shape::euler_rotate_deg`。
+    /// The Euler rotation in degrees; `shape::euler_rotate_deg` applies it.
     pub rotation: [f32; 3],
+    /// The shape-space position, `_position` in the engine's shape module.
     pub position: [f32; 3],
     /// Authored controls are preserved even when a renderer cannot consume
     /// them yet. Missing legacy metadata is distinguishable from authored zero.
@@ -187,7 +199,7 @@ pub struct ShapeControls {
 /// and path ids are both zero is the null reference too. The samplers read
 /// so far (torus and cone volume) branch on it: a non-null texture makes
 /// them read the texture controls and call ApplyTexture for each birth
-/// group, which is not transcribed; the null reference skips both.
+/// group, which is not supported; the null reference skips both.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShapeTexture {
     None,
@@ -207,7 +219,7 @@ impl ShapeTexture {
 }
 
 
-/// velocityOverLifetime 模块。
+/// The velocityOverLifetime module.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VelocityOverLifetimeParams {
     pub x: MinMaxCurve,
@@ -221,31 +233,32 @@ pub struct VelocityOverLifetimeParams {
     pub radial: MinMaxCurve,
 }
 
-/// customData 模块的一个槽（`custom1` / `custom2`）。
+/// One slot of the customData module (`custom1` / `custom2`).
 ///
-/// 逐粒子自定义流：每个分量是一条独立的 MinMax 曲线，按归一化寿命逐粒子
-/// 求值，结果进顶点属性的对应分量。着色器侧的选择器按
-/// `coord = 分量号 × 10 + 来源号` 取值，来源 1 = `custom1`、2 = `custom2`、
-/// 0 = 常量零向量。
+/// A per-particle custom stream: each component is its own MinMax curve,
+/// evaluated per particle at its normalized age, and the result fills the
+/// matching component of the vertex attribute. The shader-side selector reads
+/// `coord = component * 10 + source`, where source 1 is `custom1`, 2 is
+/// `custom2` and 0 is a constant zero vector.
 ///
-/// `componentCount` 之外的分量不写，留零——源程序的选择器可以指到那里，
-/// 取到的就是零。
+/// Components beyond `componentCount` are not written and stay zero, so a
+/// selector that names one reads zero.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CustomDataSlot {
-    /// 实际产出的分量数（1..=4）。
+    /// The number of components produced (1..=4).
     pub component_count: usize,
-    /// 逐分量曲线，长度等于 `component_count`。
+    /// The per-component curves; the length equals `component_count`.
     pub components: Vec<MinMaxCurve>,
 }
 
-/// customData 模块：两个槽，缺席或 `disabled` 为 None。
+/// The customData module: two slots, `None` when absent or `disabled`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CustomDataParams {
     pub custom1: Option<CustomDataSlot>,
     pub custom2: Option<CustomDataSlot>,
 }
 
-/// sizeOverLifetime 模块（分轴时 `curve` 是 X 轴）。
+/// The sizeOverLifetime module; with separate axes `curve` is the X axis.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SizeOverLifetimeParams {
     pub separate_axes: bool,
@@ -254,10 +267,11 @@ pub struct SizeOverLifetimeParams {
     pub z: Option<MinMaxCurve>,
 }
 
-/// rotationOverLifetime 模块。`curve` 是 z 轴（编辑器里 z 绑定在序列化
-/// 名 `curve` 上，与 size 模块镜像——那边 `curve` 是 x）；`x`/`y` 只在
-/// separateAxes 为真时由提取面导出（缺席 = 提取面缺键，不是当 0——
-/// 律构造处拒，见 `RotationOverLifetime::from_parts`）。
+/// The rotationOverLifetime module. `curve` is the z axis (the editor binds z
+/// to the serialized name `curve`, the mirror image of the size module, where
+/// `curve` is x); `x` and `y` are exported only with separateAxes (an absent
+/// one means the key is missing from the export, not a zero; law construction
+/// refuses it, see `RotationOverLifetime::from_parts`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RotationOverLifetimeParams {
     pub separate_axes: bool,
@@ -279,11 +293,12 @@ pub struct RotationBySpeedParams {
     pub range: [f32; 2],
 }
 
-/// limitVelocity 模块。`drag` 为 null（提取面在拖拽曲线为空时写 null）
-/// 是「拖拽段跳过」的规范形态；乘法标志提取面暂不导出（None = 未知，
-/// 非零拖拽时会在律构造处拒——缺一个会左右结果的键不是当 false）；
-/// `in_world_space` 在引擎的平面向量路径里不被读取，字段只为数据
-/// 可见性保留。
+/// The limitVelocity module. A `drag` of null (written when the drag curve is
+/// empty) is the canonical "skip the drag section"; the two multiplier flags
+/// are not exported yet (`None` means unknown, and a nonzero drag is refused
+/// at law construction, since a key that changes the result is not defaulted
+/// to false); `in_world_space` is not read on the engine's planar-vector path
+/// and the field exists so the data stays visible.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LimitVelocityParams {
     pub separate_axis: bool,
@@ -295,7 +310,7 @@ pub struct LimitVelocityParams {
     pub multiply_drag_by_velocity: Option<bool>,
 }
 
-/// 一个发射器的全部律侧参数。
+/// Every parameter of one emitter that the laws read.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EmitterParams {
     pub effect: String,
@@ -331,7 +346,8 @@ pub struct EmitterParams {
     pub rotation_over_lifetime: Option<RotationOverLifetimeParams>,
     pub rotation_by_speed: Option<RotationBySpeedParams>,
     pub limit_velocity: Option<LimitVelocityParams>,
-    /// 逐粒子自定义流。两个槽都缺席或 `disabled` 时为 None。
+    /// The per-particle custom stream; `None` when both slots are absent or
+    /// `disabled`.
     pub custom_data: Option<CustomDataParams>,
     pub sub_emitters: Vec<SubEmitterParams>,
     pub collision: Option<CollisionParams>,
@@ -340,13 +356,15 @@ pub struct EmitterParams {
     pub inherit_velocity: Option<InheritVelocityParams>,
     pub texture_sheet: Option<TextureSheetParams>,
     pub noise: Option<NoiseParams>,
-    /// system 层 + particle 层识别到但未映射的键（去重、按序）。
+    /// Keys recognized at the system and particle levels and not mapped
+    /// (deduplicated, in order).
     pub unmapped: Vec<String>,
 }
 
-/// system 层已映射进参数的键——之外的键全部进 `unmapped`。
-/// 「识别但具名不迁」的 scalingMode **不在**此列：它落
-/// `unmapped`，让消费侧看见「数据在、律没管」。
+/// The system-level keys mapped into parameters; every other key goes into
+/// `unmapped`. scalingMode is recognized but deliberately not mapped: it
+/// goes into `unmapped`, where a consumer can see that the data is present
+/// and the laws do not read it.
 const MAPPED_SYSTEM_KEYS: [&str; 32] = [
     "duration", "looping", "prewarm", "playOnAwake", "simulationSpeed", "useUnscaledTime",
     "simulationSpace", "emitterVelocityMode", "startDelay", "ringBufferMode", "ringBufferLoopRange",
@@ -357,7 +375,7 @@ const MAPPED_SYSTEM_KEYS: [&str; 32] = [
     "noise", "randomSeed", "autoRandomSeed",
 ];
 
-/// start 层已映射键。
+/// The start-level keys that are mapped.
 const MAPPED_START_KEYS: [&str; 12] = [
     "lifetime", "speed", "size", "sizeY", "sizeZ", "size3D", "rotation",
     "rotationX", "rotationY", "rotation3D", "color", "gravityModifier",
@@ -374,11 +392,13 @@ impl EmitterParams {
             .ok_or_else(|| EffectsError(format!("{ctx}: \"system\" object missing")))?;
         let g = |k: &str| f32_of(system_get(system, k), &format!("{ctx}.{k}"));
         let mut unmapped = Vec::new();
-        // particle 层：node 与 system 之外的键（renderer 等）收清单。
+        // At the particle level, keys besides node and system (renderer and
+        // others) go into the list.
         for (k, v) in p.as_object().unwrap_or(&[]) {
             if k != "node" && k != "system" {
                 let label = if k == "renderer" {
-                    // renderer 对象的子键不再展开——整块是渲染侧。
+                    // The renderer object's sub-keys are not expanded: the
+                    // block belongs to the render side.
                     "renderer".to_string()
                 } else {
                     k.clone()
@@ -627,10 +647,11 @@ impl EmissionParams {
                 .map(|(i, b)| {
                     let bctx = format!("{ctx}.emission.bursts[{i}]");
                     let count = min_max_curve(b.get("count"), &format!("{bctx}.count"))?;
-                    // 序列化的 `cycleCount == 0` 是「无限重复」，不是非法值：
-                    // 引擎 Editor 的轮数下拉第 0 项写的就是字面量 0，托管
-                    // setter 也只拒 `< 0`。此处此前把 0 当非法整条拒掉，
-                    // 常驻发射器（喷泉水柱一族）因此一条都进不来。
+                    // A serialized `cycleCount == 0` means repeat without
+                    // end, not an invalid value: the Editor's cycle dropdown
+                    // writes the literal 0 for its item 0 and the managed
+                    // setter rejects only `< 0`. A decoder that refused 0
+                    // would drop every long-lived emitter unread.
                     let cycles = BurstCycles::from_serialized(u32_of(
                         b.get("cycleCount"),
                         &format!("{bctx}.cycleCount"),
@@ -676,8 +697,8 @@ fn burst_repeat_interval(v: Option<&Value>, ctx: &str) -> Result<f32, EffectsErr
     f32_of(v, ctx)
 }
 
-/// shape 层映射的闭集；其余（meshes 与 texture 之外的六个贴图控制键）收
-/// unmapped。
+/// The closed set of shape-level keys that are mapped; the rest (the six
+/// texture control keys besides meshes and texture) go to unmapped.
 const MAPPED_SHAPE_KEYS: &[&str] = &[
     "type", "radius", "radiusThickness", "arc", "rotation", "position", "sourceVersion",
     "angle", "length", "donutRadius", "scale", "boxThickness", "arcMode", "arcSpread", "arcSpeed",
@@ -783,7 +804,7 @@ impl VelocityOverLifetimeParams {
 }
 
 impl CustomDataParams {
-    /// 两个槽都缺席或 `disabled` 时返回 None——没有流要产出。
+    /// `None` when both slots are absent or `disabled`: no stream to produce.
     fn from_value(v: &Value, ctx: &str) -> Result<Option<Self>, EffectsError> {
         let obj = v.as_object().unwrap_or(&[]);
         let custom1 = CustomDataSlot::from_value(
@@ -809,8 +830,9 @@ impl CustomDataSlot {
         let mode = str_of(obj_get(obj, "mode"), &format!("{ctx}.mode"))?;
         match mode.as_str() {
             "disabled" => Ok(None),
-            // `color` 档存的是 MinMaxGradient 不是逐分量曲线，是另一种形状；
-            // 本站语料里 0 条，落这里要响亮拒，不要静默当 vector 读。
+            // The `color` mode holds a MinMaxGradient rather than per-component
+            // curves; the site corpus has 0 of them, so it is refused loudly
+            // (0 such cases) rather than being read as a vector.
             "vector" => {
                 let count = f32_of(
                     obj_get(obj, "componentCount"),
@@ -818,7 +840,7 @@ impl CustomDataSlot {
                 )? as usize;
                 if count == 0 || count > 4 {
                     return Err(EffectsError(format!(
-                        "{ctx}.componentCount: {count} 不在 1..=4"
+                        "{ctx}.componentCount: {count} is outside 1..=4"
                     )));
                 }
                 let components = obj_get(obj, "components")
@@ -826,7 +848,7 @@ impl CustomDataSlot {
                     .ok_or_else(|| EffectsError(format!("{ctx}.components: array missing")))?;
                 if components.len() < count {
                     return Err(EffectsError(format!(
-                        "{ctx}.components: {} 条曲线不足 componentCount {count}",
+                        "{ctx}.components: {} curves, fewer than componentCount {count}",
                         components.len()
                     )));
                 }
@@ -841,7 +863,7 @@ impl CustomDataSlot {
                     components,
                 }))
             }
-            other => Err(EffectsError(format!("{ctx}.mode: 未实现的档 {other}"))),
+            other => Err(EffectsError(format!("{ctx}.mode: the mode {other} is unsupported"))),
         }
     }
 }
@@ -872,8 +894,9 @@ impl SizeOverLifetimeParams {
     }
 }
 
-/// MinMax 对象或 null：null/缺席 → None（拖拽段跳过的规范形态），
-/// 其余形状交给 `min_max_curve` 响亮拒。
+/// A MinMax object or null: null or absent gives `None` (the canonical form
+/// for skipping the drag section); any other shape is refused loudly by
+/// `min_max_curve`.
 fn opt_min_max_curve(v: Option<&Value>, ctx: &str) -> Result<Option<MinMaxCurve>, EffectsError> {
     match v {
         None | Some(Value::Null) => Ok(None),
@@ -881,7 +904,8 @@ fn opt_min_max_curve(v: Option<&Value>, ctx: &str) -> Result<Option<MinMaxCurve>
     }
 }
 
-/// 可选布尔：缺席/null → None（未导出 = 未知），在档而形状不对仍响亮拒。
+/// An optional boolean: absent or null gives `None` (not exported, so
+/// unknown); a present value in the wrong shape is still refused loudly.
 fn opt_bool_of(v: Option<&Value>, ctx: &str) -> Result<Option<bool>, EffectsError> {
     match v {
         None | Some(Value::Null) => Ok(None),
@@ -939,11 +963,12 @@ impl LimitVelocityParams {
     }
 }
 
-// —— MinMax 值的词汇表 ————————————————————————————————————
+// ---- MinMax value vocabulary ----
 
 /// `constant{value}` / `twoConstants{min,max}` / `curve{multiplier,keys}` /
-/// `twoCurves{multiplier,minKeys,maxKeys}`。模式之外的键被忽略（词汇
-/// 表是闭集，多余键是上游将来扩展，不是损伤）。
+/// `twoCurves{multiplier,minKeys,maxKeys}`. Keys outside the mode are
+/// ignored: the vocabulary is closed, so an extra key is a later upstream
+/// extension rather than damage.
 // Positive infinity is a lifetime sentinel, not a general numeric JSON value.
 // Keep it scoped to the constant lifetime arm: interpolation involving infinities
 // has no finite random range and other particle fields must stay finite.
@@ -1000,9 +1025,11 @@ fn wrapped(mut curve: Curve, obj: &[(String, Value)], keys: [&str; 2], ctx: &str
     Ok(curve)
 }
 
-/// 键数组 → 曲线。阶跃切线保留有符号 Infinity；旧 null 编码丢失了符号，
-/// 必须从源重新提取，不能推断为任意一端。加权键按位解析：激活位的权重
-/// 必读，缺失即拒；未激活位的权重惰性（求值时代 1/3），缺失容。
+/// A key array to a curve. A step tangent keeps its signed Infinity; the old
+/// null encoding lost the sign, so the value has to be re-extracted from the
+/// source rather than inferred as either end. A weighted key is decoded bit
+/// by bit: a set bit's weight is read and refused when missing; an unset
+/// bit's weight is inert (evaluated as 1/3) and may be missing.
 fn curve_of(v: Option<&Value>, ctx: &str) -> Result<Curve, EffectsError> {
     let arr = v
         .and_then(Value::as_array)
@@ -1042,7 +1069,8 @@ fn curve_of(v: Option<&Value>, ctx: &str) -> Result<Curve, EffectsError> {
             out_weight,
         });
     }
-    // 键序错是数据损伤：求值不排序（见 Curve 的 doc）。
+    // A key out of order is damaged data: evaluation does not sort (see the
+    // `Curve` documentation).
     for w in keys.windows(2) {
         if w[0].time > w[1].time {
             return Err(EffectsError(format!("{ctx}: keys not sorted by time")));
@@ -1056,7 +1084,7 @@ fn curve_of(v: Option<&Value>, ctx: &str) -> Result<Curve, EffectsError> {
 ///
 /// Random colour requires its authored gradient; a flat colour is lost source data.
 /// Every gradient consumer but the start colour takes 2..8 keys per group in
-/// time order: the start colour's evaluation is the only one transcribed for
+/// time order: the start colour's evaluation is the only one supported for
 /// a single key and for keys out of order (`start_color`).
 pub(crate) fn min_max_gradient(v: Option<&Value>, ctx: &str) -> Result<MinMaxGradient, EffectsError> {
     min_max_gradient_with(v, ctx, KeyTable::Ordered)
@@ -1180,7 +1208,7 @@ fn gradient_of(v: Option<&Value>, ctx: &str, keys: KeyTable) -> Result<Gradient,
     Ok(Gradient { color_keys, alpha_keys, mode, color_space })
 }
 
-// —— 基元读取 ————————————————————————————————————
+// ---- Primitive readers ----
 
 fn obj_get<'a>(obj: &'a [(String, Value)], key: &str) -> Option<&'a Value> {
     obj.iter().find(|(k, _)| k == key).map(|(_, v)| v)
@@ -1270,7 +1298,8 @@ fn vec4_of(v: Option<&Value>, ctx: &str) -> Result<[f32; 4], EffectsError> {
 mod tests {
     use super::*;
 
-    /// 覆盖全部词汇的最小合成档案（手写，非资产拷贝）。
+    /// The smallest synthetic file that covers the whole vocabulary; it is
+    /// written by hand, not copied from an asset.
     const SYNTHETIC: &str = r#"{
       "effects": {
         "fx_rain": {
@@ -1418,7 +1447,7 @@ mod tests {
         assert_eq!(e.simulation_space, SimulationSpace::World);
         assert_eq!(e.ring_buffer_mode, RingBufferMode::Disabled);
         assert_eq!(e.max_particles, 300);
-        // start 的四种模式各就各位。
+        // Each of the four start modes lands in its own variant.
         assert_eq!(e.start.lifetime, MinMaxCurve::Constant(5.0));
         assert_eq!(
             e.start.speed,
@@ -1431,17 +1460,17 @@ mod tests {
             }
             other => panic!("size mode: {other:?}"),
         }
-        // burst 用户面口径直接落。
+        // The burst fields decode straight from the serialized form.
         let b = &e.emission.as_ref().unwrap().bursts[1];
         assert_eq!(b.cycles, BurstCycles::from_serialized(3));
         assert_eq!(b.repeat_interval, 2.0);
         assert_eq!(b.probability, 0.25);
-        // shape 只映射圆参数。
+        // The shape maps the circle parameters only.
         let s = e.shape.as_ref().unwrap();
         assert_eq!(s.shape_type, "Circle");
         assert_eq!(s.rotation, [-90.0, 0.0, 0.0]);
         assert_eq!(s.radius, 50.0);
-        // VoL 落 y 的两常值。
+        // The velocity over lifetime keeps two constants on y.
         assert_eq!(
             e.velocity_over_lifetime.as_ref().unwrap().y,
             MinMaxCurve::TwoConstants { min: -0.5, max: -1.0 }
@@ -1449,14 +1478,15 @@ mod tests {
         // Typed seed ownership preserves explicit zero/true without starting RNG.
         assert_eq!(e.random_seed, Some(0));
         assert_eq!(e.auto_random_seed, Some(true));
-        // 未映射键可见：system 层 scalingMode + renderer。
+        // Unmapped keys stay visible: scalingMode at the system level, and
+        // renderer.
         assert!(e.unmapped.contains(&"scalingMode".to_string()));
         assert!(!e.unmapped.contains(&"randomSeed".to_string()));
         assert!(!e.unmapped.contains(&"autoRandomSeed".to_string()));
         assert_eq!(e.shape.as_ref().unwrap().controls.angle, Some(25.0));
         assert!(!e.unmapped.contains(&"shape.angle".to_string()));
         assert!(e.unmapped.contains(&"renderer".to_string()));
-        // effect 层键（kind 等）收在 Effects 清单。
+        // Effect-level keys (kind and others) go into the Effects list.
         assert!(fx.unmapped_effect_keys.contains(&"kind".to_string()));
     }
 
@@ -1517,26 +1547,30 @@ mod tests {
 
     #[test]
     fn synthetic_values_evaluate_against_hand_anchors() {
-        // schema 落下来的值直接喂律，手算锚钉整条链。
+        // The values the schema decodes feed the laws directly, and
+        // hand-computed anchors pin the whole chain.
         let fx = Effects::from_json_str(SYNTHETIC.as_bytes()).unwrap();
         let e = &fx.emitters[0];
-        // 雨滴速度：VoL y 两常值 Lerp(-0.5,-1.0, r=0.5) = -0.75。
+        // Raindrop speed: velocity over lifetime y has two constants,
+        // Lerp(-0.5,-1.0, r=0.5) = -0.75.
         let vol = e.velocity_over_lifetime.as_ref().unwrap();
         assert!((vol.y.evaluate(0.0, 0.5) + 0.75).abs() < 1e-6);
-        // 颜色两常值中点。
+        // The midpoint of two constant colours.
         assert_eq!(
             e.start.color.evaluate(0.0, 0.5),
             [0.5, 0.5, 0.5, 1.0]
         );
-        // colorOverLifetime 梯度 alpha 0.5 处 = 0.5。
+        // The colorOverLifetime gradient's alpha is 0.5 at 0.5.
         let col = e.color_over_lifetime.as_ref().unwrap();
         assert!((col.evaluate(0.5, 0.0)[3] - 0.5).abs() < 1e-6);
     }
 
     #[test]
     fn rejects_weighted_keys_missing_active_weight() {
-        // 加权键本身可解析（求值走律的加权 Bezier 路）；承重边界是
-        // 激活位的权重缺失即拒——缺会左右结果的键不当默认值。
+        // A weighted key decodes on its own (evaluation takes the law's
+        // weighted Bezier path); the load-bearing edge is that a set bit's
+        // missing weight is refused, since a key that changes the result is
+        // not defaulted.
         let bad = r#"{"effects":{"e":{"particles":[{"node":"n","system":{"duration":1.0,"looping":true,"prewarm":false,"playOnAwake":true,"simulationSpeed":1.0,"simulationSpace":"Local","startDelay":{"mode":"constant","value":0.0},"ringBufferMode":0,"ringBufferLoopRange":[0.0,1.0],"maxParticles":10,"start":{"lifetime":{"mode":"constant","value":1.0},"speed":{"mode":"constant","value":1.0},"size":{"mode":"constant","value":1.0},"rotation":{"mode":"constant","value":0.0},"color":{"mode":"color","color":[1.0,1.0,1.0,1.0]},"gravityModifier":{"mode":"constant","value":0.0},"size3D":false,"rotation3D":false},"sizeOverLifetime":{"separateAxes":false,"curve":{"mode":"curve","multiplier":1.0,"keys":[{"time":0.0,"value":0.0,"inSlope":0.0,"outSlope":0.0,"weightedMode":1,"outWeight":0.3}]}}}}]}}}"#;
         let err = Effects::from_json_str(bad.as_bytes()).unwrap_err();
         assert!(err.0.contains("inWeight"), "{}", err.0);
@@ -1626,7 +1660,7 @@ mod tests {
         assert!(ShapeControls::from_value(&value,"shape").unwrap_err().0.contains("shape.arcMode"));
     }
 
-    /// InitialModule's load clamps against the native instructions (rows
+    /// InitialModule's load clamps against the reference rows (rows
     /// `field input output`: 0 lifetime maximum, 1 lifetime minimum, 2 speed
     /// maximum, 3 speed minimum, 4 size, 5 rotation), NaN as a class. Each
     /// plausible misreading must mismatch somewhere on the same rows.

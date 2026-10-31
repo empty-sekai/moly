@@ -162,7 +162,7 @@ fn key_group<const N: usize>(
     Some(result)
 }
 
-/// ARM FMAX: NaN if either operand is NaN, +0 over -0.
+/// The maximum operation: NaN if either operand is NaN, +0 over -0.
 pub(crate) fn arm_fmax(a: f32, b: f32) -> f32 {
     if a.is_nan() || b.is_nan() {
         f32::NAN
@@ -173,7 +173,7 @@ pub(crate) fn arm_fmax(a: f32, b: f32) -> f32 {
     }
 }
 
-/// ARM FMIN: NaN if either operand is NaN, -0 over +0.
+/// The minimum operation: NaN if either operand is NaN, -0 over +0.
 pub(crate) fn arm_fmin(a: f32, b: f32) -> f32 {
     if a.is_nan() || b.is_nan() {
         f32::NAN

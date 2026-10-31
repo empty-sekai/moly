@@ -33,10 +33,10 @@ use crate::particle::{EmitterParams, MinMaxCurve};
 pub enum Refused {
     /// Not a Death edge.
     Trigger,
-    /// Inherited properties are not transcribed for this trigger.
+    /// Inherited properties are not supported for this trigger.
     Properties,
     /// An inherit bit, or a parent size configuration, the inherited block
-    /// does not transcribe, by name.
+    /// does not support, by name.
     Inherit(crate::particle::inherit::Refused),
     /// A probability outside [0, 1] or not finite.
     Probability,

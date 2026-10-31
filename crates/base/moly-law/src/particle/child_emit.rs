@@ -216,7 +216,7 @@ pub fn catch_up_plan(catch_up: f32, frame_dt: f32, world_playing: bool, flags: u
 }
 
 /// The smaller of two values, the other one when one is NaN, -0.0 below
-/// +0.0 (the ARM minimum-number instruction).
+/// +0.0 (the minimum-number rule).
 fn min_number(a: f32, b: f32) -> f32 {
     if a.is_nan() {
         return b;
@@ -265,7 +265,7 @@ pub fn unshaped_direction(matrix: &[f32; 16]) -> [f32; 3] {
     z.map(|v| v * r)
 }
 
-/// The minimum with NaN propagated (the ARM minimum instruction).
+/// The minimum with NaN propagated (the propagating minimum).
 pub fn min_propagating(a: f32, b: f32) -> f32 {
     if a.is_nan() || b.is_nan() {
         return f32::NAN;

@@ -1,15 +1,16 @@
 //! The source mesh-particle transform for particle arrays without 3D rotation
 //! (`ParticleSystemRenderer`'s `CalculateMeshParticleTransform`, the kernel
-//! body the View, World and Local render spaces share; its instructions are
-//! the same in the three).
+//! the View, World and Local render spaces share in the same form).
 //!
-//! `引擎原生逐指令`. The kernel branches once on the particle arrays'
-//! 3D-rotation flag. Without 3D rotation it loads, for the particle, its
-//! position, seed, age, size (X only when the size is not 3D, otherwise all
-//! three), its Z rotation and its axis of rotation, each once, plus the angle
-//! the draw call passes by reference; it never reads the X and Y rotations or
-//! the flag argument the 3D branch negates its angles with. The basis columns
-//! are loaded twice (once per matrix product below), every other input once.
+//! Tier: `bit-exact`: results, the order of operations and the constants match
+//! the reference bit for bit. Input: the particle's words, the basis, the
+//! affine, the scale, the pivot offset, the flip proportions and the draw
+//! call's angle. Output: the transformed position and the normal matrix.
+//! The 3D-rotation flag selects a separate branch that is not supported here;
+//! without 3D rotation the inputs are the particle's position, seed, age, size
+//! (X only when the size is not 3D, otherwise all three), its Z rotation and
+//! its axis of rotation, plus the angle; the X and Y rotations and the flag
+//! argument are not read on this branch.
 //!
 //! The particle's rotation is a quaternion: the Euler quaternion of the angle
 //! `(0, 0, -angle)` composed with the axis-angle quaternion of the Z rotation
@@ -17,7 +18,7 @@
 //! reciprocal square root when its square exceeds a tiny threshold, else +Y
 //! stands in. Sine and cosine are the engine's own polynomial on the argument
 //! reduced to a quarter turn. The rotation matrix `R` follows from the
-//! quaternion by the kernel's shuffled products. Then:
+//! quaternion by a fixed order of shuffled products. Then:
 //!
 //! - the particle size is mirrored per axis by the renderer flip (three
 //!   successive draws of the particle seed's flip stream; an axis is mirrored
@@ -32,18 +33,17 @@
 //! - the normal matrix the kernel writes beside it is `B * R` (neither scale
 //!   nor size).
 //!
-//! Every operation is one rounded single-precision operation in the kernel's
-//! order and lane layout; all four lanes are kept, so the fourth row of the
-//! output is the kernel's too. The sign table the quaternion product reads is
-//! filled by the geometry job's static initializer at load; its two rows are
-//! constants here.
+//! Every operation is one rounded single-precision operation, in this order
+//! and lane layout; all four lanes are kept, so the fourth row of the output
+//! is written too. The sign table the quaternion product reads has two rows,
+//! both constants here.
 //!
 //! What the draw call passes: the basis is the camera basis (View), the
 //! identity (World) or the emitter's rotation (Local); the angle is zero for
 //! World and Local, and for View whenever the renderer allows roll (otherwise
-//! View passes a camera-derived angle, not transcribed here: the caller
-//! refuses that case). The Facing and Velocity spaces have their own kernel
-//! bodies, not transcribed here.
+//! View passes a camera-derived angle, not supported here: the caller
+//! refuses that case). The Facing and Velocity spaces take their own kernels,
+//! also not supported here (the branch number is 3).
 
 use super::random::ParticleRandom;
 use super::shape::native_rsqrt;
@@ -225,18 +225,17 @@ pub fn about_axis(space: &MeshSpace, particle: &AxisParticle) -> MeshTransform {
 mod tests {
     use super::*;
 
-    /// Research instrument: native executions of the View, World and Local
-    /// kernel body without 3D rotation (the engine's own machine code run
-    /// under emulation, the geometry job's static initializer run first), one
-    /// row per call: random particles and render spaces, and the inputs the
-    /// product hands this law for the systems it draws about the axis (with
-    /// the product's own output). Row layout, hexadecimal words: set (0 random, 1 product),
+    /// Research instrument: replays reference executions of the View, World
+    /// and Local kernels without 3D rotation, one row per call: random
+    /// particles and render spaces, and the inputs the product hands this law
+    /// for the systems it draws about the axis (with the product's own
+    /// output). It checks that both outputs match the reference bit for bit
+    /// (NaN compared by class) on every row, and that the product's affine
+    /// does on its rows. Row layout, hexadecimal words: set (0 random, 1 product),
     /// body (0 View, 1 World, 2 Local), basis 12, affine 16, scale 3, offset 3,
-    /// flip 3, angle, position 3, size 3, age, seed, Z rotation, axis 3, native
-    /// affine 16, native normal 12, product affine 16 (zero for random rows).
-    /// Every row must match word for word (NaN compared by class), both
-    /// outputs, and so must the product's affine on its rows. Point
-    /// MOLY_MESH_AXIS_NATIVE_ROWS at the row file.
+    /// flip 3, angle, position 3, size 3, age, seed, Z rotation, axis 3,
+    /// reference affine 16, reference normal 12, product affine 16 (zero for
+    /// random rows). Point MOLY_MESH_AXIS_NATIVE_ROWS at the row file.
     #[test]
     #[ignore = "set MOLY_MESH_AXIS_NATIVE_ROWS to the native mesh-axis rows, 96-word layout"]
     fn about_axis_matches_native_kernel() {

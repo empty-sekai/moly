@@ -80,7 +80,7 @@ impl TextureSheet {
         let start = self.start.evaluate(ParticleRandom::sample(seed, 0x56b3_dbb0));
         let value = start + frame;
         let fraction = value - value.floor();
-        // Preserve the native multiply/divide order and the rounded row span.
+        // Preserve the multiply/divide order and the rounded row span.
         let span = (1.0 / (self.tiles[0] as f32 * self.tiles[1] as f32)) * self.tiles[0] as f32;
         let row = match self.row {
             Row::WholeSheet => return fraction,
@@ -144,7 +144,7 @@ enum FrameCurve {
 /// change, so each time is evaluated as from a reset cache.
 ///
 /// Refused by name (no data row uses them, and their kernels are separate
-/// bodies not transcribed here): Sprites mode, the Speed and FPS time modes,
+/// bodies not supported here): Sprites mode, the Speed and FPS time modes,
 /// UV flip, single-row animation with a curve, a start frame other than a
 /// constant, and a frame curve the reader optimizes into its polynomial form;
 /// and a cycle count that is not positive and finite (see `from_params`).
@@ -262,7 +262,7 @@ mod tests {
         if mutant == Mutant::NoFinalFraction { sheet.start + frame } else { fraction(sheet.start + frame) }
     }
 
-    // Native rows of the Lifetime curve-time kernel, executed through the UV
+    // Reference rows of the Lifetime curve-time kernel, through the UV
     // dispatcher with each case's module and curve objects kept across batches
     // (their caches carried as in the engine). Every admitted row must match
     // bit for bit (a NaN matches a NaN); every mutant arm must turn rows red.

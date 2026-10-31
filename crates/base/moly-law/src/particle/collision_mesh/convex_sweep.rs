@@ -155,7 +155,7 @@ fn cubemap_nearest_offset(dir: V3, subdiv: u16) -> u32 {
     face.wrapping_mul(s).wrapping_add(truncate_u32(u)).wrapping_mul(s).wrapping_add(truncate_u32(v))
 }
 
-/// `FCVTZU`: toward zero, saturating, NaN to zero.
+/// The unsigned conversion the index uses: toward zero, saturating, NaN to zero.
 fn truncate_u32(x: f32) -> u32 {
     if x.is_nan() {
         0

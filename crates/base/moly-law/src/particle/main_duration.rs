@@ -56,10 +56,10 @@ mod tests {
         assert!(set_length_in_sec(1.0, f32::NAN).is_nan());
     }
 
-    /// Native rows of `ParticleSystem::SetLengthInSec` and of the setter
+    /// Reference rows of `ParticleSystem::SetLengthInSec` and of the setter
     /// binding's tail (the source build's own code, with its static
     /// initializer run first): every stored duration word must
-    /// equal the native one, the binding rows' byte must be raised exactly
+    /// equal the reference one, the binding rows' byte must be raised exactly
     /// when the system is not stopped, and each named one-rule mutant must
     /// miss.
     #[test]
