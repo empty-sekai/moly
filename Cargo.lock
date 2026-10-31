@@ -5417,6 +5417,7 @@ dependencies = [
  "moly-audio",
  "moly-core",
  "moly-features",
+ "moly-fixture-edit",
  "moly-law",
  "moly-layout",
  "moly-link",
@@ -5490,6 +5491,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "moly-fixture-edit"
+version = "0.0.5"
+dependencies = [
+ "bevy",
+ "moly-assets",
+ "moly-features",
+ "moly-law",
+ "moly-layout",
+ "moly-link",
+ "moly-protocol",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "moly-game"
 version = "0.0.5"
 dependencies = [
@@ -5507,6 +5523,7 @@ dependencies = [
  "moly-core",
  "moly-devtools",
  "moly-features",
+ "moly-fixture-edit",
  "moly-law",
  "moly-layout",
  "moly-link",
@@ -5735,6 +5752,7 @@ dependencies = [
  "moly-audio",
  "moly-core",
  "moly-features",
+ "moly-fixture-edit",
  "moly-link",
  "moly-perf",
  "moly-protocol",

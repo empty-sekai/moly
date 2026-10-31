@@ -166,9 +166,9 @@ fn offset(center: GridPosition, (x, z): (i8, i8)) -> Option<GridPosition> {
 
 pub(super) fn autoplay(
     time: Res<Time>,
-    joystick: Res<crate::joystick::JoystickState>,
+    joystick: Res<moly_features::joystick::JoystickState>,
     view: Res<EditView>,
-    balloons: Query<&InheritedVisibility, With<crate::balloon::BalloonAnchor>>,
+    balloons: Query<&InheritedVisibility, With<moly_features::balloon::BalloonAnchor>>,
     mut out: MessageWriter<EditCommand>,
     mut run: Local<Run>,
 ) {

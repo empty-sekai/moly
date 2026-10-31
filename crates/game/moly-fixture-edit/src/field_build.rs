@@ -1,5 +1,5 @@
 //! A fixture put on the field by a character rather than through the
-//! editor's screen.
+//! editor's screen ([start], [FieldBuildState]).
 //!
 //! It goes through the editor's own steps with no editor session open: the
 //! owned catalog row ([`owned::catalog`]), the put search around a world
@@ -15,9 +15,9 @@
 //! and the walk cells are baked with it), or `Refused` with the reason.
 
 use super::{actors, layout_rules, owned, put_search, validation, EditPhase, EditSession, Facing, PutAim};
-use crate::fixture::{EditableFixture, FixturePlacements};
+use moly_features::fixture::{EditableFixture, FixturePlacements};
 use moly_law::fixture::Direction;
-use crate::userdata::Answered;
+use moly_features::userdata::Answered;
 use bevy::prelude::*;
 use moly_link::ServerLink;
 use moly_protocol::{Call, Refusal, Reply};
@@ -43,7 +43,7 @@ struct InFlight {
     uid: String,
     next: FixturePlacements,
     returned: Vec<EditableFixture>,
-    storage: crate::fixture::layouts::EditStorageSnapshot,
+    storage: moly_features::fixture::layouts::EditStorageSnapshot,
     reload: Option<actors::PendingReload>,
 }
 
@@ -122,20 +122,20 @@ pub fn start(
         return Err("the site's floor grid is not ready".into());
     };
     if layout.site_id() == 0
-        || !world.contains_resource::<crate::fixture::FixtureScenesReady>()
-        || (layout.total() != 0 && !world.contains_resource::<crate::fixture_material::FixtureMaterialsSwapped>())
+        || !world.contains_resource::<moly_features::fixture::FixtureScenesReady>()
+        || (layout.total() != 0 && !world.contains_resource::<moly_features::fixture_material::FixtureMaterialsSwapped>())
     {
         return Err("the site's fixtures are still loading".into());
     }
     if !world
-        .get_resource::<crate::site::SiteActive>()
+        .get_resource::<moly_features::site::SiteActive>()
         .is_some_and(|site| site.site_type == layout.site_type())
     {
         return Err("the site is changing".into());
     }
-    let homes = world.get_resource::<crate::house::HomeFixtures>();
+    let homes = world.get_resource::<moly_features::house::HomeFixtures>();
     let (storage, mut returned) = world
-        .get_resource::<crate::fixture::layouts::SiteFixtureLayouts>()
+        .get_resource::<moly_features::fixture::layouts::SiteFixtureLayouts>()
         .ok_or_else(|| "the saved layouts are not ready".to_owned())
         .and_then(|layouts| layouts.begin_edit(&layout, homes))?;
     let site_id = layout.site_id();
@@ -169,7 +169,7 @@ pub fn start(
         Some(direction) => Facing::Fixed(direction),
         None => {
             let Some(yaw) = world
-                .get_resource::<crate::camera::FieldCameraModel>()
+                .get_resource::<moly_features::camera::FieldCameraModel>()
                 .map(|model| model.yaw)
             else {
                 return Err("the camera is not ready".into());
@@ -187,7 +187,7 @@ pub fn start(
     validation::save(&rows, Some(floor), areas, rules.as_ref().map_err(|missing| *missing), true)
         .map_err(|(_, error)| error)?;
     let next = layout.with_editor_rows(&rows, next_uid)?;
-    let call = Call::HousingLayout(crate::fixture::layouts::housing_layout_request(&next));
+    let call = Call::HousingLayout(moly_features::fixture::layouts::housing_layout_request(&next));
     let seq = world.resource_mut::<ServerLink>().call(call);
     let mut builds = world.get_resource_or_insert_with(FieldBuilds::default);
     builds.next_ticket += 1;
@@ -248,7 +248,7 @@ fn finish_save(world: &mut World, outcome: Result<Reply, Refusal>) {
         world.insert_resource(builds);
         return;
     }
-    let receipt = match crate::fixture::layouts::persist_edit(&flight.next, &flight.returned, &flight.storage) {
+    let receipt = match moly_features::fixture::layouts::persist_edit(&flight.next, &flight.returned, &flight.storage) {
         Ok(receipt) => receipt,
         Err(error) => {
             builds.settle(flight.ticket, FieldBuildState::Refused(format!("the saved copy was not written: {error}")));
@@ -256,14 +256,14 @@ fn finish_save(world: &mut World, outcome: Result<Reply, Refusal>) {
             return;
         }
     };
-    let before = world.get_resource::<crate::fixture::FixturePlacements>().cloned();
+    let before = world.get_resource::<moly_features::fixture::FixturePlacements>().cloned();
     world.insert_resource(flight.next.clone());
-    if let Some(mut layouts) = world.get_resource_mut::<crate::fixture::layouts::SiteFixtureLayouts>() {
+    if let Some(mut layouts) = world.get_resource_mut::<moly_features::fixture::layouts::SiteFixtureLayouts>() {
         layouts.did_save(&flight.next, receipt);
     }
     match &before {
-        Some(before) => crate::fixture::reload_after_save_from(world, before),
-        None => crate::fixture::reload_after_save(world),
+        Some(before) => moly_features::fixture::reload_after_save_from(world, before),
+        None => moly_features::fixture::reload_after_save(world),
     }
     world.write_message(super::LayoutSaved);
     flight.reload = Some(actors::wait_for_reload(world, true, false));

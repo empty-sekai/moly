@@ -1,13 +1,20 @@
-//! Grid-space checks. Rendering bounds are never used as layout dimensions.
+//! The grid-space checks of the editor: whether a candidate can be placed
+//! (the put check) and whether the draft can be saved (the save check).
 //!
-//! The put check is the source's `CanPutFloor` (`tile_rules`) on the draft:
-//! the committed rows are the tile data, the selected fixture and the
-//! fixtures stacked on it are checked at their draft places.
+//! Input: the candidate, the draft rows, the floor grid, the rule table and
+//! the fixture areas. Output: `PutStatus` for the put and the first refusal
+//! (with the label the dialog shows) for the save. Invariant: every bound is
+//! computed in grid space; a rendering bound is never used as a layout
+//! dimension. The put check is `CanPutFloor` (`tile_rules`) on the draft:
+//! the committed rows are the tile data, while the selected fixture and the
+//! fixtures stacked on it are checked at their draft places. Boundary: the
+//! floor and rug grids only; a wall, fence or road row is refused when the
+//! master row is read.
 
 use super::{assets::FixtureAreas, PutStatus};
 use moly_layout::validate::{refusal_label, Board, Missing, Piece, Refusal, Rules};
 use moly_layout::MetaGrid;
-use crate::{fixture::EditableFixture, site::FloorGridLayout};
+use moly_features::{fixture::EditableFixture, site::FloorGridLayout};
 use moly_law::fixture::areas::{motion_area_bounds, rotated_center_grid, GridAreaData};
 use moly_law::fixture::position::layout_type;
 use std::collections::HashSet;
@@ -151,8 +158,8 @@ pub(super) fn check_step_save(
     })
 }
 
-/// Source CheckSaveLayout status precedence: cutscene(3), animation space(2),
-/// layout(1), success(0). Source master enforcement flags still await a
+/// CheckSaveLayout status precedence: cutscene(3), animation space(2),
+/// layout(1), success(0). The master enforcement flags still await a
 /// producer; the prior named empty enforcement mock is retained.
 fn check_save(
     rows: &[EditableFixture],
@@ -168,7 +175,7 @@ fn check_save(
         return Err("地图等级尺寸尚未就绪".into());
     };
     // Reject malformed drafts before any volume-based save checks. Valid
-    // geometry still follows the source cutscene/animation/layout precedence.
+    // geometry still follows the cutscene/animation/layout precedence.
     let footprints: Vec<_> = rows
         .iter()
         .map(|row| {

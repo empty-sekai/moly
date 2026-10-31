@@ -1,25 +1,31 @@
-//! The editor's fixture list from the owned fixtures.
+//! The editor's fixture list from the fixtures the player owns, with their
+//! placeable counts.
 //!
-//! `SiteEditFixtureContentListView.ConvertUserFixturesToThumbnailData` walks
-//! the user's `UserMysekaiFixture` rows in their order and keeps a row when
-//! its placeable count is above 0 or `MysekaiFixtureUtility.IsSelectableFixture`
-//! holds; the cell shows the placeable count. The placeable count is
-//! `FixtureSiteLayoutedManager.GetFixturePlaceableCount(id, texture)`: the
-//! row's quantity less the fixture's layouted count (the fixtures of that id
-//! and texture placed on the sites). Placing or storing a fixture changes the
-//! layouted count; the owned quantity stays.
+//! Input: the client's copy of the server's inventory
+//! (`moly_features::userdata::client::inventory`), the fixture master rows,
+//! the edited site's draft and the other sites' layouts
+//! ([`moly_features::fixture::layouts::SiteFixtureLayouts::placed_elsewhere`]),
+//! and the fixture-model index's preview paths. Output: the list's rows, each
+//! with the fixture, its texture, its placeable count and what the list left
+//! out (for the log). Invariants: a fixture's placeable count is its owned
+//! quantity less its layouted count (that id and texture placed on the
+//! sites); placing or storing changes the layouted count, the owned quantity
+//! stays. A row stays in the list when its placeable count is above 0 or the
+//! fixture is selectable, and then the cell shows the count.
 //!
-//! Here the layouted count is the draft of the edited site plus the other
-//! sites' layouts ([`crate::fixture::layouts::SiteFixtureLayouts::placed_elsewhere`]).
-//! The quantities are the client's copy of the server data
-//! (`crate::userdata::client::inventory`).
+//! Reference (`SiteEditFixtureContentListView.ConvertUserFixturesToThumbnailData`):
+//! the list walks the player's `UserMysekaiFixture` rows in their order and
+//! keeps a row when its placeable count is above 0 or
+//! `MysekaiFixtureUtility.IsSelectableFixture` holds.
+//! `FixtureSiteLayoutedManager.GetFixturePlaceableCount` gives the count (id and `texture`).
 //!
-//! Named gaps: `IsSelectableFixture` (the home fixture and the wall and floor
-//! appearance fixtures) is not applied, because this floor editor edits
-//! neither; rows whose master layout is not floor or rug (walls, roads,
-//! appearances: their own edit states) and rows whose model the fixture-model
-//! index does not export with a fixture view are left out and counted in the
-//! log; the list is not filtered by the selector's tab.
+//! Boundary: the count reads the draft of the edited site plus the
+//! other sites' layouts. `IsSelectableFixture` itself is not applied (the home
+//! fixture and the wall and floor appearance fixtures), because this floor
+//! editor edits neither; rows whose master layout is not floor or rug (walls,
+//! roads and appearances have their own edit states) and rows whose model the
+//! fixture-model index does not export with a fixture view are left out but
+//! counted in the log. The list is not filtered by the selector's tab.
 
 use std::collections::HashMap;
 
@@ -30,8 +36,8 @@ use moly_law::fixture::position::layout_type;
 use serde_json::Value;
 
 use super::assets::CandidateAssets;
-use crate::fixture::EditableFixture;
-use crate::userdata::client::inventory::ClientMysekaiInventory;
+use moly_features::fixture::EditableFixture;
+use moly_features::userdata::client::inventory::ClientMysekaiInventory;
 
 const FIXTURES: &str = "moly://mysekai-fixtures.json";
 
@@ -194,7 +200,7 @@ pub(super) fn catalog_for(
         .ok_or("the fixture-model index is not requested")?
         .paths;
     let elsewhere = world
-        .get_resource::<crate::fixture::layouts::SiteFixtureLayouts>()
+        .get_resource::<moly_features::fixture::layouts::SiteFixtureLayouts>()
         .ok_or("the layout owner is not installed")?
         .placed_elsewhere(site_id)?;
     let mut omitted = Omitted::default();

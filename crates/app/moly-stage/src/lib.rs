@@ -29,7 +29,7 @@ pub use moly_features::birthday;
 pub use moly_features::content_library;
 pub use moly_features::cutscene;
 pub use moly_features::entry;
-pub use moly_features::fixture_edit;
+pub use moly_fixture_edit as fixture_edit;
 pub use moly_features::footstep;
 pub use moly_features::game_settings;
 pub use moly_features::game_state;

@@ -1,20 +1,38 @@
-//! Ground fixture editing with one command boundary and a private map draft.
+//! The layout editor: placing, moving, rotating and storing fixtures on a
+//! site's floor grid, and saving the site's layout.
 //!
-//! Source: FloorEditState.SelectFixture snapshots StartPosition/StartDirection;
-//! Reset restores them (or removes a pre-placement preview); Decide updates
-//! tile/layout data before unselecting. SiteLayoutEditor keeps an explicit
-//! Cancel / Save / Discard exit dialog. The offline storage envelope is a
-//! product-owned input, not real account data. The fixture list offers the
-//! owned fixtures with their placeable counts (`owned`); a save posts the
-//! site's layout to the server model (`PostUserMysekaiHousingLayoutApi`)
-//! before the offline envelope is written.
+//! Input: `EditCommand` messages from the screen (`ui`), the pointer and
+//! keyboard readers (`input`), layout requests ([`apply_request`]) and the
+//! server's answers to a save. Output: the editor's `EditView` for the
+//! screen, draft poses on existing fixture roots, and, once a save succeeds,
+//! `FixturePlacements`, the returned inventory, `LayoutSaved` and the normal
+//! layout reload. The camera is [`floor_camera`]; the grid is `edit_grid`.
 //!
-//! Existing world roots can display draft poses, but FixturePlacements and
-//! returned inventory are published only after the shared store succeeds.
-//! The put check, the drag's clamp and height, stacking and the rotation of
-//! stacked fixtures follow `FloorEditState` and `SiteLayoutUtility`
-//! (`tile_rules`). Walls, fences and roads have their own edit states and
-//! are not converted into guessed ground behaviour.
+//! Invariants:
+//! - A command selects, moves, rotates, decides or stores; it never writes a
+//!   draft row directly. [`EditSession`] is the only draft owner.
+//! - A selection is a snapshot: selecting (`FloorEditState.SelectFixture`)
+//!   keeps the start position and direction, resetting restores them (or
+//!   removes a pre-placement preview), and deciding writes the tile and
+//!   layout data before the selection is dropped.
+//! - Leaving the editor goes through an explicit Cancel / Save / Discard
+//!   dialog (`SiteLayoutEditor`).
+//! - Draft rows reach `FixturePlacements` and the returned inventory only
+//!   after the save succeeds; until then only the preview's poses change.
+//! - A save posts the site's layout to the server (`PostUserMysekaiHousingLayoutApi`)
+//!   and writes the offline layout envelope afterwards; the envelope is an
+//!   input owned by the game, not account data.
+//! - The fixture list (`owned`) offers the player's fixtures with their
+//!   placeable counts.
+//!
+//! Boundaries: the put check, the drag's clamp and height, stacking and the
+//! rotation of stacked fixtures are the rules of `FloorEditState` and
+//! `SiteLayoutUtility` (`tile_rules`). Ground rows only: walls, fences and
+//! roads have their own edit states and the ground rules do not approximate
+//! them. The hub keeps the contracts this crate uses (`field_modes`,
+//! `ui_inputs`, `companion_cues`, `ui_charsets`, `fixture_put_limit`);
+//! hub paths go through `moly_features`. Scripted layout steps
+//! ([`layout_director`]) open their drafts through [`session`].
 
 mod actors;
 mod assets;
@@ -22,22 +40,26 @@ mod autoplay;
 mod edit_grid;
 mod environment;
 pub mod field_build;
+pub mod floor_camera;
 mod game_state;
 mod input;
+pub mod layout_director;
 mod layout_rules;
 mod owned;
 mod presentation;
 mod put_effect;
 mod road;
 pub(crate) mod session;
+pub mod ui;
 mod validation;
 
 #[cfg(test)]
 mod tests;
 
-use crate::audio::{SeClass, SeRequest, SeRequests};
-use crate::fixture::{EditableFixture, FixturePlacements, OccupancyRow};
-use crate::userdata::{Answered, ServerPending};
+use moly_features::audio::{SeClass, SeRequest, SeRequests};
+use moly_features::fixture::{EditableFixture, FixturePlacements, OccupancyRow};
+use moly_features::userdata::{Answered, ServerPending};
+
 use assets::FixtureAreas;
 use bevy::prelude::*;
 use moly_law::fixture::position::layout_type;
@@ -50,10 +72,10 @@ pub use input::{read_keyboard, read_pointer};
 pub use put_effect::site_origin;
 pub(crate) use put_effect::{play_put_sound, show as show_put_effect};
 
-pub use crate::field_modes::{EditSessionActive, LayoutSaved};
+pub use moly_features::field_modes::{EditSessionActive, LayoutSaved};
 
 /// UI and platform input may request operations, never mutate draft fields.
-pub use crate::ui_inputs::{
+pub use moly_features::ui_inputs::{
     EditCatalogView, EditCommand, EditContentType, EditEnvironmentView, EditItemView, EditPhase,
     EditSelectionView, EditView, PutStatus,
 };
@@ -107,7 +129,7 @@ pub struct EditSession {
     content: EditContentType,
     environment: Option<i32>,
     baseline: Option<FixturePlacements>,
-    storage_baseline: Option<crate::fixture::layouts::EditStorageSnapshot>,
+    storage_baseline: Option<moly_features::fixture::layouts::EditStorageSnapshot>,
     /// Keep editing input/actor ownership while the successful save's actual
     /// fixture scenes and matching navigation generation are being restored.
     pending_reload: Option<actors::PendingReload>,
@@ -140,7 +162,7 @@ impl EditSession {
 /// The dialogs of `SiteLayoutEditor.SaveLayoutWithValidation`.
 #[derive(Clone, Debug)]
 struct SaveDialog {
-    id: crate::ui_layers::DialogId,
+    id: moly_features::ui_layers::DialogId,
     kind: SaveDialogKind,
     /// The save was asked from the exit prompt.
     exit_after: bool,
@@ -218,10 +240,10 @@ impl EditSession {
     /// Opens the draft on the site's loaded layout, as the editor's screen
     /// does, without its game state. The layout and its returned inventory
     /// come from the saved layouts' own opening check.
-    pub(super) fn open_for_layout(
+    pub(crate) fn open_for_layout(
         &mut self,
         layout: FixturePlacements,
-        storage_baseline: crate::fixture::layouts::EditStorageSnapshot,
+        storage_baseline: moly_features::fixture::layouts::EditStorageSnapshot,
         inventory: Vec<EditableFixture>,
     ) {
         self.finish();
@@ -246,7 +268,7 @@ impl EditSession {
 
     /// The draft as the site layout a save writes, and the inventory it
     /// returns; the UID counter a new row would take next goes with it.
-    pub(super) fn decided_layout(
+    pub(crate) fn decided_layout(
         &mut self,
     ) -> Result<(FixturePlacements, Vec<EditableFixture>), String> {
         let base = self
@@ -319,7 +341,7 @@ pub fn clear_for_site_change(world: &mut World) {
     if let Some(mut active) = world.get_resource_mut::<EditSessionActive>() {
         active.active = false;
     }
-    world.remove_resource::<crate::field_modes::LayoutEnvironmentPreview>();
+    world.remove_resource::<moly_features::field_modes::LayoutEnvironmentPreview>();
     presentation::clear(world);
     actors::clear_overlay(world);
     game_state::exit_for_site_change(world);
@@ -347,24 +369,24 @@ fn begin(world: &mut World, session: &mut EditSession) {
     if session.phase != EditPhase::Idle {
         return;
     }
-    // A layout step's save ([`crate::layout_director`]) is out: the editor
+    // A layout step's save ([`layout_director`]) is out: the editor
     // opens no draft until the site has saved it.
-    if crate::layout_director::saving(world) {
+    if layout_director::saving(world) {
         session.say("正在等待一次布局保存完成，稍后再开始编辑。");
         return;
     }
     if world
-        .get_resource::<crate::ui_layers::UiLayerStack>()
+        .get_resource::<moly_features::ui_layers::UiLayerStack>()
         .is_some_and(|layers| !layers.on_field())
         || world
-            .get_resource::<crate::menu_shell::ShellDialogState>()
+            .get_resource::<moly_features::menu_shell::ShellDialogState>()
             .is_some_and(|dialogs| dialogs.blocks_field_input())
     {
         session.say("请先关闭当前窗口，再编辑家具。");
         return;
     }
-    if world.contains_resource::<crate::player_talk::PlayerTalkSession>()
-        || world.contains_resource::<crate::talk::ActiveTalk>()
+    if world.contains_resource::<moly_features::player_talk::PlayerTalkSession>()
+        || world.contains_resource::<moly_features::talk::ActiveTalk>()
     {
         session.say("请先结束对话，再编辑家具。");
         return;
@@ -374,23 +396,23 @@ fn begin(world: &mut World, session: &mut EditSession) {
     };
     if layout.site_id() == 0
         || layout.floor_grid().is_none()
-        || !world.contains_resource::<crate::fixture::FixtureScenesReady>()
+        || !world.contains_resource::<moly_features::fixture::FixtureScenesReady>()
         || (layout.total() != 0
-            && !world.contains_resource::<crate::fixture_material::FixtureMaterialsSwapped>())
+            && !world.contains_resource::<moly_features::fixture_material::FixtureMaterialsSwapped>())
     {
         session.say("场地或家具仍在加载，请稍后进入编辑。");
         return;
     }
     if !world
-        .get_resource::<crate::site::SiteActive>()
+        .get_resource::<moly_features::site::SiteActive>()
         .is_some_and(|site| site.site_type == layout.site_type())
     {
         session.say("场地正在切换，暂时不能开始编辑。");
         return;
     }
-    let homes = world.get_resource::<crate::house::HomeFixtures>();
+    let homes = world.get_resource::<moly_features::house::HomeFixtures>();
     let entry = world
-        .get_resource::<crate::fixture::layouts::SiteFixtureLayouts>()
+        .get_resource::<moly_features::fixture::layouts::SiteFixtureLayouts>()
         .ok_or_else(|| "布局存档所有者尚未就绪".to_owned())
         .and_then(|layouts| layouts.begin_edit(&layout, homes));
     let (storage_baseline, inventory) = match entry {
@@ -420,10 +442,10 @@ fn begin(world: &mut World, session: &mut EditSession) {
     actors::enter(world);
     // These are the existing owners' normal cancellation paths, not a blanket
     // component deletion or a site-change shortcut that strands NPC objectives.
-    crate::player_fixture_action::cancel_for_layout_edit(world);
-    crate::npc_fixture_activity::cancel_for_layout_edit(world);
-    crate::fixture_gimmick::cancel_for_site_change(world);
-    crate::fixture_scene_inputs::invalidate_for_site_change(world);
+    moly_features::player_fixture_action::cancel_for_layout_edit(world);
+    moly_features::npc_fixture_activity::cancel_for_layout_edit(world);
+    moly_features::fixture_gimmick::cancel_for_site_change(world);
+    moly_features::fixture_scene_inputs::invalidate_for_site_change(world);
     play_se(world, "se_change_layout", "edit-enter");
     game_state::enter(world);
     environment::preview(world, session);
@@ -522,7 +544,7 @@ fn focus(world: &mut World, item: &EditableFixture, source: &'static str) {
             false
         }
     };
-    crate::floor_edit_camera::focus(world, position, size, zoom_support, source);
+    crate::floor_camera::focus(world, position, size, zoom_support, source);
 }
 
 /// `FloorEditState.PutFixture` before the new fixture is shown: its
@@ -549,7 +571,7 @@ fn place_new(
         return false;
     };
     let Some(camera) = world
-        .get_resource::<crate::camera::FieldCameraModel>()
+        .get_resource::<moly_features::camera::FieldCameraModel>()
         .map(|model| (model.look_at, model.yaw))
     else {
         session.say("相机尚未就绪，暂时不能摆放新家具。");
@@ -589,7 +611,7 @@ pub(crate) struct PutAim {
 fn put_search(
     world: &mut World,
     rows: &[EditableFixture],
-    floor: crate::site::FloorGridLayout,
+    floor: moly_features::site::FloorGridLayout,
     item: &mut EditableFixture,
     look_at: Vec3,
     aim: PutAim,
@@ -618,7 +640,7 @@ fn put_search(
         }
         Facing::Fixed(direction) => (direction, f32::from(direction as u8) * 90.0),
     };
-    // The look-at relative to the site, in the source frame (X mirrored).
+    // The look-at relative to the site, in the reference frame (X mirrored).
     let relative = look_at - site_origin(world);
     let relative = Vec3::new(-relative.x, relative.y, relative.z);
     let board = match layout_rules::rules(world, Some(floor))
@@ -733,7 +755,7 @@ fn put_search(
 }
 
 /// The committed rows stacked on `uid` (`GetStackedFixtures`), in the
-/// source's depth-first order.
+/// reference's depth-first order.
 fn stacked_rows(
     world: &World,
     session: &EditSession,
@@ -772,7 +794,7 @@ fn put_status(world: &World, session: &EditSession, selection: &Selection) -> Pu
     )
 }
 
-/// A source-frame place of a draft row, back in the product frame.
+/// A reference-frame place of a draft row, back in the product frame.
 fn product_row(
     item: &EditableFixture,
     center: GridPosition,
@@ -945,7 +967,7 @@ fn rotate(world: &mut World, session: &mut EditSession) {
         );
         return;
     }
-    // RotationSquareToRight (source direction + 1), then
+    // RotationSquareToRight (the reference's direction + 1), then
     // UpdateEditRotateTargetPosition at the grid position.
     let direction =
         Direction::from_u8((piece.direction as u8 + 1) % 4).expect("four source directions");
@@ -1078,11 +1100,11 @@ fn select(
     session.cancel_selection();
     // A table that did not load answers false (no store action).
     let can_clean_up = world
-        .get_resource::<crate::house::HomeFixtures>()
+        .get_resource::<moly_features::house::HomeFixtures>()
         .is_some_and(|homes| {
             let free = world
-                .get_resource::<crate::free_layout::FreeLayout>()
-                .is_some_and(crate::free_layout::FreeLayout::is_on);
+                .get_resource::<moly_features::free_layout::FreeLayout>()
+                .is_some_and(moly_features::free_layout::FreeLayout::is_on);
             free || homes.can_clean_up(&item.package)
         });
     let fixture_id = item.fixture_id;
@@ -1185,7 +1207,7 @@ fn decide(session: &mut EditSession, world: &mut World) {
     // Publish(7, LayoutEditEventData(1, uid)): the edit camera's distance
     // restore.
     let block = put_effect::is_block(world, decided.fixture_id);
-    crate::floor_edit_camera::decided(world, block, "edit-decide");
+    crate::floor_camera::decided(world, block, "edit-decide");
     session.say("已决定摆放，尚未保存。");
 }
 
@@ -1250,15 +1272,15 @@ fn return_item(session: &mut EditSession) {
 /// fence or road, `CanCleanUp`) goes to storage, with what stands on it.
 fn clean_up_all(world: &World, session: &mut EditSession) {
     let (Some(homes), Some(traits)) = (
-        world.get_resource::<crate::house::HomeFixtures>(),
+        world.get_resource::<moly_features::house::HomeFixtures>(),
         put_effect::traits_table(world),
     ) else {
         session.say("家具主表仍在加载，未清理家具。");
         return;
     };
     let free = world
-        .get_resource::<crate::free_layout::FreeLayout>()
-        .is_some_and(crate::free_layout::FreeLayout::is_on);
+        .get_resource::<moly_features::free_layout::FreeLayout>()
+        .is_some_and(moly_features::free_layout::FreeLayout::is_on);
     session.cancel_selection();
     let (mut kept_house, mut kept_joint, mut moved) = (0usize, 0usize, Vec::new());
     let mut index = 0;
@@ -1378,7 +1400,7 @@ fn save(session: &mut EditSession, world: &mut World, exit_after: bool, validate
     }
     // PostUserMysekaiHousingLayoutApi first: the saved copy is written only
     // once the server has accepted the layout; a refusal keeps the draft.
-    let call = Call::HousingLayout(crate::fixture::layouts::housing_layout_request(&next));
+    let call = Call::HousingLayout(moly_features::fixture::layouts::housing_layout_request(&next));
     let kind = call.kind();
     let seq = world.resource_mut::<ServerLink>().call(call);
     info!(
@@ -1461,7 +1483,7 @@ fn commit_saved_layout(
         return;
     };
     let receipt =
-        match crate::fixture::layouts::persist_edit(&next, &session.inventory, storage_baseline) {
+        match moly_features::fixture::layouts::persist_edit(&next, &session.inventory, storage_baseline) {
             Ok(receipt) => receipt,
             Err(error) => {
                 session.say(format!("保存失败：{error}。布局、库存及退出窗口均未提交。"));
@@ -1473,7 +1495,7 @@ fn commit_saved_layout(
     // transaction. Existing settings and other site buckets are untouched.
     world.insert_resource(next.clone());
     if let Some(mut layouts) =
-        world.get_resource_mut::<crate::fixture::layouts::SiteFixtureLayouts>()
+        world.get_resource_mut::<moly_features::fixture::layouts::SiteFixtureLayouts>()
     {
         layouts.did_save(&next, receipt);
     }
@@ -1488,9 +1510,9 @@ fn commit_saved_layout(
         .filter(|row| previous.iter().find(|before| before.uid == row.uid) != Some(row))
         .map(|row| row.uid)
         .collect();
-    world.init_resource::<crate::npc_objective::events::LayoutReactionFixtures>();
+    world.init_resource::<moly_features::npc_objective::events::LayoutReactionFixtures>();
     world
-        .resource_mut::<crate::npc_objective::events::LayoutReactionFixtures>()
+        .resource_mut::<moly_features::npc_objective::events::LayoutReactionFixtures>()
         .pending
         .push(updated);
     session.baseline = Some(next);
@@ -1502,9 +1524,9 @@ fn commit_saved_layout(
         .get_resource::<assets::CandidateAssets>()
         .map(|candidates| candidates.glbs.values().cloned().collect())
         .unwrap_or_default();
-    crate::fixture::retain_sources_until_swapped(world, previews);
+    moly_features::fixture::retain_sources_until_swapped(world, previews);
     presentation::clear(world);
-    crate::fixture::reload_after_save(world);
+    moly_features::fixture::reload_after_save(world);
     world.write_message(LayoutSaved);
     // The normal loader/rebake runs on a later site-group turn. Finishing here
     // would release movement into the old WalkFace before LayoutSaved is read.
@@ -1526,11 +1548,11 @@ fn refused_save(
     session: &mut EditSession,
     status: validation::LayoutStatus,
     error: &str,
-    floor: Option<crate::site::FloorGridLayout>,
+    floor: Option<moly_features::site::FloorGridLayout>,
     rules: Option<&moly_layout::Rules>,
     exit_after: bool,
 ) {
-    use crate::common_dialog::Buttons;
+    use moly_features::common_dialog::Buttons;
     use validation::LayoutStatus;
     let (caller, body, buttons, kind) = match status {
         LayoutStatus::Unavailable => {
@@ -1547,7 +1569,7 @@ fn refused_save(
             SaveDialogKind::CutsceneArea,
         ),
         LayoutStatus::ErrorLayout | LayoutStatus::ErrorAnimationSpace => {
-            let homes = world.get_resource::<crate::house::HomeFixtures>();
+            let homes = world.get_resource::<moly_features::house::HomeFixtures>();
             let listed = match (floor, rules, homes) {
                 (Some(floor), Some(rules), Some(homes)) => {
                     validation::invalid_fixtures(&session.rows, floor, rules, |package| {
@@ -1574,7 +1596,7 @@ fn refused_save(
                     return;
                 }
             };
-            let homes = world.get_resource::<crate::house::HomeFixtures>();
+            let homes = world.get_resource::<moly_features::house::HomeFixtures>();
             let house_or_gate = session.rows.iter().any(|row| {
                 listed.contains(&row.uid)
                     && homes.is_some_and(|homes| !homes.can_clean_up(&row.package))
@@ -1590,8 +1612,8 @@ fn refused_save(
                     SaveDialogKind::GoToHome,
                 )
             } else if world
-                .get_resource::<crate::free_layout::FreeLayout>()
-                .is_some_and(crate::free_layout::FreeLayout::is_on)
+                .get_resource::<moly_features::free_layout::FreeLayout>()
+                .is_some_and(moly_features::free_layout::FreeLayout::is_on)
             {
                 // The free layout mode stores the house and the gates like
                 // any other fixture, so the list goes to storage without a
@@ -1611,7 +1633,7 @@ fn refused_save(
                 save(session, world, exit_after, true);
                 return;
             } else {
-                // The source shows the list in its own dialog
+                // The reference shows the list in its own dialog
                 // (InValidLayoutFixtureListDialog); the common dialog shows
                 // its message and buttons, and the log names the fixtures.
                 (
@@ -1626,8 +1648,8 @@ fn refused_save(
             }
         }
     };
-    let text = crate::common_dialog::wording(world, caller, body);
-    let Some(id) = crate::common_dialog::open(world, caller, text, buttons, None) else {
+    let text = moly_features::common_dialog::wording(world, caller, body);
+    let Some(id) = moly_features::common_dialog::open(world, caller, text, buttons, None) else {
         session.say(format!(
             "保存未完成：{error}；确认窗口无法显示。原布局与草稿均保留。"
         ));
@@ -1650,7 +1672,7 @@ fn answer_save_dialog(world: &mut World) {
     else {
         return;
     };
-    let Some(ok) = crate::common_dialog::answer(world, id) else {
+    let Some(ok) = moly_features::common_dialog::answer(world, id) else {
         return;
     };
     settle_save_dialog(world, id, ok);
@@ -1658,7 +1680,7 @@ fn answer_save_dialog(world: &mut World) {
 
 /// The editor's save dialog `id` is answered: `ok` runs its OK, a cancel
 /// drops it. The layout steps call this as the editor does.
-pub(crate) fn settle_save_dialog(world: &mut World, id: crate::ui_layers::DialogId, ok: bool) {
+pub(crate) fn settle_save_dialog(world: &mut World, id: moly_features::ui_layers::DialogId, ok: bool) {
     let Some(mut session) = world.remove_resource::<EditSession>() else {
         return;
     };
@@ -1868,8 +1890,8 @@ fn apply_command(world: &mut World, session: &mut EditSession, command: EditComm
         EditCommand::Nudge { x, z } => drag(world, session, DragTarget::Step { x, z }),
         EditCommand::Rotate => rotate(world, session),
         EditCommand::Decide => decide(session, world),
-        EditCommand::RotateCamera => crate::floor_edit_camera::rotate(world),
-        EditCommand::ChangeLookCamera => crate::floor_edit_camera::change_look(world),
+        EditCommand::RotateCamera => crate::floor_camera::rotate(world),
+        EditCommand::ChangeLookCamera => crate::floor_camera::change_look(world),
         EditCommand::Cancel => session.cancel_selection(),
         EditCommand::ReturnToInventory => return_item(session),
         EditCommand::Save => {
@@ -1925,7 +1947,7 @@ fn apply_command(world: &mut World, session: &mut EditSession, command: EditComm
         }
         EditCommand::DiscardAndExit => {
             // Not a hotkey nor a site-switch fallback. Only the explicit exit
-            // prompt offers this source action (ReloadPlayerLayoutDataAsync).
+            // prompt offers this action (ReloadPlayerLayoutDataAsync).
             if session.exit_dialog {
                 presentation::clear(world);
                 // The published layout/inventory never changed. Drop only
@@ -1970,7 +1992,7 @@ fn apply_commands(world: &mut World) {
         }
     }
     if world
-        .get_resource::<crate::game_settings::SettingsPanel>()
+        .get_resource::<moly_features::game_settings::SettingsPanel>()
         .is_some_and(|panel| panel.blocks_world_input())
     {
         return;
@@ -2270,7 +2292,7 @@ fn publish_view(world: &mut World) {
         return;
     };
     let owned_revision = world
-        .get_resource::<crate::userdata::client::inventory::ClientMysekaiInventory>()
+        .get_resource::<moly_features::userdata::client::inventory::ClientMysekaiInventory>()
         .map_or(0, |owned| owned.revision);
     let environment_choices = if session.phase != EditPhase::Idle {
         environment::choices(world)
@@ -2405,15 +2427,15 @@ pub struct FixtureEditPlugin;
 
 impl Plugin for FixtureEditPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(crate::companion_cues::PutEffect::new(put_effect::show));
-        app.init_resource::<crate::ui_charsets::ShellTextSources>();
+        app.insert_resource(moly_features::companion_cues::PutEffect::new(put_effect::show));
+        app.init_resource::<moly_features::ui_charsets::ShellTextSources>();
         app.world_mut()
-            .resource_mut::<crate::ui_charsets::ShellTextSources>()
-            .register_texts("fixture_edit", WORDINGS, crate::fixture_edit_ui::FIXED_TEXTS);
+            .resource_mut::<moly_features::ui_charsets::ShellTextSources>()
+            .register_texts("fixture_edit", WORDINGS, crate::ui::FIXED_TEXTS);
         edit_grid::install(app);
-        crate::fixture_put_limit::install(app);
+        moly_features::fixture_put_limit::install(app);
         road::install(app);
-        crate::layout_director::install(app);
+        layout_director::install(app);
         app.init_resource::<EditSession>()
             .init_resource::<field_build::FieldBuilds>()
             .init_resource::<EditSessionActive>()
@@ -2439,7 +2461,7 @@ impl Plugin for FixtureEditPlugin {
                 Update,
                 read_keyboard
                     .in_set(FixtureEditSystems::Input)
-                    .run_if(crate::game_settings::scene_input_enabled),
+                    .run_if(moly_features::game_settings::scene_input_enabled),
             )
             // Root places Pointer after UI consumption, with no back-edge to
             // FixtureLayoutSet. Its small adapter emits the same EditCommand.
@@ -2447,7 +2469,7 @@ impl Plugin for FixtureEditPlugin {
                 Update,
                 read_pointer
                     .in_set(FixtureEditSystems::Pointer)
-                    .run_if(crate::game_settings::scene_input_enabled),
+                    .run_if(moly_features::game_settings::scene_input_enabled),
             )
             .add_systems(
                 Update,
@@ -2461,7 +2483,7 @@ impl Plugin for FixtureEditPlugin {
                     .in_set(FixtureEditSystems::Commands)
                     .after(FixtureEditSystems::Input)
                     .after(FixtureEditSystems::Pointer)
-                    .before(crate::audio::SeDrainSet::Drain),
+                    .before(moly_features::audio::SeDrainSet::Drain),
             )
             .add_systems(
                 Update,
@@ -2487,24 +2509,24 @@ impl Plugin for FixtureEditPlugin {
                 Update,
                 autoplay::autoplay
                     .before(FixtureEditSystems::Commands)
-                    .run_if(crate::game_settings::scene_input_enabled),
+                    .run_if(moly_features::game_settings::scene_input_enabled),
             )
             .add_systems(
                 Update,
                 put_effect::advance
                     .after(FixtureEditSystems::Commands)
-                    .before(crate::audio::SeDrainSet::Drain),
+                    .before(moly_features::audio::SeDrainSet::Drain),
             )
             .add_systems(
                 Update,
-                crate::floor_edit_camera::input
+                crate::floor_camera::input
                     .after(FixtureEditSystems::Commands)
-                    .run_if(crate::game_settings::camera_input_enabled),
+                    .run_if(moly_features::game_settings::camera_input_enabled),
             )
             .add_systems(
                 PostUpdate,
                 (
-                    crate::floor_edit_camera::sample.after(crate::camera::follow_avatar),
+                    crate::floor_camera::sample.after(moly_features::camera::follow_avatar),
                     game_state::sample_tweets
                         .after(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate),
                 ),
@@ -2520,8 +2542,8 @@ impl Plugin for FixtureEditPlugin {
                     actors::maintain_detached_views,
                 )
                     .chain()
-                    .after(crate::balloon::place)
-                    .after(crate::emoticon::advance)
+                    .after(moly_features::balloon::place)
+                    .after(moly_features::emoticon::advance)
                     .before(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate),
             );
     }

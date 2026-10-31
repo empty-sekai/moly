@@ -1,9 +1,20 @@
-//! A reversible view of the private editor draft. This module owns temporary
-//! poses/previews only; it never commits layouts, inventory or gameplay leases.
+//! A reversible view of the editor's private draft: draft poses on existing
+//! fixture roots, route and road previews, the candidate's tile and its
+//! placement marker.
+//!
+//! Input: [`EditSession`]'s rows, selection and phase, the draft's put status,
+//! the resolved preview models (`CandidateAssets`) and each root's
+//! `FixtureScenePlacement`. Output: temporary components and transforms on
+//! the fixture roots (`DraftPreview`, road previews, tile markers) and
+//! `RoadDraft`. Invariants: every changed root keeps its original transform
+//! and visibility, and the restore puts exactly those back; a root whose scene
+//! is not ready, or whose materials are still being swapped, is not moved.
+//! Boundary: the module owns temporary poses and previews only; it never
+//! commits layouts, the inventory or gameplay leases.
 
 use super::{EditPhase, EditSession, PutStatus, assets::CandidateAssets};
-use crate::fixture::{EditableFixture, FixtureRoot};
-use crate::fixture_scene_inputs::FixtureScenePlacement;
+use moly_features::fixture::{EditableFixture, FixtureRoot};
+use moly_features::fixture_scene_inputs::FixtureScenePlacement;
 use bevy::{gltf::Gltf, prelude::*};
 use moly_law::fixture::position::TILE_SIZE;
 use std::collections::{HashMap, HashSet};
@@ -36,12 +47,12 @@ struct ProjectionStamp {
     waiting_assets: bool,
 }
 
-/// Source Reset restores the selected start pose, while explicit discard
+/// Reset restores the selected start pose, while explicit discard
 /// reloads the saved layout. The committed record was never changed, so both
 /// paths can remove only the editor's own overlays and restore captured poses.
 pub(super) fn clear(world: &mut World) {
     world.remove_resource::<ProjectionStamp>();
-    world.remove_resource::<crate::fixture::road::RoadDraft>();
+    world.remove_resource::<moly_features::fixture::road::RoadDraft>();
     // Preview ownership ends with the session. The catalog keeps paths, not
     // every GLB ever browsed; committed fixtures own their own source handles.
     if let Some(mut candidates) = world.get_resource_mut::<CandidateAssets>() {
@@ -79,11 +90,11 @@ pub(super) fn sync_visuals(world: &mut World) {
     // A successful save hands scene creation back to the normal loader. Do
     // not capture its intentionally-hidden not-yet-material-swapped roots as
     // the editor's original visibility, or later moves would hide them again.
-    if !world.contains_resource::<crate::fixture::FixtureScenesReady>()
+    if !world.contains_resource::<moly_features::fixture::FixtureScenesReady>()
         || (world
-            .get_resource::<crate::fixture::FixturePlacements>()
+            .get_resource::<moly_features::fixture::FixturePlacements>()
             .is_some_and(|layout| layout.total() != 0)
-            && !world.contains_resource::<crate::fixture_material::FixtureMaterialsSwapped>())
+            && !world.contains_resource::<moly_features::fixture_material::FixtureMaterialsSwapped>())
     {
         return;
     }
@@ -169,7 +180,7 @@ pub(super) fn sync_visuals(world: &mut World) {
         }
         if let Some(target) = item.and_then(|item| item.pose().ok()) {
             if pose.translation != target.translation || pose.rotation != target.rotation {
-                // Keep source-authored scale. Only the layout-owned position
+                // Keep the authored scale. Only the layout-owned position
                 // and yaw are overlaid; child animation data remains untouched.
                 let mut transform = world.get_mut::<Transform>(entity).expect("root transform");
                 transform.translation = target.translation;
@@ -191,7 +202,7 @@ pub(super) fn sync_visuals(world: &mut World) {
             }
         }
     }
-    world.insert_resource(crate::fixture::road::RoadDraft {
+    world.insert_resource(moly_features::fixture::road::RoadDraft {
         revision,
         rows: road_rows,
     });
@@ -200,7 +211,7 @@ pub(super) fn sync_visuals(world: &mut World) {
         .query::<(
             Entity,
             &DraftPreview,
-            Option<&crate::render_inputs::FixtureVisualReady>,
+            Option<&moly_features::render_inputs::FixtureVisualReady>,
         )>()
         .iter(world)
         .filter_map(|(entity, preview, ready)| ready.map(|_| (entity, preview.uid.clone())))
@@ -246,7 +257,7 @@ fn sync_previews(world: &mut World, rows: &[EditableFixture]) -> bool {
         };
         if let Some((entity, _)) = previews.iter().find(|(_, uid)| *uid == row.uid) {
             if world
-                .get::<crate::render_inputs::FixtureVisualReady>(*entity)
+                .get::<moly_features::render_inputs::FixtureVisualReady>(*entity)
                 .is_none()
             {
                 ready = false;
@@ -291,14 +302,14 @@ fn sync_previews(world: &mut World, rows: &[EditableFixture]) -> bool {
             ready = false;
             continue;
         };
-        // Share source material preparation, but not committed gameplay roles.
+        // Share the materials' preparation, but not committed gameplay roles.
         // The material owner reveals this root after the scene is expanded and
-        // all source replacements are ready, exactly as for saved furniture.
+        // all replacements are ready, exactly as for saved furniture.
         ready = false;
         let mut entity = world.spawn((
             WorldAssetRoot(scene),
-            crate::fixture::FixtureVisualRoot { layout: row.layout },
-            crate::fixture_colors::FixtureColorChoice {
+            moly_features::fixture::FixtureVisualRoot { layout: row.layout },
+            moly_features::fixture_colors::FixtureColorChoice {
                 package: row.package.clone(),
                 texture_id: row.texture_id,
             },
@@ -309,7 +320,7 @@ fn sync_previews(world: &mut World, rows: &[EditableFixture]) -> bool {
             Visibility::Hidden,
         ));
         if row.layout == moly_law::fixture::position::layout_type::ROAD {
-            entity.insert(crate::fixture::road::RoadPreview(row.uid.clone()));
+            entity.insert(moly_features::fixture::road::RoadPreview(row.uid.clone()));
         }
     }
     ready

@@ -1,23 +1,34 @@
-//! The edit game state's entry and exit (`EditGameState.OnEnter` and
-//! `OnExit`) around the product's edit session.
+//! The edit game state around an edit session: what entering and leaving the
+//! editor hides, disables and hands to the camera, as one record.
 //!
-//! `OnEnter`, in order: `ChangeGameState(2)` is published; `ShowGrid` (event
-//! 15, `ShowGridEventData(2)`); every player avatar presenter hides; every
-//! NPC presenter hides and cancels its objective; `HideTweets` (event 27);
-//! `FieldCamera.ChangeState(FloorEdit)`; the post process's fog is disabled.
-//! `OnExit`: `HideGrid` (event 16); the local player shows; the other players
-//! show unless they are this player, not in the room, on another site or in
-//! state 11, 15 or 18; the NPCs show; `ShowTweets` (event 26);
-//! `SiteObjectManager.ShowAll`; the fog is enabled again.
+//! Input: the session's entry and exit (also for a site change), the editor
+//! grid and camera, and [`EditGameState`]'s previous record. Output:
+//! [`EditGameState`], the grid shown or hidden, the edit actor overlay, the
+//! camera state and the post process's fog switch. Invariants: the fog is
+//! disabled for exactly the frames the session is active; the exit repeats the
+//! record and returns every thing the entry took; a site change keeps the
+//! same bookkeeping and returns the camera to Normal alone (the new site
+//! frames it). An exit with nothing recorded does nothing.
 //!
-//! Here:
+//! On entry `EditGameState.OnEnter` publishes `ChangeGameState(2)`, then
+//! `ShowGrid` (event 15, `ShowGridEventData(2)`), hides every player avatar
+//! presenter, hides every NPC presenter and cancels its objective,
+//! publishes `HideTweets` (event 27), changes the field camera to
+//! `FloorEdit` and disables the post process's fog. On exit
+//! `EditGameState.OnExit` publishes `HideGrid` (event 16), shows the local
+//! player, shows the other players unless they are this player, not in the
+//! room, on another site or in state 11, 15 or 18, shows the NPCs, publishes
+//! `ShowTweets` (event 26), runs `SiteObjectManager.ShowAll` and enables the
+//! fog again.
+//!
+//! Where the work lives:
 //! - Players and NPCs: the edit actor overlay (`actors`) hides every
 //!   character actor and cancels ordinary NPC objectives on entry, and its
 //!   restore shows them; there are no remote players.
 //! - Tweets: the HUD's subscriber hides (and later shows) every tweet head-up
 //!   display. The same overlay hides the balloon anchors and emote draws and
 //!   gives back their previous visibility. The instrument counts them.
-//! - Camera: `floor_edit_camera`.
+//! - Camera: `floor_camera`.
 //! - Grid: the grid manager's `SetShowGrid(2)` draws the layout grid and
 //!   `SetHide` removes it: `edit_grid` builds the floor grid's lines and tile
 //!   face on `ShowGrid` and despawns them on `HideGrid` (the floating faces,
@@ -26,7 +37,7 @@
 //!   (it reads the session's active flag, which is set and cleared on the
 //!   same frames as this entry and exit); the flag here is the record.
 //! - `ShowAll`: the site object manager shows the site objects that other
-//!   states hid; the product hides none, so there is nothing to show.
+//!   states hid; the game hides none, so there is nothing to show.
 
 use bevy::prelude::*;
 
@@ -55,7 +66,7 @@ pub(super) fn enter(world: &mut World) {
     info!("[edit-state] players Hide, NPCs HideAndCancelObjective: the edit actor overlay");
     set(world, |state| state.tweets_hidden = true);
     info!("[edit-state] HideTweets (event 27): tweet balloons and emotes under the edit actor overlay");
-    match crate::floor_edit_camera::enter(world) {
+    match crate::floor_camera::enter(world) {
         Ok(()) => {}
         Err(reason) => warn!("[edit-state] FieldCamera.ChangeState(FloorEdit) not taken: {reason}"),
     }
@@ -66,7 +77,7 @@ pub(super) fn enter(world: &mut World) {
 /// `EditGameState.OnExit`, after the session ended (actors restored), and
 /// then Normal's entry for the camera.
 pub(super) fn exit(world: &mut World) {
-    world.remove_resource::<crate::field_modes::LayoutEnvironmentPreview>();
+    world.remove_resource::<moly_features::field_modes::LayoutEnvironmentPreview>();
     if !world
         .get_resource::<EditGameState>()
         .is_some_and(|state| state.grid.is_some() || state.tweets_hidden || state.fog_disabled)
@@ -83,7 +94,7 @@ pub(super) fn exit(world: &mut World) {
     info!("[edit-state] SiteObjectManager.ShowAll: no site object is hidden in the product; nothing to show");
     set(world, |state| state.fog_disabled = false);
     info!("[edit-state] PostProcess.IsDisableFog = false: the edit session is no longer active");
-    crate::floor_edit_camera::leave(world);
+    crate::floor_camera::leave(world);
 }
 
 /// The session was cleared by a site change: the same bookkeeping, and the
@@ -97,7 +108,7 @@ pub(super) fn exit_for_site_change(world: &mut World) {
         world.insert_resource(EditGameState::default());
     }
     super::edit_grid::hide(world);
-    crate::floor_edit_camera::leave_for_site_change(world);
+    crate::floor_camera::leave_for_site_change(world);
 }
 
 fn set(world: &mut World, write: impl FnOnce(&mut EditGameState)) {
@@ -123,8 +134,8 @@ pub struct TweetSampler {
 pub fn sample_tweets(
     time: Res<Time>,
     state: Option<Res<EditGameState>>,
-    balloons: Query<&InheritedVisibility, With<crate::balloon::BalloonAnchor>>,
-    emotes: Query<&InheritedVisibility, With<crate::emoticon::EmoteDraw>>,
+    balloons: Query<&InheritedVisibility, With<moly_features::balloon::BalloonAnchor>>,
+    emotes: Query<&InheritedVisibility, With<moly_features::emoticon::EmoteDraw>>,
     mut run: Local<TweetSampler>,
 ) {
     if std::env::var("MOLY_EDIT_AUTOPLAY").is_err() {

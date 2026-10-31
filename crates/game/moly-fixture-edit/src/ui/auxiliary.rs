@@ -1,6 +1,17 @@
-//! Original shared BackUI and the actual three-button save confirmation.
+//! The editable screen's shared dialogs: the header and exit bindings built
+//! from the shared `BackUI`, and the remove-all (`Common2ButtonDialog`) and
+//! three-button save confirmations.
+//!
+//! Input: the prefab document, the UI layouts and the editor's prefab view.
+//! Output: the bindings ([`ExitBindings`], [`CleanUpBindings`], the save
+//! confirmation) with the documents' texts written into the view. Invariants:
+//! the remove-all dialog shows ``MSG_MYSEKAI_SITE_LAYOUT_EDIT_CLEAN_UP_CONFIRM``
+//! with the positive label ``WORD_CLEAN_UP`` and the negative ``WORD_CANCEL``
+//! (``ScreenLayerSiteEditMode.OnRemoveFixtureAll``); its close button and a tap
+//! outside the window (``allowCloseExternal``) cancel. Boundary: resolution only;
+//! the dialogs' answers arrive as commands.
 
-use crate::ui_layout::{UiLayouts, UiPrefabView};
+use moly_features::ui_layout::{UiLayouts, UiPrefabView};
 use moly_assets::ui_layout::UiPrefab;
 
 use super::compose::{component, enabled, field};
@@ -35,7 +46,7 @@ pub(super) fn clean_up(
     layouts: &UiLayouts,
     view: &mut UiPrefabView,
 ) -> Result<CleanUpBindings, String> {
-    let dialog = crate::two_button_dialog::resolve(doc)?;
+    let dialog = moly_features::two_button_dialog::resolve(doc)?;
     view.set_visible("WindowRoot/Tabs", false);
     view.set_text(
         &dialog.positive_label,

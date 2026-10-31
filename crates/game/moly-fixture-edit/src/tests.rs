@@ -1,5 +1,5 @@
 use super::*;
-use crate::site::FloorGridLayout;
+use moly_features::site::FloorGridLayout;
 use std::collections::{HashMap, HashSet};
 
 /// Rules with no master rows, no bundle meta and no zones.
@@ -184,7 +184,7 @@ fn invalid_candidate_save_preserves_storage() {
     );
     apply_command(&mut world, &mut session, EditCommand::Decide);
     assert!(session.selected.is_none());
-    // RotationSquareToRight turns Front to Left in the source frame, which
+    // RotationSquareToRight turns Front to Left in the reference frame, which
     // is Right in the X-mirrored product frame.
     assert_eq!(session.rows[0].direction, Direction::Right);
 

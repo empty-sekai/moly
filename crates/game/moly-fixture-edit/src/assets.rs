@@ -1,4 +1,16 @@
-//! Source tables and preview assets, shared by the editor's read-only views.
+//! The editor's tables and preview assets, shared by the editor's read-only
+//! views: the grid meta of a bundle document, the motion and cutscene areas
+//! and the per-bundle stack rules, plus the preview model index.
+//!
+//! Input: `moly://fixture-areas/areas.json` and `moly://fixture-models/index.json`
+//! from the asset server. Output: `FixtureAreas` (the loaded flag, the motion
+//! and cutscene area grids, each bundle's `stackEnables` and `AddUsingGrid`),
+//! the floor and NPC area documents, and `CandidateAssets` (each exported
+//! package's preview model path). Invariants: a document is read only once
+//! loaded; a grid's rows are `rows * cols` cells, both counts are non-zero
+//! and at least one cell is set, otherwise there is no grid. Boundary: the
+//! module reads and parses; it writes no draft, and an invalid document is a
+//! panic, not a silent empty table.
 
 use bevy::{asset::LoadState, gltf::Gltf, prelude::*};
 use moly_assets::json::JsonAsset;
@@ -62,8 +74,8 @@ pub(super) fn parse_areas(
     json: Res<Assets<JsonAsset>>,
     asset: Option<Res<AreasAsset>>,
     mut areas: ResMut<FixtureAreas>,
-    mut floor_areas: ResMut<crate::fixture_scene_inputs::FixtureFloorAreas>,
-    mut npc_areas: ResMut<crate::npc_fixture_activity::NpcFixtureAreas>,
+    mut floor_areas: ResMut<moly_features::fixture_scene_inputs::FixtureFloorAreas>,
+    mut npc_areas: ResMut<moly_features::npc_fixture_activity::NpcFixtureAreas>,
 ) {
     let Some(asset) = asset else {
         return;

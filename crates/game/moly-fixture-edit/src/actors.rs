@@ -1,15 +1,24 @@
-//! EditGameState's actor Hide/Show adaptation. Logical actors, RNG and source
-//! content stay alive; only this editor's reversible visibility overlay is held.
+//! The edit actor overlay: character actors and pending view children hidden
+//! while the edit session is active, and given back afterwards.
+//!
+//! Input: the actors and their view entities, `EditSessionActive`, the
+//! fixture layout revision and the NPC cancellation hooks. Output: each
+//! covered actor's `Visibility` set to `Hidden`, with its previous value kept
+//! so the restore writes it back; NPC objectives cancelled through the NPC
+//! owner. Invariant: logical actors, their random state and their content stay
+//! alive; only this editor's reversible visibility overlay is held, and
+//! nothing outside it sees a different visibility. `HideAndCancelObjective`
+//! hides first and then cancels, and cancellation leaves a talking action
+//! alone (`Talk(4)`); the NPC owner supplies the ordinary cancellation, and
+//! the furniture owner runs separately with its own lease checks.
+//!
+//! Boundary: on entry every covered actor is hidden first. Children added
+//! later are picked up without walking a stable hierarchy repeatedly, and a
+//! child with an explicit `Visible` is covered too, because in Bevy an
+//! explicit `Visible` can bypass a hidden parent (an object deactivated in
+//! the reference does not).
 
-use crate::{
-    fixture::{FixtureLayoutRevision, FixturePlacements, FixtureScenesReady},
-    fixture_material::FixtureMaterialsSwapped,
-    npc::CharacterUnitId,
-    npc_objective::ObjectiveFace,
-    player::{PlayerControlled, PlayerInput},
-    site::{GroundEpoch, SiteActive},
-    walk_face::WalkFace,
-};
+use moly_features::{fixture::{FixtureLayoutRevision, FixturePlacements, FixtureScenesReady}, fixture_material::FixtureMaterialsSwapped, npc::CharacterUnitId, npc_objective::ObjectiveFace, player::{PlayerControlled, PlayerInput}, site::{GroundEpoch, SiteActive}, walk_face::WalkFace};
 use bevy::prelude::*;
 
 #[derive(Component)]
@@ -26,7 +35,7 @@ struct OverlayDiscovery {
     actors: usize,
 }
 
-/// Source HideAndCancelObjective hides first, then TryCancel checks current
+/// HideAndCancelObjective hides first, then TryCancel checks the current
 /// action != Talk(4). Ordinary cancellation is supplied by the NPC owner; the
 /// existing furniture owner runs separately and retains its own lease checks.
 pub(super) fn enter(world: &mut World) {
@@ -82,9 +91,9 @@ pub(super) fn maintain(world: &mut World) {
             }
             if first
                 && !world.entity(*actor).contains::<PlayerControlled>()
-                && crate::npc_objective::cancel_ordinary_for_layout_edit(world, *actor)
+                && moly_features::npc_objective::cancel_ordinary_for_layout_edit(world, *actor)
             {
-                crate::npc::stop_for_layout_edit(world, *actor);
+                moly_features::npc::stop_for_layout_edit(world, *actor);
             }
             if first {
                 if let Some(mut input) = world.get_mut::<PlayerInput>(*actor) {
@@ -103,7 +112,7 @@ pub(super) fn maintain(world: &mut World) {
     // every producer, not a second scan/cancellation of the actor hierarchy.
     let revealed: Vec<_> = world
         .query_filtered::<(Entity, &HiddenActorView, &Visibility), (
-            Without<crate::balloon::BalloonAnchor>, Without<crate::emoticon::EmoteDraw>,
+            Without<moly_features::balloon::BalloonAnchor>, Without<moly_features::emoticon::EmoteDraw>,
         )>()
         .iter(world)
         .filter_map(|(entity, _, visibility)| (*visibility != Visibility::Hidden).then_some(entity))
@@ -124,7 +133,7 @@ pub(super) fn maintain_detached_views(world: &mut World) {
         .is_some_and(|editor| editor.is_active()) { return; }
     let views: Vec<_> = world.query_filtered::<
         (Entity, Option<&Visibility>, Has<HiddenActorView>),
-        Or<(With<crate::balloon::BalloonAnchor>, With<crate::emoticon::EmoteDraw>)>,
+        Or<(With<moly_features::balloon::BalloonAnchor>, With<moly_features::emoticon::EmoteDraw>)>,
     >().iter(world).map(|(entity, visibility, owned)| (entity, visibility.copied(), owned)).collect();
     for (entity, current, owned) in views {
         if !owned {
@@ -255,7 +264,7 @@ pub(super) fn restore(world: &mut World) -> Result<(), String> {
                 input.direction = Vec3::ZERO;
             }
         } else {
-            crate::npc::reattach_after_layout_edit(world, actor, point, generation);
+            moly_features::npc::reattach_after_layout_edit(world, actor, point, generation);
         }
     }
     clear_overlay(world);

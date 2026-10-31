@@ -1,5 +1,18 @@
-//! Road planning owns a temporary projection until Decide. Saving remains the
-//! editor's existing server/local transaction, never a parallel persistence path.
+//! Road planning: the road tab's plan of the next road tiles on a temporary
+//! projection, decided or cancelled by the player.
+//!
+//! Input: `EditCommand` messages, pointer gestures over the world
+//! ([`pick`]), the site's grid and rules, the draft's rows and the put limit.
+//! Output: the planned road rows in `RoadSession` plus their preview, the
+//! `EditRoadView` of the screen, decisions that reach the editor's draft, and
+//! the return of a stored road to the inventory. Invariant: a plan is a
+//! temporary projection until the player decides; cancelling restores every
+//! planned row to where it started (or drops it when it was new).
+//! Boundary: releasing a stored road returns it once; a pointer release keeps
+//! its claim through the frame that holds it, so a road drag does not also
+//! move the camera. Saving is the editor's own server and local transaction,
+//! never a second persistence path.
+
 use super::{EditCommand, EditContentType, EditSession, EditableFixture, item_view, owned};
 use bevy::prelude::*;
 use moly_law::fixture::{Direction, GridPosition, position::layout_type};
@@ -121,7 +134,7 @@ fn available(
         Err(error) => return Err(error),
     };
     let count = available_count(owned, returned);
-    crate::fixture_put_limit::max_placeable(
+    moly_features::fixture_put_limit::max_placeable(
         world,
         base.site_type(),
         &session.rows,
@@ -336,7 +349,7 @@ struct DecidedRoads {
 fn decide_rows(
     session: &EditSession,
     rules: &Rules,
-    floor: crate::site::FloorGridLayout,
+    floor: moly_features::site::FloorGridLayout,
     site_id: u32,
 ) -> Result<DecidedRoads, String> {
     let moving = !session.road.original.is_empty();
@@ -427,7 +440,7 @@ fn decide_rows(
         rows.push(row);
         board = Board::new(&rows, floor, rules).map_err(|e| format!("road grid: {e:?}"))?;
     }
-    // Source RemoveOverlapRoad applies its UID-aware overload in placed-road
+    // RemoveOverlapRoad applies its UID-aware overload in placed-road
     // encounter order. Matching candidate UID refuses the overlap verdict.
     let placed: Vec<_> = session
         .road
@@ -496,7 +509,7 @@ fn decide(world: &mut World, session: &mut EditSession) -> Result<(), String> {
         base.floor_grid().ok_or("road grid unavailable")?,
         base.site_id(),
     )?;
-    let budget = crate::fixture_put_limit::budget(world, base.site_type(), &result.rows)?;
+    let budget = moly_features::fixture_put_limit::budget(world, base.site_type(), &result.rows)?;
     if budget.remaining < 0 {
         return Err("road plan exceeds the current placement limit".into());
     }
@@ -731,7 +744,7 @@ pub(super) fn handle(world: &mut World, session: &mut EditSession, command: &Edi
     true
 }
 
-pub(super) fn view(world: &World, session: &EditSession) -> crate::ui_inputs::EditRoadView {
+pub(super) fn view(world: &World, session: &EditSession) -> moly_features::ui_inputs::EditRoadView {
     let target = session
         .road
         .target
@@ -743,7 +756,7 @@ pub(super) fn view(world: &World, session: &EditSession) -> crate::ui_inputs::Ed
         .as_ref()
         .and_then(|target| available(world, session, target).ok())
         .map_or(0, |n| (n - session.road.planned.len() as i32).max(0));
-    crate::ui_inputs::EditRoadView {
+    moly_features::ui_inputs::EditRoadView {
         select_mode: session.road.select_mode,
         selection_bounds: session.road.multi,
         target,
@@ -828,7 +841,7 @@ mod tests {
         source_item(&target, GridPosition::new(x, 0, z), uid.into()).unwrap()
     }
 
-    fn rules_and_grid() -> (Rules, crate::site::FloorGridLayout) {
+    fn rules_and_grid() -> (Rules, moly_features::site::FloorGridLayout) {
         let mut rules = Rules::default();
         for id in [1, 2] {
             rules.traits.insert(
@@ -838,7 +851,7 @@ mod tests {
         }
         (
             rules,
-            crate::site::FloorGridLayout {
+            moly_features::site::FloorGridLayout {
                 level: 1,
                 layout_id: 1,
                 width: 20,
@@ -970,7 +983,7 @@ mod tests {
 
     #[test]
     fn road_release_frame_does_not_pan_camera_and_next_ground_drag_does() {
-        use crate::gesture::{GestureEvent, GestureKind, GestureState};
+        use moly_features::gesture::{GestureEvent, GestureKind, GestureState};
         let (_, grid) = rules_and_grid();
         let original = row("moving", 1, 0, 0);
         let mut world = World::new();
@@ -1019,7 +1032,7 @@ mod tests {
         assert_ne!(session.road.planned[0].center, original.center);
         assert_eq!(session.rows, vec![original.clone()]);
         assert_eq!(
-            crate::floor_edit_camera::camera_drag_delta([moved, ended].iter(), false, session.road_dragging()),
+            crate::floor_camera::camera_drag_delta([moved, ended].iter(), false, session.road_dragging()),
             Vec2::ZERO,
         );
         // The no-command frame must release the frame claim as well.
@@ -1036,7 +1049,7 @@ mod tests {
         ];
         super::super::apply_commands(&mut world);
         assert_eq!(
-            crate::floor_edit_camera::camera_drag_delta(
+            crate::floor_camera::camera_drag_delta(
                 [moved, ended].iter(), false, world.resource::<EditSession>().road_dragging(),
             ),
             moved.delta,
@@ -1065,7 +1078,7 @@ mod tests {
             let revision = session.revision;
             world.insert_resource(session);
             world.init_resource::<super::super::EditSessionActive>();
-            world.insert_resource(crate::game_settings::SettingsPanel {
+            world.insert_resource(moly_features::game_settings::SettingsPanel {
                 open: modal_open,
                 ..Default::default()
             });

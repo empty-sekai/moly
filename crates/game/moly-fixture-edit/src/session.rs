@@ -1,20 +1,26 @@
-//! The editor's draft as the layout steps and the field builds use it
-//! without the editor's screen: opening the draft, deciding it, and the
-//! site's grid and fixture tables.
+//! The editor's draft for callers that run without the editor's screen: the
+//! site's grid and rules, a draft opened from the loaded layout, and the
+//! editor's save checks.
 //!
-//! The draft is the editor's own session ([`EditSession`]), so an edit is the
-//! edit a thumb would make: the same put rules, the same save checks, the
-//! same save call and the same returned inventory. The difference is where
-//! it runs: no editor game state, no actors hidden and no editor screen; the
-//! fixtures and the walk cells come from the normal reload after the save.
+//! Input: the site's loaded layout, the site's grid, the fixture tables and
+//! the fixture areas. Output: a [Draft] that is the editor's own session
+//! ([`EditSession`]) and its decided rows, the site's grid and rules
+//! ([`rules`]) and the check that a decided layout passes before it is sent
+//! ([`check_save`]). Invariants: a draft made here is the draft the editor's
+//! screen makes, with the same put rules, the same save checks, the same save
+//! call and the same returned inventory. Boundary: the draft belongs to the
+//! caller; it runs with no editor game state, no hidden actors and no editor
+//! screen, and the fixtures and walk cells come from the normal reload after
+//! the save. A draft may be opened only when the site is loaded, the site is
+//! not changing, no editor holds a draft and no layout save is out.
 
 use bevy::ecs::world::World;
 
 use super::{layout_rules, EditSession, EditPhase};
-use crate::fixture::FixturePlacements;
-use crate::site::{FloorGridLayout, SiteActive};
+use moly_features::fixture::FixturePlacements;
+use moly_features::site::{FloorGridLayout, SiteActive};
 
-/// A draft a program's step holds: its own, never the editor's.
+/// A draft a caller holds: its own, never the editor's.
 pub(crate) struct Draft(EditSession);
 
 impl Draft {
@@ -22,13 +28,12 @@ impl Draft {
     /// returns.
     pub(crate) fn decided(
         &mut self,
-    ) -> Result<(FixturePlacements, Vec<crate::fixture::EditableFixture>), String> {
+    ) -> Result<(FixturePlacements, Vec<moly_features::fixture::EditableFixture>), String> {
         self.0.decided_layout()
     }
 }
 
-/// Whether a draft may be opened: the site is loaded with its fixtures, the
-/// site is not changing, no editor holds a draft and no layout save is out.
+/// Whether a draft may be opened, or why not.
 pub(crate) fn ready(world: &World) -> Result<(), String> {
     if world
         .get_resource::<EditSession>()
@@ -40,9 +45,9 @@ pub(crate) fn ready(world: &World) -> Result<(), String> {
         return Err("the site layout is not installed".into());
     };
     if layout.site_id() == 0
-        || !world.contains_resource::<crate::fixture::FixtureScenesReady>()
+        || !world.contains_resource::<moly_features::fixture::FixtureScenesReady>()
         || (layout.total() != 0
-            && !world.contains_resource::<crate::fixture_material::FixtureMaterialsSwapped>())
+            && !world.contains_resource::<moly_features::fixture_material::FixtureMaterialsSwapped>())
     {
         return Err("the site's fixtures are still loading".into());
     }
@@ -81,9 +86,9 @@ pub(crate) fn open(world: &mut World) -> Result<Draft, String> {
     let Some(layout) = world.get_resource::<FixturePlacements>().cloned() else {
         return Err("the site layout is not installed".into());
     };
-    let homes = world.get_resource::<crate::house::HomeFixtures>();
+    let homes = world.get_resource::<moly_features::house::HomeFixtures>();
     let entry = world
-        .get_resource::<crate::fixture::layouts::SiteFixtureLayouts>()
+        .get_resource::<moly_features::fixture::layouts::SiteFixtureLayouts>()
         .ok_or_else(|| "the saved layouts are not ready".to_owned())
         .and_then(|layouts| layouts.begin_edit(&layout, homes));
     let (storage_baseline, inventory) = match entry {
@@ -95,8 +100,8 @@ pub(crate) fn open(world: &mut World) -> Result<Draft, String> {
     Ok(Draft(session))
 }
 
-/// Applies one transaction to the draft; `Ok(Err)` is the layout's own
-/// refusal.
+/// Applies one transaction to the draft; the layout's own refusal is the
+/// draft's outcome, not an error.
 pub(crate) fn apply(
     world: &mut World,
     draft: &mut Draft,
@@ -106,17 +111,17 @@ pub(crate) fn apply(
 }
 
 /// The site's rows as the editor's draft holds them.
-pub(crate) fn rows(world: &World) -> Vec<crate::fixture::EditableFixture> {
+pub(crate) fn rows(world: &World) -> Vec<moly_features::fixture::EditableFixture> {
     world
         .get_resource::<FixturePlacements>()
         .map_or_else(Vec::new, FixturePlacements::editor_rows)
 }
 
 /// The editor's save checks on a decided layout, against the site's fixture
-/// areas: what a layout step's save is held to before it is sent.
+/// areas: what a save is held to before it is sent.
 pub(crate) fn check_save(
     world: &World,
-    rows: &[crate::fixture::EditableFixture],
+    rows: &[moly_features::fixture::EditableFixture],
     floor: FloorGridLayout,
     rules: &moly_layout::Rules,
 ) -> Result<(), String> {

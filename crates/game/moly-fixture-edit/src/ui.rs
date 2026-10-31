@@ -1,29 +1,28 @@
-//! Original furniture editor prefabs, driven by the single EditCommand/EditView owner.
+//! The layout editor's screen: the furniture editor prefabs, driven by the
+//! editor's single command and view owner.
 //!
-//! The host owns only view bindings, selector motion and scroll offset. Drafts,
-//! UID ownership, validation, inventory and saving remain in fixture_edit.
+//! Input: the editor's `EditView` (rows, counts, selection and put status),
+//! pointer and scroll input, and the UI layout document. Output: `EditCommand`
+//! messages back to the editor, the prefab's selector motion and the scroll
+//! offset. Invariant: the screen never holds a draft. Draft rows, UID
+//! ownership, validation, inventory and saving stay in the crate root
+//! (`crate`); a choice only names the row it came from.
+//!
+//! Text: the hub registers `FIXED_TEXTS` with `ShellTextSources`, and the
+//! icons come from the hub's `EditorIcons` table.
 
 mod auxiliary;
 mod compose;
 
-use crate::{
-    action_button::ActionTapConsumed,
-    audio::SeRequests,
-    balloon::BALLOON_LAYER,
-    fixture::EditableFixture,
-    fixture_edit::{EditCommand, EditContentType, EditSelectionView, EditView, PutStatus},
-    gesture::{GestureEvent, GestureKind, GestureState},
-    sitemap::SITEMAP_LAYER,
-    ui_layers::{LayerId, UiLayerStack},
-    ui_layout::{UiLayouts, UiPrefabView},
-};
+use crate::{EditCommand, EditContentType, EditSelectionView, EditView, PutStatus};
+use moly_features::{action_button::ActionTapConsumed, audio::SeRequests, balloon::BALLOON_LAYER, fixture::EditableFixture, gesture::{GestureEvent, GestureKind, GestureState}, sitemap::SITEMAP_LAYER, ui_layers::{LayerId, UiLayerStack}, ui_layout::{UiLayouts, UiPrefabView}};
 use bevy::{
     camera::visibility::RenderLayers,
     input::mouse::{MouseScrollUnit, MouseWheel},
     prelude::*,
     window::PrimaryWindow,
 };
-pub use crate::editor_icons::EditorIcons;
+pub use moly_features::editor_icons::EditorIcons;
 
 /// Included with every pristine template before the existing glyph-atlas bake:
 /// the cells' counts (`UIPartsThumbnail.SetQuantity`, format `×{0}`).
@@ -86,12 +85,12 @@ impl ItemChoice {
 }
 
 fn choices(edit: &EditView, icons: &EditorIcons) -> Vec<ItemChoice> {
-    if edit.content == crate::fixture_edit::EditContentType::Environment {
+    if edit.content == crate::EditContentType::Environment {
         return Vec::new();
     }
     let mut result = Vec::new();
     // A stored fixture of a listed owned row is counted in that row.
-    let owned_row = |row: &crate::fixture_edit::EditItemView| {
+    let owned_row = |row: &crate::EditItemView| {
         edit.catalog
             .iter()
             .any(|owned| owned.fixture_id == row.fixture_id && owned.texture_id == row.texture_id)
@@ -116,7 +115,7 @@ fn choices(edit: &EditView, icons: &EditorIcons) -> Vec<ItemChoice> {
                 },
                 editable: row.editable || edit.content == EditContentType::Road,
             };
-            // An unknown image is an explicit source gap, never a generated icon.
+            // An unknown image is an explicit gap, never a generated icon.
             if choice.icon(icons).is_some() {
                 result.push(choice);
             }
@@ -142,8 +141,8 @@ pub struct EditorRoot {
     bindings: compose::Bindings,
     choices: Vec<ItemChoice>,
     environment_ready: bool,
-    content: crate::fixture_edit::EditContentType,
-    environment_choices: Vec<crate::fixture_edit::EditEnvironmentView>,
+    content: crate::EditContentType,
+    environment_choices: Vec<crate::EditEnvironmentView>,
     site_id: u32,
     seen_revision: u64,
     seen_owned_revision: u64,
@@ -312,7 +311,7 @@ pub fn spawn_when_ready(
 /// Shared PointerUi calls this in addition to actual source Button/Toggle/
 /// Slider rectangles. Only the left panel and selected HUD's measured content
 /// are opaque regions. The full-screen editor root is deliberately not one.
-pub use crate::ui_inputs::captures_background;
+pub use moly_features::ui_inputs::captures_background;
 
 fn hit(view: &UiPrefabView, layouts: &UiLayouts, path: &str, point: Vec2, canvas: Vec2) -> bool {
     view.rect(layouts, path, canvas)
@@ -336,11 +335,11 @@ pub fn click(
     mut ui: ResMut<EditorUiState>,
     mut consumed: ResMut<ActionTapConsumed>,
     mut actions: MessageWriter<EditCommand>,
-    mut library: ResMut<crate::content_library::ContentLibrary>,
+    mut library: ResMut<moly_features::content_library::ContentLibrary>,
     mut sounds: ResMut<SeRequests>,
     roots: Query<(&EditorRoot, &UiPrefabView)>,
     auxiliaries: Query<(&EditorAuxiliary, &UiPrefabView)>,
-    root_canvas: Option<Res<crate::canvas::RootCanvas>>,
+    root_canvas: Option<Res<moly_features::canvas::RootCanvas>>,
 ) {
     let events: Vec<_> = gestures.read().copied().collect();
     let scroll_events: Vec<_> = wheel.read().copied().collect();
@@ -460,7 +459,7 @@ pub fn click(
     for event in events {
         let point = canvas_position(event.position, size, scale);
         if !event.ui_owned {
-            // Source OnTryShowSelector may reveal an unselected collapsed list
+            // OnTryShowSelector may reveal an unselected collapsed list
             // without claiming the scene tap. Scene selection still uses UID pick.
             if edit.selected.is_none()
                 && event.kind.is_tap_family()
@@ -562,7 +561,7 @@ pub fn click(
             (tab.primary || tab.kind == 1 || (tab.kind == 19 && root.environment_ready))
                 && hit(view, &layouts, &tab.button, point, canvas)
         }) {
-            if let Some(content) = crate::fixture_edit::EditContentType::from_tab_kind(tab.kind) {
+            if let Some(content) = crate::EditContentType::from_tab_kind(tab.kind) {
                 layouts.queue_button_se(&mut sounds, view.key, &tab.button);
                 actions.write(EditCommand::SelectContent(content));
                 ui.scroll = 0.;
@@ -642,7 +641,7 @@ pub fn click(
             actions.write(command);
             break;
         }
-        if edit.content != crate::fixture_edit::EditContentType::Environment
+        if edit.content != crate::EditContentType::Environment
             && hit(view, &layouts, &bindings.remove_all, point, canvas)
         {
             layouts.queue_button_se(&mut sounds, view.key, &bindings.remove_all);
@@ -755,7 +754,7 @@ pub fn refresh(
     time: Res<Time>,
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
-    origins: Query<&GlobalTransform, With<crate::fixture_scene_inputs::SiteCoordinateOrigin>>,
+    origins: Query<&GlobalTransform, With<moly_features::fixture_scene_inputs::SiteCoordinateOrigin>>,
     mut ui: ResMut<EditorUiState>,
     mut roots: Query<
         (
@@ -775,7 +774,7 @@ pub fn refresh(
         ),
         Without<EditorRoot>,
     >,
-    root_canvas: Option<Res<crate::canvas::RootCanvas>>,
+    root_canvas: Option<Res<moly_features::canvas::RootCanvas>>,
 ) {
     let Ok(window) = windows.single() else {
         return;
@@ -798,7 +797,7 @@ pub fn refresh(
     } else {
         Visibility::Hidden
     });
-    crate::canvas::set_scale(&mut transform, scale);
+    moly_features::canvas::set_scale(&mut transform, scale);
     if active {
         let environment_ready =
             icons.environment(None).is_some() && layouts.ready("EditorEnvironmentCell", &server);
@@ -877,7 +876,7 @@ pub fn refresh(
             ui.selected_uid = selected_uid;
         }
         ui.motion.advance(time.delta_secs());
-        // Source SetPositionX. The right edge is the controller's
+        // SetPositionX. The right edge is the controller's
         // value; below base width the unchanged list translates offscreen.
         let position = ui.motion.position;
         let width = position
@@ -896,7 +895,7 @@ pub fn refresh(
         view.set_visible("ContentRoot", !ui.hidden);
         view.set_visible(&bindings.show_ui, ui.hidden);
         let document = layouts.document(compose::RUNTIME).unwrap();
-        let environment = edit.content == crate::fixture_edit::EditContentType::Environment;
+        let environment = edit.content == crate::EditContentType::Environment;
         view.set_visible(&bindings.environment_content, environment);
         let name = edit
             .environment_choices
@@ -1206,6 +1205,6 @@ pub fn refresh(
         } else {
             Visibility::Hidden
         });
-        crate::canvas::set_scale(&mut transform, scale);
+        moly_features::canvas::set_scale(&mut transform, scale);
     }
 }

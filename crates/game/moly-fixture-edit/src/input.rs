@@ -1,4 +1,12 @@
-//! Keyboard and mouse adapters. They emit commands; there is no second editor.
+//! Keyboard and mouse adapters for the edit screen: they read the keys, the
+//! mouse motion and the pointer over the world, and write `EditCommand`
+//! messages.
+//!
+//! Input: the keyboard, `AccumulatedMouseMotion`, the primary window and the
+//! editor's [`EditSession`] and view. Output: `EditCommand` messages only.
+//! Invariant: these readers never change the draft or the view; every effect
+//! goes through a command. Boundary: they run only while the editor's keys
+//! are claimed, so the field's own input sees the same keys when it is not.
 
 use super::{EditCommand, EditPhase, EditSession, EditView, presentation::DraftPreview};
 use bevy::{
@@ -68,7 +76,7 @@ pub fn read_keyboard(
         actions.write(EditCommand::Decide);
     }
     if keys.just_pressed(KeyCode::KeyS) {
-        // The desktop shortcut invokes the same action as the source Save button.
+        // The desktop shortcut invokes the same action as the screen's save button.
         actions.write(EditCommand::SaveAndExit);
     }
     if keys.just_pressed(KeyCode::Delete) || keys.just_pressed(KeyCode::Backspace) {
@@ -89,7 +97,7 @@ pub fn read_pointer(
     motion: Res<AccumulatedMouseMotion>,
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
-    site_origins: Query<&GlobalTransform, With<crate::fixture_scene_inputs::SiteCoordinateOrigin>>,
+    site_origins: Query<&GlobalTransform, With<moly_features::fixture_scene_inputs::SiteCoordinateOrigin>>,
     meshes: Res<Assets<Mesh>>,
     parts: Query<(
         Entity,
@@ -103,13 +111,13 @@ pub fn read_pointer(
         Option<&Visibility>,
     )>,
     roots: Query<
-        &crate::fixture_scene_inputs::FixtureScenePlacement,
-        With<crate::fixture::FixtureRoot>,
+        &moly_features::fixture_scene_inputs::FixtureScenePlacement,
+        With<moly_features::fixture::FixtureRoot>,
     >,
     previews: Query<&DraftPreview>,
-    ui: crate::ui_layout::PointerUi,
+    ui: moly_features::ui_layout::PointerUi,
     node_interactions: Query<&Interaction>,
-    mut consumed: ResMut<crate::action_button::ActionTapConsumed>,
+    mut consumed: ResMut<moly_features::action_button::ActionTapConsumed>,
     mut actions: MessageWriter<EditCommand>,
 ) {
     if session.phase == EditPhase::Idle
@@ -129,7 +137,7 @@ pub fn read_pointer(
     let Some(cursor) = window.cursor_position() else {
         return;
     };
-    // Covers source-prefab UI and the product-owned Bevy settings/editor UI.
+    // Covers the prefab UI and the Bevy settings and editor UI this game owns.
     if ui.captures(cursor, window)
         || node_interactions
             .iter()

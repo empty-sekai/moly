@@ -1,11 +1,19 @@
-//! Source prefab composition and the source custom ListView placement law.
+//! The editable screen's prefab composition: the tabs, the cells, the
+//! scrollbar and the custom ListView placement rule of the prefab layout.
+//!
+//! Input: the prefab document, the UI layouts, the `EditView` and the item
+//! choices the screen built. Output: the bound scrollbar and list positions,
+//! and each cell's icon, count, selection and placement markers in the
+//! `UiPrefabView`. Invariants: the cell count follows the choices, the
+//! quantity text keeps the multiply sign and the digits, which the fixed text
+//! table supplies, in the cell format, and the list's placement follows the
+//! ListView layout law rather than a fixed row pitch.
+//! Boundary: the module lays out and writes texts and images into the view; it
+//! never changes a choice or writes a draft.
 
 use super::{EditorIcons, ItemChoice};
-use crate::fixture_edit::EditContentType;
-use crate::{
-    ui_inputs::{EDITOR_RUNTIME_KEY, EditView},
-    ui_layout::{UiLayouts, UiPrefabView},
-};
+use crate::EditContentType;
+use moly_features::{ui_inputs::{EDITOR_RUNTIME_KEY, EditView}, ui_layout::{UiLayouts, UiPrefabView}};
 use bevy::prelude::*;
 use moly_assets::ui_layout::{UiComponent, UiInstance, UiPrefab};
 use serde_json::Value;
@@ -304,7 +312,7 @@ pub(super) fn compose(
                 .as_i64()
                 .ok_or("source scrollbar visibility")?;
             // AutoHideAndExpandViewport also drives the viewport width; this
-            // editor's source uses Permanent or AutoHide only.
+            // editor uses Permanent or AutoHide only.
             if !(0..=1).contains(&visibility) || direction.axis() != 1 {
                 return Err(
                     "source editor requires a vertical Permanent/AutoHide scrollbar".into(),
@@ -364,7 +372,7 @@ pub(super) fn compose(
                 0 => None,
                 id => Some(instance.identity(id)?),
             };
-            // Loading/failed-state graphics belong to the source texture loader;
+            // Loading/failed-state graphics belong to the texture loader;
             // the host hides them once the real catalog image is registered.
             let loader = component(
                 cells_source,
@@ -445,7 +453,7 @@ pub(super) fn compose(
         .collect::<Result<Vec<_>, String>>()?;
     // The screen's own two fixture thumbnails carry frame masks whose graphic
     // has alpha 0, so an enabled one writes no stencil and hides its
-    // thumbnail. The source shows neither in the lists this host opens:
+    // thumbnail. Neither is shown in the lists this host opens:
     // - the selector handle's FixtureThumbnail has no serialized reference, no
     //   code of the selector or the screen touches it, and it is inactive in
     //   the prefab, so it stays hidden (listed below);
@@ -521,8 +529,8 @@ pub(super) fn compose(
         .into_iter()
         .map(str::to_owned),
     );
-    // Full source hierarchy is retained, while unavailable data families have
-    // no fabricated rows. Source's inactive outer prototype stays inactive.
+    // The full hierarchy is retained, while unavailable data families have
+    // no fabricated rows. An inactive outer prototype stays inactive.
     if !environment && !road {
         hidden.extend(optional_cloned(
             &list_instance,
@@ -587,7 +595,7 @@ pub(super) fn compose(
             unsupported_buttons.push(list_instance.selector(extra_button)?);
         }
         // Sorting/filter menus require their actual data model; do not leave an
-        // enabled-looking dropdown which does nothing or show source placeholders.
+        // enabled-looking dropdown which does nothing or shows placeholders.
         hidden.push(cloned_field(
             &list_instance,
             &fixture_fields,
@@ -869,7 +877,7 @@ fn compose_environment_cells(
     doc: &mut UiPrefab,
     source: &UiPrefab,
     content: &str,
-    choices: &[crate::fixture_edit::EditEnvironmentView],
+    choices: &[crate::EditEnvironmentView],
 ) -> Result<Vec<EnvironmentCell>, String> {
     let cell = &component(source, &source.prefab, ".SiteEnvironmentSelectCell")?.fields;
     let thumbnail = &component(

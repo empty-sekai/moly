@@ -1,5 +1,16 @@
 //! Camera state 2, `FloorEdit`: the ground layout editor's camera.
 //!
+//! Input: camera changes from the edit game state (enter, leave, site
+//! change), the editor's [`crate::EditView`] live model and place a drag,
+//! pinch, a camera command or a layout event (focus, decide, rotate,
+//! change-look). Output: the field camera's live model (LookAt, yaw, pitch,
+//! FOV, distance and its range) and tweens toward a target setting.
+//! Invariants: the private model, direction and look count live as long as
+//! the camera and carry over between edit sessions; every tween keeps the
+//! durations, ease and clamps below. Boundary: the camera owns no draft and
+//! reads the editor's view only; with a fixture selected, a drag moves the
+//! fixture rather than the camera.
+//!
 //! Construction (`FloorEditCameraState..ctor`): the look pitches are
 //! [55, 85] (`RotationXValueList`), the direction starts at 2 (Back), and the
 //! state's private model is a copy of the field camera's model with FOV 20,
@@ -8,24 +19,21 @@
 //! private model, direction and look count carry over from one edit session
 //! to the next.
 //!
-//! `OnEnter`: the live model's distance range becomes [4.8, 17]. Coming from
-//! Normal (or the site environment editor) the private yaw is the live yaw
-//! snapped to a quarter turn (`GetNearestFixedAngle`) and the direction
-//! follows from it (`ConvertYawToDirection`); from the wall editor the
-//! private yaw is the live yaw as it is. The private LookAt is the live
-//! LookAt at the site's height. The camera tweens 0.5 s
-//! (`DoTweenCameraSetting`, OutQuad) to the private LookAt, (private pitch,
-//! private yaw), FOV 20 and distance 12.14, and 12.14 is kept as the backup
-//! distance. The camera is unlocked.
+//! Entering (`OnEnter`) the live model gets the distance range [4.8, 17],
+//! and, whichever state was left, the private yaw and direction
+//! (see below). The private LookAt is the live LookAt at the site's height.
+//! The camera tweens 0.5 s (`DoTweenCameraSetting`, OutQuad) to the private
+//! LookAt, (private pitch, private yaw), FOV 20 and distance 12.14, and
+//! 12.14 is kept as the backup distance. The camera is unlocked.
 //!
-//! `OnUpdate`: the eye is placed from the live model (LookAt + Offset, back
+//! Each update places the eye from the live model (LookAt + Offset, back
 //! along the view direction by the distance) and looks at LookAt, without
-//! the offset. That arm is in the field camera's follow system.
+//! the offset; that arm is in the field camera's follow system.
 //!
-//! `OnDrag`: the LookAt moves by `-delta * MoveLookAtRatio` (FloatConfigs 66)
+//! Dragging moves the LookAt by `-delta * MoveLookAtRatio` (FloatConfigs 66)
 //! along the camera's flattened forward (screen y) and its right (screen x),
 //! scaled by distance / setting distance, then is clamped to the floor
-//! grid's bounds. `OnPinch`: the distance changes by
+//! grid's bounds. A pinch changes the distance by
 //! `AddDistanceRatio * pinch * -3` (FloatConfigs 65), clamped to the live
 //! range. Duo drag and the camera reset do nothing.
 //!
@@ -42,15 +50,18 @@
 //! (`LayoutAction` 13) turns to the next direction (Back -> Right -> Front ->
 //! Left -> Back, yaw 0 -> 90 -> 180 -> -90 -> 0) and the change-look button
 //! (14) toggles the pitch between 55 and 85; both tween only the rotation,
-//! 0.5 s OutQuad (`ROTATE_CAMERA_DURATION`). `OnExit` only removes the
-//! event registrations.
+//! 0.5 s OutQuad (`ROTATE_CAMERA_DURATION`). Leaving (`OnExit`) only removes
+//! the event registrations.
 //!
 //! Entering runs the current state's `OnExit` first (`FieldCamera.ChangeState`
 //! through `camera::exit_state`): Normal's writes its private model and the
 //! site's transfer entry; the first-person state's shows the player. The
-//! yaw switch then reads that previous state: Normal and the site
-//! environment editor snap, the wall editor copies, any other state keeps
-//! the private yaw and direction from the last session.
+//! yaw switch then reads that previous state: coming from Normal or the
+//! site environment editor the private yaw is the live yaw snapped to a
+//! quarter turn (`GetNearestFixedAngle`) and the direction follows from it
+//! (`ConvertYawToDirection`); from the wall editor the private yaw is the
+//! live yaw as it is; any other state keeps the private yaw and direction
+//! from the last session.
 //!
 //! Leaving: the edit game state's exit hands the camera to Normal
 //! (`NormalGameState.OnEnter`, `camera::change_state`); Normal's
@@ -58,31 +69,34 @@
 //! previous state 2 and tweens 1.0 s to that model, unless its inherit
 //! branch applies.
 //!
-//! Named differences:
-//! - The camera lock (`FieldCamera` lock flag): the floor editor locks the
-//!   camera while a fixture is dragged. Here a drag with a selected fixture
-//!   moves the fixture (the edit pointer's rule), so the camera drag runs
-//!   only without a selection.
-//! - Pinch comes from the mouse wheel, the product's pinch input.
-//! - The focus tween's completion callback: `OnFocusOnLayoutEdit` passes the
-//!   event's `OnFocusCompleted` to `DoTweenCameraSetting`, and both of the
-//!   floor editor's pick and put events (`SelectFixture` and `PutFixture`)
-//!   are built with no callback, so [`focus`] takes none. The callers that
-//!   do pass one are the house selector (`OnReceiveHouseSelectorEvent`, which
-//!   waits until the focus completes), the fence and road planning states
-//!   and the tutorial; none of them is in the product (the tutorial is out of
-//!   scope), and a caller that ports one needs the completion added here.
-//! - The private model lives for the app run (the source's lives as long as
-//!   its field camera object).
+//! Boundaries:
+//! - The camera lock (`FieldCamera` lock flag): this editor locks the camera
+//!   while a fixture is dragged, and a drag with a selected fixture moves the
+//!   fixture (the edit pointer's rule), so the camera drag runs only without
+//!   a selection.
+//! - Pinch comes from the mouse wheel, the game's pinch input.
+//! - The focus tween takes no completion callback: `OnFocusOnLayoutEdit`
+//!   passes the event's `OnFocusCompleted` to `DoTweenCameraSetting`, and
+//!   both of the floor editor's pick and put events (`SelectFixture` and
+//!   `PutFixture`) are built with no callback, so [`focus`] takes none. The
+//!   callers that do pass one are the house selector
+//!   (`OnReceiveHouseSelectorEvent`, which waits until the focus completes),
+//!   the fence and road planning states and the tutorial; none of them is in
+//!   the game (the tutorial is out of scope), and a caller that adds one
+//!   needs the completion added here.
+//! - The private model lives for the app run (the game's own camera
+//!   object lives as long).
+
+use std::fmt::Debug;
 
 use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::prelude::*;
 
-use crate::camera::{
+use moly_features::camera::{
     CameraSetting, CameraStateType, CameraTween, FieldCameraModel, FieldCameraState,
     TweenCompletion, perspective_fov_deg, to_rotation, wrap180,
 };
-use crate::gesture::{GestureEvent, GestureKind, GestureState};
+use moly_features::gesture::{GestureEvent, GestureKind, GestureState};
 
 /// `InitializeData`: minimum and maximum distance, FOV and distance.
 const MIN_DISTANCE: f32 = 4.8;
@@ -282,10 +296,10 @@ pub fn enter(world: &mut World) -> Result<(), String> {
             world.insert_resource(previous_floor.0);
         }
     }
-    crate::camera::exit_state(world, previous, "edit-camera");
+    moly_features::camera::exit_state(world, previous, "edit-camera");
     let model = world.resource::<FieldCameraModel>().clone();
     let fov_now = camera_fov(world).unwrap_or(model.fov);
-    let site_y = crate::fixture_edit::site_origin(world).y;
+    let site_y = crate::site_origin(world).y;
     let mut private = world
         .remove_resource::<FloorEditCamera>()
         .unwrap_or_default();
@@ -355,7 +369,7 @@ pub fn enter_environment(world: &mut World) -> Result<(), String> {
         .get_resource::<FieldCameraModel>()
         .cloned()
         .ok_or("the field camera model is not built")?;
-    crate::camera::exit_state(world, previous, "environment-edit-camera");
+    moly_features::camera::exit_state(world, previous, "environment-edit-camera");
     if let Some(floor) = world.remove_resource::<FloorEditCamera>() {
         world.insert_resource(SavedFloorEditCamera(floor));
     }
@@ -407,7 +421,7 @@ pub fn leave(world: &mut World) {
     }
     info!("[edit-camera] FloorEdit.OnExit (event registrations removed); Normal's entry follows");
     retain_environment_model(world);
-    crate::camera::change_state(world, CameraStateType::Normal, "edit-camera");
+    moly_features::camera::change_state(world, CameraStateType::Normal, "edit-camera");
 }
 
 /// A site change while editing: the site loader rebuilds the camera for the
@@ -629,16 +643,16 @@ pub fn input(
     mut gestures: MessageReader<GestureEvent>,
     scroll: Res<AccumulatedMouseScroll>,
     state: Res<FieldCameraState>,
-    view: Res<crate::fixture_edit::EditView>,
-    session: Res<crate::fixture_edit::EditSession>,
-    configs: Option<Res<crate::client_config::ClientConfigs>>,
+    view: Res<crate::EditView>,
+    session: Res<crate::EditSession>,
+    configs: Option<Res<moly_features::client_config::ClientConfigs>>,
     setting: Option<Res<CameraSetting>>,
-    placements: Option<Res<crate::fixture::FixturePlacements>>,
+    placements: Option<Res<moly_features::fixture::FixturePlacements>>,
     model: Option<ResMut<FieldCameraModel>>,
     cameras: Query<&GlobalTransform, With<Camera3d>>,
-    origins: Query<&GlobalTransform, With<crate::fixture_scene_inputs::SiteCoordinateOrigin>>,
+    origins: Query<&GlobalTransform, With<moly_features::fixture_scene_inputs::SiteCoordinateOrigin>>,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
-    ui: crate::ui_layout::PointerUi,
+    ui: moly_features::ui_layout::PointerUi,
 ) {
     let drag = camera_drag_delta(
         gestures.read(),
@@ -657,14 +671,14 @@ pub fn input(
         return;
     };
     // A drag with a selected fixture moves the fixture (see the module's
-    // named differences).
+    // boundaries).
     if drag != Vec2::ZERO {
         let Ok(camera) = cameras.single() else {
             return;
         };
-        // Host screen y grows down; the source's grows up.
+        // Host screen y grows down; rows grow up.
         let delta = -Vec2::new(drag.x, -drag.y)
-            * configs.float(crate::client_config::KEY_FIELD_CAMERA_MOVE_LOOK_AT_RATIO);
+            * configs.float(moly_features::client_config::KEY_FIELD_CAMERA_MOVE_LOOK_AT_RATIO);
         let forward = camera.forward();
         let flat = Vec3::new(forward.x, 0.0, forward.z);
         let flat = if flat.length() > 1e-5 {
@@ -694,7 +708,7 @@ pub fn input(
         }
     }
     let mut pinch = match scroll.unit {
-        MouseScrollUnit::Line => scroll.delta.y * crate::camera::WHEEL_PINCH_PIXELS,
+        MouseScrollUnit::Line => scroll.delta.y * moly_features::camera::WHEEL_PINCH_PIXELS,
         MouseScrollUnit::Pixel => scroll.delta.y,
     };
     if pinch != 0.0 {
@@ -708,7 +722,7 @@ pub fn input(
         }
     }
     if pinch != 0.0 {
-        let ratio = configs.float(crate::client_config::KEY_FIELD_CAMERA_ADD_DISTANCE_RATIO);
+        let ratio = configs.float(moly_features::client_config::KEY_FIELD_CAMERA_ADD_DISTANCE_RATIO);
         let before = model.distance;
         let raw = model.distance + ratio * pinch * PINCH_FACTOR;
         model.distance = if raw < model.min_distance {

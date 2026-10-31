@@ -1,8 +1,12 @@
 //! The game-side inputs of the layout rules: the current site's grid, the
 //! fixture master predicates, the bundle meta and the unavailable zone table.
 //!
-//! The rules themselves live in `moly_layout`; this module only reads the
-//! engine resources and the site's asset.
+//! Input: `moly://mysekai-site-housing-layout-unavailable-zones.json`, the
+//! sites' loaded layouts and the bundle metas ([`FixtureAreas`]). Output: a
+//! [`Rules`] table and a [`ZoneTable`]. Invariant: the rules are built only
+//! once their inputs are ready; until then the put check refuses rather than
+//! guesses. Boundary: the rules themselves live in `moly_layout`; this module
+//! only reads engine resources and the site's asset.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,7 +18,7 @@ use moly_layout::validate::Missing;
 use moly_layout::{Rules, SiteGrid, Zone};
 
 use super::{assets::FixtureAreas, put_effect};
-use crate::site::FloorGridLayout;
+use moly_features::site::FloorGridLayout;
 
 const ZONES: &str = "moly://mysekai-site-housing-layout-unavailable-zones.json";
 
@@ -39,7 +43,7 @@ pub fn empty_zone_table() -> ZoneTable {
 #[cfg(test)]
 pub fn insert_test_site(world: &mut World) {
     const SITE: u32 = 1;
-    world.insert_resource(crate::site::SiteActive {
+    world.insert_resource(moly_features::site::SiteActive {
         site_id: SITE,
         level: 1,
         site_type: String::new(),
@@ -50,7 +54,7 @@ pub fn insert_test_site(world: &mut World) {
         room: None,
         nav_face: None,
     });
-    world.insert_resource(crate::free_layout::FreeLayout::read(&serde_json::Value::Null, SITE));
+    world.insert_resource(moly_features::free_layout::FreeLayout::read(&serde_json::Value::Null, SITE));
 }
 
 pub fn request_zones(mut commands: Commands, server: Res<AssetServer>) {
@@ -138,7 +142,7 @@ pub fn zones_of(world: &World, layout_id: u32) -> Option<Vec<Zone>> {
 /// mode off: a layout must not be stored under rules the document cannot
 /// tell.
 pub fn free_layout(world: &World) -> Result<bool, String> {
-    crate::free_layout::mode(world).map(|(_, on)| on)
+    moly_features::free_layout::mode(world).map(|(_, on)| on)
 }
 
 /// The rules for the current floor layout, or what is missing.

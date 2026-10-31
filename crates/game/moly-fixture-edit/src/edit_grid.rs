@@ -1,13 +1,27 @@
 //! The layout grid while the layout editor is open: `ShowGrid` (event 15)
-//! draws it, `HideGrid` (event 16) removes it.
+//! draws it, `HideGrid` (event 16) removes it. Input: `layout-grid/grid.json`
+//! (the grid settings, the materials, their shaders' pass state and the
+//! colour profiles), the phenomenon index's configuration for the committed
+//! phenomenon at the current environment site, the floor grid's bound
+//! (`GridData.GridBound`) and the draft's rows. Output: the grid's line and
+//! tile entities, and the tile face's per-tile state texture. Invariants: the
+//! line count, the texel packing and the state precedence below are fixed;
+//! the tile face recomputes from the decided rows, never from a row being
+//! dragged away.
 //!
-//! Source: the grid manager's subscriber takes the current site's grid
-//! controller and calls `SetShowGrid(layout type)`; `ShowGrid(2)` (floor)
-//! shows the floor grid controller, whose line and tile children the layout
-//! editor built from the floor grid's bound (`GridData.GridBound`) under the
-//! site view. `HideGrid` hides it. Both children sit at `(0, PositionY, 0)`
-//! under the floor controller, which sits at `(0, PositionY, 0)` itself, so
-//! the grid plane is at `2 * PositionY` above the site view.
+//! Boundary: only the floor grid is built. The grid works in the reference's
+//! own grid frame, and the product frame is its X mirror (a product cell x is
+//! the reference cell -x - 1, a product position x is the reference -x).
+//! Geometry and the texel layout are computed in the reference frame and
+//! mirrored per vertex, so uv, the stripe direction and the texel index keep
+//! the reference's values. The programs are `edit_grid_line.wesl` and
+//! `edit_grid_face.wesl`. The grid manager's subscriber takes the current
+//! site's grid controller and calls `SetShowGrid(layout type)`; `ShowGrid(2)`
+//! (floor) shows the floor grid controller, whose line and tile children were
+//! built from the floor grid's bound. `HideGrid` hides it. Both children sit
+//! at `(0, PositionY, 0)` under the floor controller, which sits at
+//! `(0, PositionY, 0)` itself, so the grid plane is at `2 * PositionY` above
+//! the site view.
 //!
 //! Lines (`FloorLineGridController.RefreshView`, `GridLine.CalculateMesh`):
 //! `TileCount.x + 1` lines of constant x and `TileCount.z + 1` of constant z,
@@ -45,7 +59,7 @@
 //! Highlight or FixtureExist together with MotionArea or MotionDisableArea
 //! becomes MotionConflictArea alone. The selection and the fixtures stacked
 //! on it are drawn where they are being dragged; the other checks read the
-//! decided tiles, as the source's model keeps them until the decide.
+//! decided tiles, as the reference's model keeps them until the decide.
 //!
 //! Colours: the site environment's configuration names a colour profile
 //! (`gridColorKey`); the profile table returns the first row with that key,
@@ -60,25 +74,26 @@
 //! Inputs: `layout-grid/grid.json` (the grid settings, the materials, their
 //! shaders' pass state, the colour profiles) and the phenomenon index's
 //! configuration for the committed phenomenon at the current environment
-//! site. The programs are ported in `edit_grid_line.wesl` and
+//! site. The programs are in `edit_grid_line.wesl` and
 //! `edit_grid_face.wesl`. Each material's queue and pass state (cull, depth
 //! test and write, blend, colour mask) are taken from the asset.
 //!
-//! The source works in its own grid frame; the product frame is its X mirror
+//! The grid works in the reference's own grid frame; the product frame is its X mirror
 //! (a product cell x is the source cell -x - 1, a product position x is the
-//! source -x). Geometry and the texel layout are computed in the source
+//! reference -x). Geometry and the texel layout are computed in the reference
 //! frame and mirrored per vertex, so uv, the stripe direction and the texel
 //! index keep the source's values.
 //!
-//! Named gaps: the wall grid, the floating faces and the light poles are not
+//! Boundary: the wall grid, the floating faces and the light poles are not
 //! built; the birthday cutscene areas (drawn only inside the fixture's
 //! birthday party period, `IsWithinBirthdayTimeByFixtureId`) and the
-//! hidden-fixture state are not filled; while the unavailable zone table is not read the zones are not
-//! filled (the fill log says so, and the put check refuses floor puts then);
-//! the line and the tile renderers share queue 2025 and their order within
-//! it is not the source's (the source sorts them with the engine's opaque
-//! criteria); blending happens in the target's linear space, where the
-//! source (a gamma space player) blends stored values.
+//! hidden-fixture state are not filled; while the unavailable zone table is
+//! not read the zones are not filled (the fill log says so, and the put check
+//! refuses floor puts then); the line and the tile renderers share queue 2025
+//! and their order within it is not the reference's (the reference sorts them
+//! with the engine's opaque criteria); blending happens in the target's
+//! linear space, where the reference (a gamma space player) blends stored
+//! values.
 
 use std::marker::PhantomData;
 
@@ -102,7 +117,7 @@ use serde_json::Value;
 use super::assets::FixtureAreas;
 use super::layout_rules::zones_of;
 use super::{EditSession, FixtureEditSystems, PutStatus};
-use crate::fixture::{EditableFixture, FixturePlacements};
+use moly_features::fixture::{EditableFixture, FixturePlacements};
 use moly_layout::validate::{self as tile_rules, TileBox};
 
 const GRID: &str = "moly://layout-grid/grid.json";
@@ -205,8 +220,8 @@ impl From<&GridFaceMaterial> for GridPassKey {
 }
 
 fn specialize_grid(descriptor: &mut RenderPipelineDescriptor, key: GridPassKey) {
-    crate::material_order::set_queue(descriptor, key.queue);
-    crate::source_render_state::apply(descriptor, key.state);
+    moly_features::material_order::set_queue(descriptor, key.queue);
+    moly_features::source_render_state::apply(descriptor, key.state);
 }
 
 impl Material for GridLineMaterial {
@@ -408,7 +423,7 @@ fn material_doc(doc: &Value, slot: &str) -> Result<MaterialDoc, String> {
     let pass_value = |name: &str| state_value(field(name), material, &format!("{shader} {name}"));
     for name in ["offsetFactor", "offsetUnits", "alphaToMask"] {
         if pass_value(name)? != 0.0 {
-            return Err(format!("{slot}: {shader} {name} is not 0; not ported"));
+            return Err(format!("{slot}: {shader} {name} is not 0; not supported"));
         }
     }
     let state = SourceRenderState {
@@ -595,15 +610,15 @@ fn insert_shaders(mut shaders: ResMut<Assets<Shader>>) {
     let _ = shaders.insert(
         LINE_SHADER.id(),
         Shader::from_wesl(
-            include_str!("../shaders/edit_grid_line.wesl"),
-            "moly_features/src/shaders/edit_grid_line.wesl".to_owned(),
+            include_str!("shaders/edit_grid_line.wesl"),
+            "moly_fixture_edit/src/shaders/edit_grid_line.wesl".to_owned(),
         ),
     );
     let _ = shaders.insert(
         FACE_SHADER.id(),
         Shader::from_wesl(
-            include_str!("../shaders/edit_grid_face.wesl"),
-            "moly_features/src/shaders/edit_grid_face.wesl".to_owned(),
+            include_str!("shaders/edit_grid_face.wesl"),
+            "moly_fixture_edit/src/shaders/edit_grid_face.wesl".to_owned(),
         ),
     );
 }
@@ -707,10 +722,10 @@ fn track_profile(world: &mut World, grid: &mut EditGrid) {
     };
     let (Some(phenomenon), Some(site)) = (
         world
-            .get_resource::<crate::weather::CommittedPhenomenon>()
+            .get_resource::<moly_features::weather::CommittedPhenomenon>()
             .map(|p| p.0.clone()),
         world
-            .get_resource::<crate::site::SiteActive>()
+            .get_resource::<moly_features::site::SiteActive>()
             .map(|s| s.env_site.clone()),
     ) else {
         return;
@@ -800,19 +815,19 @@ fn track_profile(world: &mut World, grid: &mut EditGrid) {
             }
         }
         Err(error) => {
-            // The source logs and leaves the grid colour unchanged.
+            // The log names it, and the grid keeps its colours.
             error!("[edit-grid] RefreshGridColor: {error}; the grid keeps its colours");
             ProfileState::Failed { environment, error }
         }
     };
 }
 
-/// The source cell x of a product cell x, and back (the X mirror).
+/// The reference cell x of a product cell x, and back (the X mirror).
 fn source_cell_x(product_x: i32) -> i32 {
     -product_x - 1
 }
 
-/// Positions (product frame), uv and indices of one quad given in the source
+/// Positions (product frame), uv and indices of one quad given in the reference
 /// frame, wound to face +Y after the mirror.
 fn push_quad(
     positions: &mut Vec<[f32; 3]>,
@@ -830,7 +845,7 @@ fn push_quad(
         positions.push(point.to_array());
         uvs.push(uv);
     }
-    // The source's triangles (0, 3, 1), (1, 3, 2); reversed when the mirror
+    // The reference's triangles (0, 3, 1), (1, 3, 2); reversed when the mirror
     // turned them to face down.
     let normal = (p[3] - p[0]).cross(p[1] - p[0]);
     let order: [u32; 6] = if normal.y > 0.0 {
@@ -853,7 +868,7 @@ fn mesh(positions: Vec<[f32; 3]>, uvs: Vec<[f32; 2]>, indices: Vec<u32>) -> Mesh
     .with_inserted_indices(Indices::U32(indices))
 }
 
-/// The grid plane's corners (source frame): the minimum tile's minimum
+/// The grid plane's corners (reference frame): the minimum tile's minimum
 /// corner and the maximum tile's maximum corner.
 fn corners(tiles: &TileBox) -> ((f32, f32), (f32, f32)) {
     (
@@ -988,7 +1003,7 @@ fn footprint_cells(item: &EditableFixture) -> Option<(GridPosition, GridPosition
     item.footprint().ok()
 }
 
-/// A source-frame rectangle of cells, `(x0, z0, x1, z1)` inclusive
+/// A reference-frame rectangle of cells, `(x0, z0, x1, z1)` inclusive
 /// (`Grid2DBound`).
 type Rect = (i32, i32, i32, i32);
 
@@ -998,7 +1013,7 @@ fn overlaps(a: Rect, b: Rect) -> bool {
     a.0.max(b.0) <= a.2.min(b.2) && a.1.max(b.1) <= a.3.min(b.3)
 }
 
-/// A product footprint's rectangle in the source frame.
+/// A product footprint's rectangle in the reference frame.
 fn footprint_rect(item: &EditableFixture) -> Option<Rect> {
     let (min, max) = footprint_cells(item)?;
     let (a, b) = (

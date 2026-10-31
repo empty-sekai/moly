@@ -1,6 +1,20 @@
-//! A verified RaycastTargetGroup collider input, not an infinite ground plane.
-use crate::fixture_edit::{EditCommand, EditContentType, EditSession};
-use crate::gesture::{GestureEvent, GestureKind, GestureState, UiPointerEvent, UiPointerPhase};
+//! Road picking over the site's collider triangles: a verified
+//! `RaycastTargetGroup` collider input rather than an infinite ground plane.
+//!
+//! Input: the pick source document (`version` 1, the
+//! `unity-lh-y-up-authored` coordinate contract, the `home` site), and the UI
+//! pointer and gesture events through `moly_features::gesture`. Output:
+//! `EditCommand` messages for the road plan, and the pick system sets
+//! (`FixtureEditSystems::Pointer`).
+//! Invariants: only enabled colliders tagged `RaycastTargetGroup` and not
+//! concave are used; a collider whose chain has an inactive step is skipped;
+//! every vector has its exact length and finite numbers, and the source must
+//! hold at least one active tagged triangle. A missing or failed source
+//! leaves picks unanswered. Boundary: the module writes commands, never the
+//! draft, and a pointer release keeps its claim for the frame that holds it.
+
+use crate::{EditCommand, EditContentType, EditSession};
+use moly_features::gesture::{GestureEvent, GestureKind, GestureState, UiPointerEvent, UiPointerPhase};
 use bevy::{asset::LoadState, prelude::*, window::PrimaryWindow};
 use moly_assets::json::JsonAsset;
 use serde_json::Value;
@@ -28,14 +42,14 @@ pub(super) fn install(app: &mut App) {
         Update,
         cancel_pointer
             .in_set(super::super::FixtureEditSystems::Pointer)
-            .after(crate::gesture::advance),
+            .after(moly_features::gesture::advance),
     )
     .add_systems(
         Update,
         input
             .in_set(super::super::FixtureEditSystems::Pointer)
-            .after(crate::gesture::advance)
-            .run_if(crate::game_settings::scene_input_enabled),
+            .after(moly_features::gesture::advance)
+            .run_if(moly_features::game_settings::scene_input_enabled),
     );
 }
 
@@ -248,13 +262,13 @@ fn input(
     source: Res<PickSource>,
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
-    origins: Query<&GlobalTransform, With<crate::fixture_scene_inputs::SiteCoordinateOrigin>>,
+    origins: Query<&GlobalTransform, With<moly_features::fixture_scene_inputs::SiteCoordinateOrigin>>,
     fixtures: Query<
         (
-            Option<&crate::fixture_scene_inputs::FixtureScenePlacement>,
+            Option<&moly_features::fixture_scene_inputs::FixtureScenePlacement>,
             Option<&super::super::presentation::DraftPreview>,
         ),
-        With<crate::fixture::FixtureVisualRoot>,
+        With<moly_features::fixture::FixtureVisualRoot>,
     >,
     source_views: Query<(
         Entity,

@@ -1,49 +1,40 @@
-//! The field put effect and the put sound of a decided ground placement.
+//! The put effect and the put sound of a decided ground placement, and the
+//! road segments' placement effect.
 //!
-//! Source (`FixtureController.ShowPutEffect`, field branch): the fixture's
-//! current grid size (the master size with x and z swapped for the two side
-//! directions), the view's world position and the model's put sound id go to
-//! `MysekaiFixtureUtility.ShowFieldPutEffect(..., clone: false)`. That
-//! utility creates one `FixturePutEffect` on the first put and keeps it; its
-//! `SetupPutEffect` loads the effect package once and instantiates its prefab
-//! `fx_fixture_put_01` once. Every later put reuses that one instance
-//! (`clone` is false on this path): `SetEffect` deactivates it, writes the
-//! position, the local scale `(size.x * TILE_SCALE, size.y, size.z *
-//! TILE_SCALE)` (the y component is the raw grid height, not scaled) and the
-//! identity rotation, and activates it again, which restarts its
-//! play-on-awake systems. Then `PlayPutSound` looks the id up in the put
-//! sound table and plays the row's `assetbundleName` as a one-shot SE cue
-//! (`PlaySEOneShot(cue, 0)`, no cue sheet argument). The 3.0 s `Destroy`
-//! of the source body runs only for a cloned copy, which the fence and road
-//! planners request; ground puts never destroy the instance.
+//! Input: a decided fixture's grid size (its master size, with x and z
+//! swapped for the two side directions), its grid position and the view's
+//! world position, its put sound id, the effect package's prefab and particle
+//! document, and the `moly_features::companion_cues::PutEffect` the hub
+//! queues. Output: one field put effect instance restarted at the placement
+//! with the local scale `(size.x * TILE_SCALE, size.y, size.z * TILE_SCALE)`
+//! (the y part is the raw grid height, not scaled) and the identity rotation,
+//! and a one-shot SE cue from the put sound table.
 //!
-//! `FixtureController.PlayPutSound` (the same table lookup, without the
-//! effect) is what selecting a placed fixture plays after its pick sound.
+//! Invariants: the effect instance is created once on the first put and
+//! reused by every later put, which deactivates it, writes position, scale
+//! and rotation, and activates it again so its play-on-awake systems restart;
+//! a ground put never destroys the instance. The cue is played as
+//! `PlaySEOneShot(cue, 0)` with no cue sheet. A road segment clones the
+//! instance when its direction changes; each clone has its own source nodes
+//! and particle systems and is destroyed 3.0 s after it is set. A stored
+//! fixture's release returns its effect copy with the same 3.0 s.
 //!
-//! Road placement shares this owner: `ShowFieldPlacementEffect` reuses the
-//! instance for the first straight segment and clones it for later segments
-//! when the direction changes. Each clone has independent source nodes and
-//! particle systems, and is destroyed 3.0 s after SetEffect and PlayPutSound.
-//! The caller supplies the segment size, mean global position and first
-//! fixture's sound identity. Wall and fence editing are separate callers.
-//!
-//! Named differences:
-//! - The instance is held inactive once its scene exists and its particle
-//!   systems are prepared while inactive (the effect pools' landing path);
-//!   the source's first instance plays on awake where it is created and the
-//!   first put restarts it in the same frame, so the visible result is the
-//!   put's play. A later put restarts the systems with the particle host's
-//!   own `ParticleSystem.Play` (a system that still holds particles keeps its
-//!   seeds and restarts its clock).
-//! - Puts that arrive while the prefab or its particle document is loading
-//!   wait in order, as the source's awaiting callers do; each plays its sound
-//!   when the instance is set. The wait also covers the particle host's
-//!   preparation of the systems (their meshes and GPU programs), which the
-//!   source has no counterpart for; it is bounded at 10 s.
-//! - Systems the particle host refuses (it logs each with its reason) are
-//!   not drawn; the others play.
-//! - A missing prefab, particle document or put sound table is a WARN and
-//!   draws or plays nothing, never a default cue.
+//! Boundary: the instance is held inactive once its scene exists and its
+//! systems are prepared while inactive (the effect pools' landing path); the
+//! reference creates its first instance on awake and its first put restarts
+//! it in the same frame, so the visible result is the put's play. A later
+//! put restarts the systems with the particle host's own `ParticleSystem.Play`
+//! (a system that still holds particles keeps its seeds and restarts its
+//! clock). Puts that arrive while the prefab or its particle document is
+//! loading wait in order and play their sound when the instance is set; the
+//! wait also covers the particle host's preparation of the systems (meshes
+//! and GPU programs), bounded at 10 s. Systems the particle host refuses (it
+//! logs each with its reason) are not drawn, the others play. A missing
+//! prefab, particle document or put sound table is a WARN that draws or plays
+//! nothing, never a default cue. Selecting a placed fixture plays
+//! `FixtureController.PlayPutSound` alone, without the effect. Wall and
+//! fence editing call their own paths.
+
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -55,8 +46,8 @@ use moly_law::fixture::position::layout_type;
 use moly_law::fixture::{Direction, Vector3Int};
 use serde_json::Value;
 
-use crate::audio::{SeClass, SeRequest, SeRequests};
-use crate::fixture::EditableFixture;
+use moly_features::audio::{SeClass, SeRequest, SeRequests};
+use moly_features::fixture::EditableFixture;
 
 /// The package `AssetBundleNames.GetMysekaiPutFixtureEffect` names.
 const PACKAGE: &str = "mysekai__effect__fixture__fx_fixture_put_01";
@@ -343,7 +334,7 @@ impl FixturePutEffect {
             return;
         };
         let Some(cue) = tables.cue_of.get(&id) else {
-            // GetMysekaiFixturePutSound returns nothing: the source plays nothing.
+            // GetMysekaiFixturePutSound returns nothing: the reference plays nothing.
             info!(
                 "[fixture-put] PlayPutSound: fixture {fixture_id} put sound id {id} has no put sound row; the source plays nothing"
             );
@@ -418,7 +409,7 @@ pub(crate) fn show(world: &mut World, item: &EditableFixture, source: &'static s
 
 /// One `ShowFieldPutCenterEffect` segment. Position is the arithmetic mean
 /// of every controller's GlobalPosition; fixture_id belongs to the first
-/// controller. The source starts with clone=false, then uses true for the
+/// controller. The reference starts with clone=false, then uses true for the
 /// remaining segments whenever the placement direction changes.
 pub(super) fn show_field_placement(
     world: &mut World,
@@ -449,7 +440,7 @@ pub(super) fn show_field_placement(
 /// The site view's world position (the scene wrapper that carries the site's
 /// coordinate origin). Zero when no site origin exists.
 pub fn site_origin(world: &mut World) -> Vec3 {
-    let mut origins = world.query_filtered::<&GlobalTransform, With<crate::fixture_scene_inputs::SiteCoordinateOrigin>>();
+    let mut origins = world.query_filtered::<&GlobalTransform, With<moly_features::fixture_scene_inputs::SiteCoordinateOrigin>>();
     origins
         .iter(world)
         .next()
@@ -629,7 +620,7 @@ impl FixturePutEffect {
                         Transform::IDENTITY,
                         // Hidden until its source nodes are held inactive.
                         Visibility::Hidden,
-                        crate::site_move::PendingInstance,
+                        moly_features::site_move::PendingInstance,
                         Name::new(format!("fixture put effect {PREFAB}")),
                     ))
                     .id();
@@ -654,16 +645,16 @@ impl FixturePutEffect {
                 ..
             } => {
                 let root = *root;
-                if planned.is_some() || world.get::<crate::site_move::InstanceReady>(root).is_none()
+                if planned.is_some() || world.get::<moly_features::site_move::InstanceReady>(root).is_none()
                 {
                     return;
                 }
-                let nodes = crate::site_move::effects::set_source_nodes_active(world, root, false);
+                let nodes = moly_features::site_move::effects::set_source_nodes_active(world, root, false);
                 if let Some(mut visibility) = world.get_mut::<Visibility>(root) {
                     visibility.set_if_neq(Visibility::Inherited);
                 }
                 *held = nodes > 0;
-                let paths = crate::site_move::node_paths(world, root);
+                let paths = moly_features::site_move::node_paths(world, root);
                 let anchors: HashMap<String, Vec<Entity>> = paths
                     .iter()
                     .map(|(path, list)| (format!("/{path}"), list.clone()))
@@ -671,7 +662,7 @@ impl FixturePutEffect {
                 let server = world.resource::<AssetServer>().clone();
                 let doc = doc.clone();
                 let mut commands = world.commands();
-                crate::weather_fx::fixture::plan(&mut commands, root, &doc, &anchors, &server);
+                moly_features::weather_fx::fixture::plan(&mut commands, root, &doc, &anchors, &server);
                 world.flush();
                 *planned = Some(now);
                 info!(
@@ -701,7 +692,7 @@ impl FixturePutEffect {
                 // waits until the host has installed (or refused) every
                 // system it accepted.
                 let preparing = world
-                    .get::<crate::weather_fx::fixture::Request>(*root)
+                    .get::<moly_features::weather_fx::fixture::Request>(*root)
                     .is_some();
                 if preparing && now - *planned < PREPARE_WAIT {
                     return;
@@ -739,7 +730,7 @@ impl FixturePutEffect {
                         WorldAssetRoot(scene.clone()),
                         Transform::IDENTITY,
                         Visibility::Hidden,
-                        crate::site_move::PendingInstance,
+                        moly_features::site_move::PendingInstance,
                         Name::new(format!("fixture put clone {PREFAB}")),
                     ))
                     .id();
@@ -766,10 +757,10 @@ impl FixturePutEffect {
                 if let Instance::Spawned { held, .. } = &mut self.instance {
                     *held = false;
                 }
-                let nodes = crate::site_move::effects::set_source_nodes_active(world, root, true);
+                let nodes = moly_features::site_move::effects::set_source_nodes_active(world, root, true);
                 format!("first activation, {nodes} source nodes active")
             } else {
-                match crate::weather_fx::fixture::play(world, root) {
+                match moly_features::weather_fx::fixture::play(world, root) {
                     Ok(systems) => format!("reactivated, {systems} systems played again"),
                     Err(error) => format!("reactivated, Play refused: {error}"),
                 }
@@ -817,19 +808,19 @@ impl FixturePutEffect {
             }
             if copy.planned.is_none() {
                 if world
-                    .get::<crate::site_move::InstanceReady>(copy.root)
+                    .get::<moly_features::site_move::InstanceReady>(copy.root)
                     .is_none()
                 {
                     self.clones.push(copy);
                     continue;
                 }
-                crate::site_move::effects::set_source_nodes_active(world, copy.root, false);
-                let anchors = crate::site_move::node_paths(world, copy.root)
+                moly_features::site_move::effects::set_source_nodes_active(world, copy.root, false);
+                let anchors = moly_features::site_move::node_paths(world, copy.root)
                     .into_iter()
                     .map(|(path, list)| (format!("/{path}"), list))
                     .collect();
                 let server = world.resource::<AssetServer>().clone();
-                crate::weather_fx::fixture::plan(
+                moly_features::weather_fx::fixture::plan(
                     &mut world.commands(),
                     copy.root,
                     &copy.doc,
@@ -841,7 +832,7 @@ impl FixturePutEffect {
             }
             if copy.put.is_some() {
                 let preparing = world
-                    .get::<crate::weather_fx::fixture::Request>(copy.root)
+                    .get::<moly_features::weather_fx::fixture::Request>(copy.root)
                     .is_some();
                 if preparing && now - copy.planned.unwrap_or(now) < PREPARE_WAIT {
                     self.clones.push(copy);
@@ -861,7 +852,7 @@ impl FixturePutEffect {
                         scale: effect_scale(put.size),
                     };
                 }
-                crate::site_move::effects::set_source_nodes_active(world, copy.root, true);
+                moly_features::site_move::effects::set_source_nodes_active(world, copy.root, true);
                 if let Some(mut visibility) = world.get_mut::<Visibility>(copy.root) {
                     *visibility = Visibility::Inherited;
                 }
@@ -898,12 +889,12 @@ impl FixturePutEffect {
         let mut total = 0;
         if let Some(children) = world.get::<Children>(sample.root) {
             for child in children.iter() {
-                let Some(system) = world.get::<crate::uber_particle::FixtureParticleLive>(child)
+                let Some(system) = world.get::<moly_features::uber_particle::FixtureParticleLive>(child)
                 else {
                     continue;
                 };
                 let playing = world
-                    .get::<crate::weather_fx::fixture::Played>(child)
+                    .get::<moly_features::weather_fx::fixture::Played>(child)
                     .is_some_and(|played| played.playing(&system.0, now));
                 total += system.0.pool.len();
                 systems.push(format!(

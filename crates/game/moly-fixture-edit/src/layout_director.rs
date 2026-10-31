@@ -26,9 +26,9 @@ use moly_layout::{Anchor, Apply, Cell, LayoutOp, Rot};
 use moly_protocol::{Call, CallKind};
 use serde_json::{json, Value};
 
-use super::fixture::EditableFixture;
-use super::fixture_edit::session;
-use crate::fixture::FixturePlacements;
+use moly_features::fixture::EditableFixture;
+use crate::session;
+use moly_features::fixture::FixturePlacements;
 
 /// What a layout step does.
 #[derive(Clone, Debug, PartialEq)]
@@ -130,7 +130,7 @@ struct Sent {
     seq: u32,
     next: FixturePlacements,
     returned: Vec<EditableFixture>,
-    storage: crate::fixture::layouts::EditStorageSnapshot,
+    storage: moly_features::fixture::layouts::EditStorageSnapshot,
 }
 
 /// The step's save in flight, and how the last one ended.
@@ -171,7 +171,7 @@ pub fn settled(world: &World) -> Option<Result<(), String>> {
 /// The layout's revision.
 fn revision(world: &World) -> u64 {
     world
-        .get_resource::<crate::fixture::FixtureLayoutRevision>()
+        .get_resource::<moly_features::fixture::FixtureLayoutRevision>()
         .map_or(0, |revision| revision.0)
 }
 
@@ -308,10 +308,10 @@ pub fn open(world: &mut World, kind: &LayoutStep) -> Result<String, String> {
     world.insert_resource(StepLayout::default());
     if let LayoutStep::SetFree { on } = kind {
         let site = world
-            .get_resource::<crate::site::SiteActive>()
+            .get_resource::<moly_features::site::SiteActive>()
             .ok_or_else(|| "no site is active".to_owned())?
             .site_id;
-        crate::free_layout::set(world, site, *on)?;
+        moly_features::free_layout::set(world, site, *on)?;
         return Ok(format!("free layout {}", if *on { "on" } else { "off" }));
     }
     session::ready(world)?;
@@ -348,9 +348,9 @@ fn edit(world: &mut World, ops: &[LayoutOp]) -> Result<String, String> {
 fn clear(world: &mut World, keep: &[Keep]) -> Result<String, String> {
     let mut draft = session::open(world)?;
     let site_free = world
-        .get_resource::<crate::free_layout::FreeLayout>()
-        .is_some_and(crate::free_layout::FreeLayout::is_on);
-    let homes = world.get_resource::<crate::house::HomeFixtures>();
+        .get_resource::<moly_features::free_layout::FreeLayout>()
+        .is_some_and(moly_features::free_layout::FreeLayout::is_on);
+    let homes = world.get_resource::<moly_features::house::HomeFixtures>();
     let rows = rows_of(world);
     let is_home = |row: &EditableFixture| homes.is_some_and(|homes| homes.is_home(&row.package).unwrap_or(false));
     let is_gate =
@@ -390,7 +390,7 @@ pub fn save(world: &mut World) -> Result<String, String> {
     // Outside the free layout mode the site's put cost may not pass its
     // limit: the same budget the editor's road plan is held to.
     if !rules.free_layout {
-        let budget = crate::fixture_put_limit::budget(world, &next.site_type(), &next.editor_rows())?;
+        let budget = moly_features::fixture_put_limit::budget(world, &next.site_type(), &next.editor_rows())?;
         if budget.remaining < 0 {
             return Err(format!(
                 "the site's put cost would be {} over its limit of {}",
@@ -400,7 +400,7 @@ pub fn save(world: &mut World) -> Result<String, String> {
         }
     }
     let storage = world
-        .get_resource_mut::<crate::fixture::layouts::SiteFixtureLayouts>()
+        .get_resource_mut::<moly_features::fixture::layouts::SiteFixtureLayouts>()
         .ok_or_else(|| "the saved layouts are not ready".to_owned())?
         .snapshot(next.site_id())?;
     let Some(storage) = storage else {
@@ -411,11 +411,11 @@ pub fn save(world: &mut World) -> Result<String, String> {
     // out as the game does.
     let site_id = next.site_id();
     let free = world
-        .get_resource::<crate::free_layout::FreeLayout>()
+        .get_resource::<moly_features::free_layout::FreeLayout>()
         .filter(|free| free.site_id() == site_id)
-        .is_some_and(crate::free_layout::FreeLayout::is_on);
-    crate::free_layout::set_server_document(site_id, free)?;
-    let call = Call::HousingLayout(crate::fixture::layouts::housing_layout_request(&next));
+        .is_some_and(moly_features::free_layout::FreeLayout::is_on);
+    moly_features::free_layout::set_server_document(site_id, free)?;
+    let call = Call::HousingLayout(moly_features::fixture::layouts::housing_layout_request(&next));
     let seq = world.resource_mut::<moly_link::ServerLink>().call(call);
     info!(
         "[layout] PostUserMysekaiHousingLayoutApi sent as seq {seq} by a layout step: {} rows",
@@ -439,17 +439,17 @@ pub fn save(world: &mut World) -> Result<String, String> {
 fn write(world: &mut World, sent: Sent, accepted: Result<(), String>) {
     keep_base(world, &sent.next);
     let ended = accepted.and_then(|()| {
-        crate::fixture::layouts::persist_edit(&sent.next, &sent.returned, &sent.storage)
+        moly_features::fixture::layouts::persist_edit(&sent.next, &sent.returned, &sent.storage)
             .map(|receipt| {
                 world.insert_resource(sent.next.clone());
                 if let Some(mut layouts) =
-                    world.get_resource_mut::<crate::fixture::layouts::SiteFixtureLayouts>()
+                    world.get_resource_mut::<moly_features::fixture::layouts::SiteFixtureLayouts>()
                 {
                     layouts.did_save(&sent.next, receipt);
                 }
                 let before = revision(world);
-                crate::fixture::reload_after_save(world);
-                world.write_message(super::fixture_edit::LayoutSaved);
+                moly_features::fixture::reload_after_save(world);
+                world.write_message(crate::LayoutSaved);
                 before
             })
             .map_err(|error| format!("the saved copy was not written: {error}"))
@@ -471,7 +471,7 @@ fn write(world: &mut World, sent: Sent, accepted: Result<(), String>) {
 
 /// Update: the housing layout answers. The answers are read, not taken: the
 /// editor's own save and a field build read the same messages.
-fn answer_saves(mut answers: MessageReader<super::userdata::Answered>, mut commands: Commands) {
+fn answer_saves(mut answers: MessageReader<moly_features::userdata::Answered>, mut commands: Commands) {
     let answers: Vec<(u32, Result<(), String>)> = answers
         .read()
         .filter(|answer| answer.call == CallKind::HousingLayout)
@@ -508,7 +508,7 @@ fn settle_saves(world: &mut World, answers: Vec<(u32, Result<(), String>)>) {
     }
     // The reload of a save has landed: nothing waits for the save any more.
     let current = revision(world);
-    let ready = world.contains_resource::<crate::fixture::FixtureScenesReady>();
+    let ready = world.contains_resource::<moly_features::fixture::FixtureScenesReady>();
     if let Some(mut save) = world.get_resource_mut::<LayoutSave>() {
         if let Some(from) = save.reload_from {
             if current != from && ready {
