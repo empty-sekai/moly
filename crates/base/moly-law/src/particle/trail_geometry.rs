@@ -309,9 +309,9 @@ fn blend_channel(codes: &[f32], value: &dyn Fn(usize, usize) -> f32, channels: u
         let (lo, hi) = (codes[j - 1], codes[j]);
         let span = a::max(a::sub(hi, lo), EPS_SPAN);
         let fac = a::min(a::div(a::sub(q, lo), span), ONE);
-        for c in 0..channels {
+        for (c, slot) in out.iter_mut().enumerate().take(channels) {
             let d = a::sub(value(j, c), value(j - 1, c));
-            out[c] = a::add(value(j - 1, c), a::mul(fac, d));
+            *slot = a::add(value(j - 1, c), a::mul(fac, d));
         }
         if hi >= q {
             break;
@@ -329,8 +329,8 @@ fn fixed_channel(codes: &[f32], value: &dyn Fn(usize, usize) -> f32, channels: u
         return;
     };
     for j in k..n {
-        for c in 0..channels {
-            out[c] = value(j, c);
+        for (c, slot) in out.iter_mut().enumerate().take(channels) {
+            *slot = value(j, c);
         }
         if codes[j] >= q {
             break;

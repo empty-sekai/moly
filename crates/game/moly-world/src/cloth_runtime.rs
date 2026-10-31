@@ -12,7 +12,7 @@
 //! （schema 只搬几何，绑定归本层）。每链 [`build_chain`] 一次，链骨与
 //! 碰撞骨按节点名绑到场景实体——骨名缺失即响亮失败；同名多实体时
 //! （源资产允许骨名重名）按档案记录的绑定姿态世界位消歧，见
-//! [`WORLD_MATCH_TOL`]。链内
+//! `WORLD_MATCH_TOL`。链内
 //! 父子关系与场景父子关系做一致性检查：写回的局部化按链内父算，场景
 //! 父不一致时直写会错位，必须在装配期就响。
 //!
@@ -99,10 +99,10 @@ const WORLD_MATCH_TOL: f32 = 1e-3;
 /// bones' Transform is written exclusively by this module and the animation library
 /// does not drive them, so the two never step on each other. Animation sampling
 /// does not use the live transform of a chain bone (it is composed from a bind-pose
-/// snapshot, see [`world_transform`]); collision geometry is the **exception
+/// snapshot, see `world_transform`); collision geometry is the **exception
 /// reader**: a collider bone can itself be a chain bone (a valid shape that follows
 /// the bone), and then it reads the chain bone's live transform — the one written
-/// back on the previous frame (see [`collider_world_transform`]).
+/// back on the previous frame (see `collider_world_transform`).
 #[derive(Component)]
 pub struct ClothBone;
 
@@ -403,7 +403,7 @@ fn parse_rig(raw: &str) -> Result<ParsedRig, String> {
 /// Update：骨架装配完成的成员解析 cloth 节、绑骨、建链。闩在
 /// NPC的[`MotionDriver`]或SD玩家的AvatarDriver上（场景已展开、动画目标已插）；档案装载失败或
 /// 任何数据面缺口响亮失败——装载面按 schema 的拒绝语义走，缺键即
-/// 停，不造默认值。数据面交给共用规划器（[`ClothWeave::plan`]），绑定
+/// 停，不造默认值。数据面交给共用规划器（`ClothWeave::plan`），绑定
 /// 姿态读装配时插在节点上的 [`CharacterRestTransform`]。
 pub fn plan_when_wired(
     mut commands: Commands,
@@ -534,7 +534,7 @@ pub fn plan_cloth(
 
 /// 两条装配路共用的规划：绑名子树里的名字表、按名绑骨、世界位消歧、
 /// 建链、碰撞体解引用。只借用查询；运行时与 [`ClothBone`] 由
-/// [`ClothWeave::install`] 装上。
+/// `ClothWeave::install` 装上。
 #[derive(SystemParam)]
 pub struct ClothWeave<'w, 's> {
     children: Query<'w, 's, &'static Children>,

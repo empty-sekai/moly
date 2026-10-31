@@ -257,13 +257,13 @@ fn lit_color_source(
     let ramp = intensity * ramp;
 
     let mut color = base;
-    for c in 0..3 {
-        let light_delta = color[c] * globals.phenomena_directional_light_color[c] + -color[c];
-        color[c] += globals.phenomena_directional_light_color[3] * light_delta;
+    for (c, slot) in color.iter_mut().enumerate() {
+        let light_delta = *slot * globals.phenomena_directional_light_color[c] + -*slot;
+        *slot += globals.phenomena_directional_light_color[3] * light_delta;
     }
-    for c in 0..3 {
-        let shade_delta = color[c] * globals.phenomena_shade_color[c] + -color[c];
-        color[c] += ramp * shade_delta;
+    for (c, slot) in color.iter_mut().enumerate() {
+        let shade_delta = *slot * globals.phenomena_shade_color[c] + -*slot;
+        *slot += ramp * shade_delta;
     }
     if let Some(t) = fresnel_treasure0 {
         color = apply_treasure_shadow(color, t, globals.treasure_shadow_intensity[0]);
@@ -291,8 +291,8 @@ fn lit_color_source(
         one_minus = one_minus.log2();
         one_minus *= material.fresnel_power;
         one_minus = one_minus.exp2();
-        for c in 0..3 {
-            color[c] += one_minus * material.fresnel_color[c] * material.fresnel_color[3];
+        for (c, slot) in color.iter_mut().enumerate() {
+            *slot += one_minus * material.fresnel_color[c] * material.fresnel_color[3];
         }
     }
     fog_source(color, input.world_position[1], input.fog_factor, globals)
@@ -345,8 +345,8 @@ pub fn water_vertex(input: WaterVertexInputs) -> WaterVertexVaryings {
     let clip_position = transform_clip_column_major(input.view_projection, world_position);
 
     let mut transformed_normal = [0.0f32; 3];
-    for row in 0..3 {
-        transformed_normal[row] = input.normal[0] * input.world_to_object[row]
+    for (row, slot) in transformed_normal.iter_mut().enumerate() {
+        *slot = input.normal[0] * input.world_to_object[row]
             + input.normal[1] * input.world_to_object[4 + row]
             + input.normal[2] * input.world_to_object[8 + row];
     }

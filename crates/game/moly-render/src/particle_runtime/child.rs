@@ -938,7 +938,7 @@ fn apply_with_laws(
             for lane in &mut lanes[..covered] {
                 integrate_rotation(laws, lane, dt);
             }
-            if !(remaining >= catch_up.step) {
+            if remaining.is_nan() || catch_up.step.is_nan() || remaining < catch_up.step {
                 break;
             }
         }

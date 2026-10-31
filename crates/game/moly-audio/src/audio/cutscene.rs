@@ -16,7 +16,7 @@
 //!
 //! Named rule of the port: the BGM channel chooses its music every frame
 //! from the site, the phenomenon, the site's music record setting and the
-//! BGM select screen's choice ([`super::record`]). A cut-scene's call stands
+//! BGM select screen's choice (`super::record`). A cut-scene's call stands
 //! over all of them from the call until it is released ([`release_bgm`]);
 //! then the channel's own choice plays again (crossfaded with its own fade
 //! time). The callers whose `EndAsync` restores the BGM release it there.
@@ -30,8 +30,8 @@
 //! **Voice.** `VoiceBehaviour.PlayVoice(cue)`: an empty cue is an error;
 //! when `ExistsCueName(cue)` is false the call returns silently (named here:
 //! logged); otherwise `PlayVoiceForMysekai(cue, startTime, volume 1, onPlay,
-//! onFinish, onNotFound)` with `startTime = (float)((double)(float)rootTime
-//! - clip.start)`; `onPlay` turns the bound `NPCAvatarView`'s lip sync on
+//! onFinish, onNotFound)` with
+//! `startTime = (float)((double)(float)rootTime - clip.start)`; `onPlay` turns the bound `NPCAvatarView`'s lip sync on
 //! with the playback's analyzer, `onFinish` and `onNotFound` turn it off.
 //! `StopVoice` stops that playback. The cue sheet is the one the caller
 //! downloaded for the cut-scene (the birthday party's `DownloadVoiceAsync`:
@@ -39,7 +39,7 @@
 //!
 //! Product mapping: the voice plays on the voice bus the dialogue voice uses
 //! ([`super::VoiceChannel`]), so the lip sync is the same meter-driven mouth
-//! ([`crate::voice_mouth`]) bound to the track's character. Named
+//! (`crate::voice_mouth`) bound to the track's character. Named
 //! differences: the source's voice player has several playback slots, the
 //! bus one (a cut-scene voice replaces a dialogue voice; none plays in a
 //! cut-scene); the start offset is taken when the play is commanded, so the

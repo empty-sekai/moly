@@ -58,7 +58,7 @@
 //!   is not checked: the asset source carries no talk-term table. A
 //!   character that is not a visitor has no talk in the list, so an NPC of
 //!   that character (the birthday party's, see
-//!   [`crate::cutscene::birthday_party`]) finds no general talk.
+//!   `crate::cutscene::birthday_party`) finds no general talk.
 //! - The **read report** handler records the talk as read on the server side
 //!   and answers with no obtained resources.
 //! - **Device time zone.** The client converts server timestamps to device
@@ -69,7 +69,7 @@
 //!
 //! The document is the server panel's NPC slice (schemaVersion 1), carried
 //! as `Sections.npcPanel` and seated in
-//! [`ClientNpcPanel`](crate::server_panel_data::ClientNpcPanel); the panel parses it
+//! [`ClientNpcPanel`]; the panel parses it
 //! once it arrives, alongside the refresh windows of the phenomena index.
 //!
 //! Gate replies: the gate presenter's `UpdateTalkList` / `SetTalkList` calls

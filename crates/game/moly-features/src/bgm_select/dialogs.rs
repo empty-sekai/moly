@@ -51,11 +51,11 @@ use super::{words, BgmSelect};
 const CHANGE_VOCAL: &str = "BgmChangeVocal";
 const CHANGE_VOCAL_CELL: &str = "BgmChangeVocalCell";
 const FILTER: &str = "BgmFilter";
-/// The characters' icons the dialog's checkboxes show (`UIPartsCharacterIcon`)
-/// are UI sprites like the player view's images (the icon sprite the root's
-/// runtime sprite inventory lists by `CharacterIconInfo`): their extracted
-/// sprites are registered with the screen's own, and their authored metrics
-/// make the Image rules draw them instead of the raw fallback.
+// The characters' icons the dialog's checkboxes show (`UIPartsCharacterIcon`)
+// are UI sprites like the player view's images (the icon sprite the root's
+// runtime sprite inventory lists by `CharacterIconInfo`): their extracted
+// sprites are registered with the screen's own, and their authored metrics
+// make the Image rules draw them instead of the raw fallback.
 
 /// Where the source documents sit under the region root.
 const CHANGE_VOCAL_PATH: &str = "bgmselect/MysekaiBGMSelectChangeVocalDialog.json";

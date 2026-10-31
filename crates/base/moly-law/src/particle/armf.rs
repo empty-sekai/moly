@@ -229,7 +229,7 @@ pub(crate) fn rsqrt_step(a: f32, c: f32) -> f32 {
 fn recip_estimate_table(a: u64) -> u64 {
     let a = a * 2 + 1;
     let b = (1u64 << 19) / a;
-    (b + 1) / 2
+    b.div_ceil(2)
 }
 
 fn rsqrt_estimate_table(a: u64) -> u64 {
@@ -238,7 +238,7 @@ fn rsqrt_estimate_table(a: u64) -> u64 {
     while a * (b + 1) * (b + 1) < (1u64 << 28) {
         b += 1;
     }
-    (b + 1) / 2
+    b.div_ceil(2)
 }
 
 const FRAC52: u64 = (1u64 << 52) - 1;

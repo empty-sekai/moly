@@ -34,7 +34,7 @@
 //! Both programs use the alpha only in the Bayer test: a fragment is
 //! discarded when `_DitherAlpha` minus its table threshold is below zero, and
 //! the sixteen thresholds are fixed. Alphas that pass the same thresholds
-//! (the same level, see [`dither_level`]) draw the same pixels, so a view's
+//! (the same level, see `dither_level`) draw the same pixels, so a view's
 //! state is its keyword and level, and the copy holds an alpha inside that
 //! level away from its edges. A moving camera then changes a view's material
 //! when its alpha crosses a threshold, not on every frame.

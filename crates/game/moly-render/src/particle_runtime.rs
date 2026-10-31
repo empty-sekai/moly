@@ -182,9 +182,8 @@ fn advance_frame_entry(system: &mut Runtime, dt: f32, emitting: bool, ctx: &Cont
         system.native_birth = Some(native);
         let result = result.map_err(|error| format!("{error:?}"))
             .and_then(|ran| if ran { end_of_update_size(system).map(|()| ran) } else { Ok(ran) });
-        return result.map_err(|error| {
+        return result.inspect_err(|_| {
             system.refused_total += 1;
-            error
         });
     }
     use moly_law::particle::frame_time::{frame_step_entry, FrameStep};
@@ -329,7 +328,7 @@ pub fn source_route(system: &serde_json::Value) -> SourceRoute {
     let distance = system.get("emissionRateOverDistance")
         .or_else(|| system.pointer("/emission/rateOverDistance"));
     match upper_scalar(distance) {
-        Some(rate) if rate == 0.0 => {}
+        Some(0.0) => {}
         Some(_) => reasons.push("rateOverDistance".into()),
         None => undecided.push("rateOverDistance not exported".into()),
     }
@@ -401,7 +400,7 @@ pub fn source_route(system: &serde_json::Value) -> SourceRoute {
                 curves("velocity", velocity, &["x", "y", "z"], &mut reasons, &mut undecided);
                 for key in ["orbitalX", "orbitalY", "orbitalZ", "radial"] {
                     match upper_scalar(velocity.get(key)) {
-                        Some(value) if value == 0.0 => {}
+                        Some(0.0) => {}
                         Some(_) => reasons.push(format!("velocity {key}")),
                         None => undecided.push(format!("velocity {key} not exported")),
                     }
@@ -1168,9 +1167,8 @@ fn simulate_with_emission(system: &mut Runtime, dt: f32, ctx: &Context, emitting
         let result = birth::step_explicit(system, &mut native, dt, stopped, ctx);
         system.native_birth = Some(native);
         let result = result.map_err(|error| format!("{error:?}")).and_then(|()| end_of_update_size(system));
-        return result.map_err(|error| {
+        return result.inspect_err(|_| {
             system.refused_total += 1;
-            error
         });
     }
     // The legacy step has no start delay word: a system whose Play leaves one
@@ -1362,7 +1360,7 @@ fn simulate_range(system: &mut Runtime, start: usize, end: usize, dt: f32,
         // 的年寿进程量——余寿先留底。
         let age_pre = system.pool[index].normalized_age();
         // 寿限非正的按出生即死（律对非正寿限拒绝推进，会永生）。
-        if !(start_lifetime > 0.0) {
+        if start_lifetime.is_nan() || start_lifetime <= 0.0 {
             system.pool[index].age_percent = f32::from_bits(0x42c80001);
             if let Some(custom) = system.custom_law.as_mut() {
                 custom.skipped_lane();
@@ -1478,12 +1476,12 @@ fn simulate_range(system: &mut Runtime, start: usize, end: usize, dt: f32,
             // newborn integration.
             if let Some((scales, velocity)) = birth_backtrack {
                 let scale = scales[index - start];
-                for axis in 0..3 { system.pool[index].position[axis] -= scale * velocity[axis]; }
+                for (axis, value) in velocity.iter().enumerate() { system.pool[index].position[axis] -= scale * value; }
             }
             // Native inline birth arithmetic groups modifier*dt before the
             // velocity multiply. Reassociation changes several f32 results.
             let step = modifier * dt;
-            for axis in 0..3 { system.pool[index].position[axis] += total[axis] * step; }
+            for (axis, value) in total.iter().enumerate() { system.pool[index].position[axis] += value * step; }
         } else if let StepVerdict::Refused = integrate(&mut system.pool[index], dt, eff) {
             system.refused_total += 1;
         }
@@ -1647,7 +1645,7 @@ pub fn director_restart_warm(emitter: &EmitterParams, route: &SourceRoute, sub_e
     // zero, whatever route the system takes.
     if let Some(upper) = upper {
         let reach = if sub_emitter_max_lifetime < upper { upper } else { sub_emitter_max_lifetime };
-        if !(reach > 0.0) {
+        if reach.is_nan() || reach <= 0.0 {
             return Ok(None);
         }
     }
@@ -2125,7 +2123,7 @@ pub fn custom_data_storage_eligible(emitter: &EmitterParams, route: &SourceRoute
         Some(MinMaxCurve::Constant(value)) if value.is_finite() && *value > 0.0 => *value,
         _ => return Err("an emission rate that is not a positive constant: the storage reservation is not known".into()),
     };
-    if emitter.max_particles == 0 || !(lifetime * rate > 0.0) {
+    if emitter.max_particles == 0 || lifetime * rate <= 0.0 || (lifetime * rate).is_nan() {
         return Err("no positive storage reservation".into());
     }
     Ok(())
@@ -2432,7 +2430,7 @@ fn source_matrix(m: Mat4) -> [f32; 16] {
 /// view with its X column negated.
 fn source_view(camera: &GlobalTransform) -> [f32; 16] {
     let mut a = Mat4::from(camera.affine().inverse()).to_cols_array();
-    for r in 0..4 { a[r] = -a[r]; }
+    for value in &mut a[..4] { *value = -*value; }
     a
 }
 

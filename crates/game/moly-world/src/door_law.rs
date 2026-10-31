@@ -187,7 +187,7 @@ pub fn state_timer(elapsed: f32, dt: f32, threshold: f32) -> (f32, bool) {
     } else {
         elapsed
     };
-    (elapsed, !(elapsed < threshold))
+    (elapsed, elapsed.is_nan() || threshold.is_nan() || elapsed >= threshold)
 }
 
 // --- AutoMove (`PlayerAvatarAutoMoveState`) --------------------------------

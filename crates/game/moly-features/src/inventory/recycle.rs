@@ -136,9 +136,7 @@ impl Recycle {
             },
             Some("MOLY_INVENTORY_RECYCLE_CONFIRM_SECS"),
         );
-        let Some(dialog) = dialog else {
-            return None;
-        };
+        let dialog = dialog?;
         info!(
             "[inventory] OpenDisassembleDialog: Show2ButtonDialog(MysekaiInventoryScrapFixtureDialog, WORD_OK, WORD_CANCEL) as {dialog:?}; Setup({name:?} ×{SELECTED_NUM}); OK sends {}",
             request.api_name()

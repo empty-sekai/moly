@@ -72,7 +72,7 @@
 //! The same presenter plays the gate's cut-scenes ([`play_async`]): the view
 //! at the gate's transform, a cast bound to the unit tracks, the gate's own
 //! clips, the view's Control clips and the fade colours of the view; see
-//! [`cast`].
+//! `cast`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

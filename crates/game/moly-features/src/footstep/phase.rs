@@ -80,7 +80,12 @@ impl FootPhases {
 /// to `current` (inclusive): `(event index, fraction)` in time order.
 pub fn crossed(phases: &[f32], previous: f32, current: f32) -> Vec<(usize, f32)> {
     let mut out = Vec::new();
-    if !(current > previous) || !previous.is_finite() || !current.is_finite() {
+    if current.is_nan()
+        || previous.is_nan()
+        || current <= previous
+        || !previous.is_finite()
+        || !current.is_finite()
+    {
         return out;
     }
     let first = previous.floor() as i64;

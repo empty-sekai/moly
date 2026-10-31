@@ -685,8 +685,8 @@ pub fn recipes(world: &World) -> serde_json::Value {
     serde_json::Value::Object(lists)
 }
 
-/// The client's current timestamp (`ClientUserData`'s server date plus the
-/// time since it was read).
+// The client's current timestamp (`ClientUserData`'s server date plus the
+// time since it was read).
 // ---------------------------------------------------------------------------
 // A script's hand on the screen
 // ---------------------------------------------------------------------------

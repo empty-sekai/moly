@@ -4,8 +4,8 @@
 //! The data surface follows `sd_*.rig.json` (survey of 31 files):
 //! * `cloth.components[*]`: `vertices{bones,parent,root,selection,depth}`
 //!   + `clothParams` (ClothParams serialized as-is) + `constraints`
-//!   (on this data set only `structDistanceDataList` / `rootDistanceDataList`
-//!   have data, entry shape `{vertexIndex,targetVertexIndex,length}`);
+//!     (on this data set only `structDistanceDataList` / `rootDistanceDataList`
+//!     have data, entry shape `{vertexIndex,targetVertexIndex,length}`);
 //! * `cloth.colliders[*]`: `{kind, bone, node, pathId, center,
 //!   radius | axis,length,startRadius,endRadius}`;
 //! * `selectionEnum`: invalid=0 / move=1 / fixed=2 / extend=3.

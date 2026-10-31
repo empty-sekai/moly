@@ -132,7 +132,7 @@ pub fn cook(positions: &[[f32; 3]], triangles: &[[u32; 3]], options: u32) -> Res
     }
     let flat: Vec<u32> = triangles.iter().flatten().copied().collect();
     let (vertices, index) = weld(positions, &flat);
-    let welded: Vec<[u32; 3]> = index.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+    let welded: Vec<[u32; 3]> = index.as_chunks::<3>().0.iter().map(|c| [c[0], c[1], c[2]]).collect();
     let tree = RTreeBuild::run(&vertices, &welded);
     let source_index = tree.permute.clone();
     let cooked: Vec<[u32; 3]> = tree.permute.iter().map(|&p| welded[p as usize]).collect();
@@ -317,7 +317,7 @@ impl RTreeBuild {
                 nodes.push((node.mn, node.mx, (node.child * 28) as u32));
             }
         }
-        build.pages = nodes.chunks_exact(4).map(|lanes| Page {
+        build.pages = nodes.as_chunks::<4>().0.iter().map(|lanes| Page {
             min: std::array::from_fn(|k| std::array::from_fn(|l| lanes[l].0[k])),
             max: std::array::from_fn(|k| std::array::from_fn(|l| lanes[l].1[k])),
             ptrs: std::array::from_fn(|l| lanes[l].2),
@@ -352,13 +352,13 @@ impl RTreeBuild {
         let leftover = size.saturating_sub(cluster4 * 3);
         let mut total = 0usize;
         let mut sub: (V3, V3) = ([0.0; 3], [0.0; 3]);
-        for i in 0..4 {
+        for (i, reduction) in REDUCTION.iter().enumerate() {
             let off = cluster4 * i;
             let count = if i < 3 {
                 if off < size {
                     let view = &mut self.permute[base..base + size];
                     quick_select_first_k(view, off, size - 1, cluster4, &self.centers, axis);
-                    me[axis] = a::mul(me[axis], REDUCTION[i]);
+                    me[axis] = a::mul(me[axis], *reduction);
                     axis = axis_of(me);
                 }
                 cluster4

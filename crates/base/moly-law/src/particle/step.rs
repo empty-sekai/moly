@@ -50,7 +50,7 @@ pub fn integrate(p: &mut Particle, dt: f32, frame_velocity: [f32; 3]) -> StepVer
 /// The caller supplies gravity in simulation space.
 pub fn apply_gravity(p: &mut Particle, dt: f32, gravity: [f32; 3], gravity_modifier: f32) {
     if !dt.is_finite() || dt < 0.0 || !all_finite(p.velocity) || !all_finite(gravity) { return; }
-    for i in 0..3 { p.velocity[i] += gravity[i] * gravity_modifier * dt; }
+    for (i, &g) in gravity.iter().enumerate() { p.velocity[i] += g * gravity_modifier * dt; }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

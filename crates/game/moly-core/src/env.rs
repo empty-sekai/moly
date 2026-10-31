@@ -61,7 +61,7 @@ pub struct SiteEnv {
     pub emission_type: f32,
     /// Ground/Water/Birthday 落影 maskramp 的边缘对 (.x=E1, .y=E2)。
     pub shadow_mask_edges: [f32; 4],
-    /// DropItem 族四个全局标量（见 [`DROPITEM_GLOBALS`]）。
+    /// DropItem 族四个全局标量（见 `DROPITEM_GLOBALS`）。
     pub dropitem_globals: [f32; 4],
     /// 高度淡出混合目标，由当前已提交的现象 ramp 元数据驱动。
     pub sky_bottom_color: [f32; 4],
@@ -71,7 +71,7 @@ impl SiteEnv {
     /// 中性初值：每个消费式子精确化简为无贡献。
     ///
     /// - 现象光/阴面色 (1,1,1,1)：混合项与阴面色差恰好为零。
-    /// - toon 边界取 (0.5, 0.5)：half-Lambert ∈ [0,1] 落在界内，斜坡因子
+    /// - toon 边界取 (0.5, 0.5)：half-Lambert ∈ \[0,1\] 落在界内，斜坡因子
     ///   有限——边界取 (0,0) 会让分母为零、把 `t·0` 变成 `inf·0 = NaN`。
     /// - 雾三件全零：斜坡 0、雾色 0，距离项与高度项都乘零。
     /// - 投影参数取 (1, 1, 4000, 0.00025)：雾深式子用远近裁剪面做除法，

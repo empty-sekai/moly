@@ -776,7 +776,7 @@ fn step_photo(world: &mut World, entity: Entity, dt: f32) -> bool {
     if call.requested {
         let rows = world.get_resource::<PhotoMode>().and_then(|mode|mode.rows.as_ref()).and_then(|rows|rows.as_ref().ok());
         let max = rows.into_iter().flatten().filter(|row|row.game_character_unit_id == unit).map(|row|row.seq).max().unwrap_or(0);
-        call.sequence = if call.sequence + 1 <= max { call.sequence + 1 } else { 1 };
+        call.sequence = if call.sequence < max { call.sequence + 1 } else { 1 };
         call.row = rows.into_iter().flatten().find(|row|row.game_character_unit_id == unit && row.seq == call.sequence).cloned();
         call.requested = false;
         if let Some(target) = overlap_position(world, entity) {

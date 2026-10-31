@@ -16,7 +16,7 @@
 //! the footprint (and thus the world position). Wiring only the former and keeping
 //! the saved row's diagonal gives identical values for odd-sided footprints but is
 //! half a cell off on even-sided ones — so placed pieces and the occupancy surface
-//! share the single entry point [`PlacementMock::placed`].
+//! share the single entry point `PlacementMock::placed`.
 //!
 //! The placement list is **server-side data** (in the game placements come from
 //! player saves and are instantiated through the site view at runtime, so they do
@@ -1374,7 +1374,7 @@ impl FixturePlacements {
     }
 
     /// 锚定摆放的世界位（对话配对面与名册巡游环的出生清空带按它取
-    /// 锚点）：与 spawn 同一条律（[`PlacementMock::placed`]，朝向已算
+    /// 锚点）：与 spawn 同一条律（`PlacementMock::placed`，朝向已算
     /// 进去），只返回表里锚定摆放的 id。
     pub fn anchor_positions(&self) -> Vec<(i32, [f32; 3])> {
         self.rows
@@ -1466,7 +1466,7 @@ pub use crate::render_inputs::{FixtureRoot, FixtureScenesReady, FixtureSource};
 #[derive(Component)]
 pub struct FixturePlacement {
     layout: u8,
-    /// 对话锚定的家具 id（见 [`PlacementMock::fixture_id`]）。
+    /// 对话锚定的家具 id（见 `PlacementMock::fixture_id`）。
     pub fixture_id: i32,
 }
 
@@ -2073,7 +2073,7 @@ fn spawn_when_ready(
         // Per-instance browser logging is surprisingly expensive for real Home
         // layouts. Keep detailed evidence for small fixtures, otherwise sample
         // progress without serializing hundreds of near-identical messages.
-        if placements.total() <= 64 || index % 100 == 0 || index + 1 == placements.total() {
+        if placements.total() <= 64 || index.is_multiple_of(100) || index + 1 == placements.total() {
             info!(
                 "家具摆放 {}/{}（{}）：方向 {:?} yaw {:.1}°，世界 ({:.3}, {:.3}, {:.3})",
                 index + 1,

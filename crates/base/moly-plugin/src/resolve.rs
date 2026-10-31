@@ -453,7 +453,7 @@ pub fn resolve(
         config.insert(id.clone(), settings);
     }
 
-    errors.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+    errors.sort_by_key(|a| a.to_string());
     if !errors.is_empty() {
         return Err(errors);
     }

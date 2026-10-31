@@ -64,7 +64,7 @@ pub fn turned(world: &mut World) -> impl Iterator<Item = (u32, Entity, f32, Comp
 }
 
 /// The point (x, z) faces from where `at` is: `atan2(x, z)` radians, the
-/// yaw [`turn_to`] gives a body turned toward it.
+/// yaw `turn_to` gives a body turned toward it.
 pub fn yaw_toward(at: Vec3, to: Vec3) -> Option<f32> {
     turn_to(at, to).map(|rotation| yaw_of(rotation * Vec3::Z))
 }

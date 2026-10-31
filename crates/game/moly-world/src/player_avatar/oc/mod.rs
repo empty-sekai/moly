@@ -52,7 +52,7 @@ use bevy::transform::TransformSystems;
 /// earlier, before the asset plugin.
 ///
 /// The own motion's frame order: the segment changes in Update
-/// ([`own::OwnAnimator::drive`], their transition starts with them); the
+/// (`own::OwnAnimator::drive`, their transition starts with them); the
 /// start, ask and end commands in Update ([`own::offer`], after the
 /// commands that write them); the animation systems pose both skeletons in
 /// PostUpdate; the pose pass ([`pose::retarget`], after

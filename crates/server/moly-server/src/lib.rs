@@ -5,11 +5,11 @@
 //! its own process behind the HTTP endpoint ([`http`]). Every request is one
 //! session; the transport reaches the server only through a [`hub::Hub`].
 //!
-//! The model itself ([`model`]) holds every server-decided value and the
+//! The model itself (`model`) holds every server-decided value and the
 //! rules over them. [`MasterLoadPlugin`] loads the master tables the model
 //! reads (the host adds it with the asset source; a harness seats a
-//! [`Masters`] fixture instead); [`users`] keeps one model per user and its
-//! stored document; [`dispatch`] answers each call; [`admin`] serves the
+//! [`Masters`] fixture instead); `users` keeps one model per user and its
+//! stored document; `dispatch` answers each call; `admin` serves the
 //! control plane's document and schema views, an edit, and the seed install.
 
 mod admin;

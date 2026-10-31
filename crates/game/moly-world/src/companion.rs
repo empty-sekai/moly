@@ -36,7 +36,7 @@
 //! next `seq`, so a caller that writes a command reads the status until it
 //! sees a `seq` at or past its own: `Walking` and `Idle` are a walk in
 //! flight, `Turning` a face's turn ([`face`]), `Building` a build's swings,
-//! `Acting` a motion ([`act`]) on the body's own skeleton, `Done` is the
+//! `Acting` a motion (`act`) on the body's own skeleton, `Done` is the
 //! walk's arrival, the turn's end, the build's last hit, the motion's end or
 //! the despawn, `Failed` is the command's named refusal.
 //!
@@ -59,7 +59,7 @@
 //! the count. A tool model the caller puts in the companion's hand
 //! ([`hold_tool`]) leaves with the gather.
 //!
-//! A motion ([`act`]) plays one motion of the shared motion library on the
+//! A motion (`act`) plays one motion of the shared motion library on the
 //! companion's own body: the motion's start segment, its loop segment once
 //! when the library has one, its end segment when it has one, then the
 //! body's idle again. The companion stands while it plays.
@@ -107,7 +107,7 @@
 //!
 //! The companion carries the body layer's avatar body
 //! ([`crate::player_avatar::body::PlayerBody`], wired with `ProxyRest` and
-//! [`AvatarDriver`] as the player's is), its own navigation state (the walk
+//! `AvatarDriver` as the player's is), its own navigation state (the walk
 //! state, path slot and route the NPCs use) and a [`Companion`] marker. It
 //! carries neither `PlayerControlled` nor `AvatarRoot`: the player's input,
 //! state machine, camera, audio and sky never see it.
@@ -177,7 +177,7 @@ pub enum CompanionCommand {
     /// is written as a [`GatherCue`] carrying `tag`.
     Gather { unit: u32, at: Vec3, reach: f32, clip: String, swings: u32, tag: u64 },
     /// Play the motion-library motion `motion` once on the body's own
-    /// skeleton, then its idle (see [`act`]).
+    /// skeleton, then its idle (see `act`).
     Motion { unit: u32, motion: String },
     /// Use the placed fixture `uid`: the character's own action
     /// there, the one named by `activity` and `variant` or the first (see

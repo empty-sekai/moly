@@ -9,8 +9,8 @@
 //! is paid from (`moly_features::userdata::inventory`), the screen and
 //! dialog documents of the UI layout, and the server's answers on the link.
 //!
-//! Output: the slot page ([`screen`], [`slot`], [`slot::cell`]), the item
-//! select page with its detail panel ([`item_select`], [`detail`]) and the
+//! Output: the slot page (`screen`, `slot`, `slot::cell`), the item
+//! select page with its detail panel (`item_select`, `detail`) and the
 //! three dialogs ([`dialogs`]: the start confirm 324, the skip 325 and the
 //! item detail 284); the start and the skip requests, one in flight at a time
 //! ([`start`]). [`model`] is the pure rule set behind all of them.

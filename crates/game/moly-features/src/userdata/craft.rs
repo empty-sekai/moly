@@ -6,7 +6,7 @@
 //!   send it (`MysekaiCraftService.Execute`, which sends a quantity of 1 when
 //!   the caller gives none).
 //! - `PostUserMysekaiHousingSketchApi` (`user/{userId}/mysekai/housing/sketch`)
-//!   carries [`UserMysekaiHousingSketchRequest`].
+//!   carries `UserMysekaiHousingSketchRequest`.
 //!
 //! Both reply with `SuiteUser`: the tables the request changed, which the
 //! client merges before it reads its copies (`UserDataManager.UpdateAll`).

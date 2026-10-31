@@ -15,6 +15,7 @@
 //!      `Range(100, 150)` ms; one `Range(0, 2)` draw, and on 1 a second
 //!      close, `Range(100, 150)` ms, open, `Range(100, 150)` ms; then
 //!      `Range(3000, 5000)` ms.
+//!
 //! The draws are integer `Random.Range(min, max)` (max exclusive), one per
 //! delay plus the one double draw. Every delay is a scaled-time,
 //! Update-timed delay ([`DelayPromise`]). The open and close cells are read

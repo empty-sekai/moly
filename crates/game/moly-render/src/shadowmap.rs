@@ -36,8 +36,9 @@
 //!   Off), move each vertex by the pipeline's caster bias along the light and
 //!   along the normal, clamp to the near plane, and are drawn under the
 //!   pipeline's global raster bias of the shadow slice (see
-//!   [`SHADOW_SLICE_RASTER_BIAS`]).
-//! Other skinned meshes (skinned fixtures) stay out, as before, and are counted.
+//!   `SHADOW_SLICE_RASTER_BIAS`).
+//!
+//! Other skinned meshes (skinned fixtures) stay out and are counted.
 //!
 //! The rigid casters carry the same source bias: every site program's
 //! ShadowCaster pass (field object, tree, ground, water, fixture, object,
@@ -59,15 +60,15 @@
 //! is written to match the engine), and z/w = the two distance-fade
 //! coefficients, computed from the distance and the margin with the engine's
 //! linear distance-fade formula (see the derivation comment on
-//! [`SHADOW_FADE_SCALE`]). The caster bias comes from the same settings: the
+//! `SHADOW_FADE_SCALE`). The caster bias comes from the same settings: the
 //! pipeline asset's depth/normal bias 1.0/1.0 × texel × soft-shadow kernel 2.5
 //! (vertex side, along the light and along the normal), together with the
-//! shadow slice's global raster bias 1 / 2.5 ([`SHADOW_SLICE_RASTER_BIAS`]).
+//! shadow slice's global raster bias 1 / 2.5 (`SHADOW_SLICE_RASTER_BIAS`).
 //! Chosen here rather than read: the light's orthographic frame itself. The
 //! engine fits its frame to a segment of the camera frustum (with the
 //! environment directional light's shadow near plane 0.2 as the near-plane
 //! offset); this module frames the bounding box of every caster in the site,
-//! so the front and back padding (see [`DEPTH_PAD`]) and the texel size (this
+//! so the front and back padding (see `DEPTH_PAD`) and the texel size (this
 //! map's light-frame width / 1024, not the width of the engine's cascade
 //! projection) are chosen here as well.
 //!
@@ -77,7 +78,7 @@
 //! shadow): the pass did not run, it ran but drew nothing, the map holds no
 //! content, or the map has content but the projection does not line up. One
 //! account line separates them: the node only receives `&World`, so counting
-//! goes through the interior mutability of [`ShadowAccount`]. The depth map is
+//! goes through the interior mutability of `ShadowAccount`. The depth map is
 //! read back periodically (on the native side; the wasm build has no blocking
 //! poll and only keeps the counts), and coverage, caster origin alignment and
 //! single-texel comparison hits are logged side by side so every value can be
@@ -95,7 +96,7 @@
 //! # Static map
 //!
 //! A rigid caster whose mesh, world matrix and winding stayed the same for
-//! [`STATIC_AFTER_FRAMES`] extractions is baked: drawn once into a second
+//! `STATIC_AFTER_FRAMES` extractions is baked: drawn once into a second
 //! depth map of the same size and state, which every frame's pass copies
 //! texel for texel before it draws the other rigid casters and the skinned
 //! ones. The map is drawn again whenever its content would differ: a baked
@@ -1843,8 +1844,8 @@ fn finish_pending_probe(world: &World, render_context: &RenderContext) {
     };
     let mut nonclear = 0usize;
     let mut min_depth = 1.0f32;
-    for chunk in data.chunks_exact(4) {
-        let d = f32::from_le_bytes(chunk.try_into().unwrap());
+    for chunk in data.as_chunks::<4>().0 {
+        let d = f32::from_le_bytes(*chunk);
         if d < PROBE_CLEAR_EPS {
             nonclear += 1;
             min_depth = min_depth.min(d);
@@ -1946,7 +1947,7 @@ fn finish_pending_probe(world: &World, render_context: &RenderContext) {
     let (mut changed_in, mut changed_out) = (None, None);
     if let Some(previous) = inner.previous_map.as_deref() {
         let (mut inside, mut outside) = (0usize, 0usize);
-        for (index, (now, before)) in data.chunks_exact(4).zip(previous.chunks_exact(4)).enumerate() {
+        for (index, (now, before)) in data.as_chunks::<4>().0.iter().zip(previous.as_chunks::<4>().0).enumerate() {
             if now != before {
                 let (x, y) = (index % size, index / size);
                 let within = union.is_some_and(|(x0, y0, x1, y1)| (x0..=x1).contains(&x) && (y0..=y1).contains(&y));
@@ -2168,7 +2169,7 @@ fn init_shadow_resources(
         mapped_at_creation: false,
     });
     // 动态 offset 槽距按设备对齐（通常 256）。
-    let align = render_device.limits().min_uniform_buffer_offset_alignment.max(64) as u32;
+    let align = render_device.limits().min_uniform_buffer_offset_alignment.max(64);
     let object_buffer = render_device.create_buffer(&BufferDescriptor {
         label: Some("site_shadow_objects"),
         size: (align as u64) * (OBJECT_CAPACITY as u64),

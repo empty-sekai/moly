@@ -644,7 +644,7 @@ impl DestroyOnTime {
                     self.phase = DestroyPhase::Accumulating(acc);
                     return acc >= t;
                 }
-                if !(acc < t) { return true; }
+                if acc.is_nan() || t.is_nan() || acc >= t { return true; }
                 let remaining = t - acc;
                 let ms = if remaining == f32::INFINITY { 0 } else { (remaining as i32).wrapping_mul(1000) };
                 self.phase = if ms < 0 { DestroyPhase::Forever }

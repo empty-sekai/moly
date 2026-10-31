@@ -20,7 +20,7 @@ use serde_json::Value;
 
 use super::order::{self, FixtureFilter, Tab};
 
-/// The layout cost of a fixture (`PutCost`), by fixture id.
+// The layout cost of a fixture (`PutCost`), by fixture id.
 
 /// A material's type (`mysekaiMaterialType`), by material id.
 pub type MaterialTypes = HashMap<i32, String>;

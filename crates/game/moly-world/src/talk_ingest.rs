@@ -76,7 +76,8 @@ pub fn common_row(row: &Value) -> Result<(), String> {
 
 fn ordinary_row(row: &Value, strict_tweet: bool) -> Result<(), String> {
     let id = i32_integer(row, "talkId")?;
-    for field in ["lua"] {
+    {
+        let field = "lua";
         string(row, field)?;
     }
     for field in ["siteGroupId", "termId"] {

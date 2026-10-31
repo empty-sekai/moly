@@ -165,9 +165,12 @@ struct EnvironmentEditCamera(FloorEditCamera);
 
 impl Default for EnvironmentEditCamera {
     fn default() -> Self {
-        let mut model = FloorEditCamera::default();
-        model.environment = true;
-        model.pitch = -5.;
+        let model = FloorEditCamera::default();
+        let model = FloorEditCamera {
+            environment: true,
+            pitch: -5.,
+            ..model
+        };
         Self(model)
     }
 }

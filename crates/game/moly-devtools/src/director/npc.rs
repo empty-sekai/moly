@@ -79,7 +79,7 @@ pub fn open_talk(world: &mut World, unit: u32, talk: i32) -> Result<Entity, Stri
     // this talk's speakers and rebuilt, so what is on screen is the two or
     // three characters that speak and nobody else. The caller asks again once
     // they stand.
-    let cast: Vec<u32> = speakers.iter().map(|speaker| *speaker as u32).collect();
+    let cast: Vec<u32> = speakers.to_vec();
     info!(
         "[director] play_talk {talk}: roster {:?} vs cast {:?}",
         world
@@ -441,7 +441,7 @@ pub fn play_talk(world: &mut World, unit: u32, talk: i32) -> Result<Entity, Stri
     // Only the conversation's cast stands on the site: a full roster crawls
     // the sim and puts strangers in frame. The roster is rebuilt in place —
     // no site reload, so no door transition plays over the shot.
-    let cast: Vec<u32> = speakers.iter().map(|speaker| *speaker as u32).collect();
+    let cast: Vec<u32> = speakers.to_vec();
     info!(
         "[director] play_talk {talk}: roster {:?} vs cast {:?}",
         world

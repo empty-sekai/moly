@@ -329,8 +329,8 @@ pub fn motion(storage: &mut Storage, normalized: &[f32], ages: &[f32], emitter: 
         let s = speed.evaluate(normalized[p], ParticleRandom::sample(slot.seed, 0x96aa_4de3));
         let age = ages[p];
         let half = age * 0.5;
-        for axis in 0..3 {
-            let ga = g[axis] * age;
+        for (axis, &gravity) in g.iter().enumerate() {
+            let ga = gravity * age;
             let sv = s * slot.velocity[axis];
             slot.position[axis] += ga * half + age * sv;
             slot.velocity[axis] = ga + sv;

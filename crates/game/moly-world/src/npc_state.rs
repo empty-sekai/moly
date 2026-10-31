@@ -730,7 +730,7 @@ fn update_greeting(
         position.z - player.z,
     );
     let distance = ((dx * dx + dy * dy) + dz * dz).sqrt();
-    if !(distance <= tweet_law::GREETING_ABORT_DISTANCE) {
+    if distance.is_nan() || distance > tweet_law::GREETING_ABORT_DISTANCE {
         info!(
             "[npc-state] unit={unit} frame={frame} greeting complete: player at {distance} m > 5.0"
         );

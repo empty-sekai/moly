@@ -130,7 +130,7 @@ fn rsqrt_estimate(value: f32) -> f32 {
     let exponent = ((bits >> 23) & 255) as i32;
     let index = ((bits & 0x7fffff) >> 16) as usize + if exponent & 1 == 0 { 128 } else { 0 };
     let estimate = RSQRT_ESTIMATE[index] as u32;
-    let estimate_bits = ((((380 - exponent) / 2) as u32) << 23) | (((estimate as u32) - 256) << 15);
+    let estimate_bits = ((((380 - exponent) / 2) as u32) << 23) | ((estimate - 256) << 15);
     f32::from_bits(estimate_bits)
 }
 
@@ -439,7 +439,7 @@ fn arm_frecpe(value: f32) -> f32 {
     }
     let index = 256 + (fraction >> 15);
     // The 8-bit table of the architecture; integer divisions are floors.
-    let estimate = ((1_u32 << 19) / (2 * index + 1) + 1) / 2;
+    let estimate = ((1_u32 << 19) / (2 * index + 1)).div_ceil(2);
     let mut result_exponent = 253 - exponent;
     let mut result_fraction = (estimate & 0xff) << 15;
     if result_exponent == 0 {

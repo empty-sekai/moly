@@ -32,7 +32,7 @@
 //! them. The hub keeps the contracts this crate uses (`field_modes`,
 //! `ui_inputs`, `companion_cues`, `ui_charsets`, `fixture_put_limit`);
 //! hub paths go through `moly_features`. Scripted layout steps
-//! ([`layout_director`]) open their drafts through [`session`].
+//! ([`layout_director`]) open their drafts through `session`.
 
 mod actors;
 mod assets;

@@ -3,7 +3,7 @@
 //! `ConvertStartProcessAsync`, and `OnShortenSlot` -> `OnClickOkShortenSlot` ->
 //! `ShortenSlotProcessAsync`.
 //!
-//! Input: the request a dialog confirmed, waiting in [`ConvertScreen`]
+//! Input: the request a dialog confirmed, waiting in `ConvertScreen`
 //! ([`StartIntent`] / [`ShortenIntent`]); the convert masters, the user's
 //! copies and the holdings, read again where a request is made; the frame's
 //! clock; the link and the answers the user data reader took off it.
@@ -35,7 +35,7 @@
 //! Boundaries (each a named line, nothing shown in its place):
 //! - The start confirm (dialog 324) and the skip dialog (325) are
 //!   [`super::dialogs`]: the request waits in
-//!   [`ConvertScreen::start_intent`] / [`ConvertScreen::shorten_intent`]
+//!   `ConvertScreen::start_intent` / `ConvertScreen::shorten_intent`
 //!   until the dialog reads it and answers [`StartIntent::confirm`] /
 //!   [`ShortenIntent::confirm`]. The dialog keeps the slot, the item's id, its
 //!   choice and the `ConvertCount` rather than the model (the item model

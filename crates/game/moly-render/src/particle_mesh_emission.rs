@@ -14,7 +14,7 @@ pub struct EmissionSurface {
 impl EmissionSurface {
     pub fn from_source(source: &SourceMesh) -> Result<Self, String> {
         if source.indices.is_empty()
-            || source.indices.len() % 3 != 0
+            || !source.indices.len().is_multiple_of(3)
             || source.positions.len() != source.normals.len()
             || source
                 .positions
@@ -41,7 +41,8 @@ impl EmissionSurface {
             // reflection here to restore the native triangle corner order.
             submeshes.push(
                 source.indices[start..end]
-                    .chunks_exact(3)
+                    .as_chunks::<3>().0
+                    .iter()
                     .flat_map(|t| [t[0], t[2], t[1]])
                     .collect::<Vec<u32>>(),
             );

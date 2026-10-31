@@ -1029,7 +1029,8 @@ pub fn spawn_when_ready(
     }
     commands.insert_resource(InfoPresentation { bindings: InfoBindings::from_prefab(doc), elapsed: 0., put_limit });
     commands.spawn((InfoRoot,Visibility::Hidden,Transform::default(),RenderLayers::layer(SITEMAP_LAYER),crate::ui_layout::UiPrefabView::new("Info",SITEMAP_LAYER)));
-    for (which,key) in [(InfoDialog::RankList,"Common1")] {
+    {
+        let (which,key) = (InfoDialog::RankList,"Common1");
         commands.spawn((InfoDialogRoot{which},Visibility::Hidden,Transform::from_xyz(0.,0.,100.),RenderLayers::layer(SITEMAP_LAYER),crate::ui_layout::UiPrefabView::new(key,SITEMAP_LAYER)));
     }
     commands.insert_resource(InfoSpawned);

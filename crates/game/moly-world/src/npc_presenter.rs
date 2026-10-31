@@ -11,10 +11,10 @@
 //! 7. the presenter has updated for less than 5.0 s since initialization;
 //! 8. the action state is not Idle, AutoMove, Walk or Rest;
 //! 9. a birthday context is open;
-//! then the state and the first-talk flag are read again, and the full 3-D
-//! float distance between the player and the character must be strictly
-//! below 1.5 m. The gate does not run on a frame on which the overlap cancel
-//! (the eighth call) fired.
+//!    then the state and the first-talk flag are read again, and the full 3-D
+//!    float distance between the player and the character must be strictly
+//!    below 1.5 m. The gate does not run on a frame on which the overlap cancel
+//!    (the eighth call) fired.
 //!
 //! The execution cancels the current objective (none means no greeting this
 //! frame; every objective this host runs can be cancelled; a Rest's cancel
@@ -211,7 +211,7 @@ pub fn try_greeting(
         let npc = transform.translation;
         let (dx, dy, dz) = (player.x - npc.x, player.y - npc.y, player.z - npc.z);
         let distance = ((dx * dx + dy * dy) + dz * dz).sqrt();
-        if !(distance < tweet_law::GREETING_TRIGGER_DISTANCE) {
+        if distance.is_nan() || distance >= tweet_law::GREETING_TRIGGER_DISTANCE {
             continue;
         }
         // ExecuteGreeting. The current objective must be cancellable and

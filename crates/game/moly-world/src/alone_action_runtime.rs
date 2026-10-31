@@ -543,7 +543,7 @@ fn parse_facial(text: &str) -> FacialTables {
 
 /// 跨帧线性同余抽签：状态随调用前进、种子含 unitId，跨帧连续——律只
 /// 约束分布与掷点次数，引擎序列不在律内。脚本的整数抽签走脚本虚拟机
-/// 自己的映射（[`Lcg::percent`]）；`below` 是别的调用方的均匀区间。
+/// 自己的映射（`Lcg::percent`）；`below` 是别的调用方的均匀区间。
 pub struct Lcg(u64);
 
 impl Lcg {

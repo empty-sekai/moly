@@ -24,7 +24,7 @@
 //! (`GetPlayerActionButtonType`'s `IsWithinBirthdayTimeByFixtureId` arm),
 //! gated by `MysekaiFixtureUtility.CanShowBirthdayCutSceneButton` (not
 //! visiting, no birthday context, `IsWithinBirthdayTimeByFixtureId`): the
-//! party fixture's [`crate::cutscene::birthday::BirthdayButton`].
+//! party fixture's `crate::cutscene::birthday::BirthdayButton`.
 //!
 //! The sensor type maps to the button type through
 //! [`ButtonType::from_action_type`]. Which of the classified buttons the
@@ -113,11 +113,11 @@ pub fn system_fixture_button(action: PlayerActionType) -> ButtonType {
 /// `IsActionButtonTypeAvailable` rule and its click arm:
 /// - `MusicPlay` -> `OpenMysekaiBGMSelect`: `CanShowBGMSelectButton` is
 ///   `!IsVisiting`, which holds in this product; the click opens the BGM
-///   select screen ([`crate::bgm_select`]).
+///   select screen (`crate::bgm_select`).
 /// - `CraftTool` -> `OpenCraftTool`: `CanShowCraftToolButton` is
 ///   `CanShowTutorialCraftToolButton` (true outside the tutorial, which this
 ///   product does not run) and `!IsVisiting`; the click opens the craft
-///   screen ([`crate::home_action::craft`]) at the pressed workbench.
+///   screen (`crate::home_action::craft`) at the pressed workbench.
 ///
 /// The others are withheld: their availability rules are not ported here.
 pub const STACKED_ACTIONS: &[PlayerActionType] =

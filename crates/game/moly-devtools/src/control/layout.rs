@@ -297,7 +297,7 @@ fn anchor(value: &Value) -> Result<moly_layout::Anchor, String> {
     })
 }
 
-/// Parses the `moly.layout.apply` parameter object into an [`Apply`].
+/// Parses the `moly.layout.apply` parameter object into an `Apply`.
 pub fn apply_request(params: &Map<String, Value>) -> Result<moly_layout::Apply, String> {
     let ops = params
         .get("ops")

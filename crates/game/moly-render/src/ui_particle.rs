@@ -48,7 +48,7 @@
 //! the program here; a UI-Default system below a `RectMask2D` is refused.
 //!
 //! The draw: the UI camera draws the pass tagged `SRPDefaultUnlit` (the pass
-//! without a LightMode) once per batch; see [`admission`]. Three programs,
+//! without a LightMode) once per batch; see `admission`. Three programs,
 //! selected by the material's shader name (`shaders/ui_particle.wesl`):
 //! - `Mysekai/Effect/UI-Uber`: the texture times the vertex colour, the rgb
 //!   times alpha for `_BlendMode` 2; pass blend `[_SrcBlend] [_DstBlend]`,

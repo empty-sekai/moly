@@ -470,7 +470,7 @@ impl Factory<'_, '_> {
     /// generation. The source starts an NPC's AI only after its site and
     /// master data exist, so the objective loop holds in front of every draw
     /// while this is Err. Gaps inside a built snapshot are not loading; see
-    /// [`Self::snapshot_gap`].
+    /// `Self::snapshot_gap`.
     pub fn loading(&self, epoch: u64, site_type: &str) -> Result<(), String> {
         if self.editor.is_active() {
             return Err(
@@ -2329,7 +2329,7 @@ pub fn set_pose(world: &mut World, actor: Entity, pose: Transform) -> Result<(),
     walk.0.position = pose.translation.to_array();
     walk.0.forward = (pose.rotation * Vec3::Z).to_array();
     walk.0.next_corner = 0;
-    drop(walk);
+    let _ = walk;
     let scale = world
         .get::<Transform>(actor)
         .ok_or("NPC transform disappeared")?

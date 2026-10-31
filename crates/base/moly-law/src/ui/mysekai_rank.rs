@@ -45,7 +45,7 @@ pub struct MasterMysekaiRank {
 pub fn get_mysekai_rank(ranks: &[MasterMysekaiRank], total_exp: i32) -> i32 {
     let mut ordered: Vec<&MasterMysekaiRank> = ranks.iter().collect();
     // OrderByDescending is a stable sort: equal keys keep master order.
-    ordered.sort_by(|a, b| b.mysekai_rank.cmp(&a.mysekai_rank));
+    ordered.sort_by_key(|a| std::cmp::Reverse(a.mysekai_rank));
     ordered
         .into_iter()
         .find(|row| row.total_exp <= total_exp)

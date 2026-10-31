@@ -38,7 +38,7 @@
 //!   `MysekaiMissionView.OnClickMissionCell`).
 //!
 //! A copy's gauge fill keeps its source's serialized reference, so the fill
-//! is drawn on the copy's own Mask, which [`GaugeFill`] remaps through the
+//! is drawn on the copy's own Mask, which `GaugeFill` remaps through the
 //! instance. Rows past the page's count stay hidden. The composed document
 //! is drawn by [`crate::screen`]'s view, whose `UiPrefabView` accepts the
 //! copies' `@<identity>` selectors.

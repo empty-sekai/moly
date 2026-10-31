@@ -159,7 +159,7 @@ impl ProgramAbi {
                 .ok_or_else(|| SourceShaderError("uniform span overflow".into()))?;
         }
         require(
-            cursor == self.uniform_bytes && cursor % 16 == 0,
+            cursor == self.uniform_bytes && cursor.is_multiple_of(16),
             "uniform block span disagrees with its fields",
         )?;
         let mut bindings = BTreeSet::from([self.uniform_binding]);

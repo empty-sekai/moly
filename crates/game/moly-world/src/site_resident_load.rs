@@ -206,7 +206,7 @@ fn triangles(world: &World,roots: &[Entity],handles: &[Handle<Mesh>]) -> Option<
             let vertices=mesh.attribute(Mesh::ATTRIBUTE_POSITION)?.as_float3()?;
             let matrix=crate::fixture_scene_inputs::live_matrix(world,entity)?;
             let indices: Vec<usize>=mesh.indices().map(|i|i.iter().collect()).unwrap_or_else(||(0..vertices.len()).collect());
-            for tri in indices.chunks_exact(3) {
+            for tri in indices.as_chunks::<3>().0 {
                 result.push([tri[0],tri[1],tri[2]].map(|i|matrix.transform_point3(Vec3::from(vertices[i])).to_array()));
             }
         }

@@ -124,7 +124,7 @@ fn advance_inner(world: &mut World, job: &mut PortraitJob) -> Result<(), String>
         return Ok(());
     }
     if job.capturing { return Ok(()); }
-    if job.last_report % 300 == 0 {
+    if job.last_report.is_multiple_of(300) {
         let _ = std::fs::write(job.directory.join("runtime-state.json"), crate::content_library::bridge::library_snapshot());
     }
     let (unit, glb, rig) = job.rows[job.index].clone();

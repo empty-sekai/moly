@@ -1282,26 +1282,24 @@ pub(super) fn after_dispose(world: &mut World, cast: &mut Cast, definition: &Tim
             crate::gate_flow::cut_scene_end_callback(world, cast)
         }
     }
-    let shown: Vec<Entity> = cast
-        .hidden_npcs
-        .drain(..)
-        .filter_map(|(entity, prior)| {
-            world.get_entity(entity).is_ok().then(|| {
-                // NPCAvatarPresenter.Show for an NPC on the loaded site; a
-                // member away from it keeps the host's residency hide.
-                let npc = world
-                    .get::<crate::npc_objective::ObjectiveMind>(entity)
-                    .is_some()
-                    && world.get::<crate::npc::residency::Away>(entity).is_none();
-                if npc {
-                    crate::npc::gate_entries::show(world, entity);
-                } else {
-                    world.entity_mut(entity).insert(prior);
-                }
-                entity
-            })
-        })
-        .collect();
+    let mut shown: Vec<Entity> = Vec::new();
+    for (entity, prior) in cast.hidden_npcs.drain(..) {
+        if world.get_entity(entity).is_err() {
+            continue;
+        }
+        // NPCAvatarPresenter.Show for an NPC on the loaded site; a
+        // member away from it keeps the host's residency hide.
+        let npc = world
+            .get::<crate::npc_objective::ObjectiveMind>(entity)
+            .is_some()
+            && world.get::<crate::npc::residency::Away>(entity).is_none();
+        if npc {
+            crate::npc::gate_entries::show(world, entity);
+        } else {
+            world.entity_mut(entity).insert(prior);
+        }
+        shown.push(entity);
+    }
     info!(
         "[cutscene-cast] EndAsync: the NPCs not bound are shown again ({} still present)",
         shown.len()

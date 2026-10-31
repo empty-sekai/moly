@@ -172,12 +172,12 @@ fn source_sum_squares(samples: &[f32]) -> f32 {
         return samples.iter().fold(0.0, |sum, value| sum + value * value);
     }
     let mut lanes = [0.0_f32; 4];
-    let mut chunks = samples.chunks_exact(16);
-    for chunk in &mut chunks {
-        for group in chunk.chunks_exact(4) {
+    let (chunks, remainder) = samples.as_chunks::<16>();
+    for chunk in chunks {
+        for group in chunk.as_chunks::<4>().0.iter() {
             for lane in 0..4 { lanes[lane] += group[lane] * group[lane]; }
         }
     }
     let sum = ((lanes[0] + lanes[1]) + lanes[2]) + lanes[3];
-    chunks.remainder().iter().fold(sum, |sum, value| sum + value * value)
+    remainder.iter().fold(sum, |sum, value| sum + value * value)
 }

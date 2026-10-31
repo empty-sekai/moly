@@ -126,7 +126,7 @@ impl CharacterParams {
     /// 按上面的槽序摊平成字节。
     pub fn byte_array(&self) -> [u8; PARAMS_BYTES] {
         let mut bytes = [0u8; PARAMS_BYTES];
-        let mut chunks = bytes.chunks_exact_mut(4);
+        let mut chunks = bytes.as_chunks_mut::<4>().0.iter_mut();
         for slot in [
             [
                 self.shader_usage,
@@ -1071,7 +1071,7 @@ pub fn plan_textures(plan: &ToonPlan, server: &AssetServer) -> PlanTextures {
 /// Update：计划就绪且贴图到齐后换装——摘 StandardMaterial、挂角色
 /// toon 材质。早于贴图到位会让实体闪回默认材质，所以等齐再换。
 /// 成员的贴图装载失败即 panic；玩家穿的角色身体由
-/// [`crate::player_avatar::oc`] 拒绝该选择、退回豆腐人身体。
+/// `crate::player_avatar::oc` 拒绝该选择、退回豆腐人身体。
 pub fn swap_when_planned(
     mut commands: Commands,
     server: Res<AssetServer>,

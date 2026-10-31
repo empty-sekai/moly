@@ -115,7 +115,7 @@ pub fn eval_curve(keys: &[CurveKey], t: f32) -> f32 {
     let d = k1.time - k0.time;
     // A NaN `d` (its comparison with 0.0 is unordered) takes the degenerate
     // branch, as a zero `d` does.
-    if !(d < 0.0 || d > 0.0) {
+    if d == 0.0 || d.is_nan() {
         return k0.value;
     }
     if let Some(value) = step_value(k0, k1) { return value; }

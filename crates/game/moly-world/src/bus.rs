@@ -2,7 +2,7 @@
 //! read with `moly.events`.
 //!
 //! Every event carries a sequence number, the frame and the game time it
-//! happened at, a `kind` and its fields. The newest [`KEPT`] events are kept;
+//! happened at, a `kind` and its fields. The newest `KEPT` events are kept;
 //! a client passes the `next` number of its last read as `since` and gets
 //! what happened after it, and `missed` tells it how many events it was too
 //! late to read.

@@ -557,7 +557,7 @@ fn step(value: &Value, at: &str) -> Result<Vec<Step>, String> {
             let unit = fields.req_u32("unit")?;
             let to = target(fields.req("to")?, &at)?;
             let secs = fields.opt_f32("secs")?.unwrap_or(1.0);
-            if !(secs >= 0.0) {
+            if secs.is_nan() || secs < 0.0 {
                 return Err(format!("{at}: secs must not be negative"));
             }
             vec![one(Node::NpcFace { unit, to, secs }, Some(secs + 5.0))]

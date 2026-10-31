@@ -329,7 +329,7 @@ impl ConvertSlot {
         }
         let each = minutes_ms(self.once_convert_minutes);
         let elapsed = now.saturating_sub(self.convert_start_at);
-        let completed = (elapsed / each.max(1)) as i64;
+        let completed = elapsed / each.max(1);
         completed.clamp(0, self.convert_count.max(0) as i64) as i32
     }
 

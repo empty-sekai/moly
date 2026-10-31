@@ -16,7 +16,7 @@
 use bevy::camera::visibility::{RenderLayers, VisibilitySystems};
 use bevy::prelude::*;
 
-/// An overlay camera switched by [`switch_idle_overlays`].
+/// An overlay camera switched by `switch_idle_overlays`.
 #[derive(Component)]
 pub struct IdleWhenEmpty;
 

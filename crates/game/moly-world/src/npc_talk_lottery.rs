@@ -62,9 +62,9 @@
 //!      list (null raises, empty refuses); without, GetTargetPosition with
 //!      index 0 and no locate list; it returns GetTargetPosition's bool, so a
 //!      target that is not found falls to the general lottery.
-//!   The locate list pairs each member slot of the unit group with the same
-//!   column of the action-point row and finds, in the fixture's action-point
-//!   order, the first locator whose StartLoc name carries that value.
+//!      The locate list pairs each member slot of the unit group with the same
+//!      column of the action-point row and finds, in the fixture's action-point
+//!      order, the first locator whose StartLoc name carries that value.
 //!
 //!   GetTargetPosition has four arms: no master gives (false, zero); a
 //!   talk without a pre-action takes GetLittleFarPosition, a miss giving
@@ -681,7 +681,7 @@ pub trait FixtureTalkHost {
     /// The StartLoc names of the fixture's action points, in the fixture's
     /// action-point array order.
     fn action_point_names(&self, fixture: &str) -> Result<Vec<String>, Halt>;
-    /// fixture.ActionPoints[index].StartLoc world position and rotation
+    /// fixture.ActionPoints\[index\].StartLoc world position and rotation
     /// (xyzw). The index is within the array.
     fn start_loc(&self, fixture: &str, index: usize) -> Result<([f32; 3], [f32; 4]), Halt>;
     /// SitePosition.y of the site the fixture stands on; `None` without a
@@ -1256,7 +1256,7 @@ pub(crate) fn reaction_talk(
 
 /// `GetUnReadFixtureActionTalkId` for `seeker`: the unread rows of the talk
 /// list, in list order, that pass the fixture-action filters (see
-/// [`matches_lottery_conditions`]; `store` is every NPC of the avatar store
+/// `matches_lottery_conditions`; `store` is every NPC of the avatar store
 /// as unit and site type), and of those the talks with a fixture-id
 /// condition row, as talk ids. An empty result draws nothing (the source
 /// returns null when no row passes the filters, and an empty list when rows

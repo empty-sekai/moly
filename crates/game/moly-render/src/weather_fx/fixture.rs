@@ -19,7 +19,7 @@
 //! A TrailModule system draws its trail as the renderer's second draw, as the
 //! weather host does; a Local simulation's trail job reads owner words, which
 //! this host composes for a placed fixture's prefab from the fixture's
-//! placement ([`placed_fixture_owner`]) and refuses elsewhere.
+//! placement (`placed_fixture_owner`) and refuses elsewhere.
 //!
 //! A sub-emitter target is installed as its parent's child with the owner
 //! words its parent's commands read composed from the spawned instance's own
@@ -227,7 +227,7 @@ pub fn prepare_control(
 /// as [`prepare_control`]'s, but wait stopped and out of the manager, drawing
 /// nothing, until [`play_pending`] runs their first Play (its seed reset and
 /// birth owner install). `Ok(None)` while geometry or GPU preparation is
-/// pending. Activity is the run time's (see [`Activity::Runtime`]).
+/// pending. Activity is the run time's (see `Activity::Runtime`).
 pub fn prepare_play_later(
     world: &mut World,
     root: Entity,
@@ -252,7 +252,7 @@ pub fn prepare_director_control(
 
 /// [`prepare_director_control`] for a prefab's director owner (a step item,
 /// a site scene's director): activity is the run time's (see
-/// [`Activity::Runtime`]).
+/// `Activity::Runtime`).
 pub fn prepare_owner_director_control(
     world: &mut World,
     root: Entity,
@@ -554,7 +554,7 @@ pub struct PendingPlay {
 }
 
 /// The first `ParticleSystem.Play` of a system [`prepare_play_later`] left
-/// stopped: the seed reset and birth owner install of [`install`], then the
+/// stopped: the seed reset and birth owner install of `install`, then the
 /// per-frame update as any played system. `Ok(false)` for a draw with no
 /// pending Play (it played already, or is not this host's).
 pub fn play_pending(world: &mut World, draw: Entity) -> Result<bool, String> {
@@ -1586,7 +1586,7 @@ pub fn spawn_when_ready(
 
 /// A system this host plays with `ParticleSystem.Play` (play on awake or an
 /// explicit Play): the engine play state the weather host keeps
-/// ([`lifecycle::PlayState`]: Stop(StopEmitting), the non-looping end, and the
+/// (`lifecycle::PlayState`: Stop(StopEmitting), the non-looping end, and the
 /// end of play once emission has stopped and no particle is left), whether it
 /// emits, and the birth owner installed at its Play. Stepped by
 /// [`step_played`]; stopped and played again by [`stop_emitting`] and
@@ -1672,7 +1672,7 @@ fn install(system: &mut Runtime, planned: &Planned,
     install_with(system, &planned.route, planned.event_edges.clone(), planned.culling.clone(), seeds)
 }
 
-/// [`install`] for another host's admitted system (the harvest stay
+/// `install` for another host's admitted system (the harvest stay
 /// particles), which carries no birth events and runs no culling pass.
 pub fn install_played(system: &mut Runtime, route: &crate::particle_runtime::SourceRoute,
     seeds: &mut crate::particle_runtime::seed::SystemSeedManager) -> Result<Played, String> {
@@ -1953,7 +1953,7 @@ fn deliver_to_targets(world: &mut World, parent: Entity, commands: Vec<(String, 
 /// effect components call (`ManagedEffect.Stop`): `Stop(withChildren: true,
 /// StopEmitting)`, so every played system under `root` stops emitting and its
 /// live particles finish their lifetimes; a system holding no particle is
-/// cleared and ends its play (see [`lifecycle::PlayState`]). Returns how many
+/// cleared and ends its play (see `lifecycle::PlayState`). Returns how many
 /// systems stopped.
 pub fn stop_emitting(world: &mut World, root: Entity) -> usize {
     let now = world.resource::<Time>().elapsed_secs_f64();
@@ -1975,7 +1975,7 @@ pub fn stop_emitting(world: &mut World, root: Entity) -> usize {
 /// `ParticleSystem.Stop(withChildren: true, StopEmittingAndClear)` reaching
 /// the played systems among `draws`: each stops emitting and is cleared at
 /// once, live particles included, and its play ends (see
-/// [`lifecycle::PlayState::stop_and_clear`]). A system that never played is
+/// `lifecycle::PlayState::stop_and_clear`). A system that never played is
 /// left waiting for its first Play. Returns how many systems stopped.
 pub fn stop_and_clear(world: &mut World, draws: &[Entity]) -> usize {
     let now = world.resource::<Time>().elapsed_secs_f64();

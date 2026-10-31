@@ -818,17 +818,17 @@ fn judge(
         return None;
     }
     let blend = match get("_BlendDst") {
-        Some(v) if v == 10.0 => BlendArm::AlphaBlend,
-        Some(v) if v == 1.0 => BlendArm::Additive,
+        Some(10.0) => BlendArm::AlphaBlend,
+        Some(1.0) => BlendArm::Additive,
         other => {
             tally.state_arm.push(format!("_BlendDst={other:?}"));
             return None;
         }
     };
     let cull = match get("_Cull") {
-        Some(v) if v == 0.0 => CullArm::Off,
-        Some(v) if v == 1.0 => CullArm::Front,
-        Some(v) if v == 2.0 => CullArm::Back,
+        Some(0.0) => CullArm::Off,
+        Some(1.0) => CullArm::Front,
+        Some(2.0) => CullArm::Back,
         other => {
             tally.state_arm.push(format!("_Cull={other:?}"));
             return None;

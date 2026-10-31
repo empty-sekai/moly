@@ -316,7 +316,7 @@ pub struct FixtureMaterial {
     /// embeds params in a 64+192+16 flat layout, and growing the slots would
     /// shift the emission fields on that side) — the texture-branch parameters
     /// share the main pass's separate binding 4, see
-    /// [`Self::shading_branch_bytes`].
+    /// `Self::shading_branch_bytes`.
     pub fresnel_power: f32,
     pub fresnel_color: [f32; 4],
     /// The reflection branch parameters (`_ReflectionFresnelPower` /
@@ -1589,7 +1589,7 @@ pub enum MipSkip {
     BadFormat,
     NoData,
     BadLength,
-    /// Used only by [`mask_storage_mean`]: the texture is not in an sRGB
+    /// Used only by `mask_storage_mean`: the texture is not in an sRGB
     /// format, while the shader always encodes back to the stored domain ⇒ that
     /// step would encode a second time. See the guard note on that function.
     NotSrgb,
@@ -2270,7 +2270,7 @@ fn switch_materials(
         let mut stack = vec![root_entity];
         while let Some(entity) = stack.pop() {
             if let Ok(kids) = children.get(entity) {
-                stack.extend(kids.iter().map(|child| child));
+                stack.extend(kids.iter());
             }
             let Ok((material, _, _)) = parts.get(entity) else {
                 // An entity without a glb material name/extras (not on the glb
@@ -2636,7 +2636,7 @@ fn build_swap_plan(
         let mut stack = vec![root_entity];
         while let Some(entity) = stack.pop() {
             if let Ok(kids) = children.get(entity) {
-                stack.extend(kids.iter().map(|child| child));
+                stack.extend(kids.iter());
             }
             let Ok((material, name, extras)) = parts.get(entity) else {
                 continue;

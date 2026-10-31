@@ -3,12 +3,12 @@
 //! Event-only motions are real clips: an empty pose curve set does not make
 //! their AnimationEvents empty. Controller references select the motion; its
 //! authored event selects the output, never a guess based on the clip name.
-//! Transform Euler and scale lanes and behaviour-enable lanes (see [`lane`])
+//! Transform Euler and scale lanes and behaviour-enable lanes (see `lane`)
 //! also preserve authored coefficients.
 //! Non-interrupting source Trigger bits wait for the next eligible evaluation.
 //! The player's switch plays its source clip `c_000_mov_fixture_action_01_01`.
 //! The view's effect events show and hide its named effect objects (see
-//! [`effect`]).
+//! `effect`).
 //! General controllers and nonzero interruption sources remain separate gaps.
 
 mod dolly;

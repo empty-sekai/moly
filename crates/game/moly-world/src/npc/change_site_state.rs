@@ -41,7 +41,7 @@
 //! the site the player has just entered, so the walk to the door and the
 //! leaving leg always run on a site that is not loaded; the NPC is suspended
 //! there (see `npc::residency`, which keeps the navigation and authored
-//! house exit program of the previous site, and [`door_walk`]). The exit
+//! house exit program of the previous site, and `door_walk`). The exit
 //! turn, character clip and house program wait advance before destination
 //! placement even when the old view is hidden. Named gaps:
 //! - the other-NPC wait compares the NPCs on the loaded site only (an NPC on

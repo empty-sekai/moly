@@ -221,7 +221,7 @@ pub fn exit(world: &mut World) {
         elapsed: 0.0,
         on_complete: TweenCompletion::None,
     };
-    drop(model);
+    let _ = model;
     info!(
         "[cutscene-camera] ChangeState(CutScene -> Normal): TransferCameraSettings default path, {TRANSFER_SECONDS}s to Normal's private model: distance {:.2} -> {:.2}, pitch {:.2} -> {:.2}, yaw {:.2} -> {:.2}, FOV {:.2} -> {:.2}",
         tween.distance.0,

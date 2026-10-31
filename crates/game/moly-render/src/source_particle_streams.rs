@@ -305,7 +305,7 @@ impl ParticleGeometry {
             return Vec3::ZERO;
         }
         let (mut min, mut max) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
-        for p in positions.data.chunks_exact(3) {
+        for p in positions.data.as_chunks::<3>().0 {
             min = min.min(Vec3::new(p[0], p[1], p[2]));
             max = max.max(Vec3::new(p[0], p[1], p[2]));
         }
@@ -401,7 +401,7 @@ fn index_bytes(
     )?;
     bytes.clear();
     bytes.resize(indices.len() * 4, 0);
-    for (out, index) in bytes.chunks_exact_mut(4).zip(indices) {
+    for (out, index) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(indices) {
         out.copy_from_slice(&index.to_le_bytes());
     }
     Ok(())

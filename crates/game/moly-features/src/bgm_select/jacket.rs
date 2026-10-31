@@ -11,9 +11,9 @@
 //! - a soundtrack record takes the package
 //!   `mysekai/music_record_soundtrack/jacket/<category assetbundleName>` of
 //!   its soundtrack category.
-//! The storage host keeps each package as a directory of the same name whose
-//! files are the package's assets, so a jacket is `music/jacket/<name>/<name>.png`
-//! below the region directory.
+//!   The storage host keeps each package as a directory of the same name whose
+//!   files are the package's assets, so a jacket is `music/jacket/<name>/<name>.png`
+//!   below the region directory.
 //!
 //! The screen asks for a jacket per record it shows (the highlighted one and
 //! the visible cells'): the record masters carry the vocal packages already;

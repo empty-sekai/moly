@@ -575,7 +575,7 @@ fn recip_sqrt_estimate(a: u32) -> u32 {
     while a * (b + 1) * (b + 1) < (1 << 28) {
         b += 1;
     }
-    ((b + 1) / 2) as u32
+    b.div_ceil(2) as u32
 }
 
 /// The reciprocal square root estimate on a single lane.

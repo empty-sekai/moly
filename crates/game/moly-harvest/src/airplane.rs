@@ -496,7 +496,11 @@ pub fn advance(
         }
         match &mut run.stage {
             Stage::Waiting => {
-                if !(run.elapsed < run.transport) || !on_harvest_site {
+                if run.elapsed.is_nan()
+                    || run.transport.is_nan()
+                    || run.elapsed >= run.transport
+                    || !on_harvest_site
+                {
                     info!(
                         "[harvest-airplane] box seq {} WaitUpdatePaperComeTime left: elapsed {:.3} s of {} (on a harvest site {on_harvest_site})",
                         run.seq, run.elapsed, run.transport

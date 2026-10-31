@@ -459,7 +459,7 @@ impl CollisionLaw {
         if let Some(trace) = trace.as_deref_mut() {
             trace.packs = packs.iter().map(pack_words).collect();
         }
-        let found = self.find(&packs, input.dt, to, scene, trace.as_deref_mut());
+        let found = self.find(&packs, input.dt, to, scene, trace);
         if let Some(reason) = scene.refusal() {
             return Err(Refused::Scene(reason));
         }

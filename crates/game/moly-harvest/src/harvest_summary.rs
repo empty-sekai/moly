@@ -39,8 +39,8 @@
 //!     `Join(canvasGroup.DOFade(0, 0.1875))`, `Join(bgImage.DOFade(0,
 //!     0.375))`;
 //!   - `OnComplete(RemoveScreen(MysekaiHarvestSummary))`, `Play()`.
-//!   The fades carry no ease of their own: they take the tween settings'
-//!   default ease.
+//!     The fades carry no ease of their own: they take the tween settings'
+//!     default ease.
 //!
 //! Product mapping, named:
 //! - The saved point lives in this resource for the session: the device's

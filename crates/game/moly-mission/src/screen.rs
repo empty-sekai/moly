@@ -8,8 +8,8 @@
 //!
 //! Output: the screen view with both pages (drawn each frame, the current
 //! page first), the page turn, the stamp and the tap cover; the receive
-//! requests and the dialog requests the buttons write ([`cell`],
-//! [`service`]).
+//! requests and the dialog requests the buttons write (`cell`,
+//! `service`).
 //!
 //! Invariants:
 //! - The boot hides the multiplay UI (this tree has none) and is then done

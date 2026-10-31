@@ -26,7 +26,7 @@
 //! falling back to +X and `d` to +Y at or below `1e-30` squared; `n = (c x d)
 //! * (1 - bend)`, and the corners take `n + c bend`, `n + d bend`, `n - c bend`
 //! and `n - d bend`, where `bend` is `cosf(normalDirection * 90 * 0.017453292)`
-//! (the Stretch mode's factor is one).
+//!   (the Stretch mode's factor is one).
 //!
 //! Not supported and refused by the caller: freeform stretching, a non-zero
 //! pivot, and a velocity speed modifier other than the constant one (the
@@ -87,7 +87,7 @@ pub struct StretchRenderer {
     pub scale: V3,
     /// Screen limits: lower = z * limits\[0\] + limits\[2\], upper = z * limits\[1\]
     /// + limits\[3\], with z the camera-space depth coordinate; a negative limit
-    /// is off.
+    ///   is off.
     pub limits: [f32; 4],
     /// [`normal_bend`] of the renderer's normalDirection.
     pub normal_bend: f32,

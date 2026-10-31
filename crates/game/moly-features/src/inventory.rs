@@ -44,7 +44,7 @@
 //!   `mysekai/thumbnail/tool/` followed by the master's
 //!   `iconAssetbundleName`, or the tool master's `assetbundleName`). The
 //!   material list's tabs are one per material type.
-//! - **Order** ([`order`]): the selected genre or type tab filters the rows;
+//! - **Order** (`order`): the selected genre or type tab filters the rows;
 //!   the sort dropdown orders them by its type (Get, Sequence, Count,
 //!   AlphabeticalOrder and, for fixtures, LayoutCost) through
 //!   `SortCellDataList`; the order button (`UIPartsSortOrder`) reverses that
@@ -73,7 +73,7 @@
 //!   recycle button and the cannot-recycle info off.
 //! - **Description** (`_descriptionView`, `DescriptionView`): a fixture's
 //!   flavour text and grid size, a material's or an item's flavour text, a
-//!   tool's description ([`recycle`]).
+//!   tool's description (`recycle`).
 //! - **Recycle** (`InventoryPreview.OpenDisassembleDialog`): the source
 //!   shows `MysekaiInventoryScrapFixtureDialog` (dialog type 328) with the
 //!   item, its name and the selected count; that prefab is not served by the
@@ -81,7 +81,7 @@
 //!   and the count as its message. OK sends
 //!   `PostUserMysekaiDisassembleFixtureApi`,
 //!   `PostUserMysekaiRecycleMaterialApi` or `PostUserMysekaiRecycleToolApi`
-//!   ([`recycle`]).
+//!   (`recycle`).
 //!
 //! The owned rows and the possession levels are the client's copy of the
 //! server data (`crate::userdata::client::inventory`, and
@@ -122,11 +122,11 @@
 //!
 //! ## Files
 //!
-//! - [`catalog`]: the master tables besides the rows' masters, and the stored
+//! - `catalog`: the master tables besides the rows' masters, and the stored
 //!   fixture filters.
-//! - [`order`]: the rows' sort keys, the tabs and their filters.
-//! - [`view`]: the prefab composition and its bindings.
-//! - [`recycle`]: the recycle confirmation, its request and the description
+//! - `order`: the rows' sort keys, the tabs and their filters.
+//! - `view`: the prefab composition and its bindings.
+//! - `recycle`: the recycle confirmation, its request and the description
 //!   page.
 //!
 //! `view::compose` binds a control by the field name its serialized list

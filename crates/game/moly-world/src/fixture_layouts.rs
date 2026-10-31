@@ -459,7 +459,7 @@ impl SiteFixtureLayouts {
     /// themselves, and other sites start empty.
     ///
     /// `homes` given: a home site layout (saved or starter) without a house
-    /// gets the entry's mock house ([`complete_home_site`]); visited layouts
+    /// gets the entry's mock house (`complete_home_site`); visited layouts
     /// were completed when first restored. `None` is a dry run without it.
     pub fn restore(
         &self,
@@ -490,8 +490,7 @@ impl SiteFixtureLayouts {
         let mut layout = match saved {
             Some(saved) => {
                 let mut layout = decode(saved, site_id, site_type, level)?;
-                if free && homes.is_some() && site_type == "home_site" {
-                    let homes = homes.expect("checked above");
+                if let (true, "home_site", Some(homes)) = (free, site_type, homes) {
                     super::take_home_rows(
                         &mut layout,
                         |package| homes.is_home(package).unwrap_or(false),

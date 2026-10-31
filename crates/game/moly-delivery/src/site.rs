@@ -22,8 +22,8 @@
 //! this module publishes as [`DeliveryCollision`] for the delivery screen.
 //!
 //! Requests: the delivery screen (`super::screen`) sends
-//! [`DeliveryRequest::Start`] on the delivery button's press and
-//! [`DeliveryRequest::End`] on its release. The reward dialogs close on the
+//! `DeliveryRequest::Start` on the delivery button's press and
+//! `DeliveryRequest::End` on its release. The reward dialogs close on the
 //! screen manager's hardware back key (Escape). `MOLY_DELIVERY_AUTOPLAY`
 //! (off by default, WARN when set) is an instrument: `hold[,close]` in
 //! seconds; it walks the player through the joystick's touch stream to each

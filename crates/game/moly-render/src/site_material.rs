@@ -1969,8 +1969,8 @@ pub struct SiteSidecarAsset {
 
 /// scene 实例已展开的常驻闩。站点模块自己的就绪标记会被取景系统撤掉，
 /// 换装等这个不撤的。
-
-
+///
+///
 /// 换装完成标记。
 #[derive(Resource)]
 pub struct SiteMaterialsSwapped;

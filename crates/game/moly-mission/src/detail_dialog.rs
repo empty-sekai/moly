@@ -5,7 +5,7 @@
 //! still in progress, or the information of a sheet's completion cell that
 //! is not complete); the master's rewards, converted to detail rows; the
 //! root's `MissionDetail` document and the `MysekaiMissionRewardCell`
-//! document as a row template ([`load_cell`]); the taps and the back key.
+//! document as a row template (`load_cell`); the taps and the back key.
 //!
 //! Output: the dialog slot (dialog type 339) and its runtime copy of the
 //! `MissionDetail` document (`VIEW`), drawn in one of two modes, with one
@@ -48,8 +48,8 @@
 //! - The reward rows count
 //!   `MysekaiMissionUtility.ConvertRewardDataToDetailData(Rewards).Count`,
 //!   which is not the master's reward-row count: the conversion is
-//!   [`reward_rows`], its count sizes the content and draws one copy per row,
-//!   and each copy runs `MysekaiMissionRewardCell.Setup` ([`draw_rows`]).
+//!   `reward_rows`, its count sizes the content and draws one copy per row,
+//!   and each copy runs `MysekaiMissionRewardCell.Setup` (`draw_rows`).
 //!   The copies are made on the runtime copy each setup installs (a replaced
 //!   document drops the subtrees copied into it, so the copies are made with
 //!   it).
@@ -57,7 +57,7 @@
 //! Rendering limits:
 //! - A row's label: a resource row names its resource as
 //!   `ResourceBoxUtility.GetResourceName` does from the `materials` table
-//!   ([`resource_name`]); a status row names its type with
+//!   (`resource_name`); a status row names its type with
 //!   `MysekaiResourceUtility.GetPlayerStatusWord`.
 //! - A row's thumbnail comes from `ResourceBoxUtility.CreateThumbnail` or
 //!   `MysekaiResourceUtility.CreatePlayerStatusThumbnail`: their prefab and
@@ -66,7 +66,7 @@
 //!   named once.
 //! - The list's wheel and drag scroll is not drawn, and `NoneInfo` is not
 //!   turned off; the rows are placed as `ListView` places them
-//!   ([`row_position`], [`rows_height`]) and the scrollbar object follows
+//!   (`row_position`, `rows_height`) and the scrollbar object follows
 //!   `SetupContentElement` alone.
 //! - The root's layout solves the authored rects: the writes reach the
 //!   dialog's view, and a lowered list top or a widened label background
@@ -712,7 +712,7 @@ pub fn show(screens: &mut ScreenManager, caller: &str) -> Result<DialogId, Strin
     Ok(id)
 }
 
-/// Update: the cell tap's request. The pushed slot is read by [`setup`] with
+/// Update: the cell tap's request. The pushed slot is read by `setup` with
 /// the dialog's own view; this step only resolves the mission and the rows.
 pub fn open(
     mut requests: MessageReader<MissionDialogRequest>,

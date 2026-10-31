@@ -2175,7 +2175,8 @@ pub fn prepare_frame(
     let particle_time = target.system_time();
     let magnitude = max(particle_time.abs(), times.last_particle.abs());
     let threshold = max(magnitude * f32::from_bits(0x3586_37bd), EXTERNAL_FLOOR);
-    let external = !((times.last_particle - particle_time).abs() < threshold)
+    let external = ((times.last_particle - particle_time).abs().is_nan()
+        || (times.last_particle - particle_time).abs() >= threshold)
         && !crate::particle_runtime::arm("directorNoExternalCheck");
     let back = if crate::particle_runtime::arm("directorRestartOnEqual") { times.last >= time } else { times.last > time };
     if back || external {

@@ -73,7 +73,7 @@ pub fn wait_time_click_skippable(auto: Option<bool>) -> bool {
 pub fn effective_animation_speed(speed: Option<f64>) -> f64 {
     match speed {
         None => 1.0,
-        Some(s) if s == 0.0 => 1.0,
+        Some(0.0) => 1.0,
         Some(s) => s,
     }
 }

@@ -11,7 +11,7 @@
 //! The switch is a property of the server document, because the document is
 //! what a session starts from; it is kept for the site it was switched on at.
 //! The game keeps its part of the document in the local list (the section
-//! [`SECTION`]), which every writer of the document merges rather than
+//! `SECTION`), which every writer of the document merges rather than
 //! replaces: a layout save writes the layout section only and never drops the
 //! switch. The extension the source server has no row for is
 //! `molyExtensions.freeLayout` in the server's own document (the game writes
@@ -87,7 +87,7 @@ pub(crate) fn mode_in(document: &Value, site_id: u32) -> Result<bool, String> {
 }
 
 /// Whether the local list holds the mode on for `site_id` (a malformed
-/// section reads as off; the writers read it with [`read_in`]).
+/// section reads as off; the writers read it with `read_in`).
 pub fn in_document(document: &Value, site_id: u32) -> bool {
     document
         .get(SECTION)

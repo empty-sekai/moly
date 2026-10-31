@@ -189,7 +189,7 @@ impl HomeAction {
 }
 
 /// What the craft, canvas and sketch screens send when their request is
-/// made; the reply comes from the server model ([`post`]) and a success starts
+/// made; the reply comes from the server model (`post`) and a success starts
 /// the world sequence.
 #[derive(Message, Debug, Clone)]
 pub enum HomeActionRequest {

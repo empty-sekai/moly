@@ -22,7 +22,7 @@
 //!   screen. When a branch finds no row, nothing starts and the current sound
 //!   keeps playing. On a track switch the old sound fades out and the new one
 //!   fades in (the linear curve of the CRI fader, see
-//!   [`CROSS_FADE_SECONDS`]); the same cue does not restart. The BGM player
+//!   `CROSS_FADE_SECONDS`); the same cue does not restart. The BGM player
 //!   starts with forced looping, so a BGM waveform without a loop point loops
 //!   as a whole. Selection happens on site entry (each site controller's
 //!   SetupBGM), on site changes (the teleport cannon and the home/room
@@ -49,10 +49,10 @@
 //!   loop.json package entries (`sequenceExport` count + `sequences` blocks).
 //!   A cue that is listed without a block is plain (one waveform per track,
 //!   played from the cue start). Cues with a block are played by the rules of
-//!   sequence types 0-4 ([`cue_law`]: all tracks, sequential, shuffle,
+//!   sequence types 0-4 (`cue_law`: all tracks, sequential, shuffle,
 //!   random, no-repeat random); each chosen track waits for its own start
 //!   delay and plays its waveform to the end, and once every track of a round
-//!   has finished and the repeat flag is set the next round starts ([`cue`]).
+//!   has finished and the repeat flag is set the next round starts (`cue`).
 //!   Positions and the order table live in the cue engine's work area, so a
 //!   stop and restart continues where it left off. One-shot SE and timeline
 //!   SE share the same engine. Every other structure (types 5-8, action
@@ -101,8 +101,8 @@
 //! package name.
 //!
 //! Volume has two layers, multiplied per sounding track (see
-//! [`cue::CueVolume`]). The **player layer** is the user's system volume on
-//! the middleware's three players: BGM (times 0.7, [`BGM_VOLUME_FACTOR`]),
+//! `cue::CueVolume`). The **player layer** is the user's system volume on
+//! the middleware's three players: BGM (times 0.7, `BGM_VOLUME_FACTOR`),
 //! SE and voice (`SetupVolume(1, bgm, se, voice)` at scene start and on every
 //! option-page `UpdateVolume`, [`apply_system_volume`]; the Live group of the
 //! local settings is the rhythm game's and is persisted, not applied). The
@@ -244,7 +244,7 @@ impl Default for VolumeSettingData {
 /// Bgm/Se/Voice. **Only the System group enters the MySekai application
 /// chain** (the on-entry `SetupVolume(1.0, Bgm×0.7, Se, Voice)` reads only
 /// SystemVolume; the 0.7 lands on the BGM consumer side as
-/// [`BGM_VOLUME_FACTOR`]); the Live group belongs to the rhythm game — MySekai
+/// `BGM_VOLUME_FACTOR`); the Live group belongs to the rhythm game — MySekai
 /// does not apply it, but still persists it and reads/writes it on the option
 /// page. Loaded in [`init_settings`].
 #[derive(Resource, Debug, Clone, Copy, PartialEq)]
@@ -1567,7 +1567,7 @@ fn parse_sequence_block(
         block["busSends"], block["parameter69"], block["commandCodesNotDecoded"]
     );
     let hex = block["trackValues"].as_str().unwrap_or("");
-    if hex.len() % 4 != 0 || !hex.is_ascii() {
+    if !hex.len().is_multiple_of(4) || !hex.is_ascii() {
         return Err(format!("trackValues {hex:?} is not whole 16-bit values"));
     }
     let track_values = (0..hex.len())
@@ -2641,7 +2641,7 @@ pub struct AmbientChannel {
 pub struct SequenceWorkAreas(pub HashMap<(String, String, u16), ShuffleWork>);
 
 /// Update：区域环境音——每次环境提交按「站点 × 现象」选行，平铺 2D，
-/// 先停后放。cue 按它的结构放（plain 或序列类型 0-4，见 [`cue`]），音量
+/// 先停后放。cue 按它的结构放（plain 或序列类型 0-4，见 `cue`），音量
 /// 是 SE 播放器 × cue 的类别 × cue 的音量命令。
 pub fn advance_ambient(
     mut commands: Commands,
@@ -3617,7 +3617,7 @@ pub struct SeChannel {
 
 /// Drain accepted requests through the same one-shot player on both targets.
 /// Every request starts its cue as the middleware does (plain, or a sequence
-/// of type 0-4: see [`cue`]); a cue this port cannot play, or one not
+/// of type 0-4: see `cue`); a cue this port cannot play, or one not
 /// decoded, is reported once and nothing else is played in its place. The
 /// volume of each track is the SE player times the cue's categories and
 /// volume commands.

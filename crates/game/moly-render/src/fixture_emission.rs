@@ -935,7 +935,7 @@ pub(crate) fn emission_pass<const EARLY: bool>(
 fn init_emission_resources(mut commands: Commands, render_device: Res<RenderDevice>) {
     let skin_uniforms = skins_use_uniform_buffers(&render_device.limits());
     // 动态 offset 槽距按设备对齐（通常 256；288 向上取整成 512）。
-    let align = render_device.limits().min_uniform_buffer_offset_alignment.max(64) as u32;
+    let align = render_device.limits().min_uniform_buffer_offset_alignment.max(64);
     let stride = (EMISSION_OBJECT_BYTES as u32).div_ceil(align) * align;
     let object_buffer = render_device.create_buffer(&BufferDescriptor {
         label: Some("fixture_emission_objects"),

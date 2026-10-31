@@ -145,13 +145,9 @@ impl Decision {
     /// 是否带「复位 + 抽签补数据」副作用（源 `ForceUpdateObjective`）：
     /// 空槽位档与打断域外回退两处。
     pub fn needs_refuel(&self) -> bool {
-        match *self {
-            Decision::RefuelAndTalk => true,
-            Decision::Interrupt {
-                dispatch: InterruptDispatch::InvalidFallback,
-            } => true,
-            _ => false,
-        }
+        matches!(*self, Decision::RefuelAndTalk | Decision::Interrupt {
+            dispatch: InterruptDispatch::InvalidFallback,
+        })
     }
 }
 

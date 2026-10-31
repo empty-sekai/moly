@@ -138,7 +138,7 @@ fn mesh_cleaner(vertices: &[V3], index: &[u32]) -> (Vec<V3>, Vec<[u32; 3]>, Vec<
     }
     let mut seen = std::collections::HashSet::new();
     let (mut tris, mut source) = (Vec::new(), Vec::new());
-    for (i, t) in index.chunks_exact(3).enumerate() {
+    for (i, t) in index.as_chunks::<3>().0.iter().enumerate() {
         if t.iter().any(|&v| v as usize >= n) {
             continue;
         }
@@ -478,16 +478,16 @@ fn build(vertices: &[V3], tris: &[[u32; 3]]) -> Result<(Bv4Tree, Vec<u32>), Refu
     let mut maxmax = [-FLT_MAX; 3];
     for node in &nodes {
         for lane in node.iter().filter(|l| !matches!(l.slot, Slot::Invalid)) {
-            for k in 0..3 {
+            for (k, slot) in minmax.iter_mut().enumerate() {
                 let m = a::abs(a::sub(lane.c[k], lane.e[k]));
-                if m > minmax[k] {
-                    minmax[k] = m;
+                if m > *slot {
+                    *slot = m;
                 }
             }
-            for k in 0..3 {
+            for (k, slot) in maxmax.iter_mut().enumerate() {
                 let m = a::abs(a::add(lane.c[k], lane.e[k]));
-                if m > maxmax[k] {
-                    maxmax[k] = m;
+                if m > *slot {
+                    *slot = m;
                 }
             }
         }
@@ -553,7 +553,7 @@ fn build(vertices: &[V3], tris: &[[u32; 3]]) -> Result<(Bv4Tree, Vec<u32>), Refu
         }
     }
     let mut words = Vec::with_capacity(nb_needed * 4);
-    for group in dest.chunks_exact(4) {
+    for group in dest.as_chunks::<4>().0 {
         for axis in 0..3 {
             for lane in group {
                 words.push(((lane.1[axis] as u32) << 16) | (lane.0[axis] as u16 as u32));

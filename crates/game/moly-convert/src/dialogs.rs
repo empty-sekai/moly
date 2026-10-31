@@ -6,7 +6,7 @@
 //! Input: the documents of the three (`START_KEY`, `SHORTEN_KEY`,
 //! `DETAIL_KEY`), installed once each as a runtime copy (`START_VIEW`,
 //! `SHORTEN_VIEW`, `DETAIL_VIEW`); the request a dialog answers, which the
-//! screen's own tap left in [`ConvertScreen`] ([`super::start::StartIntent`]
+//! screen's own tap left in `ConvertScreen` ([`super::start::StartIntent`]
 //! and [`super::start::ShortenIntent`] for the confirm and the skip, the long
 //! press's `detail_request` for the detail); the convert masters and the
 //! user's copies ([`DialogData`]); the wording and palette of the layout.

@@ -24,7 +24,7 @@
 //! Input forms:
 //! * The main path is the virtual joystick (`OnTouchJoyStick`: the stick
 //!   vector is projected onto the camera's forward/right axes, so it is
-//!   camera-relative). The touch surface is [`crate::joystick`]; while it is
+//!   camera-relative). The touch surface is `crate::joystick`; while it is
 //!   active it takes precedence (`GetMoveDirection` reads only the stick).
 //! * The keyboard is a named desktop adaptation: the product has only the
 //!   touch joystick, and `GetKeyMoveDirection` has no call site. The
@@ -36,7 +36,7 @@
 //!   than a straight line.
 //! * Dash is a **mode switch**, not a trigger: `PlayerAvatarStateMachine.MoveTo`
 //!   dispatches to the Move/Dash state by the player's `IsDashMode`, and the
-//!   HUD's dash button ([`crate::action_button`]'s sprint button) drives the
+//!   HUD's dash button (`crate::action_button`'s sprint button) drives the
 //!   switch.
 //! * With no input the player returns to idle: `UpdateController` moves to
 //!   Idle on reading empty input in the move state.
@@ -125,7 +125,7 @@ pub struct PlayerInput {
 }
 
 /// 玩家的身体输入；spawn 消费后即撤。位移速度不在这儿：速度是
-/// ClientConfig 面板三键的逐帧取值（见 [`move_speed`]），不随装配算定。
+/// ClientConfig 面板三键的逐帧取值（见 `move_speed`），不随装配算定。
 #[derive(Resource)]
 pub struct PlayerSpecs {
     body: crate::player_avatar::body::PlayerBody,
@@ -404,7 +404,7 @@ pub fn move_pace(
 /// Update: advances the input of this frame into a new position and a new
 /// facing. This is the player domain's displacement, applied directly each
 /// frame rather than by pathfinding, like `NavMeshAgent.Move`; pathfinding
-/// belongs to the NPC patrol domain. The speed is read from [`move_speed`]
+/// belongs to the NPC patrol domain. The speed is read from `move_speed`
 /// every frame (the three panel keys, the site band, the camera band). Each
 /// step is constrained by the walk face to the walkable part of the move
 /// before its first obstruction, so a thin obstacle cannot be crossed. No

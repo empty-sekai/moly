@@ -19,10 +19,10 @@
 //! - then `Scale(scale) * matrix`, where `scale` is the root canvas' local
 //!   scale times `scale3D` while the UIParticle ignores the canvas scaler and
 //!   `scale3D` otherwise.
-//! The baked mesh (`ParticleSystemRenderer.BakeMesh(mesh, camera, true)`:
-//! the system's rotation and scale, not its position) goes through that
-//! matrix into the UIParticle's local space, and the CanvasRenderer draws it
-//! there.
+//!   The baked mesh (`ParticleSystemRenderer.BakeMesh(mesh, camera, true)`:
+//!   the system's rotation and scale, not its position) goes through that
+//!   matrix into the UIParticle's local space, and the CanvasRenderer draws it
+//!   there.
 
 use bevy::math::{Affine3A, Mat3, Mat4, Quat, Vec3};
 

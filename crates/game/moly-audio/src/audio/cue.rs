@@ -607,7 +607,7 @@ const COMMAND_VOLUME: u64 = 87;
 pub const COMMAND_RANDOM_VOLUME: u64 = 89;
 
 fn decode_hex(hex: &str) -> Result<Vec<u8>, String> {
-    if hex.len() % 2 != 0 || !hex.is_ascii() {
+    if !hex.len().is_multiple_of(2) || !hex.is_ascii() {
         return Err(format!("command bytes {hex:?} are not whole bytes"));
     }
     (0..hex.len())

@@ -14,8 +14,8 @@
 //! - a joint, i.e. a fence or a road (`GridData.AddJointData`): its minimum
 //!   corner, and the joint mark on the cells of its current size at the
 //!   minimum corner's y.
-//! An add that finds the tile taken is refused by the source; the first row
-//! keeps it here too.
+//!   An add that finds the tile taken is refused by the source; the first row
+//!   keeps it here too.
 //!
 //! **Predicates** (`MysekaiFixtureUtility`, on the master row; no row answers
 //! false to all of them): `IsPlant` = fixture type plant or house_plant;

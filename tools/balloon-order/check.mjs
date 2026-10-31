@@ -1,28 +1,38 @@
 #!/usr/bin/env node
-// 头顶 tweet 气泡绘制层序的成对数值判据（研究仪器，无图无像素）。
+// Paired numeric check of the draw order of head tweet balloons (no images,
+// no pixels).
 //
-// 两只屏幕上**完全重叠**的探针气泡由冒烟旋钮 `MOLY_BALLOON_ORDER_SECS`
-// 造成（近根在相机正前方视线轴上，远锚取过近锚点的同一视线射线两倍
-// 距离处——两只锚点投影到同一屏幕点）。运行产物进程并从日志读出每
-// 部件的**最终排序键**（根部 z + 根缩放 × animation 节点缩放 × 部件
-// 层 z，与渲染器同式），断言两层顺序：
+// The `MOLY_BALLOON_ORDER_SECS` switch spawns two probe balloons that
+// **fully overlap** on screen (the near root sits on the view axis straight
+// ahead of the camera; the far anchor is at twice that distance along the
+// same view ray through the near anchor, so both anchors project to the same
+// screen point). The check runs the game, reads each part's **final sort
+// key** from the log (root z + root scale × animation node scale × part
+// layer z, the same formula as the renderer) and asserts two orders:
 //
-//   C1 跨气泡（成对判据之一）：近者的**全部**部件 z 严格大于远者的
-//      **全部**部件 z（区间不相交——同一气泡的部件整体成层，绝不与
-//      另一只交错）。出处：HUD 层每帧按「相机到各目标的欧氏距离」
-//      降序重排兄弟序，近者最后画、盖住远者。
-//   C2 同气泡内（成对判据之二）：背板 < 正文 < 箭头。出处：HUD 预制体
-//      animation 节点的子序——bg 子树在前（正文文本件是 bg 的子节点），
-//      箭头容器最后，后者画在上。
+//   C1 across balloons: **every** part z of the near balloon is strictly
+//      greater than **every** part z of the far one (the ranges do not
+//      intersect: one balloon's parts form one layer and never interleave
+//      with another's). The HUD layer reorders its children every frame by
+//      descending Euclidean distance from the camera to each target, so the
+//      nearer balloon draws last and covers the farther one.
+//   C2 within a balloon: backdrop < body text < arrow. This is the child
+//      order of the HUD prefab's animation node: the bg subtree first (the
+//      body text is a child of bg), the arrow container last, and later
+//      children draw on top.
 //
-// 反向臂（`MOLY_BALLOON_ORDER_NO_LAYER=1`：根部 z 全喂 0，即接线前的
-// 恒 0 行为）：C1 必须红（近/远区间重合，不再有覆盖序）；C2 仍绿
-// （部件层 z 不随根部接线变）。两条臂都跑，全绿才退出 0。
+// Flat run (`MOLY_BALLOON_ORDER_NO_LAYER=1`: every root z is fed 0): C1 must
+// fail (the near and far ranges overlap, so there is no covering order) and
+// C2 must still pass (part layer z does not depend on the root z). Both runs
+// are executed; the script exits 0 only when every expectation holds.
 //
-// 用法：node tools/balloon-order/check.mjs [moly-app.exe]
-//   exe 缺省取仓根的 moly-app-*.exe。moly-server(.exe) 必须与它同目录，判据
-//   先起服务器、把报出的地址交给游戏，游戏退出后收掉服务器。
-//   每臂的完整日志落在仓根 balloon-order-<run-id>-*.log 及对应 JSON 状态供复查。
+// Usage: node tools/balloon-order/check.mjs [moly-app.exe]
+//   The exe defaults to the newest moly-app-*.exe in the repository root.
+//   moly-server(.exe) must be in the same directory: the check starts the
+//   server first, passes the address it reports to the game, and stops the
+//   server when the game exits.
+//   Each run's full log is written to balloon-order-<run-id>-*.log in the
+//   exe's directory, with a JSON status file next to it.
 
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
@@ -52,28 +62,30 @@ function findExe() {
     .filter((name) => /^moly-app-.*\.exe$/.test(name))
     .sort();
   if (hits.length === 0) {
-    console.error('[check] 找不到 exe：请把 moly-app-*.exe 放进仓根，或作为参数传入');
+    console.error('[check] no exe found: put moly-app-*.exe in the repository root or pass it as an argument');
     process.exit(2);
   }
   return path.join(root, hits[hits.length - 1]);
 }
 
-// 游戏与服务器是两只进程：先起服务器，从它报出的那一行里读回地址。
-// 服务器自己的输出落在 <arm>-server.log，不混进判据要读的游戏日志。
+// The game and the server are two processes: start the server first and read
+// its address back from the line it reports. The server's own output goes to
+// <run>-server.log, separate from the game log the check reads.
 function startServer(exe, logPath) {
   const serverExe = path.join(path.dirname(exe), SERVER_FILE);
   if (!fs.existsSync(serverExe) || !fs.statSync(serverExe).isFile()) {
-    throw new Error(`找不到 ${SERVER_FILE}：请把它与 ${path.basename(exe)} 放在同一目录（${serverExe}）`);
+    throw new Error(`${SERVER_FILE} not found: put it in the same directory as ${path.basename(exe)} (${serverExe})`);
   }
   const fd = fs.openSync(logPath, 'a');
-  // close 之后到达的管道尾巴不再写：'end' 可能比收尾晚一个 tick。
+  // Pipe output that arrives after close is not written: 'end' can come one
+  // tick after shutdown.
   let open = true;
   const append = (text) => {
     if (!open) return;
     try {
       fs.writeSync(fd, text);
     } catch {
-      // 日志是诊断件：写不动也不能让判据本身崩。
+      // The log is diagnostic: a failed write must not crash the check.
     }
   };
   append(`# ${new Date().toISOString()} server ${serverExe}\n`);
@@ -83,7 +95,7 @@ function startServer(exe, logPath) {
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
-  // 两条管道都读到底：没人读会填满、把服务器堵死。
+  // Read both pipes to the end: an unread pipe fills up and blocks the server.
   const pipe = (stream, onLine) => {
     let pending = '';
     stream.setEncoding('utf8');
@@ -113,7 +125,7 @@ function startServer(exe, logPath) {
       else resolve(url);
     };
     const timer = setTimeout(
-      () => finish(new Error(`服务器 ${SERVER_START_MS / 1000} s 内没有报出地址；日志 ${logPath}`)),
+      () => finish(new Error(`the server reported no address within ${SERVER_START_MS / 1000} s; log ${logPath}`)),
       SERVER_START_MS
     );
     if (child.stdout && child.stderr) {
@@ -123,9 +135,9 @@ function startServer(exe, logPath) {
       });
       pipe(child.stderr, () => {});
     }
-    child.once('error', (err) => finish(new Error(`起不了 ${serverExe}：${err.message}`)));
+    child.once('error', (err) => finish(new Error(`cannot start ${serverExe}: ${err.message}`)));
     child.once('exit', (code, signal) => {
-      finish(new Error(`服务器在报出地址前退出（${code ?? signal}）；日志 ${logPath}`));
+      finish(new Error(`the server exited before reporting an address (${code ?? signal}); log ${logPath}`));
     });
   });
   return {
@@ -141,7 +153,8 @@ function startServer(exe, logPath) {
   };
 }
 
-// 游戏结束（含超时被杀）后收掉服务器，再关日志。
+// Stop the server after the game ends (including a timeout kill), then close
+// its log.
 async function stopServer(server) {
   const { child } = server;
   if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
@@ -230,16 +243,16 @@ function checkC1(parts, near, far, arm) {
   const nearZs = zs(parts, near);
   const farZs = zs(parts, far);
   if (nearZs.length === 0 || farZs.length === 0) {
-    console.log(`[${arm}] C1 跨气泡：部件缺失（近 ${nearZs.length} 件 / 远 ${farZs.length} 件）→ 红`);
+    console.log(`[${arm}] C1 across balloons: parts missing (near ${nearZs.length} / far ${farZs.length}) -> fail`);
     return false;
   }
   const ok = Math.min(...nearZs) > Math.max(...farZs);
   console.log(
-    `[${arm}] C1 跨气泡：近 tweet=${near} z∈[${Math.min(...nearZs).toFixed(3)},${Math.max(
+    `[${arm}] C1 across balloons: near tweet=${near} z in [${Math.min(...nearZs).toFixed(3)},${Math.max(
       ...nearZs
-    ).toFixed(3)}]（${nearZs.length} 件） 远 tweet=${far} z∈[${Math.min(...farZs).toFixed(
+    ).toFixed(3)}] (${nearZs.length} parts) far tweet=${far} z in [${Math.min(...farZs).toFixed(
       3
-    )},${Math.max(...farZs).toFixed(3)}]（${farZs.length} 件） → ${ok ? '绿：min(近) > max(远)' : '红'}`
+    )},${Math.max(...farZs).toFixed(3)}] (${farZs.length} parts) -> ${ok ? 'pass: min(near) > max(far)' : 'fail'}`
   );
   return ok;
 }
@@ -254,11 +267,11 @@ function checkC2(parts, tweets, arm) {
     const good = complete && Math.max(...bg) < Math.min(...text) && Math.max(...text) < Math.min(...arrow);
     ok = ok && good;
     const desc = complete
-      ? `背板 z≤${Math.max(...bg).toFixed(3)}(${bg.length}件) < 正文 z≥${Math.min(...text).toFixed(
+      ? `backdrop z<=${Math.max(...bg).toFixed(3)} (${bg.length} parts) < text z>=${Math.min(...text).toFixed(
           3
-        )}(${text.length}件) < 箭头 z≥${Math.min(...arrow).toFixed(3)}(${arrow.length}件)`
-      : `族缺失（背板 ${bg.length} / 正文 ${text.length} / 箭头 ${arrow.length}）`;
-    console.log(`[${arm}] C2 同气泡内 tweet=${tweet}：${desc} → ${good ? '绿' : '红'}`);
+        )} (${text.length} parts) < arrow z>=${Math.min(...arrow).toFixed(3)} (${arrow.length} parts)`
+      : `parts missing (backdrop ${bg.length} / text ${text.length} / arrow ${arrow.length})`;
+    console.log(`[${arm}] C2 within balloon tweet=${tweet}: ${desc} -> ${good ? 'pass' : 'fail'}`);
   }
   return ok;
 }
@@ -266,7 +279,7 @@ function checkC2(parts, tweets, arm) {
 function checkSelf(parts, ready, arm) {
   const errors = [];
   if (ready === null) {
-    errors.push('缺 probe ready 行（探针没造出来：主表/图集/相机未就绪，或窗口太短）');
+    errors.push('no probe ready line (the probe was not built: master table, atlas or camera not ready, or the window is too short)');
     return { errors, near: null, far: null };
   }
   const near = Number(ready[1]);
@@ -275,11 +288,11 @@ function checkSelf(parts, ready, arm) {
   const farD = Number(ready[4]);
   const probeParts = parts.filter((p) => p.probe === 1);
   if (![near, far, nearD, farD, ...parts.flatMap(p => [p.tweet, p.base, p.k, p.z])].every(Number.isFinite)) {
-    errors.push('探针包含非有限数值');
+    errors.push('the probe contains non-finite values');
   }
   for (const [tweet, name] of [
-    [near, '近'],
-    [far, '远'],
+    [near, 'near'],
+    [far, 'far'],
   ]) {
     const own = probeParts.filter((p) => p.tweet === tweet);
     const counts = {
@@ -287,18 +300,18 @@ function checkSelf(parts, ready, arm) {
       text: own.filter((p) => p.kind === 'text').length,
       arrow: own.filter((p) => p.kind === 'arrow').length,
     };
-    if (counts.bg < 9) errors.push(`${name} tweet=${tweet} 背板件 ${counts.bg} < 9（九宫缺件）`);
-    if (counts.text < 1) errors.push(`${name} tweet=${tweet} 正文件 0（字形缺失）`);
-    if (counts.arrow !== 1) errors.push(`${name} tweet=${tweet} 箭头件 ${counts.arrow} != 1`);
+    if (counts.bg < 9) errors.push(`${name} tweet=${tweet} has ${counts.bg} backdrop parts < 9 (nine-slice incomplete)`);
+    if (counts.text < 1) errors.push(`${name} tweet=${tweet} has 0 text parts (glyphs missing)`);
+    if (counts.arrow !== 1) errors.push(`${name} tweet=${tweet} has ${counts.arrow} arrow parts != 1`);
     if (own.length > 0 && !own.every((p) => p.k > 0)) {
-      errors.push(`${name} tweet=${tweet} 存在 k<=0 的部件（稳态闩到了非稳态帧）`);
+      errors.push(`${name} tweet=${tweet} has parts with k<=0 (the steady-state latch caught a non-steady frame)`);
     }
   }
-  if (!(nearD < farD)) errors.push(`探针构造反了：near_d=${nearD} >= far_d=${farD}`);
+  if (!(nearD < farD)) errors.push(`probe built the wrong way round: near_d=${nearD} >= far_d=${farD}`);
   console.log(
-    `[${arm}] 自检：近 tweet=${near} d=${nearD.toFixed(3)} / 远 tweet=${far} d=${farD.toFixed(
+    `[${arm}] self-check: near tweet=${near} d=${nearD.toFixed(3)} / far tweet=${far} d=${farD.toFixed(
       3
-    )}，探针部件 ${probeParts.length} 件 → ${errors.length === 0 ? '绿' : `红：${errors.join('；')}`}`
+    )}, ${probeParts.length} probe parts -> ${errors.length === 0 ? 'pass' : `fail: ${errors.join('; ')}`}`
   );
   return { errors, near, far };
 }
@@ -310,49 +323,49 @@ if (!expectedVersion) throw new Error('Workspace version is missing');
 const exe = path.resolve(findExe());
 const failures = [];
 
-// 正向臂：接线在——C1 绿、C2 绿、自检绿。
+// Layered run: root z wired; C1, C2 and the self-check must pass.
 {
   const { out } = await runArm(exe, 'a', {});
   const { ready, parts } = parse(out);
-  const { errors, near, far } = checkSelf(parts, ready, '正向臂');
-  for (const e of errors) failures.push(`正向臂自检：${e}`);
+  const { errors, near, far } = checkSelf(parts, ready, 'layered');
+  for (const e of errors) failures.push(`layered self-check: ${e}`);
   if (near !== null && far !== null) {
-    if (!checkC1(parts, near, far, '正向臂')) failures.push('正向臂 C1 红（近者未整套盖住远者）');
-    if (!checkC2(parts, [near, far], '正向臂')) failures.push('正向臂 C2 红（同气泡内层序错）');
+    if (!checkC1(parts, near, far, 'layered')) failures.push('layered C1 failed (the near balloon does not fully cover the far one)');
+    if (!checkC2(parts, [near, far], 'layered')) failures.push('layered C2 failed (wrong order within a balloon)');
     const nearBases = parts.filter((p) => p.tweet === near).map((p) => p.base);
     const farBases = parts.filter((p) => p.tweet === far).map((p) => p.base);
     if (nearBases.length > 0 && farBases.length > 0) {
       const nearBase = Math.max(...nearBases);
       const farBase = Math.min(...farBases);
       console.log(
-        `[正向臂] 名次档：近 base=${nearBase.toFixed(3)} 远 base=${farBase.toFixed(
+        `[layered] rank band: near base=${nearBase.toFixed(3)} far base=${farBase.toFixed(
           3
-        )}（差 ${(nearBase - farBase).toFixed(3)} ≥ 步进 ${STRIDE} 才不相交）`
+        )} (difference ${(nearBase - farBase).toFixed(3)}; the ranges are disjoint only if it is >= the stride ${STRIDE})`
       );
-      if (!(nearBase - farBase >= STRIDE)) failures.push(`正向臂名次档差 < ${STRIDE}（步进接线可疑）`);
+      if (!(nearBase - farBase >= STRIDE)) failures.push(`layered rank band difference < ${STRIDE} (stride wiring suspect)`);
     }
   }
 }
 
-// 反向臂：根部 z 全喂 0（= 接线前恒 0）——C1 必须红，C2 必须仍绿。
+// Flat run: every root z fed 0; C1 must fail and C2 must still pass.
 {
   const { out } = await runArm(exe, 'b', { MOLY_BALLOON_ORDER_NO_LAYER: '1' });
   const { ready, parts } = parse(out);
-  const { errors, near, far } = checkSelf(parts, ready, '反向臂');
-  for (const e of errors) failures.push(`反向臂自检：${e}`);
+  const { errors, near, far } = checkSelf(parts, ready, 'flat');
+  for (const e of errors) failures.push(`flat self-check: ${e}`);
   if (near !== null && far !== null) {
-    if (checkC1(parts, near, far, '反向臂')) {
-      failures.push('反向臂 C1 仍绿（喂相同深度时它应当红——这条判据对排序接线是盲的）');
+    if (checkC1(parts, near, far, 'flat')) {
+      failures.push('flat C1 still passes (with equal depths it must fail; the check cannot see the sort wiring)');
     } else {
-      console.log('[反向臂] C1 如期红（根部 z 全 0 ⇒ 近/远区间重合，无覆盖序）');
+      console.log('[flat] C1 fails as expected (all root z 0, so the near and far ranges overlap and there is no covering order)');
     }
-    if (!checkC2(parts, [near, far], '反向臂')) failures.push('反向臂 C2 红（部件层 z 不应随根部接线变）');
+    if (!checkC2(parts, [near, far], 'flat')) failures.push('flat C2 failed (part layer z must not depend on the root z)');
   }
 }
 
 if (failures.length > 0) {
-  console.log('[check] 未通过：');
+  console.log('[check] failed:');
   for (const f of failures) console.log(`  - ${f}`);
   process.exit(1);
 }
-console.log('[check] 成对判据全过：正向 C1+C2 绿，反向 C1 红、C2 绿。');
+console.log('[check] all paired checks passed: layered C1 and C2 pass, flat C1 fails and C2 passes.');

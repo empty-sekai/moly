@@ -384,8 +384,8 @@ pub fn grade(inputs: &LdrLutInputs, rgb: [f32; 3]) -> [f32; 3] {
             + c[2] * inputs.highlights[2] * highlights_f,
     ];
     // 升 / 伽马 / 增益：sign(x) * |x|^gamma。
-    for i in 0..3 {
-        let x = c[i] * inputs.gain[i] + inputs.lift[i];
+    for (i, slot) in c.iter_mut().enumerate() {
+        let x = *slot * inputs.gain[i] + inputs.lift[i];
         let sign = if x > 0.0 {
             1.0
         } else if x < 0.0 {
@@ -393,7 +393,7 @@ pub fn grade(inputs: &LdrLutInputs, rgb: [f32; 3]) -> [f32; 3] {
         } else {
             0.0
         };
-        c[i] = sign * (x.abs().log2() * inputs.gamma[i]).exp2();
+        *slot = sign * (x.abs().log2() * inputs.gamma[i]).exp2();
     }
     // HSV：色相偏移 + 色相-色相曲线；饱和倍数取三条饱和度曲线。
     let mut hsv = rgb_to_hsv(c);

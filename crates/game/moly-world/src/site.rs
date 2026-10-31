@@ -1749,9 +1749,7 @@ fn scene_plan(server: &AssetServer, gltfs: &Assets<Gltf>, gltf_meshes: &Assets<G
             return None;
         }
     }
-    let Some(gltf) = gltfs.get(&assets.gltf) else {
-        return None;
-    };
+    let gltf = gltfs.get(&assets.gltf)?;
     // glTF 的语义单位是默认 scene；没有它，这个文件对任何查看器都不是站点。
     let Some(scene) = gltf.default_scene.clone() else {
         panic!("站点主 glTF 没有默认 scene");
@@ -1790,9 +1788,7 @@ fn scene_plan(server: &AssetServer, gltfs: &Assets<Gltf>, gltf_meshes: &Assets<G
             }
             let face = match &assets.navmesh {
                 Some(handle) => {
-                    let Some(navmesh) = gltfs.get(handle) else {
-                        return None;
-                    };
+                    let navmesh = gltfs.get(handle)?;
                     let Some((_, mesh)) = navmesh.named_meshes.iter().next() else {
                         panic!("可行走面 glTF 没有网格");
                     };
@@ -1812,9 +1808,7 @@ fn scene_plan(server: &AssetServer, gltfs: &Assets<Gltf>, gltf_meshes: &Assets<G
             if !ready(server, module, "房间模块 glTF") {
                 return None;
             }
-            let Some(module) = gltfs.get(module) else {
-                return None;
-            };
+            let module = gltfs.get(module)?;
             for name in MODULE_SCENES {
                 let Some(scene) = module.named_scenes.get(name) else {
                     panic!("房间模块 glTF 没有名为 {name} 的 scene");
@@ -1829,9 +1823,7 @@ fn scene_plan(server: &AssetServer, gltfs: &Assets<Gltf>, gltf_meshes: &Assets<G
                     if !ready(server, handle, "室内寻路面 glTF") {
                         return None;
                     }
-                    let Some(walkable) = gltfs.get(handle) else {
-                        return None;
-                    };
+                    let walkable = gltfs.get(handle)?;
                     let Some((_, mesh)) = walkable.named_meshes.iter().next() else {
                         panic!("室内寻路面 glTF 没有网格");
                     };

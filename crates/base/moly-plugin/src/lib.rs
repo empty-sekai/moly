@@ -2,7 +2,7 @@
 //!
 //! A plugin is a directory with a `plugin.toml` ([`manifest`]). The profile
 //! ([`profile`]) lists which plugins are enabled and their settings. At
-//! startup [`resolve`] checks the enabled set against the running moly
+//! startup [`resolve()`] checks the enabled set against the running moly
 //! version, dependencies, conflicts and the seams each plugin provides
 //! ([`seam`]), and either returns the load order or refuses with every
 //! problem named. Luau plugins then run in a sandbox ([`luau`]) that exposes

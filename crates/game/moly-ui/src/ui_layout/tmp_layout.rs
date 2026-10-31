@@ -1670,7 +1670,10 @@ fn pass(
             adjust = rise;
         }
         let line_descender = vertical.line_descender - line_offset;
-        if !(vertical.element_descender < line_descender) {
+        if vertical.element_descender.is_nan()
+            || line_descender.is_nan()
+            || vertical.element_descender >= line_descender
+        {
             vertical.element_descender = line_descender;
         }
         lines.push(make_line(positions, start, offset_start, adjust, p, &measured));
@@ -1901,7 +1904,7 @@ fn component_array(text: &str, component: &UiComponent, input_box: bool) -> Resu
 /// The preferred width (axis 0) or height (axis 1) of a text component.
 ///
 /// `internal` is the component's own character array, which its preferred
-/// passes read and write (see [`pass`]); the caller keeps one per component
+/// passes read and write (see `pass`); the caller keeps one per component
 /// for as long as the component lives, starting empty. `input_box`: the
 /// text is the component's serialized text (TMP parses its backslash
 /// escapes), not one code assigned.

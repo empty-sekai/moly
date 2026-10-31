@@ -102,6 +102,13 @@ jobs:
         # from the other targets.
         if: runner.os == 'Windows'
         run: python tools/clippy-ratchet/check.py
+      - name: Build the API docs
+        if: runner.os == 'Windows'
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: >-
+          cargo doc --release --locked --workspace --no-deps
+          --exclude moly-launcher --exclude moly-android
       - name: Compiler cache statistics
         if: always()
         run: sccache --show-stats

@@ -17,7 +17,7 @@
 //! openers resolve them: `MysekaiResourceUtility.NoticeCollectItem` is
 //! `crate::get_resource`'s `notice`, which also reads the harvest's
 //! `CollectNotice` messages, so this module reads none of them (a second
-//! reader would draw every pickup twice). This module draws the cells ([`cell`]) in the notice
+//! reader would draw every pickup twice). This module draws the cells (`cell`) in the notice
 //! layer's view ([`crate::notice_banner`]), which shows only while the notice
 //! layer is active. A call while the layer is not active, or before the
 //! cells are composed, is reported and not drawn.

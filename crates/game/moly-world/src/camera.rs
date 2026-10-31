@@ -1037,7 +1037,7 @@ fn ratio01(value: f32, from: f32, to: f32) -> f32 {
 ///   pull, a bird's-eye view releases it; only the effective distance is
 ///   clamped, the gesture-remembered distance is not touched.
 /// - **Zoom** (`OnPinch` in the Normal state): the zoom delta v13 = ratio·(−pinch)
-///   is computed first and fed to [`can_switch_to_fps`] — **checked on every
+///   is computed first and fed to `can_switch_to_fps` — **checked on every
 ///   pinch event**; if the distance is already at the lower bound (bit-exact
 ///   equality) and the direction is zoom-in, switch to the FPS state and **stop
 ///   zooming this frame**; otherwise distance = clamp(distance + v13, distance
@@ -1046,7 +1046,7 @@ fn ratio01(value: f32, from: f32, to: f32) -> f32 {
 ///   `max(8 + t₂·16 − ratio₂, 8, model pitch lower bound)`, where `t₂` is
 ///   normalised by the new distance.
 ///
-/// FPS state: drags go through [`fps_drag`] (yaw floor-mod normalisation + pitch
+/// FPS state: drags go through `fps_drag` (yaw floor-mod normalisation + pitch
 /// clamping, from `FPSCameraState.OnDrag`); a pinch has **only the exit branch**
 /// (v13 > 0 = pinch-out direction, i.e. back to Normal; `FPSCameraState.OnPinch`
 /// has no zoom branch — "zoom in further" in the FPS state is the entry
@@ -1760,7 +1760,7 @@ pub fn normal_on_exit(world: &mut World, site: &str) -> bool {
 /// then either the inherit branch (0.5 s to the site's transfer entry, or to
 /// the setting's initial pitch with the live yaw, FOV and distance; its
 /// callback writes the entry's distance into the private model) or
-/// [`transfer_camera_settings`]. The tutorial branch is not in the product
+/// `transfer_camera_settings`. The tutorial branch is not in the product
 /// (tutorials are out of scope). `FadeInPlayerIfNeeded` (a 0.2 s dither
 /// fade-in after the first-person state) has no dither to drive: FPS's exit
 /// shows the player at once.
@@ -1838,7 +1838,7 @@ pub fn normal_on_enter(world: &mut World, prev: CameraStateType, tag: &str) {
         let transfer = tween.is_some();
         (tween, transfer)
     };
-    drop(model);
+    let _ = model;
     world.insert_resource(private);
     if transfer {
         world.insert_resource(NormalCameraTweenComplete(false));
@@ -2037,7 +2037,7 @@ pub fn fps_on_enter(world: &mut World, prev: CameraStateType) {
         camera_fov_deg,
         model.fov,
     );
-    drop(model);
+    let _ = model;
     world.insert_resource(fps);
     world.insert_resource(tween);
 }

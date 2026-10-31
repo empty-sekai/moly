@@ -384,7 +384,7 @@ fn reciprocal_chain(lifetime: f32) -> f32 {
     let exponent = ((bits >> 23) & 0xff) as i32;
     let index = 256 + ((bits & 0x007f_ffff) >> 15);
     // Exact 8-bit reciprocal estimate. Integer divisions are floors.
-    let estimate = (((1_u32 << 19) / (2 * index + 1)) + 1) / 2;
+    let estimate = ((1_u32 << 19) / (2 * index + 1)).div_ceil(2);
     let result_exponent = 253 - exponent;
     let estimate_bits = if result_exponent > 0 {
         ((result_exponent as u32) << 23) | ((estimate - 256) << 15)

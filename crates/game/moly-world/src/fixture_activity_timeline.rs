@@ -2356,7 +2356,6 @@ fn initialize(
                     cache.insert(cache_key, node);
                     node
                 });
-                drop(graphs);
                 if claimed.insert(binding.animator) {
                     world
                         .get_mut::<AnimationPlayer>(binding.animator)

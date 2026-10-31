@@ -865,7 +865,7 @@ fn step(world: &mut World, run: &mut Run, op: &Op) -> Result<bool, String> {
                 .ok_or("player pose is absent")?;
             pose.translation = Vec3::from_array(data.initial_player.position);
             pose.rotation = Quat::from_array(data.initial_player.rotation);
-            drop(pose);
+            let _ = pose;
             world.entity_mut(player).insert((
                 Visibility::Hidden,
                 lower::TutorialMovementHold,
@@ -1020,7 +1020,7 @@ fn update(world: &mut World) {
             status.boundary = None;
             status.error = None;
             status.state = "running".into();
-            drop(status);
+            let _ = status;
             match ops {
                 Ok(ops) => {
                     if input.episode == "1_1" {

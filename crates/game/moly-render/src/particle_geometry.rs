@@ -269,7 +269,7 @@ impl SourceMesh {
                 Some(Indices::U32(values)) => values.clone(),
                 None => (0..positions.len() as u32).collect(),
             };
-            if indices.len() % 3 != 0 || indices.iter().any(|&i| i as usize >= positions.len()) {
+            if !indices.len().is_multiple_of(3) || indices.iter().any(|&i| i as usize >= positions.len()) {
                 return Err("source mesh index stream is malformed".into());
             }
             out.indices.extend(indices.into_iter().map(|i| i + offset));

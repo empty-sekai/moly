@@ -465,7 +465,7 @@ impl SourceGpuBinding {
     ) -> Result<BindGroupLayoutDescriptor> {
         let unfilterable = textures
             .iter()
-            .filter_map(|(name, resource)| {
+            .filter(|&(_, resource)| {
                 matches!(
                     resource,
                     SourceSampledResource::View {
@@ -473,8 +473,8 @@ impl SourceGpuBinding {
                         ..
                     }
                 )
-                .then(|| name.clone())
             })
+            .map(|(name, _)| name.clone())
             .collect();
         resource_binding_layout(abi, &unfilterable)
     }

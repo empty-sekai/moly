@@ -3708,7 +3708,7 @@ fn direct_targets(system: &Runtime) -> Vec<String> {
 /// root at the site origin. Their anchors are the camera and the identity.
 ///
 /// The weather host's installer and frame both read it; whichever sees a
-/// site first applies the move ([`EnvironmentRoot::enter`] is idempotent for
+/// site first applies the move (`EnvironmentRoot::enter` is idempotent for
 /// a site already seen).
 #[derive(Resource, Default)]
 pub struct EnvironmentRoot {

@@ -61,6 +61,7 @@
 //! - `MOLY_GATE_CHANGE=<mysekaiGateId>[/<mysekaiGateSkinId>]:<group>,...`:
 //!   the gate change, with the server's answer stated (the new gate, its
 //!   skin and the visiting unit groups are server values).
+//!
 //! Each request is made once the home site stands with its gate and its
 //! visitors placed and the client has joined, after a 2 s settle (a product
 //! choice). A reply waits for the same readiness, without the settle.

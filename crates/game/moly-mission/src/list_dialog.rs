@@ -5,7 +5,7 @@
 //! ([`MissionDialogRequest`]); every sheet in `seq` order, each with its
 //! completion mission's and its normal missions' view data
 //! (`CreateMissionAllList`); the root's `MissionList` document and the
-//! `MysekaiMissionSheetCell` document as a cell template ([`load_cell`]); the
+//! `MysekaiMissionSheetCell` document as a cell template (`load_cell`); the
 //! pointer's taps each frame.
 //!
 //! Output: the dialog slot (dialog type 340) and its runtime copy of the
@@ -17,7 +17,7 @@
 //! - The dialog is opened from the screen's list button and takes the dialog
 //!   slot for type 340 (`ScreenManager::show_dialog`); the dialog's view
 //!   reads the pushed slot the next frame and runs its setup there
-//!   ([`setup`]).
+//!   (`setup`).
 //! - The runtime copy is made with the row copies: a replaced document drops
 //!   the subtrees copied into it, so the copies are installed with it
 //!   (`_missionListView.OnCreateCell` then `CreateViewItem(list.Count)`).
@@ -565,8 +565,8 @@ pub fn show(screens: &mut ScreenManager) -> Result<DialogId, String> {
     Ok(id)
 }
 
-/// Update: the list button's request. The pushed slot is read by [`setup`]
-/// next frame, and [`place`] draws it while it is up.
+/// Update: the list button's request. The pushed slot is read by `setup`
+/// next frame, and `place` draws it while it is up.
 pub fn open(
     mut requests: MessageReader<MissionDialogRequest>,
     mut dialog: ResMut<MissionListDialog>,

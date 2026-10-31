@@ -5,7 +5,7 @@
 //! (`plugins` beside the executable) and the user's (`plugins` in the data
 //! directory: `MOLY_DATA_DIR` when it is set, else the launcher's data
 //! folder). Each subdirectory of either with a `plugin.toml` is an installed
-//! plugin. Both directories are offered to [`moly_plugin::resolve`], which
+//! plugin. Both directories are offered to [`moly_plugin::resolve()`], which
 //! refuses an id installed in both, so a plugin has one directory and no
 //! copy silently wins. The profile is `plugins/profile.toml` in the data
 //! directory; without the file it is the empty profile, which enables
@@ -35,7 +35,7 @@
 //! `null`. A refused step is never started.
 //!
 //! Control lease: the steps that drive the player through the virtual hand
-//! ([`is_hand_action`]: `player.*`, `camera.*`, `tap`, `ui.tap` and
+//! ([`is_hand_action`](crate::plugin_host::is_hand_action): `player.*`, `camera.*`, `tap`, `ui.tap` and
 //! `dialog.answer`) belong to one owner at a time. A human is above the
 //! director and a plugin is below it: while a director script runs, a plugin
 //! hand step is refused by name, and a plugin hand step is refused by name
@@ -44,7 +44,7 @@
 //! aborted). A plugin asks for its steps once per frame, so the task that
 //! asks for the hand first holds it. When human input arrives (a key press,
 //! a mouse button, a touch, a gamepad button or stick) the hand step that
-//! holds the hand is aborted, and it fails with [`HUMAN_INPUT`]: `human
+//! holds the hand is aborted, and it fails with [`HUMAN_INPUT`](crate::plugin_host::HUMAN_INPUT): `human
 //! input took control`.
 //!
 //! Store: each plugin has one JSON object at `plugins/store/<id>.json` in

@@ -216,7 +216,7 @@ impl NpcActions {
     /// The state machine's change. It refuses a change to the current state
     /// and any change while the current state is None, the unregistered sink
     /// a spawned NPC starts in (registration leaves it through
-    /// [`Self::initialize_status`]). Otherwise the old state exits, the
+    /// `Self::initialize_status`). Otherwise the old state exits, the
     /// before state is written, the new state's clock is zeroed and the new
     /// state enters. None itself has no registered state; changing into it is
     /// a named failure.
@@ -1051,8 +1051,8 @@ pub struct Registry {
 }
 
 /// 角色清单的原始文本走共享的 [`JsonAsset`]（moly-assets 的 json 装载器，
-/// 一个扩展名一个装载器），字段解析在 [`Catalog::parse`]。
-
+/// 一个扩展名一个装载器），字段解析在 `Catalog::parse`。
+///
 /// 角色清单的装载请求；解析成功后即撤。
 #[derive(Resource)]
 pub struct CharacterListHandle(Handle<JsonAsset>);
@@ -1822,7 +1822,7 @@ fn dwell_seconds(pause_seconds: f32) -> f32 {
 /// 初始/重复 corner 保持 CheckPoint，不额外驻留；无路返回 None。
 /// 高度几何只为已查询到的导航点落高，侧偏候选由单独的三维采样门准入。
 /// `corner` is also the talk data target the move completes against
-/// ([`is_completed_within`]); a replan passes the same target again.
+/// (`is_completed_within`); a replan passes the same target again.
 pub fn depart(
     unit: &CharacterUnitId,
     state: &mut LawWalkState,
@@ -1912,7 +1912,7 @@ fn is_completed_within(p: [f32; 3], t: [f32; 3], d: [f32; 3], site_y: f32, goal:
 
 /// The distance a move with this completion has left from `p` to its target
 /// `t` (`SitePosition.y` of the site is not part of the distance), or zero
-/// once [`is_completed_within`] holds: the `remainingDistance` stand-in an upper
+/// once `is_completed_within` holds: the `remainingDistance` stand-in an upper
 /// state polls its walk with.
 pub fn remaining_distance(p: [f32; 3], t: [f32; 3], site_y: f32, goal: f32) -> f32 {
     let [px, py, pz] = [p[0] - t[0], p[1] - t[1], p[2] - t[2]];
@@ -1925,7 +1925,7 @@ pub fn remaining_distance(p: [f32; 3], t: [f32; 3], site_y: f32, goal: f32) -> f
 
 /// The objective's MoveAsync already passed its source gate and generated the
 /// polyline with the source `GeneratePath`. An empty polyline fails the move
-/// (TryGeneratePath). The move completes by [`is_completed_within`] against `target`.
+/// (TryGeneratePath). The move completes by `is_completed_within` against `target`.
 pub fn depart_along(
     unit: &CharacterUnitId,
     state: &mut LawWalkState,

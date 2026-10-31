@@ -3141,7 +3141,7 @@ fn advance_emitter(
             RingBufferMode::Disabled,
             [0.0, 1.0],
         );
-        if matches!(verdict, LifetimeVerdict::Died) || !(start_lifetime > 0.0) {
+        if matches!(verdict, LifetimeVerdict::Died) || start_lifetime.is_nan() || start_lifetime <= 0.0 {
             let p = run.particles.remove(i);
             // 死亡事件在回收之前送出：子发射要在死亡那一点的世界位上发射
             // （本帧节点世界系现算，不读上一帧的绘制位）。
@@ -3804,7 +3804,7 @@ pub fn serve_rest(
 }
 
 /// Update：对话步的表情件请求消费——对话模块折好的出件/收件按表序
-/// 走本域的同一条出件/收件通道（[`show_emote`] 与收件路径），不另起
+/// 走本域的同一条出件/收件通道（`show_emote` 与收件路径），不另起
 /// 一套呈现。同 NPC 的在屏实例唯一：出件自带撤旧件，对话件与待机编排
 /// 件在同一槽上自然互斥。档案未到齐时请求弃掉（对话候选的装载期核验
 /// 已拦过缺条目，这里的弃件不是静默跳过）。

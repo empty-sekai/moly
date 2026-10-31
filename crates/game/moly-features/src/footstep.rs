@@ -11,12 +11,12 @@
 //!    controller does not, so the delivery site has no footsteps).
 //! 2. The Dash state (23) selects the run cue, any other state the walk cue.
 //! 3. On a housing site (category home or room) the fixture under the foot
-//!    (`GetGroundFixture`, see [`ground`]) plays its fixture footstep when
+//!    (`GetGroundFixture`, see `ground`) plays its fixture footstep when
 //!    there is one; otherwise, and on every other site, the ground under the
-//!    foot plays (`PlayFootGroundSe`, see [`surface`]).
+//!    foot plays (`PlayFootGroundSe`, see `surface`).
 //! 4. `IsWater(position)` is read, `EffectManager.Stop("PlayerFootEffect")`
 //!    stops the previous foot effects, and then: on water, a ray cast down
-//!    from three metres above the player (see [`raycast`]) places the water
+//!    from three metres above the player (see `raycast`) places the water
 //!    splash (type 17) at the hit height; otherwise, in the Dash state, the
 //!    dash smoke (type 14) follows the player (see [`effects`]).
 //!
@@ -450,7 +450,7 @@ fn finish_controller(
         let to_world = origin.affine() * local;
         let world_vertices = positions
             .iter()
-            .map(|p| Vec3::from(to_world.transform_point3(Vec3::from(*p))))
+            .map(|p| to_world.transform_point3(Vec3::from(*p)))
             .collect();
         let water = masters.water()?;
         let mut triangles = Vec::new();
@@ -473,13 +473,13 @@ fn finish_controller(
                         .ok_or_else(|| format!("{file}: no float3 positions"))?;
                     let world: Vec<Vec3> = positions
                         .iter()
-                        .map(|p| Vec3::from(to_world.transform_point3(Vec3::from(*p))))
+                        .map(|p| to_world.transform_point3(Vec3::from(*p)))
                         .collect();
                     let indices: Vec<usize> = match mesh.indices() {
                         Some(indices) => indices.iter().collect(),
                         None => (0..world.len()).collect(),
                     };
-                    for tri in indices.chunks_exact(3) {
+                    for tri in indices.as_chunks::<3>().0 {
                         triangles.push([world[tri[0]], world[tri[1]], world[tri[2]]]);
                     }
                 }

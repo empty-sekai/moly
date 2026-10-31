@@ -54,7 +54,7 @@
 //!   shares with the backdrop's bottom edge). The screen-UI bands (dialogue
 //!   window, joystick) are layered by z on this crate's overlay camera, and
 //!   the balloon band always stays below them (the root z has a ceiling
-//!   constant, see [`BALLOON_LAYER_CEILING`]).
+//!   constant, see `BALLOON_LAYER_CEILING`).
 //!
 //! The font stays an **open-source, locally baked atlas** (an OFL font in the
 //! repository; the product uses a commercial SDF font whose assets never
@@ -1179,14 +1179,14 @@ fn lottery_after_edit_reactors(
 
 /// Update: layout save receipt → reactor draw → staggered release one by one
 /// → after-edit pool pick → tweet shown → 5.0s hold then close (the
-/// presentation reuses [`spawn_balloon`], the same pipeline as the greeting
+/// presentation reuses `spawn_balloon`, the same pipeline as the greeting
 /// chain).
 ///
 /// The product's pass, per receipt:
 /// 1. `LotteryHighPriorityReactionTalk(updateFixtures)` first; a talk there
 ///    takes the high-priority path (unsupported: the updated-fixture list and
 ///    the condition-type-2 talk lookup are not carried here, named).
-/// 2. Otherwise [`lottery_after_edit_reactors`] on the edited site; if any
+/// 2. Otherwise `lottery_after_edit_reactors` on the edited site; if any
 ///    chosen NPC is in the tutorial wait objective (19) the pass ends with no
 ///    reaction.
 /// 3. `ExecuteAfterEditLayout`: for each chosen NPC in order, outside a
@@ -1513,7 +1513,7 @@ pub struct Placed;
 #[derive(Component)]
 pub struct LayerLogged;
 
-/// 气泡部件的层族（同一气泡内的绘制序）。层 z 值见 [`PART_Z_BG`] 一族
+/// 气泡部件的层族（同一气泡内的绘制序）。层 z 值见 `PART_Z_BG` 一族
 /// 的出处注释。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PartKind {
@@ -1831,7 +1831,7 @@ fn spawn_balloon_text(
     )
 }
 
-/// [`spawn_balloon_text`] on a given layer, for a host that draws its bubble
+/// `spawn_balloon_text` on a given layer, for a host that draws its bubble
 /// with its own views (the player view's greeting bubble).
 pub fn spawn_balloon_on(
     commands: &mut Commands,
@@ -2608,7 +2608,7 @@ const REQUEUE_DEPTH: f32 = 1.0;
 /// from its depth when the sprite is queued and keeps it until the sprite's
 /// mesh or material changes. A bubble is placed after propagation, so its
 /// parts are first queued at the spawn depth, and the stacking step
-/// ([`BALLOON_LAYER_STRIDE`]) changes when another bubble appears or goes;
+/// (`BALLOON_LAYER_STRIDE`) changes when another bubble appears or goes;
 /// without a re-queue a part keeps drawing in the order of its first depth,
 /// and a glyph can fall under the translucent background.
 pub fn requeue_moved_parts(
@@ -2676,7 +2676,7 @@ pub struct OrderProbe;
 
 /// Update: the layer-order probe (enabled when `MOLY_BALLOON_ORDER_SECS` is
 /// greater than 0 seconds): once ready it spawns a pair of probe balloons
-/// that overlap exactly on screen — the near root is [`ORDER_PROBE_NEAR`] metres straight
+/// that overlap exactly on screen — the near root is `ORDER_PROBE_NEAR` metres straight
 /// > ahead of the camera (on the view axis), the far anchor is twice that
 /// > distance along **the same view ray through the near anchor** (both
 /// > anchors project to the same screen point, the fully overlapping case

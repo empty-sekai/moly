@@ -224,8 +224,8 @@ pub fn penlight_overlay(
         material.right_penlight_active,
     ) * 0.5;
     let mut out = base;
-    for c in 0..3 {
-        out[c] += lw * material.left_penlight_color[c] + rw * material.right_penlight_color[c];
+    for (c, slot) in out.iter_mut().enumerate() {
+        *slot += lw * material.left_penlight_color[c] + rw * material.right_penlight_color[c];
     }
     out
 }

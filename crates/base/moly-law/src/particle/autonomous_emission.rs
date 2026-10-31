@@ -695,7 +695,7 @@ pub struct DistanceBirthBatch {
 impl ConstantDistanceEmission {
     fn from_params(law: &ConstantAutonomousEmission, rate: &MinMaxCurve) -> Result<Option<Self>, Refused> {
         let rate = match *rate {
-            MinMaxCurve::Constant(value) if value == 0.0 => return Ok(None),
+            MinMaxCurve::Constant(0.0) => return Ok(None),
             MinMaxCurve::Constant(value) if value.is_finite() && value > 0.0 => value,
             _ => return Err(Refused::UnsupportedConfiguration),
         };

@@ -155,7 +155,7 @@ pub(super) fn diagnostics(
             }),
         ));
     }
-    rows.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    rows.sort_unstable_by_key(|a| std::cmp::Reverse(a.0));
     let mut mesh_families: BTreeMap<String, MeshFamily> = BTreeMap::new();
     let mut mesh_bytes = 0u64;
     for (id, mesh) in meshes.iter() {

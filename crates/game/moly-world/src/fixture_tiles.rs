@@ -181,7 +181,7 @@ impl FixtureFloorTiles {
         {
             return None;
         }
-        let position = GridPosition::new(x as i32 as i8, y as i32 as i8, z as i32 as i8);
+        let position = GridPosition::new(x as i32 as i8, y as i8, z as i32 as i8);
         // Reject byte wrapping before exposing the result to the grid map.
         if x as i32 != position.x as i32 || z as i32 != position.z as i32 {
             return None;

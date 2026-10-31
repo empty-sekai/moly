@@ -9,7 +9,7 @@
 //!
 //! Master tables are JSON assets too; [`master`] loads them from the regions'
 //! master hosts and names each one it cannot give its consumer, and
-//! [`master_merge`] holds the rows of a table across the regions.
+//! `master_merge` holds the rows of a table across the regions.
 
 pub mod master;
 mod master_merge;

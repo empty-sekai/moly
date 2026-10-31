@@ -27,7 +27,7 @@
 //! A walk's mover is the host's route: `npc::depart_along_to` starts it on
 //! the objective face's navigation, and each frame the controller polls it
 //! and feeds the state. The random walk samples its targets on the objective
-//! face ([`upper_walk::pick_target`]). A walk the controller has no route to
+//! face ([`upper_walk::pick_target`](moly_law::npc_hfsm::upper_walk::pick_target)). A walk the controller has no route to
 //! start (the moves whose plan factories are not ported) keeps its enter's
 //! running flag and is settled by its mover's invalid-path branch on its first
 //! update, at the character's place. The status the walk then reports is its
@@ -39,7 +39,7 @@
 //! The route components are taken out of the character for its frame and put
 //! back after it: the host's walk writer (`npc::advance`) runs with its own
 //! single-component parameters, so the controller holds the five components
-//! in [`Navigator`] while a state's enter or poll changes them.
+//! in [`Navigator`](crate::npc_objective::controller::Navigator) while a state's enter or poll changes them.
 //!
 //! The controller drives only the units named by `MOLY_NPC_HFSM_SCOPE`; every
 //! other character stays with `npc_objective::decide`, which runs it exactly

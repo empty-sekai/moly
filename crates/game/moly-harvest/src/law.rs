@@ -591,7 +591,7 @@ pub fn fast_yaw(from: f32, to: f32, t: f32) -> f32 {
 /// material keeps `_DISABLE_DITHER` (no dither); at or below it the keyword
 /// goes off and the Bayer dither reads `_DitherAlpha`.
 pub fn dither_variant_on(value: f32) -> bool {
-    !(value > 0.999)
+    value.is_nan() || value <= 0.999
 }
 
 /// One frame of `MysekaiAreaTreeView.PlayFadeAnimation(material, duration)`.
@@ -665,7 +665,10 @@ pub fn auto_move_step(
         Vec3::ZERO
     };
     let velocity = normal * speed;
-    if !(velocity.length_squared() > 0.01) && (target - position).length() < threshold {
+    let speed_squared = velocity.length_squared();
+    if (speed_squared.is_nan() || speed_squared <= 0.01)
+        && (target - position).length() < threshold
+    {
         AutoMoveStep::Arrived
     } else {
         AutoMoveStep::Move(velocity)

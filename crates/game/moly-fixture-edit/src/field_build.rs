@@ -2,9 +2,9 @@
 //! editor's screen ([start], [FieldBuildState]).
 //!
 //! It goes through the editor's own steps with no editor session open: the
-//! owned catalog row ([`owned::catalog`]), the put search around a world
-//! point ([`super::put_search`], the spiral `PutFixture` runs around the
-//! camera look-at), the save checks ([`validation::save`]), the housing
+//! owned catalog row (`owned::catalog`), the put search around a world
+//! point (`super::put_search`, the spiral `PutFixture` runs around the
+//! camera look-at), the save checks (`validation::save`), the housing
 //! layout call, the saved copy written on its accepted reply and the layout
 //! reload. A stored copy of the fixture is taken first, as the catalog row's
 //! selection takes it.

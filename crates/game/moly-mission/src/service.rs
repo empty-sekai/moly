@@ -2,7 +2,7 @@
 //!
 //! Input: a receive a cell or the bulk button asks for (the sheet's id, the
 //! mission ids and a callback); the client's mission copy; the link and the
-//! user data reader's answers ([`Answered`]).
+//! user data reader's answers (`Answered`).
 //!
 //! Output: one request sent as `PostUserMysekaiNormalMissionRewardApi`
 //! (`Call::NormalMissionReward`, [`MysekaiMissionService`]); on its success,

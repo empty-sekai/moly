@@ -153,7 +153,7 @@ impl MeshShapeCache {
                 return Err(MeshCacheRefused::PartialTriangle);
             }
             let mut sum = 0.0f32;
-            for corners in indices.chunks_exact(3) {
+            for corners in indices.as_chunks::<3>().0 {
                 let corners = [corners[0], corners[1], corners[2]];
                 if corners.iter().any(|&i| i as usize >= positions.len()) {
                     return Err(MeshCacheRefused::IndexOutOfRange);

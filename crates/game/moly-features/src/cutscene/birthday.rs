@@ -59,7 +59,7 @@
 //! the home screen's `HideUI` are UI not drawn here; the cut-scene area
 //! check is not modelled; the birthday
 //! character is the cast's new avatar, created while the package loads and
-//! hidden until the director's first frame (see [`super::cast`]); the voice
+//! hidden until the director's first frame (see `super::cast`); the voice
 //! download is the root's stream table (the voice track plays from it).
 //!
 //! The native instrument `MOLY_BIRTHDAY_PARTY_ACTION=<seconds>[:<fixture>]`

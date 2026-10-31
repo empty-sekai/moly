@@ -148,7 +148,10 @@ impl Masters {
     /// the server's own tests extend it with the gate tables they need and
     /// seat the shared resources with a [`MasterTables::fixture`].
     pub fn fixture() -> Self {
-        let mut masters = Self::default();
+        let mut masters = Masters {
+            ready: true,
+            ..Default::default()
+        };
         masters.periods = Some(vec![
             RefreshPeriod {
                 id: 1,
@@ -183,7 +186,6 @@ impl Masters {
             items: Some(Vec::new()),
             ..convert::ConvertMasters::default()
         });
-        masters.ready = true;
         masters
     }
 

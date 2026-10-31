@@ -35,7 +35,7 @@ pub(super) fn owns_shader(shader: &str) -> bool { matches!(shader, CANVAS | BLOC
 #[derive(Resource, Default)]
 pub(super) struct FixtureSurfaceReadiness(pub bool);
 
-/// Source BlockFixtureViewManager starts at one and clamps its global to [0,1].
+/// Source BlockFixtureViewManager starts at one and clamps its global to \[0,1\].
 /// The JP client's program multiplies the final alpha by it, after the outline
 /// mix, so the edges fade with the faces.
 #[derive(Resource)]

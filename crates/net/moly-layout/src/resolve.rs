@@ -23,13 +23,13 @@
 //! 30)` around the start are searched (`SearchSpiralOnPlane`), each ring in
 //! four legs: z = cz - r for x = cx - r ..= cx + r; x = cx + r for z = cz - r
 //! + 1 ..= cz + r; z = cz + r for x = cx + r - 1 down to cx - r; x = cx - r for
-//! z = cz + r - 1 down to cz - r + 1. A candidate is taken when it is a tile of
-//! the grid (`TileDataDictionary.ContainsKey`: the box [-ceil(w/2),
-//! ceil(w/2)) x [0, h) x [-ceil(d/2), ceil(d/2)) that `SetupGridData` fills)
-//! and `CanPutFloor` holds with the fixture moved there. A fixture whose put
-//! type is neither put_target (1) nor put_either (2), or that has no master
-//! row, searches the rings at y 0. The other two search, for each radius, the
-//! rings at y from max(y0 - r, 0) up to min(h - 1, y0 + r).
+//!   z = cz + r - 1 down to cz - r + 1. A candidate is taken when it is a tile of
+//!   the grid (`TileDataDictionary.ContainsKey`: the box [-ceil(w/2),
+//!   ceil(w/2)) x [0, h) x [-ceil(d/2), ceil(d/2)) that `SetupGridData` fills)
+//!   and `CanPutFloor` holds with the fixture moved there. A fixture whose put
+//!   type is neither put_target (1) nor put_either (2), or that has no master
+//!   row, searches the rings at y 0. The other two search, for each radius, the
+//!   rings at y from max(y0 - r, 0) up to min(h - 1, y0 + r).
 //!
 //! This runs in the source's grid frame. The product frame is its X mirror
 //! (a product cell x is the source cell -x - 1); a candidate's product center

@@ -41,7 +41,7 @@
 //!
 //! A button whose target has no counterpart in this product is greyed with
 //! the target named. That is this product's adaptation, not the source: in
-//! [`MenuButton::setup`] each button carries its source rule and, next to it,
+//! `MenuButton::setup` each button carries its source rule and, next to it,
 //! the adaptation line "greyed until X exists". When X lands the adaptation
 //! line is deleted and the button follows its source rule again. Buttons
 //! whose target exists follow the source rule exactly. A tap on a greyed
@@ -69,7 +69,7 @@
 //! ## The two cells' value chains (and one correction of the field census)
 //!
 //! - **Stamina cell** (`UpdateStaminaGateView`, see
-//!   [`update_stamina_gate_view`]): `HarvestUtility.GetStaminaData(0)` reads
+//!   `update_stamina_gate_view`): `HarvestUtility.GetStaminaData(0)` reads
 //!   `UserDataManager.UserMysekaiStamina{normal,enhance,boost}` (**server user
 //!   state**; this repository keeps the client's copy of the server model) and
 //!   derives the boost stock `GetBoostStaminaStockCount`; `GetStaminaGageRate`

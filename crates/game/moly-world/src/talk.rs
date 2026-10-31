@@ -3153,7 +3153,7 @@ fn finish_talk(
         }
         if let Ok(mut entity_commands) = commands.get_entity(entity) {
             entity_commands.remove::<TalkHold>().remove::<TalkRuntime>();
-            drop(entity_commands);
+            let _ = entity_commands;
             crate::npc::leave_player_talk(commands, entity);
         }
     }
@@ -3199,7 +3199,7 @@ fn close_talk_body(
 
 /// Update：参演者的对话转身逐帧走——位置冻结，朝向按步时长插值（缓动
 /// 取补间库缺省：先快后慢的二次出线），完成帧把终点朝向回写律状态。
-/// 位移相位不动（对话转身没有动作，见 [`TalkTurn`]）。时长
+/// 位移相位不动（对话转身没有动作，见 `TalkTurn`）。时长
 /// `Approximately` 0 即当帧到位（`LookAt`）。
 pub fn progress_turns(
     time: Res<Time>,

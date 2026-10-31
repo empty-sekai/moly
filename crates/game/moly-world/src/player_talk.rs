@@ -1250,7 +1250,7 @@ fn i_field(row: &serde_json::Value, name: &str) -> i32 {
 /// Update：名册/库/表/档案全就绪后筛候选。筛法＝unit 桶的名册归属
 /// （单角色条件门的静态半边——组的成员表全在名册才可能被点到）；
 /// 数据面核验（facial 键、动作段、表情件名）对候选段全量做成 census
-/// 点名（不拒绝，见 [`Census`]）。指称名表照录全量（名 → unit 与名册
+/// 点名（不拒绝，见 `Census`）。指称名表照录全量（名 → unit 与名册
 /// 无关）。名册上没有对话成员时警告一次并逐帧重试（名册随站点变，
 /// 空是暂态不是数据断点）。
 pub fn prepare(
@@ -4045,7 +4045,7 @@ fn finish_session(
     }
     if let Ok(mut entity) = commands.get_entity(session.npc) {
         entity.remove::<TalkHold>().remove::<PlayerTalkRuntime>();
-        drop(entity);
+        let _ = entity;
         if session.default_tutorial && completed {
             let actor = session.npc;
             let rotation = session.tutorial_rotation;
@@ -4213,7 +4213,7 @@ pub fn report(session: Option<Res<PlayerTalkSession>>, ledger: Res<PlayerTalkLed
 // ---------------------------------------------------------------------------
 
 /// Update（手势链内、拾取前）：冒烟口（`MOLY_PLAYER_TALK_AUTOTAP_SECS`，
-/// 同仓拾取/采集物仪表同款；`<until>` 或 `<from>:<until>` 秒）——窗口期内每隔 [`SMOKE_TAP_INTERVAL`] 秒
+/// 同仓拾取/采集物仪表同款；`<until>` 或 `<from>:<until>` 秒）——窗口期内每隔 `SMOKE_TAP_INTERVAL` 秒
 /// 对一名**有通用对话候选**的在场 NPC 合成一次 TAP：世界位投影到屏面、
 /// 按该屏位发布手势事件，走与真实输入**同一条**链（投影 → 射线 →
 /// 圆柱测试 → NPC 沿 → 请求 → 六门 → 会话）。任一对话会话在播时不
@@ -4249,7 +4249,7 @@ pub fn smoke_autotap(
         .filter(|(_, _, unit)| candidates.units.iter().any(|(u, _)| *u == unit.0))
         .map(|(entity, transform, unit)| (entity, transform.translation, unit.0))
         .collect();
-    targets.sort_by(|a, b| a.0.cmp(&b.0));
+    targets.sort_by_key(|a| a.0);
     if targets.is_empty() {
         return; // 候选成员不在场（站点未铺完）：等下一拍
     }

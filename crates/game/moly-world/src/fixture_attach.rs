@@ -459,7 +459,7 @@ impl AttachWorlds {
     }
 
     /// 身份判定过滤器：目标位与全表挂点比 x/z 两维（引擎 Approximately
-    /// 的逐分量式，见 [`approximately`]）。命中即「决策写的点就是某条
+    /// 的逐分量式，见 `approximately`）。命中即「决策写的点就是某条
     /// 挂点的坐标」——纯位置比对，不看目标从哪条链来：动作点目标按
     /// 构造命中自己的挂点，环带落点撞上挂点坐标的同样命中。
     pub fn matching(&self, position: [f32; 3]) -> Option<&AttachWorld> {

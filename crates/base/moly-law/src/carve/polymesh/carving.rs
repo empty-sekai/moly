@@ -215,7 +215,7 @@ impl PolyMesh {
             }
         };
         let mut pieces: Vec<Option<Vec<Vec<Pv>>>> = vec![None; n];
-        for cell in 0..n {
+        for (cell, piece_slot) in pieces.iter_mut().enumerate().take(n) {
             let tri = self.tris[cell];
             let w = tri.map(world);
             let lo = [
@@ -249,7 +249,7 @@ impl PolyMesh {
                 current = next;
             }
             if changed {
-                pieces[cell] = Some(current);
+                *piece_slot = Some(current);
             }
         }
         // The carve's points on every base edge, so both cells of a shared
@@ -270,19 +270,19 @@ impl PolyMesh {
         if pieces.iter().all(Option::is_none) {
             return self.clone();
         }
-        for cell in 0..n {
+        for (cell, piece_slot) in pieces.iter_mut().enumerate().take(n) {
             let tri = self.tris[cell];
             let touches = (0..3).any(|k| on_edge.contains_key(&key(tri[k], tri[(k + 1) % 3])));
             if !touches {
                 continue;
             }
-            let mut cell_pieces = pieces[cell]
+            let mut cell_pieces = piece_slot
                 .take()
                 .unwrap_or_else(|| vec![tri.map(corner).to_vec()]);
             for piece in &mut cell_pieces {
                 self.insert_edge_points(grid, piece, tri, &on_edge);
             }
-            pieces[cell] = Some(cell_pieces);
+            *piece_slot = Some(cell_pieces);
         }
         for cell_pieces in pieces.iter_mut().flatten() {
             weld_pieces(cell_pieces);

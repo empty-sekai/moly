@@ -2,7 +2,7 @@
 //! the rank-release rows a response carried, for the callers that hold no
 //! `World` (the master parsers, the gate presenter's bundle lookup).
 //!
-//! Both are set by [`crate::userdata::apply_arrivals`] from the response's
+//! Both are set by `crate::userdata::apply_arrivals` from the response's
 //! `Sections`; before the first answer they are absent, and a reader that
 //! needs one says so.
 

@@ -24,8 +24,8 @@
 //! only goes forward and a segment is never restarted.
 //!
 //! A one-shot ([`Family::Once`]) plays the segments of a named motion once,
-//! in the order [`OnceSegment::Start`], [`OnceSegment::Loop`] and
-//! [`OnceSegment::End`], each only when the library has it, and hands back to
+//! in the order `OnceSegment::Start`, `OnceSegment::Loop` and
+//! `OnceSegment::End`, each only when the library has it, and hands back to
 //! the idle family once the last one played.
 //!
 //! The cast's character profiles (the segment families and the walking speed

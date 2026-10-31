@@ -294,8 +294,8 @@ impl SourceParticle {
 /// again soon after (a weather changed back, a fixture shown again) finds its
 /// catalogue, programs and textures loaded instead of fetching, verifying,
 /// decoding and compiling them again. The least recently released go first
-/// once the kept textures' pixels pass [`RECENT_TEXTURE_BYTES`] or the kept
-/// assets pass [`RECENT_ASSETS`].
+/// once the kept textures' pixels pass `RECENT_TEXTURE_BYTES` or the kept
+/// assets pass `RECENT_ASSETS`.
 #[derive(Resource, Default)]
 pub struct RecentParticleAssets {
     held: std::collections::VecDeque<(UntypedHandle, usize)>,

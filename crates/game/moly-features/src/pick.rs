@@ -12,6 +12,7 @@
 //! 2. the field menu content, in the screenshot-only mode: a gesture shows
 //!    the hide-UI button and the screenshot button again;
 //! 3. the talk screen, in its screenshot mode: the same for the talk;
+//!
 //! 4-6. the talk engine, from its two initializers and its debug
 //!    initializer: taps advance or skip the talk while it plays;
 //! 7. the layout editor: its own selection, in the edit mode only;
@@ -84,7 +85,7 @@ pub fn pick(
 
 /// Update (in the gesture chain, before [`pick`]): the NPC tap instrument
 /// (`MOLY_PICK_NPC_TAP_SECS`). Within the window, every
-/// [`SMOKE_TAP_INTERVAL`] seconds it projects one present NPC's world
+/// `SMOKE_TAP_INTERVAL` seconds it projects one present NPC's world
 /// position to the screen and injects a TAP end there, through the same
 /// gesture events real input uses. Targets rotate in entity order. A tap that
 /// lands on a screen button is that button's.
@@ -108,7 +109,7 @@ pub fn smoke_npc_autotap(
         .iter()
         .map(|(entity, transform, unit)| (entity, transform.translation, unit.0))
         .collect();
-    targets.sort_by(|a, b| a.0.cmp(&b.0));
+    targets.sort_by_key(|a| a.0);
     if targets.is_empty() {
         return;
     }

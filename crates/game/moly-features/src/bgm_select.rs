@@ -35,7 +35,7 @@
 //!   same call starts (`SafeCreate` cancels the running token), so the
 //!   highlighted record keeps playing.
 //! - `OnWillExit`: `ExecuteMysekaiMusicPlaySetApiIfNeeded` (set or eject, see
-//!   [`model::Presenter::exit_request`]); the exit does not wait for it.
+//!   `model::Presenter::exit_request`); the exit does not wait for it.
 //! - `OnExited` -> `Dispose`: the chosen record plays (`PlaySettingBgm`), else
 //!   the site's default (`PlayDefaultBGM`); `SetFadeTime(1.0)`.
 //!
@@ -45,16 +45,16 @@
 //! ## The player view (`MysekaiBGMPlayerView`)
 //!
 //! - `Setup` loads the record's jacket (`LoadJacket`): the package
-//!   `MusicUtility.GetJacketResourceInfo` names (see [`jacket`]) and the
+//!   `MusicUtility.GetJacketResourceInfo` names (see `jacket`) and the
 //!   blurred background (`UIPartsBlurMusicJacket.LoadJacketAsync`). Until it
 //!   arrives the jacket's image and the blurred background are off, as they
 //!   are with no jacket at all; `SetupEmpty` clears the text and the jacket.
 //! - `MusicInfoContent.Setup` writes the three texts and shows each marquee
 //!   with its text; a marquee scrolls a text wider than its mask.
 //! - `MysekaiBGMRecordPlayer` rolls the record in and turns it while it
-//!   plays, and its `play` event starts the music ([`record`]).
+//!   plays, and its `play` event starts the music (`record`).
 //! - `SetupImages` binds the player view's package images at boot and the
-//!   music-play fixture type's icon ([`fixture`]).
+//!   music-play fixture type's icon (`fixture`).
 //! - The cells' jacket thumbnails (`UIPartsThumbnail`) are the same records'
 //!   jackets, fitted to the thumbnail's rect: the loaded image's size is not
 //!   keyed by the shared layout, so the aspect fit `UIPartsThumbnail.OnLoadSuccess`
@@ -69,7 +69,7 @@
 //!   interactivity are not wired: the list stays on tab ALL, sort Default and
 //!   list mode. The tab cell prefab is not in this UI root, so the strip shows
 //!   its frame and arrows only. The filter button is shown and takes taps;
-//!   [`dialogs`] loads `BGMFilterDialog` and the change-vocal dialog
+//!   `dialogs` loads `BGMFilterDialog` and the change-vocal dialog
 //!   (`MysekaiBGMSelectChangeVocalDialog`).
 //! - The filter's character checkboxes and its two music toggles are the
 //!   prefab's own controls; OK saves `BGMFilterData` into the local settings

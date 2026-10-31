@@ -2838,7 +2838,7 @@ pub fn click(
 /// Update, verification only: with `MOLY_SITEMAP_AUTOCLICK_SECS` and
 /// `MOLY_SITEMAP_AUTOCLICK_SITE` set, after that many seconds the hook opens
 /// the map (a `PushUIScreen`, as the menu button does) and then taps the
-/// site's icon at its position through [`tap`], the path a real tap takes.
+/// site's icon at its position through `tap`, the path a real tap takes.
 /// It retries each frame until a branch takes the tap (the map not yet open
 /// or still in its start animation, the icon not yet shown, or an open
 /// animation running).
@@ -3021,10 +3021,12 @@ pub fn tick_entries(
 ) {
     // Read every hook of the frame (a short-circuit would leave the rest for
     // the next frame).
-    let opened = hooks.read().fold(false, |opened, e| {
-        opened
-            || (e.screen == MenuScreenType::MysekaiSiteMap && e.hook == ScreenHook::OnInitComponent)
-    });
+    // Count rather than `any`: every hook message is read this frame.
+    let opened = hooks
+        .read()
+        .filter(|e| e.screen == MenuScreenType::MysekaiSiteMap && e.hook == ScreenHook::OnInitComponent)
+        .count()
+        > 0;
     // `SetupAsync` returned before `SiteMapInAnimation` (no master row for
     // the phenomenon of the day; [`setup_phenomena`] ran first and said so).
     let opened = opened && !setup.as_deref().is_some_and(|setup| setup.aborted);
@@ -3435,10 +3437,12 @@ pub fn setup_phenomena(
     mut spheres: Query<&mut Sprite, With<SphereImage>>,
     mut buttons: Query<(&mut sitemap_tap::WeatherButton, &mut UiPrefabView)>,
 ) {
-    let opened = hooks.read().fold(false, |opened, e| {
-        opened
-            || (e.screen == MenuScreenType::MysekaiSiteMap && e.hook == ScreenHook::OnInitComponent)
-    });
+    // Count rather than `any`: every hook message is read this frame.
+    let opened = hooks
+        .read()
+        .filter(|e| e.screen == MenuScreenType::MysekaiSiteMap && e.hook == ScreenHook::OnInitComponent)
+        .count()
+        > 0;
     if !opened {
         return;
     }

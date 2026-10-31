@@ -888,7 +888,7 @@ fn push_once(list: &mut Vec<&'static str>, section: &'static str) {
 }
 
 /// `PutUserMysekaiBirthdayPartyDeliveryApi`: the reply, with its
-// ---------------------------------------------------------------------------
+///
 // Panel edits and schema
 // ---------------------------------------------------------------------------
 

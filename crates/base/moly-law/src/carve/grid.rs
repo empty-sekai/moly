@@ -1288,8 +1288,8 @@ pub(crate) fn mark_collider_spans(
     // the grid; otherwise the plain scan is cheaper and equally correct.
     let columns_with_spans = lengths.iter().filter(|len| **len > 0).count();
     if site_max - site_min <= AGENT_CLIMB && columns_with_spans.saturating_mul(5) < cells {
-        for column in 0..cells {
-            if lengths[column] == 0 {
+        for (column, &length) in lengths.iter().enumerate().take(cells) {
+            if length == 0 {
                 continue;
             }
             let (cx, cz) = (column % grid.cols, column / grid.cols);
@@ -1391,7 +1391,7 @@ pub(crate) fn erode(grid: &mut Grid, radius_cells: u32, extra_edges: &[u32]) -> 
         let index = cz as usize * cols + cx as usize;
         let mut best = dist[index];
         for (sx, sz, step) in sources {
-            let candidate = read(dist, sx, sz).saturating_add(step).min(255);
+            let candidate = read(dist, sx, sz).saturating_add(step);
             if candidate < best {
                 best = candidate;
             }

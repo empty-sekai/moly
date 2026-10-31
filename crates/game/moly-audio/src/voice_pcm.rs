@@ -106,7 +106,7 @@ impl Iterator for MeteredVoiceDecoder {
                 .expect("the voice Vorbis decoder must expose its buffer length");
             self.channels = usize::from(self.inner.channels().get());
             assert!(
-                count != 0 && self.channels != 0 && count % self.channels == 0,
+                count != 0 && self.channels != 0 && count.is_multiple_of(self.channels),
                 "the voice Vorbis buffer must contain complete interleaved frames"
             );
             self.packet_remaining = count;

@@ -557,7 +557,7 @@ pub fn talk_player_dither(
         let (bx, bz) = (camera.x - other.x, camera.z - other.z);
         let denominator = ((az * az + (ax * ax + 0.0)) * (bz * bz + (bx * bx + 0.0))).sqrt();
         let mut angle = 0.0f32;
-        if !(denominator < ANGLE_EPSILON) {
+        if denominator.is_nan() || denominator >= ANGLE_EPSILON {
             let cosine = (az * bz + (ax * bx + 0.0)) / denominator;
             let clamped = if cosine >= -1.0 {
                 cosine.min(1.0)
@@ -623,6 +623,7 @@ fn is_talk_state(state: crate::camera::CameraStateType) -> bool {
 ///   frame [`talk_player_dither`] on the targets it frames (the talking
 ///   NPCs' hips, bound fixtures, then the player's view) and the camera's
 ///   position; leaving writes 1.
+///
 /// The screenshot capture's writes have no counterpart (no photo mode).
 pub fn player_dither(
     time: Res<Time>,

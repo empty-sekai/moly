@@ -602,7 +602,7 @@ pub enum RewardPayload {
     },
     /// `HonorRewardSubWindowDialog`, `ChainSubWindowDialog(message)` + `Setup(resource)`: the honor
     /// and its level (the message key follows from the honor's rarity, read
-    /// here from the root's honor image index: see [`honor_message_key`]).
+    /// here from the root's honor image index: see `honor_message_key`).
     Honor { honor_id: i32, level: i32 },
     /// `MysekaiRefreshBirthdayPlantSubWindowDialog`, `Setup(party)`: the birthday party.
     Refresh { party_id: i32 },

@@ -142,7 +142,6 @@ pub(super) fn save(
 /// asks the player about refuses the step by name instead: a step that
 /// already stored the fixtures it was asked to store cannot wait on a
 /// question.
-
 pub(super) fn check_step_save(
     rows: &[EditableFixture],
     floor: Option<FloorGridLayout>,
@@ -234,7 +233,7 @@ fn check_save(
                     .filter(|(row, _)| row.uid != item.uid && row.layout == layout_type::FLOOR)
                     .any(|(_, (a, b))| {
                         -i16::from(bound.max.x) - 1 <= i16::from(b.x)
-                            && -i16::from(bound.min.x) - 1 >= i16::from(a.x)
+                            && -i16::from(bound.min.x) > i16::from(a.x)
                             && bound.min.z <= b.z
                             && bound.max.z >= a.z
                     })
