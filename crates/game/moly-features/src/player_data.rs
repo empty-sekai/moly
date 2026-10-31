@@ -484,8 +484,8 @@ impl Drop for PlayerDataImport {
 
 fn require_clean_editor(world: &World) -> Result<(), String> {
     if world
-        .get_resource::<crate::fixture_edit::EditSession>()
-        .is_some_and(crate::fixture_edit::has_unsaved_layout)
+        .get_resource::<crate::field_modes::EditSessionActive>()
+        .is_some_and(|editor| editor.unsaved_layout)
     {
         Err(
             "Save or discard your furniture edits before importing or restoring player data."

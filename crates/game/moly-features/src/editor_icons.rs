@@ -1,4 +1,6 @@
-//! Original thumbnail assets and Sprite metrics, loaded by the ordinary asset source.
+//! The fixture and environment thumbnails that the editor, the inventory
+//! and the craft screens show, with their Sprite metrics, loaded by the
+//! ordinary asset source.
 
 use bevy::{asset::LoadState, prelude::*};
 use moly_assets::json::JsonAsset;
@@ -54,7 +56,6 @@ pub fn load(
     stage: Option<Res<crate::browser_stage::BrowserStage>>,
 ) {
     commands.init_resource::<EditorIcons>();
-    commands.init_resource::<super::EditorUiState>();
     if stage.is_some() { return; }
     commands.insert_resource(EditorAssetRequests {
         thumbnails: server.load("moly://fixture-thumbnails/fixture-thumbnails.json"),

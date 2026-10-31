@@ -10,8 +10,8 @@
 //! request's `mysekaiFixtureSurfaceAppearances` still needs the surface editor.
 //! `mysekaiPhenomenaId` is sent with the saved home environment.
 //!
-//! The request is one `Call::HousingLayout` on the server link (see
-//! [`crate::fixture_edit`]).
+//! The request is one `Call::HousingLayout` on the server link; the fixture
+//! editor sends it when a layout is saved.
 
 pub use moly_protocol::api::{
     HousingLayoutCorner, HousingLayoutFixture, UserMysekaiHousingEditLayoutRequest,

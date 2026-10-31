@@ -189,6 +189,7 @@ pub mod menu_dialog;
 pub mod menu_shell;
 pub mod collect_notice;
 pub mod companion_cues;
+pub mod editor_icons;
 pub mod effect_show;
 pub mod mysekai_rank;
 pub mod option_dialog;

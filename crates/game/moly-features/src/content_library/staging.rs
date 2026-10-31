@@ -384,7 +384,7 @@ fn preview_rows(
 
 fn plan_current(world: &mut World, choice: &PlaybackChoice) -> Result<Vec<ActorPose>, String> {
     if world
-        .get_resource::<crate::fixture_edit::EditSessionActive>()
+        .get_resource::<crate::field_modes::EditSessionActive>()
         .is_some_and(|editor| editor.is_active())
     {
         return Err("请先退出家具布局编辑，再体验内容".into());
@@ -627,7 +627,7 @@ fn independent_generation_ready(
 
 fn start_independent(world: &mut World, choice: &PlaybackChoice) -> Result<(), String> {
     if world
-        .get_resource::<crate::fixture_edit::EditSessionActive>()
+        .get_resource::<crate::field_modes::EditSessionActive>()
         .is_some_and(|editor| editor.is_active())
     {
         return Err("请先退出家具布局编辑，再开始独立体验".into());

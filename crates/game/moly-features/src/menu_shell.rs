@@ -965,7 +965,6 @@ pub fn parse(
         .chain(crate::info::WORDINGS)
         .chain(crate::delivery::screen::WORDINGS.iter())
         .chain(crate::inventory::WORDINGS)
-        .chain(crate::fixture_edit::WORDINGS)
         .chain(crate::stamina_recover_dialog::WORDINGS)
         .chain(crate::harvest::bulk::WORDINGS)
     {
@@ -976,9 +975,18 @@ pub fn parse(
     for texts in [
         crate::info::FIXED_TEXTS, crate::menu_dialog::FIXED_TEXTS,
         crate::get_resource::FIXED_TEXTS, crate::option_dialog::FIXED_TEXTS,
-        crate::fixture_edit_ui::FIXED_TEXTS, crate::delivery::screen::FIXED_TEXTS,
+        crate::delivery::screen::FIXED_TEXTS,
     ] {
         for text in texts { chars.extend(text.chars()); }
+    }
+    // The wordings and fixed texts that installed screens registered.
+    for wording in sources.as_deref().into_iter().flat_map(crate::ui_charsets::ShellTextSources::wording_keys) {
+        if let Some(text) = layouts.wordings.get(wording) {
+            chars.extend(text.chars());
+        }
+    }
+    for text in sources.as_deref().into_iter().flat_map(crate::ui_charsets::ShellTextSources::fixed_texts) {
+        chars.extend(text.chars());
     }
     chars.sort_unstable();
     chars.dedup();
@@ -1304,7 +1312,7 @@ pub fn click(
     mut ui: ResMut<ShellUiState>,
     mut dialog: ResMut<ShellDialogState>,
     mut layer_commands: MessageWriter<LayerCommand>,
-    requests: (MessageWriter<CaptureFrame>, MessageWriter<crate::fixture_edit::EditCommand>),
+    requests: (MessageWriter<CaptureFrame>, MessageWriter<crate::ui_inputs::EditCommand>),
     // Paired in one parameter: this system is at the parameter-count limit.
     (mut stack, entry): (ResMut<UiLayerStack>, Option<Res<crate::entry::EntrySequence>>),
     active: Option<Res<SiteActive>>,
@@ -1402,7 +1410,7 @@ pub fn click(
             layouts.queue_button_se(&mut sounds, view.key, root.bindings.get(action.field()));
             match action {
                 ShellAction::SiteMap => { layer_commands.write(LayerCommand::Push(LayerId::MysekaiSiteMap)); }
-                ShellAction::FixtureEdit => { edit_commands.write(crate::fixture_edit::EditCommand::Enter); }
+                ShellAction::FixtureEdit => { edit_commands.write(crate::ui_inputs::EditCommand::Enter); }
                 // `EnableMenuButton(false)` on the closing party's screens.
                 ShellAction::Menu if party == Some(PartyUi::AfterClose) => {
                     info!("[menu-shell] the menu button is disabled while the birthday party closes: nothing");

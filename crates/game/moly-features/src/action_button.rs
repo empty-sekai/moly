@@ -56,7 +56,7 @@ use crate::balloon::BALLOON_LAYER;
 use crate::canvas::RootCanvas;
 use crate::fixture::{FixturePlacement, FixtureRoot, FixtureSource};
 use crate::fixture_activity_state::{FixtureActivityIdentity, FixtureTarget};
-use crate::fixture_edit::LayoutSaved;
+use crate::field_modes::LayoutSaved;
 use crate::gesture::{GestureEvent, GestureKind, GestureState};
 use crate::joystick::{JoystickState, HANDLE_SIZE};
 use crate::npc::{CharacterUnitId, WalkState};

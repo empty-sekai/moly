@@ -21,9 +21,25 @@ use bevy::prelude::*;
 
 use crate::audio::{SeClass, SeRequest, SeRequests};
 use crate::companion::BuildCue;
-use crate::fixture::FixturePlacements;
+use crate::fixture::{EditableFixture, FixturePlacements};
 use crate::harvest::damage::push_se;
 use crate::harvest::{EffectHook, HarvestEffectHooks};
+
+/// The fixture editor's put cue (`FixtureController.ShowPutEffect`): the
+/// editor registers it when it installs, and a finished build plays it in
+/// the frame its command is applied. `source` names the caller in logs.
+#[derive(Resource, Clone, Copy)]
+pub struct PutEffect(fn(&mut World, &EditableFixture, &'static str));
+
+impl PutEffect {
+    pub fn new(show: fn(&mut World, &EditableFixture, &'static str)) -> Self {
+        Self(show)
+    }
+
+    pub fn show(self, world: &mut World, item: &EditableFixture, source: &'static str) {
+        (self.0)(world, item, source)
+    }
+}
 
 /// The hit sound of a stone's pickaxe blow (`MysekaiAreaStoneView`).
 const HIT_SE: &str = "se_pickaxe1";
@@ -71,7 +87,10 @@ fn play_cues(
                 // instance stands; the decide's sound follows at once.
                 match placements.as_ref().and_then(|placements| placed(placements, uid)) {
                     Some(item) => commands.queue(move |world: &mut World| {
-                        crate::fixture_edit::show_put_effect(world, &item, "companion-build");
+                        match world.get_resource::<PutEffect>().copied() {
+                            Some(effect) => effect.show(world, &item, "companion-build"),
+                            None => info!("[companion-cue] fixture {}: no put effect is registered", item.uid),
+                        }
                     }),
                     None => info!(
                         "[companion-cue] unit {unit}: fixture {uid} is built but no placement row holds it; no put cue"

@@ -2405,6 +2405,11 @@ pub struct FixtureEditPlugin;
 
 impl Plugin for FixtureEditPlugin {
     fn build(&self, app: &mut App) {
+        app.insert_resource(crate::companion_cues::PutEffect::new(put_effect::show));
+        app.init_resource::<crate::ui_charsets::ShellTextSources>();
+        app.world_mut()
+            .resource_mut::<crate::ui_charsets::ShellTextSources>()
+            .register_texts("fixture_edit", WORDINGS, crate::fixture_edit_ui::FIXED_TEXTS);
         edit_grid::install(app);
         crate::fixture_put_limit::install(app);
         road::install(app);

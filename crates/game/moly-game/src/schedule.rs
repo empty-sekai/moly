@@ -350,11 +350,12 @@ pub fn install(app: &mut App) {
                 .after(TransformSystems::Propagate)
                 .after(camera::follow_avatar),
         );
-    app.add_systems(Startup, crate::fixture_edit_ui::load)
+    app.init_resource::<crate::fixture_edit_ui::EditorUiState>()
+        .add_systems(Startup, moly_features::editor_icons::load)
         .add_systems(
             Update,
             (
-                crate::fixture_edit_ui::parse,
+                moly_features::editor_icons::parse,
                 crate::fixture_edit_ui::spawn_when_ready,
             )
                 .chain()

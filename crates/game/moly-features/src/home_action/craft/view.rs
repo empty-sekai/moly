@@ -82,7 +82,7 @@ use std::collections::BTreeSet;
 use super::{CRAFT_LIST_TYPES, CraftListType, CraftScreen, SE_TAB_CLICK, Stage, ViewRequest};
 use crate::action_button::ActionTapConsumed;
 use crate::audio::{SeClass, SeRequest};
-use crate::fixture_edit_ui::EditorIcons;
+use crate::editor_icons::EditorIcons;
 use crate::gesture::{GestureEvent, GestureKind, GestureState};
 use crate::home_action::HomeActionPresentation;
 use crate::item_icon::ItemIcons;

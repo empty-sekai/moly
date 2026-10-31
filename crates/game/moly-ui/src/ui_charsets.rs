@@ -29,9 +29,14 @@ pub struct BgmSelectCharset {
 /// installs and fills it once its texts are read; the shell builds its set
 /// only when every declared source is filled, so no glyph is missing from the
 /// first bake. A source that is never declared adds nothing.
+///
+/// A screen whose texts are fixed registers them instead: its wording keys
+/// (the shell takes each key's wording on the UI root; a key the root lacks
+/// adds nothing) and its fixed texts.
 #[derive(Resource, Default)]
 pub struct ShellTextSources {
     sources: std::collections::BTreeMap<&'static str, Option<Vec<char>>>,
+    texts: std::collections::BTreeMap<&'static str, (&'static [&'static str], &'static [&'static str])>,
 }
 
 impl ShellTextSources {
@@ -49,6 +54,27 @@ impl ShellTextSources {
     /// Whether `name` has been filled.
     pub fn is_filled(&self, name: &str) -> bool {
         self.sources.get(name).is_some_and(Option::is_some)
+    }
+
+    /// Registers `name`'s wording keys and fixed texts. Registering a name
+    /// again replaces what it registered.
+    pub fn register_texts(
+        &mut self,
+        name: &'static str,
+        wordings: &'static [&'static str],
+        fixed: &'static [&'static str],
+    ) {
+        self.texts.insert(name, (wordings, fixed));
+    }
+
+    /// Every registered wording key.
+    pub fn wording_keys(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.texts.values().flat_map(|(wordings, _)| wordings.iter().copied())
+    }
+
+    /// Every registered fixed text.
+    pub fn fixed_texts(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.texts.values().flat_map(|(_, fixed)| fixed.iter().copied())
     }
 
     /// Every source's characters, or `None` while a declared source is

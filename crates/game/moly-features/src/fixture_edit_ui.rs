@@ -5,7 +5,6 @@
 
 mod auxiliary;
 mod compose;
-mod icons;
 
 use crate::{
     action_button::ActionTapConsumed,
@@ -24,7 +23,7 @@ use bevy::{
     prelude::*,
     window::PrimaryWindow,
 };
-pub use icons::{EditorIcons, load, parse};
+pub use crate::editor_icons::EditorIcons;
 
 /// Included with every pristine template before the existing glyph-atlas bake:
 /// the cells' counts (`UIPartsThumbnail.SetQuantity`, format `×{0}`).

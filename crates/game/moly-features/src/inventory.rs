@@ -152,7 +152,7 @@ use moly_protocol::Call;
 use serde_json::Value;
 
 use crate::action_button::ActionTapConsumed;
-use crate::fixture_edit_ui::EditorIcons;
+use crate::editor_icons::EditorIcons;
 use crate::gesture::{GestureEvent, GestureKind, GestureState};
 use crate::item_icon::ItemIcons;
 use crate::sitemap::SITEMAP_LAYER;

@@ -774,7 +774,7 @@ pub fn apply_static(
     layouts: &UiLayouts,
     bindings: &Bindings,
     masters: &Masters,
-    icons: &crate::fixture_edit_ui::EditorIcons,
+    icons: &crate::editor_icons::EditorIcons,
     refused: &mut Vec<IconLoad>,
 ) {
     for path in &bindings.hidden {
