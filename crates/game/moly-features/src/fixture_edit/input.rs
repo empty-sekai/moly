@@ -83,7 +83,6 @@ pub fn read_keyboard(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn read_pointer(
     session: Res<EditSession>,
     buttons: Res<ButtonInput<MouseButton>>,

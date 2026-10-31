@@ -2418,7 +2418,6 @@ pub fn report_anchor(
 /// image asset whose path lies in the family's directories (a hidden site's
 /// assets stay uploaded; hiding only stops drawing). A family whose site was
 /// never shown has not requested its sidecar-listed textures yet.
-#[allow(clippy::too_many_arguments)]
 fn report_residency(
     epoch: Option<Res<GroundEpoch>>,
     mut last: Local<u64>,

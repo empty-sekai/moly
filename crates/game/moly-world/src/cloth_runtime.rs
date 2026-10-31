@@ -402,7 +402,6 @@ fn parse_rig(raw: &str) -> Result<ParsedRig, String> {
 /// 任何数据面缺口响亮失败——装载面按 schema 的拒绝语义走，缺键即
 /// 停，不造默认值。数据面交给共用规划器（[`ClothWeave::plan`]），绑定
 /// 姿态读装配时插在节点上的 [`CharacterRestTransform`]。
-#[allow(clippy::type_complexity)]
 pub fn plan_when_wired(
     mut commands: Commands,
     server: Res<AssetServer>,
@@ -548,7 +547,6 @@ impl ClothWeave<'_, '_> {
     /// 着贴合变换，不属于档案的文件空间）。
     /// 数据缺口一律响亮失败：链骨与碰撞骨按名绑定，同名多实体时按档案存的
     /// 绑定姿态世界位消歧（见 [`WORLD_MATCH_TOL`]）。
-    #[allow(clippy::too_many_arguments)]
     fn plan(
         &self,
         unit: u32,

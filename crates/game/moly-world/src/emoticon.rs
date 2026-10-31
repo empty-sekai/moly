@@ -2671,7 +2671,6 @@ fn particle_yaw_rad(anchor_pos: Vec3, anchor_quat: Quat, cam_pos: Vec3) -> f32 {
 /// 旧的；挂点骨解析；发射器运行时只给仿真与子发射驱动两类门；绘制位按
 /// 条目序建（sprite 槽 + 仿真发射器）；初拍 `applyClip(phase, 0)`；出场
 /// 日志带锚点世界位与 NDC 投影（可从相机读数复算）。
-#[allow(clippy::too_many_arguments)]
 fn show_emote(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -3063,7 +3062,6 @@ fn emit_burst_zero(
 /// 钳制 → 有效速度合成 → 积分 → 世界位 → 尺寸/截断/颜色/自旋」
 /// 的次序推进（片表格位不在这里：绘制时按粒子当时的寿命百分比取）。年寿与发射钟走仿真速度，重力/积分/自旋走原始 dt——
 /// 演示件就是这么分的。
-#[allow(clippy::too_many_arguments)]
 fn advance_emitter(
     run: &mut EmitterRun,
     params: &SimParams,
@@ -3620,7 +3618,6 @@ fn build_and_write(
 /// 次序：显式展示轮播 → 存活实例推进（挂点帧 → 顶旋转 →
 /// 仿真与死亡路由 → 相位机）→ B 拍世界仿形与顶点流写入。相机缺席时
 /// 粒子位的顶点流退化为空（billboard 基不存在），sprite 位照画。
-#[allow(clippy::too_many_arguments)]
 pub fn advance(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -3742,7 +3739,6 @@ pub fn advance(
 /// Rest commands enter the same prepared renderer as dialogue commands. Hide
 /// requests start the existing end/closing phase; they do not erase pixels
 /// synchronously. Cold asynchronous view creation remains an asset-host concern.
-#[allow(clippy::type_complexity)]
 pub fn serve_rest(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -3810,7 +3806,6 @@ pub fn serve_rest(
 /// 一套呈现。同 NPC 的在屏实例唯一：出件自带撤旧件，对话件与待机编排
 /// 件在同一槽上自然互斥。档案未到齐时请求弃掉（对话候选的装载期核验
 /// 已拦过缺条目，这里的弃件不是静默跳过）。
-#[allow(clippy::type_complexity)]
 pub fn serve_talk(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,

@@ -2561,7 +2561,6 @@ pub struct SequenceWorkAreas(pub HashMap<(String, String, u16), ShuffleWork>);
 /// Update：区域环境音——每次环境提交按「站点 × 现象」选行，平铺 2D，
 /// 先停后放。cue 按它的结构放（plain 或序列类型 0-4，见 [`cue`]），音量
 /// 是 SE 播放器 × cue 的类别 × cue 的音量命令。
-#[allow(clippy::too_many_arguments)]
 pub fn advance_ambient(
     mut commands: Commands,
     server: Res<AssetServer>,
@@ -3485,7 +3484,6 @@ pub struct SeChannel {
 /// decoded, is reported once and nothing else is played in its place. The
 /// volume of each track is the SE player times the cue's categories and
 /// volume commands.
-#[allow(clippy::too_many_arguments)]
 pub fn advance_se(
     mut commands: Commands,
     server: Res<AssetServer>,

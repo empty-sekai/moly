@@ -935,7 +935,6 @@ fn tool_thumbnail(
 }
 
 /// Draws the screen while 615 is the current screen.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn place(
     windows: Query<&Window, With<PrimaryWindow>>,
     stack: Res<UiLayerStack>,
@@ -1452,7 +1451,6 @@ fn hit(view: &UiPrefabView, layouts: &UiLayouts, path: &str, point: Vec2, canvas
 
 /// Taps while the screen is open (after the common dialogs, which take them
 /// first while shown).
-#[allow(clippy::too_many_arguments)]
 pub fn click(
     mut gestures: MessageReader<GestureEvent>,
     mut wheel: MessageReader<MouseWheel>,

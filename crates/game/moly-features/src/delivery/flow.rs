@@ -747,7 +747,6 @@ fn on_request(
 }
 
 /// `ExecuteDelivery` up to the AutoMove of `PrePlayerHarvestMotion`.
-#[allow(clippy::too_many_arguments)]
 fn execute_delivery(
     world: &mut FlowWorld,
     flow: &mut DeliveryFlow,
@@ -1027,7 +1026,6 @@ fn step_auto_move(
 
 /// The rest of `PrePlayerHarvestMotion` and `ExecuteDeliveryPreAction`,
 /// the frame after the AutoMove state ended.
-#[allow(clippy::too_many_arguments)]
 fn finish_pre_action(
     world: &mut FlowWorld,
     flow: &mut DeliveryFlow,

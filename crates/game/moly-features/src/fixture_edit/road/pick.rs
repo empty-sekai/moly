@@ -242,7 +242,6 @@ fn touch_box(
     (far >= 0. && near.is_finite()).then_some(near)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn input(
     mut gestures: MessageReader<GestureEvent>,
     session: Res<EditSession>,

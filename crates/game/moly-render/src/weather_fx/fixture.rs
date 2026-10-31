@@ -801,7 +801,6 @@ pub fn census_names_no_body(by_path: &HashMap<String, &Value>) -> Result<(), Str
 /// judgement, then the host's own gates. `Err` names the reason; on the
 /// control path every refusal carries the `<node>: source particle control
 /// rejected` prefix its callers skip single emitters by.
-#[allow(clippy::too_many_arguments)]
 fn admit(
     package: &str,
     particle: &Value,
@@ -1209,7 +1208,6 @@ mod tests {
     /// owner's install decision (the installer's route and emitter-state test
     /// on the plan's geometry evidence, and its refusal of what the legacy
     /// step cannot run); no seed is drawn.
-    #[allow(clippy::too_many_arguments)]
     fn census_admit(package: &str, particle: &Value, by_path: &HashMap<String, &Value>, nodes: &[Value],
         owners: &SubEmitterGraph<'_>, server: &AssetServer, path: Path, stepping: Stepping) -> Result<String, String> {
         let plan = admit(package, particle, by_path, nodes, owners, server, path, stepping)?;
@@ -1457,7 +1455,6 @@ fn prepare_geometry(
     Ok(true)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn spawn_when_ready(
     mut commands: Commands,
     mut requests: Query<(Entity, &mut Request)>,

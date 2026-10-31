@@ -373,7 +373,6 @@ struct Drag {
     from: Option<(f32, f32)>,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn input(
     mut panel: ResMut<ControlPanel>,
     mut keyboard: MessageReader<KeyboardInput>,
@@ -549,7 +548,6 @@ fn poll(mut panel: ResMut<ControlPanel>, time: Res<Time<Real>>) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn refresh(
     mut c: Commands,
     mut panel: ResMut<ControlPanel>,

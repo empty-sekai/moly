@@ -257,7 +257,6 @@ pub fn spawn_when_ready(
 }
 
 /// The calls, then one tween step of both channels.
-#[allow(clippy::too_many_arguments)]
 pub fn advance(
     mut calls: MessageReader<SiteEnvironmentInfo>,
     time: Res<Time>,

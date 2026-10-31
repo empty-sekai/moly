@@ -417,7 +417,6 @@ impl DetailPanel {
 
     /// One frame of the panel: `SetupView`'s bindings, in its order. `name`
     /// is `GetItemName` of the item the panel shows.
-    #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
         view: &mut UiPrefabView,

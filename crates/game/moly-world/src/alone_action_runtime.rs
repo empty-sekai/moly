@@ -657,7 +657,6 @@ const ATTACH: crate::hold::HoldSite = crate::hold::HoldSite {
 /// Update：两份表到齐 + 装配完成（有驱动与 toon 材质）的成员逐名挂
 /// 运行时。挂上即核数据面：池里用到的 facial 键与动作段必须全部在
 /// 表/库里——核不过响亮失败（事件分发时才查就是静默丢步）。
-#[allow(clippy::type_complexity)]
 pub fn attach(
     mut commands: Commands,
     time: Res<Time>,
@@ -881,7 +880,6 @@ const STEP: crate::hold::HoldSite = crate::hold::HoldSite {
 
 /// Execute exactly one script invocation for the current Rest epoch. Other
 /// activity owners keep their existing animation and presentation channels.
-#[allow(clippy::type_complexity)]
 pub fn advance(
     clock: Res<crate::npc_clock::NpcClock>,
     time: Res<Time>,

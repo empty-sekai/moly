@@ -237,7 +237,6 @@ pub(crate) enum Created {
     Refused(String),
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn create(
     view: &AvatarItemView,
     hand: Hand,
@@ -299,7 +298,6 @@ pub(crate) fn create(
 }
 
 /// Update: apply the item calls; create a waiting item once it can be.
-#[allow(clippy::too_many_arguments)]
 pub fn apply(
     mut commands: Commands,
     time: Res<Time>,

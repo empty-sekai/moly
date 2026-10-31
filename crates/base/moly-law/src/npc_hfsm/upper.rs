@@ -253,7 +253,6 @@ impl MoveToFixtureUpper {
     ///
     /// The mover walks to the action point, or to the fixture's position when
     /// the state has no action point.
-    #[allow(clippy::too_many_arguments)]
     pub fn enter(
         target_fixture: Option<u32>,
         action_point: Option<[f32; 3]>,

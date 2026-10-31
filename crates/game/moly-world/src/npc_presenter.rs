@@ -81,7 +81,6 @@ const GREETING: crate::hold::HoldSite = crate::hold::HoldSite {
 };
 
 /// Presenter call 10, per character in the avatar list order.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn try_greeting(
     mut commands: Commands,
     (frame, time): (Res<FrameCount>, Res<Time>),

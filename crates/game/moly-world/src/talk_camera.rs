@@ -348,7 +348,6 @@ impl TalkSceneContext<'_, '_> {
 /// 会话在场而无对话相机 → 尝试入场（条件不足的帧跳过留名，下一帧再
 /// 试——fail-closed，相机留常态）；会话退场 → 起还原；还原中会话又
 /// 起 → 杀在途缓动重新入场（源新入场先杀旧缓动）。
-#[allow(clippy::type_complexity)]
 pub fn advance(
     mut commands: Commands,
     time: Res<Time>,

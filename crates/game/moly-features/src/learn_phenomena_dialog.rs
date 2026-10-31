@@ -393,7 +393,6 @@ fn default_ease(layouts: &UiLayouts, warned: &mut bool) -> Ease {
 }
 
 /// `ShowSubWindowDialog` + `Setup(name, thumbnail)`.
-#[allow(clippy::too_many_arguments)]
 pub fn open(
     mut requests: MessageReader<LearnPhenomenaDialogRequest>,
     time: Res<Time>,
@@ -628,7 +627,6 @@ fn adjust_size(
 
 /// One tap on the open dialog: the balloon's TouchController press, then the
 /// click of the selectable the raycast gives the tap.
-#[allow(clippy::too_many_arguments)]
 fn tap(
     point: Vec2,
     canvas: Vec2,
@@ -735,7 +733,6 @@ pub fn back_key(
 }
 
 /// Taps while the dialog is open (the dialog slot is modal).
-#[allow(clippy::too_many_arguments)]
 pub fn click(
     mut gestures: MessageReader<GestureEvent>,
     time: Res<Time>,
@@ -797,7 +794,6 @@ pub fn click(
 }
 
 /// The tweens, the window visibility and the end of the close animation.
-#[allow(clippy::too_many_arguments)]
 pub fn place(
     time: Res<Time>,
     windows: Query<&Window, With<PrimaryWindow>>,

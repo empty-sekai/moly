@@ -1405,7 +1405,6 @@ pub struct ViewCache {
     fixture_dialog: Option<(i32, FixtureDialogTab, u64)>,
     characters: u64,
 }
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn refresh(
     mut c: Commands,
     mut state: ResMut<ContentLibrary>,

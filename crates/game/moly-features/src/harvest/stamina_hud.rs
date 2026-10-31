@@ -490,7 +490,6 @@ pub fn spawn_when_ready(
 
 /// Update: `Initialize` once per harvest site, the running tweens, the
 /// presenter's calls in order and the delayed decrease; then dress the view.
-#[allow(clippy::too_many_arguments)]
 pub fn advance(
     time: Res<Time>,
     real: Res<Time<Real>>,

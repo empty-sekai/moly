@@ -71,7 +71,6 @@ fn env_secs(name: &str) -> Option<f32> {
     std::env::var(name).ok()?.trim().parse::<f32>().ok()
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn smoke_fixture_walk(
     mut touches: MessageWriter<TouchInput>,
     mut window_events: MessageWriter<WindowEvent>,

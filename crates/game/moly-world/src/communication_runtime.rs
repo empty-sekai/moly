@@ -116,7 +116,6 @@ fn next_events(rt: &mut Running, program: &Program, participants: &[u32], dt: f3
     out
 }
 
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn advance(
     clock: Res<crate::npc_clock::NpcClock>,
     programs: Option<Res<Programs>>, mut runtime: ResMut<Runtimes>,

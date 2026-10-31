@@ -397,7 +397,6 @@ impl tweet_law::UniformDraw for GreetingDraw<'_> {
 /// Presenter call 3: queued enter and exit work, the presenter clock, the
 /// state clock and the tweet and greeting updates. NPCs in the avatar list
 /// order.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn on_update(
     clock: Res<crate::npc_clock::NpcClock>,
     frame: Res<FrameCount>,
@@ -675,7 +674,6 @@ fn update_tweet(
 }
 
 /// The greeting state's update.
-#[allow(clippy::too_many_arguments)]
 fn update_greeting(
     unit: u32,
     frame: u32,

@@ -223,7 +223,6 @@ pub fn hits(
 
 /// Update: a swinging companion takes its gather's tool model in its right
 /// hand; the companion's side puts it away with the gather.
-#[allow(clippy::too_many_arguments)]
 pub fn tools(
     mut commands: Commands,
     server: Res<AssetServer>,

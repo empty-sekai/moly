@@ -303,7 +303,6 @@ pub fn material_rarity_value(word: &str) -> i32 {
 
 /// Update: once every input is loaded, join the catalog, build the server
 /// mock panel and take the login fetch. An absent input is named once.
-#[allow(clippy::too_many_arguments)]
 pub fn build(
     mut commands: Commands,
     server: Res<AssetServer>,

@@ -155,7 +155,6 @@ pub fn merge_harvest(stacks: &[HarvestStack]) -> Vec<HarvestRequest> {
 }
 
 /// Update: the loop and the flush.
-#[allow(clippy::too_many_arguments)]
 pub fn advance(
     frames: Res<FrameCount>,
     time: Res<Time>,
@@ -364,7 +363,6 @@ fn send_harvest(queue: &mut HarvestLogQueue, link: &mut ServerLink, request: Har
 
 /// The harvest answer: the server's stamina, and the map's hit as this client
 /// predicts it.
-#[allow(clippy::too_many_arguments)]
 fn finish_harvest(
     request: &HarvestRequest,
     seq: u32,

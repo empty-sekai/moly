@@ -537,7 +537,6 @@ pub struct ConvertPress {
 
 /// Update: the views spawn once the document, the convert master tables, the
 /// item select page's cell documents and the user's convert data are all in.
-#[allow(clippy::too_many_arguments)]
 pub fn spawn_when_ready(
     mut commands: Commands,
     mut layouts: ResMut<UiLayouts>,
@@ -702,7 +701,6 @@ fn register_icons(
 }
 
 /// Update, after the screen manager: the layer's hooks.
-#[allow(clippy::too_many_arguments)]
 pub fn follow_screen(
     mut events: MessageReader<ScreenLayerEvent>,
     layouts: Res<UiLayouts>,
@@ -811,7 +809,6 @@ pub fn follow_screen(
 
 /// Update, after the hooks and the screen manager: the refusal's pop, the
 /// trading SE's loop, the root's visibility and the current page's frame.
-#[allow(clippy::too_many_arguments)]
 pub fn advance(
     real: Res<Time<Real>>,
     screens: Res<ScreenManager>,
@@ -1027,7 +1024,6 @@ pub fn back_key(
 /// Update: a press inside the convert screen takes the pointer; the slot
 /// page's buttons and the item select page's tabs, cells, count and start
 /// button answer it through the source's raycast over each page's view.
-#[allow(clippy::too_many_arguments)]
 pub fn input(
     mut pointers: MessageReader<UiPointerEvent>,
     mut wheel: MessageReader<MouseWheel>,
@@ -1180,7 +1176,6 @@ pub fn input(
 }
 
 /// The item select page's pointer and wheel.
-#[allow(clippy::too_many_arguments)]
 fn input_item_select(
     events: &[UiPointerEvent],
     scrolls: &[MouseWheel],

@@ -153,7 +153,6 @@ impl HarvestParticleCalls {
 
     /// A call after `seconds` (a view's `UniTask.Delay`), counted from
     /// `frame` as the site timeline's delays are.
-    #[allow(clippy::too_many_arguments)]
     pub fn queue_after(
         &mut self,
         root: Entity,

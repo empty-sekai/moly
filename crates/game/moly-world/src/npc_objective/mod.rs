@@ -470,7 +470,6 @@ pub struct DirectedTalks {
 /// Fixture talk data made ready for this host's execution: the fixture
 /// entity, for a single-character talk with a timeline its fixture session,
 /// the locator names, IsGeneralTalk, and the members' data from `drafts`.
-#[allow(clippy::too_many_arguments)]
 fn prepare_fixture_talk(
     fixture_activities: &crate::npc_fixture_activity::Factory<'_, '_>,
     placements: &FixturePlacements,
@@ -816,7 +815,6 @@ pub fn cell_of(x: f32, z: f32) -> Cell {
 /// 里供过渡（成员重播种与决策都按 [`ObjectiveFace::is_fresh`] 让路，不会
 /// 拿旧面走新路）。柄对不上实体或资产未到齐都整帧等：面宁可晚到不可
 /// 残缺。
-#[allow(clippy::type_complexity)]
 pub fn build_face(
     mut commands: Commands,
     meshes: Res<Assets<Mesh>>,
@@ -1435,7 +1433,6 @@ const DRAW_ENGINE_INT_RANGE: &str = "UnityEngine.Random.Range(int,int)";
 const DRAW_GUID_KEYS: &str = "Guid.NewGuid";
 
 impl DecisionRecord {
-    #[allow(clippy::too_many_arguments)]
     fn new(
         unit: u32,
         site_type: &str,
@@ -1768,7 +1765,6 @@ impl MemberSnap {
 /// `npc::walkable`). Both chains start from the character's own position,
 /// not from its navigation origin. Returns the position (none when
 /// both miss) and the log detail; every draw goes into `record`.
-#[allow(clippy::too_many_arguments)]
 fn general_talk_target(
     unit: u32,
     site_type: &str,
@@ -1968,7 +1964,6 @@ pub fn general_data_destination(world: &mut World, entity: Entity) -> Result<[f3
 ///
 /// 一次决策的抽签账目一行日志：抽签落点、门占比、目标家具与环、落点
 /// 坐标——「每员目标选取可从日志复算」。
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 /// The editor's hold: expected to last as long as an edit session.
 const HOLD_EDITOR: &str = "the layout editor owns the actors";
 /// The AI loop's hold: every input the decisions read has a gate that holds
@@ -4553,7 +4548,6 @@ pub struct CascadeMember {
 
 impl CascadeMember {
     /// The character as the decision pass reads it from its components.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         entity: Entity,
         unit: u32,
@@ -4631,7 +4625,6 @@ impl CascadeScene<'_, '_> {
     /// after its draws are committed; a scene this host cannot evaluate yet
     /// comes back as `Err` with nothing drawn. One `[npc-cascade] {json}`
     /// line records the draws.
-    #[allow(clippy::too_many_arguments)]
     pub fn discarded_create_ai_talk_data(
         &mut self,
         catalog: &crate::player_talk::TalkCatalog<'_>,
@@ -5005,7 +4998,6 @@ fn run_pre_action(
 /// TryPlayTweetAsync: skipped for a multiple-character fixture talk or a
 /// zero id; otherwise the tweet id, the tweet state Pending and the change to
 /// the tweet state, then the wait for Done.
-#[allow(clippy::too_many_arguments)]
 fn try_play_tweet(
     unit: u32,
     frame: u32,

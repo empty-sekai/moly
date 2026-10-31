@@ -1116,7 +1116,6 @@ pub struct PlaceMemory {
 /// 2. 根可见性 = 层栈当前层是否情报层；根缩放 = canvas 缩放；
 /// 3. 源页节点按当前页显隐，对话框根按对话框态显隐；
 /// 4. UiPrefabView 覆写单选勾选、箭头、量表与动态文案。
-#[allow(clippy::type_complexity)]
 pub fn place(
     windows: Query<&Window,With<PrimaryWindow>>, stack:Res<UiLayerStack>, mock:Res<InfoMock>,
     mut settings:ResMut<InfoSettings>,page_state:Res<InfoPageState>,dialog:Res<InfoDialogState>,

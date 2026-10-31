@@ -247,7 +247,6 @@ pub fn ui_point(world: &mut World, view: &str, path: &str) -> Result<Vec2, Strin
 /// first, then a grid across the rect's canvas bounds; every tested point is
 /// the window point the tap sends, so the game's own pointer conversion and
 /// raycast decide. The covering paths are collected for the refusal.
-#[allow(clippy::too_many_arguments)]
 fn ui_press_point(
     view: &crate::ui_layout::UiPrefabView,
     doc: &moly_assets::ui_layout::UiPrefab,
@@ -311,7 +310,6 @@ fn ui_press_point(
 /// Whether the press at `at` (a point of this view's canvas units) reaches
 /// `index`: the raycast winner, or the selectable the raycast hands the press
 /// to. The covering winner's path is kept for the refusal.
-#[allow(clippy::too_many_arguments)]
 fn ui_press_at(
     view: &crate::ui_layout::UiPrefabView,
     doc: &moly_assets::ui_layout::UiPrefab,

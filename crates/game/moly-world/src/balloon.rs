@@ -313,7 +313,6 @@ pub fn text_extent(
 /// mask's right edge, less `lateral`). `needs` is `NeedsMarqueeMoveWidth`;
 /// a text that fits is shown at its start and one that does not scrolls.
 /// A new text (`fresh`) starts over, as `MusicInfoContent.Setup`'s `Init`.
-#[allow(clippy::too_many_arguments)]
 pub fn step_marquee(
     marquee: &mut Marquee,
     fresh: bool,
@@ -930,7 +929,6 @@ pub struct HudBalloon {
 /// 的成员模型已隐藏）。独立场景（内容库占场）里 Show 不上屏，与背景
 /// 气泡让位同一条门。图集未就绪时到达的事件读掉并具名。家具前置动作、
 /// 摆设编辑反应与对话预览的气泡的上屏不归这里。
-#[allow(clippy::type_complexity)]
 pub fn hud_event(
     mut commands: Commands,
     library: Res<crate::field_modes::LibraryMode>,
@@ -1143,7 +1141,6 @@ fn lottery_after_edit_reactors(
 /// 之后。池空真源静默收场（不显示也不驻留），这里同语义具名一行。上屏前该
 /// 成员头上的在屏气泡先关（objective 槽位只有一个——HUD 事件消费与本链在
 /// schedule 里链式定序加显式同步点，同帧铺出的 HUD 气泡当帧可见、当帧让位）。
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn after_edit_reaction(
     mut commands: Commands,
     time: Res<Time>,
@@ -1751,7 +1748,6 @@ fn spawn_balloon_text(
 
 /// [`spawn_balloon_text`] on a given layer, for a host that draws its bubble
 /// with its own views (the player view's greeting bubble).
-#[allow(clippy::too_many_arguments)]
 pub fn spawn_balloon_on(
     commands: &mut Commands,
     art: &BalloonArt,
@@ -2247,7 +2243,6 @@ fn apply_bubble_layer(
 /// world_to_viewport 返回的已经是逻辑像素（bevy 走 logical_viewport_rect），
 /// 不能再除 scale_factor——那是对逻辑像素的二次换算，高 DPI 机器上会把
 /// 气泡整体向窗心压缩（sf=1.5 实测每个气泡向左上偏约 1/1.5）。
-#[allow(clippy::type_complexity)]
 pub fn place(
     mut commands: Commands,
     mut balloons: Query<(

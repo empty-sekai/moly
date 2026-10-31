@@ -200,7 +200,6 @@ fn with_state(base: &SiteMaterial, active: bool, alpha: f32) -> Result<Option<Si
 
 /// Update: `AttachSiteObjectView` on each obstacle ring once the site
 /// materials are on its primitives.
-#[allow(clippy::type_complexity)]
 fn attach_views(
     mut commands: Commands,
     swapped: Option<Res<SiteMaterialsSwapped>>,
@@ -256,7 +255,6 @@ fn attach_views(
 
 /// Update: `SiteObjectManager.Update` with no hide mode, over the views
 /// active in the hierarchy.
-#[allow(clippy::too_many_arguments)]
 fn update_dither(
     mut views: Query<(&mut SiteObjectView, &GlobalTransform, &InheritedVisibility)>,
     mut handles: Query<&mut MeshMaterial3d<SiteMaterial>>,

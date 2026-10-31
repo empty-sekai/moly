@@ -1846,7 +1846,6 @@ pub enum LayerCommand {
 
 /// Update: the scene setup, the site controller, the view reconciliations,
 /// the requests, then one step of the running coroutines.
-#[allow(clippy::too_many_arguments)]
 pub fn advance(
     mut commands: MessageReader<LayerCommand>,
     mut stack: ResMut<ScreenManager>,
@@ -1977,7 +1976,6 @@ pub fn advance(
 }
 
 /// Update: `BackKeyChecker.Check` and `ScreenManager.OnBackKey`.
-#[allow(clippy::too_many_arguments)]
 pub fn back_key(
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time<Real>>,

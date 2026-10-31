@@ -3,6 +3,9 @@
 //! 迁入守则见仓库 README：每族律带一份在采样输入上与真源逐值比的比对，
 //! 移植时跑一次。
 
+#![allow(clippy::excessive_precision, reason = "floating-point literals keep the full decimal text of the reference values so that each one can be checked value by value")]
+#![allow(clippy::neg_cmp_op_on_partial_ord, reason = "the negated form gives a different result from its positive counterpart for NaN inputs, so the written comparison decides the NaN path")]
+
 pub mod alone_action;
 pub mod bulk_harvest;
 pub mod carve;

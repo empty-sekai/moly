@@ -53,7 +53,6 @@ type Bodies<'w, 's> = Query<
 
 /// Update: every spawn, in arrival order. A spawn whose character file failed
 /// is refused by name: no body was built to carry the refusal.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn spawn(
     mut commands: Commands,
     mut requests: MessageReader<crate::companion::CompanionCommand>,
@@ -294,7 +293,6 @@ pub(super) fn gather_command(
 
 /// Update: every motion, in arrival order. A motion comes after the build or
 /// turn in flight; a walk in flight is stopped where the companion stands.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn motion(
     mut commands: Commands,
     mut requests: MessageReader<crate::companion::CompanionCommand>,
@@ -401,7 +399,6 @@ pub(super) fn despawn(
 
 /// Update: every use, in arrival order. A companion that is building or
 /// already using a fixture refuses it.
-#[allow(clippy::type_complexity)]
 pub(super) fn use_command(
     mut commands: Commands,
     mut requests: MessageReader<crate::companion::CompanionCommand>,
@@ -449,7 +446,6 @@ pub(super) fn use_command(
 
 /// Update: every walk, in arrival order. A walk ends a build in flight; its
 /// fixture stands solid.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn walk(
     mut commands: Commands,
     mut requests: MessageReader<crate::companion::CompanionCommand>,

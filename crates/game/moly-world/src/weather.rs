@@ -2158,7 +2158,6 @@ pub(crate) fn weather_post(
 }
 
 /// 一个全屏三角形 pass：设管线、设 bind group、画 3 顶点。
-#[allow(clippy::too_many_arguments)]
 fn fullscreen_pass(
     render_context: &mut RenderContext,
     pipeline: &bevy::render::render_resource::RenderPipeline,

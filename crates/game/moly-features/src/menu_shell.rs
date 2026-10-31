@@ -614,7 +614,6 @@ impl MenuShellRoot {
     /// has just become the active one; while the chrome is drawn, the actions
     /// visible for this host, the home mission panel and the chrome motion
     /// are applied.
-    #[allow(clippy::too_many_arguments)]
     fn advance_view(
         &mut self,
         set_up: bool,
@@ -633,7 +632,6 @@ impl MenuShellRoot {
     /// ([`MissionInputs`]): `MysekaiMenuUIContent.RefreshMissionContent`
     /// runs while the host's screen is set up, and the panel hides with the
     /// chrome.
-    #[allow(clippy::too_many_arguments)]
     fn advance_view_with_mission<'a>(
         &mut self,
         set_up: bool,
@@ -1043,7 +1041,6 @@ impl MissionPanelResources<'_> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn place(
     windows: Query<&Window, With<PrimaryWindow>>,
     time: Res<Time>,
@@ -1222,7 +1219,6 @@ pub struct EndPartyInstrument {
 /// The party instrument's touch id (a finger no real touch uses).
 const PARTY_INSTRUMENT_FINGER: u64 = 99022;
 
-#[allow(clippy::too_many_arguments)]
 pub fn end_party_instrument(
     mut events: MessageWriter<bevy::window::WindowEvent>,
     mut instrument: ResMut<EndPartyInstrument>,
@@ -1523,7 +1519,6 @@ enum ViewInteraction {
 /// only the exit: a held press that leaves finishes control, so the
 /// release no longer clicks. The enter it inherits changes only the
 /// selectable's transition state, which is not drawn.
-#[allow(clippy::too_many_arguments)]
 pub fn camera_reset_input(
     mut commands: Commands,
     mut pointers: MessageReader<UiPointerEvent>,

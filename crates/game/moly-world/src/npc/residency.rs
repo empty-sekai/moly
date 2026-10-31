@@ -148,7 +148,6 @@ pub struct Away;
 /// site); a member is never marked back here. A suspended member's balloon is
 /// retired with it: the state machine skips away members, so no hide would
 /// reach a balloon left over its hidden model.
-#[allow(clippy::type_complexity)]
 pub fn mark_away(
     mut commands: Commands,
     site: Option<Res<crate::site::SiteActive>>,

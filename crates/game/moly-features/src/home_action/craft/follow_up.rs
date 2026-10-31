@@ -889,7 +889,6 @@ pub fn place(
 
 /// Taps and the back key while a follow-up is shown: a close button or the
 /// back key closes it (the awaited close).
-#[allow(clippy::too_many_arguments)]
 pub fn click(
     mut screen: ResMut<CraftScreen>,
     layouts: Res<UiLayouts>,

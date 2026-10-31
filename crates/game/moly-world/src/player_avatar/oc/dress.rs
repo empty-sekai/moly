@@ -16,7 +16,6 @@ use moly_assets::json::JsonAsset;
 /// and the fog profile are in. A body the plan refuses is removed (by
 /// [`super::bind::attach`], once it is no longer chosen) and the avatar body
 /// stays.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn dress(
     mut commands: Commands,
     mut selection: ResMut<OcSelection>,

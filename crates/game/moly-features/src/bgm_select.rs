@@ -1265,7 +1265,6 @@ fn fade_cells(faded_in: &mut BTreeSet<i32>, previous: Option<i32>, next: Option<
 }
 
 /// Update, after the screen manager: the layer's hooks.
-#[allow(clippy::too_many_arguments)]
 pub fn follow_screen(
     mut events: MessageReader<ScreenLayerEvent>,
     mut state: ResMut<BgmSelect>,
@@ -1560,7 +1559,6 @@ fn scroll_marquee(
 /// layer the screen's views draw on. `fx_mysekai_bgm_select_record`'s
 /// greeting event is not in the public asset root; the HUD's balloon is this
 /// port's stand-in for it.
-#[allow(clippy::too_many_arguments)]
 fn raise_greeting(
     commands: &mut Commands,
     greeting: &mut Option<String>,
@@ -1640,7 +1638,6 @@ fn jacket_cells(
     }
 }
 
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn place(
     windows: Query<&Window, With<PrimaryWindow>>,
     stack: Res<UiLayerStack>,
@@ -1970,7 +1967,6 @@ fn hit(view: &UiPrefabView, layouts: &UiLayouts, path: &str, point: Vec2, canvas
 }
 
 /// Taps while the screen is open. The full-screen layer takes every tap.
-#[allow(clippy::too_many_arguments)]
 pub fn click(
     mut gestures: MessageReader<GestureEvent>,
     mut wheel: MessageReader<MouseWheel>,
@@ -2153,7 +2149,6 @@ fn parse_taps(raw: &str) -> Vec<(f32, String)> {
         .collect()
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn tap_instrument(
     mut script: Local<TapScript>,
     real: Res<Time<Real>>,

@@ -655,7 +655,6 @@ fn load(mut commands: Commands, server: Res<AssetServer>, mut masters: ResMut<Ma
 /// Each master as it resolves; a missing or malformed one (named once by the
 /// master layer, or here for a root document) is listed and the model goes on
 /// without it.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_masters(
     mut commands: Commands,
     reads: Option<ResMut<RootReads>>,

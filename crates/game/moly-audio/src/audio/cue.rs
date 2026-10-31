@@ -170,7 +170,6 @@ impl CuePlayback {
 /// sequence; spawn the result with [`spawn_playback`]. The first tracks sound
 /// from the next update of [`advance_cue_playbacks`] on (a track with no
 /// delay starts there).
-#[allow(clippy::too_many_arguments)]
 pub fn start_cue(
     server: &AssetServer,
     work: &mut SequenceWorkAreas,
@@ -310,7 +309,6 @@ fn start_due_tracks(
 
 /// [`start_cue`] with waveforms the caller already requested (in plan track
 /// order), e.g. a timeline that prepares its sounds before it starts.
-#[allow(clippy::too_many_arguments)]
 pub fn start_cue_with_handles(
     work: &mut SequenceWorkAreas,
     rngs: &mut CueRngs,
@@ -408,7 +406,6 @@ fn start_round(
 /// Starts and ends land on the first update after the moment (the middleware
 /// steps on its own audio clock). Without an audio output device no sink
 /// appears and a track stays sounding: a wall clock is not taken for its end.
-#[allow(clippy::too_many_arguments)]
 pub fn advance_cue_playbacks(
     mut commands: Commands,
     server: Res<AssetServer>,

@@ -115,7 +115,6 @@ pub fn update_collision_box(
 /// The blink's continuations (the writes after a completed delay) belong to
 /// the frame start; this host runs them here, in the same pass, before the
 /// update's start check, which is the same order within the frame.
-#[allow(clippy::type_complexity)]
 pub fn update_view(
     mut commands: Commands,
     clock: Res<crate::npc_clock::NpcClock>,

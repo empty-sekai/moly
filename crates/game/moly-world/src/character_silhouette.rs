@@ -943,7 +943,6 @@ impl ReplayGather<'_, '_, '_> {
 /// The replay's input of this frame. Nothing is replayed while no room
 /// door's stencil mesh is shown: without a writer of 1 the stencil-shadow
 /// pass has no pixel to draw.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn extract_silhouette_draws(
     mut list: ResMut<SilhouetteDrawList>,
     rules: Extract<Option<Res<SilhouetteRules>>>,
@@ -1680,7 +1679,6 @@ struct SilhouetteTarget {
 
 /// PrepareBindGroups: the views' targets (the view target and depth texture
 /// of this frame exist by then), the pipelines and the uploads.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn prepare_silhouette(
     mut commands: Commands,
     mut list: ResMut<SilhouetteDrawList>,

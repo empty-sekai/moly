@@ -272,7 +272,6 @@ fn switch_materials(
 /// 建 plan：走全部摆放的层级按句柄收首见（句柄在同包摆放间共享，一次
 /// 解析全体换上），逐包解析文档材质表，按 glb 材质下标 join（名字核对；
 /// 下标对不上时按唯一名字 join），按 shader 名分派族。
-#[allow(clippy::too_many_arguments)]
 fn build_swap_plan(
     server: &AssetServer,
     json: &Assets<moly_assets::json::JsonAsset>,
@@ -539,7 +538,6 @@ pub struct DropMaterialCache {
 /// texture is loaded. The document's material at the handle's glb index
 /// (name checked; else the unique same-named one) is resolved. A material of
 /// another shader keeps its glb material and is counted by name.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn switch_drop_materials(
     mut commands: Commands,
     server: Res<AssetServer>,

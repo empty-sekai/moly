@@ -212,7 +212,6 @@ impl DialogAwait {
 }
 
 /// Update: step every run.
-#[allow(clippy::too_many_arguments)]
 pub fn advance(
     mut commands: Commands,
     frames: Res<FrameCount>,

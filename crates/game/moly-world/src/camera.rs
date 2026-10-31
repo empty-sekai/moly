@@ -1055,7 +1055,6 @@ pub struct FpsTransitionCtx<'w, 's> {
     cameras: Query<'w, 's, &'static mut Projection, With<Camera3d>>,
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn apply_input(
     mut commands: Commands,
     mut gestures: MessageReader<GestureEvent>,

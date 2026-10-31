@@ -26,3 +26,6 @@ android_log-sys = "0.3"
 # (`libc++_shared.so`) instead of a static copy of its own, so the process has
 # one C++ runtime.
 bevy = { workspace = true }
+
+[lints]
+workspace = true

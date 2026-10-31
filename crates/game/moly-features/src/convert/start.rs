@@ -543,7 +543,6 @@ impl MysekaiConvertService {
 /// Update, after the screen's taps and the dialogs that answer them: a start
 /// or a skip whose dialog OK'd is sent. The start's `ConvertStartProcess`
 /// runs here first, so a pass dialog it shows waits for the start to send.
-#[allow(clippy::too_many_arguments)]
 pub fn send_pending(
     mut link: ResMut<ServerLink>,
     screen: Option<ResMut<ConvertScreen>>,
@@ -600,7 +599,6 @@ pub fn send_pending(
 /// Update, after the reader applied the answer's sections: a start's or a
 /// skip's answer runs its callbacks. The reply's tables are in the copies
 /// already (`UpdateAll` of the arrival's sections).
-#[allow(clippy::too_many_arguments)]
 pub fn answers(
     mut answers: MessageReader<Answered>,
     mut service: ResMut<MysekaiConvertService>,

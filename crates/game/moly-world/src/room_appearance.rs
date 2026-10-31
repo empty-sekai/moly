@@ -472,7 +472,6 @@ fn colour_texture(document: &serde_json::Value, uri: &str) -> Result<(), String>
 }
 
 /// Resolve the four module materials against the source programs.
-#[allow(clippy::too_many_arguments)]
 fn build(
     documents: &[serde_json::Value],
     appearance: &RoomAppearance,

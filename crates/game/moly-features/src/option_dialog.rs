@@ -1989,7 +1989,6 @@ fn open(
     state.activate(first, settings, app, bindings);
 }
 
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn place(
     mut commands: Commands,
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -2507,7 +2506,6 @@ fn tap_volume(
     false
 }
 
-#[allow(clippy::too_many_arguments)]
 fn dispatch_tap(
     layouts: &crate::ui_layout::UiLayouts,
     view: &crate::ui_layout::UiPrefabView,
@@ -2602,7 +2600,6 @@ fn scroll_limit(
 /// Taps and drags while the dialog is open (modal: every tap-family end is
 /// consumed). A drag starting on a volume slider track moves the slider; any
 /// other drag starting in the current page's viewport scrolls its content.
-#[allow(clippy::too_many_arguments)]
 pub fn click(
     layouts: Res<crate::ui_layout::UiLayouts>,
     views: Query<&crate::ui_layout::UiPrefabView, With<OptionDialogRoot>>,

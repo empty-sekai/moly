@@ -358,7 +358,6 @@ impl CollisionParticles for PoolView<'_> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn call(system: &mut Runtime, collision: &mut CollisionRuntime, from: usize, to: usize, gap: usize, dt: [f32; 4],
     pending: f32, emission_word: u32) -> Result<(), String> {
     // Every collision edge must be attached: a missing one would drop its
@@ -463,7 +462,6 @@ pub(super) fn post_simulation(system: &mut Runtime, collision: &mut CollisionRun
 /// One newborn group's current-size write and call over the engine's slots
 /// `[from, to)` with the group's birth times; `gap` is how many engine slots
 /// below the group the pool does not hold (see the module notes).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn newborn_block(system: &mut Runtime, collision: &mut CollisionRuntime, from: usize, to: usize,
     gap: usize, dt: [f32; 4], pending: f32, emission_word: u32) -> Result<(), String> {
     let start = from.checked_sub(gap).ok_or("collision: a newborn group starts inside the alignment gap")?;

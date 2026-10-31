@@ -336,7 +336,6 @@ fn screen_visible(
 /// Update: pointer-down on the button and the F key raise `OnPressed`;
 /// release clears `IsPress`; clicks on the cannot button and the selected
 /// tool button.
-#[allow(clippy::too_many_arguments)]
 pub fn read_input(
     mut gestures: MessageReader<GestureEvent>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -449,7 +448,6 @@ pub fn read_input(
 
 /// Update: the icon loads that `UpdateToolIcon` awaits, then place and dress
 /// the view.
-#[allow(clippy::too_many_arguments)]
 pub fn place(
     windows: Query<&Window, With<PrimaryWindow>>,
     root_canvas: Option<Res<RootCanvas>>,

@@ -35,7 +35,6 @@ pub struct CompanionAction {
 /// `activity` (a no-talk action's id or a pre-action's id) and `variant`
 /// (the row's first timeline and the first action, no-talk actions before
 /// pre-actions, when they are absent). The fixture is reserved for it.
-#[allow(clippy::too_many_arguments)]
 pub fn select(
     world: &mut World,
     root: Entity,

@@ -175,7 +175,6 @@ fn on_collect_drop_item(
 }
 
 /// Update: the collision scan, then the manager's frame pass.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn advance(
     bulk: Option<Res<crate::field_modes::BulkHarvestActive>>,
     mut commands: Commands,
@@ -335,7 +334,6 @@ pub fn move_towards(current: Vec3, target: Vec3, max_delta: f32) -> Vec3 {
 /// Update: the cannon leaves a harvest site
 /// (`AllCollectCollisionDropItemAsync`, started the frame the site move
 /// begins, then one collected drop a frame).
-#[allow(clippy::too_many_arguments)]
 pub fn collect_on_leave(
     mut commands: Commands,
     site_move: Option<Res<crate::site_move::SiteMoveActive>>,

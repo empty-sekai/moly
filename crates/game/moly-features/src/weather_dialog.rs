@@ -736,7 +736,6 @@ pub fn open(
 // ---------------------------------------------------------------------------
 
 /// The dialog's texts and window colours once it opens.
-#[allow(clippy::too_many_arguments)]
 pub fn place(
     mut weather: ResMut<WeatherDialog>,
     periods: Res<WeatherPeriods>,
@@ -835,7 +834,6 @@ fn text_component(layouts: &UiLayouts, path: &str) -> Option<i64> {
 /// One tap while the dialog is shown: the close button closes it
 /// (`OnCloseExternal` -> `OnClickOK`); any other tap is the dialog's (the
 /// dialog slot is modal).
-#[allow(clippy::too_many_arguments)]
 pub fn click(
     mut gestures: MessageReader<GestureEvent>,
     mut weather: ResMut<WeatherDialog>,

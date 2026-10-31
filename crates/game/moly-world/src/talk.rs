@@ -459,7 +459,6 @@ fn vec_field(row: &serde_json::Value, name: &str, talk_id: i32) -> Vec<i32> {
 /// Update：名册、动作库、facial 表、表情件档案、家具摆放全部就绪后做
 /// 一次性预筛与核验。核验失败响亮 panic——候选要点播的键不在表/库里
 /// 是数据断点，不是运行时静默跳过（待机动作装配同款纪律）。
-#[allow(clippy::type_complexity)]
 pub fn prepare(
     mut commands: Commands,
     store: Option<Res<TalkStore>>,
@@ -928,7 +927,6 @@ pub struct TalkActor {
 pub mod fixture_action;
 
 /// Start the existing fixture-script backend from the dispatcher's final row.
-#[allow(clippy::type_complexity)]
 pub fn start_selected(
     commands: &mut Commands,
     window: &mut TalkWindowState,
@@ -1439,7 +1437,6 @@ pub fn report_motion_library_failure(server: &AssetServer, library: &MotionLibra
 /// Update：步进主循环——窗体点击闩、`advance` 一拍、逐
 /// 触发步分发、对话动作播完交还、段收口。挂在选取与窗体输入之后
 /// （会话当帧即可步进）。
-#[allow(clippy::type_complexity)]
 pub fn advance_talk(
     mut commands: Commands,
     time: Res<Time>,
@@ -1899,7 +1896,6 @@ fn apply_delayed_face(
 }
 
 /// 一步的分发：按 op 落到呈现通道。日志只带 id/步号/指称/键名。
-#[allow(clippy::too_many_arguments)]
 fn dispatch_step(
     active: &mut ActiveTalk,
     step: &FixtureStep,
@@ -2798,7 +2794,6 @@ fn turn_toward_point(
 
 /// 到期的换动作逐条执行（延迟表冲出的顺序即执行顺序；同一帧后一条覆盖
 /// 前一条，与引擎取消上一条动作任务同效）。
-#[allow(clippy::too_many_arguments)]
 fn run_animation_commands(
     active: &mut ActiveTalk,
     now: f32,
@@ -2981,7 +2976,6 @@ fn start_motion(
 /// 段链逐帧推进：`_S` 播完（非循环剪辑到终态＝剪辑长 / 速度）接同名
 /// `_L` 循环，停在 `_L` 直到下一次换动作或对话收口；收尾段 `_E` 播完起
 /// 排在它后面的新动作。库里没有 `_L` 时退回位移驱动（待机）。
-#[allow(clippy::too_many_arguments)]
 fn advance_talk_segments(
     active: &ActiveTalk,
     lib: &Gltf,
@@ -3070,7 +3064,6 @@ fn advance_talk_segments(
 /// 段收口：撤持留与运行时、撤窗体（层弹出无淡出，与玩家链同一条路）、
 /// 相位回驻留、待机归位、转体未完的成员把朝向钉到转身终点（律状态
 /// forward 同步——撤持留后行走不回跳）、记账与收口日志。
-#[allow(clippy::too_many_arguments)]
 fn finish_talk(
     commands: &mut Commands,
     active: &mut ActiveTalk,

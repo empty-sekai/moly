@@ -640,7 +640,6 @@ fn once(channel: &mut BgmChannel, site_id: u32, line: impl FnOnce() -> String, e
 
 /// The record path for a site whose setting (or the select screen) names
 /// `record_id` / `vocal_id`.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn advance(
     params: &mut RecordParams,
     commands: &mut Commands,
@@ -971,7 +970,6 @@ pub(super) fn advance(
 /// Starts the record as the channel's voice: the current voice fades out;
 /// the first pass plays from the start time to the loop's end (or to the
 /// waveform's end), then the loop region (or the whole waveform) repeats.
-#[allow(clippy::too_many_arguments)]
 fn start_voice(
     commands: &mut Commands,
     channel: &mut BgmChannel,

@@ -38,6 +38,18 @@ edition = "2021"
 version = "0.0.5"
 license = "AGPL-3.0-only"
 
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+# Bevy system parameters inject resources and queries; their count and the
+# shape of the query types follow from the reason a system exists.
+too_many_arguments = "allow"
+# Same as above: the query type of a system is dictated by the components it
+# reads and writes, not by a complexity budget.
+type_complexity = "allow"
+
 [workspace.dependencies]
 # The application adds WebGPU for its default build. The WebGL2 build omits
 # that feature so the engine uses its required uniform padding and limits.

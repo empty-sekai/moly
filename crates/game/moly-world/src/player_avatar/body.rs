@@ -137,7 +137,6 @@ pub fn on_scene_ready(
 
 /// Update: the scene and the manifest are in; wire the loader's animator and
 /// install the driver.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn wire(
     mut commands: Commands,
     server: Res<AssetServer>,

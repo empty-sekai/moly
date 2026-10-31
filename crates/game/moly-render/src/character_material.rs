@@ -880,7 +880,6 @@ fn member_label(unit: Option<&CharacterUnitId>) -> String {
 /// name to the rig profile's slots, and its Head and Hips bones. The head
 /// marker and the accessories' shadow opt-out are inserted once the plan
 /// holds.
-#[allow(clippy::too_many_arguments)]
 pub fn plan_body(
     commands: &mut Commands,
     server: &AssetServer,
@@ -964,7 +963,6 @@ pub fn plan_body(
 
 /// Update：装配完成的成员解析骨架档案、建材质计划。等雾档案进表
 /// （雾变体按桥在场分，全侧一致）；档案装载失败响亮失败。
-#[allow(clippy::type_complexity)]
 pub fn plan_when_wired(
     mut commands: Commands,
     server: Res<AssetServer>,

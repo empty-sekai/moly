@@ -518,7 +518,6 @@ struct DepthPipelines {
 /// 仍可能把影子投进画内。不能用 ViewVisibility 筛本名单，否则旋转相机
 /// 会同时删改 caster 与光源正交框，使整张深度图的尺度、采样格和影子跳变。
 /// InheritedVisibility 保留显式隐藏和父级显隐，不把相机视锥变成光源视锥。
-#[allow(clippy::type_complexity)]
 fn extract_shadow_casters(
     mut list: ResMut<ShadowDrawList>,
     casters: Extract<
@@ -695,7 +694,6 @@ fn extract_shadow_casters(
 /// Renderers that share one skin (the same joints and inverse bind poses)
 /// share one palette. A palette is the joint's global transform times its
 /// inverse bind pose, joint by joint, exactly as the colour pass builds it.
-#[allow(clippy::type_complexity)]
 fn extract_skinned_casters(
     mut list: ResMut<ShadowDrawList>,
     skinned: Extract<

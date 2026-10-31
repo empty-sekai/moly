@@ -9,3 +9,6 @@ license.workspace = true
 [dependencies]
 moly-law = { path = "../../base/moly-law" }
 moly-protocol = { path = "../moly-protocol" }
+
+[lints]
+workspace = true

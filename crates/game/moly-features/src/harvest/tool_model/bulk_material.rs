@@ -75,7 +75,6 @@ fn resolve(
     Ok((basic.material, passes))
 }
 
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn swap(
     mut commands: Commands,
     step: Res<PlayerStepItem>,

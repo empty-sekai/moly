@@ -327,7 +327,6 @@ fn canvas_position(position: Vec2, window_size: Vec2, scale: f32) -> Vec2 {
     ) / scale
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn click(
     mut gestures: MessageReader<GestureEvent>,
     mut wheel: MessageReader<MouseWheel>,
@@ -748,7 +747,6 @@ fn place_hud(
     view.set_anchored_position(&bindings.hud, point.clamp(-limit, limit));
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn refresh(
     mut layouts: ResMut<UiLayouts>,
     server: Res<AssetServer>,

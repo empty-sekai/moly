@@ -76,7 +76,6 @@ impl Watch {
 /// and the first leg. The
 /// move completes within `goal_distance` of `corner`. A refusal is named.
 /// The walk's speed is the agent step's ([`advance`]).
-#[allow(clippy::too_many_arguments)]
 pub fn depart(
     unit: u32,
     state: &mut WalkState,
@@ -150,7 +149,6 @@ pub fn depart(
 /// One frame of the companion's route with the roster's agent step: the
 /// corridor move, the walker's turn, the check points and the move's
 /// outcome. `phase`, `transform` and `watch` are written.
-#[allow(clippy::too_many_arguments)]
 pub fn advance(
     unit: u32,
     speed: f32,

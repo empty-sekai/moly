@@ -372,7 +372,6 @@ pub struct AvatarToon;
 /// 扫到会在判据处响亮拒绝。缺 part-index 通道（UV0.z 载体）时响亮
 /// panic——那是提取缺口（合成器未烘 part-index），不静默取默认、不拆
 /// 绘制。一次性：换装完成插 [`AvatarToon`] 闩后不再进。
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn plan_and_swap(
     mut commands: Commands,
     server: Res<AssetServer>,
@@ -604,7 +603,6 @@ fn is_talk_state(state: crate::camera::CameraStateType) -> bool {
 ///   NPCs' hips, bound fixtures, then the player's view) and the camera's
 ///   position; leaving writes 1.
 /// The screenshot capture's writes have no counterpart (no photo mode).
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn player_dither(
     time: Res<Time>,
     state: Res<crate::camera::FieldCameraState>,

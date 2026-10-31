@@ -768,7 +768,6 @@ pub fn set_icon(
 }
 
 /// The texts that do not change with the selection.
-#[allow(clippy::too_many_arguments)]
 pub fn apply_static(
     view: &mut UiPrefabView,
     doc: &UiPrefab,

@@ -262,7 +262,6 @@ fn triple(value: &Value) -> Option<[f32; 3]> {
 /// emitter velocity mode falls back to the Transform mode without one, as the
 /// weather host resolves it); `gui_ztest` the canvas manager's
 /// `unity_GUIZTestMode` for the host's canvas.
-#[allow(clippy::too_many_arguments)]
 pub fn admit(
     row: &Value,
     local_scale: Vec3,

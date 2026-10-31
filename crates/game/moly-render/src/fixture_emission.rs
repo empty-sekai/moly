@@ -302,7 +302,6 @@ fn emission_vertex_layout(
 /// 不能先在 CPU 合并 MVP 再乘顶点：那与主 pass 的两段乘法有不同舍入，
 /// 会破坏共面自发光片元的深度比较。粒子保持其独立的已有对象契约。
 /// 相机不唯一整帧清名单。
-#[allow(clippy::type_complexity)]
 fn extract_emission_draws(
     mut commands: Commands,
     draws: Extract<Query<(Entity, &Mesh3d, &GlobalTransform, &ViewVisibility, &FixtureEmission, Option<&FixtureEmissionOverride>, Option<&SkinnedMesh>)>>,
@@ -463,7 +462,6 @@ fn emission_texture_descriptor(
 /// PrepareResources：特化管线、写对象池、按视口建自发光缓冲。挂
 /// PrepareResources 与阴影链同由：本帧的 `RenderAssets<RenderMesh>` 与
 /// MeshAllocator 切片已定，且组件插入与图执行之间有同步点保证。
-#[allow(clippy::too_many_arguments)]
 fn prepare_emission(
     mut commands: Commands,
     mut draws: ResMut<EmissionDrawList>,
@@ -666,7 +664,6 @@ impl FromWorld for EmissionBindGroups {
 
 /// 自发光 pass：主 pass 之后跑。每个 3D 视图一份；ViewQuery 缺件
 /// （无深度图或无本 pass 组件）的视图直接不匹配，pass 不跑。
-#[allow(clippy::type_complexity)]
 pub(crate) fn emission_pass<const EARLY: bool>(
     world: &World,
     view: ViewQuery<(

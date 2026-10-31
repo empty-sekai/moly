@@ -186,7 +186,6 @@ pub fn prepare_signal_targets(world: &mut World) {
 }
 
 /// Update: resolve the scene objects on each delivery-site arrival.
-#[allow(clippy::too_many_arguments)]
 pub fn resolve(
     server: Res<AssetServer>,
     jsons: Res<Assets<JsonAsset>>,
@@ -785,7 +784,6 @@ fn autoplay_config() -> Option<(f32, f32)> {
 }
 
 /// Update: `MOLY_DELIVERY_AUTOPLAY` (see the module comment).
-#[allow(clippy::too_many_arguments)]
 pub fn autoplay(
     time: Res<Time>,
     mut run: ResMut<DeliveryAutoplay>,

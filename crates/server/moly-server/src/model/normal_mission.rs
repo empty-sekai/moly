@@ -758,7 +758,6 @@ impl ServerModel {
     /// sheet advances when it is complete. `over` names the resources (by
     /// their place in `resources`) that do not fit; they are reported but
     /// not stored.
-    #[allow(clippy::too_many_arguments)]
     fn normal_mission_apply(
         &mut self,
         missions: &moly_masters::mission::MissionMasters,

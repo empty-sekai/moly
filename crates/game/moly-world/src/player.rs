@@ -139,7 +139,6 @@ const SPAWN: crate::hold::HoldSite = crate::hold::HoldSite {
 /// （相机自此追玩家）、dash 模式、输入。面板门与名册铺装同款：速度律
 /// 的键要读它，面板未立不铺玩家。
 /// 出生相位是待机——真源 `InitializeStatus` 起手就是 Idle。
-#[allow(clippy::type_complexity)]
 pub fn spawn_when_ready(
     mut commands: Commands,
     time: Res<Time>,

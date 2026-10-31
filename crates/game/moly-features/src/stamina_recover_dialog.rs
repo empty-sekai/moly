@@ -598,7 +598,6 @@ fn row_max(items: &[ItemRow], index: usize, row: RecoveryRow, max: moly_masters:
 // Open: the menu dialog's recover button
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
 fn open(
     mut lines: MessageReader<RecoverStaminaRequest>,
     mut screens: ResMut<ScreenManager>,
@@ -689,7 +688,6 @@ fn hit(view: &UiPrefabView, layouts: &UiLayouts, path: &str, point: Vec2, canvas
         .is_some_and(|rect| rect.active && rect.contains(point))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn click(
     mut gestures: MessageReader<GestureEvent>,
     mut back_keys: MessageReader<DialogBackKeyEvent>,
@@ -927,7 +925,6 @@ fn close_dialog(
     info!("[stamina-recover] Close: onRecoverFinish (UpdateStaminaGateView) queued");
 }
 
-#[allow(clippy::too_many_arguments)]
 fn confirm_answer(
     back_keys: &mut MessageReader<DialogBackKeyEvent>,
     gestures: &mut MessageReader<GestureEvent>,
@@ -1166,7 +1163,6 @@ fn fraction(value: i32, max: i32) -> f32 {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn process(
     mut commands: Commands,
     windows: Query<&Window, With<PrimaryWindow>>,

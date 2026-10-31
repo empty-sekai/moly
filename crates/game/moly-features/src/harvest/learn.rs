@@ -313,7 +313,6 @@ fn log_rows(rows: &[UserMysekaiPhenomena]) -> Vec<(i32, i64)> {
 /// `HasTodayEnvironment` false on a harvest site: GameState
 /// `LearnSiteEnvironment` (`ChangeGameState(6)`), then
 /// `ExecuteReleaseAPI`, whose reply the run waits for.
-#[allow(clippy::too_many_arguments)]
 fn start_learn(
     commands: &mut Commands,
     learn: &mut LearnEnvironment,
@@ -369,7 +368,6 @@ fn start_learn(
 
 /// Update: the trigger, the release, the delay, the dialog point and the
 /// return.
-#[allow(clippy::too_many_arguments)]
 pub fn advance(
     mut commands: Commands,
     time: Res<Time>,
@@ -525,7 +523,6 @@ pub fn advance(
 
 /// PostUpdate, after the field camera's follow (which advanced the entry
 /// tween): `LearnSiteEnvironmentCameraState.OnUpdate`.
-#[allow(clippy::too_many_arguments)]
 pub fn advance_learn_camera(
     time: Res<Time>,
     state: Res<FieldCameraState>,

@@ -381,7 +381,6 @@ impl Fnv {
 /// （几何面）并烘可行走场（阻挡 = 已提交实例的源物理几何）。柄对
 /// 不上实体或网格资产未到齐都整帧等（面宁可晚到不可残缺——残缺面
 /// 会把玩家假拘在洞边）。
-#[allow(clippy::type_complexity)]
 pub fn build(
     mut commands: Commands,
     revision: Res<crate::fixture::FixtureLayoutRevision>,
@@ -484,7 +483,6 @@ pub fn build(
 /// 放稳行变化即重烘；会话撤销时同时撤销增量洞，保存事件仍驱动同一入口。
 /// The same system then runs the frame's NavMeshObstacle update
 /// ([`RuntimeCarving`]) on the face it did not replace this frame.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn rebake_on_save(
     mut commands: Commands,
     mut saved: MessageReader<LayoutSaved>,
@@ -529,7 +527,6 @@ pub fn rebake_on_save(
 }
 
 /// The layout rebake; true when it replaced the face this frame.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn rebake(
     commands: &mut Commands,
     saved_now: bool,
@@ -782,7 +779,6 @@ pub fn teardown(commands: &mut Commands) {
 
 /// 面三角收集：柄对应的全部网格实体齐备且资产到齐时返回世界系三角网，
 /// 否则 `None`（调用方整帧等）。
-#[allow(clippy::type_complexity)]
 fn collect_tris(
     meshes: &Assets<Mesh>,
     handles: &WalkFaceMeshes,

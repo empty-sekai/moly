@@ -1412,7 +1412,6 @@ pub fn spawn_fixture_particles(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn advance_fixture_particles(
     mut commands: Commands, mut live: FixtureLive<'_, '_>,
     anchors: Query<&GlobalTransform>, cameras: Query<(&GlobalTransform, &Projection, &Camera), With<Camera3d>>,

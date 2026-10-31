@@ -626,7 +626,6 @@ pub fn spawn_when_ready(
 /// alpha, and finishes what the fade ends: the open reaches `Show`
 /// (`dialog_open_finished`, where `OnFinishOpenAnimation` runs) with its SE;
 /// the close destroys the dialog.
-#[allow(clippy::too_many_arguments)]
 pub fn fade(
     mut commands: Commands,
     time: Res<Time>,
@@ -752,7 +751,6 @@ fn closing_tap(
 
 /// Taps and the back key on the shown sub-window (modal: every tap is its).
 /// A tap on the window off its close areas reaches nothing.
-#[allow(clippy::too_many_arguments)]
 pub fn click(
     mut subwindows: ResMut<SubWindows>,
     mut screens: ResMut<ScreenManager>,

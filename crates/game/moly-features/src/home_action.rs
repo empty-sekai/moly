@@ -1149,7 +1149,6 @@ fn sketch_blueprint_instrument() -> Option<i32> {
 
 /// Update: the stand-in keys (J craft, K canvas, L sketch mode then sketch,
 /// U skip, I leave sketch mode).
-#[allow(clippy::too_many_arguments)]
 pub fn stand_in(
     keys: Res<ButtonInput<KeyCode>>,
     actions: Res<HomeActions>,
@@ -1244,7 +1243,6 @@ pub struct Autoplay {
 /// mode and sketch; `screen` presses the craft tool's button instead (the
 /// craft screen opens with the workbench handed over, and the craft screen's
 /// instruments go on from there). It stands in for the screens' request.
-#[allow(clippy::too_many_arguments)]
 pub fn autoplay(
     time: Res<Time>,
     actions: Res<HomeActions>,

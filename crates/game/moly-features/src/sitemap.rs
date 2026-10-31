@@ -2521,7 +2521,6 @@ fn show_balloon(
 ///   `GetMasterBirthdayPartiesInSession`; any other site requests the change.
 /// - A locked icon's cloud (`SiteMapHideCloud`'s button, the 400×400 root)
 ///   shows that icon's release balloon.
-#[allow(clippy::too_many_arguments)]
 fn tap(
     commands: &mut Commands,
     data: &SitemapData,
@@ -2694,7 +2693,6 @@ impl SitemapWeatherButton<'_, '_> {
 
 /// Update: a tap on the site map (a left click while the map is the current
 /// screen).
-#[allow(clippy::too_many_arguments)]
 pub fn click(
     buttons: Res<ButtonInput<MouseButton>>,
     mut gestures: MessageReader<crate::gesture::GestureEvent>,
@@ -2825,7 +2823,6 @@ pub fn click(
 /// It retries each frame until a branch takes the tap (the map not yet open
 /// or still in its start animation, the icon not yet shown, or an open
 /// animation running).
-#[allow(clippy::too_many_arguments)]
 pub fn smoke_autoclick(
     time: Res<Time>,
     mut commands: Commands,
@@ -2984,7 +2981,6 @@ fn shuffle<T>(items: &mut [T]) {
 /// `se_open_map` plays at the open. With no rank in the client user data the
 /// open waits and says so once. Last, every icon sprite's alpha is written
 /// from its CanvasGroups.
-#[allow(clippy::too_many_arguments)]
 pub fn tick_entries(
     time: Res<Time>,
     mut commands: Commands,
@@ -3406,7 +3402,6 @@ pub fn toggle(
 /// and `englishName` lines), the weather button enabled (the tutorial
 /// branch is out of scope) and `ChangeSiteMapColor`. The panel keeps what it
 /// shows until the next open, as in the source.
-#[allow(clippy::too_many_arguments)]
 pub fn setup_phenomena(
     mut commands: Commands,
     mut hooks: MessageReader<ScreenLayerEvent>,

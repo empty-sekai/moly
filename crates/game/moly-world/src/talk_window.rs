@@ -691,7 +691,6 @@ fn window_control_tap(
 /// Update (before the chains step): the click latch, the auto release and the
 /// window's UI buttons. A manual tap releases the talk unless it landed on one
 /// of the menu's controls.
-#[allow(clippy::too_many_arguments)]
 pub fn read_click_input(
     mut state: ResMut<TalkWindowState>,
     sessions: Option<ResMut<crate::player_talk::PlayerTalkSession>>,

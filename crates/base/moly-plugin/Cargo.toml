@@ -21,3 +21,6 @@ mlua = { version = "0.12", features = ["luau", "vendored", "serde"] }
 # emits version 13, which makes every new Luau state fail. Keep 0.22.0 until
 # an mlua-sys release accepts the newer bytecode.
 luau0-src = "=0.22.0"
+
+[lints]
+workspace = true

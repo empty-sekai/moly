@@ -1069,7 +1069,6 @@ pub fn resolve_fieldobject(
 
 /// Ground/Water/Birthday 的 overlay 坐标与贴图读取（三族同形，量名同）。
 /// 返回 (coord, st, scroll, uotva, texture)。
-#[allow(clippy::type_complexity)]
 fn read_overlay_1st(
     family: &str,
     sidecar: &SiteSidecar,
@@ -1103,7 +1102,6 @@ fn read_overlay_1st(
 }
 
 /// Ground/Water 的第二层 overlay 读取（与第一层同形，量名带 2nd）。
-#[allow(clippy::type_complexity)]
 fn read_overlay_2nd(
     family: &str,
     sidecar: &SiteSidecar,

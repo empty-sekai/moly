@@ -1,5 +1,7 @@
 //! Materials, shadows, sky, roads and the particle system the game draws with.
 
+#![allow(clippy::excessive_precision, reason = "floating-point literals keep the full decimal text of the reference values so that each one can be checked value by value")]
+
 #[macro_use]
 extern crate moly_core;
 

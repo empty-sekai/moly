@@ -126,7 +126,6 @@ pub fn parse(
 
 /// Update: apply the show / hide requests; create a model under the hand
 /// mount once its glb is loaded.
-#[allow(clippy::too_many_arguments)]
 pub fn apply(
     mut commands: Commands,
     server: Res<AssetServer>,
@@ -264,7 +263,6 @@ fn hand_mount(
 /// (the player's tool goes through [`ToolModelRequest`]): `Ok(None)` while
 /// the index, the model or the hand is not in yet; its materials are swapped
 /// as the player's are.
-#[allow(clippy::too_many_arguments)]
 pub fn spawn_in_hand(
     commands: &mut Commands,
     server: &AssetServer,
@@ -322,7 +320,6 @@ pub fn spawn_in_hand(
 /// program once its scene and document are in; the document's material of
 /// the same name gives `_UsePhenomenaLighting`, the glb material its main
 /// texture. A material of another shader keeps its glb material (named).
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn swap_materials(
     mut commands: Commands,
     server: Res<AssetServer>,

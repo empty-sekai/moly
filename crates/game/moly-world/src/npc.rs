@@ -1544,7 +1544,6 @@ pub fn remove_temporary_units(world: &mut World, entities: &[Entity]) {
 /// - it was on the loaded site before and still is (the same site rebuilt):
 ///   the host's re-placement, as before: path cleared, placed on the face's
 ///   walkable cells, the objective machine back at its spawn state.
-#[allow(clippy::type_complexity)]
 pub fn reseed(
     mut commands: Commands,
     epoch: Option<Res<crate::site::GroundEpoch>>,
@@ -1958,7 +1957,6 @@ pub fn depart_along(
 /// [`depart_along`] whose move completes at `goal_distance`: an upper state
 /// tests its arrival against its own stopping distance, so its walk takes
 /// that distance as the move's goal.
-#[allow(clippy::too_many_arguments)]
 pub fn depart_along_to(
     unit: &CharacterUnitId,
     state: &mut LawWalkState,
@@ -2016,7 +2014,6 @@ fn reenter_navigation(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn route_along(
     unit: &CharacterUnitId,
     state: &mut LawWalkState,
@@ -2044,7 +2041,6 @@ fn route_along(
 /// its end, which is the target. The roster's moves go through
 /// [`build_waypoints`], whose radial ordering ends a route that bends away
 /// from its target on the farthest bend rather than on the target.
-#[allow(clippy::too_many_arguments)]
 pub fn depart_on_path(
     unit: &CharacterUnitId,
     state: &mut LawWalkState,
@@ -2070,7 +2066,6 @@ pub fn depart_on_path(
 
 /// Starts the route whose stops are set: its target, completion and first
 /// leg.
-#[allow(clippy::too_many_arguments)]
 fn begin_route(
     unit: &CharacterUnitId,
     state: &mut LawWalkState,
@@ -2625,7 +2620,6 @@ pub fn declare_navigation_action(
 /// so the Talk state ends), the agent's setup starts it again and the leg is
 /// walked while the talk goes on. The talk's turns own the rotation while
 /// the state is Talk.
-#[allow(clippy::type_complexity)]
 pub fn advance(
     time: Res<Time>,
     clock: Res<crate::npc_clock::NpcClock>,

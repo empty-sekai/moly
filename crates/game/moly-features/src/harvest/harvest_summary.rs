@@ -447,7 +447,6 @@ pub fn spawn_when_ready(
 
 /// Update, after the screen manager's step: the trip's mock experience, the
 /// pending `Play`, one sequence step, the view.
-#[allow(clippy::too_many_arguments)]
 pub fn advance(
     time: Res<Time>,
     site: Option<Res<crate::markers::SiteActive>>,

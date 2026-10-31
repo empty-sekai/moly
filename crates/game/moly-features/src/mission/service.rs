@@ -253,7 +253,6 @@ pub const RECEIVE: CallKind = CALL;
 /// one this service holds, so a `link_lost` answer of the receive's kind,
 /// which does not match the request in flight (another send took its
 /// number), still finishes the request rather than leaving it unanswered.
-#[allow(clippy::too_many_arguments)]
 pub fn answers(
     mut answers: MessageReader<crate::userdata::Answered>,
     mut service: ResMut<MysekaiMissionService>,

@@ -73,3 +73,6 @@ moly-features = { path = "../moly-features", features = ["test-support"] }
 moly-devtools = { path = "../moly-devtools", features = ["test-support"] }
 # Compile the actual depth-sampling helper to GLSL ES before a WASM rebuild.
 naga = { version = "29", features = ["wgsl-in", "glsl-out"] }
+
+[lints]
+workspace = true

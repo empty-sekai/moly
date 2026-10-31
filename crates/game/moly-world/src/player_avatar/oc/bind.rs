@@ -408,7 +408,6 @@ fn set(transform: &mut Transform, frame: &Frame) {
 
 /// Update: a spawned OC is planned against its player's avatar skeleton,
 /// fitted, given its materials and shown.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn bind(
     mut commands: Commands,
     mut selection: ResMut<OcSelection>,

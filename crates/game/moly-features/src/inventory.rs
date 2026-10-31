@@ -1054,7 +1054,6 @@ fn denom_text(have: i32, limit: i32) -> String {
 // Spawn and frame
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
 pub fn spawn_when_ready(
     mut commands: Commands,
     mut layouts: ResMut<UiLayouts>,
@@ -1217,7 +1216,6 @@ fn layout_cells(
 }
 
 
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn place(
     windows: Query<&Window, With<PrimaryWindow>>,
     stack: Res<UiLayerStack>,
@@ -1548,7 +1546,6 @@ fn hit(view: &UiPrefabView, layouts: &UiLayouts, path: &str, point: Vec2, canvas
 /// (`OpenDisassembleDialog`). While the confirmation is open every tap
 /// belongs to it (the common dialog's own `click`). The full-screen layer
 /// takes every tap (the source's raycast blocking).
-#[allow(clippy::too_many_arguments)]
 pub fn click(
     mut commands: Commands,
     mut gestures: MessageReader<GestureEvent>,

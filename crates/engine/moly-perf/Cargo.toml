@@ -8,3 +8,6 @@ license.workspace = true
 # game crate can install it without the counters knowing any game type.
 [dependencies]
 bevy = { workspace = true }
+
+[lints]
+workspace = true

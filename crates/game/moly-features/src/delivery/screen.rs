@@ -1000,7 +1000,6 @@ fn update_remaining(view: &mut ViewState, start: i32, end: i32, time: f32, ease:
 
 /// `UpdateAddedDeliveryPoint(start, end, animationTime)`: the start clamped
 /// to 0 and written at once, the text shown.
-#[allow(clippy::too_many_arguments)]
 fn update_added(
     view: &mut ViewState,
     start: i32,
@@ -1415,7 +1414,6 @@ fn effect_actions(index: usize, effects: Vec<button_rule::ButtonEffect>) -> Vec<
 }
 
 /// Apply the handlers' requests in order.
-#[allow(clippy::too_many_arguments)]
 fn apply_actions(
     actions: Vec<ButtonAction>,
     screen: &mut DeliveryScreen,
@@ -1493,7 +1491,6 @@ fn apply_actions(
 /// system delivers a handler only to a component active and enabled at that
 /// moment; a release goes to the pressed button, clicks when it is over the
 /// same button (a cancelled touch never clicks), then exits.
-#[allow(clippy::too_many_arguments)]
 pub fn input(
     mut pointers: MessageReader<UiPointerEvent>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -1757,7 +1754,6 @@ fn put_text(
 /// Update, last in the delivery chain: the tweens' step (the tween manager
 /// after the event handlers), a pressed button that is no longer active and
 /// enabled (`CustomButton.OnDisable`), the textures and the view.
-#[allow(clippy::too_many_arguments)]
 pub fn advance(
     time: Res<Time>,
     windows: Query<&Window, With<PrimaryWindow>>,

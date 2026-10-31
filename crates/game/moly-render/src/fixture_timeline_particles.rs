@@ -1283,7 +1283,6 @@ fn empty_binding(root: Entity, fixture: Entity) -> ParticleControlBinding {
 /// The controlled systems under `root` and their dormant draws. `fixture_host`
 /// waits for a fixture's own autonomous preparation first, so taking over an
 /// already active emitter never creates two simulations for one node.
-#[allow(clippy::too_many_arguments)]
 fn prepare_root(
     world: &mut World,
     fixture: Entity,

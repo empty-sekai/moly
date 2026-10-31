@@ -2836,7 +2836,6 @@ impl ImageMeshData {
 /// sprite. A replacement without authored Sprite metrics has no rect size,
 /// border or pixels per unit to give the rules, so the rules do not draw it
 /// (the same case the preferred-size query refuses).
-#[allow(clippy::too_many_arguments)]
 pub fn image_rule_mesh_data(
     layouts: &UiLayouts,
     doc: &UiPrefab,

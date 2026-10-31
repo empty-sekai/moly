@@ -832,7 +832,6 @@ fn end_group(
 }
 
 /// One pass of a group talk; `Ok(true)` when it ended.
-#[allow(clippy::too_many_arguments)]
 fn step_group(
     world: &mut World,
     roster: &Roster,

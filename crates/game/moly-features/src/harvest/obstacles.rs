@@ -124,7 +124,6 @@ fn field_component(
 /// and stone), and a treasure box loaded as harvested enables its lid
 /// (`ForceChangeAfterObject`). A root waits until the walk field has adopted
 /// the obstacle node it writes.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn set_up(
     mut commands: Commands,
     mut roots: Query<

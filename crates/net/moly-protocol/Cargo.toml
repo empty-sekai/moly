@@ -11,3 +11,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true }
 # Frames on the wire: compact binary through serde.
 bitcode = { version = "0.6", default-features = false, features = ["std", "serde"] }
+
+[lints]
+workspace = true

@@ -87,7 +87,6 @@ fn parse_index(
     Ok(paths)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn advance(
     mut commands: Commands,
     server: Res<AssetServer>,

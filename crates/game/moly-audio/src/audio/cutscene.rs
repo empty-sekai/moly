@@ -100,7 +100,6 @@ pub fn release_bgm(world: &mut World, why: &str) {
 
 /// The BGM channel's frame while a cut-scene's call stands: `true` when it
 /// does (the channel's own choice waits).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn stands(
     audio: &mut CutSceneAudio,
     commands: &mut Commands,

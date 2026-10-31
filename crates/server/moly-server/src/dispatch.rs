@@ -69,7 +69,6 @@ pub(crate) fn admin_gate(
 }
 
 /// The dispatch system.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn answer_calls(
     mut calls: MessageReader<CallReceived>,
     mut users: ResMut<Users>,

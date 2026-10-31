@@ -451,7 +451,6 @@ pub fn animation_targets(
 /// 逐名装配，每人一份动画图与播放器（图与播放器都是实体局部状态，
 /// 不共享）。参考根见模块注释。包围盒扫网格实体的世界系顶点——外壳
 /// 高与最低点是相机取景和「真的有模型吗」的现算量。
-#[allow(clippy::type_complexity)]
 pub fn wire_when_ready(
     mut commands: Commands,
     time: Res<Time>,

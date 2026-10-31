@@ -15,7 +15,6 @@ use bevy::prelude::*;
 
 /// Update: a companion whose body is wired this frame is shown, or walks
 /// from its spawn seat to the spawn point it was seated away from.
-#[allow(clippy::too_many_arguments)]
 pub fn plan_walk(
     mut commands: Commands,
     face: Option<Res<crate::walk_face::WalkFace>>,
@@ -125,7 +124,6 @@ fn avatar_pace(
 /// Update: a walking companion's route, one agent step per frame on the
 /// roster's frame clock, at the avatar's pace ([`avatar_pace`]), and the
 /// speed it moved at.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn step_motion(
     clock: Res<crate::npc_clock::NpcClock>,
     time: Res<Time>,
@@ -277,7 +275,6 @@ pub fn step_motion(
 
 /// Update: the outcome of every walk that ended, before this frame's
 /// commands; a companion that took no step this frame stands.
-#[allow(clippy::type_complexity)]
 pub fn route_outcome(
     mut commands: Commands,
     frame: Res<bevy::diagnostic::FrameCount>,
@@ -349,7 +346,6 @@ pub fn route_outcome(
 /// throughout, so the body comes back to its live pose; the hand-over each
 /// way fades (the avatar's clip with [STATE_FADE], the body's own clips from
 /// the first frame its own motion is calibrated).
-#[allow(clippy::too_many_arguments)]
 pub fn drive_clips(
     mut commands: Commands,
     mut graphs: ResMut<Assets<AnimationGraph>>,

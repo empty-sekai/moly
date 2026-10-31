@@ -496,7 +496,6 @@ impl MissionListDialog {
 
 /// Update: the dialog's runtime document and view, once the root's document
 /// and the cell document are in.
-#[allow(clippy::too_many_arguments)]
 pub fn spawn_when_ready(
     mut commands: Commands,
     mut layouts: ResMut<UiLayouts>,
@@ -579,7 +578,6 @@ pub fn show(screens: &mut ScreenManager) -> Result<DialogId, String> {
 
 /// Update: the list button's request. The pushed slot is read by [`setup`]
 /// next frame, and [`place`] draws it while it is up.
-#[allow(clippy::too_many_arguments)]
 pub fn open(
     mut requests: MessageReader<MissionDialogRequest>,
     mut dialog: ResMut<MissionListDialog>,
@@ -638,7 +636,6 @@ pub fn open(
 /// Update: `Setup` on the dialog's own view, once its slot is open: the
 /// runtime copy is installed again with one `MysekaiMissionSheetCell` copy per
 /// sheet row, and each copy runs the cell's `Setup` on its row.
-#[allow(clippy::too_many_arguments)]
 pub fn setup(
     mut dialog: ResMut<MissionListDialog>,
     mut layouts: ResMut<UiLayouts>,
@@ -755,7 +752,6 @@ fn hit(
 /// (`OnClickOK`) closes, the window's close button (`OnCloseExternal` ->
 /// `OnClickOK`) closes, and any other tap is the dialog's (its slot is
 /// modal).
-#[allow(clippy::too_many_arguments)]
 pub fn click(
     mut gestures: MessageReader<GestureEvent>,
     mut dialog: ResMut<MissionListDialog>,
@@ -818,7 +814,6 @@ pub fn click(
 }
 
 /// Update: `Common1ButtonDialog.OnHardwareBackKeyProcess` -> `OnClickOK`.
-#[allow(clippy::too_many_arguments)]
 pub fn back_key(
     mut back_keys: MessageReader<DialogBackKeyEvent>,
     mut dialog: ResMut<MissionListDialog>,
@@ -837,7 +832,6 @@ pub fn back_key(
 
 /// Update: the dialog's entity visibility, canvas scale and drawn root while
 /// it is up.
-#[allow(clippy::too_many_arguments)]
 pub fn place(
     dialog: Res<MissionListDialog>,
     windows: Query<&Window, With<PrimaryWindow>>,

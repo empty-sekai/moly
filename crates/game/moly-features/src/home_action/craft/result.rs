@@ -323,7 +323,6 @@ pub fn place(
 
 /// Taps and the back key on the shown result dialog (modal): a close button
 /// or the back key closes it; the item button shows the name balloon.
-#[allow(clippy::too_many_arguments)]
 pub fn click(
     mut screen: ResMut<CraftScreen>,
     layouts: Res<UiLayouts>,

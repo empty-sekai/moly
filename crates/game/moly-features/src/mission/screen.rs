@@ -674,7 +674,6 @@ pub fn spawn_when_ready(
 
 /// Update, after the screen manager: the layer's hooks and the refused
 /// push's pop.
-#[allow(clippy::too_many_arguments)]
 pub fn follow_screen(
     mut events: MessageReader<ScreenLayerEvent>,
     tables: Option<Res<moly_masters::load::MasterTables>>,
@@ -821,7 +820,6 @@ pub fn follow_receive(
 
 /// Update: the turn's steps, the page roots' x and visibility, the current
 /// page's completion cell, its stamp and the tap cover.
-#[allow(clippy::too_many_arguments)]
 pub fn advance(
     time: Res<Time>,
     screens: Res<ScreenManager>,

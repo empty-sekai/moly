@@ -88,7 +88,6 @@ pub struct Ghosted {
 
 /// Update: every listed instance draws through its dithered copies; an
 /// instance no longer listed gets its own materials back.
-#[allow(clippy::type_complexity)]
 pub fn apply_ghosts(
     mut commands: Commands,
     ghosts: Res<FixtureGhosts>,
@@ -300,7 +299,6 @@ fn stand_point(
 
 /// Update, after the commands: a build waiting for its navigation sets out
 /// once the walk cells are baked with its fixture in the layout.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(super) fn approach(
     mut commands: Commands,
     time: Res<Time>,
@@ -443,7 +441,6 @@ pub(super) fn walk_ended(
 /// Update, after the walks: the swings of each build that reached its
 /// fixture, the hammer in its hand and the fixture's steps to solid; each
 /// hit and the built fixture are written as [`BuildCue`]s.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(super) fn swing(
     mut commands: Commands,
     time: Res<Time>,

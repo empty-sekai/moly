@@ -188,7 +188,6 @@ pub fn request(
 
 /// `OnDropItem`'s model half (see the module comment); the view follows in
 /// [`spawn`].
-#[allow(clippy::too_many_arguments)]
 pub fn on_drop_item(
     model: &mut DeliveryModel,
     spawns: &mut DeliveryDropSpawns,
@@ -322,7 +321,6 @@ fn play_drop_item_se(rarity: i32, se: &mut SeRequests) {
 }
 
 /// Update: spawn the views whose package is in, in model order.
-#[allow(clippy::too_many_arguments)]
 pub fn spawn(
     mut commands: Commands,
     server: Res<AssetServer>,
@@ -607,7 +605,6 @@ pub fn scan(
 }
 
 /// Update: the hops' ends and the flights.
-#[allow(clippy::too_many_arguments)]
 pub fn advance(
     mut commands: Commands,
     time: Res<Time>,
@@ -916,7 +913,6 @@ pub fn gather_loop(
 
 /// The gather answer: the reward rows start their run, the sent drops leave
 /// the stack and every party synchronizes from the updated client copy.
-#[allow(clippy::too_many_arguments)]
 fn finish_gather(
     gather: &mut DeliveryGatherLoop,
     model: &mut DeliveryModel,

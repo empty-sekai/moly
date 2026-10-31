@@ -673,7 +673,6 @@ fn thumbnail(
 
 /// Update: `RefreshView` of the start confirm, each frame it shows (the pass
 /// warning is its `Update`).
-#[allow(clippy::too_many_arguments)]
 pub fn setup_start(
     mut layouts: ResMut<UiLayouts>,
     server: Res<AssetServer>,
@@ -930,7 +929,6 @@ pub struct DialogWorld<'w, 's> {
 /// Update: the shown dialog takes the taps. Its positive button (`OnClickOK`)
 /// answers its OK, the window's close button and the second footer button
 /// cancel, and every other tap is the dialog's (its slot is modal).
-#[allow(clippy::too_many_arguments)]
 pub fn click(
     mut gestures: MessageReader<GestureEvent>,
     mut dialogs: ResMut<ConvertDialogs>,

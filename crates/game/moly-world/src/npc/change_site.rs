@@ -225,7 +225,6 @@ pub fn parse(mut controller: ResMut<ChangeSiteController>, mut masters: ResMut<M
 }
 
 /// Update: the lottery on entering home or a floor, and the loop.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn run(
     mut controller: ResMut<ChangeSiteController>,
     site: Option<Res<crate::site::SiteActive>>,

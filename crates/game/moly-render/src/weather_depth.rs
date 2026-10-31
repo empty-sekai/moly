@@ -245,7 +245,6 @@ fn init_raw_depth(mut commands:Commands, device:Res<bevy::render::renderer::Rend
 
 /// Both bind groups are cached by layout and bound resource ids, so a view
 /// whose depth attachment and snapshot textures stay the same reuses them.
-#[allow(clippy::too_many_arguments)]
 pub fn prepare_raw_depth(
     mut commands: Commands,
     device: Res<bevy::render::renderer::RenderDevice>,

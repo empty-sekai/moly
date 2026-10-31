@@ -72,3 +72,6 @@ naga = { version = "29", features = ["wgsl-in", "glsl-out"] }
 [features]
 # Test helpers that the higher layers' tests call.
 test-support = []
+
+[lints]
+workspace = true

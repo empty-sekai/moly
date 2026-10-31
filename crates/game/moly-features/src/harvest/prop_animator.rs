@@ -442,7 +442,6 @@ pub enum PropCall {
 pub struct PropAnimatorCalls(pub Vec<(Entity, PropCall)>);
 
 /// Update: build each prop's Animator once its scene expanded.
-#[allow(clippy::type_complexity)]
 pub fn bind(
     mut commands: Commands,
     roots: Query<
@@ -562,7 +561,6 @@ pub fn bind(
 
 /// Update, after the hits: apply this frame's calls, step every Animator and
 /// write its pose.
-#[allow(clippy::type_complexity)]
 pub fn advance(
     time: Res<Time>,
     mut calls: ResMut<PropAnimatorCalls>,

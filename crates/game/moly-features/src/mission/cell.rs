@@ -605,7 +605,6 @@ pub fn spawn_cells(
 }
 
 /// Update: the current page's rows, their scroll and the list's empty state.
-#[allow(clippy::too_many_arguments)]
 pub fn advance(
     layouts: Res<UiLayouts>,
     tables: Option<Res<moly_masters::load::MasterTables>>,

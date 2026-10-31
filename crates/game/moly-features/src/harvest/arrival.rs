@@ -610,7 +610,6 @@ pub struct HarvestViewNodes {
 
 /// Update: bind each spawned harvest scene's view nodes once and apply the
 /// view's Setup visibility (a tree hides its after mesh and its under part).
-#[allow(clippy::type_complexity)]
 pub fn bind_views(
     mut commands: Commands,
     roots: Query<

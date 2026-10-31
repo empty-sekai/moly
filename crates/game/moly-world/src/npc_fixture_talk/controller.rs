@@ -319,7 +319,6 @@ fn objective_cancelled(world: &World, main: Entity) -> bool {
 }
 
 /// One pass; `true` when the controller is gone.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn step(
     world: &mut World,
     roster: &Roster,

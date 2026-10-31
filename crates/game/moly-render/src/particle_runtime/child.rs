@@ -629,7 +629,6 @@ pub(super) fn apply_command_with_events(
 /// One command applied with the target's laws already read from its
 /// modules (see [`TargetLaws`]); `events` as for a target with its own birth
 /// edges.
-#[allow(clippy::too_many_arguments)]
 fn apply_with_laws(
     system: &mut Runtime,
     laws: &Result<ChildLaws, Refused>,

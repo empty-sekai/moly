@@ -633,7 +633,6 @@ impl Factory<'_, '_> {
     /// GetTargetNoTalkFixture finds a fixture (the same actionable and
     /// playable tests as the lottery, `unmovable` being this character's
     /// UnmovableFixtureList). Returns the row ids.
-    #[allow(clippy::too_many_arguments)]
     pub fn no_talk_action_rows(
         &self,
         actor: Entity,
@@ -681,7 +680,6 @@ impl Factory<'_, '_> {
     /// `CreateNoneTalkData(character, action)`: GetTargetNoTalkFixture for
     /// the one NoTalk row, then, on a hit, one engine pick of the timeline in
     /// its group on `rng`.
-    #[allow(clippy::too_many_arguments)]
     pub fn select_no_talk_row(
         &self,
         row: i32,
@@ -772,7 +770,6 @@ impl Factory<'_, '_> {
     /// on a fixture that is not a block. Every placement stands on the shown
     /// site, where every NPC of this host also is, so the site-type and
     /// site-existence tests hold.
-    #[allow(clippy::too_many_arguments)]
     fn actionable(
         &self,
         actor: Entity,
@@ -821,7 +818,6 @@ impl Factory<'_, '_> {
     /// the StartLoc or EndLoc cell is the null tile, or the StartLoc cell lies
     /// outside the fixture on a tile that is not empty. No path query:
     /// reachability is tested once, for the chosen target only, at departure.
-    #[allow(clippy::too_many_arguments)]
     fn playable_point(
         &self,
         target: &FixtureTarget,
@@ -910,7 +906,6 @@ impl Factory<'_, '_> {
     /// member-slot order) must be playable on the fixture; a group with no
     /// such timeline is not usable. Then `CanActionableFixture(character,
     /// fixture)`. `Err` names host data this host cannot evaluate.
-    #[allow(clippy::too_many_arguments)]
     pub fn talk_fixture_admissible(
         &self,
         actor: Entity,
@@ -1279,7 +1274,6 @@ impl Factory<'_, '_> {
     /// locator, the talk's picked timeline plays on it, and the pre-action's
     /// tweet opens the window before it. The claimed slot is the locator
     /// name's slot (TryParseActionPointNameToSlotId), not the locate row's.
-    #[allow(clippy::too_many_arguments)]
     pub fn talk_timeline_selection(
         &self,
         actor: Entity,

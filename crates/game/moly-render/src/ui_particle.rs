@@ -664,7 +664,6 @@ fn scene_trs(
 /// Update: resolve each visible host once and install its systems (the Play
 /// of its play-on-awake systems); clear them when it is hidden, and clear the
 /// draws of a despawned host.
-#[allow(clippy::too_many_arguments)]
 fn install(
     mut commands: Commands,
     mut hosts: Query<(
@@ -857,7 +856,6 @@ fn plain_nodes_needed(host: &UiParticleHost, doc: &Value) -> Result<Vec<String>,
     Ok(wanted)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn install_host(
     commands: &mut Commands,
     entity: Entity,
@@ -1142,7 +1140,6 @@ fn uiparticle_node(
 /// PostUpdate: one frame of every installed UIParticle, as
 /// `UIParticleUpdater.Refresh` runs it after the frame's particle update:
 /// each system's frame on the shared runtime, then the bake into canvas space.
-#[allow(clippy::too_many_arguments)]
 fn bake_frame(
     mut hosts: Query<(
         Entity,

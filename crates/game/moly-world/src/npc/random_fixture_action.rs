@@ -539,7 +539,6 @@ fn fixture_ai_data(
 /// `ForceUpdateReadTalkFixtureTalk`'s data for `unit` on `actor`, with its
 /// draws: `Err` names host data that could not be read; the inner `Err` is
 /// a source exception.
-#[allow(clippy::type_complexity)]
 fn build_read_talk(
     world: &mut World,
     actor: Entity,
@@ -709,7 +708,6 @@ fn find_npc(world: &mut World, unit: u32) -> Option<Entity> {
 }
 
 /// The character's unread fixture-action talks and its no-talk actions.
-#[allow(clippy::type_complexity)]
 fn candidates(world: &mut World, actor: Entity, unit: u32) -> Result<Candidates, String> {
     let mut params = SystemState::<(
         crate::npc_fixture_activity::Factory<'_, '_>,
@@ -946,7 +944,6 @@ fn force_no_talk_action(
 }
 
 /// CreateNoneTalkData(character, action) for one NoTalk row.
-#[allow(clippy::type_complexity)]
 fn select_row(
     world: &mut World,
     actor: Entity,

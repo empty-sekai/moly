@@ -40,3 +40,6 @@ smol-hyper = "0.1"
 # The server clock on a browser: the page's wall clock and its time zone.
 js-sys = "0.3"
 wasm-bindgen = "0.2"
+
+[lints]
+workspace = true

@@ -1260,7 +1260,6 @@ fn setup_texts(
 
 /// Resolve one `NoticeCollectItem` call: the collect notice, or a chained
 /// An acquisition entry.
-#[allow(clippy::too_many_arguments)]
 fn notice(
     resource_type: &str,
     resource_id: i32,
@@ -1683,7 +1682,6 @@ fn finish(player: &mut GetResourcePlayer, opener: Opener) {
 
 /// Update: resolve the calls, drive the acquisition dialog through the screen manager, and draw
 /// the three views.
-#[allow(clippy::too_many_arguments)]
 pub fn place(
     mut commands: Commands,
     inputs_param: PlaceInputs,
@@ -2544,7 +2542,6 @@ fn on_close_area(
 /// the close area sends the close request the back key sends, which the
 /// delivery flow answers. A reward dialog without a view is refused: its
 /// close request goes out in the frame it shows.
-#[allow(clippy::too_many_arguments)]
 pub fn click(
     layouts: Res<crate::ui_layout::UiLayouts>,
     screens: Res<ScreenManager>,

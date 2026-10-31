@@ -963,7 +963,6 @@ pub fn spawn_when_ready(
 /// 出栈。本仓没有那两层，于是在这里一次算完。Fixtures and NPCs both
 /// follow the colliding list's edges: admission runs once when an object
 /// joins, removal when it leaves, and nothing is re-tested in between.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn advance(
     mut commands: Commands,
     mut state: ResMut<ActionButtonState>,
@@ -2074,7 +2073,6 @@ fn reset_joystick(
 /// the player's own state is a later, separate step of the switch. The other
 /// buttons keep the full interaction gate. OnTimelineFixture asks
 /// IsCanActionFixture for the head again before it locks the stack.
-#[allow(clippy::too_many_arguments)]
 pub fn click(
     mut gestures: MessageReader<GestureEvent>,
     mut commands: Commands,
@@ -2716,7 +2714,6 @@ pub struct DoorWalk {
 /// starts again on the next one. `MOLY_DOOR_WALK_OFFSET=x,z` shifts the
 /// walk's goal by that many metres (to come at the sensor from another
 /// side; the button still waits for the sensor's own sphere).
-#[allow(clippy::too_many_arguments)]
 pub fn smoke_door_walk(
     mut touches: MessageWriter<TouchInput>,
     mut window_events: MessageWriter<bevy::window::WindowEvent>,

@@ -78,7 +78,6 @@ pub struct CollectNotice {
 
 /// `MysekaiResourceUtility.NoticeCollectItem(resourceType, resourceId,
 /// quantity)`.
-#[allow(clippy::too_many_arguments)]
 pub fn notice_collect_item(
     resource_type: i32,
     resource_id: i64,

@@ -921,7 +921,6 @@ fn boot_visitors(
 /// The talk list at boot, set into the client's store once. A stated list
 /// is checked against the talk table; the policy waits for the booted
 /// site's placements.
-#[allow(clippy::too_many_arguments)]
 fn boot_talk_list(
     mut commands: Commands,
     panel: Option<Res<ServerPanel>>,
@@ -1051,7 +1050,6 @@ fn follow_live_schedule(
 /// The gate presenter's talk-list calls: a change reply's visitors first,
 /// then the talk list (stated rows, or the talk-list policy's list for the
 /// new visitors).
-#[allow(clippy::too_many_arguments)]
 fn apply_talk_list_updates(
     mut commands: Commands,
     mut updates: ResMut<crate::server_panel_data::ClientTalkListUpdates>,

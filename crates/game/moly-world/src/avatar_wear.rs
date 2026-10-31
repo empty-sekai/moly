@@ -260,7 +260,6 @@ pub struct WearPart;
 
 /// Update：身体换装闩到位后装饰品。装载失败响亮 panic（未提取件具名
 /// 拒绝）；glb 未到齐静默等下一帧。
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn attach_accessory(
     mut commands: Commands,
     server: Res<AssetServer>,

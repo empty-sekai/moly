@@ -194,7 +194,6 @@ impl OwnAnimator {
     /// is the family name plus `_L`, its lead-in the name plus `_S`). `None`
     /// while the motion library is loading; an error when the library, a
     /// segment or the body's animation root is missing.
-    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         commands: &mut Commands,
         server: &AssetServer,
@@ -721,7 +720,6 @@ fn unit_name(unit: Option<u32>) -> String {
 /// Update, after the binding: each offered body gets its own animator once
 /// the motion library is in. A body whose unit or segments cannot give it
 /// one is refused once, naming them, and keeps the avatar's motion.
-#[allow(clippy::too_many_arguments)]
 pub fn prepare(
     mut commands: Commands,
     server: Res<AssetServer>,

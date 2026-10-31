@@ -129,7 +129,6 @@ mod tests {
     /// Source-value instrument: the engine's own frame-time update executed
     /// as compiled code after its start-up reset at time 0, per case the
     /// cap (bits) and each frame's (platform time, delta-time bits).
-    #[allow(clippy::type_complexity)]
     const EXECUTED: [(&str, u32, &[(f64, u32)]); 8] = [
         ("steady 60 Hz after ResetTime(true) at t=0", 0x3EAAAAAB, &[(0.016666666666666666, 0x3ca3d70a), (0.03333333333333333, 0x3ca3d70a), (0.05, 0x3c888889), (0.06666666666666667, 0x3c888889), (0.08333333333333333, 0x3c888889), (0.1, 0x3c888889), (0.11666666666666667, 0x3c888889), (0.13333333333333333, 0x3c888889)]),
         ("60 Hz then one 1.0 s frame then 60 Hz", 0x3EAAAAAB, &[(0.016666666666666666, 0x3ca3d70a), (0.03333333333333333, 0x3ca3d70a), (0.05, 0x3c888889), (0.06666666666666667, 0x3c888889), (0.08333333333333333, 0x3c888889), (1.0833333333333333, 0x3eaaaaab), (1.0999999999999999, 0x3c888889), (1.1166666666666667, 0x3c888889)]),

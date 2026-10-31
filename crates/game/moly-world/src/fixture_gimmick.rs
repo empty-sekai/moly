@@ -811,7 +811,6 @@ fn enter_switch(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn install_switch(
     world: &mut World,
     runtime: &mut Gimmicks,

@@ -193,7 +193,6 @@ fn anchor_index(anchor: Anchor) -> usize {
 }
 
 impl DoorMove {
-    #[allow(clippy::too_many_arguments)]
     fn new(
         kind: DoorKind,
         from: String,

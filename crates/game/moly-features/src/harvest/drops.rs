@@ -84,7 +84,6 @@ fn ease_out_cubic(u: f32) -> f32 {
 }
 
 /// Update: consume the drop batches.
-#[allow(clippy::too_many_arguments)]
 pub fn spawn(
     mut commands: Commands,
     server: Res<AssetServer>,

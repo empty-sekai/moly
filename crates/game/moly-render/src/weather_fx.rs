@@ -1791,7 +1791,6 @@ fn authored_trs(by_path: &HashMap<String, &Value>, path: &str)
 
 /// Whether the target's parent is admitted with a birth or death edge to it:
 /// the parent record is judged as its own turn judges it.
-#[allow(clippy::too_many_arguments)]
 fn parent_delivers(effect_name: &str, parent: &str, node: &str, by_path: &HashMap<String, &Value>,
     graph: &SubEmitterGraph<'_>, kind: EffectKind, camera_rotation: bool,
     lifecycle: Option<WeatherEffectLifecycle>, native_owner: bool, asset_root: &str,
@@ -1892,7 +1891,6 @@ fn judge(
         camera_rotation, Some(lifecycle), "phenomena", None, ground, bodies, server, tally)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn judge_in_archive(
     effect_name: &str,
     particle: &Value,
@@ -1920,7 +1918,6 @@ fn judge_in_archive(
 /// host do (its Director-driven systems install the owner at each
 /// `ParticleSystem.Simulate` restart and step by the Director's time, which
 /// reads neither frame clock).
-#[allow(clippy::too_many_arguments)]
 fn judge_in_host(
     effect_name: &str,
     particle: &Value,

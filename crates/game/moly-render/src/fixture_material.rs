@@ -2409,7 +2409,6 @@ fn switch_materials(
 /// 逐实体插（同一句柄可能同时出现在墙内与非墙摆放下）。窗外观支路
 /// 的门四角按「首见根」从同一 glb 的写零面网格读出（同一句柄的多次
 /// 摆放共享同一 glb，四角相同）。
-#[allow(clippy::type_complexity)]
 fn build_swap_plan(
     roots: &PendingVisuals,
     children: &Query<&Children>,

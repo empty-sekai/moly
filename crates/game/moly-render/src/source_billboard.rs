@@ -307,7 +307,6 @@ fn write_stretch(
 /// alignment each instance's velocity is read in the simulation space.
 /// `camera_velocity` (the camera's world velocity, source basis) is read by the
 /// Stretch mode only.
-#[allow(clippy::too_many_arguments)]
 pub fn write(
     mesh: &mut Mesh,
     draw: &Draw,

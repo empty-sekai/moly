@@ -88,7 +88,6 @@ impl SiteExtensionData {
     /// that operation order, the inner radius `radius - max(gradient, 0)`
     /// (NaN kept). Smoothness and limit line width are the `Default` values;
     /// the centre and both colours are the clip's.
-    #[allow(clippy::too_many_arguments)]
     pub fn expansion_frame(
         center_position: [f32; 3],
         start_radius: f32,

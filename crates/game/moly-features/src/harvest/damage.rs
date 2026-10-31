@@ -134,7 +134,6 @@ fn multi_hit_effect(class: &str, tool_level: i32) -> Option<u16> {
 }
 
 /// Update: drain the hit queue through `OnDamage`.
-#[allow(clippy::too_many_arguments)]
 pub fn on_damage(
     mut commands: Commands,
     mut hits: ResMut<HarvestHits>,
@@ -323,7 +322,6 @@ fn hide(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn change_after_object(
     commands: &mut Commands,
     root: Entity,
@@ -480,7 +478,6 @@ impl TopMaterials<'_, '_> {
 }
 
 /// Update: the tree fall and the delayed disappearances.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn advance_after_forms(
     time: Res<Time>,
     frames: Res<FrameCount>,
@@ -609,7 +606,6 @@ pub fn advance_after_forms(
 /// effect, the SE cues (the last-attack SEs only with `last`), and the
 /// treasure box's `open`. The punch is the caller's. Returns the cues and
 /// the hooks for the caller's line.
-#[allow(clippy::too_many_arguments)]
 fn damage_effect(
     target: Entity,
     object: &HarvestObject,
@@ -734,7 +730,6 @@ fn push_punch(commands: &mut Commands, punches: &mut Query<&mut HarvestPunches>,
 
 /// Update, after the action: the EffectOnly clip events
 /// (`PlayDamageEffectForIndefinite(toolLevel, boost)`, `isLastAttack` false).
-#[allow(clippy::too_many_arguments)]
 pub fn on_effect_only(
     mut commands: Commands,
     mut requests: ResMut<HarvestEffectOnly>,

@@ -1255,7 +1255,6 @@ fn i_field(row: &serde_json::Value, name: &str) -> i32 {
 /// 点名（不拒绝，见 [`Census`]）。指称名表照录全量（名 → unit 与名册
 /// 无关）。名册上没有对话成员时警告一次并逐帧重试（名册随站点变，
 /// 空是暂态不是数据断点）。
-#[allow(clippy::type_complexity)]
 pub fn prepare(
     mut commands: Commands,
     store: Option<Res<PlayerTalkStore>>,
@@ -1760,7 +1759,6 @@ fn communication_arrived(
 
 /// Update：消费拾取链的玩家对话请求。会话在播、自主对话在播、候选或
 /// 站点未就绪都不发起（真源态梯同形：对话态下按钮不再走通用分支）。
-#[allow(clippy::type_complexity)]
 pub fn consume_trigger(
     time: Res<Time>,
     mut commands: Commands,
@@ -2595,7 +2593,6 @@ fn selection_seed(unit: u32, site: i32, prev: Option<i32>, request_no: u32) -> u
 
 const FIXTURE_CAST_COHERENCE_RADIUS: f32 = 4.0;
 
-#[allow(clippy::type_complexity)]
 fn validate_fixture_context(
     row: &moly_law::talk::FixtureTalkRow,
     requested: Option<Entity>,
@@ -2738,7 +2735,6 @@ const SESSION_STEP: crate::hold::HoldSite = crate::hold::HoldSite {
 /// Update：步进主循环（同配对对话侧的形状）：发起点按的闩耗尽、
 /// 窗体点击放行门、`advance` 一拍、逐触发步分发、对话动作播完交还、
 /// 段收口。挂在窗体输入之后（闩先于步进）。
-#[allow(clippy::type_complexity)]
 pub fn advance_session(
     mut commands: Commands,
     time: Res<Time>,
@@ -3182,7 +3178,6 @@ fn referent_of(step: &TalkStep) -> Option<&str> {
 }
 
 /// 一步的分发：按 op 落到呈现通道。日志只带 id/步号/指称/键名。
-#[allow(clippy::too_many_arguments)]
 fn dispatch_step(
     commands: &mut Commands,
     session: &mut PlayerTalkSession,
@@ -3682,7 +3677,6 @@ pub struct PlayerTalkMotion<'w, 's> {
 /// * Otherwise `FindNPCCharacter`: the session's NPC when the id is its unit,
 ///   else nothing. A request for the base name already playing does nothing
 ///   (`IsCurrentPlayingAnimationSameAs`).
-#[allow(clippy::too_many_arguments)]
 fn run_talk_animations(
     session: &PlayerTalkSession,
     due: Vec<TalkAnimation>,
@@ -3781,7 +3775,6 @@ fn run_talk_animations(
 /// holding `<previous>_E`, that end segment plays first at speed 1 and the new
 /// motion follows it; otherwise the new motion's `_S` starts. The previous
 /// base name is unknown at the talk's start, where no end segment plays.
-#[allow(clippy::too_many_arguments)]
 fn begin_talk_animation(
     unit: u32,
     runtime: &mut PlayerTalkRuntime,
@@ -3843,7 +3836,6 @@ fn begin_talk_animation(
 /// A motion's `_S` (crossfade `blend`, animator speed `speed`). Without that
 /// segment in the library the view's crossfade finds nothing and nothing
 /// plays; the segment playing stays.
-#[allow(clippy::too_many_arguments)]
 fn start_talk_motion(
     unit: u32,
     runtime: &mut PlayerTalkRuntime,
@@ -3895,7 +3887,6 @@ fn start_talk_motion(
 /// until the next change or the talk's end (without `_L` the animator goes
 /// back to the NPC's movement driver); a finished `_E` starts the motion
 /// queued behind it.
-#[allow(clippy::too_many_arguments)]
 fn advance_talk_segments(
     session: &PlayerTalkSession,
     lib: &Gltf,
@@ -3989,7 +3980,6 @@ fn advance_talk_segments(
 
 /// 段收口：撤持留与运行时、撤窗体（层弹出无淡出）、相位回驻留、待机
 /// 归位、转体未完把朝向钉到转身终点、前一对话记账与收口日志。
-#[allow(clippy::too_many_arguments)]
 fn finish_session(
     commands: &mut Commands,
     session: &mut PlayerTalkSession,
@@ -4221,7 +4211,6 @@ pub fn report(session: Option<Res<PlayerTalkSession>>, ledger: Res<PlayerTalkLed
 /// 按该屏位发布手势事件，走与真实输入**同一条**链（投影 → 射线 →
 /// 圆柱测试 → NPC 沿 → 请求 → 六门 → 会话）。任一对话会话在播时不
 /// 注入（点按会被跳过，注入只是噪声）；目标按候选 unit 轮转点名。
-#[allow(clippy::type_complexity)]
 pub fn smoke_autotap(
     mut events: MessageWriter<GestureEvent>,
     cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,

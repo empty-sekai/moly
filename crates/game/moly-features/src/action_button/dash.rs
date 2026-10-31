@@ -554,7 +554,6 @@ fn current_host(
 
 /// Update, after the action-button click: advance the button's tweens, run
 /// Setup when its screen mounts, and dress the view.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn place(
     time: Res<Time>,
     state: Res<ActionButtonState>,
@@ -687,7 +686,6 @@ pub fn place(
 
 /// Update, after the action-button click and before the world pick: a tap
 /// on the shown dash button is its click.
-#[allow(clippy::too_many_arguments)]
 pub fn click(
     mut gestures: MessageReader<GestureEvent>,
     mut consumed: ResMut<ActionTapConsumed>,

@@ -400,7 +400,6 @@ pub fn place(
 /// Taps and the back key on the shown dialog (modal: every tap is its). A
 /// detached dialog closes here on its answer, and is forgotten when it was
 /// closed from outside.
-#[allow(clippy::too_many_arguments)]
 pub fn click(
     mut dialogs: ResMut<CommonDialogs>,
     mut screens: ResMut<ScreenManager>,

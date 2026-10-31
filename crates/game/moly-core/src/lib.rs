@@ -5,6 +5,8 @@
 //! Nothing here reads a game domain: a reader of one of these modules either
 //! takes what it needs as an argument or reads it out of the world itself.
 
+#![allow(clippy::excessive_precision, reason = "floating-point literals keep the full decimal text of the reference values so that each one can be checked value by value")]
+
 /// Assigns `$value` to `$place` only when they differ. A write through `Mut`
 /// marks the component changed even when the value is equal, and the
 /// change-driven systems (UI layout and text measurement, transform and

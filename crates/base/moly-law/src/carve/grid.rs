@@ -505,7 +505,6 @@ fn for_each_triangle_cell(
 
 /// Clip one source triangle to every cell column it touches (rows in `rows`)
 /// and append its interval.
-#[allow(clippy::too_many_arguments)]
 fn rasterize_triangle_spans(
     grid: &Grid,
     spans: &mut Vec<(u32, Span)>,
@@ -616,7 +615,6 @@ fn connected(a_top: f32, a_ceiling: f32, b_top: f32, b_ceiling: f32) -> bool {
 /// one climb. A reachable neighbour is a span with at least the agent height
 /// between the higher floor and the lower ceiling; a missing neighbour column
 /// is a drop.
-#[allow(clippy::too_many_arguments)]
 fn span_is_ledge(
     bot: f32,
     ceiling: f32,

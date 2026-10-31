@@ -625,7 +625,6 @@ pub(crate) fn camera_drag_delta<'a>(
 }
 
 /// Update: `OnDrag` and `OnPinch` while the floor edit camera is current.
-#[allow(clippy::too_many_arguments)]
 pub fn input(
     mut gestures: MessageReader<GestureEvent>,
     scroll: Res<AccumulatedMouseScroll>,

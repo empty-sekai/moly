@@ -109,7 +109,6 @@ impl DitherConfigLoad {
 }
 
 /// Presenter call 5.
-#[allow(clippy::type_complexity)]
 pub fn update_dither(
     mut materials: ResMut<Assets<CharacterMaterial>>,
     registry: Option<Res<crate::npc::Registry>>,

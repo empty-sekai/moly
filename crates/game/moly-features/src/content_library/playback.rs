@@ -3,7 +3,6 @@ use super::*;
 use crate::npc_fixture_activity::preview::{PreviewPhase, PreviewRecord};
 use crate::player_talk::{PlayerTalkLedger, PlayerTalkOutcome};
 
-#[allow(clippy::too_many_arguments)]
 pub fn dispatch(
     mut commands: Commands,
     mut state: ResMut<ContentLibrary>,
@@ -231,7 +230,6 @@ pub fn dispatch(
     state.changed();
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn observe_start(
     time: Res<Time>,
     mut state: ResMut<ContentLibrary>,

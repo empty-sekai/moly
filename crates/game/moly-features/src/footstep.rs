@@ -594,7 +594,6 @@ struct FootClock {
 
 /// PostUpdate, after the animation step: the events the locomotion clip
 /// crossed this frame.
-#[allow(clippy::too_many_arguments)]
 fn detect_events(
     inputs: Option<Res<FootInputs>>,
     states: Option<Res<PlayerAvatarStates>>,

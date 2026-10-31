@@ -1082,8 +1082,6 @@ fn hit(view: &UiPrefabView, layouts: &UiLayouts, path: &str, point: Vec2, canvas
         .is_some_and(|rect| rect.active && rect.contains(point))
 }
 
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn click(
     mut gestures: MessageReader<GestureEvent>,
     windows: Query<&Window, With<PrimaryWindow>>,

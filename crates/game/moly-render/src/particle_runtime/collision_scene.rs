@@ -1707,7 +1707,6 @@ impl PrunerScene {
 /// PostUpdate, after the transforms propagate and before the weather
 /// particles' frame: the site's readiness and the local player's avatar,
 /// into the physics scene.
-#[allow(clippy::type_complexity)]
 pub fn observe_product(
     retiring: bevy::prelude::Res<crate::weather_fx::WeatherFxRetirements>,
     ready: Option<bevy::prelude::Res<crate::markers::SiteScenesReady>>,

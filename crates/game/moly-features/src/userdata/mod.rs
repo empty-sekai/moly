@@ -545,7 +545,6 @@ fn track_join(
 
 /// PreUpdate: the arrived sections are applied to the copies in the server's
 /// order, then each answer is published to the features.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_arrivals(
     mut commands: Commands,
     time: Res<Time<Real>>,
@@ -653,7 +652,6 @@ pub(crate) fn apply_arrivals(
 }
 
 /// Applies one response's sections, as the in-process reader did.
-#[allow(clippy::too_many_arguments)]
 fn apply_sections(
     copies: &mut ClientCopies,
     fresh: &mut Option<ClientUserData>,

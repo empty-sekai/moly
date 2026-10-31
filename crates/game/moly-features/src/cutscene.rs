@@ -792,7 +792,6 @@ fn source_quat(value: &Value) -> Option<Quat> {
 }
 
 /// The prefab record's virtual cameras, effect prefabs and view fields.
-#[allow(clippy::type_complexity)]
 fn read_prefab(
     document: &Value,
     prefab: &str,

@@ -78,3 +78,6 @@ test-support = []
 # Desktop file chooser and clipboard; Android and the browser have their own.
 [target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
 arboard = { version = "3", default-features = false }
+
+[lints]
+workspace = true

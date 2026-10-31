@@ -348,7 +348,6 @@ fn missing_glyphs(art: &crate::balloon::BalloonArt, text: &str) -> Vec<char> {
 }
 
 /// `HarvestCollectItemNoticeCell.Setup` on cell `index`.
-#[allow(clippy::too_many_arguments)]
 fn setup_cell(
     bound: &mut Bound,
     index: usize,
@@ -429,7 +428,6 @@ fn setup_cell(
 
 /// The calls, the slide controller's frame, the rare delays and the new-mark
 /// letters, drawn into the notice view.
-#[allow(clippy::too_many_arguments)]
 fn advance(
     mut calls: MessageReader<NoticeCollectItem>,
     time: Res<Time>,

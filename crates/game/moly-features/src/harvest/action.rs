@@ -519,7 +519,6 @@ pub struct ActionWorld<'w> {
 
 /// Update: contacts and the target (`OnCollisionEnter/Exit`, `OnUpdate`,
 /// `OnChangeTargetHarvestObject`).
-#[allow(clippy::too_many_arguments)]
 pub fn update_targets(
     eligibility: crate::interaction::InteractionEligibility,
     bulk: Option<Res<super::bulk::BulkHarvest>>,
@@ -632,7 +631,6 @@ fn yaw_of(rotation: Quat) -> f32 {
 }
 
 /// Update: presses, the swing clock and the phases.
-#[allow(clippy::too_many_arguments)]
 pub fn advance(
     bulk: Option<Res<super::bulk::BulkHarvest>>,
     mut action: ResMut<HarvestAction>,
@@ -1015,7 +1013,6 @@ fn admit(
 }
 
 /// Steps 5 to 8 (the first loop iteration).
-#[allow(clippy::too_many_arguments)]
 fn start_action(
     action: &mut HarvestAction,
     world: &mut ActionWorld,
@@ -1129,7 +1126,6 @@ fn start_action(
 }
 
 /// `PlayHarvestMotion`: facing and the source clip.
-#[allow(clippy::too_many_arguments)]
 fn motion(
     action: &mut HarvestAction,
     world: &mut ActionWorld,
@@ -1186,7 +1182,6 @@ fn motion(
 }
 
 /// One loop iteration (step 8): `PrePlayerHarvestMotion`, then the swing.
-#[allow(clippy::too_many_arguments)]
 fn begin_loop(
     action: &mut HarvestAction,
     world: &mut ActionWorld,
@@ -1416,7 +1411,6 @@ fn step_auto_move(
 }
 
 /// The swing of one loop iteration (`PlayHarvestMotion` onward).
-#[allow(clippy::too_many_arguments)]
 fn swing(
     action: &mut HarvestAction,
     world: &mut ActionWorld,
@@ -1542,7 +1536,6 @@ fn swing(
 }
 
 /// `HarvestPresenter.OnAnimationEvent`.
-#[allow(clippy::too_many_arguments)]
 fn on_animation_event(
     action: &mut HarvestAction,
     world: &mut ActionWorld,
@@ -1712,7 +1705,6 @@ fn change_camera_mode(commands: &mut Commands, to: crate::camera::CameraStateTyp
 }
 
 /// Steps 10 and 11.
-#[allow(clippy::too_many_arguments)]
 fn finish_action(
     action: &mut HarvestAction,
     world: &mut ActionWorld,
@@ -1770,7 +1762,6 @@ fn finish_action(
 /// Update: `OnReceiveHarvestAnimationEvent` after `OnDamage`, and
 /// `OnHarvestPlayerActionHit` (stamina, durability, the log stack, a broken
 /// tool), `UpdateHarvestUI`, the camera shake.
-#[allow(clippy::too_many_arguments)]
 pub fn after_hits(
     mut action: ResMut<HarvestAction>,
     mut results: ResMut<HarvestHitResults>,
@@ -2011,7 +2002,6 @@ pub fn hold_for_auto_move(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn autoplay_press(
     time: Res<Time>,
     mut auto: ResMut<HarvestAutoplay>,
