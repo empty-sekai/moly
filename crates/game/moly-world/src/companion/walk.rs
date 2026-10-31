@@ -106,6 +106,12 @@ pub fn plan_walk(
 /// with the stick at its rim.
 const WALK_STICK: f32 = 1.0;
 
+/// How far apart, metres, the body and its walk may stand before the body
+/// walks back onto the walk's point (see [`step_motion`]).
+const REJOIN_EPSILON: f32 = 0.02;
+/// How fast the body turns toward that point, radians a second.
+const REJOIN_TURN: f32 = 8.0;
+
 /// The pace of a companion walking with the avatar's walk clip: the player's
 /// Move state with the stick at [`WALK_STICK`] (speed, animation speed).
 /// `None` until the site and the client configs are in.
@@ -138,6 +144,7 @@ pub fn step_motion(
         &mut Walker,
         &mut Gait,
     )>,
+    mut rejoining: Local<Vec<u32>>,
 ) {
     let (Some(face), Some(objective)) = (face.as_deref(), objective.as_deref()) else {
         return;
@@ -211,6 +218,32 @@ pub fn step_motion(
                 continue;
             }
         }
+        // A walk that set out from a point the navigation no longer has (a
+        // pocket between fixtures left without a cell) starts on the closest
+        // cell: the body walks there first, straight and at the walk's pace,
+        // and the route takes over once it stands there.
+        let rejoin = Vec2::new(
+            walk.0.position[0] - transform.translation.x,
+            walk.0.position[2] - transform.translation.z,
+        );
+        if rejoin.length() > REJOIN_EPSILON {
+            let length = rejoin.length();
+            if !rejoining.contains(&companion.unit) {
+                rejoining.push(companion.unit);
+                info!("[companion] unit {}: walks {length:.2} m back onto its walk", companion.unit);
+            }
+            let share = (speed * dt / length).min(1.0);
+            let target = Vec3::from(walk.0.position);
+            transform.translation = transform.translation.lerp(target, share);
+            let heading = Quat::from_rotation_y(rejoin.x.atan2(rejoin.y));
+            transform.rotation = transform.rotation.rotate_towards(heading, REJOIN_TURN * dt);
+            // The stuck watchdog starts once the route walks.
+            runtime.watch = None;
+            gait.speed = length * share / dt;
+            gait.stepped = Some(frame.0);
+            continue;
+        }
+        rejoining.retain(|unit| *unit != companion.unit);
         let from = transform.translation;
         let mut watch = runtime.watch.map_or_else(|| Watch::at(now), |watch| watch.at_time(now));
         let motion = companion::advance(
@@ -228,7 +261,16 @@ pub fn step_motion(
         );
         runtime.end(watch, motion);
         let moved = transform.translation - from;
-        gait.speed = Vec3::new(moved.x, 0.0, moved.z).length() / dt;
+        let step = Vec3::new(moved.x, 0.0, moved.z).length();
+        if step > 2.0 * speed * dt + 0.05 {
+            warn!(
+                "[companion] unit {}: one walk step moved {step:.2} m, from {from:?} to {:?}, walking {}",
+                companion.unit,
+                transform.translation,
+                matches!(*phase, MotionPhase::Walking)
+            );
+        }
+        gait.speed = step / dt;
         gait.stepped = Some(frame.0);
     }
 }

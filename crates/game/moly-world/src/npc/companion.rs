@@ -87,19 +87,43 @@ pub fn depart(
     corner: [f32; 3],
     goal_distance: f32,
 ) -> Result<MotionPhase, &'static str> {
-    let mut at = [state.0.position[0], state.0.position[2]];
-    // The source's agent stands on its navigation mesh at every frame; the
-    // agent step can end a walk just beside the walk cells, and the walk
-    // starts from the nearest cell, as the agent would.
-    if !walk_face.on_face(at[0], at[1]) {
-        let (x, z) = walk_face.seat(at[0], at[1]);
-        if !walk_face.on_face(x, z) {
-            return Err("the companion stands off the walk cells");
+    let stands = [state.0.position[0], state.0.position[2]];
+    // The source's agent stands on its navigation mesh at every frame. One
+    // still on a navigation cell is not moved, whatever the walk cells under
+    // it say (a fixture put beside it carves them away); one off the cells is
+    // put on the closest point of the nearest cell in the agent's relocation
+    // box, as the agent reconnects. Only with no cell in that box is it
+    // seated on the nearest walk cell.
+    let at = match walk_face.relocate(stands, moly_law::path::crowd::NPC_AGENT_RADIUS) {
+        Some(point) => point,
+        None => {
+            let (x, z) = walk_face.seat(stands[0], stands[1]);
+            if !walk_face.on_face(x, z) {
+                return Err("the companion stands off the walk cells");
+            }
+            info!(
+                "[companion] unit {unit}: no navigation cell near ({:.2},{:.2}); seated at ({x:.2},{z:.2})",
+                stands[0], stands[1]
+            );
+            [x, z]
         }
-        at = [x, z];
-        state.0.position[0] = x;
-        state.0.position[2] = z;
+    };
+    if at != stands {
+        info!(
+            "[companion] unit {unit}: sets out from ({:.2},{:.2}), the navigation cell nearest ({:.2},{:.2})",
+            at[0], at[1], stands[0], stands[1]
+        );
     }
+    state.0.position[0] = at[0];
+    state.0.position[2] = at[1];
+    // The route query maps the start onto the walk cells in the agent's box.
+    let at = if walk_face.on_face(at[0], at[1]) {
+        at
+    } else {
+        walk_face
+            .sample(at, moly_law::carve::AGENT_QUERY_HALF_EXTENT)
+            .ok_or("the companion stands off the walk cells")?
+    };
     if objective_face.navigation_point_at([corner[0], corner[2]]).is_none() {
         return Err("the target is off the navigation cells");
     }

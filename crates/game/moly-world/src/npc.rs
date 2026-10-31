@@ -2082,6 +2082,12 @@ fn begin_route(
     fit: Option<FitCandidate>,
     goal_distance: f32,
 ) -> Option<MotionPhase> {
+    // A corridor names cells of the navigation build it was made on; one of
+    // an earlier build lends the new route no start cell, which the agent's
+    // position then maps to on this build.
+    if !route.follows_generation(walk_face.generation()) {
+        route.crowd.corridor = None;
+    }
     route.next = 0;
     route.generation = walk_face.generation();
     route.goal = Some(corner);
