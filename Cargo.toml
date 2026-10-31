@@ -19,6 +19,7 @@ members = [
     "crates/game/moly-features",
     "crates/game/moly-convert",
     "crates/game/moly-mission",
+    "crates/game/moly-photo",
     "crates/game/moly-devtools",
     "crates/game/moly-masters",
     "crates/game/moly-game",

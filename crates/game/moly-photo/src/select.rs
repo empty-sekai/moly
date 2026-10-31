@@ -1,12 +1,27 @@
-//! The captured texture stays owned by this presenter through frame selection.
-//! The extracted animator drives presentation. LocalPhotoAdapter exports the
-//! original JPEG and frame ID together and never reports an album API result.
+//! Frame selection and saving after a capture.
+//!
+//! Input: the captured image held by the photo state, the frame presentation
+//! document (`photo-shot/presentation.json`) and the shot effect document, the
+//! frame cell template `PhotoFrameCell`, and the owned frame IDs a host writes
+//! to `photoLocalAdapter` in the NPC panel document.
+//! Output: the selection screen driven by the presentation's targets and
+//! curves, its cells, the shot effect, and on save a stored ZIP holding the
+//! JPEG as `photo.jpg` and a `metadata.json` record.
+//! Invariants: the capture texture stays owned by this presenter through frame
+//! selection; a presentation is accepted only when its version is the one the
+//! screen reads, its duration is finite and positive, its curve keys are ordered, its values
+//! finite, and every clip event is `PlayEffect`; the saved archive holds the
+//! shot's JPEG and the record of the chosen frame; the chosen frame ID is
+//! remembered for the next
+//! capture, or the first owned frame is chosen when none was.
+//! Boundaries: saving reports no album API result, and the metadata records
+//! `albumServerResult` as null and `filmConsumed` as false.
 use super::*;
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use moly_assets::json::JsonAsset;
 use serde::Deserialize;
 use std::sync::Arc;
-use crate::ui_charsets::ShellTextSources;
+use moly_features::ui_charsets::ShellTextSources;
 
 const CAPTURE_TEXTURE: &str = "photo-captured-image";
 const SHOT_EFFECT: &str = "photo-shot/shot/shot.json";
@@ -152,7 +167,7 @@ pub(super) struct Selection {
 }
 
 pub(super) fn install(app: &mut App) {
-    app.init_resource::<crate::camera::PhotoGestureHeld>()
+    app.init_resource::<moly_features::camera::PhotoGestureHeld>()
         .init_resource::<ShellTextSources>()
         .add_systems(
             Update,
@@ -165,11 +180,11 @@ pub(super) fn install(app: &mut App) {
             scroll
                 .after(super::click)
                 .before(super::dispatch)
-                .run_if(crate::game_settings::scene_input_enabled),
+                .run_if(moly_features::game_settings::scene_input_enabled),
         )
         .add_systems(
             Update,
-            place.after(super::place).before(crate::ui_layout::render),
+            place.after(super::place).before(moly_features::ui_layout::render),
         );
     app.world_mut().resource_mut::<ShellTextSources>().declare(TEXT_SOURCE);
 }
@@ -444,11 +459,13 @@ impl Bindings {
     }
 }
 
-/// Named local adapter input. The master inventory never grants possession.
-/// A host may supply this field in its normal NPC panel document.
+/// The frame IDs the player owns, read from `photoLocalAdapter.ownedFrameIds`
+/// in the NPC panel document: positive i32 values, sorted ascending and
+/// without duplicates. Empty when the panel or the adapter is absent; the
+/// master inventory never grants possession on its own.
 fn owned_frames(world: &World) -> Result<Vec<i32>, String> {
     let Some(text) = world
-        .get_resource::<crate::server_panel_data::ClientNpcPanel>()
+        .get_resource::<moly_features::server_panel_data::ClientNpcPanel>()
         .and_then(|panel| panel.text.as_deref())
     else {
         return Ok(Vec::new());
@@ -587,12 +604,12 @@ fn begin(world: &mut World) -> Result<(), String> {
     };
     let sound_owner = world.spawn_empty().id();
     world
-        .resource_mut::<crate::audio::SeRequests>()
+        .resource_mut::<moly_features::audio::SeRequests>()
         .0
-        .push(crate::audio::SeRequest {
+        .push(moly_features::audio::SeRequest {
             owner: Some(sound_owner),
             cue: "se_camera".into(),
-            class: crate::audio::SeClass::Ui,
+            class: moly_features::audio::SeClass::Ui,
             source: "PhotoShotAnimation",
         });
     stop_call_effect(world);
@@ -640,7 +657,7 @@ pub(super) fn advance(world: &mut World, delta: f32) {
         }
     }
     if let Some(dialog) = world.resource::<PhotoState>().discard {
-        if let Some(ok) = crate::common_dialog::answer(world, dialog) {
+        if let Some(ok) = moly_features::common_dialog::answer(world, dialog) {
             world.resource_mut::<PhotoState>().discard = None;
             if ok {
                 dispose(world);
@@ -688,12 +705,12 @@ pub(super) fn advance(world: &mut World, delta: f32) {
         }
     }
     if let Some(owner) = stop {
-        crate::audio::dispose_scoped_se(world, owner);
+        moly_features::audio::dispose_scoped_se(world, owner);
     }
     let state = world.resource::<PhotoState>();
     let held = state.entered
         && (state.capture.is_some() || state.pending.is_some() || state.selection.is_some());
-    world.resource_mut::<crate::camera::PhotoGestureHeld>().0 = held;
+    world.resource_mut::<moly_features::camera::PhotoGestureHeld>().0 = held;
 }
 
 fn report(world: &mut World, error: String) {
@@ -713,11 +730,11 @@ pub(super) fn back(world: &mut World) -> Result<(), String> {
     let body = world
         .resource::<UiLayouts>()
         .wording("MSG_PHOTOSHOT_UNSAVE");
-    let dialog = crate::common_dialog::open(
+    let dialog = moly_features::common_dialog::open(
         world,
         "PhotoShot.ShowUnSaveDialog",
         body,
-        crate::common_dialog::Buttons::Two {
+        moly_features::common_dialog::Buttons::Two {
             ok: "WORD_GO_BACK",
             cancel: "WORD_CANCEL",
         },
@@ -730,8 +747,8 @@ pub(super) fn back(world: &mut World) -> Result<(), String> {
 
 pub(super) fn skip(world: &mut World) -> Result<(), String> {
     let owner = if let Some(selection) = world.resource_mut::<PhotoState>().selection.as_mut() {
-        // PlayFromStartAsync cancellation writes normalizedTime=1; the caller
-        // explicitly reveals the frame. Seeking does not replay crossed events.
+        // A cancelled `PlayFromStartAsync` writes normalizedTime=1; the frame
+        // is revealed here instead. Seeking does not replay crossed events.
         selection.elapsed = selection.source.duration;
         selection.playing = false;
         selection.frame_visible = true;
@@ -740,7 +757,7 @@ pub(super) fn skip(world: &mut World) -> Result<(), String> {
         None
     };
     if let Some(owner) = owner {
-        crate::audio::dispose_scoped_se(world, owner);
+        moly_features::audio::dispose_scoped_se(world, owner);
     }
     Ok(())
 }
@@ -764,11 +781,11 @@ pub(super) fn dispose(world: &mut World) {
         }
     }
     if let Some(dialog) = world.resource_mut::<PhotoState>().discard.take() {
-        crate::common_dialog::dismiss(world, dialog);
+        moly_features::common_dialog::dismiss(world, dialog);
     }
     let selection = world.resource_mut::<PhotoState>().selection.take();
     if let Some(selection) = selection {
-        crate::audio::dispose_scoped_se(world, selection.sound_owner);
+        moly_features::audio::dispose_scoped_se(world, selection.sound_owner);
         if let Ok(entity) = world.get_entity_mut(selection.sound_owner) {
             entity.despawn();
         }
@@ -779,9 +796,10 @@ pub(super) fn dispose(world: &mut World) {
         }
     }
     world.resource_mut::<PhotoState>().pending = None;
-    world.resource_mut::<crate::camera::PhotoGestureHeld>().0 = false;
-    // The alias retains one image for the presenter's lifetime. Release the
-    // pixels after Save/discard, then replace this same asset on the next shot.
+    world.resource_mut::<moly_features::camera::PhotoGestureHeld>().0 = false;
+    // The runtime texture alias keeps one image for the presenter's lifetime.
+    // After saving or discarding, the pixels are released by replacing them
+    // with a transparent image, and the next shot writes into the same asset.
     let handle = world.resource::<PhotoState>().image.clone();
     if let Some(handle) = handle {
         if let Some(mut image) = world.resource_mut::<Assets<Image>>().get_mut(&handle) {
@@ -807,7 +825,7 @@ pub(super) fn tap(
     position: Vec2,
     size: Vec2,
     actions: &mut MessageWriter<PhotoAction>,
-    sounds: &mut crate::audio::SeRequests,
+    sounds: &mut moly_features::audio::SeRequests,
 ) -> bool {
     let hit = |path: &str| {
         view.rect(layouts, path, size)
@@ -847,7 +865,7 @@ fn scroll(
     mut wheel: MessageReader<MouseWheel>,
     mut state: ResMut<PhotoState>,
     windows: Query<&Window, With<PrimaryWindow>>,
-    canvas: Option<Res<crate::canvas::RootCanvas>>,
+    canvas: Option<Res<moly_features::canvas::RootCanvas>>,
     layouts: Res<UiLayouts>,
     views: Query<&UiPrefabView, With<PhotoView>>,
     time: Res<Time<Real>>,
@@ -901,7 +919,7 @@ fn scroll(
         }
     }
     for event in events {
-        if event.kind != crate::gesture::GestureKind::Drag {
+        if event.kind != moly_features::gesture::GestureKind::Drag {
             continue;
         }
         match event.state {
@@ -956,7 +974,7 @@ fn scroll(
     }
 }
 
-// ScrollRect's elastic return uses Mathf.SmoothDamp with unlimited maxSpeed.
+// Elastic return of `ScrollRect`: `Mathf.SmoothDamp` with unlimited maxSpeed.
 fn smooth_damp(current: f32, target: f32, velocity: &mut f32, smooth: f32, delta: f32) -> f32 {
     let omega = 2. / smooth.max(0.0001);
     let x = omega * delta;
@@ -998,14 +1016,14 @@ fn start_effect(world: &mut World) -> Result<(), String> {
         .spawn((
             Transform::default(),
             Visibility::Inherited,
-            crate::ui_particle::UiParticlePlay,
-            crate::ui_particle::UiParticleHost {
+            moly_features::ui_particle::UiParticlePlay,
+            moly_features::ui_particle::UiParticleHost {
                 document,
                 directory,
                 root: "fx_mysekai_photo_shot_pt".into(),
                 node,
                 canvas,
-                layer: crate::sitemap::SITEMAP_LAYER,
+                layer: moly_features::sitemap::SITEMAP_LAYER,
                 alpha: 1.,
             },
         ))
@@ -1021,9 +1039,9 @@ fn place(
     mut state: ResMut<PhotoState>,
     layouts: Res<UiLayouts>,
     windows: Query<&Window, With<PrimaryWindow>>,
-    canvas: Option<Res<crate::canvas::RootCanvas>>,
+    canvas: Option<Res<moly_features::canvas::RootCanvas>>,
     mut views: Query<&mut UiPrefabView, With<PhotoView>>,
-    mut effects: Query<(&mut Transform, &mut Visibility), With<crate::ui_particle::UiParticleHost>>,
+    mut effects: Query<(&mut Transform, &mut Visibility), With<moly_features::ui_particle::UiParticleHost>>,
 ) {
     let Some(selection) = state.selection.as_mut() else {
         return;

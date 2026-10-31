@@ -1,8 +1,19 @@
-//! Photo mode: capture, native presentation, frame selection and local export.
-//! The screen follows ScreenManager and uses its serialized component bindings.
-//! Capture renders the field camera alone at its current pixel dimensions, then
-//! crops the source frame rectangle. Saving exports a local image; no album
-//! server, film purchase or online success is simulated by this module.
+//! The photo screen: field capture, the call effect, frame selection and saving.
+//!
+//! Input: the menu's `OpenPhoto` request, taps and drags on the screen, the
+//! `PhotoShot` prefab and the shared `EditorHeader` prefab, the call effect
+//! documents, and per-character bounds sidecars.
+//! Output: a `MysekaiPhotoShot` screen on `ScreenManager`, a captured RGBA
+//! texture cropped to the frame rectangle the shutter reports, call particle
+//! hosts, and the saved archive written by `select::save`.
+//! Invariants: the screen registers itself with `MenuTargets` only while the
+//! prefab has every binding and runtime texture it names; an action that fails
+//! is logged and kept as the last error, never retried in the same frame; the
+//! field camera is returned to its window target as soon as the capture texture
+//! has been extracted, and to its previous target when the job is disposed.
+//! Boundaries: this module simulates no album server, film purchase or online
+//! result, and leaves the album, motion selector, effect dialog, edit mode and
+//! depth-of-field controls with their authored disabled appearance.
 use bevy::{
     asset::RenderAssetUsages,
     camera::{visibility::RenderLayers, RenderTarget},
@@ -15,7 +26,7 @@ use bevy::{
     window::PrimaryWindow,
 };
 use moly_assets::ui_layout::{UiComponent, UiPrefab};
-use crate::{gesture::{GestureEvent, GestureState}, ui_layers::{MenuScreenType, ScreenManager},
+use moly_features::{gesture::{GestureEvent, GestureState}, ui_layers::{MenuScreenType, ScreenManager},
     ui_layout::{UiLayouts, UiPrefabView}, menu_dialog::{MenuButton, MenuTargets, OpenPhoto}};
 
 mod select;
@@ -40,7 +51,7 @@ struct PhotoHeader;
 struct PhotoState {
     entered: bool, capture: Option<CaptureJob>, call_effect: Option<CallEffect>, last_error: Option<String>,
     pending: Option<Image>, image: Option<Handle<Image>>, selection: Option<select::Selection>,
-    previous_frame: i32, discard: Option<crate::ui_layers::DialogId>,
+    previous_frame: i32, discard: Option<moly_features::ui_layers::DialogId>,
 }
 struct CallEffect { hosts:Vec<Entity>, elapsed:f32, fade:Option<f32> }
 #[derive(Resource)]
@@ -133,8 +144,10 @@ impl PhotoBindings {
     }
 }
 
-/// This source may predate the photo screen. The menu advertises only a
-/// source whose serialized bindings and dynamic texture inventory are present.
+/// Whether the loaded prefab can run the screen: its serialized bindings must
+/// resolve and every runtime texture it names must exist. The menu advertises
+/// the photo entry only while this holds, so a prefab without the photo screen
+/// leaves the entry hidden.
 pub fn source_available(layouts: &UiLayouts) -> bool {
     layouts.document(KEY).and_then(|doc|PhotoBindings::read(doc).ok())
         .is_some_and(|bindings|bindings.textures.iter().all(|(_,name)|layouts.has_runtime_texture(name)))
@@ -152,12 +165,12 @@ pub fn install(app: &mut App) {
     app.init_resource::<PhotoState>().add_message::<OpenPhoto>().add_message::<PhotoAction>()
         .add_systems(Update, spawn_when_ready)
         .add_systems(Update,prepare_effects.after(spawn_when_ready).before(click))
-        .add_systems(Update, click.after(crate::menu_dialog::click).before(crate::pick::pick)
-            .before(crate::ui_layers::advance).run_if(crate::game_settings::scene_input_enabled))
-        .add_systems(Update, dispatch.after(click).before(crate::ui_layers::advance))
-        .add_systems(Update, lifecycle.after(crate::ui_layers::advance).before(place))
-        .add_systems(Update, place.after(crate::menu_shell::place).before(crate::ui_layout::render))
-        .add_systems(Update,fit_call_effect.after(place).before(crate::ui_layout::render));
+        .add_systems(Update, click.after(moly_features::menu_dialog::click).before(moly_features::pick::pick)
+            .before(moly_features::ui_layers::advance).run_if(moly_features::game_settings::scene_input_enabled))
+        .add_systems(Update, dispatch.after(click).before(moly_features::ui_layers::advance))
+        .add_systems(Update, lifecycle.after(moly_features::ui_layers::advance).before(place))
+        .add_systems(Update, place.after(moly_features::menu_shell::place).before(moly_features::ui_layout::render))
+        .add_systems(Update,fit_call_effect.after(place).before(moly_features::ui_layout::render));
 }
 
 fn mark_capture_ready(readiness: Res<CaptureReadiness>, images: Res<RenderAssets<GpuImage>>) {
@@ -179,7 +192,7 @@ fn spawn_when_ready(mut commands: Commands, layouts: Res<UiLayouts>, server: Res
             assert!(buttons.next().is_none(), "shared header BackUI callback is ambiguous");
             bindings.back = format!("@{}",button.path_id);
             let path = &doc.nodes[doc.find(&bindings.back).expect("bound header back")].path;
-            let mut header = UiPrefabView::new("EditorHeader",crate::sitemap::SITEMAP_LAYER);
+            let mut header = UiPrefabView::new("EditorHeader",moly_features::sitemap::SITEMAP_LAYER);
             for node in &doc.nodes {
                 if node.path != *path && !path.starts_with(&format!("{}/",node.path)) && !node.path.starts_with(&format!("{path}/")) {
                     header.set_visible(&format!("@{}",node.transform_id),false);
@@ -190,9 +203,9 @@ fn spawn_when_ready(mut commands: Commands, layouts: Res<UiLayouts>, server: Res
             commands.insert_resource(PhotoEffects {documents:CALL_EFFECTS.map(|(file,_)|server.load(format!("{root}/{file}"))),textures:Vec::new(),prepared:false});
             commands.insert_resource(bindings);
             commands.spawn((PhotoView, Visibility::Hidden, Transform::default(),
-                RenderLayers::layer(crate::sitemap::SITEMAP_LAYER), UiPrefabView::new(KEY, crate::sitemap::SITEMAP_LAYER)));
+                RenderLayers::layer(moly_features::sitemap::SITEMAP_LAYER), UiPrefabView::new(KEY, moly_features::sitemap::SITEMAP_LAYER)));
             commands.spawn((PhotoHeader, Visibility::Hidden, Transform::from_xyz(0.,0.,20.),
-                RenderLayers::layer(crate::sitemap::SITEMAP_LAYER), header));
+                RenderLayers::layer(moly_features::sitemap::SITEMAP_LAYER), header));
         }
         Err(error) => { if state.last_error.as_deref() != Some(&error) { error!("[photo] {error}"); state.last_error = Some(error); } }
     }
@@ -220,9 +233,9 @@ fn prepare_effects(effects:Option<ResMut<PhotoEffects>>,docs:Res<Assets<moly_ass
 
 fn click(mut open: MessageReader<OpenPhoto>, mut gestures: MessageReader<GestureEvent>,
     mut actions: MessageWriter<PhotoAction>, windows: Query<&Window, With<PrimaryWindow>>,
-    canvas: Option<Res<crate::canvas::RootCanvas>>, layouts: Res<UiLayouts>, screens: Res<ScreenManager>,
+    canvas: Option<Res<moly_features::canvas::RootCanvas>>, layouts: Res<UiLayouts>, screens: Res<ScreenManager>,
     views: Query<&UiPrefabView, With<PhotoView>>, headers: Query<&UiPrefabView, With<PhotoHeader>>, bindings: Option<Res<PhotoBindings>>,
-    mut consumed: ResMut<crate::action_button::ActionTapConsumed>, state: Res<PhotoState>, mut sounds: ResMut<crate::audio::SeRequests>) {
+    mut consumed: ResMut<moly_features::action_button::ActionTapConsumed>, state: Res<PhotoState>, mut sounds: ResMut<moly_features::audio::SeRequests>) {
     for _ in open.read() { actions.write(PhotoAction::Open); }
     let taps: Vec<_> = gestures.read().filter(|event| event.kind.is_tap_family() && event.state == GestureState::End)
         .map(|event| event.position).collect();
@@ -266,17 +279,17 @@ fn dispatch(world: &mut World, mut reader: Local<bevy::ecs::message::MessageCurs
             PhotoAction::Open => {
                 if world.resource::<PhotoState>().entered { continue; }
                 if !world.contains_resource::<PhotoBindings>() { Err("photo screen is still loading".to_owned()) }
-                else { crate::npc_objective::events::set_photo_mode(world, true).map(|()| {
-                    world.resource_mut::<crate::game_state::GameStateManager>().change_state(
-                        crate::game_state::GameStateType::PhotoShot,"PhotoShotGameState.OnEnter");
-                    crate::camera::change_state(world, crate::camera::CameraStateType::PhotoShot, "photo");
+                else { moly_features::npc_objective::events::set_photo_mode(world, true).map(|()| {
+                    world.resource_mut::<moly_features::game_state::GameStateManager>().change_state(
+                        moly_features::game_state::GameStateType::PhotoShot,"PhotoShotGameState.OnEnter");
+                    moly_features::camera::change_state(world, moly_features::camera::CameraStateType::PhotoShot, "photo");
                     world.resource_mut::<PhotoState>().entered = true;
                     world.resource_mut::<ScreenManager>().push_ui_screen(SCREEN, None, "PhotoShotGameState.OnEnter");
                 }) }
             }
             PhotoAction::Call => {
                 visible_units(world).and_then(|units| {
-                    for unit in units { crate::npc_objective::events::call_photo_character(world,unit)?; }
+                    for unit in units { moly_features::npc_objective::events::call_photo_character(world,unit)?; }
                     start_call_effect(world)
                 })
             }
@@ -322,16 +335,16 @@ fn lifecycle(world: &mut World) {
     if exited {
         stop_call_effect(world);
         select::dispose(world);
-        if let Err(error) = crate::npc_objective::events::set_photo_mode(world, false) { error!("[photo] {error}"); }
-        let restored=world.get_resource::<crate::game_state::HeldGameState>().map(|held|held.0)
-            .unwrap_or(crate::game_state::GameStateType::Normal);
-        world.resource_mut::<crate::game_state::GameStateManager>().change_state(restored,"PhotoShotGameState.OnExit");
-        crate::camera::change_state(world, crate::camera::CameraStateType::Normal, "photo");
+        if let Err(error) = moly_features::npc_objective::events::set_photo_mode(world, false) { error!("[photo] {error}"); }
+        let restored=world.get_resource::<moly_features::game_state::HeldGameState>().map(|held|held.0)
+            .unwrap_or(moly_features::game_state::GameStateType::Normal);
+        world.resource_mut::<moly_features::game_state::GameStateManager>().change_state(restored,"PhotoShotGameState.OnExit");
+        moly_features::camera::change_state(world, moly_features::camera::CameraStateType::Normal, "photo");
         world.resource_mut::<PhotoState>().entered = false;
     }
 }
 
-fn place(windows: Query<&Window, With<PrimaryWindow>>, canvas: Option<Res<crate::canvas::RootCanvas>>, layouts:Res<UiLayouts>,
+fn place(windows: Query<&Window, With<PrimaryWindow>>, canvas: Option<Res<moly_features::canvas::RootCanvas>>, layouts:Res<UiLayouts>,
     screens: Res<ScreenManager>, bindings: Option<Res<PhotoBindings>>, state: Res<PhotoState>,
     mut views: Query<(&mut Visibility, &mut Transform, &mut UiPrefabView), (With<PhotoView>,Without<PhotoHeader>)>,
     mut headers: Query<(&mut Visibility, &mut Transform, &mut UiPrefabView), (With<PhotoHeader>,Without<PhotoView>)>) {
@@ -399,7 +412,7 @@ fn start_call_effect(world:&mut World)->Result<(),String> {
         plans.push((handles[index].clone(),format!("{directory_root}/{}",file.rsplit_once('/').expect("effect directory").0),(*root).to_owned(),node));
     }
     let window=world.query_filtered::<&Window,With<PrimaryWindow>>().single(world).map_err(|_|"photo window is unavailable")?;
-    let size=world.resource::<crate::canvas::RootCanvas>().size(window);
+    let size=world.resource::<moly_features::canvas::RootCanvas>().size(window);
     let (canvas,view)=world.query_filtered::<(Entity,&UiPrefabView),With<PhotoView>>().single(world).map_err(|_|"photo view is unavailable")?;
     let bindings=world.resource::<PhotoBindings>();
     let doc=world.resource::<UiLayouts>().document(KEY).ok_or("photo layout unavailable")?;
@@ -413,8 +426,8 @@ fn start_call_effect(world:&mut World)->Result<(),String> {
     let depths=[20.+call_end as f32*0.02+0.019,20.+wave_index as f32*0.02+0.019];
     let mut hosts=Vec::new();
     for (index,(document,directory,root,node)) in plans.into_iter().enumerate() {
-        let host=world.spawn((Transform::from_xyz(position.x,position.y,depths[index]),Visibility::Inherited,crate::ui_particle::UiParticlePlay,
-            crate::ui_particle::UiParticleHost {document,directory,root,node,canvas,layer:crate::sitemap::SITEMAP_LAYER,alpha:1.})).id();
+        let host=world.spawn((Transform::from_xyz(position.x,position.y,depths[index]),Visibility::Inherited,moly_features::ui_particle::UiParticlePlay,
+            moly_features::ui_particle::UiParticleHost {document,directory,root,node,canvas,layer:moly_features::sitemap::SITEMAP_LAYER,alpha:1.})).id();
         world.entity_mut(canvas).add_child(host);hosts.push(host);
     }
     world.resource_mut::<PhotoState>().call_effect=Some(CallEffect {hosts,elapsed:0.,fade:None});
@@ -423,15 +436,15 @@ fn start_call_effect(world:&mut World)->Result<(),String> {
 
 fn advance_call_effect(world:&mut World,delta:f32) {
     let Some(effect)=world.resource::<PhotoState>().call_effect.as_ref() else {return};
-    let status=effect.hosts.first().map(|host|crate::ui_particle::playback(world,*host));
-    let refused=effect.hosts.iter().any(|host|crate::ui_particle::playback(world,*host)==crate::ui_particle::UiParticlePlayback::Refused);
+    let status=effect.hosts.first().map(|host|moly_features::ui_particle::playback(world,*host));
+    let refused=effect.hosts.iter().any(|host|moly_features::ui_particle::playback(world,*host)==moly_features::ui_particle::UiParticlePlayback::Refused);
     let expired=effect.fade.is_none() && effect.elapsed>15.;
     let mut remove=Vec::new();
     let mut done=false;
     if let Some(effect)=world.resource_mut::<PhotoState>().call_effect.as_mut() {
         effect.elapsed+=delta;
         if let Some(fade)=effect.fade.as_mut() { *fade+=delta;done=*fade>=0.2; }
-        else if expired || refused || status==Some(crate::ui_particle::UiParticlePlayback::Complete) {
+        else if expired || refused || status==Some(moly_features::ui_particle::UiParticlePlayback::Complete) {
             remove=std::mem::take(&mut effect.hosts);effect.fade=Some(0.);
         }
     }
@@ -450,14 +463,14 @@ fn fit_call_effect(world:&mut World) {
     let Some(bindings)=world.get_resource::<PhotoBindings>() else {return};
     let call=bindings.call.clone();
     let Ok(window)=world.query_filtered::<&Window,With<PrimaryWindow>>().single(world) else {return};
-    let size=world.resource::<crate::canvas::RootCanvas>().size(window);
+    let size=world.resource::<moly_features::canvas::RootCanvas>().size(window);
     let Ok(view)=world.query_filtered::<&UiPrefabView,With<PhotoView>>().single(world) else {return};
     let Some(rect)=view.rect(world.resource::<UiLayouts>(),&call,size) else {return};
     let position=rect.world.transform_point3(Vec3::ZERO);
     let alpha=world.resource::<ScreenManager>().screen_visual(SCREEN).alpha.unwrap_or(1.);
     for host in hosts {
         if let Some(mut transform)=world.get_mut::<Transform>(host) {transform.translation.x=position.x;transform.translation.y=position.y;}
-        if let Some(mut particle)=world.get_mut::<crate::ui_particle::UiParticleHost>(host) {particle.alpha=alpha;}
+        if let Some(mut particle)=world.get_mut::<moly_features::ui_particle::UiParticleHost>(host) {particle.alpha=alpha;}
     }
 }
 
@@ -469,13 +482,13 @@ fn visible_units(world: &mut World) -> Result<Vec<u32>, String> {
         .map(|window|UVec2::new(window.physical_width(),window.physical_height()))
         .filter(|size|size.min_element()>0).ok_or("photo screen size is unavailable")?;
     let range = Vec2::new(600., 700.) / pixel_size.as_vec2();
-    let candidates: Vec<_> = world.query_filtered::<(Entity, &crate::npc::CharacterUnitId, &GlobalTransform),
-        (With<crate::npc::NpcActions>, Without<crate::npc::residency::Away>)>().iter(world)
+    let candidates: Vec<_> = world.query_filtered::<(Entity, &moly_features::npc::CharacterUnitId, &GlobalTransform),
+        (With<moly_features::npc::NpcActions>, Without<moly_features::npc::residency::Away>)>().iter(world)
         .filter(|(_,_,position)| position.translation().distance(pose.translation()) < 12.)
         .map(|(entity,unit,_)| (entity,unit.0)).collect();
     let mut selected=Vec::new();
     for (root,unit) in candidates {
-        let pack=world.get::<crate::markers::CharacterPack>(root).ok_or("photo character source is loading")?;
+        let pack=world.get::<moly_features::markers::CharacterPack>(root).ok_or("photo character source is loading")?;
         let document=world.resource::<Assets<moly_assets::json::JsonAsset>>().get(&pack.rig).ok_or("photo character bounds are loading")?;
         let bounds:BoundsDocument=serde_json::from_str(&document.0).map_err(|e|format!("photo renderer bounds: {e}"))?;
         let gltf=world.resource::<Assets<Gltf>>().get(&pack.gltf).ok_or("photo character hierarchy is loading")?;
@@ -496,8 +509,9 @@ fn visible_units(world: &mut World) -> Result<Vec<u32>, String> {
             let half = affine.matrix3.abs() * Vec3A::from_array(bounds.extents);
             for x in [-1.,1.] { for y in [-1.,1.] { for z in [-1.,1.] {
                 let point = center + Vec3::new(x,y,z) * Vec3::from(half);
-                // Unity's WorldToViewportPoint test keeps points beyond the
-                // far plane: only a positive camera-space depth is required.
+                // Mirrors `WorldToViewportPoint`: a point counts when its
+                // camera-space depth is zero or more, so points beyond the far
+                // plane still count.
                 if pose.affine().inverse().transform_point3(point).z >= 0. { continue; }
                 let Some(ndc) = camera.world_to_ndc(&pose, point) else { continue; };
                 let uv = (ndc.truncate()+Vec2::ONE)*0.5;
@@ -509,8 +523,11 @@ fn visible_units(world: &mut World) -> Result<Vec<u32>, String> {
     Ok(selected)
 }
 
-/// The sidecar's node indices address the same glTF hierarchy. Resolve its
-/// complete parent/name path, so duplicate leaf bone names cannot cross rigs.
+/// The entity of the glTF node a bounds sidecar names. The sidecar's indices
+/// address the glTF hierarchy, so the complete parent/name path is matched
+/// inside one character; duplicate leaf bone names in other rigs never match.
+/// Error when the index is invalid, when the path matches more than one
+/// entity, or when the rig does not contain it.
 fn source_node(world:&World,root:Entity,gltf:&Gltf,nodes:&Assets<GltfNode>,index:usize)->Result<Entity,String> {
     let mut path=Vec::new();let mut current=index;
     loop {
@@ -543,7 +560,7 @@ fn capture(world: &mut World, requested: UVec2) -> Result<(), String> {
     image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST | TextureUsages::COPY_SRC | TextureUsages::RENDER_ATTACHMENT;
     let target = world.resource_mut::<Assets<Image>>().add(image);
     *world.resource::<CaptureReadiness>().0.lock().map_err(|_|"photo render readiness unavailable")?=Some((target.id(),false));
-    world.resource_mut::<crate::camera::PhotoGestureHeld>().0=true;
+    world.resource_mut::<moly_features::camera::PhotoGestureHeld>().0=true;
     world.resource_mut::<PhotoState>().capture = Some(CaptureJob { camera, previous, target, elapsed:0., requested, dispatched:false, restored:false });
     Ok(())
 }
@@ -576,8 +593,11 @@ fn dispatch_capture(world: &mut World) {
     });
 }
 
-/// The capture camera retains its full render size; the source reads a
-/// centered rectangle into a separate texture of the frame's requested size.
+/// The centered source rectangle for a frame of `width` by `height` inside a
+/// camera image of `camera_width` by `camera_height`, as (left, bottom, width,
+/// height) from the lower-left corner. When the camera is smaller than the
+/// frame on an axis, the frame keeps its requested size and is cut from both
+/// sides on that axis. The rectangle never leaves the camera image.
 fn capture_rect(camera_width:u32,camera_height:u32,width:u32,height:u32)->(u32,u32,u32,u32) {
     let dx=camera_width as i64-width as i64;let dy=camera_height as i64-height as i64;
     let half_x=dx/2;let half_y=dy/2;

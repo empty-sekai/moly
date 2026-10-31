@@ -176,7 +176,7 @@ pub use moly_features::menu_shell;
 pub use moly_features::collect_notice;
 pub use moly_features::mysekai_rank;
 pub use moly_features::option_dialog;
-pub use moly_features::photo_shot;
+pub use moly_photo as photo_shot;
 pub use moly_features::pick;
 pub use moly_features::player_input;
 pub use moly_features::player_data;

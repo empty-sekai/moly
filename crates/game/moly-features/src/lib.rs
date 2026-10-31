@@ -192,7 +192,6 @@ pub mod companion_cues;
 pub mod effect_show;
 pub mod mysekai_rank;
 pub mod option_dialog;
-pub mod photo_shot;
 pub mod pick;
 pub mod player_input;
 pub mod player_data;

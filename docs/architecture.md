@@ -15,6 +15,7 @@
 | `crates/game/moly-features` | Gameplay and UI for gathering, crafting, delivery and other features |
 | `crates/game/moly-convert` | Conversion: the machine's slots, the items it converts and their screen and dialogs |
 | `crates/game/moly-mission` | Missions: their screen, list cells, detail and list dialogs and the reward receive |
+| `crates/game/moly-photo` | Photo mode: field capture, frame selection and saving the shot to a local file |
 | `crates/game/moly-devtools` | Control port, director scripts and developer panel |
 | `crates/game/moly-game` | Assembles the layers above into the game |
 | `crates/net/moly-protocol` | Request, response and push message types between the game and the server |

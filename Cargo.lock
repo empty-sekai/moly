@@ -5513,6 +5513,7 @@ dependencies = [
  "moly-masters",
  "moly-mission",
  "moly-perf",
+ "moly-photo",
  "moly-protocol",
  "moly-render",
  "moly-store",
@@ -5609,6 +5610,24 @@ name = "moly-perf"
 version = "0.0.5"
 dependencies = [
  "bevy",
+]
+
+[[package]]
+name = "moly-photo"
+version = "0.0.5"
+dependencies = [
+ "bevy",
+ "image",
+ "js-sys",
+ "moly-assets",
+ "moly-features",
+ "moly-law",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "wasm-bindgen",
+ "web-sys",
+ "zip",
 ]
 
 [[package]]
