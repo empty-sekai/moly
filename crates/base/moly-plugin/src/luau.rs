@@ -787,7 +787,9 @@ mod tests {
     #[test]
     fn the_interface_waits_for_the_first_frame() {
         let mut runtime = Runtime::new(Limits::default());
-        let error = load(&mut runtime, "early", &[("main.luau", r#"moly.log("too early")"#)]).unwrap_err();
+        // `moly.log` is the one call a loading script may make (its line waits
+        // for the first frame); the host calls are refused until then.
+        let error = load(&mut runtime, "early", &[("main.luau", r#"moly.observe()"#)]).unwrap_err();
         assert!(error.to_string().contains("first frame"), "{error}");
     }
 }
