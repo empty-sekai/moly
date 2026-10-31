@@ -151,7 +151,8 @@ end
 
 -- Plays one after-edit tweet row on the companion: its face, its motion, its
 -- emoticon (the row's, or `fallback` when the row names none) and its text
--- balloon, then the unit's default face again.
+-- balloon (the unit's entry in `lines`, or the row's text), then the unit's
+-- default face again.
 local function react(unit, row, fallback)
 	run("the tweet's face", {
 		["do"] = "companion.expression",
@@ -159,7 +160,8 @@ local function react(unit, row, fallback)
 		eye = named(row.eye),
 		mouth = named(row.mouth),
 	})
-	beside("the tweet's balloon", { ["do"] = "companion.balloon", unit = unit, text = row.text, secs = BALLOON_SECS })
+	local lines = moly.config.lines or {}
+	beside("the tweet's balloon", { ["do"] = "companion.balloon", unit = unit, text = lines[tostring(unit)] or row.text, secs = BALLOON_SECS })
 	local emoticon = named(row.emoticon) or fallback
 	local motion = named(row.motion)
 	if motion ~= nil then

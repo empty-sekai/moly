@@ -25,6 +25,8 @@ face_player_within = 6
 # Seconds between one builder's reaction and the next one's.
 finale_stagger = 0.4
 finale_effects = ["fx_emote_018_single", "fx_emote_010"]
+# Balloon text per unit id, in place of the tweet row's own text.
+# lines = { "14" = "..." }
 # Each builder enters `distance` metres from the player along `degrees` (from +x),
 # or at a world point [x, y, z]. Points below take either form.
 # Each queue item may name `at`: its fixture
